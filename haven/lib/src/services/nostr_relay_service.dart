@@ -257,9 +257,8 @@ class NostrRelayService implements RelayService {
       );
       return CatchupResult(
         circlesSwept: r.circlesSwept,
-        locationsApplied: r.locationsApplied,
-        commitsApplied: r.commitsApplied,
-        autoCommitsStaged: r.autoCommitsStaged,
+        eventsApplied: r.eventsApplied,
+        eventsDeferred: r.eventsDeferred,
         cursorsAdvanced: r.cursorsAdvanced,
         deadlineHit: r.deadlineHit,
         relayErrors: r.relayErrors,
@@ -313,6 +312,31 @@ class NostrRelayService implements RelayService {
     } on Object catch (e) {
       debugPrint('[Maintenance] relay-list tick failed: ${e.runtimeType}');
       return const RelayListMaintenanceResult.empty();
+    }
+  }
+
+  @override
+  Future<LegacyRetractionResult> retractLegacyKeyMaterial({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  }) async {
+    // Best-effort: a scheduled/cutover tick must never throw into its
+    // caller. The secret bytes are consumed + zeroized Rust-side.
+    try {
+      final manager = await _ensureInitialized();
+      final r = await manager.retractLegacyKeyMaterial(
+        circle: circle,
+        identitySecretBytes: identitySecretBytes,
+      );
+      return LegacyRetractionResult(
+        alreadyDone: r.alreadyDone,
+        legacy443Scrubbed: r.legacy443Scrubbed,
+        relayListRetracted: r.relayListRetracted,
+        relayErrors: r.relayErrors,
+      );
+    } on Object catch (e) {
+      debugPrint('[Cutover] legacy retraction failed: ${e.runtimeType}');
+      return const LegacyRetractionResult.empty();
     }
   }
 

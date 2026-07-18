@@ -20,7 +20,7 @@ class _RecordingRelay extends MockRelayService {
     calls++;
     seenPubkey = ownPubkeyHex;
     seenMaxSecs = maxDurationSecs;
-    return const CatchupResult(locationsApplied: 3, cursorsAdvanced: 1);
+    return const CatchupResult(eventsApplied: 3, cursorsAdvanced: 1);
   }
 }
 
@@ -48,7 +48,7 @@ void main() {
         expect(relay.calls, 1);
         expect(relay.seenPubkey, 'deadbeef_pubkey');
         expect(relay.seenMaxSecs, 15);
-        expect(result.locationsApplied, 3);
+        expect(result.eventsApplied, 3);
         expect(result.cursorsAdvanced, 1);
       },
     );
@@ -64,7 +64,7 @@ void main() {
       final result = await service.runCatchup();
 
       expect(relay.calls, 0, reason: 'no sweep without an identity');
-      expect(result.locationsApplied, 0);
+      expect(result.eventsApplied, 0);
     });
 
     test('returns empty (never throws) when a dependency throws', () async {
@@ -78,7 +78,7 @@ void main() {
 
       final result = await service.runCatchup();
 
-      expect(result.locationsApplied, 0);
+      expect(result.eventsApplied, 0);
       expect(relay.calls, 0);
     });
   });

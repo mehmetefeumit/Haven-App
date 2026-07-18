@@ -927,6 +927,9 @@ class AppLocalizationsAr extends AppLocalizations {
   String get pendingMemberReadyToInvite => 'جاهز للدعوة';
 
   @override
+  String get pendingMemberNeedsUpdate => 'بحاجة إلى تحديث Haven';
+
+  @override
   String get memberSearchHint => 'أدخل معرّف العضو...';
 
   @override
@@ -1117,6 +1120,58 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get leaveCircleError => 'تعذّرت مغادرة الدائرة';
+
+  @override
+  String get leaveCircleAdminLimitationNote =>
+      'بصفتك مشرف هذه الدائرة، لا يمكنك مغادرتها إلا بعد أن يغادرها جميع الأعضاء الآخرين. نعلم أن هذا أمر غير مريح — سيتيح تحديث مستقبلي للمشرفين نقل الإشراف والمغادرة مباشرة.';
+
+  @override
+  String get circleBlockedBannerTitle => 'لا يمكن تحديث هذه الدائرة';
+
+  @override
+  String get circleBlockedBannerBody =>
+      'حدث خلل في تشفير هذه الدائرة، فلم يعد Haven قادرًا على إرسال التحديثات فيها أو استقبالها. يمكنك مع ذلك الاطلاع على آخر ما عرفته أدناه، أو مغادرة الدائرة.';
+
+  @override
+  String get legacyCircleBannerTitle => 'يجب إعادة إنشاء هذه الدائرة';
+
+  @override
+  String get legacyCircleBannerBody =>
+      'جرى تحديث محرك التشفير في Haven، فلم يعد بالإمكان استخدام هذه الدائرة. أعد إنشاءها لمواصلة مشاركة الموقع مع الأشخاص أنفسهم — ستحتاج إلى دعوتهم مجددًا.';
+
+  @override
+  String get legacyCircleRecreateCta => 'إعادة إنشاء الدائرة';
+
+  @override
+  String get legacyCircleRemoveCta => 'إزالة';
+
+  @override
+  String get legacyCircleRemoveDialogTitle => 'إزالة الدائرة؟';
+
+  @override
+  String get legacyCircleRemoveDialogBody =>
+      'لم يعد بالإمكان استخدام هذه الدائرة وستُزال من قائمتك. لا يؤثر هذا في أي دائرة جديدة تُنشئها لتحل محلها.';
+
+  @override
+  String get legacyCircleRemoveConfirm => 'إزالة';
+
+  @override
+  String get legacyCutoverExplainerTitle => 'تم تحديث Haven';
+
+  @override
+  String get legacyCutoverExplainerIdentityUnchanged =>
+      'هويتك وملفك الشخصي العام لم يتغيّرا — ولا يلزمك فعل أي شيء بشأنهما.';
+
+  @override
+  String get legacyCutoverExplainerCirclesNeedRecreation =>
+      'لتحسين الأمان، يجب إعادة إنشاء دوائرك ودعوة أعضائها مجددًا قبل أن تتمكّن من مشاركة الموقع فيها من جديد.';
+
+  @override
+  String get legacyCutoverExplainerAcknowledge => 'فهمت';
+
+  @override
+  String get relaySettingsLegacyRetractionPending =>
+      'لا يزال Haven ينظّف بعض البيانات المتبقّية من التحديث الأمني الأخير. سيكتمل ذلك تلقائيًا فور عودتك إلى الاتصال بالإنترنت.';
 
   @override
   String get circlesPanelCollapsedAnnouncement => 'لوحة الدوائر مطوية';

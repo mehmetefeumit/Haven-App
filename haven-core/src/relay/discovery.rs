@@ -28,6 +28,9 @@
 //!   subscriptions (consistent with Haven's relay-metadata-minimization
 //!   stance).
 
+// `OnceLock` backs the debug-only discovery override; it is unreferenced in a
+// release build (where the override static is gated out), so gate the import too.
+#[cfg(debug_assertions)]
 use std::sync::OnceLock;
 
 /// Production discovery relay URLs (public NIP-65 outbox-model indexers).
@@ -50,7 +53,9 @@ pub const PRODUCTION_DISCOVERY_RELAYS: &[&str] = &[
 
 /// Process-static override of the discovery relay list. Set once via
 /// [`set_discovery_relays_for_test`] in debug builds, never observable in
-/// release.
+/// release — hence gated to debug builds so a release build carries no
+/// unreferenced static (`dead_code`).
+#[cfg(debug_assertions)]
 static DISCOVERY_RELAYS_OVERRIDE: OnceLock<Vec<String>> = OnceLock::new();
 
 /// Returns the production discovery relay list as owned strings.

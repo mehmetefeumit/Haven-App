@@ -79,10 +79,18 @@ final circleServiceProvider = Provider<CircleService>((ref) {
     relayService: ref.read(relayServiceProvider),
     // REV-1 leaver backstop (driver 2): the foreground service authors leaves,
     // so it runs the bounded SelfRemove re-issue loop. No identity secret is
-    // wired — the re-issue publishes under an ephemeral key (Rule 9: nothing to
-    // materialise), and a concurrent-logout abort is enforced by the service's
-    // own `_wiped` latch, not an identity fetch.
+    // wired into the backstop itself — the re-issue publishes under an
+    // ephemeral key (Rule 9: nothing to materialise), and a concurrent-logout
+    // abort is enforced by the service's own `_wiped` latch, not an identity
+    // fetch.
     enableLeaverBackstop: true,
+    // Dark Matter (DM-4): `CircleManagerFfi.newInstance` hard-requires the
+    // device identity's secret bytes at construction time (it binds the
+    // account identity, the NIP-59 welcome signer, and the
+    // account-identity-proof signer). Re-fetched fresh on every
+    // `initialize()` call rather than held (Security Rule 9).
+    identitySecretBytesProvider: () =>
+        ref.read(identityNotifierProvider.notifier).getSecretBytes(),
   );
 });
 

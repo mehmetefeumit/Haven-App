@@ -4,95 +4,26 @@
 //! Proves the full networking glue wires up: the engine `Client` CONNECTS to a
 //! real relay, the supervisor RECEIVES a live `kind:445`, the worker ROUTES it
 //! by its `#h` tag to the right circle context, the processor PROCESSES it, and
-//! the result is EMITTED on the engine bus. The event is deliberately
-//! undecryptable (there is no matching MLS group), so the engine surfaces a
-//! `Status(Unprocessable)` — which is exactly the observable proof that the
-//! event traversed the entire connect → subscribe → receive → route → process →
-//! emit path rather than being dropped at any seam.
+//! the per-circle cursor ADVANCES.
+//!
+//! # Dark Matter port (DM-5a)
+//!
+//! The pre-migration tests observed the traversal via a `Status(Unprocessable)`
+//! bus emit for an undecryptable 445. The DM engine classifies an undecryptable
+//! / unknown-group 445 as `Ok(Stale)` (not an error), so no Unprocessable fires;
+//! instead the per-circle cursor ADVANCES. The whole connect → subscribe →
+//! receive → route → process path is therefore proven via the observable cursor
+//! advance (the arithmetic side effect of a Processed/Stale ingest).
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use haven_core::circle::CircleManager;
-use haven_core::relay::live_sync::{
-    CircleSpec, HealthAction, LiveSyncCore, LiveSyncEvent, SyncStatusReason,
-};
+use haven_core::relay::live_sync::{group_cursor_stream, CircleSpec, HealthAction, LiveSyncCore};
 use nostr::{Alphabet, EventBuilder, Keys, Kind, SingleLetterTag, Tag, TagKind};
 use nostr_relay_builder::MockRelay;
 use nostr_sdk::Client;
 use tempfile::TempDir;
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn engine_receives_routes_and_processes_a_kind445_over_a_real_relay() {
-    // The engine enforces a WSS-only relay gate; arm the debug-only loopback
-    // opt-in so the in-process `ws://127.0.0.1` relay is permitted for this test.
-    let _ = haven_core::relay::allow_ws_loopback_for_test();
-
-    // 1. An in-process relay.
-    let relay = MockRelay::run().await.expect("mock relay starts");
-    let url = relay.url().await.to_string();
-
-    // 2. An engine over a fresh (empty) MLS store, subscribed to one circle.
-    let dir = TempDir::new().unwrap();
-    let circle = Arc::new(CircleManager::new_unencrypted(dir.path()).unwrap());
-    let engine = LiveSyncCore::new_local(circle, Keys::generate().public_key());
-    let mut rx = engine.bus().subscribe();
-
-    let group_hex = hex::encode([0xABu8; 32]); // stand-in nostr_group_id
-    engine
-        .start(
-            &[CircleSpec {
-                group_id_hex: group_hex.clone(),
-                relays: vec![url.clone()],
-            }],
-            &[],
-        )
-        .await
-        .expect("engine starts and subscribes");
-
-    // Let the REQ register on the relay before publishing the live event.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // 3. A separate publisher sends a kind:445 carrying our circle's #h.
-    let publisher = Client::builder().build();
-    publisher.add_relay(&url).await.unwrap();
-    publisher.connect().await;
-    let event = EventBuilder::new(Kind::Custom(445), "opaque-ciphertext")
-        .tags([Tag::custom(
-            TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
-            [group_hex.clone()],
-        )])
-        .sign_with_keys(&Keys::generate())
-        .unwrap();
-    publisher
-        .send_event(&event)
-        .await
-        .expect("publish kind:445");
-
-    // 4. The engine must receive + route + process it and emit Unprocessable
-    //    (it cannot decrypt an event for a group it does not hold). Skip the
-    //    start() Connected status; fail on timeout.
-    let received = tokio::time::timeout(Duration::from_secs(8), async {
-        loop {
-            match rx.recv().await {
-                Ok(LiveSyncEvent::Status {
-                    reason: SyncStatusReason::Unprocessable,
-                }) => break true,
-                Ok(_) => {} // Connected / other status — keep waiting
-                Err(_) => break false,
-            }
-        }
-    })
-    .await;
-
-    assert_eq!(
-        received,
-        Ok(true),
-        "the relayed kind:445 must traverse the whole engine path and emit Unprocessable"
-    );
-
-    engine.stop().await;
-}
 
 /// Publishes a `kind:445` carrying `#h = h_value` via a fresh publisher.
 async fn publish_kind445(url: &str, h_value: &str) {
@@ -112,29 +43,81 @@ async fn publish_kind445(url: &str, h_value: &str) {
         .expect("publish kind:445");
 }
 
-/// Counts `Status(Unprocessable)` emissions on `rx` over a quiet window
-/// (returns once `recv` is idle for `idle`).
-async fn count_unprocessable(
-    rx: &mut tokio::sync::broadcast::Receiver<LiveSyncEvent>,
-    idle: Duration,
-) -> usize {
-    let mut count = 0;
-    while let Ok(Ok(ev)) = tokio::time::timeout(idle, rx.recv()).await {
-        if matches!(
-            ev,
-            LiveSyncEvent::Status {
-                reason: SyncStatusReason::Unprocessable
-            }
-        ) {
-            count += 1;
+/// Polls `circle`'s per-circle cursor for `group_hex` until it exceeds `floor`
+/// (or the budget elapses). Returns whether it advanced.
+async fn wait_cursor_advanced(
+    circle: &CircleManager,
+    group_hex: &str,
+    floor: Option<i64>,
+    budget: Duration,
+) -> bool {
+    let key = group_cursor_stream(group_hex);
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        let cur = circle.read_sync_cursor(&key).ok().flatten();
+        let advanced = match (cur, floor) {
+            (Some(c), Some(f)) => c > f,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if advanced {
+            return true;
         }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    count
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn engine_receives_routes_and_processes_a_kind445_over_a_real_relay() {
+    // The engine enforces a WSS-only relay gate; arm the debug-only loopback
+    // opt-in so the in-process `ws://127.0.0.1` relay is permitted for this test.
+    let _ = haven_core::relay::allow_ws_loopback_for_test();
+
+    let relay = MockRelay::run().await.expect("mock relay starts");
+    let url = relay.url().await.to_string();
+
+    let dir = TempDir::new().unwrap();
+    let circle =
+        Arc::new(CircleManager::new_unencrypted(dir.path(), &nostr::Keys::generate()).unwrap());
+    let engine = LiveSyncCore::new_local(Arc::clone(&circle), Keys::generate().public_key());
+
+    let group_hex = hex::encode([0xABu8; 32]); // stand-in nostr_group_id
+    engine
+        .start(
+            &[CircleSpec {
+                group_id_hex: group_hex.clone(),
+                relays: vec![url.clone()],
+            }],
+            &[],
+        )
+        .await
+        .expect("engine starts and subscribes");
+    tokio::time::sleep(Duration::from_millis(500)).await; // REQ registers
+
+    let seed = circle
+        .read_sync_cursor(&group_cursor_stream(&group_hex))
+        .unwrap();
+
+    // A separate publisher sends a kind:445 carrying our circle's #h.
+    publish_kind445(&url, &group_hex).await;
+
+    // The event must traverse connect → subscribe → receive → route → process →
+    // cursor-advance (the Stale ingest's observable side effect).
+    assert!(
+        wait_cursor_advanced(&circle, &group_hex, seed, Duration::from_secs(8)).await,
+        "the relayed kind:445 must traverse the whole engine path and advance the per-circle cursor"
+    );
+
+    engine.stop().await;
 }
 
 /// Two circles sharing one relay set are served by a SINGLE multiplexed `#h`
-/// REQ on ONE socket: both deliver, and an `#h` the engine did not subscribe to
-/// is excluded by the relay-side filter (never reaches the engine).
+/// REQ on ONE socket: both deliver (both cursors advance), and an `#h` the engine
+/// did not subscribe to is excluded by the relay-side filter (its cursor is never
+/// created — the event never reaches the engine).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn engine_multiplexes_two_circles_and_drops_unsubscribed_h() {
     let _ = haven_core::relay::allow_ws_loopback_for_test();
@@ -142,13 +125,13 @@ async fn engine_multiplexes_two_circles_and_drops_unsubscribed_h() {
     let url = relay.url().await.to_string();
 
     let dir = TempDir::new().unwrap();
-    let circle = Arc::new(CircleManager::new_unencrypted(dir.path()).unwrap());
-    let engine = LiveSyncCore::new_local(circle, Keys::generate().public_key());
+    let circle =
+        Arc::new(CircleManager::new_unencrypted(dir.path(), &nostr::Keys::generate()).unwrap());
+    let engine = LiveSyncCore::new_local(Arc::clone(&circle), Keys::generate().public_key());
 
     let hex_a = hex::encode([0xA1u8; 32]);
     let hex_b = hex::encode([0xB2u8; 32]);
     let hex_unsubscribed = hex::encode([0xCCu8; 32]);
-    // Same relay set ⇒ ONE multiplexed bucket/REQ for both circles.
     engine
         .start(
             &[
@@ -165,36 +148,55 @@ async fn engine_multiplexes_two_circles_and_drops_unsubscribed_h() {
         )
         .await
         .expect("start");
-
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let mut rx = engine.bus().subscribe(); // after start: skip the Connected status
+
+    let seed_a = circle
+        .read_sync_cursor(&group_cursor_stream(&hex_a))
+        .unwrap();
+    let seed_b = circle
+        .read_sync_cursor(&group_cursor_stream(&hex_b))
+        .unwrap();
 
     publish_kind445(&url, &hex_a).await;
     publish_kind445(&url, &hex_b).await;
     publish_kind445(&url, &hex_unsubscribed).await; // must be filtered out
 
-    let count = count_unprocessable(&mut rx, Duration::from_millis(1500)).await;
+    assert!(
+        wait_cursor_advanced(&circle, &hex_a, seed_a, Duration::from_secs(8)).await,
+        "circle A delivers on the multiplexed socket"
+    );
+    assert!(
+        wait_cursor_advanced(&circle, &hex_b, seed_b, Duration::from_secs(8)).await,
+        "circle B delivers on the SAME multiplexed socket"
+    );
+    // The unsubscribed #h never reaches the engine (relay-side filter): it was
+    // never subscribed, so it has no per-circle cursor at all.
     assert_eq!(
-        count, 2,
-        "exactly the two subscribed circles are delivered on one socket; the unsubscribed #h is dropped"
+        circle
+            .read_sync_cursor(&group_cursor_stream(&hex_unsubscribed))
+            .unwrap(),
+        None,
+        "the unsubscribed #h must never reach the engine (no cursor is created)"
     );
 
     engine.stop().await;
 }
 
-/// `resume_after_background` re-anchors the subscriptions (Resubscribe phase):
-/// it actually executes the resume path (asserted via the `BackgroundResumed`
-/// status — so this is non-vacuous about resume itself, not merely about the
-/// already-live REQ) AND a `kind:445` published after resume is still delivered.
+/// `resume_after_background` re-anchors the subscriptions: it emits
+/// `BackgroundResumed` (proving the resume path executed, not a silent no-op)
+/// AND a `kind:445` published after resume is still delivered (cursor advances).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn engine_resume_after_background_re_anchors_and_still_delivers() {
+    use haven_core::relay::live_sync::{LiveSyncEvent, SyncStatusReason};
+
     let _ = haven_core::relay::allow_ws_loopback_for_test();
     let relay = MockRelay::run().await.expect("mock relay");
     let url = relay.url().await.to_string();
 
     let dir = TempDir::new().unwrap();
-    let circle = Arc::new(CircleManager::new_unencrypted(dir.path()).unwrap());
-    let engine = LiveSyncCore::new_local(circle, Keys::generate().public_key());
+    let circle =
+        Arc::new(CircleManager::new_unencrypted(dir.path(), &nostr::Keys::generate()).unwrap());
+    let engine = LiveSyncCore::new_local(Arc::clone(&circle), Keys::generate().public_key());
     let group_hex = hex::encode([0x7Eu8; 32]);
     engine
         .start(
@@ -208,36 +210,38 @@ async fn engine_resume_after_background_re_anchors_and_still_delivers() {
         .expect("start");
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // Subscribe BEFORE resume so we observe the BackgroundResumed status the
-    // resume path emits — proving it ran (not a silent no-op over the live REQ).
+    // Subscribe BEFORE resume so we observe the BackgroundResumed status.
     let mut rx = engine.bus().subscribe();
+    let seed = circle
+        .read_sync_cursor(&group_cursor_stream(&group_hex))
+        .unwrap();
     engine
         .resume_after_background()
         .await
         .expect("resume re-anchors the subscriptions");
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    publish_kind445(&url, &group_hex).await;
 
-    // Drain a window: require BOTH the resume status AND post-resume delivery.
+    // Drain a short window for the resume status (proves the resume path ran).
     let mut saw_resumed = false;
-    let mut unprocessable = 0;
-    while let Ok(Ok(ev)) = tokio::time::timeout(Duration::from_millis(1500), rx.recv()).await {
-        match ev {
+    while let Ok(Ok(ev)) = tokio::time::timeout(Duration::from_millis(800), rx.recv()).await {
+        if matches!(
+            ev,
             LiveSyncEvent::Status {
-                reason: SyncStatusReason::BackgroundResumed,
-            } => saw_resumed = true,
-            LiveSyncEvent::Status {
-                reason: SyncStatusReason::Unprocessable,
-            } => unprocessable += 1,
-            _ => {}
+                reason: SyncStatusReason::BackgroundResumed
+            }
+        ) {
+            saw_resumed = true;
+            break;
         }
     }
     assert!(
         saw_resumed,
         "resume must emit BackgroundResumed (proves the resume path executed)"
     );
+
+    // Post-resume delivery: an event published after resume advances the cursor.
+    publish_kind445(&url, &group_hex).await;
     assert!(
-        unprocessable >= 1,
+        wait_cursor_advanced(&circle, &group_hex, seed, Duration::from_secs(8)).await,
         "an event published after resume must still be received and processed"
     );
 
@@ -254,7 +258,8 @@ async fn subscription_health_reports_healthy_over_a_connected_relay() {
     let url = relay.url().await.to_string();
 
     let dir = TempDir::new().unwrap();
-    let circle = Arc::new(CircleManager::new_unencrypted(dir.path()).unwrap());
+    let circle =
+        Arc::new(CircleManager::new_unencrypted(dir.path(), &nostr::Keys::generate()).unwrap());
     let engine = LiveSyncCore::new_local(circle, Keys::generate().public_key());
     engine
         .start(
@@ -300,7 +305,8 @@ async fn subscription_health_resubscribes_when_a_relay_is_down() {
     let dead_url = "ws://127.0.0.1:1".to_string();
 
     let dir = TempDir::new().unwrap();
-    let circle = Arc::new(CircleManager::new_unencrypted(dir.path()).unwrap());
+    let circle =
+        Arc::new(CircleManager::new_unencrypted(dir.path(), &nostr::Keys::generate()).unwrap());
     let engine = LiveSyncCore::new_local(circle, Keys::generate().public_key());
     engine
         .start(

@@ -257,8 +257,13 @@ class NostrRelayPreferencesService implements RelayPreferencesService {
   }
 
   /// Converts the Dart-side category enum to the FFI enum.
+  ///
+  /// `RelayCategory.keyPackage` maps to `RelayTypeFfi.nip65` (Dark Matter
+  /// W2): the wire kind changed 10051→10002, but it is persisted under the
+  /// SAME `RelayType::KeyPackage` storage slot, so no relay-preference data
+  /// migrates and the Dart-side category name is unchanged.
   RelayTypeFfi _toFfi(RelayCategory c) => switch (c) {
     RelayCategory.inbox => RelayTypeFfi.inbox,
-    RelayCategory.keyPackage => RelayTypeFfi.keyPackage,
+    RelayCategory.keyPackage => RelayTypeFfi.nip65,
   };
 }

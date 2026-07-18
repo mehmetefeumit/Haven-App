@@ -1,39 +1,36 @@
 //! The receive supervisor: a RAW `client.notifications()` loop, decoupled from
-//! decrypt by a bounded channel, with the per-circle write gate held around the
-//! MLS-mutating processor call.
+//! ingest by a bounded channel.
 //!
 //! # Why a raw loop (not `handle_notifications`)
 //!
 //! `Client::handle_notifications` exits permanently on a single broadcast
 //! `Lagged` (it treats both `Lagged` and `Closed` as a clean stop). A slow
-//! `SQLCipher` decrypt could lag the pool's notification channel and silently
+//! `SQLCipher` ingest could lag the pool's notification channel and silently
 //! kill the receive path forever. Instead [`run_receiver`] consumes
 //! `client.notifications()` directly, treats `Lagged` as `continue` (the cursor
 //! and catch-up replay anything skipped) and only `Closed`/`Shutdown` as a stop.
-//! It also **decouples** receive from decrypt: it only `try_send`s onto a
-//! bounded channel so the notification consumer never blocks, while a separate
-//! [`run_worker`] drains that channel and runs the (blocking) decrypt.
+//! It also **decouples** receive from ingest: it only `try_send`s onto a bounded
+//! channel so the notification consumer never blocks, while a separate
+//! [`run_worker`] drains that channel and awaits the engine ingest.
 //!
-//! # The write-gate contract (security/protocol must-fix)
+//! # Write serialization (Rule 14)
 //!
-//! Every MLS-mutating call must be serialized against the foreground
-//! finalize/converge writer that shares the same `CircleManager`. [`run_worker`]
-//! acquires `gate.for_group(hex).lock().await` around
-//! [`super::EngineProcessor::process_group_event`]; the foreground finalize site
-//! (M6) MUST acquire the same per-circle lock around its converge/merge.
+//! Every MLS-mutating call runs through the one process-global
+//! [`crate::nostr::mls::SessionManager`] behind its single `tokio` mutex, so the
+//! engine ingest and any foreground send serialize automatically — no per-circle
+//! write gate is needed anymore (plan §5.4).
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, PoisonError};
+use std::sync::Arc;
 
 use nostr::{Event, RelayUrl, SubscriptionId};
 use nostr_sdk::RelayPoolNotification;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, RwLock};
 
-use super::autocommit::{run_autocommit_converge, ConvergeInflightGuard, EngineHandles};
 use super::event::SyncStatusReason;
 use super::planes::PlaneKind;
-use super::processor::{EngineProcessor, GroupProcessOutcome};
+use super::processor::EngineProcessor;
 use super::router::Router;
 
 /// One routed relay event handed from the receiver to the worker.
@@ -141,19 +138,22 @@ pub async fn run_receiver(
     }
 }
 
-/// The decrypt worker: drains `rx`, routes each event, and runs the processor
-/// with the per-circle write gate held (the MLS-write serialization must-fix).
+/// The ingest worker: drains `rx`, routes each event, and awaits the engine
+/// ingest.
 ///
-/// On a path-B auto-commit it spawns the in-Rust converge task from `handles`.
+/// All MLS writes serialize through the one process-global session mutex
+/// (Rule 14), so no per-circle gate is needed. Panic isolation runs the ingest
+/// on a spawned task and treats a panicked join as a benign drop (the cursor +
+/// catch-up replay anything skipped), so one adversarial event can never blind
+/// the whole receive path.
 pub async fn run_worker(
     mut rx: mpsc::Receiver<RawEvent>,
     router: Arc<RwLock<Router>>,
     processor: Arc<EngineProcessor>,
-    handles: EngineHandles,
 ) {
     while let Some(raw) = rx.recv().await {
-        // Resolve the subscription context (cloned so the router lock is not
-        // held across the decrypt).
+        // Resolve the subscription context (cloned so the router lock is not held
+        // across the ingest).
         let ctx = {
             router
                 .read()
@@ -177,54 +177,24 @@ pub async fn run_worker(
                 let Ok(nostr_group_id) = hex::decode(&routed_hex) else {
                     continue;
                 };
-                // L2: key the gate by the canonical lowercase hex of the decoded
-                // bytes, NOT the raw `#h` tag string, so it matches the finalize
-                // site + the path-B converge task and they genuinely serialize.
                 let group_hex = canonical_group_hex(&nostr_group_id);
-                // THE write-gate must-fix: hold the per-circle lock around the
-                // MLS-mutating processor call so the engine never races the
-                // foreground converge/finalize writer on shared MDK state.
-                let lock = handles.gate.for_group(&group_hex);
-                let guard = lock.lock().await;
-                // Snapshot whether a settle window already exists for this circle
-                // BEFORE the call (under the gate). A window that pre-exists our
-                // call belongs to ANOTHER writer — a foreground finalize that
-                // opened its window under the gate and then released it during its
-                // publish+wait phase (regime 2). We must never close that window
-                // (doing so drops its fork protection). Only the regime-1
-                // AutoCommit path inside `process_group_event` opens a window, and
-                // that path is reached only when NO window pre-existed. So
-                // `!had_window_before` is exactly "any window now present was
-                // opened by THIS call" — the only window a panic-close may touch.
-                let had_window_before = {
-                    let sb = handles
-                        .settle
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner);
-                    sb.window_staged_epoch(&group_hex).is_some()
-                };
-                // Panic isolation (symmetric to surviving Lagged): a panic deep
-                // in MDK decrypt on adversarial ciphertext must NOT kill the
-                // worker — that would silently blind the whole receive path
-                // (the receiver would keep filling a never-drained channel). The
-                // processor call is synchronous, so `AssertUnwindSafe` is sound.
+
+                // Panic isolation: run the async ingest on a spawned task and join
+                // it, so a panic deep in a MLS decrypt on adversarial ciphertext
+                // is contained to this one event instead of killing the worker.
                 let process_started = std::time::Instant::now();
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    processor.process_group_event(&raw.event, &nostr_group_id)
-                }));
-                // Diagnostic (M11 e2e triage): time each engine decrypt/process AND
-                // record the outcome variant, so the drive log distinguishes
-                // `Buffered` (regime 2 — a settle window is open, so the event is NOT
-                // decrypted/delivered) from `Processed` (regime 1 — decrypted + emitted
-                // on the bus) from `AutoCommitStaged`. A circle whose live locations
-                // never surface but whose events all log `Buffered` is stuck in an
-                // open settle window; `Processed` events that never reach the UI point
-                // downstream (bus→FFI stream→Dart consumer). The elapsed ms already
-                // ruled out slow/starved decrypt (all << 1 s). `GroupProcessOutcome`'s
-                // `Debug` is presence-only for the path-B work item (redacted), so this
-                // logs only the pseudonymous group prefix + duration + variant — never
-                // decrypted content or key material (Security Rule 6).
-                let outcome_label = outcome
+                let processor_task = Arc::clone(&processor);
+                let event = raw.event.clone();
+                let joined = tokio::spawn(async move {
+                    processor_task
+                        .process_group_event(&event, &nostr_group_id)
+                        .await
+                })
+                .await;
+
+                // Diagnostic: log only the pseudonymous group prefix + duration +
+                // presence-only outcome variant (Security Rule 6).
+                let outcome_label = joined
                     .as_ref()
                     .map_or_else(|_| "panic".to_string(), |o| format!("{o:?}"));
                 log::debug!(
@@ -234,53 +204,11 @@ pub async fn run_worker(
                     outcome_label
                 );
 
-                match outcome {
-                    Ok(GroupProcessOutcome::AutoCommitStaged(work)) => {
-                        // Path B: process_group_event opened the settle window
-                        // under the gate; release the gate, then spawn the in-Rust
-                        // publish+converge task. Detached — bounded to one per
-                        // circle (a sibling auto-commit for the same circle hits
-                        // the open window → regime 2 → buffered, no 2nd spawn).
-                        drop(guard);
-                        // Register the in-flight converge BEFORE spawning (the
-                        // guard's fetch_add) and MOVE the guard into the future so
-                        // it is owned from creation and drops only when the whole
-                        // task — incl. `gated_converge` — returns. `stop`'s drain
-                        // then provably waits for any epoch-advancing converge.
-                        let inflight_guard =
-                            ConvergeInflightGuard::new(Arc::clone(&handles.converge_inflight));
-                        let converge_handles = handles.clone();
-                        let converge_work = *work;
-                        tokio::spawn(async move {
-                            let _inflight_guard = inflight_guard;
-                            run_autocommit_converge(converge_handles, converge_work).await;
-                        });
-                    }
-                    Ok(_) => drop(guard),
-                    Err(_) => {
-                        // M2: a panic MAY have opened a settle window
-                        // (`begin_window` runs before the `AutoCommitStaged`
-                        // return) without spawning the converge task → the circle
-                        // would wedge in regime 2 forever. Defensively close the
-                        // window — but ONLY if THIS call opened it
-                        // (`!had_window_before`), and while STILL HOLDING the gate
-                        // so a concurrent foreground finalize cannot open/displace
-                        // a window in the gap. This never clobbers another writer's
-                        // in-flight window (which would itself cause the fork this
-                        // milestone prevents). (A dangling pending commit from an
-                        // MDK panic mid-auto-commit self-heals via `stage_commit`
-                        // overwrite on the next delivery + `propose_leave`'s
-                        // pre-clear.)
-                        if !had_window_before {
-                            let mut sb = handles
-                                .settle
-                                .lock()
-                                .unwrap_or_else(PoisonError::into_inner);
-                            sb.close_window(&group_hex);
-                        }
-                        drop(guard);
-                        processor.emit_status(SyncStatusReason::Unprocessable);
-                    }
+                if joined.is_err() {
+                    // The ingest task panicked; surface a status so the consumer
+                    // is not silently blinded. The cursor did not advance, so the
+                    // event is re-fetched on the next catch-up.
+                    processor.emit_status(SyncStatusReason::Unprocessable);
                 }
             }
         }
@@ -355,22 +283,21 @@ mod tests {
 #[cfg(test)]
 mod supervisor_isolation_tests {
     use std::collections::HashSet;
-    use std::sync::atomic::{AtomicBool, AtomicUsize};
-    use std::sync::{Arc, Mutex};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
     use std::time::Duration;
 
     use nostr::{
         Alphabet, EventBuilder, Keys, Kind, RelayUrl, SingleLetterTag, SubscriptionId, Tag, TagKind,
     };
-    use nostr_sdk::{Client, RelayPoolNotification};
+    use nostr_sdk::RelayPoolNotification;
     use tempfile::TempDir;
     use tokio::sync::{broadcast, mpsc, RwLock};
 
     use super::{run_receiver, run_worker, RawEvent};
     use crate::circle::CircleManager;
     use crate::relay::live_sync::{
-        CommitSettleBuffer, EngineHandles, EngineProcessor, EventBus, LiveSyncEvent, MlsWriteGate,
-        Router, SyncStatusReason,
+        EngineProcessor, EventBus, LiveSyncEvent, Router, SyncStatusReason,
     };
 
     /// A `kind:445` carrying `#h = group_hex`, with `content`.
@@ -393,15 +320,13 @@ mod supervisor_isolation_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_worker_survives_a_processor_panic_and_keeps_processing() {
         let dir = TempDir::new().unwrap();
-        let circle = Arc::new(CircleManager::new_unencrypted(dir.path()).unwrap());
-        let settle = Arc::new(Mutex::new(CommitSettleBuffer::new()));
+        let keys = Keys::generate();
+        let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
         let bus = EventBus::new();
         let mut rx = bus.subscribe();
-        let processor = Arc::new(EngineProcessor::new(
-            Arc::clone(&circle),
-            Arc::clone(&settle),
-            bus.clone(),
-        ));
+        // The write gate / settle buffer are gone (plan §5.4): the engine's single
+        // session mutex serializes writes, so the processor is (circle, bus).
+        let processor = Arc::new(EngineProcessor::new(Arc::clone(&circle), bus.clone()));
 
         let group_hex = hex::encode([0x99u8; 32]);
         let sub = SubscriptionId::new("s_group_0");
@@ -414,33 +339,25 @@ mod supervisor_isolation_tests {
         );
 
         let (tx, worker_rx) = mpsc::channel::<RawEvent>(16);
-        let handles = EngineHandles {
-            client: Client::builder().build(),
-            circle,
-            gate: Arc::new(MlsWriteGate::new()),
-            settle,
-            bus,
-            shutdown: Arc::new(AtomicBool::new(false)),
-            converge_inflight: Arc::new(AtomicUsize::new(0)),
-        };
-        tokio::spawn(run_worker(
-            worker_rx,
-            Arc::clone(&router),
-            processor,
-            handles,
-        ));
+        tokio::spawn(run_worker(worker_rx, Arc::clone(&router), processor));
 
         let raw = |content: &str| RawEvent {
             relay_url: RelayUrl::parse(&relay).unwrap(),
             subscription_id: sub.clone(),
             event: event_445(&group_hex, content),
         };
-        // 1) The panic event trips the `#[cfg(test)]` seam inside
-        //    `process_group_event`; `catch_unwind` must recover it (a scary panic
-        //    message on stderr is expected — the worker survives it).
+        // TWO panic events (each trips the `#[cfg(test)]` seam inside
+        // `process_group_event`): the worker isolates each panic (the ingest runs
+        // on a joined `tokio::spawn`, so a panicked join is a benign drop) and
+        // emits a `Status { Unprocessable }` for each, THEN keeps draining. A dead
+        // worker would surface at most ONE (or none) and then wedge, timing out at
+        // seen < 2. Two panics (rather than one panic + one undecryptable event)
+        // because the DM engine classifies a 445 for an unknown group as
+        // `Ok(Stale)` — NOT an error — so an undecryptable event no longer emits a
+        // Status; the panic seam is the stable, engine-independent proof of
+        // continued draining. (Scary panic messages on stderr are expected.)
         tx.send(raw("__panic_for_test__")).await.unwrap();
-        // 2) A normal undecryptable event for the SAME circle.
-        tx.send(raw("normal-undecryptable")).await.unwrap();
+        tx.send(raw("__panic_for_test__")).await.unwrap();
 
         let mut seen = 0usize;
         while let Ok(Ok(ev)) = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await {
@@ -458,7 +375,8 @@ mod supervisor_isolation_tests {
         }
         assert!(
             seen >= 2,
-            "the worker must survive the panic (catch_unwind) AND process the next event"
+            "the worker must survive the FIRST panic (isolated join) AND keep \
+             draining to process (and survive) the SECOND"
         );
     }
 

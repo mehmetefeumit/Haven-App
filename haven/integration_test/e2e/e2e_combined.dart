@@ -144,7 +144,7 @@
 library;
 
 import 'dart:async';
-import 'dart:convert' show jsonDecode, jsonEncode;
+import 'dart:convert' show jsonEncode;
 import 'dart:typed_data' show Uint8List;
 
 import 'package:flutter/foundation.dart' show debugPrint, listEquals;
@@ -179,8 +179,7 @@ import 'package:haven/src/rust/api.dart'
         CircleWithMembersFfi,
         InvitationFfi,
         MemberKeyPackageFfi,
-        RelayManagerFfi,
-        settleWindowSecs;
+        RelayManagerFfi;
 import 'package:haven/src/services/circle_service.dart' show Circle, MembershipStatus;
 import 'package:haven/src/services/live_sync_resubscriber.dart'
     show LiveSyncResubscriber;
@@ -1831,368 +1830,42 @@ void main() {
     );
 
     // ------------------------------------------------------------------------
-    // (b) Concurrent-commit convergence (one-sided proxy — GO-MUST/P-15):
-    // the process-global `SESSION` means only ONE converging engine can run
-    // per process (`LiveSyncFfi::start_session` reserves a single static
-    // slot), so a genuine two-ADMIN, two-ENGINE race is a haven-core Rust
-    // test (`two_engines_converge_bilaterally_over_one_relay`, R1 in
-    // `live_sync_two_engine_converge_e2e.rs`), not reachable here. This
-    // proxies the fork-safety property instead: Alice's REAL converging
-    // `removeMember` (admin, the one live engine) races a GENUINE competing
-    // commit — Bob's `self_update` (needs no admin rights) — landing in her
-    // settle window.
+    // (b) and (c) — REMOVED (Dark Matter DM-4b).
     //
-    // Bob does NOT reconcile after the race, and that is deliberate — an
-    // earlier version of this scenario asserted he did, and it was FALSE.
-    // `stageAndFinalizeSelfUpdate` calls `finalize_pending_commit`
-    // (`merge_pending_commit`), which — unlike processing an INCOMING
-    // commit — writes NO epoch snapshot (`relay/live_sync/config.rs` doc;
-    // `circle::manager`'s `eager_finalize_then_exchange_native_rollback_
-    // outcome` pin). Bob merges his OWN commit unconditionally, BEFORE the
-    // race is even decided, so on the (likely) branch where Alice's remove
-    // wins, Bob is left permanently forked onto his own losing branch with
-    // no single-pass way back (same root cause as `lone_converge_does_not_
-    // single_pass_reconverge_after_a_no_snapshot_merge`) — asserting he
-    // converges, or that he can cross-decrypt Alice's post-race location,
-    // would be asserting something false on that branch.
+    // (b) "Concurrent-commit convergence (one-sided proxy)" raced Alice's
+    // REAL converging `removeMember` against a genuine competing commit
+    // manufactured via `SyntheticUser.stageAndFinalizeSelfUpdate`, then
+    // asserted on Haven's OWN hand-rolled settle-window/MIP-03-winner
+    // convergence machinery (`stage_remove_members_converging`,
+    // `converge_after_window`, `settleWindowSecs`). That whole Dart-side
+    // settle-window orchestration is deleted — the Dark Matter engine now
+    // owns publish-before-apply AND commit-ordering/convergence internally
+    // via typed `PendingStateRef` tokens, with no Haven-authored settle
+    // window, MIP-03 order key, or native-rollback proxy left to exercise.
+    // `stageAndFinalizeSelfUpdate` itself has no FFI equivalent (`self_update`
+    // is deleted — MIP-02/03 rotation is engine-internal; see
+    // `self_update_provider.dart`), so there is no way to manufacture this
+    // race from Dart any more.
     //
-    // Instead Carol joins as a PASSIVE OBSERVER (no pending commit of her
-    // own) and only ever calls `drainPendingCommits` — every event she sees
-    // is applied as an ordinary INCOMING commit, which DOES write an epoch
-    // snapshot. That is exactly the shape MDK's native rollback handles:
-    // `no_pending_observers_converge_on_sibling_commits_via_native_rollback`
-    // (`circle::manager`) proves an observer with no pending commit
-    // converges to the SAME final branch regardless of which sibling she
-    // happens to process first — matching Alice's own `converge_commit`
-    // MIP-03 winner rule byte-for-byte (`circle::converge` doc: "the
-    // Haven-layer winner and any MDK internal rollback resolution always
-    // pick the SAME commit"). So Carol converging to Alice's post-race
-    // branch — proven by cross-decrypt, the only reliable twin-fork
-    // detector — holds on BOTH race outcomes; this is the twin-fork
-    // detector that IS achievable in this single-engine harness.
-    // ------------------------------------------------------------------------
-    _m11ScenarioTestWidgets(
-      "b — a genuine competing commit races Alice's converging remove; a "
-      'passive observer converges to the SAME winning branch',
-      (tester, generation) async {
-        if (!liveSyncEnabled) return;
-        // seedOffset decouples this scenario's Bob/Carol — see
-        // SyntheticUser.bob's doc. Dave is not reused across M11 scenarios
-        // (only here), so he keeps the canonical seed.
-        final bob = await SyntheticUser.bob(m11Relay, seedOffset: 6);
-        final carol = await SyntheticUser.carol(m11Relay, seedOffset: 6);
-        final dave = await SyntheticUser.dave(m11Relay);
-        ProviderContainer? container;
-        try {
-          container = await _m11PumpAliceLiveEngine(tester, generation);
-          final circle = await _m11AliceCreatesCircle(
-            tester: tester,
-            container: container,
-            relay: m11Relay,
-            invitees: <SyntheticUser>[bob, carol, dave],
-            name: 'M11 b',
-          );
-          await bob.acceptInvitationViaRelay(relay: m11Relay);
-          final carolCircle =
-              await carol.acceptInvitationViaRelay(relay: m11Relay);
-          await dave.acceptInvitationViaRelay(relay: m11Relay);
-          await _m11Settle(tester, generation);
-
-          final mlsGroupId = circle.mlsGroupId.toList();
-          final epochBefore = await _aliceEpochForTest(tester, mlsGroupId);
-
-          // CS1 (stage_remove_members_converging) + the settle window + CS2
-          // (converge_after_window) — including the bounded re-stage on a
-          // lost race — all happen inside this ONE awaited call
-          // (NostrCircleService.removeMember). Kick it off WITHOUT awaiting
-          // so Bob's competitor can land inside the window.
-          final removeFuture = container
-              .read(circleServiceProvider)
-              .removeMember(
-                mlsGroupId: mlsGroupId,
-                memberPubkeyHex: dave.pubkeyHex,
-              );
-
-          // Give CS1 a head start to stage + publish + open the window
-          // before Bob's competitor lands.
-          await Future<void>.delayed(const Duration(milliseconds: 500));
-
-          final publishClock = Stopwatch()..start();
-          final bobCommitJson = await bob.stageAndFinalizeSelfUpdate(
-            mlsGroupId: Uint8List.fromList(mlsGroupId),
-          );
-          final (ok, msg) = await m11Relay.publishAndAwaitOk(bobCommitJson);
-          if (!ok) {
-            throw StateError(
-              "[M11:b] relay rejected Bob's competing commit: $msg",
-            );
-          }
-
-          // Waits out the window + convergence (+ any bounded re-stage if
-          // Bob's commit won the MIP-03 order key).
-          await removeFuture;
-          publishClock.stop();
-          debugPrint(
-            '[M11:b] publish->converge-decision latency: '
-            '${publishClock.elapsedMilliseconds}ms (settle window '
-            '${settleWindowSecs()}s)',
-          );
-
-          // NOT `epochBefore + 1`: if Bob's self-update wins the MIP-03
-          // order key, Alice ADOPTS it (the remove intent is still pending —
-          // a self-update touches no membership — see
-          // `CommitIntent::RemoveMembers` / `intent_unsatisfied`) and
-          // re-stages the remove from the new epoch through a SECOND full
-          // settle window, landing at `epochBefore + 2`. Either way the
-          // epoch must advance past `epochBefore` (mirrors H1's assertion
-          // shape at ~1497).
-          final epochAfter = await _aliceEpochForTest(tester, mlsGroupId);
-          expect(
-            epochAfter,
-            greaterThan(epochBefore),
-            reason: '[M11:b] the epoch must advance past $epochBefore once '
-                "the race resolves — exactly 1 transition if Alice's remove "
-                'won outright, 2 if Bob won and the remove was '
-                'bounded-re-staged; got $epochAfter.',
-          );
-
-          // Carol (a passive observer — no pending commit of her own)
-          // drains BOTH published commits. Processing an INCOMING commit
-          // (unlike Bob's eager self-merge above) writes an epoch snapshot,
-          // so MDK's native rollback lets her converge onto the GLOBAL
-          // MIP-03 winner regardless of which of the two she happens to
-          // apply first — see the group doc comment above.
-          await carol.drainPendingCommits(
-            relay: m11Relay,
-            circle: carolCircle,
-          );
-          final carolEpoch = await carol.currentEpoch(mlsGroupId);
-          expect(
-            carolEpoch,
-            epochAfter,
-            reason: "[M11:b] Carol (observer) must converge to Alice's SAME "
-                'epoch — a mismatch would mean native rollback failed to '
-                'reconcile the sibling commits.',
-          );
-
-          // Cross-decrypt is the only reliable twin-fork detector (an equal
-          // epoch NUMBER alone cannot distinguish a shared branch from a
-          // twin). Alice publishes AFTER the race resolves; Carol — who
-          // genuinely converged above — must decrypt it under the SAME
-          // exporter secret.
-          final alicePublish = await container
-              .read(locationSharingServiceProvider)
-              .publishLocation(
-                mlsGroupId: mlsGroupId,
-                senderPubkeyHex: _alicePubkeyHex(),
-                latitude: aliceFakeLatitude,
-                longitude: aliceFakeLongitude,
-              );
-          expect(alicePublish.failed, isEmpty);
-          final drain = await carol.drainPendingCommits(
-            relay: m11Relay,
-            circle: carolCircle,
-          );
-          _assertDecryptedCoords(
-            label: "[M11:b] carol <- alice's post-convergence location",
-            coords: drain.decryptedLocations,
-            senderPubkeyHex: _alicePubkeyHex(),
-            expectedLatitude: aliceFakeLatitude,
-            expectedLongitude: aliceFakeLongitude,
-          );
-
-          final roster = await _m11AliceRoster(container, mlsGroupId);
-          expect(
-            roster.contains(dave.pubkeyHex.toLowerCase()),
-            isFalse,
-            reason: '[M11:b] Dave must be removed regardless of which '
-                'commit won the race — production bounds the re-stage.',
-          );
-        } finally {
-          await _m11StopEngine(container, generation);
-          // Test-isolation reset — see _m11WipeAliceMlsState's doc: keeps
-          // Alice's circle count from accumulating across M11 scenarios.
-          await _m11WipeAliceMlsState(container, generation);
-          // Explicitly tear down this scenario's widget tree/ProviderScope —
-          // scenarios a-f are only incidentally torn down by the NEXT
-          // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
-          // leaking its maintenance timer (and the rest of its provider
-          // tree) into `tearDownAll`. Run this AFTER the engine stop so the
-          // dispose ordering is engine-first, widget-tree-second.
-          await _m11TeardownWidgetTree(tester, generation);
-          await _m11Bounded('dave dispose (teardown)', dave.dispose);
-          await _m11Bounded('carol dispose (teardown)', carol.dispose);
-          await _m11Bounded('bob dispose (teardown)', bob.dispose);
-        }
-      },
-    );
-
-    // ------------------------------------------------------------------------
-    // (c) Unprocessable-does-not-advance / does-not-bury (PSI-7): deliver a
-    // kind-445 whose epoch Alice cannot yet process (its predecessor
-    // withheld); assert the per-circle group cursor does NOT advance, then
-    // deliver the predecessor and assert (1) Alice catches up and (2) the
-    // cursor has not moved PAST the still-unprocessable commit's own
-    // timestamp — i.e. it remains inside any future re-fetch window, not
-    // buried below `since`.
+    // (c) "Unprocessable-does-not-advance / does-not-bury (PSI-7)" asserted
+    // on the OLD MDK's sticky-`Unprocessable`/`PreviouslyFailed` poison
+    // cache (`ProcessedMessageState::Failed`, keyed permanently by Nostr
+    // event id, un-poisoned only by an `is_better_candidate` rollback) —
+    // exactly the bug class the Dark Matter engine's stored convergence
+    // buffer (`MessageState::{Retryable,PeelDeferred,…}` +
+    // `advance_convergence`) is designed to remove (migration plan §2.1).
+    // Under the new engine a future-epoch event is durably buffered and
+    // RE-SURFACED once the gap fills — the opposite of what this test
+    // asserted — and it also depended on `stageAndFinalizeSelfUpdate` to
+    // manufacture the out-of-order pair.
     //
-    // This deliberately does NOT assert that the unprocessable commit later
-    // re-applies successfully on a forced resubscribe — an earlier version
-    // of this test did, via `_m11PumpUntilEpochAtLeast(..., epochBefore +
-    // 2)`, and that HANGS (30s timeout, never resolves). Traced against the
-    // pinned MDK revision: a message that fails with
-    // `ProcessMessageWrongEpoch` is unconditionally recorded as
-    // `ProcessedMessageState::Failed`, keyed by its OWN Nostr event id
-    // (`mdk-core/src/messages/error_handling.rs` — `record_failure`). Every
-    // LATER delivery of that same event id is short-circuited at Step 0 of
-    // `process_message_with_context_inner`
-    // (`mdk-core/src/messages/process.rs`) to a CACHED `Unprocessable`/
-    // `PreviouslyFailed` WITHOUT ever re-attempting the decrypt. The only
-    // path that un-poisons a `Failed` record is an `is_better_candidate`
-    // rollback (`mdk-core/src/epoch_snapshots.rs`), which requires an
-    // EXISTING stored snapshot at the message's claimed epoch — there is
-    // none here (Alice never reached that epoch before this commit's first,
-    // failing delivery), and her later, perfectly ordinary (non-rollback)
-    // application of the predecessor does not sweep it. Do NOT re-add a
-    // wait for the unprocessable commit to reach a later epoch — it will
-    // never resolve.
+    // Both scenarios' underlying protocol property — real out-of-order /
+    // concurrent-commit convergence — is NOT dropped: the migration plan
+    // requires it be kept and re-expressed as a Rust-side black-box e2e
+    // over the new engine (`live_sync_out_of_order_commit_e2e.rs`, plan
+    // §5.7, security F2), which is haven-core's (not this Dart harness's)
+    // responsibility and lives outside this file's scope.
     // ------------------------------------------------------------------------
-    _m11ScenarioTestWidgets(
-      'c — an unprocessable-epoch event does not advance the cursor and is '
-      'not buried once its predecessor catches up',
-      (tester, generation) async {
-        if (!liveSyncEnabled) return;
-        // seedOffset decouples this scenario's Bob — see SyntheticUser.bob's
-        // doc.
-        final bob = await SyntheticUser.bob(m11Relay, seedOffset: 7);
-        ProviderContainer? container;
-        try {
-          container = await _m11PumpAliceLiveEngine(tester, generation);
-          final circle = await _m11AliceCreatesCircle(
-            tester: tester,
-            container: container,
-            relay: m11Relay,
-            invitees: <SyntheticUser>[bob],
-            name: 'M11 c',
-          );
-          await bob.acceptInvitationViaRelay(relay: m11Relay);
-          await _m11Settle(tester, generation);
-
-          final mlsGroupId = circle.mlsGroupId.toList();
-          final mlsGroupIdBytes = Uint8List.fromList(mlsGroupId);
-          final nostrGroupIdHex = _hexLower(circle.nostrGroupId);
-          // Per-circle group-cursor stream key
-          // (haven-core/src/relay/live_sync/processor.rs `group_cursor_stream`).
-          final cursorStream = 'group_445:$nostrGroupIdHex';
-
-          final circleService =
-              container.read(circleServiceProvider) as NostrCircleService;
-          final aliceManager = await circleService.getCircleManagerFfi();
-
-          final epochBefore = await _aliceEpochForTest(tester, mlsGroupId);
-          final cursorBefore = await aliceManager.cursorGet(
-            stream: cursorStream,
-          );
-
-          // Bob finalizes TWO self_updates locally back-to-back
-          // (N -> N+1 -> N+2) WITHOUT publishing either yet — decoupling
-          // local finalize from relay publish lets the test deliver them
-          // out of order.
-          final commit1 = await bob.stageAndFinalizeSelfUpdate(
-            mlsGroupId: mlsGroupIdBytes,
-          );
-          final commit2 = await bob.stageAndFinalizeSelfUpdate(
-            mlsGroupId: mlsGroupIdBytes,
-          );
-          // commit2's OWN wire timestamp — used below to prove the cursor
-          // never moves past it (so it stays re-fetchable). We never assert
-          // it goes on to re-apply — see the group comment above.
-          final commit2CreatedAtSecs =
-              (jsonDecode(commit2) as Map<String, dynamic>)['created_at']
-                  as int;
-          final commit2CreatedAtMs = commit2CreatedAtSecs * 1000;
-
-          // Publish the FUTURE-epoch commit first — Alice (still at N) has
-          // never seen commit1, so this cannot be processed: haven-core's
-          // plan_outcome classifies Unprocessable/PreviouslyFailed/
-          // OtherError identically (advance_cursor: false).
-          final (ok2, msg2) = await m11Relay.publishAndAwaitOk(commit2);
-          if (!ok2) {
-            throw StateError('[M11:c] relay rejected commit2: $msg2');
-          }
-          // Let the engine receive + fail to apply.
-          await _m11Settle(tester, generation);
-
-          expect(
-            await _aliceEpochForTest(tester, mlsGroupId),
-            epochBefore,
-            reason: '[M11:c] an unprocessable event must not advance the '
-                'epoch.',
-          );
-          expect(
-            await aliceManager.cursorGet(stream: cursorStream),
-            cursorBefore,
-            reason: '[M11:c] an unprocessable event must not advance the '
-                'per-circle group cursor.',
-          );
-
-          // Deliver the missing predecessor — Alice catches up to N+1. This
-          // is an ordinary, single-commit, non-rollback apply, so it does
-          // NOT retroactively un-poison commit2's Failed record (see the
-          // group comment above) — only that Alice's own state progresses.
-          final (ok1, msg1) = await m11Relay.publishAndAwaitOk(commit1);
-          if (!ok1) {
-            throw StateError('[M11:c] relay rejected commit1: $msg1');
-          }
-          await _m11PumpUntilEpochAtLeast(
-            tester,
-            generation,
-            mlsGroupId,
-            epochBefore + 1,
-          );
-
-          // PSI-7, the load-bearing anti-skip proof: the cursor now sits at
-          // commit1's OWN timestamp (never "now" — `processor.rs` advances
-          // it to `event.created_at`), which is <= commit2's timestamp
-          // (commit1 was finalized locally strictly before commit2 above).
-          // A future resubscribe's `since` (itself further LOWERED by a
-          // clock-skew buffer, `relay/cursor.rs`) would therefore still
-          // cover commit2 — it is proven NOT buried, without claiming the
-          // (false) property that it goes on to re-apply.
-          final cursorAfterCommit1 = await aliceManager.cursorGet(
-            stream: cursorStream,
-          );
-          expect(
-            cursorAfterCommit1,
-            lessThanOrEqualTo(commit2CreatedAtMs),
-            reason: "[M11:c] the cursor must not advance past commit2's own "
-                'timestamp while commit2 is still unprocessable — otherwise '
-                'a future resubscribe would bury it below `since`.',
-          );
-
-          debugPrint(
-            '[M11:c] the unprocessable commit did not advance the epoch or '
-            'the cursor, and the cursor has not moved ahead of it now that '
-            "the predecessor caught up — it is not silently buried (MDK's "
-            'own sticky Failed-message cache means it is not expected to '
-            're-apply on redelivery; see the group comment above).',
-          );
-        } finally {
-          await _m11StopEngine(container, generation);
-          // Test-isolation reset — see _m11WipeAliceMlsState's doc: keeps
-          // Alice's circle count from accumulating across M11 scenarios.
-          await _m11WipeAliceMlsState(container, generation);
-          // Explicitly tear down this scenario's widget tree/ProviderScope —
-          // scenarios a-f are only incidentally torn down by the NEXT
-          // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
-          // leaking its maintenance timer (and the rest of its provider
-          // tree) into `tearDownAll`. Run this AFTER the engine stop so the
-          // dispose ordering is engine-first, widget-tree-second.
-          await _m11TeardownWidgetTree(tester, generation);
-          await _m11Bounded('bob dispose (teardown)', bob.dispose);
-        }
-      },
-    );
 
     // ------------------------------------------------------------------------
     // (d) Cursor-survives-restart (stop+restart the SAME production engine):
@@ -4195,121 +3868,64 @@ _reconcileHandoff({
   bool circleHasAlice(CircleWithMembersFfi circle) =>
       circle.members.any((m) => m.pubkey.toLowerCase() == aliceHex);
 
-  // Winner = lex-smallest pubkey, mirroring `select_successor` (the new
-  // admin after the handoff). The loser adopts the winner's commit.
-  final bobHex = bob.pubkeyHex.toLowerCase();
-  final carolHex = carol.pubkeyHex.toLowerCase();
-  final bobWins = bobHex.compareTo(carolHex) < 0;
-  final winner = bobWins ? bob : carol;
-  final loser = bobWins ? carol : bob;
-  debugPrint(
-    '[e2e_combined] handoff: winner=${winner.label} '
-    '(lex-smallest), loser=${loser.label}',
-  );
-
-  // 1. WINNER: content-driven convergence over Alice's VARIABLE
-  //    handoff burst (see the class doc above). Re-apply the growing
-  //    arrival-ordered buffer with `finalizeAutoCommit: true` until
-  //    the winner's own MDK state shows Alice removed — never assume
-  //    a fixed event count. Accumulate every published-commit id
-  //    across rounds; exactly one must ever be published (the
-  //    single-committer invariant).
-  final winnerPublishedCommitIds = <String>{};
+  // Dark Matter DM-4b note: the pre-migration election this helper used to
+  // run here (elect a lex-smallest "winner" peer to publish the
+  // SelfRemove auto-commit; have the "loser" stage-then-withhold its own
+  // candidate via `finalizeAutoCommit: false`, `clearPendingCommit` it,
+  // then forward-apply the winner's commit by captured id) drove Haven's
+  // OWN hand-rolled multi-committer-fork resolution for a receiver-side
+  // auto-commit. That is exactly the problem class the Dark Matter engine
+  // is adopted to own internally (out-of-order / concurrent-commit
+  // convergence) — there is no longer a Dart-visible "pending commit" to
+  // withhold, clear, or adopt (`finalizeAutoCommit` / `clearPendingCommit`
+  // no longer exist; see `synthetic_user.dart`'s `applyArrivalOrdered`
+  // doc). Both peers now simply re-apply the SAME growing arrival-ordered
+  // buffer independently and the engine is expected to converge them
+  // without any Dart-side coordination.
+  //
+  // KNOWN GAP TO CONFIRM (flagged for the haven-core owner): a bare
+  // `SelfRemove` PROPOSAL (`propose_leave`'s return, RFC 9420 §12.1.2)
+  // still needs exactly one remaining member's engine to COMMIT it before
+  // anyone converges — `haven_core::circle::manager::decrypt_location`
+  // folds `ingest.effects.events` into `LocationMessageResult`s but does
+  // not appear to surface an engine-emitted `AutoPublish` `PublishWork`
+  // item (if the engine emits one) for Haven's relay layer to publish. If
+  // that surfacing is genuinely absent, NEITHER peer below will ever
+  // observe Alice's removal and this poll will time out — which is the
+  // correct, honest failure mode rather than a silently-passing test.
   await _pollUntil<CircleWithMembersFfi?>(
-    describe:
-        "${winner.label} (winner) converging on Alice's handoff burst",
+    describe: "${bob.label} converging on Alice's handoff burst",
     probe: () async {
-      final summary = await winner.applyArrivalOrdered(
-        inbox.snapshot(),
-        relay: relay,
-      );
-      winnerPublishedCommitIds.addAll(summary.publishedCommitEventIds);
-      return winner.getCircle(mlsGroupId);
+      await bob.applyArrivalOrdered(inbox.snapshot(), relay: relay);
+      return bob.getCircle(mlsGroupId);
     },
     satisfied: (circle) => circle != null && !circleHasAlice(circle),
   );
-  if (winnerPublishedCommitIds.length != 1) {
-    throw StateError(
-      '[e2e_combined] handoff single-committer election violated: '
-      '${winner.label} (winner) published '
-      '${winnerPublishedCommitIds.length} commit(s), expected exactly '
-      '1. A second published commit would fork the residual group.',
-    );
-  }
-  final winnerCommitId = winnerPublishedCommitIds.single;
-
-  // 2. LOSER: re-apply the same growing buffer but WITHHOLD its own
-  //    auto-commit (`finalizeAutoCommit: false`) so it never publishes
-  //    a competing SelfRemove. `applyArrivalOrdered` stops the instant
-  //    it stages a withheld pending commit, so repeated calls here are
-  //    safe even while Alice's burst is still arriving.
-  await _pollUntil<bool>(
-    describe:
-        '${loser.label} (loser) staging its own (to-be-discarded) '
-        'SelfRemove candidate',
-    probe: () async {
-      final summary = await loser.applyArrivalOrdered(
-        inbox.snapshot(),
-        relay: relay,
-        finalizeAutoCommit: false,
-      );
-      return summary.withheldPendingCommit;
-    },
-    satisfied: (staged) => staged,
-  );
-  await loser.clearPendingCommit(mlsGroupId);
-
-  // 3. LOSER adopts C_winner: wait for the winner's published commit to
-  //    arrive on the shared inbox subscription (the relay OK the winner
-  //    already awaited only confirms acceptance, not that the echoed
-  //    EVENT frame has reached this subscription yet), then
-  //    forward-apply exactly that one event by its captured id — a
-  //    clean apply onto the winner's branch, with no competing commit
-  //    ever published.
-  await _pollUntil<TestRelayEvent?>(
-    describe:
-        "${winner.label}'s published commit "
-        '(${_redactPk(winnerCommitId)}) landing on the shared inbox',
-    probe: () async {
-      final matches = inbox.snapshot().where((e) => e.id == winnerCommitId);
-      return matches.isEmpty ? null : matches.first;
-    },
-    satisfied: (event) => event != null,
-  );
-  final winnerCommitEvent = inbox.snapshot().firstWhere(
-    (e) => e.id == winnerCommitId,
-  );
-  await loser.applyArrivalOrdered([winnerCommitEvent], relay: relay);
   await _pollUntil<CircleWithMembersFfi?>(
-    describe:
-        "${loser.label} (loser) observing Alice's removal after "
-        "adopting ${winner.label}'s commit",
-    probe: () => loser.getCircle(mlsGroupId),
+    describe: "${carol.label} converging on Alice's handoff burst",
+    probe: () async {
+      await carol.applyArrivalOrdered(inbox.snapshot(), relay: relay);
+      return carol.getCircle(mlsGroupId);
+    },
     satisfied: (circle) => circle != null && !circleHasAlice(circle),
   );
 
-  // 4. Non-gating sanity check only — NOT the convergence signal (see
-  //    the class doc above for why a positive decrypt alone cannot
-  //    prove convergence, given MDK's epoch lookback). The winner
-  //    publishes a fresh location and the loser attempts to decrypt
-  //    it; any failure here is logged and ignored. The actual
-  //    pass/fail gate is the residual-member-set + epoch-equality
-  //    check below.
+  // Non-gating sanity check only — NOT the convergence signal (see the
+  // class doc above for why a positive decrypt alone cannot prove
+  // convergence, given the engine's epoch retention). Bob publishes a
+  // fresh location and Carol attempts to decrypt it; any failure here is
+  // logged and ignored. The actual pass/fail gate is the
+  // residual-member-set + epoch-equality check below.
   try {
-    final winnerCircleForProbe = await winner.getCircle(mlsGroupId);
-    if (winnerCircleForProbe != null) {
-      await winner.publishLocation(
-        circle: winnerCircleForProbe,
+    final bobCircleForProbe = await bob.getCircle(mlsGroupId);
+    if (bobCircleForProbe != null) {
+      await bob.publishLocation(
+        circle: bobCircleForProbe,
         latitude: bobFakeLatitude,
         longitude: bobFakeLongitude,
         relay: relay,
       );
-      // `bobCircle` here only supplies the shared nostr/MLS group id; the
-      // decrypt runs on the LOSER's own manager, so this is correct
-      // regardless of which peer is the loser. Only stale epoch-4 SelfRemove
-      // re-issues remain on the wire, which are wrong-epoch at the loser's
-      // epoch 5 and so cannot mint a stray commit here.
-      await loser.drainPendingCommits(relay: relay, circle: bobCircle);
+      await carol.drainPendingCommits(relay: relay, circle: bobCircle);
     }
   } on Object catch (e) {
     debugPrint(
@@ -4346,8 +3962,8 @@ _reconcileHandoff({
     );
   }
   debugPrint(
-    '[e2e_combined] handoff converged via single-committer election — '
-    "${loser.label} adopted ${winner.label}'s commit "
+    '[e2e_combined] handoff converged — both peers independently applied '
+    'the arrival-ordered buffer and landed on the same epoch '
     '(epoch=$bobEpoch on both peers).',
   );
   return (bob: bobFinal, carol: carolFinal);
@@ -5766,42 +5382,7 @@ Future<void> _m11ForceResubscribe(ProviderContainer container) async {
       );
 }
 
-/// Pumps frames while polling Alice's production epoch for [mlsGroupId]
-/// until it reaches (or passes) [target], or [timeout] elapses. Mirrors
-/// [_m11PumpUntilRosterDrops]'s shape — needed because the epoch read is
-/// ASYNC (`groupEpochForTest`), so `pumpUntilCondition`'s sync predicate
-/// (`pump_helpers.dart`) cannot express this wait directly.
-Future<void> _m11PumpUntilEpochAtLeast(
-  WidgetTester tester,
-  int generation,
-  List<int> mlsGroupId,
-  int target, {
-  Duration timeout = const Duration(seconds: 30),
-}) async {
-  final deadline = DateTime.now().add(timeout);
-  var last = -1;
-  // Records the most recent read failure's type so a PERSISTENT (not merely
-  // transient mid-commit) FFI error is not masked behind an uninformative
-  // "last seen -1" timeout message.
-  Type? lastErrorType;
-  while (DateTime.now().isBefore(deadline)) {
-    if (_m11Superseded(generation)) throw const _M11ScenarioSuperseded();
-    await tester.pump(const Duration(milliseconds: 200));
-    try {
-      // Bound the read so a stuck epoch probe cannot block past the deadline
-      // (mirrors _pollUntil's hardening). A TimeoutException is an Object,
-      // caught below and retried until the outer deadline expires.
-      last = await _aliceEpochForTest(tester, mlsGroupId)
-          .timeout(const Duration(seconds: 5));
-    } on Object catch (e) {
-      lastErrorType = e.runtimeType; // mid-commit or a stuck probe; retry
-      continue;
-    }
-    if (last >= target) return;
-  }
-  throw StateError(
-    '[M11] epoch for the target circle did not reach $target within '
-    '${timeout.inSeconds}s (last seen $last'
-    '${lastErrorType == null ? '' : ', last read error: $lastErrorType'}).',
-  );
-}
+// NOTE: `_m11PumpUntilEpochAtLeast` was removed (Dark Matter DM-4b) — its
+// sole caller was M11 scenario (c), deleted above (see the removal note
+// there) because its premise depended on the OLD MDK's sticky-Unprocessable
+// poison cache and the now-FFI-less `stageAndFinalizeSelfUpdate`.

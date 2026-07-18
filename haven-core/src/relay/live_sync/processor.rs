@@ -1,239 +1,272 @@
-//! The regime-aware group-event processor — the heart of the receive engine.
+//! The group-event processor — the receive engine's ingest loop.
 //!
-//! For each incoming `kind:445`, the processor chooses between the two regimes
-//! that the M3b empirical work established (see the `*_while_holding_pending_*`
-//! and `no_pending_observers_*` regression tests in `circle::manager`):
+//! For each incoming `kind:445`, the processor feeds the transport message to
+//! the Dark Matter engine (`SessionManager::process_event`), which owns
+//! convergence, out-of-order sequencing (buffering future-epoch messages), and
+//! stale/duplicate rejection. The processor then drains the engine's emitted
+//! `GroupEvent`s onto the fan-out bus and advances the per-circle cursor — but
+//! **only** when the engine reports `Processed` or `Stale`, never on `Buffered`
+//! (so a future-epoch message is re-fed until it applies; the engine also
+//! persists it durably).
 //!
-//! - **Regime 1 — no settle window open** (the common case, all observers): the
-//!   event is decrypted via [`CircleManager::decrypt_location_for_engine`] and
-//!   planned via [`plan_outcome`]. Concurrent commits converge through MDK's
-//!   native epoch-snapshot rollback; nothing is buffered.
-//! - **Regime 2 — a settle window is open** (we hold our own unmerged pending
-//!   commit; only on an admin staging a membership change): the raw event is
-//!   **buffered** as a competitor candidate and **NOT decrypted**. This is the
-//!   load-bearing fork-safety gate — a same-epoch sibling decrypted while we
-//!   hold a pending commit is *applied* by MDK (it surfaces as `Ok(Commit)`, NOT
-//!   an error), forking the group. The gate therefore lives **here, before
-//!   decryption**, not in [`plan_outcome`] (which would only see the already
-//!   forked `GroupUpdate`). The buffered candidates are resolved by
-//!   `converge_commit` when the foreground closes the window.
+//! The hand-rolled settle-window / regime gate that used to live here is gone
+//! (plan §5.3/§5.4): the engine's stored convergence replaces it.
 //!
 //! # Per-circle cursor
 //!
-//! Each circle gets its own group cursor via the per-circle stream key
-//! `group_445:{hex(nostr_group_id)}`, so a busy circle's cursor advance cannot
-//! bury a quiet co-multiplexed circle's un-applied commit (the
-//! [`crate::relay::cursor`] machinery treats any non-inbox key as a group
-//! stream).
+//! Each circle gets its own group cursor via `group_445:{hex(nostr_group_id)}`,
+//! so a busy circle's cursor advance cannot bury a quiet co-multiplexed
+//! circle's un-applied commit.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use nostr::{Event, JsonUtil};
 
 use crate::circle::CircleManager;
+use crate::nostr::mls::types::{GroupId, IngestOutcome, LocationMessageResult, PublishWork};
+use crate::nostr::mls::SessionManager;
+use crate::relay::auto_commit::{
+    resolve_receive_publish_work, rollback_receive_publish_work, AutoCommitPublisher,
+    CONVERGENCE_RETICK_DELAY, MAX_CONVERGENCE_RETICKS,
+};
 
-use super::autocommit::AutoCommitWork;
-use super::event::{EngineDecryptOutcome, LiveSyncEvent, SyncStatusReason};
+use super::event::{LiveSyncEvent, SyncStatusReason};
 use super::event_bus::EventBus;
-use super::finalize::open_window_carrying_displaced;
-use super::plan::plan_outcome;
-use super::settle::{BufferedCommit, CommitSettleBuffer};
 
-/// Per-circle group-cursor stream key (gate #3: per-circle cursors with no
-/// storage-schema change — a distinct stream key per `hex(nostr_group_id)`).
+/// Per-circle group-cursor stream key (a distinct stream per
+/// `hex(nostr_group_id)`).
 #[must_use]
 pub fn group_cursor_stream(group_id_hex: &str) -> String {
     format!("{}:{group_id_hex}", crate::relay::cursor::STREAM_GROUP_445)
 }
 
 /// What the processor did with one group event (returned for observability and
-/// testing; the side effects — buffer insert, cursor advance, bus emit — have
-/// already been applied).
+/// testing; the side effects — bus emit, cursor advance — are already applied).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupProcessOutcome {
-    /// Regime 2: the raw event was buffered as a competitor candidate (or
-    /// ignored if the bound/dedup rejected it); the MLS state was NOT touched.
-    Buffered {
-        /// Whether the candidate was actually retained.
-        inserted: bool,
-    },
-    /// Regime 1: the event was decrypted and planned.
+    /// The engine applied the message (or it was stale/terminal); the per-circle
+    /// cursor advanced.
     Processed {
         /// Whether the per-circle group cursor advanced.
         advanced_cursor: bool,
     },
-    /// Regime 1, path B: the decrypt auto-committed a peer `SelfRemove` (MDK
-    /// staged a pending commit). The processor opened a settle window under the
-    /// gate; the supervisor must now spawn the in-Rust converge task with this
-    /// work item. The cursor did NOT advance (it advances only after convergence,
-    /// via lossless replay if the task is interrupted).
-    AutoCommitStaged(Box<AutoCommitWork>),
+    /// The engine buffered the message for a future epoch (out-of-order). The
+    /// cursor did NOT advance — the event is re-fed until it applies. The engine
+    /// also persists it durably, so nothing is lost across a restart.
+    Buffered,
+    /// The message could not be ingested at all (hard failure); cursor
+    /// unchanged.
+    Unprocessable,
 }
 
 /// The receive engine's group/inbox event processor.
 ///
-/// Holds the single MLS-state owner ([`CircleManager`]), the shared settle
-/// buffer, and the fan-out bus. `process_group_event` is **synchronous** (no
-/// `await`) so the regime gate is unit-testable against a real MDK without the
-/// async session; the async supervisor merely feeds it events.
+/// Holds the single MLS-state owner ([`CircleManager`], whose one process-global
+/// [`SessionManager`] satisfies Rule 14) and the fan-out bus.
 pub struct EngineProcessor {
     circle: Arc<CircleManager>,
-    settle: Arc<Mutex<CommitSettleBuffer>>,
     bus: EventBus,
+    /// The relay plane used to publish receive-side auto-commits (a peer
+    /// `SelfRemove` eviction) before confirming them (Rule 13). `None` for a bare
+    /// processor with no relay plane wired — it then rolls such commits back
+    /// (never an optimistic apply). The live-sync session installs the engine
+    /// `Client` here via [`Self::with_publisher`].
+    publisher: Option<Arc<dyn AutoCommitPublisher>>,
 }
 
 impl EngineProcessor {
-    /// Creates a processor over the shared MLS state, settle buffer, and bus.
+    /// Creates a processor over the shared MLS state and bus, with NO relay plane.
+    ///
+    /// A receive-side auto-commit surfaced through this processor is rolled back
+    /// (fail closed, Rule 13) since it cannot be published. Use
+    /// [`Self::with_publisher`] for the live-sync path.
     #[must_use]
-    pub const fn new(
-        circle: Arc<CircleManager>,
-        settle: Arc<Mutex<CommitSettleBuffer>>,
-        bus: EventBus,
-    ) -> Self {
+    pub const fn new(circle: Arc<CircleManager>, bus: EventBus) -> Self {
         Self {
             circle,
-            settle,
             bus,
+            publisher: None,
         }
     }
 
-    /// Shared settle buffer handle (the foreground finalize site opens/closes
-    /// windows and takes competitors through the same buffer).
+    /// Creates a processor wired to a relay `publisher`, so a receive-side
+    /// auto-commit (peer `SelfRemove` eviction) is published to the group's relays
+    /// and confirmed ONLY after a ≥1-relay OK-ack (Rule 13 / security F13).
     #[must_use]
-    pub const fn settle(&self) -> &Arc<Mutex<CommitSettleBuffer>> {
-        &self.settle
-    }
-
-    /// Recovers the settle buffer guard, tolerating a poisoned lock (a panic in
-    /// another holder must not wedge the whole receive path).
-    fn lock_settle(&self) -> std::sync::MutexGuard<'_, CommitSettleBuffer> {
-        self.settle
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    pub fn with_publisher(
+        circle: Arc<CircleManager>,
+        bus: EventBus,
+        publisher: Arc<dyn AutoCommitPublisher>,
+    ) -> Self {
+        Self {
+            circle,
+            bus,
+            publisher: Some(publisher),
+        }
     }
 
     /// Processes one incoming `kind:445` for `nostr_group_id` (its routed `#h`).
     ///
-    /// THE regime gate (HIGH fork-safety must-fix): when a settle window is open
-    /// for the circle, the raw event is buffered and **never decrypted**; only
-    /// then is decryption safe to skip. Otherwise it is decrypted, planned, and
-    /// applied (cursor advance + bus emit).
-    // `cfg_attr(test)`: the `#[cfg(test)]` fault-injection seam below holds the only
-    // `panic!`, so `missing_panics_doc` fires solely in test builds; the production
-    // signature never panics and needs no `# Panics` section.
+    /// Ingests via the engine, routes the drained events, advances stored
+    /// convergence for any pending group, resolves any engine publish work, and
+    /// gates the per-circle cursor on the ingest outcome (advance on
+    /// `Processed`/`Stale`, never on `Buffered`).
     #[cfg_attr(test, allow(clippy::missing_panics_doc))]
-    pub fn process_group_event(&self, event: &Event, nostr_group_id: &[u8]) -> GroupProcessOutcome {
-        // Test-only fault-injection seam (R6 / GAP-A): a sentinel content string
-        // panics here so the `run_worker` catch_unwind panic-isolation test can
-        // prove one adversarial event never blinds the receive path. Compiled out
-        // of every non-test build (`#[cfg(test)]`), so it has zero production or
-        // CI-clippy impact (the CI gate lints the non-test lib, where this is
-        // excluded). The `#[allow(clippy::manual_assert)]` keeps the `--all-targets`
-        // lint lane clean too — a raw `panic!` seam is intentional (it simulates an
-        // unexpected MDK panic), not a candidate for `assert!`.
+    pub async fn process_group_event(
+        &self,
+        event: &Event,
+        nostr_group_id: &[u8],
+    ) -> GroupProcessOutcome {
+        // Test-only fault-injection seam: a sentinel content string panics here
+        // so the worker's panic-isolation test proves one adversarial event
+        // never blinds the receive path. Compiled out of non-test builds.
         #[cfg(test)]
         #[allow(clippy::manual_assert)]
         if event.content == "__panic_for_test__" {
-            panic!("injected decrypt panic (R6 test seam)");
+            panic!("injected decrypt panic (test seam)");
         }
 
         let group_hex = hex::encode(nostr_group_id);
+        let created_at_secs = i64::try_from(event.created_at.as_secs()).unwrap_or(i64::MAX);
 
-        // REGIME 2 — a window is open ⇒ buffer raw, do NOT decrypt.
-        let staged_epoch = self.lock_settle().window_staged_epoch(&group_hex);
-        if let Some(staged_epoch) = staged_epoch {
-            let candidate = BufferedCommit {
-                event_json: event.as_json(),
-                created_at_secs: event.created_at.as_secs(),
-                id_hex: event.id.to_hex(),
-            };
-            // `observed_local_epoch` is the window's staged epoch. The engine
-            // never advances the epoch in regime 2 (it buffers without
-            // decrypting), and the M6 finalize site closes the window atomically
-            // with any merge (the finalize/supervisor contract), so while a
-            // window is open the local epoch equals the staged epoch and this is
-            // exact. The settle-buffer stale-drop is thus a defense-in-depth
-            // no-op here; a competitor that somehow outlived an epoch advance is
-            // still re-validated — and `RolledBack` — by `converge_commit`'s
-            // TOCTOU check, never corrupting state. Reading the true local epoch
-            // would require an MLS-group-id lookup the engine deliberately avoids
-            // (Rule 4).
-            let inserted =
-                self.lock_settle()
-                    .insert_competitor(&group_hex, candidate, staged_epoch);
+        let Ok(ingest) = self.circle.session().process_event(event).await else {
             self.bus.send(LiveSyncEvent::Status {
                 reason: SyncStatusReason::Unprocessable,
             });
-            return GroupProcessOutcome::Buffered { inserted };
+            return GroupProcessOutcome::Unprocessable;
+        };
+
+        // Route the drained events, then release any stored convergence + route
+        // those, resolving engine publish work as we go.
+        self.route_events(&ingest.effects.events, nostr_group_id, created_at_secs);
+        self.resolve_publish_work(&ingest.effects.publish).await;
+        self.drain_convergence(
+            &ingest.effects.pending_convergence,
+            nostr_group_id,
+            created_at_secs,
+        )
+        .await;
+
+        // Cursor gate: advance on Processed/Stale (the engine handled it), never
+        // on Buffered (future-epoch; re-fed until it applies — the engine also
+        // persists it durably so nothing is lost on restart).
+        match ingest.outcome {
+            IngestOutcome::Buffered { .. } => GroupProcessOutcome::Buffered,
+            IngestOutcome::Processed | IngestOutcome::Stale { .. } => {
+                let ms = created_at_secs.saturating_mul(1000);
+                // Best-effort: a cursor write failure must not drop the delivered
+                // event; the cursor re-advances on the next applied event.
+                let _ = self
+                    .circle
+                    .advance_sync_cursor(&group_cursor_stream(&group_hex), ms);
+                GroupProcessOutcome::Processed {
+                    advanced_cursor: true,
+                }
+            }
         }
+    }
 
-        // REGIME 1 — no window ⇒ decrypt + plan + apply. MDK's native rollback
-        // converges concurrent commits; nothing is buffered.
-        let outcome = self
-            .circle
-            .decrypt_location_for_engine(event, nostr_group_id);
+    /// Drains stored convergence for the pending groups, re-ticking a group that
+    /// stays pending until its jitter-delayed `SelfRemove` auto-commit surfaces
+    /// (bounded by [`MAX_CONVERGENCE_RETICKS`]).
+    ///
+    /// A single advance per group would strand the eviction: the engine re-queues
+    /// the group until the auto-commit's wall-clock due time passes, and a lone
+    /// advance drains it out of the pending set before it comes due. Each pass
+    /// routes the drained events and resolves publish work (publishing the
+    /// auto-commit over the relay plane, Rule 13). A quiet group (nothing pending)
+    /// exits immediately with no delay, so only a leave pays the re-tick cost.
+    async fn drain_convergence(
+        &self,
+        initial_pending: &[GroupId],
+        nostr_group_id: &[u8],
+        event_created_at_secs: i64,
+    ) {
+        let mut pending: Vec<GroupId> = initial_pending.to_vec();
+        for _ in 0..MAX_CONVERGENCE_RETICKS {
+            if pending.is_empty() {
+                return;
+            }
+            let mut next: Vec<GroupId> = Vec::new();
+            for gid in &pending {
+                if let Ok(more) = self.circle.session().advance_convergence(gid).await {
+                    self.route_events(&more.events, nostr_group_id, event_created_at_secs);
+                    self.resolve_publish_work(&more.publish).await;
+                    next.extend(more.pending_convergence);
+                }
+            }
+            pending = next;
+            if !pending.is_empty() {
+                tokio::time::sleep(CONVERGENCE_RETICK_DELAY).await;
+            }
+        }
+    }
 
-        // Path B (M6-2): an auto-committed peer SelfRemove. MDK already staged a
-        // pending commit (regime 2 now). Open a settle window HERE — still under
-        // the worker's gate, before it is released — so a concurrent sibling
-        // auto-commit buffers instead of being blind-applied; then hand the work
-        // to the supervisor's in-Rust converge task. Intercepted BEFORE
-        // `plan_outcome` (which must never see / apply an `AutoCommit`).
-        if let EngineDecryptOutcome::AutoCommit {
-            mls_group_id,
-            commit_json,
-            nostr_group_id: routed_id,
-        } = outcome
-        {
-            // The staged epoch is the current epoch — a pending commit does not
-            // advance it (verified against MDK 93ae324). On a read failure we
-            // cannot converge, so clear the dangling pending commit (no wedge)
-            // rather than spawn an un-resolvable task.
-            let Ok(staged_epoch) = self.circle.group_epoch_internal(&mls_group_id) else {
-                let _ = self.circle.clear_pending_commit(&mls_group_id);
-                self.bus.send(LiveSyncEvent::Status {
-                    reason: SyncStatusReason::Unprocessable,
-                });
-                return GroupProcessOutcome::Processed {
-                    advanced_cursor: false,
-                };
+    /// Routes an engine `GroupEvent` batch onto the fan-out bus.
+    fn route_events(
+        &self,
+        events: &[crate::nostr::mls::types::GroupEvent],
+        nostr_group_id: &[u8],
+        event_created_at_secs: i64,
+    ) {
+        for group_event in events {
+            let Some(result) = SessionManager::location_result_from_event(group_event) else {
+                continue;
             };
-            open_window_carrying_displaced(&self.settle, &group_hex, staged_epoch);
-            return GroupProcessOutcome::AutoCommitStaged(Box::new(AutoCommitWork {
-                mls_group_id,
-                nostr_group_id: routed_id,
-                staged_epoch,
-                commit_json,
-            }));
+            match result {
+                LocationMessageResult::Location {
+                    sender_pubkey,
+                    content,
+                    ..
+                } => self.bus.send(LiveSyncEvent::Location {
+                    nostr_group_id: nostr_group_id.to_vec(),
+                    sender_pubkey,
+                    content,
+                    event_created_at_secs,
+                }),
+                // A roster/epoch change, a join, or a superseded (invalidated)
+                // commit are all UI-only refresh signals now (the engine already
+                // applied / rolled back the change internally).
+                LocationMessageResult::GroupUpdate { .. }
+                | LocationMessageResult::Joined { .. }
+                | LocationMessageResult::Invalidated { .. } => {
+                    self.bus.send(LiveSyncEvent::GroupUpdate {
+                        nostr_group_id: nostr_group_id.to_vec(),
+                        evolution_event_json: None,
+                    });
+                }
+                // The group is unrecoverable: surface a blocked-state status so
+                // the UI can stop send/mutate (Rule 8).
+                LocationMessageResult::Unrecoverable { .. } => {
+                    self.bus.send(LiveSyncEvent::Status {
+                        reason: SyncStatusReason::Unprocessable,
+                    });
+                }
+            }
         }
+    }
 
-        let plan = plan_outcome(outcome, false);
-
-        if plan.advance_cursor {
-            let ms = i64::try_from(event.created_at.as_secs())
-                .unwrap_or(i64::MAX)
-                .saturating_mul(1000);
-            // Best-effort: a cursor write failure must not drop the delivered
-            // event (the bus emit below still fires; the cursor re-advances on
-            // the next applied event).
-            let _ = self
-                .circle
-                .advance_sync_cursor(&group_cursor_stream(&group_hex), ms);
-        }
-
-        if let Some(ev) = plan.emit {
-            self.bus.send(ev);
-        }
-
-        GroupProcessOutcome::Processed {
-            advanced_cursor: plan.advance_cursor,
+    /// Resolves engine publish work surfaced during ingest / convergence.
+    ///
+    /// On the receive path the engine can auto-commit a peer `SelfRemove`
+    /// (`PublishWork::AutoPublish`). Publish-before-apply (Rule 13 / security
+    /// F13): the commit is published over the live-sync relay plane and confirmed
+    /// ONLY after ≥1 relay OK-acks (else rolled back) — never an optimistic
+    /// confirm, which would apply an eviction no peer received and fork the group.
+    /// Without a relay plane the commit is rolled back (fail closed).
+    /// `ApplicationMessage` / `Proposal` publish work carries no pending ref.
+    async fn resolve_publish_work(&self, work: &[PublishWork]) {
+        match &self.publisher {
+            Some(publisher) => {
+                resolve_receive_publish_work(&self.circle, publisher.as_ref(), work).await;
+            }
+            None => rollback_receive_publish_work(&self.circle, work).await,
         }
     }
 
     /// Emits a raw gift-wrapped invitation (`kind:1059`) onto the bus. The
-    /// engine never unwraps it; the foreground consumer does
-    /// (`process_gift_wrapped_invitation`). The inbox cursor advances only via
-    /// the foreground after a successful unwrap, never here.
+    /// engine never unwraps it; the foreground consumer does. The inbox cursor
+    /// advances only via the foreground after a successful hold, never here.
     pub fn process_inbox_event(&self, event: &Event) {
         self.bus.send(LiveSyncEvent::Welcome {
             gift_wrap_json: event.as_json(),
@@ -241,9 +274,8 @@ impl EngineProcessor {
         });
     }
 
-    /// Emits a bare status signal on the bus. Used by the supervisor for
-    /// out-of-band conditions — notably to surface (rather than silently swallow)
-    /// a recovered worker panic, so a single bad event cannot blind the consumer.
+    /// Emits a bare status signal on the bus (e.g. to surface a recovered worker
+    /// panic rather than silently swallow it).
     pub fn emit_status(&self, reason: SyncStatusReason) {
         self.bus.send(LiveSyncEvent::Status { reason });
     }
@@ -259,8 +291,6 @@ mod tests {
         let a = group_cursor_stream("aa00");
         let b = group_cursor_stream("bb11");
         assert_ne!(a, b, "each circle gets its own group cursor");
-        // Distinct from the inbox stream and prefixed by the group stream key so
-        // `since_for_stream` treats it as a group stream (small clock buffer).
         assert!(a.starts_with(STREAM_GROUP_445));
         assert_ne!(a, crate::relay::cursor::STREAM_INBOX_1059);
     }

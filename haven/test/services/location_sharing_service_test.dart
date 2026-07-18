@@ -11,6 +11,42 @@ import '../mocks/circle_service_retention_stubs.dart';
 import '../mocks/mock_circle_service.dart';
 import '../mocks/mock_relay_service.dart';
 
+/// Builds a single-result `List<LocationEventResult>` mirroring the
+/// pre-Dark-Matter `DecryptResult` shape this file's tests were written
+/// against, so each fixture only needs to describe the outcome rather than
+/// construct the folded-engine-result wrapper by hand.
+///
+/// `groupUpdated: true` maps to a single [LocationEventKind.groupUpdate]
+/// result; otherwise a non-null [location] produces
+/// [LocationEventKind.location], and omitting both produces a single
+/// decrypted-but-non-location result ([LocationEventKind.location] with a
+/// `null` location — e.g. the legacy avatar-wire case, or the Dark Matter
+/// `joined` case when [kind] is overridden).
+List<LocationEventResult> fakeDecrypt({
+  DecryptedLocation? location,
+  bool groupUpdated = false,
+  List<int> mlsGroupId = const [],
+  LocationEventKind? kind,
+}) {
+  final resolvedKind =
+      kind ??
+      (groupUpdated
+          ? LocationEventKind.groupUpdate
+          : LocationEventKind.location);
+  return [
+    LocationEventResult(
+      kind: resolvedKind,
+      location: resolvedKind == LocationEventKind.location ? location : null,
+      mlsGroupId: mlsGroupId,
+      epoch: 0,
+    ),
+  ];
+}
+
+/// An empty decrypt result — the Dark Matter equivalent of "unprocessable" /
+/// "already seen" (no folded results this ingest).
+const List<LocationEventResult> noDecryptResult = [];
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -167,7 +203,7 @@ void main() {
         );
         final mockCircle = MockCircleService()
           ..decryptLocationResults = [
-            DecryptResult(
+            fakeDecrypt(
               location: DecryptedLocation(
                 senderPubkey: 'sender1',
                 latitude: 37.7749,
@@ -220,9 +256,9 @@ void main() {
         final mockCircle = MockCircleService()
           ..decryptLocationResults = [
             // First event is a group update (commit/proposal)
-            const DecryptResult(groupUpdated: true),
+            fakeDecrypt(groupUpdated: true),
             // Second event is a location
-            DecryptResult(
+            fakeDecrypt(
               location: DecryptedLocation(
                 senderPubkey: 'sender1',
                 latitude: 37,
@@ -232,6 +268,15 @@ void main() {
                 expiresAt: DateTime.now().add(const Duration(hours: 23)),
               ),
             ),
+          ]
+          // A `groupUpdate` result triggers the post-commit eviction sweep
+          // (the engine already applied the commit internally, so
+          // `getMembers` is queried to prune anyone no longer present —
+          // see `_evictDepartedMembers`). Sender1 must still be a current
+          // member here, else the sweep would immediately evict the
+          // location this test just asserts on.
+          ..getMembersResults = [
+            [TestCircleFactory.createMember(pubkey: 'sender1')],
           ];
 
         final svc = LocationSharingService(
@@ -252,7 +297,7 @@ void main() {
         );
         final mockCircle = MockCircleService()
           ..decryptLocationResults = [
-            DecryptResult(
+            fakeDecrypt(
               location: DecryptedLocation(
                 senderPubkey: 'sender1',
                 latitude: 37,
@@ -278,7 +323,7 @@ void main() {
       // ------------------------------------------------------------------
       // Group sync cursor (M2): advance only past fully-processed events.
       // ------------------------------------------------------------------
-      DecryptResult locationResult(String sender) => DecryptResult(
+      List<LocationEventResult> locationResult(String sender) => fakeDecrypt(
         location: DecryptedLocation(
           senderPubkey: sender,
           latitude: 37,
@@ -300,7 +345,7 @@ void main() {
         final mockCircle = MockCircleService()
           ..decryptLocationResults = [
             locationResult('sender1'),
-            const DecryptResult(groupUpdated: true),
+            fakeDecrypt(groupUpdated: true),
           ];
         final svc = LocationSharingService(
           circleService: mockCircle,
@@ -357,7 +402,7 @@ void main() {
           // a location (e.g. the legacy avatar wire) — non-null result,
           // location: null, groupUpdated: false.
           final mockCircle = MockCircleService()
-            ..decryptLocationResults = [const DecryptResult()];
+            ..decryptLocationResults = [fakeDecrypt()];
           final svc = LocationSharingService(
             circleService: mockCircle,
             relayService: mockRelay,
@@ -405,7 +450,7 @@ void main() {
         final mockCircle = MockCircleService()
           ..decryptLocationResults = [
             locationResult('sender1'), // evtA(100) succeeds
-            null, // evtB(200) unprocessable
+            noDecryptResult, // evtB(200) unprocessable
           ];
         final svc = LocationSharingService(
           circleService: mockCircle,
@@ -433,7 +478,7 @@ void main() {
           final mockCircle = MockCircleService()
             ..decryptLocationResults = [
               locationResult('sender1'),
-              const DecryptResult(groupUpdated: true),
+              fakeDecrypt(groupUpdated: true),
             ];
           final svc = LocationSharingService(
             circleService: mockCircle,
@@ -466,192 +511,221 @@ void main() {
         },
       );
 
-      test(
-        'evolution poller does not advance cursor when auto-commit publish fails',
-        () async {
-          final mockRelay = MockRelayService(
-            groupMessages: [
-              '{"id":"evtA","kind":445,"created_at":1700000100,"content":"sr"}',
-            ],
-          );
-          // GroupUpdate with an auto-commit whose publish FAILS → left un-seen
-          // → cursor must NOT advance past it (even though it has a created_at).
-          final mockCircle = MockCircleService()
-            ..decryptLocationResults = [
-              const DecryptResult(
-                groupUpdated: true,
-                evolutionEventJson: '{"id":"commit","kind":445,"content":"x"}',
-                evolutionMlsGroupId: [1, 2, 3, 4],
-              ),
-            ]
-            ..publishEvolutionEventResults = [false];
-          final svc = LocationSharingService(
-            circleService: mockCircle,
-            relayService: mockRelay,
-          );
-
-          await svc.pollEvolutionEvents(circles: [testCircle]);
-
-          expect(mockCircle.advanceGroupCursorLastSecs, isNull);
-        },
-      );
-
       // ------------------------------------------------------------------
-      // Receiver-side auto-commit (Fix #1)
+      // Receiver-side auto-commit (Fix #1) — REMOVED (Dark Matter DM-4b),
+      // REINTRODUCED for the ONE receive path with no Rust-side relay handle
+      // (Rule 13 / security F13 gap fix).
       //
-      // When MDK's `auto_commit_proposal` path stages a pending commit in
-      // response to a peer's `SelfRemove`, the decrypt FFI hands us an
-      // outbound `kind:445` evolution event plus the MLS group ID. The
-      // service owes the group two things:
-      //   1. publish the event so everyone converges on the same epoch, and
-      //   2. merge the pending commit locally (or roll back on failure).
-      // Without this, the local MLS epoch never advances and the departed
-      // member sticks around in `get_members`.
+      // The pre-migration MDK stack staged a pending commit in response to a
+      // peer's `SelfRemove` and handed the decrypt caller an outbound
+      // `kind:445` evolution event to publish + finalize/clear locally (the
+      // five tests this comment used to replace: "evolution poller does not
+      // advance cursor when auto-commit publish fails", "publishes evolution
+      // event and finalizes commit on success", "clears pending commit when
+      // evolution event publish fails", "clears pending commit when publish
+      // throws", "does not publish when FFI reports groupUpdated without
+      // evolution event"). The Dark Matter engine owns publish-before-apply
+      // for every SEND-side commit internally, and the live-sync / background
+      // catch-up receive planes publish a peer `SelfRemove` auto-commit
+      // in-Rust (`haven_core::relay::auto_commit::resolve_receive_publish_work`)
+      // — but THIS poll path (`fetchMemberLocations` / the evolution poller)
+      // owns the relay handle in Dart, not Rust, so the engine surfaces the
+      // auto-commit via `decryptLocationCollectingCommits` instead of rolling
+      // it back. The tests below (group "receive-side auto-commit publish
+      // (Rule 13)") pin `_publishAutoCommits` / `_publishAndConfirmAutoCommit`
+      // — the Dart mirror of `resolve_receive_publish_work` for this one
+      // plane. `groupUpdated` handling for a `groupUpdate` / `joined` /
+      // `invalidated` / `unrecoverable` result (no auto-commit involved) is
+      // covered by the surrounding tests in this group.
       // ------------------------------------------------------------------
-      test(
-        'publishes evolution event and finalizes commit on success',
-        () async {
-          final mockRelay = MockRelayService(
-            groupMessages: ['{"id":"evt1","kind":445,"content":"proposal"}'],
-          );
-          final mockCircle = MockCircleService()
-            ..decryptLocationResults = [
-              const DecryptResult(
-                groupUpdated: true,
-                evolutionEventJson:
-                    '{"id":"commit-evt","kind":445,"content":"commit"}',
-                evolutionMlsGroupId: [9, 9, 9, 9],
-              ),
-            ]
-            // Publish succeeds.
-            ..publishEvolutionEventResults = [true];
 
-          final svc = LocationSharingService(
-            circleService: mockCircle,
-            relayService: mockRelay,
-          );
+      group('receive-side auto-commit publish (Rule 13)', () {
+        test(
+          'publishes an auto-commit and confirms it on a relay ack',
+          () async {
+            final mockRelay = MockRelayService(
+              groupMessages: [
+                '{"id":"evtSelfRemove","kind":445,"content":"selfremove"}',
+              ],
+            );
+            final mockCircle = MockCircleService()
+              ..decryptLocationResults = [noDecryptResult]
+              ..decryptLocationAutoCommits[0] = [
+                PendingAutoCommit(
+                  commitEventJson: '{"id":"commitEvt","kind":445}',
+                  pendingToken: PendingCommitToken(BigInt.from(7)),
+                ),
+              ];
 
-          final result = await svc.fetchMemberLocations(circle: testCircle);
+            final svc = LocationSharingService(
+              circleService: mockCircle,
+              relayService: mockRelay,
+            );
 
-          expect(result.groupUpdated, isTrue);
-          // The service must have published the commit exactly once.
-          expect(mockCircle.publishEvolutionEventCalls, hasLength(1));
-          expect(
-            mockCircle.publishEvolutionEventCalls.first['eventJson'],
-            '{"id":"commit-evt","kind":445,"content":"commit"}',
-          );
-          expect(
-            mockCircle.publishEvolutionEventCalls.first['relays'],
-            testCircle.relays,
-          );
-          // And then finalized the pending commit with the right group ID.
-          expect(mockCircle.finalizePendingCommitCalledWith, [
-            [9, 9, 9, 9],
-          ]);
-          // MUST NOT have cleared on success.
-          expect(mockCircle.clearPendingCommitCalledWith, isEmpty);
-        },
-      );
+            await svc.fetchMemberLocations(circle: testCircle);
 
-      test(
-        'clears pending commit when evolution event publish fails',
-        () async {
-          final mockRelay = MockRelayService(
-            groupMessages: ['{"id":"evt1","kind":445,"content":"proposal"}'],
-          );
-          final mockCircle = MockCircleService()
-            ..decryptLocationResults = [
-              const DecryptResult(
-                groupUpdated: true,
-                evolutionEventJson:
-                    '{"id":"commit-evt","kind":445,"content":"commit"}',
-                evolutionMlsGroupId: [1, 2, 3, 4],
-              ),
-            ]
-            // Every relay rejected — publish reports failure.
-            ..publishEvolutionEventResults = [false];
-
-          final svc = LocationSharingService(
-            circleService: mockCircle,
-            relayService: mockRelay,
-          );
-
-          final result = await svc.fetchMemberLocations(circle: testCircle);
-
-          expect(result.groupUpdated, isTrue);
-          expect(mockCircle.publishEvolutionEventCalls, hasLength(1));
-          // MUST roll back the dangling local commit — leaving it pending
-          // would brick future message decryption for this circle.
-          expect(mockCircle.clearPendingCommitCalledWith, [
-            [1, 2, 3, 4],
-          ]);
-          expect(mockCircle.finalizePendingCommitCalledWith, isEmpty);
-        },
-      );
-
-      test('clears pending commit when publish throws', () async {
-        final mockRelay = MockRelayService(
-          groupMessages: ['{"id":"evt1","kind":445,"content":"proposal"}'],
-        );
-        final mockCircle = MockCircleService()
-          ..decryptLocationResults = [
-            const DecryptResult(
-              groupUpdated: true,
-              evolutionEventJson:
-                  '{"id":"commit-evt","kind":445,"content":"commit"}',
-              evolutionMlsGroupId: [5, 6, 7, 8],
-            ),
-          ]
-          ..shouldThrowOnPublishEvolutionEvent = true;
-
-        final svc = LocationSharingService(
-          circleService: mockCircle,
-          relayService: mockRelay,
+            expect(
+              mockRelay.publishedEvents,
+              contains('{"id":"commitEvt","kind":445}'),
+            );
+            expect(mockCircle.confirmPendingCommitCalls, [
+              PendingCommitToken(BigInt.from(7)),
+            ]);
+            expect(mockCircle.failPendingCommitCalls, isEmpty);
+          },
         );
 
-        // MUST NOT propagate the publish exception — fetch should
-        // degrade gracefully so polling can retry on the next cycle.
-        final result = await svc.fetchMemberLocations(circle: testCircle);
+        test(
+          'rolls back an auto-commit via failPendingCommit when no relay '
+          'acks',
+          () async {
+            final mockRelay = MockRelayService(
+              groupMessages: [
+                '{"id":"evtSelfRemove","kind":445,"content":"selfremove"}',
+              ],
+            )..shouldRejectPublish = true;
+            final mockCircle = MockCircleService()
+              ..decryptLocationResults = [noDecryptResult]
+              ..decryptLocationAutoCommits[0] = [
+                PendingAutoCommit(
+                  commitEventJson: '{"id":"commitEvt","kind":445}',
+                  pendingToken: PendingCommitToken(BigInt.from(9)),
+                ),
+              ];
 
-        expect(result.groupUpdated, isTrue);
-        expect(mockCircle.publishEvolutionEventCalls, hasLength(1));
-        expect(mockCircle.clearPendingCommitCalledWith, [
-          [5, 6, 7, 8],
-        ]);
-        expect(mockCircle.finalizePendingCommitCalledWith, isEmpty);
+            final svc = LocationSharingService(
+              circleService: mockCircle,
+              relayService: mockRelay,
+            );
+
+            await svc.fetchMemberLocations(circle: testCircle);
+
+            // Rule 13: the commit is ALWAYS published, ack or not — only
+            // the confirm/fail branch depends on the outcome.
+            expect(
+              mockRelay.publishedEvents,
+              contains('{"id":"commitEvt","kind":445}'),
+            );
+            expect(mockCircle.confirmPendingCommitCalls, isEmpty);
+            expect(mockCircle.failPendingCommitCalls, [
+              PendingCommitToken(BigInt.from(9)),
+            ]);
+          },
+        );
+
+        test(
+          'resolves the circle relays fresh via getCircle before publishing',
+          () async {
+            // `freshCircle` carries a DIFFERENT relay set than `testCircle`
+            // (the caller-held snapshot) — proves the auto-commit publish
+            // targets the freshly re-read relays, not a possibly-stale
+            // snapshot, mirroring `removeMember` / `updateCircleRelays`.
+            final freshCircle = TestCircleFactory.createCircle(
+              mlsGroupId: testCircle.mlsGroupId,
+              displayName: testCircle.displayName,
+              relays: const ['wss://fresh-relay.example.com'],
+            );
+            final mockRelay = MockRelayService(
+              groupMessages: [
+                '{"id":"evtSelfRemove","kind":445,"content":"selfremove"}',
+              ],
+            );
+            final mockCircle = MockCircleService(circles: [freshCircle])
+              ..decryptLocationResults = [noDecryptResult]
+              ..decryptLocationAutoCommits[0] = [
+                PendingAutoCommit(
+                  commitEventJson: '{"id":"commitEvt","kind":445}',
+                  pendingToken: PendingCommitToken(BigInt.from(3)),
+                ),
+              ];
+
+            final svc = LocationSharingService(
+              circleService: mockCircle,
+              relayService: mockRelay,
+            );
+
+            await svc.fetchMemberLocations(circle: testCircle);
+
+            expect(mockCircle.methodCalls, contains('getCircle'));
+            expect(mockRelay.publishEventRelayCalls.last, [
+              'wss://fresh-relay.example.com',
+            ]);
+          },
+        );
+
+        test(
+          'never confirms and never fails when there are no auto-commits',
+          () async {
+            // Regression guard: an ordinary decrypt (no eviction in flight)
+            // must not touch confirmPendingCommit/failPendingCommit, or
+            // publish anything beyond the plain location fetch.
+            final mockRelay = MockRelayService(
+              groupMessages: ['{"id":"evt1","kind":445,"content":"location"}'],
+            );
+            final mockCircle = MockCircleService()
+              ..decryptLocationResults = [
+                fakeDecrypt(
+                  location: DecryptedLocation(
+                    senderPubkey: 'sender1',
+                    latitude: 37,
+                    longitude: -122,
+                    geohash: '9q8',
+                    timestamp: DateTime.now(),
+                    expiresAt: DateTime.now().add(const Duration(hours: 23)),
+                  ),
+                ),
+              ];
+
+            final svc = LocationSharingService(
+              circleService: mockCircle,
+              relayService: mockRelay,
+            );
+
+            final result = await svc.fetchMemberLocations(circle: testCircle);
+
+            expect(result.locations, hasLength(1));
+            expect(mockCircle.confirmPendingCommitCalls, isEmpty);
+            expect(mockCircle.failPendingCommitCalls, isEmpty);
+            expect(mockRelay.methodCalls, isNot(contains('publishEvent')));
+          },
+        );
+
+        test(
+          'the evolution poller also publishes and confirms an auto-commit',
+          () async {
+            // `_runEvolutionPoll` shares the same auto-commit plumbing as
+            // `fetchMemberLocations` — both own no Rust-side relay handle.
+            final mockRelay = MockRelayService(
+              groupMessages: [
+                '{"id":"evtSelfRemove","kind":445,"content":"selfremove"}',
+              ],
+            );
+            final mockCircle = MockCircleService()
+              ..decryptLocationResults = [noDecryptResult]
+              ..decryptLocationAutoCommits[0] = [
+                PendingAutoCommit(
+                  commitEventJson: '{"id":"commitEvt2","kind":445}',
+                  pendingToken: PendingCommitToken(BigInt.from(11)),
+                ),
+              ];
+
+            final svc = LocationSharingService(
+              circleService: mockCircle,
+              relayService: mockRelay,
+            );
+
+            await svc.pollEvolutionEvents(circles: [testCircle]);
+
+            expect(
+              mockRelay.publishedEvents,
+              contains('{"id":"commitEvt2","kind":445}'),
+            );
+            expect(mockCircle.confirmPendingCommitCalls, [
+              PendingCommitToken(BigInt.from(11)),
+            ]);
+          },
+        );
       });
-
-      test(
-        'does not publish when FFI reports groupUpdated without evolution event',
-        () async {
-          // Commit/ExternalJoin/PendingProposal/IgnoredProposal results all
-          // surface as `groupUpdated: true` with no outbound event. In
-          // those arms the service MUST NOT invoke publish or
-          // finalize/clear — MDK has either already applied the commit or
-          // has nothing for the receiver to carry out.
-          final mockRelay = MockRelayService(
-            groupMessages: [
-              '{"id":"evt1","kind":445,"content":"plain-commit"}',
-            ],
-          );
-          final mockCircle = MockCircleService()
-            ..decryptLocationResults = [
-              const DecryptResult(groupUpdated: true),
-            ];
-
-          final svc = LocationSharingService(
-            circleService: mockCircle,
-            relayService: mockRelay,
-          );
-
-          final result = await svc.fetchMemberLocations(circle: testCircle);
-
-          expect(result.groupUpdated, isTrue);
-          expect(mockCircle.publishEvolutionEventCalls, isEmpty);
-          expect(mockCircle.finalizePendingCommitCalledWith, isEmpty);
-          expect(mockCircle.clearPendingCommitCalledWith, isEmpty);
-        },
-      );
 
       test(
         'returns expired locations within eviction grace as stale',
@@ -666,7 +740,7 @@ void main() {
           );
           final mockCircle = MockCircleService()
             ..decryptLocationResults = [
-              DecryptResult(
+              fakeDecrypt(
                 location: DecryptedLocation(
                   senderPubkey: 'sender1',
                   latitude: 37,
@@ -704,7 +778,7 @@ void main() {
         );
         final mockCircle = MockCircleService()
           ..decryptLocationResults = [
-            DecryptResult(
+            fakeDecrypt(
               location: DecryptedLocation(
                 senderPubkey: 'sender1',
                 latitude: 37,
@@ -714,7 +788,7 @@ void main() {
                 expiresAt: now.add(const Duration(hours: 23)),
               ),
             ),
-            DecryptResult(
+            fakeDecrypt(
               location: DecryptedLocation(
                 senderPubkey: 'sender1',
                 latitude: 38,
@@ -765,7 +839,7 @@ void main() {
         );
         final mockCircle = MockCircleService()
           ..decryptLocationResults = [
-            DecryptResult(
+            fakeDecrypt(
               location: DecryptedLocation(
                 senderPubkey: 'sender1',
                 latitude: 37.7749,
@@ -807,7 +881,7 @@ void main() {
         );
         final mockCircle = MockCircleService()
           ..decryptLocationResults = [
-            DecryptResult(
+            fakeDecrypt(
               location: DecryptedLocation(
                 senderPubkey: 'sender1',
                 latitude: 37,
@@ -818,7 +892,7 @@ void main() {
               ),
             ),
             // Second decrypt result for the new event
-            DecryptResult(
+            fakeDecrypt(
               location: DecryptedLocation(
                 senderPubkey: 'sender1',
                 latitude: 38,
@@ -858,7 +932,7 @@ void main() {
         );
         final mockCircle = MockCircleService()
           ..decryptLocationResults = [
-            DecryptResult(
+            fakeDecrypt(
               location: DecryptedLocation(
                 senderPubkey: 'sender1',
                 latitude: 37,
@@ -900,7 +974,7 @@ void main() {
         );
         final mockCircle = MockCircleService()
           ..decryptLocationResults = [
-            DecryptResult(
+            fakeDecrypt(
               location: DecryptedLocation(
                 senderPubkey: 'sender1',
                 latitude: 37,
@@ -935,7 +1009,7 @@ void main() {
         );
         final mockCircle = MockCircleService()
           ..decryptLocationResults = [
-            DecryptResult(
+            fakeDecrypt(
               location: DecryptedLocation(
                 senderPubkey: 'sender1',
                 latitude: 37,
@@ -966,7 +1040,7 @@ void main() {
           (i) => '{"id":"evt$i","kind":445,"content":"c$i"}',
         );
         final mockRelay = MockRelayService(groupMessages: events);
-        // `DecryptResult(groupUpdated: true)` is the minimal non-null
+        // `fakeDecrypt(groupUpdated: true)` is the minimal non-null
         // payload: it marks the event as successfully processed (so
         // `_seenEventIds` is populated under the mark-after-success
         // rule) without producing a cached location. Exactly what the
@@ -974,7 +1048,7 @@ void main() {
         final mockCircle = MockCircleService()
           ..decryptLocationResults = List.filled(
             5,
-            const DecryptResult(groupUpdated: true),
+            fakeDecrypt(groupUpdated: true),
           );
 
         final svc = LocationSharingService(
@@ -1009,7 +1083,7 @@ void main() {
           final mockCircle = MockCircleService()
             ..decryptLocationResults = List.filled(
               5,
-              const DecryptResult(groupUpdated: true),
+              fakeDecrypt(groupUpdated: true),
             );
 
           final svc = LocationSharingService(
@@ -1056,7 +1130,7 @@ void main() {
           );
           final mockCircle = MockCircleService()
             ..decryptLocationResults = [
-              DecryptResult(
+              fakeDecrypt(
                 location: DecryptedLocation(
                   senderPubkey: 'sender1',
                   latitude: 37,
@@ -1095,7 +1169,7 @@ void main() {
           );
           final mockCircle = MockCircleService()
             ..decryptLocationResults = [
-              DecryptResult(
+              fakeDecrypt(
                 location: DecryptedLocation(
                   senderPubkey: 'sender1',
                   latitude: 37,
@@ -1160,7 +1234,7 @@ void main() {
           );
           final mockCircle = MockCircleService()
             ..decryptLocationResults = [
-              DecryptResult(
+              fakeDecrypt(
                 location: DecryptedLocation(
                   senderPubkey: 'senderB',
                   latitude: 40,
@@ -1185,7 +1259,7 @@ void main() {
 
           // Now feed A with a past-grace entry via a second fetch on A.
           mockCircle.decryptLocationResults = [
-            DecryptResult(
+            fakeDecrypt(
               location: DecryptedLocation(
                 senderPubkey: 'senderA',
                 latitude: 37,
@@ -1230,7 +1304,7 @@ void main() {
         final mockCircle = MockCircleService()
           ..decryptLocationResults = List.filled(
             4,
-            const DecryptResult(groupUpdated: true),
+            fakeDecrypt(groupUpdated: true),
           );
 
         final mockRelay = _MutableMockRelayService(
@@ -1266,7 +1340,7 @@ void main() {
         final decryptsBefore = mockCircle.methodCalls
             .where((c) => c == 'decryptLocation')
             .length;
-        mockCircle.decryptLocationResults = [null];
+        mockCircle.decryptLocationResults = [noDecryptResult];
         mockRelay.replaceAll(['{"id":"evt0","kind":445,"content":"c0"}']);
         await svc.fetchMemberLocations(circle: testCircle);
         final decryptsAfter = mockCircle.methodCalls
@@ -1297,7 +1371,7 @@ void main() {
           final mockCircle = MockCircleService()
             ..decryptLocationResults = List.filled(
               3,
-              const DecryptResult(groupUpdated: true),
+              fakeDecrypt(groupUpdated: true),
             );
 
           final svc = LocationSharingService(
@@ -1357,10 +1431,10 @@ void main() {
           );
           final mockCircle = MockCircleService()
             ..decryptLocationResults = [
-              // First attempt: wrong epoch → null.
-              null,
+              // First attempt: wrong epoch → no result.
+              noDecryptResult,
               // Second attempt: epoch has caught up → success.
-              DecryptResult(
+              fakeDecrypt(
                 location: DecryptedLocation(
                   senderPubkey: 'sender1',
                   latitude: 37,
@@ -1471,8 +1545,8 @@ void main() {
         // second by the application message.
         final mockCircle = MockCircleService()
           ..decryptLocationResults = [
-            const DecryptResult(groupUpdated: true),
-            DecryptResult(
+            fakeDecrypt(groupUpdated: true),
+            fakeDecrypt(
               location: DecryptedLocation(
                 senderPubkey: 'sender1',
                 latitude: 37,
@@ -1482,6 +1556,12 @@ void main() {
                 expiresAt: DateTime.now().add(const Duration(hours: 23)),
               ),
             ),
+          ]
+          // Same as above: `groupUpdated` triggers the post-commit
+          // eviction sweep, so sender1 must be a current member or the
+          // sweep would immediately evict the location under test.
+          ..getMembersResults = [
+            [TestCircleFactory.createMember(pubkey: 'sender1')],
           ];
 
         final svc = LocationSharingService(
@@ -1514,8 +1594,8 @@ void main() {
           final mockRelay = MockRelayService(groupMessages: [valid, malformed]);
           final mockCircle = MockCircleService()
             ..decryptLocationResults = [
-              const DecryptResult(groupUpdated: true),
-              const DecryptResult(groupUpdated: true),
+              fakeDecrypt(groupUpdated: true),
+              fakeDecrypt(groupUpdated: true),
             ];
 
           final svc = LocationSharingService(
@@ -1548,7 +1628,7 @@ void main() {
           final mockCircle = MockCircleService()
             ..decryptLocationResults = List.filled(
               3,
-              const DecryptResult(groupUpdated: true),
+              fakeDecrypt(groupUpdated: true),
             );
 
           final svc = LocationSharingService(
@@ -1608,8 +1688,8 @@ void main() {
       buildSeededService() async {
         final mockCircle = MockCircleService()
           ..decryptLocationResults = [
-            DecryptResult(location: locFor('alicepubkey')),
-            DecryptResult(location: locFor('bobpubkey')),
+            fakeDecrypt(location: locFor('alicepubkey')),
+            fakeDecrypt(location: locFor('bobpubkey')),
           ];
         final relay = _MutableMockRelayService(
           initialMessages: [
@@ -1634,18 +1714,17 @@ void main() {
           final (:svc, :circle, :relay) = await buildSeededService();
           expect(svc.debugCachedLocationCount, 2);
 
-          // Phase 2: relay delivers the auto-commit event that removes bob.
-          // After finalizePendingCommit, getMembers returns only alice.
+          // Phase 2: relay delivers the group-changing event that removes
+          // bob. The engine applies it internally, so getMembers reflects
+          // the post-change roster by the time decrypt returns.
           relay.replaceAll([
             '{"id":"proposal","kind":445,"content":"bob-remove"}',
           ]);
           circle
             ..decryptLocationResults = [
-              const DecryptResult(
+              fakeDecrypt(
                 groupUpdated: true,
-                evolutionEventJson:
-                    '{"id":"commit","kind":445,"content":"bob-removal"}',
-                evolutionMlsGroupId: [10, 20, 30, 40],
+                mlsGroupId: const [10, 20, 30, 40],
               ),
             ]
             ..getMembersResults = [
@@ -1655,8 +1734,7 @@ void main() {
                   displayName: 'Alice',
                 ),
               ],
-            ]
-            ..publishEvolutionEventResults = [true];
+            ];
 
           final result = await svc.fetchMemberLocations(circle: evictionCircle);
 
@@ -1690,17 +1768,15 @@ void main() {
           expect(aliceRowsBefore, greaterThan(0));
           expect(bobRowsBefore, greaterThan(0));
 
-          // Phase 2: deliver the auto-commit event removing bob.
+          // Phase 2: deliver the group-changing event removing bob.
           relay.replaceAll([
             '{"id":"proposal","kind":445,"content":"bob-remove"}',
           ]);
           circle
             ..decryptLocationResults = [
-              const DecryptResult(
+              fakeDecrypt(
                 groupUpdated: true,
-                evolutionEventJson:
-                    '{"id":"commit","kind":445,"content":"bob-removal"}',
-                evolutionMlsGroupId: [10, 20, 30, 40],
+                mlsGroupId: const [10, 20, 30, 40],
               ),
             ]
             ..getMembersResults = [
@@ -1710,8 +1786,7 @@ void main() {
                   displayName: 'Alice',
                 ),
               ],
-            ]
-            ..publishEvolutionEventResults = [true];
+            ];
           await svc.fetchMemberLocations(circle: evictionCircle);
 
           // removeLastKnownMember must have been called for bob.
@@ -1743,18 +1818,16 @@ void main() {
           final (:svc, :circle, :relay) = await buildSeededService();
           expect(svc.debugCachedLocationCount, 2);
 
-          // Deliver an evolution event (e.g., self-update) with no member
-          // change — getMembers returns alice + bob unchanged.
+          // Deliver a group-state-changing event (e.g., a rename) with no
+          // member change — getMembers returns alice + bob unchanged.
           relay.replaceAll([
             '{"id":"self-update-evt","kind":445,"content":"update"}',
           ]);
           circle
             ..decryptLocationResults = [
-              const DecryptResult(
+              fakeDecrypt(
                 groupUpdated: true,
-                evolutionEventJson:
-                    '{"id":"self-update","kind":445,"content":"update"}',
-                evolutionMlsGroupId: [10, 20, 30, 40],
+                mlsGroupId: const [10, 20, 30, 40],
               ),
             ]
             ..getMembersResults = [
@@ -1768,8 +1841,7 @@ void main() {
                   displayName: 'Bob',
                 ),
               ],
-            ]
-            ..publishEvolutionEventResults = [true];
+            ];
           await svc.fetchMemberLocations(circle: evictionCircle);
 
           // Both alice and bob must still be in cache.
@@ -1787,92 +1859,19 @@ void main() {
         },
       );
 
-      test('does not evict when finalize fails', () async {
-        final (:svc, :circle, :relay) = await buildSeededService();
-        expect(svc.debugCachedLocationCount, 2);
+      // NOTE: "does not evict when finalize fails" and "does not evict when
+      // publish fails (clearPendingCommit path)" were removed (Dark Matter
+      // DM-4b) — both tested the deleted receiver-side auto-commit
+      // publish/finalize/clear cycle (see the "Receiver-side auto-commit
+      // (Fix #1) — REMOVED" note above). Eviction is now gated purely on
+      // whether the engine's decrypt result reports a roster-changing kind
+      // (`joined` / `groupUpdate` / `invalidated`); there is no publish or
+      // finalize step in the decrypt-triggered path left to fail.
 
-        // Deliver an evolution event; finalize will throw.
-        relay.replaceAll([
-          '{"id":"proposal","kind":445,"content":"bob-remove"}',
-        ]);
-        circle
-          ..decryptLocationResults = [
-            const DecryptResult(
-              groupUpdated: true,
-              evolutionEventJson:
-                  '{"id":"commit","kind":445,"content":"bob-removal"}',
-              evolutionMlsGroupId: [10, 20, 30, 40],
-            ),
-          ]
-          ..publishEvolutionEventResults = [true]
-          ..shouldThrowOnFinalizePendingCommit = true;
-        await svc.fetchMemberLocations(circle: evictionCircle);
-
-        // finalize threw → _evictDepartedMembers was never entered.
-        expect(
-          svc.debugCachedLocationCount,
-          2,
-          reason: 'finalize failed — cache must be untouched for retry',
-        );
-        // getMembers must NOT have been called (eviction skipped on throw).
-        final getMembersCalls = circle.methodCalls
-            .where((c) => c == 'getMembers')
-            .length;
-        expect(
-          getMembersCalls,
-          0,
-          reason: 'eviction path must not run when finalize throws',
-        );
-      });
-
-      test(
-        'does not evict when publish fails (clearPendingCommit path)',
-        () async {
-          final (:svc, :circle, :relay) = await buildSeededService();
-          expect(svc.debugCachedLocationCount, 2);
-
-          // Deliver the proposal; publish will fail (returns false).
-          relay.replaceAll([
-            '{"id":"proposal","kind":445,"content":"bob-remove"}',
-          ]);
-          circle
-            ..decryptLocationResults = [
-              const DecryptResult(
-                groupUpdated: true,
-                evolutionEventJson:
-                    '{"id":"commit","kind":445,"content":"bob-removal"}',
-                evolutionMlsGroupId: [10, 20, 30, 40],
-              ),
-            ]
-            ..publishEvolutionEventResults = [false];
-          await svc.fetchMemberLocations(circle: evictionCircle);
-
-          // publish failed → clearPendingCommit path → epoch NOT advanced.
-          expect(
-            svc.debugCachedLocationCount,
-            2,
-            reason: 'publish failed — cache must be untouched',
-          );
-          expect(
-            circle.clearPendingCommitCalledWith,
-            isNotEmpty,
-            reason: 'clearPendingCommit must be called on publish failure',
-          );
-          expect(
-            circle.finalizePendingCommitCalledWith,
-            isEmpty,
-            reason: 'finalize must not be called when publish fails',
-          );
-          // getMembers must not be called — eviction only runs after finalize.
-          expect(circle.methodCalls, isNot(contains('getMembers')));
-        },
-      );
-
-      test('retries on next fetch when getMembers fails transiently after '
-          'finalize', () async {
+      test('retries on next fetch when getMembers fails transiently', () async {
         // Review-driven (security-reviewer MEDIUM): if getMembers throws
-        // after finalizePendingCommit has advanced the local epoch, the
-        // departed member has been removed from MDK but remains in the
+        // right after a roster-changing decrypt result, the departed member
+        // has already left the engine's roster but remains in the
         // in-memory cache AND the persistent store. Without a retry, the
         // stale pin lingers until the next message-triggered cycle (which
         // may never come for a silently-departed peer) or the 30-min
@@ -1881,37 +1880,25 @@ void main() {
         final (:svc, :circle, :relay) = await buildSeededService();
         expect(svc.debugCachedLocationCount, 2);
 
-        // Phase 2: deliver the commit event that removes bob. finalize
-        // succeeds (epoch advances), but getMembers throws once.
+        // Phase 2: deliver the group-changing event that removes bob.
+        // getMembers throws once (transient FFI error).
         relay.replaceAll([
           '{"id":"proposal","kind":445,"content":"bob-remove"}',
         ]);
         circle
           ..decryptLocationResults = [
-            const DecryptResult(
-              groupUpdated: true,
-              evolutionEventJson:
-                  '{"id":"commit","kind":445,"content":"bob-removal"}',
-              evolutionMlsGroupId: [10, 20, 30, 40],
-            ),
+            fakeDecrypt(groupUpdated: true, mlsGroupId: const [10, 20, 30, 40]),
           ]
-          ..publishEvolutionEventResults = [true]
           ..getMembersThrowCount = 1;
 
         await svc.fetchMemberLocations(circle: evictionCircle);
 
-        // Cache must be untouched — we could not determine the post-commit
+        // Cache must be untouched — we could not determine the post-change
         // roster, so pruning would be unsafe.
         expect(
           svc.debugCachedLocationCount,
           2,
           reason: 'getMembers threw — eviction deferred, cache intact',
-        );
-        // finalize ran (epoch advanced) before getMembers threw.
-        expect(
-          circle.finalizePendingCommitCalledWith,
-          isNotEmpty,
-          reason: 'finalize must run before the throwing getMembers call',
         );
         // No persistent prune yet — retry is queued.
         expect(
@@ -1986,22 +1973,20 @@ void main() {
           final (:svc, :circle, :relay) = await buildSeededService();
           expect(svc.debugCachedLocationCount, 2);
 
-          // Deliver bob's removal proposal via the evolution-poll path
-          // (no location-fetch in between). finalize advances the local
-          // epoch; getMembers returns only alice.
+          // Deliver bob's removal via the evolution-poll path (no
+          // location-fetch in between). The engine has already applied the
+          // change by the time decrypt returns, so getMembers reflects the
+          // post-change roster (only alice).
           relay.replaceAll([
             '{"id":"proposal-poll","kind":445,"content":"bob-remove"}',
           ]);
           circle
             ..decryptLocationResults = [
-              const DecryptResult(
+              fakeDecrypt(
                 groupUpdated: true,
-                evolutionEventJson:
-                    '{"id":"commit-poll","kind":445,"content":"bob-removal"}',
-                evolutionMlsGroupId: [10, 20, 30, 40],
+                mlsGroupId: const [10, 20, 30, 40],
               ),
             ]
-            ..publishEvolutionEventResults = [true]
             ..getMembersResults = [
               [
                 TestCircleFactory.createMember(
@@ -2028,7 +2013,6 @@ void main() {
             isEmpty,
             reason: "evolution-poll path must prune bob's persistent row",
           );
-          expect(circle.methodCalls, contains('finalizePendingCommit'));
           expect(circle.methodCalls, contains('getMembers'));
           expect(circle.methodCalls, contains('removeLastKnownMember'));
         },
@@ -2054,7 +2038,7 @@ void main() {
           );
           final mockCircle = MockCircleService()
             ..decryptLocationResults = [
-              DecryptResult(
+              fakeDecrypt(
                 location: DecryptedLocation(
                   senderPubkey: 'sender1',
                   latitude: 37,
@@ -2174,7 +2158,7 @@ void main() {
           );
           final mockCircle = MockCircleService()
             ..decryptLocationResults = [
-              DecryptResult(
+              fakeDecrypt(
                 location: DecryptedLocation(
                   senderPubkey: 'sender1',
                   latitude: 37,
@@ -2184,7 +2168,7 @@ void main() {
                   expiresAt: DateTime.now().add(const Duration(hours: 23)),
                 ),
               ),
-              DecryptResult(
+              fakeDecrypt(
                 location: DecryptedLocation(
                   senderPubkey: 'sender2',
                   latitude: 38,
@@ -2348,23 +2332,38 @@ class _ThrowOnFirstDecryptService
     implements CircleService {
   int _decryptCount = 0;
 
-  @override
-  Future<DecryptResult?> decryptLocation({required String eventJson}) async {
+  List<LocationEventResult> _decryptOrThrow() {
     _decryptCount++;
     if (_decryptCount == 1) {
       throw const CircleServiceException('MLS decryption failed');
     }
-    return DecryptResult(
-      location: DecryptedLocation(
-        senderPubkey: 'sender1',
-        latitude: 38,
-        longitude: -121,
-        geohash: '9q9',
-        timestamp: DateTime.now(),
-        expiresAt: DateTime.now().add(const Duration(hours: 23)),
+    return [
+      LocationEventResult(
+        kind: LocationEventKind.location,
+        location: DecryptedLocation(
+          senderPubkey: 'sender1',
+          latitude: 38,
+          longitude: -121,
+          geohash: '9q9',
+          timestamp: DateTime.now(),
+          expiresAt: DateTime.now().add(const Duration(hours: 23)),
+        ),
+        mlsGroupId: const [],
+        epoch: 0,
       ),
-    );
+    ];
   }
+
+  @override
+  Future<List<LocationEventResult>> decryptLocation({
+    required String eventJson,
+  }) async => _decryptOrThrow();
+
+  @override
+  Future<DecryptLocationOutcome> decryptLocationCollectingCommits({
+    required String eventJson,
+  }) async =>
+      DecryptLocationOutcome(results: _decryptOrThrow(), autoCommits: const []);
 
   @override
   Future<EncryptedLocation> encryptLocation({
@@ -2426,36 +2425,10 @@ class _ThrowOnFirstDecryptService
   }) async => throw UnimplementedError();
 
   @override
-  Future<void> finalizePendingCommit(List<int> mlsGroupId) async {}
-
-  @override
-  Future<void> clearPendingCommit(List<int> mlsGroupId) async {}
-
-  @override
-  Future<bool> publishEvolutionEvent({
-    required String eventJson,
-    required List<String> relays,
-    required String label,
-  }) async => true;
-
-  @override
-  Future<SignedKeyPackageEvent> signKeyPackageEvent({
-    required List<int> identitySecretBytes,
-    required List<String> relays,
-  }) async => throw UnimplementedError();
-
-  @override
   Future<String> signDeletionEvent({
     required List<int> identitySecretBytes,
     required List<String> eventIds,
   }) async => throw UnimplementedError();
-
-  @override
-  Future<List<List<int>>> groupsNeedingSelfUpdate(int thresholdSecs) async =>
-      [];
-
-  @override
-  Future<void> selfUpdate(List<int> mlsGroupId) async {}
 }
 
 /// A mock relay service that allows adding messages between fetches.
@@ -2482,6 +2455,12 @@ class _MutableMockRelayService implements RelayService {
   @override
   Future<SubscriptionHealthResult> maintainSubscriptionHealth() async =>
       const SubscriptionHealthResult.empty();
+
+  @override
+  Future<LegacyRetractionResult> retractLegacyKeyMaterial({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  }) async => const LegacyRetractionResult.empty();
   _MutableMockRelayService({List<String>? initialMessages})
     : _messages = initialMessages ?? [];
 
@@ -2594,6 +2573,12 @@ class _PauseRacingRelayService implements RelayService {
   @override
   Future<SubscriptionHealthResult> maintainSubscriptionHealth() async =>
       const SubscriptionHealthResult.empty();
+
+  @override
+  Future<LegacyRetractionResult> retractLegacyKeyMaterial({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  }) async => const LegacyRetractionResult.empty();
   _PauseRacingRelayService({required this.messages});
 
   final List<String> messages;
@@ -2697,6 +2682,12 @@ class _SinceCapturingRelayService implements RelayService {
   @override
   Future<SubscriptionHealthResult> maintainSubscriptionHealth() async =>
       const SubscriptionHealthResult.empty();
+
+  @override
+  Future<LegacyRetractionResult> retractLegacyKeyMaterial({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  }) async => const LegacyRetractionResult.empty();
 
   /// The `since` captured from the most recent `fetchGroupMessages` call.
   DateTime? lastSince;

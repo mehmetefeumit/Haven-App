@@ -12,12 +12,19 @@ class _RecordingRelay extends MockRelayService {
   int kpCalls = 0;
   int relayListCalls = 0;
   int healthCalls = 0;
+  int retractCalls = 0;
   bool throwOnHealth = false;
 
   /// The exact `identitySecretBytes` reference passed to the last KP call, so
   /// the test can assert the orchestrator scrubbed it afterwards.
   List<int>? capturedKpSecret;
   List<int>? capturedRelayListSecret;
+  List<int>? capturedRetractSecret;
+
+  LegacyRetractionResult retractResult = const LegacyRetractionResult(
+    legacy443Scrubbed: 1,
+    relayListRetracted: true,
+  );
 
   KeyPackageMaintenanceResult kpResult = const KeyPackageMaintenanceResult(
     action: KeyPackageMaintenanceAction.republishedFreshD,
@@ -62,6 +69,16 @@ class _RecordingRelay extends MockRelayService {
       relaysTotal: 4,
       relaysDisconnected: 1,
     );
+  }
+
+  @override
+  Future<LegacyRetractionResult> retractLegacyKeyMaterial({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  }) async {
+    retractCalls++;
+    capturedRetractSecret = identitySecretBytes;
+    return retractResult;
   }
 }
 
@@ -216,6 +233,74 @@ void main() {
       final result = await service.maintainSubscriptionHealth();
 
       expect(result.action, SubscriptionHealthAction.engineOff);
+    });
+  });
+
+  group('MaintenanceService.retractLegacyKeyMaterial (DM-4c)', () {
+    test('forwards to relay with the resolved handle + secret', () async {
+      final relay = _RecordingRelay();
+      final service = MaintenanceService(
+        relayService: relay,
+        circleManagerFactory: () async => _FakeCircleManager(),
+        identitySecretBytes: () async => [1, 2, 3, 4],
+      );
+
+      final result = await service.retractLegacyKeyMaterial();
+
+      expect(relay.retractCalls, 1);
+      expect(result.legacy443Scrubbed, 1);
+      expect(result.relayListRetracted, isTrue);
+    });
+
+    test('scrubs the secret buffer after the call (Rule 9)', () async {
+      final relay = _RecordingRelay();
+      final service = MaintenanceService(
+        relayService: relay,
+        circleManagerFactory: () async => _FakeCircleManager(),
+        identitySecretBytes: () async => [9, 8, 7, 6, 5],
+      );
+
+      await service.retractLegacyKeyMaterial();
+
+      final captured = relay.capturedRetractSecret;
+      expect(captured, isNotNull);
+      expect(
+        captured!.every((b) => b == 0),
+        isTrue,
+        reason: 'secret buffer must be zeroized after the FFI consumes it',
+      );
+    });
+
+    test('returns empty (never throws) when the handle factory throws',
+        () async {
+      final relay = _RecordingRelay();
+      final service = MaintenanceService(
+        relayService: relay,
+        circleManagerFactory: () async => throw StateError('no manager'),
+        identitySecretBytes: () async => [1, 2, 3],
+      );
+
+      final result = await service.retractLegacyKeyMaterial();
+
+      expect(relay.retractCalls, 0);
+      expect(result.alreadyDone, isFalse);
+      expect(result.legacy443Scrubbed, 0);
+      expect(result.relayListRetracted, isFalse);
+    });
+
+    test('surfaces alreadyDone once the Rust sentinel is set', () async {
+      final relay = _RecordingRelay()
+        ..retractResult = const LegacyRetractionResult(alreadyDone: true);
+      final service = MaintenanceService(
+        relayService: relay,
+        circleManagerFactory: () async => _FakeCircleManager(),
+        identitySecretBytes: () async => [1, 2, 3],
+      );
+
+      final result = await service.retractLegacyKeyMaterial();
+
+      expect(result.alreadyDone, isTrue);
+      expect(result.legacy443Scrubbed, 0);
     });
   });
 }

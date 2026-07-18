@@ -918,6 +918,9 @@ class AppLocalizationsRu extends AppLocalizations {
   String get pendingMemberReadyToInvite => 'Готово к приглашению';
 
   @override
+  String get pendingMemberNeedsUpdate => 'Требуется обновить Haven';
+
+  @override
   String get memberSearchHint => 'Введите ID участника...';
 
   @override
@@ -1106,6 +1109,58 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get leaveCircleError => 'Не удалось покинуть круг';
+
+  @override
+  String get leaveCircleAdminLimitationNote =>
+      'Как администратор этого круга вы можете покинуть его только после того, как это сделают все остальные участники. Мы понимаем, что это неудобно, — в будущем обновлении администраторы смогут передавать свою роль и покидать круг напрямую.';
+
+  @override
+  String get circleBlockedBannerTitle => 'Этот круг нельзя обновить';
+
+  @override
+  String get circleBlockedBannerBody =>
+      'Что-то пошло не так с шифрованием этого круга, поэтому Haven больше не может отправлять и получать в нём обновления. Ниже по-прежнему доступно последнее известное состояние, или вы можете покинуть круг.';
+
+  @override
+  String get legacyCircleBannerTitle => 'Этот круг нужно создать заново';
+
+  @override
+  String get legacyCircleBannerBody =>
+      'Механизм шифрования Haven был обновлён, поэтому этот круг больше нельзя использовать. Создайте его заново, чтобы продолжить делиться местоположением с теми же людьми — вам нужно будет пригласить их снова.';
+
+  @override
+  String get legacyCircleRecreateCta => 'Создать круг заново';
+
+  @override
+  String get legacyCircleRemoveCta => 'Удалить';
+
+  @override
+  String get legacyCircleRemoveDialogTitle => 'Удалить круг?';
+
+  @override
+  String get legacyCircleRemoveDialogBody =>
+      'Этот круг больше нельзя использовать, и он будет удалён из вашего списка. Это не повлияет на новый круг, который вы создадите взамен.';
+
+  @override
+  String get legacyCircleRemoveConfirm => 'Удалить';
+
+  @override
+  String get legacyCutoverExplainerTitle => 'Haven обновлён';
+
+  @override
+  String get legacyCutoverExplainerIdentityUnchanged =>
+      'Ваша личность и публичный профиль не изменились — вам ничего не нужно с ними делать.';
+
+  @override
+  String get legacyCutoverExplainerCirclesNeedRecreation =>
+      'Для большей безопасности ваши круги нужно создать заново, а их участников — пригласить повторно, прежде чем вы снова сможете делиться местоположением в них.';
+
+  @override
+  String get legacyCutoverExplainerAcknowledge => 'Понятно';
+
+  @override
+  String get relaySettingsLegacyRetractionPending =>
+      'Haven всё ещё очищает часть данных после недавнего обновления безопасности. Очистка завершится автоматически, как только вы снова окажетесь в сети.';
 
   @override
   String get circlesPanelCollapsedAnnouncement => 'Панель кругов свёрнута';

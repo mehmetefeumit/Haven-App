@@ -158,9 +158,9 @@ const _: () = assert!(SUBSCRIBE_MAX_ATTEMPTS >= 1);
 /// Once a task's settle wait is interrupted it only needs to acquire the
 /// per-circle gate + run the network-free MDK converge (sub-second), so 3 s is
 /// ample headroom while keeping logout/teardown/session-replace snappy. On
-/// timeout `stop` proceeds: an escaped task's writes are fork-safe — a single
-/// shared MDK store serialized by the process-global `crate::write_lock` writer
-/// lock + the converge epoch-TOCTOU guard means one epoch lineage (a raced late
+/// timeout `stop` proceeds: an escaped task's writes are fork-safe — the single
+/// process-global `SessionManager` (`tokio::sync::Mutex<AccountDeviceSession>`,
+/// Rule 14) serializes all MLS writes into one epoch lineage (a raced late
 /// converge degrades to `RolledBack`/retryable, never a fork). Kept below
 /// `COMMIT_SETTLE_WINDOW_SECS` so a (precluded) missed interrupt degrades to a
 /// 3 s wait, never the full window.

@@ -40,20 +40,11 @@ mixin CircleServiceRetentionStubs {
 
   Future<void> wipeAllLastKnownLocations() async {}
 
-  Future<void> wipeAllStagedCommits() async {}
-
   Future<void> closeAndInvalidate() async {}
 
   Future<void> wipeAllMlsState() async {}
 
   Future<void> pruneProcessedGiftWraps({DateTime? now}) async {}
-
-  Future<void> recordPublishedKeyPackages({
-    required List<int> canonicalHashRef,
-    required String dTag,
-    required String canonicalEventId,
-    required String legacyEventId,
-  }) async {}
 
   Future<void> resetAllSyncCursors() async {}
 
@@ -64,11 +55,16 @@ mixin CircleServiceRetentionStubs {
     String? displayName,
   }) async {}
 
-  Future<bool> publishEvolutionEvent({
-    required String eventJson,
-    required List<String> relays,
-    required String label,
-  }) async => true;
+  // Rule 8 blocked-circle tracking — inert no-op set for fakes that do not
+  // exercise the `Unrecoverable` path.
+  final Set<String> _blockedCircleIdsStub = {};
+
+  void markCircleBlocked(List<int> mlsGroupId) {
+    _blockedCircleIdsStub.add(mlsGroupId.join(','));
+  }
+
+  bool isCircleBlocked(List<int> mlsGroupId) =>
+      _blockedCircleIdsStub.contains(mlsGroupId.join(','));
 
   Future<void> advanceGroupCursorToEventSecs(int eventCreatedAtSecs) async {}
 
@@ -92,4 +88,14 @@ mixin CircleServiceRetentionStubs {
     required List<KeyPackageData> memberKeyPackages,
     List<String> creatorFallbackRelays = const [],
   }) async => const AddMemberResult(welcomesSent: 1, welcomesTotal: 1);
+
+  // Receive-side auto-commit surface (Rule 13) — inert no-op defaults for
+  // fakes that do not exercise the peer-`SelfRemove`-eviction path.
+  Future<DecryptLocationOutcome> decryptLocationCollectingCommits({
+    required String eventJson,
+  }) async => const DecryptLocationOutcome(results: [], autoCommits: []);
+
+  Future<void> confirmPendingCommit(PendingCommitToken pending) async {}
+
+  Future<void> failPendingCommit(PendingCommitToken pending) async {}
 }

@@ -902,6 +902,9 @@ class AppLocalizationsFa extends AppLocalizations {
   String get pendingMemberReadyToInvite => 'آمادهٔ دعوت';
 
   @override
+  String get pendingMemberNeedsUpdate => 'نیاز به به‌روزرسانی Haven دارد';
+
+  @override
   String get memberSearchHint => 'شناسهٔ عضو را وارد کن...';
 
   @override
@@ -1088,6 +1091,58 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get leaveCircleError => 'ترک حلقه ناموفق بود';
+
+  @override
+  String get leaveCircleAdminLimitationNote =>
+      'به‌عنوان مدیر این حلقه، تنها زمانی می‌توانی آن را ترک کنی که همهٔ اعضای دیگر آن را ترک کرده باشند. می‌دانیم که این ناخوشایند است — به‌روزرسانی‌ای در آینده به مدیران امکان می‌دهد نقش خود را واگذار کرده و مستقیماً حلقه را ترک کنند.';
+
+  @override
+  String get circleBlockedBannerTitle => 'این حلقه قابل به‌روزرسانی نیست';
+
+  @override
+  String get circleBlockedBannerBody =>
+      'مشکلی در رمزگذاری این حلقه پیش آمده، بنابراین Haven دیگر نمی‌تواند در آن به‌روزرسانی ارسال یا دریافت کند. هنوز می‌توانی آخرین چیزی را که می‌دانستی در پایین ببینی، یا حلقه را ترک کنی.';
+
+  @override
+  String get legacyCircleBannerTitle => 'این حلقه باید دوباره ساخته شود';
+
+  @override
+  String get legacyCircleBannerBody =>
+      'موتور رمزگذاری Haven ارتقا یافته، بنابراین این حلقه دیگر قابل استفاده نیست. آن را دوباره بساز تا بتوانی موقعیت مکانی را همچنان با همان افراد به اشتراک بگذاری — باید دوباره دعوتشان کنی.';
+
+  @override
+  String get legacyCircleRecreateCta => 'بازسازی حلقه';
+
+  @override
+  String get legacyCircleRemoveCta => 'حذف';
+
+  @override
+  String get legacyCircleRemoveDialogTitle => 'حلقه حذف شود؟';
+
+  @override
+  String get legacyCircleRemoveDialogBody =>
+      'این حلقه دیگر قابل استفاده نیست و از فهرستت حذف خواهد شد. این کار روی هیچ حلقهٔ جدیدی که برای جایگزینی آن می‌سازی اثر نمی‌گذارد.';
+
+  @override
+  String get legacyCircleRemoveConfirm => 'حذف';
+
+  @override
+  String get legacyCutoverExplainerTitle => 'Haven به‌روزرسانی شده است';
+
+  @override
+  String get legacyCutoverExplainerIdentityUnchanged =>
+      'هویت و نمایهٔ عمومی‌ات بدون تغییر مانده‌اند — نیازی به انجام کاری برای آن‌ها نیست.';
+
+  @override
+  String get legacyCutoverExplainerCirclesNeedRecreation =>
+      'برای امنیت بیشتر، باید حلقه‌هایت را از نو بسازی و اعضایشان را دوباره دعوت کنی تا بتوانی باز هم موقعیت مکانی‌ات را در آن‌ها به اشتراک بگذاری.';
+
+  @override
+  String get legacyCutoverExplainerAcknowledge => 'متوجه شدم';
+
+  @override
+  String get relaySettingsLegacyRetractionPending =>
+      'Haven هنوز در حال پاک‌سازی برخی داده‌های به‌جامانده از به‌روزرسانی امنیتی اخیر است. این کار به‌محض اتصال دوباره‌ات به اینترنت به‌طور خودکار کامل خواهد شد.';
 
   @override
   String get circlesPanelCollapsedAnnouncement => 'پنل حلقه‌ها بسته شد';

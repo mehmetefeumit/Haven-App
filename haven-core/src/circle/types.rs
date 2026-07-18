@@ -545,6 +545,7 @@ impl std::fmt::Debug for GiftWrappedWelcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nostr::mls::types::GroupIdExt;
 
     #[test]
     fn circle_type_default() {

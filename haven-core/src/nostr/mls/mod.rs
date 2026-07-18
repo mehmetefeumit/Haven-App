@@ -1,35 +1,42 @@
-//! MLS integration for Nostr event encryption using MDK.
+//! MLS integration for Nostr event encryption using the Marmot "Dark Matter"
+//! MLS stack (`cgka-engine` / `cgka-session` / `cgka-traits` / `storage-sqlite`
+//! / `transport-nostr-peeler`).
 //!
-//! This module provides the MDK (Marmot Development Kit) integration for
-//! secure group messaging with forward secrecy. It includes:
+//! This module provides Haven's interface to the Dark Matter MLS engine for
+//! secure group messaging with forward secrecy:
 //!
-//! - `MdkManager`: Main interface for group and message operations
-//! - `MlsGroupContext`: Context for encryption/decryption operations
-//! - Storage configuration for SQLite-backed persistence
+//! - [`SessionManager`]: the main interface for group and message operations,
+//!   wrapping one `AccountDeviceSession` behind a `tokio` mutex.
+//! - [`HavenIdentityProofSigner`]: the hardened account-identity-proof signer
+//!   binding the MLS leaf to the Nostr identity (security F1).
+//! - [`PendingWelcomeStore`]: the hold-before-ingest pending-welcome store
+//!   (security F3).
+//! - [`MlsGroupContext`]: a group-scoped encrypt/decrypt context.
+//! - Storage configuration for the encrypted `session.sqlite`.
 //!
 //! # Architecture
 //!
 //! ```text
 //! Flutter App
 //!     ↓
-//! MdkManager (group lifecycle, message handling)
+//! SessionManager (group lifecycle, message handling — async, &mut serialized)
 //!     ↓
-//! MDK (MLS protocol implementation)
+//! AccountDeviceSession → CgkaEngine (MLS protocol) + TransportPeeler (445/1059)
 //!     ↓
-//! SQLite Storage (persistent group/key state)
+//! SqliteAccountStorage (encrypted session.sqlite)
 //! ```
 
 mod context;
 mod manager;
-mod peek_crypto;
+mod signer;
 pub mod storage;
 pub mod types;
+mod welcome;
 
 pub use context::MlsGroupContext;
 pub use manager::redact_hex_sequences;
-pub use manager::{classify_mdk_error, ClassifiedProcessing, MdkManager, PeekedContent};
+pub use manager::{SessionManager, DEFAULT_EXPORTER_LABEL};
+pub use signer::HavenIdentityProofSigner;
 pub use storage::StorageConfig;
-pub use types::{
-    CommitClassification, KeyPackageBundle, LocationGroupConfig, LocationGroupInfo,
-    LocationMessageResult,
-};
+pub use types::{GroupIdExt, LocationGroupConfig, LocationGroupInfo, LocationMessageResult};
+pub use welcome::{PendingWelcome, PendingWelcomeStore, WelcomePreview};

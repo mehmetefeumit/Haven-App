@@ -149,42 +149,46 @@ void main() {
         'haven_conv1_alice_',
       );
       try {
-        // Alice's CircleManagerFfi — the real MLS + SQLCipher stack.
-        final aliceManager = await CircleManagerFfi.newInstance(
-          dataDir: aliceDir.path,
-        );
-
-        // Build a real NostrCircleService backed by aliceManager. This is
-        // the production code path under test — not the FFI directly.
-        final relayService = NostrRelayService();
-        final aliceService = NostrCircleService.withInjectedManager(
-          relayService: relayService,
-          injectedManager: aliceManager,
-        );
-
-        final aliceSecretBytes = await alice.getSecretBytes();
+        // Bob bootstraps as a SyntheticUser on R1 first — this hard-requires
+        // the identity secret bytes at construction time (Dark Matter DM-4)
+        // and already publishes his KeyPackage via `maintainKeyPackage`
+        // during bootstrap, so Alice can fetch it from R1 below.
+        final bob = await SyntheticUser.bob(r1);
         try {
-          // Bob bootstraps as a SyntheticUser on R1 so Alice can fetch his
-          // KeyPackage from R1 without a live relay query (we hand the KP
-          // JSON directly to createCircle).
-          final bob = await SyntheticUser.bob(r1);
+          // Alice's CircleManagerFfi — the real MLS + SQLCipher stack.
+          final aliceSecretBytesForManager = await alice.getSecretBytes();
+          final aliceManager = await CircleManagerFfi.newInstance(
+            dataDir: aliceDir.path,
+            identitySecretBytes: aliceSecretBytesForManager,
+          );
+
+          // Build a real NostrCircleService backed by aliceManager. This is
+          // the production code path under test — not the FFI directly.
+          final relayService = NostrRelayService();
+          final aliceService = NostrCircleService.withInjectedManager(
+            relayService: relayService,
+            injectedManager: aliceManager,
+          );
+
+          final aliceSecretBytes = await alice.getSecretBytes();
           try {
-            final bobSecretBytes = await bob.user.getSecretBytes();
+            final bobKpJson = await relayService.fetchKeyPackage(
+              bob.pubkeyHex,
+            );
+            expect(
+              bobKpJson,
+              isNotNull,
+              reason: 'Bob must have a discoverable KeyPackage on R1',
+            );
             try {
               // -----------------------------------------------------------
               // Step 1: Alice creates a circle on [R1] only.
               // -----------------------------------------------------------
-              final bobKp =
-                  await bob.user.circleManager.signKeyPackageEvent(
-                    identitySecretBytes: bobSecretBytes,
-                    relays: <String>[defaultStrfryUrl],
-                  );
-
               final creation = await aliceManager.createCircle(
                 identitySecretBytes: aliceSecretBytes,
                 members: [
                   MemberKeyPackageFfi(
-                    keyPackageJson: bobKp.eventJson,
+                    keyPackageJson: bobKpJson!.eventJson,
                     inboxRelays: <String>[defaultStrfryUrl],
                     nip65Relays: <String>[defaultStrfryUrl],
                   ),
@@ -199,13 +203,12 @@ void main() {
                 creation.circle.nostrGroupId,
               );
 
-              // Publish the Welcome to R1 and finalize the Add-members commit.
+              // Publish the Welcome to R1 and confirm the pending
+              // group-creation state (publish-before-apply, Rule 13).
               for (final w in creation.welcomeEvents) {
                 await r1.publishAndAwaitOk(w.eventJson);
               }
-              await aliceManager.finalizePendingCommit(
-                mlsGroupId: mlsGroupId,
-              );
+              await aliceManager.confirmPublished(pending: creation.pending);
 
               // ORACLE: Alice's initial circle must have exactly [R1].
               final aliceInitial = await aliceManager.getCircle(
@@ -486,17 +489,18 @@ void main() {
                 'post-update 445 reached R2 and Bob decrypted it.',
               );
             } finally {
-              for (var i = 0; i < bobSecretBytes.length; i++) {
-                bobSecretBytes[i] = 0;
-              }
+              // Nothing peer-specific to scrub at this level any more —
+              // Bob's/Carol's/Dave's KeyPackage came from
+              // `maintainKeyPackage` during `SyntheticUser` bootstrap, not a
+              // secret fetched here.
             }
           } finally {
-            await bob.dispose();
+            for (var i = 0; i < aliceSecretBytes.length; i++) {
+              aliceSecretBytes[i] = 0;
+            }
           }
         } finally {
-          for (var i = 0; i < aliceSecretBytes.length; i++) {
-            aliceSecretBytes[i] = 0;
-          }
+          await bob.dispose();
         }
       } finally {
         try {
@@ -529,39 +533,47 @@ void main() {
         'haven_conv2_alice_',
       );
       try {
-        final aliceManager = await CircleManagerFfi.newInstance(
-          dataDir: aliceDir.path,
-        );
-
-        final aliceSecretBytes = await alice.getSecretBytes();
+        // Distinct invitee identity per subtest (CONV-1 bob, CONV-2 carol,
+        // CONV-3 dave). The three subtests share ONE R1 that is wiped only
+        // per CI target, so each subtest's gift-wrapped Welcome (kind 1059,
+        // tagged `#p = invitee pubkey`) accumulates on R1. Reusing one
+        // pubkey let acceptInvitationViaRelay's firstWhere(#p) pick a STALE
+        // Welcome whose single-use KeyPackage is absent from this fresh
+        // keystore -> "No matching key package was found" (flaky: NIP-59
+        // randomizes gift-wrap created_at, so relay delivery order !=
+        // publish order). A unique pubkey makes this subtest's #p query
+        // match exactly one Welcome. Variable stays `bob` (the non-admin
+        // invitee role); the admin-gate oracle is identity-agnostic.
+        //
+        // Bootstrapping bob FIRST (before aliceManager) also already
+        // publishes his KeyPackage via `maintainKeyPackage` during
+        // `SyntheticUser` bootstrap — Dark Matter's ONE publish path.
+        final bob = await SyntheticUser.carol(r1);
         try {
-          // Distinct invitee identity per subtest (CONV-1 bob, CONV-2 carol,
-          // CONV-3 dave). The three subtests share ONE R1 that is wiped only
-          // per CI target, so each subtest's gift-wrapped Welcome (kind 1059,
-          // tagged `#p = invitee pubkey`) accumulates on R1. Reusing one
-          // pubkey let acceptInvitationViaRelay's firstWhere(#p) pick a STALE
-          // Welcome whose single-use KeyPackage is absent from this fresh
-          // keystore -> "No matching key package was found" (flaky: NIP-59
-          // randomizes gift-wrap created_at, so relay delivery order !=
-          // publish order). A unique pubkey makes this subtest's #p query
-          // match exactly one Welcome. Variable stays `bob` (the non-admin
-          // invitee role); the admin-gate oracle is identity-agnostic.
-          final bob = await SyntheticUser.carol(r1);
+          final aliceSecretBytesForManager = await alice.getSecretBytes();
+          final aliceManager = await CircleManagerFfi.newInstance(
+            dataDir: aliceDir.path,
+            identitySecretBytes: aliceSecretBytesForManager,
+          );
+          final relayServiceForKp = NostrRelayService();
+
+          final aliceSecretBytes = await alice.getSecretBytes();
           try {
-            final bobSecretBytes = await bob.user.getSecretBytes();
+            final bobKpJson = await relayServiceForKp.fetchKeyPackage(
+              bob.pubkeyHex,
+            );
+            expect(
+              bobKpJson,
+              isNotNull,
+              reason: 'Bob must have a discoverable KeyPackage on R1',
+            );
             try {
               // Alice creates a circle on [R1] with Bob as a member.
-              final bobKp =
-                  await bob.user.circleManager.signKeyPackageEvent(
-                    identitySecretBytes: bobSecretBytes,
-                    relays: <String>[defaultStrfryUrl],
-                  );
-
               final creation = await aliceManager.createCircle(
                 identitySecretBytes: aliceSecretBytes,
                 members: [
                   MemberKeyPackageFfi(
-                    keyPackageJson: bobKp.eventJson,
+                    keyPackageJson: bobKpJson!.eventJson,
                     inboxRelays: <String>[defaultStrfryUrl],
                     nip65Relays: <String>[defaultStrfryUrl],
                   ),
@@ -571,18 +583,16 @@ void main() {
                 relays: <String>[defaultStrfryUrl],
                 creatorFallbackRelays: <String>[defaultStrfryUrl],
               );
-              final mlsGroupId = creation.circle.mlsGroupId;
               final nostrGroupIdHex = _hex(
                 creation.circle.nostrGroupId,
               );
 
-              // Publish Welcome to R1 and finalize the Add-members commit.
+              // Publish Welcome to R1 and confirm the pending group-creation
+              // state (publish-before-apply, Rule 13).
               for (final w in creation.welcomeEvents) {
                 await r1.publishAndAwaitOk(w.eventJson);
               }
-              await aliceManager.finalizePendingCommit(
-                mlsGroupId: mlsGroupId,
-              );
+              await aliceManager.confirmPublished(pending: creation.pending);
 
               // Bob accepts the invitation so he is a full MLS member (and
               // therefore provably non-admin in Haven's single-admin model).
@@ -694,17 +704,18 @@ void main() {
                 '${nostrGroupIdHex.substring(0, 8)}...)',
               );
             } finally {
-              for (var i = 0; i < bobSecretBytes.length; i++) {
-                bobSecretBytes[i] = 0;
-              }
+              // Nothing peer-specific to scrub at this level any more —
+              // Bob's/Carol's/Dave's KeyPackage came from
+              // `maintainKeyPackage` during `SyntheticUser` bootstrap, not a
+              // secret fetched here.
             }
           } finally {
-            await bob.dispose();
+            for (var i = 0; i < aliceSecretBytes.length; i++) {
+              aliceSecretBytes[i] = 0;
+            }
           }
         } finally {
-          for (var i = 0; i < aliceSecretBytes.length; i++) {
-            aliceSecretBytes[i] = 0;
-          }
+          await bob.dispose();
         }
       } finally {
         try {
@@ -744,43 +755,48 @@ void main() {
         'haven_conv3_alice_',
       );
       try {
-        // Alice's isolated CircleManagerFfi for this scenario.
-        final aliceManager = await CircleManagerFfi.newInstance(
-          dataDir: aliceDir.path,
-        );
-
-        final relayService = NostrRelayService();
-        final aliceService = NostrCircleService.withInjectedManager(
-          relayService: relayService,
-          injectedManager: aliceManager,
-        );
-
-        final aliceSecretBytes = await alice.getSecretBytes();
+        // dave is this subtest's non-admin invitee — a distinct pubkey from
+        // CONV-1's bob and CONV-2's carol (see CONV-2's note: the shared,
+        // per-target-only-reset R1 accumulates one kind-1059 Welcome per
+        // subtest, and a reused `#p` lets firstWhere pick a stale Welcome
+        // whose KeyPackage isn't in this keystore). Bootstraps on R1 (the
+        // relay that will be REMOVED) — this already publishes his
+        // KeyPackage via `maintainKeyPackage` (Dark Matter's ONE publish
+        // path), so Alice can fetch it below.
+        final bob = await SyntheticUser.dave(r1);
         try {
-          // dave is this subtest's non-admin invitee — a distinct pubkey from
-          // CONV-1's bob and CONV-2's carol (see CONV-2's note: the shared,
-          // per-target-only-reset R1 accumulates one kind-1059 Welcome per
-          // subtest, and a reused `#p` lets firstWhere pick a stale Welcome
-          // whose KeyPackage isn't in this keystore). Bootstraps on R1 (the
-          // relay that will be REMOVED).
-          final bob = await SyntheticUser.dave(r1);
+          // Alice's isolated CircleManagerFfi for this scenario.
+          final aliceSecretBytesForManager = await alice.getSecretBytes();
+          final aliceManager = await CircleManagerFfi.newInstance(
+            dataDir: aliceDir.path,
+            identitySecretBytes: aliceSecretBytesForManager,
+          );
+
+          final relayService = NostrRelayService();
+          final aliceService = NostrCircleService.withInjectedManager(
+            relayService: relayService,
+            injectedManager: aliceManager,
+          );
+
+          final aliceSecretBytes = await alice.getSecretBytes();
           try {
-            final bobSecretBytes = await bob.user.getSecretBytes();
+            final bobKpJson = await relayService.fetchKeyPackage(
+              bob.pubkeyHex,
+            );
+            expect(
+              bobKpJson,
+              isNotNull,
+              reason: 'Bob must have a discoverable KeyPackage on R1',
+            );
             try {
               // -----------------------------------------------------------
               // Step 1: Alice creates a circle on [R1] only.
               // -----------------------------------------------------------
-              final bobKp =
-                  await bob.user.circleManager.signKeyPackageEvent(
-                    identitySecretBytes: bobSecretBytes,
-                    relays: <String>[defaultStrfryUrl],
-                  );
-
               final creation = await aliceManager.createCircle(
                 identitySecretBytes: aliceSecretBytes,
                 members: [
                   MemberKeyPackageFfi(
-                    keyPackageJson: bobKp.eventJson,
+                    keyPackageJson: bobKpJson!.eventJson,
                     inboxRelays: <String>[defaultStrfryUrl],
                     nip65Relays: <String>[defaultStrfryUrl],
                   ),
@@ -795,13 +811,12 @@ void main() {
                 creation.circle.nostrGroupId,
               );
 
-              // Publish Welcome to R1 and finalize the Add-members commit.
+              // Publish Welcome to R1 and confirm the pending group-creation
+              // state (publish-before-apply, Rule 13).
               for (final w in creation.welcomeEvents) {
                 await r1.publishAndAwaitOk(w.eventJson);
               }
-              await aliceManager.finalizePendingCommit(
-                mlsGroupId: mlsGroupId,
-              );
+              await aliceManager.confirmPublished(pending: creation.pending);
 
               // ORACLE: initial circle must have exactly [R1].
               final aliceInitial = await aliceManager.getCircle(
@@ -1073,17 +1088,18 @@ void main() {
                 'Bob decrypted it from R2.',
               );
             } finally {
-              for (var i = 0; i < bobSecretBytes.length; i++) {
-                bobSecretBytes[i] = 0;
-              }
+              // Nothing peer-specific to scrub at this level any more —
+              // Bob's/Carol's/Dave's KeyPackage came from
+              // `maintainKeyPackage` during `SyntheticUser` bootstrap, not a
+              // secret fetched here.
             }
           } finally {
-            await bob.dispose();
+            for (var i = 0; i < aliceSecretBytes.length; i++) {
+              aliceSecretBytes[i] = 0;
+            }
           }
         } finally {
-          for (var i = 0; i < aliceSecretBytes.length; i++) {
-            aliceSecretBytes[i] = 0;
-          }
+          await bob.dispose();
         }
       } finally {
         try {

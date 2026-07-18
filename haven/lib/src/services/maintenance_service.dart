@@ -67,6 +67,27 @@ class MaintenanceService {
     );
   }
 
+  /// Runs the Dark Matter cutover's once-only legacy-KeyPackage retraction
+  /// tick (plan §6 step 5 / security F10a/F10b): retracts this account's
+  /// stale pre-migration KeyPackage advertisements (legacy kind-443 twins +
+  /// the kind-10051 relay list).
+  ///
+  /// Self-gates on a persisted Rust-side sentinel, so calling this on every
+  /// app session (or relay reconnect) is safe — after the first successful
+  /// run it becomes a fast, traffic-free no-op.
+  ///
+  /// Returns [LegacyRetractionResult.empty] on any failure — never throws.
+  Future<LegacyRetractionResult> retractLegacyKeyMaterial() async {
+    return _withSecret(
+      (circle, secret) => _relayService.retractLegacyKeyMaterial(
+        circle: circle,
+        identitySecretBytes: secret,
+      ),
+      onFailure: const LegacyRetractionResult.empty(),
+      label: 'legacy-retraction',
+    );
+  }
+
   /// Runs a subscription-health maintenance tick (engine-coupled).
   ///
   /// Unlike the other two tasks this needs neither the identity secret nor the

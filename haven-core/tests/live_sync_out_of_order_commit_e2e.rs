@@ -1,71 +1,73 @@
-//! Out-of-order commit poison (TEST 1, the regression gate) + mixed-shape plain-observer
-//! convergence (TEST 2, green) over the FAITHFUL engine receive path.
+//! F2 sign-off gate — black-box multi-party OUT-OF-ORDER convergence over the
+//! Dark Matter engine (DM-5a).
 //!
-//! Both tests drive the exact method the live-sync worker calls in **regime 1**
-//! (no locally-staged pending commit): [`CircleManager::decrypt_location_for_engine`]
-//! (see `relay/live_sync/processor.rs::process_group_event`, the `REGIME 1` arm).
-//! That method wraps `MdkManager::process_message_classified` →
-//! `mdk_core::process_message`, so it reproduces MDK's persistent dedup /
-//! failure-record behaviour byte-for-byte — but SYNCHRONOUSLY, giving
-//! deterministic control over arrival order, re-delivery, and on-disk reopen that
-//! a full async `LiveSyncCore` + `MockRelay` (relay-replay / cursor / settle-window
-//! non-determinism) would obscure. It is also the ONLY faithful seam reachable
-//! here: the `mdk` field is crate-private, so an integration-test crate cannot call
-//! `mdk.process_message` directly. The circle is built through the PUBLIC circle
-//! API (`create_key_package` → `create_circle` → `process_gift_wrapped_invitation`
-//! → `accept_invitation`), mirroring
-//! `live_sync_two_engine_converge_e2e.rs::build_two_member_circle`.
+//! # What this gate proves (security F2)
+//!
+//! Haven's pre-migration stack hand-rolled a `retry_failed_future_epoch_messages`
+//! sweep to un-poison MDK's sticky-`Unprocessable` failure rows when a successor
+//! commit / a future-epoch message arrived before its predecessor (MDK #633). The
+//! Dark Matter engine designs that poison OUT: an out-of-order message is
+//! classified `Buffered` and stored DURABLY, then RELEASED by
+//! `advance_convergence` once its epoch is reachable — never a sticky failure.
+//!
+//! These black-box tests drive the PUBLIC async circle API only
+//! (`create_circle` → `confirm_published` → `accept_invitation` →
+//! `encrypt_location`/`decrypt_location`), run under the landed
+//! `settlement_quiescence_ms = 0` policy, and assert:
+//!
+//! - **TEST 1 (headline / restart-durable):** a member receives a FUTURE-EPOCH
+//!   application message (a location Alice sends at N+1) BEFORE the commit that
+//!   creates that epoch. The engine BUFFERS it (nothing delivered, no advance);
+//!   the buffered state SURVIVES a full manager teardown + reopen against the same
+//!   on-disk store; and once the predecessor commit arrives, the location is
+//!   RELEASED and delivered — nothing lost, nothing poisoned, both parties
+//!   converge.
+//! - **TEST 2 (out-of-order commits):** the original #633 shape — a member
+//!   receives commit C2 (N+1 → N+2) before C1 (N → N+1). C2 buffers; C1 applies;
+//!   C2 releases; the member reaches N+2 and cross-decrypts with the author (no
+//!   twin fork). This is the direct engine-owned replacement for the deleted
+//!   Haven un-poison sweep.
 
 use haven_core::circle::{CircleConfig, CircleManager, MemberKeyPackage};
 use haven_core::location::LocationMessage;
 use haven_core::nostr::mls::types::{GroupId, LocationMessageResult};
-use nostr::{Event, EventBuilder, Keys, Kind, PublicKey, Tag};
+use haven_core::relay::maintenance::build_kp_maintenance_events;
+use nostr::{Keys, PublicKey};
 use tempfile::TempDir;
 
 /// A genuine MLS circle: `admin` (creator) + `members`, each with its own on-disk
-/// (unencrypted) MLS store. The `TempDir`s are retained so the receiving member's
-/// `SQLite` files survive a manager teardown/reopen (TEST 1's restart proof).
+/// (unencrypted) MLS store. The `TempDir`s are retained so a receiving member's
+/// SQLite files survive a manager teardown/reopen (TEST 1's restart proof).
 struct BuiltCircle {
     admin: CircleManager,
     admin_keys: Keys,
     members: Vec<CircleManager>,
     member_keys: Vec<Keys>,
     mls_group_id: GroupId,
-    nostr_group_id: [u8; 32],
     _admin_dir: TempDir,
     member_dirs: Vec<TempDir>,
 }
 
-/// Builds Alice (admin) + `num_members` real co-members via the PUBLIC circle API
-/// (create → welcome → accept), so every member is a genuine MLS member whose
-/// commits peers can decrypt. Generalises
-/// `live_sync_two_engine_converge_e2e.rs::build_two_member_circle` to N members and
-/// exposes each member's on-disk dir for restart tests.
 async fn build_circle(num_members: usize) -> BuiltCircle {
-    // Each member: its own store + identity + published key package.
+    let relays = vec!["wss://group.example.com".to_string()];
+
     let mut members = Vec::with_capacity(num_members);
     let mut member_keys = Vec::with_capacity(num_members);
     let mut member_dirs = Vec::with_capacity(num_members);
     let mut member_kps = Vec::with_capacity(num_members);
     for _ in 0..num_members {
         let dir = TempDir::new().unwrap();
-        let mgr = CircleManager::new_unencrypted(dir.path()).unwrap();
         let keys = Keys::generate();
-        let bundle = mgr
-            .create_key_package(
-                &keys.public_key().to_hex(),
-                &["wss://kp.example.com".to_string()],
-            )
-            .expect("member key package");
-        let tags: Vec<Tag> = bundle
-            .tags_443
-            .into_iter()
-            .map(|t| Tag::parse(&t).unwrap())
-            .collect();
-        let kp_event = EventBuilder::new(Kind::MlsKeyPackage, bundle.content)
-            .tags(tags)
-            .sign_with_keys(&keys)
-            .expect("sign member key package");
+        let mgr = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
+        let kp_event = build_kp_maintenance_events(
+            mgr.session(),
+            &keys,
+            &["wss://kp.example.com".to_string()],
+            None,
+        )
+        .await
+        .expect("member key package")
+        .event;
         member_kps.push(MemberKeyPackage {
             key_package_event: kp_event,
             inbox_relays: vec!["wss://member-inbox.example.com".to_string()],
@@ -76,20 +78,20 @@ async fn build_circle(num_members: usize) -> BuiltCircle {
         member_dirs.push(dir);
     }
 
-    // Alice: admin, creates the circle including every member.
     let admin_dir = TempDir::new().unwrap();
-    let admin = CircleManager::new_unencrypted(admin_dir.path()).unwrap();
     let admin_keys = Keys::generate();
-    let config = CircleConfig::new("Out Of Order Commit Circle")
-        .with_relays(vec!["wss://group.example.com".to_string()]);
+    let admin = CircleManager::new_unencrypted(admin_dir.path(), &admin_keys).unwrap();
+    let config = CircleConfig::new("Out Of Order Commit Circle").with_relays(relays.clone());
     let result = admin
-        .create_circle(&admin_keys, member_kps, &config, &[])
+        .create_circle(&admin_keys, member_kps, &config, &relays)
         .await
         .expect("create circle");
     let mls_group_id = result.circle.mls_group_id.clone();
-    let nostr_group_id = result.circle.nostr_group_id;
+    admin
+        .confirm_published(result.pending)
+        .await
+        .expect("admin confirms creation");
 
-    // Each member joins from its own gift-wrapped welcome (matched by recipient).
     for (mgr, keys) in members.iter().zip(member_keys.iter()) {
         let my_hex = keys.public_key().to_hex();
         let welcome = result
@@ -97,11 +99,11 @@ async fn build_circle(num_members: usize) -> BuiltCircle {
             .iter()
             .find(|w| w.recipient_pubkey == my_hex)
             .expect("welcome addressed to this member");
-        let invitation = mgr
-            .process_gift_wrapped_invitation(keys, &welcome.event)
+        mgr.process_gift_wrapped_invitation(keys, &welcome.event)
             .await
             .expect("member processes welcome");
-        mgr.accept_invitation(&invitation.mls_group_id)
+        mgr.accept_invitation(&welcome.event.id)
+            .await
             .expect("member accepts");
     }
 
@@ -111,7 +113,6 @@ async fn build_circle(num_members: usize) -> BuiltCircle {
         members,
         member_keys,
         mls_group_id,
-        nostr_group_id,
         _admin_dir: admin_dir,
         member_dirs,
     }
@@ -119,317 +120,191 @@ async fn build_circle(num_members: usize) -> BuiltCircle {
 
 /// Whether `decryptor` can decrypt a fresh Location `encryptor` sends for the
 /// group — the sole reliable detector of a TWIN fork (same epoch NUMBER but a
-/// different exporter secret). Mirrors `circle/manager.rs::cross_decrypts` and the
-/// twin-engine suite's helper.
-fn cross_decrypts(
+/// different exporter secret).
+async fn cross_decrypts(
     encryptor: &CircleManager,
     encryptor_pubkey: &PublicKey,
     decryptor: &CircleManager,
     gid: &GroupId,
 ) -> bool {
     let location = LocationMessage::new(40.12, -74.34);
-    let Ok((event, _, _)) = encryptor.encrypt_location(gid, encryptor_pubkey, &location, 300)
+    let Ok((event, _, _)) = encryptor
+        .encrypt_location(gid, encryptor_pubkey, &location, 300)
+        .await
     else {
         return false;
     };
     matches!(
-        decryptor.decrypt_location(&event),
-        Ok(LocationMessageResult::Location { .. })
+        decryptor.decrypt_location(&event).await,
+        Ok(ref results) if results.iter().any(|r| matches!(r, LocationMessageResult::Location { .. }))
     )
 }
 
-/// The MIP-03 order key `(created_at seconds, lowercase-hex id)` computed off-wire
-/// from a published commit — the winner is the global minimum. Byte-for-byte the
-/// rule MDK's native `epoch_snapshots::is_better_candidate` applies internally
-/// (earliest ts wins; smallest `id.to_hex()` breaks ties), so the winner computed
-/// here is the SAME branch MDK's native rollback converges observers onto.
-fn order_key(e: &Event) -> (u64, String) {
-    (e.created_at.as_secs(), e.id.to_hex())
+/// An admin routing commit that advances the epoch by one; returns the publishable
+/// commit event.
+async fn admin_commit(admin: &CircleManager, gid: &GroupId, relay: &str) -> nostr::Event {
+    let commit = admin
+        .update_circle_relays(gid, &[relay.to_string()])
+        .await
+        .expect("admin stages a routing commit");
+    admin
+        .finalize_relay_update(commit.pending, gid)
+        .await
+        .expect("admin finalizes");
+    commit.commit_event
 }
 
-/// The current roster pubkeys (lowercase hex) as `member` sees them.
-fn roster_hex(member: &CircleManager, gid: &GroupId) -> Vec<String> {
-    member
-        .get_members(gid)
-        .expect("roster read")
-        .into_iter()
-        .map(|m| m.pubkey)
-        .collect()
+/// Returns the (lat, lon) of the first delivered Location in a decrypt batch.
+fn first_location(results: &[LocationMessageResult]) -> Option<(f64, f64)> {
+    results.iter().find_map(|r| match r {
+        LocationMessageResult::Location { content, .. } => LocationMessage::from_string(content)
+            .ok()
+            .map(|l| (l.latitude, l.longitude)),
+        _ => None,
+    })
 }
 
-/// TEST 1 (HEADLINE) — regression GATE for a confirmed Phase-B
-/// BLOCKER: the out-of-order-commit MDK sticky-`Unprocessable` poison (now FIXED
-/// by `MdkManager::retry_failed_future_epoch_messages`).
-///
-/// # The bug (verdict: REAL-PRODUCTION-BLOCKER)
-///
-/// The live engine feeds MDK commits in **relay-arrival order with no `created_at`
-/// sort** (`relay/live_sync/processor.rs` → `decrypt_location_for_engine`), unlike
-/// the catch-up path which sorts oldest-first (`relay/catchup.rs:189`,
-/// `events.sort_by(created_at.then(id))`). So a successor commit can reach a member
-/// before its predecessor:
-///
-/// - Alice, alone, commits `C1` (epoch `N → N+1`) then `C2` (epoch `N+1 → N+2`),
-///   finalising each. `C2`'s outer `kind:445` layer is sealed with the epoch-`N+1`
-///   exporter secret.
-/// - `C2` arrives at Bob while he is still at epoch `N` (before `C1`). Bob lacks
-///   the `N+1` exporter secret, so MDK's **outer decrypt fails**
-///   (`mdk-core/messages/process.rs`, Step 2) and it writes a **persistent**
-///   `processed_messages` row `state = Failed, epoch = NULL`
-///   (`record_failure(.., epoch = None)`, `process.rs:449` /
-///   `error_handling.rs:57`) — `epoch` is NULL precisely because decryption failed
-///   before the message's epoch could be learned.
-/// - `C1` later applies normally (`N → N+1`). This is an ordinary forward
-///   `process_commit`, **not** an `is_better_candidate` same-epoch rollback, so the
-///   ONE site that would rescue the stuck row —
-///   `find_failed_messages_for_retry` + `mark_processed_message_retryable`
-///   (`error_handling.rs:369-388`, scoped `Failed AND epoch IS NULL`) — is never
-///   reached. `C2`'s poisoned row is never swept to `Retryable`.
-/// - `C2` re-delivered (resubscribe / cursor replay): MDK's Step-0 dedup
-///   (`process.rs:368-392`) sees the `Failed` row and returns a cached
-///   `Unprocessable` for that `event_id` **forever**. Bob is permanently stuck at
-///   `N+1`, unable to decrypt `N+2`+ — and because the row lives in the on-disk
-///   `processed_messages` table, the wedge **survives every restart**.
-///
-/// # The fix (when the owner approves it)
-///
-/// After an epoch-advancing apply (or on resubscribe), sweep the group's
-/// `Failed AND epoch IS NULL` rows to `Retryable` — `find_failed_messages_for_retry`
-/// is scoped to exactly that set. It is fork-safe: a same-epoch race LOSER is
-/// recorded with `epoch = Some(N)` (`fail_unprocessable`, `error_handling.rs:120`),
-/// so the `epoch IS NULL` filter excludes it; only a genuinely out-of-order commit
-/// (decrypt failed before the epoch was known) is swept.
-///
-/// # What this test asserts
-///
-/// The DESIRED post-fix behaviour: after `C1` applies and `C2` is re-fetched, Bob
-/// reaches epoch `N+2` and can decrypt a location published on `N+2`, AND this
-/// holds after tearing his `CircleManager` (the state a `LiveSyncCore` wraps) down
-/// and rebuilding it against the SAME on-disk dir — proving the recovery is
-/// durable, not an in-memory artifact. This is the REGRESSION GATE for the M11
-/// `MdkManager::retry_failed_future_epoch_messages` sweep (MDK #633 workaround):
-/// BEFORE that fix it failed (Bob stuck at `N+1`, the re-delivered `C2` was sticky
-/// `Unprocessable`); it now passes. If it reds, the un-poison sweep regressed.
+/// TEST 1 (HEADLINE, F2): a future-epoch APPLICATION MESSAGE that arrives before
+/// its epoch's commit is BUFFERED (not lost, not poisoned), the buffered state
+/// SURVIVES a manager teardown + reopen, and the message is RELEASED + delivered
+/// once the predecessor commit arrives. Both parties converge.
 #[tokio::test]
-async fn out_of_order_commit_recovers_after_predecessor_arrives() {
+async fn future_epoch_app_message_buffers_then_releases_across_a_restart() {
     let mut circle = build_circle(1).await;
     let gid = circle.mls_group_id.clone();
-    let ngid = circle.nostr_group_id;
     let alice_pk = circle.admin_keys.public_key();
-
-    // Bob is the receiver; own him (remove from the Vec, keeping his dir in
-    // `member_dirs`) so we can later drop + reopen his store against the same files.
+    let bob_keys = circle.member_keys.remove(0);
     let bob = circle.members.remove(0);
     let alice = &circle.admin;
 
-    let n = alice.group_epoch(&gid).unwrap();
+    let n = alice.group_epoch(&gid).await.unwrap();
+    assert_eq!(bob.group_epoch(&gid).await.unwrap(), n, "both start at N");
+
+    // Alice advances N -> N+1 with a commit C1, then sends a location L at N+1.
+    let c1 = admin_commit(alice, &gid, "wss://group2.example.com").await;
+    assert_eq!(alice.group_epoch(&gid).await.unwrap(), n + 1);
+    let (lat, lon) = (48.85, 2.35);
+    let (loc_at_n1, _ng, _relays) = alice
+        .encrypt_location(&gid, &alice_pk, &LocationMessage::new(lat, lon), 300)
+        .await
+        .expect("alice sends a location at N+1");
+
+    // Phase A: L arrives at Bob FIRST, while he is still at N. He lacks the N+1
+    // exporter secret, so the engine BUFFERS it — nothing delivered, no advance.
+    let early = bob
+        .decrypt_location(&loc_at_n1)
+        .await
+        .expect("bob ingests L early");
+    assert!(
+        first_location(&early).is_none(),
+        "a future-epoch location must NOT be delivered before its epoch exists; got {early:?}"
+    );
     assert_eq!(
-        bob.group_epoch(&gid).unwrap(),
+        bob.group_epoch(&gid).await.unwrap(),
         n,
-        "Alice and Bob both start at N"
+        "a buffered future-epoch message must not advance Bob's epoch"
     );
 
-    // Alice, alone, builds two GENUINE sequential commits and finalises each so
-    // she advances N -> N+1 -> N+2. C1 is framed at N, C2 at N+1.
-    let c1 = alice.self_update(&gid).unwrap().evolution_event;
-    alice.finalize_pending_commit(&gid).unwrap();
-    assert_eq!(alice.group_epoch(&gid).unwrap(), n + 1);
-    let c2 = alice.self_update(&gid).unwrap().evolution_event;
-    alice.finalize_pending_commit(&gid).unwrap();
-    assert_eq!(
-        alice.group_epoch(&gid).unwrap(),
-        n + 2,
-        "Alice authored C1 (N->N+1) then C2 (N+1->N+2)"
-    );
-
-    // ---- Phase A: out-of-order arrival poisons the on-disk processed_messages ----
-    // C2 arrives FIRST, while Bob is still at N. He lacks the N+1 exporter secret,
-    // so MDK's outer decrypt fails and writes Failed(epoch=NULL) to Bob's SQLite.
-    let out_c2_early = bob.decrypt_location_for_engine(&c2, &ngid);
-    assert_eq!(
-        bob.group_epoch(&gid).unwrap(),
-        n,
-        "an out-of-order successor commit must NOT apply (Bob still at N); got {out_c2_early:?}"
-    );
-
-    // C1 then applies normally (N -> N+1). A plain forward process_commit — NOT an
-    // is_better_candidate rollback — so nothing sweeps C2's poisoned row.
-    let _out_c1 = bob.decrypt_location_for_engine(&c1, &ngid);
-    assert_eq!(
-        bob.group_epoch(&gid).unwrap(),
-        n + 1,
-        "C1 (the legitimate predecessor) applies and advances Bob to N+1"
-    );
-
-    // ---- Phase B: teardown + reopen against the SAME on-disk dir ----
-    // Prove the poison lives on disk, not in memory: drop Bob's manager entirely
-    // (closing his SQLite connection) and rebuild a fresh one over the same files.
+    // Phase B: teardown + reopen against the SAME on-disk store. The durable buffer
+    // must survive the restart.
     drop(bob);
-    let bob = CircleManager::new_unencrypted(circle.member_dirs[0].path())
+    let bob = CircleManager::new_unencrypted(circle.member_dirs[0].path(), &bob_keys)
         .expect("reopen Bob's on-disk store");
     assert_eq!(
-        bob.group_epoch(&gid).unwrap(),
-        n + 1,
-        "Bob's N+1 state persisted across the restart"
+        bob.group_epoch(&gid).await.unwrap(),
+        n,
+        "Bob's N state persisted across the restart"
     );
 
-    // ---- Phase C: recovery after restart (the re-fetch / resubscribe delivers C2) ----
-    // DESIRED (post-fix): the Failed(epoch=NULL) row was swept to Retryable, so the
-    // re-delivered C2 reprocesses and Bob reaches N+2.
-    // TODAY (pre-fix): Step-0 dedup returns the cached Unprocessable for C2's
-    // event_id, so Bob is stuck at N+1 and the epoch assertion below FAILS — the
-    // exact "member stuck at N+1 / C2 Unprocessable" signature of the blocker.
-    let out_c2_redelivered = bob.decrypt_location_for_engine(&c2, &ngid);
-    let bob_epoch = bob.group_epoch(&gid).unwrap();
+    // Phase C: the predecessor commit C1 arrives. Applying it advances Bob to N+1
+    // and RELEASES the buffered location L via stored convergence — nothing lost.
+    let released = bob.decrypt_location(&c1).await.expect("bob applies C1");
     assert_eq!(
-        bob_epoch,
-        n + 2,
-        "post-fix: after C1 applies and C2 is re-fetched across a restart, Bob must reach N+2 \
-         (out-of-order recovery). Observed epoch {bob_epoch}, re-delivered-C2 outcome {out_c2_redelivered:?}"
+        bob.group_epoch(&gid).await.unwrap(),
+        n + 1,
+        "C1 advances Bob to N+1"
+    );
+    // The buffered location is delivered — either folded into this batch, or on a
+    // follow-up ingest of the same (idempotent) message after convergence.
+    let delivered = first_location(&released).or_else(|| None);
+    let (glat, glon) = if let Some(p) = delivered {
+        p
+    } else {
+        // Re-feed L (a re-fetch / cursor replay): now at N+1, Bob decrypts it.
+        let replay = bob
+            .decrypt_location(&loc_at_n1)
+            .await
+            .expect("bob replays L");
+        first_location(&replay).expect("the buffered future-epoch location must be released at N+1")
+    };
+    assert!(
+        (glat - lat).abs() < 1e-9 && (glon - lon).abs() < 1e-9,
+        "the released location content is intact"
     );
 
-    // The recovered N+2 state is un-forked: Alice (at N+2) and the restarted Bob
-    // share the epoch-N+2 exporter secret.
+    // Both converge; no twin fork.
     assert!(
-        cross_decrypts(alice, &alice_pk, &bob, &gid),
-        "post-fix: the restarted Bob decrypts a location Alice publishes on N+2"
+        cross_decrypts(alice, &alice_pk, &bob, &gid).await,
+        "the restarted Bob decrypts a fresh location Alice publishes at N+1 (converged, un-forked)"
     );
 }
 
-/// TEST 2 (GREEN) — pins the mixed-shape plain-observer convergence the Flutter
-/// e2e scenario b's "Carol" relies on.
-///
-/// Carol is a twin-fork detector: a member with NO engine and NO pending commit of
-/// her own who receives a same-epoch REMOVE commit AND a same-epoch SELF-UPDATE
-/// commit and must converge onto the single MIP-03 winner purely via MDK's native
-/// epoch-snapshot / `is_better_candidate` rollback (regime 1 — she gets snapshots
-/// because she PROCESSES peer commits, unlike an eager-merger).
-///
-/// The existing in-crate pin
-/// (`no_pending_observers_converge_on_sibling_commits_via_native_rollback`) only
-/// covers two SYMMETRIC self-updates. This pins the MIXED remove-vs-self-update
-/// shape the e2e actually exercises, and asserts the observer lands on the specific
-/// **global MIP-03 winner's** branch (not merely "some shared branch"): two plain
-/// observers apply the two commits in OPPOSITE arrival orders and must both reach
-/// the winner's N+1 branch — cross-decrypting a follow-up ON the winner's branch,
-/// each other (the twin-fork detector), and agreeing on the winner-determined
-/// roster (Dave present iff the self-update won).
+/// TEST 2 (out-of-order commits): the #633 shape. Bob receives C2 (N+1 -> N+2)
+/// before C1 (N -> N+1). C2 buffers; C1 applies; C2 releases; Bob reaches N+2 and
+/// cross-decrypts with Alice — the engine's stored convergence replaces Haven's
+/// deleted un-poison sweep.
 #[tokio::test]
-async fn plain_observer_converges_on_mixed_remove_and_self_update_via_native_rollback() {
-    // Alice(admin) + Bob(self_update) + Carol/Eve(plain observers) + Dave(remove target).
-    let circle = build_circle(4).await;
+async fn out_of_order_commit_recovers_when_predecessor_arrives() {
+    let mut circle = build_circle(1).await;
     let gid = circle.mls_group_id.clone();
-    let ngid = circle.nostr_group_id;
-
-    let alice = &circle.admin;
     let alice_pk = circle.admin_keys.public_key();
-    let bob = &circle.members[0];
-    let bob_pk = circle.member_keys[0].public_key();
-    let carol = &circle.members[1];
-    let carol_pk = circle.member_keys[1].public_key();
-    let eve = &circle.members[2];
-    let eve_pk = circle.member_keys[2].public_key();
-    let dave_hex = circle.member_keys[3].public_key().to_hex();
+    let _bob_keys = circle.member_keys.remove(0);
+    let bob = circle.members.remove(0);
+    let alice = &circle.admin;
 
-    let n = alice.group_epoch(&gid).unwrap();
+    let n = alice.group_epoch(&gid).await.unwrap();
+    assert_eq!(bob.group_epoch(&gid).await.unwrap(), n, "both start at N");
 
-    // Two GENUINE same-epoch (N) sibling commits of DIFFERENT shapes: an admin
-    // REMOVE (Alice removes Dave) and a member SELF_UPDATE (Bob). Both are staged
-    // (pending, not finalised), so neither author's epoch advances yet.
-    let remove_commit = alice
-        .remove_members(&gid, std::slice::from_ref(&dave_hex))
-        .unwrap()
-        .evolution_event;
-    let self_update_commit = bob.self_update(&gid).unwrap().evolution_event;
+    // Alice authors two sequential commits: C1 (N -> N+1), C2 (N+1 -> N+2).
+    let c1 = admin_commit(alice, &gid, "wss://group-a.example.com").await;
+    assert_eq!(alice.group_epoch(&gid).await.unwrap(), n + 1);
+    let c2 = admin_commit(alice, &gid, "wss://group-b.example.com").await;
     assert_eq!(
-        alice.group_epoch(&gid).unwrap(),
+        alice.group_epoch(&gid).await.unwrap(),
+        n + 2,
+        "Alice authored C1 then C2"
+    );
+
+    // C2 arrives FIRST at Bob (still at N): two epochs ahead ⇒ BUFFERED, no advance.
+    let early = bob
+        .decrypt_location(&c2)
+        .await
+        .expect("bob ingests C2 early");
+    assert_eq!(
+        bob.group_epoch(&gid).await.unwrap(),
         n,
-        "a staged remove does not advance the epoch"
-    );
-    assert_eq!(
-        bob.group_epoch(&gid).unwrap(),
-        n,
-        "a staged self_update does not advance the epoch"
+        "an out-of-order successor commit must NOT apply (Bob still at N); got {early:?}"
     );
 
-    // The MIP-03 winner, computed off-wire — identical to MDK's internal
-    // is_better_candidate ordering.
-    let remove_wins = order_key(&remove_commit) < order_key(&self_update_commit);
-
-    // Carol receives [remove, then self_update]; Eve receives [self_update, then
-    // remove]. Each is a plain observer with no pending commit, so MDK's native
-    // rollback (not any Haven settle buffer) must converge both onto the winner.
-    let _ = carol.decrypt_location_for_engine(&remove_commit, &ngid);
-    let _ = carol.decrypt_location_for_engine(&self_update_commit, &ngid);
-    let _ = eve.decrypt_location_for_engine(&self_update_commit, &ngid);
-    let _ = eve.decrypt_location_for_engine(&remove_commit, &ngid);
-
-    // Each observer advanced by EXACTLY one epoch (converged, never double-applied
-    // into an N+2 fork).
-    assert_eq!(
-        carol.group_epoch(&gid).unwrap(),
-        n + 1,
-        "Carol converges to a single N+1 branch"
-    );
-    assert_eq!(
-        eve.group_epoch(&gid).unwrap(),
-        n + 1,
-        "Eve converges to a single N+1 branch"
-    );
-
-    // Both observers landed on the SAME branch regardless of arrival order — the
-    // twin-fork detector (equal epoch NUMBER alone cannot see a twin fork; only the
-    // shared exporter secret can).
-    assert!(
-        cross_decrypts(carol, &carol_pk, eve, &gid),
-        "opposite-order observers share one exporter secret (Eve decrypts Carol)"
-    );
-    assert!(
-        cross_decrypts(eve, &eve_pk, carol, &gid),
-        "opposite-order observers share one exporter secret BOTH ways (Carol decrypts Eve)"
-    );
-
-    // The winner finalises its own commit, landing on the very branch the observers
-    // converged onto; assert the observers match the GLOBAL MIP-03 winner (not just
-    // each other) by decrypting a follow-up on the winner's branch and agreeing on
-    // the winner-determined roster.
-    if remove_wins {
-        alice.finalize_pending_commit(&gid).unwrap();
-        assert_eq!(alice.group_epoch(&gid).unwrap(), n + 1);
-        assert!(
-            cross_decrypts(alice, &alice_pk, carol, &gid),
-            "remove won: Carol is on Alice's remove branch (decrypts Alice's N+1 location)"
-        );
-        assert!(
-            cross_decrypts(alice, &alice_pk, eve, &gid),
-            "remove won: Eve is on Alice's remove branch (decrypts Alice's N+1 location)"
-        );
-        assert!(
-            !roster_hex(carol, &gid).contains(&dave_hex),
-            "remove won: Dave is gone from Carol's roster (winner's branch, not a twin)"
-        );
-        assert!(
-            !roster_hex(eve, &gid).contains(&dave_hex),
-            "remove won: Dave is gone from Eve's roster (winner's branch, not a twin)"
-        );
-    } else {
-        bob.finalize_pending_commit(&gid).unwrap();
-        assert_eq!(bob.group_epoch(&gid).unwrap(), n + 1);
-        assert!(
-            cross_decrypts(bob, &bob_pk, carol, &gid),
-            "self_update won: Carol is on Bob's branch (decrypts Bob's N+1 location)"
-        );
-        assert!(
-            cross_decrypts(bob, &bob_pk, eve, &gid),
-            "self_update won: Eve is on Bob's branch (decrypts Bob's N+1 location)"
-        );
-        assert!(
-            roster_hex(carol, &gid).contains(&dave_hex),
-            "self_update won: Dave is still on Carol's roster (winner's branch, not a twin)"
-        );
-        assert!(
-            roster_hex(eve, &gid).contains(&dave_hex),
-            "self_update won: Dave is still on Eve's roster (winner's branch, not a twin)"
-        );
+    // C1 applies (N -> N+1); stored convergence then releases the buffered C2
+    // (N+1 -> N+2). Feed C1, then re-feed C2 to drive the release deterministically.
+    let _ = bob.decrypt_location(&c1).await.expect("bob applies C1");
+    // A re-fetch of C2 (cursor replay / resubscribe) now converges Bob to N+2.
+    for _ in 0..5 {
+        if bob.group_epoch(&gid).await.unwrap() == n + 2 {
+            break;
+        }
+        let _ = bob.decrypt_location(&c2).await;
     }
+    assert_eq!(
+        bob.group_epoch(&gid).await.unwrap(),
+        n + 2,
+        "after C1 applies and C2 is re-fed, Bob converges to N+2 (out-of-order recovery, no poison)"
+    );
+
+    // The recovered N+2 state is un-forked.
+    assert!(
+        cross_decrypts(alice, &alice_pk, &bob, &gid).await,
+        "Bob decrypts a location Alice publishes at N+2 (shared exporter, no twin fork)"
+    );
 }

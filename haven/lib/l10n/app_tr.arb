@@ -265,6 +265,7 @@
   "pendingMemberWarning": "Uyarı",
   "pendingMemberCheckingAvailability": "Uygunluk denetleniyor...",
   "pendingMemberReadyToInvite": "Davet edilmeye hazır",
+  "pendingMemberNeedsUpdate": "Haven güncellemesi gerekiyor",
 
   "memberSearchHint": "Üye kimliğini girin...",
   "memberSearchPasteTooltip": "Panodan yapıştır",
@@ -316,6 +317,23 @@
   "leaveCircleIdentityUnavailable": "Kimlik kullanılamıyor",
   "leaveCircleSuccess": "Çevreden başarıyla ayrıldınız",
   "leaveCircleError": "Çevreden ayrılınamadı",
+  "leaveCircleAdminLimitationNote": "Bu çevrenin yöneticisi olarak, yalnızca diğer tüm üyeler ayrıldıktan sonra ayrılabilirsiniz. Bunun zahmetli olduğunu biliyoruz — gelecek bir güncellemede yöneticiler, görevlerini devredip doğrudan ayrılabilecek.",
+
+  "circleBlockedBannerTitle": "Bu çevre güncellenemiyor",
+  "circleBlockedBannerBody": "Bu çevrenin şifrelemesinde bir sorun oluştu, bu yüzden Haven bu çevrede artık güncelleme gönderemiyor ya da alamıyor. Aşağıda en son bildiklerinizi görmeye devam edebilir ya da çevreden ayrılabilirsiniz.",
+  "legacyCircleBannerTitle": "Bu çevrenin yeniden oluşturulması gerekiyor",
+  "legacyCircleBannerBody": "Haven'ın şifreleme motoru güncellendi, bu yüzden bu çevre artık kullanılamıyor. Aynı kişilerle konum paylaşmaya devam etmek için çevreyi yeniden oluşturun — onları tekrar davet etmeniz gerekecek.",
+  "legacyCircleRecreateCta": "Çevreyi Yeniden Oluştur",
+  "legacyCircleRemoveCta": "Kaldır",
+  "legacyCircleRemoveDialogTitle": "Çevre kaldırılsın mı?",
+  "legacyCircleRemoveDialogBody": "Bu çevre artık kullanılamıyor ve listenizden kaldırılacak. Bu işlem, onun yerine oluşturacağınız yeni bir çevreyi etkilemez.",
+  "legacyCircleRemoveConfirm": "Kaldır",
+  "legacyCutoverExplainerTitle": "Haven güncellendi",
+  "legacyCutoverExplainerIdentityUnchanged": "Kimliğiniz ve herkese açık profiliniz değişmedi — bunlar için yapmanız gereken bir şey yok.",
+  "legacyCutoverExplainerCirclesNeedRecreation": "Güvenliği artırmak için, bu çevrelerde tekrar konum paylaşabilmenizden önce çevrelerinizin yeniden oluşturulması ve üyelerinin yeniden davet edilmesi gerekiyor.",
+  "legacyCutoverExplainerAcknowledge": "Anladım",
+  "relaySettingsLegacyRetractionPending": "Haven, son güvenlik güncellemesinden kalan bazı verileri hâlâ temizliyor. Tekrar çevrimiçi olduğunuzda bu işlem otomatik olarak tamamlanacak.",
+
 
   "circlesPanelCollapsedAnnouncement": "Çevreler paneli daraltıldı",
   "circlesPanelExpandedAnnouncement": "Çevreler paneli genişletildi",

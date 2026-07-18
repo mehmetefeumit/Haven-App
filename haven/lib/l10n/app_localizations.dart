@@ -1506,6 +1506,12 @@ abstract class AppLocalizations {
   /// **'Ready to invite'**
   String get pendingMemberReadyToInvite;
 
+  /// Subtitle/accessibility label shown when a pending member's discovered KeyPackage is the deprecated pre-migration kind — the person is running an old Haven build and must update it before they can be invited (Dark Matter migration).
+  ///
+  /// In en, this message translates to:
+  /// **'Needs to update Haven'**
+  String get pendingMemberNeedsUpdate;
+
   /// Hint inside the member-search text field where a member ID is entered.
   ///
   /// In en, this message translates to:
@@ -1775,6 +1781,96 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Failed to leave circle'**
   String get leaveCircleError;
+
+  /// Informational note shown only to a circle's admin, directly below the Leave Circle button in the circle-details sheet. Explains that MDK's current public API exposes no admin-policy component codec (mdk#755), so Haven cannot yet support admin hand-off or self-demotion: an admin can only leave once every other member already has (the sole-remaining-member 'abandon' path still works). Temporary, upstream-blocked limitation; never shown to non-admin members.
+  ///
+  /// In en, this message translates to:
+  /// **'As this circle\'s admin, you can only leave once every other member has left. We know that\'s inconvenient — a future update will let admins hand off and leave directly.'**
+  String get leaveCircleAdminLimitationNote;
+
+  /// Title of the banner shown above a circle's member list when the encryption engine has flagged the circle as unrecoverable (Dark Matter migration, Security Rule 8). Never shows a raw internal error.
+  ///
+  /// In en, this message translates to:
+  /// **'This circle can’t be updated'**
+  String get circleBlockedBannerTitle;
+
+  /// Body text of the blocked-circle banner. Kept generic and non-technical, per the app's no-raw-errors-in-UI rule.
+  ///
+  /// In en, this message translates to:
+  /// **'Something went wrong with this circle’s encryption, so Haven can no longer send or receive updates in it. You can still see what you last knew below, or leave the circle.'**
+  String get circleBlockedBannerBody;
+
+  /// Title of the banner shown in place of the member list for a circle left over from before the app's encryption engine was upgraded (Dark Matter migration).
+  ///
+  /// In en, this message translates to:
+  /// **'This circle needs to be re-created'**
+  String get legacyCircleBannerTitle;
+
+  /// Body text of the legacy-circle banner, explaining why the circle must be re-created.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven’s encryption engine was upgraded, so this circle can no longer be used. Re-create it to keep sharing locations with the same people — you’ll need to invite them again.'**
+  String get legacyCircleBannerBody;
+
+  /// Button on the legacy-circle banner that starts creating a new circle, pre-filled with the old circle's name.
+  ///
+  /// In en, this message translates to:
+  /// **'Re-create Circle'**
+  String get legacyCircleRecreateCta;
+
+  /// Button on the legacy-circle banner that removes the stale local circle entry.
+  ///
+  /// In en, this message translates to:
+  /// **'Remove'**
+  String get legacyCircleRemoveCta;
+
+  /// Title of the confirmation dialog shown before removing a legacy (pre-upgrade) circle.
+  ///
+  /// In en, this message translates to:
+  /// **'Remove circle?'**
+  String get legacyCircleRemoveDialogTitle;
+
+  /// Body of the confirmation dialog shown before removing a legacy (pre-upgrade) circle.
+  ///
+  /// In en, this message translates to:
+  /// **'This circle can no longer be used and will be removed from your list. This does not affect any new circle you create to replace it.'**
+  String get legacyCircleRemoveDialogBody;
+
+  /// Confirm button in the remove-legacy-circle dialog.
+  ///
+  /// In en, this message translates to:
+  /// **'Remove'**
+  String get legacyCircleRemoveConfirm;
+
+  /// Title of the one-time dialog shown after Haven's encryption engine upgrade (Dark Matter migration) destroys the old, no-longer-usable circle data.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven has been updated'**
+  String get legacyCutoverExplainerTitle;
+
+  /// First paragraph of the one-time cutover explainer: reassures the user their Nostr identity/profile survived the upgrade.
+  ///
+  /// In en, this message translates to:
+  /// **'Your identity and public profile are unchanged — there is nothing you need to do for those.'**
+  String get legacyCutoverExplainerIdentityUnchanged;
+
+  /// Second paragraph of the one-time cutover explainer: explains that existing circles must be re-created.
+  ///
+  /// In en, this message translates to:
+  /// **'For improved security, your circles need to be re-created and their members re-invited before you can share locations in them again.'**
+  String get legacyCutoverExplainerCirclesNeedRecreation;
+
+  /// Acknowledgement button that dismisses the one-time cutover explainer dialog.
+  ///
+  /// In en, this message translates to:
+  /// **'Got it'**
+  String get legacyCutoverExplainerAcknowledge;
+
+  /// Subtle, non-blocking note on the Relay Settings page shown only while the one-time post-upgrade cleanup of old encryption-key advertisements has not yet completed (most commonly because no relay was reachable yet).
+  ///
+  /// In en, this message translates to:
+  /// **'Haven is still cleaning up some data from the recent security update. This will finish automatically once you’re back online.'**
+  String get relaySettingsLegacyRetractionPending;
 
   /// Accessibility announcement when the circles bottom sheet snaps to its collapsed position.
   ///

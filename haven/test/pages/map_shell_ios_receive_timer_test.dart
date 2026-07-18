@@ -52,7 +52,7 @@ class _CountingRelayService extends MockRelayService {
     int maxDurationSecs = 20,
   }) async {
     catchupCalls++;
-    return const CatchupResult(locationsApplied: 1, cursorsAdvanced: 0);
+    return const CatchupResult(eventsApplied: 1, cursorsAdvanced: 0);
   }
 }
 
@@ -99,7 +99,7 @@ void main() {
       // contacted (baseline).
       final result1 = await service.runCatchup(isBackgroundWake: true);
       expect(relay.catchupCalls, 1, reason: 'baseline: gate is open');
-      expect(result1.locationsApplied, 1);
+      expect(result1.eventsApplied, 1);
 
       // Step 3: User disables background sharing (simulating
       // BackgroundSharingNotifier.setEnabled(false) writing the pref).
@@ -118,7 +118,7 @@ void main() {
             'This is the C3 chokepoint — the third backstop after the '
             'timer cancel (C4) and the scheduler teardown (C1).',
       );
-      expect(result2.locationsApplied, 0);
+      expect(result2.eventsApplied, 0);
     });
 
     test(
@@ -149,7 +149,7 @@ void main() {
               'toggle. A user who opts out of background activity must still '
               'receive peer location updates while the app is open.',
         );
-        expect(result.locationsApplied, 1);
+        expect(result.eventsApplied, 1);
       },
     );
 

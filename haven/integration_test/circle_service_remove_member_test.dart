@@ -97,6 +97,12 @@ class _RecordingRelayService implements RelayService {
   Future<SubscriptionHealthResult> maintainSubscriptionHealth() async =>
       const SubscriptionHealthResult.empty();
 
+  @override
+  Future<LegacyRetractionResult> retractLegacyKeyMaterial({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  }) async => const LegacyRetractionResult.empty();
+
   final List<({String eventJson, List<String> relays})> publishEventCalls = [];
   final List<({String eventJson, List<String> relays})>
   publishFireAndForgetCalls = [];
@@ -235,10 +241,18 @@ void main() {
         );
 
         try {
+          // Dark Matter (DM-4): `CircleManagerFfi.newInstance` hard-requires
+          // the identity secret bytes at construction time — give the
+          // service a real (throwaway) identity to open with.
+          final idManager = await NostrIdentityManager.newInstance();
+          await idManager.createIdentity();
+          final secretBytes = await idManager.getSecretBytes();
+
           final relayRecorder = _RecordingRelayService();
           final service = NostrCircleService(
             relayService: relayRecorder,
             dataDirectoryProvider: _FixedDataDirectoryProvider(dataDir.path),
+            identitySecretBytesProvider: () async => secretBytes,
           );
 
           await service.initialize();
@@ -360,19 +374,35 @@ void main() {
 
         final aliceManager = await CircleManagerFfi.newInstance(
           dataDir: aliceDir.path,
+          identitySecretBytes: aliceSecretBytes,
         );
         final bobManager = await CircleManagerFfi.newInstance(
           dataDir: bobDir.path,
+          identitySecretBytes: bobSecretBytes,
         );
 
-        const testRelays = <String>[_testRelayUrl];
-
         // ----------------------------------------------------------------
-        // Bob signs a key package so Alice can create the circle with him.
+        // Bob publishes a KeyPackage so Alice can create the circle with
+        // him, via the Dark Matter maintain-key-package path (the ONE
+        // publish path). It probes/publishes to Bob's OWN NIP-65 relays,
+        // so seed that list with the test relay first.
         // ----------------------------------------------------------------
-        final bobKpResult = await bobManager.signKeyPackageEvent(
+        await bobManager.addUserRelay(
+          url: _testRelayUrl,
+          relayType: RelayTypeFfi.nip65,
+        );
+        final bobRelayManager = await RelayManagerFfi.newInstance();
+        await bobRelayManager.maintainKeyPackage(
+          circle: bobManager,
           identitySecretBytes: bobSecretBytes,
-          relays: testRelays,
+        );
+        final bobKpJson = await bobRelayManager.fetchKeypackage(
+          pubkey: bobPubkeyHex,
+        );
+        expect(
+          bobKpJson,
+          isNotNull,
+          reason: 'Bob must have published a discoverable KeyPackage',
         );
 
         // ----------------------------------------------------------------
@@ -386,7 +416,7 @@ void main() {
           identitySecretBytes: aliceSecretBytes,
           members: [
             MemberKeyPackageFfi(
-              keyPackageJson: bobKpResult.eventJson,
+              keyPackageJson: bobKpJson!,
               inboxRelays: const [_testRelayUrl],
               nip65Relays: const [_testRelayUrl],
             ),
@@ -399,9 +429,11 @@ void main() {
 
         final mlsGroupId = Uint8List.fromList(creation.circle.mlsGroupId);
 
-        // Alice merges her pending commit (from adding Bob) before any
-        // subsequent operations on the group.
-        await aliceManager.finalizePendingCommit(mlsGroupId: mlsGroupId);
+        // Alice confirms her pending group-creation state (from adding
+        // Bob) before any subsequent operations on the group
+        // (publish-before-apply, Rule 13) — the Welcome is handed to Bob
+        // in-process here, not via a real relay round-trip.
+        await aliceManager.confirmPublished(pending: creation.pending);
 
         // ----------------------------------------------------------------
         // Bob processes his welcome and accepts — both parties must be
@@ -425,8 +457,10 @@ void main() {
               'gift-wrap was already processed in a prior run, which '
               'cannot happen for a freshly-created temp dir.',
         );
+        // `bobInvitation.mlsGroupId` is the pre-join stand-in id — actually
+        // the gift-wrap event id the invitation was keyed by.
         await bobManager.acceptInvitation(
-          mlsGroupId: bobInvitation!.mlsGroupId,
+          giftWrapId: bobInvitation!.mlsGroupId,
         );
 
         // ----------------------------------------------------------------
@@ -465,11 +499,15 @@ void main() {
             kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
           ),
         );
-        final bobPreRemovalResult = await bobManager.decryptLocation(
+        final bobPreRemovalResults = await bobManager.decryptLocation(
           eventJson: preRemovalEncrypt.eventJson,
         );
+        final bobPreRemovalLocation = bobPreRemovalResults
+            .where((r) => r.kind == LocationMessageResultKindFfi.location)
+            .firstOrNull
+            ?.location;
         expect(
-          bobPreRemovalResult?.location,
+          bobPreRemovalLocation,
           isNotNull,
           reason:
               'Baseline: Bob (a current member) MUST decrypt an Alice '
@@ -477,24 +515,23 @@ void main() {
               'forward-secrecy check below would be vacuous.',
         );
         expect(
-          bobPreRemovalResult!.location!.latitude,
+          bobPreRemovalLocation!.latitude,
           closeTo(40.111222, 1e-5),
           reason: 'Baseline decrypt must recover the exact latitude.',
         );
 
         // ----------------------------------------------------------------
         // Alice removes Bob directly via the FFI (bypassing the service
-        // layer so we test the core MDK path without relay publish).
-        // This call stages a pending commit and returns an evolution event.
+        // layer so we test the core MDK path without relay publish). This
+        // stages a commit and returns a pending token; confirming it here
+        // (publish-before-apply, Rule 13) merges it directly rather than
+        // via a real relay round-trip.
         // ----------------------------------------------------------------
         final removeResult = await aliceManager.removeMembers(
           mlsGroupId: mlsGroupId,
           memberPubkeys: [bobPubkeyHex],
         );
-
-        // Merge the pending commit so Alice's MLS state advances and Bob
-        // is no longer in her local group view.
-        await aliceManager.finalizePendingCommit(mlsGroupId: mlsGroupId);
+        await aliceManager.confirmPublished(pending: removeResult.pending);
 
         // ----------------------------------------------------------------
         // FN-3 Assertion 1: member count dropped by one on Alice's side.
@@ -556,7 +593,7 @@ void main() {
         // check is what happens when Bob tries to decrypt *after* it.
         try {
           await bobManager.decryptLocation(
-            eventJson: removeResult.evolutionEventJson,
+            eventJson: removeResult.commitEventJson,
           );
         } on Object catch (e) {
           // If Bob's side rejects the commit event (e.g., MDK raises an
@@ -591,9 +628,9 @@ void main() {
         //     (location_sharing_service.dart decrypt loop).
         // A throw is therefore an ACCEPTABLE forward-secrecy outcome — it
         // yields no plaintext.
-        DecryptResultFfi? bobPostRemovalResult;
+        List<LocationMessageResultFfi> bobPostRemovalResults = const [];
         try {
-          bobPostRemovalResult = await bobManager.decryptLocation(
+          bobPostRemovalResults = await bobManager.decryptLocation(
             eventJson: postRemovalEncrypt.eventJson,
           );
         } on Object catch (e) {
@@ -610,13 +647,17 @@ void main() {
         // Acceptable outcomes for `recovered`:
         //   null  — decryptLocation threw (failed closed), so the result stays
         //           null (no group / evicted)
-        //   null  — MDK returned None, or the inner DecryptedLocationFfi had
-        //           location == null (a commit/state event, not a location)
+        //   null  — the engine returned no results, or a `location`-kind
+        //           result had a null inner location (a commit/state event,
+        //           not a location)
         //
         // The ONLY unacceptable outcome is a non-null Location, which would
         // mean Bob successfully decrypted Alice's plaintext coordinates after
         // being evicted — a critical forward-secrecy failure.
-        final recovered = bobPostRemovalResult?.location;
+        final recovered = bobPostRemovalResults
+            .where((r) => r.kind == LocationMessageResultKindFfi.location)
+            .firstOrNull
+            ?.location;
         expect(
           recovered,
           isNull,

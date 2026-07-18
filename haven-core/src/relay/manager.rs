@@ -770,12 +770,12 @@ impl RelayManager {
     /// Fetches a user's key package (kind 30443 or legacy kind 443) from the
     /// given relay list.
     ///
-    /// Issues a **single** REQ for both kinds (`kinds([30443, 443])`) — this
-    /// matches the reference implementation in `whitenoise-rs`
-    /// (`fetch_user_key_package_lookup`) and saves a round-trip versus the
-    /// previous two-filter approach. From the returned events, we prefer the
-    /// most recent valid kind 30443, falling back to the most recent kind 443
-    /// twin if no canonical event was returned.
+    /// Issues a **single** REQ for both kinds (`kinds([30443, 443])`) so a
+    /// legacy 443 stays visible for un-migrated-member detection (migration plan
+    /// §6 step 4 / F11) without a second round-trip. **Selection is 30443-only**
+    /// ([`Self::pick_keypackage_from_events`]): a 443 is never usable under the
+    /// Dark Matter engine, so it is fetched for detection but never returned as a
+    /// `KeyPackage`. Returns the latest kind-30443, or `None` if none is present.
     ///
     /// Uses the provided relay list directly, falling back to the read-only
     /// discovery plane
@@ -822,31 +822,27 @@ impl RelayManager {
         Ok(Self::pick_keypackage_from_events(events))
     }
 
-    /// Selects the best key package event from a combined-kind result set.
+    /// Selects the usable key package event — the most recent kind-30443 —
+    /// from a combined-kind result set.
     ///
-    /// Prefers the most recent kind 30443 (addressable) event and falls back
-    /// to the most recent kind 443 (legacy) event only when no 30443 event
-    /// is present. Returns `None` if neither kind appears.
+    /// **30443-only (Dark Matter):** a legacy kind-443 `KeyPackage` carries the
+    /// old MLS wire format the new engine cannot parse
+    /// ([`SessionManager::key_package_from_event`] would decode it but the engine
+    /// rejects it on invite), so a 443 is NEVER usable and is ignored here. An
+    /// un-migrated member (443-only, no 30443) therefore resolves to `None`; the
+    /// "needs to update" detection UX is layered at the FFI over the same
+    /// combined-kind REQ (migration plan §6 step 4 / F11), never by returning a
+    /// `KeyPackage` the engine will reject. When multiple 30443 events are present
+    /// (multiple slots / relays), the latest by `created_at` wins.
     ///
     /// Kept separate from [`Self::fetch_keypackage_from_relays`] so the
     /// selection logic can be unit-tested without a relay round-trip.
+    ///
+    /// [`SessionManager::key_package_from_event`]: crate::nostr::mls::SessionManager::key_package_from_event
     fn pick_keypackage_from_events(events: Vec<Event>) -> Option<Event> {
-        if events.is_empty() {
-            return None;
-        }
-
-        if let Some(canonical) = events
-            .iter()
-            .filter(|e| e.kind == Kind::Custom(30443))
-            .max_by_key(|e| e.created_at)
-            .cloned()
-        {
-            return Some(canonical);
-        }
-
         events
             .into_iter()
-            .filter(|e| e.kind == Kind::MlsKeyPackage)
+            .filter(|e| e.kind == Kind::Custom(30443))
             .max_by_key(|e| e.created_at)
     }
 
@@ -1875,28 +1871,29 @@ mod tests {
     }
 
     #[test]
-    fn pick_keypackage_falls_back_to_443_when_no_30443_present() {
+    fn pick_keypackage_ignores_legacy_443_returns_none() {
+        // Dark Matter: a 443-only result (un-migrated member) is NOT usable — a
+        // 443 KeyPackage cannot be processed by the new engine, so selection
+        // must resolve to None rather than return an unprocessable KP.
         let keys = nostr::Keys::generate();
         let legacy = make_kp_event(&keys, Kind::MlsKeyPackage, 1_000);
 
-        let picked = RelayManager::pick_keypackage_from_events(vec![legacy.clone()])
-            .expect("should fall back to legacy");
-
-        assert_eq!(picked.kind, Kind::MlsKeyPackage);
-        assert_eq!(picked.id, legacy.id);
+        assert!(
+            RelayManager::pick_keypackage_from_events(vec![legacy]).is_none(),
+            "a legacy 443 must never be selected as a usable key package"
+        );
     }
 
     #[test]
-    fn pick_keypackage_picks_newest_443_when_only_legacy_present() {
+    fn pick_keypackage_ignores_all_legacy_443() {
         let keys = nostr::Keys::generate();
         let old_legacy = make_kp_event(&keys, Kind::MlsKeyPackage, 1_000);
         let new_legacy = make_kp_event(&keys, Kind::MlsKeyPackage, 7_000);
 
-        let picked =
-            RelayManager::pick_keypackage_from_events(vec![old_legacy.clone(), new_legacy.clone()])
-                .expect("should pick a key package");
-
-        assert_eq!(picked.id, new_legacy.id);
+        assert!(
+            RelayManager::pick_keypackage_from_events(vec![old_legacy, new_legacy]).is_none(),
+            "multiple legacy 443s still yield no usable key package"
+        );
     }
 
     #[test]

@@ -17,9 +17,8 @@ class CatchupResult {
   /// Creates a catch-up result.
   const CatchupResult({
     this.circlesSwept = 0,
-    this.locationsApplied = 0,
-    this.commitsApplied = 0,
-    this.autoCommitsStaged = 0,
+    this.eventsApplied = 0,
+    this.eventsDeferred = 0,
     this.cursorsAdvanced = 0,
     this.deadlineHit = false,
     this.relayErrors = 0,
@@ -31,14 +30,15 @@ class CatchupResult {
   /// Circles whose relays were swept.
   final int circlesSwept;
 
-  /// Location events decrypted + persisted.
-  final int locationsApplied;
+  /// Events the engine applied / terminally handled (Dark Matter taxonomy:
+  /// locations, commits, and state changes are all engine-internal now, so
+  /// this single counter replaces the pre-migration
+  /// locations/commits/auto-commits-staged split).
+  final int eventsApplied;
 
-  /// Already-merged peer commits observed.
-  final int commitsApplied;
-
-  /// Peer proposals MDK auto-staged (left for the foreground to converge).
-  final int autoCommitsStaged;
+  /// Events the engine durably buffered for a FUTURE epoch (the cursor
+  /// stopped so they are re-fetched + re-surfaced once the gap fills).
+  final int eventsDeferred;
 
   /// Per-circle group cursors advanced.
   final int cursorsAdvanced;
@@ -191,6 +191,35 @@ class SubscriptionHealthResult {
 
   /// Relays found dropped at check time (0 when engine off).
   final int relaysDisconnected;
+}
+
+/// Presence-only result of the one-time legacy KeyPackage retraction
+/// (Dark Matter cutover, security F10a). Counters only — no relay urls,
+/// event ids, or `d` values — mirrors the Rust `LegacyRetractionOutcomeFfi`.
+@immutable
+class LegacyRetractionResult {
+  /// Creates a legacy-retraction result.
+  const LegacyRetractionResult({
+    this.alreadyDone = false,
+    this.legacy443Scrubbed = 0,
+    this.relayListRetracted = false,
+    this.relayErrors = 0,
+  });
+
+  /// An empty result (e.g. a best-effort call that failed / no-op'd).
+  const LegacyRetractionResult.empty() : this();
+
+  /// `true` when the sentinel was already set (no work done this call).
+  final bool alreadyDone;
+
+  /// Stale legacy kind-443 KeyPackage twins scrubbed (kind-5 deletions ACKed).
+  final int legacy443Scrubbed;
+
+  /// `true` when the kind-10051 KeyPackage-relay list was retracted (≥1 ACK).
+  final bool relayListRetracted;
+
+  /// Relay probes / publishes that errored (tallied, never fatal).
+  final int relayErrors;
 }
 
 /// Exception thrown when relay operations fail.
@@ -438,6 +467,24 @@ abstract class RelayService {
   /// Best-effort — returns a [RelayListMaintenanceResult.empty] on failure
   /// rather than throwing.
   Future<RelayListMaintenanceResult> maintainRelayList({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  });
+
+  /// Once-only Dark Matter cutover cleanup (plan §6 step 5 / security F10a):
+  /// retracts this account's stale pre-migration KeyPackage advertisements
+  /// (legacy kind-443 twins + the kind-10051 relay list) so an old-stack
+  /// client cannot mint a Welcome the new stack can't process.
+  ///
+  /// Self-gates on a persisted sentinel (`legacy_kp_retraction_done`) so it
+  /// fires at most once; a repeat call after the sentinel is set returns
+  /// [LegacyRetractionResult.alreadyDone] `== true` with no relay traffic.
+  /// `circle` is the circle-manager FFI handle; the secret bytes are
+  /// consumed by the FFI and zeroized Rust-side.
+  ///
+  /// Best-effort — returns a [LegacyRetractionResult.empty] on failure rather
+  /// than throwing.
+  Future<LegacyRetractionResult> retractLegacyKeyMaterial({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
   });

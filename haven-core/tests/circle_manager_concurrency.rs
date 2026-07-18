@@ -67,7 +67,9 @@ fn make_location(ngid: [u8; 32], sender: &str, ts: i64) -> LastKnownLocation {
 #[test]
 fn concurrent_contact_writes_are_safe() {
     let dir = TempDir::new().expect("temp dir");
-    let manager = Arc::new(CircleManager::new_unencrypted(dir.path()).expect("manager"));
+    let manager = Arc::new(
+        CircleManager::new_unencrypted(dir.path(), &nostr::Keys::generate()).expect("manager"),
+    );
 
     let writers: Vec<_> = (0..16u64)
         .map(|i| {
@@ -93,7 +95,9 @@ fn concurrent_contact_writes_are_safe() {
 #[test]
 fn concurrent_reads_and_writes_are_safe() {
     let dir = TempDir::new().expect("temp dir");
-    let manager = Arc::new(CircleManager::new_unencrypted(dir.path()).expect("manager"));
+    let manager = Arc::new(
+        CircleManager::new_unencrypted(dir.path(), &nostr::Keys::generate()).expect("manager"),
+    );
 
     // Seed.
     for i in 0..20u64 {
@@ -159,7 +163,9 @@ fn concurrent_reads_and_writes_are_safe() {
 #[test]
 fn concurrent_last_known_upserts_are_idempotent() {
     let dir = TempDir::new().expect("temp dir");
-    let manager = Arc::new(CircleManager::new_unencrypted(dir.path()).expect("manager"));
+    let manager = Arc::new(
+        CircleManager::new_unencrypted(dir.path(), &nostr::Keys::generate()).expect("manager"),
+    );
 
     let ngid = [42u8; 32];
     let sender = pubkey(7);
@@ -201,7 +207,9 @@ fn concurrent_last_known_upserts_are_idempotent() {
 #[test]
 fn concurrent_prune_and_upsert_do_not_deadlock() {
     let dir = TempDir::new().expect("temp dir");
-    let manager = Arc::new(CircleManager::new_unencrypted(dir.path()).expect("manager"));
+    let manager = Arc::new(
+        CircleManager::new_unencrypted(dir.path(), &nostr::Keys::generate()).expect("manager"),
+    );
 
     let ngid = [9u8; 32];
 

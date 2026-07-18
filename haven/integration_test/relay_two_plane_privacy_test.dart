@@ -98,9 +98,12 @@ void main() {
 
     final dataDir = await Directory.systemTemp.createTemp('haven_2plane_');
     try {
-      final manager = await CircleManagerFfi.newInstance(dataDir: dataDir.path);
-      await manager.seedRelayDefaultsIfUnseeded();
       final secretBytes = await alice.getSecretBytes();
+      final manager = await CircleManagerFfi.newInstance(
+        dataDir: dataDir.path,
+        identitySecretBytes: secretBytes,
+      );
+      await manager.seedRelayDefaultsIfUnseeded();
 
       await manager.setPublishRelayList(relayType: category, value: true);
 
@@ -215,7 +218,7 @@ void main() {
     'TP-KP: private-only KeyPackage list (10051) never leaks to the public relay',
     (tester) async {
       await runLeakProof(
-        category: RelayTypeFfi.keyPackage,
+        category: RelayTypeFfi.nip65,
         listKind: 10051,
         label: 'TP-KP',
       );

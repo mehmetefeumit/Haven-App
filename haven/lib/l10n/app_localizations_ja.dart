@@ -864,6 +864,9 @@ class AppLocalizationsJa extends AppLocalizations {
   String get pendingMemberReadyToInvite => '招待できます';
 
   @override
+  String get pendingMemberNeedsUpdate => 'Haven のアップデートが必要です';
+
+  @override
   String get memberSearchHint => 'メンバーIDを入力...';
 
   @override
@@ -1046,6 +1049,58 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get leaveCircleError => 'サークルを退出できませんでした';
+
+  @override
+  String get leaveCircleAdminLimitationNote =>
+      'このサークルの管理者は、ほかのすべてのメンバーが退出するまで退出できません。ご不便をおかけしますが、今後のアップデートで、管理者をほかのメンバーに引き継いでそのまま退出できるようになる予定です。';
+
+  @override
+  String get circleBlockedBannerTitle => 'このサークルは更新できません';
+
+  @override
+  String get circleBlockedBannerBody =>
+      'このサークルの暗号化で問題が発生したため、Haven はこのサークルで更新を送受信できなくなりました。以下で最後に確認できた情報は引き続き見られますが、サークルを退出することもできます。';
+
+  @override
+  String get legacyCircleBannerTitle => 'このサークルは再作成が必要です';
+
+  @override
+  String get legacyCircleBannerBody =>
+      'Haven の暗号化エンジンがアップグレードされたため、このサークルは使用できなくなりました。同じメンバーと引き続き位置情報を共有するには、サークルを再作成してください。メンバーを改めて招待する必要があります。';
+
+  @override
+  String get legacyCircleRecreateCta => 'サークルを再作成';
+
+  @override
+  String get legacyCircleRemoveCta => '削除';
+
+  @override
+  String get legacyCircleRemoveDialogTitle => 'サークルを削除しますか？';
+
+  @override
+  String get legacyCircleRemoveDialogBody =>
+      'このサークルはもう使用できないため、リストから削除されます。これは、代わりに作成する新しいサークルには影響しません。';
+
+  @override
+  String get legacyCircleRemoveConfirm => '削除';
+
+  @override
+  String get legacyCutoverExplainerTitle => 'Haven がアップデートされました';
+
+  @override
+  String get legacyCutoverExplainerIdentityUnchanged =>
+      'あなたの識別情報と公開プロフィールは変更されていません。これらについて特に何かをする必要はありません。';
+
+  @override
+  String get legacyCutoverExplainerCirclesNeedRecreation =>
+      'セキュリティ向上のため、位置情報を再び共有するには、サークルを再作成し、メンバーを改めて招待する必要があります。';
+
+  @override
+  String get legacyCutoverExplainerAcknowledge => 'わかりました';
+
+  @override
+  String get relaySettingsLegacyRetractionPending =>
+      'Haven は最近のセキュリティアップデートに伴う一部のデータの整理をまだ続けています。オンラインに戻れば自動的に完了します。';
 
   @override
   String get circlesPanelCollapsedAnnouncement => 'サークルパネルを閉じました';

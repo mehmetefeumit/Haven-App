@@ -271,6 +271,7 @@
   "pendingMemberWarning": "Aviso",
   "pendingMemberCheckingAvailability": "Verificando disponibilidade...",
   "pendingMemberReadyToInvite": "Pronto para convidar",
+  "pendingMemberNeedsUpdate": "Precisa atualizar o Haven",
 
   "memberSearchHint": "Digite o ID do membro...",
   "memberSearchPasteTooltip": "Colar da área de transferência",
@@ -322,6 +323,23 @@
   "leaveCircleIdentityUnavailable": "Identidade indisponível",
   "leaveCircleSuccess": "Você saiu do círculo",
   "leaveCircleError": "Falha ao sair do círculo",
+  "leaveCircleAdminLimitationNote": "Como administrador deste círculo, você só pode sair depois que todos os outros membros tiverem saído. Sabemos que isso é inconveniente — uma atualização futura permitirá que administradores transfiram sua função e saiam diretamente.",
+
+  "circleBlockedBannerTitle": "Este círculo não pode ser atualizado",
+  "circleBlockedBannerBody": "Algo deu errado com a criptografia deste círculo, então o Haven não consegue mais enviar nem receber atualizações nele. Você ainda pode ver abaixo as últimas informações que tinha, ou sair do círculo.",
+  "legacyCircleBannerTitle": "Este círculo precisa ser recriado",
+  "legacyCircleBannerBody": "O mecanismo de criptografia do Haven foi atualizado, então este círculo não pode mais ser usado. Recrie-o para continuar compartilhando localização com as mesmas pessoas — você precisará convidá-las novamente.",
+  "legacyCircleRecreateCta": "Recriar círculo",
+  "legacyCircleRemoveCta": "Remover",
+  "legacyCircleRemoveDialogTitle": "Remover círculo?",
+  "legacyCircleRemoveDialogBody": "Este círculo não pode mais ser usado e será removido da sua lista. Isso não afeta nenhum novo círculo que você criar para substituí-lo.",
+  "legacyCircleRemoveConfirm": "Remover",
+  "legacyCutoverExplainerTitle": "O Haven foi atualizado",
+  "legacyCutoverExplainerIdentityUnchanged": "Sua identidade e seu perfil público não mudaram — não há nada que você precise fazer quanto a eles.",
+  "legacyCutoverExplainerCirclesNeedRecreation": "Para maior segurança, seus círculos precisam ser recriados e seus membros convidados novamente antes que você possa voltar a compartilhar localização neles.",
+  "legacyCutoverExplainerAcknowledge": "Entendi",
+  "relaySettingsLegacyRetractionPending": "O Haven ainda está finalizando a limpeza de alguns dados da atualização de segurança recente. Isso será concluído automaticamente assim que você estiver online novamente.",
+
 
   "circlesPanelCollapsedAnnouncement": "Painel de círculos recolhido",
   "circlesPanelExpandedAnnouncement": "Painel de círculos expandido",

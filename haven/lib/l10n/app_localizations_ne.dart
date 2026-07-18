@@ -901,6 +901,9 @@ class AppLocalizationsNe extends AppLocalizations {
   String get pendingMemberReadyToInvite => 'निमन्त्रणा गर्न तयार';
 
   @override
+  String get pendingMemberNeedsUpdate => 'Haven अपडेट गर्नुपर्छ';
+
+  @override
   String get memberSearchHint => 'सदस्य ID लेख्नुहोस्...';
 
   @override
@@ -1088,6 +1091,58 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get leaveCircleError => 'सर्कल छोड्न सकिएन';
+
+  @override
+  String get leaveCircleAdminLimitationNote =>
+      'यो सर्कलको एडमिन भएकाले, अरू सबै सदस्यले छोडिसकेपछि मात्र तपाईंले यो छोड्न सक्नुहुन्छ। हामीलाई थाहा छ, यो असुविधाजनक छ — भविष्यको कुनै अपडेटले एडमिनहरूलाई आफ्नो भूमिका हस्तान्तरण गरेर सिधै छोड्न दिनेछ।';
+
+  @override
+  String get circleBlockedBannerTitle => 'यो सर्कल अपडेट गर्न सकिँदैन';
+
+  @override
+  String get circleBlockedBannerBody =>
+      'यो सर्कलको इन्क्रिप्शनमा केही गडबड भयो, त्यसैले Haven ले अब यसमा अपडेट पठाउन वा प्राप्त गर्न सक्दैन। तपाईंले अन्तिम पटक थाहा पाएको कुरा तल अझै हेर्न सक्नुहुन्छ, वा सर्कल छोड्न सक्नुहुन्छ।';
+
+  @override
+  String get legacyCircleBannerTitle => 'यो सर्कल फेरि बनाउनुपर्छ';
+
+  @override
+  String get legacyCircleBannerBody =>
+      'Haven को इन्क्रिप्शन इन्जिन अपग्रेड गरिएको छ, त्यसैले यो सर्कल अब प्रयोग गर्न सकिँदैन। उही व्यक्तिहरूसँग स्थान साझेदारी जारी राख्न यसलाई फेरि बनाउनुहोस् — तपाईंले तिनीहरूलाई फेरि निमन्त्रणा दिनुपर्नेछ।';
+
+  @override
+  String get legacyCircleRecreateCta => 'सर्कल फेरि बनाउनुहोस्';
+
+  @override
+  String get legacyCircleRemoveCta => 'हटाउनुहोस्';
+
+  @override
+  String get legacyCircleRemoveDialogTitle => 'सर्कल हटाउने?';
+
+  @override
+  String get legacyCircleRemoveDialogBody =>
+      'यो सर्कल अब प्रयोग गर्न सकिँदैन र तपाईंको सूचीबाट हटाइनेछ। यसको सट्टा तपाईंले बनाउने कुनै पनि नयाँ सर्कललाई यसले असर गर्दैन।';
+
+  @override
+  String get legacyCircleRemoveConfirm => 'हटाउनुहोस्';
+
+  @override
+  String get legacyCutoverExplainerTitle => 'Haven अपडेट भएको छ';
+
+  @override
+  String get legacyCutoverExplainerIdentityUnchanged =>
+      'तपाईंको परिचय र सार्वजनिक प्रोफाइल जस्ताको तस्तै छन् — तिनका लागि तपाईंले केही गर्नुपर्दैन।';
+
+  @override
+  String get legacyCutoverExplainerCirclesNeedRecreation =>
+      'राम्रो सुरक्षाका लागि, तपाईंका सर्कलहरू फेरि बनाउनु र तिनका सदस्यहरूलाई फेरि निमन्त्रणा दिनुपर्नेछ; त्यसपछि मात्र तपाईंले तिनमा फेरि स्थान साझा गर्न सक्नुहुन्छ।';
+
+  @override
+  String get legacyCutoverExplainerAcknowledge => 'बुझेँ';
+
+  @override
+  String get relaySettingsLegacyRetractionPending =>
+      'Haven ले भर्खरैको सुरक्षा अपडेटबाट केही डाटा अझै सफा गर्दै छ। तपाईं फेरि अनलाइन हुनासाथ यो स्वतः पूरा हुनेछ।';
 
   @override
   String get circlesPanelCollapsedAnnouncement =>

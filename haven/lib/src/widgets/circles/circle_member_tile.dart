@@ -608,6 +608,14 @@ class PendingMemberTile extends StatelessWidget {
           semanticLabel: l10n.pendingMemberWarning,
         ),
       ),
+      ValidationStatus.needsUpdate => CircleAvatar(
+        backgroundColor: HavenSecurityColors.warning.withValues(alpha: 0.1),
+        child: Icon(
+          LucideIcons.cloudDownload,
+          color: HavenSecurityColors.warning,
+          semanticLabel: l10n.pendingMemberNeedsUpdate,
+        ),
+      ),
     };
   }
 
@@ -629,6 +637,10 @@ class PendingMemberTile extends StatelessWidget {
         errorMessage ?? l10n.createCircleNoAccountFound,
         style: textStyle?.copyWith(color: HavenSecurityColors.warning),
       ),
+      ValidationStatus.needsUpdate => Text(
+        errorMessage ?? l10n.pendingMemberNeedsUpdate,
+        style: textStyle?.copyWith(color: HavenSecurityColors.warning),
+      ),
     };
   }
 }
@@ -643,4 +655,11 @@ enum ValidationStatus {
 
   /// Validation failed (no KeyPackage found).
   invalid,
+
+  /// A KeyPackage was found, but it carries the deprecated pre-Dark-Matter
+  /// kind (443) — the person is running an old Haven build and cannot be
+  /// invited into a circle on the new engine until they update (DM-4c, plan
+  /// §6 F11). Distinct from [invalid]: this is not a network/lookup failure
+  /// and offers no retry.
+  needsUpdate,
 }

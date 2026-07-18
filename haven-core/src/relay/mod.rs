@@ -23,6 +23,7 @@
 //! Nostr Relays (WSS)
 //! ```
 
+pub mod auto_commit;
 pub mod catchup;
 pub mod cursor;
 pub mod discovery;
@@ -33,6 +34,9 @@ mod manager;
 pub mod publishers;
 mod types;
 
+pub use auto_commit::{
+    resolve_receive_publish_work, rollback_receive_publish_work, AutoCommitPublisher,
+};
 pub use catchup::{CatchupOutcome, ReceiveOnlyOutcome};
 pub use cursor::{
     cap_timestamp_to_now, since_for_stream, SubscribePhase, GROUP_INITIAL_BUFFER_SECS,
@@ -43,8 +47,9 @@ pub use discovery::{discovery_relays, set_discovery_relays_for_test, PRODUCTION_
 pub use error::{RelayError, RelayResult};
 pub use manager::{allow_ws_loopback_for_test, ws_loopback_allowed_for_test, RelayManager};
 pub use publishers::{
-    build_nip09_deletion, build_relay_list_event, build_unpublish_event, dedup_relay_targets,
-    superseding_created_at, PublisherError, PublisherResult,
+    build_nip09_deletion, build_nip65_relay_list_event, build_relay_list_event,
+    build_unpublish_event, dedup_relay_targets, superseding_created_at, PublisherError,
+    PublisherResult,
 };
 pub use types::{
     PublishResult, RelayConnectionStatus, RelayEventCheck, RelayFetchOutcome, RelayStatus,

@@ -498,8 +498,16 @@ Future<void> _runCatchupViaWorkerBootstrap() async {
   }
 
   // 5. ONE CircleManagerFfi per isolate (same rule as the FGS template):
-  //    two instances would diverge across two in-memory MDK caches.
-  final circleManager = await CircleManagerFfi.newInstance(dataDir: dataDir);
+  //    two instances would diverge across two in-memory engine sessions.
+  //    Dark Matter hard-requires the identity secret at construction time
+  //    (account identity + NIP-59 welcome signer + account-identity-proof
+  //    signer); re-fetched fresh here rather than reusing `bytes` above
+  //    (already zeroized) — Security Rule 9.
+  final identitySecretBytes = await identityManager.getSecretBytes();
+  final circleManager = await CircleManagerFfi.newInstance(
+    dataDir: dataDir,
+    identitySecretBytes: identitySecretBytes,
+  );
 
   // 6. Relay service.
   final relayService = NostrRelayService();
@@ -525,11 +533,19 @@ Future<void> _runCatchupViaWorkerBootstrap() async {
       },
     ).runCatchup(isBackgroundWake: true, maxDurationSecs: 25);
     // Presence-only counters (CatchupResult is counters-only by
-    // construction) — the exact line Phase A of the CI lane parses.
+    // construction) — the exact line Phase A of the CI lane parses via
+    // `tooling/e2e/ci/run-m7-background-catchup.sh`'s `parse_counter`
+    // (circles / locations / relayErrors). Dark Matter folds the
+    // pre-migration locations/commits/auto-commits-staged split into one
+    // `eventsApplied` counter (see `CatchupResultFfi`), so `locations=` now
+    // reports that combined counter — CI's `locations >= 1` decryption-
+    // observed heuristic still holds (an applied Location event is a subset
+    // of eventsApplied). `deferred=` is new, informational-only output that
+    // CI does not parse.
     debugPrint(
       '$kCatchupWorkerSweepCompletePrefix circles=${result.circlesSwept} '
-      'locations=${result.locationsApplied} commits=${result.commitsApplied} '
-      'staged=${result.autoCommitsStaged} cursors=${result.cursorsAdvanced} '
+      'locations=${result.eventsApplied} deferred=${result.eventsDeferred} '
+      'cursors=${result.cursorsAdvanced} '
       'deadline=${result.deadlineHit} relayErrors=${result.relayErrors}',
     );
   } finally {

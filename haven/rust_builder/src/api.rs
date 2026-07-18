@@ -772,15 +772,20 @@ const CIRCLES_DB_KEY_ID: &str = "circles.db.key";
 /// mode → `-journal` sidecar).
 const CIRCLES_DB_FILENAME: &str = "circles.db";
 
-/// On-disk filename for MDK's encrypted MLS-state DB (WAL mode →
+/// On-disk filename for the Dark Matter MLS-state DB (WAL mode →
 /// `-wal`/`-shm` sidecars). Mirrors
-/// [`haven_core::nostr::mls::storage::StorageConfig::database_path`].
-const MDK_DB_FILENAME: &str = "haven_mdk.db";
+/// [`haven_core::nostr::mls::StorageConfig::database_path`] (`session.sqlite`).
+const MLS_SESSION_DB_FILENAME: &str = "session.sqlite";
 
-/// Keyring key identifier for MDK's DB encryption key. The service identifier
-/// is the shared [`CIRCLES_DB_SERVICE`]; only the key id differs. Mirrors the
-/// `DB_KEY_ID` constant in `haven_core::nostr::mls::storage`.
-const MDK_DB_KEY_ID: &str = "mdk.db.key.default";
+/// Keyring key identifier for the Dark Matter MLS session passphrase. The
+/// service identifier is the shared [`CIRCLES_DB_SERVICE`]; only the key id
+/// differs. Mirrors the `MLS_DB_KEY_ID` constant in
+/// `haven_core::nostr::mls::storage`.
+const MLS_SESSION_DB_KEY_ID: &str = "mls.session.key.default";
+
+/// On-disk filename for the PRE-Dark-Matter MLS-state DB (retained only for the
+/// one-time first-launch cutover cleanup; see [`destroy_legacy_mls_state`]).
+const LEGACY_MLS_DB_FILENAME: &str = "haven_mdk.db";
 
 /// Retrieves or creates the circles.db encryption key from the system keyring.
 ///
@@ -872,13 +877,13 @@ fn remove_circles_db_key() -> Result<(), String> {
     remove_keyring_key(CIRCLES_DB_SERVICE, CIRCLES_DB_KEY_ID)
 }
 
-/// Removes MDK's DB keyring entry. See [`remove_keyring_key`].
+/// Removes the Dark Matter MLS session's DB keyring entry. See [`remove_keyring_key`].
 ///
-/// MDK owns this key (see `haven_core::nostr::mls::storage`); we never touch
-/// MDK's code, only delete the keyring entry so the next identity re-provisions
-/// a fresh MLS DB key.
-fn remove_mdk_db_key() -> Result<(), String> {
-    remove_keyring_key(CIRCLES_DB_SERVICE, MDK_DB_KEY_ID)
+/// The core `haven_core::nostr::mls::storage` provisions this key; we never
+/// touch the core, only delete the keyring entry so the next identity
+/// re-provisions a fresh `session.sqlite` passphrase (wipe-on-logout).
+fn remove_mls_session_db_key() -> Result<(), String> {
+    remove_keyring_key(CIRCLES_DB_SERVICE, MLS_SESSION_DB_KEY_ID)
 }
 
 /// Deletes one file, distinguishing "already gone" from a genuine failure.
@@ -933,18 +938,27 @@ fn delete_circles_db_files(data_dir: &str) -> Result<(), String> {
     delete_db_files(data_dir, CIRCLES_DB_FILENAME)
 }
 
-/// Deletes `haven_mdk.db` (+ sidecars) under `data_dir`. See [`delete_db_files`].
-fn delete_mdk_db_files(data_dir: &str) -> Result<(), String> {
-    delete_db_files(data_dir, MDK_DB_FILENAME)
+/// Deletes `session.sqlite` (+ sidecars) under `data_dir`. See [`delete_db_files`].
+fn delete_mls_session_db_files(data_dir: &str) -> Result<(), String> {
+    delete_db_files(data_dir, MLS_SESSION_DB_FILENAME)
 }
 
-/// Wipes ALL local MLS state on logout: deletes both encrypted databases'
-/// files (`circles.db` and `haven_mdk.db`, plus every WAL/SHM/journal sidecar)
-/// and then removes both keyring keys.
+/// Deletes the PRE-Dark-Matter `haven_mdk.db` (+ sidecars) under `data_dir` —
+/// the first-launch cutover cleanup. See [`delete_db_files`].
+fn delete_legacy_mls_db_files(data_dir: &str) -> Result<(), String> {
+    delete_db_files(data_dir, LEGACY_MLS_DB_FILENAME)
+}
+
+/// Wipes ALL local NEW-STACK MLS state on logout: deletes both encrypted
+/// databases' files (`circles.db` and the Dark Matter `session.sqlite`, plus
+/// every WAL/SHM/journal sidecar) and then removes both keyring keys.
 ///
 /// This is the highest-severity teardown in the logout path: it guarantees a
 /// returning (or different) identity never inherits the prior identity's MLS
-/// group state, circle metadata, dedup cache, sync cursors, or DB keys.
+/// group state, circle metadata, dedup cache, sync cursors, or DB keys. It
+/// targets the NEW Dark Matter stack (`session.sqlite` +
+/// `mls.session.key.default`); the PRE-Dark-Matter legacy DB/key are handled
+/// separately by the one-time first-launch cutover ([`destroy_legacy_mls_state`]).
 ///
 /// # Ordering and safety
 ///
@@ -952,7 +966,8 @@ fn delete_mdk_db_files(data_dir: &str) -> Result<(), String> {
 /// `Arc<CoreCircleManager>` is gone and both SQLite connections have closed)
 /// and stopped any live subscriptions BEFORE calling this — that is the Flutter
 /// layer's responsibility. No Rust global holds the manager, so there is
-/// nothing for this function to `.take()`.
+/// nothing for this function to `.take()`. (Rule 14: at most one live session
+/// per DB file — the handle drop closes it.)
 ///
 /// This function is **idempotent**: deleting an already-gone file or key is not
 /// an error, so a partial prior wipe or a double-call both converge to "nothing
@@ -971,8 +986,8 @@ fn delete_mdk_db_files(data_dir: &str) -> Result<(), String> {
 /// opposed to "already gone", which is success. Surfacing a genuine failure is
 /// load-bearing: it tells the Dart M10.1 logout to KEEP its durable retry
 /// marker and re-attempt on the next launch, instead of clearing it and leaving
-/// a decryptable `circles.db` / `haven_mdk.db` + keyring key at rest. The error
-/// string is generic/opaque — no path, key id, or backend detail (Security).
+/// a decryptable `circles.db` / `session.sqlite` + keyring key at rest. The
+/// error string is generic/opaque — no path, key id, or backend detail (Security).
 pub async fn wipe_all_mls_state(data_dir: String) -> Result<(), String> {
     run_blocking(move || {
         // Delete DB files first (POSIX-safe even if a descriptor briefly
@@ -985,11 +1000,47 @@ pub async fn wipe_all_mls_state(data_dir: String) -> Result<(), String> {
         // flag, preserving idempotency for the launch-retry).
         let mut failed = false;
         failed |= delete_circles_db_files(&data_dir).is_err();
-        failed |= delete_mdk_db_files(&data_dir).is_err();
+        failed |= delete_mls_session_db_files(&data_dir).is_err();
         failed |= remove_circles_db_key().is_err();
-        failed |= remove_mdk_db_key().is_err();
+        failed |= remove_mls_session_db_key().is_err();
         if failed {
             Err("failed to fully wipe local MLS state".to_string())
+        } else {
+            Ok(())
+        }
+    })
+    .await
+}
+
+/// First-launch cutover hook (Dark Matter §6 step 2 / security F6): destroys ALL
+/// PRE-Dark-Matter MLS state so the new stack starts on a clean slate and the
+/// old key material is gone.
+///
+/// Deletes the legacy `haven_mdk.db` (+ WAL/SHM/journal sidecars) AND destroys
+/// the legacy keyring entry `mdk.db.key.default` (via the core helper). The old
+/// DB was NOT written with `secure_delete` and flash wear-leveling can leave
+/// residual ciphertext, so key destruction is the practical secure-erase for
+/// the abandoned SQLCipher DB (F6). Distinct from [`wipe_all_mls_state`]: THIS
+/// destroys LEGACY state (a one-time migration), that wipes NEW-stack state on
+/// logout.
+///
+/// Idempotent and fail-soft on "already gone"; the Dart cutover guard should
+/// call this ONCE on the first launch of the Dark Matter build (before opening
+/// the new `CircleManagerFfi`), keyed off a persisted one-time flag.
+///
+/// # Errors
+///
+/// Returns `Err` (generic/opaque) if deleting a legacy DB file or destroying the
+/// legacy keyring key hit a GENUINE failure (locked file / unavailable keyring),
+/// so the Dart guard KEEPS its "cutover pending" flag and retries next launch.
+pub async fn destroy_legacy_mls_state(data_dir: String) -> Result<(), String> {
+    run_blocking(move || {
+        let mut failed = false;
+        failed |= delete_legacy_mls_db_files(&data_dir).is_err();
+        // Key destruction is the practical secure-erase for the abandoned DB.
+        failed |= haven_core::nostr::mls::storage::destroy_legacy_mls_key_material().is_err();
+        if failed {
+            Err("failed to destroy legacy MLS state".to_string())
         } else {
             Ok(())
         }
@@ -1104,11 +1155,13 @@ fn get_or_create_tiles_db_key() -> Result<zeroize::Zeroizing<String>, String> {
     // open the cache. No-op on every other target. Non-fatal: the migration
     // restores the key on any failure, so we log a redacted warning and return
     // the (unchanged) key.
-    if let Err(e) = haven_core::keyring_policy::ensure_db_key_after_first_unlock(
-        TILES_DB_SERVICE,
-        TILES_DB_KEY_ID,
-    ) {
-        log::warn!("tiles.db key access-policy migration deferred: {e}");
+    if haven_core::keyring_policy::ensure_db_key_after_first_unlock(TILES_DB_SERVICE, TILES_DB_KEY_ID)
+        .is_err()
+    {
+        // Static message (no interpolation): a tile-layer log line must never
+        // embed a value (check_no_tile_cache_secrets). Non-fatal — the migration
+        // restored the key, so the cache stays fully functional.
+        log::warn!("tiles.db key access-policy migration deferred (non-fatal)");
     }
 
     Ok(key)
@@ -1443,7 +1496,7 @@ use haven_core::circle::{
     CircleWithMembers as CoreCircleWithMembers, Contact as CoreContact,
     Invitation as CoreInvitation,
 };
-use haven_core::nostr::mls::types::{GroupId, KeyPackageBundle as CoreKeyPackageBundle};
+use haven_core::nostr::mls::types::{GroupId, GroupIdExt, PendingStateRef};
 
 /// Circle information (FFI-friendly).
 ///
@@ -1687,91 +1740,6 @@ impl From<CoreInvitation> for InvitationFfi {
 
 /// Key package bundle for publishing (FFI-friendly).
 ///
-/// Contains the data needed to build a Nostr key package event.
-/// Supports both addressable kind 30443 (preferred) and legacy kind 443.
-#[derive(Debug, Clone)]
-pub struct KeyPackageBundleFfi {
-    /// Base64-encoded TLS-serialized key package (event content).
-    pub content: String,
-    /// Tags for the addressable kind 30443 event (preferred).
-    pub tags_30443: Vec<Vec<String>>,
-    /// Tags for the legacy kind 443 event.
-    pub tags_443: Vec<Vec<String>>,
-    /// Serialized `KeyPackageRef` for deletion by hash reference.
-    pub hash_ref: Vec<u8>,
-    /// NIP-33 `d` tag value for the addressable kind 30443 event.
-    pub d_tag: String,
-    /// Relay URLs where this key package will be published.
-    pub relays: Vec<String>,
-}
-
-impl From<CoreKeyPackageBundle> for KeyPackageBundleFfi {
-    fn from(b: CoreKeyPackageBundle) -> Self {
-        Self {
-            content: b.content,
-            tags_30443: b.tags_30443,
-            tags_443: b.tags_443,
-            hash_ref: b.hash_ref,
-            d_tag: b.d_tag,
-            relays: b.relays,
-        }
-    }
-}
-
-/// A signed key package event pair ready for relay publishing (FFI-friendly).
-///
-/// During the kind 443 → 30443 transition (per MIP-00 / MDK), publishers sign
-/// both the canonical addressable event (kind 30443) and the legacy
-/// non-replaceable twin (kind 443) from the same MLS key material so that
-/// clients which haven't migrated to 30443 yet can still discover this user.
-///
-/// The two events share `content` and `hash_ref`; only the tag set differs
-/// (the legacy twin omits the `d` tag). The pair carries a single relay list
-/// so callers fan-out the same URLs.
-#[derive(Clone)]
-pub struct SignedKeyPackageEventFfi {
-    /// The canonical kind 30443 (addressable) signed event as JSON string.
-    pub event_json: String,
-    /// The legacy kind 443 signed event as JSON string.
-    ///
-    /// Publish best-effort: relays/clients that have already migrated may
-    /// reject or ignore this twin, but we keep publishing it to remain
-    /// discoverable by clients that still query kind 443.
-    pub legacy_event_json: String,
-    /// Relay URLs where both events should be published.
-    pub relays: Vec<String>,
-    /// M8-6: the MLS `KeyPackageRef` bytes for the published pair, so the Dart
-    /// publish flow can record the published `KeyPackage` (via
-    /// [`CircleManagerFfi::record_published_key_packages`]) AFTER a relay accepts
-    /// it — making the maintenance live-material gate recognize it as live (and
-    /// thus NoOp) instead of misreading the primary KP as dead + rotating it.
-    pub canonical_hash_ref: Vec<u8>,
-    /// The stable NIP-33 `d` the canonical event was published into (reused
-    /// across logins so the addressable slot never forks).
-    pub d_tag: String,
-    /// Lowercase-hex event id of the canonical (30443) event, for the tracking
-    /// row recorded after publish.
-    pub canonical_event_id: String,
-    /// Lowercase-hex event id of the legacy (443) twin, for its tracking row.
-    pub legacy_event_id: String,
-}
-
-impl std::fmt::Debug for SignedKeyPackageEventFfi {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Presence-only: the event JSON, `d`, hash_ref, and relay URLs must
-        // never reach a log (Security Rule 4/6).
-        f.debug_struct("SignedKeyPackageEventFfi")
-            .field("event_json", &"<redacted>")
-            .field("legacy_event_json", &"<redacted>")
-            .field("relay_count", &self.relays.len())
-            .field("canonical_hash_ref", &"<redacted>")
-            .field("d_tag", &"<redacted>")
-            .field("canonical_event_id", &"<redacted>")
-            .field("legacy_event_id", &"<redacted>")
-            .finish()
-    }
-}
-
 /// A member's key package with their inbox relay list (FFI-friendly).
 ///
 /// Used when adding members to a circle. Relay resolution follows a
@@ -1820,7 +1788,39 @@ impl std::fmt::Debug for GiftWrappedWelcomeFfi {
     }
 }
 
+/// A publish-before-apply token (FFI mirror of `PendingStateRef`).
+///
+/// The Dark Matter engine stages a group-evolving commit and returns an opaque
+/// `PendingStateRef` (a `u64` newtype). Haven publishes the commit (and, for an
+/// Add, the welcomes), and ONLY after ≥1 relay returns OK confirms the token via
+/// [`CircleManagerFfi::confirm_published`] so the engine applies the commit and
+/// advances the epoch (Rule 13, publish-before-apply). On publish FAILURE the
+/// token is rolled back via [`CircleManagerFfi::publish_failed`]. The `token` is
+/// an in-memory session handle — meaningless across a process restart, never
+/// persisted, never published.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingStateRefFfi {
+    /// The opaque engine token (a `PendingStateRef` `u64`).
+    pub token: u64,
+}
+
+impl From<PendingStateRef> for PendingStateRefFfi {
+    fn from(p: PendingStateRef) -> Self {
+        Self { token: p.as_u64() }
+    }
+}
+
+impl From<PendingStateRefFfi> for PendingStateRef {
+    fn from(p: PendingStateRefFfi) -> Self {
+        Self::new(p.token)
+    }
+}
+
 /// Result of circle creation (FFI-friendly).
+///
+/// Publish-before-apply (Rule 13): publish `welcome_events`, then confirm
+/// `pending` via [`CircleManagerFfi::confirm_published`] once ≥1 relay ACKs a
+/// welcome (or roll back via [`CircleManagerFfi::publish_failed`]).
 #[derive(Debug, Clone)]
 pub struct CircleCreationResultFfi {
     /// The created circle.
@@ -1828,27 +1828,61 @@ pub struct CircleCreationResultFfi {
     /// Gift-wrapped Welcome events ready to publish to recipients.
     /// Each is a kind 1059 event containing an encrypted kind 444 Welcome.
     pub welcome_events: Vec<GiftWrappedWelcomeFfi>,
+    /// The pending group-creation state to confirm after ≥1-relay welcome ACK.
+    pub pending: PendingStateRefFfi,
 }
 
 /// Result of adding members to an existing circle (FFI-friendly).
+///
+/// Publish-before-apply (Rule 13): publish `commit_event_json`, confirm
+/// `pending`, THEN publish `welcome_events` (a welcome for a losing/unconfirmed
+/// commit references an epoch that never applied).
 #[derive(Clone)]
 pub struct AddMembersResultFfi {
     /// JSON-serialized kind 445 evolution (Add commit) event, to publish to
-    /// the circle's relays before finalizing the pending commit.
-    pub evolution_event_json: String,
+    /// the circle's relays before confirming `pending`.
+    pub commit_event_json: String,
     /// Gift-wrapped Welcome events for the newly added members.
     /// Each is a kind 1059 event containing an encrypted kind 444 Welcome.
-    /// Publish these only after the evolution event is published and merged.
+    /// Publish these only after `commit_event_json` is published and `pending`
+    /// is confirmed.
     pub welcome_events: Vec<GiftWrappedWelcomeFfi>,
+    /// The pending commit to confirm after ≥1-relay commit ACK.
+    pub pending: PendingStateRefFfi,
 }
 
 impl std::fmt::Debug for AddMembersResultFfi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // The evolution-event JSON can embed the MLS group ID in its tags;
+        // The commit-event JSON can embed the MLS group ID in its tags;
         // redact it. Welcome events redact themselves via their own Debug impl.
         f.debug_struct("AddMembersResultFfi")
-            .field("evolution_event_json", &"<redacted>")
+            .field("commit_event_json", &"<redacted>")
             .field("welcome_events_count", &self.welcome_events.len())
+            .field("pending", &self.pending)
+            .finish()
+    }
+}
+
+/// A group-evolving commit awaiting publish + confirm (remove / relay update /
+/// admin change) — FFI mirror of `haven_core::circle::CommitToPublish`.
+///
+/// Publish-before-apply (Rule 13): publish `commit_event_json` to the circle's
+/// relays, then confirm `pending` via [`CircleManagerFfi::confirm_published`]
+/// on ≥1-relay ACK (or roll back via [`CircleManagerFfi::publish_failed`]).
+#[derive(Clone)]
+pub struct CommitToPublishFfi {
+    /// JSON-serialized kind 445 commit event to publish to the circle's relays.
+    pub commit_event_json: String,
+    /// The pending commit to confirm after ≥1-relay ACK.
+    pub pending: PendingStateRefFfi,
+}
+
+impl std::fmt::Debug for CommitToPublishFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The commit-event JSON's `h` tag carries the nostr_group_id; redact.
+        f.debug_struct("CommitToPublishFfi")
+            .field("commit_event_json", &"<redacted>")
+            .field("pending", &self.pending)
             .finish()
     }
 }
@@ -1943,134 +1977,73 @@ impl std::fmt::Debug for LastKnownLocationFfi {
     }
 }
 
-/// Result of processing a kind 445 MLS group event (FFI-friendly).
+/// Discriminator for [`LocationMessageResultFfi`].
 ///
-/// Distinguishes between location messages and MLS group state changes
-/// (commits, proposals) so the Flutter layer can refresh circle membership
-/// when the group roster changes.
-#[derive(Clone)]
-pub struct DecryptResultFfi {
-    /// The decrypted location, if this was an application message.
-    /// `None` for group updates and unprocessable events.
-    pub location: Option<DecryptedLocationFfi>,
-    /// `true` when the event was an MLS commit or proposal that changed
-    /// the group state (e.g., a new member joined). The Flutter layer
-    /// should refresh the circle's member list when this is `true`.
-    pub group_updated: bool,
-    /// Outbound `kind:445` commit event the Flutter layer must publish
-    /// to the circle's relays and then merge locally.
-    ///
-    /// Populated only when MDK auto-commits a peer's `SelfRemove`
-    /// proposal (MLS leave): MDK stages a pending commit and the caller
-    /// owes a publish-then-merge cycle so the local epoch advances and
-    /// the leaver stops appearing in the roster.
-    ///
-    /// `None` for location messages, plain commits (already merged by
-    /// MDK on the sender side), pending Add/Remove proposals awaiting
-    /// admin approval, external join proposals, ignored proposals, and
-    /// unprocessable events.
-    pub evolution_event_json: Option<String>,
-    /// MLS group ID (raw bytes) the evolution event belongs to.
-    ///
-    /// Carried alongside `evolution_event_json` so the Flutter layer can
-    /// invoke `finalizePendingCommit` / `clearPendingCommit` after the
-    /// publish attempt. `None` for every variant where
-    /// `evolution_event_json` is also `None`.
-    pub evolution_mls_group_id: Option<Vec<u8>>,
-}
-
-impl std::fmt::Debug for DecryptResultFfi {
-    /// Redacts the evolution event JSON (may embed the MLS group ID in
-    /// its `h` tag) and the raw MLS group ID bytes. Mirrors the redaction
-    /// policy on [`LocationMessageResult::GroupUpdate`]'s core `Debug` impl.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DecryptResultFfi")
-            .field("has_location", &self.location.is_some())
-            .field("group_updated", &self.group_updated)
-            .field("has_evolution_event", &self.evolution_event_json.is_some())
-            .field(
-                "has_evolution_mls_group_id",
-                &self.evolution_mls_group_id.is_some(),
-            )
-            .finish()
-    }
-}
-
-/// Discriminator for [`DecryptOutcomeFfi`].
-///
-/// Mirrors the four
-/// [`haven_core::nostr::mls::types::LocationMessageResult`] variants 1:1. A
-/// struct-with-discriminant shape (rather than a Rust enum with per-variant
-/// data) follows the existing [`LeavePlanFfi`] convention and avoids pulling
-/// Dart `freezed` into the generated bindings.
+/// Mirrors the five
+/// [`haven_core::nostr::mls::types::LocationMessageResult`] variants 1:1
+/// (Dark Matter taxonomy). Unlike the pre-migration outcome, stale / duplicate
+/// / out-of-order handling is entirely engine-internal (the engine durably
+/// buffers a future-epoch event and re-surfaces it once the gap fills), so
+/// there is NO `Unprocessable` / `PreviouslyFailed` here. A struct-with-
+/// discriminant shape (rather than a tagged Rust enum) follows the existing
+/// [`LeavePlanFfi`] convention and avoids pulling Dart `freezed` into the
+/// generated bindings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DecryptOutcomeKindFfi {
+pub enum LocationMessageResultKindFfi {
     /// A decrypted application (location) message.
     Location,
-    /// An MLS commit/proposal that advanced or changed group state.
+    /// The local client joined a group via an accepted welcome.
+    Joined,
+    /// A durable, MLS-authenticated change to group state (membership, admin,
+    /// rename, retention) or an epoch advance the receiver should react to by
+    /// refreshing the circle's roster.
     GroupUpdate,
-    /// The event could not be processed at the current epoch (wrong/expired
-    /// epoch, malformed payload, past NIP-40 expiration, or a sibling fork
-    /// commit). Distinct from `PreviouslyFailed`.
-    Unprocessable,
-    /// The event was already attempted and failed previously.
-    PreviouslyFailed,
+    /// A previously-surfaced result was withdrawn because branch selection
+    /// superseded the commit that produced it — the caller must treat the
+    /// earlier change as if it never happened.
+    Invalidated,
+    /// The group entered the unrecoverable state; the UI MUST block
+    /// send/mutate for it (Rule 8, blocked-group state).
+    Unrecoverable,
 }
 
-/// FFI-surfaced result of decrypting a `kind:445` event, distinguishing ALL
-/// four decrypt outcomes.
+/// One folded engine [`haven_core::nostr::mls::types::LocationMessageResult`],
+/// FFI-friendly. A single `kind:445` ingest can yield SEVERAL of these (an
+/// engine `advance_convergence` may release buffered inbound after the outer
+/// event), so [`CircleManagerFfi::decrypt_location`] returns a `Vec` of them.
 ///
-/// The legacy [`CircleManagerFfi::decrypt_location`] flattens `Unprocessable`
-/// and `PreviouslyFailed` to `None`, which silently drops the signal the
-/// sync-cursor logic needs: a dropped `Unprocessable` event must NOT advance
-/// the persisted cursor, or an unprocessed commit is skipped forever (the
-/// field epoch-desync bug). This type surfaces the distinction so the Dart
-/// layer can advance the cursor only on a real `Location` / `GroupUpdate`.
-pub struct DecryptOutcomeFfi {
-    /// Which of the four outcomes occurred.
-    pub kind: DecryptOutcomeKindFfi,
-    /// The outer `kind:445` event's `created_at`, in Unix **seconds**.
-    ///
-    /// Surfaced for ALL outcomes (it is read off the public event before
-    /// decryption) so the Dart sync layer can advance the group cursor without
-    /// re-parsing `event_json`. Pass this value straight to
-    /// [`CircleManagerFfi::cursor_advance_group_to_event`], which owns the
-    /// seconds→milliseconds conversion — do NOT pre-multiply by 1000. A Nostr
-    /// timestamp is public on relays, so this carries no privacy cost.
-    pub event_created_at_secs: i64,
-    /// The decrypted location — `Some` only when `kind == Location`.
+/// Cursor contract (DM-4b): the engine now owns out-of-order buffering, so the
+/// caller advances its relay sync cursor on the OUTER event's `created_at`
+/// (which Dart already holds — it passed `event_json` in), NOT per result.
+/// A buffered future-epoch event is re-surfaced by the engine once the gap
+/// fills; the caller never needs to re-fetch it.
+pub struct LocationMessageResultFfi {
+    /// Which of the five outcomes this result is.
+    pub kind: LocationMessageResultKindFfi,
+    /// The decrypted location — `Some` only when `kind == Location` AND the
+    /// inner content parsed as a `LocationMessage`. A successfully-decrypted
+    /// but unparseable inner (e.g. a forward-incompatible payload) still yields
+    /// `kind == Location` with `location == None` (decrypt succeeded).
     pub location: Option<DecryptedLocationFfi>,
-    /// Outbound `kind:445` commit the receiver must publish then merge —
-    /// `Some` only for an auto-committed peer `SelfRemove`
-    /// (`kind == GroupUpdate`).
-    pub evolution_event_json: Option<String>,
-    /// Raw MLS group id the evolution event belongs to — paired with
-    /// `evolution_event_json`.
-    pub evolution_mls_group_id: Option<Vec<u8>>,
-    /// Redacted failure reason — `Some` only when `kind == Unprocessable`.
-    /// Safe for developer logs (hex sequences are already redacted); never
-    /// surface it in the UI.
-    pub unprocessable_reason: Option<String>,
+    /// The MLS group id (raw bytes) this result belongs to — the LOCAL circle
+    /// handle (never published; Rule 4 keeps it off the wire). Present for
+    /// every variant so the caller can refresh / join / block / withdraw the
+    /// right circle.
+    pub mls_group_id: Vec<u8>,
+    /// The MLS epoch the message was authenticated at — meaningful only for
+    /// `kind == Location` (0 otherwise).
+    pub epoch: u64,
 }
 
-impl std::fmt::Debug for DecryptOutcomeFfi {
-    /// Redacts payloads (location, evolution event, raw group id) and exposes
-    /// only their presence, mirroring [`DecryptResultFfi`]'s redaction policy.
-    /// `event_created_at_secs` is a relay-public timestamp, shown verbatim.
+impl std::fmt::Debug for LocationMessageResultFfi {
+    /// Redacts payloads (location, raw group id) and exposes only presence;
+    /// `epoch` is a non-secret counter.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DecryptOutcomeFfi")
+        f.debug_struct("LocationMessageResultFfi")
             .field("kind", &self.kind)
-            .field("event_created_at_secs", &self.event_created_at_secs)
             .field("has_location", &self.location.is_some())
-            .field("has_evolution_event", &self.evolution_event_json.is_some())
-            .field(
-                "has_evolution_mls_group_id",
-                &self.evolution_mls_group_id.is_some(),
-            )
-            .field(
-                "has_unprocessable_reason",
-                &self.unprocessable_reason.is_some(),
-            )
+            .field("mls_group_id", &"<redacted>")
+            .field("epoch", &self.epoch)
             .finish()
     }
 }
@@ -2120,38 +2093,33 @@ pub fn parse_engine_location(
     })
 }
 
+/// Converts a core [`LocationMessageResult`] into the FFI
+/// [`LocationMessageResultFfi`] (Dark Matter five-variant taxonomy).
+///
+/// Pure and synchronous (no engine / no FFI / no async) so the fold is
+/// unit-testable without a live `CircleManager`.
+///
+/// [`LocationMessageResult`]: haven_core::nostr::mls::types::LocationMessageResult
 fn convert_location_result(
     result: haven_core::nostr::mls::types::LocationMessageResult,
-    event_created_at_secs: i64,
-) -> Result<DecryptOutcomeFfi, String> {
+) -> LocationMessageResultFfi {
     use haven_core::nostr::mls::types::LocationMessageResult as R;
     match result {
         R::Location {
             sender_pubkey,
             content,
-            ..
+            group_id,
+            epoch,
         } => {
-            // The MLS layer has already successfully decrypted this
-            // application message — that is a cursor-ADVANCING outcome
-            // regardless of what its inner content turns out to be. Whether
-            // `content` actually parses as a `LocationMessage` is a
-            // SEPARATE, non-fatal question: a legacy `haven-avatar-*` inner
-            // (or any other forward/backward-incompatible payload) from a
-            // pre-migration client decrypts fine but is not a location.
-            // Wire-compat (plan D8 / protocol review 4.3): a parse failure
-            // here must NEVER be surfaced as an `Err` — that would make the
-            // Dart caller treat a successfully-decrypted-but-unparseable
-            // event as a retriable decrypt failure (never marked seen,
-            // reprocessed every poll cycle forever). Instead, keep the kind
-            // as `Location` (decrypt succeeded) with `location: None` (no
-            // location payload to surface) so the caller advances past it
-            // exactly like a `GroupUpdate` with no evolution event.
+            // Decrypt succeeded — a location result regardless of whether the
+            // inner content parses. A forward-incompatible inner (from a peer
+            // on a newer content schema) decrypts fine but yields `None`; the
+            // caller advances past it exactly like a `GroupUpdate`.
             let location = serde_json::from_str::<haven_core::location::LocationMessage>(&content)
                 .ok()
                 .map(|location| DecryptedLocationFfi {
-                    // Normalize to lowercase so Dart-side self-compare
-                    // against the cached own pubkey is case-insensitive by
-                    // construction.
+                    // Normalize to lowercase so the Dart self-compare against
+                    // the cached own pubkey is case-insensitive by construction.
                     sender_pubkey: normalize_pubkey_hex(&sender_pubkey),
                     latitude: location.latitude,
                     longitude: location.longitude,
@@ -2159,89 +2127,62 @@ fn convert_location_result(
                     timestamp: location.timestamp.timestamp(),
                     expires_at: location.expires_at.timestamp(),
                 });
-            Ok(DecryptOutcomeFfi {
-                kind: DecryptOutcomeKindFfi::Location,
-                event_created_at_secs,
+            LocationMessageResultFfi {
+                kind: LocationMessageResultKindFfi::Location,
                 location,
-                evolution_event_json: None,
-                evolution_mls_group_id: None,
-                unprocessable_reason: None,
-            })
+                mls_group_id: group_id.as_slice().to_vec(),
+                epoch,
+            }
         }
-        R::GroupUpdate {
-            group_id,
-            evolution_event,
-        } => {
-            // `evolution_event` is `Some` only when MDK auto-commits a peer's
-            // SelfRemove proposal. Serialize it here so the Flutter layer can
-            // publish it without touching MDK types.
-            let evolution_event_json = match evolution_event {
-                Some(event) => Some(
-                    serde_json::to_string(&event)
-                        .map_err(|e| format!("Failed to serialize evolution event: {e}"))?,
-                ),
-                None => None,
-            };
-            let evolution_mls_group_id = evolution_event_json
-                .as_ref()
-                .map(|_| group_id.as_slice().to_vec());
-            Ok(DecryptOutcomeFfi {
-                kind: DecryptOutcomeKindFfi::GroupUpdate,
-                event_created_at_secs,
-                location: None,
-                evolution_event_json,
-                evolution_mls_group_id,
-                unprocessable_reason: None,
-            })
-        }
-        R::Unprocessable { reason, .. } => {
-            // The core `to_location_result` already redacts this reason;
-            // re-redact at the boundary (idempotent) so the no-key-material
-            // invariant holds locally before it crosses FFI. The `group_id`
-            // field is intentionally dropped (`..`) — never surface it.
-            let reason = haven_core::nostr::mls::redact_hex_sequences(&reason);
-            Ok(DecryptOutcomeFfi {
-                kind: DecryptOutcomeKindFfi::Unprocessable,
-                event_created_at_secs,
-                location: None,
-                evolution_event_json: None,
-                evolution_mls_group_id: None,
-                unprocessable_reason: Some(reason),
-            })
-        }
-        R::PreviouslyFailed => Ok(DecryptOutcomeFfi {
-            kind: DecryptOutcomeKindFfi::PreviouslyFailed,
-            event_created_at_secs,
+        R::Joined { group_id } => LocationMessageResultFfi {
+            kind: LocationMessageResultKindFfi::Joined,
             location: None,
-            evolution_event_json: None,
-            evolution_mls_group_id: None,
-            unprocessable_reason: None,
-        }),
+            mls_group_id: group_id.as_slice().to_vec(),
+            epoch: 0,
+        },
+        R::GroupUpdate { group_id } => LocationMessageResultFfi {
+            kind: LocationMessageResultKindFfi::GroupUpdate,
+            location: None,
+            mls_group_id: group_id.as_slice().to_vec(),
+            epoch: 0,
+        },
+        R::Invalidated { group_id } => LocationMessageResultFfi {
+            kind: LocationMessageResultKindFfi::Invalidated,
+            location: None,
+            mls_group_id: group_id.as_slice().to_vec(),
+            epoch: 0,
+        },
+        R::Unrecoverable { group_id } => LocationMessageResultFfi {
+            kind: LocationMessageResultKindFfi::Unrecoverable,
+            location: None,
+            mls_group_id: group_id.as_slice().to_vec(),
+            epoch: 0,
+        },
     }
 }
 
-/// Flattens a [`DecryptOutcomeFfi`] to the legacy `Option<DecryptResultFfi>`
-/// shape for the [`CircleManagerFfi::decrypt_location`] compat shim.
+/// The folded outcome of ingesting one received `kind:445` — FFI mirror of
+/// `haven_core::circle::DecryptedIngest`.
 ///
-/// `Location` / `GroupUpdate` map to `Some`; `Unprocessable` /
-/// `PreviouslyFailed` map to `None` — byte-for-byte the historical behavior.
-/// Pure and synchronous so the equivalence is unit-testable.
-fn flatten_outcome_to_legacy(outcome: DecryptOutcomeFfi) -> Option<DecryptResultFfi> {
-    match outcome.kind {
-        DecryptOutcomeKindFfi::Location => Some(DecryptResultFfi {
-            location: outcome.location,
-            group_updated: false,
-            evolution_event_json: None,
-            evolution_mls_group_id: None,
-        }),
-        DecryptOutcomeKindFfi::GroupUpdate => Some(DecryptResultFfi {
-            location: None,
-            group_updated: true,
-            evolution_event_json: outcome.evolution_event_json,
-            evolution_mls_group_id: outcome.evolution_mls_group_id,
-        }),
-        DecryptOutcomeKindFfi::Unprocessable | DecryptOutcomeKindFfi::PreviouslyFailed => None,
-    }
+/// Carries the folded location results AND any receive-side auto-commit the
+/// engine staged (a peer `SelfRemove` eviction). Publish-before-apply (Rule 13 /
+/// security F13): for EACH [`Self::auto_commits`] entry, publish
+/// `commit_event_json` to the circle's relays, then
+/// [`CircleManagerFfi::confirm_published`] on a ≥1-relay ACK (or
+/// [`CircleManagerFfi::publish_failed`] on failure) — exactly like the
+/// [`CommitToPublishFfi`] returned by remove / relay-update. NEVER confirm before
+/// a relay ACKs, and NEVER drop an entry silently (that re-forks the group the
+/// leaver departed).
+///
+/// Both fields carry redacting `Debug` impls (`LocationMessageResultFfi` /
+/// `CommitToPublishFfi`), so the derived `Debug` here cannot leak group ids or
+/// coordinates.
+#[derive(Debug)]
+pub struct DecryptLocationOutcomeFfi {
+    /// The folded location-facing results (locations, joins, updates, …).
+    pub results: Vec<LocationMessageResultFfi>,
+    /// Receive-side auto-commits the caller MUST publish then confirm/fail.
+    pub auto_commits: Vec<CommitToPublishFfi>,
 }
 
 /// Converts a Nostr event `created_at` (Unix seconds) to the millisecond unit
@@ -2252,55 +2193,6 @@ fn flatten_outcome_to_legacy(outcome: DecryptOutcomeFfi) -> Option<DecryptResult
 /// removes the ms/s drift footgun at the FFI boundary.
 const fn event_secs_to_cursor_ms(secs: i64) -> i64 {
     secs.saturating_mul(1000)
-}
-
-/// Unsigned Nostr event (FFI-friendly).
-///
-/// Generic unsigned event for FFI use.
-#[derive(Debug, Clone)]
-pub struct UnsignedEventFfi {
-    /// Event kind.
-    pub kind: u16,
-    /// Event content.
-    pub content: String,
-    /// Event tags.
-    pub tags: Vec<Vec<String>>,
-    /// Unix timestamp when the event was created.
-    pub created_at: i64,
-    /// Public key (hex) of the event creator (may be empty for unsigned).
-    pub pubkey: String,
-}
-
-/// Generic signed event for FFI use.
-#[derive(Debug, Clone)]
-pub struct SignedEventFfi {
-    /// Event ID (hex).
-    pub id: String,
-    /// Event kind.
-    pub kind: u16,
-    /// Event content.
-    pub content: String,
-    /// Event tags.
-    pub tags: Vec<Vec<String>>,
-    /// Unix timestamp when the event was created.
-    pub created_at: i64,
-    /// Public key (hex) of the event creator.
-    pub pubkey: String,
-    /// Signature (hex).
-    pub sig: String,
-}
-
-/// Update group result (FFI-friendly).
-///
-/// Returned after add/remove members or leave operations.
-#[derive(Debug, Clone)]
-pub struct UpdateGroupResultFfi {
-    /// Evolution event (kind 445) to publish to the group relays.
-    pub evolution_event: SignedEventFfi,
-    /// Canonical NIP-01 JSON of the evolution event, ready for relay publishing.
-    pub evolution_event_json: String,
-    /// Welcome events (kind 444) for newly added members (if any).
-    pub welcome_events: Vec<UnsignedEventFfi>,
 }
 
 /// Discriminator for [`LeavePlanFfi`].
@@ -2352,28 +2244,47 @@ impl std::fmt::Debug for LeavePlanFfi {
     }
 }
 
-// ==================== Relay preferences (kind 10050 / 10051) ====================
+// ==================== Relay preferences (kind 10050 / 10002) ====================
 //
 // FFI mirror of `haven_core::circle::RelayType`. Compile-time exhaustive on
 // the Dart side so we never round-trip a stringly-typed slug across the
 // boundary. Conversions live next to the type so they are easy to audit.
+//
+// RelayTypeFfi decision (Dark Matter W2): the pre-migration `KeyPackage`
+// variant (kind 10051) is RETIRED in favor of `Nip65` (kind 10002). Under Dark
+// Matter, KeyPackages are discovered on the account's NIP-65 kind-10002 relays
+// (the kind-10051 list is abolished + retracted at cutover). To avoid a
+// storage/schema churn, `Nip65` maps onto the SAME underlying
+// `RelayType::KeyPackage` storage slot + publish toggle (`publish_kp_relay_list`)
+// — only the ON-WIRE publish kind changes from 10051 to 10002. So a user's
+// "where my KeyPackage is discoverable" relay list is stored exactly as before;
+// the publish/maintenance paths just emit kind 10002 (`r` tags) instead of
+// 10051 (`relay` tags). The core `RelayType::KeyPackage` (10051) survives only
+// for the one-time cutover RETRACTION of the abolished 10051 list.
 
 /// Category of relay preference managed per user.
 ///
-/// Mirrors [`haven_core::circle::RelayType`].
+/// Mirrors [`haven_core::circle::RelayType`] with the Dark Matter W2 rename:
+/// - [`RelayTypeFfi::Inbox`] → kind 10050 (NIP-17 welcome delivery).
+/// - [`RelayTypeFfi::Nip65`] → kind 10002 (NIP-65; KeyPackage discovery under
+///   Dark Matter). Persisted under the same slot the retired kind-10051
+///   `KeyPackage` list used, so no relay-preference data migrates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelayTypeFfi {
     /// Inbox relays (kind 10050, NIP-17).
     Inbox,
-    /// `KeyPackage` relays (kind 10051, MIP-00).
-    KeyPackage,
+    /// NIP-65 relays (kind 10002) — where this account's KeyPackage is
+    /// discoverable under Dark Matter (W2, replacing the retired kind-10051
+    /// list). Stored under the `RelayType::KeyPackage` slot.
+    Nip65,
 }
 
 impl From<RelayTypeFfi> for haven_core::circle::RelayType {
     fn from(t: RelayTypeFfi) -> Self {
         match t {
             RelayTypeFfi::Inbox => Self::Inbox,
-            RelayTypeFfi::KeyPackage => Self::KeyPackage,
+            // `Nip65` shares the persisted `KeyPackage` slot (see banner).
+            RelayTypeFfi::Nip65 => Self::KeyPackage,
         }
     }
 }
@@ -2382,9 +2293,67 @@ impl From<haven_core::circle::RelayType> for RelayTypeFfi {
     fn from(t: haven_core::circle::RelayType) -> Self {
         match t {
             haven_core::circle::RelayType::Inbox => Self::Inbox,
-            haven_core::circle::RelayType::KeyPackage => Self::KeyPackage,
+            haven_core::circle::RelayType::KeyPackage => Self::Nip65,
         }
     }
+}
+
+/// The on-wire replaceable-list kind published for a relay-preference category
+/// under Dark Matter: 10050 for Inbox, **10002 (NIP-65)** for the KeyPackage-
+/// discovery list (W2; the kind-10051 list is retired).
+fn relay_list_wire_kind(relay_type: RelayTypeFfi) -> nostr::Kind {
+    match relay_type {
+        RelayTypeFfi::Inbox => nostr::Kind::InboxRelays,
+        RelayTypeFfi::Nip65 => nostr::Kind::RelayList,
+    }
+}
+
+/// Builds the signed replaceable relay-list event for `relay_type`, choosing
+/// the correct Dark Matter wire form: kind-10050 `relay` tags for Inbox,
+/// kind-10002 `r` tags for the NIP-65 KeyPackage-discovery list (W2).
+fn build_relay_list_event_for(
+    relay_type: RelayTypeFfi,
+    keys: &nostr::Keys,
+    urls: &[String],
+    created_at: Option<i64>,
+) -> Result<nostr::Event, String> {
+    match relay_type {
+        RelayTypeFfi::Inbox => haven_core::relay::build_relay_list_event(
+            keys,
+            haven_core::circle::RelayType::Inbox,
+            urls,
+            created_at,
+        ),
+        RelayTypeFfi::Nip65 => {
+            haven_core::relay::build_nip65_relay_list_event(keys, urls, created_at)
+        }
+    }
+    .map_err(|e| format!("Failed to build relay list event: {e}"))
+}
+
+/// Builds the "empty replacement" event used to unpublish a relay-list category,
+/// in the correct Dark Matter wire form: an empty kind-10050 replacement for
+/// Inbox, an empty kind-10002 (NIP-65) replacement for the KeyPackage-discovery
+/// list (W2). `last_published_at` floors the `created_at` so the replacement
+/// strictly supersedes the previous list across clock skew.
+fn build_relay_list_unpublish_for(
+    relay_type: RelayTypeFfi,
+    keys: &nostr::Keys,
+    last_published_at: Option<i64>,
+) -> Result<nostr::Event, String> {
+    match relay_type {
+        RelayTypeFfi::Inbox => haven_core::relay::build_unpublish_event(
+            keys,
+            haven_core::circle::RelayType::Inbox,
+            last_published_at,
+        ),
+        RelayTypeFfi::Nip65 => haven_core::relay::build_nip65_relay_list_event(
+            keys,
+            &[],
+            Some(haven_core::relay::superseding_created_at(last_published_at)),
+        ),
+    }
+    .map_err(|e| format!("Failed to build replacement: {e}"))
 }
 
 /// Outcome of a [`CircleManagerFfi::build_relay_list_publish`] call.
@@ -2444,49 +2413,18 @@ pub struct BuiltUnpublishFfi {
     pub suppressed: bool,
 }
 
-/// Converts a core `UpdateGroupResult` into `UpdateGroupResultFfi`.
-fn convert_update_result(
-    result: haven_core::nostr::mls::types::UpdateGroupResult,
-) -> Result<UpdateGroupResultFfi, String> {
-    let evolution_event_json = serde_json::to_string(&result.evolution_event)
-        .map_err(|e| format!("Failed to serialize evolution event: {e}"))?;
+/// Serializes a group-evolving commit event to JSON for the Dart publish path.
+fn commit_event_to_json(event: &nostr::Event) -> Result<String, String> {
+    serde_json::to_string(event).map_err(|e| format!("Failed to serialize commit event: {e}"))
+}
 
-    let e = result.evolution_event;
-    let evolution_event = SignedEventFfi {
-        id: e.id.to_hex(),
-        kind: e.kind.as_u16(),
-        content: e.content.to_string(),
-        tags: e
-            .tags
-            .iter()
-            .map(|t: &nostr::Tag| t.as_slice().iter().map(ToString::to_string).collect())
-            .collect(),
-        created_at: e.created_at.as_secs() as i64,
-        pubkey: e.pubkey.to_hex(),
-        sig: e.sig.to_string(),
-    };
-
-    let welcome_events: Vec<UnsignedEventFfi> = result
-        .welcome_rumors
-        .unwrap_or_default()
-        .into_iter()
-        .map(|e| UnsignedEventFfi {
-            kind: e.kind.as_u16(),
-            content: e.content.to_string(),
-            tags: e
-                .tags
-                .iter()
-                .map(|t: &nostr::Tag| t.as_slice().iter().map(ToString::to_string).collect())
-                .collect(),
-            created_at: e.created_at.as_secs() as i64,
-            pubkey: e.pubkey.to_hex(),
-        })
-        .collect();
-
-    Ok(UpdateGroupResultFfi {
-        evolution_event,
-        evolution_event_json,
-        welcome_events,
+/// Converts a core [`haven_core::circle::CommitToPublish`] into its FFI mirror.
+fn convert_commit_to_publish(
+    commit: haven_core::circle::CommitToPublish,
+) -> Result<CommitToPublishFfi, String> {
+    Ok(CommitToPublishFfi {
+        commit_event_json: commit_event_to_json(&commit.commit_event)?,
+        pending: commit.pending.into(),
     })
 }
 
@@ -2533,26 +2471,6 @@ const _: fn() = || {
     assert_send_sync::<CoreCircleManager>();
 };
 
-/// Dispatches a blocking closure onto tokio's dedicated blocking pool and
-/// awaits its completion.
-///
-/// The closure owns an `Arc<CoreCircleManager>` clone, so it is free of
-/// borrowing constraints and has the `'static` lifetime `spawn_blocking`
-/// requires. A panic inside the closure is converted into a generic error
-/// so raw panic payloads (which may contain redacted-but-unchecked
-/// material) never reach the Dart layer.
-/// Parses a `Vec<Vec<String>>` tag list (as returned by `KeyPackageBundle`)
-/// into nostr `Tag` values. Returns a structured error string on the first
-/// malformed tag.
-#[inline]
-fn parse_kp_tags(tags: &[Vec<String>]) -> Result<Vec<nostr::Tag>, String> {
-    tags.iter()
-        .map(|tag_vec| {
-            nostr::Tag::parse(tag_vec).map_err(|e| format!("Failed to parse key package tag: {e}"))
-        })
-        .collect()
-}
-
 /// Extracts the NIP-33 `d` tag value from a probed kind-30443 `KeyPackage`
 /// event, if present. Used by [`RelayManagerFfi::maintain_key_package`] to
 /// build the on-relay snapshot. Never logged.
@@ -2564,7 +2482,7 @@ fn kp_event_d_tag(event: &nostr::Event) -> Option<String> {
     })
 }
 
-/// Extracts the `["relay", <url>]` URLs from a probed kind-10050/10051
+/// Extracts the `["relay", <url>]` URLs from a probed kind-10050 (Inbox)
 /// relay-list event, for drift detection in
 /// [`RelayManagerFfi::maintain_relay_list_category`]. Never logged.
 #[inline]
@@ -2577,6 +2495,31 @@ fn relay_list_urls(event: &nostr::Event) -> Vec<String> {
             (s.len() >= 2 && s[0] == "relay").then(|| s[1].clone())
         })
         .collect()
+}
+
+/// Extracts the `["r", <url>]` URLs from a probed kind-10002 (NIP-65)
+/// relay-list event, for drift detection on the KeyPackage-discovery list under
+/// Dark Matter (W2; NIP-65 tags relays as `r`, NOT the `relay` form 10050 uses).
+#[inline]
+fn nip65_relay_list_urls(event: &nostr::Event) -> Vec<String> {
+    event
+        .tags
+        .iter()
+        .filter_map(|t| {
+            let s = t.as_slice();
+            (s.len() >= 2 && s[0] == "r").then(|| s[1].clone())
+        })
+        .collect()
+}
+
+/// The on-relay URL extractor for a relay-list category's wire form: `relay`
+/// tags for Inbox (10050), `r` tags for the NIP-65 KeyPackage list (10002).
+#[inline]
+fn relay_list_urls_for(relay_type: RelayTypeFfi, event: &nostr::Event) -> Vec<String> {
+    match relay_type {
+        RelayTypeFfi::Inbox => relay_list_urls(event),
+        RelayTypeFfi::Nip65 => nip65_relay_list_urls(event),
+    }
 }
 
 #[inline]
@@ -2597,19 +2540,47 @@ where
     })?
 }
 
+/// Derives identity [`Keys`] from 32-byte secret bytes, failing closed on a
+/// wrong length or malformed key. Wraps the input in `Zeroizing` so an
+/// early-return path never leaks the secret (Security Rule 7/9).
+///
+/// [`Keys`]: nostr::Keys
+fn keys_from_secret_bytes(identity_secret_bytes: Vec<u8>) -> Result<nostr::Keys, String> {
+    let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
+    if identity_secret_bytes.len() != 32 {
+        return Err("Invalid secret bytes length".to_string());
+    }
+    let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
+        .map_err(|e| format!("Invalid secret key: {e}"))?;
+    Ok(nostr::Keys::new(secret_key))
+}
+
 impl CircleManagerFfi {
-    /// Creates a new circle manager.
+    /// Creates a new circle manager bound to the device identity.
     ///
-    /// Initializes both MLS storage and circle metadata database
-    /// at the given data directory. Ensures the platform keyring store
-    /// is initialized first (idempotent, safe to call multiple times).
-    /// The circles.db database is encrypted with SQLCipher using a key
-    /// stored in the platform keyring.
-    pub fn new(data_dir: String) -> Result<Self, String> {
+    /// Initializes both the Dark Matter MLS session (`session.sqlite`) and the
+    /// circle metadata database (`circles.db`) at the given data directory.
+    /// Ensures the platform keyring store is initialized first (idempotent).
+    ///
+    /// # Dark Matter identity gating (DM-4)
+    ///
+    /// The Dark Matter [`SessionManager`] binds the device's Nostr identity as
+    /// its account identity, its NIP-59 welcome signer, AND its hardened
+    /// account-identity-proof signer (Rule 1), so the identity secret is now a
+    /// HARD construction requirement — the engine cannot open without it.
+    /// `identity_secret_bytes` (32 bytes, from
+    /// `NostrIdentityManager.get_secret_bytes()`) MUST be present; a wrong
+    /// length or missing identity fails closed with a clear error, matching the
+    /// existing identity-gating call sites. The bytes are `Zeroizing`-wrapped
+    /// and dropped before this returns.
+    ///
+    /// [`SessionManager`]: haven_core::nostr::mls::SessionManager
+    pub fn new(data_dir: String, identity_secret_bytes: Vec<u8>) -> Result<Self, String> {
+        let keys = keys_from_secret_bytes(identity_secret_bytes)?;
         init_keyring_store()?;
         let circle_db_key = get_or_create_circle_db_key()?;
         let path = Path::new(&data_dir);
-        CoreCircleManager::new(path, Some(&circle_db_key))
+        CoreCircleManager::new(path, &keys, Some(&circle_db_key))
             .map(|inner| Self {
                 inner: Arc::new(inner),
             })
@@ -2659,14 +2630,7 @@ impl CircleManagerFfi {
         relays: Vec<String>,
         creator_fallback_relays: Vec<String>,
     ) -> Result<CircleCreationResultFfi, String> {
-        // Zeroize immediately so early-return paths don't leak secret bytes.
-        let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
-        if identity_secret_bytes.len() != 32 {
-            return Err("Invalid secret bytes length".to_string());
-        }
-        let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
-            .map_err(|e| format!("Invalid secret key: {e}"))?;
-        let keys = nostr::Keys::new(secret_key);
+        let keys = keys_from_secret_bytes(identity_secret_bytes)?;
 
         // Parse member key packages
         let member_key_packages: Vec<haven_core::circle::MemberKeyPackage> = members
@@ -2711,8 +2675,12 @@ impl CircleManagerFfi {
             .await
             .map_err(|e| e.to_string())?;
 
-        // Convert gift-wrapped welcome events to FFI
-        let welcome_events: Vec<GiftWrappedWelcomeFfi> = result
+        // Convert gift-wrapped welcome events to FFI. F3: if serialization fails
+        // after the create was staged, roll the pending back BEFORE returning
+        // (the core `publish_failed` also deletes the just-saved circle rows), so
+        // neither a leaked `PendingStateRef` nor a ghost circle row survives.
+        let pending_ref = result.pending;
+        let welcome_events: Vec<GiftWrappedWelcomeFfi> = match result
             .welcome_events
             .into_iter()
             .map(|w| {
@@ -2724,52 +2692,56 @@ impl CircleManagerFfi {
                     event_json,
                 })
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<Result<Vec<_>, String>>()
+        {
+            Ok(events) => events,
+            Err(e) => {
+                let _ = self.inner.publish_failed(pending_ref).await;
+                return Err(e);
+            }
+        };
 
+        let pending = pending_ref.into();
         Ok(CircleCreationResultFfi {
             circle: CircleFfi::from(&result.circle),
             welcome_events,
+            pending,
         })
     }
 
     /// Gets a circle by its MLS group ID.
+    ///
+    /// Async: resolving the roster reads the Dark Matter session (which is
+    /// `&mut`-serialized behind a `tokio` mutex), so this awaits directly on
+    /// the current worker rather than dispatching to the blocking pool.
     pub async fn get_circle(
         &self,
         mls_group_id: Vec<u8>,
     ) -> Result<Option<CircleWithMembersFfi>, String> {
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            let group_id = GroupId::from_slice(&mls_group_id);
-            inner
-                .get_circle(&group_id)
-                .map(|opt| opt.map(|c| CircleWithMembersFfi::from(&c)))
-                .map_err(|e| e.to_string())
-        })
-        .await
+        let group_id = GroupId::from_slice(&mls_group_id);
+        self.inner
+            .get_circle(&group_id)
+            .await
+            .map(|opt| opt.map(|c| CircleWithMembersFfi::from(&c)))
+            .map_err(|e| e.to_string())
     }
 
     /// Gets all circles.
     pub async fn get_circles(&self) -> Result<Vec<CircleWithMembersFfi>, String> {
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            inner
-                .get_circles()
-                .map(|circles| circles.iter().map(CircleWithMembersFfi::from).collect())
-                .map_err(|e| e.to_string())
-        })
-        .await
+        self.inner
+            .get_circles()
+            .await
+            .map(|circles| circles.iter().map(CircleWithMembersFfi::from).collect())
+            .map_err(|e| e.to_string())
     }
 
     /// Gets visible circles (excludes declined invitations).
     pub async fn get_visible_circles(&self) -> Result<Vec<CircleWithMembersFfi>, String> {
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            inner
-                .get_visible_circles()
-                .map(|circles| circles.iter().map(CircleWithMembersFfi::from).collect())
-                .map_err(|e| e.to_string())
-        })
-        .await
+        self.inner
+            .get_visible_circles()
+            .await
+            .map(|circles| circles.iter().map(CircleWithMembersFfi::from).collect())
+            .map_err(|e| e.to_string())
     }
 
     /// Classifies the leave operation — see [`LeavePlanFfi`] for the
@@ -2779,121 +2751,124 @@ impl CircleManagerFfi {
         mls_group_id: Vec<u8>,
         self_pubkey_hex: String,
     ) -> Result<LeavePlanFfi, String> {
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            let group_id = GroupId::from_slice(&mls_group_id);
-            let self_pk = nostr::PublicKey::from_hex(&self_pubkey_hex)
-                .map_err(|_| "Invalid self_pubkey_hex".to_string())?;
-            let plan = inner
-                .plan_leave(&group_id, &self_pk)
-                .map_err(|e| e.to_string())?;
-            Ok(match plan {
-                haven_core::circle::LeavePlan::NonAdmin => LeavePlanFfi {
-                    kind: LeavePlanKindFfi::NonAdmin,
-                    successor_hex: None,
-                },
-                haven_core::circle::LeavePlan::AdminHandoff { successor } => LeavePlanFfi {
-                    kind: LeavePlanKindFfi::AdminHandoff,
-                    successor_hex: Some(successor.to_hex()),
-                },
-                haven_core::circle::LeavePlan::AdminDemote => LeavePlanFfi {
-                    kind: LeavePlanKindFfi::AdminDemote,
-                    successor_hex: None,
-                },
-                haven_core::circle::LeavePlan::Abandon => LeavePlanFfi {
-                    kind: LeavePlanKindFfi::Abandon,
-                    successor_hex: None,
-                },
-                haven_core::circle::LeavePlan::OrphanLocalOnly => LeavePlanFfi {
-                    kind: LeavePlanKindFfi::OrphanLocalOnly,
-                    successor_hex: None,
-                },
-            })
+        let group_id = GroupId::from_slice(&mls_group_id);
+        let self_pk = nostr::PublicKey::from_hex(&self_pubkey_hex)
+            .map_err(|_| "Invalid self_pubkey_hex".to_string())?;
+        let plan = self
+            .inner
+            .plan_leave(&group_id, &self_pk)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(match plan {
+            haven_core::circle::LeavePlan::NonAdmin => LeavePlanFfi {
+                kind: LeavePlanKindFfi::NonAdmin,
+                successor_hex: None,
+            },
+            haven_core::circle::LeavePlan::AdminHandoff { successor } => LeavePlanFfi {
+                kind: LeavePlanKindFfi::AdminHandoff,
+                successor_hex: Some(successor.to_hex()),
+            },
+            haven_core::circle::LeavePlan::AdminDemote => LeavePlanFfi {
+                kind: LeavePlanKindFfi::AdminDemote,
+                successor_hex: None,
+            },
+            haven_core::circle::LeavePlan::Abandon => LeavePlanFfi {
+                kind: LeavePlanKindFfi::Abandon,
+                successor_hex: None,
+            },
+            haven_core::circle::LeavePlan::OrphanLocalOnly => LeavePlanFfi {
+                kind: LeavePlanKindFfi::OrphanLocalOnly,
+                successor_hex: None,
+            },
         })
-        .await
     }
 
     /// Step 1 of admin handoff: propose promoting `successor_hex` to admin.
-    /// Returns a pending commit — publish, then finalize or clear.
+    ///
+    /// # GAP (plan §5.2 #18)
+    ///
+    /// The Dark Matter v0.9.4 public API exposes no admin-policy component
+    /// codec, so this currently returns a documented error (the core method
+    /// fails closed). Kept so the Dart leave state machine keeps its shape.
     pub async fn propose_admin_handoff(
         &self,
         mls_group_id: Vec<u8>,
         successor_hex: String,
-    ) -> Result<UpdateGroupResultFfi, String> {
-        let inner = self.inner.clone();
-        let result = run_blocking(move || {
-            let group_id = GroupId::from_slice(&mls_group_id);
-            let successor = nostr::PublicKey::from_hex(&successor_hex)
-                .map_err(|_| "Invalid successor_hex".to_string())?;
-            inner
-                .propose_admin_handoff(&group_id, &successor)
-                .map_err(|e| e.to_string())
-        })
-        .await?;
-        convert_update_result(result)
+    ) -> Result<CommitToPublishFfi, String> {
+        let group_id = GroupId::from_slice(&mls_group_id);
+        let successor = nostr::PublicKey::from_hex(&successor_hex)
+            .map_err(|_| "Invalid successor_hex".to_string())?;
+        let commit = self
+            .inner
+            .propose_admin_handoff(&group_id, &successor)
+            .await
+            .map_err(|e| e.to_string())?;
+        convert_commit_to_publish(commit)
     }
 
-    /// Admin: replace this circle's group relay list (MIP-01) via a
-    /// `GroupContextExtensions` commit.
+    /// Admin: replace this circle's group relay list (MIP-01) via an
+    /// `UpdateAppComponents(nostr-routing.v1)` commit.
     ///
-    /// Returns a pending commit. Publish the returned evolution event to the
+    /// Returns a [`CommitToPublishFfi`]. Publish `commit_event_json` to the
     /// **union of the circle's current relays and `new_relays`** (so a member
-    /// only listening on a relay being removed still receives the commit),
-    /// then call [`finalize_relay_update`](Self::finalize_relay_update) on ACK
-    /// or [`clear_pending_commit`](Self::clear_pending_commit) on failure.
-    /// `new_relays` MUST be non-empty, `wss://` (or the debug loopback test
-    /// seam), credential-free, and at most 20 entries; admin authorization is
-    /// enforced by MDK against live MLS state.
+    /// only listening on a relay being removed still receives the commit), then
+    /// call [`finalize_relay_update`](Self::finalize_relay_update) on a ≥1-relay
+    /// ACK or [`publish_failed`](Self::publish_failed) on failure. `new_relays`
+    /// MUST be non-empty, `wss://` (or the debug loopback test seam),
+    /// credential-free, and at most 20 entries; admin authorization is enforced
+    /// by the engine against live MLS state.
     pub async fn update_circle_relays(
         &self,
         mls_group_id: Vec<u8>,
         new_relays: Vec<String>,
-    ) -> Result<UpdateGroupResultFfi, String> {
-        let inner = self.inner.clone();
-        let result = run_blocking(move || {
-            let group_id = GroupId::from_slice(&mls_group_id);
-            inner
-                .update_circle_relays(&group_id, &new_relays)
-                .map_err(|e| e.to_string())
-        })
-        .await?;
-        convert_update_result(result)
+    ) -> Result<CommitToPublishFfi, String> {
+        let group_id = GroupId::from_slice(&mls_group_id);
+        let commit = self
+            .inner
+            .update_circle_relays(&group_id, &new_relays)
+            .await
+            .map_err(|e| e.to_string())?;
+        convert_commit_to_publish(commit)
     }
 
-    /// Step 2 of admin handoff: demote self from admin.
-    /// Returns a pending commit — publish, then finalize or clear.
+    /// Step 2 of admin handoff (or step 1 of `Abandon`): demote self from admin.
+    ///
+    /// # GAP (plan §5.2 #18)
+    ///
+    /// Same admin-policy-codec gap as [`propose_admin_handoff`](Self::propose_admin_handoff);
+    /// the core method currently returns a documented error.
     pub async fn propose_self_demote(
         &self,
         mls_group_id: Vec<u8>,
-    ) -> Result<UpdateGroupResultFfi, String> {
-        let inner = self.inner.clone();
-        let result = run_blocking(move || {
-            let group_id = GroupId::from_slice(&mls_group_id);
-            inner
-                .propose_self_demote(&group_id)
-                .map_err(|e| e.to_string())
-        })
-        .await?;
-        convert_update_result(result)
+    ) -> Result<CommitToPublishFfi, String> {
+        let group_id = GroupId::from_slice(&mls_group_id);
+        let commit = self
+            .inner
+            .propose_self_demote(&group_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        convert_commit_to_publish(commit)
     }
 
-    /// Returns a `SelfRemove` proposal event. Publish it, then call
-    /// `complete_leave` — no pending commit to finalize or clear.
-    pub async fn propose_leave(
-        &self,
-        mls_group_id: Vec<u8>,
-    ) -> Result<UpdateGroupResultFfi, String> {
-        let inner = self.inner.clone();
-        let result = run_blocking(move || {
-            let group_id = GroupId::from_slice(&mls_group_id);
-            inner.propose_leave(&group_id).map_err(|e| e.to_string())
-        })
-        .await?;
-        convert_update_result(result)
+    /// Returns a `SelfRemove` proposal event JSON. Publish it, then call
+    /// [`complete_leave`](Self::complete_leave).
+    ///
+    /// A bare `SelfRemove` proposal has NO `PendingStateRef` — a remaining
+    /// member commits it later (RFC 9420 §12.1.2), so there is nothing to
+    /// confirm or roll back. The returned string is the signed kind:445 event
+    /// JSON to publish to the circle's relays.
+    pub async fn propose_leave(&self, mls_group_id: Vec<u8>) -> Result<String, String> {
+        let group_id = GroupId::from_slice(&mls_group_id);
+        let event = self
+            .inner
+            .propose_leave(&group_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        commit_event_to_json(&event)
     }
 
     /// Removes the local circle row after a successful leave sequence, or
-    /// for the `OrphanLocalOnly` plan.
+    /// for the `OrphanLocalOnly` plan. (Storage-only; sync in the core.)
     pub async fn complete_leave(&self, mls_group_id: Vec<u8>) -> Result<(), String> {
         let inner = self.inner.clone();
         run_blocking(move || {
@@ -2904,7 +2879,7 @@ impl CircleManagerFfi {
     }
 
     /// Wipes local state for the `Abandon` plan — sole-member cleanup with
-    /// no MLS commit and no relay publish.
+    /// no MLS commit and no relay publish. (Storage-only; sync in the core.)
     pub async fn abandon_circle_local_only(&self, mls_group_id: Vec<u8>) -> Result<(), String> {
         let inner = self.inner.clone();
         run_blocking(move || {
@@ -2916,35 +2891,35 @@ impl CircleManagerFfi {
         .await
     }
 
-    // ==================== Member Management ====================
+    // ==================== Publish-before-apply (Rule 13) ====================
 
-    /// Adds members to a circle.
+    /// Confirms a staged commit was published (≥1-relay OK-ack) so the engine
+    /// applies it and advances the epoch.
     ///
-    /// Returns the update result with evolution and welcome events.
-    pub async fn add_members(
-        &self,
-        mls_group_id: Vec<u8>,
-        key_packages_json: Vec<String>,
-    ) -> Result<UpdateGroupResultFfi, String> {
-        // Parse key packages from JSON (pure CPU work, off the blocking pool).
-        let key_packages: Vec<nostr::Event> = key_packages_json
-            .iter()
-            .map(|json| {
-                serde_json::from_str(json).map_err(|e| format!("Invalid key package JSON: {e}"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let inner = self.inner.clone();
-        let result = run_blocking(move || {
-            let group_id = GroupId::from_slice(&mls_group_id);
-            inner
-                .add_members(&group_id, &key_packages)
-                .map_err(|e| e.to_string())
-        })
-        .await?;
-
-        convert_update_result(result)
+    /// "Acked" MUST mean a relay returned OK — never merely "sent" — to avoid
+    /// optimistic-merge forks (Rule 13, security F13). Pass the `pending` token
+    /// carried in a [`CircleCreationResultFfi`] / [`AddMembersResultFfi`] /
+    /// [`CommitToPublishFfi`].
+    pub async fn confirm_published(&self, pending: PendingStateRefFfi) -> Result<(), String> {
+        self.inner
+            .confirm_published(pending.into())
+            .await
+            .map_err(|e| e.to_string())
     }
+
+    /// Reports that a staged publish FAILED; the engine discards the staged
+    /// commit and returns the group to `Stable` at the prior epoch.
+    ///
+    /// The publish-failure counterpart to [`confirm_published`](Self::confirm_published);
+    /// pass the same `pending` token.
+    pub async fn publish_failed(&self, pending: PendingStateRefFfi) -> Result<(), String> {
+        self.inner
+            .publish_failed(pending.into())
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    // ==================== Member Management ====================
 
     /// Adds members to an existing circle and gift-wraps their Welcomes.
     ///
@@ -2986,14 +2961,7 @@ impl CircleManagerFfi {
         members: Vec<MemberKeyPackageFfi>,
         creator_fallback_relays: Vec<String>,
     ) -> Result<AddMembersResultFfi, String> {
-        // Zeroize immediately so early-return paths don't leak secret bytes.
-        let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
-        if identity_secret_bytes.len() != 32 {
-            return Err("Invalid secret bytes length".to_string());
-        }
-        let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
-            .map_err(|e| format!("Invalid secret key: {e}"))?;
-        let keys = nostr::Keys::new(secret_key);
+        let keys = keys_from_secret_bytes(identity_secret_bytes)?;
 
         // Parse member key packages.
         let member_key_packages: Vec<haven_core::circle::MemberKeyPackage> = members
@@ -3011,8 +2979,8 @@ impl CircleManagerFfi {
 
         let group_id = GroupId::from_slice(&mls_group_id);
 
-        // `add_members_with_welcomes` is genuinely async (giftwrap
-        // construction awaits), so it stays on the current tokio worker.
+        // `add_members_with_welcomes` is genuinely async (engine send +
+        // giftwrap construction await), so it stays on the current tokio worker.
         let result = self
             .inner
             .add_members_with_welcomes(
@@ -3024,8 +2992,8 @@ impl CircleManagerFfi {
             .await
             .map_err(|e| e.to_string())?;
 
-        let evolution_event_json = serde_json::to_string(&result.evolution_event)
-            .map_err(|e| format!("Failed to serialize evolution event: {e}"))?;
+        let commit_event_json = commit_event_to_json(&result.commit_event)?;
+        let pending = result.pending.into();
 
         // Convert gift-wrapped welcome events to FFI.
         let welcome_events: Vec<GiftWrappedWelcomeFfi> = result
@@ -3043,42 +3011,41 @@ impl CircleManagerFfi {
             .collect::<Result<Vec<_>, String>>()?;
 
         Ok(AddMembersResultFfi {
-            evolution_event_json,
+            commit_event_json,
             welcome_events,
+            pending,
         })
     }
 
     /// Removes members from a circle.
     ///
-    /// Returns the update result with evolution events.
+    /// Returns a [`CommitToPublishFfi`] (publish-before-apply, Rule 13):
+    /// publish `commit_event_json`, then [`confirm_published`](Self::confirm_published)
+    /// on a ≥1-relay ACK or [`publish_failed`](Self::publish_failed) on failure.
     pub async fn remove_members(
         &self,
         mls_group_id: Vec<u8>,
         member_pubkeys: Vec<String>,
-    ) -> Result<UpdateGroupResultFfi, String> {
-        let inner = self.inner.clone();
-        let result = run_blocking(move || {
-            let group_id = GroupId::from_slice(&mls_group_id);
-            inner
-                .remove_members(&group_id, &member_pubkeys)
-                .map_err(|e| e.to_string())
-        })
-        .await?;
-
-        convert_update_result(result)
+    ) -> Result<CommitToPublishFfi, String> {
+        let group_id = GroupId::from_slice(&mls_group_id);
+        let commit = self
+            .inner
+            .remove_members(&group_id, &member_pubkeys)
+            .await
+            .map_err(|e| e.to_string())?;
+        convert_commit_to_publish(commit)
     }
 
     /// Gets members of a circle with resolved contact info.
+    ///
+    /// Async: reads the roster from the Dark Matter session (awaits directly).
     pub async fn get_members(&self, mls_group_id: Vec<u8>) -> Result<Vec<CircleMemberFfi>, String> {
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            let group_id = GroupId::from_slice(&mls_group_id);
-            inner
-                .get_members(&group_id)
-                .map(|members| members.iter().map(CircleMemberFfi::from).collect())
-                .map_err(|e| e.to_string())
-        })
-        .await
+        let group_id = GroupId::from_slice(&mls_group_id);
+        self.inner
+            .get_members(&group_id)
+            .await
+            .map(|members| members.iter().map(CircleMemberFfi::from).collect())
+            .map_err(|e| e.to_string())
     }
 
     /// Returns whether `pubkey_hex` is still in the circle's current MLS
@@ -3097,14 +3064,11 @@ impl CircleManagerFfi {
         mls_group_id: Vec<u8>,
         pubkey_hex: String,
     ) -> Result<bool, String> {
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            let group_id = GroupId::from_slice(&mls_group_id);
-            inner
-                .still_a_member(&group_id, &pubkey_hex)
-                .map_err(|e| e.to_string())
-        })
-        .await
+        let group_id = GroupId::from_slice(&mls_group_id);
+        self.inner
+            .still_a_member(&group_id, &pubkey_hex)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     // ==================== Contact Management ====================
@@ -3187,20 +3151,18 @@ impl CircleManagerFfi {
         identity_secret_bytes: Vec<u8>,
         gift_wrap_event_json: String,
     ) -> Result<Option<InvitationFfi>, String> {
-        // Zeroize immediately so early-return paths don't leak secret bytes.
-        let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
-        if identity_secret_bytes.len() != 32 {
-            return Err("Invalid secret bytes length".to_string());
-        }
-        let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
-            .map_err(|e| format!("Invalid secret key: {e}"))?;
-        let keys = nostr::Keys::new(secret_key);
+        let keys = keys_from_secret_bytes(identity_secret_bytes)?;
 
         // Parse the gift-wrapped event
         let gift_wrap_event: nostr::Event = serde_json::from_str(&gift_wrap_event_json)
             .map_err(|e| format!("Invalid gift wrap event JSON: {e}"))?;
 
-        // Genuinely async — NIP-59 giftwrap unwrap awaits internally.
+        // Genuinely async — the Dark Matter peeler previews the welcome (peel
+        // WITHOUT ingest, F3 hold-before-ingest) internally. The returned
+        // `InvitationFfi.mlsGroupId` is a STAND-IN (the gift-wrap event id)
+        // until Accept ingests and the engine yields the real MLS group id;
+        // Dart passes that stand-in id back to `accept_invitation` /
+        // `decline_invitation` (they key on the gift-wrap id).
         match self
             .inner
             .process_gift_wrapped_invitation(&keys, &gift_wrap_event)
@@ -3215,50 +3177,14 @@ impl CircleManagerFfi {
         }
     }
 
-    /// Processes an incoming invitation from already-unwrapped components.
+    /// Gets all pending invitations from the in-memory held-welcome store.
     ///
-    /// This is the low-level API that takes pre-unwrapped components.
-    /// Prefer [`process_gift_wrapped_invitation`] for most use cases.
-    ///
-    /// # Arguments
-    ///
-    /// * `wrapper_event_id` - ID of the gift-wrapped event (hex)
-    /// * `rumor_event_json` - The decrypted kind 444 rumor event JSON
-    /// * `inviter_pubkey` - Public key (hex) of the inviter
-    ///
-    /// # Returns
-    ///
-    /// Same tri-state semantics as [`process_gift_wrapped_invitation`]:
-    /// `Ok(Some(_))` for new invitations, `Ok(None)` for already-processed
-    /// gift wraps (silent skip), `Err(_)` for real failures.
-    ///
-    /// [`process_gift_wrapped_invitation`]: Self::process_gift_wrapped_invitation
-    pub async fn process_invitation(
-        &self,
-        wrapper_event_id: String,
-        rumor_event_json: String,
-        inviter_pubkey: String,
-    ) -> Result<Option<InvitationFfi>, String> {
-        // Parse the event ID
-        let event_id = nostr::EventId::from_hex(&wrapper_event_id)
-            .map_err(|e| format!("Invalid event ID: {e}"))?;
-
-        // Parse the rumor event from JSON
-        let rumor: nostr::UnsignedEvent = serde_json::from_str(&rumor_event_json)
-            .map_err(|e| format!("Invalid rumor event JSON: {e}"))?;
-
-        let inner = self.inner.clone();
-        run_blocking(
-            move || match inner.process_invitation(&event_id, &rumor, &inviter_pubkey) {
-                Ok(invitation) => Ok(Some(InvitationFfi::from(invitation))),
-                Err(haven_core::circle::CircleError::AlreadyProcessed) => Ok(None),
-                Err(e) => Err(e.to_string()),
-            },
-        )
-        .await
-    }
-
-    /// Gets all pending invitations.
+    /// Each [`InvitationFfi`] carries pre-join STAND-IN fields (the gift-wrap
+    /// event id as `mlsGroupId`, `"New Circle"` as the name, `memberCount == 0`)
+    /// because the real MLS group state lives inside the still-encrypted 1059
+    /// held until Accept (F3). The gift-wrap id is the key the caller passes to
+    /// [`accept_invitation`](Self::accept_invitation) /
+    /// [`decline_invitation`](Self::decline_invitation).
     pub async fn get_pending_invitations(&self) -> Result<Vec<InvitationFfi>, String> {
         let inner = self.inner.clone();
         run_blocking(move || {
@@ -3270,29 +3196,36 @@ impl CircleManagerFfi {
         .await
     }
 
-    /// Accepts an invitation to join a circle.
+    /// Accepts an invitation to join a circle, keyed by the gift-wrap event id.
+    ///
+    /// Feeds the still-encrypted 1059 held for `gift_wrap_id` (the stand-in
+    /// `mlsGroupId` bytes from [`process_gift_wrapped_invitation`]) to the
+    /// engine, which peels + joins and yields the real circle.
     pub async fn accept_invitation(
         &self,
-        mls_group_id: Vec<u8>,
+        gift_wrap_id: Vec<u8>,
     ) -> Result<CircleWithMembersFfi, String> {
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            let group_id = GroupId::from_slice(&mls_group_id);
-            inner
-                .accept_invitation(&group_id)
-                .map(|c| CircleWithMembersFfi::from(&c))
-                .map_err(|e| e.to_string())
-        })
-        .await
+        let event_id = nostr::EventId::from_slice(&gift_wrap_id)
+            .map_err(|e| format!("Invalid gift-wrap id: {e}"))?;
+        self.inner
+            .accept_invitation(&event_id)
+            .await
+            .map(|c| CircleWithMembersFfi::from(&c))
+            .map_err(|e| e.to_string())
     }
 
-    /// Declines an invitation to join a circle.
-    pub async fn decline_invitation(&self, mls_group_id: Vec<u8>) -> Result<(), String> {
+    /// Declines an invitation, keyed by the gift-wrap event id.
+    ///
+    /// Drops the held 1059 locally (never ingested → nothing on the wire,
+    /// Rule 10) and marks the gift wrap resolved so a re-poll never re-surfaces
+    /// it. (Storage-only; sync in the core.)
+    pub async fn decline_invitation(&self, gift_wrap_id: Vec<u8>) -> Result<(), String> {
         let inner = self.inner.clone();
         run_blocking(move || {
-            let group_id = GroupId::from_slice(&mls_group_id);
+            let event_id = nostr::EventId::from_slice(&gift_wrap_id)
+                .map_err(|e| format!("Invalid gift-wrap id: {e}"))?;
             inner
-                .decline_invitation(&group_id)
+                .decline_invitation(&event_id)
                 .map_err(|e| e.to_string())
         })
         .await
@@ -3300,173 +3233,18 @@ impl CircleManagerFfi {
 
     // ==================== Key Packages ====================
 
-    /// Creates a key package for publishing.
-    ///
-    /// Returns the data needed to build and sign a key package event
-    /// (kind 30443 addressable or legacy kind 443).
-    pub async fn create_key_package(
-        &self,
-        identity_pubkey: String,
-        relays: Vec<String>,
-    ) -> Result<KeyPackageBundleFfi, String> {
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            inner
-                .create_key_package(&identity_pubkey, &relays)
-                .map(KeyPackageBundleFfi::from)
-                .map_err(|e| e.to_string())
-        })
-        .await
-    }
-
-    /// Creates and signs the key package event pair (kinds 30443 and 443).
-    ///
-    /// Generates MLS key material once, then signs **both** the canonical
-    /// kind 30443 (addressable) event and the legacy kind 443 twin from the
-    /// same bundle (same `content` and `hash_ref`, only the tag set differs:
-    /// the legacy twin omits the `d` tag).
-    ///
-    /// Publishing both is required during the MIP-00 transition window so
-    /// that Marmot clients which still query kind 443 can discover this user.
-    /// Mirrors the reference implementation (`whitenoise-rs`'s
-    /// `publish_key_package_pair_to_relays`).
-    ///
-    /// # Arguments
-    ///
-    /// * `identity_secret_bytes` - The user's identity secret bytes (32 bytes)
-    /// * `relays` - Relay URLs where the pair should be published
-    pub async fn sign_key_package_event(
-        &self,
-        identity_secret_bytes: Vec<u8>,
-        relays: Vec<String>,
-    ) -> Result<SignedKeyPackageEventFfi, String> {
-        let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
-        if identity_secret_bytes.len() != 32 {
-            return Err("Invalid secret bytes length".to_string());
-        }
-        let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
-            .map_err(|e| format!("Invalid secret key: {e}"))?;
-        let keys = nostr::Keys::new(secret_key);
-        let pubkey_hex = keys.public_key().to_hex();
-
-        // Reuse the stored stable NIP-33 `d` slot (M8-6): reading the last
-        // recorded canonical `d` and signing into it means every login REPLACES
-        // the same addressable coordinate instead of minting a rival slot, and
-        // it lets the maintenance live-material gate recognize this KeyPackage.
-        // `None` on the first-ever login → mints a fresh `d` (pre-M8 behavior;
-        // `create_key_package_with_d(.., None)` == `create_key_package`).
-        let stored_d = {
-            let inner = self.inner.clone();
-            run_blocking(move || inner.latest_canonical_d_tag().map_err(|e| e.to_string())).await?
-        };
-
-        // Generate MLS key package on the blocking pool (touches SQLite).
-        let bundle = {
-            let inner = self.inner.clone();
-            run_blocking(move || {
-                inner
-                    .create_key_package_with_d(&pubkey_hex, &relays, stored_d.as_deref())
-                    .map_err(|e| e.to_string())
-            })
-            .await?
-        };
-        // Bundle is owned now; signing below is pure CPU work.
-        let canonical_hash_ref = bundle.hash_ref.clone();
-        let d_tag = bundle.d_tag.clone();
-
-        // Parse tags from Vec<Vec<String>> into nostr::Tag for both kinds.
-        let tags_30443 = parse_kp_tags(&bundle.tags_30443)?;
-        let tags_443 = parse_kp_tags(&bundle.tags_443)?;
-
-        // Sign both events from the same key material. The legacy twin
-        // shares `content` and `hash_ref` with the canonical event; only
-        // the tag set differs (no `d` tag for kind 443).
-        let event_30443 =
-            nostr::EventBuilder::new(nostr::Kind::Custom(30443), bundle.content.clone())
-                .tags(tags_30443)
-                .sign_with_keys(&keys)
-                .map_err(|e| format!("Failed to sign kind 30443 key package event: {e}"))?;
-
-        let event_443 = nostr::EventBuilder::new(nostr::Kind::Custom(443), bundle.content)
-            .tags(tags_443)
-            .sign_with_keys(&keys)
-            .map_err(|e| format!("Failed to sign kind 443 key package event: {e}"))?;
-
-        let canonical_event_id = event_30443.id.to_hex();
-        let legacy_event_id = event_443.id.to_hex();
-
-        let event_json = serde_json::to_string(&event_30443)
-            .map_err(|e| format!("Failed to serialize kind 30443 event: {e}"))?;
-        let legacy_event_json = serde_json::to_string(&event_443)
-            .map_err(|e| format!("Failed to serialize kind 443 event: {e}"))?;
-
-        Ok(SignedKeyPackageEventFfi {
-            event_json,
-            legacy_event_json,
-            relays: bundle.relays,
-            canonical_hash_ref,
-            d_tag,
-            canonical_event_id,
-            legacy_event_id,
-        })
-    }
-
-    /// Records a just-published `KeyPackage` pair into `published_key_packages`
-    /// (M8-6). Call AFTER a relay accepts the canonical 30443 (publish-first),
-    /// with the fields from [`SignedKeyPackageEventFfi`]. This is what lets the
-    /// maintenance live-material gate recognize the login/onboarding KeyPackage
-    /// as live — so the first maintenance tick returns `AlreadyHealthy` instead
-    /// of misreading the primary KP as dead and force-rotating it.
-    ///
-    /// Records both the canonical (30443, with `d`) and the legacy (443, no `d`)
-    /// rows, mirroring the maintenance republish path.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redacted error string if the storage write fails.
-    pub async fn record_published_key_packages(
-        &self,
-        canonical_hash_ref: Vec<u8>,
-        d_tag: String,
-        canonical_event_id: String,
-        legacy_event_id: String,
-    ) -> Result<(), String> {
-        let mgr = self.inner.clone();
-        run_blocking(move || {
-            let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(0);
-            mgr.record_published_key_package(&haven_core::circle::PublishedKeyPackageRow {
-                key_package_hash_ref: canonical_hash_ref.clone(),
-                event_id: canonical_event_id,
-                kind: haven_core::circle::KEY_PACKAGE_KIND_CANONICAL,
-                d_tag: Some(d_tag),
-                created_at: now,
-            })
-            .and_then(|()| {
-                mgr.record_published_key_package(&haven_core::circle::PublishedKeyPackageRow {
-                    key_package_hash_ref: canonical_hash_ref,
-                    event_id: legacy_event_id,
-                    kind: haven_core::circle::KEY_PACKAGE_KIND_LEGACY,
-                    d_tag: None,
-                    created_at: now,
-                })
-            })
-            .map_err(|e| e.to_string())
-        })
-        .await
-    }
-
-    // NOTE: `sign_relay_list_event` was removed.
-    //
-    // The privacy-toggle-aware flow goes through
-    // [`Self::build_relay_list_publish`], which atomically reads the
-    // user's `publish_*_relay_list` toggle, signs the event with the
-    // correct kind (10050 or 10051), and resolves publish targets in a
-    // single Rust dispatch. Exposing a parallel "sign without checking
-    // toggle" method left a footgun for future contributors who could
-    // accidentally publish a 10051 the user opted out of.
-    //
-    // If you need a kind 10051/10050 event, call
-    // `build_relay_list_publish` and publish via `RelayManagerFfi`.
+    // NOTE (Dark Matter): the old `create_key_package` / `sign_key_package_event`
+    // / `record_published_key_packages` trio is RETIRED. It built the kind
+    // 30443+443 TWIN from a `KeyPackageBundle`, which no longer exists — the
+    // Dark Matter engine mints a single last-resort KeyPackage (`fresh_key_package`)
+    // and the 443 twin is dropped (W1). The ONE onboarding/login/heal KeyPackage
+    // publish path is now [`RelayManagerFfi::maintain_key_package`], which mints
+    // via the engine, builds+signs the single kind-30443 event, publishes it to
+    // the user's own NIP-65 relays, records the tracking row, and deletes the
+    // minted material on a failed publish (mdk#160) — all under one idempotent,
+    // fail-soft tick that also serves the first-ever publish (a responding relay
+    // that serves nothing + no tracked slot ⇒ mint-fresh Republish). DM-4b
+    // re-points onboarding/login to call `maintainKeyPackage`.
 
     /// Signs a NIP-09 event deletion event.
     ///
@@ -3506,107 +3284,34 @@ impl CircleManagerFfi {
             .map_err(|e| format!("Failed to serialize deletion event: {e}"))
     }
 
-    /// Performs a self-update on the user's leaf node in a group.
-    ///
-    /// Rotates the user's MLS key material to restore forward secrecy
-    /// after joining a group (MIP-02 requirement). Returns the evolution
-    /// event to publish and creates a pending commit that must be merged
-    /// (on publish success) or cleared (on publish failure).
-    pub async fn self_update(&self, mls_group_id: Vec<u8>) -> Result<UpdateGroupResultFfi, String> {
-        let inner = self.inner.clone();
-        let result = run_blocking(move || {
-            let group_id = GroupId::from_slice(&mls_group_id);
-            inner.self_update(&group_id).map_err(|e| e.to_string())
-        })
-        .await?;
+    // NOTE (Dark Matter): `self_update` and `groups_needing_self_update` are
+    // RETIRED. The Dark Matter engine internalizes leaf-key rotation and
+    // convergence (there is no app-driven periodic self-update; Haven already
+    // shipped `enablePeriodicSelfUpdate = false`). The publish-before-apply
+    // pending-commit lifecycle that `finalize_pending_commit` /
+    // `clear_pending_commit` used to drive is now
+    // [`confirm_published`](Self::confirm_published) /
+    // [`publish_failed`](Self::publish_failed), keyed by the typed
+    // `PendingStateRefFfi` token carried in each result — not by group id.
 
-        convert_update_result(result)
-    }
-
-    /// Returns groups where the user's leaf node key material needs rotation.
+    /// Finalizes an admin relay update: confirms the pending commit, then
+    /// re-syncs the admin's own `circle.relays` from the engine's routing
+    /// component so the admin converges on the new set immediately.
     ///
-    /// Groups are returned if the self-update is either required (post-join,
-    /// not yet completed) or overdue (last rotation older than `threshold_secs`).
-    /// Callers should iterate the result and call [`self_update`] for each.
-    pub async fn groups_needing_self_update(
+    /// Use this instead of a bare [`confirm_published`](Self::confirm_published)
+    /// for the [`update_circle_relays`](Self::update_circle_relays) flow
+    /// (members converge via the receive path). Pass the `pending` token from
+    /// the [`CommitToPublishFfi`] and the circle's `mls_group_id`.
+    pub async fn finalize_relay_update(
         &self,
-        threshold_secs: u64,
-    ) -> Result<Vec<Vec<u8>>, String> {
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            inner
-                .groups_needing_self_update(threshold_secs)
-                .map(|ids| ids.into_iter().map(|id| id.to_vec()).collect())
-                .map_err(|e| e.to_string())
-        })
-        .await
-    }
-
-    /// Finalizes a pending commit after publishing evolution events.
-    ///
-    /// Call this after successfully publishing the evolution event.
-    ///
-    /// # Concurrency
-    ///
-    /// Merges the pending commit into MDK's local group state — a non-atomic
-    /// read-modify-write on the epoch. Callers **must not** invoke this
-    /// concurrently with any other state-mutating call for the same
-    /// `mls_group_id` (e.g., [`encrypt_location`], [`clear_pending_commit`],
-    /// [`process_message`], or another `finalize_pending_commit`). The Dart
-    /// side serialises evolution handling per circle, which satisfies this.
-    pub async fn finalize_pending_commit(&self, mls_group_id: Vec<u8>) -> Result<(), String> {
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            let group_id = GroupId::from_slice(&mls_group_id);
-            inner
-                .finalize_pending_commit(&group_id)
-                .map_err(|e| e.to_string())
-        })
-        .await
-    }
-
-    /// Finalizes an admin relay update: merges the pending commit, then
-    /// re-syncs the admin's own `circle.relays` from MDK so the admin
-    /// converges on the new set immediately.
-    ///
-    /// Use this instead of [`finalize_pending_commit`](Self::finalize_pending_commit)
-    /// for the relay-update flow (members converge via the receive path). Same
-    /// concurrency contract as `finalize_pending_commit` — the Dart side
-    /// serialises evolution handling per circle.
-    pub async fn finalize_relay_update(&self, mls_group_id: Vec<u8>) -> Result<(), String> {
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            let group_id = GroupId::from_slice(&mls_group_id);
-            inner
-                .finalize_relay_update(&group_id)
-                .map_err(|e| e.to_string())
-        })
-        .await
-    }
-
-    /// Clears a pending commit, rolling back the MLS group state.
-    ///
-    /// Call this when a relay publish fails after an operation that creates
-    /// a pending commit. This prevents the group from being permanently
-    /// blocked by a dangling pending commit.
-    ///
-    /// # Concurrency
-    ///
-    /// Drops the pending commit from MDK's local group state — a non-atomic
-    /// read-modify-write on the epoch. Callers **must not** invoke this
-    /// concurrently with any other state-mutating call for the same
-    /// `mls_group_id` (e.g., [`encrypt_location`], [`finalize_pending_commit`],
-    /// [`process_message`], or another `clear_pending_commit`). The Dart side
-    /// serialises evolution handling per circle, which satisfies this.
-    pub async fn clear_pending_commit(&self, mls_group_id: Vec<u8>) -> Result<(), String> {
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            let group_id = GroupId::from_slice(&mls_group_id);
-            inner
-                .clear_pending_commit(&group_id)
-                .map_err(|e| e.to_string())
-        })
-        .await
+        pending: PendingStateRefFfi,
+        mls_group_id: Vec<u8>,
+    ) -> Result<(), String> {
+        let group_id = GroupId::from_slice(&mls_group_id);
+        self.inner
+            .finalize_relay_update(pending.into(), &group_id)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     // ==================== Location Sharing ====================
@@ -3664,14 +3369,14 @@ impl CircleManagerFfi {
         // public kind-0 profiles at the public-profile migration.
         let location = haven_core::location::LocationMessage::new(latitude, longitude);
 
-        let inner = self.inner.clone();
-        let (event, nostr_group_id, relays) = run_blocking(move || {
-            let group_id = GroupId::from_slice(&mls_group_id);
-            inner
-                .encrypt_location(&group_id, &sender_pubkey, &location, update_interval_secs)
-                .map_err(|e| e.to_string())
-        })
-        .await?;
+        // `encrypt_location` sends via the Dark Matter engine (async), so it
+        // awaits directly on the current worker.
+        let group_id = GroupId::from_slice(&mls_group_id);
+        let (event, nostr_group_id, relays) = self
+            .inner
+            .encrypt_location(&group_id, &sender_pubkey, &location, update_interval_secs)
+            .await
+            .map_err(|e| e.to_string())?;
 
         let event_json =
             serde_json::to_string(&event).map_err(|e| format!("Failed to serialize event: {e}"))?;
@@ -3691,22 +3396,37 @@ impl CircleManagerFfi {
         })
     }
 
-    /// Decrypts a `kind:445` event and surfaces ALL four decrypt outcomes.
+    /// Decrypts / ingests a received `kind:445` event, returning the folded
+    /// engine results (Dark Matter five-variant taxonomy).
     ///
-    /// Unlike [`Self::decrypt_location`] (which flattens `Unprocessable` /
-    /// `PreviouslyFailed` to `None`), this returns the full
-    /// [`DecryptOutcomeFfi`] so the Dart sync layer can advance the persisted
-    /// sync cursor ONLY on a real `Location` / `GroupUpdate` and never skip an
-    /// unprocessed commit — the fix for the field epoch-desync bug.
+    /// A single ingest can yield SEVERAL [`LocationMessageResultFfi`] — the
+    /// engine's `advance_convergence` may release buffered inbound after the
+    /// outer event — so this returns a `Vec`. The engine owns stale / duplicate
+    /// / out-of-order handling internally (a future-epoch event is durably
+    /// buffered and re-surfaced once the gap fills), so there is no
+    /// `Unprocessable` / `PreviouslyFailed` outcome anymore.
     ///
-    /// This is the single decrypt implementation; [`Self::decrypt_location`]
-    /// is a thin compatibility shim over it during the migration rollout.
+    /// # Peer `SelfRemove` eviction (auto-commit) — Rule 13
+    ///
+    /// This variant does NOT surface receive-side auto-commits (a peer
+    /// `SelfRemove` eviction the engine staged): to stay Rule-13-safe the core
+    /// rolls back any that surfaced rather than confirm an unpublished commit.
+    /// The eviction still propagates via the background catch-up sweep (which
+    /// publishes it). Callers that own relay publishing in poll mode SHOULD
+    /// migrate to [`Self::decrypt_location_collecting_commits`], which surfaces the
+    /// auto-commit so the caller can publish-then-confirm it in the foreground.
+    ///
+    /// # Cursor contract (DM-4b)
+    ///
+    /// The engine owns retry/buffering, so the caller advances its relay sync
+    /// cursor on the OUTER event's `created_at` (which the Dart caller already
+    /// holds — it passed `event_json` in). A buffered event is re-delivered by
+    /// the engine when the epoch gap fills; the caller never re-fetches it.
     ///
     /// # Concurrency
     ///
-    /// Same constraint as [`encrypt_location`]: concurrent calls for the same
-    /// group can race on MLS epoch state. The Dart-side `fetchMemberLocations`
-    /// processes events sequentially per circle.
+    /// The session is `&mut`-serialized behind a `tokio` mutex, so concurrent
+    /// calls are serialized by the engine; this awaits directly.
     ///
     /// # Arguments
     ///
@@ -3714,81 +3434,111 @@ impl CircleManagerFfi {
     ///
     /// # Errors
     ///
-    /// Returns a redacted error string if the event JSON is invalid, the
-    /// blocking task fails, or the location payload cannot be parsed.
-    pub async fn decrypt_location_outcome(
+    /// Returns a redacted error string if the event JSON is invalid or the
+    /// engine ingest fails hard.
+    pub async fn decrypt_location(
         &self,
         event_json: String,
-    ) -> Result<DecryptOutcomeFfi, String> {
+    ) -> Result<Vec<LocationMessageResultFfi>, String> {
         let event: nostr::Event =
             serde_json::from_str(&event_json).map_err(|e| format!("Invalid event JSON: {e}"))?;
 
         // Event id prefix for correlating diagnostic logs across publish /
-        // fetch / decrypt. Nostr event ids are public on relays so the prefix
-        // carries no privacy cost.
+        // fetch / decrypt. Nostr event ids are public on relays, so no cost.
         let evt_prefix: String = event.id.to_hex().chars().take(8).collect();
-        // Read off the public outer event BEFORE decryption so every outcome
-        // (including `Unprocessable`) can carry it for the Dart cursor.
-        let event_created_at_secs = i64::try_from(event.created_at.as_secs()).unwrap_or(i64::MAX);
 
-        let inner = self.inner.clone();
         // Defense-in-depth: the core `decrypt_location` already redacts its
-        // error strings, but re-redact at the FFI boundary so the invariant is
-        // local here too (matches the sibling FFI methods in this file).
-        let result = run_blocking(move || {
-            inner
-                .decrypt_location(&event)
-                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
-        })
-        .await?;
+        // error strings; re-redact at the boundary so the invariant is local.
+        let results = self
+            .inner
+            .decrypt_location(&event)
+            .await
+            .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))?;
 
-        let outcome = convert_location_result(result, event_created_at_secs)?;
+        let out: Vec<LocationMessageResultFfi> =
+            results.into_iter().map(convert_location_result).collect();
 
-        match &outcome.kind {
-            DecryptOutcomeKindFfi::Location => {
-                let sender_prefix: String = outcome
-                    .location
-                    .as_ref()
-                    .map_or_else(String::new, |l| l.sender_pubkey.chars().take(8).collect());
-                log::debug!("[FFI decrypt] evt={evt_prefix} → location (sender={sender_prefix})");
-            }
-            DecryptOutcomeKindFfi::GroupUpdate => log::debug!(
-                "[FFI decrypt] evt={evt_prefix} → group_update (auto_commit={})",
-                outcome.evolution_event_json.is_some()
-            ),
-            DecryptOutcomeKindFfi::Unprocessable => log::debug!(
-                "[FFI decrypt] evt={evt_prefix} → unprocessable ({})",
-                outcome.unprocessable_reason.as_deref().unwrap_or("")
-            ),
-            DecryptOutcomeKindFfi::PreviouslyFailed => {
-                log::debug!("[FFI decrypt] evt={evt_prefix} → previously_failed");
-            }
-        }
+        log::debug!("[FFI decrypt] evt={evt_prefix} → {} result(s)", out.len());
 
-        Ok(outcome)
+        Ok(out)
     }
 
-    /// Decrypts a received location event (legacy compatibility shim).
+    /// Decrypts / ingests a received `kind:445`, returning the folded results AND
+    /// any receive-side auto-commit the engine staged (publish-before-apply).
     ///
-    /// Delegates to [`Self::decrypt_location_outcome`] and flattens the result
-    /// to the historical `Option<DecryptResultFfi>` shape so existing Dart
-    /// call sites keep their exact behavior during the migration:
-    /// `Unprocessable` / `PreviouslyFailed` collapse to `None`. New code should
-    /// call [`Self::decrypt_location_outcome`] so it can drive the sync cursor.
+    /// Identical ingest to [`Self::decrypt_location`], but surfaces a peer
+    /// `SelfRemove` eviction the engine auto-committed instead of dropping it.
+    /// Rule 13 / security F13: for EACH
+    /// [`DecryptLocationOutcomeFfi::auto_commits`] entry, publish
+    /// `commit_event_json` to the circle's relays, then
+    /// [`confirm_published`](Self::confirm_published) on a ≥1-relay ACK (or
+    /// [`publish_failed`](Self::publish_failed) on failure) — exactly like the
+    /// [`CommitToPublishFfi`] from remove / relay-update. Confirming before an
+    /// ACK, or dropping an entry, re-forks the group the leaver departed. The
+    /// foreground poll receive path SHOULD call this in place of
+    /// [`Self::decrypt_location`].
     ///
-    /// # Arguments
-    ///
-    /// * `event_json` - JSON-serialized `kind:445` event.
+    /// The cursor contract of [`Self::decrypt_location`] applies unchanged.
     ///
     /// # Errors
     ///
-    /// Propagates the errors of [`Self::decrypt_location_outcome`].
-    pub async fn decrypt_location(
+    /// Returns a redacted error string if the event JSON is invalid or the
+    /// engine ingest fails hard.
+    pub async fn decrypt_location_collecting_commits(
         &self,
         event_json: String,
-    ) -> Result<Option<DecryptResultFfi>, String> {
-        let outcome = self.decrypt_location_outcome(event_json).await?;
-        Ok(flatten_outcome_to_legacy(outcome))
+    ) -> Result<DecryptLocationOutcomeFfi, String> {
+        let event: nostr::Event =
+            serde_json::from_str(&event_json).map_err(|e| format!("Invalid event JSON: {e}"))?;
+        let evt_prefix: String = event.id.to_hex().chars().take(8).collect();
+
+        let ingest = self
+            .inner
+            .decrypt_location_collecting_commits(&event)
+            .await
+            .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))?;
+
+        let results: Vec<LocationMessageResultFfi> = ingest
+            .results
+            .into_iter()
+            .map(convert_location_result)
+            .collect();
+        // F3: a convert failure MUST NOT drop the OTHER surfaced auto-commit
+        // pendings on the floor. Collect every pending up-front so a mid-stream
+        // failure rolls each staged receive-side auto-commit back item-by-item
+        // (`publish_failed`) instead of leaking them — otherwise a group the
+        // leaver departed silently re-forks (Rule 13 / security F13).
+        let all_pendings: Vec<PendingStateRef> =
+            ingest.auto_commits.iter().map(|c| c.pending).collect();
+        let mut auto_commits: Vec<CommitToPublishFfi> =
+            Vec::with_capacity(ingest.auto_commits.len());
+        let mut convert_err: Option<String> = None;
+        for commit in ingest.auto_commits {
+            match convert_commit_to_publish(commit) {
+                Ok(ffi) => auto_commits.push(ffi),
+                Err(e) => {
+                    convert_err = Some(e);
+                    break;
+                }
+            }
+        }
+        if let Some(e) = convert_err {
+            for pending in all_pendings {
+                let _ = self.inner.publish_failed(pending).await;
+            }
+            return Err(e);
+        }
+
+        log::debug!(
+            "[FFI decrypt] evt={evt_prefix} → {} result(s), {} auto-commit(s)",
+            results.len(),
+            auto_commits.len()
+        );
+
+        Ok(DecryptLocationOutcomeFfi {
+            results,
+            auto_commits,
+        })
     }
 
     // ==================== Sync Cursors ====================
@@ -4047,20 +3797,11 @@ impl CircleManagerFfi {
         .await
     }
 
-    /// Wipes every M7 staged-commit marker (wipe-on-logout).
-    ///
-    /// Called from the identity-deletion path so a returning (or different)
-    /// identity never inherits a stale marker that would wrongly skip a
-    /// background receive. Errors are redacted.
-    pub async fn wipe_all_staged_commits(&self) -> Result<(), String> {
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            inner
-                .wipe_all_staged_commits()
-                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
-        })
-        .await
-    }
+    // NOTE (Dark Matter): `wipe_all_staged_commits` is RETIRED. The M7
+    // staged-commit marker table is deleted — the engine owns pending-commit
+    // durability via `EpochState::PendingPublish` / `PendingStateRef` /
+    // `PendingCommitRecovered` on hydrate, so there is no Haven-side marker for
+    // a returning identity to inherit. Logout wipes the whole `session.sqlite`.
 
     /// Prunes the gift-wrap dedup cache (`processed_gift_wraps`): drops rows
     /// past the retention window, then enforces the row cap. Returns the number
@@ -4218,7 +3959,8 @@ impl CircleManagerFfi {
         run_blocking(move || {
             match relay_type {
                 RelayTypeFfi::Inbox => inner.get_publish_inbox_relay_list(),
-                RelayTypeFfi::KeyPackage => inner.get_publish_kp_relay_list(),
+                // `Nip65` shares the persisted `KeyPackage` toggle (W2).
+                RelayTypeFfi::Nip65 => inner.get_publish_kp_relay_list(),
             }
             .map_err(|e| e.to_string())
         })
@@ -4236,7 +3978,7 @@ impl CircleManagerFfi {
         run_blocking(move || {
             match relay_type {
                 RelayTypeFfi::Inbox => inner.set_publish_inbox_relay_list(value),
-                RelayTypeFfi::KeyPackage => inner.set_publish_kp_relay_list(value),
+                RelayTypeFfi::Nip65 => inner.set_publish_kp_relay_list(value),
             }
             .map_err(|e| e.to_string())
         })
@@ -4293,6 +4035,10 @@ impl CircleManagerFfi {
         let keys = nostr::Keys::new(secret_key);
 
         let core_type = haven_core::circle::RelayType::from(relay_type);
+        // Dark Matter W2: the recorded / on-wire kind is 10002 for Nip65, 10050
+        // for Inbox (NOT the persisted-slot `to_kind()`, which is 10051 for the
+        // KeyPackage slot).
+        let wire_kind_u16 = relay_list_wire_kind(relay_type).as_u16();
         let inner = self.inner.clone();
         let own_pk = keys.public_key();
 
@@ -4320,7 +4066,7 @@ impl CircleManagerFfi {
             // it even on a same-second re-edit (NIP-01 replaceable-event
             // determinism — a `created_at` tie can otherwise keep the old list).
             let last_published_at = inner
-                .last_published_event(core_type.to_kind().as_u16(), "", &own_pk)
+                .last_published_event(wire_kind_u16, "", &own_pk)
                 .map_err(|e| e.to_string())?
                 .map(|r| r.published_at);
             Ok((true, user, targets, last_published_at))
@@ -4339,13 +4085,12 @@ impl CircleManagerFfi {
             });
         }
 
-        let event = haven_core::relay::build_relay_list_event(
+        let event = build_relay_list_event_for(
+            relay_type,
             &keys,
-            core_type,
             &user_list,
             Some(haven_core::relay::superseding_created_at(last_published_at)),
-        )
-        .map_err(|e| format!("Failed to build relay list event: {e}"))?;
+        )?;
         let event_json = serde_json::to_string(&event)
             .map_err(|e| format!("Failed to serialize relay list event: {e}"))?;
         let event_id_hex = event.id.to_hex();
@@ -4423,7 +4168,9 @@ impl CircleManagerFfi {
 
         let core_type = haven_core::circle::RelayType::from(relay_type);
         let inner = self.inner.clone();
-        let kind_u16 = core_type.to_kind().as_u16();
+        // W2: the on-wire kind is 10002 for Nip65, 10050 for Inbox.
+        let wire_kind = relay_list_wire_kind(relay_type);
+        let kind_u16 = wire_kind.as_u16();
 
         // Look up prior publication and resolve targets atomically.
         let lookup: (
@@ -4450,20 +4197,15 @@ impl CircleManagerFfi {
         let targets = haven_core::relay::dedup_relay_targets(&user_list);
 
         let last_published_at = last_event.as_ref().map(|r| r.published_at);
-        let replacement =
-            haven_core::relay::build_unpublish_event(&keys, core_type, last_published_at)
-                .map_err(|e| format!("Failed to build replacement: {e}"))?;
+        let replacement = build_relay_list_unpublish_for(relay_type, &keys, last_published_at)?;
         let replacement_json = serde_json::to_string(&replacement)
             .map_err(|e| format!("Failed to serialize replacement: {e}"))?;
 
         let deletion_json = match last_event {
             Some(record) => {
-                let deletion = haven_core::relay::build_nip09_deletion(
-                    &keys,
-                    record.event_id,
-                    core_type.to_kind(),
-                )
-                .map_err(|e| format!("Failed to build deletion: {e}"))?;
+                let deletion =
+                    haven_core::relay::build_nip09_deletion(&keys, record.event_id, wire_kind)
+                        .map_err(|e| format!("Failed to build deletion: {e}"))?;
                 Some(
                     serde_json::to_string(&deletion)
                         .map_err(|e| format!("Failed to serialize deletion: {e}"))?,
@@ -4525,8 +4267,9 @@ impl CircleManagerFfi {
             });
         }
 
-        let core_type = haven_core::circle::RelayType::from(relay_type);
-        let kind_u16 = core_type.to_kind().as_u16();
+        // W2: probe/scrub the on-wire kind (10002 for Nip65, 10050 for Inbox).
+        let wire_kind = relay_list_wire_kind(relay_type);
+        let kind_u16 = wire_kind.as_u16();
         let inner = self.inner.clone();
 
         let last = run_blocking(move || {
@@ -4547,9 +4290,8 @@ impl CircleManagerFfi {
             });
         };
 
-        let deletion =
-            haven_core::relay::build_nip09_deletion(&keys, record.event_id, core_type.to_kind())
-                .map_err(|e| format!("Failed to build deletion: {e}"))?;
+        let deletion = haven_core::relay::build_nip09_deletion(&keys, record.event_id, wire_kind)
+            .map_err(|e| format!("Failed to build deletion: {e}"))?;
         let deletion_json = serde_json::to_string(&deletion)
             .map_err(|e| format!("Failed to serialize deletion: {e}"))?;
 
@@ -4576,12 +4318,11 @@ impl CircleManagerFfi {
     /// Returns an error if the group does not exist or the MDK query fails.
     #[cfg(debug_assertions)]
     pub async fn group_epoch_for_test(&self, mls_group_id: Vec<u8>) -> Result<u64, String> {
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            let group_id = GroupId::from_slice(&mls_group_id);
-            inner.group_epoch(&group_id).map_err(|e| e.to_string())
-        })
-        .await
+        let group_id = GroupId::from_slice(&mls_group_id);
+        self.inner
+            .group_epoch(&group_id)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     /// Release-build stub for [`group_epoch_for_test`](Self::group_epoch_for_test).
@@ -5836,12 +5577,12 @@ pub struct RelayManagerFfi {
 pub struct CatchupResultFfi {
     /// Circles whose relays were swept.
     pub circles_swept: u32,
-    /// Location events decrypted + persisted.
-    pub locations_applied: u32,
-    /// Already-merged peer commits observed.
-    pub commits_applied: u32,
-    /// Peer proposals MDK auto-staged (left for the foreground to converge).
-    pub auto_commits_staged: u32,
+    /// Events the engine applied / terminally handled (Dark Matter taxonomy:
+    /// locations, commits, and state changes are all engine-internal now).
+    pub events_applied: u32,
+    /// Events the engine durably buffered for a FUTURE epoch (the cursor
+    /// stopped so they are re-fetched + re-surfaced once the gap fills).
+    pub events_deferred: u32,
     /// Per-circle group cursors advanced.
     pub cursors_advanced: u32,
     /// The deadline was reached before every bucket was swept.
@@ -5855,9 +5596,8 @@ impl From<haven_core::relay::CatchupOutcome> for CatchupResultFfi {
         let c = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
         Self {
             circles_swept: c(o.circles_swept),
-            locations_applied: c(o.locations_applied),
-            commits_applied: c(o.commits_applied),
-            auto_commits_staged: c(o.auto_commits_staged),
+            events_applied: c(o.events_applied),
+            events_deferred: c(o.events_deferred),
             cursors_advanced: c(o.cursors_advanced),
             deadline_hit: o.deadline_hit,
             relay_errors: c(o.relay_errors),
@@ -6061,6 +5801,22 @@ impl From<haven_core::relay::live_sync::SubscriptionHealthOutcome>
             relays_disconnected: c(o.relays_disconnected),
         }
     }
+}
+
+/// Presence-only result of the one-time legacy KeyPackage retraction (F10a).
+///
+/// Counters only — no relay urls, event ids, or `d` values — so a derived
+/// `Debug` is leak-free (Security Rule 4/6).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LegacyRetractionOutcomeFfi {
+    /// `true` when the sentinel was already set (no work done this call).
+    pub already_done: bool,
+    /// Stale legacy kind-443 KeyPackage twins scrubbed (kind-5 deletions ACKed).
+    pub legacy_443_scrubbed: u32,
+    /// `true` when the kind-10051 KeyPackage-relay list was retracted (≥1 ACK).
+    pub relay_list_retracted: bool,
+    /// Relay probes / publishes that errored (tallied, never fatal).
+    pub relay_errors: u32,
 }
 
 impl RelayManagerFfi {
@@ -6437,12 +6193,11 @@ impl RelayManagerFfi {
 
     /// Runs an M7 receive-only catch-up sweep over every visible circle.
     ///
-    /// Best-effort + deadline-bounded; NEVER authors/merges/converges a commit
-    /// (fork-safe by the persisted staged-commit marker gate + the fail-closed
-    /// `has_pending_commit`). When a live-sync engine is running in-process, the
-    /// sweep serializes each group's decrypt against it via the shared
-    /// `MlsWriteGate`; otherwise (cold background wake) the persisted marker is
-    /// the fork guard. Returns a presence-only [`CatchupResultFfi`] (counters).
+    /// Best-effort + deadline-bounded; NEVER authors/merges/converges a commit.
+    /// The Dark Matter engine owns convergence + publish-before-apply, so
+    /// catch-up ingests through the single process-global session (Rule 14) and
+    /// the old `MlsWriteGate` hand-off is gone. Returns a presence-only
+    /// [`CatchupResultFfi`] (counters).
     pub async fn run_catchup_all_circles(
         &self,
         circle: &CircleManagerFfi,
@@ -6452,21 +6207,20 @@ impl RelayManagerFfi {
         let circle_mgr = circle.inner.clone();
         let own_pk = nostr::PublicKey::parse(&own_pubkey_hex)
             .map_err(|e| format!("invalid own pubkey: {e}"))?;
-        // Serialize with the engine writer if one is running in-process.
-        let gate = live_session_core()?.map(|core| core.gate().clone());
         let outcome = haven_core::relay::catchup::run_catchup_all_circles(
             &circle_mgr,
             &self.inner,
             &own_pk,
-            gate.as_deref(),
             max_duration_secs,
         )
         .await;
         Ok(CatchupResultFfi::from(outcome))
     }
 
-    /// M8-2 `KeyPackage` maintenance — republish-if-missing/dead into a stable
-    /// NIP-33 `d` slot, gated on LIVE local init-key material.
+    /// `KeyPackage` maintenance (Dark Matter DM-2b) — republish-if-missing into
+    /// a stable NIP-33 `d` slot on the user's own NIP-65 relays. Also the
+    /// FIRST-publish path (onboarding / login): a responding relay serving
+    /// nothing + no tracked slot mints a fresh package.
     ///
     /// Dart-timer-driven (the identity secret lives only in Dart, Security Rule
     /// 9): the secret bytes are consumed per-call and zeroized. Fail-soft and
@@ -6474,18 +6228,19 @@ impl RelayManagerFfi {
     ///
     /// Steps:
     /// 1. Derive `Keys`/pubkey from the secret bytes (zeroized after).
-    /// 2. Probe the user's OWN `KeyPackage` relays (dedup'd, own-relays-only —
-    ///    never the discovery plane / NIP-65 / a default union) for kind-30443
-    ///    events authored by self.
-    /// 3. For each on-relay canonical, resolve its tracked `hash_ref` and run
-    ///    the live-material gate ([`CircleManager::has_live_key_material`]).
+    /// 2. Probe the user's OWN NIP-65 relays (dedup'd, own-relays-only — never a
+    ///    default union) for kind-30443 events authored by self.
+    /// 3. Build the presence snapshot (`(d, event_id)` per responder) — under
+    ///    Dark Matter a published 30443 is a last-resort package that never dies
+    ///    on join, so the presence gate is pure relay presence of the tracked
+    ///    stable slot (the M8-2 live-material gate is gone).
     /// 4. Decide via [`decide_kp_maintenance`]; on `SeedD` record the seed row;
-    ///    on `Republish` build+sign the 30443(+443) pair, publish to OWN relays
-    ///    only (publish-first, never zero KPs), then record both rows.
+    ///    on `Republish` reuse-or-mint the single kind-30443 event, publish to
+    ///    OWN relays only (publish-first), record the row, and delete minted
+    ///    material on a failed publish (mdk#160).
     ///
     /// Returns a presence-only [`KpMaintenanceOutcomeFfi`] (counters + enum).
     ///
-    /// [`CircleManager::has_live_key_material`]: haven_core::circle::CircleManager::has_live_key_material
     /// [`decide_kp_maintenance`]: haven_core::relay::maintenance::decide_kp_maintenance
     pub async fn maintain_key_package(
         &self,
@@ -6497,21 +6252,11 @@ impl RelayManagerFfi {
             KpMaintenanceOutcome, RelayKpEntry, RelayKpPerRelay, RelayKpSnapshot,
         };
 
-        // Derive keys, then drop the secret bytes immediately (Rule 9).
-        let (keys, own_pubkey_hex) = {
-            let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
-            if identity_secret_bytes.len() != 32 {
-                return Err("Invalid secret bytes length".to_string());
-            }
-            let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
-                .map_err(|e| format!("Invalid secret key: {e}"))?;
-            let keys = nostr::Keys::new(secret_key);
-            let hex = keys.public_key().to_hex();
-            (keys, hex)
-        };
+        let keys = keys_from_secret_bytes(identity_secret_bytes)?;
         let own_pk = keys.public_key();
 
-        // Own KeyPackage relays only — no default union, no discovery plane.
+        // Own NIP-65 (KeyPackage-discovery) relays only — no default union, no
+        // discovery plane. Persisted under the `KeyPackage` slot (W2).
         let circle_mgr = circle.inner.clone();
         let own_relays: Vec<String> = run_blocking({
             let mgr = circle_mgr.clone();
@@ -6525,16 +6270,14 @@ impl RelayManagerFfi {
         .await?;
 
         if own_relays.is_empty() {
-            // Nowhere to probe or publish (own-relays-only). No-op.
             log::debug!("[maintain_key_package] no KeyPackage relays configured; skipping");
             return Ok(KpMaintenanceOutcomeFfi::from(KpMaintenanceOutcome::no_op(
                 0,
             )));
         }
 
-        // PER-RELAY probe of OWN relays for kind-30443 authored by self. Unlike
-        // a merged fetch, this reports each relay's own answer so a PARTIAL drop
-        // (live on A, dropped from B) is visible and healed on B only.
+        // PER-RELAY probe of OWN relays for kind-30443 authored by self, so a
+        // PARTIAL drop (present on A, dropped from B) is visible + healed on B.
         let filter = nostr::Filter::new()
             .kind(nostr::Kind::Custom(30443))
             .author(own_pk)
@@ -6543,8 +6286,8 @@ impl RelayManagerFfi {
         let per_relay = match self.inner.fetch_events_per_relay(filter, &own_relays).await {
             Ok(v) => v,
             Err(e) => {
-                // Fail-closed: a top-level probe error (e.g. URL validation)
-                // yields NO responders ⇒ decide_kp_maintenance returns NoOp.
+                // Fail-closed: a top-level probe error yields NO responders ⇒
+                // decide_kp_maintenance returns NoOp.
                 relay_errors += 1;
                 log::debug!(
                     "[maintain_key_package] probe failed: {}",
@@ -6554,62 +6297,22 @@ impl RelayManagerFfi {
             }
         };
 
-        // Build the snapshot: for each RESPONDING relay, resolve each on-relay
-        // canonical's tracked hash_ref (by matching the recorded event id) and
-        // run the live gate. Non-responders are excluded structurally (C4).
-        let tracked: Vec<(String, Vec<u8>)> = run_blocking({
-            let mgr = circle_mgr.clone();
-            move || {
-                mgr.canonical_published_event_refs()
-                    .map_err(|e| e.to_string())
-            }
-        })
-        .await?;
-
-        // NOTE on `responded` semantics: `fetch_events_per_relay` sets
-        // `responded` from `try_connect_relay`, which — because the maintenance
-        // path shares one pooled `Client` with location publishing + catch-up —
-        // returns `Ok` for a relay already in a pooled state (incl. a transient
-        // `Disconnected`) WITHOUT a fresh handshake. So a transiently-down relay
-        // can read `responded=true`, its fetch then returns empty, and it is
-        // treated as a confirmed drop → a heal attempt. This is BENIGN + self-
-        // limiting: the targeted republish to a genuinely-down relay simply
-        // fails/queues (tallied in `relay_errors`, no spam), and a real drop on
-        // a live relay is healed correctly. The `responders_probed`/
-        // `relays_healed` counts are therefore best-effort observability, not a
-        // strict handshake tally. A true per-relay handshake signal would
-        // require changing the shared `fetch_events_per_relay` primitive.
+        // Build the snapshot from RESPONDING relays only (non-responders are
+        // excluded structurally, C4). Each responder contributes `(d, event_id)`
+        // per on-relay 30443 — no live-material verdict under Dark Matter.
         let mut responders: Vec<RelayKpPerRelay> = Vec::new();
         for outcome in &per_relay {
             if !outcome.responded {
-                // C4: a non-responder is neither healed nor "unhealthy".
                 continue;
             }
-            let mut canonical: Vec<RelayKpEntry> = Vec::with_capacity(outcome.events.len());
-            for ev in &outcome.events {
-                let event_id = ev.id.to_hex();
-                let d_tag = kp_event_d_tag(ev).unwrap_or_default();
-                // Live-material verdict: does a tracked hash_ref for this event
-                // id still have live local init-key material?
-                let hash_ref = tracked
-                    .iter()
-                    .find(|(id, _)| id == &event_id)
-                    .map(|(_, h)| h.clone());
-                let live = match hash_ref {
-                    Some(h) => run_blocking({
-                        let mgr = circle_mgr.clone();
-                        move || mgr.has_live_key_material(&h).map_err(|e| e.to_string())
-                    })
-                    .await
-                    .unwrap_or(false),
-                    None => false,
-                };
-                canonical.push(RelayKpEntry {
-                    d_tag,
-                    event_id,
-                    hash_ref_matches_local_live: live,
-                });
-            }
+            let canonical: Vec<RelayKpEntry> = outcome
+                .events
+                .iter()
+                .map(|ev| RelayKpEntry {
+                    d_tag: kp_event_d_tag(ev).unwrap_or_default(),
+                    event_id: ev.id.to_hex(),
+                })
+                .collect();
             responders.push(RelayKpPerRelay {
                 relay_url: outcome.relay_url.clone(),
                 canonical,
@@ -6625,18 +6328,18 @@ impl RelayManagerFfi {
             move || mgr.latest_canonical_d_tag().map_err(|e| e.to_string())
         })
         .await?;
-        let decision = decide_kp_maintenance(&snapshot, false, stored_stable_d.as_deref());
+        let decision = decide_kp_maintenance(&snapshot, stored_stable_d.as_deref());
 
         // Republished-relay tally, only non-zero on a successful Republish.
         let mut relays_healed: usize = 0;
         let action = match decision {
             KpMaintenanceDecision::NoOp => KpMaintenanceAction::AlreadyHealthy,
             KpMaintenanceDecision::SeedD { d } => {
-                // Record the seed row (30443, on-relay event id, d) BEFORE any
-                // future generate so stability holds from cycle 1. No publish.
-                // Resolve the event id DETERMINISTICALLY: the first responder,
-                // in order, whose canonical entry carries this `d` (the same
-                // relay `pick_seed_d` picked from, but iteration-order-stable).
+                // Record the seed row (on-relay event id + `d`, EMPTY bytes)
+                // BEFORE any future mint so stability holds from cycle 1. The
+                // empty `key_package` marks "adopt but not-yet-minted": the next
+                // republish tick mints fresh into this slot (heal reuse needs
+                // non-empty tracked bytes). No publish this tick.
                 let event_id = snapshot
                     .responders
                     .iter()
@@ -6651,14 +6354,9 @@ impl RelayManagerFfi {
                     move || {
                         mgr.record_published_key_package(
                             &haven_core::circle::PublishedKeyPackageRow {
-                                // No local hash_ref yet — seeding a foreign/dead
-                                // on-relay `d`; the next republish records the
-                                // real material. Empty ref never matches the
-                                // live gate (correct: it reads DEAD).
-                                key_package_hash_ref: Vec::new(),
                                 event_id,
-                                kind: haven_core::circle::KEY_PACKAGE_KIND_CANONICAL,
-                                d_tag: Some(d),
+                                d_tag: d,
+                                key_package: Vec::new(),
                                 created_at: now,
                             },
                         )
@@ -6679,10 +6377,8 @@ impl RelayManagerFfi {
                     .republish_key_package(
                         &circle_mgr,
                         &keys,
-                        &own_pubkey_hex,
-                        &own_relays, // CONTENT: full own KP relay set (relays tag)
-                        &targets,    // PUBLISH: responded-and-non-live subset
                         existing_d.as_deref(),
+                        &targets,
                         &mut relay_errors,
                     )
                     .await?;
@@ -6700,88 +6396,73 @@ impl RelayManagerFfi {
         }))
     }
 
-    /// Builds, signs, publishes (to the confirmed-drop TARGET relays only), and
-    /// records a `KeyPackage` republish for [`Self::maintain_key_package`].
-    /// Publish-first: only after a relay write succeeds are the rows recorded.
+    /// Reuses-or-mints, signs, publishes (to the confirmed-drop TARGET relays
+    /// only), and records a `KeyPackage` republish for
+    /// [`Self::maintain_key_package`]. Publish-first: only after a relay write
+    /// succeeds is the tracking row recorded; freshly-minted material that
+    /// FAILS to publish is deleted (mdk#160) so a retry loop never leaks
+    /// private init keys.
     ///
-    /// `targets` is the responded-and-non-live subset of the user's own relays
-    /// (from [`KpMaintenanceDecision::Republish`]) — a subset of the own-relays
-    /// probe set, so `targets ⊆ configured ⊆ own` holds. Returns the action and
-    /// the number of relays healed (`targets.len()` on a successful publish, `0`
-    /// otherwise).
+    /// `targets` is the responded-and-non-serving subset of the user's own
+    /// relays (from [`KpMaintenanceDecision::Republish`]). When the tracked slot
+    /// still holds the cached last-resort package bytes, HEAL by re-publishing
+    /// the SAME bytes verbatim (no re-mint); otherwise MINT a fresh package into
+    /// the slot (first publish / seed-handoff / rotation).
     ///
     /// [`KpMaintenanceDecision::Republish`]: haven_core::relay::maintenance::KpMaintenanceDecision::Republish
-    // Private helper: the split content-relays (KeyPackage `relays` tag) vs
-    // publish-targets (subset) plus the shared out-params is inherently 8 args.
-    #[allow(clippy::too_many_arguments)]
     async fn republish_key_package(
         &self,
         circle_mgr: &Arc<CoreCircleManager>,
         keys: &nostr::Keys,
-        own_pubkey_hex: &str,
-        content_relays: &[String],
-        targets: &[String],
         existing_d: Option<&str>,
+        targets: &[String],
         relay_errors: &mut usize,
     ) -> Result<(haven_core::relay::maintenance::KpMaintenanceAction, usize), String> {
-        use haven_core::relay::maintenance::{build_legacy_twin_deletion, KpMaintenanceAction};
-
-        let minted_fresh = existing_d.is_none();
-
-        // Read the CURRENT legacy-443 twin id BEFORE we publish/record the fresh
-        // bundle, so we can garbage-collect it once the new twin supersedes it.
-        // The canonical (30443) self-supersedes via NIP-33 same-`d` replacement
-        // and is NEVER deleted; only the non-addressable 443 accumulates. This
-        // read is best-effort — a lookup error just skips the GC (never fatal).
-        let old_legacy_id: Option<String> = {
-            let mgr = circle_mgr.clone();
-            run_blocking(move || Ok::<_, String>(mgr.latest_legacy_event_id().ok().flatten()))
-                .await
-                .unwrap_or(None)
+        use haven_core::relay::maintenance::{
+            build_kp_maintenance_events, build_kp_maintenance_events_reusing, KpMaintenanceAction,
         };
-        // Build the bundle (touches SQLite/MDK) on the blocking pool via the
-        // CircleManager wrapper. The bundle CONTENT advertises the user's FULL
-        // configured own KeyPackage relay set (`content_relays`) — NOT the
-        // narrowed publish target — so a healed 30443's MIP-00 `relays` tag
-        // stays identical to a normally-published one (an inviter reading the
-        // healed copy is told to deliver the Welcome to ALL own relays, keeping
-        // delivery redundancy). Only the publish TARGET is the responded-and-
-        // non-live subset. Both are own-relays-only (targets ⊆ content_relays ⊆
-        // own). Mirrors the relay-list heal (content=full, target=subset).
-        let bundle = run_blocking({
+
+        // Read the currently-tracked row (bytes + d) so we can (a) HEAL by reuse
+        // when the slot matches and carries bytes, and (b) capture superseded
+        // bytes to delete on a rotation (mdk#160).
+        let tracked = run_blocking({
             let mgr = circle_mgr.clone();
-            let pubkey = own_pubkey_hex.to_string();
-            let relays = content_relays.to_vec();
-            let existing_d = existing_d.map(str::to_owned);
             move || {
-                mgr.create_key_package_with_d(&pubkey, &relays, existing_d.as_deref())
+                mgr.latest_published_key_package()
                     .map_err(|e| e.to_string())
             }
         })
         .await?;
 
-        // Sign both events from the same material (mirror sign_key_package_event).
-        let tags_30443 = parse_kp_tags(&bundle.tags_30443)?;
-        let tags_443 = parse_kp_tags(&bundle.tags_443)?;
-        let event_30443 =
-            nostr::EventBuilder::new(nostr::Kind::Custom(30443), bundle.content.clone())
-                .tags(tags_30443)
-                .sign_with_keys(keys)
-                .map_err(|e| format!("Failed to sign kind 30443 key package event: {e}"))?;
-        let event_443 = nostr::EventBuilder::new(nostr::Kind::Custom(443), bundle.content.clone())
-            .tags(tags_443)
-            .sign_with_keys(keys)
-            .map_err(|e| format!("Failed to sign kind 443 key package event: {e}"))?;
+        // Reuse only when the tracked row is the SAME slot AND carries non-empty
+        // cached bytes (a seed row has empty bytes → mint fresh instead).
+        let reuse_bytes: Option<Vec<u8>> = match (&tracked, existing_d) {
+            (Some(row), Some(d)) if row.d_tag == d && !row.key_package.is_empty() => {
+                Some(row.key_package.clone())
+            }
+            _ => None,
+        };
+        let minted_fresh = reuse_bytes.is_none();
 
-        // Publish-first to the TARGET relays only — the responded-and-non-live
-        // subset of the user's own relays (targets ⊆ configured ⊆ own). Healthy
-        // relays already serve a live copy and are skipped.
-        let hash_ref = bundle.hash_ref.clone();
-        let d_tag = bundle.d_tag.clone();
-        let id_30443 = event_30443.id;
-        let id_443 = event_443.id;
+        let events = if let Some(bytes) = reuse_bytes {
+            // HEAL: re-advertise the cached last-resort package into the same slot.
+            let d = existing_d.unwrap_or_default().to_owned();
+            build_kp_maintenance_events_reusing(keys, &bytes, targets, &d)
+                .map_err(|e| format!("build (reuse) key package events: {e}"))?
+        } else {
+            // MINT: a fresh last-resort package into `existing_d` (or a new slot).
+            // Reuses the single process-global session (Rule 14) via the manager.
+            build_kp_maintenance_events(circle_mgr.session(), keys, targets, existing_d)
+                .await
+                .map_err(|e| format!("build (mint) key package events: {e}"))?
+        };
 
-        let published = match self.inner.publish_event(&event_30443, targets).await {
+        let event_id = events.event.id.to_hex();
+        let d_tag = events.d_tag.clone();
+        let kp_bytes = events.key_package.bytes().to_vec();
+
+        // Publish-first to the TARGET relays only (targets ⊆ configured ⊆ own).
+        let published = match self.inner.publish_event(&events.event, targets).await {
             Ok(_) => true,
             Err(e) => {
                 *relay_errors += 1;
@@ -6792,91 +6473,18 @@ impl RelayManagerFfi {
                 false
             }
         };
-        // The legacy twin is best-effort; a failure never blocks recording the
-        // canonical (which is the addressable, authoritative slot). We DO
-        // capture whether the fresh twin landed on >=1 target, because the OLD
-        // twin's GC below is gated on it: scrubbing the old twin without a live
-        // replacement in place would leave the relay with NEITHER twin.
-        let twin_published = match self.inner.publish_event(&event_443, targets).await {
-            Ok(_) => true,
-            Err(e) => {
-                *relay_errors += 1;
-                log::debug!(
-                    "[maintain_key_package] 443 publish failed: {}",
-                    haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
-                );
-                false
-            }
-        };
-
-        // GC the SUPERSEDED legacy-443 twin (best-effort). The fresh 443 above
-        // gets a NEW event id and does not replace the old one (443 is a regular,
-        // non-replaceable event), so the previous twin lingers on relays forever
-        // unless we scrub it. Publish a self-authored NIP-09 kind-5 deletion of
-        // the OLD twin to the same target relays. This NEVER blocks or fails the
-        // republish: the canonical 30443 (the authoritative addressable slot) is
-        // already published/recorded, and a consumed KP's Welcome is already in
-        // flight — deleting the dead twin only stops FUTURE fetches of it.
-        //
-        // GATED on `twin_published`: the OLD twin is scrubbed ONLY once the FRESH
-        // twin has landed on >=1 target. If the fresh 443 failed to publish,
-        // deleting the old twin would leave the relay with NEITHER twin — worse
-        // than a lingering-but-live twin — so we skip the GC and retry next tick.
-        //
-        // Also a no-op when there is no prior twin (first publish), or when the
-        // recorded id equals the just-signed 443 (defensive: never delete our own
-        // new twin). `build_legacy_twin_deletion` re-checks self-authorship.
-        if let Some(old_id) = old_legacy_id
-            .as_deref()
-            .filter(|_| twin_published)
-            .filter(|id| *id != id_443.to_hex())
-        {
-            match build_legacy_twin_deletion(keys, old_id, own_pubkey_hex) {
-                Ok(deletion) => {
-                    if let Err(e) = self.inner.publish_event(&deletion, targets).await {
-                        // Best-effort: a failed deletion is tallied, never fatal.
-                        *relay_errors += 1;
-                        log::debug!(
-                            "[maintain_key_package] legacy twin deletion publish failed: {}",
-                            haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
-                        );
-                    } else {
-                        log::debug!("[maintain_key_package] scrubbed a superseded legacy 443 twin");
-                    }
-                }
-                Err(e) => {
-                    // A malformed stored id / authorship-guard rejection: skip GC.
-                    log::debug!(
-                        "[maintain_key_package] legacy twin deletion build skipped: {}",
-                        haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
-                    );
-                }
-            }
-        }
 
         if published {
-            let now = nostr::Timestamp::now().as_secs();
-            let now = i64::try_from(now).unwrap_or(0);
+            // Record the single-row-per-slot tracking row (drops the prior row).
+            let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(0);
             let record = run_blocking({
                 let mgr = circle_mgr.clone();
                 move || {
                     mgr.record_published_key_package(&haven_core::circle::PublishedKeyPackageRow {
-                        key_package_hash_ref: hash_ref.clone(),
-                        event_id: id_30443.to_hex(),
-                        kind: haven_core::circle::KEY_PACKAGE_KIND_CANONICAL,
-                        d_tag: Some(d_tag.clone()),
+                        event_id,
+                        d_tag,
+                        key_package: kp_bytes,
                         created_at: now,
-                    })
-                    .and_then(|()| {
-                        mgr.record_published_key_package(
-                            &haven_core::circle::PublishedKeyPackageRow {
-                                key_package_hash_ref: hash_ref,
-                                event_id: id_443.to_hex(),
-                                kind: haven_core::circle::KEY_PACKAGE_KIND_LEGACY,
-                                d_tag: None,
-                                created_at: now,
-                            },
-                        )
                     })
                     .map_err(|e| e.to_string())
                 }
@@ -6885,6 +6493,35 @@ impl RelayManagerFfi {
             if record.is_err() {
                 *relay_errors += 1;
             }
+
+            // ROTATION cleanup (mdk#160): a fresh mint into a slot that held
+            // DIFFERENT live material supersedes it — delete the old private
+            // material so it does not accumulate. (No-op for a heal/reuse, a
+            // first publish, or a seed-handoff row with empty bytes.)
+            if minted_fresh {
+                if let Some(row) = &tracked {
+                    if !row.key_package.is_empty() && row.key_package != events.key_package.bytes()
+                    {
+                        let superseded =
+                            haven_core::nostr::mls::types::KeyPackage::new(row.key_package.clone());
+                        if let Err(e) = circle_mgr.delete_key_package(&superseded).await {
+                            log::debug!(
+                                "[maintain_key_package] superseded KP delete failed: {}",
+                                haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+                            );
+                        }
+                    }
+                }
+            }
+        } else if minted_fresh {
+            // FAILED publish of freshly-minted material: delete it so a retry
+            // loop against a failing relay never leaks private init keys (mdk#160).
+            if let Err(e) = circle_mgr.delete_key_package(&events.key_package).await {
+                log::debug!(
+                    "[maintain_key_package] minted-on-failure KP delete failed: {}",
+                    haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+                );
+            }
         }
 
         let action = if minted_fresh {
@@ -6892,10 +6529,194 @@ impl RelayManagerFfi {
         } else {
             KpMaintenanceAction::RepublishedStableD
         };
-        // `relays_healed` = the target count only when the canonical write
-        // succeeded (publish-first); a failed publish heals nothing.
+        // `relays_healed` = the target count only when the write succeeded.
         let healed = if published { targets.len() } else { 0 };
         Ok((action, healed))
+    }
+
+    /// Once-only legacy relay hygiene (Dark Matter §6 step 5 / F10a): retracts
+    /// this account's stale pre-migration KeyPackage advertisements so an
+    /// old-stack client cannot mint a Welcome the new stack can't process.
+    ///
+    /// NON-OPTIONAL cutover cleanup, guarded by a persisted sentinel
+    /// (`legacy_kp_retraction_done`) so it fires at most once:
+    /// 1. If the sentinel is already set → no-op (`already_done = true`).
+    /// 2. Probe the user's OWN NIP-65 (KeyPackage-discovery) relays for their
+    ///    own kind-443 KeyPackages AND their kind-10051 relay list.
+    /// 3. For each 443, publish a self-authored NIP-09 (kind-5) id-only deletion
+    ///    ([`build_legacy_key_package_retraction`]). For a present 10051, publish
+    ///    an empty-replacement retraction ([`build_key_package_relay_list_retraction`])
+    ///    plus a best-effort NIP-09 coordinate deletion.
+    /// 4. On ≥1-relay ACK of ANY retraction, set the sentinel
+    ///    ([`mark_legacy_kp_retraction_done`]) so it never re-runs.
+    ///
+    /// Dart-driven (the identity secret lives only in Dart, Rule 9); the secret
+    /// bytes are consumed per-call and zeroized. Fail-soft: relay errors are
+    /// tallied, never fatal. Returns a presence-only [`LegacyRetractionOutcomeFfi`].
+    ///
+    /// [`build_legacy_key_package_retraction`]: haven_core::relay::maintenance::build_legacy_key_package_retraction
+    /// [`build_key_package_relay_list_retraction`]: haven_core::relay::maintenance::build_key_package_relay_list_retraction
+    pub async fn retract_legacy_key_material(
+        &self,
+        circle: &CircleManagerFfi,
+        identity_secret_bytes: Vec<u8>,
+    ) -> Result<LegacyRetractionOutcomeFfi, String> {
+        use haven_core::relay::maintenance::{
+            build_key_package_relay_list_retraction, build_legacy_key_package_retraction,
+        };
+
+        let keys = keys_from_secret_bytes(identity_secret_bytes)?;
+        let own_pk = keys.public_key();
+        let own_hex = own_pk.to_hex();
+        let circle_mgr = circle.inner.clone();
+
+        // Sentinel gate: fire at most once.
+        let done = run_blocking({
+            let mgr = circle_mgr.clone();
+            move || mgr.legacy_kp_retraction_done().map_err(|e| e.to_string())
+        })
+        .await?;
+        if done {
+            return Ok(LegacyRetractionOutcomeFfi {
+                already_done: true,
+                ..Default::default()
+            });
+        }
+
+        let mut outcome = LegacyRetractionOutcomeFfi::default();
+
+        // Own NIP-65 (KeyPackage-discovery) relays — where the stale 443/10051
+        // were published. Own-relays-only, no default union.
+        let own_relays: Vec<String> = run_blocking({
+            let mgr = circle_mgr.clone();
+            move || {
+                let user = mgr
+                    .list_user_relays(haven_core::circle::RelayType::KeyPackage)
+                    .map_err(|e| e.to_string())?;
+                Ok::<Vec<String>, String>(haven_core::relay::dedup_relay_targets(&user))
+            }
+        })
+        .await?;
+        if own_relays.is_empty() {
+            // Nowhere to probe or publish; leave the sentinel UNSET so a later
+            // call (once relays are configured) retries the cleanup.
+            log::debug!("[retract_legacy] no KeyPackage relays configured; deferring");
+            return Ok(outcome);
+        }
+
+        // Probe own relays for the account's legacy 443 KeyPackages and 10051
+        // relay list (single merged filter over both kinds).
+        let filter = nostr::Filter::new()
+            .kinds([nostr::Kind::Custom(443), nostr::Kind::MlsKeyPackageRelays])
+            .author(own_pk)
+            .limit(64);
+        let events = match self.inner.fetch_events(filter, &own_relays, None).await {
+            Ok(v) => v,
+            Err(e) => {
+                outcome.relay_errors += 1;
+                log::debug!(
+                    "[retract_legacy] probe failed: {}",
+                    haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+                );
+                Vec::new()
+            }
+        };
+
+        let mut any_acked = false;
+
+        // Scrub each stale legacy 443 by an id-only kind-5 deletion; track the
+        // newest 10051 (created_at + id) for the relay-list retraction.
+        let mut latest_10051: Option<(i64, nostr::EventId)> = None;
+        for ev in &events {
+            match ev.kind {
+                nostr::Kind::Custom(443) => {
+                    match build_legacy_key_package_retraction(&keys, &ev.id.to_hex(), &own_hex) {
+                        Ok(deletion) => {
+                            match self.inner.publish_event(&deletion, &own_relays).await {
+                                Ok(_) => {
+                                    outcome.legacy_443_scrubbed += 1;
+                                    any_acked = true;
+                                }
+                                Err(e) => {
+                                    outcome.relay_errors += 1;
+                                    log::debug!(
+                                        "[retract_legacy] 443 deletion publish failed: {}",
+                                        haven_core::nostr::mls::redact_hex_sequences(
+                                            &e.to_string()
+                                        )
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => log::debug!(
+                            "[retract_legacy] 443 deletion build skipped: {}",
+                            haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+                        ),
+                    }
+                }
+                nostr::Kind::MlsKeyPackageRelays => {
+                    let at = i64::try_from(ev.created_at.as_secs()).unwrap_or(0);
+                    if latest_10051.is_none_or(|(prev, _)| at >= prev) {
+                        latest_10051 = Some((at, ev.id));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Retract the 10051 relay list if one was present: publish an empty
+        // replaceable 10051 (superseding the last), plus a NIP-09 coordinate
+        // deletion of the observed list for relays that honor NIP-09 over
+        // replaceable supersession.
+        if let Some((at, id)) = latest_10051 {
+            match build_key_package_relay_list_retraction(&keys, Some(at)) {
+                Ok(retraction) => {
+                    match self.inner.publish_event(&retraction, &own_relays).await {
+                        Ok(_) => {
+                            outcome.relay_list_retracted = true;
+                            any_acked = true;
+                        }
+                        Err(e) => {
+                            outcome.relay_errors += 1;
+                            log::debug!(
+                                "[retract_legacy] 10051 retraction publish failed: {}",
+                                haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+                            );
+                        }
+                    }
+                    // Best-effort coordinate deletion (never fatal).
+                    if let Ok(deletion) = haven_core::relay::build_nip09_deletion(
+                        &keys,
+                        id,
+                        nostr::Kind::MlsKeyPackageRelays,
+                    ) {
+                        let _ = self.inner.publish_event(&deletion, &own_relays).await;
+                    }
+                }
+                Err(e) => log::debug!(
+                    "[retract_legacy] 10051 retraction build skipped: {}",
+                    haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+                ),
+            }
+        }
+
+        // Set the once-only sentinel only after ≥1 retraction ACKed, so a
+        // fully-failed run retries next call (idempotent; NIP-09 twice is safe).
+        if any_acked {
+            let marked = run_blocking({
+                let mgr = circle_mgr.clone();
+                move || {
+                    mgr.mark_legacy_kp_retraction_done()
+                        .map_err(|e| e.to_string())
+                }
+            })
+            .await;
+            if marked.is_err() {
+                outcome.relay_errors += 1;
+            }
+        }
+
+        Ok(outcome)
     }
 
     /// M8-1 relay-list maintenance — republish-if-missing/drifted for the
@@ -7008,13 +6829,16 @@ impl RelayManagerFfi {
             return RelayListCategoryOutcome::no_publish(RelayListAction::Suppressed);
         }
 
+        // Dark Matter W2: the KeyPackage-discovery list is published as NIP-65
+        // kind-10002 (`r` tags), the inbox list as kind-10050 (`relay` tags).
+        let ffi_type = RelayTypeFfi::from(relay_type);
+        let kind = relay_list_wire_kind(ffi_type);
+
         // PER-RELAY network probe of the user's OWN relays for a current list
-        // (kind 10050/10051 authored by self). Unlike a merged fetch, this
-        // detects a PARTIAL drop (present on A, dropped from B) so we can heal
-        // B only. A top-level Err (e.g. URL validation) yields NO responders
-        // ⇒ decide_relay_list returns NoOp (fail-closed — strictly better than
-        // the old false-present hack that suppressed a genuine drop).
-        let kind = relay_type.to_kind();
+        // (the wire kind authored by self). Unlike a merged fetch, this detects
+        // a PARTIAL drop (present on A, dropped from B) so we can heal B only. A
+        // top-level Err (e.g. URL validation) yields NO responders ⇒
+        // decide_relay_list returns NoOp (fail-closed).
         let filter = nostr::Filter::new().kind(kind).author(*own_pk).limit(4);
         let per_relay = match self.inner.fetch_events_per_relay(filter, &configured).await {
             Ok(v) => v,
@@ -7040,7 +6864,7 @@ impl RelayManagerFfi {
                 .events
                 .iter()
                 .max_by_key(|e| e.created_at.as_secs())
-                .map(relay_list_urls)
+                .map(|e| relay_list_urls_for(ffi_type, e))
                 .unwrap_or_default();
             let healthy = list_relay_healthy(&on_relay_urls, &configured);
             responders.push(RelayListPerRelay {
@@ -7072,10 +6896,10 @@ impl RelayManagerFfi {
                 // second as a manual edit whose event hasn't propagated to the
                 // probed relays yet (NIP-01 replaceable-event determinism). A
                 // failed lookup falls back to now() — no worse than before.
+                let kind_u16 = kind.as_u16();
                 let last_published_at = {
                     let cm = circle_mgr.clone();
                     let pk = own_pk.to_owned();
-                    let kind_u16 = relay_type.to_kind().as_u16();
                     run_blocking(move || {
                         cm.last_published_event(kind_u16, "", &pk)
                             .map_err(|e| e.to_string())
@@ -7088,9 +6912,9 @@ impl RelayManagerFfi {
                 // The event CONTENT stays the FULL configured relay set (the
                 // list always advertises all configured relays); only the
                 // publish TARGET is the responded-and-unhealthy subset.
-                let event = match haven_core::relay::build_relay_list_event(
+                let event = match build_relay_list_event_for(
+                    ffi_type,
                     keys,
-                    relay_type,
                     &configured,
                     Some(haven_core::relay::superseding_created_at(last_published_at)),
                 ) {
@@ -7106,7 +6930,6 @@ impl RelayManagerFfi {
                 };
                 let event_id = event.id;
                 let created_at = i64::try_from(event.created_at.as_secs()).unwrap_or(0);
-                let kind_u16 = kind.as_u16();
 
                 match self.inner.publish_event(&event, &targets).await {
                     Ok(_) => {
@@ -7438,28 +7261,70 @@ mod tests {
         delete_circles_db_files(&dir_str).expect("second delete on empty slate must be Ok");
     }
 
-    /// `delete_mdk_db_files` removes MDK's base file + WAL/SHM/journal sidecars.
+    // Migration note: the pre-Dark-Matter `delete_mdk_db_files` / `MDK_DB_FILENAME`
+    // (`haven_mdk.db`) were split into `delete_mls_session_db_files` (the NEW
+    // Dark Matter `session.sqlite` stack, wiped on logout) and
+    // `delete_legacy_mls_db_files` (the legacy `haven_mdk.db`, deleted once at the
+    // first-launch cutover). The base+sidecar deletion invariant is re-expressed
+    // over BOTH successors below.
+
+    /// `delete_mls_session_db_files` removes the Dark Matter session DB's base
+    /// file + WAL/SHM/journal sidecars.
     #[test]
-    fn delete_mdk_db_files_removes_base_and_wal_sidecars() {
-        let dir = ScratchDir::new("mdk_delete");
+    fn delete_mls_session_db_files_removes_base_and_wal_sidecars() {
+        let dir = ScratchDir::new("session_delete");
         for suffix in ["", "-wal", "-shm", "-journal"] {
             let p = std::path::PathBuf::from(format!(
                 "{}{suffix}",
-                dir.path().join(MDK_DB_FILENAME).display()
+                dir.path().join(MLS_SESSION_DB_FILENAME).display()
             ));
-            std::fs::write(&p, b"mdk bytes").expect("seed file");
+            std::fs::write(&p, b"session bytes").expect("seed file");
         }
 
-        delete_mdk_db_files(&dir.path().to_string_lossy())
+        delete_mls_session_db_files(&dir.path().to_string_lossy())
             .expect("deleting seeded files must succeed");
 
         for suffix in ["", "-wal", "-shm", "-journal"] {
             let p = std::path::PathBuf::from(format!(
                 "{}{suffix}",
-                dir.path().join(MDK_DB_FILENAME).display()
+                dir.path().join(MLS_SESSION_DB_FILENAME).display()
             ));
-            assert!(!p.exists(), "MDK '{suffix}' sidecar must be deleted");
+            assert!(
+                !p.exists(),
+                "session.sqlite '{suffix}' sidecar must be deleted"
+            );
         }
+    }
+
+    /// `delete_legacy_mls_db_files` removes the PRE-Dark-Matter `haven_mdk.db`
+    /// base file + WAL/SHM/journal sidecars — the file half of the one-time
+    /// first-launch cutover cleanup (`destroy_legacy_mls_state`, whose keyring
+    /// half needs a live backend). Idempotent on an already-gone slate.
+    #[test]
+    fn delete_legacy_mls_db_files_removes_base_and_wal_sidecars() {
+        let dir = ScratchDir::new("legacy_delete");
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let p = std::path::PathBuf::from(format!(
+                "{}{suffix}",
+                dir.path().join(LEGACY_MLS_DB_FILENAME).display()
+            ));
+            std::fs::write(&p, b"legacy mdk bytes").expect("seed file");
+        }
+
+        delete_legacy_mls_db_files(&dir.path().to_string_lossy())
+            .expect("deleting seeded legacy files must succeed");
+
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let p = std::path::PathBuf::from(format!(
+                "{}{suffix}",
+                dir.path().join(LEGACY_MLS_DB_FILENAME).display()
+            ));
+            assert!(!p.exists(), "legacy '{suffix}' sidecar must be deleted");
+        }
+
+        // Idempotent: a second delete on the empty slate is a success (Ok).
+        delete_legacy_mls_db_files(&dir.path().to_string_lossy())
+            .expect("second legacy delete on empty slate must be Ok");
     }
 
     /// After wiping the circles.db file, a fresh open at the same path yields an
@@ -7500,9 +7365,9 @@ mod tests {
         );
     }
 
-    /// `remove_circles_db_key` and `remove_mdk_db_key` are idempotent: calling
-    /// them when no entry exists is a no-op (never panics/errs). Requires a live
-    /// keyring backend to exercise the real delete path.
+    /// `remove_circles_db_key` and `remove_mls_session_db_key` are idempotent:
+    /// calling them when no entry exists is a no-op (never panics/errs). Requires
+    /// a live keyring backend to exercise the real delete path.
     #[test]
     #[ignore = "requires a running keyring backend (D-Bus Secret Service on Linux)"]
     fn remove_db_keys_are_idempotent() {
@@ -7510,8 +7375,8 @@ mod tests {
         // entry is already absent — "already gone" is success, not an error.
         remove_circles_db_key().expect("first circles key removal must be Ok");
         remove_circles_db_key().expect("second circles key removal (already gone) must be Ok");
-        remove_mdk_db_key().expect("first mdk key removal must be Ok");
-        remove_mdk_db_key().expect("second mdk key removal (already gone) must be Ok");
+        remove_mls_session_db_key().expect("first session key removal must be Ok");
+        remove_mls_session_db_key().expect("second session key removal (already gone) must be Ok");
     }
 
     // ========================================================================
@@ -7540,8 +7405,19 @@ mod tests {
             .expect("wipe_all_mls_state must not error");
     }
 
+    /// A generic 32-byte identity secret for constructing a real
+    /// `CircleManagerFfi` under test. The Dark Matter session binds the device
+    /// identity as a HARD construction requirement (DM-4), so `new` now demands
+    /// the secret bytes; the keys never touch a real network here.
+    fn wipe_test_secret_bytes() -> Vec<u8> {
+        nostr::Keys::generate()
+            .secret_key()
+            .to_secret_bytes()
+            .to_vec()
+    }
+
     /// Drives one full M10 wipe end-to-end against a REAL `CircleManagerFfi`:
-    /// the manager actually creates `circles.db` + `haven_mdk.db` on disk and
+    /// the manager actually creates `circles.db` + `session.sqlite` on disk and
     /// provisions BOTH SQLCipher keys in whatever keyring backend is installed.
     /// The wipe must then delete every DB file + sidecar AND remove both keyring
     /// keys, and be safe to call a second time on the now-empty slate.
@@ -7562,16 +7438,16 @@ mod tests {
         // shared keyring keys behind. Removing them first makes the "present
         // after create" assertions meaningful rather than coincidental.
         let _ = remove_circles_db_key();
-        let _ = remove_mdk_db_key();
+        let _ = remove_mls_session_db_key();
 
         let dir = ScratchDir::new("wipe_e2e");
         let data_dir = dir.path().to_string_lossy().to_string();
         let circles_db = dir.path().join(CIRCLES_DB_FILENAME);
-        let mdk_db = dir.path().join(MDK_DB_FILENAME);
+        let session_db = dir.path().join(MLS_SESSION_DB_FILENAME);
 
         // --- 1. Create a REAL manager: this mints both DB files + both keys. ---
         {
-            let manager = CircleManagerFfi::new(data_dir.clone())
+            let manager = CircleManagerFfi::new(data_dir.clone(), wipe_test_secret_bytes())
                 .expect("CircleManagerFfi::new must create real MLS + circle DBs");
             // Hold the handle only long enough to prove the files/keys landed,
             // then drop it so both SQLite connections close before the wipe.
@@ -7584,8 +7460,8 @@ mod tests {
             "circles.db must exist after CircleManagerFfi::new"
         );
         assert!(
-            mdk_db.exists(),
-            "haven_mdk.db must exist after CircleManagerFfi::new"
+            session_db.exists(),
+            "session.sqlite must exist after CircleManagerFfi::new"
         );
 
         // --- 3. Both keyring keys must exist after creation. ---
@@ -7594,15 +7470,15 @@ mod tests {
             "circles.db keyring key must exist after manager creation"
         );
         assert!(
-            keyring_key_present(CIRCLES_DB_SERVICE, MDK_DB_KEY_ID),
-            "mdk.db keyring key must exist after manager creation"
+            keyring_key_present(CIRCLES_DB_SERVICE, MLS_SESSION_DB_KEY_ID),
+            "session.sqlite keyring key must exist after manager creation"
         );
 
         // --- 4. Call the REAL wipe. ---
         run_wipe(&data_dir);
 
         // --- 5a. Every DB file + sidecar must be gone. ---
-        for base in [&circles_db, &mdk_db] {
+        for base in [&circles_db, &session_db] {
             for suffix in ["", "-wal", "-shm", "-journal"] {
                 let p = if suffix.is_empty() {
                     base.clone()
@@ -7623,8 +7499,8 @@ mod tests {
             "circles.db keyring key must be removed by wipe"
         );
         assert!(
-            !keyring_key_present(CIRCLES_DB_SERVICE, MDK_DB_KEY_ID),
-            "mdk.db keyring key must be removed by wipe"
+            !keyring_key_present(CIRCLES_DB_SERVICE, MLS_SESSION_DB_KEY_ID),
+            "session.sqlite keyring key must be removed by wipe"
         );
 
         // --- 6. Idempotent: a second wipe on the empty slate must not panic
@@ -7634,19 +7510,22 @@ mod tests {
             !circles_db.exists(),
             "circles.db still absent after 2nd wipe"
         );
-        assert!(!mdk_db.exists(), "haven_mdk.db still absent after 2nd wipe");
+        assert!(
+            !session_db.exists(),
+            "session.sqlite still absent after 2nd wipe"
+        );
         assert!(
             !keyring_key_present(CIRCLES_DB_SERVICE, CIRCLES_DB_KEY_ID),
             "circles.db key still absent after 2nd wipe"
         );
         assert!(
-            !keyring_key_present(CIRCLES_DB_SERVICE, MDK_DB_KEY_ID),
-            "mdk.db key still absent after 2nd wipe"
+            !keyring_key_present(CIRCLES_DB_SERVICE, MLS_SESSION_DB_KEY_ID),
+            "session.sqlite key still absent after 2nd wipe"
         );
     }
 
     /// M10 (non-ignored): proves `wipe_all_mls_state` deletes a REAL
-    /// manager-created `circles.db` + `haven_mdk.db` (files + WAL/SHM/journal
+    /// manager-created `circles.db` + `session.sqlite` (files + WAL/SHM/journal
     /// sidecars) AND removes both SQLCipher keyring keys — end-to-end, using the
     /// in-memory keyring backend so it runs in headless sandboxes/CI without a
     /// D-Bus Secret Service. This is the coverage a prior security review flagged
@@ -7723,75 +7602,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&blocker);
     }
 
-    /// Verifies that `DecryptResultFfi`'s `Debug` impl never emits the raw
-    /// evolution event JSON (which embeds the MLS group ID in its `h` tag)
-    /// or the raw MLS group ID bytes. This is a security-critical property:
-    /// FFI debug logs routinely surface via `debugPrint` on the Flutter side,
-    /// and the group ID is never meant to be observable off-device.
-    #[test]
-    fn decrypt_result_ffi_debug_redacts_secrets() {
-        let secret_group_id_bytes = vec![
-            0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe, 0x00, 0x11, 0x22, 0x33,
-        ];
-        let secret_hex = "deadbeefcafebabe00112233";
-        let secret_event_json = format!(
-            r#"{{"kind":445,"tags":[["h","{secret_hex}"]],"content":"secret-ciphertext"}}"#
-        );
-
-        let result = DecryptResultFfi {
-            location: None,
-            group_updated: true,
-            evolution_event_json: Some(secret_event_json.clone()),
-            evolution_mls_group_id: Some(secret_group_id_bytes.clone()),
-        };
-
-        let debug_str = format!("{result:?}");
-
-        assert!(
-            !debug_str.contains(&secret_event_json),
-            "Debug impl must not embed raw evolution event JSON: {debug_str}"
-        );
-        assert!(
-            !debug_str.contains(secret_hex),
-            "Debug impl must not leak MLS group ID hex fragment: {debug_str}"
-        );
-        assert!(
-            !debug_str.contains("secret-ciphertext"),
-            "Debug impl must not leak event content: {debug_str}"
-        );
-
-        assert!(debug_str.contains("has_evolution_event"));
-        assert!(debug_str.contains("has_evolution_mls_group_id"));
-        assert!(debug_str.contains("group_updated"));
-    }
-
-    /// Companion to the redaction test: confirm the `None` branches
-    /// still render as `false` so downstream log parsing can distinguish
-    /// "present-but-redacted" from "absent".
-    #[test]
-    fn decrypt_result_ffi_debug_reports_absence() {
-        let result = DecryptResultFfi {
-            location: None,
-            group_updated: false,
-            evolution_event_json: None,
-            evolution_mls_group_id: None,
-        };
-
-        let debug_str = format!("{result:?}");
-
-        assert!(debug_str.contains("has_evolution_event: false"));
-        assert!(debug_str.contains("has_evolution_mls_group_id: false"));
-        assert!(debug_str.contains("has_location: false"));
-        assert!(debug_str.contains("group_updated: false"));
-    }
-
-    // ===== M1: decrypt-outcome surfacing + compat-shim equivalence =====
+    // ===== Decrypt-result folding — Dark Matter five-variant taxonomy =====
     //
-    // These exercise the pure `convert_location_result` / `flatten_outcome_to_legacy`
-    // free functions directly, with no MDK / FFI / async, so the M1 safety
-    // contract is provable from a green build: `Unprocessable` and
-    // `PreviouslyFailed` are SURFACED (not silently dropped), and the legacy
-    // `decrypt_location` shim keeps its exact historical flattening.
+    // The pre-migration `DecryptResultFfi` / `DecryptOutcomeFfi` /
+    // `DecryptOutcomeKindFfi` types — with their `Unprocessable` /
+    // `PreviouslyFailed` variants and the `flatten_outcome_to_legacy` compat shim
+    // — were DELETED in the Dark Matter migration: stale / duplicate /
+    // out-of-order handling is now entirely engine-internal, so the FFI surfaces
+    // only the five application-visible `LocationMessageResult` variants via the
+    // pure `convert_location_result` → `LocationMessageResultFfi` fold (no MDK /
+    // no async / no live manager). The tests below re-express the surviving
+    // conversion + redaction invariants over that new taxonomy, and add the
+    // three new-in-Dark-Matter variants (Joined / Invalidated / Unrecoverable)
+    // the old `Unprocessable`/`PreviouslyFailed` surfacing tests are replaced by.
 
     fn sample_location_content() -> String {
         // A real, parseable LocationMessage payload (same shape decrypt emits).
@@ -7799,201 +7622,207 @@ mod tests {
         serde_json::to_string(&msg).expect("LocationMessage serializes")
     }
 
-    /// THE critical M1 contract: an `Unprocessable` core result is surfaced
-    /// with its kind + a redacted reason and no location — never flattened to
-    /// `None` at this layer (so the Dart side can refuse to advance the cursor).
-    #[test]
-    fn convert_unprocessable_is_surfaced_not_dropped() {
-        let result = haven_core::nostr::mls::types::LocationMessageResult::Unprocessable {
-            group_id: haven_core::nostr::mls::types::GroupId::from_slice(&[1, 2, 3]),
-            reason: "Message could not be processed".to_string(),
-        };
-        let outcome = convert_location_result(result, 1_700_000_000).expect("maps");
-        assert_eq!(outcome.kind, DecryptOutcomeKindFfi::Unprocessable);
-        assert!(outcome.unprocessable_reason.is_some());
-        assert!(outcome.location.is_none());
-        assert!(outcome.evolution_event_json.is_none());
-        assert_eq!(outcome.event_created_at_secs, 1_700_000_000);
-    }
-
-    #[test]
-    fn convert_previously_failed_is_surfaced() {
-        let outcome = convert_location_result(
-            haven_core::nostr::mls::types::LocationMessageResult::PreviouslyFailed,
-            42,
-        )
-        .expect("maps");
-        assert_eq!(outcome.kind, DecryptOutcomeKindFfi::PreviouslyFailed);
-        assert!(outcome.location.is_none());
-        assert!(outcome.unprocessable_reason.is_none());
-        assert_eq!(outcome.event_created_at_secs, 42);
-    }
-
+    /// A decrypted `Location` populates the FFI location, threads its MLS epoch
+    /// through, and normalizes the sender pubkey to lowercase (so the Dart
+    /// self-compare against the cached own pubkey is case-insensitive).
     #[test]
     fn convert_location_populates_location_and_normalizes_sender() {
         let result = haven_core::nostr::mls::types::LocationMessageResult::Location {
             sender_pubkey: "ABCDEF0123".to_string(),
             content: sample_location_content(),
             group_id: haven_core::nostr::mls::types::GroupId::from_slice(&[9]),
+            epoch: 7,
         };
-        let outcome = convert_location_result(result, 100).expect("maps");
-        assert_eq!(outcome.kind, DecryptOutcomeKindFfi::Location);
+        let outcome = convert_location_result(result);
+        assert_eq!(outcome.kind, LocationMessageResultKindFfi::Location);
+        assert_eq!(outcome.epoch, 7, "epoch threads through for Location");
+        assert_eq!(outcome.mls_group_id, vec![9]);
         let loc = outcome.location.expect("location present");
         assert_eq!(
             loc.sender_pubkey, "abcdef0123",
             "sender normalized lowercase"
         );
-        assert!(outcome.evolution_event_json.is_none());
-        assert!(outcome.unprocessable_reason.is_none());
-        assert_eq!(outcome.event_created_at_secs, 100);
     }
 
-    /// Wire-compat (plan D8 / protocol review 4.3): a decrypted `Location`
-    /// whose content does NOT parse as a `LocationMessage` (e.g. a legacy
-    /// `haven-avatar-*` inner from a pre-migration client) must surface as
-    /// `Ok` with `kind: Location, location: None` — NEVER as an `Err`. An
-    /// `Err` here would make the Dart caller treat a successfully-decrypted
-    /// event as a retriable decrypt failure, so it would never be marked
-    /// seen and would be reprocessed on every poll cycle forever. Companion
-    /// to `haven_avatar_inner_kind9_from_old_client_ignored_without_state_damage`
+    /// Wire-compat (plan D8 / protocol review 4.3): a decrypted `Location` whose
+    /// content does NOT parse as a `LocationMessage` (e.g. a legacy
+    /// `haven-avatar-*` inner from a pre-migration client) must still surface as
+    /// `kind: Location, location: None` — decrypt succeeded at the MLS layer, so
+    /// the caller advances past it exactly like a `GroupUpdate` (it must never
+    /// treat a successfully-decrypted event as a retriable decrypt failure that
+    /// gets reprocessed forever). Companion to
+    /// `haven_avatar_inner_kind9_from_old_client_ignored_without_state_damage`
     /// in `haven-core/src/circle/manager.rs`, which pins the core-level
-    /// `decrypt_location` half of this contract.
+    /// `decrypt_location` half of this contract. (Under the new taxonomy the fold
+    /// is infallible — it returns `LocationMessageResultFfi` directly, not a
+    /// `Result` — so "never an Err on parse failure" is now structural.)
     #[test]
-    fn convert_location_with_unparseable_content_is_seen_not_error() {
+    fn convert_location_with_unparseable_content_is_seen_not_dropped() {
         let result = haven_core::nostr::mls::types::LocationMessageResult::Location {
             sender_pubkey: "ABCDEF0123".to_string(),
             content: r#"{"type":"haven-avatar-chunk","v":1,"version":1,"index":1,"data":"AAAA"}"#
                 .to_string(),
             group_id: haven_core::nostr::mls::types::GroupId::from_slice(&[9]),
+            epoch: 3,
         };
-        let outcome =
-            convert_location_result(result, 100).expect("must be Ok, never Err, on parse failure");
+        let outcome = convert_location_result(result);
         assert_eq!(
             outcome.kind,
-            DecryptOutcomeKindFfi::Location,
+            LocationMessageResultKindFfi::Location,
             "decrypt succeeded at the MLS layer — kind stays Location"
         );
         assert!(
             outcome.location.is_none(),
             "unparseable content must not fabricate a location"
         );
-        assert!(outcome.evolution_event_json.is_none());
-        assert!(outcome.unprocessable_reason.is_none());
-        assert_eq!(outcome.event_created_at_secs, 100);
     }
 
+    /// Every NON-Location variant folds to its matching FFI kind, carries the
+    /// local MLS group id (never published; Rule 4) through, has no location, and
+    /// reports epoch 0 (the epoch is meaningful only for `Location`). Pins the
+    /// full Dark Matter five-variant mapping so a new core variant cannot
+    /// silently misfold. `Joined` / `Invalidated` / `Unrecoverable` are new
+    /// Dark Matter outcomes with no pre-migration equivalent (they replace the
+    /// deleted `Unprocessable` / `PreviouslyFailed` surfacing tests).
     #[test]
-    fn convert_group_update_without_autocommit_has_no_evolution() {
-        let result = haven_core::nostr::mls::types::LocationMessageResult::GroupUpdate {
-            group_id: haven_core::nostr::mls::types::GroupId::from_slice(&[7, 7]),
-            evolution_event: None,
-        };
-        let outcome = convert_location_result(result, 5).expect("maps");
-        assert_eq!(outcome.kind, DecryptOutcomeKindFfi::GroupUpdate);
-        assert!(outcome.location.is_none());
-        assert!(outcome.evolution_event_json.is_none());
-        assert!(outcome.evolution_mls_group_id.is_none());
-    }
-
-    /// The compat shim must be behavior-identical to the historical
-    /// `decrypt_location`: Location/GroupUpdate → `Some`, Unprocessable /
-    /// PreviouslyFailed → `None`.
-    #[test]
-    fn flatten_shim_matches_legacy_behavior() {
-        let loc = DecryptOutcomeFfi {
-            kind: DecryptOutcomeKindFfi::Location,
-            event_created_at_secs: 1,
-            location: Some(DecryptedLocationFfi {
-                sender_pubkey: "abc".to_string(),
-                latitude: 1.0,
-                longitude: 2.0,
-                geohash: "u".to_string(),
-                timestamp: 0,
-                expires_at: 0,
-            }),
-            evolution_event_json: None,
-            evolution_mls_group_id: None,
-            unprocessable_reason: None,
-        };
-        let flat = flatten_outcome_to_legacy(loc).expect("Location → Some");
-        assert!(flat.location.is_some());
-        assert!(!flat.group_updated);
-        assert!(flat.evolution_event_json.is_none());
-
-        let gu = DecryptOutcomeFfi {
-            kind: DecryptOutcomeKindFfi::GroupUpdate,
-            event_created_at_secs: 1,
-            location: None,
-            evolution_event_json: Some("{}".to_string()),
-            evolution_mls_group_id: Some(vec![1, 2]),
-            unprocessable_reason: None,
-        };
-        let flat = flatten_outcome_to_legacy(gu).expect("GroupUpdate → Some");
-        assert!(flat.location.is_none());
-        assert!(flat.group_updated);
-        assert_eq!(flat.evolution_event_json.as_deref(), Some("{}"));
-        assert_eq!(flat.evolution_mls_group_id, Some(vec![1, 2]));
-
-        for kind in [
-            DecryptOutcomeKindFfi::Unprocessable,
-            DecryptOutcomeKindFfi::PreviouslyFailed,
-        ] {
-            let o = DecryptOutcomeFfi {
-                kind,
-                event_created_at_secs: 1,
-                location: None,
-                evolution_event_json: None,
-                evolution_mls_group_id: None,
-                unprocessable_reason: Some("x".to_string()),
-            };
-            assert!(
-                flatten_outcome_to_legacy(o).is_none(),
-                "{kind:?} must flatten to None"
+    fn convert_non_location_variants_map_and_carry_group_id() {
+        use haven_core::nostr::mls::types::{GroupId, LocationMessageResult as R};
+        let gid = GroupId::from_slice(&[7, 7, 7]);
+        let cases = [
+            (
+                R::Joined {
+                    group_id: gid.clone(),
+                },
+                LocationMessageResultKindFfi::Joined,
+            ),
+            (
+                R::GroupUpdate {
+                    group_id: gid.clone(),
+                },
+                LocationMessageResultKindFfi::GroupUpdate,
+            ),
+            (
+                R::Invalidated {
+                    group_id: gid.clone(),
+                },
+                LocationMessageResultKindFfi::Invalidated,
+            ),
+            (
+                R::Unrecoverable {
+                    group_id: gid.clone(),
+                },
+                LocationMessageResultKindFfi::Unrecoverable,
+            ),
+        ];
+        for (result, expected) in cases {
+            let outcome = convert_location_result(result);
+            assert_eq!(outcome.kind, expected);
+            assert!(outcome.location.is_none(), "{expected:?} has no location");
+            assert_eq!(outcome.epoch, 0, "{expected:?} reports epoch 0");
+            assert_eq!(
+                outcome.mls_group_id,
+                gid.as_slice().to_vec(),
+                "{expected:?} carries the local group id"
             );
         }
     }
 
-    /// `DecryptOutcomeFfi`'s `Debug` must redact the same secrets as its
-    /// sibling `DecryptResultFfi` — evolution event JSON (embeds the MLS group
-    /// id), raw group id bytes, and the reason string — exposing only presence.
+    /// Security Rule 4/8: `LocationMessageResultFfi`'s `Debug` must redact the
+    /// raw MLS group id and the decrypted location, exposing only presence + the
+    /// non-secret epoch counter. FFI debug lines routinely surface via
+    /// `debugPrint` on the Flutter side, and the group id is never meant to be
+    /// observable off-device. (Successor to the deleted `DecryptResultFfi` /
+    /// `DecryptOutcomeFfi` redaction tests.)
     #[test]
-    fn decrypt_outcome_ffi_debug_redacts_secrets() {
-        let secret_group_id_bytes = vec![0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe];
-        let secret_hex = "deadbeefcafebabe";
-        let secret_event_json =
-            format!(r#"{{"kind":445,"tags":[["h","{secret_hex}"]],"content":"ct"}}"#);
-        let secret_reason = "secret-reason-value".to_string();
-
-        let outcome = DecryptOutcomeFfi {
-            kind: DecryptOutcomeKindFfi::Unprocessable,
-            event_created_at_secs: 1_700_000_000,
-            location: None,
-            evolution_event_json: Some(secret_event_json.clone()),
-            evolution_mls_group_id: Some(secret_group_id_bytes),
-            unprocessable_reason: Some(secret_reason.clone()),
+    fn location_message_result_ffi_debug_redacts_secrets() {
+        let secret_group_id = vec![0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe];
+        let result = haven_core::nostr::mls::types::LocationMessageResult::Location {
+            sender_pubkey: "SENDER_PK_SECRET".to_string(),
+            content: sample_location_content(),
+            group_id: haven_core::nostr::mls::types::GroupId::from_slice(&secret_group_id),
+            epoch: 1_700_000_000,
         };
+        let ffi = convert_location_result(result);
+        // Sanity: the location DID parse, so `has_location` is meaningfully true.
+        assert!(ffi.location.is_some());
 
-        let debug_str = format!("{outcome:?}");
-
+        let debug_str = format!("{ffi:?}");
         assert!(
-            !debug_str.contains(&secret_event_json),
-            "Debug must not embed raw evolution event JSON: {debug_str}"
-        );
-        assert!(
-            !debug_str.contains(secret_hex),
+            !debug_str.contains("deadbeefcafebabe"),
             "Debug must not leak MLS group id hex: {debug_str}"
         );
         assert!(
-            !debug_str.contains(&secret_reason),
-            "Debug must not leak the unprocessable reason value: {debug_str}"
+            !debug_str.contains("37.77"),
+            "Debug must not leak decrypted coordinates: {debug_str}"
+        );
+        assert!(
+            !debug_str.to_lowercase().contains("sender_pk_secret"),
+            "Debug must not leak the sender pubkey: {debug_str}"
+        );
+        // Presence flags + the non-secret epoch counter DO render.
+        assert!(debug_str.contains("has_location: true"));
+        assert!(
+            debug_str.contains("<redacted>"),
+            "group id must render redacted: {debug_str}"
+        );
+        assert!(
+            debug_str.contains("1700000000"),
+            "epoch is a non-secret counter: {debug_str}"
+        );
+    }
+
+    /// W2 wire cutover: the FFI relay-list category maps to the correct Dark
+    /// Matter on-wire kind — `Inbox` → 10050 (NIP-17) and the KeyPackage-
+    /// discovery category (`Nip65`, which replaced the retired kind-10051
+    /// `KeyPackage` variant) → 10002 (NIP-65) — and `Nip65` shares the persisted
+    /// `RelayType::KeyPackage` storage slot (zero data migration). Guards against
+    /// a regression that would re-publish the abolished kind-10051 list.
+    #[test]
+    fn relay_type_ffi_maps_nip65_to_kind_10002_and_keypackage_slot() {
+        // Wire kind per category.
+        assert_eq!(
+            relay_list_wire_kind(RelayTypeFfi::Inbox),
+            nostr::Kind::InboxRelays
+        );
+        assert_eq!(
+            relay_list_wire_kind(RelayTypeFfi::Nip65),
+            nostr::Kind::RelayList
+        );
+        assert_eq!(
+            nostr::Kind::RelayList.as_u16(),
+            10002,
+            "Nip65 publishes kind 10002, not the retired 10051"
+        );
+        assert_eq!(nostr::Kind::InboxRelays.as_u16(), 10050);
+
+        // Storage slot: Nip65 ↔ the persisted KeyPackage slot (W2, no migration).
+        assert_eq!(
+            haven_core::circle::RelayType::from(RelayTypeFfi::Nip65),
+            haven_core::circle::RelayType::KeyPackage
+        );
+        assert_eq!(
+            RelayTypeFfi::from(haven_core::circle::RelayType::KeyPackage),
+            RelayTypeFfi::Nip65
+        );
+        assert_eq!(
+            haven_core::circle::RelayType::from(RelayTypeFfi::Inbox),
+            haven_core::circle::RelayType::Inbox
         );
 
-        assert!(debug_str.contains("has_location"));
-        assert!(debug_str.contains("has_evolution_event"));
-        assert!(debug_str.contains("has_unprocessable_reason"));
-        assert!(debug_str.contains("Unprocessable"));
-        // The public outer-event timestamp IS shown verbatim (non-secret).
-        assert!(debug_str.contains("1700000000"));
+        // The actually-built signed event carries kind 10002 for Nip65.
+        let keys = nostr::Keys::generate();
+        let ev = build_relay_list_event_for(
+            RelayTypeFfi::Nip65,
+            &keys,
+            &["wss://relay.example".to_string()],
+            None,
+        )
+        .expect("build nip65 relay-list event");
+        assert_eq!(
+            ev.kind,
+            nostr::Kind::RelayList,
+            "Nip65 relay-list event must be kind 10002"
+        );
     }
 
     /// The seconds→milliseconds cursor conversion (M2) must scale by 1000 and
@@ -8022,9 +7851,6 @@ mod tests {
 // opaque handle holds only a borrow of the one MLS-state owner. Decrypted
 // events are pushed to Dart over a single `StreamSink<FfiRelayEvent>`.
 
-use haven_core::circle::{
-    CommitConvergence as CoreCommitConvergence, CommitIntent as CoreCommitIntent,
-};
 use haven_core::relay::live_sync::{
     CircleSpec as CoreCircleSpec, LiveSyncCore, LiveSyncEvent as CoreLiveSyncEvent,
     SyncStatusReason as CoreSyncStatusReason,
@@ -8206,166 +8032,6 @@ pub struct FfiGroupSpec {
     pub nostr_group_id: Vec<u8>,
     /// The circle's relay set.
     pub relays: Vec<String>,
-}
-
-// ===================== SEND-path convergence (M6, path A) =====================
-//
-// When the engine is running, the foreground finalize sites converge their own
-// commit against same-epoch siblings instead of eagerly merging (which forks).
-// CS1 (`stage_*_converging`) opens a settle window + stages under the per-circle
-// gate; the caller publishes the commit + waits `settle_window_secs`; CS2
-// (`converge_after_window`) takes the buffered competitors + runs MIP-03
-// convergence under the gate. A publish failure between the two runs
-// `abort_converging_window`. Every method returns `Ok(None)` ("engine off") so
-// the Dart caller can fall back to the legacy eager path (M6 ships flag-OFF).
-// The orchestration lives in `LiveSyncCore` (haven-core, unit-tested); these are
-// thin, validating wrappers.
-
-/// A staged commit awaiting publication + convergence (self-update / remove).
-///
-/// `Debug` is presence-only: `commit_json` is a `kind:445` whose `h` tag carries
-/// the `nostr_group_id`, so it is redacted (Security Rule 4/8).
-pub struct StagedCommitFfi {
-    /// The staged commit JSON — publish it during the window, then pass it back
-    /// to [`LiveSyncFfi::converge_after_window`].
-    pub commit_json: String,
-    /// The epoch the commit was built from (pass back to converge).
-    pub staged_epoch: u64,
-}
-
-impl std::fmt::Debug for StagedCommitFfi {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StagedCommitFfi")
-            .field("commit_json", &"<redacted>")
-            .field("staged_epoch", &self.staged_epoch)
-            .finish()
-    }
-}
-
-/// A staged Add commit + the gift-wrapped Welcomes for the new members.
-///
-/// Publish [`Self::welcome_events`] ONLY after the convergence returns
-/// `Merged` — Welcomes for a losing Add reference an epoch that never committed.
-/// `Debug` is presence-only (commit JSON + welcomes redacted).
-pub struct StagedAddFfi {
-    /// The staged Add commit JSON.
-    pub commit_json: String,
-    /// The epoch the commit was built from.
-    pub staged_epoch: u64,
-    /// Gift-wrapped Welcomes — publish only after a `Merged` convergence.
-    pub welcome_events: Vec<GiftWrappedWelcomeFfi>,
-}
-
-impl std::fmt::Debug for StagedAddFfi {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StagedAddFfi")
-            .field("commit_json", &"<redacted>")
-            .field("staged_epoch", &self.staged_epoch)
-            .field("welcome_events_count", &self.welcome_events.len())
-            .finish()
-    }
-}
-
-/// Which membership goal a staged commit was trying to achieve (mirrors
-/// [`CoreCommitIntent`]). `Add`/`Remove` carry the target pubkeys in
-/// [`ConvergeIntentFfi::pubkeys`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConvergeIntentKind {
-    /// A self-update (or any non-membership commit); nothing to re-satisfy.
-    None,
-    /// Remove the listed members.
-    Remove,
-    /// Add the listed members.
-    Add,
-}
-
-/// The convergence intent passed to [`LiveSyncFfi::converge_after_window`].
-///
-/// `Debug` is presence-only — the pubkeys are relay-public but rendered as a
-/// count for uniform redaction (Security Rule 8).
-pub struct ConvergeIntentFfi {
-    /// The intent discriminant.
-    pub kind: ConvergeIntentKind,
-    /// Hex Nostr pubkeys for `Add`/`Remove` (empty for `None`).
-    pub pubkeys: Vec<String>,
-}
-
-impl std::fmt::Debug for ConvergeIntentFfi {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ConvergeIntentFfi")
-            .field("kind", &self.kind)
-            .field("pubkeys_count", &self.pubkeys.len())
-            .finish()
-    }
-}
-
-impl ConvergeIntentFfi {
-    /// Maps to the core [`CoreCommitIntent`], parsing the hex pubkeys.
-    fn to_core(&self) -> Result<CoreCommitIntent, String> {
-        match self.kind {
-            ConvergeIntentKind::None => Ok(CoreCommitIntent::None),
-            ConvergeIntentKind::Remove => {
-                Ok(CoreCommitIntent::RemoveMembers(self.parse_pubkeys()?))
-            }
-            ConvergeIntentKind::Add => Ok(CoreCommitIntent::AddMembers(self.parse_pubkeys()?)),
-        }
-    }
-
-    fn parse_pubkeys(&self) -> Result<Vec<nostr::PublicKey>, String> {
-        // `PublicKey::parse` (NOT hex-only `from_hex`) so BOTH intent shapes are
-        // accepted: the converging Remove passes canonical roster hex, but the
-        // converging Add passes the picker's `KeyPackageData.pubkey`, which the UI
-        // carries as an `npub` (bech32). A hex-only parse rejected the Add intent
-        // BEFORE convergence ran — the deterministic flag-on converging-Add
-        // failure. `parse` handles hex, bech32 npub, and NIP-21 alike and yields
-        // the identical `PublicKey` (so the downstream `intent_unsatisfied`
-        // hex comparison is unchanged).
-        self.pubkeys
-            .iter()
-            .map(|p| nostr::PublicKey::parse(p).map_err(|e| e.to_string()))
-            .collect()
-    }
-}
-
-/// The outcome of a convergence (mirrors [`CoreCommitConvergence`]). All fields
-/// are non-secret, so a derived `Debug` is safe.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConvergeResultKind {
-    /// Our commit won and merged; the caller already published it.
-    Merged,
-    /// A competitor won; we adopted it. The caller must NOT re-publish ours.
-    AdoptedWinner,
-    /// Neither merged nor adopted; re-fetch + retry. No dangling pending commit.
-    RolledBack,
-}
-
-/// The result of [`LiveSyncFfi::converge_after_window`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ConvergeResultFfi {
-    /// The convergence outcome.
-    pub kind: ConvergeResultKind,
-    /// `true` (only when `AdoptedWinner`) when the original membership intent was
-    /// not satisfied by the winner and should be re-staged (caller bounds it).
-    pub intent_still_pending: bool,
-}
-
-fn converge_result_to_ffi(result: CoreCommitConvergence) -> ConvergeResultFfi {
-    match result {
-        CoreCommitConvergence::Merged => ConvergeResultFfi {
-            kind: ConvergeResultKind::Merged,
-            intent_still_pending: false,
-        },
-        CoreCommitConvergence::AdoptedWinner {
-            intent_still_pending,
-        } => ConvergeResultFfi {
-            kind: ConvergeResultKind::AdoptedWinner,
-            intent_still_pending,
-        },
-        CoreCommitConvergence::RolledBack => ConvergeResultFfi {
-            kind: ConvergeResultKind::RolledBack,
-            intent_still_pending: false,
-        },
-    }
 }
 
 /// Opaque handle to the live-sync engine. Holds only a borrow of the one MLS
@@ -8614,201 +8280,6 @@ impl LiveSyncFfi {
     }
 }
 
-// ===================== SEND-path convergence (M6, path A) =====================
-//
-// FREE functions (NOT methods on `LiveSyncFfi`): they route entirely through the
-// `SESSION` global (the engine's gate/settle + the shared `CircleManager`),
-// needing no handle, circle, or pubkey — so a foreground finalize site (M6-4)
-// calls them directly without building an engine handle. Each returns
-// `Ok(None)`/`false` when no engine is running, so the Dart caller falls back to
-// the legacy eager-finalize path (the flag-OFF behavior is unchanged).
-
-/// The settle-window duration (seconds) the caller waits between CS1
-/// (`stage_*_converging`) and CS2 (`converge_after_window`).
-#[frb(sync)]
-#[must_use]
-pub fn settle_window_secs() -> u64 {
-    LiveSyncCore::settle_window_secs()
-}
-
-/// CS1 (self-update): open a settle window + stage a self-update commit under
-/// the per-circle gate. Returns `Ok(None)` if no engine is running.
-///
-/// # Errors
-///
-/// Returns an error if the lock is poisoned or staging fails.
-pub async fn stage_self_update_converging(
-    mls_group_id: Vec<u8>,
-    nostr_group_id: Vec<u8>,
-) -> Result<Option<StagedCommitFfi>, String> {
-    let Some(core) = live_session_core()? else {
-        return Ok(None);
-    };
-    let group_id = GroupId::from_slice(&mls_group_id);
-    let staged = core
-        .stage_self_update_converging(&group_id, &nostr_group_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(Some(StagedCommitFfi {
-        commit_json: staged.commit_json,
-        staged_epoch: staged.staged_epoch,
-    }))
-}
-
-/// CS1 (remove members): open a settle window + stage a Remove commit under
-/// the per-circle gate. Returns `Ok(None)` if no engine is running.
-///
-/// # Errors
-///
-/// Returns an error if the lock is poisoned or staging fails.
-pub async fn stage_remove_members_converging(
-    mls_group_id: Vec<u8>,
-    nostr_group_id: Vec<u8>,
-    member_pubkeys: Vec<String>,
-) -> Result<Option<StagedCommitFfi>, String> {
-    let Some(core) = live_session_core()? else {
-        return Ok(None);
-    };
-    let group_id = GroupId::from_slice(&mls_group_id);
-    let staged = core
-        .stage_remove_members_converging(&group_id, &nostr_group_id, &member_pubkeys)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(Some(StagedCommitFfi {
-        commit_json: staged.commit_json,
-        staged_epoch: staged.staged_epoch,
-    }))
-}
-
-/// CS1 (add members): open a settle window + stage an Add commit (and build
-/// its gift-wrapped Welcomes) under the per-circle gate. Publish the welcomes
-/// only after the convergence returns `Merged`. Returns `Ok(None)` if no
-/// engine is running.
-///
-/// # Errors
-///
-/// Returns an error if the secret is malformed, a key package is invalid, the
-/// lock is poisoned, or staging fails.
-pub async fn stage_add_members_converging(
-    identity_secret_bytes: Vec<u8>,
-    mls_group_id: Vec<u8>,
-    nostr_group_id: Vec<u8>,
-    members: Vec<MemberKeyPackageFfi>,
-    creator_fallback_relays: Vec<String>,
-) -> Result<Option<StagedAddFfi>, String> {
-    let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
-    if identity_secret_bytes.len() != 32 {
-        return Err("Invalid secret bytes length".to_string());
-    }
-    let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
-        .map_err(|e| format!("Invalid secret key: {e}"))?;
-    let keys = nostr::Keys::new(secret_key);
-
-    let member_key_packages: Vec<haven_core::circle::MemberKeyPackage> = members
-        .into_iter()
-        .map(|m| {
-            let key_package_event: nostr::Event = serde_json::from_str(&m.key_package_json)
-                .map_err(|e| format!("Invalid key package JSON: {e}"))?;
-            Ok(haven_core::circle::MemberKeyPackage {
-                key_package_event,
-                inbox_relays: m.inbox_relays,
-                nip65_relays: m.nip65_relays,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-
-    let Some(core) = live_session_core()? else {
-        return Ok(None);
-    };
-    let group_id = GroupId::from_slice(&mls_group_id);
-    let staged = core
-        .stage_add_members_converging(
-            &keys,
-            &group_id,
-            &nostr_group_id,
-            member_key_packages,
-            &creator_fallback_relays,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let welcome_events: Vec<GiftWrappedWelcomeFfi> = staged
-        .welcome_events
-        .into_iter()
-        .map(|w| {
-            let event_json = serde_json::to_string(&w.event)
-                .map_err(|e| format!("Failed to serialize welcome event: {e}"))?;
-            Ok(GiftWrappedWelcomeFfi {
-                recipient_pubkey: w.recipient_pubkey,
-                recipient_relays: w.recipient_relays,
-                event_json,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-
-    Ok(Some(StagedAddFfi {
-        commit_json: staged.commit_json,
-        staged_epoch: staged.staged_epoch,
-        welcome_events,
-    }))
-}
-
-/// CS2: take the buffered competitors + run MIP-03 convergence under the
-/// gate. `our_commit_json` is the JSON from CS1 (already published).
-/// Returns `Ok(None)` if no engine is running.
-///
-/// # Errors
-///
-/// Returns an error if the intent pubkeys are invalid, the lock is poisoned,
-/// a buffered competitor is unparseable, or convergence fails.
-pub async fn converge_after_window(
-    mls_group_id: Vec<u8>,
-    nostr_group_id: Vec<u8>,
-    our_commit_json: String,
-    staged_epoch: u64,
-    intent: ConvergeIntentFfi,
-) -> Result<Option<ConvergeResultFfi>, String> {
-    // Engine-off short-circuits BEFORE parsing the intent, so a flag-race
-    // call cleanly falls back to the legacy path (Ok(None)) rather than
-    // surfacing an input-parse error.
-    let Some(core) = live_session_core()? else {
-        return Ok(None);
-    };
-    let core_intent = intent.to_core()?;
-    let group_id = GroupId::from_slice(&mls_group_id);
-    let result = core
-        .converge_after_window(
-            &group_id,
-            &nostr_group_id,
-            &our_commit_json,
-            staged_epoch,
-            &core_intent,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(Some(converge_result_to_ffi(result)))
-}
-
-/// Publish-failure / converge-error cleanup: clear any staged pending commit +
-/// close the window under the gate. Returns `false` if no engine is running.
-///
-/// # Errors
-///
-/// Returns an error only if the session lock is poisoned.
-pub async fn abort_converging_window(
-    mls_group_id: Vec<u8>,
-    nostr_group_id: Vec<u8>,
-) -> Result<bool, String> {
-    let Some(core) = live_session_core()? else {
-        return Ok(false);
-    };
-    let group_id = GroupId::from_slice(&mls_group_id);
-    core.abort_converging_window(&group_id, &nostr_group_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(true)
-}
-
 /// M8-4 subscription-health maintenance tick (Dart-timer-driven, no secret).
 ///
 /// Reads the `SESSION` global: with no live engine session it returns the inert
@@ -8989,162 +8460,45 @@ mod live_sync_ffi_tests {
     }
 }
 
-#[cfg(test)]
-mod send_path_ffi_tests {
-    use super::{
-        converge_result_to_ffi, ConvergeIntentFfi, ConvergeIntentKind, ConvergeResultKind,
-        StagedAddFfi, StagedCommitFfi,
-    };
-    use haven_core::circle::CommitConvergence;
-
-    #[test]
-    fn converge_result_maps_every_variant() {
-        let m = converge_result_to_ffi(CommitConvergence::Merged);
-        assert_eq!(m.kind, ConvergeResultKind::Merged);
-        assert!(!m.intent_still_pending);
-
-        let a = converge_result_to_ffi(CommitConvergence::AdoptedWinner {
-            intent_still_pending: true,
-        });
-        assert_eq!(a.kind, ConvergeResultKind::AdoptedWinner);
-        assert!(a.intent_still_pending);
-
-        let r = converge_result_to_ffi(CommitConvergence::RolledBack);
-        assert_eq!(r.kind, ConvergeResultKind::RolledBack);
-        assert!(!r.intent_still_pending);
-    }
-
-    #[test]
-    fn intent_none_ignores_pubkeys() {
-        let intent = ConvergeIntentFfi {
-            kind: ConvergeIntentKind::None,
-            pubkeys: vec!["garbage".to_string()], // not parsed for None
-        };
-        assert!(matches!(
-            intent.to_core(),
-            Ok(haven_core::circle::CommitIntent::None)
-        ));
-    }
-
-    #[test]
-    fn intent_remove_parses_pubkeys() {
-        let pk = nostr::Keys::generate().public_key().to_hex();
-        let intent = ConvergeIntentFfi {
-            kind: ConvergeIntentKind::Remove,
-            pubkeys: vec![pk],
-        };
-        match intent.to_core() {
-            Ok(haven_core::circle::CommitIntent::RemoveMembers(pks)) => assert_eq!(pks.len(), 1),
-            other => panic!("expected RemoveMembers, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn intent_add_rejects_invalid_pubkey() {
-        let intent = ConvergeIntentFfi {
-            kind: ConvergeIntentKind::Add,
-            pubkeys: vec!["not-a-pubkey".to_string()],
-        };
-        assert!(intent.to_core().is_err());
-    }
-
-    #[test]
-    fn intent_add_parses_an_npub_pubkey() {
-        // Regression: the member picker carries pubkeys as bech32 `npub`s, so the
-        // converging-Add intent MUST accept them. A hex-only parse rejected every
-        // Add intent before convergence ran — the deterministic flag-on
-        // converging-Add failure. The npub must round-trip to the SAME canonical
-        // hex the roster-driven Remove intent produces.
-        use nostr::prelude::ToBech32 as _;
-        let keys = nostr::Keys::generate();
-        let npub = keys.public_key().to_bech32().expect("npub");
-        let expected_hex = keys.public_key().to_hex();
-        let intent = ConvergeIntentFfi {
-            kind: ConvergeIntentKind::Add,
-            pubkeys: vec![npub],
-        };
-        match intent.to_core() {
-            Ok(haven_core::circle::CommitIntent::AddMembers(pks)) => {
-                assert_eq!(pks.len(), 1);
-                assert_eq!(pks[0].to_hex(), expected_hex);
-            }
-            other => panic!("expected AddMembers, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn intent_remove_still_parses_hex_pubkey() {
-        // The Remove path feeds canonical roster hex; `parse` must keep accepting
-        // it identically (uppercase or lowercase), so the hex→npub widening does
-        // not regress the converging-Remove that already works in CI.
-        let pk = nostr::Keys::generate().public_key();
-        let intent = ConvergeIntentFfi {
-            kind: ConvergeIntentKind::Remove,
-            pubkeys: vec![pk.to_hex()],
-        };
-        match intent.to_core() {
-            Ok(haven_core::circle::CommitIntent::RemoveMembers(pks)) => {
-                assert_eq!(pks.len(), 1);
-                assert_eq!(pks[0].to_hex(), pk.to_hex());
-            }
-            other => panic!("expected RemoveMembers, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn staged_debug_is_presence_only() {
-        // Security Rule 8: the commit JSON (whose `h` tag carries the group id)
-        // and welcome payloads must never render in Debug.
-        let c = StagedCommitFfi {
-            commit_json: "{\"h\":\"deadbeefdeadbeefdeadbeefdeadbeef\"}".to_string(),
-            staged_epoch: 7,
-        };
-        let dbg = format!("{c:?}");
-        assert!(
-            !dbg.contains("deadbeef"),
-            "commit json must be redacted: {dbg}"
-        );
-        assert!(dbg.contains("staged_epoch: 7"));
-
-        let a = StagedAddFfi {
-            commit_json: "secret-commit".to_string(),
-            staged_epoch: 3,
-            welcome_events: vec![],
-        };
-        let dbg = format!("{a:?}");
-        assert!(
-            !dbg.contains("secret-commit"),
-            "add commit json redacted: {dbg}"
-        );
-        assert!(dbg.contains("welcome_events_count: 0"));
-    }
-
-    #[test]
-    fn intent_debug_redacts_pubkeys_to_a_count() {
-        let pk = nostr::Keys::generate().public_key().to_hex();
-        let intent = ConvergeIntentFfi {
-            kind: ConvergeIntentKind::Remove,
-            pubkeys: vec![pk.clone()],
-        };
-        let dbg = format!("{intent:?}");
-        assert!(!dbg.contains(&pk), "pubkeys must not render: {dbg}");
-        assert!(dbg.contains("pubkeys_count: 1"));
-    }
-}
+// REMOVED (Dark Matter migration): `mod send_path_ffi_tests`. Its entire subject
+// — the Dart-side settle-window convergence + staged-commit send-path FFI
+// (`converge_result_to_ffi`, `ConvergeIntentFfi`/`ConvergeIntentKind`,
+// `ConvergeResultKind`, `StagedCommitFfi`/`StagedAddFfi`, and the core
+// `CommitConvergence`/`CommitIntent` they mapped) — was DELETED. Convergence is
+// now engine-owned (branch selection happens inside the MDK engine), and the
+// send path is publish-before-apply (`CommitToPublishFfi` +
+// `confirm_published`/`publish_failed`, Rule 13). There is no FFI-helper-level
+// conversion surface left to unit-test here; the publish-before-apply commit
+// lifecycle needs a live manager and is exercised by the live-sync e2e lanes.
 
 // ============================================================================
-// M8-2 KeyPackage maintenance — REAL-FFI end-to-end over MockRelay.
+// KeyPackage maintenance — REAL-FFI end-to-end over MockRelay (Dark Matter).
 //
 // Unlike `haven-core/tests/maintenance_per_relay_e2e_test.rs` (a hand-written
 // MIRROR that re-implements the probe → decide → publish logic itself), these
 // tests drive the ACTUAL FFI orchestration `RelayManagerFfi::maintain_key_package`
 // — which cannot be reached from `haven-core` because it lives here in
-// `rust_builder`. They construct a REAL `CircleManagerFfi` (real MDK + circles.db
-// on the in-memory keyring) and a REAL `RelayManagerFfi`, point them at an
-// in-process `MockRelay`, call the real `maintain_key_package`, and assert the
-// outcome against the relay's actual stored state. This closes the gap a prior
-// review flagged (TC-1/TC-2/TC-3/TC-7): the mirror can pass while the real glue
-// (probe → decide → `republish_key_package` → 443-GC → record) is broken.
+// `rust_builder`. They construct a REAL `CircleManagerFfi` (real Dark Matter
+// `session.sqlite` + `circles.db` on the in-memory keyring) and a REAL
+// `RelayManagerFfi`, point them at an in-process `MockRelay`, and assert the
+// outcome against the relay's actual stored state.
+//
+// Dark Matter migration note: the pre-migration setup helpers
+// `sign_key_package_event` + `record_published_key_packages` + the manual
+// `publish_event` twins (and the M8-2 dead-material "live gate") were DELETED —
+// `maintain_key_package` is now the ONE publish path (decide → reuse-or-mint →
+// publish OWN-relays-only → record), and presence is pure relay presence of the
+// tracked stable `d`. So each test now uses `maintain_key_package` itself as the
+// first-publish setup, then drives it again to assert the surviving invariants:
+//   * TC-1: a fresh mint reads AlreadyHealthy on the very next tick (idempotent
+//     when live + tracked; never a force-rotate) — re-expressed.
+//   * TC-3: per-relay presence isolation — a relay serving the tracked slot is
+//     left UNTOUCHED while a newly-added empty relay is republished-to — the
+//     surviving half of the partial-drop fix, re-expressed over the presence gate.
+// TC-2 (aged-out-dead-material → republish + kind-5 GC of the 443 twin) was
+// DELETED with its subject: the dead-material gate is gone and there is no more
+// 443 twin on the publish path (the legacy 443/10051 hygiene moved to the
+// one-time `retract_legacy_key_material` retraction cutover, not maintenance).
 //
 // Security: presence-only — no secret bytes, `d` slots, hash_refs, or group ids
 // are printed or asserted on; only event kinds, counts, action enums, and public
@@ -9157,7 +8511,7 @@ mod maintenance_real_ffi_tests {
         allow_ws_loopback_for_test, use_in_memory_keyring_for_test, CircleManagerFfi,
         KpMaintenanceActionFfi, RelayManagerFfi, RelayTypeFfi,
     };
-    use nostr::{EventBuilder, Keys, Kind, Tag};
+    use nostr::{Keys, Kind};
     use nostr_relay_builder::MockRelay;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
@@ -9228,34 +8582,23 @@ mod maintenance_real_ffi_tests {
         events.into_iter().collect()
     }
 
-    /// Seeds one signed event onto exactly `relay` via a bare client, so a
-    /// subsequent probe finds it there (mirrors the mirror test's helper).
-    async fn seed_event_on(relay: &str, event: &nostr::Event) {
-        let client = nostr_sdk::Client::builder().build();
-        client.add_relay(relay).await.expect("add relay");
-        client.connect().await;
-        client.send_event(event).await.expect("send event");
-        // Give the relay a moment to persist before a subsequent probe.
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        client.shutdown().await;
-    }
-
     // ------------------------------------------------------------------------
-    // TC-1 / TC-7: Login-tracked → AlreadyHealthy.
+    // TC-1 / TC-7: Live + tracked → AlreadyHealthy (idempotent, no force-rotate).
     //
-    // Drives: CircleManagerFfi::new, ::add_user_relay, ::sign_key_package_event,
-    //         ::record_published_key_packages, RelayManagerFfi::publish_event,
-    //         and the REAL RelayManagerFfi::maintain_key_package.
+    // Drives: CircleManagerFfi::new, ::add_user_relay, and the REAL
+    //         RelayManagerFfi::maintain_key_package (twice).
     //
-    // Proves the real FFI path honors the login-tracking fix: a freshly-signed,
-    // published, and recorded KeyPackage (built from LIVE MDK material) is read
-    // as healthy by the maintenance probe — it returns AlreadyHealthy and does
-    // NOT force-rotate the live login KP. A regression here (the bug the
-    // login-tracking fix closed) would misread the primary KP as dead and
-    // republish it every tick.
+    // Re-expressed (Dark Matter): the deleted manual setup
+    // (`sign_key_package_event` + `publish_event` twins +
+    // `record_published_key_packages`) is replaced by the FIRST
+    // `maintain_key_package` tick, which IS the publish path — a responding own
+    // relay serving nothing + no tracked slot mints a fresh KeyPackage and
+    // publishes it (RepublishedFreshD). The SECOND tick must then read the
+    // now-live, tracked KeyPackage as AlreadyHealthy and NOT force-rotate it. A
+    // regression (misreading the primary KP as dead) would republish every tick.
     // ------------------------------------------------------------------------
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn tc1_login_tracked_kp_is_already_healthy_via_real_ffi() {
+    async fn tc1_live_tracked_kp_is_already_healthy_via_real_ffi() {
         // Serialize with the M10 wipe tests + sibling tc* tests: they share the
         // fixed global keyring key-ids that `CircleManagerFfi::new` provisions.
         let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
@@ -9267,57 +8610,54 @@ mod maintenance_real_ffi_tests {
         let author = keys.public_key();
         let secret = secret_bytes(&keys);
 
-        // REAL manager (real MDK + circles.db) + REAL relay manager.
+        // REAL manager (real Dark Matter session + circles.db) + REAL relay mgr.
         let dir = DataDir::new("healthy");
-        let circle = CircleManagerFfi::new(dir.as_str()).expect("CircleManagerFfi::new");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
         let relay_mgr = RelayManagerFfi::new_instance()
             .await
             .expect("RelayManagerFfi::new_instance");
 
-        // The MockRelay is the user's ONLY own KeyPackage relay. A fresh manager
-        // seeds no defaults, so this is the entire own-relay probe/publish set —
-        // no real network is ever touched.
+        // The MockRelay is the user's ONLY own NIP-65 (KeyPackage-discovery)
+        // relay. A fresh manager seeds no defaults, so this is the entire
+        // own-relay probe/publish set — no real network is ever touched.
         circle
-            .add_user_relay(url.clone(), RelayTypeFfi::KeyPackage)
+            .add_user_relay(url.clone(), RelayTypeFfi::Nip65)
             .await
-            .expect("register own KeyPackage relay");
+            .expect("register own NIP-65 relay");
 
-        // REAL login/publish flow: sign a genuine KeyPackage from live MDK
-        // material, publish both twins to the relay, then record them (this is
-        // exactly what the login/onboarding path does — the tracking rows are
-        // what let the live-material gate see the KP as live).
-        let signed = circle
-            .sign_key_package_event(secret.clone(), vec![url.clone()])
-            .await
-            .expect("sign_key_package_event");
-        relay_mgr
-            .publish_event(signed.event_json.clone(), vec![url.clone()])
-            .await
-            .expect("publish canonical 30443");
-        relay_mgr
-            .publish_event(signed.legacy_event_json.clone(), vec![url.clone()])
-            .await
-            .expect("publish legacy 443");
-        circle
-            .record_published_key_packages(
-                signed.canonical_hash_ref.clone(),
-                signed.d_tag.clone(),
-                signed.canonical_event_id.clone(),
-                signed.legacy_event_id.clone(),
-            )
-            .await
-            .expect("record published KeyPackages");
-        // Let the relay persist before the maintenance probe reads it back.
+        // FIRST tick = the real first-publish path (replaces the deleted manual
+        // sign/publish/record): mint a fresh KeyPackage into a new slot and
+        // publish it to the own relay.
+        let first = circle_maintain(&relay_mgr, &circle, secret.clone()).await;
+        assert_eq!(
+            first.action,
+            KpMaintenanceActionFfi::RepublishedFreshD,
+            "the first tick on an empty own relay must mint + publish a fresh slot"
+        );
+        // Let the relay persist before the second probe reads it back.
         tokio::time::sleep(Duration::from_millis(250)).await;
 
-        // DRIVE THE REAL FFI: probe → live-material gate → decide.
-        let outcome = circle_maintain(&relay_mgr, &circle, secret).await;
+        // Capture the published canonical id so we can prove it stays UNTOUCHED.
+        let after_first = fetch_by_kind(author, Kind::Custom(30443), &url).await;
+        assert_eq!(
+            after_first.len(),
+            1,
+            "exactly one canonical 30443 must be on the relay after first publish"
+        );
+        let original_id = after_first
+            .first()
+            .expect("one canonical present")
+            .id
+            .to_hex();
 
-        // The live login KP must read healthy — no rotation.
+        // SECOND tick: DRIVE THE REAL FFI again. The live, tracked KP must read
+        // healthy — no rotation.
+        let outcome = circle_maintain(&relay_mgr, &circle, secret).await;
         assert_eq!(
             outcome.action,
             KpMaintenanceActionFfi::AlreadyHealthy,
-            "a live, tracked login KeyPackage must be AlreadyHealthy, not rotated"
+            "a live, tracked KeyPackage must be AlreadyHealthy, not rotated"
         );
         assert_eq!(
             outcome.relays_healed, 0,
@@ -9336,9 +8676,7 @@ mod maintenance_real_ffi_tests {
         // did not publish a rival 30443 over the healthy one.
         let on_relay = fetch_by_kind(author, Kind::Custom(30443), &url).await;
         assert!(
-            on_relay
-                .iter()
-                .any(|e| e.id.to_hex() == signed.canonical_event_id),
+            on_relay.iter().any(|e| e.id.to_hex() == original_id),
             "the original tracked canonical must still be on the relay untouched"
         );
         // No deletion (kind 5) is ever published on the healthy path.
@@ -9351,225 +8689,89 @@ mod maintenance_real_ffi_tests {
         relay.shutdown();
     }
 
+    // REMOVED (Dark Matter migration): `tc2_stale_relay_republishes_and_gcs_legacy_twin_via_real_ffi`.
+    // Its subject — the M8-2 aged-out "dead-material" live gate forcing a
+    // Republish plus a self-authored kind-5 NIP-09 GC of the superseded legacy
+    // 443 twin — no longer exists in production: presence is now pure relay
+    // presence of the tracked stable `d` (there is no live-material verdict), and
+    // `maintain_key_package` publishes ONLY the addressable kind-30443 (no 443
+    // twin, so nothing to GC on the publish path). The legacy 443/10051 hygiene
+    // moved to the one-time `retract_legacy_key_material` retraction cutover, not
+    // per-tick maintenance. Its dead-material state was fabricated via the deleted
+    // `record_published_key_packages` seam, which no longer exists. The surviving
+    // "republish into the SAME stable `d`, leaving healthy relays untouched"
+    // invariant is retained by the re-expressed per-relay isolation test below.
+
     // ------------------------------------------------------------------------
-    // TC-2 / TC-3: Stale relay → Republish + 443-twin GC (real FFI).
+    // TC-3: Per-relay presence isolation — one relay already serving the tracked
+    // slot + one freshly-added empty relay.
     //
-    // Drives the REAL maintain_key_package → republish_key_package glue: a
-    // stored stable `d` plus an on-relay canonical whose tracked material reads
-    // DEAD (not live) makes the relay a heal target. The FFI must:
-    //   * build a FRESH KeyPackage from real MDK into the SAME stable `d`,
-    //   * publish the new 30443 + 443 to the relay, and
-    //   * publish a self-authored NIP-09 kind-5 deletion of the PRIOR 443 twin
-    //     (never of the addressable 30443).
-    // We assert all three against the relay's actual stored events.
+    // Drives the REAL maintain_key_package across TWO own relays. The relay that
+    // already serves the tracked stable `d` (published on the first tick) must be
+    // left UNTOUCHED (RepublishedStableD targets only the drop), while only the
+    // newly-added empty relay is republished-to. This is the surviving half of
+    // the headline partial-drop fix, exercised through the real FFI over the Dark
+    // Matter presence gate. Re-expressed: a relay added AFTER the first publish
+    // stands in for a per-relay drop, since the deleted `record_published_key_packages`
+    // seam can no longer fabricate a dead-material state.
     // ------------------------------------------------------------------------
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn tc2_stale_relay_republishes_and_gcs_legacy_twin_via_real_ffi() {
-        // Serialize with the M10 wipe tests + sibling tc* tests: they share the
-        // fixed global keyring key-ids that `CircleManagerFfi::new` provisions.
-        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
-        install_test_seams();
-        let relay = MockRelay::run().await.expect("start MockRelay");
-        let url = relay.url().await.to_string();
-
-        let keys = Keys::generate();
-        let author = keys.public_key();
-        let secret = secret_bytes(&keys);
-
-        let dir = DataDir::new("stale");
-        let circle = CircleManagerFfi::new(dir.as_str()).expect("CircleManagerFfi::new");
-        let relay_mgr = RelayManagerFfi::new_instance()
-            .await
-            .expect("RelayManagerFfi::new_instance");
-        circle
-            .add_user_relay(url.clone(), RelayTypeFfi::KeyPackage)
-            .await
-            .expect("register own KeyPackage relay");
-
-        // Establish a STALE prior state that a real login would leave behind but
-        // whose material has since aged out (consumed + pruned): a canonical
-        // 30443 in a stable `d`, tracked under a hash_ref that is NOT live MDK
-        // material (so the live gate reads DEAD), plus a prior legacy 443 twin
-        // to be GC'd. We seed the on-relay events with a bare client and record
-        // the matching tracking rows via the REAL FFI recorder — exactly the
-        // rows a prior publish cycle would have written.
-        let stable_d = "stale-stable-slot";
-        let dead_30443 = EventBuilder::new(Kind::Custom(30443), "aged-out-canonical")
-            .tags([Tag::parse(["d", stable_d]).unwrap()])
-            .sign_with_keys(&keys)
-            .unwrap();
-        let old_443 = EventBuilder::new(Kind::Custom(443), "aged-out-legacy-twin")
-            .sign_with_keys(&keys)
-            .unwrap();
-        seed_event_on(&url, &dead_30443).await;
-        seed_event_on(&url, &old_443).await;
-
-        // Record the tracking rows. The canonical row carries a DEAD hash_ref
-        // (a byte pattern that is not live MDK material) so `has_live_key_material`
-        // reads false → the relay is a confirmed heal target. `d_tag` gives the
-        // decision a stored stable slot → Republish (not SeedD).
-        circle
-            .record_published_key_packages(
-                vec![0xDE, 0xAD, 0xBE, 0xEF], // dead correlator (never live MDK)
-                stable_d.to_string(),
-                dead_30443.id.to_hex(),
-                old_443.id.to_hex(),
-            )
-            .await
-            .expect("record stale tracking rows");
-        tokio::time::sleep(Duration::from_millis(250)).await;
-
-        // DRIVE THE REAL FFI: probe → dead gate → Republish + 443-GC.
-        let outcome = circle_maintain(&relay_mgr, &circle, secret).await;
-
-        // The stale relay was healed by a republish into the SAME stable slot.
-        assert_eq!(
-            outcome.action,
-            KpMaintenanceActionFfi::RepublishedStableD,
-            "a stored `d` + dead on-relay material must republish the stable slot"
-        );
-        assert_eq!(
-            outcome.relays_healed, 1,
-            "the single stale relay must be healed"
-        );
-
-        // Give the FFI's publishes time to land, then read the relay's state.
-        tokio::time::sleep(Duration::from_millis(400)).await;
-
-        // 1) A NEW canonical 30443 in the SAME `d` now exists (real MDK material,
-        //    a distinct event id from the seeded dead one).
-        let canon = fetch_by_kind(author, Kind::Custom(30443), &url).await;
-        let fresh_canon: Vec<&nostr::Event> = canon
-            .iter()
-            .filter(|e| e.id != dead_30443.id && kp_d_tag(e).as_deref() == Some(stable_d))
-            .collect();
-        assert!(
-            !fresh_canon.is_empty(),
-            "a freshly-republished 30443 in the stable `d` must be on the relay"
-        );
-
-        // 2) THE GC: a self-authored kind-5 deletion referencing the OLD 443
-        //    twin id — and NEVER the addressable 30443 (which self-supersedes).
-        //    The deletion is id-only (`e`-tag, no `a`-coordinate); its effect on
-        //    relay state is asserted in (3) below.
-        let deletions = fetch_by_kind(author, Kind::EventDeletion, &url).await;
-        let references = |d: &nostr::Event, target_hex: &str| {
-            d.tags.iter().any(|t| {
-                let s = t.as_slice();
-                s.len() >= 2 && s[0] == "e" && s[1] == target_hex
-            })
-        };
-        assert!(
-            deletions
-                .iter()
-                .any(|d| references(d, &old_443.id.to_hex())),
-            "the FFI must publish a NIP-09 deletion of the superseded 443 twin"
-        );
-        assert!(
-            !deletions
-                .iter()
-                .any(|d| references(d, &dead_30443.id.to_hex())),
-            "the deletion must NEVER target the addressable canonical 30443"
-        );
-
-        // 3) POST-GC RELAY STATE (regression guard for the e-tag-only twin GC):
-        //    nostr-database (MockRelay's store) DOES honor NIP-09 tombstoning.
-        //    An id-only deletion tombstones EXACTLY the old twin, so the relay
-        //    now serves the FRESH 443 twin (a distinct id) and no longer the OLD
-        //    one. If the GC ever regressed to the invalid `443:<pubkey>:`
-        //    coordinate form, the store would delete every kind-443 with
-        //    `created_at <= deletion` — INCLUDING the fresh twin — and the second
-        //    assertion below would fail.
-        let twins_443 = fetch_by_kind(author, Kind::Custom(443), &url).await;
-        assert!(
-            !twins_443.iter().any(|e| e.id == old_443.id),
-            "the superseded 443 twin must be tombstoned by the id-only deletion"
-        );
-        assert!(
-            twins_443.iter().any(|e| e.id != old_443.id),
-            "a freshly-republished 443 twin must SURVIVE the id-only GC (an \
-             `a`-coordinate deletion would wrongly nuke it too)"
-        );
-
-        relay.shutdown();
-    }
-
-    // ------------------------------------------------------------------------
-    // TC-3: Per-relay isolation — one healthy own relay + one stale own relay.
-    //
-    // Drives the REAL maintain_key_package across TWO own relays. The healthy
-    // relay (serving a live, tracked canonical) must be left UNTOUCHED, while
-    // only the stale relay (dead material) is republished to. This is the
-    // headline partial-drop fix exercised through the real FFI, not a mirror:
-    // republish must target the stale relay only.
-    // ------------------------------------------------------------------------
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn tc3_per_relay_isolation_heals_only_stale_relay_via_real_ffi() {
+    async fn tc3_per_relay_isolation_heals_only_empty_relay_via_real_ffi() {
         // Serialize with the M10 wipe tests + sibling tc* tests: they share the
         // fixed global keyring key-ids that `CircleManagerFfi::new` provisions.
         let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
         install_test_seams();
         let relay_live = MockRelay::run().await.expect("start live MockRelay");
-        let relay_stale = MockRelay::run().await.expect("start stale MockRelay");
+        let relay_empty = MockRelay::run().await.expect("start empty MockRelay");
         let url_live = relay_live.url().await.to_string();
-        let url_stale = relay_stale.url().await.to_string();
+        let url_empty = relay_empty.url().await.to_string();
 
         let keys = Keys::generate();
         let author = keys.public_key();
         let secret = secret_bytes(&keys);
 
         let dir = DataDir::new("isolation");
-        let circle = CircleManagerFfi::new(dir.as_str()).expect("CircleManagerFfi::new");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
         let relay_mgr = RelayManagerFfi::new_instance()
             .await
             .expect("RelayManagerFfi::new_instance");
+
+        // Only the LIVE relay is configured for the first publish, so the tracked
+        // canonical lands ONLY there (the empty relay is not yet in the own set).
         circle
-            .add_user_relay(url_live.clone(), RelayTypeFfi::KeyPackage)
+            .add_user_relay(url_live.clone(), RelayTypeFfi::Nip65)
             .await
             .expect("register live own relay");
-        circle
-            .add_user_relay(url_stale.clone(), RelayTypeFfi::KeyPackage)
-            .await
-            .expect("register stale own relay");
-
-        // LIVE relay: a genuine login KP, published + recorded (live material).
-        let signed = circle
-            .sign_key_package_event(secret.clone(), vec![url_live.clone(), url_stale.clone()])
-            .await
-            .expect("sign_key_package_event");
-        relay_mgr
-            .publish_event(signed.event_json.clone(), vec![url_live.clone()])
-            .await
-            .expect("publish canonical to live relay");
-        relay_mgr
-            .publish_event(signed.legacy_event_json.clone(), vec![url_live.clone()])
-            .await
-            .expect("publish legacy to live relay");
-        circle
-            .record_published_key_packages(
-                signed.canonical_hash_ref.clone(),
-                signed.d_tag.clone(),
-                signed.canonical_event_id.clone(),
-                signed.legacy_event_id.clone(),
-            )
-            .await
-            .expect("record live KP");
-
-        // STALE relay: the SAME stable slot exists there but its on-relay event
-        // is a DIFFERENT id whose material is NOT tracked-live → reads dead → a
-        // confirmed drop only on this relay. (The tracked live id lives on the
-        // live relay; the stale relay serves an untracked twin under the same
-        // `d`.) This models the exact partial-drop the fix heals.
-        let stale_untracked = EventBuilder::new(Kind::Custom(30443), "stale-untracked-canonical")
-            .tags([Tag::parse(["d", signed.d_tag.as_str()]).unwrap()])
-            .sign_with_keys(&keys)
-            .unwrap();
-        seed_event_on(&url_stale, &stale_untracked).await;
+        let first = circle_maintain(&relay_mgr, &circle, secret.clone()).await;
+        assert_eq!(
+            first.action,
+            KpMaintenanceActionFfi::RepublishedFreshD,
+            "the first tick must mint + publish the tracked slot to the live relay"
+        );
         tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // Capture the live relay's canonical (id + stable `d`): it must stay
+        // untouched, and its `d` is the slot the healed relay must receive.
+        let on_live_before = fetch_by_kind(author, Kind::Custom(30443), &url_live).await;
+        assert_eq!(
+            on_live_before.len(),
+            1,
+            "the live relay must serve exactly the one first-published canonical"
+        );
+        let live_canonical = on_live_before.first().expect("one canonical present");
+        let live_id = live_canonical.id.to_hex();
+        let stable_d = kp_d_tag(live_canonical).expect("published canonical carries a `d`");
+
+        // Now add a SECOND own relay that serves NOTHING — a per-relay drop under
+        // the presence gate (tracked slot present on `live`, absent on `empty`).
+        circle
+            .add_user_relay(url_empty.clone(), RelayTypeFfi::Nip65)
+            .await
+            .expect("register empty own relay");
 
         // DRIVE THE REAL FFI across both relays.
         let outcome = circle_maintain(&relay_mgr, &circle, secret).await;
-
         assert_eq!(
             outcome.responders_probed, 2,
             "both own relays must have responded"
@@ -9577,46 +8779,40 @@ mod maintenance_real_ffi_tests {
         assert_eq!(
             outcome.action,
             KpMaintenanceActionFfi::RepublishedStableD,
-            "the partial drop must trigger a stable-slot republish"
+            "the per-relay drop must trigger a stable-slot republish"
         );
         assert_eq!(
             outcome.relays_healed, 1,
-            "exactly the ONE stale relay must be healed (per-relay isolation)"
+            "exactly the ONE empty relay must be healed (per-relay isolation)"
         );
 
         tokio::time::sleep(Duration::from_millis(400)).await;
 
-        // The LIVE relay must STILL serve its original tracked canonical, and
-        // NOT a rival republished id (it was already healthy → skipped).
+        // The LIVE relay must STILL serve its original canonical, and NOT a rival
+        // republished id (it was already healthy → skipped).
         let on_live = fetch_by_kind(author, Kind::Custom(30443), &url_live).await;
         assert!(
-            on_live
-                .iter()
-                .any(|e| e.id.to_hex() == signed.canonical_event_id),
+            on_live.iter().any(|e| e.id.to_hex() == live_id),
             "the healthy relay must retain its original canonical"
         );
         assert!(
             !on_live.iter().any(|e| {
-                e.id.to_hex() != signed.canonical_event_id
-                    && kp_d_tag(e).as_deref() == Some(signed.d_tag.as_str())
+                e.id.to_hex() != live_id && kp_d_tag(e).as_deref() == Some(stable_d.as_str())
             }),
             "no rival same-`d` canonical may be published to the already-healthy relay"
         );
 
-        // The STALE relay must now serve a FRESH canonical in the same `d`
-        // (distinct from both the untracked seed and the live relay's id).
-        let on_stale = fetch_by_kind(author, Kind::Custom(30443), &url_stale).await;
+        // The EMPTY relay must now serve a canonical in the SAME stable `d`.
+        let on_empty = fetch_by_kind(author, Kind::Custom(30443), &url_empty).await;
         assert!(
-            on_stale.iter().any(|e| {
-                e.id != stale_untracked.id
-                    && e.id.to_hex() != signed.canonical_event_id
-                    && kp_d_tag(e).as_deref() == Some(signed.d_tag.as_str())
-            }),
-            "the stale relay must receive a freshly-republished same-`d` canonical"
+            on_empty
+                .iter()
+                .any(|e| kp_d_tag(e).as_deref() == Some(stable_d.as_str())),
+            "the healed relay must receive a republished same-`d` canonical"
         );
 
         relay_live.shutdown();
-        relay_stale.shutdown();
+        relay_empty.shutdown();
     }
 
     /// Thin wrapper so each test reads as one call to the REAL FFI under test.

@@ -714,163 +714,93 @@ class LocationSharingService {
       }
 
       try {
-        final result = await _circleService.decryptLocation(
+        // The Dark Matter engine owns publish-before-apply for every SEND-side
+        // commit internally, so a decrypt/ingest never hands back an outbound
+        // event for those. The ONE exception is a receive-side auto-commit (a
+        // peer `SelfRemove` eviction a remaining member's engine decided to
+        // auto-commit): this poll path owns no Rust-side relay handle, so
+        // `decryptLocationCollectingCommits` surfaces it instead of rolling it
+        // back, and `_publishAutoCommits` below runs the publish-then-confirm
+        // dance (Rule 13 / security F13). A single outer event can still yield
+        // SEVERAL folded results (the engine may release buffered inbound
+        // after this one), so iterate the list.
+        final outcome = await _circleService.decryptLocationCollectingCommits(
           eventJson: eventJson,
         );
-        if (result == null) {
-          decryptNull++;
-          // Per-event reason emitted by [FFI decrypt] log (Unprocessable
-          // vs PreviouslyFailed); this Dart-side line gives the high-level
-          // category. Do NOT mark seen. Unprocessable / PreviouslyFailed
-          // may succeed on a later fetch once the group state catches up
-          // (e.g., the commit that advances the epoch arrives in a
-          // subsequent batch).
-          debugPrint('[LocationService] evt=$evtTag → null');
-          continue;
-        }
-
-        // Track MLS group state changes (commits, proposals).
-        if (result.groupUpdated) {
-          groupUpdated = true;
-          final autoCommit = result.evolutionEventJson != null;
-          debugPrint(
-            '[LocationService] evt=$evtTag → group_update '
-            '(auto_commit=$autoCommit)',
+        if (outcome.autoCommits.isNotEmpty) {
+          await _publishAutoCommits(
+            autoCommits: outcome.autoCommits,
+            circle: circle,
           );
         }
 
-        // Receiver-side auto-commit publish: when MDK's
-        // `auto_commit_proposal` stages a pending commit in response to
-        // an incoming proposal (most commonly a departing member's
-        // `SelfRemove`), the decrypt FFI returns the outbound
-        // `kind:445` evolution event. The remaining members owe the
-        // group two things: publishing the event so everyone converges
-        // on the same epoch, and locally merging via
-        // `finalize_pending_commit` so this member's own MDK advances.
-        // If the publish fails, roll back via `clear_pending_commit`
-        // to avoid a dangling local commit that would brick future
-        // message decryption. Errors are swallowed to `debugPrint`
-        // because this path already races on relay connectivity — a
-        // later fetch will drive retry when we see the proposal again.
-        final evolutionEventJson = result.evolutionEventJson;
-        final evolutionMlsGroupId = result.evolutionMlsGroupId;
-        // When the decrypted event triggers an outbound evolution
-        // commit but the publish fails, we clear the pending commit
-        // and keep the event ID *un-seen* so the next fetch can drive
-        // a retry. Mirrors whitenoise-rs's behaviour of not advancing
-        // `last_synced_at` on Unprocessable / PreviouslyFailed results.
-        var evolutionPublishFailed = false;
-        if (evolutionEventJson != null && evolutionMlsGroupId != null) {
-          var publishSucceeded = false;
-          try {
-            publishSucceeded = await _circleService.publishEvolutionEvent(
-              eventJson: evolutionEventJson,
-              relays: circle.relays,
-              label: '[LocationService] receiver-side commit',
-            );
-          } on Object catch (e) {
-            // Pre-redacted by Rust FFI; safe for developer logs. The
-            // detail matters: this is the upstream path that, when it
-            // fails silently and clearPendingCommit also fails below,
-            // leaves a stale pending commit that later blocks operations
-            // like `propose_leave` (manager.rs pre-clear is the downstream
-            // safety net).
-            debugPrint(
-              '[LocationService] receiver-side commit publish failed: '
-              '${e.runtimeType}',
-            );
-          }
-          if (publishSucceeded) {
-            try {
-              await _circleService.finalizePendingCommit(evolutionMlsGroupId);
-              debugPrint(
-                '[LocationService] receiver-side commit finalized locally',
-              );
-              await _evictDepartedMembers(
-                evolutionMlsGroupId: evolutionMlsGroupId,
-                circle: circle,
-                circleKey: circleKey,
-                cache: cache,
-              );
-            } on Object catch (e) {
-              debugPrint(
-                '[LocationService] finalizePendingCommit failed: '
-                '${e.runtimeType}',
-              );
-            }
-          } else {
-            evolutionPublishFailed = true;
-            try {
-              await _circleService.clearPendingCommit(evolutionMlsGroupId);
-              debugPrint(
-                '[LocationService] receiver-side commit cleared after '
-                'publish failure',
-              );
-            } on Object catch (e) {
-              // If this also fails, a stale pending commit will persist
-              // across sessions and surface later as "pending commit
-              // exists" on the next `propose_leave` / `remove_members` /
-              // `self_update`.
-              debugPrint(
-                '[LocationService] clearPendingCommit failed: '
-                '${e.runtimeType}',
-              );
-            }
-          }
+        final results = outcome.results;
+        if (results.isEmpty) {
+          decryptNull++;
+          debugPrint('[LocationService] evt=$evtTag → empty');
+          continue;
         }
 
-        // Decrypt + any required evolution publish/merge succeeded —
-        // mark seen so the next fetch skips this event. If publish
-        // failed above we intentionally leave the ID un-seen so the
-        // retry can happen on the next cycle.
-        if (eventId != null && !evolutionPublishFailed) {
+        // Fully processed (the engine ingested it, regardless of how many —
+        // if any — folded results it yielded) — mark seen so the next fetch
+        // skips this event, and let the cursor advance past it.
+        if (eventId != null) {
           _seenEventIds.add(eventId);
           _enforceSeenEventIdsCap();
-          // Fully processed — eligible to move the persisted cursor forward.
-          // `timestamps[idx]` is this event's `created_at` (seconds; 0 if
-          // unparseable, which never advances the cursor).
           final ts = timestamps[idx];
           if (ts > maxSeenCreatedAtSecs) {
             maxSeenCreatedAtSecs = ts;
           }
         }
 
-        final decrypted = result.location;
-        if (decrypted == null) {
-          // Group update with no location payload, OR a successfully
-          // decrypted application message whose content is not a location
-          // (e.g. a legacy `haven-avatar-*` chunk from a pre-migration
-          // client). Either way the event was already marked seen above —
-          // a parse failure is never a decrypt failure (plan D8 / protocol
-          // review 4.3) — so there is nothing further to do here.
-          continue;
+        for (final result in results) {
+          switch (result.kind) {
+            case LocationEventKind.joined:
+            case LocationEventKind.groupUpdate:
+            case LocationEventKind.invalidated:
+              groupUpdated = true;
+              debugPrint(
+                '[LocationService] evt=$evtTag → ${result.kind.name}',
+              );
+            case LocationEventKind.unrecoverable:
+              groupUpdated = true;
+              debugPrint(
+                '[LocationService] evt=$evtTag → unrecoverable '
+                '(circle blocked)',
+              );
+            case LocationEventKind.location:
+              final decrypted = result.location;
+              if (decrypted == null) {
+                // Decrypted but the inner content did not parse as a
+                // location (e.g. a legacy `haven-avatar-*` chunk from a
+                // pre-migration client) — not a decrypt failure (plan D8).
+                continue;
+              }
+              // Skip echoed self-broadcasts: never persist our own location
+              // to the local last-known store, and never surface it on the
+              // map as a peer marker. Lowercase compare is defensive.
+              final senderPrefix = _evtTag(decrypted.senderPubkey);
+              if (ownPubkeyHex != null &&
+                  decrypted.senderPubkey.toLowerCase() == ownPubkeyHex) {
+                debugPrint(
+                  '[LocationService] evt=$evtTag → location '
+                  '(self-echo, dropped)',
+                );
+                continue;
+              }
+              debugPrint(
+                '[LocationService] evt=$evtTag → location '
+                '(sender=$senderPrefix)',
+              );
+              newEvents++;
+              await _persistDecryptedLocation(
+                circle: circle,
+                circleKey: circleKey,
+                decrypted: decrypted,
+                ownPubkeyHex: ownPubkeyHex,
+              );
+          }
         }
-
-        // Skip echoed self-broadcasts: never persist our own location to
-        // the local last-known store, and never surface it on the map as
-        // a peer marker. The live user pin is rendered from the fresh
-        // device GPS stream elsewhere in the UI. Lowercase compare is
-        // defensive — the FFI already normalises, but we do not want a
-        // stray uppercase hex anywhere in the pipeline to break this.
-        final senderPrefix = _evtTag(decrypted.senderPubkey);
-        if (ownPubkeyHex != null &&
-            decrypted.senderPubkey.toLowerCase() == ownPubkeyHex) {
-          debugPrint(
-            '[LocationService] evt=$evtTag → location (self-echo, dropped)',
-          );
-          continue;
-        }
-        debugPrint(
-          '[LocationService] evt=$evtTag → location (sender=$senderPrefix)',
-        );
-        newEvents++;
-
-        await _persistDecryptedLocation(
-          circle: circle,
-          circleKey: circleKey,
-          decrypted: decrypted,
-          ownPubkeyHex: ownPubkeyHex,
-        );
       } on Object catch (e) {
         decryptFailed++;
         debugPrint('[LocationService] Decrypt failed: ${e.runtimeType}');
@@ -906,6 +836,19 @@ class LocationSharingService {
       }
     }
 
+    // A roster-changing result (joined / groupUpdate / invalidated) means the
+    // engine already applied the change internally by the time decrypt
+    // returned, so `getMembers` now reflects the post-change roster — prune
+    // any cached pin for a member who is no longer present.
+    if (groupUpdated) {
+      await _evictDepartedMembers(
+        evolutionMlsGroupId: circle.mlsGroupId,
+        circle: circle,
+        circleKey: circleKey,
+        cache: cache,
+      );
+    }
+
     // Evict entries whose `expiresAt` is more than [cacheEvictionGrace]
     // in the past. Entries that are merely `isExpired` are retained so
     // the UI can surface them as "last known" markers (rendered
@@ -923,6 +866,116 @@ class LocationSharingService {
       locations: cache.values.toList(),
       groupUpdated: groupUpdated,
     );
+  }
+
+  // ============== Receive-side auto-commit publish (Rule 13) ==============
+  //
+  // `decryptLocationCollectingCommits` surfaces a peer `SelfRemove` eviction
+  // a remaining member's engine auto-staged during ingest, instead of the
+  // engine rolling it back — because the FOREGROUND POLL path (this file)
+  // owns a relay handle (`_relayService`) but the Rust `CircleManagerFfi`
+  // does not. Live-sync and background-catch-up already publish these
+  // in-Rust via `haven_core::relay::auto_commit::resolve_receive_publish_work`
+  // and never surface an auto-commit here; THIS is the Dart mirror of that
+  // exact function for the one receive plane it cannot reach. One publish
+  // attempt per entry (no retry/backoff, matching the Rust reference
+  // one-for-one): confirm on a ≥1-relay OK-ack, else roll back — NEVER
+  // confirm before an ack, NEVER drop an entry silently (either would
+  // re-fork or re-open the group the leaver departed). An unconfirmed
+  // commit is NOT lost: the underlying `SelfRemove` proposal stays buffered
+  // in the engine, so the NEXT poll tick (or the background catch-up sweep)
+  // re-surfaces a fresh jittered auto-commit attempt — that recurring cadence
+  // is this path's retry, exactly as it is for the live-sync / catch-up
+  // planes.
+
+  /// Publishes every [autoCommits] entry surfaced for [circle], resolving
+  /// the circle's CURRENT relays fresh (mirrors `removeMember` /
+  /// `updateCircleRelays`, which re-read `circle.relays` from the manager
+  /// rather than trust a possibly-stale caller-held snapshot — a relay
+  /// rotation could have landed between this poll cycle's hydration and this
+  /// decrypt). Best-effort per entry: a failure is logged, never thrown, so
+  /// one bad auto-commit cannot abort the rest of the decrypt/persist loop.
+  Future<void> _publishAutoCommits({
+    required List<PendingAutoCommit> autoCommits,
+    required Circle circle,
+  }) async {
+    List<String> relays;
+    try {
+      final fresh = await _circleService.getCircle(circle.mlsGroupId);
+      relays = (fresh == null || fresh.relays.isEmpty)
+          ? circle.relays
+          : fresh.relays;
+    } on Object catch (e) {
+      debugPrint(
+        '[LocationService] auto-commit relay lookup failed: '
+        '${e.runtimeType}',
+      );
+      relays = circle.relays;
+    }
+
+    for (final commit in autoCommits) {
+      if (relays.isEmpty) {
+        debugPrint(
+          '[LocationService] auto-commit: no relays available — '
+          'rolling back',
+        );
+        try {
+          await _circleService.failPendingCommit(commit.pendingToken);
+        } on Object catch (e) {
+          debugPrint(
+            '[LocationService] auto-commit rollback failed: '
+            '${e.runtimeType}',
+          );
+        }
+        continue;
+      }
+      await _publishAndConfirmAutoCommit(commit: commit, relays: relays);
+    }
+  }
+
+  /// Publishes one [PendingAutoCommit]'s event to [relays] — ONE attempt,
+  /// mirroring `haven_core::relay::auto_commit::resolve_receive_publish_work`
+  /// (the live-sync / catch-up planes' own receive-side auto-commit
+  /// publisher) rather than the send-side retry/backoff loop used by
+  /// one-shot admin actions (`removeMember` / `updateCircleRelays`) — this
+  /// path already recurs on its own poll cadence, which is its retry.
+  /// Confirms on a ≥1-relay OK-ack, else rolls back. Never throws — a
+  /// publish or confirm/rollback failure is logged and swallowed so it
+  /// cannot abort the surrounding decrypt/persist loop.
+  Future<void> _publishAndConfirmAutoCommit({
+    required PendingAutoCommit commit,
+    required List<String> relays,
+  }) async {
+    var published = false;
+    try {
+      final result = await _relayService.publishEvent(
+        eventJson: commit.commitEventJson,
+        relays: relays,
+      );
+      published = result.acceptedBy.isNotEmpty;
+      if (!published) {
+        debugPrint(
+          '[LocationService] auto-commit publish rejected by all relays',
+        );
+      }
+    } on Object catch (e) {
+      debugPrint(
+        '[LocationService] auto-commit publish failed: ${e.runtimeType}',
+      );
+    }
+
+    try {
+      if (published) {
+        await _circleService.confirmPendingCommit(commit.pendingToken);
+      } else {
+        await _circleService.failPendingCommit(commit.pendingToken);
+      }
+    } on Object catch (e) {
+      debugPrint(
+        '[LocationService] auto-commit '
+        '${published ? "confirm" : "rollback"} failed: ${e.runtimeType}',
+      );
+    }
   }
 
   // ============== Live-sync stream ingest (M6-3) ==============
@@ -1009,13 +1062,13 @@ class LocationSharingService {
   final Map<String, List<int>> _pendingEvictionRetries = {};
 
   /// Evicts cache and persistent last-known-location entries for members
-  /// who are no longer in the MLS group after a finalized commit.
+  /// who are no longer in the MLS group after a roster-changing result.
   ///
-  /// Called immediately after [CircleService.finalizePendingCommit] succeeds.
-  /// At that point MDK has advanced the local epoch, so
-  /// [CircleService.getMembers] reflects the post-commit roster. Any pubkey
-  /// present in [cache] but absent
-  /// from that roster is a departed member whose stale pin must be removed.
+  /// Called once a `joined` / `groupUpdate` / `invalidated` result comes back
+  /// from a decrypt — by then the engine has already applied the change
+  /// internally, so [CircleService.getMembers] reflects the post-change
+  /// roster. Any pubkey present in [cache] but absent from that roster is a
+  /// departed member whose stale pin must be removed.
   ///
   /// Both the in-memory [cache] and the persistent last-known-location store
   /// are pruned. Errors from the persistent prune are swallowed to
@@ -1304,9 +1357,11 @@ class LocationSharingService {
           continue;
         }
 
-        DecryptResult? result;
+        DecryptLocationOutcome outcome;
         try {
-          result = await _circleService.decryptLocation(eventJson: eventJson);
+          outcome = await _circleService.decryptLocationCollectingCommits(
+            eventJson: eventJson,
+          );
         } on Object catch (e) {
           debugPrint(
             '[EvolutionPoller] evt=$evtTag → decrypt error: ${e.runtimeType}',
@@ -1314,129 +1369,85 @@ class LocationSharingService {
           continue;
         }
 
-        if (result == null) {
-          debugPrint('[EvolutionPoller] evt=$evtTag → null');
+        // Rule 13 / security F13: a receive-side auto-commit (a peer
+        // `SelfRemove` eviction) surfaces here instead of being rolled back —
+        // this poller, like `fetchMemberLocations`, owns no Rust-side relay
+        // handle, so `_publishAutoCommits` runs the publish-then-confirm
+        // dance.
+        if (outcome.autoCommits.isNotEmpty) {
+          await _publishAutoCommits(
+            autoCommits: outcome.autoCommits,
+            circle: circle,
+          );
+        }
+
+        final results = outcome.results;
+        if (results.isEmpty) {
+          debugPrint('[EvolutionPoller] evt=$evtTag → empty');
           continue;
         }
 
-        if (result.groupUpdated) {
-          anyGroupUpdated = true;
-          circleGroupUpdated = true;
-          final autoCommit = result.evolutionEventJson != null;
-          debugPrint(
-            '[EvolutionPoller] evt=$evtTag → group_update '
-            '(auto_commit=$autoCommit)',
-          );
-        } else if (result.location != null) {
-          // Location decoded inside the evolution poll path — common
-          // when the poller's 60-second tick beats the 30-second
-          // location-fetch tick for a given event id. Persisting here
-          // (rather than just logging) is mandatory: this loop and
-          // `fetchMemberLocations` share `_seenEventIds`, so once
-          // either marks an id seen the other short-circuits the
-          // decrypt-and-persist work. Without the persist call below,
-          // any event the poller observed first would be marked seen
-          // but never reach `_locationCache`, and
-          // `memberLocationsProvider` would never surface the peer's
-          // location to the UI.
-          final decrypted = result.location!;
-          final senderPrefix = _evtTag(decrypted.senderPubkey);
-          if (ownPubkeyHex != null &&
-              decrypted.senderPubkey.toLowerCase() == ownPubkeyHex) {
-            debugPrint(
-              '[EvolutionPoller] evt=$evtTag → location '
-              '(self-echo, dropped)',
-            );
-          } else {
-            try {
-              await _persistDecryptedLocation(
-                circle: circle,
-                circleKey: circleKey,
-                decrypted: decrypted,
-                ownPubkeyHex: ownPubkeyHex,
-              );
-              anyLocationPersisted = true;
+        // The Dark Matter engine owns publish-before-apply for every commit
+        // internally, so there is no outbound evolution event for this loop
+        // to publish/finalize (contrast the pre-migration receiver-side
+        // auto-commit dance). Fully processed regardless of how many — if
+        // any — folded results came back, so mark seen unconditionally.
+        for (final result in results) {
+          switch (result.kind) {
+            case LocationEventKind.joined:
+            case LocationEventKind.groupUpdate:
+            case LocationEventKind.invalidated:
+            case LocationEventKind.unrecoverable:
+              anyGroupUpdated = true;
+              circleGroupUpdated = true;
               debugPrint(
-                '[EvolutionPoller] evt=$evtTag → location persisted '
-                '(sender=$senderPrefix)',
+                '[EvolutionPoller] evt=$evtTag → ${result.kind.name}',
               );
-            } on Object catch (e) {
-              debugPrint(
-                '[EvolutionPoller] evt=$evtTag → persist failed: '
-                '${e.runtimeType}',
-              );
-            }
-          }
-        }
-
-        // Receiver-side auto-commit: publish the outbound evolution event
-        // (if any) then finalize locally — identical logic to the
-        // fetchMemberLocations path. Reuses the same CircleService methods
-        // rather than duplicating the plumbing.
-        final evolutionEventJson = result.evolutionEventJson;
-        final evolutionMlsGroupId = result.evolutionMlsGroupId;
-        var evolutionPublishFailed = false;
-        if (evolutionEventJson != null && evolutionMlsGroupId != null) {
-          var publishSucceeded = false;
-          try {
-            publishSucceeded = await _circleService.publishEvolutionEvent(
-              eventJson: evolutionEventJson,
-              relays: circle.relays,
-              label: '[EvolutionPoller] receiver-side commit',
-            );
-          } on Object catch (e) {
-            debugPrint(
-              '[EvolutionPoller] receiver-side commit publish failed: '
-              '${e.runtimeType}',
-            );
-          }
-          if (publishSucceeded) {
-            try {
-              await _circleService.finalizePendingCommit(evolutionMlsGroupId);
-              debugPrint(
-                '[EvolutionPoller] receiver-side commit finalized locally',
-              );
-              // After the local epoch advances, evict any cached pins for
-              // members who just departed. Without this, a leave-commit
-              // that arrives via the evolution poll (app backgrounded →
-              // resume) leaves the ex-member's stale pin on the map
-              // until the next location-fetch cycle happens to run.
-              final circleCache = _locationCache[circleKey];
-              if (circleCache != null) {
-                await _evictDepartedMembers(
-                  evolutionMlsGroupId: evolutionMlsGroupId,
+            case LocationEventKind.location:
+              // Location decoded inside the evolution poll path — common
+              // when the poller's 60-second tick beats the 30-second
+              // location-fetch tick for a given event id. Persisting here
+              // (rather than just logging) is mandatory: this loop and
+              // `fetchMemberLocations` share `_seenEventIds`, so once
+              // either marks an id seen the other short-circuits the
+              // decrypt-and-persist work. Without the persist call below,
+              // any event the poller observed first would be marked seen
+              // but never reach `_locationCache`, and
+              // `memberLocationsProvider` would never surface the peer's
+              // location to the UI.
+              final decrypted = result.location;
+              if (decrypted == null) continue;
+              final senderPrefix = _evtTag(decrypted.senderPubkey);
+              if (ownPubkeyHex != null &&
+                  decrypted.senderPubkey.toLowerCase() == ownPubkeyHex) {
+                debugPrint(
+                  '[EvolutionPoller] evt=$evtTag → location '
+                  '(self-echo, dropped)',
+                );
+                continue;
+              }
+              try {
+                await _persistDecryptedLocation(
                   circle: circle,
                   circleKey: circleKey,
-                  cache: circleCache,
+                  decrypted: decrypted,
+                  ownPubkeyHex: ownPubkeyHex,
+                );
+                anyLocationPersisted = true;
+                debugPrint(
+                  '[EvolutionPoller] evt=$evtTag → location persisted '
+                  '(sender=$senderPrefix)',
+                );
+              } on Object catch (e) {
+                debugPrint(
+                  '[EvolutionPoller] evt=$evtTag → persist failed: '
+                  '${e.runtimeType}',
                 );
               }
-            } on Object catch (e) {
-              debugPrint(
-                '[EvolutionPoller] finalizePendingCommit failed: '
-                '${e.runtimeType}',
-              );
-            }
-          } else {
-            evolutionPublishFailed = true;
-            try {
-              await _circleService.clearPendingCommit(evolutionMlsGroupId);
-              debugPrint(
-                '[EvolutionPoller] receiver-side commit cleared after '
-                'publish failure',
-              );
-            } on Object catch (e) {
-              debugPrint(
-                '[EvolutionPoller] clearPendingCommit failed: '
-                '${e.runtimeType}',
-              );
-            }
           }
         }
 
-        // Mark seen only after the full flow (decrypt + any evolution
-        // publish/merge) has landed. On evolution publish failure we
-        // leave the ID un-seen so the next poll cycle can drive retry.
-        if (eventId != null && !evolutionPublishFailed) {
+        if (eventId != null) {
           _seenEventIds.add(eventId);
           _enforceSeenEventIdsCap();
           final ts = timestamps[idx];
@@ -1452,6 +1463,24 @@ class LocationSharingService {
         '[EvolutionPoller] circle done: $processed processed, '
         '$skipped already-seen',
       );
+
+      // After a roster-changing result the engine already applied the
+      // change internally, so `getMembers` reflects the post-change roster
+      // — prune any cached pin for a member who just departed. Without this,
+      // a leave-commit that arrives via the evolution poll (app backgrounded
+      // → resume) leaves the ex-member's stale pin on the map until the next
+      // location-fetch cycle happens to run.
+      if (circleGroupUpdated) {
+        final circleCache = _locationCache[circleKey];
+        if (circleCache != null) {
+          await _evictDepartedMembers(
+            evolutionMlsGroupId: circle.mlsGroupId,
+            circle: circle,
+            circleKey: circleKey,
+            cache: circleCache,
+          );
+        }
+      }
 
       // Advance the per-circle evolution cursor.
       _lastEvolutionFetchTime[circleKey] = fetchTime;

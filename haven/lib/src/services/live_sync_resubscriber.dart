@@ -80,7 +80,7 @@ class Delta {
 /// unsubscribe-then-subscribe pair for a relay rotation — leaving every
 /// unrelated circle's subscription untouched (the `subscribe_circle` /
 /// `unsubscribe_circle` FFI that the M3 StreamSink engine's "Deferred: dynamic
-/// subscription" note deferred; see `docs/M3_STREAMSINK_ENGINE.md`). If a
+/// subscription" note deferred; see `docs/WN_RELAY_EPOCH_SYNC_MIGRATION.md` Appendix M3). If a
 /// delta op fails (e.g. the session dropped), it falls back to the old
 /// whole-set STOP then START ("stop+new_local+start") so an engine hiccup can
 /// never leave the app worse off than before this change.

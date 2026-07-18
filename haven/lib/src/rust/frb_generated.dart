@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -189495492;
+  int get rustContentHash => 529189239;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -84,13 +84,7 @@ abstract class RustLibApi extends BaseApi {
 
   Future<CircleWithMembersFfi> crateApiCircleManagerFfiAcceptInvitation({
     required CircleManagerFfi that,
-    required List<int> mlsGroupId,
-  });
-
-  Future<UpdateGroupResultFfi> crateApiCircleManagerFfiAddMembers({
-    required CircleManagerFfi that,
-    required List<int> mlsGroupId,
-    required List<String> keyPackagesJson,
+    required List<int> giftWrapId,
   });
 
   Future<AddMembersResultFfi> crateApiCircleManagerFfiAddMembersToCircle({
@@ -126,14 +120,14 @@ abstract class RustLibApi extends BaseApi {
     required RelayTypeFfi relayType,
   });
 
-  Future<void> crateApiCircleManagerFfiClearPendingCommit({
+  Future<void> crateApiCircleManagerFfiCompleteLeave({
     required CircleManagerFfi that,
     required List<int> mlsGroupId,
   });
 
-  Future<void> crateApiCircleManagerFfiCompleteLeave({
+  Future<void> crateApiCircleManagerFfiConfirmPublished({
     required CircleManagerFfi that,
-    required List<int> mlsGroupId,
+    required PendingStateRefFfi pending,
   });
 
   Future<CircleCreationResultFfi> crateApiCircleManagerFfiCreateCircle({
@@ -145,12 +139,6 @@ abstract class RustLibApi extends BaseApi {
     required String circleType,
     required List<String> relays,
     required List<String> creatorFallbackRelays,
-  });
-
-  Future<KeyPackageBundleFfi> crateApiCircleManagerFfiCreateKeyPackage({
-    required CircleManagerFfi that,
-    required String identityPubkey,
-    required List<String> relays,
   });
 
   Future<void> crateApiCircleManagerFfiCursorAdvance({
@@ -187,15 +175,17 @@ abstract class RustLibApi extends BaseApi {
 
   Future<void> crateApiCircleManagerFfiDeclineInvitation({
     required CircleManagerFfi that,
-    required List<int> mlsGroupId,
+    required List<int> giftWrapId,
   });
 
-  Future<DecryptResultFfi?> crateApiCircleManagerFfiDecryptLocation({
+  Future<List<LocationMessageResultFfi>>
+  crateApiCircleManagerFfiDecryptLocation({
     required CircleManagerFfi that,
     required String eventJson,
   });
 
-  Future<DecryptOutcomeFfi> crateApiCircleManagerFfiDecryptLocationOutcome({
+  Future<DecryptLocationOutcomeFfi>
+  crateApiCircleManagerFfiDecryptLocationCollectingCommits({
     required CircleManagerFfi that,
     required String eventJson,
   });
@@ -235,13 +225,9 @@ abstract class RustLibApi extends BaseApi {
     required String pubkeyHex,
   });
 
-  Future<void> crateApiCircleManagerFfiFinalizePendingCommit({
-    required CircleManagerFfi that,
-    required List<int> mlsGroupId,
-  });
-
   Future<void> crateApiCircleManagerFfiFinalizeRelayUpdate({
     required CircleManagerFfi that,
+    required PendingStateRefFfi pending,
     required List<int> mlsGroupId,
   });
 
@@ -301,11 +287,6 @@ abstract class RustLibApi extends BaseApi {
     required List<int> mlsGroupId,
   });
 
-  Future<List<Uint8List>> crateApiCircleManagerFfiGroupsNeedingSelfUpdate({
-    required CircleManagerFfi that,
-    required BigInt thresholdSecs,
-  });
-
   Future<List<String>> crateApiCircleManagerFfiListUserRelays({
     required CircleManagerFfi that,
     required RelayTypeFfi relayType,
@@ -313,6 +294,7 @@ abstract class RustLibApi extends BaseApi {
 
   Future<CircleManagerFfi> crateApiCircleManagerFfiNew({
     required String dataDir,
+    required List<int> identitySecretBytes,
   });
 
   Future<LeavePlanFfi> crateApiCircleManagerFfiPlanLeave({
@@ -327,25 +309,18 @@ abstract class RustLibApi extends BaseApi {
     required String giftWrapEventJson,
   });
 
-  Future<InvitationFfi?> crateApiCircleManagerFfiProcessInvitation({
-    required CircleManagerFfi that,
-    required String wrapperEventId,
-    required String rumorEventJson,
-    required String inviterPubkey,
-  });
-
-  Future<UpdateGroupResultFfi> crateApiCircleManagerFfiProposeAdminHandoff({
+  Future<CommitToPublishFfi> crateApiCircleManagerFfiProposeAdminHandoff({
     required CircleManagerFfi that,
     required List<int> mlsGroupId,
     required String successorHex,
   });
 
-  Future<UpdateGroupResultFfi> crateApiCircleManagerFfiProposeLeave({
+  Future<String> crateApiCircleManagerFfiProposeLeave({
     required CircleManagerFfi that,
     required List<int> mlsGroupId,
   });
 
-  Future<UpdateGroupResultFfi> crateApiCircleManagerFfiProposeSelfDemote({
+  Future<CommitToPublishFfi> crateApiCircleManagerFfiProposeSelfDemote({
     required CircleManagerFfi that,
     required List<int> mlsGroupId,
   });
@@ -360,19 +335,16 @@ abstract class RustLibApi extends BaseApi {
     required PlatformInt64 nowUnixSecs,
   });
 
+  Future<void> crateApiCircleManagerFfiPublishFailed({
+    required CircleManagerFfi that,
+    required PendingStateRefFfi pending,
+  });
+
   Future<ProfileMetadataFfi> crateApiCircleManagerFfiPublishMyProfile({
     required CircleManagerFfi that,
     required List<int> identitySecretBytes,
     String? displayName,
     String? about,
-  });
-
-  Future<void> crateApiCircleManagerFfiRecordPublishedKeyPackages({
-    required CircleManagerFfi that,
-    required List<int> canonicalHashRef,
-    required String dTag,
-    required String canonicalEventId,
-    required String legacyEventId,
   });
 
   Future<void> crateApiCircleManagerFfiRecordPublishedRelayList({
@@ -399,7 +371,7 @@ abstract class RustLibApi extends BaseApi {
     required String senderPubkey,
   });
 
-  Future<UpdateGroupResultFfi> crateApiCircleManagerFfiRemoveMembers({
+  Future<CommitToPublishFfi> crateApiCircleManagerFfiRemoveMembers({
     required CircleManagerFfi that,
     required List<int> mlsGroupId,
     required List<String> memberPubkeys,
@@ -429,11 +401,6 @@ abstract class RustLibApi extends BaseApi {
     required CircleManagerFfi that,
   });
 
-  Future<UpdateGroupResultFfi> crateApiCircleManagerFfiSelfUpdate({
-    required CircleManagerFfi that,
-    required List<int> mlsGroupId,
-  });
-
   Future<ContactFfi> crateApiCircleManagerFfiSetContact({
     required CircleManagerFfi that,
     required String pubkey,
@@ -459,12 +426,6 @@ abstract class RustLibApi extends BaseApi {
     required List<String> eventIds,
   });
 
-  Future<SignedKeyPackageEventFfi> crateApiCircleManagerFfiSignKeyPackageEvent({
-    required CircleManagerFfi that,
-    required List<int> identitySecretBytes,
-    required List<String> relays,
-  });
-
   Future<List<LastKnownLocationFfi>>
   crateApiCircleManagerFfiSnapshotLastKnownForCircle({
     required CircleManagerFfi that,
@@ -478,7 +439,7 @@ abstract class RustLibApi extends BaseApi {
     required String pubkeyHex,
   });
 
-  Future<UpdateGroupResultFfi> crateApiCircleManagerFfiUpdateCircleRelays({
+  Future<CommitToPublishFfi> crateApiCircleManagerFfiUpdateCircleRelays({
     required CircleManagerFfi that,
     required List<int> mlsGroupId,
     required List<String> newRelays,
@@ -496,10 +457,6 @@ abstract class RustLibApi extends BaseApi {
   });
 
   Future<void> crateApiCircleManagerFfiWipeAllLastKnownLocations({
-    required CircleManagerFfi that,
-  });
-
-  Future<void> crateApiCircleManagerFfiWipeAllStagedCommits({
     required CircleManagerFfi that,
   });
 
@@ -744,6 +701,13 @@ abstract class RustLibApi extends BaseApi {
     required List<String> relays,
   });
 
+  Future<LegacyRetractionOutcomeFfi>
+  crateApiRelayManagerFfiRetractLegacyKeyMaterial({
+    required RelayManagerFfi that,
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  });
+
   Future<CatchupResultFfi> crateApiRelayManagerFfiRunCatchupAllCircles({
     required RelayManagerFfi that,
     required CircleManagerFfi circle,
@@ -753,30 +717,22 @@ abstract class RustLibApi extends BaseApi {
 
   Future<void> crateApiRelayManagerFfiShutdown({required RelayManagerFfi that});
 
-  Future<bool> crateApiAbortConvergingWindow({
-    required List<int> mlsGroupId,
-    required List<int> nostrGroupId,
-  });
-
   void crateApiAllowPrivateBlossomForTest();
 
   void crateApiAllowWsLoopbackForTest();
 
-  Future<ConvergeResultFfi?> crateApiConvergeAfterWindow({
-    required List<int> mlsGroupId,
-    required List<int> nostrGroupId,
-    required String ourCommitJson,
-    required BigInt stagedEpoch,
-    required ConvergeIntentFfi intent,
-  });
-
   List<String> crateApiDefaultRelays();
+
+  Future<void> crateApiDestroyLegacyMlsState({required String dataDir});
 
   List<String> crateApiDiscoveryRelays();
 
   Future<void> crateApiInitApp();
 
   Future<void> crateApiInitKeyringStore();
+
+  Future<LegacyRetractionOutcomeFfi>
+  crateApiLegacyRetractionOutcomeFfiDefault();
 
   Future<SubscriptionHealthOutcomeFfi> crateApiMaintainSubscriptionHealth();
 
@@ -790,27 +746,6 @@ abstract class RustLibApi extends BaseApi {
   void crateApiSetDefaultRelaysForTest({required List<String> relays});
 
   void crateApiSetDiscoveryRelaysForTest({required List<String> relays});
-
-  BigInt crateApiSettleWindowSecs();
-
-  Future<StagedAddFfi?> crateApiStageAddMembersConverging({
-    required List<int> identitySecretBytes,
-    required List<int> mlsGroupId,
-    required List<int> nostrGroupId,
-    required List<MemberKeyPackageFfi> members,
-    required List<String> creatorFallbackRelays,
-  });
-
-  Future<StagedCommitFfi?> crateApiStageRemoveMembersConverging({
-    required List<int> mlsGroupId,
-    required List<int> nostrGroupId,
-    required List<String> memberPubkeys,
-  });
-
-  Future<StagedCommitFfi?> crateApiStageSelfUpdateConverging({
-    required List<int> mlsGroupId,
-    required List<int> nostrGroupId,
-  });
 
   Future<BigInt> crateApiTileCacheEvict({
     required PlatformInt64 maxBytes,
@@ -977,7 +912,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @override
   Future<CircleWithMembersFfi> crateApiCircleManagerFfiAcceptInvitation({
     required CircleManagerFfi that,
-    required List<int> mlsGroupId,
+    required List<int> giftWrapId,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -987,7 +922,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          sse_encode_list_prim_u_8_loose(mlsGroupId, serializer);
+          sse_encode_list_prim_u_8_loose(giftWrapId, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -1000,7 +935,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCircleManagerFfiAcceptInvitationConstMeta,
-        argValues: [that, mlsGroupId],
+        argValues: [that, giftWrapId],
         apiImpl: this,
       ),
     );
@@ -1009,47 +944,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiCircleManagerFfiAcceptInvitationConstMeta =>
       const TaskConstMeta(
         debugName: "CircleManagerFfi_accept_invitation",
-        argNames: ["that", "mlsGroupId"],
-      );
-
-  @override
-  Future<UpdateGroupResultFfi> crateApiCircleManagerFfiAddMembers({
-    required CircleManagerFfi that,
-    required List<int> mlsGroupId,
-    required List<String> keyPackagesJson,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
-            that,
-            serializer,
-          );
-          sse_encode_list_prim_u_8_loose(mlsGroupId, serializer);
-          sse_encode_list_String(keyPackagesJson, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 3,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_update_group_result_ffi,
-          decodeErrorData: sse_decode_String,
-        ),
-        constMeta: kCrateApiCircleManagerFfiAddMembersConstMeta,
-        argValues: [that, mlsGroupId, keyPackagesJson],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiCircleManagerFfiAddMembersConstMeta =>
-      const TaskConstMeta(
-        debugName: "CircleManagerFfi_add_members",
-        argNames: ["that", "mlsGroupId", "keyPackagesJson"],
+        argNames: ["that", "giftWrapId"],
       );
 
   @override
@@ -1075,7 +970,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 4,
+            funcId: 3,
             port: port_,
           );
         },
@@ -1127,7 +1022,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 5,
+            funcId: 4,
             port: port_,
           );
         },
@@ -1167,7 +1062,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 6,
+            funcId: 5,
             port: port_,
           );
         },
@@ -1209,7 +1104,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 7,
+            funcId: 6,
             port: port_,
           );
         },
@@ -1249,7 +1144,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 8,
+            funcId: 7,
             port: port_,
           );
         },
@@ -1271,44 +1166,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<void> crateApiCircleManagerFfiClearPendingCommit({
-    required CircleManagerFfi that,
-    required List<int> mlsGroupId,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
-            that,
-            serializer,
-          );
-          sse_encode_list_prim_u_8_loose(mlsGroupId, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 9,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: sse_decode_String,
-        ),
-        constMeta: kCrateApiCircleManagerFfiClearPendingCommitConstMeta,
-        argValues: [that, mlsGroupId],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiCircleManagerFfiClearPendingCommitConstMeta =>
-      const TaskConstMeta(
-        debugName: "CircleManagerFfi_clear_pending_commit",
-        argNames: ["that", "mlsGroupId"],
-      );
-
-  @override
   Future<void> crateApiCircleManagerFfiCompleteLeave({
     required CircleManagerFfi that,
     required List<int> mlsGroupId,
@@ -1325,7 +1182,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 10,
+            funcId: 8,
             port: port_,
           );
         },
@@ -1344,6 +1201,44 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(
         debugName: "CircleManagerFfi_complete_leave",
         argNames: ["that", "mlsGroupId"],
+      );
+
+  @override
+  Future<void> crateApiCircleManagerFfiConfirmPublished({
+    required CircleManagerFfi that,
+    required PendingStateRefFfi pending,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
+            that,
+            serializer,
+          );
+          sse_encode_box_autoadd_pending_state_ref_ffi(pending, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 9,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCircleManagerFfiConfirmPublishedConstMeta,
+        argValues: [that, pending],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCircleManagerFfiConfirmPublishedConstMeta =>
+      const TaskConstMeta(
+        debugName: "CircleManagerFfi_confirm_published",
+        argNames: ["that", "pending"],
       );
 
   @override
@@ -1375,7 +1270,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 11,
+            funcId: 10,
             port: port_,
           );
         },
@@ -1415,46 +1310,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<KeyPackageBundleFfi> crateApiCircleManagerFfiCreateKeyPackage({
-    required CircleManagerFfi that,
-    required String identityPubkey,
-    required List<String> relays,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
-            that,
-            serializer,
-          );
-          sse_encode_String(identityPubkey, serializer);
-          sse_encode_list_String(relays, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 12,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_key_package_bundle_ffi,
-          decodeErrorData: sse_decode_String,
-        ),
-        constMeta: kCrateApiCircleManagerFfiCreateKeyPackageConstMeta,
-        argValues: [that, identityPubkey, relays],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiCircleManagerFfiCreateKeyPackageConstMeta =>
-      const TaskConstMeta(
-        debugName: "CircleManagerFfi_create_key_package",
-        argNames: ["that", "identityPubkey", "relays"],
-      );
-
-  @override
   Future<void> crateApiCircleManagerFfiCursorAdvance({
     required CircleManagerFfi that,
     required String stream,
@@ -1473,7 +1328,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 13,
+            funcId: 11,
             port: port_,
           );
         },
@@ -1511,7 +1366,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 14,
+            funcId: 12,
             port: port_,
           );
         },
@@ -1550,7 +1405,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 15,
+            funcId: 13,
             port: port_,
           );
         },
@@ -1589,7 +1444,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 16,
+            funcId: 14,
             port: port_,
           );
         },
@@ -1627,7 +1482,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 17,
+            funcId: 15,
             port: port_,
           );
         },
@@ -1667,7 +1522,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 18,
+            funcId: 16,
             port: port_,
           );
         },
@@ -1691,7 +1546,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @override
   Future<void> crateApiCircleManagerFfiDeclineInvitation({
     required CircleManagerFfi that,
-    required List<int> mlsGroupId,
+    required List<int> giftWrapId,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -1701,11 +1556,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          sse_encode_list_prim_u_8_loose(mlsGroupId, serializer);
+          sse_encode_list_prim_u_8_loose(giftWrapId, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 19,
+            funcId: 17,
             port: port_,
           );
         },
@@ -1714,7 +1569,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCircleManagerFfiDeclineInvitationConstMeta,
-        argValues: [that, mlsGroupId],
+        argValues: [that, giftWrapId],
         apiImpl: this,
       ),
     );
@@ -1723,11 +1578,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiCircleManagerFfiDeclineInvitationConstMeta =>
       const TaskConstMeta(
         debugName: "CircleManagerFfi_decline_invitation",
-        argNames: ["that", "mlsGroupId"],
+        argNames: ["that", "giftWrapId"],
       );
 
   @override
-  Future<DecryptResultFfi?> crateApiCircleManagerFfiDecryptLocation({
+  Future<List<LocationMessageResultFfi>>
+  crateApiCircleManagerFfiDecryptLocation({
     required CircleManagerFfi that,
     required String eventJson,
   }) {
@@ -1743,12 +1599,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 20,
+            funcId: 18,
             port: port_,
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_opt_box_autoadd_decrypt_result_ffi,
+          decodeSuccessData: sse_decode_list_location_message_result_ffi,
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCircleManagerFfiDecryptLocationConstMeta,
@@ -1765,7 +1621,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<DecryptOutcomeFfi> crateApiCircleManagerFfiDecryptLocationOutcome({
+  Future<DecryptLocationOutcomeFfi>
+  crateApiCircleManagerFfiDecryptLocationCollectingCommits({
     required CircleManagerFfi that,
     required String eventJson,
   }) {
@@ -1781,24 +1638,26 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 21,
+            funcId: 19,
             port: port_,
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_decrypt_outcome_ffi,
+          decodeSuccessData: sse_decode_decrypt_location_outcome_ffi,
           decodeErrorData: sse_decode_String,
         ),
-        constMeta: kCrateApiCircleManagerFfiDecryptLocationOutcomeConstMeta,
+        constMeta:
+            kCrateApiCircleManagerFfiDecryptLocationCollectingCommitsConstMeta,
         argValues: [that, eventJson],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiCircleManagerFfiDecryptLocationOutcomeConstMeta =>
+  TaskConstMeta
+  get kCrateApiCircleManagerFfiDecryptLocationCollectingCommitsConstMeta =>
       const TaskConstMeta(
-        debugName: "CircleManagerFfi_decrypt_location_outcome",
+        debugName: "CircleManagerFfi_decrypt_location_collecting_commits",
         argNames: ["that", "eventJson"],
       );
 
@@ -1819,7 +1678,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 22,
+            funcId: 20,
             port: port_,
           );
         },
@@ -1857,7 +1716,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 23,
+            funcId: 21,
             port: port_,
           );
         },
@@ -1895,7 +1754,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 24,
+            funcId: 22,
             port: port_,
           );
         },
@@ -1941,7 +1800,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 25,
+            funcId: 23,
             port: port_,
           );
         },
@@ -1995,7 +1854,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 26,
+            funcId: 24,
             port: port_,
           );
         },
@@ -2033,7 +1892,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 27,
+            funcId: 25,
             port: port_,
           );
         },
@@ -2055,46 +1914,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<void> crateApiCircleManagerFfiFinalizePendingCommit({
-    required CircleManagerFfi that,
-    required List<int> mlsGroupId,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
-            that,
-            serializer,
-          );
-          sse_encode_list_prim_u_8_loose(mlsGroupId, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 28,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: sse_decode_String,
-        ),
-        constMeta: kCrateApiCircleManagerFfiFinalizePendingCommitConstMeta,
-        argValues: [that, mlsGroupId],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiCircleManagerFfiFinalizePendingCommitConstMeta =>
-      const TaskConstMeta(
-        debugName: "CircleManagerFfi_finalize_pending_commit",
-        argNames: ["that", "mlsGroupId"],
-      );
-
-  @override
   Future<void> crateApiCircleManagerFfiFinalizeRelayUpdate({
     required CircleManagerFfi that,
+    required PendingStateRefFfi pending,
     required List<int> mlsGroupId,
   }) {
     return handler.executeNormal(
@@ -2105,11 +1927,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
+          sse_encode_box_autoadd_pending_state_ref_ffi(pending, serializer);
           sse_encode_list_prim_u_8_loose(mlsGroupId, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 29,
+            funcId: 26,
             port: port_,
           );
         },
@@ -2118,7 +1941,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCircleManagerFfiFinalizeRelayUpdateConstMeta,
-        argValues: [that, mlsGroupId],
+        argValues: [that, pending, mlsGroupId],
         apiImpl: this,
       ),
     );
@@ -2127,7 +1950,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiCircleManagerFfiFinalizeRelayUpdateConstMeta =>
       const TaskConstMeta(
         debugName: "CircleManagerFfi_finalize_relay_update",
-        argNames: ["that", "mlsGroupId"],
+        argNames: ["that", "pending", "mlsGroupId"],
       );
 
   @override
@@ -2145,7 +1968,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 30,
+            funcId: 27,
             port: port_,
           );
         },
@@ -2180,7 +2003,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             serializer,
           );
           sse_encode_String(pubkeyHex, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 31)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 28)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_opt_box_autoadd_profile_metadata_ffi,
@@ -2216,7 +2039,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 32,
+            funcId: 29,
             port: port_,
           );
         },
@@ -2252,7 +2075,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 33,
+            funcId: 30,
             port: port_,
           );
         },
@@ -2290,7 +2113,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 34,
+            funcId: 31,
             port: port_,
           );
         },
@@ -2328,7 +2151,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 35,
+            funcId: 32,
             port: port_,
           );
         },
@@ -2364,7 +2187,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 36,
+            funcId: 33,
             port: port_,
           );
         },
@@ -2402,7 +2225,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 37,
+            funcId: 34,
             port: port_,
           );
         },
@@ -2440,7 +2263,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 38,
+            funcId: 35,
             port: port_,
           );
         },
@@ -2478,7 +2301,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 39,
+            funcId: 36,
             port: port_,
           );
         },
@@ -2514,7 +2337,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 40,
+            funcId: 37,
             port: port_,
           );
         },
@@ -2552,7 +2375,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 41,
+            funcId: 38,
             port: port_,
           );
         },
@@ -2574,44 +2397,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<List<Uint8List>> crateApiCircleManagerFfiGroupsNeedingSelfUpdate({
-    required CircleManagerFfi that,
-    required BigInt thresholdSecs,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
-            that,
-            serializer,
-          );
-          sse_encode_u_64(thresholdSecs, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 42,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_list_list_prim_u_8_strict,
-          decodeErrorData: sse_decode_String,
-        ),
-        constMeta: kCrateApiCircleManagerFfiGroupsNeedingSelfUpdateConstMeta,
-        argValues: [that, thresholdSecs],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiCircleManagerFfiGroupsNeedingSelfUpdateConstMeta =>
-      const TaskConstMeta(
-        debugName: "CircleManagerFfi_groups_needing_self_update",
-        argNames: ["that", "thresholdSecs"],
-      );
-
-  @override
   Future<List<String>> crateApiCircleManagerFfiListUserRelays({
     required CircleManagerFfi that,
     required RelayTypeFfi relayType,
@@ -2628,7 +2413,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 43,
+            funcId: 39,
             port: port_,
           );
         },
@@ -2652,16 +2437,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @override
   Future<CircleManagerFfi> crateApiCircleManagerFfiNew({
     required String dataDir,
+    required List<int> identitySecretBytes,
   }) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(dataDir, serializer);
+          sse_encode_list_prim_u_8_loose(identitySecretBytes, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 44,
+            funcId: 40,
             port: port_,
           );
         },
@@ -2671,7 +2458,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCircleManagerFfiNewConstMeta,
-        argValues: [dataDir],
+        argValues: [dataDir, identitySecretBytes],
         apiImpl: this,
       ),
     );
@@ -2680,7 +2467,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiCircleManagerFfiNewConstMeta =>
       const TaskConstMeta(
         debugName: "CircleManagerFfi_new",
-        argNames: ["dataDir"],
+        argNames: ["dataDir", "identitySecretBytes"],
       );
 
   @override
@@ -2702,7 +2489,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 45,
+            funcId: 41,
             port: port_,
           );
         },
@@ -2742,7 +2529,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 46,
+            funcId: 42,
             port: port_,
           );
         },
@@ -2766,49 +2553,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<InvitationFfi?> crateApiCircleManagerFfiProcessInvitation({
-    required CircleManagerFfi that,
-    required String wrapperEventId,
-    required String rumorEventJson,
-    required String inviterPubkey,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
-            that,
-            serializer,
-          );
-          sse_encode_String(wrapperEventId, serializer);
-          sse_encode_String(rumorEventJson, serializer);
-          sse_encode_String(inviterPubkey, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 47,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_opt_box_autoadd_invitation_ffi,
-          decodeErrorData: sse_decode_String,
-        ),
-        constMeta: kCrateApiCircleManagerFfiProcessInvitationConstMeta,
-        argValues: [that, wrapperEventId, rumorEventJson, inviterPubkey],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiCircleManagerFfiProcessInvitationConstMeta =>
-      const TaskConstMeta(
-        debugName: "CircleManagerFfi_process_invitation",
-        argNames: ["that", "wrapperEventId", "rumorEventJson", "inviterPubkey"],
-      );
-
-  @override
-  Future<UpdateGroupResultFfi> crateApiCircleManagerFfiProposeAdminHandoff({
+  Future<CommitToPublishFfi> crateApiCircleManagerFfiProposeAdminHandoff({
     required CircleManagerFfi that,
     required List<int> mlsGroupId,
     required String successorHex,
@@ -2826,12 +2571,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 48,
+            funcId: 43,
             port: port_,
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_update_group_result_ffi,
+          decodeSuccessData: sse_decode_commit_to_publish_ffi,
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCircleManagerFfiProposeAdminHandoffConstMeta,
@@ -2848,7 +2593,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<UpdateGroupResultFfi> crateApiCircleManagerFfiProposeLeave({
+  Future<String> crateApiCircleManagerFfiProposeLeave({
     required CircleManagerFfi that,
     required List<int> mlsGroupId,
   }) {
@@ -2864,12 +2609,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 49,
+            funcId: 44,
             port: port_,
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_update_group_result_ffi,
+          decodeSuccessData: sse_decode_String,
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCircleManagerFfiProposeLeaveConstMeta,
@@ -2886,7 +2631,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<UpdateGroupResultFfi> crateApiCircleManagerFfiProposeSelfDemote({
+  Future<CommitToPublishFfi> crateApiCircleManagerFfiProposeSelfDemote({
     required CircleManagerFfi that,
     required List<int> mlsGroupId,
   }) {
@@ -2902,12 +2647,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 50,
+            funcId: 45,
             port: port_,
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_update_group_result_ffi,
+          decodeSuccessData: sse_decode_commit_to_publish_ffi,
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCircleManagerFfiProposeSelfDemoteConstMeta,
@@ -2940,7 +2685,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 51,
+            funcId: 46,
             port: port_,
           );
         },
@@ -2978,7 +2723,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 52,
+            funcId: 47,
             port: port_,
           );
         },
@@ -2997,6 +2742,44 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(
         debugName: "CircleManagerFfi_prune_processed_gift_wraps",
         argNames: ["that", "nowUnixSecs"],
+      );
+
+  @override
+  Future<void> crateApiCircleManagerFfiPublishFailed({
+    required CircleManagerFfi that,
+    required PendingStateRefFfi pending,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
+            that,
+            serializer,
+          );
+          sse_encode_box_autoadd_pending_state_ref_ffi(pending, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 48,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiCircleManagerFfiPublishFailedConstMeta,
+        argValues: [that, pending],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiCircleManagerFfiPublishFailedConstMeta =>
+      const TaskConstMeta(
+        debugName: "CircleManagerFfi_publish_failed",
+        argNames: ["that", "pending"],
       );
 
   @override
@@ -3020,7 +2803,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 53,
+            funcId: 49,
             port: port_,
           );
         },
@@ -3039,63 +2822,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(
         debugName: "CircleManagerFfi_publish_my_profile",
         argNames: ["that", "identitySecretBytes", "displayName", "about"],
-      );
-
-  @override
-  Future<void> crateApiCircleManagerFfiRecordPublishedKeyPackages({
-    required CircleManagerFfi that,
-    required List<int> canonicalHashRef,
-    required String dTag,
-    required String canonicalEventId,
-    required String legacyEventId,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
-            that,
-            serializer,
-          );
-          sse_encode_list_prim_u_8_loose(canonicalHashRef, serializer);
-          sse_encode_String(dTag, serializer);
-          sse_encode_String(canonicalEventId, serializer);
-          sse_encode_String(legacyEventId, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 54,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: sse_decode_String,
-        ),
-        constMeta: kCrateApiCircleManagerFfiRecordPublishedKeyPackagesConstMeta,
-        argValues: [
-          that,
-          canonicalHashRef,
-          dTag,
-          canonicalEventId,
-          legacyEventId,
-        ],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta
-  get kCrateApiCircleManagerFfiRecordPublishedKeyPackagesConstMeta =>
-      const TaskConstMeta(
-        debugName: "CircleManagerFfi_record_published_key_packages",
-        argNames: [
-          "that",
-          "canonicalHashRef",
-          "dTag",
-          "canonicalEventId",
-          "legacyEventId",
-        ],
       );
 
   @override
@@ -3121,7 +2847,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 55,
+            funcId: 50,
             port: port_,
           );
         },
@@ -3166,7 +2892,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 56,
+            funcId: 51,
             port: port_,
           );
         },
@@ -3204,7 +2930,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 57,
+            funcId: 52,
             port: port_,
           );
         },
@@ -3244,7 +2970,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 58,
+            funcId: 53,
             port: port_,
           );
         },
@@ -3266,7 +2992,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<UpdateGroupResultFfi> crateApiCircleManagerFfiRemoveMembers({
+  Future<CommitToPublishFfi> crateApiCircleManagerFfiRemoveMembers({
     required CircleManagerFfi that,
     required List<int> mlsGroupId,
     required List<String> memberPubkeys,
@@ -3284,12 +3010,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 59,
+            funcId: 54,
             port: port_,
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_update_group_result_ffi,
+          decodeSuccessData: sse_decode_commit_to_publish_ffi,
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCircleManagerFfiRemoveMembersConstMeta,
@@ -3322,7 +3048,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 60,
+            funcId: 55,
             port: port_,
           );
         },
@@ -3362,7 +3088,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 61,
+            funcId: 56,
             port: port_,
           );
         },
@@ -3398,7 +3124,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 62,
+            funcId: 57,
             port: port_,
           );
         },
@@ -3436,7 +3162,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 63,
+            funcId: 58,
             port: port_,
           );
         },
@@ -3472,7 +3198,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 64,
+            funcId: 59,
             port: port_,
           );
         },
@@ -3496,44 +3222,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<UpdateGroupResultFfi> crateApiCircleManagerFfiSelfUpdate({
-    required CircleManagerFfi that,
-    required List<int> mlsGroupId,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
-            that,
-            serializer,
-          );
-          sse_encode_list_prim_u_8_loose(mlsGroupId, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 65,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_update_group_result_ffi,
-          decodeErrorData: sse_decode_String,
-        ),
-        constMeta: kCrateApiCircleManagerFfiSelfUpdateConstMeta,
-        argValues: [that, mlsGroupId],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiCircleManagerFfiSelfUpdateConstMeta =>
-      const TaskConstMeta(
-        debugName: "CircleManagerFfi_self_update",
-        argNames: ["that", "mlsGroupId"],
-      );
-
-  @override
   Future<ContactFfi> crateApiCircleManagerFfiSetContact({
     required CircleManagerFfi that,
     required String pubkey,
@@ -3554,7 +3242,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 66,
+            funcId: 60,
             port: port_,
           );
         },
@@ -3591,7 +3279,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
           sse_encode_String(pubkeyHex, serializer);
           sse_encode_opt_String(nickname, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 67)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 61)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -3629,7 +3317,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 68,
+            funcId: 62,
             port: port_,
           );
         },
@@ -3666,7 +3354,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
           sse_encode_list_prim_u_8_loose(identitySecretBytes, serializer);
           sse_encode_list_String(eventIds, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 69)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 63)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_String,
@@ -3683,46 +3371,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(
         debugName: "CircleManagerFfi_sign_deletion_event",
         argNames: ["that", "identitySecretBytes", "eventIds"],
-      );
-
-  @override
-  Future<SignedKeyPackageEventFfi> crateApiCircleManagerFfiSignKeyPackageEvent({
-    required CircleManagerFfi that,
-    required List<int> identitySecretBytes,
-    required List<String> relays,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
-            that,
-            serializer,
-          );
-          sse_encode_list_prim_u_8_loose(identitySecretBytes, serializer);
-          sse_encode_list_String(relays, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 70,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_signed_key_package_event_ffi,
-          decodeErrorData: sse_decode_String,
-        ),
-        constMeta: kCrateApiCircleManagerFfiSignKeyPackageEventConstMeta,
-        argValues: [that, identitySecretBytes, relays],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiCircleManagerFfiSignKeyPackageEventConstMeta =>
-      const TaskConstMeta(
-        debugName: "CircleManagerFfi_sign_key_package_event",
-        argNames: ["that", "identitySecretBytes", "relays"],
       );
 
   @override
@@ -3745,7 +3393,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 71,
+            funcId: 64,
             port: port_,
           );
         },
@@ -3786,7 +3434,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 72,
+            funcId: 65,
             port: port_,
           );
         },
@@ -3808,7 +3456,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<UpdateGroupResultFfi> crateApiCircleManagerFfiUpdateCircleRelays({
+  Future<CommitToPublishFfi> crateApiCircleManagerFfiUpdateCircleRelays({
     required CircleManagerFfi that,
     required List<int> mlsGroupId,
     required List<String> newRelays,
@@ -3826,12 +3474,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 73,
+            funcId: 66,
             port: port_,
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_update_group_result_ffi,
+          decodeSuccessData: sse_decode_commit_to_publish_ffi,
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCircleManagerFfiUpdateCircleRelaysConstMeta,
@@ -3866,7 +3514,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 74,
+            funcId: 67,
             port: port_,
           );
         },
@@ -3904,7 +3552,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 75,
+            funcId: 68,
             port: port_,
           );
         },
@@ -3940,7 +3588,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 76,
+            funcId: 69,
             port: port_,
           );
         },
@@ -3963,42 +3611,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<void> crateApiCircleManagerFfiWipeAllStagedCommits({
-    required CircleManagerFfi that,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
-            that,
-            serializer,
-          );
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 77,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: sse_decode_String,
-        ),
-        constMeta: kCrateApiCircleManagerFfiWipeAllStagedCommitsConstMeta,
-        argValues: [that],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiCircleManagerFfiWipeAllStagedCommitsConstMeta =>
-      const TaskConstMeta(
-        debugName: "CircleManagerFfi_wipe_all_staged_commits",
-        argNames: ["that"],
-      );
-
-  @override
   Future<void> crateApiCircleManagerFfiWipeAndResetDefaultsFor({
     required CircleManagerFfi that,
     required RelayTypeFfi relayType,
@@ -4015,7 +3627,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 78,
+            funcId: 70,
             port: port_,
           );
         },
@@ -4045,7 +3657,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 79,
+            funcId: 71,
             port: port_,
           );
         },
@@ -4076,7 +3688,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 80)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 72)!;
         },
         codec: SseCodec(
           decodeSuccessData:
@@ -4109,7 +3721,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 81,
+            funcId: 73,
             port: port_,
           );
         },
@@ -4140,7 +3752,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 82)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 74)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_bool,
@@ -4168,7 +3780,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 83,
+            funcId: 75,
             port: port_,
           );
         },
@@ -4204,7 +3816,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             settings,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 84)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 76)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -4239,7 +3851,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
           sse_encode_f_64(latitude, serializer);
           sse_encode_f_64(longitude, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 85)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 77)!;
         },
         codec: SseCodec(
           decodeSuccessData:
@@ -4269,7 +3881,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 86)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 78)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_bool,
@@ -4306,7 +3918,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 87,
+              funcId: 79,
               port: port_,
             );
           },
@@ -4346,7 +3958,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 88,
+            funcId: 80,
             port: port_,
           );
         },
@@ -4383,7 +3995,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 89,
+            funcId: 81,
             port: port_,
           );
         },
@@ -4423,7 +4035,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 90,
+            funcId: 82,
             port: port_,
           );
         },
@@ -4457,7 +4069,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 91,
+            funcId: 83,
             port: port_,
           );
         },
@@ -4495,7 +4107,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 92,
+            funcId: 84,
             port: port_,
           );
         },
@@ -4533,7 +4145,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 93,
+            funcId: 85,
             port: port_,
           );
         },
@@ -4571,7 +4183,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             location,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 94)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 86)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unsigned_location_event_ffi,
@@ -4599,7 +4211,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 95,
+            funcId: 87,
             port: port_,
           );
         },
@@ -4635,7 +4247,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             serializer,
           );
           sse_encode_u_64(nominalSecs, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 96)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 88)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_u_64,
@@ -4662,7 +4274,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 97)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 89)!;
         },
         codec: SseCodec(
           decodeSuccessData:
@@ -4693,7 +4305,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             serializer,
           );
           sse_encode_box_autoadd_signed_location_event_ffi(event, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 98)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 90)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_bool,
@@ -4724,7 +4336,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 99)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 91)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_i_64,
@@ -4753,11 +4365,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 100,
-          )!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 92)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_String,
@@ -4786,11 +4394,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 101,
-          )!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 93)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_bool,
@@ -4819,11 +4423,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 102,
-          )!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 94)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_f_64,
@@ -4852,11 +4452,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 103,
-          )!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 95)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_f_64,
@@ -4887,11 +4483,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 104,
-          )!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 96)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_i_64,
@@ -4922,7 +4514,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 105,
+            funcId: 97,
             port: port_,
           );
         },
@@ -4956,11 +4548,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 106,
-          )!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 98)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_u_32,
@@ -4994,7 +4582,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 107,
+            funcId: 99,
             port: port_,
           );
         },
@@ -5030,7 +4618,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 108,
+            funcId: 100,
             port: port_,
           );
         },
@@ -5060,7 +4648,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 109,
+            funcId: 101,
             port: port_,
           );
         },
@@ -5097,7 +4685,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 110,
+            funcId: 102,
             port: port_,
           );
         },
@@ -5133,7 +4721,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 111,
+            funcId: 103,
             port: port_,
           );
         },
@@ -5169,7 +4757,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 112,
+            funcId: 104,
           )!;
         },
         codec: SseCodec(
@@ -5204,7 +4792,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 113,
+            funcId: 105,
             port: port_,
           );
         },
@@ -5240,7 +4828,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 114,
+            funcId: 106,
           )!;
         },
         codec: SseCodec(
@@ -5277,7 +4865,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 115,
+            funcId: 107,
             port: port_,
           );
         },
@@ -5315,7 +4903,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 116,
+            funcId: 108,
             port: port_,
           );
         },
@@ -5345,7 +4933,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 117,
+            funcId: 109,
             port: port_,
           );
         },
@@ -5379,7 +4967,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 118,
+            funcId: 110,
           )!;
         },
         codec: SseCodec(
@@ -5416,7 +5004,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 119,
+            funcId: 111,
             port: port_,
           );
         },
@@ -5458,7 +5046,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 120,
+            funcId: 112,
             port: port_,
           );
         },
@@ -5496,7 +5084,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 121,
+            funcId: 113,
             port: port_,
           );
         },
@@ -5538,7 +5126,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 122,
+            funcId: 114,
             port: port_,
           );
         },
@@ -5581,7 +5169,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 123,
+            funcId: 115,
             port: port_,
           );
         },
@@ -5625,7 +5213,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 124,
+            funcId: 116,
             port: port_,
           );
         },
@@ -5663,7 +5251,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 125,
+            funcId: 117,
             port: port_,
           );
         },
@@ -5701,7 +5289,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 126,
+            funcId: 118,
             port: port_,
           );
         },
@@ -5739,7 +5327,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 127,
+            funcId: 119,
             port: port_,
           );
         },
@@ -5777,7 +5365,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 128,
+            funcId: 120,
             port: port_,
           );
         },
@@ -5813,7 +5401,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 129,
+            funcId: 121,
             port: port_,
           );
         },
@@ -5856,7 +5444,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 130,
+            funcId: 122,
             port: port_,
           );
         },
@@ -5900,7 +5488,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 131,
+            funcId: 123,
             port: port_,
           );
         },
@@ -5930,7 +5518,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 132,
+            funcId: 124,
             port: port_,
           );
         },
@@ -5971,7 +5559,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 133,
+            funcId: 125,
             port: port_,
           );
         },
@@ -6011,7 +5599,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 134,
+            funcId: 126,
             port: port_,
           );
         },
@@ -6031,6 +5619,50 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(
         debugName: "RelayManagerFfi_publish_event_fire_and_forget",
         argNames: ["that", "eventJson", "relays"],
+      );
+
+  @override
+  Future<LegacyRetractionOutcomeFfi>
+  crateApiRelayManagerFfiRetractLegacyKeyMaterial({
+    required RelayManagerFfi that,
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerRelayManagerFfi(
+            that,
+            serializer,
+          );
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
+            circle,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(identitySecretBytes, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 127,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_legacy_retraction_outcome_ffi,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiRelayManagerFfiRetractLegacyKeyMaterialConstMeta,
+        argValues: [that, circle, identitySecretBytes],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiRelayManagerFfiRetractLegacyKeyMaterialConstMeta =>
+      const TaskConstMeta(
+        debugName: "RelayManagerFfi_retract_legacy_key_material",
+        argNames: ["that", "circle", "identitySecretBytes"],
       );
 
   @override
@@ -6057,7 +5689,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 135,
+            funcId: 128,
             port: port_,
           );
         },
@@ -6093,7 +5725,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 136,
+            funcId: 129,
             port: port_,
           );
         },
@@ -6115,41 +5747,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<bool> crateApiAbortConvergingWindow({
-    required List<int> mlsGroupId,
-    required List<int> nostrGroupId,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_list_prim_u_8_loose(mlsGroupId, serializer);
-          sse_encode_list_prim_u_8_loose(nostrGroupId, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 137,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_bool,
-          decodeErrorData: sse_decode_String,
-        ),
-        constMeta: kCrateApiAbortConvergingWindowConstMeta,
-        argValues: [mlsGroupId, nostrGroupId],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiAbortConvergingWindowConstMeta =>
-      const TaskConstMeta(
-        debugName: "abort_converging_window",
-        argNames: ["mlsGroupId", "nostrGroupId"],
-      );
-
-  @override
   void crateApiAllowPrivateBlossomForTest() {
     return handler.executeSync(
       SyncTask(
@@ -6158,7 +5755,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 138,
+            funcId: 130,
           )!;
         },
         codec: SseCodec(
@@ -6187,7 +5784,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 139,
+            funcId: 131,
           )!;
         },
         codec: SseCodec(
@@ -6208,59 +5805,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<ConvergeResultFfi?> crateApiConvergeAfterWindow({
-    required List<int> mlsGroupId,
-    required List<int> nostrGroupId,
-    required String ourCommitJson,
-    required BigInt stagedEpoch,
-    required ConvergeIntentFfi intent,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_list_prim_u_8_loose(mlsGroupId, serializer);
-          sse_encode_list_prim_u_8_loose(nostrGroupId, serializer);
-          sse_encode_String(ourCommitJson, serializer);
-          sse_encode_u_64(stagedEpoch, serializer);
-          sse_encode_box_autoadd_converge_intent_ffi(intent, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 140,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_opt_box_autoadd_converge_result_ffi,
-          decodeErrorData: sse_decode_String,
-        ),
-        constMeta: kCrateApiConvergeAfterWindowConstMeta,
-        argValues: [
-          mlsGroupId,
-          nostrGroupId,
-          ourCommitJson,
-          stagedEpoch,
-          intent,
-        ],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiConvergeAfterWindowConstMeta =>
-      const TaskConstMeta(
-        debugName: "converge_after_window",
-        argNames: [
-          "mlsGroupId",
-          "nostrGroupId",
-          "ourCommitJson",
-          "stagedEpoch",
-          "intent",
-        ],
-      );
-
-  @override
   List<String> crateApiDefaultRelays() {
     return handler.executeSync(
       SyncTask(
@@ -6269,7 +5813,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 141,
+            funcId: 132,
           )!;
         },
         codec: SseCodec(
@@ -6287,6 +5831,37 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "default_relays", argNames: []);
 
   @override
+  Future<void> crateApiDestroyLegacyMlsState({required String dataDir}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(dataDir, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 133,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiDestroyLegacyMlsStateConstMeta,
+        argValues: [dataDir],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDestroyLegacyMlsStateConstMeta =>
+      const TaskConstMeta(
+        debugName: "destroy_legacy_mls_state",
+        argNames: ["dataDir"],
+      );
+
+  @override
   List<String> crateApiDiscoveryRelays() {
     return handler.executeSync(
       SyncTask(
@@ -6295,7 +5870,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 142,
+            funcId: 134,
           )!;
         },
         codec: SseCodec(
@@ -6321,7 +5896,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 143,
+            funcId: 135,
             port: port_,
           );
         },
@@ -6348,7 +5923,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 144,
+            funcId: 136,
             port: port_,
           );
         },
@@ -6367,6 +5942,37 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "init_keyring_store", argNames: []);
 
   @override
+  Future<LegacyRetractionOutcomeFfi>
+  crateApiLegacyRetractionOutcomeFfiDefault() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 137,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_legacy_retraction_outcome_ffi,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiLegacyRetractionOutcomeFfiDefaultConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiLegacyRetractionOutcomeFfiDefaultConstMeta =>
+      const TaskConstMeta(
+        debugName: "legacy_retraction_outcome_ffi_default",
+        argNames: [],
+      );
+
+  @override
   Future<SubscriptionHealthOutcomeFfi> crateApiMaintainSubscriptionHealth() {
     return handler.executeNormal(
       NormalTask(
@@ -6375,7 +5981,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 145,
+            funcId: 138,
             port: port_,
           );
         },
@@ -6410,7 +6016,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 146,
+            funcId: 139,
             port: port_,
           );
         },
@@ -6441,7 +6047,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 147,
+            funcId: 140,
           )!;
         },
         codec: SseCodec(
@@ -6471,7 +6077,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 148,
+            funcId: 141,
           )!;
         },
         codec: SseCodec(
@@ -6501,7 +6107,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 149,
+            funcId: 142,
           )!;
         },
         codec: SseCodec(
@@ -6522,157 +6128,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  BigInt crateApiSettleWindowSecs() {
-    return handler.executeSync(
-      SyncTask(
-        callFfi: () {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 150,
-          )!;
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_u_64,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiSettleWindowSecsConstMeta,
-        argValues: [],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiSettleWindowSecsConstMeta =>
-      const TaskConstMeta(debugName: "settle_window_secs", argNames: []);
-
-  @override
-  Future<StagedAddFfi?> crateApiStageAddMembersConverging({
-    required List<int> identitySecretBytes,
-    required List<int> mlsGroupId,
-    required List<int> nostrGroupId,
-    required List<MemberKeyPackageFfi> members,
-    required List<String> creatorFallbackRelays,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_list_prim_u_8_loose(identitySecretBytes, serializer);
-          sse_encode_list_prim_u_8_loose(mlsGroupId, serializer);
-          sse_encode_list_prim_u_8_loose(nostrGroupId, serializer);
-          sse_encode_list_member_key_package_ffi(members, serializer);
-          sse_encode_list_String(creatorFallbackRelays, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 151,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_opt_box_autoadd_staged_add_ffi,
-          decodeErrorData: sse_decode_String,
-        ),
-        constMeta: kCrateApiStageAddMembersConvergingConstMeta,
-        argValues: [
-          identitySecretBytes,
-          mlsGroupId,
-          nostrGroupId,
-          members,
-          creatorFallbackRelays,
-        ],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiStageAddMembersConvergingConstMeta =>
-      const TaskConstMeta(
-        debugName: "stage_add_members_converging",
-        argNames: [
-          "identitySecretBytes",
-          "mlsGroupId",
-          "nostrGroupId",
-          "members",
-          "creatorFallbackRelays",
-        ],
-      );
-
-  @override
-  Future<StagedCommitFfi?> crateApiStageRemoveMembersConverging({
-    required List<int> mlsGroupId,
-    required List<int> nostrGroupId,
-    required List<String> memberPubkeys,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_list_prim_u_8_loose(mlsGroupId, serializer);
-          sse_encode_list_prim_u_8_loose(nostrGroupId, serializer);
-          sse_encode_list_String(memberPubkeys, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 152,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_opt_box_autoadd_staged_commit_ffi,
-          decodeErrorData: sse_decode_String,
-        ),
-        constMeta: kCrateApiStageRemoveMembersConvergingConstMeta,
-        argValues: [mlsGroupId, nostrGroupId, memberPubkeys],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiStageRemoveMembersConvergingConstMeta =>
-      const TaskConstMeta(
-        debugName: "stage_remove_members_converging",
-        argNames: ["mlsGroupId", "nostrGroupId", "memberPubkeys"],
-      );
-
-  @override
-  Future<StagedCommitFfi?> crateApiStageSelfUpdateConverging({
-    required List<int> mlsGroupId,
-    required List<int> nostrGroupId,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_list_prim_u_8_loose(mlsGroupId, serializer);
-          sse_encode_list_prim_u_8_loose(nostrGroupId, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 153,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_opt_box_autoadd_staged_commit_ffi,
-          decodeErrorData: sse_decode_String,
-        ),
-        constMeta: kCrateApiStageSelfUpdateConvergingConstMeta,
-        argValues: [mlsGroupId, nostrGroupId],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiStageSelfUpdateConvergingConstMeta =>
-      const TaskConstMeta(
-        debugName: "stage_self_update_converging",
-        argNames: ["mlsGroupId", "nostrGroupId"],
-      );
-
-  @override
   Future<BigInt> crateApiTileCacheEvict({
     required PlatformInt64 maxBytes,
     required PlatformInt64 idleAgeSecs,
@@ -6688,7 +6143,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 154,
+            funcId: 143,
             port: port_,
           );
         },
@@ -6728,7 +6183,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 155,
+            funcId: 144,
             port: port_,
           );
         },
@@ -6758,7 +6213,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 156,
+            funcId: 145,
             port: port_,
           );
         },
@@ -6804,7 +6259,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 157,
+            funcId: 146,
             port: port_,
           );
         },
@@ -6870,7 +6325,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 158,
+            funcId: 147,
             port: port_,
           );
         },
@@ -6909,7 +6364,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 159,
+            funcId: 148,
             port: port_,
           );
         },
@@ -6936,7 +6391,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 160,
+            funcId: 149,
             port: port_,
           );
         },
@@ -6967,7 +6422,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 161,
+            funcId: 150,
             port: port_,
           );
         },
@@ -7300,11 +6755,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   AddMembersResultFfi dco_decode_add_members_result_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 2)
-      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
     return AddMembersResultFfi(
-      evolutionEventJson: dco_decode_String(arr[0]),
+      commitEventJson: dco_decode_String(arr[0]),
       welcomeEvents: dco_decode_list_gift_wrapped_welcome_ffi(arr[1]),
+      pending: dco_decode_pending_state_ref_ffi(arr[2]),
     );
   }
 
@@ -7326,24 +6782,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ContactFfi dco_decode_box_autoadd_contact_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_contact_ffi(raw);
-  }
-
-  @protected
-  ConvergeIntentFfi dco_decode_box_autoadd_converge_intent_ffi(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return dco_decode_converge_intent_ffi(raw);
-  }
-
-  @protected
-  ConvergeResultFfi dco_decode_box_autoadd_converge_result_ffi(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return dco_decode_converge_result_ffi(raw);
-  }
-
-  @protected
-  DecryptResultFfi dco_decode_box_autoadd_decrypt_result_ffi(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return dco_decode_decrypt_result_ffi(raw);
   }
 
   @protected
@@ -7397,6 +6835,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  PendingStateRefFfi dco_decode_box_autoadd_pending_state_ref_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_pending_state_ref_ffi(raw);
+  }
+
+  @protected
   ProfileMetadataFfi dco_decode_box_autoadd_profile_metadata_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_profile_metadata_ffi(raw);
@@ -7414,18 +6858,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_signed_location_event_ffi(raw);
-  }
-
-  @protected
-  StagedAddFfi dco_decode_box_autoadd_staged_add_ffi(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return dco_decode_staged_add_ffi(raw);
-  }
-
-  @protected
-  StagedCommitFfi dco_decode_box_autoadd_staged_commit_ffi(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return dco_decode_staged_commit_ffi(raw);
   }
 
   @protected
@@ -7480,16 +6912,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   CatchupResultFfi dco_decode_catchup_result_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 7)
-      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
     return CatchupResultFfi(
       circlesSwept: dco_decode_u_32(arr[0]),
-      locationsApplied: dco_decode_u_32(arr[1]),
-      commitsApplied: dco_decode_u_32(arr[2]),
-      autoCommitsStaged: dco_decode_u_32(arr[3]),
-      cursorsAdvanced: dco_decode_u_32(arr[4]),
-      deadlineHit: dco_decode_bool(arr[5]),
-      relayErrors: dco_decode_u_32(arr[6]),
+      eventsApplied: dco_decode_u_32(arr[1]),
+      eventsDeferred: dco_decode_u_32(arr[2]),
+      cursorsAdvanced: dco_decode_u_32(arr[3]),
+      deadlineHit: dco_decode_bool(arr[4]),
+      relayErrors: dco_decode_u_32(arr[5]),
     );
   }
 
@@ -7497,11 +6928,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   CircleCreationResultFfi dco_decode_circle_creation_result_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 2)
-      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
     return CircleCreationResultFfi(
       circle: dco_decode_circle_ffi(arr[0]),
       welcomeEvents: dco_decode_list_gift_wrapped_welcome_ffi(arr[1]),
+      pending: dco_decode_pending_state_ref_ffi(arr[2]),
     );
   }
 
@@ -7551,6 +6983,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  CommitToPublishFfi dco_decode_commit_to_publish_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return CommitToPublishFfi(
+      commitEventJson: dco_decode_String(arr[0]),
+      pending: dco_decode_pending_state_ref_ffi(arr[1]),
+    );
+  }
+
+  @protected
   ContactFfi dco_decode_contact_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -7566,74 +7010,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  ConvergeIntentFfi dco_decode_converge_intent_ffi(dynamic raw) {
+  DecryptLocationOutcomeFfi dco_decode_decrypt_location_outcome_ffi(
+    dynamic raw,
+  ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
     if (arr.length != 2)
       throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
-    return ConvergeIntentFfi(
-      kind: dco_decode_converge_intent_kind(arr[0]),
-      pubkeys: dco_decode_list_String(arr[1]),
-    );
-  }
-
-  @protected
-  ConvergeIntentKind dco_decode_converge_intent_kind(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return ConvergeIntentKind.values[raw as int];
-  }
-
-  @protected
-  ConvergeResultFfi dco_decode_converge_result_ffi(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    final arr = raw as List<dynamic>;
-    if (arr.length != 2)
-      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
-    return ConvergeResultFfi(
-      kind: dco_decode_converge_result_kind(arr[0]),
-      intentStillPending: dco_decode_bool(arr[1]),
-    );
-  }
-
-  @protected
-  ConvergeResultKind dco_decode_converge_result_kind(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return ConvergeResultKind.values[raw as int];
-  }
-
-  @protected
-  DecryptOutcomeFfi dco_decode_decrypt_outcome_ffi(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    final arr = raw as List<dynamic>;
-    if (arr.length != 6)
-      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
-    return DecryptOutcomeFfi(
-      kind: dco_decode_decrypt_outcome_kind_ffi(arr[0]),
-      eventCreatedAtSecs: dco_decode_i_64(arr[1]),
-      location: dco_decode_opt_box_autoadd_decrypted_location_ffi(arr[2]),
-      evolutionEventJson: dco_decode_opt_String(arr[3]),
-      evolutionMlsGroupId: dco_decode_opt_list_prim_u_8_strict(arr[4]),
-      unprocessableReason: dco_decode_opt_String(arr[5]),
-    );
-  }
-
-  @protected
-  DecryptOutcomeKindFfi dco_decode_decrypt_outcome_kind_ffi(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return DecryptOutcomeKindFfi.values[raw as int];
-  }
-
-  @protected
-  DecryptResultFfi dco_decode_decrypt_result_ffi(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
-    return DecryptResultFfi(
-      location: dco_decode_opt_box_autoadd_decrypted_location_ffi(arr[0]),
-      groupUpdated: dco_decode_bool(arr[1]),
-      evolutionEventJson: dco_decode_opt_String(arr[2]),
-      evolutionMlsGroupId: dco_decode_opt_list_prim_u_8_strict(arr[3]),
+    return DecryptLocationOutcomeFfi(
+      results: dco_decode_list_location_message_result_ffi(arr[0]),
+      autoCommits: dco_decode_list_commit_to_publish_ffi(arr[1]),
     );
   }
 
@@ -7756,22 +7142,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  KeyPackageBundleFfi dco_decode_key_package_bundle_ffi(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    final arr = raw as List<dynamic>;
-    if (arr.length != 6)
-      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
-    return KeyPackageBundleFfi(
-      content: dco_decode_String(arr[0]),
-      tags30443: dco_decode_list_list_String(arr[1]),
-      tags443: dco_decode_list_list_String(arr[2]),
-      hashRef: dco_decode_list_prim_u_8_strict(arr[3]),
-      dTag: dco_decode_String(arr[4]),
-      relays: dco_decode_list_String(arr[5]),
-    );
-  }
-
-  @protected
   KpMaintenanceActionFfi dco_decode_kp_maintenance_action_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return KpMaintenanceActionFfi.values[raw as int];
@@ -7831,6 +7201,22 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  LegacyRetractionOutcomeFfi dco_decode_legacy_retraction_outcome_ffi(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return LegacyRetractionOutcomeFfi(
+      alreadyDone: dco_decode_bool(arr[0]),
+      legacy443Scrubbed: dco_decode_u_32(arr[1]),
+      relayListRetracted: dco_decode_bool(arr[2]),
+      relayErrors: dco_decode_u_32(arr[3]),
+    );
+  }
+
+  @protected
   List<String> dco_decode_list_String(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_String).toList();
@@ -7849,6 +7235,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>)
         .map(dco_decode_circle_with_members_ffi)
+        .toList();
+  }
+
+  @protected
+  List<CommitToPublishFfi> dco_decode_list_commit_to_publish_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>)
+        .map(dco_decode_commit_to_publish_ffi)
         .toList();
   }
 
@@ -7897,9 +7291,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  List<Uint8List> dco_decode_list_list_prim_u_8_strict(dynamic raw) {
+  List<LocationMessageResultFfi> dco_decode_list_location_message_result_ffi(
+    dynamic raw,
+  ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
-    return (raw as List<dynamic>).map(dco_decode_list_prim_u_8_strict).toList();
+    return (raw as List<dynamic>)
+        .map(dco_decode_location_message_result_ffi)
+        .toList();
   }
 
   @protected
@@ -7957,9 +7355,25 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  List<UnsignedEventFfi> dco_decode_list_unsigned_event_ffi(dynamic raw) {
+  LocationMessageResultFfi dco_decode_location_message_result_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
-    return (raw as List<dynamic>).map(dco_decode_unsigned_event_ffi).toList();
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return LocationMessageResultFfi(
+      kind: dco_decode_location_message_result_kind_ffi(arr[0]),
+      location: dco_decode_opt_box_autoadd_decrypted_location_ffi(arr[1]),
+      mlsGroupId: dco_decode_list_prim_u_8_strict(arr[2]),
+      epoch: dco_decode_u_64(arr[3]),
+    );
+  }
+
+  @protected
+  LocationMessageResultKindFfi dco_decode_location_message_result_kind_ffi(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return LocationMessageResultKindFfi.values[raw as int];
   }
 
   @protected
@@ -7995,20 +7409,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ContactFfi? dco_decode_opt_box_autoadd_contact_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_contact_ffi(raw);
-  }
-
-  @protected
-  ConvergeResultFfi? dco_decode_opt_box_autoadd_converge_result_ffi(
-    dynamic raw,
-  ) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return raw == null ? null : dco_decode_box_autoadd_converge_result_ffi(raw);
-  }
-
-  @protected
-  DecryptResultFfi? dco_decode_opt_box_autoadd_decrypt_result_ffi(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return raw == null ? null : dco_decode_box_autoadd_decrypt_result_ffi(raw);
   }
 
   @protected
@@ -8070,18 +7470,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  StagedAddFfi? dco_decode_opt_box_autoadd_staged_add_ffi(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return raw == null ? null : dco_decode_box_autoadd_staged_add_ffi(raw);
-  }
-
-  @protected
-  StagedCommitFfi? dco_decode_opt_box_autoadd_staged_commit_ffi(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return raw == null ? null : dco_decode_box_autoadd_staged_commit_ffi(raw);
-  }
-
-  @protected
   TileCacheEntryFfi? dco_decode_opt_box_autoadd_tile_cache_entry_ffi(
     dynamic raw,
   ) {
@@ -8107,6 +7495,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_list_prim_u_8_strict(raw);
+  }
+
+  @protected
+  PendingStateRefFfi dco_decode_pending_state_ref_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 1)
+      throw Exception('unexpected arr length: expect 1 but see ${arr.length}');
+    return PendingStateRefFfi(token: dco_decode_u_64(arr[0]));
   }
 
   @protected
@@ -8262,42 +7659,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  SignedEventFfi dco_decode_signed_event_ffi(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    final arr = raw as List<dynamic>;
-    if (arr.length != 7)
-      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
-    return SignedEventFfi(
-      id: dco_decode_String(arr[0]),
-      kind: dco_decode_u_16(arr[1]),
-      content: dco_decode_String(arr[2]),
-      tags: dco_decode_list_list_String(arr[3]),
-      createdAt: dco_decode_i_64(arr[4]),
-      pubkey: dco_decode_String(arr[5]),
-      sig: dco_decode_String(arr[6]),
-    );
-  }
-
-  @protected
-  SignedKeyPackageEventFfi dco_decode_signed_key_package_event_ffi(
-    dynamic raw,
-  ) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    final arr = raw as List<dynamic>;
-    if (arr.length != 7)
-      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
-    return SignedKeyPackageEventFfi(
-      eventJson: dco_decode_String(arr[0]),
-      legacyEventJson: dco_decode_String(arr[1]),
-      relays: dco_decode_list_String(arr[2]),
-      canonicalHashRef: dco_decode_list_prim_u_8_strict(arr[3]),
-      dTag: dco_decode_String(arr[4]),
-      canonicalEventId: dco_decode_String(arr[5]),
-      legacyEventId: dco_decode_String(arr[6]),
-    );
-  }
-
-  @protected
   SignedLocationEventFfi dco_decode_signed_location_event_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -8311,31 +7672,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       tags: dco_decode_list_list_String(arr[4]),
       content: dco_decode_String(arr[5]),
       sig: dco_decode_String(arr[6]),
-    );
-  }
-
-  @protected
-  StagedAddFfi dco_decode_staged_add_ffi(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    final arr = raw as List<dynamic>;
-    if (arr.length != 3)
-      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
-    return StagedAddFfi(
-      commitJson: dco_decode_String(arr[0]),
-      stagedEpoch: dco_decode_u_64(arr[1]),
-      welcomeEvents: dco_decode_list_gift_wrapped_welcome_ffi(arr[2]),
-    );
-  }
-
-  @protected
-  StagedCommitFfi dco_decode_staged_commit_ffi(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    final arr = raw as List<dynamic>;
-    if (arr.length != 2)
-      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
-    return StagedCommitFfi(
-      commitJson: dco_decode_String(arr[0]),
-      stagedEpoch: dco_decode_u_64(arr[1]),
     );
   }
 
@@ -8408,21 +7744,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  UnsignedEventFfi dco_decode_unsigned_event_ffi(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    final arr = raw as List<dynamic>;
-    if (arr.length != 5)
-      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
-    return UnsignedEventFfi(
-      kind: dco_decode_u_16(arr[0]),
-      content: dco_decode_String(arr[1]),
-      tags: dco_decode_list_list_String(arr[2]),
-      createdAt: dco_decode_i_64(arr[3]),
-      pubkey: dco_decode_String(arr[4]),
-    );
-  }
-
-  @protected
   UnsignedLocationEventFfi dco_decode_unsigned_location_event_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -8433,19 +7754,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       content: dco_decode_String(arr[1]),
       tags: dco_decode_list_list_String(arr[2]),
       createdAt: dco_decode_i_64(arr[3]),
-    );
-  }
-
-  @protected
-  UpdateGroupResultFfi dco_decode_update_group_result_ffi(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    final arr = raw as List<dynamic>;
-    if (arr.length != 3)
-      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
-    return UpdateGroupResultFfi(
-      evolutionEvent: dco_decode_signed_event_ffi(arr[0]),
-      evolutionEventJson: dco_decode_String(arr[1]),
-      welcomeEvents: dco_decode_list_unsigned_event_ffi(arr[2]),
     );
   }
 
@@ -8782,13 +8090,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     SseDeserializer deserializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_evolutionEventJson = sse_decode_String(deserializer);
+    var var_commitEventJson = sse_decode_String(deserializer);
     var var_welcomeEvents = sse_decode_list_gift_wrapped_welcome_ffi(
       deserializer,
     );
+    var var_pending = sse_decode_pending_state_ref_ffi(deserializer);
     return AddMembersResultFfi(
-      evolutionEventJson: var_evolutionEventJson,
+      commitEventJson: var_commitEventJson,
       welcomeEvents: var_welcomeEvents,
+      pending: var_pending,
     );
   }
 
@@ -8810,30 +8120,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ContactFfi sse_decode_box_autoadd_contact_ffi(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_contact_ffi(deserializer));
-  }
-
-  @protected
-  ConvergeIntentFfi sse_decode_box_autoadd_converge_intent_ffi(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    return (sse_decode_converge_intent_ffi(deserializer));
-  }
-
-  @protected
-  ConvergeResultFfi sse_decode_box_autoadd_converge_result_ffi(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    return (sse_decode_converge_result_ffi(deserializer));
-  }
-
-  @protected
-  DecryptResultFfi sse_decode_box_autoadd_decrypt_result_ffi(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    return (sse_decode_decrypt_result_ffi(deserializer));
   }
 
   @protected
@@ -8891,6 +8177,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  PendingStateRefFfi sse_decode_box_autoadd_pending_state_ref_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_pending_state_ref_ffi(deserializer));
+  }
+
+  @protected
   ProfileMetadataFfi sse_decode_box_autoadd_profile_metadata_ffi(
     SseDeserializer deserializer,
   ) {
@@ -8912,22 +8206,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_signed_location_event_ffi(deserializer));
-  }
-
-  @protected
-  StagedAddFfi sse_decode_box_autoadd_staged_add_ffi(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    return (sse_decode_staged_add_ffi(deserializer));
-  }
-
-  @protected
-  StagedCommitFfi sse_decode_box_autoadd_staged_commit_ffi(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    return (sse_decode_staged_commit_ffi(deserializer));
   }
 
   @protected
@@ -8992,17 +8270,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   CatchupResultFfi sse_decode_catchup_result_ffi(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_circlesSwept = sse_decode_u_32(deserializer);
-    var var_locationsApplied = sse_decode_u_32(deserializer);
-    var var_commitsApplied = sse_decode_u_32(deserializer);
-    var var_autoCommitsStaged = sse_decode_u_32(deserializer);
+    var var_eventsApplied = sse_decode_u_32(deserializer);
+    var var_eventsDeferred = sse_decode_u_32(deserializer);
     var var_cursorsAdvanced = sse_decode_u_32(deserializer);
     var var_deadlineHit = sse_decode_bool(deserializer);
     var var_relayErrors = sse_decode_u_32(deserializer);
     return CatchupResultFfi(
       circlesSwept: var_circlesSwept,
-      locationsApplied: var_locationsApplied,
-      commitsApplied: var_commitsApplied,
-      autoCommitsStaged: var_autoCommitsStaged,
+      eventsApplied: var_eventsApplied,
+      eventsDeferred: var_eventsDeferred,
       cursorsAdvanced: var_cursorsAdvanced,
       deadlineHit: var_deadlineHit,
       relayErrors: var_relayErrors,
@@ -9018,9 +8294,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_welcomeEvents = sse_decode_list_gift_wrapped_welcome_ffi(
       deserializer,
     );
+    var var_pending = sse_decode_pending_state_ref_ffi(deserializer);
     return CircleCreationResultFfi(
       circle: var_circle,
       welcomeEvents: var_welcomeEvents,
+      pending: var_pending,
     );
   }
 
@@ -9078,6 +8356,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  CommitToPublishFfi sse_decode_commit_to_publish_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_commitEventJson = sse_decode_String(deserializer);
+    var var_pending = sse_decode_pending_state_ref_ffi(deserializer);
+    return CommitToPublishFfi(
+      commitEventJson: var_commitEventJson,
+      pending: var_pending,
+    );
+  }
+
+  @protected
   ContactFfi sse_decode_contact_ffi(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_pubkey = sse_decode_String(deserializer);
@@ -9095,96 +8386,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  ConvergeIntentFfi sse_decode_converge_intent_ffi(
+  DecryptLocationOutcomeFfi sse_decode_decrypt_location_outcome_ffi(
     SseDeserializer deserializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_kind = sse_decode_converge_intent_kind(deserializer);
-    var var_pubkeys = sse_decode_list_String(deserializer);
-    return ConvergeIntentFfi(kind: var_kind, pubkeys: var_pubkeys);
-  }
-
-  @protected
-  ConvergeIntentKind sse_decode_converge_intent_kind(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var inner = sse_decode_i_32(deserializer);
-    return ConvergeIntentKind.values[inner];
-  }
-
-  @protected
-  ConvergeResultFfi sse_decode_converge_result_ffi(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_kind = sse_decode_converge_result_kind(deserializer);
-    var var_intentStillPending = sse_decode_bool(deserializer);
-    return ConvergeResultFfi(
-      kind: var_kind,
-      intentStillPending: var_intentStillPending,
-    );
-  }
-
-  @protected
-  ConvergeResultKind sse_decode_converge_result_kind(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var inner = sse_decode_i_32(deserializer);
-    return ConvergeResultKind.values[inner];
-  }
-
-  @protected
-  DecryptOutcomeFfi sse_decode_decrypt_outcome_ffi(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_kind = sse_decode_decrypt_outcome_kind_ffi(deserializer);
-    var var_eventCreatedAtSecs = sse_decode_i_64(deserializer);
-    var var_location = sse_decode_opt_box_autoadd_decrypted_location_ffi(
-      deserializer,
-    );
-    var var_evolutionEventJson = sse_decode_opt_String(deserializer);
-    var var_evolutionMlsGroupId = sse_decode_opt_list_prim_u_8_strict(
-      deserializer,
-    );
-    var var_unprocessableReason = sse_decode_opt_String(deserializer);
-    return DecryptOutcomeFfi(
-      kind: var_kind,
-      eventCreatedAtSecs: var_eventCreatedAtSecs,
-      location: var_location,
-      evolutionEventJson: var_evolutionEventJson,
-      evolutionMlsGroupId: var_evolutionMlsGroupId,
-      unprocessableReason: var_unprocessableReason,
-    );
-  }
-
-  @protected
-  DecryptOutcomeKindFfi sse_decode_decrypt_outcome_kind_ffi(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var inner = sse_decode_i_32(deserializer);
-    return DecryptOutcomeKindFfi.values[inner];
-  }
-
-  @protected
-  DecryptResultFfi sse_decode_decrypt_result_ffi(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_location = sse_decode_opt_box_autoadd_decrypted_location_ffi(
-      deserializer,
-    );
-    var var_groupUpdated = sse_decode_bool(deserializer);
-    var var_evolutionEventJson = sse_decode_opt_String(deserializer);
-    var var_evolutionMlsGroupId = sse_decode_opt_list_prim_u_8_strict(
-      deserializer,
-    );
-    return DecryptResultFfi(
-      location: var_location,
-      groupUpdated: var_groupUpdated,
-      evolutionEventJson: var_evolutionEventJson,
-      evolutionMlsGroupId: var_evolutionMlsGroupId,
+    var var_results = sse_decode_list_location_message_result_ffi(deserializer);
+    var var_autoCommits = sse_decode_list_commit_to_publish_ffi(deserializer);
+    return DecryptLocationOutcomeFfi(
+      results: var_results,
+      autoCommits: var_autoCommits,
     );
   }
 
@@ -9328,27 +8538,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  KeyPackageBundleFfi sse_decode_key_package_bundle_ffi(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_content = sse_decode_String(deserializer);
-    var var_tags30443 = sse_decode_list_list_String(deserializer);
-    var var_tags443 = sse_decode_list_list_String(deserializer);
-    var var_hashRef = sse_decode_list_prim_u_8_strict(deserializer);
-    var var_dTag = sse_decode_String(deserializer);
-    var var_relays = sse_decode_list_String(deserializer);
-    return KeyPackageBundleFfi(
-      content: var_content,
-      tags30443: var_tags30443,
-      tags443: var_tags443,
-      hashRef: var_hashRef,
-      dTag: var_dTag,
-      relays: var_relays,
-    );
-  }
-
-  @protected
   KpMaintenanceActionFfi sse_decode_kp_maintenance_action_ffi(
     SseDeserializer deserializer,
   ) {
@@ -9423,6 +8612,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  LegacyRetractionOutcomeFfi sse_decode_legacy_retraction_outcome_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_alreadyDone = sse_decode_bool(deserializer);
+    var var_legacy443Scrubbed = sse_decode_u_32(deserializer);
+    var var_relayListRetracted = sse_decode_bool(deserializer);
+    var var_relayErrors = sse_decode_u_32(deserializer);
+    return LegacyRetractionOutcomeFfi(
+      alreadyDone: var_alreadyDone,
+      legacy443Scrubbed: var_legacy443Scrubbed,
+      relayListRetracted: var_relayListRetracted,
+      relayErrors: var_relayErrors,
+    );
+  }
+
+  @protected
   List<String> sse_decode_list_String(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
@@ -9458,6 +8664,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var ans_ = <CircleWithMembersFfi>[];
     for (var idx_ = 0; idx_ < len_; ++idx_) {
       ans_.add(sse_decode_circle_with_members_ffi(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<CommitToPublishFfi> sse_decode_list_commit_to_publish_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <CommitToPublishFfi>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_commit_to_publish_ffi(deserializer));
     }
     return ans_;
   }
@@ -9543,15 +8763,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  List<Uint8List> sse_decode_list_list_prim_u_8_strict(
+  List<LocationMessageResultFfi> sse_decode_list_location_message_result_ffi(
     SseDeserializer deserializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
     var len_ = sse_decode_i_32(deserializer);
-    var ans_ = <Uint8List>[];
+    var ans_ = <LocationMessageResultFfi>[];
     for (var idx_ = 0; idx_ < len_; ++idx_) {
-      ans_.add(sse_decode_list_prim_u_8_strict(deserializer));
+      ans_.add(sse_decode_location_message_result_ffi(deserializer));
     }
     return ans_;
   }
@@ -9641,17 +8861,31 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  List<UnsignedEventFfi> sse_decode_list_unsigned_event_ffi(
+  LocationMessageResultFfi sse_decode_location_message_result_ffi(
     SseDeserializer deserializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_kind = sse_decode_location_message_result_kind_ffi(deserializer);
+    var var_location = sse_decode_opt_box_autoadd_decrypted_location_ffi(
+      deserializer,
+    );
+    var var_mlsGroupId = sse_decode_list_prim_u_8_strict(deserializer);
+    var var_epoch = sse_decode_u_64(deserializer);
+    return LocationMessageResultFfi(
+      kind: var_kind,
+      location: var_location,
+      mlsGroupId: var_mlsGroupId,
+      epoch: var_epoch,
+    );
+  }
 
-    var len_ = sse_decode_i_32(deserializer);
-    var ans_ = <UnsignedEventFfi>[];
-    for (var idx_ = 0; idx_ < len_; ++idx_) {
-      ans_.add(sse_decode_unsigned_event_ffi(deserializer));
-    }
-    return ans_;
+  @protected
+  LocationMessageResultKindFfi sse_decode_location_message_result_kind_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return LocationMessageResultKindFfi.values[inner];
   }
 
   @protected
@@ -9701,32 +8935,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_contact_ffi(deserializer));
-    } else {
-      return null;
-    }
-  }
-
-  @protected
-  ConvergeResultFfi? sse_decode_opt_box_autoadd_converge_result_ffi(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    if (sse_decode_bool(deserializer)) {
-      return (sse_decode_box_autoadd_converge_result_ffi(deserializer));
-    } else {
-      return null;
-    }
-  }
-
-  @protected
-  DecryptResultFfi? sse_decode_opt_box_autoadd_decrypt_result_ffi(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    if (sse_decode_bool(deserializer)) {
-      return (sse_decode_box_autoadd_decrypt_result_ffi(deserializer));
     } else {
       return null;
     }
@@ -9822,32 +9030,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  StagedAddFfi? sse_decode_opt_box_autoadd_staged_add_ffi(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    if (sse_decode_bool(deserializer)) {
-      return (sse_decode_box_autoadd_staged_add_ffi(deserializer));
-    } else {
-      return null;
-    }
-  }
-
-  @protected
-  StagedCommitFfi? sse_decode_opt_box_autoadd_staged_commit_ffi(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    if (sse_decode_bool(deserializer)) {
-      return (sse_decode_box_autoadd_staged_commit_ffi(deserializer));
-    } else {
-      return null;
-    }
-  }
-
-  @protected
   TileCacheEntryFfi? sse_decode_opt_box_autoadd_tile_cache_entry_ffi(
     SseDeserializer deserializer,
   ) {
@@ -9891,6 +9073,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     } else {
       return null;
     }
+  }
+
+  @protected
+  PendingStateRefFfi sse_decode_pending_state_ref_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_token = sse_decode_u_64(deserializer);
+    return PendingStateRefFfi(token: var_token);
   }
 
   @protected
@@ -10067,50 +9258,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  SignedEventFfi sse_decode_signed_event_ffi(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_id = sse_decode_String(deserializer);
-    var var_kind = sse_decode_u_16(deserializer);
-    var var_content = sse_decode_String(deserializer);
-    var var_tags = sse_decode_list_list_String(deserializer);
-    var var_createdAt = sse_decode_i_64(deserializer);
-    var var_pubkey = sse_decode_String(deserializer);
-    var var_sig = sse_decode_String(deserializer);
-    return SignedEventFfi(
-      id: var_id,
-      kind: var_kind,
-      content: var_content,
-      tags: var_tags,
-      createdAt: var_createdAt,
-      pubkey: var_pubkey,
-      sig: var_sig,
-    );
-  }
-
-  @protected
-  SignedKeyPackageEventFfi sse_decode_signed_key_package_event_ffi(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_eventJson = sse_decode_String(deserializer);
-    var var_legacyEventJson = sse_decode_String(deserializer);
-    var var_relays = sse_decode_list_String(deserializer);
-    var var_canonicalHashRef = sse_decode_list_prim_u_8_strict(deserializer);
-    var var_dTag = sse_decode_String(deserializer);
-    var var_canonicalEventId = sse_decode_String(deserializer);
-    var var_legacyEventId = sse_decode_String(deserializer);
-    return SignedKeyPackageEventFfi(
-      eventJson: var_eventJson,
-      legacyEventJson: var_legacyEventJson,
-      relays: var_relays,
-      canonicalHashRef: var_canonicalHashRef,
-      dTag: var_dTag,
-      canonicalEventId: var_canonicalEventId,
-      legacyEventId: var_legacyEventId,
-    );
-  }
-
-  @protected
   SignedLocationEventFfi sse_decode_signed_location_event_ffi(
     SseDeserializer deserializer,
   ) {
@@ -10130,32 +9277,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       tags: var_tags,
       content: var_content,
       sig: var_sig,
-    );
-  }
-
-  @protected
-  StagedAddFfi sse_decode_staged_add_ffi(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_commitJson = sse_decode_String(deserializer);
-    var var_stagedEpoch = sse_decode_u_64(deserializer);
-    var var_welcomeEvents = sse_decode_list_gift_wrapped_welcome_ffi(
-      deserializer,
-    );
-    return StagedAddFfi(
-      commitJson: var_commitJson,
-      stagedEpoch: var_stagedEpoch,
-      welcomeEvents: var_welcomeEvents,
-    );
-  }
-
-  @protected
-  StagedCommitFfi sse_decode_staged_commit_ffi(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_commitJson = sse_decode_String(deserializer);
-    var var_stagedEpoch = sse_decode_u_64(deserializer);
-    return StagedCommitFfi(
-      commitJson: var_commitJson,
-      stagedEpoch: var_stagedEpoch,
     );
   }
 
@@ -10232,23 +9353,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  UnsignedEventFfi sse_decode_unsigned_event_ffi(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_kind = sse_decode_u_16(deserializer);
-    var var_content = sse_decode_String(deserializer);
-    var var_tags = sse_decode_list_list_String(deserializer);
-    var var_createdAt = sse_decode_i_64(deserializer);
-    var var_pubkey = sse_decode_String(deserializer);
-    return UnsignedEventFfi(
-      kind: var_kind,
-      content: var_content,
-      tags: var_tags,
-      createdAt: var_createdAt,
-      pubkey: var_pubkey,
-    );
-  }
-
-  @protected
   UnsignedLocationEventFfi sse_decode_unsigned_location_event_ffi(
     SseDeserializer deserializer,
   ) {
@@ -10262,21 +9366,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       content: var_content,
       tags: var_tags,
       createdAt: var_createdAt,
-    );
-  }
-
-  @protected
-  UpdateGroupResultFfi sse_decode_update_group_result_ffi(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_evolutionEvent = sse_decode_signed_event_ffi(deserializer);
-    var var_evolutionEventJson = sse_decode_String(deserializer);
-    var var_welcomeEvents = sse_decode_list_unsigned_event_ffi(deserializer);
-    return UpdateGroupResultFfi(
-      evolutionEvent: var_evolutionEvent,
-      evolutionEventJson: var_evolutionEventJson,
-      welcomeEvents: var_welcomeEvents,
     );
   }
 
@@ -10649,8 +9738,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     SseSerializer serializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_String(self.evolutionEventJson, serializer);
+    sse_encode_String(self.commitEventJson, serializer);
     sse_encode_list_gift_wrapped_welcome_ffi(self.welcomeEvents, serializer);
+    sse_encode_pending_state_ref_ffi(self.pending, serializer);
   }
 
   @protected
@@ -10675,33 +9765,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_contact_ffi(self, serializer);
-  }
-
-  @protected
-  void sse_encode_box_autoadd_converge_intent_ffi(
-    ConvergeIntentFfi self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_converge_intent_ffi(self, serializer);
-  }
-
-  @protected
-  void sse_encode_box_autoadd_converge_result_ffi(
-    ConvergeResultFfi self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_converge_result_ffi(self, serializer);
-  }
-
-  @protected
-  void sse_encode_box_autoadd_decrypt_result_ffi(
-    DecryptResultFfi self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_decrypt_result_ffi(self, serializer);
   }
 
   @protected
@@ -10768,6 +9831,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_pending_state_ref_ffi(
+    PendingStateRefFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_pending_state_ref_ffi(self, serializer);
+  }
+
+  @protected
   void sse_encode_box_autoadd_profile_metadata_ffi(
     ProfileMetadataFfi self,
     SseSerializer serializer,
@@ -10792,24 +9864,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_signed_location_event_ffi(self, serializer);
-  }
-
-  @protected
-  void sse_encode_box_autoadd_staged_add_ffi(
-    StagedAddFfi self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_staged_add_ffi(self, serializer);
-  }
-
-  @protected
-  void sse_encode_box_autoadd_staged_commit_ffi(
-    StagedCommitFfi self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_staged_commit_ffi(self, serializer);
   }
 
   @protected
@@ -10866,9 +9920,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_u_32(self.circlesSwept, serializer);
-    sse_encode_u_32(self.locationsApplied, serializer);
-    sse_encode_u_32(self.commitsApplied, serializer);
-    sse_encode_u_32(self.autoCommitsStaged, serializer);
+    sse_encode_u_32(self.eventsApplied, serializer);
+    sse_encode_u_32(self.eventsDeferred, serializer);
     sse_encode_u_32(self.cursorsAdvanced, serializer);
     sse_encode_bool(self.deadlineHit, serializer);
     sse_encode_u_32(self.relayErrors, serializer);
@@ -10882,6 +9935,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_circle_ffi(self.circle, serializer);
     sse_encode_list_gift_wrapped_welcome_ffi(self.welcomeEvents, serializer);
+    sse_encode_pending_state_ref_ffi(self.pending, serializer);
   }
 
   @protected
@@ -10921,6 +9975,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_commit_to_publish_ffi(
+    CommitToPublishFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.commitEventJson, serializer);
+    sse_encode_pending_state_ref_ffi(self.pending, serializer);
+  }
+
+  @protected
   void sse_encode_contact_ffi(ContactFfi self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.pubkey, serializer);
@@ -10931,82 +9995,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_converge_intent_ffi(
-    ConvergeIntentFfi self,
+  void sse_encode_decrypt_location_outcome_ffi(
+    DecryptLocationOutcomeFfi self,
     SseSerializer serializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_converge_intent_kind(self.kind, serializer);
-    sse_encode_list_String(self.pubkeys, serializer);
-  }
-
-  @protected
-  void sse_encode_converge_intent_kind(
-    ConvergeIntentKind self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_i_32(self.index, serializer);
-  }
-
-  @protected
-  void sse_encode_converge_result_ffi(
-    ConvergeResultFfi self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_converge_result_kind(self.kind, serializer);
-    sse_encode_bool(self.intentStillPending, serializer);
-  }
-
-  @protected
-  void sse_encode_converge_result_kind(
-    ConvergeResultKind self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_i_32(self.index, serializer);
-  }
-
-  @protected
-  void sse_encode_decrypt_outcome_ffi(
-    DecryptOutcomeFfi self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_decrypt_outcome_kind_ffi(self.kind, serializer);
-    sse_encode_i_64(self.eventCreatedAtSecs, serializer);
-    sse_encode_opt_box_autoadd_decrypted_location_ffi(
-      self.location,
-      serializer,
-    );
-    sse_encode_opt_String(self.evolutionEventJson, serializer);
-    sse_encode_opt_list_prim_u_8_strict(self.evolutionMlsGroupId, serializer);
-    sse_encode_opt_String(self.unprocessableReason, serializer);
-  }
-
-  @protected
-  void sse_encode_decrypt_outcome_kind_ffi(
-    DecryptOutcomeKindFfi self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_i_32(self.index, serializer);
-  }
-
-  @protected
-  void sse_encode_decrypt_result_ffi(
-    DecryptResultFfi self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_opt_box_autoadd_decrypted_location_ffi(
-      self.location,
-      serializer,
-    );
-    sse_encode_bool(self.groupUpdated, serializer);
-    sse_encode_opt_String(self.evolutionEventJson, serializer);
-    sse_encode_opt_list_prim_u_8_strict(self.evolutionMlsGroupId, serializer);
+    sse_encode_list_location_message_result_ffi(self.results, serializer);
+    sse_encode_list_commit_to_publish_ffi(self.autoCommits, serializer);
   }
 
   @protected
@@ -11119,20 +10114,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_key_package_bundle_ffi(
-    KeyPackageBundleFfi self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_String(self.content, serializer);
-    sse_encode_list_list_String(self.tags30443, serializer);
-    sse_encode_list_list_String(self.tags443, serializer);
-    sse_encode_list_prim_u_8_strict(self.hashRef, serializer);
-    sse_encode_String(self.dTag, serializer);
-    sse_encode_list_String(self.relays, serializer);
-  }
-
-  @protected
   void sse_encode_kp_maintenance_action_ffi(
     KpMaintenanceActionFfi self,
     SseSerializer serializer,
@@ -11189,6 +10170,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_legacy_retraction_outcome_ffi(
+    LegacyRetractionOutcomeFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_bool(self.alreadyDone, serializer);
+    sse_encode_u_32(self.legacy443Scrubbed, serializer);
+    sse_encode_bool(self.relayListRetracted, serializer);
+    sse_encode_u_32(self.relayErrors, serializer);
+  }
+
+  @protected
   void sse_encode_list_String(List<String> self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
@@ -11218,6 +10211,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_i_32(self.length, serializer);
     for (final item in self) {
       sse_encode_circle_with_members_ffi(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_commit_to_publish_ffi(
+    List<CommitToPublishFfi> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_commit_to_publish_ffi(item, serializer);
     }
   }
 
@@ -11294,14 +10299,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_list_list_prim_u_8_strict(
-    List<Uint8List> self,
+  void sse_encode_list_location_message_result_ffi(
+    List<LocationMessageResultFfi> self,
     SseSerializer serializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
     for (final item in self) {
-      sse_encode_list_prim_u_8_strict(item, serializer);
+      sse_encode_location_message_result_ffi(item, serializer);
     }
   }
 
@@ -11388,15 +10393,27 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_list_unsigned_event_ffi(
-    List<UnsignedEventFfi> self,
+  void sse_encode_location_message_result_ffi(
+    LocationMessageResultFfi self,
     SseSerializer serializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_i_32(self.length, serializer);
-    for (final item in self) {
-      sse_encode_unsigned_event_ffi(item, serializer);
-    }
+    sse_encode_location_message_result_kind_ffi(self.kind, serializer);
+    sse_encode_opt_box_autoadd_decrypted_location_ffi(
+      self.location,
+      serializer,
+    );
+    sse_encode_list_prim_u_8_strict(self.mlsGroupId, serializer);
+    sse_encode_u_64(self.epoch, serializer);
+  }
+
+  @protected
+  void sse_encode_location_message_result_kind_ffi(
+    LocationMessageResultKindFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
   }
 
   @protected
@@ -11443,32 +10460,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_contact_ffi(self, serializer);
-    }
-  }
-
-  @protected
-  void sse_encode_opt_box_autoadd_converge_result_ffi(
-    ConvergeResultFfi? self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    sse_encode_bool(self != null, serializer);
-    if (self != null) {
-      sse_encode_box_autoadd_converge_result_ffi(self, serializer);
-    }
-  }
-
-  @protected
-  void sse_encode_opt_box_autoadd_decrypt_result_ffi(
-    DecryptResultFfi? self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    sse_encode_bool(self != null, serializer);
-    if (self != null) {
-      sse_encode_box_autoadd_decrypt_result_ffi(self, serializer);
     }
   }
 
@@ -11564,32 +10555,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_opt_box_autoadd_staged_add_ffi(
-    StagedAddFfi? self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    sse_encode_bool(self != null, serializer);
-    if (self != null) {
-      sse_encode_box_autoadd_staged_add_ffi(self, serializer);
-    }
-  }
-
-  @protected
-  void sse_encode_opt_box_autoadd_staged_commit_ffi(
-    StagedCommitFfi? self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    sse_encode_bool(self != null, serializer);
-    if (self != null) {
-      sse_encode_box_autoadd_staged_commit_ffi(self, serializer);
-    }
-  }
-
-  @protected
   void sse_encode_opt_box_autoadd_tile_cache_entry_ffi(
     TileCacheEntryFfi? self,
     SseSerializer serializer,
@@ -11633,6 +10598,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     if (self != null) {
       sse_encode_list_prim_u_8_strict(self, serializer);
     }
+  }
+
+  @protected
+  void sse_encode_pending_state_ref_ffi(
+    PendingStateRefFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_u_64(self.token, serializer);
   }
 
   @protected
@@ -11767,36 +10741,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_signed_event_ffi(
-    SignedEventFfi self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_String(self.id, serializer);
-    sse_encode_u_16(self.kind, serializer);
-    sse_encode_String(self.content, serializer);
-    sse_encode_list_list_String(self.tags, serializer);
-    sse_encode_i_64(self.createdAt, serializer);
-    sse_encode_String(self.pubkey, serializer);
-    sse_encode_String(self.sig, serializer);
-  }
-
-  @protected
-  void sse_encode_signed_key_package_event_ffi(
-    SignedKeyPackageEventFfi self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_String(self.eventJson, serializer);
-    sse_encode_String(self.legacyEventJson, serializer);
-    sse_encode_list_String(self.relays, serializer);
-    sse_encode_list_prim_u_8_strict(self.canonicalHashRef, serializer);
-    sse_encode_String(self.dTag, serializer);
-    sse_encode_String(self.canonicalEventId, serializer);
-    sse_encode_String(self.legacyEventId, serializer);
-  }
-
-  @protected
   void sse_encode_signed_location_event_ffi(
     SignedLocationEventFfi self,
     SseSerializer serializer,
@@ -11809,24 +10753,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_list_list_String(self.tags, serializer);
     sse_encode_String(self.content, serializer);
     sse_encode_String(self.sig, serializer);
-  }
-
-  @protected
-  void sse_encode_staged_add_ffi(StagedAddFfi self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_String(self.commitJson, serializer);
-    sse_encode_u_64(self.stagedEpoch, serializer);
-    sse_encode_list_gift_wrapped_welcome_ffi(self.welcomeEvents, serializer);
-  }
-
-  @protected
-  void sse_encode_staged_commit_ffi(
-    StagedCommitFfi self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_String(self.commitJson, serializer);
-    sse_encode_u_64(self.stagedEpoch, serializer);
   }
 
   @protected
@@ -11892,19 +10818,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_unsigned_event_ffi(
-    UnsignedEventFfi self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_u_16(self.kind, serializer);
-    sse_encode_String(self.content, serializer);
-    sse_encode_list_list_String(self.tags, serializer);
-    sse_encode_i_64(self.createdAt, serializer);
-    sse_encode_String(self.pubkey, serializer);
-  }
-
-  @protected
   void sse_encode_unsigned_location_event_ffi(
     UnsignedLocationEventFfi self,
     SseSerializer serializer,
@@ -11914,17 +10827,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.content, serializer);
     sse_encode_list_list_String(self.tags, serializer);
     sse_encode_i_64(self.createdAt, serializer);
-  }
-
-  @protected
-  void sse_encode_update_group_result_ffi(
-    UpdateGroupResultFfi self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_signed_event_ffi(self.evolutionEvent, serializer);
-    sse_encode_String(self.evolutionEventJson, serializer);
-    sse_encode_list_unsigned_event_ffi(self.welcomeEvents, serializer);
   }
 
   @protected
@@ -11958,31 +10860,23 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   );
 
   /// Wipes local state for the `Abandon` plan — sole-member cleanup with
-  /// no MLS commit and no relay publish.
+  /// no MLS commit and no relay publish. (Storage-only; sync in the core.)
   Future<void> abandonCircleLocalOnly({required List<int> mlsGroupId}) =>
       RustLib.instance.api.crateApiCircleManagerFfiAbandonCircleLocalOnly(
         that: this,
         mlsGroupId: mlsGroupId,
       );
 
-  /// Accepts an invitation to join a circle.
+  /// Accepts an invitation to join a circle, keyed by the gift-wrap event id.
+  ///
+  /// Feeds the still-encrypted 1059 held for `gift_wrap_id` (the stand-in
+  /// `mlsGroupId` bytes from [`process_gift_wrapped_invitation`]) to the
+  /// engine, which peels + joins and yields the real circle.
   Future<CircleWithMembersFfi> acceptInvitation({
-    required List<int> mlsGroupId,
+    required List<int> giftWrapId,
   }) => RustLib.instance.api.crateApiCircleManagerFfiAcceptInvitation(
     that: this,
-    mlsGroupId: mlsGroupId,
-  );
-
-  /// Adds members to a circle.
-  ///
-  /// Returns the update result with evolution and welcome events.
-  Future<UpdateGroupResultFfi> addMembers({
-    required List<int> mlsGroupId,
-    required List<String> keyPackagesJson,
-  }) => RustLib.instance.api.crateApiCircleManagerFfiAddMembers(
-    that: this,
-    mlsGroupId: mlsGroupId,
-    keyPackagesJson: keyPackagesJson,
+    giftWrapId: giftWrapId,
   );
 
   /// Adds members to an existing circle and gift-wraps their Welcomes.
@@ -12117,32 +11011,25 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
     relayType: relayType,
   );
 
-  /// Clears a pending commit, rolling back the MLS group state.
-  ///
-  /// Call this when a relay publish fails after an operation that creates
-  /// a pending commit. This prevents the group from being permanently
-  /// blocked by a dangling pending commit.
-  ///
-  /// # Concurrency
-  ///
-  /// Drops the pending commit from MDK's local group state — a non-atomic
-  /// read-modify-write on the epoch. Callers **must not** invoke this
-  /// concurrently with any other state-mutating call for the same
-  /// `mls_group_id` (e.g., [`encrypt_location`], [`finalize_pending_commit`],
-  /// [`process_message`], or another `clear_pending_commit`). The Dart side
-  /// serialises evolution handling per circle, which satisfies this.
-  Future<void> clearPendingCommit({required List<int> mlsGroupId}) =>
-      RustLib.instance.api.crateApiCircleManagerFfiClearPendingCommit(
-        that: this,
-        mlsGroupId: mlsGroupId,
-      );
-
   /// Removes the local circle row after a successful leave sequence, or
-  /// for the `OrphanLocalOnly` plan.
+  /// for the `OrphanLocalOnly` plan. (Storage-only; sync in the core.)
   Future<void> completeLeave({required List<int> mlsGroupId}) =>
       RustLib.instance.api.crateApiCircleManagerFfiCompleteLeave(
         that: this,
         mlsGroupId: mlsGroupId,
+      );
+
+  /// Confirms a staged commit was published (≥1-relay OK-ack) so the engine
+  /// applies it and advances the epoch.
+  ///
+  /// "Acked" MUST mean a relay returned OK — never merely "sent" — to avoid
+  /// optimistic-merge forks (Rule 13, security F13). Pass the `pending` token
+  /// carried in a [`CircleCreationResultFfi`] / [`AddMembersResultFfi`] /
+  /// [`CommitToPublishFfi`].
+  Future<void> confirmPublished({required PendingStateRefFfi pending}) =>
+      RustLib.instance.api.crateApiCircleManagerFfiConfirmPublished(
+        that: this,
+        pending: pending,
       );
 
   /// Creates a new circle with gift-wrapped Welcome events.
@@ -12187,19 +11074,6 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
     circleType: circleType,
     relays: relays,
     creatorFallbackRelays: creatorFallbackRelays,
-  );
-
-  /// Creates a key package for publishing.
-  ///
-  /// Returns the data needed to build and sign a key package event
-  /// (kind 30443 addressable or legacy kind 443).
-  Future<KeyPackageBundleFfi> createKeyPackage({
-    required String identityPubkey,
-    required List<String> relays,
-  }) => RustLib.instance.api.crateApiCircleManagerFfiCreateKeyPackage(
-    that: this,
-    identityPubkey: identityPubkey,
-    relays: relays,
   );
 
   /// Advances `stream`'s cursor to `ms` (monotonic max; never backward).
@@ -12305,50 +11179,48 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
     ms: ms,
   );
 
-  /// Declines an invitation to join a circle.
-  Future<void> declineInvitation({required List<int> mlsGroupId}) =>
+  /// Declines an invitation, keyed by the gift-wrap event id.
+  ///
+  /// Drops the held 1059 locally (never ingested → nothing on the wire,
+  /// Rule 10) and marks the gift wrap resolved so a re-poll never re-surfaces
+  /// it. (Storage-only; sync in the core.)
+  Future<void> declineInvitation({required List<int> giftWrapId}) =>
       RustLib.instance.api.crateApiCircleManagerFfiDeclineInvitation(
         that: this,
-        mlsGroupId: mlsGroupId,
+        giftWrapId: giftWrapId,
       );
 
-  /// Decrypts a received location event (legacy compatibility shim).
+  /// Decrypts / ingests a received `kind:445` event, returning the folded
+  /// engine results (Dark Matter five-variant taxonomy).
   ///
-  /// Delegates to [`Self::decrypt_location_outcome`] and flattens the result
-  /// to the historical `Option<DecryptResultFfi>` shape so existing Dart
-  /// call sites keep their exact behavior during the migration:
-  /// `Unprocessable` / `PreviouslyFailed` collapse to `None`. New code should
-  /// call [`Self::decrypt_location_outcome`] so it can drive the sync cursor.
+  /// A single ingest can yield SEVERAL [`LocationMessageResultFfi`] — the
+  /// engine's `advance_convergence` may release buffered inbound after the
+  /// outer event — so this returns a `Vec`. The engine owns stale / duplicate
+  /// / out-of-order handling internally (a future-epoch event is durably
+  /// buffered and re-surfaced once the gap fills), so there is no
+  /// `Unprocessable` / `PreviouslyFailed` outcome anymore.
   ///
-  /// # Arguments
+  /// # Peer `SelfRemove` eviction (auto-commit) — Rule 13
   ///
-  /// * `event_json` - JSON-serialized `kind:445` event.
+  /// This variant does NOT surface receive-side auto-commits (a peer
+  /// `SelfRemove` eviction the engine staged): to stay Rule-13-safe the core
+  /// rolls back any that surfaced rather than confirm an unpublished commit.
+  /// The eviction still propagates via the background catch-up sweep (which
+  /// publishes it). Callers that own relay publishing in poll mode SHOULD
+  /// migrate to [`Self::decrypt_location_collecting_commits`], which surfaces the
+  /// auto-commit so the caller can publish-then-confirm it in the foreground.
   ///
-  /// # Errors
+  /// # Cursor contract (DM-4b)
   ///
-  /// Propagates the errors of [`Self::decrypt_location_outcome`].
-  Future<DecryptResultFfi?> decryptLocation({required String eventJson}) =>
-      RustLib.instance.api.crateApiCircleManagerFfiDecryptLocation(
-        that: this,
-        eventJson: eventJson,
-      );
-
-  /// Decrypts a `kind:445` event and surfaces ALL four decrypt outcomes.
-  ///
-  /// Unlike [`Self::decrypt_location`] (which flattens `Unprocessable` /
-  /// `PreviouslyFailed` to `None`), this returns the full
-  /// [`DecryptOutcomeFfi`] so the Dart sync layer can advance the persisted
-  /// sync cursor ONLY on a real `Location` / `GroupUpdate` and never skip an
-  /// unprocessed commit — the fix for the field epoch-desync bug.
-  ///
-  /// This is the single decrypt implementation; [`Self::decrypt_location`]
-  /// is a thin compatibility shim over it during the migration rollout.
+  /// The engine owns retry/buffering, so the caller advances its relay sync
+  /// cursor on the OUTER event's `created_at` (which the Dart caller already
+  /// holds — it passed `event_json` in). A buffered event is re-delivered by
+  /// the engine when the epoch gap fills; the caller never re-fetches it.
   ///
   /// # Concurrency
   ///
-  /// Same constraint as [`encrypt_location`]: concurrent calls for the same
-  /// group can race on MLS epoch state. The Dart-side `fetchMemberLocations`
-  /// processes events sequentially per circle.
+  /// The session is `&mut`-serialized behind a `tokio` mutex, so concurrent
+  /// calls are serialized by the engine; this awaits directly.
   ///
   /// # Arguments
   ///
@@ -12356,14 +11228,43 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   ///
   /// # Errors
   ///
-  /// Returns a redacted error string if the event JSON is invalid, the
-  /// blocking task fails, or the location payload cannot be parsed.
-  Future<DecryptOutcomeFfi> decryptLocationOutcome({
+  /// Returns a redacted error string if the event JSON is invalid or the
+  /// engine ingest fails hard.
+  Future<List<LocationMessageResultFfi>> decryptLocation({
     required String eventJson,
-  }) => RustLib.instance.api.crateApiCircleManagerFfiDecryptLocationOutcome(
+  }) => RustLib.instance.api.crateApiCircleManagerFfiDecryptLocation(
     that: this,
     eventJson: eventJson,
   );
+
+  /// Decrypts / ingests a received `kind:445`, returning the folded results AND
+  /// any receive-side auto-commit the engine staged (publish-before-apply).
+  ///
+  /// Identical ingest to [`Self::decrypt_location`], but surfaces a peer
+  /// `SelfRemove` eviction the engine auto-committed instead of dropping it.
+  /// Rule 13 / security F13: for EACH
+  /// [`DecryptLocationOutcomeFfi::auto_commits`] entry, publish
+  /// `commit_event_json` to the circle's relays, then
+  /// [`confirm_published`](Self::confirm_published) on a ≥1-relay ACK (or
+  /// [`publish_failed`](Self::publish_failed) on failure) — exactly like the
+  /// [`CommitToPublishFfi`] from remove / relay-update. Confirming before an
+  /// ACK, or dropping an entry, re-forks the group the leaver departed. The
+  /// foreground poll receive path SHOULD call this in place of
+  /// [`Self::decrypt_location`].
+  ///
+  /// The cursor contract of [`Self::decrypt_location`] applies unchanged.
+  ///
+  /// # Errors
+  ///
+  /// Returns a redacted error string if the event JSON is invalid or the
+  /// engine ingest fails hard.
+  Future<DecryptLocationOutcomeFfi> decryptLocationCollectingCommits({
+    required String eventJson,
+  }) => RustLib.instance.api
+      .crateApiCircleManagerFfiDecryptLocationCollectingCommits(
+        that: this,
+        eventJson: eventJson,
+      );
 
   /// Deletes a contact.
   Future<void> deleteContact({required String pubkey}) => RustLib.instance.api
@@ -12497,37 +11398,22 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
         pubkeyHex: pubkeyHex,
       );
 
-  /// Finalizes a pending commit after publishing evolution events.
+  /// Finalizes an admin relay update: confirms the pending commit, then
+  /// re-syncs the admin's own `circle.relays` from the engine's routing
+  /// component so the admin converges on the new set immediately.
   ///
-  /// Call this after successfully publishing the evolution event.
-  ///
-  /// # Concurrency
-  ///
-  /// Merges the pending commit into MDK's local group state — a non-atomic
-  /// read-modify-write on the epoch. Callers **must not** invoke this
-  /// concurrently with any other state-mutating call for the same
-  /// `mls_group_id` (e.g., [`encrypt_location`], [`clear_pending_commit`],
-  /// [`process_message`], or another `finalize_pending_commit`). The Dart
-  /// side serialises evolution handling per circle, which satisfies this.
-  Future<void> finalizePendingCommit({required List<int> mlsGroupId}) =>
-      RustLib.instance.api.crateApiCircleManagerFfiFinalizePendingCommit(
-        that: this,
-        mlsGroupId: mlsGroupId,
-      );
-
-  /// Finalizes an admin relay update: merges the pending commit, then
-  /// re-syncs the admin's own `circle.relays` from MDK so the admin
-  /// converges on the new set immediately.
-  ///
-  /// Use this instead of [`finalize_pending_commit`](Self::finalize_pending_commit)
-  /// for the relay-update flow (members converge via the receive path). Same
-  /// concurrency contract as `finalize_pending_commit` — the Dart side
-  /// serialises evolution handling per circle.
-  Future<void> finalizeRelayUpdate({required List<int> mlsGroupId}) =>
-      RustLib.instance.api.crateApiCircleManagerFfiFinalizeRelayUpdate(
-        that: this,
-        mlsGroupId: mlsGroupId,
-      );
+  /// Use this instead of a bare [`confirm_published`](Self::confirm_published)
+  /// for the [`update_circle_relays`](Self::update_circle_relays) flow
+  /// (members converge via the receive path). Pass the `pending` token from
+  /// the [`CommitToPublishFfi`] and the circle's `mls_group_id`.
+  Future<void> finalizeRelayUpdate({
+    required PendingStateRefFfi pending,
+    required List<int> mlsGroupId,
+  }) => RustLib.instance.api.crateApiCircleManagerFfiFinalizeRelayUpdate(
+    that: this,
+    pending: pending,
+    mlsGroupId: mlsGroupId,
+  );
 
   /// Gets all contacts.
   Future<List<ContactFfi>> getAllContacts() =>
@@ -12548,6 +11434,10 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
       );
 
   /// Gets a circle by its MLS group ID.
+  ///
+  /// Async: resolving the roster reads the Dark Matter session (which is
+  /// `&mut`-serialized behind a `tokio` mutex), so this awaits directly on
+  /// the current worker rather than dispatching to the blocking pool.
   Future<CircleWithMembersFfi?> getCircle({required List<int> mlsGroupId}) =>
       RustLib.instance.api.crateApiCircleManagerFfiGetCircle(
         that: this,
@@ -12565,13 +11455,22 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
       .crateApiCircleManagerFfiGetContact(that: this, pubkey: pubkey);
 
   /// Gets members of a circle with resolved contact info.
+  ///
+  /// Async: reads the roster from the Dark Matter session (awaits directly).
   Future<List<CircleMemberFfi>> getMembers({required List<int> mlsGroupId}) =>
       RustLib.instance.api.crateApiCircleManagerFfiGetMembers(
         that: this,
         mlsGroupId: mlsGroupId,
       );
 
-  /// Gets all pending invitations.
+  /// Gets all pending invitations from the in-memory held-welcome store.
+  ///
+  /// Each [`InvitationFfi`] carries pre-join STAND-IN fields (the gift-wrap
+  /// event id as `mlsGroupId`, `"New Circle"` as the name, `memberCount == 0`)
+  /// because the real MLS group state lives inside the still-encrypted 1059
+  /// held until Accept (F3). The gift-wrap id is the key the caller passes to
+  /// [`accept_invitation`](Self::accept_invitation) /
+  /// [`decline_invitation`](Self::decline_invitation).
   Future<List<InvitationFfi>> getPendingInvitations() => RustLib.instance.api
       .crateApiCircleManagerFfiGetPendingInvitations(that: this);
 
@@ -12628,18 +11527,6 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
         mlsGroupId: mlsGroupId,
       );
 
-  /// Returns groups where the user's leaf node key material needs rotation.
-  ///
-  /// Groups are returned if the self-update is either required (post-join,
-  /// not yet completed) or overdue (last rotation older than `threshold_secs`).
-  /// Callers should iterate the result and call [`self_update`] for each.
-  Future<List<Uint8List>> groupsNeedingSelfUpdate({
-    required BigInt thresholdSecs,
-  }) => RustLib.instance.api.crateApiCircleManagerFfiGroupsNeedingSelfUpdate(
-    that: this,
-    thresholdSecs: thresholdSecs,
-  );
-
   /// Returns the user's relays for one category, ordered by insertion time.
   Future<List<String>> listUserRelays({required RelayTypeFfi relayType}) =>
       RustLib.instance.api.crateApiCircleManagerFfiListUserRelays(
@@ -12690,38 +11577,14 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
         giftWrapEventJson: giftWrapEventJson,
       );
 
-  /// Processes an incoming invitation from already-unwrapped components.
-  ///
-  /// This is the low-level API that takes pre-unwrapped components.
-  /// Prefer [`process_gift_wrapped_invitation`] for most use cases.
-  ///
-  /// # Arguments
-  ///
-  /// * `wrapper_event_id` - ID of the gift-wrapped event (hex)
-  /// * `rumor_event_json` - The decrypted kind 444 rumor event JSON
-  /// * `inviter_pubkey` - Public key (hex) of the inviter
-  ///
-  /// # Returns
-  ///
-  /// Same tri-state semantics as [`process_gift_wrapped_invitation`]:
-  /// `Ok(Some(_))` for new invitations, `Ok(None)` for already-processed
-  /// gift wraps (silent skip), `Err(_)` for real failures.
-  ///
-  /// [`process_gift_wrapped_invitation`]: Self::process_gift_wrapped_invitation
-  Future<InvitationFfi?> processInvitation({
-    required String wrapperEventId,
-    required String rumorEventJson,
-    required String inviterPubkey,
-  }) => RustLib.instance.api.crateApiCircleManagerFfiProcessInvitation(
-    that: this,
-    wrapperEventId: wrapperEventId,
-    rumorEventJson: rumorEventJson,
-    inviterPubkey: inviterPubkey,
-  );
-
   /// Step 1 of admin handoff: propose promoting `successor_hex` to admin.
-  /// Returns a pending commit — publish, then finalize or clear.
-  Future<UpdateGroupResultFfi> proposeAdminHandoff({
+  ///
+  /// # GAP (plan §5.2 #18)
+  ///
+  /// The Dark Matter v0.9.4 public API exposes no admin-policy component
+  /// codec, so this currently returns a documented error (the core method
+  /// fails closed). Kept so the Dart leave state machine keeps its shape.
+  Future<CommitToPublishFfi> proposeAdminHandoff({
     required List<int> mlsGroupId,
     required String successorHex,
   }) => RustLib.instance.api.crateApiCircleManagerFfiProposeAdminHandoff(
@@ -12730,17 +11593,25 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
     successorHex: successorHex,
   );
 
-  /// Returns a `SelfRemove` proposal event. Publish it, then call
-  /// `complete_leave` — no pending commit to finalize or clear.
-  Future<UpdateGroupResultFfi> proposeLeave({required List<int> mlsGroupId}) =>
-      RustLib.instance.api.crateApiCircleManagerFfiProposeLeave(
-        that: this,
-        mlsGroupId: mlsGroupId,
-      );
+  /// Returns a `SelfRemove` proposal event JSON. Publish it, then call
+  /// [`complete_leave`](Self::complete_leave).
+  ///
+  /// A bare `SelfRemove` proposal has NO `PendingStateRef` — a remaining
+  /// member commits it later (RFC 9420 §12.1.2), so there is nothing to
+  /// confirm or roll back. The returned string is the signed kind:445 event
+  /// JSON to publish to the circle's relays.
+  Future<String> proposeLeave({required List<int> mlsGroupId}) => RustLib
+      .instance
+      .api
+      .crateApiCircleManagerFfiProposeLeave(that: this, mlsGroupId: mlsGroupId);
 
-  /// Step 2 of admin handoff: demote self from admin.
-  /// Returns a pending commit — publish, then finalize or clear.
-  Future<UpdateGroupResultFfi> proposeSelfDemote({
+  /// Step 2 of admin handoff (or step 1 of `Abandon`): demote self from admin.
+  ///
+  /// # GAP (plan §5.2 #18)
+  ///
+  /// Same admin-policy-codec gap as [`propose_admin_handoff`](Self::propose_admin_handoff);
+  /// the core method currently returns a documented error.
+  Future<CommitToPublishFfi> proposeSelfDemote({
     required List<int> mlsGroupId,
   }) => RustLib.instance.api.crateApiCircleManagerFfiProposeSelfDemote(
     that: this,
@@ -12768,6 +11639,16 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
     nowUnixSecs: nowUnixSecs,
   );
 
+  /// Reports that a staged publish FAILED; the engine discards the staged
+  /// commit and returns the group to `Stable` at the prior epoch.
+  ///
+  /// The publish-failure counterpart to [`confirm_published`](Self::confirm_published);
+  /// pass the same `pending` token.
+  Future<void> publishFailed({required PendingStateRefFfi pending}) => RustLib
+      .instance
+      .api
+      .crateApiCircleManagerFfiPublishFailed(that: this, pending: pending);
+
   /// Publishes the local user's OWN public profile (fetch → merge → publish).
   ///
   /// Publishing is **unconditional** (public-by-default, owner-directed
@@ -12790,32 +11671,6 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
     identitySecretBytes: identitySecretBytes,
     displayName: displayName,
     about: about,
-  );
-
-  /// Records a just-published `KeyPackage` pair into `published_key_packages`
-  /// (M8-6). Call AFTER a relay accepts the canonical 30443 (publish-first),
-  /// with the fields from [`SignedKeyPackageEventFfi`]. This is what lets the
-  /// maintenance live-material gate recognize the login/onboarding KeyPackage
-  /// as live — so the first maintenance tick returns `AlreadyHealthy` instead
-  /// of misreading the primary KP as dead and force-rotating it.
-  ///
-  /// Records both the canonical (30443, with `d`) and the legacy (443, no `d`)
-  /// rows, mirroring the maintenance republish path.
-  ///
-  /// # Errors
-  ///
-  /// Returns a redacted error string if the storage write fails.
-  Future<void> recordPublishedKeyPackages({
-    required List<int> canonicalHashRef,
-    required String dTag,
-    required String canonicalEventId,
-    required String legacyEventId,
-  }) => RustLib.instance.api.crateApiCircleManagerFfiRecordPublishedKeyPackages(
-    that: this,
-    canonicalHashRef: canonicalHashRef,
-    dTag: dTag,
-    canonicalEventId: canonicalEventId,
-    legacyEventId: legacyEventId,
   );
 
   /// Records a successful publication so the unpublish path can issue a
@@ -12877,8 +11732,10 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
 
   /// Removes members from a circle.
   ///
-  /// Returns the update result with evolution events.
-  Future<UpdateGroupResultFfi> removeMembers({
+  /// Returns a [`CommitToPublishFfi`] (publish-before-apply, Rule 13):
+  /// publish `commit_event_json`, then [`confirm_published`](Self::confirm_published)
+  /// on a ≥1-relay ACK or [`publish_failed`](Self::publish_failed) on failure.
+  Future<CommitToPublishFfi> removeMembers({
     required List<int> mlsGroupId,
     required List<String> memberPubkeys,
   }) => RustLib.instance.api.crateApiCircleManagerFfiRemoveMembers(
@@ -12950,18 +11807,6 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   Future<bool> seedRelayDefaultsIfUnseeded() => RustLib.instance.api
       .crateApiCircleManagerFfiSeedRelayDefaultsIfUnseeded(that: this);
 
-  /// Performs a self-update on the user's leaf node in a group.
-  ///
-  /// Rotates the user's MLS key material to restore forward secrecy
-  /// after joining a group (MIP-02 requirement). Returns the evolution
-  /// event to publish and creates a pending commit that must be merged
-  /// (on publish success) or cleared (on publish failure).
-  Future<UpdateGroupResultFfi> selfUpdate({required List<int> mlsGroupId}) =>
-      RustLib.instance.api.crateApiCircleManagerFfiSelfUpdate(
-        that: this,
-        mlsGroupId: mlsGroupId,
-      );
-
   /// Sets or updates a contact.
   ///
   /// Contact information is stored locally only and never synced to relays.
@@ -13016,31 +11861,6 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
     eventIds: eventIds,
   );
 
-  /// Creates and signs the key package event pair (kinds 30443 and 443).
-  ///
-  /// Generates MLS key material once, then signs **both** the canonical
-  /// kind 30443 (addressable) event and the legacy kind 443 twin from the
-  /// same bundle (same `content` and `hash_ref`, only the tag set differs:
-  /// the legacy twin omits the `d` tag).
-  ///
-  /// Publishing both is required during the MIP-00 transition window so
-  /// that Marmot clients which still query kind 443 can discover this user.
-  /// Mirrors the reference implementation (`whitenoise-rs`'s
-  /// `publish_key_package_pair_to_relays`).
-  ///
-  /// # Arguments
-  ///
-  /// * `identity_secret_bytes` - The user's identity secret bytes (32 bytes)
-  /// * `relays` - Relay URLs where the pair should be published
-  Future<SignedKeyPackageEventFfi> signKeyPackageEvent({
-    required List<int> identitySecretBytes,
-    required List<String> relays,
-  }) => RustLib.instance.api.crateApiCircleManagerFfiSignKeyPackageEvent(
-    that: this,
-    identitySecretBytes: identitySecretBytes,
-    relays: relays,
-  );
-
   /// Returns all non-purged last-known locations for a circle.
   Future<List<LastKnownLocationFfi>> snapshotLastKnownForCircle({
     required List<int> nostrGroupId,
@@ -13071,18 +11891,18 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
     pubkeyHex: pubkeyHex,
   );
 
-  /// Admin: replace this circle's group relay list (MIP-01) via a
-  /// `GroupContextExtensions` commit.
+  /// Admin: replace this circle's group relay list (MIP-01) via an
+  /// `UpdateAppComponents(nostr-routing.v1)` commit.
   ///
-  /// Returns a pending commit. Publish the returned evolution event to the
+  /// Returns a [`CommitToPublishFfi`]. Publish `commit_event_json` to the
   /// **union of the circle's current relays and `new_relays`** (so a member
-  /// only listening on a relay being removed still receives the commit),
-  /// then call [`finalize_relay_update`](Self::finalize_relay_update) on ACK
-  /// or [`clear_pending_commit`](Self::clear_pending_commit) on failure.
-  /// `new_relays` MUST be non-empty, `wss://` (or the debug loopback test
-  /// seam), credential-free, and at most 20 entries; admin authorization is
-  /// enforced by MDK against live MLS state.
-  Future<UpdateGroupResultFfi> updateCircleRelays({
+  /// only listening on a relay being removed still receives the commit), then
+  /// call [`finalize_relay_update`](Self::finalize_relay_update) on a ≥1-relay
+  /// ACK or [`publish_failed`](Self::publish_failed) on failure. `new_relays`
+  /// MUST be non-empty, `wss://` (or the debug loopback test seam),
+  /// credential-free, and at most 20 entries; admin authorization is enforced
+  /// by the engine against live MLS state.
+  Future<CommitToPublishFfi> updateCircleRelays({
     required List<int> mlsGroupId,
     required List<String> newRelays,
   }) => RustLib.instance.api.crateApiCircleManagerFfiUpdateCircleRelays(
@@ -13131,14 +11951,6 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   /// survives a full account wipe.
   Future<void> wipeAllLastKnownLocations() => RustLib.instance.api
       .crateApiCircleManagerFfiWipeAllLastKnownLocations(that: this);
-
-  /// Wipes every M7 staged-commit marker (wipe-on-logout).
-  ///
-  /// Called from the identity-deletion path so a returning (or different)
-  /// identity never inherits a stale marker that would wrongly skip a
-  /// background receive. Errors are redacted.
-  Future<void> wipeAllStagedCommits() => RustLib.instance.api
-      .crateApiCircleManagerFfiWipeAllStagedCommits(that: this);
 
   /// Destructively resets a category to exactly the default relay list
   /// returned by [`haven_core::circle::default_relays`].
@@ -13758,8 +12570,10 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
   Future<List<RelayConnectionStatusFfi>> getRelayStatus() =>
       RustLib.instance.api.crateApiRelayManagerFfiGetRelayStatus(that: this);
 
-  /// M8-2 `KeyPackage` maintenance — republish-if-missing/dead into a stable
-  /// NIP-33 `d` slot, gated on LIVE local init-key material.
+  /// `KeyPackage` maintenance (Dark Matter DM-2b) — republish-if-missing into
+  /// a stable NIP-33 `d` slot on the user's own NIP-65 relays. Also the
+  /// FIRST-publish path (onboarding / login): a responding relay serving
+  /// nothing + no tracked slot mints a fresh package.
   ///
   /// Dart-timer-driven (the identity secret lives only in Dart, Security Rule
   /// 9): the secret bytes are consumed per-call and zeroized. Fail-soft and
@@ -13767,18 +12581,19 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
   ///
   /// Steps:
   /// 1. Derive `Keys`/pubkey from the secret bytes (zeroized after).
-  /// 2. Probe the user's OWN `KeyPackage` relays (dedup'd, own-relays-only —
-  ///    never the discovery plane / NIP-65 / a default union) for kind-30443
-  ///    events authored by self.
-  /// 3. For each on-relay canonical, resolve its tracked `hash_ref` and run
-  ///    the live-material gate ([`CircleManager::has_live_key_material`]).
+  /// 2. Probe the user's OWN NIP-65 relays (dedup'd, own-relays-only — never a
+  ///    default union) for kind-30443 events authored by self.
+  /// 3. Build the presence snapshot (`(d, event_id)` per responder) — under
+  ///    Dark Matter a published 30443 is a last-resort package that never dies
+  ///    on join, so the presence gate is pure relay presence of the tracked
+  ///    stable slot (the M8-2 live-material gate is gone).
   /// 4. Decide via [`decide_kp_maintenance`]; on `SeedD` record the seed row;
-  ///    on `Republish` build+sign the 30443(+443) pair, publish to OWN relays
-  ///    only (publish-first, never zero KPs), then record both rows.
+  ///    on `Republish` reuse-or-mint the single kind-30443 event, publish to
+  ///    OWN relays only (publish-first), record the row, and delete minted
+  ///    material on a failed publish (mdk#160).
   ///
   /// Returns a presence-only [`KpMaintenanceOutcomeFfi`] (counters + enum).
   ///
-  /// [`CircleManager::has_live_key_material`]: haven_core::circle::CircleManager::has_live_key_material
   /// [`decide_kp_maintenance`]: haven_core::relay::maintenance::decide_kp_maintenance
   Future<KpMaintenanceOutcomeFfi> maintainKeyPackage({
     required CircleManagerFfi circle,
@@ -13845,14 +12660,44 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
     relays: relays,
   );
 
+  /// Once-only legacy relay hygiene (Dark Matter §6 step 5 / F10a): retracts
+  /// this account's stale pre-migration KeyPackage advertisements so an
+  /// old-stack client cannot mint a Welcome the new stack can't process.
+  ///
+  /// NON-OPTIONAL cutover cleanup, guarded by a persisted sentinel
+  /// (`legacy_kp_retraction_done`) so it fires at most once:
+  /// 1. If the sentinel is already set → no-op (`already_done = true`).
+  /// 2. Probe the user's OWN NIP-65 (KeyPackage-discovery) relays for their
+  ///    own kind-443 KeyPackages AND their kind-10051 relay list.
+  /// 3. For each 443, publish a self-authored NIP-09 (kind-5) id-only deletion
+  ///    ([`build_legacy_key_package_retraction`]). For a present 10051, publish
+  ///    an empty-replacement retraction ([`build_key_package_relay_list_retraction`])
+  ///    plus a best-effort NIP-09 coordinate deletion.
+  /// 4. On ≥1-relay ACK of ANY retraction, set the sentinel
+  ///    ([`mark_legacy_kp_retraction_done`]) so it never re-runs.
+  ///
+  /// Dart-driven (the identity secret lives only in Dart, Rule 9); the secret
+  /// bytes are consumed per-call and zeroized. Fail-soft: relay errors are
+  /// tallied, never fatal. Returns a presence-only [`LegacyRetractionOutcomeFfi`].
+  ///
+  /// [`build_legacy_key_package_retraction`]: haven_core::relay::maintenance::build_legacy_key_package_retraction
+  /// [`build_key_package_relay_list_retraction`]: haven_core::relay::maintenance::build_key_package_relay_list_retraction
+  Future<LegacyRetractionOutcomeFfi> retractLegacyKeyMaterial({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  }) => RustLib.instance.api.crateApiRelayManagerFfiRetractLegacyKeyMaterial(
+    that: this,
+    circle: circle,
+    identitySecretBytes: identitySecretBytes,
+  );
+
   /// Runs an M7 receive-only catch-up sweep over every visible circle.
   ///
-  /// Best-effort + deadline-bounded; NEVER authors/merges/converges a commit
-  /// (fork-safe by the persisted staged-commit marker gate + the fail-closed
-  /// `has_pending_commit`). When a live-sync engine is running in-process, the
-  /// sweep serializes each group's decrypt against it via the shared
-  /// `MlsWriteGate`; otherwise (cold background wake) the persisted marker is
-  /// the fork guard. Returns a presence-only [`CatchupResultFfi`] (counters).
+  /// Best-effort + deadline-bounded; NEVER authors/merges/converges a commit.
+  /// The Dark Matter engine owns convergence + publish-before-apply, so
+  /// catch-up ingests through the single process-global session (Rule 14) and
+  /// the old `MlsWriteGate` hand-off is gone. Returns a presence-only
+  /// [`CatchupResultFfi`] (counters).
   Future<CatchupResultFfi> runCatchupAllCircles({
     required CircleManagerFfi circle,
     required String ownPubkeyHex,

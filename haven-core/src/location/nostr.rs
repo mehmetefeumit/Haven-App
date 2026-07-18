@@ -1,54 +1,38 @@
 //! Nostr integration for location sharing.
 //!
-//! This module handles publishing location data to Nostr relays using:
+//! This module handles preparing location data for Nostr relays using the
+//! Marmot "Dark Matter" MLS engine:
 //! - Marmot event kind 445 (Group Message)
-//! - MDK for MLS encryption and group management
-//! - Automatic expiration handling via MDK
+//! - The engine (via [`MlsGroupContext`]) for MLS encryption and group
+//!   management
+//! - Group-level NIP-40 retention (`message-retention.v1`), not per-send TTL
 //!
 //! # Architecture
 //!
 //! ```text
 //! LocationMessage → UnsignedEvent (rumor with location JSON)
 //!                          ↓
-//!                   MDK encrypt_event (MLS + signing)
+//!                   MlsGroupContext::encrypt_event (async → SessionEffects)
 //!                          ↓
-//!                   Event (kind 445, ready for relay)
+//!                   PublishWork::ApplicationMessage (published by relay layer)
 //! ```
 //!
 //! # Privacy Features
 //!
-//! - Location is encrypted using MLS (via MDK)
-//! - MDK handles ephemeral keypairs and signing
+//! - Location is encrypted using MLS (via the engine)
+//! - The engine handles ephemeral keypairs and signing
 //! - Forward secrecy through MLS epoch rotation
 //!
-//! # Example
-//!
-//! ```ignore
-//! use std::sync::Arc;
-//! use std::path::Path;
-//! use haven_core::location::{LocationMessage, nostr::LocationEventBuilder};
-//! use haven_core::nostr::mls::{MdkManager, MlsGroupContext};
-//! use haven_core::nostr::mls::types::GroupId;
-//!
-//! let manager = Arc::new(MdkManager::new(Path::new("/tmp/data")).unwrap());
-//! let group_id = GroupId::from_slice(&[1, 2, 3]);
-//! let group = MlsGroupContext::new(manager, group_id, "nostr-group-id");
-//!
-//! let location = LocationMessage::new(37.7749, -122.4194);
-//! let builder = LocationEventBuilder::new();
-//!
-//! // Encrypt using MDK
-//! let event = builder.encrypt(&location, &group).unwrap();
-//!
-//! // Later, decrypt received event
-//! let decrypted = builder.decrypt(&event, &group).unwrap();
-//! ```
+//! Since the Dark Matter engine's mutating calls are `async`, the encrypt and
+//! decrypt helpers here are `async` (M6 send/receive convergence).
 
-use mdk_core::prelude::MessageProcessingResult;
 use nostr::prelude::{Event, EventBuilder, Kind, PublicKey, Tag};
 
 use super::types::LocationMessage;
+use crate::nostr::mls::types::LocationMessageResult;
+use crate::nostr::mls::SessionManager;
 use crate::nostr::{MlsGroupContext, NostrError, Result};
+use cgka_session::SessionEffects;
 
 /// Event kind for application messages (inner event).
 ///
@@ -89,61 +73,44 @@ impl LocationEventBuilder {
         Self { _private: () }
     }
 
-    /// Encrypts a location message using MDK and creates a signed Nostr event.
+    /// Encrypts a location message via the engine and returns the publishable
+    /// [`SessionEffects`].
     ///
-    /// This method performs the full encryption flow:
+    /// This method performs the send flow:
     /// 1. Serializes the location data to JSON
-    /// 2. Creates an unsigned event (rumor) with the location content
-    /// 3. Delegates to MDK for MLS encryption and signing
+    /// 2. Creates an unsigned inner event (rumor) with the location content
+    ///    (Marmot app event, kind 9, `["t","location"]` tag; `pubkey` MUST be
+    ///    the sender's identity per W9)
+    /// 3. Delegates to the engine, which encrypts the MLS group message and
+    ///    returns a [`PublishWork::ApplicationMessage`] for Haven's relay layer
+    ///    to publish
     ///
-    /// MDK handles:
-    /// - MLS encryption using the group's current epoch key
-    /// - Event signing with the group's keypair
-    /// - Creating a kind 445 outer event with proper tags
+    /// The engine owns MLS encryption, ephemeral-key generation, and the kind
+    /// 445 outer event. Because those calls are `async`, this method is `async`.
     ///
     /// # Arguments
     ///
     /// * `location` - The location message to encrypt
     /// * `group` - The MLS group context for encryption
-    /// * `sender_pubkey` - The sender's Nostr public key (for the inner rumor event)
+    /// * `sender_pubkey` - The sender's Nostr public key (the inner rumor
+    ///   `pubkey`; MUST equal the session's local identity)
     ///
     /// # Returns
     ///
-    /// A signed Nostr event (kind 445) ready for relay transmission.
+    /// [`SessionEffects`] carrying the `ApplicationMessage` transport work.
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - Serialization of the location fails
-    /// - MDK encryption fails
-    /// - The group is not found
+    /// Returns an error if serialization fails, the inner `pubkey` is not the
+    /// local identity (W9), or the engine rejects the send.
     ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use std::sync::Arc;
-    /// use std::path::Path;
-    /// use haven_core::location::{LocationMessage, nostr::LocationEventBuilder};
-    /// use haven_core::nostr::mls::{MdkManager, MlsGroupContext};
-    /// use haven_core::nostr::mls::types::GroupId;
-    /// use nostr::PublicKey;
-    ///
-    /// let manager = Arc::new(MdkManager::new(Path::new("/tmp/data")).unwrap());
-    /// let group_id = GroupId::from_slice(&[1, 2, 3]);
-    /// let group = MlsGroupContext::new(manager, group_id, "nostr-group-id");
-    ///
-    /// let location = LocationMessage::new(37.7749, -122.4194);
-    /// let builder = LocationEventBuilder::new();
-    /// let my_pubkey = PublicKey::from_hex("...").unwrap();
-    ///
-    /// let event = builder.encrypt(&location, &group, &my_pubkey).unwrap();
-    /// ```
-    pub fn encrypt(
+    /// [`PublishWork::ApplicationMessage`]: cgka_session::PublishWork::ApplicationMessage
+    pub async fn encrypt(
         &self,
         location: &LocationMessage,
         group: &MlsGroupContext,
         sender_pubkey: &PublicKey,
-    ) -> Result<Event> {
+    ) -> Result<SessionEffects> {
         // Step 1: Serialize location to string
         let content = location.to_string()?;
 
@@ -155,21 +122,22 @@ impl LocationEventBuilder {
             .tag(location_tag)
             .build(*sender_pubkey);
 
-        // Step 3: Delegate to MDK for encryption
-        group.encrypt_event(rumor)
+        // Step 3: Delegate to the engine for encryption + transport framing.
+        group.encrypt_event(rumor).await
     }
 
-    /// Decrypts a received location event using MDK.
+    /// Decrypts / ingests a received location event via the engine.
     ///
-    /// This method performs the decryption flow:
-    /// 1. Delegates to MDK for signature verification and decryption
-    /// 2. Extracts the location content from the decrypted message
+    /// This method performs the receive flow:
+    /// 1. Delegates to the engine, which peels + ingests the transport message,
+    ///    validates the MLS-authenticated sender, and advances group state
+    /// 2. Drains the emitted [`GroupEvent`] stream for the first application
+    ///    message ([`LocationMessageResult::Location`])
     /// 3. Deserializes and returns the location message
     ///
-    /// MDK handles:
-    /// - Signature verification
-    /// - MLS decryption
-    /// - Epoch validation and updates
+    /// The engine owns signature verification, MLS decryption, epoch validation,
+    /// and out-of-order sequencing. Because those calls are `async`, this method
+    /// is `async`.
     ///
     /// # Arguments
     ///
@@ -182,75 +150,30 @@ impl LocationEventBuilder {
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - MDK decryption fails
-    /// - The message is not an application message (e.g., it's a proposal or commit)
-    /// - Deserialization fails
+    /// Returns an error if ingest fails hard, or if the event did not yield an
+    /// application message (e.g. it was a commit/proposal, was stale, or was
+    /// buffered for a future epoch), or if deserialization fails.
     ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use std::sync::Arc;
-    /// use std::path::Path;
-    /// use haven_core::location::{LocationMessage, nostr::LocationEventBuilder};
-    /// use haven_core::nostr::mls::{MdkManager, MlsGroupContext};
-    /// use haven_core::nostr::mls::types::GroupId;
-    ///
-    /// let manager = Arc::new(MdkManager::new(Path::new("/tmp/data")).unwrap());
-    /// let group_id = GroupId::from_slice(&[1, 2, 3]);
-    /// let group = MlsGroupContext::new(manager, group_id, "nostr-group-id");
-    ///
-    /// let builder = LocationEventBuilder::new();
-    ///
-    /// // Assuming `event` is a received kind 445 event
-    /// // let decrypted = builder.decrypt(&event, &group).unwrap();
-    /// ```
-    pub fn decrypt(&self, event: &Event, group: &MlsGroupContext) -> Result<LocationMessage> {
-        // Step 1: Delegate to MDK for decryption
-        let result = group.decrypt_event(event)?;
+    /// [`GroupEvent`]: cgka_traits::engine::GroupEvent
+    pub async fn decrypt(&self, event: &Event, group: &MlsGroupContext) -> Result<LocationMessage> {
+        // Step 1: Delegate to the engine for peel + ingest.
+        let ingest = group.decrypt_event(event).await?;
 
-        // Step 2: Extract content from application message
-        let content = match result {
-            MessageProcessingResult::ApplicationMessage(msg) => msg.content,
-            MessageProcessingResult::Proposal(_) => {
-                return Err(NostrError::InvalidEvent(
-                    "Expected application message, got proposal".to_string(),
-                ));
+        // Step 2: Fold the emitted GroupEvents; the first location application
+        // message carries the inner content. Commits/proposals/state changes
+        // emit no `Location`, and stale/buffered outcomes emit no event at all.
+        for group_event in &ingest.effects.events {
+            if let Some(LocationMessageResult::Location { content, .. }) =
+                SessionManager::location_result_from_event(group_event)
+            {
+                // Step 3: Deserialize location
+                return LocationMessage::from_string(&content).map_err(NostrError::from);
             }
-            MessageProcessingResult::Commit { .. } => {
-                return Err(NostrError::InvalidEvent(
-                    "Expected application message, got commit".to_string(),
-                ));
-            }
-            MessageProcessingResult::ExternalJoinProposal { .. } => {
-                return Err(NostrError::InvalidEvent(
-                    "Expected application message, got external join proposal".to_string(),
-                ));
-            }
-            MessageProcessingResult::Unprocessable { .. } => {
-                return Err(NostrError::Decryption(
-                    "Message could not be processed".to_string(),
-                ));
-            }
-            MessageProcessingResult::PendingProposal { .. } => {
-                return Err(NostrError::InvalidEvent(
-                    "Expected application message, got pending proposal".to_string(),
-                ));
-            }
-            MessageProcessingResult::IgnoredProposal { .. } => {
-                return Err(NostrError::InvalidEvent(
-                    "Expected application message, got ignored proposal".to_string(),
-                ));
-            }
-            MessageProcessingResult::PreviouslyFailed => {
-                return Err(NostrError::Decryption(
-                    "Message previously failed processing".to_string(),
-                ));
-            }
-        };
+        }
 
-        // Step 3: Deserialize location
-        LocationMessage::from_string(&content).map_err(NostrError::from)
+        Err(NostrError::Decryption(
+            "no application message in ingest result".to_string(),
+        ))
     }
 
     /// Prepares location data for publishing to Nostr.

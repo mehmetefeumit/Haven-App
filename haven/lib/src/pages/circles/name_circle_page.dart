@@ -25,10 +25,20 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 /// Second step of circle creation: naming the circle.
 class NameCirclePage extends ConsumerStatefulWidget {
   /// Creates a [NameCirclePage].
-  const NameCirclePage({required this.memberKeyPackages, super.key});
+  ///
+  /// [initialName], when provided, pre-fills the name field — used by the
+  /// Dark Matter cutover "re-create circle" flow (DM-4c).
+  const NameCirclePage({
+    required this.memberKeyPackages,
+    this.initialName,
+    super.key,
+  });
 
   /// KeyPackage data for each member to invite.
   final List<KeyPackageData> memberKeyPackages;
+
+  /// Pre-filled circle name, or `null` for the normal empty-name flow.
+  final String? initialName;
 
   @override
   ConsumerState<NameCirclePage> createState() => _NameCirclePageState();
@@ -37,6 +47,15 @@ class NameCirclePage extends ConsumerStatefulWidget {
 class _NameCirclePageState extends ConsumerState<NameCirclePage> {
   final _nameController = TextEditingController();
   final _formKey = GlobalKey<FormState>();
+
+  @override
+  void initState() {
+    super.initState();
+    final initialName = widget.initialName;
+    if (initialName != null && initialName.isNotEmpty) {
+      _nameController.text = initialName;
+    }
+  }
 
   bool _isCreating = false;
   String? _errorMessage;
@@ -256,7 +275,6 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
     try {
       final circleService = ref.read(circleServiceProvider);
       final identityNotifier = ref.read(identityNotifierProvider.notifier);
-      final relayService = ref.read(relayServiceProvider);
 
       // Two-plane model: the creator's tier-3 Welcome-delivery fallback is
       // their OWN inbox relays (kind 10050), read locally. Best-effort — a
@@ -278,28 +296,15 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
         creatorFallbackRelays: creatorFallbackRelays,
       );
 
-      // Send invitations (welcome events)
+      // `CircleService.createCircle` already published the gift-wrapped
+      // Welcome events and confirmed (or rolled back) the engine's pending
+      // group-creation state internally (publish-before-apply, Rule 13) —
+      // nothing further to publish here.
       setState(() => _stage = CreationStage.sendingInvites);
 
-      final total = result.welcomeEvents.length;
-      // Publish all welcome events in parallel — each is independently
-      // gift-wrapped for a different recipient, no shared mutable state.
-      final welcomeResults = await Future.wait(
-        result.welcomeEvents.map(
-          (we) => relayService
-              .publishWelcome(welcomeEvent: we)
-              .then((_) => true)
-              .onError((_, _) {
-                debugPrint('[CircleCreate] Welcome invitation send failed');
-                return false;
-              }),
-        ),
-      );
-      final sentCount = welcomeResults.where((ok) => ok).length;
+      final total = result.welcomesTotal;
+      final sentCount = result.welcomesSent;
 
-      // MDK's create_group auto-merges the pending commit internally,
-      // so no finalizePendingCommit call is needed here.
-      // finalizePendingCommit is only required after add_members/remove_members.
       if (sentCount < total) {
         debugPrint('[CircleCreate] partial invitation send');
       }

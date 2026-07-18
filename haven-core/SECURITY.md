@@ -57,11 +57,31 @@ Haven uses SQLCipher (encrypted SQLite) for all persistent databases. Encryption
 
 | Database | Purpose | Service ID | Key ID |
 |----------|---------|------------|--------|
-| `haven_mdk.db` | MLS group state (via MDK) | `com.oblivioustech.haven` | `mdk.db.key.default` |
+| `session.sqlite` | MLS group state (Dark Matter `AccountDeviceSession`; WAL) | `com.oblivioustech.haven` | `mls.session.key.default` |
 | `circles.db` | Circle metadata, contacts, memberships | `com.oblivioustech.haven` | `circles.db.key` |
 | `tiles.db` | Encrypted map-tile cache | `com.oblivioustech.haven` | `tiles.db.key` |
+| `haven_mdk.db` | **LEGACY** — pre-Dark-Matter MLS state, deleted at cutover | `com.oblivioustech.haven` | `mdk.db.key.default` (**LEGACY — destroyed at cutover**) |
 
-All databases use 256-bit AES encryption with raw keys generated from `OsRng`.
+All keys are 32 bytes of `OsRng` output. `circles.db` and `tiles.db` apply the
+key raw (`PRAGMA key = "x'<64-hex>'"`, KDF bypassed). The MLS `session.sqlite`
+key is provisioned differently (security F5): the keyring stores the raw 32
+bytes, and Haven feeds their lowercase-hex encoding to the Dark Matter
+`storage-sqlite` backend as a **SQLCipher passphrase** (`SqlCipherKey`), which
+SQLCipher stretches through PBKDF2 (`cipher_compatibility = 4`) — a pure
+defense-in-depth stretch over already-256-bit material. The passphrase is
+`Zeroizing` end to end and never logged; `session.sqlite` runs **WAL** (the
+legacy MLS DB was rollback-journal) with `secure_delete` and
+`cipher_memory_security` (see `haven-core/src/nostr/mls/storage.rs`).
+
+**Dark Matter cutover secure-erase (security F6).** The pre-Dark-Matter
+`haven_mdk.db` has no importer: at cutover Haven deletes the old database files
+(plus their WAL/SHM/journal sidecars) AND destroys the `mdk.db.key.default`
+keyring entry (`destroy_legacy_mls_state`, backed by
+`destroy_legacy_mls_key_material`). Unlinking alone is NOT a secure erase — the
+old DB was not written with `secure_delete`, and flash wear-levelling leaves
+residual ciphertext — so **destroying the key is the practical secure-erase**
+for the abandoned SQLCipher database.
+
 Existing unencrypted `circles.db` files are automatically migrated to encrypted
 storage on first access via SQLCipher's `sqlcipher_export()` function.
 
@@ -69,8 +89,9 @@ storage on first access via SQLCipher's `sqlcipher_export()` function.
 (GNOME Keyring, KDE Wallet, or KeePassXC). Without one, circle
 operations will be disabled with a descriptive error.
 
-**iOS keychain accessibility (owner-approved tradeoff)**: On iOS the three
-SQLCipher DB keys (`mdk.db.key.default`, `circles.db.key`, `tiles.db.key`) are
+**iOS keychain accessibility (owner-approved tradeoff)**: On iOS the SQLCipher
+DB keys (`mls.session.key.default`, `circles.db.key`, `tiles.db.key`; formerly
+also the legacy `mdk.db.key.default`, destroyed at the Dark Matter cutover) are
 stored with `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` rather than the
 keyring library's default `kSecAttrAccessibleWhenUnlocked`. The default makes a
 key readable *only while the device is unlocked*, so a background wake while the
@@ -124,9 +145,13 @@ and on background wake.
 all of its `processed_gift_wraps` rows in the same transaction as the circle delete.
 
 **Wipe-on-logout leaves no decryptable data at rest.** Deleting the identity
-tears down all MLS state: it deletes the `haven_mdk.db` and `circles.db` files
-**and removes their keyring keys** (so neither the ciphertext nor the key
-survives), after resetting the sync cursors and staged-commit markers. A
+tears down all MLS state: it deletes the MLS `session.sqlite` and `circles.db`
+files **and removes their keyring keys** (`mls.session.key.default`,
+`circles.db.key` — so neither the ciphertext nor the key survives), after
+resetting the sync cursors. (Any legacy `haven_mdk.db` + `mdk.db.key.default`
+residue is already gone via the one-time cutover erase above; the pre-Dark-
+Matter staged-commit markers no longer exist — the engine's typed pending-state
+lifecycle replaced them.) A
 one-way `_wiped` latch on the circle service closes a re-open race: the M8
 maintenance timers run on their own cadence regardless of the live-sync engine
 (LIVE by default since M11, but stopped before the wipe on logout — see the
@@ -188,7 +213,11 @@ boot device read the SQLCipher key during a background wake is documented under
 
 ### Test-Utils Feature
 
-The `test-utils` feature enables unencrypted storage for testing purposes. This feature:
+The `test-utils` feature enables keyring-free test storage. (For the MLS DB the
+Dark Matter backend always encrypts: `SessionManager::new_unencrypted` opens a
+temp SQLCipher DB under a fixed test passphrase — the "unencrypted" name is
+historical API continuity; `circles.db` test paths remain truly unencrypted.)
+This feature:
 
 - Is gated with `#[cfg(any(test, feature = "test-utils"))]`
 - Produces a compile error if enabled in release builds
@@ -196,12 +225,53 @@ The `test-utils` feature enables unencrypted storage for testing purposes. This 
 
 ### MLS Security
 
-Haven implements the Marmot Protocol for MLS over Nostr. Key security properties:
+Haven implements the Marmot Protocol (v2, Dark Matter engine) for MLS over
+Nostr. Key security properties:
 
-1. **Key Separation**: MLS signing keys are separate from Nostr identity keys
+1. **Key Separation**: MLS signing keys are separate from Nostr identity keys —
+   formalized on-wire as the mandatory `marmot.account-identity-proof.v2` MLS
+   leaf extension (`0xF2F1`): a canonical kind-450 event signed by the identity
+   key, binding identity pubkey ↔ MLS leaf signature key (see the rebroadcast
+   threat note below)
 2. **Ephemeral Keys**: Each group message uses a new keypair
 3. **Forward Secrecy**: Provided by MLS epoch rotation
 4. **Memory Safety**: Secrets use `Zeroizing<T>` for automatic memory clearing
+5. **Single-session invariant (Rule 14) — a confidentiality control**: at most
+   ONE live `AccountDeviceSession` per MLS DB file across all isolates and
+   processes. The engine hydrates authoritative epoch state into memory at
+   open; two live sessions diverge in-memory and risk **epoch/exporter-key
+   reuse and forward-secrecy erosion** — a confidentiality loss, not merely DB
+   corruption (`storage-sqlite` takes no OS-level file lock to save you).
+   Enforced structurally: the only `AccountDeviceSession::open(` call site in
+   the tree is `SessionManager::open_session` (guard test
+   `single_account_device_session_construction_site`), and background catch-up
+   reuses the one process-global session rather than opening a second one.
+
+#### Identity-proof rebroadcast (kind 450) — irreducible, by design (F12)
+
+Every MLS leaf Haven produces embeds the `marmot.account-identity-proof.v2`
+extension: a canonical kind-450 Nostr event (`created_at = 0`) Schnorr-signed by
+the user's Nostr **identity** key, binding the identity pubkey to the MLS leaf
+signature key. Haven never publishes this event to relays — but **any co-member
+can extract the proof from the ratchet tree and rebroadcast it**, publicly and
+verifiably binding the user's Nostr pubkey to MLS participation. This is
+irreducible: co-members necessarily see the credential to validate the group,
+and the proof is self-authenticating wherever it lands. Accepted; it discloses
+only *that* the pubkey participates in Marmot MLS — never message content,
+group membership sets, or location data.
+
+#### Convergence-buffer flooding (upstream #757 — OPEN)
+
+The Dark Matter engine persists out-of-order / future-epoch inbound messages in
+a durable stored-convergence buffer that currently has **no per-group cap and
+no eviction API**. A malicious co-member can flood a group with future-epoch
+messages and grow the on-device `session.sqlite` without bound. Haven mitigates
+at intake with rate-limit-plus-backpressure (Security Rule 12 — never a silent
+drop, because future-epoch catch-up after an offline period is legitimate
+backlog), but an intake cap only throttles: once a message is ingested the
+engine owns its durable storage, so Haven **cannot bound engine storage**.
+Closure of upstream #757 is the real fix; until then this is an accepted
+insider-threat storage-DoS exposure.
 
 ### Post-Compromise Security window from polling cadence
 
@@ -294,9 +364,12 @@ Mitigation and residual (M5):
 - As of M5, Haven issues NO post-accept or periodic self-update (see
   "Self-update disabled (M5)" below). The MIP-02 post-Welcome rotation
   that would close the consumed-KeyPackage window is therefore NOT
-  performed; this residual race is accepted. The forward mitigation is
-  `last_resort` KeyPackages (MIP-00), which are not single-consumption,
-  tracked separately.
+  performed. The forward mitigation — `last_resort` KeyPackages, which are
+  not single-consumption — **landed at the Dark Matter cutover**: every
+  KeyPackage Haven now mints is marked `last_resort`, so a welcome consuming
+  it no longer deletes its private material and the consumed-KeyPackage race
+  above is structurally closed (the described residual is historical for
+  pre-cutover clients).
 
 ### Self-update disabled (M5) — accepted MIP-02/MIP-03 deviation
 
@@ -311,12 +384,14 @@ Removing the periodic/post-join driver removes that generator.
 
 **Residual fork surface (closed for membership commits since M11):** concurrent
 MEMBERSHIP commits by multiple admins from the same epoch were a fork risk while
-add / remove / demote eagerly finalized on publish-success. The M4 adopt-winner
-convergence primitive (`CircleManager::converge_commit`, proven in haven-core
-tests), fed by the M6 settle-window, is the fix — and since M11 (live-sync
-enabled by default) it takes production effect: add / remove / demote finalize
-through the converging path, so a same-epoch multi-admin membership race
-deterministically adopts the MIP-03 winner instead of forking. A leave is a
+add / remove / demote eagerly finalized on publish-success. The adopt-winner
+convergence is the fix — since the Dark Matter migration it is **engine-owned**
+(deterministic `CommitOrderingKey` branch selection inside the MDK engine
+replaced Haven's hand-rolled `converge_commit` + M6 settle-window, both
+deleted) — and since M11 (live-sync enabled by default) it takes production
+effect: add / remove / demote finalize through the publish-then-confirm
+converging path, so a same-epoch multi-admin membership race deterministically
+adopts the protocol winner instead of forking. A leave is a
 `SelfRemove` **proposal** (not a self-finalized commit); it converges on the
 receiving admins' side via the REV-1 drivers, which harden the distributed
 `SelfRemove` case (see "Bounded leave-removal window under live-sync" and
@@ -339,17 +414,33 @@ leaf key material is re-keyed only by a real **membership** change
   not the ~1 h the periodic rotation provided. The 5-epoch exporter-secret
   prune does NOT rotate the leaf key, so it does not bound this.
 
-Accepted by the project owner; revertible once M3's settle-window + M4's
-convergence make concurrent self-updates fork-safe (flip
-`enablePeriodicSelfUpdate`).
+Accepted by the project owner; the fork-safety precondition for reverting is
+now met by the engine-owned convergence (Dark Matter branch selection makes
+concurrent self-updates converge deterministically) — re-enabling remains an
+owner decision (flip `enablePeriodicSelfUpdate`).
 
 Inverse risk (documented, bounded by M7): a burst of >5 membership changes
 while a device is suspended could advance the group past
-`DEFAULT_EPOCH_LOOKBACK` (5) for that device, rendering in-flight kind:445
-events at the old epoch permanently Unprocessable. M7's catch-up bounds the
-offline epoch lag.
+`DEFAULT_MAX_PAST_EPOCHS` (5; the Dark Matter engine's past-epoch retention,
+formerly named `DEFAULT_EPOCH_LOOKBACK`) for that device, leaving in-flight
+kind:445 **application messages** at the aged-out epoch undecryptable. (Under
+the Dark Matter engine future-epoch commits are buffered and replayed, so the
+group state itself recovers; only the aged-out epoch's application messages are
+lost.) M7's catch-up bounds the offline epoch lag.
 
 ### Bounded leave-removal window under live-sync (REV-1)
+
+> **Dark Matter update (2026-07-17).** The window mechanics below describe the
+> pre-migration Haven-side implementation. At the Dark Matter cutover the Haven
+> settle-window layer was deleted: same-epoch concurrent commits now converge
+> inside the MDK engine via deterministic `CommitOrderingKey` branch selection
+> with `settlement_quiescence_ms = 0` (no settle delay), and a peer's
+> `SelfRemove` proposal is auto-committed by every remaining member's engine
+> (`PublishWork::AutoPublish`, confirmed only on a ≥1-relay OK-ack per Rule
+> 13). Driver 1 is therefore engine-owned and stronger — no windowed deferral
+> exists anymore — while Driver 2 (the leaver's `still_a_member` backstop with
+> the durable resume marker) is retained. The bounded-window guarantee and the
+> residual analysis below still hold; the "~8 s settle window" is historical.
 
 This section applies when the live-sync engine is enabled — the **default since
 M11**. Only in the retained short-poll fallback (`liveSyncEnabled = false`) are
@@ -412,6 +503,17 @@ forward-secrecy property is weakened for anyone else. It is net-positive versus
 the unbounded ghost that a race-losing leave would otherwise leave behind.
 
 ### Outer kind:445 metadata: jittered NIP-40 expiration
+
+> **Dark Matter update (2026-07-17).** The per-send jittered NIP-40 TTL below
+> was retired at the Dark Matter cutover: the engine's send path takes no
+> per-send expiration — NIP-40 expiration on kind-445 is now governed by the
+> group-level `marmot.group.message-retention.v1` component (0x8005), which
+> Haven has **not yet configured**. Until that retention wiring lands, Haven
+> 445s carry **no** expiration tag and the receiver-side expiration enforcement
+> is inactive (the jitter/grace helpers in `src/location/ttl.rs` are retained
+> for the re-wiring). The analysis below — including the no-gap invariant in
+> the publish-cadence section — is kept as the design of record for the
+> retention parameters.
 
 Each kind:445 wrapper for a **location update** carries a NIP-40
 `["expiration", ts]` tag with `ts` sampled uniformly from
@@ -629,21 +731,25 @@ threat model is honest:
   analysis, but the `h`-tag linkability itself is a MIP-03 constraint with no
   app-layer fix.
 
-- **Superseded commit during multi-admin convergence (M6).** Under the M6
-  settle-window convergence (active whenever the live-sync engine is on — the
-  default since M11), two admins committing from the same epoch each publish
-  their commit *during* the window so the other can collect it and the group
-  deterministically adopts the MIP-03 winner instead of forking. The losing admin's commit is therefore
+- **Superseded commit during multi-admin convergence.** Under concurrent-commit
+  convergence (engine-owned `CommitOrderingKey` branch selection since the Dark
+  Matter cutover; previously the M6 settle window — active whenever the
+  live-sync engine is on, the default since M11), two admins committing from
+  the same epoch each publish their commit before branch selection resolves, so
+  the group deterministically adopts the winner instead of forking. The losing
+  admin's commit is therefore
   briefly observable on the relay before it is superseded. This reveals only
   that *a concurrent-admin race occurred* (an extra same-epoch `kind:445` under
   the circle's stable `h` tag) — never the membership target, which lives inside
   the encrypted MLS commit, not the relay-visible tags. It is the same class of
   metadata as the stable-`h`-tag and ephemeral-author-counting residuals above.
-  The same applies to the receiver-side path (M6-2): two members auto-committing
-  the same peer `SelfRemove` each publish their commit during convergence, and a
-  process kill mid-convergence may, on restart, re-publish a fresh same-epoch
-  commit (MDK re-stages over the stale pending commit) — another superseded
-  same-epoch commit on the relay, never the membership target.
+  The same applies to the receiver-side path: multiple members' engines
+  auto-committing the same peer `SelfRemove` (`PublishWork::AutoPublish`) each
+  publish their commit during convergence, and a process kill between publish
+  and confirm may, on restart, re-publish a fresh same-epoch commit (the engine
+  clears the staged commit at hydrate and emits `PendingCommitRecovered`; the
+  subsequent resync can re-commit) — another superseded same-epoch commit on
+  the relay, never the membership target.
 
 - **Incremental subscribe/unsubscribe REQ shape (live-sync engine).** When the
   live-sync engine is on, a circle added mid-session (create / accept an
@@ -674,24 +780,29 @@ threat model is honest:
     re-folds the singletons back into their relay-set buckets.
 
 - **Relay-list rotation trail.** When Haven unpublishes a relay-list category
-  (kind 10050 inbox / kind 10051 KeyPackage-relay list) — e.g. after the user
-  edits their relays — its unpublish path emits a NIP-09 kind-5 deletion
-  (signed by the identity key) alongside the empty replacement event, so a
-  relay that retained the old list learns the change history. This reveals
-  nothing beyond what the relay-list events already exposed; the deletion is a
-  best-effort tidy-up for cooperative relays
-  (`relay::publishers::build_nip09_deletion`, driven from
-  `CircleManagerFfi::build_unpublish_relay_list`).
+  (kind 10050 inbox / kind 10002 NIP-65 KeyPackage-discovery list — the latter
+  replaced the kind-10051 KeyPackage-relay list at the Dark Matter cutover) —
+  e.g. after the user edits their relays — its unpublish path emits a NIP-09
+  kind-5 deletion (signed by the identity key) alongside the empty replacement
+  event, so a relay that retained the old list learns the change history. The
+  one-time cutover retraction of the retired kind-10051 (empty replaceable +
+  kind-5) leaves the same class of trail. This reveals nothing beyond what the
+  relay-list events already exposed; the deletion is a best-effort tidy-up for
+  cooperative relays (`relay::publishers::build_nip09_deletion`).
 
-- **KeyPackage residue.** On rotation Haven *does* publish a NIP-09 kind-5
-  deletion for the consumed KeyPackage (via `CircleManagerFfi::sign_deletion_event`,
-  driven from `key_package_provider.dart`), but only for the single event id it
-  re-fetches — the canonical kind-30443. The legacy kind-443 twin is not tracked
-  and is never deleted, so old KeyPackages accumulate on relays over time; a
-  relay can thus observe the set of a user's past KeyPackages (each exposing
-  only an init key already bound to the identity pubkey). This is a known
-  lifecycle-hygiene gap (`docs/RELAY_INTERACTION_BACKLOG.md`, Finding A2), not a
-  content leak.
+- **KeyPackage residue.** Since the Dark Matter cutover, KeyPackages are
+  NIP-33-addressable kind-30443 events: a republish into the same stable `d`
+  slot supersedes the previous one in place, so current-format KeyPackages no
+  longer accumulate on relays (this closes the old Finding-A2 accumulation gap
+  for the new format). The pre-cutover residue — legacy non-addressable
+  kind-443 events and the retired kind-10051 relay list — is scrubbed by a
+  one-time, sentinel-gated retraction
+  (`RelayManagerFfi::retract_legacy_key_material`): a kind-5 NIP-09 deletion of
+  the user's own 443 by event id (self-authorship-guarded; deliberately no
+  `a`-coordinate, since a `443:<pubkey>:` coordinate would over-delete) plus an
+  empty replaceable kind-10051. Both are best-effort on cooperative relays; an
+  uncooperative relay may retain the old 443 (exposing only an init key already
+  bound to the identity pubkey) — a content-free lifecycle residual.
 
 - **Client fingerprint.** The relay WebSocket handshake carries `nostr-sdk`'s
   default `User-Agent` (e.g. `nostr-sdk/0.44`). This is **not** unique to

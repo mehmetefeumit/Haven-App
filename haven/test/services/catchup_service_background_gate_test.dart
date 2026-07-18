@@ -39,7 +39,7 @@ class _CountingRelay extends MockRelayService {
     int maxDurationSecs = 20,
   }) async {
     calls++;
-    return const CatchupResult(locationsApplied: 2, cursorsAdvanced: 1);
+    return const CatchupResult(eventsApplied: 2, cursorsAdvanced: 1);
   }
 }
 
@@ -103,7 +103,7 @@ void main() {
             'and this is a background wake — this is the C3 privacy chokepoint',
       );
       expect(
-        result.locationsApplied,
+        result.eventsApplied,
         0,
         reason: 'Must return an empty result when gated',
       );
@@ -130,7 +130,7 @@ void main() {
             "controls only what the OS does on the user's behalf when the "
             'app is not in use.',
       );
-      expect(result.locationsApplied, 2);
+      expect(result.eventsApplied, 2);
     });
 
     // -----------------------------------------------------------------------
@@ -149,7 +149,7 @@ void main() {
           1,
           reason: 'The chokepoint must not block when the user has opted in',
         );
-        expect(result.locationsApplied, 2);
+        expect(result.eventsApplied, 2);
       },
     );
 
@@ -173,7 +173,7 @@ void main() {
             'cannot accidentally enable background relay activity after '
             'an opt-out.',
       );
-      expect(result.locationsApplied, 0);
+      expect(result.eventsApplied, 0);
     });
 
     // -----------------------------------------------------------------------
@@ -197,7 +197,7 @@ void main() {
             'The background-sharing check must NOT be performed for '
             'foreground callers regardless of what the check would return',
       );
-      expect(result.locationsApplied, 2);
+      expect(result.eventsApplied, 2);
     });
   });
 }

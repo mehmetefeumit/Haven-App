@@ -1016,6 +1016,10 @@
   "@pendingMemberReadyToInvite": {
     "description": "Subtitle shown when a pending member passed validation and can be invited."
   },
+  "pendingMemberNeedsUpdate": "Needs to update Haven",
+  "@pendingMemberNeedsUpdate": {
+    "description": "Subtitle/accessibility label shown when a pending member's discovered KeyPackage is the deprecated pre-migration kind — the person is running an old Haven build and must update it before they can be invited (Dark Matter migration)."
+  },
 
   "memberSearchHint": "Enter member ID...",
   "@memberSearchHint": {
@@ -1230,6 +1234,70 @@
   "leaveCircleError": "Failed to leave circle",
   "@leaveCircleError": {
     "description": "Error snackbar shown when leaving a circle fails."
+  },
+  "leaveCircleAdminLimitationNote": "As this circle's admin, you can only leave once every other member has left. We know that's inconvenient — a future update will let admins hand off and leave directly.",
+  "@leaveCircleAdminLimitationNote": {
+    "description": "Informational note shown only to a circle's admin, directly below the Leave Circle button in the circle-details sheet. Explains that MDK's current public API exposes no admin-policy component codec (mdk#755), so Haven cannot yet support admin hand-off or self-demotion: an admin can only leave once every other member already has (the sole-remaining-member 'abandon' path still works). Temporary, upstream-blocked limitation; never shown to non-admin members."
+  },
+
+  "circleBlockedBannerTitle": "This circle can’t be updated",
+  "@circleBlockedBannerTitle": {
+    "description": "Title of the banner shown above a circle's member list when the encryption engine has flagged the circle as unrecoverable (Dark Matter migration, Security Rule 8). Never shows a raw internal error."
+  },
+  "circleBlockedBannerBody": "Something went wrong with this circle’s encryption, so Haven can no longer send or receive updates in it. You can still see what you last knew below, or leave the circle.",
+  "@circleBlockedBannerBody": {
+    "description": "Body text of the blocked-circle banner. Kept generic and non-technical, per the app's no-raw-errors-in-UI rule."
+  },
+
+  "legacyCircleBannerTitle": "This circle needs to be re-created",
+  "@legacyCircleBannerTitle": {
+    "description": "Title of the banner shown in place of the member list for a circle left over from before the app's encryption engine was upgraded (Dark Matter migration)."
+  },
+  "legacyCircleBannerBody": "Haven’s encryption engine was upgraded, so this circle can no longer be used. Re-create it to keep sharing locations with the same people — you’ll need to invite them again.",
+  "@legacyCircleBannerBody": {
+    "description": "Body text of the legacy-circle banner, explaining why the circle must be re-created."
+  },
+  "legacyCircleRecreateCta": "Re-create Circle",
+  "@legacyCircleRecreateCta": {
+    "description": "Button on the legacy-circle banner that starts creating a new circle, pre-filled with the old circle's name."
+  },
+  "legacyCircleRemoveCta": "Remove",
+  "@legacyCircleRemoveCta": {
+    "description": "Button on the legacy-circle banner that removes the stale local circle entry."
+  },
+  "legacyCircleRemoveDialogTitle": "Remove circle?",
+  "@legacyCircleRemoveDialogTitle": {
+    "description": "Title of the confirmation dialog shown before removing a legacy (pre-upgrade) circle."
+  },
+  "legacyCircleRemoveDialogBody": "This circle can no longer be used and will be removed from your list. This does not affect any new circle you create to replace it.",
+  "@legacyCircleRemoveDialogBody": {
+    "description": "Body of the confirmation dialog shown before removing a legacy (pre-upgrade) circle."
+  },
+  "legacyCircleRemoveConfirm": "Remove",
+  "@legacyCircleRemoveConfirm": {
+    "description": "Confirm button in the remove-legacy-circle dialog."
+  },
+
+  "legacyCutoverExplainerTitle": "Haven has been updated",
+  "@legacyCutoverExplainerTitle": {
+    "description": "Title of the one-time dialog shown after Haven's encryption engine upgrade (Dark Matter migration) destroys the old, no-longer-usable circle data."
+  },
+  "legacyCutoverExplainerIdentityUnchanged": "Your identity and public profile are unchanged — there is nothing you need to do for those.",
+  "@legacyCutoverExplainerIdentityUnchanged": {
+    "description": "First paragraph of the one-time cutover explainer: reassures the user their Nostr identity/profile survived the upgrade."
+  },
+  "legacyCutoverExplainerCirclesNeedRecreation": "For improved security, your circles need to be re-created and their members re-invited before you can share locations in them again.",
+  "@legacyCutoverExplainerCirclesNeedRecreation": {
+    "description": "Second paragraph of the one-time cutover explainer: explains that existing circles must be re-created."
+  },
+  "legacyCutoverExplainerAcknowledge": "Got it",
+  "@legacyCutoverExplainerAcknowledge": {
+    "description": "Acknowledgement button that dismisses the one-time cutover explainer dialog."
+  },
+
+  "relaySettingsLegacyRetractionPending": "Haven is still cleaning up some data from the recent security update. This will finish automatically once you’re back online.",
+  "@relaySettingsLegacyRetractionPending": {
+    "description": "Subtle, non-blocking note on the Relay Settings page shown only while the one-time post-upgrade cleanup of old encryption-key advertisements has not yet completed (most commonly because no relay was reachable yet)."
   },
 
   "circlesPanelCollapsedAnnouncement": "Circles panel collapsed",

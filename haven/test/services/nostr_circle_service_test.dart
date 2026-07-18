@@ -55,6 +55,13 @@ class _StubRelayService implements RelayService {
   @override
   Future<SubscriptionHealthResult> maintainSubscriptionHealth() async =>
       const SubscriptionHealthResult.empty();
+
+  @override
+  Future<LegacyRetractionResult> retractLegacyKeyMaterial({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  }) async => const LegacyRetractionResult.empty();
+
   @override
   Future<List<String>> fetchKeyPackageRelays(String pubkey) =>
       throw UnimplementedError();
@@ -362,7 +369,12 @@ void main() {
     });
 
     group('CircleCreationResult', () {
-      test('creates with circle and welcome events', () {
+      test('creates with circle and welcome delivery counts', () {
+        // Publish-before-apply (Rule 13): NostrCircleService.createCircle now
+        // publishes the gift-wrapped Welcomes and confirms/rolls back the
+        // engine's pending state internally, so the result carries delivery
+        // counts (mirrors AddMemberResult) rather than the raw welcome
+        // events.
         final circle = Circle(
           mlsGroupId: const [1, 2, 3, 4],
           nostrGroupId: const [5, 6, 7, 8],
@@ -375,22 +387,15 @@ void main() {
           updatedAt: DateTime.now(),
         );
 
-        const welcomes = [
-          GiftWrappedWelcome(
-            recipientPubkey:
-                'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-            recipientRelays: ['wss://relay.example.com'],
-            eventJson: '{"kind":1059}',
-          ),
-        ];
-
         final result = CircleCreationResult(
           circle: circle,
-          welcomeEvents: welcomes,
+          welcomesSent: 1,
+          welcomesTotal: 1,
         );
 
         expect(result.circle, equals(circle));
-        expect(result.welcomeEvents.length, 1);
+        expect(result.welcomesSent, 1);
+        expect(result.welcomesTotal, 1);
       });
     });
 
@@ -732,6 +737,11 @@ void main() {
           keyringInitializer: () async {
             callOrder.add('keyring');
           },
+          // A configured (non-null) identity secret provider is required so
+          // the "no identity available" gate — checked right after keyring
+          // init, before the data-directory I/O — doesn't short-circuit
+          // before `getDataDirectory()` is ever reached.
+          identitySecretBytesProvider: () async => List<int>.filled(32, 7),
         );
 
         // Initialization will fail when data directory throws — that is fine.

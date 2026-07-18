@@ -271,6 +271,7 @@
   "pendingMemberWarning": "تحذير",
   "pendingMemberCheckingAvailability": "جارٍ التحقق من التوفّر...",
   "pendingMemberReadyToInvite": "جاهز للدعوة",
+  "pendingMemberNeedsUpdate": "بحاجة إلى تحديث Haven",
 
   "memberSearchHint": "أدخل معرّف العضو...",
   "memberSearchPasteTooltip": "لصق من الحافظة",
@@ -322,6 +323,23 @@
   "leaveCircleIdentityUnavailable": "الهوية غير متاحة",
   "leaveCircleSuccess": "تمت مغادرة الدائرة بنجاح",
   "leaveCircleError": "تعذّرت مغادرة الدائرة",
+  "leaveCircleAdminLimitationNote": "بصفتك مشرف هذه الدائرة، لا يمكنك مغادرتها إلا بعد أن يغادرها جميع الأعضاء الآخرين. نعلم أن هذا أمر غير مريح — سيتيح تحديث مستقبلي للمشرفين نقل الإشراف والمغادرة مباشرة.",
+
+  "circleBlockedBannerTitle": "لا يمكن تحديث هذه الدائرة",
+  "circleBlockedBannerBody": "حدث خلل في تشفير هذه الدائرة، فلم يعد Haven قادرًا على إرسال التحديثات فيها أو استقبالها. يمكنك مع ذلك الاطلاع على آخر ما عرفته أدناه، أو مغادرة الدائرة.",
+  "legacyCircleBannerTitle": "يجب إعادة إنشاء هذه الدائرة",
+  "legacyCircleBannerBody": "جرى تحديث محرك التشفير في Haven، فلم يعد بالإمكان استخدام هذه الدائرة. أعد إنشاءها لمواصلة مشاركة الموقع مع الأشخاص أنفسهم — ستحتاج إلى دعوتهم مجددًا.",
+  "legacyCircleRecreateCta": "إعادة إنشاء الدائرة",
+  "legacyCircleRemoveCta": "إزالة",
+  "legacyCircleRemoveDialogTitle": "إزالة الدائرة؟",
+  "legacyCircleRemoveDialogBody": "لم يعد بالإمكان استخدام هذه الدائرة وستُزال من قائمتك. لا يؤثر هذا في أي دائرة جديدة تُنشئها لتحل محلها.",
+  "legacyCircleRemoveConfirm": "إزالة",
+  "legacyCutoverExplainerTitle": "تم تحديث Haven",
+  "legacyCutoverExplainerIdentityUnchanged": "هويتك وملفك الشخصي العام لم يتغيّرا — ولا يلزمك فعل أي شيء بشأنهما.",
+  "legacyCutoverExplainerCirclesNeedRecreation": "لتحسين الأمان، يجب إعادة إنشاء دوائرك ودعوة أعضائها مجددًا قبل أن تتمكّن من مشاركة الموقع فيها من جديد.",
+  "legacyCutoverExplainerAcknowledge": "فهمت",
+  "relaySettingsLegacyRetractionPending": "لا يزال Haven ينظّف بعض البيانات المتبقّية من التحديث الأمني الأخير. سيكتمل ذلك تلقائيًا فور عودتك إلى الاتصال بالإنترنت.",
+
 
   "circlesPanelCollapsedAnnouncement": "لوحة الدوائر مطوية",
   "circlesPanelExpandedAnnouncement": "لوحة الدوائر مفتوحة",

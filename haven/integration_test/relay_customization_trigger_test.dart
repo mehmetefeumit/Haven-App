@@ -224,10 +224,11 @@ void main() {
 
           final circleManager = await CircleManagerFfi.newInstance(
             dataDir: aliceDir.path,
+            identitySecretBytes: secretBytes,
           );
           await circleManager.seedRelayDefaultsIfUnseeded();
           await circleManager.setPublishRelayList(
-            relayType: RelayTypeFfi.keyPackage,
+            relayType: RelayTypeFfi.nip65,
             value: true,
           );
 

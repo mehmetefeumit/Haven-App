@@ -10,12 +10,14 @@ crate-type = ["lib"]
 
 [features]
 default = []
-# Enables test utilities like unencrypted storage. DO NOT use in production.
-# Propagates to mdk-sqlite-storage to expose MdkSqliteStorage::new_unencrypted().
-# (openmls_traits is now an unconditional dependency — the M8-2 live-material
-# gate needs the OpenMLS StorageProvider trait in production too — so it no
-# longer needs to be feature-activated here.)
-test-utils = ["mdk-sqlite-storage/test-utils"]
+# Enables test-only MLS storage construction (in-memory SQLCipher). DO NOT use
+# in production. The Dark Matter `storage-sqlite` crate exposes
+# `SqliteAccountStorage::in_memory()` as a public, un-gated constructor, so this
+# feature no longer forwards to any upstream crate feature (the old
+# `mdk-sqlite-storage/test-utils` is gone) — it is now a Haven-local marker that
+# gates `StorageConfig::in_memory_storage()` and the two-party in-memory session
+# fixtures the integration tests build on it.
+test-utils = []
 
 [dependencies]
 # Serialization
@@ -39,38 +41,61 @@ thiserror = "2.0"
 # Nostr protocol
 nostr = { version = "0.44", features = ["std", "nip44"] }
 
-# MLS encryption (Marmot Development Kit)
-mdk-core = { git = "https://github.com/parres-hq/mdk", rev = "93ae32479211d7a241ff379c34d3fe87ac161e7a" }
-mdk-sqlite-storage = { git = "https://github.com/parres-hq/mdk", rev = "93ae32479211d7a241ff379c34d3fe87ac161e7a" }
-mdk-storage-traits = { git = "https://github.com/parres-hq/mdk", rev = "93ae32479211d7a241ff379c34d3fe87ac161e7a" }
+# Marmot "Dark Matter" MLS stack (MDK v0.9.4, marmot-protocol/mdk).
+#
+# The old single-crate `mdk-core` was replaced upstream by a crate topology with
+# no `mdk-core`: the CGKA engine (`cgka-engine`) drives an `AccountDeviceSession`
+# (`cgka-session`) over SQLCipher storage (`storage-sqlite`); shared value types
+# and traits live in `cgka-traits` (package `cgka-traits`, directory
+# `crates/traits`); the Nostr kind-445/1059 outer-layer crypto and welcome
+# gift-wrap live in `transport-nostr-peeler`. Haven keeps its own relay /
+# subscription / cursor plane, so `transport-nostr-adapter` is deliberately NOT
+# adopted, and `marmot-account` / `marmot-app` / `marmot-uniffi` are rejected
+# (keyring / full-runtime / FFI overlap). `marmot-forensics` still enters the
+# audit graph transitively — `cgka-session` imports it unconditionally — even
+# though no `ForensicRecorder` is installed by default.
+#
+# Pinned to the RELEASED tag v0.9.4 (`e391adc…`), never a master HEAD: the
+# monorepo is `publish = false` and self-describes as "not semver-stable", so a
+# released tag is the only acceptable supply-chain anchor. All five crates share
+# ONE rev so the workspace resolves as a unit. A `cargo tree` supply-chain gate
+# asserts the uniffi / quic / agent crates stay OUT of Haven's graph.
+cgka-session = { git = "https://github.com/marmot-protocol/mdk", rev = "e391adc133a9b60e420da7a0446f014a180ac8d2" }
+cgka-engine = { git = "https://github.com/marmot-protocol/mdk", rev = "e391adc133a9b60e420da7a0446f014a180ac8d2" }
+cgka-traits = { git = "https://github.com/marmot-protocol/mdk", rev = "e391adc133a9b60e420da7a0446f014a180ac8d2" }
+storage-sqlite = { git = "https://github.com/marmot-protocol/mdk", rev = "e391adc133a9b60e420da7a0446f014a180ac8d2" }
+transport-nostr-peeler = { git = "https://github.com/marmot-protocol/mdk", rev = "e391adc133a9b60e420da7a0446f014a180ac8d2" }
 
-# OpenMLS — the MLS engine MDK builds on. haven-core does NOT fork or patch MDK;
-# it only calls the PUBLIC OpenMLS `StorageProvider` trait against MDK's `pub
-# provider` for the M8-2 KeyPackage live-material gate (querying whether a
-# published KeyPackage's private init-key material is still stored locally —
-# MDK exposes no equivalent query at the pinned rev). These MUST resolve to the
-# exact same crates.io versions mdk-core/mdk-sqlite-storage already lock
-# (openmls 0.8.1 / openmls_traits 0.5) so cargo unifies them to a single crate
-# instance — otherwise the storage backend types would not match. `cargo tree -i
-# openmls` must show a single version.
-openmls = { version = "0.8.1", default-features = false }
-openmls_traits = { version = "0.5", default-features = false }
+# NOTE: the old direct `openmls` / `openmls_traits` deps were dropped. They
+# existed only for the M8-2 KeyPackage live-material gate (OpenMLS
+# `StorageProvider` trait). That gate is deleted in DM-2 (last-resort KP
+# semantics dissolve its premise), and no other Haven code names OpenMLS types.
+# openmls (~0.8.1, `extensions-draft-08`) now enters the graph solely through
+# cgka-engine / storage-sqlite, unified to a single instance; `cargo tree -i
+# openmls` must show one version.
 
-# Keyring (system credential store) — pulled transitively via mdk-sqlite-storage,
-# declared here so `keyring_policy` can migrate the SQLCipher DB-key access policy
-# on iOS. MUST resolve to the SAME version mdk already locks (0.7.4) so the global
-# default store set in rust_builder is the same crate instance; `cargo tree -i
-# keyring-core` confirms a single version.
+# Keyring (system credential store) — declared directly so `keyring_policy` and
+# the MLS storage layer (`nostr::mls::storage`) can provision the SQLCipher
+# passphrase and migrate the DB-key access policy on iOS. The Dark Matter stack
+# does NOT depend on keyring-core (only the rejected `marmot-account` /
+# `marmot-uniffi` crates do), so this pin is now fully Haven-owned; the 1.0 bump
+# is deliberately NOT required. Kept at 0.7 so it stays ONE crate instance with
+# the platform store installed in rust_builder; `cargo tree -i keyring-core`
+# confirms a single version.
 keyring-core = "0.7"
 
-# SQLite for local storage (circles, contacts)
-# Note: Version must match mdk-sqlite-storage's rusqlite version
-rusqlite = { version = "0.37", features = ["bundled"] }
+# SQLite for local storage (circles.db, tiles.db, and — via storage-sqlite — the
+# MLS session.sqlite). Version MUST match the Dark Matter workspace's rusqlite
+# (0.32 / libsqlite3-sys 0.30): libsqlite3-sys is a `links = "sqlite3"` crate, so
+# exactly ONE version may exist in the dependency graph. The SQLCipher build is
+# shared across all three databases.
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }
 
 # SQLCipher requires OpenSSL. For Android cross-compilation, we must bundle OpenSSL
-# since Android NDK doesn't include OpenSSL headers. This unifies with mdk-sqlite-storage's
-# libsqlite3-sys dependency, adding the vendored-openssl feature.
-libsqlite3-sys = { version = "0.35", features = ["bundled-sqlcipher-vendored-openssl"] }
+# since Android NDK doesn't include OpenSSL headers. Pinned to 0.30 to unify with
+# storage-sqlite's libsqlite3-sys (one `links = "sqlite3"` version per graph);
+# `cargo tree -i libsqlite3-sys` must show a single 0.30.x.
+libsqlite3-sys = { version = "0.30", features = ["bundled-sqlcipher-vendored-openssl"] }
 
 # Async runtime (required by MDK)
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "net", "time"] }
@@ -115,29 +140,24 @@ subtle = "2.5"
 rand = "0.8"
 sha2 = "0.10"
 
-# ChaCha20-Poly1305 — the kind:445 outer-layer AEAD. Needed by the REV-1
-# non-destructive content-type peek (`nostr::mls::peek_crypto`): MDK's decrypt
-# routine is `pub(crate)` and unreachable downstream, so the peek carries a
-# byte-for-byte copy to read a settle-window competitor's MLS `content_type`
-# without a destructive trial-apply. Pinned to the SAME `0.10` line MDK locks
-# (0.10.1) so cargo unifies to ONE crate instance — otherwise the AEAD would not
-# byte-match MDK's and the peek/MDK decrypt-parity gate would break.
-# `cargo tree -i chacha20poly1305` must show a single version.
-chacha20poly1305 = "0.10"
+# NOTE: the direct `chacha20poly1305` dependency was removed in DM-2. Its only
+# Haven consumer was the legacy REV-1 non-destructive content-type peek
+# (`nostr::mls::peek_crypto`), which the Dark Matter peeler's public
+# `peel_group_message` supersedes; that module is deleted. The kind-445
+# outer-layer AEAD now lives entirely inside `transport-nostr-peeler`, which
+# still pulls `chacha20poly1305` transitively on the workspace `0.10` line
+# (`cargo tree -i chacha20poly1305` must still show a single version).
 
 # Image processing (avatar pipeline: decode/strip/downscale/re-encode).
 #
-# `image` is ALSO a transitive dependency of mdk-core, which enables the
-# features `["jpeg", "png", "webp", "gif"]`. Cargo feature unification means
-# the `gif` codec (and any other feature mdk turns on) WILL compile in here
-# regardless of what we declare — codec isolation by feature gating is NOT
-# achievable and is therefore NOT relied on for security. The decode-bomb
-# defense rests instead on (a) an explicit pre-decode byte-size cap and (b) an
-# explicit format allowlist enforced in `avatar::image` BEFORE any bytes reach
-# the decoder. We pin the same `0.25` line as mdk-core so unification resolves
-# to one version, and disable default features (drops `rayon`, the heavier
-# `avif`/`exr`/etc. codecs we never enable ourselves) — though unification with
-# mdk still brings its set in.
+# The Dark Matter MLS stack has NO `image` dependency (unlike the old mdk-core,
+# which pulled `image` with `["jpeg","png","webp","gif"]` and forced the `gif`
+# codec in via feature unification). `image` is now Haven's OWN dependency with a
+# minimal codec set. The decode-bomb defense does NOT rely on codec feature
+# gating (an upstream could still re-enable codecs through unification): it rests
+# on (a) an explicit pre-decode byte-size cap and (b) an explicit format
+# allowlist enforced in `avatar::image` BEFORE any bytes reach the decoder.
+# `default-features = false` drops `rayon` and the heavier avif/exr codecs.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 
 [dev-dependencies]

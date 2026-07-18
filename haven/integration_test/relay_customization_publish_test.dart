@@ -112,10 +112,26 @@ void main() {
   });
 
   // =========================================================================
-  // FFI-KP-1  — custom KeyPackage relay R2 receives kind 30443 + 10051
+  // FFI-KP-1  — custom KeyPackage relay R2 receives kind 30443 + kind 10002
+  //
+  // Dark Matter DM-4b note: `CircleManagerFfi.signKeyPackageEvent` (a bare
+  // "sign, don't publish" call giving the test direct control over which
+  // relays the KeyPackage's `relays` tag embeds) no longer exists.
+  // `RelayManagerFfi.maintainKeyPackage` is now the ONE publish path
+  // (decide → reuse-or-mint → publish → record, all Rust-internal): it
+  // reads the user's OWN NIP-65 relay list and probes/publishes to it,
+  // with no Dart-controllable relay parameter. This test is re-expressed
+  // to verify the SAME two-plane privacy oracles — the published
+  // KeyPackage's `relays` tag matches the user's configured list exactly,
+  // and it lands on the newly-added custom relay (R2), never a
+  // public-default union — by OBSERVING the wire-published event on R2
+  // rather than introspecting a `signed.relays` return value. The kind
+  // 10002 relay-list build+publish path is unaffected (still a directly
+  // Dart-controlled `buildRelayListPublish` + `publishEvent` call; W2
+  // renamed the wire kind 10051→10002, replacing kind 10051 entirely).
   // =========================================================================
   testWidgets(
-    'FFI-KP-1: custom KeyPackage relay R2 receives kind 30443 and kind 10051',
+    'FFI-KP-1: custom KeyPackage relay R2 receives kind 30443 and kind 10002',
     (tester) async {
       // Skip honestly when the platform keyring is unavailable.
       try {
@@ -132,61 +148,54 @@ void main() {
         'haven_relay_kp1_',
       );
       try {
+        final secretBytes = await alice.getSecretBytes();
         final manager = await CircleManagerFfi.newInstance(
           dataDir: dataDir.path,
+          identitySecretBytes: secretBytes,
         );
 
         // Seed the default relay list so the manager has a non-empty
         // starting point.  This is idempotent.
         await manager.seedRelayDefaultsIfUnseeded();
 
-        final secretBytes = await alice.getSecretBytes();
         try {
           // Enable publishing of the relay list so buildRelayListPublish
           // does not return suppressed.
           await manager.setPublishRelayList(
-            relayType: RelayTypeFfi.keyPackage,
+            relayType: RelayTypeFfi.nip65,
             value: true,
           );
 
-          // Add R2 to the KeyPackage category.
+          // Add R2 to the KeyPackage-discovery (NIP-65) category.
           await manager.addUserRelay(
             url: secondStrfryUrl,
-            relayType: RelayTypeFfi.keyPackage,
+            relayType: RelayTypeFfi.nip65,
           );
 
           // Read back the list — must contain both R1 and R2.
           final kpRelays = await manager.listUserRelays(
-            relayType: RelayTypeFfi.keyPackage,
+            relayType: RelayTypeFfi.nip65,
           );
           expect(
             kpRelays,
             contains(defaultStrfryUrl),
             reason:
-                'listUserRelays(keyPackage) must still contain R1 after '
+                'listUserRelays(nip65) must still contain R1 after '
                 'adding R2 — addUserRelay must be additive, not replacing.',
           );
           expect(
             kpRelays,
             contains(secondStrfryUrl),
             reason:
-                'listUserRelays(keyPackage) must contain R2 '
+                'listUserRelays(nip65) must contain R2 '
                 'after addUserRelay.',
           );
 
-          // Sign the kind 30443 event with the current kpRelays.
-          final signed = await manager.signKeyPackageEvent(
-            identitySecretBytes: secretBytes,
-            relays: kpRelays,
-          );
-
-          // Build the kind 10051 relay-list event.  The Rust side unions
-          // kpRelays with the process-global default list; the result may
-          // be larger than kpRelays when the defaults are not all present
-          // in the user's explicit list.
+          // Build the kind 10002 relay-list event. Still a directly
+          // Dart-controlled publish (unaffected by the KP-publish change).
           final built = await manager.buildRelayListPublish(
             identitySecretBytes: secretBytes,
-            relayType: RelayTypeFfi.keyPackage,
+            relayType: RelayTypeFfi.nip65,
           );
 
           // ORACLE: suppressed must be false — we just enabled publishing.
@@ -209,10 +218,10 @@ void main() {
                 'suppressed.',
           );
           // ORACLE (two-plane): targets are EXACTLY the user's configured
-          // KeyPackage list — no public-default union. R1 is present only
-          // because it was seeded into the user's list; R2 because the user
-          // added it. Neither comes from a forced default union (that would
-          // leak a private relay onto public relays).
+          // KeyPackage-discovery list — no public-default union. R1 is
+          // present only because it was seeded into the user's list; R2
+          // because the user added it. Neither comes from a forced default
+          // union (that would leak a private relay onto public relays).
           expect(
             built.targets,
             contains(defaultStrfryUrl),
@@ -228,32 +237,18 @@ void main() {
                 'relay).',
           );
           // ORACLE (two-plane): built.targets == the user's configured list,
-          // verbatim. The 30443 KP event also targets the user list. No
-          // public-default union is added to either.
+          // verbatim. No public-default union is added.
           expect(
             built.targets.toSet(),
             equals(kpRelays.toSet()),
             reason:
-                'built.targets must equal the user KeyPackage list exactly — '
-                'no public-default union (two-plane leak invariant).',
-          );
-          // ORACLE (MIP-00): the kind 30443 KeyPackage event embeds exactly
-          // the user's KeyPackage relay list (signed.relays == kpRelays).
-          // Under the two-plane model both the 30443 KP and the 10051 list
-          // publish to the user's own list only — neither force-unions the
-          // public defaults.
-          expect(
-            signed.relays.toSet(),
-            equals(kpRelays.toSet()),
-            reason:
-                'The kind 30443 KeyPackage event must embed exactly the user '
-                'KeyPackage relay list (signed.relays == kpRelays) so peers '
-                'fetch the KeyPackage only from the relays the user advertised '
-                'for it — not from the wider kind-10051 default union.',
+                'built.targets must equal the user KeyPackage-discovery list '
+                'exactly — no public-default union (two-plane leak '
+                'invariant).',
           );
 
-          // Register observers BEFORE publishing so we do not race the
-          // relay's ingestion of the EVENT frame.
+          // Register observers BEFORE publishing/triggering maintenance so
+          // we do not race the relay's ingestion of the EVENT frame.
           final r2Kp30443Future = r2.firstWhere(
             filter: <String, dynamic>{
               'kinds': <int>[30443],
@@ -261,21 +256,31 @@ void main() {
             },
             timeout: const Duration(seconds: 40),
           );
-          final r2KpList10051Future = r2.firstWhere(
+          final r2KpListFuture = r2.firstWhere(
             filter: <String, dynamic>{
-              'kinds': <int>[10051],
+              'kinds': <int>[10002],
               'authors': <String>[alice.pubkeyHex],
             },
             timeout: const Duration(seconds: 40),
           );
 
-          // Publish kind 30443 to kpRelays (the user's explicit KP list).
+          // Publish the kind 30443 KeyPackage via the ONE publish path —
+          // `maintainKeyPackage` reads the user's OWN NIP-65 relay list
+          // (just seeded with R1+R2 above) and probes/publishes to it
+          // internally; there is no Dart-controllable relay parameter.
           final relayMgr = await RelayManagerFfi.newInstance();
-          await relayMgr.publishEvent(
-            eventJson: signed.eventJson,
-            relays: kpRelays,
+          final kpOutcome = await relayMgr.maintainKeyPackage(
+            circle: manager,
+            identitySecretBytes: secretBytes,
           );
-          // Publish kind 10051 to built.targets (the user's own list).
+          expect(
+            kpOutcome.relayErrors,
+            0,
+            reason:
+                'maintainKeyPackage must reach both R1 and R2 without a '
+                'relay error for this assertion to be meaningful.',
+          );
+          // Publish kind 10002 to built.targets (the user's own list).
           await relayMgr.publishEvent(
             eventJson: built.eventJson!,
             relays: built.targets,
@@ -283,12 +288,15 @@ void main() {
 
           // Wait for both events to land on R2.
           final kp30443OnR2 = await r2Kp30443Future;
-          final kpList10051OnR2 = await r2KpList10051Future;
+          final kpListOnR2 = await r2KpListFuture;
 
           // ORACLE: the 30443 event must carry a multi-value `relays` tag
-          // that contains R2.  Per MIP-00 §3.2, the KeyPackage event MUST
-          // advertise all relays where it can be fetched so peers know where
-          // to query for it.
+          // that matches the user's configured KeyPackage-discovery list
+          // EXACTLY (kpRelays) — the two-plane leak invariant restated at
+          // the wire level, since `maintainKeyPackage` no longer returns
+          // the signed event for direct introspection. Per MIP-00 §3.2 the
+          // KeyPackage event MUST advertise all relays where it can be
+          // fetched so peers know where to query for it.
           final kpTags = kp30443OnR2.tags;
           final relaysTag = kpTags
               .where((t) => t.isNotEmpty && t.first == 'relays')
@@ -307,19 +315,26 @@ void main() {
                 "The 30443 'relays' tag must list R2 so peers know to query "
                 'R2 for this user’s KeyPackage.',
           );
+          expect(
+            relaysTag!.sublist(1).toSet(),
+            equals(kpRelays.toSet()),
+            reason:
+                'The kind 30443 KeyPackage event must embed exactly the '
+                "user's configured KeyPackage-discovery list — not a wider "
+                'public-default union — so peers fetch the KeyPackage only '
+                'from the relays the user advertised for it.',
+          );
 
-          // ORACLE: the 10051 event must carry singular `relay` tags (one
-          // per URL) per NIP-65 semantics.  It must contain R2 and must NOT
-          // carry an `r` tag (that would be a NIP-65 mis-encoding).
-          final listTags = kpList10051OnR2.tags;
+          // ORACLE: the kind 10002 event must carry singular `r` tags (one
+          // per URL) per NIP-65 semantics.  It must contain R2.
+          final listTags = kpListOnR2.tags;
           final relayTagsOnList = listTags
-              .where((t) => t.isNotEmpty && t.first == 'relay')
+              .where((t) => t.isNotEmpty && t.first == 'r')
               .toList();
           expect(
             relayTagsOnList,
             isNotEmpty,
-            reason:
-                "kind 10051 must carry at least one 'relay' tag per MIP-00.",
+            reason: "kind 10002 must carry at least one 'r' tag per NIP-65.",
           );
           final r2RelayTag = relayTagsOnList
               .where((t) => t.length >= 2 && t[1] == secondStrfryUrl)
@@ -328,31 +343,16 @@ void main() {
             r2RelayTag,
             isNotNull,
             reason:
-                "kind 10051 must carry a ['relay', '$secondStrfryUrl'] tag "
+                "kind 10002 must carry an ['r', '$secondStrfryUrl'] tag "
                 'so peers know to query R2 for this user’s KeyPackages.',
           );
-          // NIP-65 confusion guard: kind 10051 must NOT use the `r` tag
-          // that NIP-65 (kind 10002) uses.  Using `r` instead of `relay`
-          // would make the event unreadable by MIP-00-compliant clients.
-          final rTags = listTags
-              .where((t) => t.isNotEmpty && t.first == 'r')
-              .toList();
-          expect(
-            rTags,
-            isEmpty,
-            reason:
-                "kind 10051 must NOT carry 'r' tags. Use 'relay' per MIP-00 "
-                '/ NIP-17 semantics for kind 10050/10051. The NIP-65 kind '
-                "10002 uses 'r'; confusing the two tag names breaks "
-                'MIP-00-compliant client discovery.',
-          );
-          // Negative-control comment: if addUserRelay silently failed, kpRelays
-          // would be [R1] only.  The 30443 publish would go to R1 only and
-          // r2Kp30443Future would time out here → test red.
+          // Negative-control comment: if addUserRelay silently failed,
+          // kpRelays would be [R1] only.  The 30443 publish would go to R1
+          // only and r2Kp30443Future would time out here → test red.
           debugPrint(
             '[FFI-KP-1] PASS: '
             '30443 on R2 id=${kp30443OnR2.id.substring(0, 8)}, '
-            '10051 on R2 id=${kpList10051OnR2.id.substring(0, 8)}',
+            '10002 on R2 id=${kpListOnR2.id.substring(0, 8)}',
           );
         } finally {
           // Best-effort wipe of secret bytes in Dart's managed heap.
@@ -389,12 +389,13 @@ void main() {
         'haven_relay_inbox1_',
       );
       try {
+        final secretBytes = await alice.getSecretBytes();
         final manager = await CircleManagerFfi.newInstance(
           dataDir: dataDir.path,
+          identitySecretBytes: secretBytes,
         );
         await manager.seedRelayDefaultsIfUnseeded();
 
-        final secretBytes = await alice.getSecretBytes();
         try {
           await manager.setPublishRelayList(
             relayType: RelayTypeFfi.inbox,
@@ -520,26 +521,30 @@ void main() {
         'haven_relay_445pos_alice_',
       );
       try {
+        final secretBytes = await alice.getSecretBytes();
         final aliceManager = await CircleManagerFfi.newInstance(
           dataDir: aliceDir.path,
+          identitySecretBytes: secretBytes,
         );
 
-        final secretBytes = await alice.getSecretBytes();
         try {
-          // Bob is a SyntheticUser bootstrapped on R1 so Alice can fetch
-          // his KeyPackage from R1 without needing a real relay query
-          // (we hand the KP JSON directly to createCircle).
+          // Bob is a SyntheticUser bootstrapped on R1 — this already
+          // publishes his KeyPackage via `maintainKeyPackage` during
+          // bootstrap (Dark Matter's ONE publish path), so Alice can
+          // fetch it from R1 below without needing to sign it herself.
           final bob = await SyntheticUser.bob(r1);
           try {
-            final bobSecretBytes = await bob.user.getSecretBytes();
-            try {
-              // Sign Bob's KP with both relays so the event is valid per
-              // MIP-00 (non-empty relays tag).
-              final bobKp = await bob.user.circleManager.signKeyPackageEvent(
-                identitySecretBytes: bobSecretBytes,
-                relays: <String>[defaultStrfryUrl, secondStrfryUrl],
-              );
+            final relayMgrForKp = await RelayManagerFfi.newInstance();
+            final bobKpJson = await relayMgrForKp.fetchKeypackage(
+              pubkey: bob.pubkeyHex,
+            );
+            expect(
+              bobKpJson,
+              isNotNull,
+              reason: 'Bob must have a discoverable KeyPackage on R1',
+            );
 
+            try {
               // Alice creates the circle with BOTH relays explicitly.
               // This snapshot is stored in the circle row and later
               // returned as circle.relays.
@@ -551,7 +556,7 @@ void main() {
                 identitySecretBytes: secretBytes,
                 members: [
                   MemberKeyPackageFfi(
-                    keyPackageJson: bobKp.eventJson,
+                    keyPackageJson: bobKpJson!,
                     inboxRelays: <String>[defaultStrfryUrl],
                     nip65Relays: <String>[defaultStrfryUrl],
                   ),
@@ -562,11 +567,9 @@ void main() {
                 creatorFallbackRelays: <String>[defaultStrfryUrl],
               );
 
-              // Finalize the pending Add-members commit Alice's MLS
-              // state staged when creating the circle.
-              await aliceManager.finalizePendingCommit(
-                mlsGroupId: creation.circle.mlsGroupId,
-              );
+              // Confirm the pending group-creation state Alice staged when
+              // creating the circle (publish-before-apply, Rule 13).
+              await aliceManager.confirmPublished(pending: creation.pending);
 
               // ORACLE: the stored circle.relays must exactly match the
               // explicit list.  If createCircle ignores the caller's relay
@@ -734,9 +737,9 @@ void main() {
                 'nostrGroupIdHex=${nostrGroupIdHex.substring(0, 8)}...',
               );
             } finally {
-              for (var i = 0; i < bobSecretBytes.length; i++) {
-                bobSecretBytes[i] = 0;
-              }
+              // Nothing peer-specific to scrub at this level any more —
+              // Bob's KeyPackage came from `maintainKeyPackage` during
+              // `SyntheticUser` bootstrap, not a secret fetched here.
             }
           } finally {
             await bob.dispose();
@@ -776,34 +779,40 @@ void main() {
         'haven_relay_445neg_alice_',
       );
       try {
+        final secretBytes = await alice.getSecretBytes();
         final aliceManager = await CircleManagerFfi.newInstance(
           dataDir: aliceDir.path,
+          identitySecretBytes: secretBytes,
         );
 
-        final secretBytes = await alice.getSecretBytes();
         try {
           // Use a distinct Bob seed so this circle's nostrGroupId differs
           // from the one in FFI-445-POS, making the R2 negative-control
-          // filter unambiguous.
+          // filter unambiguous. Bootstrapping already publishes his
+          // KeyPackage via `maintainKeyPackage` (Dark Matter's ONE publish
+          // path), so Alice can fetch it from R1 below.
           final bob = await SyntheticUser.bootstrap(
             label: 'bob_neg',
             seed: bobSeed,
             relay: r1,
           );
           try {
-            final bobSecretBytes = await bob.user.getSecretBytes();
+            final relayMgrForKp = await RelayManagerFfi.newInstance();
+            final bobKpJson = await relayMgrForKp.fetchKeypackage(
+              pubkey: bob.pubkeyHex,
+            );
+            expect(
+              bobKpJson,
+              isNotNull,
+              reason: 'Bob must have a discoverable KeyPackage on R1',
+            );
             try {
-              final bobKp = await bob.user.circleManager.signKeyPackageEvent(
-                identitySecretBytes: bobSecretBytes,
-                relays: <String>[defaultStrfryUrl],
-              );
-
               // Create the circle with R1 ONLY.
               final creation = await aliceManager.createCircle(
                 identitySecretBytes: secretBytes,
                 members: [
                   MemberKeyPackageFfi(
-                    keyPackageJson: bobKp.eventJson,
+                    keyPackageJson: bobKpJson!,
                     inboxRelays: <String>[defaultStrfryUrl],
                     nip65Relays: <String>[defaultStrfryUrl],
                   ),
@@ -814,9 +823,7 @@ void main() {
                 creatorFallbackRelays: <String>[defaultStrfryUrl],
               );
 
-              await aliceManager.finalizePendingCommit(
-                mlsGroupId: creation.circle.mlsGroupId,
-              );
+              await aliceManager.confirmPublished(pending: creation.pending);
 
               // ORACLE: circle.relays must be [R1] only.
               expect(
@@ -904,9 +911,9 @@ void main() {
                 '(nostrGroupIdHex=${nostrGroupIdHex.substring(0, 8)}...)',
               );
             } finally {
-              for (var i = 0; i < bobSecretBytes.length; i++) {
-                bobSecretBytes[i] = 0;
-              }
+              // Nothing peer-specific to scrub at this level any more —
+              // Bob's KeyPackage came from `maintainKeyPackage` during
+              // `SyntheticUser` bootstrap, not a secret fetched here.
             }
           } finally {
             await bob.dispose();
@@ -961,32 +968,39 @@ void main() {
         'haven_relay_445snap_alice_',
       );
       try {
+        final secretBytes = await alice.getSecretBytes();
         final aliceManager = await CircleManagerFfi.newInstance(
           dataDir: aliceDir.path,
+          identitySecretBytes: secretBytes,
         );
         await aliceManager.seedRelayDefaultsIfUnseeded();
 
-        final secretBytes = await alice.getSecretBytes();
         try {
+          // Bootstrapping already publishes Bob's KeyPackage via
+          // `maintainKeyPackage` (Dark Matter's ONE publish path), so
+          // Alice can fetch it from R1 below.
           final bob = await SyntheticUser.bootstrap(
             label: 'bob_snap',
             seed: bobSeed,
             relay: r1,
           );
           try {
-            final bobSecretBytes = await bob.user.getSecretBytes();
+            final relayMgrForKp = await RelayManagerFfi.newInstance();
+            final bobKpJson = await relayMgrForKp.fetchKeypackage(
+              pubkey: bob.pubkeyHex,
+            );
+            expect(
+              bobKpJson,
+              isNotNull,
+              reason: 'Bob must have a discoverable KeyPackage on R1',
+            );
             try {
-              final bobKp = await bob.user.circleManager.signKeyPackageEvent(
-                identitySecretBytes: bobSecretBytes,
-                relays: <String>[defaultStrfryUrl],
-              );
-
               // Step 1: Create a circle with R1 only.
               final creation = await aliceManager.createCircle(
                 identitySecretBytes: secretBytes,
                 members: [
                   MemberKeyPackageFfi(
-                    keyPackageJson: bobKp.eventJson,
+                    keyPackageJson: bobKpJson!,
                     inboxRelays: <String>[defaultStrfryUrl],
                     nip65Relays: <String>[defaultStrfryUrl],
                   ),
@@ -996,9 +1010,7 @@ void main() {
                 relays: <String>[defaultStrfryUrl],
                 creatorFallbackRelays: <String>[defaultStrfryUrl],
               );
-              await aliceManager.finalizePendingCommit(
-                mlsGroupId: creation.circle.mlsGroupId,
-              );
+              await aliceManager.confirmPublished(pending: creation.pending);
 
               // Step 2: Add R2 to BOTH personal relay lists.
               await aliceManager.addUserRelay(
@@ -1007,7 +1019,7 @@ void main() {
               );
               await aliceManager.addUserRelay(
                 url: secondStrfryUrl,
-                relayType: RelayTypeFfi.keyPackage,
+                relayType: RelayTypeFfi.nip65,
               );
 
               // Step 3: Re-read the circle and assert its relay list is
@@ -1093,9 +1105,9 @@ void main() {
                 '(nostrGroupIdHex=${nostrGroupIdHex.substring(0, 8)}...)',
               );
             } finally {
-              for (var i = 0; i < bobSecretBytes.length; i++) {
-                bobSecretBytes[i] = 0;
-              }
+              // Nothing peer-specific to scrub at this level any more —
+              // Bob's KeyPackage came from `maintainKeyPackage` during
+              // `SyntheticUser` bootstrap, not a secret fetched here.
             }
           } finally {
             await bob.dispose();

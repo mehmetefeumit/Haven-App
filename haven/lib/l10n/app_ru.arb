@@ -265,6 +265,7 @@
   "pendingMemberWarning": "Предупреждение",
   "pendingMemberCheckingAvailability": "Проверяем доступность...",
   "pendingMemberReadyToInvite": "Готово к приглашению",
+  "pendingMemberNeedsUpdate": "Требуется обновить Haven",
 
   "memberSearchHint": "Введите ID участника...",
   "memberSearchPasteTooltip": "Вставить из буфера обмена",
@@ -316,6 +317,23 @@
   "leaveCircleIdentityUnavailable": "Личность недоступна",
   "leaveCircleSuccess": "Вы покинули круг",
   "leaveCircleError": "Не удалось покинуть круг",
+  "leaveCircleAdminLimitationNote": "Как администратор этого круга вы можете покинуть его только после того, как это сделают все остальные участники. Мы понимаем, что это неудобно, — в будущем обновлении администраторы смогут передавать свою роль и покидать круг напрямую.",
+
+  "circleBlockedBannerTitle": "Этот круг нельзя обновить",
+  "circleBlockedBannerBody": "Что-то пошло не так с шифрованием этого круга, поэтому Haven больше не может отправлять и получать в нём обновления. Ниже по-прежнему доступно последнее известное состояние, или вы можете покинуть круг.",
+  "legacyCircleBannerTitle": "Этот круг нужно создать заново",
+  "legacyCircleBannerBody": "Механизм шифрования Haven был обновлён, поэтому этот круг больше нельзя использовать. Создайте его заново, чтобы продолжить делиться местоположением с теми же людьми — вам нужно будет пригласить их снова.",
+  "legacyCircleRecreateCta": "Создать круг заново",
+  "legacyCircleRemoveCta": "Удалить",
+  "legacyCircleRemoveDialogTitle": "Удалить круг?",
+  "legacyCircleRemoveDialogBody": "Этот круг больше нельзя использовать, и он будет удалён из вашего списка. Это не повлияет на новый круг, который вы создадите взамен.",
+  "legacyCircleRemoveConfirm": "Удалить",
+  "legacyCutoverExplainerTitle": "Haven обновлён",
+  "legacyCutoverExplainerIdentityUnchanged": "Ваша личность и публичный профиль не изменились — вам ничего не нужно с ними делать.",
+  "legacyCutoverExplainerCirclesNeedRecreation": "Для большей безопасности ваши круги нужно создать заново, а их участников — пригласить повторно, прежде чем вы снова сможете делиться местоположением в них.",
+  "legacyCutoverExplainerAcknowledge": "Понятно",
+  "relaySettingsLegacyRetractionPending": "Haven всё ещё очищает часть данных после недавнего обновления безопасности. Очистка завершится автоматически, как только вы снова окажетесь в сети.",
+
 
   "circlesPanelCollapsedAnnouncement": "Панель кругов свёрнута",
   "circlesPanelExpandedAnnouncement": "Панель кругов развёрнута",

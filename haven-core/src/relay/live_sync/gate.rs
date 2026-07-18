@@ -1,52 +1,15 @@
-//! Engine safety primitives: the MLS write gate and the per-session sub-id salt.
+//! Engine safety primitive: the per-session sub-id salt.
 //!
-//! The always-on engine processor and the foreground finalize/converge writer
-//! share ONE [`crate::circle::CircleManager`] (one MDK / one `SQLCipher` store).
-//! [`MlsWriteGate`] serializes every MDK-mutating call per circle so the two
-//! never corrupt the shared MLS state by writing concurrently. The
-//! [`generate_session_salt`] helper produces the ephemeral salt that makes
+//! The [`generate_session_salt`] helper produces the ephemeral salt that makes
 //! subscription ids unlinkable across app sessions (PSI-2).
+//!
+//! (The former per-circle `MlsWriteGate` was removed in the MDK Dark Matter
+//! migration: write serialization is now enforced by the single process-global
+//! `AccountDeviceSession` behind one `tokio` mutex — see Security Rule 14 and
+//! `nostr::mls::storage::LiveSessionGuard` — so a separate per-circle gate is no
+//! longer meaningful.)
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex};
-
-use tokio::sync::Mutex as AsyncMutex;
 use zeroize::Zeroizing;
-
-/// A per-circle async write gate over the shared MLS state.
-///
-/// A caller acquires `for_group(hex).lock().await` around every MDK-mutating
-/// call for that circle (engine decrypt, finalize, converge, `create_message`,
-/// clear). Distinct circles get distinct locks, so unrelated circles still write
-/// in parallel; the same circle is fully serialized. Added defensively — MDK's
-/// own storage-level serialization was not relied upon.
-#[derive(Default)]
-pub struct MlsWriteGate {
-    locks: StdMutex<HashMap<String, Arc<AsyncMutex<()>>>>,
-}
-
-impl MlsWriteGate {
-    /// Creates an empty write gate.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Returns the (shared, lazily-created) async lock for `group_id_hex`.
-    ///
-    /// Two callers for the SAME circle receive the same `Arc`, so awaiting the
-    /// lock serializes them; callers for DISTINCT circles receive distinct locks
-    /// and proceed in parallel. The brief inner `std` mutex is never held across
-    /// an `.await`.
-    #[must_use]
-    pub fn for_group(&self, group_id_hex: &str) -> Arc<AsyncMutex<()>> {
-        let mut locks = self
-            .locks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Arc::clone(locks.entry(group_id_hex.to_string()).or_default())
-    }
-}
 
 /// Generates a per-session ephemeral subscription-id salt.
 ///
@@ -69,47 +32,6 @@ pub fn generate_session_salt() -> Zeroizing<[u8; 16]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn same_group_shares_one_lock_distinct_groups_do_not() {
-        let gate = MlsWriteGate::new();
-        let a1 = gate.for_group("aa00");
-        let a2 = gate.for_group("aa00");
-        let b = gate.for_group("bb11");
-        assert!(
-            Arc::ptr_eq(&a1, &a2),
-            "same circle must share one lock (serialized writes)"
-        );
-        assert!(
-            !Arc::ptr_eq(&a1, &b),
-            "distinct circles must have distinct locks (parallel writes)"
-        );
-    }
-
-    #[test]
-    fn write_gate_actually_serializes_same_group_holders() {
-        // A held async lock must block a second acquisition of the SAME group's
-        // lock (proving serialization), while a different group proceeds.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        rt.block_on(async {
-            let gate = MlsWriteGate::new();
-            let lock_a = gate.for_group("aa00");
-            let _held = lock_a.lock().await;
-
-            // Same group: a fresh handle to the same lock cannot be acquired now.
-            let same = gate.for_group("aa00");
-            assert!(
-                same.try_lock().is_err(),
-                "same-group lock must be contended while held"
-            );
-
-            // Different group: independent, acquirable.
-            let other = gate.for_group("bb11");
-            assert!(other.try_lock().is_ok(), "distinct-group lock must be free");
-        });
-    }
 
     #[test]
     fn session_salt_is_random_ephemeral_and_nonzero() {

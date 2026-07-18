@@ -265,6 +265,7 @@
   "pendingMemberWarning": "انتباہ",
   "pendingMemberCheckingAvailability": "دستیابی جانچی جا رہی ہے...",
   "pendingMemberReadyToInvite": "دعوت دینے کے لیے تیار",
+  "pendingMemberNeedsUpdate": "Haven کو اپ ڈیٹ کرنے کی ضرورت ہے",
 
   "memberSearchHint": "رکن کی ID درج کریں...",
   "memberSearchPasteTooltip": "کلپ بورڈ سے چسپاں کریں",
@@ -316,6 +317,23 @@
   "leaveCircleIdentityUnavailable": "شناخت دستیاب نہیں",
   "leaveCircleSuccess": "حلقہ کامیابی سے چھوڑ دیا گیا",
   "leaveCircleError": "حلقہ چھوڑنے میں ناکامی",
+  "leaveCircleAdminLimitationNote": "اس حلقے کے منتظم کی حیثیت سے، آپ اسے تب ہی چھوڑ سکتے ہیں جب باقی تمام ارکان اسے چھوڑ چکے ہوں۔ ہمیں معلوم ہے کہ یہ زحمت کا باعث ہے — مستقبل کی ایک اپ ڈیٹ منتظمین کو اپنی ذمہ داری کسی اور کو سونپ کر براہِ راست حلقہ چھوڑنے کی سہولت دے گی۔",
+
+  "circleBlockedBannerTitle": "یہ حلقہ اپ ڈیٹ نہیں کیا جا سکتا",
+  "circleBlockedBannerBody": "اس حلقے کی خفیہ کاری میں کچھ گڑبڑ ہو گئی، اس لیے Haven اب اس میں نہ تو اپ ڈیٹس بھیج سکتا ہے اور نہ وصول کر سکتا ہے۔ آپ پھر بھی نیچے اپنی آخری معلوم صورتحال دیکھ سکتے ہیں، یا حلقہ چھوڑ سکتے ہیں۔",
+  "legacyCircleBannerTitle": "اس حلقے کو دوبارہ بنانا ضروری ہے",
+  "legacyCircleBannerBody": "Haven کے خفیہ کاری کے نظام کو اپ گریڈ کر دیا گیا ہے، اس لیے یہ حلقہ اب استعمال نہیں کیا جا سکتا۔ انہی لوگوں کے ساتھ مقام شیئر کرتے رہنے کے لیے اسے دوبارہ بنائیں — آپ کو انہیں دوبارہ دعوت دینی ہوگی۔",
+  "legacyCircleRecreateCta": "حلقہ دوبارہ بنائیں",
+  "legacyCircleRemoveCta": "ہٹائیں",
+  "legacyCircleRemoveDialogTitle": "حلقہ ہٹائیں؟",
+  "legacyCircleRemoveDialogBody": "یہ حلقہ اب استعمال نہیں کیا جا سکتا اور آپ کی فہرست سے ہٹا دیا جائے گا۔ اس کی جگہ آپ جو بھی نیا حلقہ بنائیں گے، اس پر اس کا کوئی اثر نہیں پڑے گا۔",
+  "legacyCircleRemoveConfirm": "ہٹائیں",
+  "legacyCutoverExplainerTitle": "Haven اپ ڈیٹ ہو چکا ہے",
+  "legacyCutoverExplainerIdentityUnchanged": "آپ کی شناخت اور عوامی پروفائل میں کوئی تبدیلی نہیں آئی — ان کے لیے آپ کو کچھ کرنے کی ضرورت نہیں۔",
+  "legacyCutoverExplainerCirclesNeedRecreation": "بہتر سیکیورٹی کے لیے، آپ کے حلقوں کو دوبارہ بنانا اور ان کے ارکان کو دوبارہ دعوت دینا ضروری ہے، اس کے بعد ہی آپ ان میں دوبارہ مقام شیئر کر سکیں گے۔",
+  "legacyCutoverExplainerAcknowledge": "ٹھیک ہے",
+  "relaySettingsLegacyRetractionPending": "Haven ابھی بھی حالیہ سیکیورٹی اپ ڈیٹ سے کچھ ڈیٹا صاف کر رہا ہے۔ آپ کے دوبارہ آن لائن آتے ہی یہ خود بخود مکمل ہو جائے گا۔",
+
 
   "circlesPanelCollapsedAnnouncement": "حلقوں کا پینل سمیٹا گیا",
   "circlesPanelExpandedAnnouncement": "حلقوں کا پینل پھیلایا گیا",

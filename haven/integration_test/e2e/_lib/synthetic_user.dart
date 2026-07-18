@@ -91,24 +91,14 @@ typedef DecryptedCoords = ({double latitude, double longitude});
 /// future refactor — keeping them out of CI artifacts is cheap
 /// forward defence.
 ///
-/// `publishedCommitEventIds` collects the Nostr event id of every
-/// receiver-side auto-commit this call published + finalized (only
-/// possible when `finalizeAutoCommit` is `true`). Most calls publish
-/// zero or one commit; a caller electing a single committer among
-/// multiple peers (e.g. `_reconcileHandoff` in `e2e_combined.dart`)
-/// uses this to capture the WINNER's exact published commit id
-/// directly, instead of inferring it positionally from a growing,
-/// arrival-ordered event buffer whose size is not fixed (Alice's
-/// admin-handoff leave, for example, emits a variable-length burst of
-/// kind-445 events, not a fixed count).
-///
-/// `withheldPendingCommit` is `true` when this call staged a
-/// receiver-side commit but left it PENDING because
-/// `finalizeAutoCommit` was `false` — the signal a "loser" peer in a
-/// single-committer election uses to know it is time to
-/// `clearPendingCommit` and adopt the winner's commit instead (see
-/// [applyArrivalOrdered]'s `finalizeAutoCommit` doc for why this call
-/// also stops processing the remainder of the batch at that point).
+/// `publishedCommitEventIds` and `withheldPendingCommit` are VESTIGIAL
+/// under Dark Matter — always empty / `false`, respectively. They backed
+/// the pre-migration receiver-side auto-commit publish/finalize dance and
+/// the single-committer election built on top of it; the Dark Matter
+/// engine now owns publish-before-apply AND commit-ordering/convergence
+/// entirely internally, so there is nothing left for a Dart-side decrypt
+/// loop to publish, finalize, or withhold. See [applyArrivalOrdered]'s
+/// `finalizeAutoCommit` doc.
 typedef ApplyEventsSummary = ({
   int locationsProcessed,
   int groupUpdatesProcessed,
@@ -142,42 +132,44 @@ class SyntheticUser {
   }) async {
     final user = await TestUser.bootstrap(label: label, seed: seed);
     try {
+      // Dark Matter (DM-4): `maintain_key_package` is now the ONE publish
+      // path for `KeyPackage` material (kind 30443 only — the legacy kind
+      // 443 twin is retired) — there is no longer a bare "sign, don't
+      // publish" FFI call. It probes/publishes to the account's OWN NIP-65
+      // relays (never a directly-passed relay list), so this synthetic
+      // peer's NIP-65 relay list must include the hermetic relay FIRST —
+      // mirrors the production relay-preferences seeding an onboarding
+      // identity goes through before its first KeyPackage publish.
+      await user.circleManager.addUserRelay(
+        url: relay.url,
+        relayType: RelayTypeFfi.nip65,
+      );
+
       final secret = await user.getSecretBytes();
+      final relayManager = await RelayManagerFfi.newInstance();
       try {
-        final kp = await user.circleManager.signKeyPackageEvent(
+        final outcome = await relayManager.maintainKeyPackage(
+          circle: user.circleManager,
           identitySecretBytes: secret,
-          relays: <String>[relay.url],
         );
-
-        // Publish kind 30443 (canonical) first.
-        final (acceptedCanonical, msgCanonical) = await relay
-            .publishAndAwaitOk(kp.eventJson);
-        if (!acceptedCanonical) {
+        if (outcome.relaysHealed < 1) {
           throw StateError(
-            "relay rejected $label's kind 30443 KeyPackage: $msgCanonical",
+            "$label's KeyPackage maintenance did not reach the hermetic "
+            'relay (action=${outcome.action.name}, '
+            'errors=${outcome.relayErrors})',
           );
         }
-
-        // Then the legacy kind 443. Some relays might reject duplicates
-        // by event id, but the two events have distinct ids (different
-        // kind), so both should land.
-        final (acceptedLegacy, msgLegacy) = await relay.publishAndAwaitOk(
-          kp.legacyEventJson,
+        debugPrint(
+          '[SyntheticUser:$label] KeyPackage published '
+          '(action=${outcome.action.name})',
         );
-        if (!acceptedLegacy) {
-          // Non-fatal: production code falls back gracefully to whichever
-          // event is present. Log but don't fail the test setup.
-          debugPrint(
-            '[SyntheticUser:$label] relay rejected legacy kind 443: '
-            '$msgLegacy (non-fatal)',
-          );
-        }
 
         return SyntheticUser._(
           user: user,
           keyPackageRelays: <String>[relay.url],
         );
       } finally {
+        await relayManager.shutdown();
         // Best-effort wipe of the local copy of the secret. Rust-side is
         // already Zeroizing-wrapped (see api.rs:load_from_bytes); this
         // covers the Dart-side List<int> that crossed the FFI boundary.
@@ -359,8 +351,11 @@ class SyntheticUser {
     if (invitation == null) return null;
 
     try {
+      // `invitation.mlsGroupId` is the pre-join stand-in id — actually the
+      // gift-wrap event id the invitation was keyed by; `acceptInvitation`
+      // accepts by that same id.
       final accepted = await user.circleManager.acceptInvitation(
-        mlsGroupId: invitation.mlsGroupId,
+        giftWrapId: invitation.mlsGroupId,
       );
       debugPrint(
         '[SyntheticUser:$label] acceptInvitation OK '
@@ -445,7 +440,8 @@ class SyntheticUser {
   ///
   /// The production `LocationSharingService` distinguishes between
   /// location messages and group-update commits via the
-  /// `DecryptResult` discriminator. This drainer surfaces both via
+  /// `LocationEventKind` discriminator (mirrors the FFI
+  /// `LocationMessageResultKindFfi`). This drainer surfaces both via
   /// the returned record so scenarios can assert on the
   /// MLS-protocol-level outcome (e.g., a non-zero
   /// `groupUpdatesProcessed` after Alice's AdminHandoff).
@@ -542,26 +538,23 @@ class SyntheticUser {
   /// returns `Ok(None)`), so callers may re-pass a growing buffer
   /// across retry rounds.
   ///
-  /// [finalizeAutoCommit] controls what happens when MDK auto-stages a
-  /// receiver-side commit (e.g. each remaining member auto-commits a
-  /// SelfRemove proposal). When `true` (default) the commit is
-  /// published and finalized. When `false` the commit is left PENDING
-  /// in MDK (not published, not finalized, not cleared) so the caller
-  /// can `clearPendingCommit` it and adopt a different (winning)
-  /// commit instead — the single-committer election that avoids the
-  /// multi-committer fork an admin handoff would otherwise produce in
-  /// a 3+-member residual (see `_reconcileHandoff`). This mirrors the
-  /// canonical `concurrent_admin_remove_member_converges_after_clear_pending`
-  /// recipe in `haven-core/src/circle/manager.rs`.
-  ///
-  /// When `false`, this method also STOPS processing the remainder of
-  /// [events] the instant it stages that withheld commit — MDK does
-  /// not support applying further group events while an uncommitted
-  /// pending commit is outstanding, and a real admin-handoff leave may
-  /// contain more events after the one that triggers the stage
-  /// (SelfRemove proposal re-issues, a location, avatar epoch-reshare
-  /// chunks). Nothing is lost: re-invoke with a grown buffer after
-  /// `clearPendingCommit`; already-applied events are a dedup no-op.
+  /// [finalizeAutoCommit] is VESTIGIAL under Dark Matter — kept only so
+  /// existing call sites across the E2E suite do not all need to change
+  /// their signature at once — and has NO effect. The pre-migration MDK
+  /// stack staged a receiver-side auto-commit in Dart-visible pending
+  /// state that a caller could choose to leave uncommitted (the
+  /// single-committer election `_reconcileHandoff` used to referee a
+  /// concurrent admin-handoff leave). The Dark Matter engine now owns
+  /// publish-before-apply AND commit-ordering/convergence entirely
+  /// internally — there is no Dart-visible pending receiver-side commit
+  /// left to withhold, publish, or clear. [ApplyEventsSummary
+  /// .withheldPendingCommit] is therefore always `false` and
+  /// [ApplyEventsSummary.publishedCommitEventIds] is always empty; any
+  /// scenario that relied on the old election (checking those fields, or
+  /// clearing a "loser" peer's withheld commit) needs the engine's own
+  /// convergence to settle instead — see `MDK_DARKMATTER_MIGRATION_PLAN.md`
+  /// §2.1/§2.2 (out-of-order-commit / concurrent-commit-fork handling
+  /// moves into the engine).
   Future<ApplyEventsSummary> applyArrivalOrdered(
     List<TestRelayEvent> events, {
     required TestRelay relay,
@@ -571,19 +564,17 @@ class SyntheticUser {
       events,
       relay: relay,
       context: 'applyArrivalOrdered',
-      finalizeAutoCommit: finalizeAutoCommit,
     );
   }
 
   /// Shared decrypt-and-apply loop for [drainPendingCommits] and
   /// [applyArrivalOrdered]. Processes [events] in the exact order
-  /// given (the caller owns ordering policy) and handles the
-  /// receiver-side auto-commit.
+  /// given (the caller owns ordering policy); the engine applies any
+  /// resulting group state change internally.
   Future<ApplyEventsSummary> _applyEventsInOrder(
     List<TestRelayEvent> events, {
     required TestRelay relay,
     required String context,
-    bool finalizeAutoCommit = true,
   }) async {
     var locationsProcessed = 0;
     var groupUpdatesProcessed = 0;
@@ -592,98 +583,46 @@ class SyntheticUser {
     // Coordinates per sender (lowercase hex key). Only the first
     // successful decrypt for a given sender is recorded per the
     // [drainPendingCommits] contract: Rust dedup means repeat calls on
-    // the same event return null, so callers must accumulate across
-    // drain rounds.
+    // the same event return an empty result, so callers must accumulate
+    // across drain rounds.
     final decryptedLocations = <String, DecryptedCoords>{};
-    // Ids of every receiver-side auto-commit this call published +
-    // finalized (only when finalizeAutoCommit is true). See
-    // [ApplyEventsSummary.publishedCommitEventIds].
-    final publishedCommitEventIds = <String>[];
-    // True once this call stages a receiver-side commit but leaves it
-    // PENDING because finalizeAutoCommit is false. See
-    // [ApplyEventsSummary.withheldPendingCommit].
-    var withheldPendingCommit = false;
+    // Dark Matter: the engine owns publish-before-apply for every commit
+    // internally, so a decrypt/ingest never hands back an outbound event
+    // for a receiver to publish/finalize — these stay permanently empty/
+    // false. See [ApplyEventsSummary]'s field docs and
+    // [applyArrivalOrdered]'s `finalizeAutoCommit` doc.
+    const publishedCommitEventIds = <String>[];
+    const withheldPendingCommit = false;
     for (final event in events) {
       final eventJson = jsonEncode(event.raw);
       try {
-        final result = await user.circleManager.decryptLocation(
+        final results = await user.circleManager.decryptLocation(
           eventJson: eventJson,
         );
-        if (result == null) {
-          // Already-seen / not for us — Rust's dedup absorbed it.
-          continue;
-        }
-        final location = result.location;
-        if (location != null) {
-          locationsProcessed++;
-          final senderKey = location.senderPubkey.toLowerCase();
-          decryptedSenders.add(senderKey);
-          // Only store the first successful result; subsequent drains for
-          // the same event return null (dedup), so this map entry is stable.
-          decryptedLocations[senderKey] = (
-            latitude: location.latitude,
-            longitude: location.longitude,
-          );
-        }
-        if (result.groupUpdated) {
-          groupUpdatesProcessed++;
-        }
-        // Receiver-side auto-commit: when MDK stages an outbound
-        // commit as a side effect of receiving this event, the FFI
-        // surfaces it via `evolutionEventJson` and we must publish +
-        // finalize it. Lives OUTSIDE the `result.groupUpdated`
-        // branch to mirror the production location-sharing service
-        // (`lib/src/services/location_sharing_service.dart:741-779`):
-        // a SelfRemove proposal received on the admin side often
-        // returns `groupUpdated=false` with a non-null
-        // `evolutionEventJson` — the receiver's auto-commit applying
-        // the leave. Gating on `groupUpdated` here would silently
-        // drop those commits, leaving a dangling pending commit that
-        // can brick subsequent decrypts.
-        final evolutionEventJson = result.evolutionEventJson;
-        final evolutionMlsGroupId = result.evolutionMlsGroupId;
-        if (evolutionEventJson != null && evolutionMlsGroupId != null) {
-          if (finalizeAutoCommit) {
-            final (ok, _) = await relay.publishAndAwaitOk(
-              evolutionEventJson,
-            );
-            if (ok) {
-              await user.circleManager.finalizePendingCommit(
-                mlsGroupId: evolutionMlsGroupId,
+        for (final result in results) {
+          switch (result.kind) {
+            case LocationMessageResultKindFfi.location:
+              final location = result.location;
+              if (location == null) continue;
+              locationsProcessed++;
+              final senderKey = location.senderPubkey.toLowerCase();
+              decryptedSenders.add(senderKey);
+              // Only store the first successful result; subsequent drains
+              // for the same event return no result (dedup), so this map
+              // entry is stable.
+              decryptedLocations[senderKey] = (
+                latitude: location.latitude,
+                longitude: location.longitude,
               );
-              final decoded = jsonDecode(evolutionEventJson);
-              final publishedId = decoded is Map<String, dynamic>
-                  ? decoded['id'] as String?
-                  : null;
-              if (publishedId != null) {
-                publishedCommitEventIds.add(publishedId);
-              }
-            } else {
-              await user.circleManager.clearPendingCommit(
-                mlsGroupId: evolutionMlsGroupId,
+            case LocationMessageResultKindFfi.joined:
+            case LocationMessageResultKindFfi.groupUpdate:
+            case LocationMessageResultKindFfi.invalidated:
+              groupUpdatesProcessed++;
+            case LocationMessageResultKindFfi.unrecoverable:
+              debugPrint(
+                '[SyntheticUser:$label] $context: group entered '
+                'Unrecoverable state for evt=${_redactPk(event.id)}',
               );
-            }
-          } else {
-            // Deliberately LEFT PENDING in MDK (not published,
-            // finalized, or cleared) — the caller (`_reconcileHandoff`'s
-            // loser path) will `clearPendingCommit` it and adopt a
-            // different (winning) commit instead.
-            //
-            // STOP processing the rest of `events` for this call: a
-            // real admin-handoff leave emits a *variable* burst — the
-            // SelfRemove proposal that lands here may be followed by
-            // more re-issues of the same proposal, a location, and
-            // avatar epoch-reshare chunks — and MDK does not support
-            // decrypting further group events while an uncommitted
-            // pending commit is outstanding for this group (the same
-            // precondition the canonical
-            // `concurrent_admin_remove_member_converges_after_clear_pending`
-            // Rust test observes). Nothing is lost: the caller
-            // re-invokes this method with a (possibly grown) buffer
-            // after clearing the pending commit, and already-applied
-            // events are a no-op (MDK dedup).
-            withheldPendingCommit = true;
-            break;
           }
         }
       } on Object catch (e) {
@@ -761,17 +700,14 @@ class SyntheticUser {
         );
     }
 
-    final result = await user.circleManager.proposeLeave(
+    // `propose_leave` returns a bare SelfRemove *proposal* event JSON — a
+    // remaining member commits it later (RFC 9420 §12.1.2), so there is no
+    // `PendingStateRef` here to confirm or roll back on publish failure.
+    final proposalEventJson = await user.circleManager.proposeLeave(
       mlsGroupId: circle.circle.mlsGroupId,
     );
-    final (accepted, msg) = await relay.publishAndAwaitOk(
-      result.evolutionEventJson,
-    );
+    final (accepted, msg) = await relay.publishAndAwaitOk(proposalEventJson);
     if (!accepted) {
-      // Clear the pending commit so MDK state isn't wedged.
-      await user.circleManager.clearPendingCommit(
-        mlsGroupId: circle.circle.mlsGroupId,
-      );
       throw StateError(
         '[SyntheticUser:$label] relay rejected SelfRemove: $msg',
       );
@@ -801,14 +737,14 @@ class SyntheticUser {
     return user.circleManager.getCircle(mlsGroupId: mlsGroupId);
   }
 
-  /// Discards any commit this peer has staged but not yet finalized for
-  /// [mlsGroupId]. Used by the handoff single-committer election to
-  /// drop the loser's withheld SelfRemove auto-commit before it adopts
-  /// the winner's commit (mirrors `clear_pending_commit` in the
-  /// canonical Rust convergence test). A no-op when nothing is pending.
-  Future<void> clearPendingCommit(Uint8List mlsGroupId) {
-    return user.circleManager.clearPendingCommit(mlsGroupId: mlsGroupId);
-  }
+  // NOTE: `clearPendingCommit(Uint8List mlsGroupId)` was removed (Dark
+  // Matter DM-4b). It backed the handoff single-committer election's
+  // "loser drops its withheld receiver-side auto-commit" step — the Dark
+  // Matter engine now owns publish-before-apply AND commit-ordering /
+  // convergence entirely internally (via typed `PendingStateRef` tokens
+  // scoped to a single publish call, not a Dart-visible per-group pending
+  // commit), so there is no longer a Dart-side "pending commit for this
+  // group" to discard. See `applyArrivalOrdered`'s `finalizeAutoCommit` doc.
 
   /// Reads the current MLS epoch for [mlsGroupId] from this peer's local
   /// MDK instance.
@@ -832,34 +768,23 @@ class SyntheticUser {
     return epoch.toInt();
   }
 
-  /// Stages a self-update commit and immediately finalizes it into THIS
-  /// peer's own local MDK state, WITHOUT publishing it to any relay.
-  ///
-  /// Decouples "locally finalize" from "publish to relay" — the caller
-  /// decides when (or whether) to put the returned event on the wire. This
-  /// lets a scenario construct racing / out-of-order commits: e.g. a
-  /// genuine competing commit for the M11 concurrent-commit-convergence
-  /// proxy (scenario b), or two commits finalized locally back-to-back but
-  /// published in REVERSE order to manufacture a receiver-side
-  /// Unprocessable event (scenario c).
-  ///
-  /// `self_update` requires no admin rights (any member may rotate their
-  /// own leaf key), so any [SyntheticUser] — admin or not — can call this.
-  /// NOT the production pattern (production finalizes only after a
-  /// successful publish); this is a raw legacy-path FFI call for building
-  /// adversarial/racing test fixtures.
-  ///
-  /// Returns the signed `evolution_event_json` for the caller to publish
-  /// whenever it chooses.
-  Future<String> stageAndFinalizeSelfUpdate({
-    required Uint8List mlsGroupId,
-  }) async {
-    final staged = await user.circleManager.selfUpdate(
-      mlsGroupId: mlsGroupId,
-    );
-    await user.circleManager.finalizePendingCommit(mlsGroupId: mlsGroupId);
-    return staged.evolutionEventJson;
-  }
+  // NOTE: `stageAndFinalizeSelfUpdate` was removed (Dark Matter DM-4b). It
+  // called the legacy-path `self_update` FFI method to manufacture racing /
+  // out-of-order commits for the M11 concurrent-commit-convergence proxy
+  // scenarios in `e2e_combined.dart` — `self_update` (and
+  // `finalizePendingCommit`) no longer exist: MIP-02/03 leaf-key rotation
+  // is engine-internal under Dark Matter (see `self_update_provider.dart`),
+  // and the engine now owns commit-ordering/convergence for concurrent
+  // commits internally rather than exposing a Dart-visible stage-then-
+  // finalize-without-publish seam to manufacture them. There is no
+  // equivalent FFI call left to build this specific race with. The
+  // M11-scenario call sites in `e2e_combined.dart` that depended on this
+  // (and on the now-removed `clearPendingCommit` election helper) test the
+  // concurrent-commit-fork problem class Dark Matter's engine is adopted
+  // specifically to own — re-designing that coverage against the new
+  // engine belongs with the Rust-side black-box convergence e2e the
+  // migration plan calls for (`MDK_DARKMATTER_MIGRATION_PLAN.md` §5.7),
+  // not a mechanical Dart port.
 
   /// Releases the underlying [TestUser].
   Future<void> dispose() => user.dispose();

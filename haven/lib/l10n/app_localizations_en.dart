@@ -895,6 +895,9 @@ class AppLocalizationsEn extends AppLocalizations {
   String get pendingMemberReadyToInvite => 'Ready to invite';
 
   @override
+  String get pendingMemberNeedsUpdate => 'Needs to update Haven';
+
+  @override
   String get memberSearchHint => 'Enter member ID...';
 
   @override
@@ -1080,6 +1083,58 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get leaveCircleError => 'Failed to leave circle';
+
+  @override
+  String get leaveCircleAdminLimitationNote =>
+      'As this circle\'s admin, you can only leave once every other member has left. We know that\'s inconvenient — a future update will let admins hand off and leave directly.';
+
+  @override
+  String get circleBlockedBannerTitle => 'This circle can’t be updated';
+
+  @override
+  String get circleBlockedBannerBody =>
+      'Something went wrong with this circle’s encryption, so Haven can no longer send or receive updates in it. You can still see what you last knew below, or leave the circle.';
+
+  @override
+  String get legacyCircleBannerTitle => 'This circle needs to be re-created';
+
+  @override
+  String get legacyCircleBannerBody =>
+      'Haven’s encryption engine was upgraded, so this circle can no longer be used. Re-create it to keep sharing locations with the same people — you’ll need to invite them again.';
+
+  @override
+  String get legacyCircleRecreateCta => 'Re-create Circle';
+
+  @override
+  String get legacyCircleRemoveCta => 'Remove';
+
+  @override
+  String get legacyCircleRemoveDialogTitle => 'Remove circle?';
+
+  @override
+  String get legacyCircleRemoveDialogBody =>
+      'This circle can no longer be used and will be removed from your list. This does not affect any new circle you create to replace it.';
+
+  @override
+  String get legacyCircleRemoveConfirm => 'Remove';
+
+  @override
+  String get legacyCutoverExplainerTitle => 'Haven has been updated';
+
+  @override
+  String get legacyCutoverExplainerIdentityUnchanged =>
+      'Your identity and public profile are unchanged — there is nothing you need to do for those.';
+
+  @override
+  String get legacyCutoverExplainerCirclesNeedRecreation =>
+      'For improved security, your circles need to be re-created and their members re-invited before you can share locations in them again.';
+
+  @override
+  String get legacyCutoverExplainerAcknowledge => 'Got it';
+
+  @override
+  String get relaySettingsLegacyRetractionPending =>
+      'Haven is still cleaning up some data from the recent security update. This will finish automatically once you’re back online.';
 
   @override
   String get circlesPanelCollapsedAnnouncement => 'Circles panel collapsed';

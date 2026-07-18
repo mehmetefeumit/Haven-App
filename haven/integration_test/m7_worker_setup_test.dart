@@ -141,7 +141,10 @@ void main() {
       // path the worker resolves — so the worker opens the SAME database.
       final dataDir =
           await const PathProviderDataDirectory().getDataDirectory();
-      final aliceManager = await CircleManagerFfi.newInstance(dataDir: dataDir);
+      final aliceManager = await CircleManagerFfi.newInstance(
+        dataDir: dataDir,
+        identitySecretBytes: aliceSeed,
+      );
 
       // --- Bob = in-process synthetic peer -------------------------------
       final bob = await SyntheticUser.bob(relay);

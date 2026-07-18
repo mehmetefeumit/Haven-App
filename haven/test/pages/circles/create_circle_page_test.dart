@@ -26,6 +26,14 @@ const _testNpub2 =
 
 KeyPackageData _makeKeyPackage(String pubkey) => KeyPackageData(
   pubkey: pubkey,
+  eventJson: '{"kind":30443}',
+  relays: const ['wss://relay.example.com'],
+);
+
+/// A KeyPackage carrying the deprecated pre-Dark-Matter kind (443) — the
+/// peer is on an old Haven build (DM-4c, plan §6 F11).
+KeyPackageData _makeLegacyKeyPackage(String pubkey) => KeyPackageData(
+  pubkey: pubkey,
   eventJson: '{"kind":443}',
   relays: const ['wss://relay.example.com'],
 );
@@ -239,5 +247,38 @@ void main() {
       expect(find.byIcon(LucideIcons.circleCheck), findsNothing);
       expect(find.text('Add circle members'), findsOneWidget);
     });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Dark Matter migration (DM-4c, plan §6 F11): a legacy (kind 443)
+  // KeyPackage means the person is on a pre-migration Haven build and
+  // cannot be invited — blocked with a distinct "needs update" status, not
+  // treated as a generic invalid/no-account result.
+  // ---------------------------------------------------------------------------
+  group('CreateCirclePage legacy KeyPackage detection (DM-4c)', () {
+    testWidgets(
+      'shows "needs update" status for a legacy (kind 443) KeyPackage and '
+      'keeps continue disabled',
+      (tester) async {
+        final mock = MockRelayService(
+          keyPackageResult: _makeLegacyKeyPackage('hex'),
+        );
+        await tester.pumpWidget(_buildApp(mock));
+
+        await _addMember(tester, _testNpub1);
+        await tester.pumpAndSettle();
+
+        // Distinct icon/status from both "valid" and "invalid" (no-account).
+        expect(find.byIcon(LucideIcons.circleCheck), findsNothing);
+        expect(find.text('Ready to invite'), findsNothing);
+        expect(find.text('No Haven account found'), findsNothing);
+        expect(find.text('Needs to update Haven'), findsOneWidget);
+
+        final button = tester.widget<FilledButton>(
+          find.widgetWithText(FilledButton, 'Continue'),
+        );
+        expect(button.onPressed, isNull);
+      },
+    );
   });
 }

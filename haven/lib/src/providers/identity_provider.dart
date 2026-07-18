@@ -256,18 +256,19 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
         'delete: ${e.runtimeType}\n$stack',
       );
     }
-    // M7 teardown: wipe the staged-commit markers + reset all sync cursors so a
-    // returning (or different) identity never inherits a stale marker (which
-    // would wrongly skip a background receive) or a stale cursor floor.
-    // Best-effort — swallow errors so a storage hiccup cannot block the primary
-    // objective of removing the secret key.
+    // M7 teardown: reset all sync cursors so a returning (or different)
+    // identity never inherits a stale cursor floor. (The pre-migration
+    // staged-commit marker wipe was removed with the Dark Matter migration —
+    // the engine owns pending-commit state internally, so there is no
+    // Haven-owned marker left to clear.) Best-effort — swallow errors so a
+    // storage hiccup cannot block the primary objective of removing the
+    // secret key.
     try {
       final circleService = ref.read(circleServiceProvider);
-      await circleService.wipeAllStagedCommits();
       await circleService.resetAllSyncCursors();
     } on Object catch (e) {
       debugPrint(
-        '[SECURITY][IdentityNotifier] M7 teardown (staged_commits/cursors) '
+        '[SECURITY][IdentityNotifier] M7 teardown (sync cursors) '
         'failed during identity deletion: ${e.runtimeType}',
       );
     }

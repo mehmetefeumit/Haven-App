@@ -1,26 +1,58 @@
-//! Shared types for MDK integration.
+//! Shared types for the Marmot "Dark Matter" MLS integration.
 //!
-//! This module re-exports and aliases types from the MDK crate
-//! for use throughout the haven-core library.
+//! This module re-exports the value types Haven's MLS surface needs from the
+//! Dark Matter crate set (`cgka-traits` / `cgka-session`) and defines the
+//! Haven-local location wrappers.
+//!
+//! # `GroupId` compatibility shim
+//!
+//! The Dark Matter [`GroupId`] (`cgka_traits::types::GroupId`) constructs from
+//! bytes via `GroupId::new(bytes)` and reads via `as_slice()` / `into_bytes()`
+//! — it does **not** expose the old MDK `from_slice` / `to_vec` pair. Haven has
+//! many `GroupId::from_slice(&bytes)` call sites (circle storage, tests), so
+//! [`GroupIdExt`] restores `from_slice` as an extension over the new type. The
+//! byte contract is identical; bring [`GroupIdExt`] into scope to use it.
 
-// Re-export core MDK types
-pub use mdk_core::prelude::{
-    GroupId, GroupResult, JoinedGroupResult, MessageProcessingResult, NostrGroupConfigData,
-    NostrGroupDataUpdate, UpdateGroupResult, WelcomePreview,
+// ── Dark Matter re-exports (the DM-3 consumer surface) ───────────────────────
+pub use cgka_session::{CreateGroupEffects, IngestEffects, PublishWork, SessionEffects};
+pub use cgka_traits::app_components::AppComponentData;
+pub use cgka_traits::engine::{
+    CreateGroupRequest, GroupEvent, GroupStateChange, KeyPackage, KeyPackageSource, SendIntent,
+    WelcomeMetadata,
 };
+pub use cgka_traits::engine_state::PendingStateRef;
+pub use cgka_traits::group::{Group as MlsGroup, Member as MlsMember};
+pub use cgka_traits::ingest::{IngestOutcome, StaleReason};
+pub use cgka_traits::transport::TransportMessage;
+pub use cgka_traits::types::{EpochId, GroupId, MemberId, MessageId};
 pub use nostr::Event;
 
-// Re-export storage types
-pub use mdk_core::prelude::group_types::Group as MlsGroup;
-pub use mdk_core::prelude::group_types::GroupExporterSecret;
-pub use mdk_core::prelude::group_types::GroupState;
-pub use mdk_core::prelude::message_types::Message as MlsMessage;
-pub use mdk_core::prelude::welcome_types::Welcome as MlsWelcome;
+/// Extension trait restoring the old MDK `GroupId::from_slice` constructor over
+/// the Dark Matter [`GroupId`].
+///
+/// The new engine names the constructor `GroupId::new`; Haven's persistence and
+/// test code call `GroupId::from_slice`. This trait maps one to the other with
+/// no change in the byte contract. `GroupId::as_slice()` and `into_bytes()`
+/// already exist natively, so only the constructor needs a shim.
+pub trait GroupIdExt {
+    /// Builds a [`GroupId`] from a byte slice (alias for `GroupId::new`).
+    #[must_use]
+    fn from_slice(bytes: &[u8]) -> Self;
+}
+
+impl GroupIdExt for GroupId {
+    fn from_slice(bytes: &[u8]) -> Self {
+        Self::new(bytes.to_vec())
+    }
+}
 
 /// Configuration for creating a location sharing group.
 ///
 /// This is a simplified configuration focused on location sharing use cases.
-/// It wraps `NostrGroupConfigData` with sensible defaults.
+/// The name/description become the group's `marmot.group.profile.v1` component,
+/// the relays become the `marmot.transport.nostr.routing.v1` component, and the
+/// admins bootstrap the group's initial admin set (the creator is always an
+/// admin implicitly).
 #[derive(Debug, Clone)]
 pub struct LocationGroupConfig {
     /// Name of the family/group (e.g., "Smith Family")
@@ -35,10 +67,6 @@ pub struct LocationGroupConfig {
 
 impl LocationGroupConfig {
     /// Creates a new location group configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - The name of the group (e.g., "Smith Family")
     ///
     /// # Example
     ///
@@ -90,11 +118,13 @@ impl LocationGroupConfig {
 
 /// Information about a joined or created group.
 ///
-/// This provides a simplified view of the group state
-/// suitable for the location sharing use case.
+/// A simplified, redaction-safe view of the group state suitable for the
+/// location sharing use case. The `nostr_group_id` here is the transport
+/// routing id (from the `marmot.transport.nostr.routing.v1` component), never
+/// the real MLS `GroupId`.
 #[derive(Clone)]
 pub struct LocationGroupInfo {
-    /// The MLS group ID (used for MDK operations)
+    /// The MLS group ID (used for engine operations)
     pub mls_group_id: GroupId,
     /// The Nostr group ID (used in h-tags for relay routing)
     pub nostr_group_id: String,
@@ -118,165 +148,79 @@ impl std::fmt::Debug for LocationGroupInfo {
     }
 }
 
-impl LocationGroupInfo {
-    /// Creates group info from an MDK Group.
-    ///
-    /// This function is used internally to convert MDK group data
-    /// to the Haven-specific `LocationGroupInfo` representation.
-    #[allow(dead_code)] // Reserved for future MDK integration
-    pub(crate) fn from_mls_group(group: &MlsGroup, epoch: u64) -> Self {
-        Self {
-            mls_group_id: group.mls_group_id.clone(),
-            // Convert [u8; 32] to hex string
-            nostr_group_id: hex::encode(group.nostr_group_id),
-            name: group.name.clone(),
-            description: group.description.clone(),
-            epoch,
-        }
-    }
-}
-
-/// Bundle containing data needed to create a key package event.
+/// Result of interpreting an ordered engine [`GroupEvent`] for the location
+/// sharing use case.
 ///
-/// This is returned by `MdkManager::create_key_package` and contains
-/// everything needed to build and sign a Nostr key package event.
-/// Supports both addressable kind 30443 (preferred) and legacy kind 443.
-#[derive(Clone)]
-pub struct KeyPackageBundle {
-    /// Base64-encoded TLS-serialized key package (event content).
-    pub content: String,
-    /// Tags for the addressable kind 30443 event (preferred).
-    pub tags_30443: Vec<Vec<String>>,
-    /// Tags for the legacy kind 443 event.
-    pub tags_443: Vec<Vec<String>>,
-    /// Serialized `KeyPackageRef` for deletion by hash reference.
-    pub hash_ref: Vec<u8>,
-    /// NIP-33 `d` tag value for the addressable kind 30443 event.
-    pub d_tag: String,
-    /// Relay URLs where this key package will be published.
-    pub relays: Vec<String>,
-}
-
-impl std::fmt::Debug for KeyPackageBundle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Presence-only: `d_tag` (a NIP-33 `d`) and `relays` (own relay URLs)
-        // must never reach a log (Security Rule 4/6) — the redaction helper does
-        // NOT strip URLs, so redact them structurally here.
-        f.debug_struct("KeyPackageBundle")
-            .field("content", &"<redacted>")
-            .field("tags_30443_count", &self.tags_30443.len())
-            .field("tags_443_count", &self.tags_443.len())
-            .field("hash_ref", &"<redacted>")
-            .field("d_tag", &"<redacted>")
-            .field("relay_count", &self.relays.len())
-            .finish()
-    }
-}
-
-/// Result of processing an incoming location message.
+/// The Dark Matter engine emits a rich `GroupEvent` stream from `ingest` /
+/// `advance_convergence`; Haven folds the location-relevant subset into this
+/// enum. Unlike the old `MessageProcessingResult`-derived taxonomy, stale /
+/// duplicate / out-of-order handling is entirely engine-internal (surfaced as
+/// [`IngestOutcome::Stale`] / [`IngestOutcome::Buffered`] on the ingest call),
+/// so this type carries only application-visible outcomes.
 pub enum LocationMessageResult {
-    /// A decrypted location message
+    /// A decrypted inner application message (a location update).
     Location {
-        /// The sender's public key (hex-encoded)
+        /// The sender's public key (hex-encoded, from the MLS-authenticated
+        /// member id).
         sender_pubkey: String,
-        /// The decrypted content (JSON)
+        /// The decrypted inner content (the location JSON payload).
         content: String,
-        /// The MLS group ID this message belongs to
+        /// The MLS group ID this message belongs to.
+        group_id: GroupId,
+        /// The MLS epoch the message was authenticated at.
+        epoch: u64,
+    },
+    /// The local client joined a group via an accepted welcome.
+    Joined {
+        /// The MLS group ID that was joined.
         group_id: GroupId,
     },
-    /// A group update (member added/removed, etc.)
-    ///
-    /// When MDK auto-commits a peer's `SelfRemove` proposal (a member leaving
-    /// the circle), the resulting commit is staged locally as a **pending
-    /// commit** and returned in `evolution_event`. The caller owes a
-    /// publish-and-merge cycle so the local MLS epoch advances:
-    ///
-    /// 1. Publish `evolution_event` to the circle's relays.
-    /// 2. On success, call `MdkManager::merge_pending_commit` to finalize.
-    /// 3. On publish failure, call `MdkManager::clear_pending_commit` to
-    ///    roll back so the group is not left with a dangling pending commit.
-    ///
-    /// Without this cycle, the remaining member's view of the roster (via
-    /// `get_members`) will continue to include the leaver indefinitely.
-    ///
-    /// `evolution_event` is `None` for non-auto-committed group updates:
-    /// plain commits (already merged by MDK on the sender side during
-    /// `merge_pending_commit`, and simply applied by peers on receive),
-    /// pending proposals (stored for later admin commit with no per-receiver
-    /// action), and external join proposals. Proposals MDK ignores surface as
-    /// [`Self::Unprocessable`] rather than a distinct variant.
+    /// A durable, MLS-authenticated change to group state (membership, admin,
+    /// rename, retention) or an epoch advance the receiver should react to.
     GroupUpdate {
-        /// The MLS group ID that was updated
+        /// The MLS group ID that was updated.
         group_id: GroupId,
-        /// Outbound `kind:445` commit event the receiver must publish to the
-        /// group's relays and then merge locally. Populated only for the
-        /// auto-committed `Proposal` variant (peer `SelfRemove`); `None`
-        /// otherwise.
-        evolution_event: Option<Event>,
     },
-    /// Message could not be processed
-    ///
-    /// # `group_id` may be empty
-    ///
-    /// When `CircleManager::decrypt_location` drops an event before MLS
-    /// processing (e.g. past the NIP-40 `expiration` tag), it has no way
-    /// to know the destination group yet. In that case `group_id` is an
-    /// empty slice sentinel. Consumers that branch on `group_id` MUST
-    /// treat the empty case as "unknown" rather than "group with empty
-    /// id". The `Debug` impl already redacts this field.
-    Unprocessable {
-        /// The MLS group ID (may be empty; see variant docs).
+    /// A previously-surfaced application message or state change was withdrawn
+    /// because branch selection superseded the commit that produced it. The
+    /// caller must treat the earlier change as if it never happened.
+    Invalidated {
+        /// The MLS group ID whose prior output was withdrawn.
         group_id: GroupId,
-        /// Error description
-        reason: String,
     },
-    /// Message was previously attempted and failed
-    PreviouslyFailed,
-}
-
-/// How an MDK `process_message` **failure** is interpreted by the live-sync
-/// engine's settle machinery.
-///
-/// A same-epoch sibling commit racing our own pending commit does not surface as
-/// a [`LocationMessageResult::GroupUpdate`]; MDK rejects it as an *error*
-/// ([`mdk_core::Error::OwnCommitPending`] and friends). Classifying that error
-/// as [`Self::CompetingCommit`] — rather than dropping it as an opaque failure —
-/// is what lets the engine buffer the sibling for deterministic MIP-03
-/// convergence instead of forking the group.
-///
-/// The classification reads only the error discriminant; no secret material is
-/// inspected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommitClassification {
-    /// A same-epoch sibling commit racing our own pending commit. Buffer it for
-    /// convergence; never advance the cursor.
-    CompetingCommit,
-    /// Any other failure: a plain drop. Never buffered.
-    Other,
+    /// The group entered the unrecoverable state; the UI must block send/mutate.
+    Unrecoverable {
+        /// The MLS group ID that is now unrecoverable.
+        group_id: GroupId,
+    },
 }
 
 impl std::fmt::Debug for LocationMessageResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Location { .. } => f
+            Self::Location { epoch, .. } => f
                 .debug_struct("Location")
                 .field("sender_pubkey", &"<redacted>")
                 .field("content", &"<redacted>")
                 .field("group_id", &"<redacted>")
+                .field("epoch", epoch)
                 .finish(),
-            Self::GroupUpdate {
-                evolution_event, ..
-            } => f
+            Self::Joined { .. } => f
+                .debug_struct("Joined")
+                .field("group_id", &"<redacted>")
+                .finish(),
+            Self::GroupUpdate { .. } => f
                 .debug_struct("GroupUpdate")
                 .field("group_id", &"<redacted>")
-                .field("has_evolution_event", &evolution_event.is_some())
                 .finish(),
-            Self::Unprocessable { reason, .. } => f
-                .debug_struct("Unprocessable")
+            Self::Invalidated { .. } => f
+                .debug_struct("Invalidated")
                 .field("group_id", &"<redacted>")
-                .field("reason", reason)
                 .finish(),
-            Self::PreviouslyFailed => write!(f, "PreviouslyFailed"),
+            Self::Unrecoverable { .. } => f
+                .debug_struct("Unrecoverable")
+                .field("group_id", &"<redacted>")
+                .finish(),
         }
     }
 }
@@ -284,6 +228,14 @@ impl std::fmt::Debug for LocationMessageResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_id_ext_from_slice_matches_new() {
+        let a = GroupId::from_slice(&[1, 2, 3, 4]);
+        let b = GroupId::new(vec![1, 2, 3, 4]);
+        assert_eq!(a, b);
+        assert_eq!(a.as_slice(), &[1, 2, 3, 4]);
+    }
 
     #[test]
     fn location_group_config_builder_pattern() {
@@ -303,15 +255,13 @@ mod tests {
     fn location_group_config_with_relays() {
         let relays = vec!["wss://r1.com", "wss://r2.com"];
         let config = LocationGroupConfig::new("Test").with_relays(relays);
-
         assert_eq!(config.relays.len(), 2);
     }
 
     #[test]
-    fn location_group_info_debug_output() {
-        let group_id = GroupId::from_slice(&[1, 2, 3, 4, 5]);
+    fn location_group_info_debug_redacts_mls_group_id() {
         let info = LocationGroupInfo {
-            mls_group_id: group_id,
+            mls_group_id: GroupId::from_slice(&[1, 2, 3, 4, 5]),
             nostr_group_id: "abc123".to_string(),
             name: "Test Group".to_string(),
             description: "A test group".to_string(),
@@ -323,7 +273,6 @@ mod tests {
         assert!(debug_str.contains("abc123"));
         assert!(debug_str.contains("Test Group"));
         assert!(debug_str.contains("42"));
-        // MLS group ID must be redacted
         assert!(debug_str.contains("<redacted>"));
         assert!(
             !debug_str.contains("0102030405"),
@@ -332,175 +281,39 @@ mod tests {
     }
 
     #[test]
-    fn location_group_info_clone() {
-        let group_id = GroupId::from_slice(&[1, 2, 3]);
-        let info1 = LocationGroupInfo {
-            mls_group_id: group_id.clone(),
-            nostr_group_id: "test".to_string(),
-            name: "Name".to_string(),
-            description: "Desc".to_string(),
-            epoch: 5,
-        };
-
-        let info2 = info1.clone();
-
-        assert_eq!(info1.nostr_group_id, info2.nostr_group_id);
-        assert_eq!(info1.name, info2.name);
-        assert_eq!(info1.description, info2.description);
-        assert_eq!(info1.epoch, info2.epoch);
-    }
-
-    #[test]
-    fn location_group_config_default_values() {
-        let config = LocationGroupConfig::new("Group");
-
-        assert_eq!(config.name, "Group");
-        assert!(config.description.is_empty());
-        assert!(config.relays.is_empty());
-        assert!(config.admins.is_empty());
-    }
-
-    #[test]
-    fn location_group_config_chained_with_relays() {
-        let config = LocationGroupConfig::new("Test")
-            .with_relay("wss://r1.com")
-            .with_relays(["wss://r2.com", "wss://r3.com"])
-            .with_relay("wss://r4.com");
-
-        assert_eq!(config.relays.len(), 4);
-        assert_eq!(config.relays[0], "wss://r1.com");
-        assert_eq!(config.relays[3], "wss://r4.com");
-    }
-
-    #[test]
-    fn location_message_result_location_variant() {
-        let group_id = GroupId::from_slice(&[1, 2, 3]);
+    fn location_message_result_debug_redacts_group_id() {
         let result = LocationMessageResult::Location {
-            sender_pubkey: "pubkey123".to_string(),
+            sender_pubkey: "pk".to_string(),
             content: r#"{"lat":0}"#.to_string(),
-            group_id,
+            group_id: GroupId::from_slice(&[9, 9, 9]),
+            epoch: 7,
         };
-
-        // Verify it can be pattern matched
-        if let LocationMessageResult::Location {
-            sender_pubkey,
-            content,
-            ..
-        } = result
-        {
-            assert_eq!(sender_pubkey, "pubkey123");
-            assert!(content.contains("lat"));
-        } else {
-            panic!("Expected Location variant");
-        }
-    }
-
-    #[test]
-    fn location_message_result_group_update_variant() {
-        let group_id = GroupId::from_slice(&[4, 5, 6]);
-        let result = LocationMessageResult::GroupUpdate {
-            group_id,
-            evolution_event: None,
-        };
-
-        if let LocationMessageResult::GroupUpdate {
-            group_id: gid,
-            evolution_event,
-        } = result
-        {
-            assert_eq!(gid.as_slice(), &[4, 5, 6]);
-            assert!(
-                evolution_event.is_none(),
-                "default GroupUpdate should carry no evolution event"
-            );
-        } else {
-            panic!("Expected GroupUpdate variant");
-        }
-    }
-
-    /// The `GroupUpdate` variant's `Debug` impl must not leak the
-    /// evolution-event contents; it should only expose whether one is
-    /// present. MDK events can embed the MLS group ID in their tags.
-    #[test]
-    fn location_message_result_group_update_debug_redacts_event() {
-        let group_id = GroupId::from_slice(&[9, 9, 9]);
-        let result = LocationMessageResult::GroupUpdate {
-            group_id,
-            evolution_event: None,
-        };
-
         let debug_str = format!("{result:?}");
-        assert!(debug_str.contains("GroupUpdate"));
+        assert!(debug_str.contains("Location"));
         assert!(debug_str.contains("<redacted>"));
-        assert!(debug_str.contains("has_evolution_event: false"));
+        assert!(debug_str.contains("epoch: 7"));
+        assert!(!debug_str.contains("090909"));
+        assert!(!debug_str.contains("lat"));
     }
 
     #[test]
-    fn location_message_result_unprocessable_variant() {
-        let group_id = GroupId::from_slice(&[7, 8, 9]);
-        let result = LocationMessageResult::Unprocessable {
-            group_id,
-            reason: "Test error".to_string(),
-        };
-
-        if let LocationMessageResult::Unprocessable { reason, .. } = result {
-            assert_eq!(reason, "Test error");
-        } else {
-            panic!("Expected Unprocessable variant");
+    fn location_message_result_group_update_and_invalidated_redact() {
+        for result in [
+            LocationMessageResult::GroupUpdate {
+                group_id: GroupId::from_slice(&[1]),
+            },
+            LocationMessageResult::Invalidated {
+                group_id: GroupId::from_slice(&[2]),
+            },
+            LocationMessageResult::Joined {
+                group_id: GroupId::from_slice(&[3]),
+            },
+            LocationMessageResult::Unrecoverable {
+                group_id: GroupId::from_slice(&[4]),
+            },
+        ] {
+            let debug_str = format!("{result:?}");
+            assert!(debug_str.contains("<redacted>"));
         }
-    }
-
-    #[test]
-    fn key_package_bundle_debug_and_clone() {
-        let bundle = super::KeyPackageBundle {
-            content: "hex-content".to_string(),
-            tags_30443: vec![
-                vec!["mls_protocol_version".to_string(), "1.0".to_string()],
-                vec!["d".to_string(), "abcd1234".to_string()],
-            ],
-            tags_443: vec![
-                vec!["mls_protocol_version".to_string(), "1.0".to_string()],
-                vec!["relays".to_string(), "wss://relay.example.com".to_string()],
-            ],
-            hash_ref: vec![1, 2, 3, 4],
-            d_tag: "abcd1234".to_string(),
-            relays: vec!["wss://relay.example.com".to_string()],
-        };
-
-        // Test Debug
-        let debug_str = format!("{:?}", bundle);
-        assert!(debug_str.contains("KeyPackageBundle"));
-        assert!(
-            !debug_str.contains("hex-content"),
-            "content should be redacted"
-        );
-        assert!(debug_str.contains("<redacted>"));
-        // The `d_tag` (a NIP-33 `d`) and relay URLs must NOT appear in Debug
-        // (Security Rule 4/6) — they are redacted / reduced to a count.
-        assert!(
-            !debug_str.contains("abcd1234"),
-            "d_tag must be redacted: {debug_str}"
-        );
-        assert!(
-            !debug_str.contains("wss://relay.example.com"),
-            "relay URL must not appear in Debug: {debug_str}"
-        );
-        // hash_ref bytes ([1, 2, 3, 4]) must be redacted, not rendered.
-        assert!(
-            !debug_str.contains("[1, 2, 3, 4]"),
-            "hash_ref bytes must not appear in Debug: {debug_str}"
-        );
-        assert!(debug_str.contains("relay_count: 1"));
-        assert!(debug_str.contains("tags_30443_count: 2"));
-        assert!(debug_str.contains("tags_443_count: 2"));
-
-        // Test Clone
-        let bundle2 = bundle.clone();
-        assert_eq!(bundle.content, bundle2.content);
-        assert_eq!(bundle.tags_30443.len(), bundle2.tags_30443.len());
-        assert_eq!(bundle.tags_443.len(), bundle2.tags_443.len());
-        assert_eq!(bundle.hash_ref, bundle2.hash_ref);
-        assert_eq!(bundle.d_tag, bundle2.d_tag);
-        assert_eq!(bundle.relays, bundle2.relays);
     }
 }

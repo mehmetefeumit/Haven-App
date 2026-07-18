@@ -24,6 +24,8 @@ import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/providers/join_watcher_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
+import 'package:haven/src/providers/legacy_cutover_provider.dart';
+import 'package:haven/src/providers/legacy_retraction_provider.dart';
 import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/providers/location_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
@@ -47,6 +49,7 @@ import 'package:haven/src/utils/profile_refresh_trigger.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
 import 'package:haven/src/widgets/common/dim_overlay.dart';
 import 'package:haven/src/widgets/common/invitations_button.dart';
+import 'package:haven/src/widgets/common/legacy_cutover_explainer_dialog.dart';
 import 'package:haven/src/widgets/common/settings_button.dart';
 import 'package:haven/src/widgets/debug/debug_log_overlay.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -197,9 +200,24 @@ class _MapShellState extends ConsumerState<MapShell>
       // The widget may have been disposed during the async relay init (rapid
       // logout); don't read providers (incl. the maintenance scheduler) if so.
       if (!mounted) return;
+      // DM-4c: show the one-time Dark Matter cutover explainer if this
+      // launch's cutover guard (main.dart, before runApp) newly destroyed
+      // legacy MLS state. Flip the flag back immediately so a later
+      // rebuild (hot reload, an unrelated provider invalidation cascade)
+      // never re-shows it within the same app session.
+      if (ref.read(legacyCutoverExplainerProvider)) {
+        ref.read(legacyCutoverExplainerProvider.notifier).state = false;
+        unawaited(LegacyCutoverExplainerDialog.show(context));
+      }
       ref
         ..read(keyPackagePublisherProvider)
         ..read(locationPublisherProvider)
+        // DM-4c (plan §6 F10a/F10b): once-only retraction of this account's
+        // stale pre-migration KeyPackage advertisements, now that relays are
+        // connected. Self-gates on a Rust sentinel, so reading it here every
+        // app session is safe — it becomes a fast no-op after the first
+        // successful run.
+        ..read(legacyRetractionProvider)
         // M8: start the scheduled resilience timers (KeyPackage + relay-list
         // republish-if-missing). Engine-independent — active regardless of
         // `liveSyncEnabled`. Cancelled on dispose + explicitly invalidated in

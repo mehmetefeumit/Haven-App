@@ -271,6 +271,7 @@
   "pendingMemberWarning": "警告",
   "pendingMemberCheckingAvailability": "利用可能か確認しています...",
   "pendingMemberReadyToInvite": "招待できます",
+  "pendingMemberNeedsUpdate": "Haven のアップデートが必要です",
 
   "memberSearchHint": "メンバーIDを入力...",
   "memberSearchPasteTooltip": "クリップボードから貼り付け",
@@ -322,6 +323,23 @@
   "leaveCircleIdentityUnavailable": "識別情報を利用できません",
   "leaveCircleSuccess": "サークルを退出しました",
   "leaveCircleError": "サークルを退出できませんでした",
+  "leaveCircleAdminLimitationNote": "このサークルの管理者は、ほかのすべてのメンバーが退出するまで退出できません。ご不便をおかけしますが、今後のアップデートで、管理者をほかのメンバーに引き継いでそのまま退出できるようになる予定です。",
+
+  "circleBlockedBannerTitle": "このサークルは更新できません",
+  "circleBlockedBannerBody": "このサークルの暗号化で問題が発生したため、Haven はこのサークルで更新を送受信できなくなりました。以下で最後に確認できた情報は引き続き見られますが、サークルを退出することもできます。",
+  "legacyCircleBannerTitle": "このサークルは再作成が必要です",
+  "legacyCircleBannerBody": "Haven の暗号化エンジンがアップグレードされたため、このサークルは使用できなくなりました。同じメンバーと引き続き位置情報を共有するには、サークルを再作成してください。メンバーを改めて招待する必要があります。",
+  "legacyCircleRecreateCta": "サークルを再作成",
+  "legacyCircleRemoveCta": "削除",
+  "legacyCircleRemoveDialogTitle": "サークルを削除しますか？",
+  "legacyCircleRemoveDialogBody": "このサークルはもう使用できないため、リストから削除されます。これは、代わりに作成する新しいサークルには影響しません。",
+  "legacyCircleRemoveConfirm": "削除",
+  "legacyCutoverExplainerTitle": "Haven がアップデートされました",
+  "legacyCutoverExplainerIdentityUnchanged": "あなたの識別情報と公開プロフィールは変更されていません。これらについて特に何かをする必要はありません。",
+  "legacyCutoverExplainerCirclesNeedRecreation": "セキュリティ向上のため、位置情報を再び共有するには、サークルを再作成し、メンバーを改めて招待する必要があります。",
+  "legacyCutoverExplainerAcknowledge": "わかりました",
+  "relaySettingsLegacyRetractionPending": "Haven は最近のセキュリティアップデートに伴う一部のデータの整理をまだ続けています。オンラインに戻れば自動的に完了します。",
+
 
   "circlesPanelCollapsedAnnouncement": "サークルパネルを閉じました",
   "circlesPanelExpandedAnnouncement": "サークルパネルを開きました",

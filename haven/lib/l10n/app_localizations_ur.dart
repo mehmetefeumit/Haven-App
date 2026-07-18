@@ -897,6 +897,9 @@ class AppLocalizationsUr extends AppLocalizations {
   String get pendingMemberReadyToInvite => 'دعوت دینے کے لیے تیار';
 
   @override
+  String get pendingMemberNeedsUpdate => 'Haven کو اپ ڈیٹ کرنے کی ضرورت ہے';
+
+  @override
   String get memberSearchHint => 'رکن کی ID درج کریں...';
 
   @override
@@ -1082,6 +1085,58 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get leaveCircleError => 'حلقہ چھوڑنے میں ناکامی';
+
+  @override
+  String get leaveCircleAdminLimitationNote =>
+      'اس حلقے کے منتظم کی حیثیت سے، آپ اسے تب ہی چھوڑ سکتے ہیں جب باقی تمام ارکان اسے چھوڑ چکے ہوں۔ ہمیں معلوم ہے کہ یہ زحمت کا باعث ہے — مستقبل کی ایک اپ ڈیٹ منتظمین کو اپنی ذمہ داری کسی اور کو سونپ کر براہِ راست حلقہ چھوڑنے کی سہولت دے گی۔';
+
+  @override
+  String get circleBlockedBannerTitle => 'یہ حلقہ اپ ڈیٹ نہیں کیا جا سکتا';
+
+  @override
+  String get circleBlockedBannerBody =>
+      'اس حلقے کی خفیہ کاری میں کچھ گڑبڑ ہو گئی، اس لیے Haven اب اس میں نہ تو اپ ڈیٹس بھیج سکتا ہے اور نہ وصول کر سکتا ہے۔ آپ پھر بھی نیچے اپنی آخری معلوم صورتحال دیکھ سکتے ہیں، یا حلقہ چھوڑ سکتے ہیں۔';
+
+  @override
+  String get legacyCircleBannerTitle => 'اس حلقے کو دوبارہ بنانا ضروری ہے';
+
+  @override
+  String get legacyCircleBannerBody =>
+      'Haven کے خفیہ کاری کے نظام کو اپ گریڈ کر دیا گیا ہے، اس لیے یہ حلقہ اب استعمال نہیں کیا جا سکتا۔ انہی لوگوں کے ساتھ مقام شیئر کرتے رہنے کے لیے اسے دوبارہ بنائیں — آپ کو انہیں دوبارہ دعوت دینی ہوگی۔';
+
+  @override
+  String get legacyCircleRecreateCta => 'حلقہ دوبارہ بنائیں';
+
+  @override
+  String get legacyCircleRemoveCta => 'ہٹائیں';
+
+  @override
+  String get legacyCircleRemoveDialogTitle => 'حلقہ ہٹائیں؟';
+
+  @override
+  String get legacyCircleRemoveDialogBody =>
+      'یہ حلقہ اب استعمال نہیں کیا جا سکتا اور آپ کی فہرست سے ہٹا دیا جائے گا۔ اس کی جگہ آپ جو بھی نیا حلقہ بنائیں گے، اس پر اس کا کوئی اثر نہیں پڑے گا۔';
+
+  @override
+  String get legacyCircleRemoveConfirm => 'ہٹائیں';
+
+  @override
+  String get legacyCutoverExplainerTitle => 'Haven اپ ڈیٹ ہو چکا ہے';
+
+  @override
+  String get legacyCutoverExplainerIdentityUnchanged =>
+      'آپ کی شناخت اور عوامی پروفائل میں کوئی تبدیلی نہیں آئی — ان کے لیے آپ کو کچھ کرنے کی ضرورت نہیں۔';
+
+  @override
+  String get legacyCutoverExplainerCirclesNeedRecreation =>
+      'بہتر سیکیورٹی کے لیے، آپ کے حلقوں کو دوبارہ بنانا اور ان کے ارکان کو دوبارہ دعوت دینا ضروری ہے، اس کے بعد ہی آپ ان میں دوبارہ مقام شیئر کر سکیں گے۔';
+
+  @override
+  String get legacyCutoverExplainerAcknowledge => 'ٹھیک ہے';
+
+  @override
+  String get relaySettingsLegacyRetractionPending =>
+      'Haven ابھی بھی حالیہ سیکیورٹی اپ ڈیٹ سے کچھ ڈیٹا صاف کر رہا ہے۔ آپ کے دوبارہ آن لائن آتے ہی یہ خود بخود مکمل ہو جائے گا۔';
 
   @override
   String get circlesPanelCollapsedAnnouncement => 'حلقوں کا پینل سمیٹا گیا';

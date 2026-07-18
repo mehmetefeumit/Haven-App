@@ -1,37 +1,44 @@
 //! Integration tests for the key package signing flow.
 //!
 //! These tests verify that the `create_key_package_event` helper (which mirrors
-//! the `sign_key_package_event` FFI method) produces valid, well-formed kind 443
+//! the DM-2b `KeyPackage` publish path) produces valid, well-formed kind-30443
 //! Nostr events with correct signatures, decodable content, and expected tags.
+//!
+//! # Dark Matter port (DM-5a)
+//!
+//! The KeyPackage kind is now **30443** (addressable, W1), not the legacy 443,
+//! and `create_key_package_event` is async over `SessionManager`. The kind-10051
+//! relay-list builder is retained (its retirement + retraction is the DM-4 FFI
+//! flip), so those tests are unchanged.
 
 mod helpers;
 
 use base64::Engine;
-use haven_core::circle::RelayType;
-use haven_core::nostr::mls::MdkManager;
+use haven_core::circle::{RelayType, KEY_PACKAGE_KIND};
+use haven_core::nostr::mls::SessionManager;
 use haven_core::relay::build_relay_list_event;
 use nostr::{Keys, Kind};
 
 use helpers::{cleanup_dir, create_key_package_event, unique_temp_dir};
 
 // ============================================================================
-// Key Package Signing Tests
+// Key Package Signing Tests (kind 30443)
 // ============================================================================
 
-#[test]
-fn sign_key_package_produces_valid_kind_443() {
-    let dir = unique_temp_dir("kp_valid_443");
-    let manager = MdkManager::new_unencrypted(&dir).expect("should create manager");
+#[tokio::test]
+async fn sign_key_package_produces_valid_kind_30443() {
+    let dir = unique_temp_dir("kp_valid_30443");
     let keys = Keys::generate();
+    let session = SessionManager::new_unencrypted(&dir, &keys).expect("should create session");
     let relays = vec!["wss://relay.example.com".to_string()];
 
-    let event = create_key_package_event(&manager, &keys, &relays);
+    let event = create_key_package_event(&session, &keys, &relays).await;
 
-    // Event kind must be 443 (MLS Key Package)
+    // Event kind must be 30443 (addressable MLS Key Package, W1).
     assert_eq!(
-        event.kind,
-        Kind::MlsKeyPackage,
-        "Key package event must be kind 443"
+        event.kind.as_u16(),
+        KEY_PACKAGE_KIND,
+        "Key package event must be kind 30443"
     );
 
     // Event author must match the signing key
@@ -49,14 +56,14 @@ fn sign_key_package_produces_valid_kind_443() {
     cleanup_dir(&dir);
 }
 
-#[test]
-fn sign_key_package_content_is_valid_encoding() {
+#[tokio::test]
+async fn sign_key_package_content_is_valid_encoding() {
     let dir = unique_temp_dir("kp_content_encoding");
-    let manager = MdkManager::new_unencrypted(&dir).expect("should create manager");
     let keys = Keys::generate();
+    let session = SessionManager::new_unencrypted(&dir, &keys).expect("should create session");
     let relays = vec!["wss://relay.example.com".to_string()];
 
-    let event = create_key_package_event(&manager, &keys, &relays);
+    let event = create_key_package_event(&session, &keys, &relays).await;
 
     // Content must not be empty
     assert!(
@@ -64,8 +71,7 @@ fn sign_key_package_content_is_valid_encoding() {
         "Key package event content must not be empty"
     );
 
-    // Content from MDK is base64-encoded serialized MLS key package bytes.
-    // Try base64 first (standard encoding), fall back to hex.
+    // Content is base64-encoded serialized MLS key package bytes.
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&event.content)
         .or_else(|_| hex::decode(&event.content))
@@ -80,14 +86,14 @@ fn sign_key_package_content_is_valid_encoding() {
     cleanup_dir(&dir);
 }
 
-#[test]
-fn sign_key_package_has_expected_tags() {
+#[tokio::test]
+async fn sign_key_package_has_expected_tags() {
     let dir = unique_temp_dir("kp_tags");
-    let manager = MdkManager::new_unencrypted(&dir).expect("should create manager");
     let keys = Keys::generate();
+    let session = SessionManager::new_unencrypted(&dir, &keys).expect("should create session");
     let relays = vec!["wss://relay.example.com".to_string()];
 
-    let event = create_key_package_event(&manager, &keys, &relays);
+    let event = create_key_package_event(&session, &keys, &relays).await;
 
     // Event must have at least one tag
     assert!(
@@ -128,24 +134,22 @@ fn sign_key_package_has_expected_tags() {
     cleanup_dir(&dir);
 }
 
-/// Verify that a signed kind 443 event does not carry the NIP-70 protected
+/// Verify that a signed kind-30443 event does not carry the NIP-70 protected
 /// tag (`["-"]`).
 ///
-/// MDK's `create_key_package_for_event` includes `Tag::protected()` in its
-/// output. The `create_key_package` method must strip that tag before the
-/// bundle is returned to callers. This test builds a complete signed kind 443
-/// event and asserts the protected tag is absent from the final event tags,
-/// confirming the strip happens end-to-end — not just inside the bundle.
-#[test]
-fn sign_key_package_event_has_no_nip70_protected_tag() {
+/// The DM-2b builder never emits a `Tag::protected()`, so the invariant that a
+/// published KeyPackage carries no NIP-70 protected tag (which most production
+/// relays reject) holds by construction. This test proves it end-to-end.
+#[tokio::test]
+async fn sign_key_package_event_has_no_nip70_protected_tag() {
     let dir = unique_temp_dir("kp_no_protected_tag");
-    let manager = MdkManager::new_unencrypted(&dir).expect("should create manager");
     let keys = Keys::generate();
+    let session = SessionManager::new_unencrypted(&dir, &keys).expect("should create session");
     let relays = vec!["wss://relay.example.com".to_string()];
 
-    let event = create_key_package_event(&manager, &keys, &relays);
+    let event = create_key_package_event(&session, &keys, &relays).await;
 
-    // The NIP-70 protected tag is ["-"]. No tag in a kind 443 event should
+    // The NIP-70 protected tag is ["-"]. No tag in a kind 30443 event should
     // have "-" as its sole identifier, because most production relays reject
     // protected events outright.
     let has_protected_tag = event.tags.iter().any(|tag| {
@@ -156,7 +160,7 @@ fn sign_key_package_event_has_no_nip70_protected_tag() {
 
     assert!(
         !has_protected_tag,
-        "Kind 443 key package event must not contain the NIP-70 protected tag [\"-\"]; \
+        "Kind 30443 key package event must not contain the NIP-70 protected tag [\"-\"]; \
          most production relays (e.g. relay.damus.io, nos.lol) reject events with this tag"
     );
 

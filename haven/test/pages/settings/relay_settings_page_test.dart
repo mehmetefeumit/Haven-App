@@ -13,12 +13,14 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/legacy_retraction_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/relay_preferences_service.dart';
 import 'package:haven/src/widgets/common/refresh_ring/refresh_ring_button.dart';
 
+import '../../mocks/mock_circle_service.dart';
 import '../../mocks/mock_relay_preferences_service.dart';
 import '../../mocks/mock_relay_service.dart';
 
@@ -45,6 +47,19 @@ void main() {
         // exercise the persistent FFI client, but the page still calls
         // it on remove and would otherwise hit production NostrRelayService.
         relayServiceProvider.overrideWithValue(MockRelayService()),
+        // Removing/restoring a relay invalidates `keyPackagePublisherProvider`
+        // downstream (`InboxRelaysNotifier._invalidateDownstream`), which now
+        // resolves a real `CircleManagerFfi` via `maintenanceServiceProvider`
+        // (Dark Matter DM-4). Without this override the default provider
+        // constructs a real `NostrCircleService`, which reaches the native
+        // keyring plugin in this pure widget-test sandbox — a slow, flaky
+        // real-async round trip that can settle after `pumpAndSettle` gives
+        // up, surfacing as an unhandled exception "after the test had
+        // completed". A non-`NostrCircleService` fake makes
+        // `maintenanceServiceProvider`'s `circleManagerFactory` fail fast and
+        // synchronously (`StateError`, caught by
+        // `MaintenanceService._withSecret`) instead.
+        circleServiceProvider.overrideWithValue(MockCircleService()),
       ],
       child: const MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -186,5 +201,75 @@ void main() {
       expect(find.text('drop.example.com'), findsNothing);
       expect(find.text('keep.example.com'), findsOneWidget);
     });
+
+    // -------------------------------------------------------------------
+    // DM-4c: the legacy-retraction "pending" note (plan §6 F10b).
+    // -------------------------------------------------------------------
+
+    testWidgets(
+      'shows the legacy-retraction pending note when the tick has not '
+      'completed yet',
+      (tester) async {
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              identityProvider.overrideWith((ref) async => _stubIdentity()),
+              relayPreferencesServiceProvider.overrideWith(
+                (ref) async => seededMock(),
+              ),
+              relayServiceProvider.overrideWithValue(MockRelayService()),
+              circleServiceProvider.overrideWithValue(MockCircleService()),
+              legacyRetractionProvider.overrideWith(
+                (ref) async => LegacyRetractionUiStatus.pending,
+              ),
+            ],
+            child: const MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: RelaySettingsPage(),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.textContaining('still cleaning up some data'),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets(
+      'hides the legacy-retraction pending note once the tick has '
+      'completed',
+      (tester) async {
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              identityProvider.overrideWith((ref) async => _stubIdentity()),
+              relayPreferencesServiceProvider.overrideWith(
+                (ref) async => seededMock(),
+              ),
+              relayServiceProvider.overrideWithValue(MockRelayService()),
+              circleServiceProvider.overrideWithValue(MockCircleService()),
+              legacyRetractionProvider.overrideWith(
+                (ref) async => LegacyRetractionUiStatus.done,
+              ),
+            ],
+            child: const MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: RelaySettingsPage(),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.textContaining('still cleaning up some data'),
+          findsNothing,
+        );
+      },
+    );
   });
 }

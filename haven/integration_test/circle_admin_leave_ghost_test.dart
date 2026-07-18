@@ -12,10 +12,28 @@
 /// the upstream change before it can produce stale rosters in the field.
 ///
 /// The scenario sets up two parties through `CircleManagerFfi` directly
-/// (no UI, no relay), promotes Bob to admin via `proposeAdminHandoff` so
-/// the admin set has two members, and then has Alice — *still admin* —
-/// call `proposeLeave`. The assertion is that the call throws an error
-/// whose message contains `self-demote` / `self_demote`.
+/// (no UI, no relay), and has Alice — the circle's sole admin, *still
+/// admin* — call `proposeLeave`. The assertion is that the call throws an
+/// error whose message contains `self-demote` / `self_demote`.
+///
+/// ## Dark Matter DM-4b note — 2-admin variant descoped (GAP)
+///
+/// The original scenario additionally promoted Bob to admin via
+/// `proposeAdminHandoff` first (so the admin set had two members) before
+/// Alice's still-admin `proposeLeave`, specifically to rule out a
+/// hypothetical "a second admin lets you bypass self-demote" loophole.
+/// Dark Matter v0.9.4's public API exposes no admin-policy component
+/// codec, so `propose_admin_handoff` / `propose_self_demote` now
+/// unconditionally fail closed with a documented error (plan §5.2 #18;
+/// mirrors haven-core's own re-expressed
+/// `propose_admin_handoff_is_a_documented_gap` Rust test) — there is no
+/// way to construct a real 2-admin group via the public FFI right now.
+/// This test is descoped to the sole-admin case (Alice is the only
+/// admin), which still exercises the load-bearing invariant: MDK's engine
+/// rejects a raw `SelfRemove` from ANY admin caller, not just a sole one.
+/// Restore the 2-admin variant once a go-signal (mdk#755-adjacent
+/// admin-policy codec work) lands — see
+/// `docs/MDK_DARKMATTER_MIGRATION_PLAN.md` §5.2 #18 / §3.1(5).
 ///
 /// ## FN-4: Admin precondition assertions
 ///
@@ -23,7 +41,7 @@
 /// explicitly asserts:
 /// 1. Alice's own `CircleMemberFfi.isAdmin == true` — the tripwire only
 ///    makes sense if Alice is truly admin at test time.
-/// 2. The total admin count equals 2 after the handoff add (Alice + Bob).
+/// 2. The total admin count equals 1 (Alice is the circle's sole admin).
 /// This ensures the test diagnoses "wrong admin count going in" separately
 /// from "MDK regressed its gate", so a future failure is actionable.
 ///
@@ -130,21 +148,40 @@ void main() {
           final bobSecret = await bobIdent.getSecretBytes();
 
           // --------------------------------------------------------------
-          // Two CircleManagerFfi instances — one per party.
+          // Two CircleManagerFfi instances — one per party. Dark Matter
+          // (DM-4): construction hard-requires the identity secret bytes.
           // --------------------------------------------------------------
           final aliceCircle = await CircleManagerFfi.newInstance(
             dataDir: aliceDir.path,
+            identitySecretBytes: aliceSecret,
           );
           final bobCircle = await CircleManagerFfi.newInstance(
             dataDir: bobDir.path,
+            identitySecretBytes: bobSecret,
           );
 
           // --------------------------------------------------------------
-          // 1. Bob signs a KeyPackage so Alice can include him.
+          // 1. Bob publishes a KeyPackage so Alice can include him, via the
+          //    Dark Matter maintain-key-package path (the ONE publish path).
+          //    It probes/publishes to Bob's OWN NIP-65 relays, so seed that
+          //    list with the test relay first.
           // --------------------------------------------------------------
-          final bobKp = await bobCircle.signKeyPackageEvent(
+          await bobCircle.addUserRelay(
+            url: _testRelayUrl,
+            relayType: RelayTypeFfi.nip65,
+          );
+          final bobRelayManager = await RelayManagerFfi.newInstance();
+          await bobRelayManager.maintainKeyPackage(
+            circle: bobCircle,
             identitySecretBytes: bobSecret,
-            relays: const <String>[_testRelayUrl],
+          );
+          final bobKpJson = await bobRelayManager.fetchKeypackage(
+            pubkey: bobPub.pubkeyHex,
+          );
+          expect(
+            bobKpJson,
+            isNotNull,
+            reason: 'Bob must have a discoverable KeyPackage',
           );
 
           // --------------------------------------------------------------
@@ -155,7 +192,7 @@ void main() {
             identitySecretBytes: aliceSecret,
             members: [
               MemberKeyPackageFfi(
-                keyPackageJson: bobKp.eventJson,
+                keyPackageJson: bobKpJson!,
                 inboxRelays: const <String>[_testRelayUrl],
                 nip65Relays: const <String>[_testRelayUrl],
               ),
@@ -167,9 +204,10 @@ void main() {
           );
           final mlsGroupId = Uint8List.fromList(creation.circle.mlsGroupId);
 
-          // Alice must merge her own pending commit (from adding Bob)
-          // before subsequent operations on the group.
-          await aliceCircle.finalizePendingCommit(mlsGroupId: mlsGroupId);
+          // Alice confirms her own pending group-creation state (from
+          // adding Bob) before subsequent operations on the group
+          // (publish-before-apply, Rule 13).
+          await aliceCircle.confirmPublished(pending: creation.pending);
 
           // --------------------------------------------------------------
           // 3. Bob processes the gift-wrap and accepts.
@@ -184,49 +222,32 @@ void main() {
             giftWrapEventJson: creation.welcomeEvents.first.eventJson,
           );
           expect(invitation, isNotNull);
-          await bobCircle.acceptInvitation(mlsGroupId: invitation!.mlsGroupId);
+          // `invitation.mlsGroupId` is the pre-join stand-in id — actually
+          // the gift-wrap event id the invitation was keyed by.
+          await bobCircle.acceptInvitation(giftWrapId: invitation!.mlsGroupId);
 
           // --------------------------------------------------------------
-          // 4. Promote Bob to admin via proposeAdminHandoff. Bob needs to
-          //    be admin so his later removeMembers call is authoritative.
-          //    Both sides apply the commit.
+          // 4. Descoped (GAP, see the library doc comment above): the
+          //    original scenario promoted Bob to admin here via
+          //    `proposeAdminHandoff` — that call now unconditionally fails
+          //    closed (Dark Matter v0.9.4 exposes no admin-policy component
+          //    codec). Alice remains the circle's SOLE admin below.
           // --------------------------------------------------------------
-          final handoff = await aliceCircle.proposeAdminHandoff(
-            mlsGroupId: mlsGroupId,
-            successorHex: bobPub.pubkeyHex,
-          );
-          await aliceCircle.finalizePendingCommit(mlsGroupId: mlsGroupId);
-          final bobAppliedHandoff = await bobCircle.decryptLocation(
-            eventJson: handoff.evolutionEventJson,
-          );
-          expect(
-            bobAppliedHandoff,
-            isNotNull,
-            reason:
-                'Bob must process the handoff commit emitted by '
-                'the existing admin (Alice).',
-          );
-          expect(
-            bobAppliedHandoff!.groupUpdated,
-            isTrue,
-            reason:
-                'AdminHandoff is a group-state change; '
-                'the joiner side must observe groupUpdated == true.',
-          );
 
           // ==============================================================
           // FN-4: Admin precondition assertions.
           //
           // Before Alice calls proposeLeave, verify via getMembers that:
-          // 1. Alice herself is still admin (isAdmin == true).
-          // 2. The admin count is 2 (Alice + Bob after handoff).
+          // 1. Alice herself is admin (isAdmin == true).
+          // 2. The admin count is 1 (Alice is the circle's sole admin —
+          //    see the descoping note above).
           //
           // If either assertion fails, the test surfaces the setup
           // regression separately from the MDK gate being tested.
           // ==============================================================
           final members = await aliceCircle.getMembers(mlsGroupId: mlsGroupId);
 
-          // --- FN-4 precondition 1: Alice is still admin ---
+          // --- FN-4 precondition 1: Alice is admin ---
           final aliceMember = members.where(
             (m) => m.pubkey.toLowerCase() == alicePubkeyHex.toLowerCase(),
           );
@@ -243,22 +264,21 @@ void main() {
             isTrue,
             reason:
                 'FN-4: Alice must still be admin before proposeLeave is '
-                'called. The handoff added Bob as admin but did NOT demote '
-                'Alice. If Alice is not admin here the tripwire test is '
-                'vacuous — MDK would reject the call for a different reason.',
+                'called. As the circle creator she is admin from the start; '
+                'if she is not admin here the tripwire test is vacuous — '
+                'MDK would reject the call for a different reason.',
           );
 
-          // --- FN-4 precondition 2: exactly 2 admins (Alice + Bob) ---
+          // --- FN-4 precondition 2: exactly 1 admin (Alice, sole admin) ---
           final adminCount = members.where((m) => m.isAdmin).length;
           expect(
             adminCount,
-            equals(2),
+            equals(1),
             reason:
-                'FN-4: After proposeAdminHandoff the group must have exactly '
-                '2 admins (Alice + Bob). Got $adminCount. '
-                'A mismatch means the handoff commit did not propagate '
-                'correctly or Alice was already demoted — either is a setup '
-                'regression that would make the gate assertion unreliable.',
+                "FN-4: Alice must be the circle's sole admin (Bob was never "
+                'promoted — see the descoping note above). Got $adminCount. '
+                'A mismatch is a setup regression that would make the gate '
+                'assertion unreliable.',
           );
 
           debugPrint(
@@ -267,8 +287,7 @@ void main() {
           );
 
           // --------------------------------------------------------------
-          // 5. Alice — still admin in the group state (AdminHandoff
-          //    promoted Bob but did not demote Alice) — attempts a raw
+          // 5. Alice — still admin in the group state — attempts a raw
           //    proposeLeave. MDK's admin-gate must reject the call at
           //    the sender. The pre-fix behaviour was a silent
           //    IgnoredProposal at the receiver; that path is gone in the

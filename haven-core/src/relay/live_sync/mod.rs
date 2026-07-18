@@ -29,34 +29,27 @@
 //! relay-public commit JSON (Security Rule 5), and every error/event `Debug` is
 //! presence-only (Security Rule 8).
 
-pub mod autocommit;
 pub mod config;
 pub mod error;
 pub mod event;
 pub mod event_bus;
-pub mod finalize;
 pub mod gate;
 pub mod health;
-pub mod plan;
 pub mod planes;
 pub mod processor;
 pub mod router;
 pub mod session;
-pub mod settle;
 pub mod supervisor;
 
-pub use autocommit::{run_autocommit_converge, AutoCommitWork, EngineHandles};
 pub use config::COMMIT_SETTLE_WINDOW_SECS;
 pub use error::{LiveSyncError, LiveSyncResult};
-pub use event::{EngineDecryptOutcome, LiveSyncEvent, SyncStatusReason};
+pub use event::{LiveSyncEvent, SyncStatusReason};
 pub use event_bus::{classify_recv, EventBus, RecvDisposition};
-pub use finalize::{StagedAdd, StagedCommit};
-pub use gate::{generate_session_salt, MlsWriteGate};
+pub use gate::generate_session_salt;
 pub use health::{
     health_needs_resubscribe, health_still_connecting, HealthAction, RelayHealthSnapshot,
     SubscriptionHealthOutcome,
 };
-pub use plan::{plan_outcome, ProcessorPlan};
 pub use planes::{
     build_relay_set_subscriptions, derive_dynamic_group_sub_id, derive_sub_id, CircleSpec,
     GroupSubscription, InboxSubscription, PlaneKind,
@@ -64,4 +57,3 @@ pub use planes::{
 pub use processor::{group_cursor_stream, EngineProcessor, GroupProcessOutcome};
 pub use router::{Router, SubCtx};
 pub use session::LiveSyncCore;
-pub use settle::{BufferedCommit, CommitSettleBuffer};

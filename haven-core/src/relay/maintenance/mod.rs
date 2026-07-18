@@ -8,11 +8,13 @@
 //!
 //! # Module layout
 //!
-//! * [`key_package`] — B2 `KeyPackageMaintenance` (M8-2): stable-`d` rotation,
-//!   the live-material gate, and republish-if-missing. This module holds the
-//!   pure, unit-testable decision + event-building logic; the network probe /
-//!   publish orchestration is composed at the FFI boundary (which owns the
-//!   identity secret and the `RelayManager`).
+//! * [`key_package`] — `KeyPackageMaintenance` (Dark Matter DM-2b): stable-`d`
+//!   reuse/rotation and republish-if-missing for the user's own kind-30443
+//!   `KeyPackage`, plus the one-time cutover retraction of a legacy 443 twin and
+//!   the abolished kind-10051 relay list. This module holds the pure,
+//!   unit-testable decision + event-building logic; the network probe / publish
+//!   orchestration is composed at the FFI boundary (which owns the identity
+//!   secret and the `RelayManager`).
 //! * [`relay_list`] — B1 `RelayListMaintenance` (M8-1): republish-if-missing /
 //!   -drifted for the user's kind 10050 (inbox) + 10051 (`KeyPackage`) relay
 //!   lists. Pure decision only; the own-relays network probe + signed publish
@@ -22,9 +24,10 @@ pub mod key_package;
 pub mod relay_list;
 
 pub use key_package::{
-    build_kp_maintenance_events, build_legacy_twin_deletion, decide_kp_maintenance,
-    KpMaintenanceAction, KpMaintenanceDecision, KpMaintenanceEvents, KpMaintenanceOutcome,
-    RelayKpEntry, RelayKpPerRelay, RelayKpSnapshot,
+    build_key_package_relay_list_retraction, build_kp_maintenance_events,
+    build_kp_maintenance_events_reusing, build_legacy_key_package_retraction,
+    decide_kp_maintenance, KpMaintenanceAction, KpMaintenanceDecision, KpMaintenanceEvents,
+    KpMaintenanceOutcome, RelayKpEntry, RelayKpPerRelay, RelayKpSnapshot, KIND_MARMOT_KEY_PACKAGE,
 };
 pub use relay_list::{
     decide_relay_list, list_relay_healthy, RelayListAction, RelayListCategoryOutcome,

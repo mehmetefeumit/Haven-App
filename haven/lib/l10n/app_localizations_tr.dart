@@ -902,6 +902,9 @@ class AppLocalizationsTr extends AppLocalizations {
   String get pendingMemberReadyToInvite => 'Davet edilmeye hazır';
 
   @override
+  String get pendingMemberNeedsUpdate => 'Haven güncellemesi gerekiyor';
+
+  @override
   String get memberSearchHint => 'Üye kimliğini girin...';
 
   @override
@@ -1088,6 +1091,59 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get leaveCircleError => 'Çevreden ayrılınamadı';
+
+  @override
+  String get leaveCircleAdminLimitationNote =>
+      'Bu çevrenin yöneticisi olarak, yalnızca diğer tüm üyeler ayrıldıktan sonra ayrılabilirsiniz. Bunun zahmetli olduğunu biliyoruz — gelecek bir güncellemede yöneticiler, görevlerini devredip doğrudan ayrılabilecek.';
+
+  @override
+  String get circleBlockedBannerTitle => 'Bu çevre güncellenemiyor';
+
+  @override
+  String get circleBlockedBannerBody =>
+      'Bu çevrenin şifrelemesinde bir sorun oluştu, bu yüzden Haven bu çevrede artık güncelleme gönderemiyor ya da alamıyor. Aşağıda en son bildiklerinizi görmeye devam edebilir ya da çevreden ayrılabilirsiniz.';
+
+  @override
+  String get legacyCircleBannerTitle =>
+      'Bu çevrenin yeniden oluşturulması gerekiyor';
+
+  @override
+  String get legacyCircleBannerBody =>
+      'Haven\'ın şifreleme motoru güncellendi, bu yüzden bu çevre artık kullanılamıyor. Aynı kişilerle konum paylaşmaya devam etmek için çevreyi yeniden oluşturun — onları tekrar davet etmeniz gerekecek.';
+
+  @override
+  String get legacyCircleRecreateCta => 'Çevreyi Yeniden Oluştur';
+
+  @override
+  String get legacyCircleRemoveCta => 'Kaldır';
+
+  @override
+  String get legacyCircleRemoveDialogTitle => 'Çevre kaldırılsın mı?';
+
+  @override
+  String get legacyCircleRemoveDialogBody =>
+      'Bu çevre artık kullanılamıyor ve listenizden kaldırılacak. Bu işlem, onun yerine oluşturacağınız yeni bir çevreyi etkilemez.';
+
+  @override
+  String get legacyCircleRemoveConfirm => 'Kaldır';
+
+  @override
+  String get legacyCutoverExplainerTitle => 'Haven güncellendi';
+
+  @override
+  String get legacyCutoverExplainerIdentityUnchanged =>
+      'Kimliğiniz ve herkese açık profiliniz değişmedi — bunlar için yapmanız gereken bir şey yok.';
+
+  @override
+  String get legacyCutoverExplainerCirclesNeedRecreation =>
+      'Güvenliği artırmak için, bu çevrelerde tekrar konum paylaşabilmenizden önce çevrelerinizin yeniden oluşturulması ve üyelerinin yeniden davet edilmesi gerekiyor.';
+
+  @override
+  String get legacyCutoverExplainerAcknowledge => 'Anladım';
+
+  @override
+  String get relaySettingsLegacyRetractionPending =>
+      'Haven, son güvenlik güncellemesinden kalan bazı verileri hâlâ temizliyor. Tekrar çevrimiçi olduğunuzda bu işlem otomatik olarak tamamlanacak.';
 
   @override
   String get circlesPanelCollapsedAnnouncement => 'Çevreler paneli daraltıldı';

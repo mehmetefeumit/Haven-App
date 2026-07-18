@@ -33,7 +33,7 @@ class _RecordingRelay extends MockRelayService {
     int maxDurationSecs = 20,
   }) async {
     calls++;
-    return const CatchupResult(locationsApplied: 1);
+    return const CatchupResult(eventsApplied: 1);
   }
 }
 

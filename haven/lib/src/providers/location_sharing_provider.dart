@@ -176,8 +176,17 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
     debugPrint('[LocationPublish] GPS fix acquired');
 
     final circles = await circleService.getVisibleCircles();
+    // Rule 8 (no send/mutate for a blocked circle) + the Dark Matter cutover:
+    // exclude circles the MLS engine has flagged Unrecoverable
+    // (`isCircleBlocked`) and orphaned pre-cutover rows (`isLegacyOrphaned`,
+    // no live MLS group to encrypt against) from the publish set. Both would
+    // otherwise fail the encrypt/publish call anyway; skipping them here
+    // avoids a noisy per-tick failure for a circle the user cannot fix by
+    // retrying.
     final accepted = circles
         .where((c) => c.membershipStatus == MembershipStatus.accepted)
+        .where((c) => !c.isLegacyOrphaned)
+        .where((c) => !circleService.isCircleBlocked(c.mlsGroupId))
         .toList();
 
     debugPrint(

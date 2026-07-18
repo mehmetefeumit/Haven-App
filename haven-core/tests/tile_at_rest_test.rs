@@ -5,8 +5,8 @@
 //! magic), a raw byte scan of the database file **and** every sidecar it may
 //! spill to (`-wal`, `-shm`, `-journal`) finds no tile plaintext.
 //!
-//! This is the Security-HIGH gate the design (`docs/TILE_CACHING_DESIGN.md`
-//! §5/§8) mandates. It matters more here than for `circles.db` because the tile
+//! This is the Security-HIGH at-rest gate for the tile cache. It matters more
+//! here than for `circles.db` because the tile
 //! cache deliberately enables **WAL** — so tile bytes land in the `-wal` sidecar
 //! before checkpoint. The encryption of that sidecar is asserted in comments; this
 //! test enforces it. The scan runs BOTH while the connection is live (so the

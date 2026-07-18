@@ -27,6 +27,5 @@ pub mod relay;
 pub mod tiles;
 pub mod util;
 pub mod validation;
-mod write_lock;
 
 pub use api::HavenCore;

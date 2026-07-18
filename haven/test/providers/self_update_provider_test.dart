@@ -1,12 +1,23 @@
-/// Tests for self-update provider.
+/// Tests for the self-update provider.
+///
+/// Dark Matter DM-4b note: MIP-02/03 leaf-key rotation moved from a
+/// Dart-driven query-and-loop (`CircleService.groupsNeedingSelfUpdate` +
+/// `selfUpdate`) to the Dark Matter engine's internal rotation lifecycle —
+/// see `self_update_provider.dart`'s library doc comment. Both
+/// `CircleService` methods were deleted; there is no surviving subject for
+/// the pre-migration query/loop/per-group-failure tests this file used to
+/// carry (`returns 0 when no groups need rotation`, `calls selfUpdate for
+/// each group needing rotation`, `returns 0 when query fails`, `continues
+/// updating remaining groups when selfUpdate throws`, `passes
+/// selfUpdateThresholdSecs to the service`, `handles single group`) — they
+/// are removed rather than re-expressed. What remains verifies the provider
+/// is a documented, side-effect-free no-op and that its constants are
+/// unchanged (callers still gate on them).
 ///
 /// Verifies that:
-/// - selfUpdateProvider returns 0 when no groups need rotation
-/// - selfUpdateProvider calls selfUpdate for each group needing rotation
-/// - selfUpdateProvider handles query failures gracefully
-/// - selfUpdateProvider continues updating remaining groups on individual failure
-/// - selfUpdateProvider passes the correct threshold to the service
-/// - selfUpdateProvider calls selfUpdate with the correct group IDs
+/// - selfUpdateProvider always resolves to 0
+/// - selfUpdateProvider never touches the circle service
+/// - selfUpdateThresholdSecs / enablePeriodicSelfUpdate stay as documented
 library;
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -20,7 +31,7 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('selfUpdateProvider', () {
-    test('returns 0 when no groups need rotation', () async {
+    test('always resolves to 0 (engine-internal rotation, no-op)', () async {
       final mockService = MockCircleService();
 
       final container = ProviderContainer(
@@ -31,98 +42,9 @@ void main() {
       final result = await container.read(selfUpdateProvider.future);
 
       expect(result, 0);
-      expect(
-        mockService.methodCalls
-            .where((c) => c == 'groupsNeedingSelfUpdate')
-            .length,
-        1,
-        reason: 'should query exactly once',
-      );
-      expect(
-        mockService.methodCalls.where((c) => c == 'selfUpdate').length,
-        0,
-        reason: 'should not call selfUpdate when no groups need it',
-      );
     });
 
-    test('calls selfUpdate for each group needing rotation', () async {
-      final mockService = MockCircleService();
-      mockService.groupsNeedingUpdate = [
-        [1, 2, 3],
-        [4, 5, 6],
-      ];
-
-      final container = ProviderContainer(
-        overrides: [circleServiceProvider.overrideWithValue(mockService)],
-      );
-      addTearDown(container.dispose);
-
-      final result = await container.read(selfUpdateProvider.future);
-
-      expect(result, 2);
-      expect(
-        mockService.methodCalls
-            .where((c) => c == 'groupsNeedingSelfUpdate')
-            .length,
-        1,
-        reason: 'should query exactly once, not per group',
-      );
-      expect(mockService.methodCalls.where((c) => c == 'selfUpdate').length, 2);
-      expect(
-        mockService.selfUpdateCalledWith,
-        [
-          [1, 2, 3],
-          [4, 5, 6],
-        ],
-        reason: 'should pass the correct group IDs in order',
-      );
-    });
-
-    test('returns 0 when query fails', () async {
-      final mockService = MockCircleService();
-      mockService.shouldThrowOnGroupsNeedingSelfUpdate = true;
-
-      final container = ProviderContainer(
-        overrides: [circleServiceProvider.overrideWithValue(mockService)],
-      );
-      addTearDown(container.dispose);
-
-      final result = await container.read(selfUpdateProvider.future);
-
-      expect(result, 0);
-    });
-
-    test(
-      'continues updating remaining groups when selfUpdate throws',
-      () async {
-        final mockService = MockCircleService();
-        mockService
-          ..groupsNeedingUpdate = [
-            [1, 2, 3],
-            [4, 5, 6],
-            [7, 8, 9],
-          ]
-          ..shouldThrowOnSelfUpdate = true;
-
-        final container = ProviderContainer(
-          overrides: [circleServiceProvider.overrideWithValue(mockService)],
-        );
-        addTearDown(container.dispose);
-
-        final result = await container.read(selfUpdateProvider.future);
-
-        // All three groups should be attempted despite throws.
-        expect(
-          mockService.selfUpdateCalledWith.length,
-          3,
-          reason: 'should attempt all groups even when selfUpdate throws',
-        );
-        // No groups succeed because all throw.
-        expect(result, 0);
-      },
-    );
-
-    test('passes selfUpdateThresholdSecs to the service', () async {
+    test('never touches the circle service', () async {
       final mockService = MockCircleService();
 
       final container = ProviderContainer(
@@ -132,37 +54,24 @@ void main() {
 
       await container.read(selfUpdateProvider.future);
 
-      expect(mockService.capturedThresholdSecs, selfUpdateThresholdSecs);
-    });
-
-    test('handles single group', () async {
-      final mockService = MockCircleService();
-      mockService.groupsNeedingUpdate = [
-        [10, 20],
-      ];
-
-      final container = ProviderContainer(
-        overrides: [circleServiceProvider.overrideWithValue(mockService)],
+      expect(
+        mockService.methodCalls,
+        isEmpty,
+        reason:
+            'rotation is entirely engine-internal under Dark Matter — the '
+            'provider must not call any CircleService method',
       );
-      addTearDown(container.dispose);
-
-      final result = await container.read(selfUpdateProvider.future);
-
-      expect(result, 1);
-      expect(mockService.selfUpdateCalledWith, [
-        [10, 20],
-      ]);
     });
 
     test('threshold constant is 1 hour', () {
       expect(selfUpdateThresholdSecs, 3600);
     });
 
-    // ---- M5: periodic + post-join self-update disabled ----
+    // ---- periodic + post-join self-update disabled ----
 
-    test('periodic self-update is DISABLED (M5 kill switch)', () {
-      // Single source of truth gating every call site. Leaderless self-update
-      // is the dominant MLS fork generator; M5 disables it.
+    test('periodic self-update is DISABLED', () {
+      // Single source of truth gating every call site. Superseded by the
+      // Dark Matter engine's internal rotation lifecycle.
       expect(enablePeriodicSelfUpdate, isFalse);
     });
 
@@ -173,16 +82,17 @@ void main() {
       );
       addTearDown(container.dispose);
 
-      // Mirror the map_shell call-site gate: the provider is only read when the
-      // flag is on. With it off, the rotation loop never runs — proven by the
-      // service never being queried for groups needing a self-update.
+      // Mirror the map_shell call-site gate: the provider is only read when
+      // the flag is on. With it off, nothing runs — and even when read
+      // (below), it is still a no-op — proven by the service never being
+      // called.
       if (enablePeriodicSelfUpdate) {
         await container.read(selfUpdateProvider.future);
       }
       expect(
-        mockService.capturedThresholdSecs,
-        isNull,
-        reason: 'groupsNeedingSelfUpdate must not be called when disabled',
+        mockService.methodCalls,
+        isEmpty,
+        reason: 'the circle service must not be touched when disabled',
       );
     });
   });

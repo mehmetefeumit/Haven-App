@@ -920,6 +920,9 @@ class AppLocalizationsFr extends AppLocalizations {
   String get pendingMemberReadyToInvite => 'Prêt à inviter';
 
   @override
+  String get pendingMemberNeedsUpdate => 'Doit mettre à jour Haven';
+
+  @override
   String get memberSearchHint => 'Saisissez l\'identifiant du membre...';
 
   @override
@@ -1108,6 +1111,59 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get leaveCircleError => 'Échec de la sortie du cercle';
+
+  @override
+  String get leaveCircleAdminLimitationNote =>
+      'En tant qu\'administrateur de ce cercle, vous ne pouvez le quitter qu\'une fois que tous les autres membres l\'ont quitté. Nous savons que c\'est contraignant — une future mise à jour permettra aux administrateurs de transmettre leur rôle et de quitter directement.';
+
+  @override
+  String get circleBlockedBannerTitle =>
+      'Ce cercle ne peut pas être mis à jour';
+
+  @override
+  String get circleBlockedBannerBody =>
+      'Un problème est survenu avec le chiffrement de ce cercle, Haven ne peut donc plus y envoyer ni recevoir de mises à jour. Vous pouvez toujours voir ci-dessous les dernières informations connues, ou quitter le cercle.';
+
+  @override
+  String get legacyCircleBannerTitle => 'Ce cercle doit être recréé';
+
+  @override
+  String get legacyCircleBannerBody =>
+      'Le moteur de chiffrement de Haven a été mis à jour, ce cercle ne peut donc plus être utilisé. Recréez-le pour continuer à partager votre position avec les mêmes personnes — vous devrez les inviter à nouveau.';
+
+  @override
+  String get legacyCircleRecreateCta => 'Recréer le cercle';
+
+  @override
+  String get legacyCircleRemoveCta => 'Retirer';
+
+  @override
+  String get legacyCircleRemoveDialogTitle => 'Retirer ce cercle ?';
+
+  @override
+  String get legacyCircleRemoveDialogBody =>
+      'Ce cercle ne peut plus être utilisé et sera retiré de votre liste. Cela n\'affecte pas un nouveau cercle que vous créeriez pour le remplacer.';
+
+  @override
+  String get legacyCircleRemoveConfirm => 'Retirer';
+
+  @override
+  String get legacyCutoverExplainerTitle => 'Haven a été mis à jour';
+
+  @override
+  String get legacyCutoverExplainerIdentityUnchanged =>
+      'Votre identité et votre profil public sont inchangés — vous n\'avez rien à faire de ce côté.';
+
+  @override
+  String get legacyCutoverExplainerCirclesNeedRecreation =>
+      'Pour une meilleure sécurité, vos cercles doivent être recréés et leurs membres réinvités avant que vous puissiez à nouveau y partager votre position.';
+
+  @override
+  String get legacyCutoverExplainerAcknowledge => 'Compris';
+
+  @override
+  String get relaySettingsLegacyRetractionPending =>
+      'Haven nettoie encore certaines données liées à la récente mise à jour de sécurité. Cela se terminera automatiquement dès que vous serez à nouveau en ligne.';
 
   @override
   String get circlesPanelCollapsedAnnouncement => 'Panneau des cercles réduit';

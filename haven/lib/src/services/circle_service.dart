@@ -103,6 +103,28 @@ class Circle {
   String toString() => 'Circle(members: ${members.length})';
 }
 
+/// Dark Matter cutover helpers (DM-4c).
+extension CircleLegacyStatus on Circle {
+  /// Whether this is an orphaned pre-cutover circle row: locally recorded as
+  /// [MembershipStatus.accepted] but with an empty [members] list.
+  ///
+  /// A live, healthy accepted circle always includes at least the caller
+  /// (self) in [members] (the underlying MLS roster always contains the
+  /// local device once accepted), so this combination is otherwise
+  /// unreachable. It arises specifically when the local `circles.db` row
+  /// survives the once-only Dark Matter cutover (see
+  /// `LegacyCutoverService`/`destroyLegacyMlsState`, which deletes only the
+  /// old MLS session store) while the MLS group it refers to no longer
+  /// exists — `getVisibleCircles`/`getCircles` swallow the resulting
+  /// per-group member-lookup failure to an empty list rather than failing
+  /// the whole call (see `haven-core`'s `CircleManager::get_circles`).
+  ///
+  /// A circle in this state must be re-created (and its members re-invited)
+  /// — there is no way to resume the old MLS group.
+  bool get isLegacyOrphaned =>
+      membershipStatus == MembershipStatus.accepted && members.isEmpty;
+}
+
 /// Represents a member of a circle.
 @immutable
 class CircleMember {
@@ -147,24 +169,28 @@ class CircleMember {
 
 /// Result of creating a circle.
 ///
-/// Contains the created circle and gift-wrapped welcome events
-/// ready to publish to each invited member.
+/// Publish-before-apply (Rule 13): `CircleService.createCircle` publishes the
+/// gift-wrapped Welcome events and confirms (or rolls back) the engine's
+/// pending group-creation state internally before returning, so this result
+/// is presence-only — the raw welcome events never leave the service
+/// (mirrors [AddMemberResult]).
 @immutable
 class CircleCreationResult {
   /// Creates a new [CircleCreationResult].
   const CircleCreationResult({
     required this.circle,
-    required this.welcomeEvents,
+    required this.welcomesSent,
+    required this.welcomesTotal,
   });
 
   /// The created circle.
   final Circle circle;
 
-  /// Gift-wrapped welcome events ready to publish.
-  ///
-  /// Each event is a kind 1059 gift-wrapped event containing an
-  /// encrypted kind 444 Welcome, ready to publish to recipient relays.
-  final List<GiftWrappedWelcome> welcomeEvents;
+  /// Number of gift-wrapped Welcomes that reached at least one relay.
+  final int welcomesSent;
+
+  /// Total Welcomes produced (one per invited member).
+  final int welcomesTotal;
 }
 
 /// Result of adding members to an existing circle.
@@ -296,50 +322,140 @@ class DecryptedLocation {
   bool get isExpired => DateTime.now().isAfter(expiresAt);
 }
 
-/// Result of decrypting a kind 445 MLS group event.
+/// Discriminator for a single folded engine result from decrypting/ingesting
+/// one `kind:445` event (Dark Matter taxonomy — mirrors
+/// `LocationMessageResultKindFfi` 1:1).
 ///
-/// Distinguishes between location messages and MLS group state changes
-/// (commits, proposals) so callers can refresh circle membership when
-/// the group roster changes.
+/// Unlike the pre-migration outcome, stale / duplicate / out-of-order
+/// handling is entirely engine-internal (a future-epoch event is durably
+/// buffered and re-surfaced once the gap fills), so there is no
+/// "unprocessable" / "previously failed" variant here, and — because the
+/// engine now owns publish-before-apply for every commit — callers never
+/// need to publish or finalize anything in reaction to a decrypt result.
+enum LocationEventKind {
+  /// A decrypted application (location) message.
+  location,
+
+  /// The local client joined a group via an accepted welcome.
+  joined,
+
+  /// A durable, MLS-authenticated change to group state (membership, admin,
+  /// rename, retention) or an epoch advance the receiver should react to by
+  /// refreshing the circle's roster.
+  groupUpdate,
+
+  /// A previously-surfaced result was withdrawn because branch selection
+  /// superseded the commit that produced it — the caller must treat the
+  /// earlier change as if it never happened.
+  invalidated,
+
+  /// The group entered the unrecoverable state; the UI MUST block
+  /// send/mutate for it (Rule 8, blocked-circle UI state).
+  unrecoverable,
+}
+
+/// One folded engine result from decrypting/ingesting a single `kind:445`
+/// event. A single ingest can yield SEVERAL of these — the engine's internal
+/// convergence may release buffered inbound after the outer event — so
+/// [CircleService.decryptLocation] returns a `List`.
+///
+/// Cursor contract: the engine owns out-of-order buffering, so callers
+/// advance their relay sync cursor on the OUTER event's `created_at` (which
+/// the caller already holds), NOT per result. A buffered future-epoch event
+/// is re-surfaced by the engine once the gap fills.
 @immutable
-class DecryptResult {
-  /// Creates a [DecryptResult].
-  const DecryptResult({
+class LocationEventResult {
+  /// Creates a [LocationEventResult].
+  const LocationEventResult({
+    required this.kind,
+    required this.mlsGroupId,
+    required this.epoch,
     this.location,
-    this.groupUpdated = false,
-    this.evolutionEventJson,
-    this.evolutionMlsGroupId,
   });
 
-  /// The decrypted location, if this was an application message.
+  /// Which of the five outcomes this result is.
+  final LocationEventKind kind;
+
+  /// The decrypted location — non-null only when [kind] is
+  /// [LocationEventKind.location] AND the inner content parsed as a
+  /// location message.
   final DecryptedLocation? location;
 
-  /// Whether this event was an MLS commit or proposal that changed
-  /// the group state (e.g., a new member joined).
-  final bool groupUpdated;
+  /// The MLS group id (raw bytes) this result belongs to — the LOCAL circle
+  /// handle (never published; Rule 4 keeps it off the wire).
+  final List<int> mlsGroupId;
 
-  /// Outbound `kind:445` commit event the caller must publish to the
-  /// circle's relays and then finalize locally.
-  ///
-  /// Populated only when the Rust core auto-committed a peer's
-  /// `SelfRemove` proposal (MLS leave): MDK stages a pending commit and
-  /// the caller must publish it and call [CircleService.finalizePendingCommit]
-  /// (or [CircleService.clearPendingCommit] on publish failure) so the
-  /// local MLS epoch advances and the leaver stops appearing in the
-  /// roster.
-  ///
-  /// `null` for location messages, plain commits, pending Add/Remove
-  /// proposals awaiting admin approval, external join proposals, and
-  /// unprocessable events.
-  final String? evolutionEventJson;
+  /// The MLS epoch the message was authenticated at — meaningful only for
+  /// [LocationEventKind.location] (0 otherwise).
+  final int epoch;
+}
 
-  /// MLS group ID (raw bytes) the evolution event belongs to.
-  ///
-  /// Carried alongside [evolutionEventJson] so the caller can invoke
-  /// [CircleService.finalizePendingCommit] / [CircleService.clearPendingCommit]
-  /// after the publish attempt. `null` whenever [evolutionEventJson] is
-  /// `null`.
-  final List<int>? evolutionMlsGroupId;
+/// An opaque publish-before-apply token for a [PendingAutoCommit].
+///
+/// Dart-native mirror of `PendingStateRefFfi` — pass it, unmodified, to
+/// [CircleService.confirmPendingCommit] or [CircleService.failPendingCommit].
+/// Meaningless across a process restart; never persisted, never published.
+@immutable
+class PendingCommitToken {
+  /// Creates a [PendingCommitToken] wrapping the opaque engine token.
+  const PendingCommitToken(this.value);
+
+  /// The opaque engine token.
+  final BigInt value;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PendingCommitToken && value == other.value;
+
+  @override
+  int get hashCode => value.hashCode;
+}
+
+/// A group-evolving commit the engine auto-staged while ingesting a received
+/// `kind:445` (a peer `SelfRemove` eviction it decided to auto-commit) that
+/// the caller MUST publish then confirm/fail. Dart-native mirror of
+/// `CommitToPublishFfi`.
+///
+/// Publish-before-apply (Rule 13 / security F13): publish
+/// [commitEventJson] to the circle's relays, then
+/// [CircleService.confirmPendingCommit] on a ≥1-relay ACK, or
+/// [CircleService.failPendingCommit] on failure/timeout. NEVER confirm
+/// before an ACK, and NEVER drop an entry silently — that re-forks the
+/// group the leaver departed.
+@immutable
+class PendingAutoCommit {
+  /// Creates a [PendingAutoCommit].
+  const PendingAutoCommit({
+    required this.commitEventJson,
+    required this.pendingToken,
+  });
+
+  /// JSON-serialized kind 445 commit event to publish to the circle's relays.
+  final String commitEventJson;
+
+  /// The pending commit to confirm/fail after publishing.
+  final PendingCommitToken pendingToken;
+}
+
+/// The folded outcome of ingesting one received `kind:445` via
+/// [CircleService.decryptLocationCollectingCommits] — the folded
+/// location-facing results AND any receive-side auto-commit the caller MUST
+/// publish then confirm/fail (Rule 13). Dart-native mirror of
+/// `DecryptLocationOutcomeFfi`.
+@immutable
+class DecryptLocationOutcome {
+  /// Creates a [DecryptLocationOutcome].
+  const DecryptLocationOutcome({
+    required this.results,
+    required this.autoCommits,
+  });
+
+  /// The folded location-facing results (locations, joins, updates, …).
+  final List<LocationEventResult> results;
+
+  /// Receive-side auto-commits the caller MUST publish then confirm/fail.
+  final List<PendingAutoCommit> autoCommits;
 }
 
 /// Abstract interface for circle management services.
@@ -352,8 +468,10 @@ abstract class CircleService {
   /// (32 bytes). The [memberKeyPackages] are the fetched KeyPackage data
   /// for each member. The [name] is the user-facing display name.
   ///
-  /// Returns a [CircleCreationResult] containing the circle and gift-wrapped
-  /// welcome events ready to publish.
+  /// Publishes the gift-wrapped Welcome events and confirms (or rolls back)
+  /// the engine's pending group-creation state internally (publish-before-
+  /// apply, Rule 13) before returning a [CircleCreationResult] with the
+  /// created circle and Welcome delivery counts.
   ///
   /// [creatorFallbackRelays] are the creator's own inbox relays (kind 10050),
   /// used as the third tier in the Welcome-delivery cascade
@@ -516,62 +634,6 @@ abstract class CircleService {
     required String giftWrapEventJson,
   });
 
-  /// Returns MLS group IDs where the user's key material needs rotation.
-  ///
-  /// A group is included if the post-join self-update was never completed
-  /// (`Required`) or the last rotation is older than [thresholdSecs]
-  /// (`CompletedAt` past threshold). Callers should iterate the result
-  /// and call [selfUpdate] for each group.
-  ///
-  /// Throws [CircleServiceException] on failure.
-  Future<List<List<int>>> groupsNeedingSelfUpdate(int thresholdSecs);
-
-  /// Performs a self-update on the user's leaf node in a group (MIP-02/03).
-  ///
-  /// Rotates the user's MLS key material to restore forward secrecy after
-  /// joining a group (MIP-02) or for periodic post-compromise security
-  /// (MIP-03). Publishes the evolution event to the circle's relays with
-  /// retry and rollback on failure.
-  ///
-  /// This is a best-effort operation — failure is logged but does not throw.
-  Future<void> selfUpdate(List<int> mlsGroupId);
-
-  /// Finalizes a pending MLS commit for a circle.
-  ///
-  /// Must be called after all welcome events have been published to relays.
-  /// This merges the pending commit into the MLS group state, completing
-  /// the group creation or member addition.
-  ///
-  /// Throws [CircleServiceException] if finalization fails.
-  Future<void> finalizePendingCommit(List<int> mlsGroupId);
-
-  /// Clears a pending MLS commit, rolling back failed publish attempts.
-  ///
-  /// Call this when a relay publish fails after an operation that creates
-  /// a pending commit (circle creation, member addition, etc.). This
-  /// prevents the group from being permanently blocked by a dangling
-  /// pending commit.
-  ///
-  /// Throws [CircleServiceException] if clearing fails.
-  Future<void> clearPendingCommit(List<int> mlsGroupId);
-
-  /// Publishes an MLS evolution event (kind 445 commit) to [relays].
-  ///
-  /// Used to surface an evolution event produced during [decryptLocation]
-  /// — specifically when MDK auto-commits a peer's `SelfRemove` proposal
-  /// and hands the caller a pending commit. The returned `bool` indicates
-  /// whether at least one relay accepted the event on any attempt, so
-  /// the caller can decide between finalizing (on success) and clearing
-  /// (on failure) the local pending commit.
-  ///
-  /// [label] is used for diagnostic logging only; it is never included
-  /// in the published event and not surfaced to the UI.
-  Future<bool> publishEvolutionEvent({
-    required String eventJson,
-    required List<String> relays,
-    required String label,
-  });
-
   /// Encrypts a location for a circle.
   ///
   /// Creates an MLS-encrypted kind 445 event containing the location data,
@@ -591,17 +653,78 @@ abstract class CircleService {
     required int updateIntervalSecs,
   });
 
-  /// Decrypts a received kind 445 event through MLS.
+  /// Decrypts / ingests a received kind 445 event through the MLS engine.
   ///
-  /// Returns a [DecryptResult] indicating whether this was a location
-  /// message or a group state change (commit/proposal). Returns `null`
-  /// for unprocessable or previously-failed events.
+  /// Returns the folded engine results (Dark Matter five-variant taxonomy —
+  /// see [LocationEventKind]). A single ingest can yield SEVERAL results (the
+  /// engine may release buffered inbound after the outer event), so this
+  /// returns a `List` — empty when nothing new resulted (e.g. a duplicate).
   ///
-  /// When [DecryptResult.groupUpdated] is `true`, callers should refresh
-  /// the circle's member list to pick up roster changes.
+  /// Callers should refresh the circle's member list on
+  /// [LocationEventKind.joined], [LocationEventKind.groupUpdate], or
+  /// [LocationEventKind.invalidated], and treat
+  /// [LocationEventKind.unrecoverable] as a blocked-circle signal (Rule 8 —
+  /// see [markCircleBlocked]). The engine owns publish-before-apply for every
+  /// commit internally, so callers never need to publish or finalize
+  /// anything in reaction to a decrypt result.
   ///
-  /// Throws [CircleServiceException] if decryption fails.
-  Future<DecryptResult?> decryptLocation({required String eventJson});
+  /// Throws [CircleServiceException] if the event JSON is invalid or the
+  /// engine ingest fails hard.
+  Future<List<LocationEventResult>> decryptLocation({
+    required String eventJson,
+  });
+
+  /// Decrypts / ingests a received kind 445 event, identically to
+  /// [decryptLocation], but ALSO surfaces any receive-side auto-commit the
+  /// engine staged (a peer `SelfRemove` eviction) instead of rolling it back.
+  ///
+  /// Rule 13 / security F13: for EACH
+  /// [DecryptLocationOutcome.autoCommits] entry, publish its
+  /// `commitEventJson` to the circle's relays, then
+  /// [confirmPendingCommit] on a ≥1-relay ACK (or [failPendingCommit] on
+  /// failure/timeout) — exactly like the [PendingAutoCommit] contract
+  /// describes. NEVER confirm before an ACK, and NEVER drop an entry
+  /// silently.
+  ///
+  /// The foreground poll receive path (which owns no Rust-side relay handle)
+  /// SHOULD call this in place of [decryptLocation]; the live-sync and
+  /// background-catch-up planes already publish receive-side auto-commits
+  /// in-Rust.
+  ///
+  /// Throws [CircleServiceException] if the event JSON is invalid or the
+  /// engine ingest fails hard.
+  Future<DecryptLocationOutcome> decryptLocationCollectingCommits({
+    required String eventJson,
+  });
+
+  /// Confirms a [PendingAutoCommit] after ≥1 relay acknowledged its publish
+  /// (Rule 13). See [decryptLocationCollectingCommits].
+  ///
+  /// Throws [CircleServiceException] if the confirm fails.
+  Future<void> confirmPendingCommit(PendingCommitToken pending);
+
+  /// Rolls back a [PendingAutoCommit] after a publish failure/timeout
+  /// (Rule 13). See [decryptLocationCollectingCommits].
+  ///
+  /// Best-effort: implementations should swallow rollback failures rather
+  /// than throw, since the caller has already determined the publish did
+  /// not succeed.
+  Future<void> failPendingCommit(PendingCommitToken pending);
+
+  /// Records that [mlsGroupId] entered the MLS `Unrecoverable` state (Rule 8).
+  ///
+  /// Session-scoped (in-memory): the FFI surface does not persist this flag
+  /// on the circle row, so it is derived locally from
+  /// [LocationEventKind.unrecoverable] results and does not survive an app
+  /// restart — a restart re-derives it from the next ingest of an event for
+  /// that group, if any arrives. See [isCircleBlocked].
+  void markCircleBlocked(List<int> mlsGroupId);
+
+  /// Whether [mlsGroupId] was observed entering the MLS `Unrecoverable`
+  /// state this session (see [markCircleBlocked]).
+  ///
+  /// The UI MUST block send/mutate for a blocked circle (Rule 8).
+  bool isCircleBlocked(List<int> mlsGroupId);
 
   /// Advances the persisted `group_445` sync cursor to a fully-processed
   /// kind:445 event's `created_at` (Unix **seconds**).
@@ -623,29 +746,11 @@ abstract class CircleService {
   /// backdating, so advancing on the outer wrapper timestamp is safe.
   Future<void> advanceInboxCursorToWrapSecs(int wrapCreatedAtSecs);
 
-  /// Creates and signs a key package event (kind 443) for relay publishing.
-  ///
-  /// Generates MLS key material, builds the Nostr event, and signs it
-  /// with the identity key. Returns the signed event ready for publishing.
-  ///
-  /// Throws [CircleServiceException] if signing fails.
-  Future<SignedKeyPackageEvent> signKeyPackageEvent({
-    required List<int> identitySecretBytes,
-    required List<String> relays,
-  });
-
-  /// Records a just-published `KeyPackage` pair (M8-6) so the maintenance
-  /// live-material gate recognizes it as live (and thus NoOp).
-  ///
-  /// Call AFTER a relay accepts the canonical 30443 (publish-first), passing
-  /// the fields from the [SignedKeyPackageEvent]. Best-effort at the call site;
-  /// throws [CircleServiceException] on a storage error.
-  Future<void> recordPublishedKeyPackages({
-    required List<int> canonicalHashRef,
-    required String dTag,
-    required String canonicalEventId,
-    required String legacyEventId,
-  });
+  // NOTE: `KeyPackage` signing/publishing no longer lives on `CircleService`.
+  // The Dark Matter `maintain_key_package` FFI method (via
+  // `RelayService.maintainKeyPackage`) is now the ONE publish path
+  // (onboarding/login/heal): it owns the decide/reuse-or-mint/publish/record
+  // sequence internally. See `key_package_provider.dart`.
 
   // NOTE: `signRelayListEvent` was removed. The privacy-toggle-aware
   // flow lives on `RelayPreferencesService.buildRelayListPublish`,
@@ -713,12 +818,9 @@ abstract class CircleService {
   /// Wired into the identity-deletion path.
   Future<void> wipeAllLastKnownLocations();
 
-  /// Wipes every M7 staged-commit marker.
-  ///
-  /// Wired into the identity-deletion path so a returning (or different)
-  /// identity never inherits a stale marker that would wrongly skip a
-  /// background receive.
-  Future<void> wipeAllStagedCommits();
+  // NOTE: `wipeAllStagedCommits` was removed. The Dark Matter engine owns
+  // pending-commit state internally (`EpochState::PendingPublish` +
+  // `PendingStateRef`) — there is no Haven-owned staged-commit marker to wipe.
 
   /// Resets every sync cursor (bulk).
   ///
@@ -776,10 +878,10 @@ abstract class CircleService {
   /// Stages the commit, publishes the resulting `kind:445` evolution event to
   /// the **union** of the circle's current relays and [newRelays] — so a
   /// member that only listens on a relay being removed still receives the
-  /// commit before it stops polling that relay. On publish success, calls
-  /// `finalizeRelayUpdate` (which merges the commit and re-syncs the admin's
-  /// own `circle.relays` to [newRelays]). On publish failure, calls
-  /// `clearPendingCommit` and rethrows.
+  /// commit before it stops polling that relay. On publish success, confirms
+  /// the engine's pending state (which also re-syncs the admin's own
+  /// `circle.relays` to [newRelays]). On publish failure, rolls the pending
+  /// state back and rethrows.
   ///
   /// [newRelays] must be non-empty, `wss://` (or a debug loopback URL in
   /// test builds), credential-free, and at most 20 entries. Admin
@@ -791,54 +893,6 @@ abstract class CircleService {
     required List<int> mlsGroupId,
     required List<String> newRelays,
   });
-}
-
-/// A signed key package event pair ready for relay publishing.
-///
-/// During the MIP-00 transition window, publishers sign both the canonical
-/// kind 30443 (addressable) event and the legacy kind 443 twin from the same
-/// MLS material so that clients which still query kind 443 can discover this
-/// user. The two events share `content` and `hash_ref`; only the tag set
-/// differs (the legacy twin omits the `d` tag).
-@immutable
-class SignedKeyPackageEvent {
-  /// Creates a [SignedKeyPackageEvent].
-  const SignedKeyPackageEvent({
-    required this.eventJson,
-    required this.legacyEventJson,
-    required this.relays,
-    this.canonicalHashRef = const [],
-    this.dTag = '',
-    this.canonicalEventId = '',
-    this.legacyEventId = '',
-  });
-
-  /// The canonical kind 30443 signed event as JSON string.
-  final String eventJson;
-
-  /// The legacy kind 443 signed event as JSON string.
-  ///
-  /// Publishing is best-effort: callers should not fail the rotation when
-  /// this twin is rejected, but should keep publishing it to remain
-  /// discoverable by clients that haven't migrated yet.
-  final String legacyEventJson;
-
-  /// Relay URLs where both events should be published.
-  final List<String> relays;
-
-  /// The MLS `KeyPackageRef` bytes (M8-6), for recording the published
-  /// `KeyPackage` after a relay accepts it — so maintenance recognizes it as
-  /// live. See [CircleService.recordPublishedKeyPackages].
-  final List<int> canonicalHashRef;
-
-  /// The stable NIP-33 `d` the canonical event was published into.
-  final String dTag;
-
-  /// Lowercase-hex event id of the canonical (30443) event.
-  final String canonicalEventId;
-
-  /// Lowercase-hex event id of the legacy (443) twin.
-  final String legacyEventId;
 }
 
 /// KeyPackage data for a user.
@@ -857,7 +911,9 @@ class KeyPackageData {
   /// User's Nostr public key (hex format).
   final String pubkey;
 
-  /// Kind 443 KeyPackage event as JSON string.
+  /// KeyPackage event as JSON string (kind 30443, or legacy kind 443 from a
+  /// not-yet-updated peer — see the F11 "needs to update" detection in
+  /// `add_member_page.dart` / `create_circle_page.dart`).
   final String eventJson;
 
   /// Inbox relay URLs for Welcome delivery (kind 10050).

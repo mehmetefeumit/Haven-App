@@ -20,6 +20,7 @@ import 'package:haven/src/constants/tiles.dart';
 import 'package:haven/src/licenses/map_licenses.dart';
 import 'package:haven/src/network/pinned_tile_client.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
+import 'package:haven/src/providers/legacy_cutover_provider.dart';
 import 'package:haven/src/providers/locale_provider.dart';
 import 'package:haven/src/providers/map_style_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
@@ -33,6 +34,7 @@ import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/data_directory_provider.dart';
 import 'package:haven/src/services/image_cache_guard.dart';
 import 'package:haven/src/services/ios_background_catchup.dart';
+import 'package:haven/src/services/legacy_cutover_service.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/pending_mls_wipe_service.dart';
@@ -148,6 +150,31 @@ Future<void> main() async {
     );
   }
 
+  // DM-4c: Dark Matter first-launch cutover guard. Runs AFTER the M10.1
+  // retry above (so a pending logout wipe from the OLD stack completes
+  // first) and BEFORE any `CircleManagerFfi` is ever constructed — the
+  // first construction happens lazily via `circleServiceProvider`, only
+  // after `runApp` returns and a widget reads it. Destroys legacy
+  // pre-Dark-Matter MLS state (`haven_mdk.db` + its keyring key) exactly
+  // once per install, gated on both a persisted marker and the presence of
+  // an existing identity (see `LegacyCutoverService`). The identity probe
+  // is computed once here and reused by `_loadInitialOnboardingFlags` below
+  // so secure storage is read only once at startup.
+  final hasExistingIdentity = await _probeHasNostrIdentity();
+  var showLegacyCutoverExplainer = false;
+  try {
+    final cutoverService = LegacyCutoverService(prefs: prefs);
+    showLegacyCutoverExplainer = await cutoverService.runIfNeeded(
+      dataDir: dataDir,
+      hasIdentity: hasExistingIdentity,
+    );
+  } on Object catch (e) {
+    debugPrint(
+      '[SECURITY][Haven] DM-4c legacy-cutover guard setup failed: '
+      '${e.runtimeType}',
+    );
+  }
+
   // One-time migration: destroy the legacy BuiltInMapCachingProvider plaintext
   // cache so its unencrypted tile files are removed from disk. Gated by a
   // SharedPreferences flag so this runs exactly once per install.
@@ -213,7 +240,9 @@ Future<void> main() async {
     );
   }
 
-  final initialFlags = await _loadInitialOnboardingFlags();
+  final initialFlags = await _loadInitialOnboardingFlags(
+    hasIdentity: hasExistingIdentity,
+  );
   final initialThemeMode = await loadInitialThemeMode();
   final initialMapStyle = await loadInitialMapStyle();
   // Pre-load the persisted language before the first frame so the UI renders
@@ -250,6 +279,11 @@ Future<void> main() async {
     ),
     tileHttpClientProvider.overrideWithValue(tileHttpClient),
     tileCacheEnabledProvider.overrideWithValue(tileCacheEnabled),
+    // DM-4c: seeds whether MapShell owes the one-time Dark Matter cutover
+    // explainer this launch (computed above, before any DB/manager touch).
+    legacyCutoverExplainerProvider.overrideWith(
+      (ref) => showLegacyCutoverExplainer,
+    ),
   ];
 
   // Always create an explicit ProviderContainer so the iOS background
@@ -294,47 +328,65 @@ Future<void> main() async {
   }
 }
 
+/// Storage key for the Nostr identity secret bytes.
+///
+/// Duplicated from `NostrIdentityService`'s private storage-key constant
+/// (exported there only as `@visibleForTesting identityStorageKeyForTesting`,
+/// so production code must not import it): this file needs the literal at
+/// two points that both run BEFORE any Riverpod container exists — the
+/// pre-onboarding-era migration check below and the DM-4c legacy-cutover
+/// guard in [main] — so both share the one [_probeHasNostrIdentity] probe
+/// rather than reading secure storage twice.
+const String _identityStorageKey = 'haven.nostr.identity';
+
+/// Probes secure storage directly for the presence of a saved Nostr
+/// identity, without constructing a full `NostrIdentityService` (there is
+/// no Riverpod container yet at this point in `main()`).
+///
+/// Best-effort: a storage read failure is treated as "no identity" and
+/// logged generically.
+Future<bool> _probeHasNostrIdentity() async {
+  const storage = FlutterSecureStorage(
+    iOptions: IOSOptions(
+      accessibility: KeychainAccessibility.first_unlock_this_device,
+    ),
+  );
+  try {
+    final existing = await storage.read(key: _identityStorageKey);
+    return existing != null;
+  } on Object catch (e) {
+    debugPrint(
+      '[Haven] secure storage identity probe failed: ${e.runtimeType}',
+    );
+    return false;
+  }
+}
+
 /// Loads the initial [OnboardingFlags] synchronously before `runApp`.
 ///
 /// Handles a one-time migration for users upgrading from versions that
 /// predate the onboarding feature: if no `completed` value is stored but
-/// the secure-storage identity key is present, the user already has an
-/// identity and should not be routed back into onboarding. All flags are
-/// flipped to `true` in that case.
-Future<OnboardingFlags> _loadInitialOnboardingFlags() async {
+/// [hasIdentity] is `true` (a secure-storage identity key is present — see
+/// [_probeHasNostrIdentity]), the user already has an identity and should
+/// not be routed back into onboarding. All flags are flipped to `true` in
+/// that case.
+Future<OnboardingFlags> _loadInitialOnboardingFlags({
+  required bool hasIdentity,
+}) async {
   final prefs = await SharedPreferences.getInstance();
 
   final storedCompleted = prefs.getBool(kOnboardingCompletedKey);
-  if (storedCompleted == null) {
-    // Migration path for pre-onboarding installs.
-    const storage = FlutterSecureStorage(
-      iOptions: IOSOptions(
-        accessibility: KeychainAccessibility.first_unlock_this_device,
-      ),
+  if (storedCompleted == null && hasIdentity) {
+    // Existing users have already onboarded — flip every flag so they skip
+    // straight to the main shell.
+    await prefs.setBool(kOnboardingIntroSeenKey, true);
+    await prefs.setBool(kOnboardingDisplayNameSetKey, true);
+    await prefs.setBool(kOnboardingCompletedKey, true);
+    return const OnboardingFlags(
+      introSeen: true,
+      displayNameSet: true,
+      completed: true,
     );
-    var hasIdentity = false;
-    try {
-      final existing = await storage.read(key: 'haven.nostr.identity');
-      hasIdentity = existing != null;
-    } on Object catch (e) {
-      debugPrint(
-        '[Haven] secure storage probe failed during onboarding migration: '
-        '${e.runtimeType}',
-      );
-    }
-
-    if (hasIdentity) {
-      // Existing users have already onboarded — flip every flag so they skip
-      // straight to the main shell.
-      await prefs.setBool(kOnboardingIntroSeenKey, true);
-      await prefs.setBool(kOnboardingDisplayNameSetKey, true);
-      await prefs.setBool(kOnboardingCompletedKey, true);
-      return const OnboardingFlags(
-        introSeen: true,
-        displayNameSet: true,
-        completed: true,
-      );
-    }
   }
 
   return OnboardingFlags(

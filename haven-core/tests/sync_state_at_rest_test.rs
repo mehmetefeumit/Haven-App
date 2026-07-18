@@ -19,6 +19,7 @@ use haven_core::circle::{
     Circle, CircleStorage, CircleType, LastKnownLocation, PublishedKeyPackageRow,
 };
 use haven_core::nostr::mls::types::GroupId;
+use haven_core::nostr::mls::GroupIdExt as _;
 use nostr::{EventId, Keys};
 
 /// Long, high-entropy ASCII sentinel written into a TEXT column. Unlikely to
@@ -27,13 +28,14 @@ const SENTINEL_CURSOR_STREAM: &str = "M10_AT_REST_SYNC_CURSOR_STREAM_SENTINEL_DO
 const SENTINEL_PUB_EVENT_DTAG: &str = "M10_AT_REST_PUBLISHED_EVENT_DTAG_SENTINEL_DO_NOT_LEAK_XY";
 const SENTINEL_PKP_EVENT_ID: &str = "M10_AT_REST_PUBLISHED_KEY_PACKAGE_EVENT_ID_SENTINEL_XY";
 const SENTINEL_PKP_DTAG: &str = "M10_AT_REST_PUBLISHED_KEY_PACKAGE_DTAG_SENTINEL_DO_NOT_LEAK";
-const SENTINEL_STAGED_HEX: &str = "M10_AT_REST_STAGED_COMMIT_NGID_HEX_SENTINEL_DO_NOT_LEAK_XY";
 const SENTINEL_LKL_SENDER: &str = "M10_AT_REST_LAST_KNOWN_LOCATION_SENDER_SENTINEL_DO_NOT_LEAK";
 
 /// Distinctive ≥16-byte BLOB needles written into BLOB columns.
 const NEEDLE_WRAPPER_ID: [u8; 32] = *b"M10_AT_REST_GIFTWRAP_WRAP_ID_XYZ";
 const NEEDLE_PUB_EVENT_ID: [u8; 32] = *b"M10_AT_REST_PUBLISHED_EVENT_IDXY";
-const NEEDLE_PKP_HASH_REF: &[u8] = b"M10_AT_REST_KEY_PACKAGE_HASH_REF_NEEDLE_16B+";
+/// The DM `published_key_packages` BLOB column is the cached last-resort
+/// `key_package` bytes (the old `key_package_hash_ref` column is dropped).
+const NEEDLE_PKP_KEY_PACKAGE: &[u8] = b"M10_AT_REST_KEY_PACKAGE_BYTES_NEEDLE_16B+++";
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty()
@@ -48,13 +50,12 @@ fn assert_no_plaintext_at_rest(db_path: &std::path::Path, phase: &str) {
         SENTINEL_PUB_EVENT_DTAG,
         SENTINEL_PKP_EVENT_ID,
         SENTINEL_PKP_DTAG,
-        SENTINEL_STAGED_HEX,
         SENTINEL_LKL_SENDER,
     ];
     let blob_needles: &[&[u8]] = &[
         &NEEDLE_WRAPPER_ID,
         &NEEDLE_PUB_EVENT_ID,
-        NEEDLE_PKP_HASH_REF,
+        NEEDLE_PKP_KEY_PACKAGE,
     ];
 
     let mut scanned_any = false;
@@ -134,12 +135,13 @@ fn seed_and_verify_roundtrip(storage: &CircleStorage, now: i64) {
     );
     assert_eq!(rec.d_tag, SENTINEL_PUB_EVENT_DTAG);
 
-    // --- 4. published_key_packages (event_id hex TEXT + d_tag TEXT + hash_ref BLOB) ---
+    // --- 4. published_key_packages (event_id hex TEXT + d_tag TEXT + key_package BLOB) ---
+    // DM 4-field shape: `(event_id, d_tag NOT NULL, key_package BLOB, created_at)`
+    // — the old `key_package_hash_ref`/`kind` columns are dropped (DM-2b).
     let pkp = PublishedKeyPackageRow {
-        key_package_hash_ref: NEEDLE_PKP_HASH_REF.to_vec(),
         event_id: SENTINEL_PKP_EVENT_ID.to_string(),
-        kind: 30443,
-        d_tag: Some(SENTINEL_PKP_DTAG.to_string()),
+        d_tag: SENTINEL_PKP_DTAG.to_string(),
+        key_package: NEEDLE_PKP_KEY_PACKAGE.to_vec(),
         created_at: now,
     };
     storage
@@ -150,19 +152,22 @@ fn seed_and_verify_roundtrip(storage: &CircleStorage, now: i64) {
         Some(SENTINEL_PKP_DTAG.to_string()),
         "published_key_package d_tag must round-trip through the cipher"
     );
-
-    // --- 5. staged_commits (nostr_group_id_hex TEXT sentinel) ---
-    storage
-        .set_staged_commit(SENTINEL_STAGED_HEX, 3, now)
-        .expect("write staged_commits");
-    assert!(
+    // The cached KeyPackage bytes also round-trip through the cipher.
+    assert_eq!(
         storage
-            .has_staged_commit(SENTINEL_STAGED_HEX)
-            .expect("read staged"),
-        "staged_commit must round-trip through the cipher"
+            .latest_published_key_package()
+            .expect("read latest kp")
+            .expect("kp row exists")
+            .key_package,
+        NEEDLE_PKP_KEY_PACKAGE.to_vec(),
+        "published_key_package bytes must round-trip through the cipher"
     );
 
-    // --- 6. last_known_locations (sender_pubkey TEXT sentinel) ---
+    // DELETED-WITH-SUBJECT: the former table #5 (staged_commits) — the M7
+    // staged-commit marker + its table are removed (the engine owns
+    // `EpochState::PendingPublish`), so there is no such at-rest surface.
+
+    // --- 5. last_known_locations (sender_pubkey TEXT sentinel) ---
     let loc = LastKnownLocation {
         nostr_group_id: [0x5A; 32],
         sender_pubkey: SENTINEL_LKL_SENDER.to_string(),
@@ -277,23 +282,25 @@ fn wiped_sync_state_leaves_nothing_decryptable_at_rest() {
         seed_and_verify_roundtrip(&storage, now);
 
         // (1) STORAGE/MANAGER RESET half: the bulk per-table wipes clear their
-        // rows through the cipher. (published_events / published_key_packages have
-        // no bulk primitive; the file delete below erases them.)
+        // rows through the cipher. (published_events has no bulk primitive; the
+        // file delete below erases it.)
         storage.reset_all_sync_cursors().expect("reset cursors");
-        storage.wipe_all_staged_commits().expect("wipe staged");
         storage
             .wipe_all_processed_gift_wraps()
             .expect("wipe processed");
         storage
             .wipe_all_last_known_locations()
             .expect("wipe locations");
+        // DM: published_key_packages now HAS a bulk wipe primitive (DM-2b).
+        storage
+            .wipe_published_key_packages()
+            .expect("wipe published key packages");
 
         // The reset tables read empty through the cipher.
         assert_eq!(
             storage.read_sync_cursor(SENTINEL_CURSOR_STREAM).unwrap(),
             None
         );
-        assert!(!storage.has_staged_commit(SENTINEL_STAGED_HEX).unwrap());
         assert!(storage
             .is_gift_wrap_processed(&wrapper_id)
             .unwrap()
@@ -327,10 +334,6 @@ fn wiped_sync_state_leaves_nothing_decryptable_at_rest() {
         reopened.read_sync_cursor(SENTINEL_CURSOR_STREAM).unwrap(),
         None,
         "sync_cursors must not survive the wipe"
-    );
-    assert!(
-        !reopened.has_staged_commit(SENTINEL_STAGED_HEX).unwrap(),
-        "staged_commits must not survive the wipe"
     );
     assert!(
         reopened

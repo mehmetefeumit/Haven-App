@@ -485,8 +485,14 @@ void main() {
       );
     });
 
-    test('deleteIdentity wipes staged-commit markers + resets cursors '
-        '(M7 teardown)', () async {
+    // Dark Matter DM-4b note: this test used to also assert
+    // `wipeAllStagedCommits` ran on logout (M7). `CircleService
+    // .wipeAllStagedCommits` was deleted — the Dark Matter engine now owns
+    // commit staging/convergence entirely inside Rust, so there is no
+    // Dart-visible staged-commit marker left for `deleteIdentity()` to wipe.
+    // `resetAllSyncCursors` remains a real, still-called teardown step, so
+    // the test is re-expressed around it rather than dropped outright.
+    test('deleteIdentity resets all sync cursors (M7 teardown)', () async {
       final mockService = _MockIdentityService(
         initialIdentity: createdIdentity,
         deleteClears: true,
@@ -505,8 +511,8 @@ void main() {
 
       expect(
         mockCircle.methodCalls,
-        containsAll(<String>['wipeAllStagedCommits', 'resetAllSyncCursors']),
-        reason: 'logout must wipe the M7 staged_commits + all sync cursors',
+        contains('resetAllSyncCursors'),
+        reason: 'logout must reset all sync cursors',
       );
     });
 

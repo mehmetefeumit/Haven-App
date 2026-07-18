@@ -41,6 +41,16 @@
 #     The app language must remain a local preference and never be referenced
 #     from the service layer (nothing locale-shaped may reach a relay).
 #
+#   No exporter-label override        scripts/ci/check_no_exporter_label_override.sh
+#     The transport-nostr-peeler's with_exporter_label hook is the only local
+#     lever that can downgrade the kind-445 exporter derivation away from
+#     "marmot/group-event"; Haven's Rust source must never name it.
+#
+#   MDK supply-chain shape            scripts/ci/check_mdk_supply_chain.sh
+#     haven-core/Cargo.lock must hold exactly the five Dark Matter crates —
+#     no forbidden uniffi/app/account/QUIC/agent crates, no legacy mdk-*
+#     crates, and a single libsqlite3-sys version.
+#
 #   E2E harness self-tests            tooling/e2e/ci/*.sh --self-test
 #     The bash guards embedded in the E2E tooling must not silently rot: the
 #     connect-flake retry predicate must never retry a genuine test failure,
@@ -93,6 +103,14 @@ jobs:
       - name: Locale stays device-local
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_locale_privacy.sh
+
+      - name: No exporter-label override
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_no_exporter_label_override.sh
+
+      - name: MDK supply-chain shape
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_mdk_supply_chain.sh
 
       - name: E2E harness self-test (connect-flake predicate)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

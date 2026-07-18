@@ -28,7 +28,6 @@
 //! - [`CircleMember`]: A member with resolved contact info
 //! - [`Invitation`]: A pending invitation to join a circle
 
-pub mod converge;
 mod error;
 mod leave;
 mod manager;
@@ -39,15 +38,14 @@ mod storage_profile;
 mod storage_relay_prefs;
 pub mod types;
 
-pub use converge::{CommitConvergence, CommitIntent, ConvergedLocation};
 pub use error::{CircleError, Result};
 pub use leave::LeavePlan;
-pub use manager::{AddMembersResult, CircleCreationResult, CircleManager};
+pub use manager::{
+    AddMembersResult, CircleCreationResult, CircleManager, CommitToPublish, DecryptedIngest,
+};
 pub use relay_prefs::RelayType;
 pub use storage::CircleStorage;
-pub use storage_key_packages::{
-    PublishedKeyPackageRow, KEY_PACKAGE_KIND_CANONICAL, KEY_PACKAGE_KIND_LEGACY,
-};
+pub use storage_key_packages::{PublishedKeyPackageRow, KEY_PACKAGE_KIND};
 pub use storage_relay_prefs::{PublishedEventRecord, UserRelayRow};
 pub use types::{
     default_relays, set_default_relays_for_test, Circle, CircleConfig, CircleMember,

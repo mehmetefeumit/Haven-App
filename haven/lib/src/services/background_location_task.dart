@@ -146,15 +146,11 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       final dataDir = await const PathProviderDataDirectory()
           .getDataDirectory();
 
-      // 4. Create the circle manager (opens the same SQLCipher DB).
-      //    Tests inject a pre-built instance via [overrideCircleManager];
-      //    only one CircleManagerFfi may exist per isolate or MLS state
-      //    will diverge across two in-memory MDK caches.
-      _circleManager =
-          overrideCircleManager ??
-          await CircleManagerFfi.newInstance(dataDir: dataDir);
-
-      // 5. Create identity manager and load from secure storage.
+      // 4. Create identity manager and load from secure storage. MUST run
+      //    BEFORE the circle manager (step 5, below): Dark Matter's
+      //    `CircleManagerFfi.newInstance` hard-requires the identity secret
+      //    bytes at construction time (it binds the account identity, the
+      //    NIP-59 welcome signer, and the account-identity-proof signer).
       _identityManager = await NostrIdentityManager.newInstance();
       final storedBytes = await _secureStorage.read(key: _identityStorageKey);
       if (storedBytes != null) {
@@ -173,6 +169,27 @@ class BackgroundLocationTaskHandler extends TaskHandler {
         }
       }
 
+      // 5. Create the circle manager (opens the same SQLCipher DB), only if
+      //    an identity was loaded (Dark Matter identity gating — see step 4).
+      //    Tests inject a pre-built instance via [overrideCircleManager];
+      //    only one CircleManagerFfi may exist per isolate or MLS state
+      //    will diverge across two in-memory engine sessions. With no
+      //    identity, `_circleManager` stays null — every downstream call
+      //    site already gates on `_pubkeyHex == null || _circleManager ==
+      //    null` and no-ops, matching the pre-migration no-identity
+      //    behaviour.
+      if (overrideCircleManager != null) {
+        _circleManager = overrideCircleManager;
+      } else if (_identityManager!.hasIdentity()) {
+        // Re-fetched fresh rather than reusing `bytes` above (already
+        // zeroized) — Security Rule 9.
+        final identitySecretBytes = await _identityManager!.getSecretBytes();
+        _circleManager = await CircleManagerFfi.newInstance(
+          dataDir: dataDir,
+          identitySecretBytes: identitySecretBytes,
+        );
+      }
+
       // 6. Create relay, location, and jitter services.
       _relayService = overrideRelayService ?? NostrRelayService();
       await _relayService!.initialize();
@@ -187,7 +204,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       //    stays inside the underlying NostrIdentityManager.
       if (overrideLocationSharingService != null) {
         _locationSharingService = overrideLocationSharingService;
-      } else if (_identityManager != null) {
+      } else if (_identityManager != null && _circleManager != null) {
         _circleService = NostrCircleService.withInjectedManager(
           relayService: _relayService!,
           injectedManager: _circleManager!,
@@ -474,7 +491,9 @@ class BackgroundLocationTaskHandler extends TaskHandler {
         try {
           await _circleService!.pruneProcessedGiftWraps();
         } on Object catch (e) {
-          debugPrint('[BackgroundTask] pruneProcessedGiftWraps failed: ${e.runtimeType}');
+          debugPrint(
+            '[BackgroundTask] pruneProcessedGiftWraps failed: ${e.runtimeType}',
+          );
         }
       }
 

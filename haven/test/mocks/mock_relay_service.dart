@@ -32,6 +32,12 @@ class MockRelayService implements RelayService {
   Future<SubscriptionHealthResult> maintainSubscriptionHealth() async =>
       const SubscriptionHealthResult.empty();
 
+  @override
+  Future<LegacyRetractionResult> retractLegacyKeyMaterial({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  }) async => const LegacyRetractionResult.empty();
+
   /// Creates a [MockRelayService].
   MockRelayService({
     this.groupMessages = const [],
@@ -90,6 +96,17 @@ class MockRelayService implements RelayService {
   /// Published events.
   final List<String> publishedEvents = [];
 
+  /// Relay lists passed to [publishEvent], in call order — lets a test
+  /// assert WHICH relays a publish targeted (e.g. that a freshly-resolved
+  /// relay list was used rather than a stale caller-held snapshot).
+  final List<List<String>> publishEventRelayCalls = [];
+
+  /// When `true`, [publishEvent] reports that NO relay accepted the event
+  /// (every relay rejects) — simulates a publish failure so a caller's
+  /// rollback (publish-before-apply, Rule 13) path can be exercised.
+  /// Defaults to `false` (every relay acks).
+  bool shouldRejectPublish = false;
+
   @override
   Future<List<String>> fetchGroupMessages({
     required List<int> nostrGroupId,
@@ -108,10 +125,18 @@ class MockRelayService implements RelayService {
   }) async {
     methodCalls.add('publishEvent');
     publishedEvents.add(eventJson);
+    publishEventRelayCalls.add(List.of(relays));
     return PublishResult(
       eventId: 'mock-event-id',
-      acceptedBy: relays,
-      rejectedBy: const [],
+      acceptedBy: shouldRejectPublish ? const [] : relays,
+      rejectedBy: shouldRejectPublish
+          ? relays
+                .map(
+                  (relay) =>
+                      RelayRejection(relay: relay, reason: 'mock rejection'),
+                )
+                .toList()
+          : const [],
       failed: const [],
     );
   }

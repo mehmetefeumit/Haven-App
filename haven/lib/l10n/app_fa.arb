@@ -271,6 +271,7 @@
   "pendingMemberWarning": "هشدار",
   "pendingMemberCheckingAvailability": "در حال بررسی در دسترس بودن...",
   "pendingMemberReadyToInvite": "آمادهٔ دعوت",
+  "pendingMemberNeedsUpdate": "نیاز به به‌روزرسانی Haven دارد",
 
   "memberSearchHint": "شناسهٔ عضو را وارد کن...",
   "memberSearchPasteTooltip": "جای‌گذاری از کلیپ‌بورد",
@@ -322,6 +323,23 @@
   "leaveCircleIdentityUnavailable": "هویت در دسترس نیست",
   "leaveCircleSuccess": "با موفقیت از حلقه خارج شدی",
   "leaveCircleError": "ترک حلقه ناموفق بود",
+  "leaveCircleAdminLimitationNote": "به‌عنوان مدیر این حلقه، تنها زمانی می‌توانی آن را ترک کنی که همهٔ اعضای دیگر آن را ترک کرده باشند. می‌دانیم که این ناخوشایند است — به‌روزرسانی‌ای در آینده به مدیران امکان می‌دهد نقش خود را واگذار کرده و مستقیماً حلقه را ترک کنند.",
+
+  "circleBlockedBannerTitle": "این حلقه قابل به‌روزرسانی نیست",
+  "circleBlockedBannerBody": "مشکلی در رمزگذاری این حلقه پیش آمده، بنابراین Haven دیگر نمی‌تواند در آن به‌روزرسانی ارسال یا دریافت کند. هنوز می‌توانی آخرین چیزی را که می‌دانستی در پایین ببینی، یا حلقه را ترک کنی.",
+  "legacyCircleBannerTitle": "این حلقه باید دوباره ساخته شود",
+  "legacyCircleBannerBody": "موتور رمزگذاری Haven ارتقا یافته، بنابراین این حلقه دیگر قابل استفاده نیست. آن را دوباره بساز تا بتوانی موقعیت مکانی را همچنان با همان افراد به اشتراک بگذاری — باید دوباره دعوتشان کنی.",
+  "legacyCircleRecreateCta": "بازسازی حلقه",
+  "legacyCircleRemoveCta": "حذف",
+  "legacyCircleRemoveDialogTitle": "حلقه حذف شود؟",
+  "legacyCircleRemoveDialogBody": "این حلقه دیگر قابل استفاده نیست و از فهرستت حذف خواهد شد. این کار روی هیچ حلقهٔ جدیدی که برای جایگزینی آن می‌سازی اثر نمی‌گذارد.",
+  "legacyCircleRemoveConfirm": "حذف",
+  "legacyCutoverExplainerTitle": "Haven به‌روزرسانی شده است",
+  "legacyCutoverExplainerIdentityUnchanged": "هویت و نمایهٔ عمومی‌ات بدون تغییر مانده‌اند — نیازی به انجام کاری برای آن‌ها نیست.",
+  "legacyCutoverExplainerCirclesNeedRecreation": "برای امنیت بیشتر، باید حلقه‌هایت را از نو بسازی و اعضایشان را دوباره دعوت کنی تا بتوانی باز هم موقعیت مکانی‌ات را در آن‌ها به اشتراک بگذاری.",
+  "legacyCutoverExplainerAcknowledge": "متوجه شدم",
+  "relaySettingsLegacyRetractionPending": "Haven هنوز در حال پاک‌سازی برخی داده‌های به‌جامانده از به‌روزرسانی امنیتی اخیر است. این کار به‌محض اتصال دوباره‌ات به اینترنت به‌طور خودکار کامل خواهد شد.",
+
 
   "circlesPanelCollapsedAnnouncement": "پنل حلقه‌ها بسته شد",
   "circlesPanelExpandedAnnouncement": "پنل حلقه‌ها باز شد",

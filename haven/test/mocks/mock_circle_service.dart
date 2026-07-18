@@ -44,13 +44,12 @@ class MockCircleService implements CircleService {
   List<EncryptedLocation> encryptLocationResults = [];
   int _encryptIndex = 0;
 
-  /// Decrypted location results to return (null = non-location message).
-  List<DecryptResult?> decryptLocationResults = [];
+  /// Decrypted location results to return (empty = no results this call).
+  List<List<LocationEventResult>> decryptLocationResults = [];
   int _decryptIndex = 0;
 
   /// Resets the sequential-result indices for [decryptLocationResults],
-  /// [encryptLocationResults], [publishEvolutionEventResults], and
-  /// [getMembersResults].
+  /// [encryptLocationResults], and [getMembersResults].
   ///
   /// Call this before Phase 2 of a two-phase test that reuses the same
   /// [MockCircleService] instance with a new result list, so the new list
@@ -58,7 +57,6 @@ class MockCircleService implements CircleService {
   void resetResultIndices() {
     _decryptIndex = 0;
     _encryptIndex = 0;
-    _publishEvolutionEventIndex = 0;
     _getMembersIndex = 0;
   }
 
@@ -178,110 +176,35 @@ class MockCircleService implements CircleService {
     );
   }
 
-  /// MLS group IDs passed to [finalizePendingCommit], in call order.
-  final List<List<int>> finalizePendingCommitCalledWith = [];
+  // NOTE: `finalizePendingCommit` / `clearPendingCommit` /
+  // `publishEvolutionEvent` were removed from `CircleService` — the Dark
+  // Matter engine owns publish-before-apply for every commit internally
+  // (see `NostrCircleService`'s `_publishAndConfirm`), so there is nothing
+  // left for the receiver-side decrypt path to publish or finalize.
 
-  /// MLS group IDs passed to [clearPendingCommit], in call order.
-  final List<List<int>> clearPendingCommitCalledWith = [];
+  /// Hex-encoded `mlsGroupId`s marked via [markCircleBlocked], for test
+  /// assertions.
+  final Set<String> blockedCircleIdsForTest = {};
 
-  /// Whether [finalizePendingCommit] should throw an exception.
-  bool shouldThrowOnFinalizePendingCommit = false;
-
-  /// Whether [clearPendingCommit] should throw an exception.
-  bool shouldThrowOnClearPendingCommit = false;
-
-  @override
-  Future<void> finalizePendingCommit(List<int> mlsGroupId) async {
-    methodCalls.add('finalizePendingCommit');
-    finalizePendingCommitCalledWith.add(List<int>.of(mlsGroupId));
-    if (shouldThrowOnFinalizePendingCommit) {
-      throw const CircleServiceException('Mock finalizePendingCommit error');
-    }
+  static String _hexGroupId(List<int> mlsGroupId) {
+    return mlsGroupId.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }
 
   @override
-  Future<void> clearPendingCommit(List<int> mlsGroupId) async {
-    methodCalls.add('clearPendingCommit');
-    clearPendingCommitCalledWith.add(List<int>.of(mlsGroupId));
-    if (shouldThrowOnClearPendingCommit) {
-      throw const CircleServiceException('Mock clearPendingCommit error');
-    }
+  void markCircleBlocked(List<int> mlsGroupId) {
+    methodCalls.add('markCircleBlocked');
+    blockedCircleIdsForTest.add(_hexGroupId(mlsGroupId));
   }
-
-  /// Arguments captured from each [publishEvolutionEvent] call, in order.
-  ///
-  /// Each entry is a 3-tuple-like map with keys `eventJson`, `relays`,
-  /// and `label`. Tests use this to verify the service delegated the
-  /// correct payload to the mock.
-  final List<Map<String, Object?>> publishEvolutionEventCalls = [];
-
-  /// Return values queued for successive [publishEvolutionEvent] calls.
-  ///
-  /// When empty, [publishEvolutionEvent] returns `true` by default.
-  /// Lets tests simulate a rejected publish without constructing a
-  /// failure relay mock.
-  List<bool> publishEvolutionEventResults = [];
-  int _publishEvolutionEventIndex = 0;
-
-  /// Whether [publishEvolutionEvent] should throw an exception.
-  bool shouldThrowOnPublishEvolutionEvent = false;
 
   @override
-  Future<bool> publishEvolutionEvent({
-    required String eventJson,
-    required List<String> relays,
-    required String label,
-  }) async {
-    methodCalls.add('publishEvolutionEvent');
-    publishEvolutionEventCalls.add({
-      'eventJson': eventJson,
-      'relays': List<String>.of(relays),
-      'label': label,
-    });
-    if (shouldThrowOnPublishEvolutionEvent) {
-      throw const CircleServiceException('Mock publishEvolutionEvent error');
-    }
-    if (_publishEvolutionEventIndex < publishEvolutionEventResults.length) {
-      return publishEvolutionEventResults[_publishEvolutionEventIndex++];
-    }
-    return true;
+  bool isCircleBlocked(List<int> mlsGroupId) {
+    methodCalls.add('isCircleBlocked');
+    return blockedCircleIdsForTest.contains(_hexGroupId(mlsGroupId));
   }
 
-  /// Groups returned by [groupsNeedingSelfUpdate].
-  List<List<int>> groupsNeedingUpdate = [];
-
-  /// Whether [groupsNeedingSelfUpdate] should throw.
-  bool shouldThrowOnGroupsNeedingSelfUpdate = false;
-
-  /// The threshold argument captured from the last [groupsNeedingSelfUpdate] call.
-  int? capturedThresholdSecs;
-
-  @override
-  Future<List<List<int>>> groupsNeedingSelfUpdate(int thresholdSecs) async {
-    methodCalls.add('groupsNeedingSelfUpdate');
-    capturedThresholdSecs = thresholdSecs;
-    if (shouldThrowOnGroupsNeedingSelfUpdate) {
-      throw const CircleServiceException(
-        'Mock groups needing self-update error',
-      );
-    }
-    return groupsNeedingUpdate;
-  }
-
-  /// Whether [selfUpdate] should throw an exception.
-  bool shouldThrowOnSelfUpdate = false;
-
-  /// Group IDs passed to [selfUpdate], in call order.
-  List<List<int>> selfUpdateCalledWith = [];
-
-  @override
-  Future<void> selfUpdate(List<int> mlsGroupId) async {
-    methodCalls.add('selfUpdate');
-    selfUpdateCalledWith.add(mlsGroupId);
-    if (shouldThrowOnSelfUpdate) {
-      throw const CircleServiceException('Mock self-update error');
-    }
-  }
+  // NOTE: `groupsNeedingSelfUpdate` / `selfUpdate` were removed from
+  // `CircleService` — MIP-02/03 leaf-key rotation is now engine-internal
+  // under Dark Matter (see `self_update_provider.dart`).
 
   /// Args captured from each [leaveCircle] call, in order.
   final List<({List<int> mlsGroupId, String selfPubkeyHex})>
@@ -494,11 +417,6 @@ class MockCircleService implements CircleService {
   }
 
   @override
-  Future<void> wipeAllStagedCommits() async {
-    methodCalls.add('wipeAllStagedCommits');
-  }
-
-  @override
   Future<void> resetAllSyncCursors() async {
     methodCalls.add('resetAllSyncCursors');
   }
@@ -525,13 +443,62 @@ class MockCircleService implements CircleService {
   }
 
   @override
-  Future<DecryptResult?> decryptLocation({required String eventJson}) async {
+  Future<List<LocationEventResult>> decryptLocation({
+    required String eventJson,
+  }) async {
     methodCalls.add('decryptLocation');
     decryptCallEventJsons.add(eventJson);
     if (_decryptIndex < decryptLocationResults.length) {
       return decryptLocationResults[_decryptIndex++];
     }
-    return null;
+    return const [];
+  }
+
+  /// Auto-commits to attach to a [decryptLocationCollectingCommits] call,
+  /// keyed by the (0-based) index into [decryptLocationResults] that call
+  /// consumes — i.e. set `decryptLocationAutoCommits[0]` to attach
+  /// auto-commits to whichever call consumes `decryptLocationResults[0]`.
+  /// Unset indices attach no auto-commits, so existing tests that only
+  /// populate [decryptLocationResults] are unaffected.
+  final Map<int, List<PendingAutoCommit>> decryptLocationAutoCommits = {};
+
+  /// Pending tokens passed to [confirmPendingCommit], in call order.
+  final List<PendingCommitToken> confirmPendingCommitCalls = [];
+
+  /// Pending tokens passed to [failPendingCommit], in call order.
+  final List<PendingCommitToken> failPendingCommitCalls = [];
+
+  @override
+  Future<DecryptLocationOutcome> decryptLocationCollectingCommits({
+    required String eventJson,
+  }) async {
+    // Shares `decryptLocationResults`/`_decryptIndex`/`decryptCallEventJsons`
+    // with [decryptLocation] (and records the SAME `methodCalls` entry) so
+    // every existing test that only sets `decryptLocationResults` keeps
+    // working unchanged against this richer method.
+    methodCalls.add('decryptLocation');
+    decryptCallEventJsons.add(eventJson);
+    if (_decryptIndex < decryptLocationResults.length) {
+      final index = _decryptIndex;
+      final results = decryptLocationResults[_decryptIndex++];
+      return DecryptLocationOutcome(
+        results: results,
+        autoCommits: decryptLocationAutoCommits[index] ?? const [],
+      );
+    }
+    return const DecryptLocationOutcome(results: [], autoCommits: []);
+  }
+
+  @override
+  Future<void> confirmPendingCommit(PendingCommitToken pending) async {
+    methodCalls.add('confirmPendingCommit');
+    confirmPendingCommitCalls.add(pending);
+  }
+
+  @override
+  Future<void> failPendingCommit(PendingCommitToken pending) async {
+    methodCalls.add('failPendingCommit');
+    failPendingCommitCalls.add(pending);
   }
 
   /// Records the last seconds value passed to [advanceGroupCursorToEventSecs],
@@ -554,32 +521,9 @@ class MockCircleService implements CircleService {
     advanceInboxCursorLastSecs = wrapCreatedAtSecs;
   }
 
-  @override
-  Future<SignedKeyPackageEvent> signKeyPackageEvent({
-    required List<int> identitySecretBytes,
-    required List<String> relays,
-  }) async {
-    methodCalls.add('signKeyPackageEvent');
-    return SignedKeyPackageEvent(
-      eventJson: '{"id":"mock-kp-30443","kind":30443}',
-      legacyEventJson: '{"id":"mock-kp-443","kind":443}',
-      relays: relays,
-      canonicalHashRef: const [1, 2, 3, 4],
-      dTag: 'mock-d-tag',
-      canonicalEventId: 'mock-kp-30443',
-      legacyEventId: 'mock-kp-443',
-    );
-  }
-
-  @override
-  Future<void> recordPublishedKeyPackages({
-    required List<int> canonicalHashRef,
-    required String dTag,
-    required String canonicalEventId,
-    required String legacyEventId,
-  }) async {
-    methodCalls.add('recordPublishedKeyPackages');
-  }
+  // NOTE: `signKeyPackageEvent` / `recordPublishedKeyPackages` were removed
+  // from `CircleService` — `KeyPackage` publish now lives entirely behind
+  // `RelayService.maintainKeyPackage` (see `key_package_provider.dart`).
 
   /// Whether [signDeletionEvent] should throw an exception.
   bool shouldThrowOnDeletion = false;
@@ -655,13 +599,14 @@ class TestCircleFactory {
     String displayName = 'Test Circle',
     List<CircleMember>? members,
     MembershipStatus membershipStatus = MembershipStatus.accepted,
+    List<String>? relays,
   }) {
     return Circle(
       mlsGroupId: mlsGroupId ?? [1, 2, 3, 4],
       nostrGroupId: nostrGroupId ?? [5, 6, 7, 8],
       displayName: displayName,
       circleType: CircleType.locationSharing,
-      relays: const ['wss://relay.example.com'],
+      relays: relays ?? const ['wss://relay.example.com'],
       membershipStatus: membershipStatus,
       members: members ?? const [],
       createdAt: DateTime(2024),

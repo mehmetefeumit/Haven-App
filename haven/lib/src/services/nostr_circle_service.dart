@@ -17,16 +17,27 @@
 ///                     ├── MLS Manager (group operations)
 ///                     └── SQLCipher DB (circle metadata)
 /// ```
+///
+/// # Publish-before-apply (Dark Matter, Rule 13)
+///
+/// Every group-evolving operation (`createCircle`, `addMember`,
+/// `removeMember`, `updateCircleRelays`, and the admin-handoff/self-demote
+/// steps inside `leaveCircle`) follows the same contract: the FFI stages the
+/// commit and returns an opaque `PendingStateRefFfi` token; this service
+/// publishes the commit event to the circle's relays and, ONLY once at least
+/// one relay returns an OK-ack, confirms the token via
+/// `CircleManagerFfi.confirmPublished` so the engine applies the commit and
+/// advances the epoch. A publish failure instead rolls the token back via
+/// `CircleManagerFfi.publishFailed`. "Acked" means a relay accepted the
+/// event — never merely "sent" — to avoid optimistic-merge forks.
 library;
 
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
-import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/rust/api.dart' as frb_api;
 import 'package:haven/src/services/circle_service.dart';
-import 'package:haven/src/services/converge_finalize.dart';
 import 'package:haven/src/services/fresh_secret.dart';
 import 'package:haven/src/services/leaver_backstop.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
@@ -54,18 +65,20 @@ class NostrCircleService implements CircleService {
     DataDirectoryProvider? dataDirectoryProvider,
     KeyringInitializer? keyringInitializer,
     bool enableLeaverBackstop = false,
+    Future<List<int>> Function()? identitySecretBytesProvider,
   }) : _relayService = relayService,
        _dataDirectoryProvider =
            dataDirectoryProvider ?? const PathProviderDataDirectory(),
        _keyringInitializer = keyringInitializer ?? initKeyringStore,
-       _enableLeaverBackstop = enableLeaverBackstop;
+       _enableLeaverBackstop = enableLeaverBackstop,
+       _identitySecretBytesProvider = identitySecretBytesProvider;
 
   /// Creates a [NostrCircleService] backed by a pre-built [CircleManagerFfi].
   ///
   /// Used by the background isolate (`background_location_task.dart`) to
   /// share the already-constructed manager rather than constructing a
   /// second one over the same SQLCipher path. Holding two managers in one
-  /// isolate would split MLS state across two in-memory MDK caches and
+  /// isolate would split MLS state across two in-memory engine sessions and
   /// risk SQLite contention; the foreground hands its existing manager to
   /// this constructor so all MLS work in the bg isolate goes through one
   /// authoritative handle.
@@ -80,12 +93,23 @@ class NostrCircleService implements CircleService {
        _dataDirectoryProvider = const PathProviderDataDirectory(),
        _keyringInitializer = initKeyringStore,
        _enableLeaverBackstop = false,
+       _identitySecretBytesProvider = null,
        _manager = injectedManager,
        _initialized = true;
 
   final RelayService _relayService;
   final DataDirectoryProvider _dataDirectoryProvider;
   final KeyringInitializer _keyringInitializer;
+
+  /// Supplies the device identity's 32-byte Nostr secret for
+  /// [CircleManagerFfi.newInstance], which (Dark Matter) hard-requires the
+  /// identity at construction time (it binds the account identity, the NIP-59
+  /// welcome signer, AND the account-identity-proof signer). Re-fetched on
+  /// every `initialize()` call rather than held (Security Rule 9).
+  ///
+  /// `null` for the background-isolate / injected-manager constructor, which
+  /// never calls [initialize] (the manager is already open).
+  final Future<List<int>> Function()? _identitySecretBytesProvider;
 
   /// Whether this instance runs the REV-1 leaver backstop (driver 2) after a
   /// `propose_leave`.
@@ -117,13 +141,16 @@ class NostrCircleService implements CircleService {
   /// (un-wiped) instance.
   bool _wiped = false;
 
-  /// Completes once [closeAndInvalidate] latches [_wiped]. A live-sync converge
-  /// finalize loop races its settle wait against this so a logout / leave that
-  /// lands mid-window unblocks the wait immediately instead of stalling for the
-  /// full [settleWindowSecs], then bails without converging (M11 L1 —
-  /// no-resurrection, paired with the `isTornDown` short-circuit). Completed at
-  /// most once; a converge started after teardown sees it already done.
+  /// Completes once [closeAndInvalidate] latches [_wiped]. Reserved as the
+  /// no-resurrection fence for any future settle-wait style operation; no
+  /// current code path awaits it (the Dark Matter engine owns convergence
+  /// internally, so there is no Dart-side settle window left to race).
   final Completer<void> _teardownSignal = Completer<void>();
+
+  /// Hex-encoded `mlsGroupId`s observed entering the MLS `Unrecoverable`
+  /// state this session (Rule 8 blocked-circle UI state). See
+  /// [markCircleBlocked] / [isCircleBlocked].
+  final Set<String> _blockedCircleIds = {};
 
   /// Initializes the circle manager with persistent storage.
   ///
@@ -156,7 +183,8 @@ class NostrCircleService implements CircleService {
     final completer = _initCompleter!;
     try {
       // Initialize the platform keyring store before creating the circle
-      // manager. MDK uses the keyring to store the SQLCipher encryption key.
+      // manager. The Dark Matter session uses the keyring to store the
+      // SQLCipher encryption key.
       try {
         await _keyringInitializer();
       } on Object catch (e) {
@@ -165,8 +193,19 @@ class NostrCircleService implements CircleService {
           'Failed to initialize secure storage',
         );
       }
+      final secretBytesProvider = _identitySecretBytesProvider;
+      if (secretBytesProvider == null) {
+        throw const CircleServiceException(
+          'No identity available to open the circle manager',
+        );
+      }
       final dataDir = await _dataDirectoryProvider.getDataDirectory();
-      final manager = await CircleManagerFfi.newInstance(dataDir: dataDir);
+      // Re-fetched fresh (never held) — Security Rule 9.
+      final identitySecretBytes = await secretBytesProvider();
+      final manager = await CircleManagerFfi.newInstance(
+        dataDir: dataDir,
+        identitySecretBytes: identitySecretBytes,
+      );
       // M10 (H1 in-flight race): the service may have been wiped/latched while
       // this init was suspended at the awaited open above. If so, do NOT adopt
       // the just-(re)created handle — a caller receiving it would operate on a
@@ -210,8 +249,9 @@ class NostrCircleService implements CircleService {
   /// Exposed so adjacent services that need access to the same
   /// authoritative FFI manager (e.g. [`NostrRelayPreferencesService`])
   /// can share one handle. Holding two managers against the same
-  /// SQLCipher DB would split MLS state across two in-memory MDK caches
-  /// and risk SQLite contention; consumers MUST go through this getter.
+  /// SQLCipher DB would split MLS state across two in-memory engine
+  /// sessions and risk SQLite contention; consumers MUST go through this
+  /// getter.
   Future<CircleManagerFfi> getCircleManagerFfi() => _ensureInitialized();
 
   /// Converts a Rust timestamp to DateTime.
@@ -318,7 +358,7 @@ class NostrCircleService implements CircleService {
 
       // Collect relay URLs from all members. The circle's `relays` field
       // populates the kind 444 Welcome rumor's `relays` tag, which MIP-02
-      // requires to be non-empty (validated by MDK's `validate_welcome_event`).
+      // requires to be non-empty (validated by the engine's welcome wrap).
       //
       // When neither the caller nor any member supplies a URL, we pass an
       // empty list to Rust intentionally — Rust's `create_circle` then
@@ -345,6 +385,49 @@ class NostrCircleService implements CircleService {
         creatorFallbackRelays: creatorFallbackRelays,
       );
 
+      // Publish-before-apply (Rule 13): publish the gift-wrapped Welcomes,
+      // then confirm (or roll back) the engine's pending group-creation
+      // state based on whether at least one Welcome reached a relay. With
+      // zero invited members there is nothing to ack, so confirm
+      // unconditionally (a circle with only the creator is still valid).
+      final total = result.welcomeEvents.length;
+      final welcomeResults = await Future.wait(
+        result.welcomeEvents.map(
+          (w) => _relayService
+              .publishWelcome(
+                welcomeEvent: GiftWrappedWelcome(
+                  recipientPubkey: w.recipientPubkey,
+                  recipientRelays: w.recipientRelays,
+                  eventJson: w.eventJson,
+                ),
+              )
+              .then((_) => true)
+              .onError((_, _) {
+                debugPrint('[Circle] Create: welcome send failed');
+                return false;
+              }),
+        ),
+      );
+      final sentCount = welcomeResults.where((ok) => ok).length;
+      final anySent = total == 0 || sentCount > 0;
+
+      try {
+        if (anySent) {
+          await manager.confirmPublished(pending: result.pending);
+        } else {
+          await manager.publishFailed(pending: result.pending);
+        }
+      } on Object catch (e) {
+        debugPrint(
+          '[Circle] Create ${anySent ? "confirm" : "rollback"} failed: '
+          '${e.runtimeType}',
+        );
+        throw const CircleServiceException('Failed to create circle');
+      }
+      if (!anySent) {
+        throw const CircleServiceException('Failed to create circle');
+      }
+
       // Convert FFI result to service types
       final circle = Circle(
         mlsGroupId: result.circle.mlsGroupId.toList(),
@@ -358,18 +441,13 @@ class NostrCircleService implements CircleService {
         updatedAt: _timestampToDateTime(result.circle.updatedAt),
       );
 
-      // Convert gift-wrapped welcome events
-      final welcomeEvents = result.welcomeEvents
-          .map(
-            (w) => GiftWrappedWelcome(
-              recipientPubkey: w.recipientPubkey,
-              recipientRelays: w.recipientRelays,
-              eventJson: w.eventJson,
-            ),
-          )
-          .toList();
-
-      return CircleCreationResult(circle: circle, welcomeEvents: welcomeEvents);
+      return CircleCreationResult(
+        circle: circle,
+        welcomesSent: sentCount,
+        welcomesTotal: total,
+      );
+    } on CircleServiceException {
+      rethrow;
     } on Object catch (_) {
       debugPrint('[Circle] Create failed');
       throw const CircleServiceException('Failed to create circle');
@@ -438,8 +516,12 @@ class NostrCircleService implements CircleService {
     final manager = await _ensureInitialized();
 
     try {
+      // `mlsGroupId` here is the pre-join stand-in id — actually the
+      // gift-wrap event id the invitation was keyed by (see
+      // `InvitationFfi`/`processGiftWrappedInvitation`); the FFI accepts by
+      // that same id.
       final ffiCircle = await manager.acceptInvitation(
-        mlsGroupId: Uint8List.fromList(mlsGroupId),
+        giftWrapId: Uint8List.fromList(mlsGroupId),
       );
       return _convertCircleWithMembers(ffiCircle);
     } on Object catch (e) {
@@ -454,7 +536,7 @@ class NostrCircleService implements CircleService {
 
     try {
       await manager.declineInvitation(
-        mlsGroupId: Uint8List.fromList(mlsGroupId),
+        giftWrapId: Uint8List.fromList(mlsGroupId),
       );
     } on Object catch (e) {
       debugPrint('Failed to decline invitation: ${e.runtimeType}');
@@ -489,152 +571,6 @@ class NostrCircleService implements CircleService {
       throw const CircleServiceException(
         'Failed to process gift-wrapped invitation',
       );
-    }
-  }
-
-  @override
-  Future<void> finalizePendingCommit(List<int> mlsGroupId) async {
-    final manager = await _ensureInitialized();
-
-    try {
-      await manager.finalizePendingCommit(
-        mlsGroupId: Uint8List.fromList(mlsGroupId),
-      );
-    } on Object catch (e) {
-      // FFI message is pre-redacted (hex ≥16 chars → [REDACTED]); safe
-      // for developer logs.
-      debugPrint('Failed to finalize pending commit: ${e.runtimeType}');
-      throw const CircleServiceException('Failed to finalize pending commit');
-    }
-  }
-
-  @override
-  Future<void> clearPendingCommit(List<int> mlsGroupId) async {
-    final manager = await _ensureInitialized();
-
-    try {
-      await manager.clearPendingCommit(
-        mlsGroupId: Uint8List.fromList(mlsGroupId),
-      );
-    } on Object catch (e) {
-      debugPrint('Failed to clear pending commit: ${e.runtimeType}');
-      throw const CircleServiceException('Failed to clear pending commit');
-    }
-  }
-
-  @override
-  Future<List<List<int>>> groupsNeedingSelfUpdate(int thresholdSecs) async {
-    final manager = await _ensureInitialized();
-
-    try {
-      return await manager.groupsNeedingSelfUpdate(
-        thresholdSecs: BigInt.from(thresholdSecs),
-      );
-    } on Object catch (e) {
-      debugPrint(
-        'Failed to query groups needing self-update: ${e.runtimeType}',
-      );
-      throw const CircleServiceException(
-        'Failed to query groups needing self-update',
-      );
-    }
-  }
-
-  @override
-  Future<void> selfUpdate(List<int> mlsGroupId) async {
-    final manager = await _ensureInitialized();
-
-    try {
-      debugPrint('[SelfUpdate] starting');
-      final groupId = Uint8List.fromList(mlsGroupId);
-
-      // Live-sync engine ON: converge against concurrent same-epoch commits
-      // instead of eagerly merging. (`stageSelfUpdateConverging` returns null
-      // when the engine is off — a flag race — in which case we fall through to
-      // the legacy eager path below.)
-      //
-      // NOTE: this branch is dead under the shipped flags — it also requires
-      // the periodic driver (`enablePeriodicSelfUpdate`, currently false) to
-      // call `selfUpdate` at all. Flipping only `liveSyncEnabled` does not
-      // re-enable rotation.
-      if (liveSyncEnabled) {
-        final ctx = await _convergeContext(groupId);
-        if (ctx == null) {
-          debugPrint('[SelfUpdate] skipped: circle relays unavailable');
-          return;
-        }
-        final staged = await stageSelfUpdateConverging(
-          mlsGroupId: mlsGroupId,
-          nostrGroupId: ctx.nostrGroupId,
-        );
-        if (staged != null) {
-          // Self-update intent is None → never re-stages, no Welcomes. The
-          // outcome is ignored on purpose: a rolled-back rotation (notApplied)
-          // is benign — the hourly self-update scheduler re-queries it and
-          // retries, so there is nothing to surface to the user here.
-          await _runConvergingFinalize(
-            mlsGroupId: mlsGroupId,
-            nostrGroupId: ctx.nostrGroupId,
-            relays: ctx.relays,
-            intent: const ConvergeIntentFfi(
-              kind: ConvergeIntentKind.none,
-              pubkeys: [],
-            ),
-            label: 'self-update',
-            commitJson: staged.commitJson,
-            stagedEpoch: staged.stagedEpoch,
-          );
-          return;
-        }
-      }
-
-      // Fetch circle relays for publishing.
-      List<String>? relays;
-      try {
-        final circle = await manager.getCircle(mlsGroupId: groupId);
-        relays = circle?.circle.relays;
-      } on Object catch (e) {
-        debugPrint('[SelfUpdate] relay lookup failed: ${e.runtimeType}');
-      }
-
-      if (relays == null || relays.isEmpty) {
-        debugPrint('[SelfUpdate] skipped: circle relays unavailable');
-        return;
-      }
-
-      debugPrint('[SelfUpdate] staging pending commit via FFI');
-      final result = await manager.selfUpdate(mlsGroupId: groupId);
-
-      debugPrint(
-        '[SelfUpdate] publishing commit event to ${relays.length} relay(s)',
-      );
-      final published = await _publishEvolutionEvent(
-        result.evolutionEventJson,
-        relays,
-        label: 'self-update',
-      );
-
-      if (published) {
-        await finalizePendingCommit(mlsGroupId);
-        debugPrint('[SelfUpdate] finalized locally');
-      } else {
-        debugPrint('[SelfUpdate] publish failed, rolling back');
-        try {
-          await clearPendingCommit(mlsGroupId);
-        } on Object catch (e) {
-          // If this also fails, the residual pending commit will block
-          // future commit-staging operations on this group until the
-          // downstream pre-clear paths run (e.g. propose_leave).
-          debugPrint(
-            '[SelfUpdate] clearPendingCommit failed after publish failure: '
-            '${e.runtimeType}',
-          );
-        }
-      }
-    } on Object catch (e) {
-      // Self-update is best-effort (MIP-02 requires completion within 24h).
-      // Log and return — the hourly selfUpdateProvider retries missed rotations.
-      debugPrint('[SelfUpdate] failed: ${e.runtimeType}');
     }
   }
 
@@ -694,14 +630,20 @@ class NostrCircleService implements CircleService {
           throw const CircleServiceException('Failed to leave circle');
         }
         stage = 'proposeAdminHandoff';
+        // GAP (Dark Matter plan §5.2 #18): the engine's public API exposes
+        // no admin-policy component codec yet, so `propose_admin_handoff`
+        // currently fails closed with a documented Rust-side error — admin
+        // handoff via leave is not yet functional upstream. The `catch`
+        // block below surfaces that as the same generic leave failure.
         final promote = await manager.proposeAdminHandoff(
           mlsGroupId: groupId,
           successorHex: successor,
         );
         stage = 'publish admin handoff commit';
-        if (!await _commitAndPublish(
-          mlsGroupId: mlsGroupId,
-          eventJson: promote.evolutionEventJson,
+        if (!await _publishAndConfirm(
+          manager: manager,
+          commitEventJson: promote.commitEventJson,
+          pending: promote.pending,
           relays: relays,
           label: 'admin handoff',
         )) {
@@ -713,15 +655,14 @@ class NostrCircleService implements CircleService {
       if (plan.kind == LeavePlanKindFfi.adminHandoff ||
           plan.kind == LeavePlanKindFfi.adminDemote) {
         stage = 'proposeSelfDemote';
-        final demote = await _stageOrClear(
-          () => manager.proposeSelfDemote(mlsGroupId: groupId),
-          mlsGroupId: mlsGroupId,
-          label: 'self-demote',
-        );
+        // Same GAP as above — the self-demote step of the fallback path
+        // (adminDemote, multiple admins) shares the same upstream limit.
+        final demote = await manager.proposeSelfDemote(mlsGroupId: groupId);
         stage = 'publish self-demote commit';
-        if (!await _commitAndPublish(
-          mlsGroupId: mlsGroupId,
-          eventJson: demote.evolutionEventJson,
+        if (!await _publishAndConfirm(
+          manager: manager,
+          commitEventJson: demote.commitEventJson,
+          pending: demote.pending,
           relays: relays,
           label: 'self-demote',
         )) {
@@ -732,16 +673,17 @@ class NostrCircleService implements CircleService {
 
       // `propose_leave` returns a SelfRemove *proposal* (RFC 9420 §12.1.2)
       // — a remaining member commits it later, so the leaver does not
-      // finalize a pending commit here. We bump the publish attempts to
+      // finalize a pending commit here (there is no `PendingStateRef` for a
+      // bare proposal). We bump the publish attempts to
       // [_leaveMaxPublishAttempts] because this publish is terminal:
       // success is immediately followed by a forward-secrecy purge of
-      // the leaver's MDK state, and failure must keep local state intact
+      // the leaver's engine state, and failure must keep local state intact
       // so the user can retry.
       stage = 'proposeLeave';
-      final leave = await manager.proposeLeave(mlsGroupId: groupId);
+      final leaveEventJson = await manager.proposeLeave(mlsGroupId: groupId);
       stage = 'publish leave proposal';
       if (!await _publishEvolutionEvent(
-        leave.evolutionEventJson,
+        leaveEventJson,
         relays,
         label: 'leave',
         maxAttempts: _leaveMaxPublishAttempts,
@@ -750,16 +692,15 @@ class NostrCircleService implements CircleService {
         throw const CircleServiceException('Failed to leave circle');
       }
 
-      // REV-1 leaver backstop (driver 2): under live-sync a race-losing
-      // SelfRemove can be deferred in EVERY remaining member's settle window
-      // at once. Rather than wipe immediately and risk a stale roster ghost,
-      // we poll our own removal and re-issue a fresh SelfRemove until removed
-      // (bounded), then wipe. A durable marker lets a crashed-then-returned
-      // leaver finish the leave on the next launch. Inert under flag-off, or
-      // when the backstop is disabled (the background isolate / launch-time
-      // wipe-only service, neither of which authors leaves): the leave wipes
-      // immediately, exactly as before.
-      if (liveSyncEnabled && _enableLeaverBackstop) {
+      // REV-1 leaver backstop (driver 2): a race-losing SelfRemove can be
+      // deferred while every remaining member converges. Rather than wipe
+      // immediately and risk a stale roster ghost, we poll our own removal
+      // and re-issue a fresh SelfRemove until removed (bounded), then wipe.
+      // A durable marker lets a crashed-then-returned leaver finish the
+      // leave on the next launch. Disabled for the background isolate /
+      // launch-time wipe-only service (neither of which authors leaves): the
+      // leave wipes immediately, exactly as before.
+      if (_enableLeaverBackstop) {
         stage = 'leaver backstop';
         await _runLeaverBackstop(
           manager: manager,
@@ -804,7 +745,7 @@ class NostrCircleService implements CircleService {
     }
   }
 
-  /// Runs the REV-1 leaver backstop for a departing member (live-sync only).
+  /// Runs the REV-1 leaver backstop for a departing member.
   ///
   /// Sets a durable "leave in progress" marker, then polls our own removal via
   /// `still_a_member`, re-issuing a fresh SelfRemove on each still-a-member
@@ -918,9 +859,9 @@ class NostrCircleService implements CircleService {
     List<String> relays,
   ) async {
     try {
-      final leave = await manager.proposeLeave(mlsGroupId: groupId);
+      final leaveEventJson = await manager.proposeLeave(mlsGroupId: groupId);
       await _publishEvolutionEvent(
-        leave.evolutionEventJson,
+        leaveEventJson,
         relays,
         label: 'leave re-issue',
         maxAttempts: _leaveMaxPublishAttempts,
@@ -939,76 +880,23 @@ class NostrCircleService implements CircleService {
     final groupId = Uint8List.fromList(mlsGroupId);
 
     try {
-      // Live-sync engine ON: converge against concurrent same-epoch admin
-      // commits (two admins removing different members at epoch N would fork
-      // under the eager path). Falls through to legacy when the engine is off.
-      if (liveSyncEnabled) {
-        final ctx = await _convergeContext(groupId);
-        if (ctx == null) {
-          debugPrint('Circle relays unavailable — aborting remove');
-          throw const CircleServiceException('Failed to remove member');
-        }
-        final staged = await stageRemoveMembersConverging(
-          mlsGroupId: mlsGroupId,
-          nostrGroupId: ctx.nostrGroupId,
-          memberPubkeys: [memberPubkeyHex],
-        );
-        if (staged != null) {
-          final outcome = await _runConvergingFinalize(
-            mlsGroupId: mlsGroupId,
-            nostrGroupId: ctx.nostrGroupId,
-            relays: ctx.relays,
-            intent: ConvergeIntentFfi(
-              kind: ConvergeIntentKind.remove,
-              pubkeys: [memberPubkeyHex],
-            ),
-            label: 'remove member',
-            commitJson: staged.commitJson,
-            stagedEpoch: staged.stagedEpoch,
-            reStage: (attempt) async {
-              final next = await stageRemoveMembersConverging(
-                mlsGroupId: mlsGroupId,
-                nostrGroupId: ctx.nostrGroupId,
-                memberPubkeys: [memberPubkeyHex],
-              );
-              return next == null
-                  ? null
-                  : (
-                      commitJson: next.commitJson,
-                      stagedEpoch: next.stagedEpoch,
-                    );
-            },
-          );
-          // The removal was not applied (bounded re-stage exhausted or the
-          // engine stopped mid-flow). No scheduler retries membership ops, so
-          // surface a retryable error instead of a silent success.
-          if (outcome == ConvergeFinalizeOutcome.notApplied) {
-            throw const CircleServiceException('Failed to remove member');
-          }
-          return;
-        }
-      }
-
       final relays = await _circleRelays(groupId);
       if (relays == null || relays.isEmpty) {
         debugPrint('Circle relays unavailable — aborting remove');
         throw const CircleServiceException('Failed to remove member');
       }
 
-      // MDK's `remove_members` stages a pending commit and returns the
-      // `kind:445` evolution event for the admin to publish.
-      final result = await _stageOrClear(
-        () => manager.removeMembers(
-          mlsGroupId: groupId,
-          memberPubkeys: [memberPubkeyHex],
-        ),
-        mlsGroupId: mlsGroupId,
-        label: 'remove member',
+      // The engine stages the Remove commit and returns the `kind:445`
+      // evolution event + a pending token for the admin to publish+confirm.
+      final result = await manager.removeMembers(
+        mlsGroupId: groupId,
+        memberPubkeys: [memberPubkeyHex],
       );
 
-      if (!await _commitAndPublish(
-        mlsGroupId: mlsGroupId,
-        eventJson: result.evolutionEventJson,
+      if (!await _publishAndConfirm(
+        manager: manager,
+        commitEventJson: result.commitEventJson,
+        pending: result.pending,
         relays: relays,
         label: 'remove member',
       )) {
@@ -1050,97 +938,13 @@ class NostrCircleService implements CircleService {
           )
           .toList();
 
-      // Live-sync engine ON: converge the Add against concurrent same-epoch
-      // admin commits. Welcomes are published only after a `Merged` converge
-      // (a losing Add references an epoch that never committed). Falls through
-      // to legacy when the engine is off.
-      if (liveSyncEnabled) {
-        final ctx = await _convergeContext(groupId);
-        if (ctx == null) {
-          debugPrint('[AddMember] circle relays unavailable — aborting');
-          throw const CircleServiceException('Failed to add member');
-        }
-        final memberPubkeys = memberKeyPackages.map((kp) => kp.pubkey).toList();
-        final staged = await withFreshSecret(
-          secretProvider,
-          (secret) => stageAddMembersConverging(
-            identitySecretBytes: secret,
-            mlsGroupId: mlsGroupId,
-            nostrGroupId: ctx.nostrGroupId,
-            members: ffiMembers,
-            creatorFallbackRelays: creatorFallbackRelays,
-          ),
-        );
-        if (staged != null) {
-          var welcomes = staged.welcomeEvents;
-          var welcomesSent = 0;
-          final outcome = await _runConvergingFinalize(
-            mlsGroupId: mlsGroupId,
-            nostrGroupId: ctx.nostrGroupId,
-            relays: ctx.relays,
-            intent: ConvergeIntentFfi(
-              kind: ConvergeIntentKind.add,
-              pubkeys: memberPubkeys,
-            ),
-            label: 'add member',
-            commitJson: staged.commitJson,
-            stagedEpoch: staged.stagedEpoch,
-            onMerged: () async {
-              welcomesSent = await _publishConvergedWelcomes(
-                welcomes,
-                'add member',
-              );
-            },
-            reStage: (attempt) async {
-              // Re-fetch the secret FRESH for every re-stage (M11 L1, Rule 9):
-              // it lives only for this FFI round-trip, scrubbed before the next
-              // settle wait — never held across the ~24s of re-staging.
-              final next = await withFreshSecret(
-                secretProvider,
-                (secret) => stageAddMembersConverging(
-                  identitySecretBytes: secret,
-                  mlsGroupId: mlsGroupId,
-                  nostrGroupId: ctx.nostrGroupId,
-                  members: ffiMembers,
-                  creatorFallbackRelays: creatorFallbackRelays,
-                ),
-              );
-              if (next == null) return null;
-              welcomes = next.welcomeEvents;
-              return (
-                commitJson: next.commitJson,
-                stagedEpoch: next.stagedEpoch,
-              );
-            },
-          );
-          // The Add was not applied (bounded re-stage exhausted or the engine
-          // stopped mid-flow): no member was added and no Welcome was sent.
-          // Surface a retryable error rather than a false-success result.
-          if (outcome == ConvergeFinalizeOutcome.notApplied) {
-            throw const CircleServiceException('Failed to add member');
-          }
-          // `merged` sent our Welcomes (welcomesSent); `adoptedSatisfied` means
-          // a sibling admin's winning commit already added the member and sent
-          // their own Welcome, so we sent none — welcomesTotal reflects the
-          // Welcomes we had prepared.
-          return AddMemberResult(
-            welcomesSent: welcomesSent,
-            welcomesTotal: welcomes.length,
-          );
-        }
-      }
-
       // Torn down (logout / leave) after we captured `manager` above: do NOT
       // stage on the wiped handle — an MLS write could re-create state the M10
-      // sweep removed. (The live-sync branch above is already guarded by the
-      // converge loop's isTornDown; this legacy fall-through needs its own.)
+      // sweep removed.
       if (_wiped) {
         throw const CircleServiceException('Failed to add member');
       }
 
-      // Stage the MLS Add commit inside an inline try/clear because the
-      // result type is AddMembersResultFfi, not UpdateGroupResultFfi, so
-      // the typed _stageOrClear helper does not apply here.
       final AddMembersResultFfi staged;
       try {
         staged = await withFreshSecret(secretProvider, (secret) {
@@ -1158,25 +962,36 @@ class NostrCircleService implements CircleService {
         });
       } on Object catch (e) {
         debugPrint('add member: FFI staging failed: ${e.runtimeType}');
-        try {
-          await clearPendingCommit(mlsGroupId);
-        } on Object catch (_) {
-          // No pending commit to clear — expected when staging fails early.
-        }
         rethrow;
       }
 
-      // Publish the kind:445 Add commit; finalize on success, clear on failure.
-      if (!await _commitAndPublish(
-        mlsGroupId: mlsGroupId,
-        eventJson: staged.evolutionEventJson,
-        relays: relays,
+      // Publish-before-apply (Rule 13): publish the commit; only after ≥1
+      // relay OK confirms the pending state, so a member is added ONLY once
+      // the commit is durably confirmed. Welcomes are published ONLY after
+      // that confirm succeeds — a welcome for a losing/unconfirmed commit
+      // references an epoch that never applied.
+      final published = await _publishEvolutionEvent(
+        staged.commitEventJson,
+        relays,
         label: 'add member',
-      )) {
+      );
+
+      if (!published) {
+        try {
+          await manager.publishFailed(pending: staged.pending);
+        } on Object catch (e) {
+          debugPrint('add member: publishFailed failed: ${e.runtimeType}');
+        }
         throw const CircleServiceException('Failed to add member');
       }
 
-      // Only after a successful finalize: publish gift-wrapped Welcome(s).
+      try {
+        await manager.confirmPublished(pending: staged.pending);
+      } on Object catch (e) {
+        debugPrint('add member: confirmPublished failed: ${e.runtimeType}');
+        throw const CircleServiceException('Failed to add member');
+      }
+
       final total = staged.welcomeEvents.length;
       final results = await Future.wait(
         staged.welcomeEvents.map(
@@ -1231,48 +1046,42 @@ class NostrCircleService implements CircleService {
       // Compute the publish union: deduplicated, order-stable.
       final publishRelays = {...currentRelays, ...newRelays}.toList();
 
-      // Stage the GroupContextExtensions commit via the FFI. _stageOrClear
-      // handles a staging failure by best-effort clearing any dangling pending
-      // commit and rethrowing — keeps the MLS group from getting wedged.
-      final result = await _stageOrClear(
-        () => manager.updateCircleRelays(
-          mlsGroupId: groupId,
-          newRelays: newRelays,
-        ),
-        mlsGroupId: mlsGroupId,
-        label: 'update circle relays',
+      // Stage the relay-rotation commit via the FFI.
+      final result = await manager.updateCircleRelays(
+        mlsGroupId: groupId,
+        newRelays: newRelays,
       );
 
-      // Publish to the union set, then finalize (or clear) locally.
-      // Using a bespoke publish+finalize rather than the shared
-      // _commitAndPublish so we can call finalizeRelayUpdate (which also
-      // re-syncs admin's circle.relays) instead of finalizePendingCommit.
+      // Publish to the union set, then finalize (or roll back) locally.
       final published = await _publishEvolutionEvent(
-        result.evolutionEventJson,
+        result.commitEventJson,
         publishRelays,
         label: 'update circle relays',
       );
 
       try {
         if (published) {
-          // finalizeRelayUpdate merges the commit AND re-syncs the admin's
-          // own circle.relays to newRelays, so the admin converges to the
-          // new set immediately without waiting for the receive path.
+          // finalizeRelayUpdate confirms the pending state AND re-syncs the
+          // admin's own circle.relays to newRelays, so the admin converges to
+          // the new set immediately without waiting for the receive path.
           //
-          // If this throws AFTER the MLS merge already committed (epoch
-          // advanced in Rust), the admin's local circle.relays may transiently
-          // LAG the merged MLS state — never get ahead of it. That lag
+          // If this throws AFTER the engine already applied the commit
+          // (epoch advanced), the admin's local circle.relays may transiently
+          // LAG the applied state — never get ahead of it. That lag
           // self-heals idempotently: the next commit the admin processes runs
           // the decrypt_location re-sync hook, and a restart re-derives the
-          // row from MDK. So the throw below is safe to surface.
-          await manager.finalizeRelayUpdate(mlsGroupId: groupId);
+          // row from the engine. So the throw below is safe to surface.
+          await manager.finalizeRelayUpdate(
+            pending: result.pending,
+            mlsGroupId: groupId,
+          );
         } else {
-          await manager.clearPendingCommit(mlsGroupId: groupId);
+          await manager.publishFailed(pending: result.pending);
         }
       } on Object catch (e) {
         debugPrint(
           'update circle relays: pending-commit '
-          '${published ? "finalizeRelayUpdate" : "clear"} '
+          '${published ? "finalizeRelayUpdate" : "rollback"} '
           'failed: ${e.runtimeType}',
         );
         throw const CircleServiceException('Failed to update circle relays');
@@ -1289,25 +1098,36 @@ class NostrCircleService implements CircleService {
     }
   }
 
-  /// Runs an FFI call that stages a pending commit. If it throws, clears
-  /// any lingering pending commit (best-effort) and rethrows — keeps the
-  /// MLS group from getting stuck on a half-staged commit.
-  Future<UpdateGroupResultFfi> _stageOrClear(
-    Future<UpdateGroupResultFfi> Function() stage, {
-    required List<int> mlsGroupId,
+  /// Publishes a staged commit's event; confirms the pending state on
+  /// success or rolls it back on failure so the engine never applies a
+  /// commit that no relay acknowledged. Returns `true` iff the event
+  /// reached at least one relay and the confirm succeeded.
+  Future<bool> _publishAndConfirm({
+    required CircleManagerFfi manager,
+    required String commitEventJson,
+    required PendingStateRefFfi pending,
+    required List<String> relays,
     required String label,
   }) async {
+    final published = await _publishEvolutionEvent(
+      commitEventJson,
+      relays,
+      label: label,
+    );
     try {
-      return await stage();
-    } on Object catch (e) {
-      debugPrint('$label: FFI staging failed: ${e.runtimeType}');
-      try {
-        await clearPendingCommit(mlsGroupId);
-      } on Object catch (_) {
-        // No pending commit to clear — expected when staging fails early.
+      if (published) {
+        await manager.confirmPublished(pending: pending);
+      } else {
+        await manager.publishFailed(pending: pending);
       }
-      rethrow;
+    } on Object catch (e) {
+      debugPrint(
+        '$label: pending-commit ${published ? "confirm" : "rollback"} '
+        'failed: ${e.runtimeType}',
+      );
+      return false;
     }
+    return published;
   }
 
   /// Fetches the circle's relay list, returning `null` if unavailable.
@@ -1320,169 +1140,6 @@ class NostrCircleService implements CircleService {
       debugPrint('Circle relay lookup failed: ${e.runtimeType}');
       return null;
     }
-  }
-
-  /// Publishes a pending commit's evolution event; finalizes on success or
-  /// clears on failure so the MLS group is never left with a dangling commit.
-  /// Returns `true` iff the event reached at least one relay and was merged.
-  Future<bool> _commitAndPublish({
-    required List<int> mlsGroupId,
-    required String eventJson,
-    required List<String> relays,
-    required String label,
-  }) async {
-    final published = await _publishEvolutionEvent(
-      eventJson,
-      relays,
-      label: label,
-    );
-    try {
-      if (published) {
-        await finalizePendingCommit(mlsGroupId);
-      } else {
-        await clearPendingCommit(mlsGroupId);
-      }
-    } on Object catch (e) {
-      debugPrint(
-        '$label: pending-commit ${published ? "finalize" : "clear"} '
-        'failed: ${e.runtimeType}',
-      );
-      return false;
-    }
-    return published;
-  }
-
-  // ============== M6-4: converging finalize (path A, live-sync) ==============
-  //
-  // When the live-sync engine is running, a foreground membership/self-update
-  // commit converges against concurrent same-epoch sibling commits instead of
-  // eagerly merging its own (which forks). The Rust converging FFI (`stage_*`
-  // opens a settle window + stages under the per-circle gate; `convergeAfter
-  // Window` takes the buffered competitors + runs MIP-03 convergence) does the
-  // gating; this orchestrates the publish-during-window + the result.
-
-  /// The publish context for a converging finalize: the circle's relays + its
-  /// pseudonymous `nostr_group_id` (the gate/settle key). `null` if unavailable.
-  Future<({List<String> relays, List<int> nostrGroupId})?> _convergeContext(
-    Uint8List groupId,
-  ) async {
-    try {
-      final circle = await (await _ensureInitialized()).getCircle(
-        mlsGroupId: groupId,
-      );
-      final relays = circle?.circle.relays;
-      if (circle == null || relays == null || relays.isEmpty) return null;
-      return (relays: relays, nostrGroupId: circle.circle.nostrGroupId);
-    } on Object catch (e) {
-      debugPrint('converge context lookup failed: ${e.runtimeType}');
-      return null;
-    }
-  }
-
-  /// Aborts an open settle window + clears any dangling staged commit. Called
-  /// on a publish/converge error or an engine-stopped-mid-flow (so the circle
-  /// is never wedged in regime 2 / left holding an unmerged commit).
-  Future<void> _abortConvergeAndClear(
-    List<int> mlsGroupId,
-    List<int> nostrGroupId,
-  ) async {
-    // Torn down: the M10 logout/leave sweep already deleted the group and its
-    // pending commit and closed circles.db. Any FFI here would re-open the DB
-    // (defeating the wipe) or throw — there is nothing left to abort.
-    if (_wiped) return;
-    try {
-      final aborted = await abortConvergingWindow(
-        mlsGroupId: mlsGroupId,
-        nostrGroupId: nostrGroupId,
-      );
-      if (!aborted) {
-        // Engine off → its window is already gone, but a CS1 pending commit
-        // may dangle in MDK; clear it directly (the legacy rollback).
-        await clearPendingCommit(mlsGroupId);
-      }
-    } on Object catch (e) {
-      debugPrint('converge cleanup failed: ${e.runtimeType}');
-    }
-  }
-
-  /// Publishes the gift-wrapped Welcomes after a `Merged` Add convergence
-  /// (never for a losing Add — it references an epoch that never committed).
-  Future<int> _publishConvergedWelcomes(
-    List<GiftWrappedWelcomeFfi> welcomes,
-    String label,
-  ) async {
-    var sent = 0;
-    for (final w in welcomes) {
-      try {
-        await _relayService.publishWelcome(
-          welcomeEvent: GiftWrappedWelcome(
-            recipientPubkey: w.recipientPubkey,
-            recipientRelays: w.recipientRelays,
-            eventJson: w.eventJson,
-          ),
-        );
-        sent++;
-      } on Object catch (e) {
-        debugPrint('$label: welcome send failed: ${e.runtimeType}');
-      }
-    }
-    return sent;
-  }
-
-  /// Runs the settle-window finalize after CS1 staged a commit + opened the
-  /// window: publish the commit DURING the window (so a sibling admin can
-  /// collect it), wait [settleWindowSecs], then converge under the gate. On
-  /// `AdoptedWinner` with a still-pending intent / `RolledBack`, re-stages
-  /// (bounded ≤2) via [reStage]. On `Merged`, runs [onMerged] (e.g. publish
-  /// Welcomes). On ANY publish/converge error — or the engine stopping mid-flow
-  /// — aborts the window + clears the commit (never leaves a dangling commit).
-  ///
-  /// Throws [CircleServiceException] on a hard publish/converge failure so the
-  /// caller surfaces a generic error, matching the legacy path. Returns the
-  /// terminal [ConvergeFinalizeOutcome] so a membership caller can distinguish
-  /// an applied change ([ConvergeFinalizeOutcome.merged] /
-  /// [ConvergeFinalizeOutcome.adoptedSatisfied]) from one that was NOT applied
-  /// ([ConvergeFinalizeOutcome.notApplied] — bounded re-stage exhausted, or the
-  /// engine stopped mid-flow) and surface a retryable error.
-  Future<ConvergeFinalizeOutcome> _runConvergingFinalize({
-    required List<int> mlsGroupId,
-    required List<int> nostrGroupId,
-    required List<String> relays,
-    required ConvergeIntentFfi intent,
-    required String label,
-    required String commitJson,
-    required BigInt stagedEpoch,
-    Future<void> Function()? onMerged,
-    Future<({String commitJson, BigInt stagedEpoch})?> Function(int attempt)?
-    reStage,
-  }) {
-    // The loop logic lives in the testable `runConvergeFinalize` free function;
-    // here we inject the real FFI/relay ops.
-    return runConvergeFinalize(
-      label: label,
-      commitJson: commitJson,
-      stagedEpoch: stagedEpoch,
-      publish: (c) => _publishEvolutionEvent(c, relays, label: label),
-      // Race the settle wait against teardown so a logout / leave that lands
-      // mid-window unblocks immediately; `isTornDown` then bails before the
-      // converge FFI so no MLS write resurrects the wiped group (M11 L1).
-      waitWindow: () => Future.any<void>([
-        Future<void>.delayed(Duration(seconds: settleWindowSecs().toInt())),
-        _teardownSignal.future,
-      ]),
-      converge: (c, e) => convergeAfterWindow(
-        mlsGroupId: mlsGroupId,
-        nostrGroupId: nostrGroupId,
-        ourCommitJson: c,
-        stagedEpoch: e,
-        intent: intent,
-      ),
-      abort: () => _abortConvergeAndClear(mlsGroupId, nostrGroupId),
-      onHardError: () => throw CircleServiceException('Failed to $label'),
-      onMerged: onMerged,
-      reStage: reStage,
-      isTornDown: () => _wiped,
-    );
   }
 
   /// Default max publish attempts for evolution events.
@@ -1576,38 +1233,136 @@ class NostrCircleService implements CircleService {
     }
   }
 
+  /// Converts one FFI folded engine result to the service-level type,
+  /// recording a session-scoped blocked-circle marker on `Unrecoverable`
+  /// (Rule 8).
+  LocationEventResult _convertLocationEventResult(LocationMessageResultFfi r) {
+    if (r.kind == LocationMessageResultKindFfi.unrecoverable) {
+      markCircleBlocked(r.mlsGroupId.toList());
+    }
+    final loc = r.location;
+    return LocationEventResult(
+      kind: _convertLocationEventKind(r.kind),
+      location: loc == null
+          ? null
+          : DecryptedLocation(
+              senderPubkey: loc.senderPubkey,
+              latitude: loc.latitude,
+              longitude: loc.longitude,
+              geohash: loc.geohash,
+              timestamp: DateTime.fromMillisecondsSinceEpoch(
+                loc.timestamp * 1000,
+              ),
+              expiresAt: DateTime.fromMillisecondsSinceEpoch(
+                loc.expiresAt * 1000,
+              ),
+            ),
+      mlsGroupId: r.mlsGroupId.toList(),
+      epoch: r.epoch.toInt(),
+    );
+  }
+
+  LocationEventKind _convertLocationEventKind(
+    LocationMessageResultKindFfi kind,
+  ) {
+    return switch (kind) {
+      LocationMessageResultKindFfi.location => LocationEventKind.location,
+      LocationMessageResultKindFfi.joined => LocationEventKind.joined,
+      LocationMessageResultKindFfi.groupUpdate =>
+        LocationEventKind.groupUpdate,
+      LocationMessageResultKindFfi.invalidated =>
+        LocationEventKind.invalidated,
+      LocationMessageResultKindFfi.unrecoverable =>
+        LocationEventKind.unrecoverable,
+    };
+  }
+
   @override
-  Future<DecryptResult?> decryptLocation({required String eventJson}) async {
+  Future<List<LocationEventResult>> decryptLocation({
+    required String eventJson,
+  }) async {
     final manager = await _ensureInitialized();
 
     try {
-      final result = await manager.decryptLocation(eventJson: eventJson);
-      if (result == null) return null;
+      final results = await manager.decryptLocation(eventJson: eventJson);
+      return results.map(_convertLocationEventResult).toList();
+    } on Object catch (_) {
+      debugPrint('[Circle] Location decryption failed');
+      throw const CircleServiceException('Failed to decrypt location');
+    }
+  }
 
-      final loc = result.location;
-      return DecryptResult(
-        location: loc == null
-            ? null
-            : DecryptedLocation(
-                senderPubkey: loc.senderPubkey,
-                latitude: loc.latitude,
-                longitude: loc.longitude,
-                geohash: loc.geohash,
-                timestamp: DateTime.fromMillisecondsSinceEpoch(
-                  loc.timestamp * 1000,
-                ),
-                expiresAt: DateTime.fromMillisecondsSinceEpoch(
-                  loc.expiresAt * 1000,
-                ),
+  @override
+  Future<DecryptLocationOutcome> decryptLocationCollectingCommits({
+    required String eventJson,
+  }) async {
+    final manager = await _ensureInitialized();
+
+    try {
+      final outcome = await manager.decryptLocationCollectingCommits(
+        eventJson: eventJson,
+      );
+      return DecryptLocationOutcome(
+        results: outcome.results.map(_convertLocationEventResult).toList(),
+        autoCommits: outcome.autoCommits
+            .map(
+              (c) => PendingAutoCommit(
+                commitEventJson: c.commitEventJson,
+                pendingToken: PendingCommitToken(c.pending.token),
               ),
-        groupUpdated: result.groupUpdated,
-        evolutionEventJson: result.evolutionEventJson,
-        evolutionMlsGroupId: result.evolutionMlsGroupId?.toList(),
+            )
+            .toList(),
       );
     } on Object catch (_) {
       debugPrint('[Circle] Location decryption failed');
       throw const CircleServiceException('Failed to decrypt location');
     }
+  }
+
+  @override
+  Future<void> confirmPendingCommit(PendingCommitToken pending) async {
+    final manager = await _ensureInitialized();
+    try {
+      await manager.confirmPublished(
+        pending: PendingStateRefFfi(token: pending.value),
+      );
+    } on Object catch (e) {
+      debugPrint('[Circle] auto-commit confirm failed: ${e.runtimeType}');
+      throw const CircleServiceException('Failed to confirm auto-commit');
+    }
+  }
+
+  @override
+  Future<void> failPendingCommit(PendingCommitToken pending) async {
+    final manager = await _ensureInitialized();
+    try {
+      await manager.publishFailed(
+        pending: PendingStateRefFfi(token: pending.value),
+      );
+    } on Object catch (e) {
+      // Best-effort (interface contract): the caller already knows the
+      // publish did not succeed; this is cleanup, never a fresh failure to
+      // surface. Rule 13's non-negotiable half is the publish attempt +
+      // its outcome, already resolved by the caller — a rollback that
+      // itself fails self-heals on the next ingest of the same buffered
+      // proposal (a fresh jittered auto-commit attempt is scheduled).
+      debugPrint('[Circle] auto-commit rollback failed: ${e.runtimeType}');
+    }
+  }
+
+  /// Hex-encodes an `mlsGroupId` for use as a blocked-circle set key.
+  static String _hexGroupId(List<int> mlsGroupId) {
+    return mlsGroupId.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  }
+
+  @override
+  void markCircleBlocked(List<int> mlsGroupId) {
+    _blockedCircleIds.add(_hexGroupId(mlsGroupId));
+  }
+
+  @override
+  bool isCircleBlocked(List<int> mlsGroupId) {
+    return _blockedCircleIds.contains(_hexGroupId(mlsGroupId));
   }
 
   @override
@@ -1637,62 +1392,9 @@ class NostrCircleService implements CircleService {
     }
   }
 
-  @override
-  Future<bool> publishEvolutionEvent({
-    required String eventJson,
-    required List<String> relays,
-    required String label,
-  }) async {
-    return _publishEvolutionEvent(eventJson, relays, label: label);
-  }
-
-  @override
-  Future<SignedKeyPackageEvent> signKeyPackageEvent({
-    required List<int> identitySecretBytes,
-    required List<String> relays,
-  }) async {
-    final manager = await _ensureInitialized();
-
-    try {
-      final result = await manager.signKeyPackageEvent(
-        identitySecretBytes: Uint8List.fromList(identitySecretBytes),
-        relays: relays,
-      );
-      return SignedKeyPackageEvent(
-        eventJson: result.eventJson,
-        legacyEventJson: result.legacyEventJson,
-        relays: result.relays,
-        canonicalHashRef: result.canonicalHashRef,
-        dTag: result.dTag,
-        canonicalEventId: result.canonicalEventId,
-        legacyEventId: result.legacyEventId,
-      );
-    } on Object {
-      throw const CircleServiceException('Failed to sign key package event');
-    }
-  }
-
-  @override
-  Future<void> recordPublishedKeyPackages({
-    required List<int> canonicalHashRef,
-    required String dTag,
-    required String canonicalEventId,
-    required String legacyEventId,
-  }) async {
-    final manager = await _ensureInitialized();
-    try {
-      await manager.recordPublishedKeyPackages(
-        canonicalHashRef: canonicalHashRef,
-        dTag: dTag,
-        canonicalEventId: canonicalEventId,
-        legacyEventId: legacyEventId,
-      );
-    } on Object {
-      throw const CircleServiceException(
-        'Failed to record published key package',
-      );
-    }
-  }
+  // NOTE: `KeyPackage` signing/publishing/recording no longer live on this
+  // service — see the `CircleService` doc comment. Use
+  // `RelayService.maintainKeyPackage` (`key_package_provider.dart`).
 
   // signRelayListEvent removed — see CircleService doc comment. The
   // FFI sign_relay_list_event method has also been deleted from
@@ -1839,17 +1541,6 @@ class NostrCircleService implements CircleService {
   }
 
   @override
-  Future<void> wipeAllStagedCommits() async {
-    final manager = await _ensureInitialized();
-    try {
-      await manager.wipeAllStagedCommits();
-    } on Object catch (e) {
-      debugPrint('Failed to wipe staged commits: ${e.runtimeType}');
-      throw const CircleServiceException('Failed to wipe staged commits');
-    }
-  }
-
-  @override
   Future<void> resetAllSyncCursors() async {
     final manager = await _ensureInitialized();
     try {
@@ -1868,8 +1559,9 @@ class NostrCircleService implements CircleService {
     // between), so the in-flight init — whenever it resumes — is guaranteed to
     // see `_wiped` at its post-open re-check and fail closed.
     _wiped = true;
-    // Unblock any live-sync converge loop parked in its settle wait so it bails
-    // (no-resurrection) instead of stalling the wipe for a full window.
+    // Reserved teardown fence for any future settle-wait style operation —
+    // completing it here keeps the invariant "torn down ⇒ signalled" even
+    // though no current code path awaits it.
     if (!_teardownSignal.isCompleted) _teardownSignal.complete();
     // M10 (H1 in-flight race): an initialization already suspended at its
     // awaited DB open when we latched will still run to completion and
@@ -1970,5 +1662,4 @@ class NostrCircleService implements CircleService {
       throw const CircleServiceException('Failed to set nickname');
     }
   }
-
 }

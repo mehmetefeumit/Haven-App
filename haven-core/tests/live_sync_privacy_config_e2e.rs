@@ -76,7 +76,8 @@ async fn engine_never_authenticates_to_an_auth_required_relay() {
     // the relay's AUTH challenge it sends NO client AUTH and its REQ is CLOSED
     // (auth-required) — it can never read the stored event.
     let dir = TempDir::new().unwrap();
-    let circle = Arc::new(CircleManager::new_unencrypted(dir.path()).unwrap());
+    let circle =
+        Arc::new(CircleManager::new_unencrypted(dir.path(), &nostr::Keys::generate()).unwrap());
     let engine = LiveSyncCore::new_local(circle, Keys::generate().public_key());
     let mut rx = engine.bus().subscribe(); // before start: capture any content emit
     engine
@@ -174,7 +175,8 @@ async fn engine_connects_only_to_configured_relays_never_gossip_discovered() {
 
     let identity = Keys::generate();
     let dir = TempDir::new().unwrap();
-    let circle = Arc::new(CircleManager::new_unencrypted(dir.path()).unwrap());
+    let circle =
+        Arc::new(CircleManager::new_unencrypted(dir.path(), &nostr::Keys::generate()).unwrap());
     let engine = LiveSyncCore::new_local(circle, identity.public_key());
     engine
         .start(

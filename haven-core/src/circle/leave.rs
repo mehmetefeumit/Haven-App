@@ -27,7 +27,7 @@ use nostr::PublicKey;
 use super::error::{CircleError, Result};
 use super::manager::short_id;
 use crate::nostr::mls::types::GroupId;
-use crate::nostr::mls::MdkManager;
+use crate::nostr::mls::SessionManager;
 
 /// Planned exit strategy for a single user leaving a single circle.
 pub enum LeavePlan {
@@ -69,23 +69,38 @@ impl std::fmt::Debug for LeavePlan {
 
 /// Chooses the [`LeavePlan`] for `self_pubkey` leaving `group_id`.
 ///
+/// Maps the engine's `SelfRemove` admin gating (`AdminCannotSelfRemove` /
+/// `AdminDepletion`) onto Haven's leave state machine: an admin must first
+/// exit the admin set (self-demote, handing off if they are the sole admin)
+/// before the engine will accept their `SendIntent::Leave`.
+///
 /// # Errors
 ///
-/// Returns [`CircleError::Mls`] if MDK queries fail for reasons other than
+/// Returns [`CircleError::Mls`] if engine queries fail for reasons other than
 /// "group not found" (which maps to [`LeavePlan::OrphanLocalOnly`]).
-pub fn plan_leave(
-    mdk: &MdkManager,
+pub async fn plan_leave(
+    session: &SessionManager,
     group_id: &GroupId,
     self_pubkey: &PublicKey,
 ) -> Result<LeavePlan> {
-    let Some(group) = mdk
-        .get_group(group_id)
+    // Unknown group ⇒ orphaned local row; nothing to leave on the wire.
+    if session
+        .find_group(group_id)
+        .await
         .map_err(|e| CircleError::Mls(e.to_string()))?
-    else {
+        .is_none()
+    {
         return Ok(LeavePlan::OrphanLocalOnly);
-    };
+    }
 
-    if !group.admin_pubkeys.contains(self_pubkey) {
+    // Admins are raw x-only pubkey bytes (Rule 4: never the MLS group id).
+    let self_bytes = self_pubkey.to_bytes();
+    let admins = session
+        .admin_pubkeys(group_id)
+        .await
+        .map_err(|e| CircleError::Mls(e.to_string()))?;
+
+    if !admins.iter().any(|a| a == &self_bytes) {
         return Ok(LeavePlan::NonAdmin);
     }
 
@@ -93,13 +108,19 @@ pub fn plan_leave(
     // This is also the retry path when a prior handoff's promote succeeded
     // but demote failed: the successor is now an admin, so AdminDemote
     // resumes cleanly without re-promoting.
-    if group.admin_pubkeys.len() > 1 {
+    if admins.len() > 1 {
         return Ok(LeavePlan::AdminDemote);
     }
 
-    let members = mdk
-        .get_members(group_id)
-        .map_err(|e| CircleError::Mls(e.to_string()))?;
+    // Sole admin: pick a successor from the remaining roster (or Abandon if we
+    // are the only member left).
+    let members: BTreeSet<PublicKey> = session
+        .member_pubkeys(group_id)
+        .await
+        .map_err(|e| CircleError::Mls(e.to_string()))?
+        .iter()
+        .filter_map(|hex| PublicKey::from_hex(hex).ok())
+        .collect();
 
     Ok(
         select_successor(&members, self_pubkey).map_or(LeavePlan::Abandon, |successor| {

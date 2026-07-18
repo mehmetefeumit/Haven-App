@@ -26,7 +26,7 @@ use super::types::{
     Circle, CircleMembership, CircleType, CircleUiState, Contact, LastKnownLocation,
     MembershipStatus,
 };
-use crate::nostr::mls::types::GroupId;
+use crate::nostr::mls::types::{GroupId, GroupIdExt};
 
 /// `SQLite`-based storage for circle data.
 ///
@@ -243,12 +243,11 @@ impl CircleStorage {
     /// **defense-in-depth for the marker table alone**: under brief contention
     /// on `circles.db` (e.g. the foreground publish and a background sweep both
     /// touching the staged-commit / last-known-location tables) it stops
-    /// `has_pending_commit` / `mark_group_staged` from spuriously failing-closed
-    /// or aborting a legitimate stage. It does **NOT** and MUST NOT be sold as
-    /// fixing the MDK-DB fork hazard: MDK's `haven_mdk.db` stays PRISTINE at
-    /// `busy_timeout = 0`, and the only thing that excludes the concurrent
-    /// MDK-write collision is the process-global [`crate::write_lock`]. See
-    /// `docs/M7_BACKGROUND_SHARING.md` §B (Defense-in-depth) and §E(2).
+    /// `circles.db` writers from spuriously failing-closed under contention. It
+    /// does **NOT** fix any MLS-store fork hazard: under the Dark Matter stack the
+    /// MLS DB is owned by the single process-global `SessionManager`
+    /// (`tokio::sync::Mutex<AccountDeviceSession>`, Rule 14), which is the sole
+    /// thing that serializes concurrent MLS writes across isolates.
     ///
     /// A failure to apply them is surfaced so the caller fails closed rather
     /// than running with weaker guarantees.
@@ -522,55 +521,35 @@ impl CircleStorage {
                 last_synced_ms INTEGER NOT NULL
             );
 
-            -- M7: Haven-owned mirror of MDK's per-group unmerged pending-commit
-            -- state. A row means 'this group currently holds a locally-staged,
-            -- unmerged MLS commit' (self-update / add / remove / admin-handoff /
-            -- relay-update / self-demote / an auto-committed peer proposal).
-            -- Cross-process-visible (unlike MDK's in-memory pending_commit and
-            -- the in-memory settle window), so a background/catch-up receive can
-            -- fork-safely SKIP decrypting a group whose epoch transition the
-            -- foreground owns (regime 2). Keyed by the PUBLIC lowercase-hex
-            -- nostr_group_id (Rule 4: never the real MLS group id). Set
-            -- BEFORE the MDK stage and cleared AFTER the MDK merge/clear, so a
-            -- crash only ever leaves a STALE marker (over-skip, self-healing),
-            -- never a MISSING one (which would be fork-unsafe).
-            CREATE TABLE IF NOT EXISTS staged_commits (
-                nostr_group_id_hex TEXT PRIMARY KEY,
-                staged_epoch       INTEGER NOT NULL,
-                updated_at         INTEGER NOT NULL
-            );
-
-            -- M8-2: identity-level tracking of KeyPackages this device has
-            -- published, so the periodic KeyPackageMaintenance task can rotate
-            -- IN PLACE (reuse the same NIP-33 `d` slot) instead of minting a new
-            -- addressable coordinate every cycle. A row records one published
-            -- KeyPackage event: its MLS `hash_ref` (correlates the relay event
-            -- to local live-material state), the `event_id`, its `kind`
-            -- (30443 canonical / 443 legacy twin), the NIP-33 `d_tag` (NULL for
-            -- the legacy 443 twin, which is not addressable), and `created_at`.
+            -- Dark Matter (DM-2b): identity-level tracking of the CURRENT
+            -- KeyPackage this device has published, so the periodic
+            -- KeyPackageMaintenance task can (a) republish the SAME cached
+            -- last-resort KeyPackage into the SAME NIP-33 `d` slot when a relay
+            -- drops it, and (b) `delete_key_package` the superseded private
+            -- bundle on rotation (mdk#160). A row records one published kind-30443
+            -- event: its `event_id`, its stable NIP-33 `d_tag` (30443 is
+            -- addressable — always present now; the non-addressable 443 twin is
+            -- RETIRED), the public `key_package` wire bytes (re-published verbatim
+            -- on a heal, and fed to `delete_key_package` on rotation), and
+            -- `created_at`. Single kind (30443), so no `kind` column; last-resort
+            -- KeyPackages never die on join, so the old MLS `hash_ref`
+            -- live-material correlator is GONE.
             --
             -- This table is IDENTITY-scoped, NOT per-circle: KeyPackages are
             -- pre-group init material and outlive any single circle, so there is
             -- NO `delete_circle` cascade (a circle's teardown must not drop the
             -- user's published-KP tracking). Single-identity Haven, so no
             -- account_pubkey column (additive if multi-identity ever lands).
-            --
-            -- MINIMAL form (owner decision, M8-2): the consumed/deleted/twin-GC
-            -- lifecycle columns White Noise carries are DEFERRED to M10. The
-            -- live-material gate here reads MDK's OpenMLS storage directly via
-            -- `hash_ref`, so no `consumed_at`/`key_material_deleted` mirror is
-            -- needed for correctness at this milestone.
             CREATE TABLE IF NOT EXISTS published_key_packages (
-                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-                key_package_hash_ref BLOB NOT NULL,
-                event_id             TEXT NOT NULL,
-                kind                 INTEGER NOT NULL,
-                d_tag                TEXT,
-                created_at           INTEGER NOT NULL,
-                UNIQUE (event_id, kind)
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id     TEXT NOT NULL,
+                d_tag        TEXT NOT NULL,
+                key_package  BLOB NOT NULL,
+                created_at   INTEGER NOT NULL,
+                UNIQUE (event_id)
             );
-            CREATE INDEX IF NOT EXISTS idx_published_key_packages_kind_created
-                ON published_key_packages(kind, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_published_key_packages_slot
+                ON published_key_packages(d_tag, created_at DESC);
 
             -- Public-profile (kind-0) metadata cache. Keyed by pubkey (hex);
             -- there is deliberately NO circle/group column (a group id must
@@ -614,7 +593,94 @@ impl CircleStorage {
         // public-profile cutover. Sentinel-gated so it runs at most once.
         Self::migrate_drop_legacy_avatar_tables(&conn)?;
 
+        // Dark Matter cutover: drop the pre-migration `published_key_packages`
+        // schema (hash_ref/kind columns) so the fresh DM schema takes over.
+        Self::migrate_reset_published_key_packages(&conn)?;
+
         Ok(())
+    }
+
+    /// Sentinel for whether the Dark Matter `published_key_packages` reset ran.
+    const KP_TRACKING_RESET_KEY: &'static str = "dm_published_key_packages_reset_v1";
+
+    /// One-shot, sentinel-guarded drop of the legacy (pre-Dark-Matter)
+    /// `published_key_packages` table.
+    ///
+    /// The pre-migration schema carried `key_package_hash_ref` + `kind` columns
+    /// (for the deleted M8-2 live-material gate and the retired 443 twin). The
+    /// Dark Matter schema replaces them with a single-kind (30443) row holding
+    /// the public `KeyPackage` wire bytes. Because `CREATE TABLE IF NOT EXISTS`
+    /// will not alter an existing table, this drops the old table so the DM
+    /// `CREATE TABLE` above recreates it in the new shape. The tracked data is
+    /// purely ephemeral (regenerated by the next maintenance tick), so dropping
+    /// it loses nothing precious — this is exactly the `published_key_packages`
+    /// clear the migration plan §5.5 mandates at cutover. `DROP TABLE IF EXISTS`
+    /// makes a brand-new database a clean no-op; the sentinel makes it once-only.
+    ///
+    /// Runs BEFORE the schema batch's `CREATE TABLE IF NOT EXISTS` on the next
+    /// open, so ordering is: (open N) create new schema afresh if absent; (open
+    /// with legacy schema present) this drop fires, then the create recreates.
+    /// To guarantee that ordering within a single open, the drop is idempotent
+    /// and the DM `CREATE TABLE IF NOT EXISTS` re-adds the table in the same
+    /// `initialize_schema` pass that follows.
+    fn migrate_reset_published_key_packages(conn: &Connection) -> Result<()> {
+        let already: Option<String> = conn
+            .query_row(
+                "SELECT value FROM user_settings WHERE key = ?1",
+                params![Self::KP_TRACKING_RESET_KEY],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        if already.is_some() {
+            return Ok(());
+        }
+
+        // Only drop when the LEGACY shape is present (the `kind` column is the
+        // discriminator). A fresh DM database created the new schema directly in
+        // this same pass, so we must not drop it.
+        let is_legacy = Self::table_has_column(conn, "published_key_packages", "kind")?;
+        if is_legacy {
+            conn.execute_batch("DROP TABLE IF EXISTS published_key_packages;")?;
+            conn.execute_batch(
+                r"
+                CREATE TABLE IF NOT EXISTS published_key_packages (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id     TEXT NOT NULL,
+                    d_tag        TEXT NOT NULL,
+                    key_package  BLOB NOT NULL,
+                    created_at   INTEGER NOT NULL,
+                    UNIQUE (event_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_published_key_packages_slot
+                    ON published_key_packages(d_tag, created_at DESC);
+                ",
+            )?;
+            log::info!("dark matter migration: reset published_key_packages tracking");
+        }
+
+        conn.execute(
+            "INSERT OR REPLACE INTO user_settings (key, value) VALUES (?1, '1')",
+            params![Self::KP_TRACKING_RESET_KEY],
+        )?;
+        Ok(())
+    }
+
+    /// Returns whether `table` currently has a column named `column`.
+    ///
+    /// Used by schema migrations to detect a legacy table shape without failing
+    /// on a table that does not exist yet.
+    fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+        // `PRAGMA table_info` takes an identifier, not a bind parameter; the
+        // arguments here are compile-time constants, never user input.
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Sentinel for whether the legacy `avatar_path` migration has run.
@@ -1007,14 +1073,6 @@ impl CircleStorage {
             params![mls_group_id.as_slice()],
         )?;
         if let Some(ngid) = nostr_group_id {
-            // Wipe-on-LEAVE for the M7 staged-commit marker (keyed by the
-            // canonical lowercase hex of the nostr_group_id) so leaving a
-            // circle cannot orphan a marker that would wrongly skip a future
-            // same-id group's background receive.
-            tx.execute(
-                "DELETE FROM staged_commits WHERE nostr_group_id_hex = ?1",
-                params![hex::encode(&ngid)],
-            )?;
             // Wipe-on-LEAVE for the per-group sync cursor so a returning
             // circle with the same nostr_group_id re-seeds cleanly instead of
             // resuming at a stale floor. The key mirrors the group cursor key
@@ -1730,103 +1788,6 @@ impl CircleStorage {
             .lock()
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
         conn.execute("DELETE FROM sync_cursors", [])?;
-        Ok(())
-    }
-
-    // ==================== Staged Commit Marker (M7) ====================
-
-    /// Records that a group holds a locally-staged, unmerged MLS pending commit.
-    ///
-    /// Called BEFORE the MDK stage (crash-safe ordering: a crash between this
-    /// and the stage leaves a stale marker that self-heals on the next
-    /// finalize/clear — never a missing marker, which would be fork-unsafe).
-    /// Idempotent upsert; refreshes the staged epoch + timestamp. `nostr_group_id_hex`
-    /// is the PUBLIC canonical lowercase hex of the `nostr_group_id` (Rule 4).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
-    pub fn set_staged_commit(
-        &self,
-        nostr_group_id_hex: &str,
-        staged_epoch: u64,
-        now_unix_secs: i64,
-    ) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
-        conn.execute(
-            "INSERT INTO staged_commits (nostr_group_id_hex, staged_epoch, updated_at) \
-             VALUES (?1, ?2, ?3) \
-             ON CONFLICT(nostr_group_id_hex) DO UPDATE SET \
-             staged_epoch = excluded.staged_epoch, updated_at = excluded.updated_at",
-            params![
-                nostr_group_id_hex,
-                i64::try_from(staged_epoch).unwrap_or(i64::MAX),
-                now_unix_secs
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// Clears the staged-commit marker for a group. Called AFTER the MDK
-    /// merge/clear (crash-safe ordering). Idempotent (absent row = no-op).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
-    pub fn clear_staged_commit(&self, nostr_group_id_hex: &str) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
-        conn.execute(
-            "DELETE FROM staged_commits WHERE nostr_group_id_hex = ?1",
-            params![nostr_group_id_hex],
-        )?;
-        Ok(())
-    }
-
-    /// Returns whether a staged-commit marker exists for the group.
-    ///
-    /// Returns the honest `Result`. A caller gating a fork-unsafe decrypt on
-    /// this MUST fail CLOSED (treat any `Err` as `true`) — that policy lives in
-    /// [`crate::circle::CircleManager::has_pending_commit`], not here.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
-    pub fn has_staged_commit(&self, nostr_group_id_hex: &str) -> Result<bool> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
-        let found: Option<i64> = conn
-            .query_row(
-                "SELECT 1 FROM staged_commits WHERE nostr_group_id_hex = ?1",
-                params![nostr_group_id_hex],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(found.is_some())
-    }
-
-    /// Removes ALL staged-commit markers (wipe-on-logout).
-    ///
-    /// Idempotent. Wired into the identity-deletion path alongside the
-    /// cursor/location wipes so no stale marker survives an account wipe and
-    /// wrongly skips a returning identity's background receive.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
-    pub fn wipe_all_staged_commits(&self) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
-        conn.execute("DELETE FROM staged_commits", [])?;
         Ok(())
     }
 
@@ -2637,11 +2598,11 @@ mod tests {
     ///
     /// # MDK's `haven_mdk.db` invariant (documented, not asserted here)
     ///
-    /// MDK's database (`mdk-sqlite-storage`, pinned rev 93ae324) stays PRISTINE:
-    /// it is never opened by this crate, applies no `busy_timeout` (so it remains
-    /// `0`), and is NOT WAL. That DB's fork hazard under concurrent writers is
-    /// excluded ONLY by `crate::write_lock`, never by any PRAGMA — this crate
-    /// deliberately does not touch `haven_mdk.db`.
+    /// This assertion covers `circles.db` only. The Dark Matter MLS store
+    /// (`storage-sqlite`'s `session.sqlite`) is a SEPARATE database owned by the
+    /// single process-global `SessionManager`; its concurrent-writer safety comes
+    /// from the one `tokio::sync::Mutex<AccountDeviceSession>` (Rule 14), not from
+    /// this crate's PRAGMAs — this crate never opens the MLS DB directly.
     #[test]
     fn m7b_m4_circles_db_is_rollback_journal_not_wal() {
         let dir = tempfile::TempDir::new().unwrap();

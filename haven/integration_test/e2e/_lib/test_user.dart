@@ -212,8 +212,14 @@ class TestUser {
     );
     final identity = await NostrIdentityManager.newInstance();
     final publicIdentity = await identity.loadFromBytes(secretBytes: seed);
+    // Dark Matter (DM-4): `CircleManagerFfi.newInstance` hard-requires the
+    // identity secret bytes at construction time (it binds the account
+    // identity, the NIP-59 welcome signer, and the account-identity-proof
+    // signer). `seed` IS the 32-byte identity secret this `TestUser` was
+    // just loaded from, above.
     final circleManager = await CircleManagerFfi.newInstance(
       dataDir: dataDir.path,
+      identitySecretBytes: seed,
     );
     return TestUser._(
       label: label,

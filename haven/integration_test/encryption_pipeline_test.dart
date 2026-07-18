@@ -209,35 +209,54 @@ void main() {
 
         // --------------------------------------------------------------
         // 4. Initialise two CircleManagerFfi instances (separate stores).
+        //    Dark Matter (DM-4): construction hard-requires the identity
+        //    secret bytes (binds the account identity, the NIP-59 welcome
+        //    signer, and the account-identity-proof signer).
         // --------------------------------------------------------------
         final aliceManager = await CircleManagerFfi.newInstance(
           dataDir: aliceDir.path,
+          identitySecretBytes: aliceSecretBytes,
         );
         final bobManager = await CircleManagerFfi.newInstance(
           dataDir: bobDir.path,
+          identitySecretBytes: bobSecretBytes,
         );
 
         // --------------------------------------------------------------
-        // 5. Bob creates and signs a key package event for Alice to use
-        //    when building the MLS group.
+        // 5. Bob publishes a KeyPackage for Alice to discover, via the
+        //    Dark Matter maintain-key-package path (the ONE publish path —
+        //    there is no longer a bare "sign, don't publish" FFI call). It
+        //    probes/publishes to Bob's OWN NIP-65 relays, so seed that list
+        //    with the test relay first.
         // --------------------------------------------------------------
-        const testRelays = <String>[_testRelayUrl];
-
-        final bobKpResult = await bobManager.signKeyPackageEvent(
+        await bobManager.addUserRelay(
+          url: _testRelayUrl,
+          relayType: RelayTypeFfi.nip65,
+        );
+        final bobRelayManager = await RelayManagerFfi.newInstance();
+        await bobRelayManager.maintainKeyPackage(
+          circle: bobManager,
           identitySecretBytes: bobSecretBytes,
-          relays: testRelays,
+        );
+        final bobKpJson = await bobRelayManager.fetchKeypackage(
+          pubkey: bobIdManager.pubkeyHex(),
+        );
+        expect(
+          bobKpJson,
+          isNotNull,
+          reason: 'Bob must have published a discoverable KeyPackage',
         );
 
         // --------------------------------------------------------------
         // 6. Alice creates a circle with Bob as the sole member.
-        //    Pass Bob's signed key package event JSON inside a
-        //    MemberKeyPackageFfi so the Rust layer can consume it.
+        //    Pass Bob's KeyPackage event JSON inside a MemberKeyPackageFfi
+        //    so the Rust layer can consume it.
         // --------------------------------------------------------------
         final creationResult = await aliceManager.createCircle(
           identitySecretBytes: aliceSecretBytes,
           members: [
             MemberKeyPackageFfi(
-              keyPackageJson: bobKpResult.eventJson,
+              keyPackageJson: bobKpJson!,
               inboxRelays: const [_testRelayUrl],
               nip65Relays: const [_testRelayUrl],
             ),
@@ -254,12 +273,12 @@ void main() {
           Uint8List.fromList(creationResult.circle.nostrGroupId),
         );
 
-        // Alice's pending commit (from adding Bob) must be merged before
-        // she can send messages. This mirrors what the production code
-        // does after a successful relay publish.
-        await aliceManager.finalizePendingCommit(
-          mlsGroupId: Uint8List.fromList(mlsGroupId),
-        );
+        // Alice's pending group-creation state (from adding Bob) must be
+        // confirmed before she can send messages — publish-before-apply
+        // (Rule 13). This test hands the Welcome to Bob in-process (not via
+        // a real relay round-trip), so it confirms directly rather than
+        // gating on a relay ack.
+        await aliceManager.confirmPublished(pending: creationResult.pending);
 
         // --------------------------------------------------------------
         // 7. Bob processes the gift-wrapped Welcome and accepts it so
@@ -288,8 +307,10 @@ void main() {
           // `null` means the wrapper was already processed on a prior
           // iteration of this test — safe to skip the accept.
           if (bobInvitation != null) {
+            // `bobInvitation.mlsGroupId` is the pre-join stand-in id —
+            // actually the gift-wrap event id the invitation was keyed by.
             await bobManager.acceptInvitation(
-              mlsGroupId: bobInvitation.mlsGroupId,
+              giftWrapId: bobInvitation.mlsGroupId,
             );
           }
         } on Object catch (e) {
@@ -637,24 +658,42 @@ void main() {
 
         final aliceManager = await CircleManagerFfi.newInstance(
           dataDir: aliceDir.path,
+          identitySecretBytes: aliceSecretBytes,
         );
         final bobManager = await CircleManagerFfi.newInstance(
           dataDir: bobDir.path,
+          identitySecretBytes: bobSecretBytes,
         );
         // Carol's manager has its own separate circle database and MLS
         // state — she is never invited to Alice's group.
+        final carolSecretBytes = await carolIdManager.getSecretBytes();
         final carolManager = await CircleManagerFfi.newInstance(
           dataDir: carolDir.path,
+          identitySecretBytes: carolSecretBytes,
         );
 
-        const testRelays = <String>[_testRelayUrl];
-
         // ----------------------------------------------------------------
-        // Bob signs a key package so Alice can create the circle with him.
+        // Bob publishes a KeyPackage so Alice can create the circle with
+        // him, via the Dark Matter maintain-key-package path (the ONE
+        // publish path). It probes/publishes to Bob's OWN NIP-65 relays,
+        // so seed that list with the test relay first.
         // ----------------------------------------------------------------
-        final bobKpResult = await bobManager.signKeyPackageEvent(
+        await bobManager.addUserRelay(
+          url: _testRelayUrl,
+          relayType: RelayTypeFfi.nip65,
+        );
+        final bobRelayManager = await RelayManagerFfi.newInstance();
+        await bobRelayManager.maintainKeyPackage(
+          circle: bobManager,
           identitySecretBytes: bobSecretBytes,
-          relays: testRelays,
+        );
+        final bobKpJson = await bobRelayManager.fetchKeypackage(
+          pubkey: bobIdManager.pubkeyHex(),
+        );
+        expect(
+          bobKpJson,
+          isNotNull,
+          reason: 'Bob must have published a discoverable KeyPackage',
         );
 
         // ----------------------------------------------------------------
@@ -664,7 +703,7 @@ void main() {
           identitySecretBytes: aliceSecretBytes,
           members: [
             MemberKeyPackageFfi(
-              keyPackageJson: bobKpResult.eventJson,
+              keyPackageJson: bobKpJson!,
               inboxRelays: const [_testRelayUrl],
               nip65Relays: const [_testRelayUrl],
             ),
@@ -677,8 +716,10 @@ void main() {
 
         final mlsGroupId = Uint8List.fromList(creation.circle.mlsGroupId);
 
-        // Alice merges her pending commit before encrypting.
-        await aliceManager.finalizePendingCommit(mlsGroupId: mlsGroupId);
+        // Alice confirms her pending group-creation state before encrypting
+        // (publish-before-apply, Rule 13) — the Welcome is handed to Bob
+        // in-process here, not via a real relay round-trip.
+        await aliceManager.confirmPublished(pending: creation.pending);
 
         // ----------------------------------------------------------------
         // Bob processes the gift-wrap and accepts the invitation.
@@ -702,7 +743,9 @@ void main() {
               'null means the gift-wrap was already processed, which is '
               'impossible for a freshly-created group in a fresh temp dir.',
         );
-        await bobManager.acceptInvitation(mlsGroupId: invitation!.mlsGroupId);
+        // `invitation.mlsGroupId` is the pre-join stand-in id — actually
+        // the gift-wrap event id the invitation was keyed by.
+        await bobManager.acceptInvitation(giftWrapId: invitation!.mlsGroupId);
 
         // ----------------------------------------------------------------
         // Alice encrypts a location with the sentinel coordinates.
@@ -732,22 +775,24 @@ void main() {
         // no-op or the MLS group states diverged, the result is null and
         // the expect below fails, surfacing the bug.
         // ----------------------------------------------------------------
-        final decryptResult = await bobManager.decryptLocation(
+        final decryptResults = await bobManager.decryptLocation(
           eventJson: encrypted.eventJson,
         );
 
         expect(
-          decryptResult,
-          isNotNull,
+          decryptResults,
+          isNotEmpty,
           reason:
               "Bob must be able to decrypt Alice's location event. "
-              "A null result means either Bob's acceptInvitation did not "
+              "An empty result means either Bob's acceptInvitation did not "
               "converge to Alice's epoch, or decryptLocation is a no-op — "
               'both are regressions in the MLS pipeline.',
         );
 
-        // decryptResult is non-null here; access its location field.
-        final loc = decryptResult!.location;
+        final loc = decryptResults
+            .where((r) => r.kind == LocationMessageResultKindFfi.location)
+            .firstOrNull
+            ?.location;
         expect(
           loc,
           isNotNull,
@@ -813,9 +858,9 @@ void main() {
         // The load-bearing invariant is the same either way: Carol recovers NO
         // plaintext location. We assert exactly that, so a real regression — a
         // non-null *location* for a non-member — still fails loudly.
-        DecryptResultFfi? carolResult;
+        List<LocationMessageResultFfi> carolResults = const [];
         try {
-          carolResult = await carolManager.decryptLocation(
+          carolResults = await carolManager.decryptLocation(
             eventJson: encrypted.eventJson,
           );
         } on Object catch (e) {
@@ -825,8 +870,12 @@ void main() {
           );
         }
 
+        final carolLocation = carolResults
+            .where((r) => r.kind == LocationMessageResultKindFfi.location)
+            .firstOrNull
+            ?.location;
         expect(
-          carolResult?.location,
+          carolLocation,
           isNull,
           reason:
               "Carol (not a member of Alice's group) must NOT recover a "

@@ -254,10 +254,13 @@ class _ThrowingCircleService implements CircleService {
   }
 
   @override
-  Future<void> wipeAllStagedCommits() async {}
+  Future<void> resetAllSyncCursors() async {}
 
   @override
-  Future<void> resetAllSyncCursors() async {}
+  void markCircleBlocked(List<int> mlsGroupId) {}
+
+  @override
+  bool isCircleBlocked(List<int> mlsGroupId) => false;
 
   @override
   Future<void> closeAndInvalidate() async {}
@@ -302,19 +305,6 @@ class _ThrowingCircleService implements CircleService {
   }) async {
     throw UnimplementedError();
   }
-
-  @override
-  Future<void> finalizePendingCommit(List<int> mlsGroupId) async {}
-
-  @override
-  Future<void> clearPendingCommit(List<int> mlsGroupId) async {}
-
-  @override
-  Future<bool> publishEvolutionEvent({
-    required String eventJson,
-    required List<String> relays,
-    required String label,
-  }) async => true;
 
   @override
   Future<void> declineInvitation(List<int> mlsGroupId) async {}
@@ -390,28 +380,26 @@ class _ThrowingCircleService implements CircleService {
   Future<int> pruneExpiredLastKnown({DateTime? now}) async => 0;
 
   @override
-  Future<DecryptResult?> decryptLocation({required String eventJson}) async =>
-      throw UnimplementedError();
+  Future<List<LocationEventResult>> decryptLocation({
+    required String eventJson,
+  }) async => throw UnimplementedError();
+
+  @override
+  Future<DecryptLocationOutcome> decryptLocationCollectingCommits({
+    required String eventJson,
+  }) async => throw UnimplementedError();
+
+  @override
+  Future<void> confirmPendingCommit(PendingCommitToken pending) async {}
+
+  @override
+  Future<void> failPendingCommit(PendingCommitToken pending) async {}
 
   @override
   Future<void> advanceGroupCursorToEventSecs(int eventCreatedAtSecs) async {}
 
   @override
   Future<void> advanceInboxCursorToWrapSecs(int wrapCreatedAtSecs) async {}
-
-  @override
-  Future<SignedKeyPackageEvent> signKeyPackageEvent({
-    required List<int> identitySecretBytes,
-    required List<String> relays,
-  }) async => throw UnimplementedError();
-
-  @override
-  Future<void> recordPublishedKeyPackages({
-    required List<int> canonicalHashRef,
-    required String dTag,
-    required String canonicalEventId,
-    required String legacyEventId,
-  }) async => throw UnimplementedError();
 
   @override
   Future<String> signDeletionEvent({
@@ -424,13 +412,6 @@ class _ThrowingCircleService implements CircleService {
     required String pubkey,
     String? displayName,
   }) async {}
-
-  @override
-  Future<List<List<int>>> groupsNeedingSelfUpdate(int thresholdSecs) async =>
-      [];
-
-  @override
-  Future<void> selfUpdate(List<int> mlsGroupId) async {}
 
   @override
   Future<void> updateCircleRelays({
@@ -450,10 +431,13 @@ class _ThrowingErrorCircleService implements CircleService {
   }
 
   @override
-  Future<void> wipeAllStagedCommits() async {}
+  Future<void> resetAllSyncCursors() async {}
 
   @override
-  Future<void> resetAllSyncCursors() async {}
+  void markCircleBlocked(List<int> mlsGroupId) {}
+
+  @override
+  bool isCircleBlocked(List<int> mlsGroupId) => false;
 
   @override
   Future<void> closeAndInvalidate() async {}
@@ -498,19 +482,6 @@ class _ThrowingErrorCircleService implements CircleService {
   }) async {
     throw UnimplementedError();
   }
-
-  @override
-  Future<void> finalizePendingCommit(List<int> mlsGroupId) async {}
-
-  @override
-  Future<void> clearPendingCommit(List<int> mlsGroupId) async {}
-
-  @override
-  Future<bool> publishEvolutionEvent({
-    required String eventJson,
-    required List<String> relays,
-    required String label,
-  }) async => true;
 
   @override
   Future<void> declineInvitation(List<int> mlsGroupId) async {}
@@ -586,28 +557,26 @@ class _ThrowingErrorCircleService implements CircleService {
   Future<int> pruneExpiredLastKnown({DateTime? now}) async => 0;
 
   @override
-  Future<DecryptResult?> decryptLocation({required String eventJson}) async =>
-      throw UnimplementedError();
+  Future<List<LocationEventResult>> decryptLocation({
+    required String eventJson,
+  }) async => throw UnimplementedError();
+
+  @override
+  Future<DecryptLocationOutcome> decryptLocationCollectingCommits({
+    required String eventJson,
+  }) async => throw UnimplementedError();
+
+  @override
+  Future<void> confirmPendingCommit(PendingCommitToken pending) async {}
+
+  @override
+  Future<void> failPendingCommit(PendingCommitToken pending) async {}
 
   @override
   Future<void> advanceGroupCursorToEventSecs(int eventCreatedAtSecs) async {}
 
   @override
   Future<void> advanceInboxCursorToWrapSecs(int wrapCreatedAtSecs) async {}
-
-  @override
-  Future<SignedKeyPackageEvent> signKeyPackageEvent({
-    required List<int> identitySecretBytes,
-    required List<String> relays,
-  }) async => throw UnimplementedError();
-
-  @override
-  Future<void> recordPublishedKeyPackages({
-    required List<int> canonicalHashRef,
-    required String dTag,
-    required String canonicalEventId,
-    required String legacyEventId,
-  }) async => throw UnimplementedError();
 
   @override
   Future<String> signDeletionEvent({
@@ -620,13 +589,6 @@ class _ThrowingErrorCircleService implements CircleService {
     required String pubkey,
     String? displayName,
   }) async {}
-
-  @override
-  Future<List<List<int>>> groupsNeedingSelfUpdate(int thresholdSecs) async =>
-      [];
-
-  @override
-  Future<void> selfUpdate(List<int> mlsGroupId) async {}
 
   @override
   Future<void> updateCircleRelays({

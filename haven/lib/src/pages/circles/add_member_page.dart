@@ -20,6 +20,7 @@ import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/key_package_kind.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/widgets/widgets.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -263,6 +264,21 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
           _memberStatus[npub] = ValidationStatus.invalid;
           _memberErrors[npub] = l10n.createCircleNoAccountFound;
         });
+        return;
+      }
+
+      // Dark Matter migration (DM-4c, plan §6 F11): a legacy (kind 443)
+      // KeyPackage means this person is still on a pre-migration Haven
+      // build and cannot be invited into a circle on the new engine until
+      // they update. Check this BEFORE the already-in-circle exclusion —
+      // a stale-protocol peer is blocked regardless of membership overlap.
+      if (isLegacyKeyPackageJson(keyPackage.eventJson)) {
+        if (mounted && _selectedMembers.contains(npub)) {
+          setState(() {
+            _memberStatus[npub] = ValidationStatus.needsUpdate;
+            _memberErrors[npub] = l10n.pendingMemberNeedsUpdate;
+          });
+        }
         return;
       }
 

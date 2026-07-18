@@ -154,6 +154,46 @@ pub fn build_relay_list_event(
         .map_err(|e| PublisherError::Build(format!("sign: {e}")))
 }
 
+/// Builds a signed NIP-65 relay-list event (kind 10002).
+///
+/// Under Dark Matter (W2), the abolished kind-10051 `KeyPackage`-relay list is
+/// replaced by the account's NIP-65 kind-10002 relays for `KeyPackage` discovery
+/// (the kind-10050 inbox list stays for NIP-17 welcome delivery). NIP-65 tags
+/// each relay as `["r", "<url>"]` (NOT the `["relay", "<url>"]` form the
+/// MIP-00/NIP-17 lists use), with empty content. `created_at`, when supplied,
+/// floors the timestamp so a republish strictly supersedes the previous list
+/// (see [`superseding_created_at`]).
+///
+/// Kept as a standalone builder (rather than a new [`RelayType`] variant) so the
+/// persisted `relay_type` slug set is untouched; the FFI wires the 10002 publish
+/// target set (own relays only, [`dedup_relay_targets`]) at DM-4.
+///
+/// # Errors
+///
+/// Returns [`PublisherError::Build`] if a relay tag or signing fails.
+pub fn build_nip65_relay_list_event(
+    keys: &Keys,
+    urls: &[String],
+    created_at: Option<i64>,
+) -> PublisherResult<nostr::Event> {
+    let tags: Vec<Tag> = urls
+        .iter()
+        .map(|url| {
+            Tag::parse(["r", url.as_str()])
+                .map_err(|e| PublisherError::Build(format!("r tag: {e}")))
+        })
+        .collect::<PublisherResult<Vec<Tag>>>()?;
+
+    let mut builder = EventBuilder::new(Kind::RelayList, "").tags(tags);
+    if let Some(ts) = created_at {
+        let ts = u64::try_from(ts).unwrap_or(0);
+        builder = builder.custom_created_at(Timestamp::from_secs(ts));
+    }
+    builder
+        .sign_with_keys(keys)
+        .map_err(|e| PublisherError::Build(format!("sign: {e}")))
+}
+
 /// Builds the "empty replacement" event used to unpublish a relay list.
 ///
 /// The event has the same `kind` as the list (10050 / 10051) but no `relay`
@@ -335,6 +375,32 @@ mod tests {
         assert_eq!(relay_tags.len(), 2);
         // Tag form is ["relay", url] — singular, NOT "r".
         assert_eq!(relay_tags[0].as_slice()[0], "relay");
+    }
+
+    #[test]
+    fn build_nip65_event_uses_kind_10002_and_r_tags() {
+        let k = keys();
+        let urls = vec![
+            "wss://a.example.com".to_string(),
+            "wss://b.example.com".to_string(),
+        ];
+        let event = build_nip65_relay_list_event(&k, &urls, None).unwrap();
+        assert_eq!(event.kind, Kind::RelayList);
+        assert_eq!(event.content, "");
+        // NIP-65 uses `r` tags, NOT the `relay` form of 10050/10051.
+        let r_tags: Vec<&Tag> = event
+            .tags
+            .iter()
+            .filter(|t| {
+                let s = t.as_slice();
+                !s.is_empty() && s[0] == "r"
+            })
+            .collect();
+        assert_eq!(r_tags.len(), 2);
+        assert!(!event.tags.iter().any(|t| {
+            let s = t.as_slice();
+            !s.is_empty() && s[0] == "relay"
+        }));
     }
 
     #[test]

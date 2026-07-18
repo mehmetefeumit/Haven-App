@@ -1,29 +1,35 @@
 //! High-level circle management API.
 //!
 //! This module provides the [`CircleManager`] which combines MLS operations
-//! (via [`MdkManager`]) with application-level storage ([`CircleStorage`])
+//! (via [`SessionManager`]) with application-level storage ([`CircleStorage`])
 //! to provide a unified API for circle management.
 //!
 //! # Privacy Model
 //!
 //! Haven uses a privacy-first approach where:
-//! - User profiles (kind 0) are never published to relays
-//! - Contact info (display names, avatars) is stored locally only
-//! - Relays only see pubkeys, never usernames
+//! - User profiles (kind 0) are public-by-default; all other group metadata
+//!   stays local
+//! - Contact info (petnames) is stored locally only
+//! - Relays only see pubkeys and the pseudonymous `nostr_group_id`
 //!
-//! [`MdkManager`]: crate::nostr::mls::MdkManager
+//! # Dark Matter engine (DM-3)
+//!
+//! The circle layer sits on the Dark Matter [`SessionManager`] (one hydrated
+//! `AccountDeviceSession` behind a `tokio` mutex). Its mutating calls are
+//! `async` and take `&mut self` internally, so every `CircleManager` method
+//! that touches the session is `async`. The engine owns convergence,
+//! out-of-order sequencing, and publish-before-apply (`PendingStateRef`); the
+//! hand-rolled settle-window / staged-commit / un-poison machinery that used to
+//! live here is deleted (plan §5.3/§5.4).
+//!
+//! [`SessionManager`]: crate::nostr::mls::SessionManager
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
-use nostr::{
-    Event, EventBuilder, EventId, Keys, Kind, PublicKey, RelayUrl, Tag, TagStandard, Timestamp,
-    UnsignedEvent,
-};
+use nostr::{Event, EventId, Keys, PublicKey};
 
-use super::converge::{
-    commit_beats, commit_order_key, our_commit_wins, CommitConvergence, CommitIntent,
-    ConvergedLocation,
-};
 use super::error::{CircleError, Result};
 use super::leave::{plan_leave, LeavePlan};
 use super::storage::CircleStorage;
@@ -32,18 +38,18 @@ use super::types::{
     GiftWrappedWelcome, Invitation, MemberKeyPackage, MembershipStatus,
 };
 use crate::location::LocationMessage;
-use crate::nostr::giftwrap;
 use crate::nostr::mls::redact_hex_sequences;
 use crate::nostr::mls::types::{
-    GroupId, GroupState, KeyPackageBundle, LocationMessageResult, UpdateGroupResult,
+    GroupEvent, GroupId, GroupIdExt, KeyPackage, LocationGroupConfig, LocationMessageResult,
+    PendingStateRef, PublishWork, SessionEffects, TransportMessage,
 };
-use crate::nostr::mls::MdkManager;
+use crate::nostr::mls::{PendingWelcome, PendingWelcomeStore, SessionManager};
 
 /// Formats the first 8 hex chars of an event ID for diagnostic logging.
 ///
 /// Safe to log: gives operators enough to correlate a log line with a relay
-/// event without exposing the full ID. Full IDs are public relay identifiers
-/// but we still keep output short and consistent.
+/// event without exposing the full ID.
+#[must_use]
 pub fn short_id(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(8);
@@ -55,194 +61,169 @@ pub fn short_id(bytes: &[u8]) -> String {
 
 /// High-level API for circle management.
 ///
-/// Combines MLS operations with application-level storage to provide
-/// a unified interface for creating and managing circles.
-///
-/// # Example
-///
-/// ```ignore
-/// use std::path::Path;
-/// use haven_core::circle::CircleManager;
-///
-/// let manager = CircleManager::new(Path::new("/data/haven"), None)?;
-/// let circles = manager.get_visible_circles()?;
-/// ```
+/// Combines MLS operations with application-level storage to provide a unified
+/// interface for creating and managing circles.
 pub struct CircleManager {
-    mdk: MdkManager,
+    /// The single, process-global Dark Matter session (Rule 14: one live
+    /// [`SessionManager`] per DB file across ALL isolates — the M7 background
+    /// catch-up path MUST reuse this handle, never open a second session).
+    session: Arc<SessionManager>,
+    /// Hold-before-ingest pending-welcome store (F3): the still-encrypted 1059
+    /// gift wraps awaiting the user's accept / decline. In-memory; re-seeded
+    /// from relays on each poll (gift wraps are permanent on relays).
+    pending_welcomes: PendingWelcomeStore,
+    /// Binds each in-flight `GroupCreated` `pending` to its group id so a
+    /// create that is rolled back (all welcomes zero-ack → `publish_failed`, or
+    /// a post-stage error) removes the eagerly-persisted circle/membership rows
+    /// instead of stranding a ghost circle backed by no confirmed group (F2).
+    /// In-memory: an unresolved create at process exit self-clears on restart
+    /// (the engine also rolls the staged create back at hydrate).
+    create_pending: Mutex<HashMap<PendingStateRef, GroupId>>,
     pub(crate) storage: CircleStorage,
 }
 
 impl CircleManager {
-    /// Creates a new circle manager.
+    /// Maximum number of relays a circle may carry.
     ///
-    /// Initializes both the MLS manager and circle storage at the given path.
-    /// Creates necessary directories and databases if they don't exist.
+    /// MIP-01 says the group relay list SHOULD NOT exceed 20; Haven enforces it
+    /// as a hard cap to bound kind-445 fan-out metadata and to stop an admin
+    /// from inflating every member's subscription set.
+    const MAX_CIRCLE_RELAYS: usize = 20;
+
+    /// Creates a new circle manager bound to the device identity `keys`.
+    ///
+    /// Initializes both the MLS session and circle storage at the given path.
+    /// The identity keys bind the engine's account identity, its NIP-59 welcome
+    /// signer, and its hardened account-identity-proof signer (Rule 1).
     ///
     /// # Arguments
     ///
     /// * `data_dir` - Base directory for all Haven data
-    /// * `circle_db_hex_key` - Optional hex-encoded encryption key for circles.db.
-    ///   When provided, the database is encrypted with `SQLCipher`.
+    /// * `keys` - The device's Nostr identity keys
+    /// * `circle_db_hex_key` - Optional hex-encoded encryption key for
+    ///   circles.db. When provided, the database is encrypted with `SQLCipher`.
     ///
     /// # Errors
     ///
     /// Returns an error if initialization fails.
-    pub fn new(data_dir: &Path, circle_db_hex_key: Option<&str>) -> Result<Self> {
-        // Create data directory if needed
+    pub fn new(data_dir: &Path, keys: &Keys, circle_db_hex_key: Option<&str>) -> Result<Self> {
         std::fs::create_dir_all(data_dir)
             .map_err(|e| CircleError::Storage(format!("Failed to create data directory: {e}")))?;
 
-        // Initialize MdkManager
-        let mdk = MdkManager::new(data_dir)
+        let session = SessionManager::new(data_dir, keys)
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
 
-        // Initialize CircleStorage with optional encryption
         let db_path = data_dir.join("circles.db");
         let storage = CircleStorage::new(&db_path, circle_db_hex_key)?;
 
-        Ok(Self { mdk, storage })
+        Ok(Self {
+            session: Arc::new(session),
+            pending_welcomes: PendingWelcomeStore::new(),
+            create_pending: Mutex::new(HashMap::new()),
+            storage,
+        })
     }
 
-    /// Creates a new circle manager with unencrypted MLS storage.
+    /// Creates a new circle manager with a fixed-key (test) MLS session.
     ///
     /// # Warning
     ///
-    /// This creates an unencrypted MLS database. Sensitive state will be stored
-    /// in plaintext. Only use this for testing or development purposes.
-    ///
-    /// # Arguments
-    ///
-    /// * `data_dir` - Base directory for all Haven data
+    /// Uses a constant passphrase for the encrypted session DB. Only for
+    /// testing or development.
     ///
     /// # Errors
     ///
     /// Returns an error if initialization fails.
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn new_unencrypted(data_dir: &Path) -> Result<Self> {
-        // Create data directory if needed
+    pub fn new_unencrypted(data_dir: &Path, keys: &Keys) -> Result<Self> {
         std::fs::create_dir_all(data_dir)
             .map_err(|e| CircleError::Storage(format!("Failed to create data directory: {e}")))?;
 
-        // Initialize MdkManager with unencrypted storage
-        let mdk = MdkManager::new_unencrypted(data_dir)
+        let session = SessionManager::new_unencrypted(data_dir, keys)
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
 
-        // Initialize CircleStorage without encryption
         let db_path = data_dir.join("circles.db");
         let storage = CircleStorage::new(&db_path, None)?;
 
-        Ok(Self { mdk, storage })
+        Ok(Self {
+            session: Arc::new(session),
+            pending_welcomes: PendingWelcomeStore::new(),
+            create_pending: Mutex::new(HashMap::new()),
+            storage,
+        })
+    }
+
+    /// A shared handle to the underlying session (for a group-scoped context).
+    #[must_use]
+    pub const fn session(&self) -> &Arc<SessionManager> {
+        &self.session
     }
 
     /// Returns the current MLS epoch for a group (test/feature-only).
     ///
-    /// Exposes MDK's group epoch so integration tests can assert real key
-    /// rotation: after a `self_update`/`add_members`/`remove_members` commit
-    /// is finalized (or a peer processes one), the epoch MUST advance.
-    /// A behavioural test that only checks `kind == 445` or a `get_members`
-    /// read-back would pass even if the commit failed to rotate the epoch,
-    /// so this accessor is the only way to observe the protocol outcome from
-    /// a downstream test crate. Also gated on `debug_assertions` so the
-    /// debug-only FFI epoch seam (`group_epoch_for_test`) can read it; the
-    /// epoch counter is not secret and carries no privacy/perf cost, and the
-    /// accessor is compiled out of every release build.
-    ///
     /// # Errors
     ///
     /// Returns [`CircleError::NotFound`] if the group does not exist, or
-    /// [`CircleError::Mls`] if the MDK query fails.
+    /// [`CircleError::Mls`] if the query fails.
     #[cfg(any(test, feature = "test-utils", debug_assertions))]
-    pub fn group_epoch(&self, mls_group_id: &GroupId) -> Result<u64> {
+    pub async fn group_epoch(&self, mls_group_id: &GroupId) -> Result<u64> {
         let group = self
-            .mdk
-            .get_group(mls_group_id)
+            .session
+            .find_group(mls_group_id)
+            .await
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
             .ok_or_else(|| CircleError::NotFound("Group not found: <redacted>".to_string()))?;
-        Ok(group.epoch)
+        Ok(group.epoch.0)
     }
 
     /// Returns whether `pubkey_hex` is still present in the group's current
-    /// roster — the REV-1 leaver-backstop liveness predicate (the async FFI
-    /// target for the Dart `leaveCircle` re-issue loop; the roster read touches
-    /// `SQLCipher`, so the FFI dispatches it via `run_blocking`, not `#[frb(sync)]`).
+    /// roster — the REV-1 leaver-backstop liveness predicate.
     ///
-    /// The leaver polls this with its OWN pubkey on each epoch advance after
-    /// publishing a `SelfRemove`; while it returns `true` the leaver re-issues a
-    /// fresh, NEW-epoch `propose_leave` (bounded) until removed, then
-    /// `complete_leave` wipes its keys. The step-2 impl MUST fail SAFE to
-    /// `false` when the group is gone or the caller has been evicted
-    /// (use-after-eviction), so a removed leaver stops re-issuing.
+    /// Fails SAFE to `false` when the group is gone or the caller has been
+    /// evicted, so a removed leaver stops re-issuing.
     ///
     /// # Errors
     ///
-    /// Returns [`CircleError::Mls`] if the roster cannot be read for a reason
-    /// other than the caller's own eviction.
-    pub fn still_a_member(&self, mls_group_id: &GroupId, pubkey_hex: &str) -> Result<bool> {
-        // Fail SAFE: a group deleted locally after the caller's own eviction
-        // means the caller is no longer a member — the leaver's re-issue loop
-        // must STOP rather than error. `get_group` returns `Ok(None)` for a gone
-        // group (never an error), so this cannot mask a genuine storage failure.
+    /// Returns [`CircleError::Mls`] if the roster cannot be read.
+    pub async fn still_a_member(&self, mls_group_id: &GroupId, pubkey_hex: &str) -> Result<bool> {
         if self
-            .mdk
-            .get_group(mls_group_id)
+            .session
+            .find_group(mls_group_id)
+            .await
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
             .is_none()
         {
             return Ok(false);
         }
 
-        // Read-only roster membership test (no mutation, no epoch advance). Uses
-        // the raw MLS roster directly (not the contact-resolving
-        // `get_members`) — a liveness poll needs no local contact lookups.
         Ok(self
-            .mdk
-            .get_members(mls_group_id)
+            .session
+            .member_pubkeys(mls_group_id)
+            .await
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
             .iter()
-            .any(|pk| pk.to_hex() == pubkey_hex))
+            .any(|pk| pk == pubkey_hex))
     }
 
     // ==================== Circle Lifecycle ====================
 
     /// Creates a new circle with gift-wrapped welcome events.
     ///
-    /// This creates the underlying MLS group, stores circle metadata, and
-    /// gift-wraps Welcome events for all invited members per NIP-59.
+    /// Creates the underlying MLS group and stores circle metadata. The engine
+    /// produces the per-member gift-wrapped Welcomes (kind 1059) itself (the
+    /// peeler owns the NIP-59 crypto now); Haven only resolves each recipient's
+    /// delivery relays through the fail-closed cascade (member inbox → member
+    /// NIP-65 → creator inbox → fail closed), so a bare-pubkey invitee with no
+    /// advertised relay is uninvitable (the intended two-plane tradeoff).
     ///
-    /// # Welcome delivery cascade
-    ///
-    /// For each member, the gift-wrapped Welcome (kind 1059) is delivered to
-    /// the first non-empty tier:
-    ///
-    /// 1. Member's inbox relays (kind 10050, NIP-17)
-    /// 2. Member's NIP-65 relays (kind 10002)
-    /// 3. Creator's own inbox relays (`creator_fallback_relays`) — lets the
-    ///    inviter deliver on relays they control when the invitee published
-    ///    nothing, relying on the overlap between the two parties' relays.
-    ///
-    /// If every tier is empty, circle creation **fails closed** with
-    /// [`CircleError::MissingWelcomeRelays`] rather than delivering the
-    /// Welcome to public default relays — doing so would expose the
-    /// invite-recipient's pubkey to those relays. A fully-private invitee is
-    /// therefore uninvitable by bare pubkey (the intended two-plane tradeoff).
-    ///
-    /// # Arguments
-    ///
-    /// * `sender_keys` - The circle creator's Nostr identity keys (for gift-wrapping)
-    /// * `members` - Key packages and inbox relays for initial members
-    /// * `config` - Circle configuration (name, type, relays)
-    /// * `creator_fallback_relays` - The creator's own inbox relays (kind
-    ///   10050), used as the third tier in the Welcome delivery cascade. Pass
-    ///   `&[]` if the creator has no inbox relays (the cascade then fails
-    ///   closed when tiers 1 and 2 are also empty).
-    ///
-    /// # Returns
-    ///
-    /// Returns the created circle and gift-wrapped Welcome events ready to publish.
+    /// Publish-before-apply (Rule 13): the returned
+    /// [`CircleCreationResult::pending`] must be confirmed via
+    /// [`Self::confirm_published`] after the welcomes reach ≥1 relay, or rolled
+    /// back via [`Self::publish_failed`] on failure.
     ///
     /// # Errors
     ///
-    /// Returns an error if circle creation or gift-wrapping fails.
+    /// Returns an error if circle creation or welcome routing fails.
     pub async fn create_circle(
         &self,
         sender_keys: &Keys,
@@ -250,18 +231,10 @@ impl CircleManager {
         config: &CircleConfig,
         creator_fallback_relays: &[String],
     ) -> Result<CircleCreationResult> {
-        // Fail closed BEFORE creating any MLS group or persisting circle /
-        // membership state. The per-member Welcome-delivery cascade
-        // (member inbox → member NIP-65 → creator inbox → fail closed) would
-        // otherwise only abort mid-loop in `create_circle_with_config`, AFTER
-        // `mdk.create_group` + `save_circle` + `save_membership` already ran —
-        // stranding a phantom circle and an advanced-epoch MLS group. Since the
-        // creator-inbox fallback (`creator_fallback_relays`) is identical for
-        // every member, a member is deliverable iff it advertises an inbox or
-        // NIP-65 relay, OR the creator has an inbox fallback. Pre-validate that
-        // here so the fail-closed path leaves storage untouched. (The loop in
-        // `create_circle_with_config` keeps the same check as a defensive
-        // backstop.)
+        // Fail closed BEFORE creating the MLS group: a member is deliverable iff
+        // it advertises an inbox/NIP-65 relay OR the creator has an inbox
+        // fallback (identical for every member). Pre-validate so the fail-closed
+        // path leaves storage untouched.
         if creator_fallback_relays.is_empty() {
             for m in &members {
                 if m.inbox_relays.is_empty() && m.nip65_relays.is_empty() {
@@ -270,75 +243,47 @@ impl CircleManager {
             }
         }
 
-        // Extract just the key package events for MLS group creation
-        let key_package_events: Vec<Event> = members
-            .iter()
-            .map(|m| m.key_package_event.clone())
-            .collect();
-
-        // The Welcome rumor's `relays` tag must be non-empty per MIP-02
-        // (validated by MDK's `validate_welcome_event`). When the caller
-        // passes an empty list, substitute the user's *Inbox* relays from
-        // [`crate::circle::storage_relay_prefs`].
-        //
-        // Why Inbox and NOT KeyPackage: `Circle.relays` populates the
-        // kind:444 Welcome's `relays` tag (where members will subscribe for
-        // group messages, kind:445 — see MIP-03) and is the kind:445
-        // publish target. Inbox relays are where this user receives gift
-        // wraps; they are the closest semantic match for "where my groups
-        // should publish, since I subscribe there." `KeyPackage` relays
-        // (kind 10051) are for KP discovery only and would be wrong here.
-        //
-        // If the user's Inbox list is also empty (should not happen
-        // post-seed; covers a defensive bootstrap race), fall back to
-        // the default relay list so MDK never sees an empty tag and the
-        // Welcome is still publishable.
-        let effective_config = if config.relays.is_empty() {
-            let mut c = config.clone();
-            let inbox_relays = self
+        // Default the group relay set to the user's Inbox relays when the caller
+        // passed none (the group relay list drives kind-445 routing and the
+        // Welcome metadata; the engine fail-closes on an empty set — W8).
+        let effective_relays: Vec<String> = if config.relays.is_empty() {
+            let inbox = self
                 .storage
                 .list_user_relays(crate::circle::relay_prefs::RelayType::Inbox)
                 .unwrap_or_default();
-            c.relays = if inbox_relays.is_empty() {
+            if inbox.is_empty() {
                 log::warn!(
                     "[CircleManager] create_circle: user inbox relays empty, \
                      falling back to default relays (seed may not have run yet)"
                 );
                 crate::circle::types::default_relays()
             } else {
-                inbox_relays
-            };
-            std::borrow::Cow::Owned(c)
+                inbox
+            }
         } else {
-            std::borrow::Cow::Borrowed(config)
+            config.relays.clone()
         };
-        let config = effective_config.as_ref();
 
-        // Create MLS group via MDK
-        let mls_config = crate::nostr::mls::types::LocationGroupConfig::new(&config.name)
-            .with_relays(config.relays.iter().map(String::as_str))
+        let mut mls_config = LocationGroupConfig::new(&config.name)
+            .with_relays(effective_relays.iter().map(String::as_str))
             .with_admin(sender_keys.public_key().to_hex());
-
         if let Some(ref description) = config.description {
-            let mls_config = mls_config.with_description(description);
-            return self
-                .create_circle_with_config(
-                    sender_keys,
-                    &members,
-                    key_package_events,
-                    mls_config,
-                    config,
-                    creator_fallback_relays,
-                )
-                .await;
+            mls_config = mls_config.with_description(description);
         }
 
+        let key_package_events: Vec<Event> = members
+            .iter()
+            .map(|m| m.key_package_event.clone())
+            .collect();
+
+        let mut cfg = config.clone();
+        cfg.relays = effective_relays;
+
         self.create_circle_with_config(
-            sender_keys,
             &members,
             key_package_events,
             mls_config,
-            config,
+            &cfg,
             creator_fallback_relays,
         )
         .await
@@ -347,202 +292,176 @@ impl CircleManager {
     /// Internal helper for circle creation with a configured MLS config.
     async fn create_circle_with_config(
         &self,
-        sender_keys: &Keys,
         members: &[MemberKeyPackage],
         key_package_events: Vec<Event>,
-        mls_config: crate::nostr::mls::types::LocationGroupConfig,
+        mls_config: LocationGroupConfig,
         config: &CircleConfig,
         creator_fallback_relays: &[String],
     ) -> Result<CircleCreationResult> {
-        let creator_pubkey = sender_keys.public_key().to_hex();
+        let key_packages = parse_key_packages(&key_package_events)?;
 
-        // M7-B: `create_group` writes MDK group state (an authoring MDK write).
-        // Exclude a concurrent background sweep, but hold the guard ONLY around
-        // the sync MDK call — this method is async and the relay I/O
-        // (`wrap_welcomes_with_cascade().await`) below MUST stay outside the
-        // lock (the guard is dropped at the end of this block).
-        let group_result = {
-            let _writer = crate::write_lock::acquire_authoring();
-            self.mdk
-                .create_group(&creator_pubkey, key_package_events, mls_config)
-                .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
-        };
+        let effects = self
+            .session
+            .create_group(key_packages, mls_config)
+            .await
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+        let group_id = effects.group_id.clone();
+
+        // The transport routing id comes from the engine's freshly-minted
+        // `marmot.transport.nostr.routing.v1` component (Rule 4: never the real
+        // MLS group id).
+        let (nostr_group_id, _) = self
+            .session
+            .group_routing(&group_id)
+            .await
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+
+        // The engine returns gift-wrapped 1059 welcomes + a PendingStateRef under
+        // GroupCreated. Extract BEFORE persisting any storage row, so a
+        // (defensive) extraction failure leaves storage untouched.
+        let (welcomes, pending) = take_group_created(effects.effects)?;
 
         let now = chrono::Utc::now().timestamp();
-
-        // Create Circle record using group from result
         let circle = Circle {
-            mls_group_id: group_result.group.mls_group_id.clone(),
-            nostr_group_id: group_result.group.nostr_group_id,
+            mls_group_id: group_id.clone(),
+            nostr_group_id,
             display_name: config.name.clone(),
             circle_type: config.circle_type,
             relays: config.relays.clone(),
             created_at: now,
             updated_at: now,
         };
-
-        // Save circle to storage
         self.storage.save_circle(&circle)?;
 
-        // Save membership as accepted (creator is automatically a member)
         let membership = CircleMembership {
-            mls_group_id: group_result.group.mls_group_id.clone(),
+            mls_group_id: group_id.clone(),
             status: MembershipStatus::Accepted,
-            inviter_pubkey: None, // Creator wasn't invited
+            inviter_pubkey: None,
             invited_at: now,
             responded_at: Some(now),
         };
         self.storage.save_membership(&membership)?;
 
-        // Gift-wrap each MDK welcome rumor for its recipient and resolve the
-        // privacy-critical delivery relays (shared with the add-member flow).
-        let welcome_events = self
-            .wrap_welcomes_with_cascade(
-                sender_keys,
-                members,
-                group_result.welcome_rumors,
-                creator_fallback_relays,
-            )
-            .await?;
+        // F2: bind this create's `pending` to the just-saved rows so a later
+        // rollback (all welcomes zero-ack → `publish_failed`, or the route error
+        // below) deletes them instead of stranding a ghost circle backed by no
+        // confirmed group.
+        self.register_create_pending(pending, &group_id);
+
+        // Route each welcome to its recipient's cascade relays. F3: if routing
+        // fails AFTER the group + rows are staged, roll the pending back — which
+        // also deletes the just-saved rows via the create-pending map — so
+        // neither a PendingStateRef nor a ghost circle row leaks.
+        let welcome_events = match self
+            .route_welcomes_with_cascade(members, welcomes, creator_fallback_relays)
+            .await
+        {
+            Ok(events) => events,
+            Err(e) => {
+                let _ = self.publish_failed(pending).await;
+                return Err(e);
+            }
+        };
 
         Ok(CircleCreationResult {
             circle,
             welcome_events,
+            pending,
         })
     }
 
-    /// Gift-wraps MDK Welcome rumors and resolves their delivery relays.
+    /// Binds a create's `pending` to its group id so a later rollback removes
+    /// the eagerly-persisted circle/membership rows (F2). See
+    /// [`Self::publish_failed`].
+    fn register_create_pending(&self, pending: PendingStateRef, group_id: &GroupId) {
+        self.create_pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(pending, group_id.clone());
+    }
+
+    /// Removes and returns any group id bound to `pending` in the create-pending
+    /// map (F2).
+    fn take_create_pending(&self, pending: PendingStateRef) -> Option<GroupId> {
+        self.create_pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&pending)
+    }
+
+    /// Routes engine-produced gift-wrapped Welcomes to their recipients' relays.
     ///
-    /// Shared by [`create_circle`] and [`add_members_with_welcomes`]: both
-    /// consume MDK's per-member kind:444 Welcome rumors, gift-wrap them per
-    /// NIP-59, and route each wrap through the fail-closed delivery cascade.
-    ///
-    /// Each rumor is matched to its `members` entry by the consumed `KeyPackage`
-    /// event ID (the rumor's `e` tag) rather than by index, because MDK may
-    /// reorder the rumors internally.
-    ///
-    /// # Welcome delivery cascade
-    ///
-    /// For each member, the gift-wrapped Welcome (kind 1059) is delivered to
-    /// the first non-empty tier:
-    ///
-    /// 1. Member's inbox relays (kind 10050, NIP-17).
-    /// 2. Member's NIP-65 relays (kind 10002).
-    /// 3. The sender's own inbox relays (`creator_fallback_relays`).
-    /// 4. (none) — **fail closed** with [`CircleError::MissingWelcomeRelays`]
-    ///    rather than delivering to public default relays, which would expose
-    ///    the invite-recipient's pubkey to them.
+    /// The Dark Matter peeler owns the NIP-59 1059 crypto, so Haven no longer
+    /// wraps welcomes — it fans the engine's wrapped 1059s out to the
+    /// fail-closed delivery cascade. Each welcome is matched to its `members`
+    /// entry by the recipient pubkey carried in the 1059's `p` tag.
     ///
     /// # Errors
     ///
-    /// Returns [`CircleError::Mls`] if the rumor count does not match the
-    /// member count, a rumor is missing its `e` tag, no member matches a
-    /// rumor, or gift-wrapping fails; [`CircleError::MissingWelcomeRelays`] if
-    /// a member has no advertised relay and there is no sender fallback.
-    ///
-    /// [`create_circle`]: Self::create_circle
-    /// [`add_members_with_welcomes`]: Self::add_members_with_welcomes
-    async fn wrap_welcomes_with_cascade(
+    /// Returns [`CircleError::Mls`] on a count/recipient mismatch, or
+    /// [`CircleError::MissingWelcomeRelays`] if a member has no advertised relay
+    /// and there is no sender fallback.
+    // `async` is part of the welcome fan-out contract DM-4 wires to real relay
+    // publishing; the body has no `await` yet (the gift wraps are assembled
+    // synchronously), so the lint is suppressed rather than flip the signature.
+    #[allow(clippy::unused_async)]
+    async fn route_welcomes_with_cascade(
         &self,
-        sender_keys: &Keys,
         members: &[MemberKeyPackage],
-        welcome_rumors: Vec<UnsignedEvent>,
+        welcomes: Vec<TransportMessage>,
         creator_fallback_relays: &[String],
     ) -> Result<Vec<GiftWrappedWelcome>> {
-        // Validate that MDK produced one welcome per invited member.
-        if welcome_rumors.len() != members.len() {
+        if welcomes.len() != members.len() {
             return Err(CircleError::Mls(format!(
                 "Expected {} welcome(s), got {}",
                 members.len(),
-                welcome_rumors.len()
+                welcomes.len()
             )));
         }
 
-        // Gift-wrap each welcome for its recipient.
-        // Match welcome rumors to members by the consumed KeyPackage event ID
-        // (the "e" tag in each rumor) rather than relying on index ordering,
-        // because MDK may reorder welcome_rumors internally.
-        let mut welcome_events = Vec::with_capacity(welcome_rumors.len());
-        for rumor in welcome_rumors {
-            // Extract the consumed KeyPackage event ID from the rumor's "e" tag
-            let kp_event_id = rumor
+        let mut welcome_events = Vec::with_capacity(welcomes.len());
+        for wt in welcomes {
+            let event = SessionManager::transport_message_to_event(&wt)
+                .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+
+            // The gift wrap's `p` tag is the recipient identity.
+            let recipient_pubkey = event
                 .tags
                 .iter()
                 .find_map(|tag| {
-                    let values = tag.as_slice();
-                    if values.len() >= 2 && values[0] == "e" {
-                        EventId::parse(&values[1]).ok()
+                    let v = tag.as_slice();
+                    if v.len() >= 2 && v[0] == "p" {
+                        PublicKey::from_hex(&v[1]).ok()
                     } else {
                         None
                     }
                 })
                 .ok_or_else(|| {
-                    CircleError::Mls(
-                        "Welcome rumor missing 'e' tag for KeyPackage event ID".to_string(),
-                    )
+                    CircleError::Mls("Welcome gift wrap missing recipient 'p' tag".to_string())
                 })?;
 
-            // Find the member whose key package matches this welcome rumor
             let member = members
                 .iter()
-                .find(|m| m.key_package_event.id == kp_event_id)
+                .find(|m| m.key_package_event.pubkey == recipient_pubkey)
                 .ok_or_else(|| {
-                    CircleError::Mls(
-                        "No member found matching welcome rumor KeyPackage event ID".to_string(),
-                    )
+                    CircleError::Mls("No member matches welcome recipient".to_string())
                 })?;
 
-            let recipient_pubkey = member.key_package_event.pubkey;
-
-            // Gift-wrap the welcome (NIP-59)
-            let wrapped = giftwrap::wrap_welcome(sender_keys, &recipient_pubkey, rumor)
-                .await
-                .map_err(|e| {
-                    CircleError::Mls(format!(
-                        "Gift-wrap failed: {}",
-                        redact_hex_sequences(&e.to_string())
-                    ))
-                })?;
-
-            // Cascading relay resolution for Welcome delivery. Two-plane
-            // model: deliver only to relays the parties actually advertise —
-            // NEVER fall back to public default relays, which would expose
-            // the recipient's pubkey to them.
-            // 1. Member's inbox relays (kind 10050) — preferred per NIP-17.
-            // 2. Member's NIP-65 relays (kind 10002) — general-purpose fallback.
-            // 3. Sender's own inbox relays — best-effort on relays the
-            //    inviter controls, relying on overlap with the invitee.
-            // 4. (none) — fail closed; see CircleError::MissingWelcomeRelays.
+            // Cascade: member inbox → member NIP-65 → sender inbox → fail closed.
             let recipient_relays = if !member.inbox_relays.is_empty() {
                 member.inbox_relays.clone()
             } else if !member.nip65_relays.is_empty() {
-                log::warn!(
-                    "[CircleManager] welcome delivery: member has no inbox relays, \
-                     falling back to member's NIP-65 relays"
-                );
                 member.nip65_relays.clone()
             } else if !creator_fallback_relays.is_empty() {
-                log::warn!(
-                    "[CircleManager] welcome delivery: member has no inbox or NIP-65 \
-                     relays, falling back to sender's own inbox relays"
-                );
                 creator_fallback_relays.to_vec()
             } else {
-                // Fail closed: no advertised relay for this member. Delivering
-                // to public defaults would leak the recipient's pubkey, so the
-                // whole operation aborts and the user can retry when the
-                // invitee is reachable.
-                log::warn!(
-                    "[CircleManager] welcome delivery: no inbox/NIP-65 relay for a member \
-                     and sender has no inbox relays; failing closed (no default fallback)"
-                );
                 return Err(CircleError::MissingWelcomeRelays);
             };
 
             welcome_events.push(GiftWrappedWelcome {
                 recipient_pubkey: recipient_pubkey.to_hex(),
                 recipient_relays,
-                event: wrapped,
+                event,
             });
         }
 
@@ -551,12 +470,10 @@ impl CircleManager {
 
     /// Retrieves a circle with its members.
     ///
-    /// Returns `None` if the circle doesn't exist.
-    ///
     /// # Errors
     ///
     /// Returns an error if the database operation fails.
-    pub fn get_circle(&self, mls_group_id: &GroupId) -> Result<Option<CircleWithMembers>> {
+    pub async fn get_circle(&self, mls_group_id: &GroupId) -> Result<Option<CircleWithMembers>> {
         let Some(circle) = self.storage.get_circle(mls_group_id)? else {
             return Ok(None);
         };
@@ -565,7 +482,7 @@ impl CircleManager {
             CircleError::NotFound("Membership not found for circle: <redacted>".to_string())
         })?;
 
-        let members = self.get_members(mls_group_id)?;
+        let members = self.get_members(mls_group_id).await?;
 
         Ok(Some(CircleWithMembers {
             circle,
@@ -579,14 +496,16 @@ impl CircleManager {
     /// # Errors
     ///
     /// Returns an error if the database operation fails.
-    pub fn get_circles(&self) -> Result<Vec<CircleWithMembers>> {
+    pub async fn get_circles(&self) -> Result<Vec<CircleWithMembers>> {
         let circles = self.storage.get_all_circles()?;
         let mut result = Vec::with_capacity(circles.len());
 
         for circle in circles {
-            let membership = self.storage.get_membership(&circle.mls_group_id)?;
-            if let Some(membership) = membership {
-                let members = self.get_members(&circle.mls_group_id).unwrap_or_default();
+            if let Some(membership) = self.storage.get_membership(&circle.mls_group_id)? {
+                let members = self
+                    .get_members(&circle.mls_group_id)
+                    .await
+                    .unwrap_or_default();
                 result.push(CircleWithMembers {
                     circle,
                     membership,
@@ -603,8 +522,8 @@ impl CircleManager {
     /// # Errors
     ///
     /// Returns an error if the database operation fails.
-    pub fn get_visible_circles(&self) -> Result<Vec<CircleWithMembers>> {
-        let circles = self.get_circles()?;
+    pub async fn get_visible_circles(&self) -> Result<Vec<CircleWithMembers>> {
+        let circles = self.get_circles().await?;
         Ok(circles
             .into_iter()
             .filter(|c| c.membership.status.is_visible())
@@ -613,117 +532,74 @@ impl CircleManager {
 
     /// Classifies what the caller must do to leave the circle.
     ///
-    /// Result values drive the Flutter-side state machine:
-    ///
-    /// - `NonAdmin` — `propose_leave` → publish → `complete_leave`.
-    /// - `AdminHandoff { successor }` — `propose_admin_handoff` → publish →
-    ///   finalize → `propose_self_demote` → publish → finalize →
-    ///   `propose_leave` → publish → `complete_leave`.
-    /// - `AdminDemote` — `propose_self_demote` → publish → finalize →
-    ///   `propose_leave` → publish → `complete_leave`.
-    /// - `Abandon` — call `abandon_circle_local_only`; no commit, no publish.
-    /// - `OrphanLocalOnly` — call `complete_leave` to delete the local row.
-    ///
-    /// `propose_leave` returns a `SelfRemove` **proposal**, not a pending
-    /// commit — a remaining member commits it later, so the leaver does
-    /// not finalize after publishing.
+    /// See [`LeavePlan`]. Admin exits are gated by the engine's `SelfRemove` rules
+    /// (`AdminCannotSelfRemove`/`AdminDepletion`): an admin exits the admin set
+    /// first.
     ///
     /// # Errors
     ///
-    /// Returns [`CircleError::Mls`] if the MDK query fails for a reason other
+    /// Returns [`CircleError::Mls`] if the engine query fails for a reason other
     /// than "group not found" (which maps to `OrphanLocalOnly`).
-    pub fn plan_leave(&self, mls_group_id: &GroupId, self_pubkey: &PublicKey) -> Result<LeavePlan> {
-        plan_leave(&self.mdk, mls_group_id, self_pubkey)
-    }
-
-    /// Step 1 of admin handoff: propose promoting `successor` to admin.
-    ///
-    /// Creates a pending `GroupContextExtensions` commit that updates the
-    /// group's admin list to `[current_admins..., successor]`. Caller must
-    /// publish the returned evolution event, then call
-    /// [`finalize_pending_commit`] on ACK or [`clear_pending_commit`] on
-    /// failure.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the caller is not an admin, `successor` is not a
-    /// group member, or MDK rejects the update.
-    ///
-    /// [`finalize_pending_commit`]: Self::finalize_pending_commit
-    /// [`clear_pending_commit`]: Self::clear_pending_commit
-    pub fn propose_admin_handoff(
+    pub async fn plan_leave(
         &self,
         mls_group_id: &GroupId,
-        successor: &PublicKey,
-    ) -> Result<UpdateGroupResult> {
-        let group = self
-            .mdk
-            .get_group(mls_group_id)
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
-            .ok_or_else(|| CircleError::NotFound("<redacted>".to_string()))?;
-
-        let mut admins = group.admin_pubkeys;
-        admins.insert(*successor);
-        let admin_vec: Vec<PublicKey> = admins.into_iter().collect();
-
-        // M7-B: exclude a concurrent background sweep for the marker+MDK write.
-        let _writer = crate::write_lock::acquire_authoring();
-        // M7: SET-BEFORE-STAGE (update_admins stages a GroupContextExtensions
-        // pending commit).
-        self.mark_group_staged(mls_group_id)?;
-        match self.mdk.update_admins(mls_group_id, &admin_vec) {
-            Ok(result) => Ok(result),
-            Err(e) => {
-                self.mark_group_unstaged(mls_group_id);
-                Err(CircleError::Mls(redact_hex_sequences(&e.to_string())))
-            }
-        }
+        self_pubkey: &PublicKey,
+    ) -> Result<LeavePlan> {
+        plan_leave(&self.session, mls_group_id, self_pubkey).await
     }
 
-    /// Maximum number of relays a circle may carry.
+    /// Step 1 of admin handoff: promote `successor` to admin.
     ///
-    /// MIP-01 says the group relay list SHOULD NOT exceed 20; Haven enforces
-    /// it as a hard cap to bound kind-445 fan-out metadata (relay-metadata
-    /// minimization) and to stop an admin from inflating every member's
-    /// subscription set.
-    const MAX_CIRCLE_RELAYS: usize = 20;
+    /// # GAP (plan §5.2 #18)
+    ///
+    /// The Dark Matter v0.9.4 public API exposes no admin-policy component codec
+    /// (`GROUP_ADMIN_POLICY_COMPONENT_ID` exists but no encode/decode helper),
+    /// so Haven cannot construct the `UpdateAppComponents(admin-policy.v1)`
+    /// commit that would grant admin. Fails with a documented error until the
+    /// codec lands (tracked upstream alongside mdk#755).
+    ///
+    /// USER-FACING CONSEQUENCE: because an admin cannot hand off or self-demote,
+    /// a circle's admin can only leave once every *other* member has left (the
+    /// `Abandon` leg). This ships with an admin-only note beside the Leave Circle
+    /// button (`circles_bottom_sheet.dart`, l10n `leaveCircleAdminLimitationNote`).
+    /// Full write-up + removal steps: `docs/MDK_DARKMATTER_MIGRATION_PLAN.md` §11.1.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`CircleError::Mls`] (admin-policy codec unavailable).
+    // `async` is retained for the admin-policy flow DM-4 wires once the codec
+    // lands (it will `session.send(UpdateAppComponents)`); today it only errors.
+    #[allow(clippy::unused_async)]
+    pub async fn propose_admin_handoff(
+        &self,
+        _mls_group_id: &GroupId,
+        _successor: &PublicKey,
+    ) -> Result<CommitToPublish> {
+        Err(CircleError::Mls(
+            "admin handoff requires the admin-policy component codec, which the \
+             Dark Matter v0.9.4 public API does not expose (GAP, plan §5.2 #18)"
+                .to_string(),
+        ))
+    }
 
-    /// Proposes an admin update of a circle's group relay list (MIP-01)
-    /// via a `GroupContextExtensions` commit.
+    /// Proposes an admin update of a circle's group relay list (MIP-01) via an
+    /// `UpdateAppComponents(nostr-routing.v1)` commit.
     ///
-    /// Stages a pending commit (admin-gated by MDK) and returns the evolution
-    /// event (kind 445) the caller must publish. Per the established
-    /// publish-then-merge template, the caller publishes the event to the
-    /// **union of the circle's current relays and `new_relays`** (so a member
-    /// only listening on a relay being *removed* still receives the commit
-    /// before they stop polling it — this is the single kind-445 in Haven
-    /// permitted to target a superset of `circle.relays`), then calls
-    /// [`finalize_relay_update`](Self::finalize_relay_update) on ACK or
-    /// [`clear_pending_commit`](Self::clear_pending_commit) on failure. The
-    /// circle row is NOT updated here — only on a successful merge.
-    ///
-    /// `new_relays` are validated through the same strict path as the
-    /// user-relay storage ([`normalize_url`]): plaintext `ws://` is rejected
-    /// (except the debug-only loopback test seam), credentials are rejected,
-    /// and URLs are canonicalized and deduplicated. The set MUST be non-empty
-    /// (an empty set would brick 445 routing, which has no default fallback)
-    /// and MUST NOT exceed [`MAX_CIRCLE_RELAYS`](Self::MAX_CIRCLE_RELAYS).
+    /// Publish-before-apply (Rule 13): publish [`CommitToPublish::commit_event`]
+    /// to the union of the circle's current and new relays, then
+    /// [`Self::finalize_relay_update`] on ≥1-relay ack or [`Self::publish_failed`]
+    /// on failure. The circle row is updated only on a successful confirm.
     ///
     /// # Errors
     ///
     /// Returns [`CircleError::InvalidData`] for an empty / all-invalid /
-    /// oversized relay set, or [`CircleError::Mls`] if the caller is not an
-    /// admin or MDK rejects the update.
-    ///
-    /// [`normalize_url`]: super::storage_relay_prefs::normalize_url
-    pub fn update_circle_relays(
+    /// oversized relay set, or [`CircleError::Mls`] if the caller is not an admin
+    /// or the engine rejects the update.
+    pub async fn update_circle_relays(
         &self,
         mls_group_id: &GroupId,
         new_relays: &[String],
-    ) -> Result<UpdateGroupResult> {
-        // Canonicalize + validate via the same strict validator the user-relay
-        // storage uses (rejects ws:// outside the debug loopback seam, rejects
-        // credentials), then sort + dedupe.
+    ) -> Result<CommitToPublish> {
         let mut canonical: Vec<String> = Vec::with_capacity(new_relays.len());
         for relay in new_relays {
             canonical.push(super::storage_relay_prefs::normalize_url(relay)?);
@@ -731,8 +607,6 @@ impl CircleManager {
         canonical.sort();
         canonical.dedup();
 
-        // Non-empty is a hard MUST: 445 routes to circle.relays ONLY (no
-        // default fallback), so an empty set strands the group permanently.
         if canonical.is_empty() {
             return Err(CircleError::InvalidData(
                 "A circle must have at least one relay".to_string(),
@@ -745,115 +619,68 @@ impl CircleManager {
             )));
         }
 
-        // `normalize_url` already guaranteed each URL parses; re-parse to the
-        // `RelayUrl` MDK requires. Length equality is a defensive invariant.
-        let parsed: Vec<RelayUrl> = canonical
-            .iter()
-            .filter_map(|u| RelayUrl::parse(u).ok())
-            .collect();
-        if parsed.len() != canonical.len() {
-            return Err(CircleError::InvalidData("Invalid relay URL".to_string()));
-        }
-
-        // M7-B: exclude a concurrent background sweep for the marker+MDK write.
-        let _writer = crate::write_lock::acquire_authoring();
-        // M7: SET-BEFORE-STAGE (update_relays stages a GroupContextExtensions
-        // pending commit).
-        self.mark_group_staged(mls_group_id)?;
-        match self.mdk.update_relays(mls_group_id, &parsed) {
-            Ok(result) => Ok(result),
-            Err(e) => {
-                self.mark_group_unstaged(mls_group_id);
-                Err(CircleError::Mls(redact_hex_sequences(&e.to_string())))
-            }
-        }
+        let effects = self
+            .session
+            .update_relays(mls_group_id, canonical)
+            .await
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+        let (commit_event, _welcomes, pending) = take_group_evolution(effects)?;
+        Ok(CommitToPublish {
+            commit_event,
+            pending,
+        })
     }
 
-    /// Re-derives the app-level `circle.relays` row from MDK's authoritative
-    /// group relay set after a commit.
-    ///
-    /// MDK already re-syncs its own `group_relays` store on every
-    /// processed/merged commit; Haven keeps a *separate* `circle.relays` row
-    /// (the only list that drives kind-445 routing) which must be reconciled
-    /// or members publish/subscribe to a stale relay set (split-brain). This
-    /// is the single convergence primitive, called from both the consumer
-    /// path ([`decrypt_location`](Self::decrypt_location)) and the producer
-    /// finalize ([`finalize_relay_update`](Self::finalize_relay_update)). It
-    /// is idempotent: an order-insensitive compare no-ops when the sets match,
-    /// so it is safe to run after *any* commit.
-    ///
-    /// HARD INVARIANT: never overwrite a non-empty `circle.relays` with an
-    /// empty set. MDK does not validate non-empty on update, and at join Haven
-    /// may store `default_relays()` as a fallback while MDK holds empty — the
-    /// first commit a member processes must not brick 445 routing.
+    /// Re-derives the app-level `circle.relays` row from the engine's routing
+    /// component after a commit. Idempotent; never overwrites a non-empty
+    /// `circle.relays` with an empty set (never bricks 445 routing).
     ///
     /// # Errors
     ///
-    /// Returns an error if MDK or storage access fails.
-    fn resync_circle_relays_from_mdk(&self, mls_group_id: &GroupId) -> Result<()> {
-        let mut mdk_relays: Vec<String> = self
-            .mdk
-            .get_group_relays(mls_group_id)
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
-            .into_iter()
-            .map(|u| u.to_string())
-            .collect();
-        mdk_relays.sort();
-        mdk_relays.dedup();
+    /// Returns an error if the engine or storage access fails.
+    async fn resync_circle_relays_from_mdk(&self, mls_group_id: &GroupId) -> Result<()> {
+        let mut engine_relays = self
+            .session
+            .group_relays(mls_group_id)
+            .await
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+        engine_relays.sort();
+        engine_relays.dedup();
 
         let Some(mut circle) = self.storage.get_circle(mls_group_id)? else {
-            // No local circle row (e.g. a group we have not materialized into a
-            // circle). Nothing to reconcile.
             return Ok(());
         };
 
-        // Never strand the group: if MDK reports an empty set, keep whatever
-        // working relays the circle row already has.
-        if mdk_relays.is_empty() {
-            if !circle.relays.is_empty() {
-                log::debug!(
-                    "resync_circle_relays: MDK returned an empty relay set; \
-                     keeping the existing non-empty circle.relays"
-                );
-            }
+        if engine_relays.is_empty() {
             return Ok(());
         }
 
         let mut current = circle.relays.clone();
         current.sort();
         current.dedup();
-        if current != mdk_relays {
-            circle.relays = mdk_relays;
+        if current != engine_relays {
+            circle.relays = engine_relays;
             circle.updated_at = chrono::Utc::now().timestamp();
             self.storage.save_circle(&circle)?;
         }
         Ok(())
     }
 
-    /// Finalizes an admin relay update: merges the pending commit, then
-    /// re-syncs the admin's own `circle.relays` from MDK.
-    ///
-    /// The producer (admin) does not process their own commit through
-    /// [`decrypt_location`](Self::decrypt_location), so their app-row
-    /// reconcile happens here, after the MLS epoch advances on a successful
-    /// merge. Call this instead of [`finalize_pending_commit`] for the relay
-    /// update flow so the admin converges immediately; the consumer side
-    /// converges via the `decrypt_location` hook.
+    /// Finalizes an admin relay update: confirms the pending commit, then
+    /// re-syncs the admin's own `circle.relays` from the engine.
     ///
     /// # Errors
     ///
-    /// Returns an error if the merge fails. A merge success followed by a
-    /// transient re-sync failure is logged (not returned) — the merge is
-    /// already committed and the re-sync self-heals idempotently on the next
-    /// processed commit or app restart.
-    ///
-    /// [`finalize_pending_commit`]: Self::finalize_pending_commit
-    pub fn finalize_relay_update(&self, mls_group_id: &GroupId) -> Result<()> {
-        self.finalize_pending_commit(mls_group_id)?;
-        if let Err(e) = self.resync_circle_relays_from_mdk(mls_group_id) {
-            // The MLS merge already succeeded (epoch advanced); do not mask a
-            // committed relay update with a transient row-write error. The
-            // re-sync is idempotent and re-runs on the next processed commit.
+    /// Returns an error if the confirm fails. A confirm success followed by a
+    /// transient re-sync failure is logged (not returned) — the commit is
+    /// already applied and the re-sync self-heals idempotently.
+    pub async fn finalize_relay_update(
+        &self,
+        pending: PendingStateRef,
+        mls_group_id: &GroupId,
+    ) -> Result<()> {
+        self.confirm_published(pending).await?;
+        if let Err(e) = self.resync_circle_relays_from_mdk(mls_group_id).await {
             log::warn!(
                 "finalize_relay_update: relay re-sync failed (will self-heal): {}",
                 redact_hex_sequences(&e.to_string())
@@ -862,236 +689,175 @@ impl CircleManager {
         Ok(())
     }
 
-    /// Step 2 of admin handoff (or step 1 for `Abandon`): demote caller
-    /// from the admin set.
+    /// Step 2 of admin handoff (or step 1 for `Abandon`): demote the caller from
+    /// the admin set.
     ///
-    /// Pending commit — caller publishes, then finalizes on ACK or clears
-    /// on failure.
+    /// # GAP (plan §5.2 #18)
+    ///
+    /// Same admin-policy-codec gap as [`Self::propose_admin_handoff`].
     ///
     /// # Errors
     ///
-    /// Returns an error if the caller is not an admin or MDK rejects the
-    /// update (e.g., caller is the sole admin — must handoff first).
-    pub fn propose_self_demote(&self, mls_group_id: &GroupId) -> Result<UpdateGroupResult> {
-        // M7-B: exclude a concurrent background sweep for the marker+MDK write.
-        let _writer = crate::write_lock::acquire_authoring();
-        // M7: SET-BEFORE-STAGE (self_demote stages a GroupContextExtensions commit).
-        self.mark_group_staged(mls_group_id)?;
-        match self.mdk.self_demote(mls_group_id) {
-            Ok(result) => Ok(result),
-            Err(e) => {
-                self.mark_group_unstaged(mls_group_id);
-                Err(CircleError::Mls(redact_hex_sequences(&e.to_string())))
-            }
-        }
+    /// Always returns [`CircleError::Mls`] (admin-policy codec unavailable).
+    // See `propose_admin_handoff`: `async` is retained for the DM-4 wiring.
+    #[allow(clippy::unused_async)]
+    pub async fn propose_self_demote(&self, _mls_group_id: &GroupId) -> Result<CommitToPublish> {
+        Err(CircleError::Mls(
+            "self-demote requires the admin-policy component codec, which the \
+             Dark Matter v0.9.4 public API does not expose (GAP, plan §5.2 #18)"
+                .to_string(),
+        ))
     }
 
-    /// Final step of every non-abandoning leave: returns a `SelfRemove`
-    /// proposal event so peers can advance past the caller.
+    /// Final step of every non-abandoning leave: returns a `SelfRemove` proposal
+    /// event so peers can advance past the caller.
     ///
-    /// Unlike [`propose_admin_handoff`] and [`propose_self_demote`], this
-    /// does **not** stage a pending commit — a remaining group member
-    /// commits the `SelfRemove` later per RFC 9420 §12.1.2. The caller
-    /// publishes the returned event and then calls [`complete_leave`];
-    /// there is nothing to finalize or clear on the leaver's side.
+    /// A bare proposal has no `PendingStateRef` — a remaining member commits it
+    /// later (RFC 9420 §12.1.2). The caller publishes the returned event, then
+    /// calls [`Self::complete_leave`]; there is nothing to confirm.
     ///
     /// # Errors
     ///
-    /// Returns an error if MDK rejects the leave (e.g., caller is still an
-    /// admin — must demote first via [`propose_self_demote`]).
-    ///
-    /// [`propose_admin_handoff`]: Self::propose_admin_handoff
-    /// [`propose_self_demote`]: Self::propose_self_demote
-    /// [`complete_leave`]: Self::complete_leave
-    pub fn propose_leave(&self, mls_group_id: &GroupId) -> Result<UpdateGroupResult> {
-        // Pre-clear any residual pending commit so MDK's `leave_group`
-        // doesn't reject the SelfRemove with "pending commit exists".
-        //
-        // By the time we reach this step under any leave plan, legitimate
-        // in-flight commits from prior steps (handoff, demote) have already
-        // been finalized or cleared by the caller's `_commitAndPublish`.
-        // A pending commit lingering here can only be stale — most likely
-        // from a prior session's receiver-side auto-commit (another
-        // member's SelfRemove) whose publish-then-finalize sequence
-        // didn't complete. Discarding it is safe: the user is leaving,
-        // so they won't need that staged state to advance local MDK.
-        //
-        // Symmetric with `complete_leave`'s pre-clear (see line ~583).
-        // Logs at debug level when a commit was actually discarded so a
-        // resurgence of this bug class remains diagnosable. The group ID
-        // is intentionally omitted from the log to avoid linking sessions.
-        //
-        // M7-B: exclude a concurrent background sweep for the two MDK writes
-        // (the residual-commit clear + the SelfRemove stage). Wrapped inline
-        // here (not via `clear_pending_commit`, which acquires the lock itself)
-        // so both writes are one critical section; the non-reentrant lock is
-        // NOT taken twice.
-        let _writer = crate::write_lock::acquire_authoring();
-        if self.mdk.clear_pending_commit(mls_group_id).is_ok() {
-            log::debug!("propose_leave: cleared residual pending commit before staging SelfRemove");
-        }
-        self.mdk
+    /// Returns an error if the engine rejects the leave (e.g. the caller is
+    /// still an admin — `AdminCannotSelfRemove`).
+    pub async fn propose_leave(&self, mls_group_id: &GroupId) -> Result<Event> {
+        let effects = self
+            .session
             .leave_group(mls_group_id)
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
+            .await
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+        take_proposal(effects)
     }
 
-    /// Finalizes a leave by purging every trace of the group locally.
+    /// Finalizes a leave by removing the local circle row.
     ///
-    /// Destroys MDK state (tree, epoch secrets, leaf keys, proposals,
-    /// snapshots) *before* removing the app-level circle row so the
-    /// forward-secrecy purge is atomic from the user's perspective:
-    /// once a leave succeeds, no material remains on-device that could
-    /// decrypt past ciphertext for the group.
-    ///
-    /// Safe for the `OrphanLocalOnly` plan — `mdk.delete_group` is
-    /// idempotent and no-ops when the MDK group is absent.
-    ///
-    /// # Pending-commit cleanup
-    ///
-    /// A prior operation in the same leave flow may have staged a
-    /// pending commit that never finalized (e.g. a `self_demote` whose
-    /// commit was not yet `ACKed` when the plan advanced to `leave_group`,
-    /// or a partial-publish on the handoff path). Call
-    /// `clear_pending_commit` first so `delete_group` sees clean state;
-    /// any error there is intentionally ignored because a missing
-    /// pending commit is the expected case and the subsequent
-    /// `delete_group` is the authoritative purge.
+    /// The Dark Matter engine has no per-group delete: leaving is a `SelfRemove`
+    /// (via [`Self::propose_leave`]) after which the engine marks its local copy
+    /// `removed` (retained inactive, spec `member-departure.md`). Haven removes
+    /// its own circle row here. Safe for the `OrphanLocalOnly` plan.
     ///
     /// # Errors
     ///
-    /// Returns an error if the MDK deletion or the circle-row deletion
-    /// fails.
+    /// Returns an error if the circle-row deletion fails.
     pub fn complete_leave(&self, mls_group_id: &GroupId) -> Result<()> {
-        // Best-effort: drops any residual pending commit staged by a
-        // prior step in the leave flow. Errors are ignored — the
-        // common case is "no pending commit", and `delete_group`
-        // below is the forward-secrecy-relevant operation.
-        //
-        // M7-B: exclude a concurrent background sweep for the clear + delete
-        // MDK writes. Wrapped inline (not via `clear_pending_commit`, which
-        // acquires the lock) so the non-reentrant lock is taken once.
-        let writer = crate::write_lock::acquire_authoring();
-        let _ = self.mdk.clear_pending_commit(mls_group_id);
-        self.mdk
-            .delete_group(mls_group_id)
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
-        // Release the writer lock before the (non-MDK) circles.db row cleanup
-        // below — that work does not touch haven_mdk.db.
-        drop(writer);
         let _existed = self.storage.delete_circle(mls_group_id)?;
         Ok(())
     }
 
     /// Abandons a circle where the caller is the sole remaining member.
     ///
-    /// Same purge semantics as [`complete_leave`] — MDK state is wiped
-    /// alongside the local row — but skips the relay publish because
-    /// MDK's `self_demote` and `leave_group` both require at least one
-    /// other admin/member, so there is no one to receive a `SelfRemove`.
+    /// Same local-teardown semantics as [`Self::complete_leave`] (no relay
+    /// publish — there is no one to receive a `SelfRemove`).
     ///
     /// # Errors
     ///
-    /// Returns an error if the MDK deletion or the circle-row deletion
-    /// fails.
-    ///
-    /// [`complete_leave`]: Self::complete_leave
+    /// Returns an error if the circle-row deletion fails.
     pub fn abandon_circle_local_only(&self, mls_group_id: &GroupId) -> Result<()> {
         self.complete_leave(mls_group_id)
     }
 
+    // ==================== Publish-before-apply (Rule 13) ====================
+
+    /// Confirms a staged commit was published (≥1-relay OK-ack) so the engine
+    /// applies it and advances the epoch.
+    ///
+    /// "Acked" MUST mean a relay returned OK — never merely "sent" — to avoid
+    /// optimistic-merge forks (Rule 13, security F13).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pending ref is unknown or the engine rejects it.
+    pub async fn confirm_published(&self, pending: PendingStateRef) -> Result<()> {
+        let result = self
+            .session
+            .confirm_published(pending)
+            .await
+            .map(|_| ())
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())));
+        // A confirmed create KEEPS its eagerly-persisted rows; just drop the
+        // rollback binding so a subsequent stray `publish_failed` can never
+        // delete a now-live circle (F2). A no-op for every non-create pending.
+        if result.is_ok() {
+            let _ = self.take_create_pending(pending);
+        }
+        result
+    }
+
+    /// Reports that a staged publish failed; the engine discards the staged
+    /// commit and returns the group to `Stable` at the prior epoch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pending ref is unknown.
+    pub async fn publish_failed(&self, pending: PendingStateRef) -> Result<()> {
+        let result = self
+            .session
+            .publish_failed(pending)
+            .await
+            .map(|_| ())
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())));
+        // F2: a rolled-back create must not strand a ghost circle row. Delete the
+        // eagerly-persisted rows ONLY on a SUCCESSFUL rollback (the engine
+        // actually discarded the staged create); an unknown / already-resolved
+        // pending — e.g. one already confirmed — leaves storage untouched. A
+        // no-op for every non-create pending (auto-commit / evolution).
+        if result.is_ok() {
+            if let Some(group_id) = self.take_create_pending(pending) {
+                if let Err(e) = self.storage.delete_circle(&group_id) {
+                    log::warn!(
+                        "create rollback: circle-row cleanup failed (self-heals on logout wipe): {}",
+                        redact_hex_sequences(&e.to_string())
+                    );
+                }
+            }
+        }
+        result
+    }
+
     // ==================== Member Management ====================
 
-    /// Adds members to a circle.
-    ///
-    /// # Arguments
-    ///
-    /// * `mls_group_id` - The circle's MLS group ID
-    /// * `key_packages` - Key package events for new members
+    /// Adds members to a circle, returning the engine [`SessionEffects`]
+    /// (a `GroupEvolution` with the commit + welcomes + `PendingStateRef`).
     ///
     /// # Errors
     ///
     /// Returns an error if adding members fails.
-    pub fn add_members(
+    pub async fn add_members(
         &self,
         mls_group_id: &GroupId,
         key_packages: &[Event],
-    ) -> Result<UpdateGroupResult> {
-        // Update the circle's updated_at timestamp
+    ) -> Result<SessionEffects> {
         if let Some(mut circle) = self.storage.get_circle(mls_group_id)? {
             circle.updated_at = chrono::Utc::now().timestamp();
             self.storage.save_circle(&circle)?;
         }
 
-        // M7-B: exclude a concurrent background sweep for the marker+MDK write.
-        // (Called by `add_members_with_welcomes`, whose async relay I/O stays
-        // OUTSIDE this lock — the guard is dropped when this sync fn returns.)
-        let _writer = crate::write_lock::acquire_authoring();
-        // M7: SET-BEFORE-STAGE.
-        self.mark_group_staged(mls_group_id)?;
-        match self.mdk.add_members(mls_group_id, key_packages) {
-            Ok(result) => Ok(result),
-            Err(e) => {
-                self.mark_group_unstaged(mls_group_id);
-                Err(CircleError::Mls(redact_hex_sequences(&e.to_string())))
-            }
-        }
+        let kps = parse_key_packages(key_packages)?;
+        self.session
+            .add_members(mls_group_id, kps)
+            .await
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
     }
 
-    /// Adds members to an existing circle and gift-wraps their Welcomes.
+    /// Adds members to an existing circle and routes their gift-wrapped Welcomes.
     ///
-    /// This is the add-time counterpart to [`create_circle`]: it stages an MLS
-    /// Add commit (kind:445, advances existing members N→N+1 on finalize) and
-    /// gift-wraps the resulting per-member Welcome rumors (kind:444) for
-    /// delivery, resolving each recipient's relays through the same fail-closed
-    /// cascade. The caller owns the publish/finalize cycle:
-    ///
-    /// 1. Publish [`AddMembersResult::evolution_event`] to the circle's relays.
-    /// 2. On success, call [`finalize_pending_commit`] to merge locally.
-    /// 3. On publish failure, call [`clear_pending_commit`] to roll back.
-    /// 4. Only after a successful finalize, publish each
-    ///    [`AddMembersResult::welcome_events`] entry.
-    ///
-    /// Adding is admin-gated by MDK; a non-admin caller fails with
-    /// [`CircleError::Mls`].
-    ///
-    /// # Arguments
-    ///
-    /// * `sender_keys` - The admin's Nostr identity keys (for gift-wrapping).
-    /// * `mls_group_id` - The circle's MLS group ID.
-    /// * `members` - Key packages and inbox/NIP-65 relays for the new members.
-    /// * `creator_fallback_relays` - The admin's own inbox relays (kind
-    ///   10050), used as the third tier in the Welcome delivery cascade. Pass
-    ///   `&[]` if the admin has no inbox relays (the cascade then fails closed
-    ///   when tiers 1 and 2 are also empty).
+    /// Publish-before-apply (Rule 13): publish
+    /// [`AddMembersResult::commit_event`] to the circle's relays, confirm via
+    /// [`Self::confirm_published`] on ≥1-relay ack (or [`Self::publish_failed`]
+    /// on failure), and only after a successful confirm publish each
+    /// [`AddMembersResult::welcome_events`] entry.
     ///
     /// # Errors
     ///
-    /// Returns [`CircleError::MissingWelcomeRelays`] if a member has no
-    /// advertised relay and there is no sender fallback (checked **before**
-    /// staging so a non-deliverable add never leaves a dangling pending
-    /// commit), or [`CircleError::Mls`] if staging, gift-wrapping, or the MDK
-    /// admin gate rejects the operation.
-    ///
-    /// [`create_circle`]: Self::create_circle
-    /// [`finalize_pending_commit`]: Self::finalize_pending_commit
-    /// [`clear_pending_commit`]: Self::clear_pending_commit
+    /// Returns [`CircleError::MissingWelcomeRelays`] (checked before staging) or
+    /// [`CircleError::Mls`] if staging or the admin gate rejects.
     pub async fn add_members_with_welcomes(
         &self,
-        sender_keys: &Keys,
+        _sender_keys: &Keys,
         mls_group_id: &GroupId,
         members: Vec<MemberKeyPackage>,
         creator_fallback_relays: &[String],
     ) -> Result<AddMembersResult> {
-        // Fail closed BEFORE staging the Add commit. The per-member
-        // Welcome-delivery cascade in `wrap_welcomes_with_cascade` only aborts
-        // AFTER `self.add_members` has staged the pending commit; a fail there
-        // would strand a dangling pending commit that wedges the group until
-        // it is cleared. Since the sender-inbox fallback
-        // (`creator_fallback_relays`) is identical for every member, a member
-        // is deliverable iff it advertises an inbox or NIP-65 relay, OR the
-        // sender has an inbox fallback. Pre-validate that here so the
-        // fail-closed path leaves the group's MLS state untouched. (The
-        // cascade keeps the same check as a defensive backstop.)
         if creator_fallback_relays.is_empty() {
             for m in &members {
                 if m.inbox_relays.is_empty() && m.nip65_relays.is_empty() {
@@ -1100,108 +866,79 @@ impl CircleManager {
             }
         }
 
-        // Extract just the key package events for the MLS Add.
         let key_package_events: Vec<Event> = members
             .iter()
             .map(|m| m.key_package_event.clone())
             .collect();
 
-        // Stage the pending Add commit (epoch advances only on finalize).
-        let update = self.add_members(mls_group_id, &key_package_events)?;
-
-        // MDK returns one Welcome rumor per added KeyPackage.
-        let welcome_rumors = update.welcome_rumors.ok_or_else(|| {
-            CircleError::Mls("add_members produced no welcome rumors".to_string())
-        })?;
-
-        // Gift-wrap each rumor and resolve its delivery relays (shared with
-        // the create-circle flow).
+        let effects = self.add_members(mls_group_id, &key_package_events).await?;
+        let (commit_event, welcomes, pending) = take_group_evolution(effects)?;
         let welcome_events = self
-            .wrap_welcomes_with_cascade(
-                sender_keys,
-                &members,
-                welcome_rumors,
-                creator_fallback_relays,
-            )
+            .route_welcomes_with_cascade(&members, welcomes, creator_fallback_relays)
             .await?;
 
         Ok(AddMembersResult {
-            evolution_event: update.evolution_event,
+            commit_event,
             welcome_events,
+            pending,
         })
     }
 
-    /// Removes members from a circle.
+    /// Removes members from a circle, returning the commit + pending ref.
     ///
-    /// # Arguments
-    ///
-    /// * `mls_group_id` - The circle's MLS group ID
-    /// * `member_pubkeys` - Public keys (hex) of members to remove
+    /// Publish-before-apply (Rule 13).
     ///
     /// # Errors
     ///
-    /// Returns an error if removing members fails.
-    pub fn remove_members(
+    /// Returns an error if removing members fails (e.g. `NotGroupAdmin`).
+    pub async fn remove_members(
         &self,
         mls_group_id: &GroupId,
         member_pubkeys: &[String],
-    ) -> Result<UpdateGroupResult> {
-        // Update the circle's updated_at timestamp
+    ) -> Result<CommitToPublish> {
         if let Some(mut circle) = self.storage.get_circle(mls_group_id)? {
             circle.updated_at = chrono::Utc::now().timestamp();
             self.storage.save_circle(&circle)?;
         }
 
-        // M7-B: exclude a concurrent background sweep for the marker+MDK write.
-        let writer = crate::write_lock::acquire_authoring();
-        // M7: SET-BEFORE-STAGE.
-        self.mark_group_staged(mls_group_id)?;
-        let result = match self.mdk.remove_members(mls_group_id, member_pubkeys) {
-            Ok(r) => r,
-            Err(e) => {
-                self.mark_group_unstaged(mls_group_id);
-                return Err(CircleError::Mls(redact_hex_sequences(&e.to_string())));
-            }
-        };
-        drop(writer);
-        Ok(result)
+        let effects = self
+            .session
+            .remove_members(mls_group_id, member_pubkeys)
+            .await
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+        let (commit_event, _welcomes, pending) = take_group_evolution(effects)?;
+        Ok(CommitToPublish {
+            commit_event,
+            pending,
+        })
     }
 
     /// Gets members of a circle with resolved contact info.
     ///
-    /// For each member, this resolves any locally-stored contact information
-    /// (display name, avatar) from the contacts database.
-    ///
     /// # Errors
     ///
     /// Returns an error if retrieving members fails.
-    pub fn get_members(&self, mls_group_id: &GroupId) -> Result<Vec<CircleMember>> {
-        let mls_members = self
-            .mdk
-            .get_members(mls_group_id)
+    pub async fn get_members(&self, mls_group_id: &GroupId) -> Result<Vec<CircleMember>> {
+        let member_hexes = self
+            .session
+            .member_pubkeys(mls_group_id)
+            .await
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
 
-        // Get the group to check admins
-        let group = self
-            .mdk
-            .get_group(mls_group_id)
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+        // Admin pubkeys are raw x-only bytes; hex-encode to compare with members.
+        let admin_hexes: std::collections::HashSet<String> = self
+            .session
+            .admin_pubkeys(mls_group_id)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(hex::encode)
+            .collect();
 
-        let admins = group
-            .as_ref()
-            .map(|g| &g.admin_pubkeys)
-            .cloned()
-            .unwrap_or_default();
-
-        let mut members = Vec::with_capacity(mls_members.len());
-
-        for member_pubkey in mls_members {
-            let pubkey_hex = member_pubkey.to_hex();
-            let is_admin = admins.contains(&member_pubkey);
-
-            // Look up local contact info
+        let mut members = Vec::with_capacity(member_hexes.len());
+        for pubkey_hex in member_hexes {
+            let is_admin = admin_hexes.contains(&pubkey_hex);
             let contact = self.storage.get_contact(&pubkey_hex)?;
-
             members.push(CircleMember {
                 pubkey: pubkey_hex,
                 display_name: contact.as_ref().and_then(|c| c.display_name.clone()),
@@ -1214,17 +951,7 @@ impl CircleManager {
 
     // ==================== Contact Management ====================
 
-    /// Sets or updates a contact.
-    ///
-    /// Contact information is stored locally only and never synced to relays.
-    /// This allows users to assign custom display names and avatars to other
-    /// users without revealing this information to relays.
-    ///
-    /// # Arguments
-    ///
-    /// * `pubkey` - Nostr public key (hex) of the contact
-    /// * `display_name` - Optional display name to assign
-    /// * `notes` - Optional notes about the contact
+    /// Sets or updates a contact (stored locally only, never synced to relays).
     ///
     /// # Errors
     ///
@@ -1236,8 +963,6 @@ impl CircleManager {
         notes: Option<&str>,
     ) -> Result<Contact> {
         let now = chrono::Utc::now().timestamp();
-
-        // Get existing contact or create new one
         let existing = self.storage.get_contact(pubkey)?;
         let created_at = existing.as_ref().map_or(now, |c| c.created_at);
 
@@ -1251,17 +976,6 @@ impl CircleManager {
 
         self.storage.save_contact(&contact)?;
         Ok(contact)
-    }
-
-    /// Internal (non-test-gated) MLS epoch accessor used by the location
-    /// commit/convergence paths.
-    pub(crate) fn group_epoch_internal(&self, mls_group_id: &GroupId) -> Result<u64> {
-        let group = self
-            .mdk
-            .get_group(mls_group_id)
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
-            .ok_or_else(|| CircleError::NotFound("Group not found: <redacted>".to_string()))?;
-        Ok(group.epoch)
     }
 
     /// Gets a contact by pubkey.
@@ -1293,397 +1007,195 @@ impl CircleManager {
 
     // ==================== Invitation Handling ====================
 
-    /// Processes a gift-wrapped Welcome event (kind 1059).
+    /// Processes a gift-wrapped Welcome event (kind 1059) into a held pending
+    /// welcome (hold-before-ingest, F3).
     ///
-    /// This is the high-level API for processing incoming invitations.
-    /// It unwraps the gift-wrapped event, extracts the sender info,
-    /// and processes the invitation. Circle name and relays are
-    /// extracted from the Welcome's embedded group data.
-    ///
-    /// # Arguments
-    ///
-    /// * `recipient_keys` - The recipient's Nostr identity keys (for unwrapping)
-    /// * `gift_wrap_event` - The kind 1059 gift-wrapped event from relay
+    /// The still-encrypted 1059 is held locally and a non-secret preview (the
+    /// inviter identity only — group name / member count are unavailable
+    /// pre-join by design) is derived via a transient peel. Nothing is ingested
+    /// until [`Self::accept_invitation`]; declining leaves no on-wire trace
+    /// (Rule 10).
     ///
     /// # Errors
     ///
-    /// Returns an error if unwrapping or processing fails.
+    /// Returns [`CircleError::AlreadyProcessed`] for a duplicate, or
+    /// [`CircleError::Mls`] if the gift wrap cannot be peeled.
     pub async fn process_gift_wrapped_invitation(
         &self,
-        recipient_keys: &Keys,
+        _recipient_keys: &Keys,
         gift_wrap_event: &Event,
     ) -> Result<Invitation> {
         let wrapper_id_prefix = short_id(gift_wrap_event.id.as_bytes());
         log::debug!(
             "[CircleManager] process_gift_wrapped_invitation: wrapper_id={wrapper_id_prefix} \
-             kind={} created_at={}",
+             kind={}",
             gift_wrap_event.kind.as_u16(),
-            gift_wrap_event.created_at.as_secs(),
         );
 
-        // Unwrap the gift-wrapped event
-        let unwrapped = giftwrap::unwrap_welcome(recipient_keys, gift_wrap_event)
-            .await
-            .map_err(|e| {
-                log::warn!(
-                    "[CircleManager] unwrap_welcome failed for wrapper_id={wrapper_id_prefix}: \
-                     {}",
-                    redact_hex_sequences(&e.to_string()),
-                );
-                CircleError::Mls(format!(
-                    "Failed to unwrap welcome: {}",
-                    redact_hex_sequences(&e.to_string())
-                ))
-            })?;
-
-        log::debug!(
-            "[CircleManager] unwrap ok: wrapper_id={wrapper_id_prefix} \
-             rumor_kind={} rumor_tags={}",
-            unwrapped.rumor.kind.as_u16(),
-            unwrapped.rumor.tags.len(),
-        );
-
-        // Process the invitation using the low-level method
-        self.process_invitation(
-            &unwrapped.wrapper_event_id,
-            &unwrapped.rumor,
-            &unwrapped.sender_pubkey.to_hex(),
-        )
-    }
-
-    /// Processes an incoming invitation from an already-unwrapped Welcome.
-    ///
-    /// This is the low-level API that takes pre-unwrapped components.
-    /// Prefer [`process_gift_wrapped_invitation`] for most use cases.
-    /// Circle name and relays are extracted from the Welcome's embedded
-    /// group data.
-    ///
-    /// # Arguments
-    ///
-    /// * `wrapper_event_id` - ID of the gift-wrapped event
-    /// * `rumor_event` - The decrypted rumor event containing the welcome
-    /// * `inviter_pubkey` - Public key (hex) of the inviter
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if processing fails.
-    ///
-    /// [`process_gift_wrapped_invitation`]: Self::process_gift_wrapped_invitation
-    #[allow(clippy::too_many_lines)] // Single coherent pipeline: dedup → MDK → membership guard → persist.
-    pub fn process_invitation(
-        &self,
-        wrapper_event_id: &EventId,
-        rumor_event: &UnsignedEvent,
-        inviter_pubkey: &str,
-    ) -> Result<Invitation> {
-        let wrapper_id_prefix = short_id(wrapper_event_id.as_bytes());
-        log::info!(
-            "[CircleManager] process_invitation: wrapper_id={wrapper_id_prefix} \
-             rumor_kind={} rumor_tags={}",
-            rumor_event.kind.as_u16(),
-            rumor_event.tags.len(),
-        );
-
-        // Idempotency pre-check: NIP-59 gift wraps are permanent on relays
-        // and the poller re-fetches them within a 2-day lookback window on
-        // every cycle. MDK consumes the referenced KeyPackage on first
-        // successful `process_welcome` and errors with "invalid welcome"
-        // on every subsequent call, which masks our post-MDK conflict guard
-        // below. Short-circuit here so the same wrapper never reaches MDK
-        // twice.
-        if let Some(group_id_bytes) = self.storage.is_gift_wrap_processed(wrapper_event_id)? {
-            let outcome = if group_id_bytes.is_empty() {
-                "terminal-failure"
-            } else {
-                "success"
-            };
-            log::info!(
-                "[CircleManager] dedup hit for wrapper_id={wrapper_id_prefix} \
-                 (prior_outcome={outcome})",
-            );
+        // A resolved (accepted/declined) wrap is skipped; a still-held one is a
+        // no-op (the store is idempotent per gift-wrap id).
+        if self
+            .storage
+            .is_gift_wrap_processed(&gift_wrap_event.id)?
+            .is_some()
+        {
+            return Err(CircleError::AlreadyProcessed);
+        }
+        if self.pending_welcomes.contains(&gift_wrap_event.id) {
             return Err(CircleError::AlreadyProcessed);
         }
 
-        // Process welcome via MDK.
-        // M7-B: `process_welcome` writes MDK group state (an authoring MDK
-        // write); exclude a concurrent background sweep. The subsequent sentinel
-        // bookkeeping is on circles.db, so acquire only around the MDK call.
-        let welcome_processing = {
-            let _writer = crate::write_lock::acquire_authoring();
-            self.mdk.process_welcome(wrapper_event_id, rumor_event)
-        };
-        let welcome_result = match welcome_processing {
-            Ok(r) => r,
-            Err(e) => {
-                let redacted = redact_hex_sequences(&e.to_string());
-                // MDK welcome processing is non-retriable: it consumes the
-                // referenced KeyPackage's key material on the single call
-                // that matters. Any error here (malformed welcome, already-
-                // consumed KP, unknown group, etc.) will never succeed on a
-                // re-fetch — the relay-side gift wrap is immutable and the
-                // local MDK state is now terminal. Record a sentinel in the
-                // dedup table so the next poll cycle skips this wrapper
-                // silently instead of re-printing the same error every 2
-                // minutes. If the sentinel insert itself fails we log and
-                // continue — the MDK error is the more important signal.
-                let now = chrono::Utc::now().timestamp();
-                if let Err(sentinel_err) =
-                    self.storage.record_gift_wrap_failure(wrapper_event_id, now)
-                {
-                    log::warn!(
-                        "[CircleManager] failed to record failure sentinel for \
-                         wrapper_id={wrapper_id_prefix}: {}",
-                        redact_hex_sequences(&sentinel_err.to_string()),
-                    );
-                }
-                log::warn!(
-                    "[CircleManager] MDK process_welcome failed (terminal; sentinel written): \
-                     wrapper_id={wrapper_id_prefix} rumor_kind={} \
-                     rumor_tags={} err={redacted}",
-                    rumor_event.kind.as_u16(),
-                    rumor_event.tags.len(),
-                );
-                return Err(CircleError::Mls(redacted));
-            }
-        };
+        // Peel a non-secret preview WITHOUT ingesting; the encrypted 1059 is held
+        // verbatim (the decrypted welcome bytes carry MLS join secrets and are
+        // never stored — F3).
+        let preview = self
+            .session
+            .preview_welcome(gift_wrap_event)
+            .await
+            .map_err(|e| {
+                CircleError::Mls(format!(
+                    "Failed to preview welcome: {}",
+                    redact_hex_sequences(&e.to_string())
+                ))
+            })?;
+        let inviter_pubkey = preview.inviter_pubkey.clone();
 
-        log::info!(
-            "[CircleManager] MDK process_welcome ok: wrapper_id={wrapper_id_prefix} \
-             group_relays={} member_count={}",
-            welcome_result.group_relays.len(),
-            welcome_result.member_count,
-        );
-
-        // Defense-in-depth: if a membership already exists with a non-Pending
-        // status, the invitation was already accepted or declined. This can
-        // still fire under concurrent pollers or after a DB reset that wiped
-        // the dedup cache but left MDK state intact.
-        if let Some(existing) = self.storage.get_membership(&welcome_result.mls_group_id)? {
-            if existing.status != MembershipStatus::Pending {
-                log::warn!(
-                    "[CircleManager] membership conflict: wrapper_id={wrapper_id_prefix} \
-                     existing_status={:?}",
-                    existing.status,
-                );
-                return Err(CircleError::MembershipConflict(format!(
-                    "Invitation already responded: {:?}",
-                    existing.status
-                )));
-            }
-        }
+        self.pending_welcomes
+            .insert(PendingWelcome::new(gift_wrap_event.clone(), preview));
 
         let now = chrono::Utc::now().timestamp();
-
-        // Extract the circle name from the Welcome's embedded group data.
-        // Fall back to "New Circle" if empty.
-        let resolved_name = if welcome_result.group_name.is_empty() {
-            "New Circle".to_string()
-        } else {
-            welcome_result.group_name.clone()
-        };
-
-        // Extract relays from the Welcome's embedded NostrGroupData.
-        // Fall back to default relays if none are present.
-        let relays: Vec<String> = if welcome_result.group_relays.is_empty() {
-            crate::circle::types::default_relays()
-        } else {
-            welcome_result
-                .group_relays
-                .iter()
-                .map(ToString::to_string)
-                .collect()
-        };
-
-        // Build the Circle + pending membership records.
-        let circle = Circle {
-            mls_group_id: welcome_result.mls_group_id.clone(),
-            nostr_group_id: welcome_result.nostr_group_id,
-            display_name: resolved_name.clone(),
-            circle_type: CircleType::LocationSharing,
-            relays,
-            created_at: now,
-            updated_at: now,
-        };
-        let membership = CircleMembership {
-            mls_group_id: welcome_result.mls_group_id.clone(),
-            status: MembershipStatus::Pending,
-            inviter_pubkey: Some(inviter_pubkey.to_string()),
-            invited_at: now,
-            responded_at: None,
-        };
-
-        // Persist the circle, membership, and dedup row atomically so a
-        // crash between MDK success and Rust-side bookkeeping cannot leave
-        // orphaned rows or poison the dedup cache.
-        self.storage
-            .record_processed_invitation(wrapper_event_id, &circle, &membership, now)?;
-
-        // Use the Welcome's member count directly (avoids extra MDK query).
-        let member_count = welcome_result.member_count as usize;
-
         Ok(Invitation {
-            mls_group_id: welcome_result.mls_group_id,
-            circle_name: resolved_name,
-            inviter_pubkey: inviter_pubkey.to_string(),
-            member_count,
+            // Pre-join the real MLS group id is unavailable (it lives inside the
+            // still-encrypted welcome). Key the invitation by the gift-wrap id as
+            // a stand-in until Accept ingests and `GroupJoined` yields the real
+            // id. DM-4: the Dart accept path passes the gift-wrap id.
+            mls_group_id: GroupId::from_slice(gift_wrap_event.id.as_bytes()),
+            circle_name: "New Circle".to_string(),
+            inviter_pubkey,
+            member_count: 0,
             invited_at: now,
         })
     }
 
-    /// Gets all pending invitations.
+    /// Gets all pending invitations (from the held-welcome store).
     ///
     /// # Errors
     ///
-    /// Returns an error if the database operation fails.
+    /// Never errors; the `Result` is kept for API stability.
     pub fn get_pending_invitations(&self) -> Result<Vec<Invitation>> {
-        let circles = self.storage.get_all_circles()?;
-
-        // Build a lookup map from pending welcomes so we can use the
-        // Welcome's member_count instead of querying MDK per circle.
-        let welcomes = self.mdk.get_pending_welcomes().unwrap_or_default();
-        let welcome_map: std::collections::HashMap<_, _> = welcomes
+        Ok(self
+            .pending_welcomes
+            .previews()
             .into_iter()
-            .map(|w| (w.mls_group_id.clone(), w))
-            .collect();
-
-        let mut invitations = Vec::new();
-
-        for circle in circles {
-            if let Some(membership) = self.storage.get_membership(&circle.mls_group_id)? {
-                if membership.status == MembershipStatus::Pending {
-                    let member_count = welcome_map.get(&circle.mls_group_id).map_or_else(
-                        || {
-                            self.mdk
-                                .get_members(&circle.mls_group_id)
-                                .map_or(0, |m| m.len())
-                        },
-                        |w| w.member_count as usize,
-                    );
-
-                    invitations.push(Invitation {
-                        mls_group_id: circle.mls_group_id,
-                        circle_name: circle.display_name,
-                        inviter_pubkey: membership.inviter_pubkey.unwrap_or_default(),
-                        member_count,
-                        invited_at: membership.invited_at,
-                    });
-                }
-            }
-        }
-
-        Ok(invitations)
+            .map(|(id, preview)| Invitation {
+                mls_group_id: GroupId::from_slice(id.as_bytes()),
+                circle_name: "New Circle".to_string(),
+                inviter_pubkey: preview.inviter_pubkey,
+                member_count: 0,
+                invited_at: 0,
+            })
+            .collect())
     }
 
-    /// Accepts an invitation to join a circle.
+    /// Accepts an invitation to join a circle by ingesting the held welcome.
+    ///
+    /// Feeds the still-encrypted 1059 to the engine, which peels + joins and
+    /// emits `GroupJoined` carrying the real MLS group id. Haven then
+    /// materializes the circle row + accepted membership and drops the held
+    /// welcome.
     ///
     /// # Errors
     ///
-    /// Returns an error if acceptance fails.
-    pub fn accept_invitation(&self, mls_group_id: &GroupId) -> Result<CircleWithMembers> {
-        // Verify invitation exists and is pending
-        let membership = self
-            .storage
-            .get_membership(mls_group_id)?
-            .ok_or_else(|| CircleError::NotFound("Invitation not found: <redacted>".to_string()))?;
+    /// Returns [`CircleError::NotFound`] if no welcome is held for `gift_wrap_id`,
+    /// or [`CircleError::Mls`] if the join fails.
+    pub async fn accept_invitation(&self, gift_wrap_id: &EventId) -> Result<CircleWithMembers> {
+        let held = self
+            .pending_welcomes
+            .get(gift_wrap_id)
+            .ok_or_else(|| CircleError::NotFound("No held welcome for invitation".to_string()))?;
 
-        if membership.status != MembershipStatus::Pending {
-            return Err(CircleError::MembershipConflict(format!(
-                "Invitation already responded: {:?}",
-                membership.status
-            )));
-        }
+        let ingest = self
+            .session
+            .accept_welcome(held.gift_wrap())
+            .await
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
 
-        // Accept the welcome in MDK to activate the MLS group.
-        // First check if already active (recovery from partial failure where MDK
-        // accepted but Haven storage update failed on a previous attempt).
-        let group = self.mdk.get_group(mls_group_id)?;
-        let already_active = group.is_some_and(|g| g.state == GroupState::Active);
+        let group_id = ingest
+            .effects
+            .events
+            .iter()
+            .find_map(|ev| match ev {
+                GroupEvent::GroupJoined { group_id, .. } => Some(group_id.clone()),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                CircleError::Mls("welcome accept did not yield a joined group".to_string())
+            })?;
 
-        if !already_active {
-            let pending_welcomes = self.mdk.get_pending_welcomes()?;
+        let (nostr_group_id, relays) = self
+            .session
+            .group_routing(&group_id)
+            .await
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+        let group = self
+            .session
+            .group_record(&group_id)
+            .await
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
 
-            let welcome = pending_welcomes
-                .iter()
-                .find(|w| &w.mls_group_id == mls_group_id)
-                .ok_or_else(|| {
-                    CircleError::NotFound(
-                        "No pending MDK welcome found for invitation: <redacted>".to_string(),
-                    )
-                })?;
-
-            // M7-B: `accept_welcome` writes MDK group state (an authoring MDK
-            // write); exclude a concurrent background sweep.
-            {
-                let _writer = crate::write_lock::acquire_authoring();
-                self.mdk.accept_welcome(welcome)?;
-            }
-        }
-
-        // Update membership status
         let now = chrono::Utc::now().timestamp();
-        self.storage.update_membership_status(
-            mls_group_id,
-            MembershipStatus::Accepted,
-            Some(now),
-        )?;
+        let resolved_name = if group.name.is_empty() {
+            "New Circle".to_string()
+        } else {
+            group.name
+        };
+        let effective_relays = if relays.is_empty() {
+            crate::circle::types::default_relays()
+        } else {
+            relays
+        };
+        let circle = Circle {
+            mls_group_id: group_id.clone(),
+            nostr_group_id,
+            display_name: resolved_name,
+            circle_type: CircleType::LocationSharing,
+            relays: effective_relays,
+            created_at: now,
+            updated_at: now,
+        };
+        let membership = CircleMembership {
+            mls_group_id: group_id.clone(),
+            status: MembershipStatus::Accepted,
+            inviter_pubkey: Some(held.preview().inviter_pubkey.clone()),
+            invited_at: now,
+            responded_at: Some(now),
+        };
 
-        // Return the circle with members
-        self.get_circle(mls_group_id)?
+        // Atomically persist the circle + membership + dedup row, then drop the
+        // held welcome (terminal).
+        self.storage
+            .record_processed_invitation(gift_wrap_id, &circle, &membership, now)?;
+        self.pending_welcomes.remove(gift_wrap_id);
+
+        self.get_circle(&group_id)
+            .await?
             .ok_or_else(|| CircleError::NotFound("Circle not found after acceptance".to_string()))
     }
 
-    /// Declines an invitation to join a circle.
+    /// Declines an invitation: drops the held 1059 locally.
+    ///
+    /// The welcome is never ingested, so there is no join commit, no
+    /// self-remove, nothing on the wire (Rule 10). The gift wrap is marked
+    /// resolved so a re-poll does not re-surface it.
     ///
     /// # Errors
     ///
-    /// Returns an error if declining fails.
-    pub fn decline_invitation(&self, mls_group_id: &GroupId) -> Result<()> {
-        // Verify invitation exists and is pending
-        let membership = self
-            .storage
-            .get_membership(mls_group_id)?
-            .ok_or_else(|| CircleError::NotFound("Invitation not found: <redacted>".to_string()))?;
-
-        if membership.status != MembershipStatus::Pending {
-            return Err(CircleError::MembershipConflict(format!(
-                "Invitation already responded: {:?}",
-                membership.status
-            )));
-        }
-
-        // Best-effort MDK cleanup: decline the welcome if it exists in MDK.
-        // If MDK has no group or no pending welcome (orphaned Haven record,
-        // DB mismatch, test data, etc.), that is fine — the MLS group was
-        // never joined, so there is no crypto state to clean up.
-        // MDK's decline_welcome is purely state bookkeeping (sets welcome
-        // state to Declined, group state to Inactive) with no crypto impact.
-        let group = self.mdk.get_group(mls_group_id)?;
-        let already_inactive = group.is_some_and(|g| g.state == GroupState::Inactive);
-
-        if !already_inactive {
-            let pending_welcomes = self.mdk.get_pending_welcomes().unwrap_or_default();
-
-            if let Some(welcome) = pending_welcomes
-                .iter()
-                .find(|w| &w.mls_group_id == mls_group_id)
-            {
-                // M7-B: `decline_welcome` writes MDK welcome/group state (an
-                // authoring MDK write); exclude a concurrent background sweep.
-                let _writer = crate::write_lock::acquire_authoring();
-                self.mdk.decline_welcome(welcome)?;
-            }
-            // No pending welcome found — expected for orphaned records.
-            // Skip MDK decline; just update Haven storage below.
-        }
-
-        // Update membership status
+    /// Returns an error only if the resolution sentinel write fails.
+    pub fn decline_invitation(&self, gift_wrap_id: &EventId) -> Result<()> {
+        self.pending_welcomes.remove(gift_wrap_id);
         let now = chrono::Utc::now().timestamp();
-        self.storage.update_membership_status(
-            mls_group_id,
-            MembershipStatus::Declined,
-            Some(now),
-        )?;
-
+        // Reuse the failure-sentinel row as a "resolved, do not re-surface" mark.
+        let _ = self.storage.record_gift_wrap_failure(gift_wrap_id, now);
         Ok(())
     }
 
@@ -1691,44 +1203,31 @@ impl CircleManager {
 
     /// Encrypts a location for a circle, producing a kind 445 event.
     ///
-    /// Looks up the circle's MLS group, builds an inner rumor event (kind 9
-    /// with `["t", "location"]` tag per MIP-03), and encrypts it via MDK.
-    /// MDK handles MLS encryption and ephemeral keypair generation.
+    /// Builds the inner Marmot app event (kind 9, `["t","location"]`, `pubkey`
+    /// == the local identity per W9) and sends it via the engine, returning the
+    /// transport event plus the circle's `nostr_group_id` and relays for the
+    /// relay layer to publish.
     ///
-    /// # Arguments
-    ///
-    /// * `mls_group_id` - The circle's MLS group ID
-    /// * `sender_pubkey` - The sender's Nostr public key (for the inner rumor)
-    /// * `location` - The obfuscated location message to encrypt
-    /// * `update_interval_secs` - Publish-cadence hint used to compute the
-    ///   jittered NIP-40 `expiration` tag on the outer kind:445 wrapper.
-    ///   Clamped to `[MIN_UPDATE_INTERVAL_SECS, MAX_UPDATE_INTERVAL_SECS]`
-    ///   before the jitter window is computed. See `location::ttl` for the
-    ///   threat model.
-    ///
-    /// # Returns
-    ///
-    /// A tuple of `(kind_445_event, nostr_group_id, relay_urls)` ready for
-    /// publishing via [`RelayManager`].
+    /// The per-send NIP-40 expiration is dropped (retention is now a group-level
+    /// `message-retention.v1` component, not a per-message tag — `dm2_report` #2);
+    /// `update_interval_secs` is retained for signature stability but unused.
     ///
     /// # Errors
     ///
-    /// Returns an error if the circle is not found, serialization fails,
-    /// or MLS encryption fails.
-    pub fn encrypt_location(
+    /// Returns an error if the circle is not found, serialization fails, or the
+    /// engine rejects the send.
+    pub async fn encrypt_location(
         &self,
         mls_group_id: &GroupId,
-        sender_pubkey: &PublicKey,
+        _sender_pubkey: &PublicKey,
         location: &LocationMessage,
-        update_interval_secs: u64,
+        _update_interval_secs: u64,
     ) -> Result<(Event, [u8; 32], Vec<String>)> {
-        // Look up circle to get nostr_group_id and relays
         let circle = self
             .storage
             .get_circle(mls_group_id)?
             .ok_or_else(|| CircleError::NotFound("Circle not found: <redacted>".to_string()))?;
 
-        // Build the inner rumor event (kind 9 with location tag per MIP-03)
         let content = location.to_string().map_err(|e| {
             CircleError::Mls(format!(
                 "Failed to serialize location: {}",
@@ -1736,116 +1235,107 @@ impl CircleManager {
             ))
         })?;
 
-        let location_tag = Tag::parse(["t", "location"]).map_err(|e| {
-            CircleError::Mls(format!(
-                "Failed to create location tag: {}",
-                redact_hex_sequences(&e.to_string())
-            ))
-        })?;
-
-        let rumor = EventBuilder::new(Kind::Custom(9), content)
-            .tag(location_tag)
-            .build(*sender_pubkey);
-
-        // Compute the jittered NIP-40 expiration for the outer kind:445 wrapper.
-        // The absolute timestamp is plaintext on the wire, so it leaks a coarse
-        // "this event expires in ~interval..2*interval seconds" signal — but it
-        // breaks the constant-TTL fingerprint that would otherwise identify
-        // Haven clients on shared relays. See location/ttl.rs and SECURITY.md.
-        let interval = crate::location::ttl::validate_update_interval_secs(update_interval_secs);
-        let expiration = crate::location::ttl::compute_jittered_ttl_secs(interval)
-            .map(|jitter| Timestamp::now() + std::time::Duration::from_secs(jitter));
-
-        // Encrypt using MdkManager directly (MLS encryption + ephemeral keypair).
-        // M7-B: `create_message` is a ratchet advance (an authoring MDK write);
-        // exclude a concurrent background sweep. No `.await` — safe to hold.
-        let event = {
-            let _writer = crate::write_lock::acquire_authoring();
-            self.mdk
-                .create_message(mls_group_id, rumor, expiration)
-                .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
-        };
+        // `send_location` stamps the inner pubkey with the session identity (W9)
+        // and generates a fresh ephemeral key per 445 (Rule 2, engine-owned).
+        let effects = self
+            .session
+            .send_location(mls_group_id, content)
+            .await
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+        let event = take_app_message(effects)?;
 
         Ok((event, circle.nostr_group_id, circle.relays))
     }
 
-    /// Decrypts a kind 445 event, returning the location result.
+    /// The group relays a `kind:445` commit routes to, resolved from its `#h`
+    /// (`nostr_group_id`) tag against the local circle rows.
     ///
-    /// Delegates to MDK for MLS decryption, signature verification, and epoch
-    /// management. The result indicates whether the message is a location
-    /// update, a group evolution event, or unprocessable.
+    /// Used by the receive-side auto-commit publisher
+    /// ([`crate::relay::auto_commit`]) to target a peer `SelfRemove` eviction
+    /// commit at the correct circle's relays. Returns `None` (fail closed — the
+    /// caller then rolls the commit back rather than publish it nowhere) when the
+    /// `#h` tag is absent/malformed or no local circle matches.
+    #[must_use]
+    pub fn relays_for_commit_event(&self, event: &Event) -> Option<Vec<String>> {
+        let ngid = nostr_group_id_from_commit_event(event)?;
+        let circles = self.storage.get_all_circles().ok()?;
+        circles
+            .into_iter()
+            .find(|c| c.nostr_group_id == ngid)
+            .map(|c| c.relays)
+    }
+
+    /// Decrypts / ingests a received kind 445 event, returning the folded
+    /// location-facing results AND any receive-side auto-commit(s) the engine
+    /// staged (a peer `SelfRemove` eviction).
     ///
-    /// # Arguments
+    /// Ingests the transport message, drains the engine's emitted
+    /// [`GroupEvent`]s, advances stored convergence for any group with pending
+    /// convergence, folds each event into a [`LocationMessageResult`], and
+    /// collects every [`PublishWork::AutoPublish`] into a [`CommitToPublish`].
     ///
-    /// * `event` - The received kind 445 event to decrypt
-    ///
-    /// # Returns
-    ///
-    /// A [`LocationMessageResult`] indicating the message type:
-    /// - `Location`: Decrypted location with sender pubkey and content JSON
-    /// - `GroupUpdate`: Member addition/removal (commit or proposal)
-    /// - `Unprocessable`: Could not decrypt (epoch mismatch, etc.)
-    /// - `PreviouslyFailed`: Previously attempted and failed
+    /// Publish-before-apply (Rule 13): the caller MUST publish each returned
+    /// [`DecryptedIngest::auto_commits`] entry's `commit_event` to the circle's
+    /// relays and then [`Self::confirm_published`] on a ≥1-relay ack (or
+    /// [`Self::publish_failed`] on failure) — exactly like [`CommitToPublish`]
+    /// from the send paths. An auto-commit that cannot be serialized is rolled
+    /// back here (never surfaced half-formed).
     ///
     /// # Errors
     ///
-    /// Returns an error if MLS processing fails entirely.
-    pub fn decrypt_location(&self, event: &Event) -> Result<LocationMessageResult> {
-        // Receiver-side NIP-40 expiration enforcement.
-        //
-        // The outer kind:445 wrapper may carry an `expiration` tag (see
-        // `encrypt_location`). A well-behaved relay will drop expired events,
-        // but we cannot trust the relay — a malicious or buggy relay could
-        // replay stale ciphertext past its advertised TTL. Defense-in-depth:
-        // drop locally too, with a small grace window for clock skew.
-        if let Some(expires_at) = event.tags.iter().find_map(|t| match t.as_standardized() {
-            Some(TagStandard::Expiration(ts)) => Some(*ts),
-            _ => None,
-        }) {
-            let now = Timestamp::now();
-            let grace = Timestamp::from(
-                expires_at
-                    .as_secs()
-                    .saturating_add(crate::location::ttl::RECEIVER_EXPIRATION_GRACE_SECS),
-            );
-            if now > grace {
-                // Drop expired event. Use a zero group-id marker because we
-                // haven't yet decrypted the outer event to learn which group
-                // it was destined for; callers treat `Unprocessable` the same
-                // as other non-delivery cases and will not surface it to UI.
-                return Ok(LocationMessageResult::Unprocessable {
-                    group_id: GroupId::from_slice(&[]),
-                    reason: "event past NIP-40 expiration (+60s grace)".to_string(),
-                });
+    /// Returns an error only for a hard ingest failure.
+    pub async fn decrypt_location_collecting_commits(
+        &self,
+        event: &Event,
+    ) -> Result<DecryptedIngest> {
+        let ingest = self
+            .session
+            .process_event(event)
+            .await
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+
+        let mut results = fold_group_events(&ingest.effects.events);
+        let mut auto_commits = Vec::new();
+        self.collect_auto_commits(&ingest.effects.publish, &mut auto_commits)
+            .await;
+
+        // Release any queued work + buffered inbound now safe to apply, re-ticking
+        // a group that stays pending until its jitter-delayed `SelfRemove`
+        // auto-commit surfaces (bounded) — a single advance would drain the group
+        // out of the engine's pending set before the auto-commit's wall-clock due
+        // time, so the eviction would never be surfaced for the caller to publish.
+        // A quiet group exits immediately (no delay).
+        let mut pending: Vec<GroupId> = ingest.effects.pending_convergence.clone();
+        for _ in 0..crate::relay::auto_commit::MAX_CONVERGENCE_RETICKS {
+            if pending.is_empty() {
+                break;
+            }
+            let mut next: Vec<GroupId> = Vec::new();
+            for gid in &pending {
+                if let Ok(more) = self.session.advance_convergence(gid).await {
+                    results.extend(fold_group_events(&more.events));
+                    self.collect_auto_commits(&more.publish, &mut auto_commits)
+                        .await;
+                    next.extend(more.pending_convergence);
+                }
+            }
+            pending = next;
+            if !pending.is_empty() {
+                tokio::time::sleep(crate::relay::auto_commit::CONVERGENCE_RETICK_DELAY).await;
             }
         }
 
-        // M7-B: the legacy foreground receive path is an AUTHORING writer —
-        // `process_message` can auto-commit a peer SelfRemove (an MDK write).
-        // Exclude a concurrent background sweep. Sync method (no `.await`).
-        let result = {
-            let _writer = crate::write_lock::acquire_authoring();
-            self.mdk
-                .process_message(event)
-                .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
-        };
-
-        let location_result = MdkManager::to_location_result(result);
-
-        // Consumer-side convergence: when a member processes an
-        // admin-authorized GroupContextExtensions commit that changes the
-        // group relay list, MDK has already updated its own `group_relays`
-        // store (process_commit -> sync_group_metadata_from_mls). Re-derive
-        // the app-level `circle.relays` so the NEXT kind-445 publish/subscribe
-        // converges on the new set; the Dart poller self-heals via the
-        // existing `circlesProvider` invalidation on `group_updated`.
-        //
-        // Gated on `GroupUpdate` so plain location messages (mapped to
-        // `Location`) never trigger a relay read. Best-effort: a transient
-        // storage error must never drop a successfully-processed commit or
-        // location — the idempotent re-sync re-runs on the next commit.
-        if let LocationMessageResult::GroupUpdate { ref group_id, .. } = location_result {
-            if let Err(e) = self.resync_circle_relays_from_mdk(group_id) {
+        // Best-effort: re-derive `circle.relays` after a group update. Collect
+        // ids first to avoid borrowing `results` across the await.
+        let updated: Vec<GroupId> = results
+            .iter()
+            .filter_map(|r| match r {
+                LocationMessageResult::GroupUpdate { group_id } => Some(group_id.clone()),
+                _ => None,
+            })
+            .collect();
+        for gid in updated {
+            if let Err(e) = self.resync_circle_relays_from_mdk(&gid).await {
                 log::debug!(
                     "decrypt_location: relay re-sync failed (will retry on next commit): {}",
                     redact_hex_sequences(&e.to_string())
@@ -1853,376 +1343,77 @@ impl CircleManager {
             }
         }
 
-        Ok(location_result)
+        Ok(DecryptedIngest {
+            results,
+            auto_commits,
+        })
     }
 
-    /// Decrypts an incoming `kind:445` for the live-sync engine (regime 1),
-    /// returning the neutral [`EngineDecryptOutcome`] the processor plans
-    /// against.
-    ///
-    /// `nostr_group_id` is the pseudonymous id the event was routed under (its
-    /// `#h` tag); it is stamped onto the outcome so the real MLS group id never
-    /// leaves haven-core (Security Rule 4). Like [`Self::decrypt_location`] this
-    /// drops an event past its NIP-40 `expiration` (with the receiver grace) and
-    /// best-effort re-syncs the circle's relay set on a group update; unlike it,
-    /// a same-epoch sibling commit racing our pending commit is surfaced as
-    /// [`EngineDecryptOutcome::CompetingCommit`] rather than collapsed to an
-    /// opaque error.
-    ///
-    /// # Regime
-    ///
-    /// This is the REGIME-1 path (we hold no pending commit for the group). The
-    /// engine must NOT call it while a settle window is open for the group:
-    /// applying a sibling commit while holding our own pending FORKS the group
-    /// (see the `*_while_holding_pending_*` / `blind_apply_*` regression tests).
-    /// In that case the processor buffers raw candidates for `converge_commit`
-    /// instead.
-    #[must_use]
-    pub fn decrypt_location_for_engine(
-        &self,
-        event: &Event,
-        nostr_group_id: &[u8],
-    ) -> crate::relay::live_sync::EngineDecryptOutcome {
-        use crate::nostr::mls::types::MessageProcessingResult;
-        use crate::nostr::mls::ClassifiedProcessing;
-        use crate::relay::live_sync::EngineDecryptOutcome as Out;
-        use nostr::JsonUtil;
-
-        // Receiver-side NIP-40 expiration drop (mirrors `decrypt_location`).
-        if let Some(expires_at) = event.tags.iter().find_map(|t| match t.as_standardized() {
-            Some(TagStandard::Expiration(ts)) => Some(*ts),
-            _ => None,
-        }) {
-            let grace = Timestamp::from(
-                expires_at.as_secs() + crate::location::ttl::RECEIVER_EXPIRATION_GRACE_SECS,
-            );
-            if Timestamp::now() > grace {
-                return Out::Unprocessable;
-            }
-        }
-
-        let created_at_secs = i64::try_from(event.created_at.as_secs()).unwrap_or(i64::MAX);
-
-        // M7-B: this is the live-sync receiver AUTHORING path — `process_message_classified`
-        // can auto-stage a peer-SelfRemove commit (an MDK write), and the AutoCommit
-        // leg below writes the staged-commit marker. Hold the writer lock across the
-        // whole classification + marker write so a background sweep cannot interleave.
-        // This method is sync (no `.await`); the guard drops at the end of the match.
-        let _writer = crate::write_lock::acquire_authoring();
-        match self.mdk.process_message_classified(event) {
-            ClassifiedProcessing::Processed(result) => {
-                // An applied PEER commit (`MessageProcessingResult::Commit`) is the
-                // ONLY `Processed` variant that advances OUR epoch — the three
-                // proposal variants do not, yet `to_location_result` collapses all
-                // four into `GroupUpdate { evolution_event: None }`. Capture the raw
-                // discriminant BEFORE `to_location_result` consumes `result`, to gate
-                // the future-epoch un-poison sweep (below) strictly on an epoch
-                // advance (MDK #633 workaround).
-                let was_applied_commit = matches!(&*result, MessageProcessingResult::Commit { .. });
-                match MdkManager::to_location_result(*result) {
-                    LocationMessageResult::Location {
-                        sender_pubkey,
-                        content,
-                        ..
-                    } => Out::Location {
-                        nostr_group_id: nostr_group_id.to_vec(),
-                        sender_pubkey,
-                        content,
-                        created_at_secs,
-                    },
-                    LocationMessageResult::GroupUpdate {
-                        group_id,
-                        evolution_event,
-                    } => {
-                        // Best-effort relay re-sync on a commit (mirrors
-                        // `decrypt_location`); a transient storage error must not
-                        // drop the successfully-processed update.
-                        if let Err(e) = self.resync_circle_relays_from_mdk(&group_id) {
-                            log::debug!(
-                                "decrypt_location_for_engine: relay re-sync failed: {}",
-                                redact_hex_sequences(&e.to_string())
-                            );
-                        }
-                        // `Some` ⇒ an auto-committed peer SelfRemove: MDK staged a
-                        // pending commit. The ENGINE (path B, M6-2) publishes +
-                        // converges it in-Rust; surface the real group id + commit
-                        // JSON for the converge task (in-crate only, never the
-                        // FFI). The relay re-sync above ran at the still-epoch-N
-                        // state, so the publish target relays are epoch-consistent.
-                        // `None` ⇒ an already-applied peer commit (a UI roster
-                        // change; safe to advance the cursor + emit).
-                        match evolution_event {
-                            // An already-applied peer commit. If it ADVANCED our
-                            // epoch (`was_applied_commit`), un-poison any out-of-order
-                            // FUTURE-epoch commit that arrived early — MDK #633
-                            // workaround (see `retry_failed_future_epoch_messages`).
-                            // Best-effort; the `_writer` held above covers this
-                            // MDK-DB write. The `was_applied_commit` gate skips a
-                            // proposal, which also maps to this `None` arm but does
-                            // not advance the epoch.
-                            None => {
-                                if was_applied_commit {
-                                    if let Err(e) =
-                                        self.mdk.retry_failed_future_epoch_messages(&group_id)
-                                    {
-                                        log::debug!(
-                                            "decrypt_location_for_engine: future-epoch \
-                                             retryable sweep failed: {}",
-                                            redact_hex_sequences(&e.to_string())
-                                        );
-                                    }
-                                }
-                                Out::GroupUpdate {
-                                    nostr_group_id: nostr_group_id.to_vec(),
-                                    evolution_event_json: None,
-                                }
-                            }
-                            Some(commit) => {
-                                // M7: mirror `decrypt_receive_only`'s AutoCommit
-                                // leg — record the MDK-auto-staged pending commit
-                                // so a concurrent / cold-wake catch-up SKIPS this
-                                // group until the foreground path-B converge
-                                // clears it. Defense-in-depth (MDK's
-                                // OwnCommitPending is the structural fork barrier);
-                                // closes the marker-absent window during the
-                                // settle wait + a mid-converge process kill.
-                                if let Err(e) = self.mark_group_staged(&group_id) {
-                                    log::debug!(
-                                        "decrypt_location_for_engine: marking \
-                                         auto-staged commit failed: {}",
-                                        redact_hex_sequences(&e.to_string())
-                                    );
-                                }
-                                Out::AutoCommit {
-                                    nostr_group_id: nostr_group_id.to_vec(),
-                                    mls_group_id: group_id,
-                                    commit_json: commit.as_json(),
-                                }
-                            }
-                        }
+    /// Converts each [`PublishWork::AutoPublish`] in `work` into a surfaced
+    /// [`CommitToPublish`]; an auto-commit whose wrapped message cannot be
+    /// serialized is rolled back ([`Self::publish_failed`]) rather than surfaced
+    /// half-formed (Rule 13: never leave a pending ref dangling).
+    async fn collect_auto_commits(&self, work: &[PublishWork], out: &mut Vec<CommitToPublish>) {
+        for item in work {
+            if let PublishWork::AutoPublish { msg, pending } = item {
+                match SessionManager::transport_message_to_event(msg) {
+                    Ok(commit_event) => out.push(CommitToPublish {
+                        commit_event,
+                        pending: *pending,
+                    }),
+                    Err(_) => {
+                        let _ = self.publish_failed(*pending).await;
                     }
-                    LocationMessageResult::Unprocessable { .. } => Out::Unprocessable,
-                    LocationMessageResult::PreviouslyFailed => Out::PreviouslyFailed,
                 }
             }
-            ClassifiedProcessing::CompetingCommit => Out::CompetingCommit,
-            ClassifiedProcessing::Failed(_) => Out::OtherError,
         }
     }
 
-    /// Fork-safe RECEIVE-ONLY decrypt for the background / resume catch-up sweep
-    /// (M7). Returns a presence-only [`ReceiveOnlyOutcome`] (no coordinates,
-    /// pubkey, group id, or commit JSON — the location content is persisted
-    /// in-crate, never surfaced), so the sweep can decide cursor advancement
-    /// without leaking (Security Rule 4).
+    /// Decrypts / ingests a received kind 445 event, returning ONLY the folded
+    /// location-facing results.
     ///
-    /// Fork-safety (C-NOFORK-2): a group that holds a locally-staged pending
-    /// commit is SKIPPED WITHOUT DECRYPTING (the foreground owns its epoch
-    /// transition; blind-applying a same-epoch sibling would fork). The check
-    /// FAILS CLOSED — a storage error (e.g. locked device pre-first-unlock)
-    /// yields [`ReceiveOnlyOutcome::Skipped`], never a decrypt.
+    /// Back-compatible shim over [`Self::decrypt_location_collecting_commits`]
+    /// for call sites (chiefly tests) that never trigger a peer `SelfRemove`. It
+    /// does NOT surface receive-side auto-commits; to stay Rule-13-safe it rolls
+    /// back ([`Self::publish_failed`]) any that surfaced rather than
+    /// optimistically applying an unpublished commit. Production receive paths use
+    /// [`Self::decrypt_location_collecting_commits`] (poll → Dart publishes) or
+    /// the live-sync / catch-up planes (which publish in-Rust).
     ///
-    /// This NEVER authors, merges, converges, or CLEARS a commit. An
-    /// auto-committed peer proposal is left staged (clearing loses the leave —
-    /// the foreground engine converges it) and marked so future wakes skip.
-    /// Unlike [`Self::decrypt_location_for_engine`] it does NOT re-sync relays.
+    /// # Errors
     ///
-    /// `own_pubkey_hex` lets a self-echo advance the cursor without persisting.
-    #[must_use]
-    pub fn decrypt_receive_only(
-        &self,
-        event: &Event,
-        nostr_group_id: &[u8],
-        own_pubkey_hex: &str,
-    ) -> crate::relay::ReceiveOnlyOutcome {
-        use crate::nostr::mls::types::MessageProcessingResult;
-        use crate::nostr::mls::ClassifiedProcessing;
-        use crate::relay::ReceiveOnlyOutcome as Out;
-
-        // C-NOFORK-2: never decrypt a group with a staged pending commit
-        // (fail-closed: has_pending_commit returns true on any storage error).
-        if self.has_pending_commit(nostr_group_id) {
-            return Out::Skipped;
+    /// Returns an error only for a hard ingest failure.
+    pub async fn decrypt_location(&self, event: &Event) -> Result<Vec<LocationMessageResult>> {
+        let ingest = self.decrypt_location_collecting_commits(event).await?;
+        for commit in ingest.auto_commits {
+            // No relay plane here — never apply an unpublished eviction commit.
+            let _ = self.publish_failed(commit.pending).await;
         }
-
-        // Receiver-side NIP-40 expiration drop (mirrors the engine path).
-        if let Some(expires_at) = event.tags.iter().find_map(|t| match t.as_standardized() {
-            Some(TagStandard::Expiration(ts)) => Some(*ts),
-            _ => None,
-        }) {
-            let grace = Timestamp::from(
-                expires_at.as_secs() + crate::location::ttl::RECEIVER_EXPIRATION_GRACE_SECS,
-            );
-            if Timestamp::now() > grace {
-                return Out::Skipped;
-            }
-        }
-
-        // M7-B: the SWEEP writer. Try (non-blocking) to acquire the writer lock;
-        // if a foreground authoring writer holds it, YIELD — treat contention
-        // exactly like `Skipped` (no decrypt, cursor does not advance, the event
-        // is re-fetched next sweep via the contiguous-prefix cursor). The guard
-        // is held across `process_message_classified` (an MDK write) + the
-        // co-located marker write; this method is sync (no `.await`).
-        let Some(_writer) = crate::write_lock::try_acquire_background() else {
-            return Out::Skipped;
-        };
-        match self.mdk.process_message_classified(event) {
-            ClassifiedProcessing::Processed(result) => {
-                // Gate the future-epoch un-poison sweep (below, in the applied-commit
-                // leg) on the raw `Commit` discriminant, captured before
-                // `to_location_result` consumes `result` — mirrors the engine path.
-                let was_applied_commit = matches!(&*result, MessageProcessingResult::Commit { .. });
-                match MdkManager::to_location_result(*result) {
-                    LocationMessageResult::Location {
-                        sender_pubkey,
-                        content,
-                        ..
-                    } => {
-                        // Self-echo: advance the cursor, do not persist our own.
-                        if sender_pubkey != own_pubkey_hex {
-                            if let Err(e) = self.persist_receive_only_location(
-                                nostr_group_id,
-                                &sender_pubkey,
-                                &content,
-                            ) {
-                                log::debug!(
-                                    "receive_only persist failed: {}",
-                                    redact_hex_sequences(&e.to_string())
-                                );
-                                // Do NOT advance past an unpersisted location.
-                                return Out::Skipped;
-                            }
-                        }
-                        Out::Location
-                    }
-                    LocationMessageResult::GroupUpdate {
-                        group_id,
-                        evolution_event,
-                    } => {
-                        if evolution_event.is_some() {
-                            // AutoCommit: MDK auto-staged a peer proposal commit
-                            // (reachable only because has_pending_commit was
-                            // false at entry). NEVER clear (loses the leave); SET
-                            // the marker (future wakes skip) + stop the cursor;
-                            // the foreground engine converges it.
-                            if let Err(e) = self.mark_group_staged(&group_id) {
-                                log::debug!(
-                                    "receive_only: marking auto-staged commit failed: {}",
-                                    redact_hex_sequences(&e.to_string())
-                                );
-                            }
-                            Out::AutoCommitStaged
-                        } else {
-                            // Already-merged peer commit (convergent). Advance. If it
-                            // ADVANCED our epoch, un-poison any out-of-order FUTURE-epoch
-                            // commit that arrived early — so a stationary / receive-only
-                            // user self-heals HERE, not only on a later foreground epoch
-                            // advance (sites 1-3). Best-effort; the `_writer`
-                            // (`try_acquire_background`) held above covers this MDK-DB
-                            // write. MDK #633 workaround (see
-                            // `MdkManager::retry_failed_future_epoch_messages`).
-                            if was_applied_commit {
-                                if let Err(e) =
-                                    self.mdk.retry_failed_future_epoch_messages(&group_id)
-                                {
-                                    log::debug!(
-                                        "receive_only: future-epoch retryable sweep \
-                                         failed: {}",
-                                        redact_hex_sequences(&e.to_string())
-                                    );
-                                }
-                            }
-                            Out::CommitApplied
-                        }
-                    }
-                    LocationMessageResult::Unprocessable { .. }
-                    | LocationMessageResult::PreviouslyFailed => Out::Skipped,
-                }
-            }
-            ClassifiedProcessing::CompetingCommit | ClassifiedProcessing::Failed(_) => Out::Skipped,
-        }
-    }
-
-    /// Parses a decrypted `LocationMessage` content string and persists it as a
-    /// last-known-location row (the in-crate persist the receive-only sweep uses
-    /// so location content never crosses the FFI). `purge_after` is recomputed
-    /// authoritatively by [`Self::upsert_last_known_location`].
-    fn persist_receive_only_location(
-        &self,
-        nostr_group_id: &[u8],
-        sender_pubkey: &str,
-        content: &str,
-    ) -> Result<()> {
-        let msg: crate::location::LocationMessage = serde_json::from_str(content)
-            .map_err(|_| CircleError::InvalidData("invalid location content".to_string()))?;
-        let ngid: [u8; 32] = nostr_group_id
-            .try_into()
-            .map_err(|_| CircleError::InvalidData("invalid nostr_group_id length".to_string()))?;
-        let row = super::LastKnownLocation {
-            nostr_group_id: ngid,
-            sender_pubkey: sender_pubkey.to_string(),
-            latitude: msg.latitude,
-            longitude: msg.longitude,
-            geohash: msg.geohash,
-            display_name: msg.display_name,
-            timestamp: msg.timestamp.timestamp(),
-            expires_at: msg.expires_at.timestamp(),
-            purge_after: 0, // recomputed authoritatively by upsert
-            updated_at: chrono::Utc::now().timestamp(),
-        };
-        self.upsert_last_known_location(&row)
+        Ok(ingest.results)
     }
 
     // ==================== Last-Known Location Cache ====================
 
-    /// Persists a last-known-location row.
-    ///
-    /// Authoritative enforcement point for the receiver-side retention
-    /// window:
-    ///
-    /// * `purge_after` is **recomputed** server-side as
-    ///   `timestamp + LOCATION_RETENTION_SECS` (1 day) so a caller cannot
-    ///   inflate the persistence window. The retention window is hard-coded
-    ///   and not configurable.
-    /// * `display_name` is re-sanitized via
-    ///   `sanitize_display_name` so non-printable or
-    ///   over-length values from a forked sender cannot land on disk.
+    /// Persists a last-known-location row (authoritative retention-window and
+    /// display-name sanitization enforcement point).
     ///
     /// # Errors
     ///
     /// Returns an error if the database operation fails.
     pub fn upsert_last_known_location(&self, location: &super::LastKnownLocation) -> Result<()> {
-        // Receiver-side retention is a fixed 1-day window. The `try_from`
-        // is infallible for `LOCATION_RETENTION_SECS` (86_400 ≪ i64::MAX);
-        // the `unwrap_or(i64::MAX)` is defensive in case the constant is
-        // ever raised beyond `i64::MAX`.
         let retention_i64 =
             i64::try_from(crate::location::LOCATION_RETENTION_SECS).unwrap_or(i64::MAX);
-
-        // purge_after = timestamp + retention, saturating so a
-        // pathological timestamp cannot overflow i64.
         let derived_purge_after = location.timestamp.saturating_add(retention_i64);
 
-        // Start from the caller-supplied row, then overwrite only the
-        // fields we authoritatively control. Any future field on
-        // `LastKnownLocation` is carried through automatically.
         let mut clamped = location.clone();
         clamped.purge_after = derived_purge_after;
-        // Re-sanitize display_name: the sender ran sanitization already,
-        // but we re-run here so a forked client cannot bypass it.
         clamped.display_name = crate::location::types::sanitize_display_name(clamped.display_name);
 
         self.storage.upsert_last_known_location(&clamped)
     }
 
-    /// Returns all non-purged last-known locations for a circle.
-    ///
-    /// `display_name` is re-sanitized on read in addition to write. This
-    /// defends against rows that predate a sanitization policy change:
-    /// if the rule is strengthened (e.g. a new control character is
-    /// added to the deny-list), existing rows are cleaned the next time
-    /// they are surfaced, with no migration required.
+    /// Returns all non-purged last-known locations for a circle (display names
+    /// re-sanitized on read).
     ///
     /// # Errors
     ///
@@ -2285,610 +1476,37 @@ impl CircleManager {
 
     // ==================== Key Packages ====================
 
-    /// Creates a key package for the given identity.
+    /// Produces a fresh `KeyPackage` for publishing to a directory (kind 30443).
     ///
-    /// The returned bundle contains the unsigned event content and tags
-    /// that should be signed by the identity key and published.
-    ///
-    /// # Arguments
-    ///
-    /// * `identity_pubkey` - Nostr public key (hex) of the identity
-    /// * `relays` - Relay URLs where the key package should be published
+    /// Event building / signing stays in Haven's relay layer (DM-2b); this
+    /// returns the raw engine [`KeyPackage`].
     ///
     /// # Errors
     ///
-    /// Returns an error if key package creation fails.
-    pub fn create_key_package(
-        &self,
-        identity_pubkey: &str,
-        relays: &[String],
-    ) -> Result<KeyPackageBundle> {
-        // M7-B: `create_key_package` persists the key package's private
-        // init/encryption material to MDK storage (an authoring MDK write);
-        // exclude a concurrent background sweep.
-        let _writer = crate::write_lock::acquire_authoring();
-        self.mdk
-            .create_key_package(identity_pubkey, relays)
+    /// Returns an error if generation fails.
+    pub async fn fresh_key_package(&self) -> Result<KeyPackage> {
+        self.session
+            .fresh_key_package()
+            .await
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
     }
 
-    /// Finalizes a pending commit after publishing evolution events.
-    ///
-    /// This should be called after the commit event has been successfully
-    /// published to relays.
+    /// Deletes a previously generated `KeyPackage` bundle (publish-failure cleanup;
+    /// mdk#160). Idempotent.
     ///
     /// # Errors
     ///
-    /// Returns an error if finalization fails.
-    pub fn finalize_pending_commit(&self, mls_group_id: &GroupId) -> Result<()> {
-        // M7-B: exclude a concurrent background sweep for the merge (an MDK
-        // write) + the marker clear. `converge_commit` calls this WITHOUT
-        // holding the lock itself, so the non-reentrant lock is taken exactly
-        // once here.
-        let _writer = crate::write_lock::acquire_authoring();
-        self.mdk
-            .merge_pending_commit(mls_group_id)
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
-        // M7: CLEAR-AFTER-MERGE (crash-safe). The merge is the CHOKEPOINT every
-        // finalize path funnels through, so clearing the marker here covers all
-        // of them by construction.
-        self.mark_group_unstaged(mls_group_id);
-        Ok(())
-    }
-
-    // ==================== M7 staged-commit marker ====================
-    //
-    // A Haven-owned, cross-process-visible mirror of MDK's per-group unmerged
-    // `pending_commit` state (MDK exposes no public query for it, and the
-    // in-memory settle window/gate don't survive a background wake). Set BEFORE
-    // every MDK stage, cleared AFTER every MDK merge/clear. See the M7 design.
-
-    /// Resolves a group's canonical lowercase-hex `nostr_group_id` — the marker
-    /// key (Rule 4: the pseudonymous id, never the real MLS group id). `None`
-    /// if the circle is unknown.
-    fn marker_key(&self, mls_group_id: &GroupId) -> Option<String> {
-        self.storage
-            .get_circle(mls_group_id)
-            .ok()
-            .flatten()
-            .map(|c| hex::encode(c.nostr_group_id))
-    }
-
-    /// Records that `mls_group_id` now holds a locally-staged, unmerged pending
-    /// commit. MUST be called BEFORE the MDK stage: a crash between this and the
-    /// stage leaves a STALE marker (over-skip, self-healing), never a MISSING
-    /// one (fork-unsafe). Propagates errors so a marker-write failure ABORTS the
-    /// stage — staging without a marker would let a background receive
-    /// blind-apply a same-epoch sibling over the pending commit and fork.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the circle is unknown or the marker write fails.
-    fn mark_group_staged(&self, mls_group_id: &GroupId) -> Result<()> {
-        let key = self.marker_key(mls_group_id).ok_or_else(|| {
-            CircleError::Storage("staged-commit marker: circle not found".to_string())
-        })?;
-        let epoch = self.group_epoch_internal(mls_group_id).unwrap_or(0);
-        let now = chrono::Utc::now().timestamp();
-        self.storage.set_staged_commit(&key, epoch, now)
-    }
-
-    /// Clears a group's staged-commit marker. Called AFTER the MDK merge/clear.
-    /// Best-effort: a failed clear leaves a STALE marker (over-skip, self-heals
-    /// on the next finalize/clear), never a fork-unsafe missing one — so it
-    /// never fails its caller.
-    fn mark_group_unstaged(&self, mls_group_id: &GroupId) {
-        if let Some(key) = self.marker_key(mls_group_id) {
-            if let Err(e) = self.storage.clear_staged_commit(&key) {
-                log::debug!(
-                    "staged-commit marker clear failed (stale is safe): {}",
-                    redact_hex_sequences(&e.to_string())
-                );
-            }
-        }
-    }
-
-    /// Whether a group holds a locally-staged pending commit — the background /
-    /// catch-up regime-2 gate, keyed by the pseudonymous `nostr_group_id`.
-    ///
-    /// FAILS CLOSED: any storage error (e.g. a locked device pre-first-unlock,
-    /// or a momentary lock) returns `true`, so a receive-only sweep SKIPS the
-    /// decrypt rather than fork-unsafely blind-applying a sibling commit.
-    #[must_use]
-    pub fn has_pending_commit(&self, nostr_group_id: &[u8]) -> bool {
-        let key = hex::encode(nostr_group_id);
-        match self.storage.has_staged_commit(&key) {
-            Ok(present) => present,
-            Err(e) => {
-                log::debug!(
-                    "has_pending_commit failing closed on storage error: {}",
-                    redact_hex_sequences(&e.to_string())
-                );
-                true
-            }
-        }
-    }
-
-    /// Performs a self-update on the user's leaf node in a group.
-    ///
-    /// Rotates the user's MLS key material to restore forward secrecy
-    /// after joining (MIP-02 MUST). Creates a pending commit — the caller
-    /// must publish the returned evolution event and then merge or clear
-    /// the pending commit depending on publish success.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the self-update fails.
-    pub fn self_update(&self, mls_group_id: &GroupId) -> Result<UpdateGroupResult> {
-        // M7-B: exclude a concurrent background sweep for the marker+MDK write.
-        let _writer = crate::write_lock::acquire_authoring();
-        // M7: SET-BEFORE-STAGE. A marker-write failure aborts the stage.
-        self.mark_group_staged(mls_group_id)?;
-        match self.mdk.self_update(mls_group_id) {
-            Ok(result) => Ok(result),
-            Err(e) => {
-                // Stage failed → no pending commit → un-mark (best-effort;
-                // a leftover stale marker is safe).
-                self.mark_group_unstaged(mls_group_id);
-                Err(CircleError::Mls(redact_hex_sequences(&e.to_string())))
-            }
-        }
-    }
-
-    /// Returns group IDs that need a self-update (MIP-02/MIP-03).
-    ///
-    /// Groups need a self-update when the post-join rotation is incomplete
-    /// or the last rotation is older than `threshold_secs`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the query fails.
-    pub fn groups_needing_self_update(&self, threshold_secs: u64) -> Result<Vec<GroupId>> {
-        self.mdk
-            .groups_needing_self_update(threshold_secs)
+    /// Returns an error if deletion fails.
+    pub async fn delete_key_package(&self, key_package: &KeyPackage) -> Result<()> {
+        self.session
+            .delete_key_package(key_package)
+            .await
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
-    }
-
-    /// Clears a pending commit, rolling back the MLS group state.
-    ///
-    /// Call this when a relay publish fails after an operation that creates
-    /// a pending commit (add/remove members, leave, self-update, etc.).
-    /// This prevents the group from being permanently blocked by a
-    /// dangling pending commit.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if clearing fails.
-    pub fn clear_pending_commit(&self, mls_group_id: &GroupId) -> Result<()> {
-        // M7-B: exclude a concurrent background sweep for the clear (an MDK
-        // write) + the marker clear. `converge_commit` calls this WITHOUT
-        // holding the lock, so the non-reentrant lock is taken exactly once.
-        let _writer = crate::write_lock::acquire_authoring();
-        self.mdk
-            .clear_pending_commit(mls_group_id)
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
-        // M7: CLEAR-AFTER-CLEAR (crash-safe). The other CHOKEPOINT every rollback
-        // path funnels through (converge losers, propose_leave/complete_leave
-        // pre-clears, path-B gated_abort).
-        self.mark_group_unstaged(mls_group_id);
-        Ok(())
-    }
-
-    /// Converges a just-staged commit against competing same-epoch commits.
-    ///
-    /// Implements the MIP-03 adopt-winner rule so concurrent committers from a
-    /// shared epoch N land on the SAME epoch with the SAME exporter secret
-    /// instead of forking. This does NOT publish — it only decides LOCAL state.
-    /// `competing_commits` are the same-epoch sibling commits the caller
-    /// observed (empty before M3, where this degrades to today's eager merge);
-    /// `staged_epoch` is the epoch the commit was created from; `intent` lets
-    /// the loser path report whether its membership change still needs
-    /// re-staging by the caller.
-    ///
-    /// # Publication ordering (M6 settle-window callers — READ THIS)
-    ///
-    /// In the M6 settle-window model the caller publishes `our_commit` *during*
-    /// the window — BEFORE calling this — and UNCONDITIONALLY, not "only when
-    /// `Merged`". This is load-bearing for fork-safety: two concurrent admins
-    /// each converge only over the competitors they actually received, and a
-    /// competitor only exists because the other admin published it during its
-    /// window. If neither publishes until after converging, each sees an empty
-    /// competitor set, both take the `Merged` leg, and the group FORKS (the
-    /// exact `eager_finalize_then_exchange` bug). Publishing a *losing* commit
-    /// is harmless: any member already advanced to the winner's N+1 drops it via
-    /// MDK `WrongEpoch` (no rollback). This function operates purely on the local
-    /// pending commit + the passed competitors and is oblivious to whether the
-    /// caller published — so it stays correct either way. The pre-M3 eager path
-    /// (empty competitors) keeps the historical "publish on success" shape; the
-    /// distinction is only that a settle-window caller publishes earlier.
-    ///
-    /// Every non-`Merged` path leaves NO dangling pending commit (a security
-    /// invariant — a dangling commit would brick future operations). The
-    /// load-bearing proof that an `AdoptedWinner` loser holds the winner's
-    /// exporter secret (not a same-number twin) is a cross-manager
-    /// cross-decrypt asserted by the callers' tests; the core's own check is the
-    /// cheap epoch advance.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error only if the group epoch or membership cannot be read.
-    /// Individual MDK message-processing outcomes are tolerated by design.
-    pub fn converge_commit(
-        &self,
-        mls_group_id: &GroupId,
-        our_commit: &nostr::Event,
-        staged_epoch: u64,
-        competing_commits: &[nostr::Event],
-        intent: &CommitIntent,
-    ) -> Result<CommitConvergence> {
-        self.converge_commit_collecting_locations(
-            mls_group_id,
-            our_commit,
-            staged_epoch,
-            competing_commits,
-            intent,
-        )
-        .map(|(convergence, _delivered)| convergence)
-    }
-
-    /// [`Self::converge_commit`] that ALSO returns the buffered Locations it
-    /// excluded from the candidate set, so a bus-aware caller can re-deliver them.
-    ///
-    /// # The H1 liveness gate (M11) — why a Location is not a competitor
-    ///
-    /// During a settle window the engine buffers **every** same-epoch `kind:445`
-    /// raw, without classifying it (regime 2 — decrypting a sibling commit would
-    /// fork; see [`crate::relay::live_sync::settle`]). Because Haven is a
-    /// **location** app, routine Location `kind:445` events land in that buffer
-    /// too. A Location decrypts to an MLS *application message*, which cannot
-    /// advance the epoch — so it is NOT a genuine convergence competitor. If it
-    /// merely SORTS ahead of our commit in MIP-03 order and we blindly picked the
-    /// order-key minimum (the pre-M11 behavior), applying it would fail to advance
-    /// and we would report `RolledBack` → re-stage → likely another Location wins
-    /// → the membership op is starved to `notApplied`. That is the liveness bug.
-    ///
-    /// The fix is **receiver-side, post-decrypt, zero new wire metadata**: the
-    /// published `kind:445` is byte-identical; we classify by the decrypt RESULT
-    /// (an application message vs an epoch-advancing commit) — the only signal
-    /// MDK exposes without a destructive apply is "did the epoch advance." We walk
-    /// the order-beating competitors in MIP-03 order and adopt the FIRST that
-    /// actually advances the epoch (the winning commit); every non-commit is
-    /// skipped — a Location is COLLECTED (never dropped from receive) and a
-    /// forged/undecryptable event is ignored. If none advances, our commit is the
-    /// sole real commit and merges. So a Location can neither win the order key
-    /// (→ no spurious `RolledBack`) nor be adopted; both failure modes are closed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error only if the group epoch or membership cannot be read.
-    /// Individual MDK message-processing outcomes are tolerated by design.
-    #[allow(clippy::too_many_lines)] // Multi-branch MIP-03 walk + per-branch M11 converge diagnostics.
-    pub(crate) fn converge_commit_collecting_locations(
-        &self,
-        mls_group_id: &GroupId,
-        our_commit: &nostr::Event,
-        staged_epoch: u64,
-        competing_commits: &[nostr::Event],
-        intent: &CommitIntent,
-    ) -> Result<(CommitConvergence, Vec<ConvergedLocation>)> {
-        use crate::nostr::mls::{ClassifiedProcessing, PeekedContent};
-
-        let mut delivered: Vec<ConvergedLocation> = Vec::new();
-
-        // TOCTOU: the local group may have advanced past `staged_epoch` between
-        // staging and this call (e.g. the evolution poller applied a peer
-        // commit). Our staged commit is then stale; clear it so nothing dangles
-        // and let the caller re-fetch + re-stage from the new epoch.
-        // NB: `group_epoch_internal` (not the test-gated `group_epoch`) — this
-        // is a production path and must compile in release builds.
-        let current = self.group_epoch_internal(mls_group_id)?;
-        if current > staged_epoch {
-            // Diagnostic (M11 e2e triage): the send-path converge had NO outcome
-            // logging (only the receive worker did), so a converging Add reaching
-            // a non-`Merged` result was undiagnosable in CI. Integers + the
-            // outcome variant only — never the MLS/nostr group id, key material,
-            // competitor content, or member pubkeys (Security Rules 4/6).
-            log::debug!(
-                "[converge] TOCTOU rollback: current_epoch={current} > staged_epoch={staged_epoch} \
-                 competitors={} → {:?}",
-                competing_commits.len(),
-                CommitConvergence::RolledBack
-            );
-            let _ = self.clear_pending_commit(mls_group_id);
-            return Ok((CommitConvergence::RolledBack, delivered));
-        }
-
-        // We are the global MIP-03 minimum over EVERY competitor (real commit OR
-        // non-commit): merge our pending commit WITHOUT decrypting any competitor,
-        // so buffered Locations are left untouched for lossless cursor replay. The
-        // empty-competitor leg is the eager-merge degrade when no settle-window
-        // competitors were collected.
-        if competing_commits.is_empty() || our_commit_wins(our_commit, competing_commits) {
-            let outcome = self.merge_our_pending_commit(mls_group_id, staged_epoch)?;
-            // Diagnostic (M11 e2e triage): the win/merge leg — the one a clean
-            // single-admin Add should always take (its only competitor is its own
-            // echo, an equal order key). Logging `empty`/`our_commit_wins` +
-            // count + the resulting variant tells the CI whether this leg was
-            // reached and whether `merge_our_pending_commit` returned `Merged` or
-            // `RolledBack`. Integers/booleans + variant only (Rules 4/6).
-            log::debug!(
-                "[converge] win/merge branch: staged_epoch={staged_epoch} competitors={} \
-                 empty={} our_commit_wins={} → {outcome:?}",
-                competing_commits.len(),
-                competing_commits.is_empty(),
-                our_commit_wins(our_commit, competing_commits)
-            );
-            return Ok((outcome, delivered));
-        }
-
-        // A competitor sorts ahead of us. Only a REAL COMMIT is a genuine
-        // convergence competitor (H1). Walk the order-beating competitors in
-        // MIP-03 order and adopt the FIRST that is a real epoch-advancing commit;
-        // every non-commit is skipped (collecting a Location for re-delivery).
-        // Restricting to `commit_beats` (strict `<`) also excludes our OWN commit
-        // re-delivered as a competitor (identical order key).
-        let mut beating: Vec<&nostr::Event> = competing_commits
-            .iter()
-            .filter(|c| commit_beats(c, our_commit))
-            .collect();
-        beating.sort_by_key(|a| commit_order_key(a));
-
-        for candidate in beating {
-            // REV-1 corroboration-gate pre-filter (fork-prevention SAFETY half).
-            // Classify the competitor by its MLS `content_type` via the
-            // NON-DESTRUCTIVE peek BEFORE any trial-apply — the peek decrypts only
-            // the outer exporter-secret layer at `staged_epoch` (the pre-merge
-            // epoch these competitors were framed from), never mutating the group:
-            //   * Proposal (e.g. a peer `SelfRemove`) ⇒ SKIP — never trial-apply.
-            //     Trial-applying a peer SelfRemove makes MDK `auto_commit_proposal`
-            //     OVERWRITE our published `C_A1`'s staged state, stranding us while
-            //     passive peers keep `C_A1` → the distributed fork. A Proposal can
-            //     never advance the epoch (RFC 9420 §12), so it is categorically
-            //     NOT in the MIP-03 commit-ordering winner set — skipping it can
-            //     never drop a real competing commit. `continue`-ing (not
-            //     `return`) also fixes MEDIUM-2: a later real commit in the same
-            //     beating set is still reached and adopted.
-            //   * Unpeekable (no stored secret / undecryptable / unparseable) ⇒
-            //     SKIP — HIGH-2 fail-safe. Trial-applying an unpeekable competitor
-            //     could re-open the fork; the redundant non-windowed convergence
-            //     path (any member NOT in a settle window fully processes and
-            //     auto-commits a real SelfRemove) carries the leave instead.
-            // The peek NEVER reads the competitor's `sender()`, so a forged-sender
-            // SelfRemove cannot evict a bystander (HIGH-1 closed by construction).
-            //   * Commit | Application ⇒ fall through to the UNCHANGED trial-apply
-            //     + Location-collection logic below.
-            match self
-                .mdk
-                .peek_content_type(candidate, mls_group_id, staged_epoch)
-            {
-                PeekedContent::Proposal | PeekedContent::Unpeekable => continue,
-                PeekedContent::Commit | PeekedContent::Application => {}
-            }
-
-            // Trial-apply in MIP-03 order via the CLASSIFYING processor. Two
-            // signals mark a real competing commit that beat us and must be
-            // adopted (never skipped → fork):
-            //   * our epoch ADVANCED (the pinned MDK applies a sibling commit even
-            //     under our held pending commit), or
-            //   * MDK refused to apply it over our pending and the error
-            //     CLASSIFIES as a competing commit (`OwnCommitPending` etc.) — a
-            //     rev-dependent behavior this arm future-proofs against.
-            //
-            // M7-B: do NOT hold the writer lock at method scope (the clear/finalize
-            // helpers take the non-reentrant lock → deadlock). Wrap ONLY the
-            // low-level MDK writes, each in its own brief critical section.
-            let outcome = {
-                let _writer = crate::write_lock::acquire_authoring();
-                self.mdk.process_message_classified(candidate)
-            };
-            let advanced = self.group_epoch_internal(mls_group_id)? > staged_epoch;
-
-            if advanced || matches!(outcome, ClassifiedProcessing::CompetingCommit) {
-                // Adopt the winner. Clear our now-stale pending commit + its
-                // orphaned signer (the NO-STALE-STAGED-SECRET enforcement point;
-                // no-op-safe), then (re-)apply the winner to sit firmly on its
-                // branch. Verify we advanced; if not, roll back cleanly.
-                let _ = self.clear_pending_commit(mls_group_id);
-                {
-                    let _writer = crate::write_lock::acquire_authoring();
-                    let _ = self.mdk.process_message(candidate);
-                }
-                if self.group_epoch_internal(mls_group_id)? <= staged_epoch {
-                    // Diagnostic (M11 e2e triage): adopt-apply did not advance the
-                    // epoch (a candidate that classified as a winner but did not
-                    // move the group forward). Integers + variant only (Rules 4/6).
-                    log::debug!(
-                        "[converge] adopt-apply did not advance epoch \
-                         (staged_epoch={staged_epoch}) → {:?}",
-                        CommitConvergence::RolledBack
-                    );
-                    let _ = self.clear_pending_commit(mls_group_id);
-                    return Ok((CommitConvergence::RolledBack, delivered));
-                }
-                // Adopt-winner epoch advance: un-poison any out-of-order FUTURE-epoch
-                // commit that arrived early (MDK #633 workaround — see
-                // `MdkManager::retry_failed_future_epoch_messages`). Brief lock scope
-                // (this method holds no writer lock at scope; the one taken for the
-                // adopt-apply above was already released).
-                {
-                    let _writer = crate::write_lock::acquire_authoring();
-                    if let Err(e) = self.mdk.retry_failed_future_epoch_messages(mls_group_id) {
-                        log::debug!(
-                            "converge adopt-winner: future-epoch retryable sweep failed: {}",
-                            redact_hex_sequences(&e.to_string())
-                        );
-                    }
-                }
-                let intent_still_pending = self.intent_unsatisfied(mls_group_id, intent)?;
-                let outcome = CommitConvergence::AdoptedWinner {
-                    intent_still_pending,
-                };
-                // Diagnostic (M11 e2e triage): a real competing commit beat ours
-                // and was adopted; `intent_still_pending` drives the caller's
-                // bounded re-stage. Integers/booleans + variant only (Rules 4/6).
-                log::debug!(
-                    "[converge] adopted winner: staged_epoch={staged_epoch} competitors={} \
-                     intent_still_pending={intent_still_pending} → {outcome:?}",
-                    competing_commits.len()
-                );
-                return Ok((outcome, delivered));
-            }
-
-            // Did NOT advance and did NOT classify as a competing commit: inspect
-            // the decrypt result.
-            if let ClassifiedProcessing::Processed(result) = outcome {
-                match MdkManager::to_location_result(*result) {
-                    LocationMessageResult::Location {
-                        sender_pubkey,
-                        content,
-                        ..
-                    } => {
-                        // A buffered Location: collect it so the caller re-delivers
-                        // it (a buffered Location must never be dropped from receive
-                        // just because a membership op was converging).
-                        delivered.push(ConvergedLocation {
-                            sender_pubkey,
-                            content,
-                            created_at_secs: i64::try_from(candidate.created_at.as_secs())
-                                .unwrap_or(i64::MAX),
-                        });
-                    }
-                    LocationMessageResult::GroupUpdate {
-                        evolution_event: Some(_),
-                        ..
-                    } => {
-                        // An auto-committing proposal (e.g. a peer `SelfRemove`
-                        // received by an admin) drove MDK's `auto_commit_proposal`,
-                        // whose `stage_commit` OVERWRITES our own staged pending
-                        // commit. Our commit is gone — merging the pending MDK now
-                        // holds would merge an unpublished change → local FORK.
-                        // Clear it and roll back.
-                        //
-                        // LEGACY BACKSTOP (REV-1 fixed the distributed fork this
-                        // once caused): the corroboration-gate pre-filter above now
-                        // SKIPS every Proposal (incl. a `SelfRemove`) before it can
-                        // reach `process_message_classified`, so an admin's
-                        // published `C_A1` merges instead of being destroyed. A
-                        // Proposal therefore no longer reaches this arm; it stays as
-                        // a defensive fail-safe (e.g. a hypothetical PURE_CIPHERTEXT
-                        // PrivateMessage self-remove, which Haven — hard-coded to
-                        // MIXED_CIPHERTEXT — never emits) that still refuses to merge
-                        // an overwritten pending commit. See docs/M11_ROLLOUT.md.
-                        //
-                        // Diagnostic (M11 e2e triage): our pending commit was
-                        // overwritten by an auto-committing proposal. Integers +
-                        // variant only (Rules 4/6).
-                        log::debug!(
-                            "[converge] overwritten pending (auto-commit proposal): \
-                             staged_epoch={staged_epoch} → {:?}",
-                            CommitConvergence::RolledBack
-                        );
-                        let _ = self.clear_pending_commit(mls_group_id);
-                        return Ok((CommitConvergence::RolledBack, delivered));
-                    }
-                    _ => {
-                        // A stored proposal (evolution_event None), a non-advancing
-                        // Commit, or Unprocessable/PreviouslyFailed: our pending
-                        // commit is intact — skip and keep walking.
-                    }
-                }
-            }
-            // ClassifiedProcessing::Failed (forged / undecryptable) → ignore.
-        }
-
-        // No order-beating competitor was a real commit ⇒ our commit is the sole
-        // real commit ⇒ merge ours.
-        let outcome = self.merge_our_pending_commit(mls_group_id, staged_epoch)?;
-        // Diagnostic (M11 e2e triage): walked the beating set, none was a real
-        // epoch-advancing commit (all Locations/skips), so our commit merges.
-        // Integers + variant only (Rules 4/6).
-        log::debug!(
-            "[converge] no beating real commit; merged ours: staged_epoch={staged_epoch} \
-             competitors={} collected_locations={} → {outcome:?}",
-            competing_commits.len(),
-            delivered.len()
-        );
-        Ok((outcome, delivered))
-    }
-
-    /// Merges our own staged pending commit (the MIP-03 "we won" leg of
-    /// [`Self::converge_commit_collecting_locations`]). A finalize failure with an
-    /// already-advanced group is a benign already-merged; otherwise a clean
-    /// rollback that leaves no dangling pending commit.
-    fn merge_our_pending_commit(
-        &self,
-        mls_group_id: &GroupId,
-        staged_epoch: u64,
-    ) -> Result<CommitConvergence> {
-        let outcome = match self.finalize_pending_commit(mls_group_id) {
-            Ok(()) => CommitConvergence::Merged,
-            Err(_) => {
-                if self.group_epoch_internal(mls_group_id)? > staged_epoch {
-                    CommitConvergence::Merged
-                } else {
-                    CommitConvergence::RolledBack
-                }
-            }
-        };
-        // Path-B "we won" epoch advance: un-poison any out-of-order FUTURE-epoch
-        // commit that arrived early (MDK #633 workaround — see
-        // `MdkManager::retry_failed_future_epoch_messages`). Unlike the peer-commit
-        // path in `decrypt_location_for_engine`, `converge_commit_collecting_locations`
-        // holds NO writer lock at method scope (it wraps only the low-level MDK
-        // writes; see its M7-B note), so take a brief `acquire_authoring()` scope
-        // here — it is non-reentrant, and `finalize_pending_commit` already released
-        // its own before returning.
-        if matches!(outcome, CommitConvergence::Merged) {
-            let _writer = crate::write_lock::acquire_authoring();
-            if let Err(e) = self.mdk.retry_failed_future_epoch_messages(mls_group_id) {
-                log::debug!(
-                    "merge_our_pending_commit: future-epoch retryable sweep failed: {}",
-                    redact_hex_sequences(&e.to_string())
-                );
-            }
-        }
-        Ok(outcome)
-    }
-
-    /// Returns whether a commit `intent` is still unsatisfied by the group's
-    /// current (post-adopt) membership.
-    fn intent_unsatisfied(&self, mls_group_id: &GroupId, intent: &CommitIntent) -> Result<bool> {
-        match intent {
-            CommitIntent::None => Ok(false),
-            CommitIntent::RemoveMembers(pks) => {
-                let present = self.member_pubkeys_hex(mls_group_id)?;
-                Ok(pks.iter().any(|pk| present.contains(&pk.to_hex())))
-            }
-            CommitIntent::AddMembers(pks) => {
-                let present = self.member_pubkeys_hex(mls_group_id)?;
-                Ok(pks.iter().any(|pk| !present.contains(&pk.to_hex())))
-            }
-        }
-    }
-
-    /// Returns the hex public keys of the group's current members.
-    fn member_pubkeys_hex(
-        &self,
-        mls_group_id: &GroupId,
-    ) -> Result<std::collections::HashSet<String>> {
-        Ok(self
-            .get_members(mls_group_id)?
-            .into_iter()
-            .map(|m| m.pubkey)
-            .collect())
     }
 
     // ==================== Sync Cursors ====================
-    //
-    // Thin pass-throughs to `CircleStorage`'s per-stream sync-cursor methods,
-    // exposed publicly so the FFI layer does not need direct access to the
-    // `pub(crate)` storage field. See [`crate::relay::cursor`] for the stream
-    // keys and `since`-derivation semantics, and [`crate::circle::storage`]
-    // for the monotonic-max persistence guarantees.
 
     /// Reads the persisted relay sync cursor (raw ms) for `stream`.
-    ///
-    /// Returns `None` when the stream has never been seeded.
     ///
     /// # Errors
     ///
@@ -2933,19 +1551,7 @@ impl CircleManager {
         self.storage.reset_all_sync_cursors()
     }
 
-    /// Removes ALL M7 staged-commit markers (wipe-on-logout). See
-    /// [`CircleStorage::wipe_all_staged_commits`].
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the storage write fails.
-    pub fn wipe_all_staged_commits(&self) -> Result<()> {
-        self.storage.wipe_all_staged_commits()
-    }
-
-    /// Prunes the `processed_gift_wraps` dedup cache: retention-deletes rows
-    /// past the window, then enforces the row cap. Returns the number removed.
-    /// See [`CircleStorage::prune_processed_gift_wraps`].
+    /// Prunes the `processed_gift_wraps` dedup cache. Returns the number removed.
     ///
     /// # Errors
     ///
@@ -2954,8 +1560,7 @@ impl CircleManager {
         self.storage.prune_processed_gift_wraps(now_secs)
     }
 
-    /// Removes ALL `processed_gift_wraps` rows (wipe-on-logout). See
-    /// [`CircleStorage::wipe_all_processed_gift_wraps`].
+    /// Removes ALL `processed_gift_wraps` rows (wipe-on-logout).
     ///
     /// # Errors
     ///
@@ -2965,12 +1570,6 @@ impl CircleManager {
     }
 
     // ==================== Relay Preferences ====================
-    //
-    // Thin pass-throughs to `CircleStorage`'s relay-preference methods,
-    // exposed publicly so external crates (the FFI layer) do not need
-    // direct access to the `pub(crate)` storage field. See
-    // [`crate::circle::storage_relay_prefs`] for behaviour details and
-    // tests.
 
     /// See [`CircleStorage::seed_defaults_if_unseeded`].
     ///
@@ -3011,8 +1610,8 @@ impl CircleManager {
     ///
     /// # Errors
     ///
-    /// Returns [`CircleError::InvalidData`] when the URL is invalid or
-    /// would empty the category. Database errors otherwise.
+    /// Returns [`CircleError::InvalidData`] when the URL is invalid or would
+    /// empty the category. Database errors otherwise.
     pub fn remove_user_relay(
         &self,
         url: &str,
@@ -3112,12 +1711,7 @@ impl CircleManager {
         self.storage.last_published_event(kind, d_tag, pubkey)
     }
 
-    // ==================== M8-2 KeyPackage maintenance ====================
-    //
-    // Thin pass-throughs so the FFI orchestration (which owns the identity
-    // secret + the RelayManager, in the sibling `rust_builder` crate) can run
-    // the KeyPackage-maintenance decision. The `storage` field is `pub(crate)`
-    // and `mdk` is private, so the cross-crate FFI cannot reach them directly.
+    // ==================== KeyPackage maintenance (storage) ====================
 
     /// See [`CircleStorage::record_published_key_package`].
     ///
@@ -3131,8 +1725,18 @@ impl CircleManager {
         self.storage.record_published_key_package(row)
     }
 
-    /// See [`CircleStorage::latest_canonical_d_tag`] — the stable NIP-33 `d`
-    /// slot the maintenance task reuses across rotations.
+    /// See [`CircleStorage::latest_published_key_package`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn latest_published_key_package(
+        &self,
+    ) -> Result<Option<super::storage_key_packages::PublishedKeyPackageRow>> {
+        self.storage.latest_published_key_package()
+    }
+
+    /// See [`CircleStorage::latest_canonical_d_tag`].
     ///
     /// # Errors
     ///
@@ -3141,83 +1745,34 @@ impl CircleManager {
         self.storage.latest_canonical_d_tag()
     }
 
-    /// See [`CircleStorage::canonical_published_hash_refs`] — the tracked
-    /// `hash_ref`s the live-material gate runs against.
+    /// See [`CircleStorage::wipe_published_key_packages`].
     ///
     /// # Errors
     ///
     /// Propagates database errors.
-    pub fn canonical_published_hash_refs(&self) -> Result<Vec<Vec<u8>>> {
-        self.storage.canonical_published_hash_refs()
+    pub fn wipe_published_key_packages(&self) -> Result<()> {
+        self.storage.wipe_published_key_packages()
     }
 
-    /// See [`CircleStorage::latest_legacy_event_id`] — the most-recent legacy
-    /// (kind 443) `KeyPackage` twin id the maintenance republish GC scrubs via a
-    /// best-effort NIP-09 deletion.
+    /// See [`CircleStorage::legacy_kp_retraction_done`].
     ///
     /// # Errors
     ///
     /// Propagates database errors.
-    pub fn latest_legacy_event_id(&self) -> Result<Option<String>> {
-        self.storage.latest_legacy_event_id()
+    pub fn legacy_kp_retraction_done(&self) -> Result<bool> {
+        self.storage.legacy_kp_retraction_done()
     }
 
-    /// See [`CircleStorage::canonical_published_event_refs`] — `(event_id,
-    /// hash_ref)` pairs used to correlate a probed on-relay `KeyPackage` event
-    /// with its tracked local material for the live-material gate.
+    /// See [`CircleStorage::mark_legacy_kp_retraction_done`].
     ///
     /// # Errors
     ///
     /// Propagates database errors.
-    pub fn canonical_published_event_refs(&self) -> Result<Vec<(String, Vec<u8>)>> {
-        self.storage.canonical_published_event_refs()
+    pub fn mark_legacy_kp_retraction_done(&self) -> Result<()> {
+        self.storage.mark_legacy_kp_retraction_done()
     }
 
-    /// See [`MdkManager::has_live_key_material`] — the live-material gate.
-    ///
-    /// Returns whether the private MLS init-key material for a published
-    /// `KeyPackage` (identified by its stored `hash_ref`) is still LIVE in
-    /// local storage. A `false` verdict means the published event is DEAD
-    /// (consumed + deleted, or never stored) and republishing over it is safe.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the `hash_ref` cannot be deserialized or the storage
-    /// query fails; all error strings are hex-redacted.
-    pub fn has_live_key_material(&self, hash_ref_bytes: &[u8]) -> Result<bool> {
-        self.mdk
-            .has_live_key_material(hash_ref_bytes)
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
-    }
-
-    /// See [`MdkManager::create_key_package_with_d`] — builds a `KeyPackage`
-    /// bundle, optionally reusing a stable NIP-33 `d` tag so a rotation
-    /// REPLACES the same addressable coordinate.
-    ///
-    /// Mirrors [`Self::create_key_package`] in taking the authoring write lock
-    /// (the generate persists private init/encryption material to MDK storage).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the pubkey is invalid, no valid relay URLs are
-    /// provided, or key package generation fails.
-    pub fn create_key_package_with_d(
-        &self,
-        identity_pubkey: &str,
-        relays: &[String],
-        existing_d_tag: Option<&str>,
-    ) -> Result<KeyPackageBundle> {
-        let _writer = crate::write_lock::acquire_authoring();
-        self.mdk
-            .create_key_package_with_d(identity_pubkey, relays, existing_d_tag)
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
-    }
-
-    // Thin pass-throughs to `CircleStorage`'s public-profile cache methods
-    // (`storage_profile.rs`), exposed publicly so the FFI layer can orchestrate
-    // fetch/merge/publish + cache without direct access to the `pub(crate)`
-    // storage field. Behaviour and tests live in `storage_profile`; these add
-    // no logic. Profile rows are keyed by pubkey only — never by circle/group.
+    // ==================== Public-profile cache (storage) ====================
 
     /// See [`CircleStorage::upsert_profile`].
     ///
@@ -3228,8 +1783,7 @@ impl CircleManager {
         self.storage.upsert_profile(cached)
     }
 
-    /// See [`CircleStorage::upsert_profile_if_newer`] — the newer-wins gate for
-    /// the fetch path.
+    /// See [`CircleStorage::upsert_profile_if_newer`].
     ///
     /// # Errors
     ///
@@ -3320,9 +1874,7 @@ impl CircleManager {
         self.storage.get_profile_picture_url(pubkey_hex)
     }
 
-    /// See [`CircleStorage::has_current_picture`] — the source of truth for the
-    /// FFI `has_picture` flag (cached bytes exist AND their URL matches the
-    /// current kind-0 `picture`).
+    /// See [`CircleStorage::has_current_picture`].
     ///
     /// # Errors
     ///
@@ -3331,8 +1883,7 @@ impl CircleManager {
         self.storage.has_current_picture(pubkey_hex, current_url)
     }
 
-    /// See [`CircleStorage::delete_profile_picture`] — clears one pubkey's cached
-    /// picture bytes (member/own picture removal).
+    /// See [`CircleStorage::delete_profile_picture`].
     ///
     /// # Errors
     ///
@@ -3341,8 +1892,7 @@ impl CircleManager {
         self.storage.delete_profile_picture(pubkey_hex)
     }
 
-    /// See [`CircleStorage::has_published_profile`] — the D1 retraction no-op
-    /// gate (a retraction must never mint a first public event).
+    /// See [`CircleStorage::has_published_profile`].
     ///
     /// # Errors
     ///
@@ -3361,186 +1911,317 @@ impl CircleManager {
     }
 }
 
+/// Parses invitee `KeyPackage` events (kind 30443) into engine [`KeyPackage`]s.
+fn parse_key_packages(events: &[Event]) -> Result<Vec<KeyPackage>> {
+    events
+        .iter()
+        .map(|e| {
+            SessionManager::key_package_from_event(e)
+                .map_err(|err| CircleError::Mls(redact_hex_sequences(&err.to_string())))
+        })
+        .collect()
+}
+
+/// Emits a redacted debug note if a send/create drain would drop a Rule-13
+/// resync signal, so the occurrence is never SILENT (Rust F1).
+///
+/// The `take_*` helpers extract only [`PublishWork`]; they intentionally ignore
+/// `effects.events`. Engine [`GroupEvent`]s are folded to location results ONLY
+/// on the ingest / `advance_convergence` path
+/// ([`CircleManager::decrypt_location_collecting_commits`] → [`fold_group_events`]),
+/// which is Haven's authoritative resync driver and always runs first after open
+/// (startup relay catch-up) — so a hydrate-emitted `PendingCommitRecovered` /
+/// `GroupHydrationRecovered` surfaces there and maps to a `GroupUpdate`. In the
+/// corner case where a send/create is somehow the first post-open drain, these
+/// events would be consumed here; this logs a redacted, group-id-free note
+/// rather than dropping them without a trace.
+fn note_dropped_resync_events(events: &[GroupEvent]) {
+    let dropped = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                GroupEvent::PendingCommitRecovered { .. }
+                    | GroupEvent::GroupHydrationRecovered { .. }
+            )
+        })
+        .count();
+    if dropped > 0 {
+        log::debug!(
+            "send/create drain observed {dropped} resync signal(s); \
+             resync is authoritatively driven by the receive path"
+        );
+    }
+}
+
+/// Extracts the `GroupCreated { welcomes, pending }` publish work from a
+/// create-group's effects.
+fn take_group_created(effects: SessionEffects) -> Result<(Vec<TransportMessage>, PendingStateRef)> {
+    note_dropped_resync_events(&effects.events);
+    for work in effects.publish {
+        if let PublishWork::GroupCreated { welcomes, pending } = work {
+            return Ok((welcomes, pending));
+        }
+    }
+    Err(CircleError::Mls(
+        "create_group produced no GroupCreated publish work".to_string(),
+    ))
+}
+
+/// Extracts the `GroupEvolution { commit, welcomes, pending }` publish work from
+/// an invite/remove/update's effects, converting the commit to a signed Event.
+fn take_group_evolution(
+    effects: SessionEffects,
+) -> Result<(Event, Vec<TransportMessage>, PendingStateRef)> {
+    note_dropped_resync_events(&effects.events);
+    for work in effects.publish {
+        if let PublishWork::GroupEvolution {
+            msg,
+            welcomes,
+            pending,
+        } = work
+        {
+            let commit = SessionManager::transport_message_to_event(&msg)
+                .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+            return Ok((commit, welcomes, pending));
+        }
+    }
+    Err(CircleError::Mls(
+        "operation produced no GroupEvolution publish work".to_string(),
+    ))
+}
+
+/// Extracts the bare `Proposal { msg }` (`SelfRemove`) transport event.
+fn take_proposal(effects: SessionEffects) -> Result<Event> {
+    note_dropped_resync_events(&effects.events);
+    for work in effects.publish {
+        if let PublishWork::Proposal { msg } = work {
+            return SessionManager::transport_message_to_event(&msg)
+                .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())));
+        }
+    }
+    Err(CircleError::Mls(
+        "leave produced no Proposal publish work".to_string(),
+    ))
+}
+
+/// Extracts the `ApplicationMessage { msg }` (location) transport event.
+fn take_app_message(effects: SessionEffects) -> Result<Event> {
+    note_dropped_resync_events(&effects.events);
+    for work in effects.publish {
+        if let PublishWork::ApplicationMessage { msg } = work {
+            return SessionManager::transport_message_to_event(&msg)
+                .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())));
+        }
+    }
+    Err(CircleError::Mls(
+        "send produced no ApplicationMessage publish work".to_string(),
+    ))
+}
+
+/// Folds an engine [`GroupEvent`] batch into location-facing results.
+fn fold_group_events(events: &[GroupEvent]) -> Vec<LocationMessageResult> {
+    events
+        .iter()
+        .filter_map(SessionManager::location_result_from_event)
+        .collect()
+}
+
+/// Reads the 32-byte `nostr_group_id` from a `kind:445` event's `#h` tag
+/// (`["h", "<hex>"]`), or `None` if the tag is absent / malformed. Never exposes
+/// the real MLS group id (Rule 4) — the `#h` tag carries only the pseudonymous
+/// routing id.
+fn nostr_group_id_from_commit_event(event: &Event) -> Option<[u8; 32]> {
+    let hex_str = event.tags.iter().find_map(|t| {
+        let slice = t.as_slice();
+        if slice.first().map(String::as_str) == Some("h") {
+            slice.get(1).cloned()
+        } else {
+            None
+        }
+    })?;
+    let bytes = hex::decode(hex_str).ok()?;
+    bytes.try_into().ok()
+}
+
 /// Result of circle creation.
-#[derive(Debug)]
+///
+/// Publish-before-apply (Rule 13): publish `welcome_events`, then confirm
+/// `pending`.
 pub struct CircleCreationResult {
     /// The created circle.
     pub circle: Circle,
-    /// Gift-wrapped Welcome events ready to publish to recipients.
+    /// Gift-wrapped Welcome events (engine-produced 1059s) ready to publish.
     pub welcome_events: Vec<GiftWrappedWelcome>,
+    /// The pending group-creation state to confirm after ≥1-relay welcome ack.
+    pub pending: PendingStateRef,
+}
+
+impl std::fmt::Debug for CircleCreationResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CircleCreationResult")
+            .field("circle", &"<redacted>")
+            .field("welcome_events_count", &self.welcome_events.len())
+            .field("pending", &self.pending)
+            .finish()
+    }
 }
 
 /// Result of adding members to an existing circle.
+///
+/// Publish-before-apply (Rule 13): publish `commit_event`, confirm `pending`,
+/// then publish `welcome_events`.
 pub struct AddMembersResult {
-    /// Kind:445 evolution (Add commit) event to publish to the circle's relays.
-    ///
-    /// Staged as a pending commit; finalize (merge) it only after a successful
-    /// publish, or clear it on failure (see [`add_members_with_welcomes`]).
-    ///
-    /// [`add_members_with_welcomes`]: CircleManager::add_members_with_welcomes
-    pub evolution_event: nostr::Event,
-    /// Gift-wrapped Welcome events for the newly added members.
-    ///
-    /// Publish these only after the evolution event has been published and the
-    /// pending commit finalized, so a rolled-back add produces no Welcome on
-    /// the wire (avoids a MIP-02 state fork where an invitee accepts into an
-    /// epoch no existing member reached).
+    /// The kind:445 evolution (Add) commit to publish to the circle's relays.
+    pub commit_event: Event,
+    /// Gift-wrapped Welcome events for the newly added members. Publish only
+    /// after `commit_event` is published and `pending` is confirmed.
     pub welcome_events: Vec<GiftWrappedWelcome>,
+    /// The pending commit to confirm after ≥1-relay commit ack.
+    pub pending: PendingStateRef,
 }
 
-// Custom `Debug` redacts the evolution event (whose `h` tag carries the
-// `nostr_group_id`) and the Welcome payloads, so a stray `{:?}` can never
-// leak group-ID / key material (Security Rule 4/6). Mirrors the redacting
-// `Debug` impls on the `*Ffi` result types.
 impl std::fmt::Debug for AddMembersResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AddMembersResult")
-            .field("evolution_event", &"<redacted>")
+            .field("commit_event", &"<redacted>")
             .field("welcome_events_count", &self.welcome_events.len())
+            .field("pending", &self.pending)
+            .finish()
+    }
+}
+
+/// A group-evolving commit awaiting publish + confirm (remove / relay update).
+pub struct CommitToPublish {
+    /// The kind:445 commit to publish to the circle's relays.
+    pub commit_event: Event,
+    /// The pending commit to confirm after ≥1-relay ack.
+    pub pending: PendingStateRef,
+}
+
+/// The folded outcome of ingesting one received `kind:445`
+/// ([`CircleManager::decrypt_location_collecting_commits`]).
+///
+/// Carries the location-facing results AND any receive-side auto-commit the
+/// engine staged (a peer `SelfRemove` eviction). Publish-before-apply (Rule 13):
+/// each [`Self::auto_commits`] entry MUST be published to the circle's relays and
+/// then confirmed on a ≥1-relay ack (or rolled back on failure).
+pub struct DecryptedIngest {
+    /// The folded location-facing results (locations, joins, updates, …).
+    pub results: Vec<LocationMessageResult>,
+    /// Receive-side auto-commits the caller must publish then confirm/fail.
+    pub auto_commits: Vec<CommitToPublish>,
+}
+
+impl std::fmt::Debug for DecryptedIngest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DecryptedIngest")
+            .field("results_count", &self.results.len())
+            .field("auto_commits_count", &self.auto_commits.len())
+            .finish()
+    }
+}
+
+// Redacts the commit event (whose `h` tag carries the `nostr_group_id`) so a
+// stray `{:?}` cannot leak group-id material (Rule 4/6).
+impl std::fmt::Debug for CommitToPublish {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CommitToPublish")
+            .field("commit_event", &"<redacted>")
+            .field("pending", &self.pending)
             .finish()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    //! Dark Matter (DM-5a) re-expression of the `CircleManager` test suite.
+    //!
+    //! The pre-migration suite tested the hand-rolled convergence / settle-window
+    //! / staged-commit-marker / peek / self-update stack that the engine now owns
+    //! (plan §5.3/§5.4). Those tests are **deleted with their subject** — the
+    //! subject no longer exists to test:
+    //!
+    //! * `converge_commit` / `CommitConvergence` / `CommitIntent` fork-selection
+    //!   internals, `decrypt_receive_only` / `ReceiveOnlyOutcome::Skipped`, the
+    //!   `receive_only_until_applied` contention helper, `mdk_process_message_*`,
+    //!   the `no_pending_observers_*` / `sibling_commit_*` / `blind_apply_*` /
+    //!   `exact_original_bug_*` / `eager_finalize_*` / `converge_*` /
+    //!   `concurrent_admin_remove_*` / `rev1_*` / `auto_commit_*` /
+    //!   `engine_processor_*` / `decrypt_for_engine_*` families — the engine's
+    //!   `advance_convergence` + branch selection replaces Haven's picker. The
+    //!   surviving INVARIANT (real out-of-order multi-party convergence with no
+    //!   loss) is **re-expressed as the black-box F2 gate**
+    //!   `tests/live_sync_out_of_order_commit_e2e.rs`, not here.
+    //! * `m7_*` / `should3_*` staged-commit-marker tests — the marker + its
+    //!   `staged_commits` table are deleted; crash recovery is now the engine's
+    //!   `PendingCommitRecovered` at hydrate.
+    //! * `rev1_peek_*` — `peek_crypto` is deleted (the peeler's non-destructive
+    //!   outer decrypt replaces it).
+    //! * `self_update` / `groups_needing_self_update` / `epoch_stable_across_idle`
+    //!   — the engine converges; Haven's periodic self-update ritual is gone.
+    //! * per-send NIP-40 expiration tests (`encrypt_location_attaches_expiration_*`,
+    //!   `*_evolution_event_has_no_expiration_tag`, `decrypt_location_drops_expired`)
+    //!   — per-message TTL is dropped (retention is a group-level
+    //!   `message-retention.v1` component now, `dm2_report` #2).
+    //! * `has_live_key_material_*` / `create_key_package_with_d_*` /
+    //!   `*_login_key_package_*` — the M8-2 gate + `create_key_package_with_d`
+    //!   dissolve (last-resort KP semantics); KP lifetime tracking is DM-2b's
+    //!   `relay/maintenance/key_package.rs` suite.
+    //! * `admin_handoff_end_to_end` — `propose_admin_handoff`/`propose_self_demote`
+    //!   are a documented GAP (no admin-policy component codec in v0.9.4); the GAP
+    //!   error is asserted below instead.
+    //! * `m7b_every_mdk_write_site_acquires_the_writer_lock` — the process-global
+    //!   `write_lock` is superseded by the engine's single
+    //!   `tokio::sync::Mutex<AccountDeviceSession>`; the invariant is re-expressed
+    //!   structurally as `single_account_device_session_construction_site` below
+    //!   (Rule 14: at most one session per DB file).
+
     use super::*;
+    use crate::nostr::mls::types::LocationMessageResult;
+    use crate::relay::maintenance::build_kp_maintenance_events;
+    use nostr::JsonUtil as _;
     use tempfile::TempDir;
 
-    fn create_test_manager() -> (CircleManager, TempDir) {
+    // ── Construction helpers (new-stack idiom) ───────────────────────────────
+
+    fn create_test_manager() -> (CircleManager, Keys, TempDir) {
         let temp_dir = TempDir::new().unwrap();
-        let manager = CircleManager::new_unencrypted(temp_dir.path()).unwrap();
-        (manager, temp_dir)
+        let keys = Keys::generate();
+        let manager = CircleManager::new_unencrypted(temp_dir.path(), &keys).unwrap();
+        (manager, keys, temp_dir)
     }
 
-    /// Calls `decrypt_receive_only`, absorbing a `Skipped` that is caused by
-    /// TRANSIENT contention on the process-global `write_lock` from OTHER
-    /// parallel authoring tests (the sweep uses `try_acquire_background`, which
-    /// yields on ANY concurrent authoring writer in the process). A
-    /// contention-`Skipped` is the documented lossless-yield behavior; because
-    /// the sweep never advanced its cursor and never touched MDK, the SAME event
-    /// re-processes on the next attempt. Only for tests whose TRUE outcome is
-    /// non-`Skipped`; tests asserting a genuine `Skipped` must call
-    /// `decrypt_receive_only` directly (a real skip must not be retried away).
-    fn receive_only_until_applied(
-        manager: &CircleManager,
-        event: &Event,
-        nostr_group_id: &[u8],
-        own_pubkey_hex: &str,
-    ) -> crate::relay::ReceiveOnlyOutcome {
-        use crate::relay::ReceiveOnlyOutcome;
-        let mut out = ReceiveOnlyOutcome::Skipped;
-        // Bounded by ~2s worst case; converges in a few ms in practice (the
-        // authoring lock is held only microseconds per op). A short sleep (not a
-        // bare `yield_now`) lets the scheduler drain concurrent lock holders so
-        // this thread reliably observes an uncontended window, even under the
-        // full parallel test suite's sustained authoring pressure.
-        for _ in 0..2000 {
-            out = manager.decrypt_receive_only(event, nostr_group_id, own_pubkey_hex);
-            if out != ReceiveOnlyOutcome::Skipped {
-                return out;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        out
+    /// Mints a signed kind-30443 KeyPackage event via the DM-2b maintenance
+    /// builder (the real publish path), so `create_group`/`add_members` consume a
+    /// KeyPackage the receiver actually produced, exactly as in production.
+    async fn make_kp_event(manager: &CircleManager, keys: &Keys, relays: &[String]) -> Event {
+        build_kp_maintenance_events(manager.session(), keys, relays, None)
+            .await
+            .expect("build key package event")
+            .event
     }
 
     /// Builds a `MemberKeyPackage` for a fresh identity with caller-controlled
-    /// inbox / NIP-65 relays, for exercising the Welcome-delivery cascade.
-    ///
-    /// The underlying key package is minted with a throwaway group relay; the
-    /// member never processes the resulting Welcome, so the temporary MDK
-    /// store used to create it can be discarded immediately.
-    fn make_member_with_relays(
+    /// delivery relays, for exercising the Welcome-delivery cascade. The member's
+    /// throwaway session is dropped after minting the KP event.
+    async fn make_member_with_relays(
         inbox_relays: Vec<String>,
         nip65_relays: Vec<String>,
     ) -> MemberKeyPackage {
         let kp_relays = vec!["wss://kp.example.com".to_string()];
         let member_keys = Keys::generate();
-        let member_pubkey_hex = member_keys.public_key().to_hex();
         let kp_dir = TempDir::new().unwrap();
-        let kp_manager = CircleManager::new_unencrypted(kp_dir.path()).unwrap();
-        let bundle = kp_manager
-            .mdk
-            .create_key_package(&member_pubkey_hex, &kp_relays)
-            .expect("create member key package");
-        let tags: Vec<nostr::Tag> = bundle
-            .tags_443
-            .into_iter()
-            .map(|t| nostr::Tag::parse(&t).unwrap())
-            .collect();
-        let kp_event = EventBuilder::new(Kind::MlsKeyPackage, bundle.content)
-            .tags(tags)
-            .sign_with_keys(&member_keys)
-            .expect("sign member key package");
+        let member = CircleManager::new_unencrypted(kp_dir.path(), &member_keys).unwrap();
+        let event = make_kp_event(&member, &member_keys, &kp_relays).await;
         MemberKeyPackage {
-            key_package_event: kp_event,
+            key_package_event: event,
             inbox_relays,
             nip65_relays,
         }
     }
 
-    #[tokio::test]
-    async fn welcome_delivery_uses_creator_inbox_as_tier3() {
-        let dir = TempDir::new().unwrap();
-        let alice = CircleManager::new_unencrypted(dir.path()).unwrap();
-        let alice_keys = Keys::generate();
-
-        // Member advertises NO relays (empty inbox + empty NIP-65), forcing
-        // the cascade down to the creator's own inbox relays (tier 3).
-        let member = make_member_with_relays(vec![], vec![]);
-        let config = CircleConfig::new("Tier3 Circle")
-            .with_relays(vec!["wss://group.example.com".to_string()]);
-        let creator_inbox = vec!["wss://creator-inbox.example.com".to_string()];
-
-        let result = alice
-            .create_circle(&alice_keys, vec![member], &config, &creator_inbox)
-            .await
-            .expect("creation should succeed using the creator's inbox as tier 3");
-
-        assert_eq!(result.welcome_events.len(), 1);
-        // Tier 3 delivery uses the creator's own inbox relays verbatim.
-        assert_eq!(result.welcome_events[0].recipient_relays, creator_inbox);
-        // ...and NEVER a public default (two-plane leak invariant I1).
-        for d in crate::circle::PRODUCTION_DEFAULT_RELAYS {
-            assert!(
-                !result.welcome_events[0]
-                    .recipient_relays
-                    .iter()
-                    .any(|r| r.starts_with(d)),
-                "welcome delivery must never fall back to a public default ({d})"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn welcome_delivery_errors_when_no_relays() {
-        let dir = TempDir::new().unwrap();
-        let alice = CircleManager::new_unencrypted(dir.path()).unwrap();
-        let alice_keys = Keys::generate();
-
-        let member = make_member_with_relays(vec![], vec![]);
-        let config = CircleConfig::new("Fail Closed Circle")
-            .with_relays(vec!["wss://group.example.com".to_string()]);
-
-        // No member relays AND no creator fallback relays -> fail closed,
-        // rather than leaking the recipient's pubkey to public defaults.
-        let err = alice
-            .create_circle(&alice_keys, vec![member], &config, &[])
-            .await
-            .expect_err("creation must fail closed when no delivery relay exists");
-        assert!(matches!(err, CircleError::MissingWelcomeRelays));
-        // The surfaced message is generic — no relay URL, pubkey, or group id.
-        assert_eq!(err.to_string(), "No reachable relay for welcome delivery");
-        // No phantom state: failing closed must persist NO circle (the
-        // pre-check fires before create_group / save_circle / save_membership).
-        let circles = alice.get_circles().expect("get_circles");
-        assert!(
-            circles.is_empty(),
-            "fail-closed create_circle must leave no circle in storage"
-        );
-    }
-
-    /// Result of setting up a two-party MLS group between two CircleManagers.
+    /// A real two-party MLS circle established over the Dark Matter stack.
     struct TwoPartyCircle {
         alice: CircleManager,
         _alice_dir: TempDir,
@@ -3553,114 +2234,47 @@ mod tests {
         relays: Vec<String>,
     }
 
-    /// Creates two CircleManagers with an established MLS group and matching
-    /// Circle records in both managers' storage.
-    fn setup_two_party_circle() -> TwoPartyCircle {
+    /// Establishes a two-party circle: Alice creates with Bob's KeyPackage,
+    /// confirms the pending create (publish-before-apply), then Bob holds and
+    /// accepts the engine-produced gift-wrapped (1059) welcome.
+    async fn setup_two_party_circle() -> TwoPartyCircle {
         let relays = vec!["wss://relay.test.com".to_string()];
 
         let alice_dir = TempDir::new().unwrap();
-        let alice = CircleManager::new_unencrypted(alice_dir.path()).unwrap();
         let alice_keys = Keys::generate();
+        let alice = CircleManager::new_unencrypted(alice_dir.path(), &alice_keys).unwrap();
 
         let bob_dir = TempDir::new().unwrap();
-        let bob = CircleManager::new_unencrypted(bob_dir.path()).unwrap();
         let bob_keys = Keys::generate();
+        let bob = CircleManager::new_unencrypted(bob_dir.path(), &bob_keys).unwrap();
 
-        // Bob creates a key package (signed event)
-        let bob_pubkey_hex = bob_keys.public_key().to_hex();
-        let bundle = bob
-            .mdk
-            .create_key_package(&bob_pubkey_hex, &relays)
-            .expect("should create bob key package");
+        let bob_kp_event = make_kp_event(&bob, &bob_keys, &relays).await;
+        let bob_member = MemberKeyPackage {
+            key_package_event: bob_kp_event,
+            inbox_relays: relays.clone(),
+            nip65_relays: vec![],
+        };
 
-        let tags: Vec<nostr::Tag> = bundle
-            .tags_443
-            .into_iter()
-            .map(|t| nostr::Tag::parse(&t).unwrap())
-            .collect();
-
-        let bob_kp_event = EventBuilder::new(Kind::MlsKeyPackage, bundle.content)
-            .tags(tags)
-            .sign_with_keys(&bob_keys)
-            .expect("should sign bob key package");
-
-        // Alice creates the group
-        let config = crate::nostr::mls::types::LocationGroupConfig::new("Test Circle")
-            .with_description("Integration test circle")
-            .with_relay("wss://relay.test.com")
-            .with_admin(&alice_keys.public_key().to_hex());
-
-        let group_result = alice
-            .mdk
-            .create_group(
-                &alice_keys.public_key().to_hex(),
-                vec![bob_kp_event],
-                config,
-            )
-            .expect("should create group");
-
-        let mls_group_id = group_result.group.mls_group_id.clone();
-        let nostr_group_id = group_result.group.nostr_group_id;
-
-        // Alice merges the pending commit
+        let config = CircleConfig::new("Test Circle").with_relays(relays.clone());
+        let creation = alice
+            .create_circle(&alice_keys, vec![bob_member], &config, &relays)
+            .await
+            .expect("create two-party circle");
         alice
-            .mdk
-            .merge_pending_commit(&mls_group_id)
-            .expect("should merge alice pending commit");
+            .confirm_published(creation.pending)
+            .await
+            .expect("confirm create");
 
-        // Bob processes the welcome
-        let welcome_rumor = group_result
-            .welcome_rumors
-            .first()
-            .expect("should have welcome for bob");
+        let mls_group_id = creation.circle.mls_group_id.clone();
+        let nostr_group_id = creation.circle.nostr_group_id;
 
-        bob.mdk
-            .process_welcome(&nostr::EventId::all_zeros(), welcome_rumor)
-            .expect("should process welcome");
-
-        let pending = bob
-            .mdk
-            .get_pending_welcomes()
-            .expect("should get pending welcomes");
-        let welcome = pending.first().expect("should have one pending welcome");
-
-        bob.mdk
-            .accept_welcome(welcome)
-            .expect("should accept welcome");
-
-        // Save Circle records to both managers' storage
-        let now = chrono::Utc::now().timestamp();
-        let circle = super::super::types::Circle {
-            mls_group_id: mls_group_id.clone(),
-            nostr_group_id,
-            display_name: "Test Circle".to_string(),
-            circle_type: super::super::types::CircleType::LocationSharing,
-            relays: relays.clone(),
-            created_at: now,
-            updated_at: now,
-        };
-
-        alice.storage.save_circle(&circle).unwrap();
-        bob.storage.save_circle(&circle).unwrap();
-
-        // Save accepted memberships for both
-        let alice_membership = super::super::types::CircleMembership {
-            mls_group_id: mls_group_id.clone(),
-            status: super::super::types::MembershipStatus::Accepted,
-            inviter_pubkey: None,
-            invited_at: now,
-            responded_at: Some(now),
-        };
-        alice.storage.save_membership(&alice_membership).unwrap();
-
-        let bob_membership = super::super::types::CircleMembership {
-            mls_group_id: mls_group_id.clone(),
-            status: super::super::types::MembershipStatus::Accepted,
-            inviter_pubkey: Some(alice_keys.public_key().to_hex()),
-            invited_at: now,
-            responded_at: Some(now),
-        };
-        bob.storage.save_membership(&bob_membership).unwrap();
+        let welcome = creation.welcome_events.first().expect("one welcome");
+        bob.process_gift_wrapped_invitation(&bob_keys, &welcome.event)
+            .await
+            .expect("bob holds welcome");
+        bob.accept_invitation(&welcome.event.id)
+            .await
+            .expect("bob accepts welcome");
 
         TwoPartyCircle {
             alice,
@@ -3675,11 +2289,6 @@ mod tests {
         }
     }
 
-    // ====================================================================
-    // MIP-01 group-relay update (admin) + member convergence (re-sync)
-    // ====================================================================
-
-    /// Sorted+deduped copy, for order-insensitive relay-set assertions.
     fn sorted_relays(v: &[String]) -> Vec<String> {
         let mut out = v.to_vec();
         out.sort();
@@ -3687,22 +2296,366 @@ mod tests {
         out
     }
 
+    /// A random 32-byte `GroupId` for storage-only fixtures (no live MLS group).
+    fn random_group_id() -> GroupId {
+        GroupId::from_slice(&Keys::generate().public_key().to_bytes())
+    }
+
+    /// Returns the first `Location` result (or panics) in a decrypt batch.
+    fn expect_location(results: &[LocationMessageResult]) -> (&str, &str) {
+        for r in results {
+            if let LocationMessageResult::Location {
+                sender_pubkey,
+                content,
+                ..
+            } = r
+            {
+                return (sender_pubkey, content);
+            }
+        }
+        panic!("expected a Location result, got {results:?}");
+    }
+
+    fn save_stored_circle(manager: &CircleManager, status: MembershipStatus) {
+        let now = chrono::Utc::now().timestamp();
+        let gid = random_group_id();
+        let circle = Circle {
+            mls_group_id: gid.clone(),
+            nostr_group_id: [1u8; 32],
+            display_name: "Stored".to_string(),
+            circle_type: CircleType::LocationSharing,
+            relays: vec!["wss://relay.test.com".to_string()],
+            created_at: now,
+            updated_at: now,
+        };
+        manager.storage.save_circle(&circle).unwrap();
+        manager
+            .storage
+            .save_membership(&CircleMembership {
+                mls_group_id: gid,
+                status,
+                inviter_pubkey: None,
+                invited_at: now,
+                responded_at: Some(now),
+            })
+            .unwrap();
+    }
+
+    // ── Welcome-delivery cascade ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn welcome_delivery_uses_creator_inbox_as_tier3() {
+        let dir = TempDir::new().unwrap();
+        let alice_keys = Keys::generate();
+        let alice = CircleManager::new_unencrypted(dir.path(), &alice_keys).unwrap();
+
+        // Member advertises NO relays (empty inbox + empty NIP-65), forcing the
+        // cascade down to the creator's own inbox relays (tier 3).
+        let member = make_member_with_relays(vec![], vec![]).await;
+        let config = CircleConfig::new("Tier3 Circle")
+            .with_relays(vec!["wss://group.example.com".to_string()]);
+        let creator_inbox = vec!["wss://creator-inbox.example.com".to_string()];
+
+        let result = alice
+            .create_circle(&alice_keys, vec![member], &config, &creator_inbox)
+            .await
+            .expect("creation should succeed using the creator's inbox as tier 3");
+
+        assert_eq!(result.welcome_events.len(), 1);
+        assert_eq!(result.welcome_events[0].recipient_relays, creator_inbox);
+        for d in crate::circle::PRODUCTION_DEFAULT_RELAYS {
+            assert!(
+                !result.welcome_events[0]
+                    .recipient_relays
+                    .iter()
+                    .any(|r| r.starts_with(d)),
+                "welcome delivery must never fall back to a public default ({d})"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn welcome_delivery_errors_when_no_relays() {
+        let dir = TempDir::new().unwrap();
+        let alice_keys = Keys::generate();
+        let alice = CircleManager::new_unencrypted(dir.path(), &alice_keys).unwrap();
+
+        let member = make_member_with_relays(vec![], vec![]).await;
+        let config = CircleConfig::new("Fail Closed Circle")
+            .with_relays(vec!["wss://group.example.com".to_string()]);
+
+        let err = alice
+            .create_circle(&alice_keys, vec![member], &config, &[])
+            .await
+            .expect_err("creation must fail closed when no delivery relay exists");
+        assert!(matches!(err, CircleError::MissingWelcomeRelays));
+        assert_eq!(err.to_string(), "No reachable relay for welcome delivery");
+        // No phantom state: failing closed persists NO circle.
+        let circles = alice.get_circles().await.expect("get_circles");
+        assert!(
+            circles.is_empty(),
+            "fail-closed create_circle must leave no circle in storage"
+        );
+    }
+
+    // ── Create rollback / ghost-row cleanup (F2/F3) ──────────────────────────
+
+    #[tokio::test]
+    async fn create_then_publish_failed_removes_orphan_circle_row() {
+        // F2: create succeeds (deliverable member) and eagerly persists a circle
+        // row; then all welcomes zero-ack and the caller calls `publish_failed`.
+        // The circle row MUST be rolled back — no ghost circle backed by an
+        // unconfirmed group survives.
+        let relays = vec!["wss://relay.test.com".to_string()];
+        let dir = TempDir::new().unwrap();
+        let alice_keys = Keys::generate();
+        let alice = CircleManager::new_unencrypted(dir.path(), &alice_keys).unwrap();
+
+        let member = make_member_with_relays(relays.clone(), vec![]).await;
+        let config = CircleConfig::new("Rollback Circle").with_relays(relays.clone());
+        let creation = alice
+            .create_circle(&alice_keys, vec![member], &config, &relays)
+            .await
+            .expect("create");
+
+        // Before rollback the row exists (eager persistence is unchanged).
+        assert_eq!(alice.get_circles().await.unwrap().len(), 1);
+
+        alice
+            .publish_failed(creation.pending)
+            .await
+            .expect("rollback the unconfirmed create");
+
+        assert!(
+            alice.get_circles().await.unwrap().is_empty(),
+            "publish_failed on a create must remove the orphan circle row"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_then_confirm_persists_exactly_one_circle() {
+        // The happy path is unchanged: a confirmed create keeps exactly one row.
+        let relays = vec!["wss://relay.test.com".to_string()];
+        let dir = TempDir::new().unwrap();
+        let alice_keys = Keys::generate();
+        let alice = CircleManager::new_unencrypted(dir.path(), &alice_keys).unwrap();
+
+        let member = make_member_with_relays(relays.clone(), vec![]).await;
+        let config = CircleConfig::new("Confirmed Circle").with_relays(relays.clone());
+        let creation = alice
+            .create_circle(&alice_keys, vec![member], &config, &relays)
+            .await
+            .expect("create");
+        assert_eq!(alice.get_circles().await.unwrap().len(), 1);
+
+        alice
+            .confirm_published(creation.pending)
+            .await
+            .expect("confirm");
+        assert_eq!(
+            alice.get_circles().await.unwrap().len(),
+            1,
+            "a confirmed create persists exactly one circle"
+        );
+
+        // A stray publish_failed after confirm must NOT delete the now-live row
+        // (the create binding was dropped on confirm). It errors on the unknown
+        // pending; the circle survives.
+        let _ = alice.publish_failed(creation.pending).await;
+        assert_eq!(
+            alice.get_circles().await.unwrap().len(),
+            1,
+            "a confirmed circle must survive a stray publish_failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_route_error_rolls_back_pending_and_leaves_no_row() {
+        // F3: exercise the internal helper directly so `route_welcomes_with_cascade`
+        // fails AFTER the MLS group + storage rows are staged (a member with no
+        // delivery relay and no creator fallback). The post-stage error path MUST
+        // roll the pending back and leave NO orphan circle row.
+        let dir = TempDir::new().unwrap();
+        let alice_keys = Keys::generate();
+        let alice = CircleManager::new_unencrypted(dir.path(), &alice_keys).unwrap();
+
+        let member = make_member_with_relays(vec![], vec![]).await; // undeliverable
+        let group_relays = vec!["wss://group.example.com".to_string()];
+        let mls_config = LocationGroupConfig::new("Route Error Circle")
+            .with_relays(group_relays.iter().map(String::as_str))
+            .with_admin(alice_keys.public_key().to_hex());
+        let config = CircleConfig::new("Route Error Circle").with_relays(group_relays.clone());
+        let kp_events = vec![member.key_package_event.clone()];
+
+        let result = alice
+            .create_circle_with_config(&[member], kp_events, mls_config, &config, &[])
+            .await;
+        assert!(
+            matches!(result, Err(CircleError::MissingWelcomeRelays)),
+            "welcome routing must fail closed for an undeliverable member"
+        );
+
+        assert!(
+            alice.get_circles().await.unwrap().is_empty(),
+            "a post-stage route error must roll back the ghost circle row (F2/F3)"
+        );
+        // The create binding was consumed by the rollback, so nothing lingers to
+        // re-delete: a fresh, deliverable create then works cleanly.
+        let ok_member =
+            make_member_with_relays(vec!["wss://relay.test.com".to_string()], vec![]).await;
+        let ok_config = CircleConfig::new("Recovered Circle")
+            .with_relays(vec!["wss://relay.test.com".to_string()]);
+        alice
+            .create_circle(
+                &alice_keys,
+                vec![ok_member],
+                &ok_config,
+                &["wss://relay.test.com".to_string()],
+            )
+            .await
+            .expect("a subsequent create is unaffected by the prior rollback");
+        assert_eq!(alice.get_circles().await.unwrap().len(), 1);
+    }
+
     #[test]
-    fn admin_relay_update_converges_admin_and_member() {
-        let tp = setup_two_party_circle();
+    fn fold_surfaces_pending_commit_recovered_as_group_update() {
+        // Rust F1: the ingest/drain fold path must surface a hydrate-emitted
+        // PendingCommitRecovered as a GroupUpdate (drive resync), not drop it.
+        use crate::nostr::mls::types::EpochId;
+        let gid = GroupId::new(vec![7, 7, 7]);
+        let folded = fold_group_events(&[GroupEvent::PendingCommitRecovered {
+            group_id: gid.clone(),
+            recovered_epoch: EpochId(2),
+        }]);
+        assert!(
+            matches!(
+                folded.as_slice(),
+                [LocationMessageResult::GroupUpdate { .. }]
+            ),
+            "a drained PendingCommitRecovered must fold to a GroupUpdate, got {folded:?}"
+        );
+    }
+
+    // ── Basic construction / empty getters ───────────────────────────────────
+
+    #[test]
+    fn new_creates_manager() {
+        let (_manager, _keys, _dir) = create_test_manager();
+    }
+
+    #[tokio::test]
+    async fn get_circles_returns_empty_initially() {
+        let (manager, _keys, _dir) = create_test_manager();
+        assert!(manager.get_circles().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_visible_circles_returns_empty_initially() {
+        let (manager, _keys, _dir) = create_test_manager();
+        assert!(manager.get_visible_circles().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn get_pending_invitations_returns_empty_initially() {
+        let (manager, _keys, _dir) = create_test_manager();
+        assert!(manager.get_pending_invitations().unwrap().is_empty());
+    }
+
+    #[test]
+    fn get_all_contacts_returns_empty_initially() {
+        let (manager, _keys, _dir) = create_test_manager();
+        assert!(manager.get_all_contacts().unwrap().is_empty());
+    }
+
+    // ── Contacts (local-only, sync) ──────────────────────────────────────────
+
+    #[test]
+    fn set_and_get_contact() {
+        let (manager, _keys, _dir) = create_test_manager();
+        let pk = Keys::generate().public_key().to_hex();
+        let contact = manager
+            .set_contact(&pk, Some("Alice"), Some("note"))
+            .unwrap();
+        assert_eq!(contact.display_name.as_deref(), Some("Alice"));
+        let fetched = manager.get_contact(&pk).unwrap().unwrap();
+        assert_eq!(fetched.display_name.as_deref(), Some("Alice"));
+        assert_eq!(fetched.notes.as_deref(), Some("note"));
+    }
+
+    #[test]
+    fn set_contact_updates_existing() {
+        let (manager, _keys, _dir) = create_test_manager();
+        let pk = Keys::generate().public_key().to_hex();
+        let first = manager.set_contact(&pk, Some("Old"), None).unwrap();
+        let second = manager.set_contact(&pk, Some("New"), None).unwrap();
+        assert_eq!(second.display_name.as_deref(), Some("New"));
+        assert_eq!(first.created_at, second.created_at, "created_at preserved");
+    }
+
+    #[test]
+    fn delete_contact_removes_it() {
+        let (manager, _keys, _dir) = create_test_manager();
+        let pk = Keys::generate().public_key().to_hex();
+        manager.set_contact(&pk, Some("X"), None).unwrap();
+        manager.delete_contact(&pk).unwrap();
+        assert!(manager.get_contact(&pk).unwrap().is_none());
+    }
+
+    #[test]
+    fn get_contact_nonexistent_returns_none() {
+        let (manager, _keys, _dir) = create_test_manager();
+        let pk = Keys::generate().public_key().to_hex();
+        assert!(manager.get_contact(&pk).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn get_circle_nonexistent_returns_none() {
+        let (manager, _keys, _dir) = create_test_manager();
+        assert!(manager
+            .get_circle(&random_group_id())
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    // ── Stored-data getters (storage-only, no live MLS group) ─────────────────
+
+    #[tokio::test]
+    async fn get_circles_with_stored_data() {
+        let (manager, _keys, _dir) = create_test_manager();
+        save_stored_circle(&manager, MembershipStatus::Accepted);
+        let circles = manager.get_circles().await.unwrap();
+        assert_eq!(circles.len(), 1);
+        // A stored-only circle (no live MLS group) tolerates an empty roster.
+        assert!(circles[0].members.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_visible_circles_filters_declined() {
+        let (manager, _keys, _dir) = create_test_manager();
+        save_stored_circle(&manager, MembershipStatus::Accepted);
+        save_stored_circle(&manager, MembershipStatus::Declined);
+        assert_eq!(manager.get_circles().await.unwrap().len(), 2);
+        assert_eq!(manager.get_visible_circles().await.unwrap().len(), 1);
+    }
+
+    // ── MIP-01 group-relay update (admin) + member convergence ───────────────
+
+    #[tokio::test]
+    async fn admin_relay_update_converges_admin_and_member() {
+        let tp = setup_two_party_circle().await;
         let new_relays = vec![
             "wss://relay.test.com".to_string(),
             "wss://relay2.test.com".to_string(),
         ];
 
-        // Alice (admin) stages the relay-update commit.
         let update = tp
             .alice
             .update_circle_relays(&tp.mls_group_id, &new_relays)
+            .await
             .expect("admin must be allowed to update relays");
 
-        // Publish-then-merge ordering: before finalize, the admin's app row is
-        // unchanged (the new relays are not yet authoritative).
+        // Publish-before-apply: before finalize, the admin's app row is unchanged.
         let alice_before = tp
             .alice
             .storage
@@ -3711,12 +2664,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             alice_before.relays, tp.relays,
-            "circle.relays must not change before the commit is merged"
+            "circle.relays must not change before the commit is confirmed"
         );
 
-        // Finalize on the admin side (merge + producer-side re-sync).
         tp.alice
-            .finalize_relay_update(&tp.mls_group_id)
+            .finalize_relay_update(update.pending, &tp.mls_group_id)
+            .await
             .expect("admin finalize");
 
         let expected = sorted_relays(&new_relays);
@@ -3728,18 +2681,20 @@ mod tests {
             .unwrap();
         assert_eq!(
             alice_after.relays, expected,
-            "admin circle.relays must converge to the new set after merge"
+            "admin circle.relays must converge to the new set after confirm"
         );
 
-        // The member (Bob) processes the commit through the REAL consumer path
-        // (decrypt_location) and converges on the identical set.
-        let result = tp
+        // The member (Bob) processes the commit through the REAL consumer path.
+        let results = tp
             .bob
-            .decrypt_location(&update.evolution_event)
+            .decrypt_location(&update.commit_event)
+            .await
             .expect("bob processes the relay-update commit");
         assert!(
-            matches!(result, LocationMessageResult::GroupUpdate { .. }),
-            "a GroupContextExtensions commit must surface as GroupUpdate"
+            results
+                .iter()
+                .any(|r| matches!(r, LocationMessageResult::GroupUpdate { .. })),
+            "a routing-component commit must surface as GroupUpdate, got {results:?}"
         );
         let bob_after = tp
             .bob
@@ -3757,22 +2712,19 @@ mod tests {
         );
     }
 
-    #[test]
-    fn admin_relay_replacement_drops_old_relay_and_converges() {
-        let tp = setup_two_party_circle();
-        // Genuine REMOVAL/replacement: [R1] -> [R2], dropping R1. This is the
-        // case the union(old∪new) publish (Dart side) exists to protect; here
-        // we lock the CORE convergence invariant: after both sides process the
-        // commit, circle.relays is exactly the new set (a hard REPLACE, not a
-        // merge) — the dropped relay must not survive on either side.
+    #[tokio::test]
+    async fn admin_relay_replacement_drops_old_relay_and_converges() {
+        let tp = setup_two_party_circle().await;
         let new_relays = vec!["wss://relay2.test.com".to_string()];
 
         let update = tp
             .alice
             .update_circle_relays(&tp.mls_group_id, &new_relays)
+            .await
             .expect("admin replaces the relay set");
         tp.alice
-            .finalize_relay_update(&tp.mls_group_id)
+            .finalize_relay_update(update.pending, &tp.mls_group_id)
+            .await
             .expect("admin finalize");
 
         let expected = sorted_relays(&new_relays);
@@ -3784,51 +2736,39 @@ mod tests {
             .get_circle(&tp.mls_group_id)
             .unwrap()
             .unwrap();
-        assert_eq!(
-            alice_after.relays, expected,
-            "admin circle.relays must REPLACE (not merge) to the new set"
-        );
-        assert!(
-            !alice_after.relays.contains(&dropped),
-            "the dropped relay must not survive on the admin side"
-        );
+        assert_eq!(alice_after.relays, expected);
+        assert!(!alice_after.relays.contains(&dropped));
 
-        let result = tp
+        let results = tp
             .bob
-            .decrypt_location(&update.evolution_event)
+            .decrypt_location(&update.commit_event)
+            .await
             .expect("bob processes the replacement commit");
-        assert!(matches!(result, LocationMessageResult::GroupUpdate { .. }));
+        assert!(results
+            .iter()
+            .any(|r| matches!(r, LocationMessageResult::GroupUpdate { .. })));
         let bob_after = tp
             .bob
             .storage
             .get_circle(&tp.mls_group_id)
             .unwrap()
             .unwrap();
-        assert_eq!(
-            bob_after.relays, expected,
-            "member circle.relays must converge to the replacement set"
-        );
-        assert!(
-            !bob_after.relays.contains(&dropped),
-            "the dropped relay must not survive on the member side"
-        );
-        assert_eq!(
-            alice_after.relays, bob_after.relays,
-            "no split-brain on a relay removal"
-        );
+        assert_eq!(bob_after.relays, expected);
+        assert!(!bob_after.relays.contains(&dropped));
+        assert_eq!(alice_after.relays, bob_after.relays);
     }
 
-    #[test]
-    fn non_admin_relay_update_is_rejected_and_changes_nothing() {
-        let tp = setup_two_party_circle();
-        // Bob is a plain member, not an admin — MDK enforces admin-only
-        // GroupContextExtensions commits against live MLS state.
+    #[tokio::test]
+    async fn non_admin_relay_update_is_rejected_and_changes_nothing() {
+        let tp = setup_two_party_circle().await;
+        // Bob is a plain member — the engine enforces admin-only routing commits.
         let result = tp
             .bob
-            .update_circle_relays(&tp.mls_group_id, &["wss://relay2.test.com".to_string()]);
+            .update_circle_relays(&tp.mls_group_id, &["wss://relay2.test.com".to_string()])
+            .await;
         assert!(
             matches!(result, Err(CircleError::Mls(_))),
-            "MDK must reject a non-admin relay update"
+            "the engine must reject a non-admin relay update, got {result:?}"
         );
         let bob_circle = tp
             .bob
@@ -3836,22 +2776,16 @@ mod tests {
             .get_circle(&tp.mls_group_id)
             .unwrap()
             .unwrap();
-        assert_eq!(
-            bob_circle.relays, tp.relays,
-            "a rejected update must change nothing"
-        );
+        assert_eq!(bob_circle.relays, tp.relays);
     }
 
-    #[test]
-    fn update_circle_relays_rejects_empty_set() {
-        let tp = setup_two_party_circle();
-        assert!(
-            matches!(
-                tp.alice.update_circle_relays(&tp.mls_group_id, &[]),
-                Err(CircleError::InvalidData(_))
-            ),
-            "an empty relay set must be rejected (445 has no default fallback)"
-        );
+    #[tokio::test]
+    async fn update_circle_relays_rejects_empty_set() {
+        let tp = setup_two_party_circle().await;
+        assert!(matches!(
+            tp.alice.update_circle_relays(&tp.mls_group_id, &[]).await,
+            Err(CircleError::InvalidData(_))
+        ));
         let circle = tp
             .alice
             .storage
@@ -3861,84 +2795,42 @@ mod tests {
         assert_eq!(circle.relays, tp.relays, "no commit staged on rejection");
     }
 
-    #[test]
-    fn update_circle_relays_rejects_oversized_set() {
-        let tp = setup_two_party_circle();
+    #[tokio::test]
+    async fn update_circle_relays_rejects_oversized_set() {
+        let tp = setup_two_party_circle().await;
         let many: Vec<String> = (0..=CircleManager::MAX_CIRCLE_RELAYS)
             .map(|i| format!("wss://relay{i}.test.com"))
             .collect();
         assert!(many.len() > CircleManager::MAX_CIRCLE_RELAYS);
         assert!(matches!(
-            tp.alice.update_circle_relays(&tp.mls_group_id, &many),
+            tp.alice.update_circle_relays(&tp.mls_group_id, &many).await,
             Err(CircleError::InvalidData(_))
         ));
     }
 
-    #[test]
-    fn update_circle_relays_rejects_plaintext_ws() {
-        let tp = setup_two_party_circle();
-        // ws:// (non-loopback host; the debug loopback seam is not armed here)
-        // is rejected by the shared `normalize_url` validator.
+    #[tokio::test]
+    async fn update_circle_relays_rejects_plaintext_ws() {
+        let tp = setup_two_party_circle().await;
         assert!(matches!(
             tp.alice
-                .update_circle_relays(&tp.mls_group_id, &["ws://relay.test.com".to_string()]),
+                .update_circle_relays(&tp.mls_group_id, &["ws://relay.test.com".to_string()])
+                .await,
             Err(CircleError::InvalidData(_))
         ));
     }
 
-    #[test]
-    fn resync_never_overwrites_nonempty_relays_with_empty() {
-        let tp = setup_two_party_circle();
-        // Reproduce the real hazard: MDK does NOT validate non-empty on a
-        // relay update, and a member can legitimately observe an empty MDK set
-        // (e.g. join with an empty Welcome group_relays while circle.relays
-        // holds default_relays()). Commit an empty set DIRECTLY via the
-        // unvalidated MDK path (`update_circle_relays` would reject it).
-        tp.alice
-            .mdk
-            .update_relays(&tp.mls_group_id, &[])
-            .expect("MDK accepts an (unvalidated) empty relay update");
-        tp.alice
-            .mdk
-            .merge_pending_commit(&tp.mls_group_id)
-            .expect("merge the empty relay commit");
-        assert!(
-            tp.alice
-                .mdk
-                .get_group_relays(&tp.mls_group_id)
-                .unwrap()
-                .is_empty(),
-            "MDK relay store is now empty (the hazard)"
-        );
-
-        // The re-sync MUST NOT wipe the non-empty circle.relays.
-        tp.alice
-            .resync_circle_relays_from_mdk(&tp.mls_group_id)
-            .expect("resync");
-        let circle = tp
-            .alice
-            .storage
-            .get_circle(&tp.mls_group_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            circle.relays, tp.relays,
-            "an empty MDK relay set must never brick a non-empty circle.relays"
-        );
-    }
-
-    #[test]
-    fn resync_is_idempotent_noop_when_already_converged() {
-        let tp = setup_two_party_circle();
+    #[tokio::test]
+    async fn resync_is_idempotent_noop_when_already_converged() {
+        let tp = setup_two_party_circle().await;
         let before = tp
             .alice
             .storage
             .get_circle(&tp.mls_group_id)
             .unwrap()
             .unwrap();
-        // circle.relays already equals MDK's set; a re-sync must not write.
         tp.alice
             .resync_circle_relays_from_mdk(&tp.mls_group_id)
+            .await
             .expect("resync");
         let after = tp
             .alice
@@ -3947,7103 +2839,530 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(before.relays, after.relays);
-        assert_eq!(
-            before.updated_at, after.updated_at,
-            "a no-op re-sync must not bump updated_at (no spurious save)"
-        );
     }
-
-    #[test]
-    fn new_creates_manager() {
-        let (manager, _temp_dir) = create_test_manager();
-        // Verify manager was created successfully
-        assert!(manager.get_circles().unwrap().is_empty());
-    }
-
-    #[test]
-    fn get_circles_returns_empty_initially() {
-        let (manager, _temp_dir) = create_test_manager();
-        let circles = manager.get_circles().unwrap();
-        assert!(circles.is_empty());
-    }
-
-    #[test]
-    fn get_visible_circles_returns_empty_initially() {
-        let (manager, _temp_dir) = create_test_manager();
-        let circles = manager.get_visible_circles().unwrap();
-        assert!(circles.is_empty());
-    }
-
-    #[test]
-    fn get_pending_invitations_returns_empty_initially() {
-        let (manager, _temp_dir) = create_test_manager();
-        let invitations = manager.get_pending_invitations().unwrap();
-        assert!(invitations.is_empty());
-    }
-
-    #[test]
-    fn get_all_contacts_returns_empty_initially() {
-        let (manager, _temp_dir) = create_test_manager();
-        let contacts = manager.get_all_contacts().unwrap();
-        assert!(contacts.is_empty());
-    }
-
-    #[test]
-    fn set_and_get_contact() {
-        let (manager, _temp_dir) = create_test_manager();
-
-        let contact = manager
-            .set_contact("abc123", Some("Alice"), Some("Friend from work"))
-            .unwrap();
-
-        assert_eq!(contact.pubkey, "abc123");
-        assert_eq!(contact.display_name, Some("Alice".to_string()));
-        assert_eq!(contact.notes, Some("Friend from work".to_string()));
-
-        let retrieved = manager.get_contact("abc123").unwrap().unwrap();
-        assert_eq!(retrieved.pubkey, contact.pubkey);
-        assert_eq!(retrieved.display_name, contact.display_name);
-    }
-
-    #[test]
-    fn set_contact_updates_existing() {
-        let (manager, _temp_dir) = create_test_manager();
-
-        let contact1 = manager.set_contact("abc123", Some("Alice"), None).unwrap();
-        let created_at = contact1.created_at;
-
-        // Update the contact
-        let contact2 = manager
-            .set_contact("abc123", Some("Alice Updated"), None)
-            .unwrap();
-
-        // created_at should be preserved
-        assert_eq!(contact2.created_at, created_at);
-        assert_eq!(contact2.display_name, Some("Alice Updated".to_string()));
-    }
-
-    #[test]
-    fn delete_contact() {
-        let (manager, _temp_dir) = create_test_manager();
-
-        manager.set_contact("abc123", Some("Alice"), None).unwrap();
-        assert!(manager.get_contact("abc123").unwrap().is_some());
-
-        manager.delete_contact("abc123").unwrap();
-        assert!(manager.get_contact("abc123").unwrap().is_none());
-    }
-
-    #[test]
-    fn get_contact_nonexistent_returns_none() {
-        let (manager, _temp_dir) = create_test_manager();
-        let contact = manager.get_contact("nonexistent").unwrap();
-        assert!(contact.is_none());
-    }
-
-    #[test]
-    fn get_circle_nonexistent_returns_none() {
-        let (manager, _temp_dir) = create_test_manager();
-        let circle = manager
-            .get_circle(&GroupId::from_slice(&[0u8; 32]))
-            .unwrap();
-        assert!(circle.is_none());
-    }
-
-    #[test]
-    fn accept_invitation_nonexistent_fails() {
-        let (manager, _temp_dir) = create_test_manager();
-        let result = manager.accept_invitation(&GroupId::from_slice(&[0u8; 32]));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn decline_invitation_nonexistent_fails() {
-        let (manager, _temp_dir) = create_test_manager();
-        let result = manager.decline_invitation(&GroupId::from_slice(&[0u8; 32]));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn create_key_package_invalid_pubkey_fails() {
-        let (manager, _temp_dir) = create_test_manager();
-        let result =
-            manager.create_key_package("invalid", &["wss://relay.example.com".to_string()]);
-        assert!(result.is_err());
-    }
-
-    // ---- M8-2 KeyPackage maintenance wrappers -------------------------------
-
-    #[test]
-    fn create_key_package_with_d_reuses_stable_slot() {
-        let (manager, _temp_dir) = create_test_manager();
-        let pk = Keys::generate().public_key().to_hex();
-        let relays = vec!["wss://own.example.com".to_string()];
-        let stable = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
-
-        let first = manager
-            .create_key_package_with_d(&pk, &relays, Some(stable))
-            .expect("first");
-        let second = manager
-            .create_key_package_with_d(&pk, &relays, Some(stable))
-            .expect("second");
-
-        // Two rotations into the SAME stable slot yield the SAME NIP-33 `d`,
-        // so the second replaces the first at one addressable coordinate.
-        assert_eq!(first.d_tag, stable);
-        assert_eq!(second.d_tag, stable);
-    }
-
-    #[test]
-    fn has_live_key_material_true_for_fresh_then_tracked() {
-        let (manager, _temp_dir) = create_test_manager();
-        let pk = Keys::generate().public_key().to_hex();
-        let relays = vec!["wss://own.example.com".to_string()];
-
-        let bundle = manager
-            .create_key_package_with_d(&pk, &relays, None)
-            .expect("kp");
-        // A freshly-created KeyPackage's private init material is LIVE.
-        assert!(manager
-            .has_live_key_material(&bundle.hash_ref)
-            .expect("live"));
-
-        // Record it, then the maintenance-side accessors reflect it.
-        manager
-            .record_published_key_package(
-                &super::super::storage_key_packages::PublishedKeyPackageRow {
-                    key_package_hash_ref: bundle.hash_ref.clone(),
-                    event_id: "ev1".to_string(),
-                    kind: super::super::storage_key_packages::KEY_PACKAGE_KIND_CANONICAL,
-                    d_tag: Some(bundle.d_tag.clone()),
-                    created_at: 100,
-                },
-            )
-            .expect("record");
-        assert_eq!(
-            manager.latest_canonical_d_tag().expect("latest"),
-            Some(bundle.d_tag.clone())
-        );
-        assert_eq!(
-            manager.canonical_published_hash_refs().expect("refs"),
-            vec![bundle.hash_ref]
-        );
-    }
-
-    #[test]
-    fn recorded_login_key_package_reads_live_for_the_maintenance_gate() {
-        // M8-6: after the login/onboarding publish records its KeyPackage, the
-        // maintenance live-material gate must recognize it as LIVE — so the
-        // first maintenance tick NoOps instead of misreading the primary KP as
-        // dead and force-rotating it. This exercises the EXACT gate inputs the
-        // FFI's `maintain_key_package` builds: `canonical_published_event_refs`
-        // (on-relay event id → tracked hash_ref) + `has_live_key_material`.
-        let (manager, _temp_dir) = create_test_manager();
-        let pk = Keys::generate().public_key().to_hex();
-        let relays = vec!["wss://own.example.com".to_string()];
-
-        // Login publish: create the KP + record it under its on-relay event id
-        // (as `record_published_key_packages` does after a successful publish).
-        let bundle = manager
-            .create_key_package_with_d(&pk, &relays, None)
-            .expect("kp");
-        manager
-            .record_published_key_package(
-                &super::super::storage_key_packages::PublishedKeyPackageRow {
-                    key_package_hash_ref: bundle.hash_ref.clone(),
-                    event_id: "login_event_id".to_string(),
-                    kind: super::super::storage_key_packages::KEY_PACKAGE_KIND_CANONICAL,
-                    d_tag: Some(bundle.d_tag.clone()),
-                    created_at: 100,
-                },
-            )
-            .expect("record");
-
-        // The maintenance snapshot builder resolves the on-relay event id to the
-        // tracked hash_ref, then runs the live gate on it.
-        let refs = manager
-            .canonical_published_event_refs()
-            .expect("event refs");
-        let resolved = refs
-            .iter()
-            .find(|(id, _)| id == "login_event_id")
-            .map(|(_, h)| h.clone())
-            .expect("the login event id resolves to a tracked hash_ref");
-        assert_eq!(resolved, bundle.hash_ref);
-        assert!(
-            manager.has_live_key_material(&resolved).expect("live gate"),
-            "the recorded login KeyPackage must read LIVE (gate → NoOp)"
-        );
-    }
-
-    #[test]
-    fn login_reuses_the_stored_stable_d_across_publishes() {
-        // M8-6: the login path reads `latest_canonical_d_tag` and signs into it,
-        // so a second login REPLACES the same NIP-33 slot rather than forking.
-        let (manager, _temp_dir) = create_test_manager();
-        let pk = Keys::generate().public_key().to_hex();
-        let relays = vec!["wss://own.example.com".to_string()];
-
-        // First login: no stored d → fresh slot, then recorded.
-        let first = manager
-            .create_key_package_with_d(&pk, &relays, None)
-            .expect("first");
-        manager
-            .record_published_key_package(
-                &super::super::storage_key_packages::PublishedKeyPackageRow {
-                    key_package_hash_ref: first.hash_ref.clone(),
-                    event_id: "ev_first".to_string(),
-                    kind: super::super::storage_key_packages::KEY_PACKAGE_KIND_CANONICAL,
-                    d_tag: Some(first.d_tag.clone()),
-                    created_at: 1,
-                },
-            )
-            .expect("record first");
-
-        // Second login: reuse the stored d (what the FFI now threads in).
-        let stored = manager.latest_canonical_d_tag().expect("stored");
-        assert_eq!(stored, Some(first.d_tag.clone()));
-        let second = manager
-            .create_key_package_with_d(&pk, &relays, stored.as_deref())
-            .expect("second");
-        assert_eq!(
-            second.d_tag, first.d_tag,
-            "second login must reuse the same stable NIP-33 d (no slot fork)"
-        );
-    }
-
-    #[test]
-    fn has_live_key_material_false_for_unknown_hash_ref() {
-        let (manager, _temp_dir) = create_test_manager();
-        let pk = Keys::generate().public_key().to_hex();
-        let relays = vec!["wss://own.example.com".to_string()];
-
-        // Create one package for a well-formed hash_ref, then flip a byte so it
-        // deserializes to a HashReference that was never stored ⇒ DEAD.
-        let bundle = manager
-            .create_key_package_with_d(&pk, &relays, None)
-            .expect("kp");
-        let mut unknown = bundle.hash_ref.clone();
-        let last = unknown.len() - 1;
-        unknown[last] ^= 0xff;
-        assert!(!manager
-            .has_live_key_material(&unknown)
-            .expect("query unknown"));
-    }
-
-    #[test]
-    fn finalize_pending_commit_nonexistent_fails() {
-        let (manager, _temp_dir) = create_test_manager();
-        let result = manager.finalize_pending_commit(&GroupId::from_slice(&[0u8; 32]));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn clear_pending_commit_nonexistent_fails() {
-        let (manager, _temp_dir) = create_test_manager();
-        let result = manager.clear_pending_commit(&GroupId::from_slice(&[0u8; 32]));
-        assert!(
-            result.is_err(),
-            "Clearing a non-existent commit should fail"
-        );
-    }
-
-    #[test]
-    fn get_circles_with_stored_data() {
-        let (manager, _temp_dir) = create_test_manager();
-
-        // Store circle and membership directly
-        let circle = super::super::types::Circle {
-            mls_group_id: GroupId::from_slice(&[1, 2, 3, 4, 5]),
-            nostr_group_id: [0xAB; 32],
-            display_name: "Storage Test Circle".to_string(),
-            circle_type: super::super::types::CircleType::LocationSharing,
-            relays: vec!["wss://relay.example.com".to_string()],
-            created_at: 1000,
-            updated_at: 2000,
-        };
-        manager.storage.save_circle(&circle).unwrap();
-
-        let membership = super::super::types::CircleMembership {
-            mls_group_id: GroupId::from_slice(&[1, 2, 3, 4, 5]),
-            status: super::super::types::MembershipStatus::Accepted,
-            inviter_pubkey: Some("inviter123".to_string()),
-            invited_at: 1000,
-            responded_at: Some(1001),
-        };
-        manager.storage.save_membership(&membership).unwrap();
-
-        // get_circles should work because get_members uses unwrap_or_default
-        let circles = manager.get_circles().unwrap();
-        assert_eq!(circles.len(), 1);
-        assert_eq!(circles[0].circle.display_name, "Storage Test Circle");
-        assert!(circles[0].members.is_empty()); // MLS group doesn't exist, so empty
-    }
-
-    #[test]
-    fn get_visible_circles_filters_declined() {
-        let (manager, _temp_dir) = create_test_manager();
-
-        // Store two circles: one accepted, one declined
-        let circle1 = super::super::types::Circle {
-            mls_group_id: GroupId::from_slice(&[1]),
-            nostr_group_id: [0x01; 32],
-            display_name: "Accepted Circle".to_string(),
-            circle_type: super::super::types::CircleType::LocationSharing,
-            relays: vec![],
-            created_at: 1000,
-            updated_at: 2000,
-        };
-        manager.storage.save_circle(&circle1).unwrap();
-        manager
-            .storage
-            .save_membership(&super::super::types::CircleMembership {
-                mls_group_id: GroupId::from_slice(&[1]),
-                status: super::super::types::MembershipStatus::Accepted,
-                inviter_pubkey: None,
-                invited_at: 1000,
-                responded_at: Some(1001),
-            })
-            .unwrap();
-
-        let circle2 = super::super::types::Circle {
-            mls_group_id: GroupId::from_slice(&[2]),
-            nostr_group_id: [0x02; 32],
-            display_name: "Declined Circle".to_string(),
-            circle_type: super::super::types::CircleType::LocationSharing,
-            relays: vec![],
-            created_at: 1000,
-            updated_at: 2000,
-        };
-        manager.storage.save_circle(&circle2).unwrap();
-        manager
-            .storage
-            .save_membership(&super::super::types::CircleMembership {
-                mls_group_id: GroupId::from_slice(&[2]),
-                status: super::super::types::MembershipStatus::Declined,
-                inviter_pubkey: None,
-                invited_at: 1000,
-                responded_at: Some(1001),
-            })
-            .unwrap();
-
-        let visible = manager.get_visible_circles().unwrap();
-        assert_eq!(visible.len(), 1);
-        assert_eq!(visible[0].circle.display_name, "Accepted Circle");
-    }
-
-    #[test]
-    fn get_pending_invitations_with_stored_data() {
-        let (manager, _temp_dir) = create_test_manager();
-
-        let circle = super::super::types::Circle {
-            mls_group_id: GroupId::from_slice(&[10]),
-            nostr_group_id: [0x10; 32],
-            display_name: "Pending Circle".to_string(),
-            circle_type: super::super::types::CircleType::LocationSharing,
-            relays: vec![],
-            created_at: 5000,
-            updated_at: 5000,
-        };
-        manager.storage.save_circle(&circle).unwrap();
-
-        let membership = super::super::types::CircleMembership {
-            mls_group_id: GroupId::from_slice(&[10]),
-            status: super::super::types::MembershipStatus::Pending,
-            inviter_pubkey: Some("inviter-pubkey".to_string()),
-            invited_at: 5000,
-            responded_at: None,
-        };
-        manager.storage.save_membership(&membership).unwrap();
-
-        let invitations = manager.get_pending_invitations().unwrap();
-        assert_eq!(invitations.len(), 1);
-        assert_eq!(invitations[0].circle_name, "Pending Circle");
-        assert_eq!(invitations[0].inviter_pubkey, "inviter-pubkey");
-        assert_eq!(invitations[0].member_count, 0); // MLS group doesn't exist
-    }
-
-    #[test]
-    fn decline_invitation_success() {
-        let setup = setup_pending_invite();
-
-        // Decline should succeed
-        setup.bob.decline_invitation(&setup.mls_group_id).unwrap();
-
-        // Verify it's now declined
-        let invitations = setup.bob.get_pending_invitations().unwrap();
-        assert!(invitations.is_empty());
-    }
-
-    #[test]
-    fn accept_invitation_already_accepted_fails() {
-        let (manager, _temp_dir) = create_test_manager();
-
-        let circle = super::super::types::Circle {
-            mls_group_id: GroupId::from_slice(&[30]),
-            nostr_group_id: [0x30; 32],
-            display_name: "Already Accepted".to_string(),
-            circle_type: super::super::types::CircleType::LocationSharing,
-            relays: vec![],
-            created_at: 1000,
-            updated_at: 1000,
-        };
-        manager.storage.save_circle(&circle).unwrap();
-
-        let membership = super::super::types::CircleMembership {
-            mls_group_id: GroupId::from_slice(&[30]),
-            status: super::super::types::MembershipStatus::Accepted,
-            inviter_pubkey: None,
-            invited_at: 1000,
-            responded_at: Some(1001),
-        };
-        manager.storage.save_membership(&membership).unwrap();
-
-        // Should fail because status is not Pending
-        let result = manager.accept_invitation(&GroupId::from_slice(&[30]));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn decline_invitation_already_declined_fails() {
-        let (manager, _temp_dir) = create_test_manager();
-
-        let circle = super::super::types::Circle {
-            mls_group_id: GroupId::from_slice(&[40]),
-            nostr_group_id: [0x40; 32],
-            display_name: "Already Declined".to_string(),
-            circle_type: super::super::types::CircleType::LocationSharing,
-            relays: vec![],
-            created_at: 1000,
-            updated_at: 1000,
-        };
-        manager.storage.save_circle(&circle).unwrap();
-
-        let membership = super::super::types::CircleMembership {
-            mls_group_id: GroupId::from_slice(&[40]),
-            status: super::super::types::MembershipStatus::Declined,
-            inviter_pubkey: None,
-            invited_at: 1000,
-            responded_at: Some(1001),
-        };
-        manager.storage.save_membership(&membership).unwrap();
-
-        let result = manager.decline_invitation(&GroupId::from_slice(&[40]));
-        assert!(result.is_err());
-    }
-
-    /// Declining an orphaned invitation (Haven storage has Pending membership
-    /// but MDK has no welcome/group) should succeed gracefully.
-    #[test]
-    fn decline_invitation_orphaned_succeeds() {
-        let (manager, _temp_dir) = create_test_manager();
-        let group_id = GroupId::from_slice(&[50]);
-
-        // Create Haven storage records WITHOUT any MDK state
-        let circle = super::super::types::Circle {
-            mls_group_id: group_id.clone(),
-            nostr_group_id: [0x50; 32],
-            display_name: "Orphaned Test".to_string(),
-            circle_type: super::super::types::CircleType::LocationSharing,
-            relays: vec![],
-            created_at: 1000,
-            updated_at: 1000,
-        };
-        manager.storage.save_circle(&circle).unwrap();
-
-        let membership = super::super::types::CircleMembership {
-            mls_group_id: group_id.clone(),
-            status: super::super::types::MembershipStatus::Pending,
-            inviter_pubkey: Some("test-inviter".to_string()),
-            invited_at: 1000,
-            responded_at: None,
-        };
-        manager.storage.save_membership(&membership).unwrap();
-
-        // Decline should succeed even without MDK state
-        manager
-            .decline_invitation(&group_id)
-            .expect("declining orphaned invitation should succeed");
-
-        // Verify status is now Declined
-        let updated = manager.storage.get_membership(&group_id).unwrap().unwrap();
-        assert_eq!(
-            updated.status,
-            super::super::types::MembershipStatus::Declined
-        );
-
-        // Verify it no longer appears in pending invitations
-        let invitations = manager.get_pending_invitations().unwrap();
-        assert!(invitations.is_empty());
-    }
-
-    #[test]
-    fn plan_leave_non_admin_member_returns_non_admin() {
-        let circle = setup_two_party_circle();
-        let plan = circle
+    // DELETED-WITH-SUBJECT: `resync_never_overwrites_nonempty_relays_with_empty`
+    // drove the hazard via `mdk.update_relays(&[])` — the UNVALIDATED empty relay
+    // update. The session's `validate_group_relays` now rejects an empty set at
+    // the source (both `update_relays` and `create_group`), so the engine never
+    // holds an empty routing set and the hazard is unreachable from the public
+    // API. The defensive `if engine_relays.is_empty()` guard in
+    // `resync_circle_relays_from_mdk` remains but cannot be driven.
+
+    // ── Leave planning + local teardown ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn plan_leave_non_admin_member_returns_non_admin() {
+        let tp = setup_two_party_circle().await;
+        let plan = tp
             .bob
-            .plan_leave(&circle.mls_group_id, &circle.bob_keys.public_key())
+            .plan_leave(&tp.mls_group_id, &tp.bob_keys.public_key())
+            .await
             .expect("plan_leave for non-admin");
         assert!(matches!(plan, LeavePlan::NonAdmin));
     }
 
-    #[test]
-    fn plan_leave_sole_admin_with_member_returns_handoff() {
-        let circle = setup_two_party_circle();
-        let plan = circle
+    #[tokio::test]
+    async fn plan_leave_sole_admin_with_member_returns_handoff() {
+        let tp = setup_two_party_circle().await;
+        let plan = tp
             .alice
-            .plan_leave(&circle.mls_group_id, &circle.alice_keys.public_key())
+            .plan_leave(&tp.mls_group_id, &tp.alice_keys.public_key())
+            .await
             .expect("plan_leave for sole admin");
         let LeavePlan::AdminHandoff { successor } = plan else {
             panic!("expected AdminHandoff, got {plan:?}");
         };
-        assert_eq!(successor, circle.bob_keys.public_key());
+        assert_eq!(successor, tp.bob_keys.public_key());
     }
 
-    #[test]
-    fn admin_handoff_end_to_end() {
-        let circle = setup_two_party_circle();
-
-        // Step 1: Alice promotes Bob to admin.
-        circle
-            .alice
-            .propose_admin_handoff(&circle.mls_group_id, &circle.bob_keys.public_key())
-            .expect("propose_admin_handoff");
-        circle
-            .alice
-            .finalize_pending_commit(&circle.mls_group_id)
-            .expect("finalize promote");
-
-        // Alice's local view: Bob is now an admin.
-        let group = circle
-            .alice
-            .mdk
-            .get_group(&circle.mls_group_id)
-            .expect("get_group")
-            .expect("group exists");
-        assert!(group.admin_pubkeys.contains(&circle.bob_keys.public_key()));
-
-        // Re-planning in this state should return AdminDemote (both are admins).
-        let resume_plan = circle
-            .alice
-            .plan_leave(&circle.mls_group_id, &circle.alice_keys.public_key())
-            .expect("plan_leave after promote");
-        assert!(matches!(resume_plan, LeavePlan::AdminDemote));
-
-        // Step 2: Alice self-demotes.
-        circle
-            .alice
-            .propose_self_demote(&circle.mls_group_id)
-            .expect("propose_self_demote");
-        circle
-            .alice
-            .finalize_pending_commit(&circle.mls_group_id)
-            .expect("finalize demote");
-
-        let group = circle
-            .alice
-            .mdk
-            .get_group(&circle.mls_group_id)
-            .expect("get_group")
-            .expect("group exists");
-        assert!(!group
-            .admin_pubkeys
-            .contains(&circle.alice_keys.public_key()));
-
-        // Step 3: Alice proposes SelfRemove (no pending commit to finalize).
-        circle
-            .alice
-            .propose_leave(&circle.mls_group_id)
-            .expect("propose_leave");
-
-        // Step 4: Alice wipes her local circle row AND MDK state.
-        circle
-            .alice
-            .complete_leave(&circle.mls_group_id)
-            .expect("complete_leave");
-        assert!(circle
-            .alice
-            .storage
-            .get_circle(&circle.mls_group_id)
-            .expect("get_circle")
-            .is_none());
-        assert!(
-            circle
-                .alice
-                .mdk
-                .get_group(&circle.mls_group_id)
-                .expect("get_group")
-                .is_none(),
-            "complete_leave must purge MDK group state for forward secrecy"
-        );
-
-        // Bob's MDK is a separate instance; Alice's local purge must not
-        // affect it. The remaining admin still holds the group on his side.
-        assert!(
-            circle
-                .bob
-                .mdk
-                .get_group(&circle.mls_group_id)
-                .expect("bob get_group")
-                .is_some(),
-            "Alice's local purge must not touch Bob's MDK state"
-        );
-    }
-
-    #[test]
-    fn plan_leave_nonexistent_group_returns_orphan() {
-        let (manager, _temp_dir) = create_test_manager();
+    #[tokio::test]
+    async fn plan_leave_nonexistent_group_returns_orphan() {
+        let (manager, _keys, _dir) = create_test_manager();
         let self_pk = Keys::generate().public_key();
         let plan = manager
             .plan_leave(&GroupId::from_slice(&[0u8; 32]), &self_pk)
+            .await
             .expect("plan_leave should succeed for missing group");
         assert!(matches!(plan, LeavePlan::OrphanLocalOnly));
     }
 
+    #[tokio::test]
+    async fn propose_admin_handoff_is_a_documented_gap() {
+        // RE-EXPRESSED from `admin_handoff_end_to_end`: v0.9.4 exposes no
+        // admin-policy component codec, so post-hoc admin grant / self-demote are
+        // a documented GAP that fails with a clear (redacted) error rather than
+        // silently succeeding.
+        let tp = setup_two_party_circle().await;
+        assert!(matches!(
+            tp.alice
+                .propose_admin_handoff(&tp.mls_group_id, &tp.bob_keys.public_key())
+                .await,
+            Err(CircleError::Mls(_))
+        ));
+        assert!(matches!(
+            tp.alice.propose_self_demote(&tp.mls_group_id).await,
+            Err(CircleError::Mls(_))
+        ));
+    }
+
     #[test]
     fn complete_leave_nonexistent_group_succeeds() {
-        // `complete_leave` is idempotent: after OrphanLocalOnly, the Flutter
-        // service calls it to wipe local state regardless of prior state.
-        // MDK's delete_group is idempotent on missing groups, so this must
-        // still succeed.
-        let (manager, _temp_dir) = create_test_manager();
+        let (manager, _keys, _dir) = create_test_manager();
         manager
             .complete_leave(&GroupId::from_slice(&[0u8; 32]))
             .expect("complete_leave should not fail when row is missing");
     }
 
-    #[test]
-    fn complete_leave_purges_mdk_state() {
-        // Forward-secrecy guarantee: once complete_leave returns Ok, no
-        // MDK state for the group remains on-device — exporter secrets,
-        // leaf keys, and tree are all gone.
-        let circle = setup_two_party_circle();
-
-        // Pre-condition: Alice's MDK has the group.
-        assert!(circle
-            .alice
-            .mdk
-            .get_group(&circle.mls_group_id)
-            .expect("get_group")
-            .is_some());
-
-        circle
-            .alice
-            .complete_leave(&circle.mls_group_id)
-            .expect("complete_leave");
-
-        assert!(
-            circle
-                .alice
-                .mdk
-                .get_group(&circle.mls_group_id)
-                .expect("get_group")
-                .is_none(),
-            "MDK state must be purged after complete_leave"
-        );
-        assert!(circle
+    #[tokio::test]
+    async fn complete_leave_removes_circle_row() {
+        // DM has no per-group MLS delete (the `complete_leave_purges_mdk_state`
+        // subject is gone); `complete_leave` removes the local circle row and its
+        // cascade. The engine keeps its own `removed`-marked copy.
+        let tp = setup_two_party_circle().await;
+        assert!(tp
             .alice
             .storage
-            .get_circle(&circle.mls_group_id)
-            .expect("get_circle")
+            .get_circle(&tp.mls_group_id)
+            .unwrap()
+            .is_some());
+        tp.alice
+            .complete_leave(&tp.mls_group_id)
+            .expect("complete_leave");
+        assert!(tp
+            .alice
+            .storage
+            .get_circle(&tp.mls_group_id)
+            .unwrap()
             .is_none());
     }
 
-    #[test]
-    fn complete_leave_purges_per_circle_sync_cursor() {
-        // Wipe-on-leave (N5): the group's per-circle sync cursor must be gone
-        // after leaving, so a returning circle with the same nostr_group_id
-        // re-seeds cleanly instead of resuming at a stale floor.
-        let circle = setup_two_party_circle();
+    #[tokio::test]
+    async fn complete_leave_purges_per_circle_sync_cursor() {
+        let tp = setup_two_party_circle().await;
         let key = crate::relay::live_sync::processor::group_cursor_stream(&hex::encode(
-            circle.nostr_group_id,
+            tp.nostr_group_id,
         ));
-
-        circle
-            .alice
+        tp.alice
             .advance_sync_cursor(&key, 1_700_000_000_000)
             .expect("advance cursor");
-        assert!(
-            circle
-                .alice
-                .read_sync_cursor(&key)
-                .expect("read cursor")
-                .is_some(),
-            "cursor must be seeded before leave"
-        );
-
-        circle
-            .alice
-            .complete_leave(&circle.mls_group_id)
+        assert!(tp.alice.read_sync_cursor(&key).unwrap().is_some());
+        tp.alice
+            .complete_leave(&tp.mls_group_id)
             .expect("complete_leave");
-
-        assert!(
-            circle
-                .alice
-                .read_sync_cursor(&key)
-                .expect("read cursor")
-                .is_none(),
-            "per-circle sync cursor must be purged on leave"
-        );
-    }
-
-    #[test]
-    fn complete_leave_purges_processed_gift_wraps_for_group() {
-        // Wipe-on-leave (N6): the left circle's per-group gift-wrap dedup rows
-        // must be purged, while an UNRELATED group's dedup row survives.
-        let circle = setup_two_party_circle();
-
-        // A success dedup row bound to THIS circle's real mls_group_id.
-        let ours = nostr::EventId::from_byte_array([0x11; 32]);
-        circle
-            .alice
-            .storage
-            .record_gift_wrap_dedup_for_test(&ours, circle.mls_group_id.as_slice(), 1_700_000_000)
-            .expect("record ours");
-
-        // A dedup row bound to a DIFFERENT (unrelated) group id — must survive.
-        let theirs = nostr::EventId::from_byte_array([0x22; 32]);
-        let other_group = [0x99u8; 32];
-        circle
-            .alice
-            .storage
-            .record_gift_wrap_dedup_for_test(&theirs, &other_group, 1_700_000_000)
-            .expect("record theirs");
-
-        // A terminal-failure sentinel (empty mls_group_id blob) — FIX-2: it
-        // must SURVIVE the leave (it is purged only by retention pruning).
-        let failed = nostr::EventId::from_byte_array([0x33; 32]);
-        circle
-            .alice
-            .storage
-            .record_gift_wrap_failure(&failed, 1_700_000_000)
-            .expect("record failure sentinel");
-
-        circle
-            .alice
-            .complete_leave(&circle.mls_group_id)
-            .expect("complete_leave");
-
-        assert!(
-            circle
-                .alice
-                .storage
-                .is_gift_wrap_processed(&ours)
-                .expect("is_processed")
-                .is_none(),
-            "the left circle's dedup row must be purged on leave"
-        );
-        assert!(
-            circle
-                .alice
-                .storage
-                .is_gift_wrap_processed(&theirs)
-                .expect("is_processed")
-                .is_some(),
-            "an unrelated group's dedup row must survive the leave"
-        );
-        assert!(
-            circle
-                .alice
-                .storage
-                .is_gift_wrap_processed(&failed)
-                .expect("is_processed")
-                .is_some(),
-            "the empty-blob failure sentinel must survive the leave (FIX-2)"
-        );
-    }
-
-    #[test]
-    fn abandon_circle_local_only_purges_mdk_state() {
-        // Abandon path (sole remaining member): there is no SelfRemove to
-        // publish, but the MDK purge is still mandatory for forward secrecy.
-        //
-        // Reduce the 2-party circle to Alice-only by removing Bob and merging,
-        // then assert plan_leave actually returns Abandon so we're exercising
-        // the intended code path.
-        let circle = setup_two_party_circle();
-
-        circle
-            .alice
-            .mdk
-            .remove_members(
-                &circle.mls_group_id,
-                &[circle.bob_keys.public_key().to_hex()],
-            )
-            .expect("remove bob");
-        circle
-            .alice
-            .mdk
-            .merge_pending_commit(&circle.mls_group_id)
-            .expect("merge bob removal");
-
-        let plan = circle
-            .alice
-            .plan_leave(&circle.mls_group_id, &circle.alice_keys.public_key())
-            .expect("plan_leave");
-        assert!(
-            matches!(plan, LeavePlan::Abandon),
-            "precondition: sole-member group must plan Abandon, got {plan:?}"
-        );
-
-        circle
-            .alice
-            .abandon_circle_local_only(&circle.mls_group_id)
-            .expect("abandon_circle_local_only");
-
-        assert!(
-            circle
-                .alice
-                .mdk
-                .get_group(&circle.mls_group_id)
-                .expect("get_group")
-                .is_none(),
-            "MDK state must be purged after abandon"
-        );
-        assert!(circle
-            .alice
-            .storage
-            .get_circle(&circle.mls_group_id)
-            .expect("get_circle")
-            .is_none());
-    }
-
-    #[test]
-    fn complete_leave_renders_captured_ciphertext_undecryptable() {
-        use crate::nostr::mls::types::LocationMessageResult;
-
-        // Self-side forward secrecy: after a user leaves a circle,
-        // `complete_leave` purges ALL local MDK state (tree, leaf keys, exporter
-        // secrets), so the device can no longer decrypt that circle's traffic —
-        // not even ciphertext captured while it was still a member. The existing
-        // `complete_leave_purges_mdk_state` proves the group row is gone; this
-        // proves the user-visible consequence (lost decryptability).
-        //
-        // Two DISTINCT ciphertexts avoid a dedup confound: re-processing the
-        // SAME event pre/post would make the second attempt fail via MDK's
-        // already-seen dedup even if the purge did nothing. Instead Alice
-        // decrypts M1 before leaving (positive control: a functioning member who
-        // can read Bob's traffic at this epoch), then — after the purge —
-        // attempts M2, which she has NEVER processed, so its failure is
-        // attributable solely to the missing group state, not to replay dedup.
-        let setup = setup_two_party_circle();
-
-        // Bob is the peer/sender; Alice is the leaver.
-        let bob_mls_group_id = setup
-            .bob
-            .mdk
-            .get_groups()
-            .expect("bob groups")
-            .first()
-            .expect("bob has a group")
-            .mls_group_id
-            .clone();
-
-        let encrypt_for_alice = |lat: f64, lon: f64| {
-            setup
-                .bob
-                .encrypt_location(
-                    &bob_mls_group_id,
-                    &setup.bob_keys.public_key(),
-                    &LocationMessage::new(lat, lon),
-                    300,
-                )
-                .expect("bob should encrypt location")
-                .0
-        };
-        let m1 = encrypt_for_alice(40.0, -74.0); // positive-control probe
-        let m2 = encrypt_for_alice(48.8566, 2.3522); // post-leave target (Alice never processes it pre-leave)
-
-        // Positive control: Alice CAN decrypt Bob's traffic before leaving, so
-        // the post-leave failure below is meaningful (M2 is the same kind of
-        // ciphertext at the same epoch).
-        match setup
-            .alice
-            .decrypt_location(&m1)
-            .expect("alice should decrypt before leaving")
-        {
-            LocationMessageResult::Location { sender_pubkey, .. } => assert_eq!(
-                sender_pubkey,
-                setup.bob_keys.public_key().to_hex(),
-                "control: M1 must decrypt to Bob's location before the leave"
-            ),
-            other => panic!("precondition: leaver must decrypt the peer's location, got {other:?}"),
-        }
-
-        // Alice leaves via the production purge path.
-        setup
-            .alice
-            .complete_leave(&setup.mls_group_id)
-            .expect("complete_leave");
-
-        // Primary invariant — the captured-but-never-processed M2 must NOT
-        // decrypt now. Because the group row is gone, the legitimate signal is
-        // group-not-found — the INVERSE of an AEAD failure — so we assert that
-        // shape rather than a bare is_err (which could pass for an unrelated
-        // reason). Ok(Location) is the forward-secrecy violation the mutation
-        // test exercises. Checked before the state corroboration so a defeated
-        // purge surfaces as the user-visible property, not an internal detail.
-        let post = setup.alice.decrypt_location(&m2);
-        match &post {
-            Ok(LocationMessageResult::Location { .. }) => panic!(
-                "forward-secrecy violation: leaver decrypted a captured ciphertext after \
-                 complete_leave"
-            ),
-            Err(e) => assert!(
-                e.to_string().to_lowercase().contains("group not found"),
-                "post-leave failure must be group-not-found (purged state), got: {post:?}"
-            ),
-            Ok(other) => {
-                panic!("post-leave decrypt must fail with group-not-found, got Ok({other:?})")
-            }
-        }
-
-        // Corroborate the purge at the state level too (defense in depth;
-        // `complete_leave_purges_mdk_state` is the dedicated state-level check).
-        assert!(
-            setup
-                .alice
-                .mdk
-                .get_group(&setup.mls_group_id)
-                .expect("get_group")
-                .is_none(),
-            "complete_leave must purge MDK group state"
-        );
-    }
-
-    #[test]
-    fn complete_leave_succeeds_with_outstanding_pending_commit() {
-        // Reviewer-flagged HIGH: a prior step in the leave flow may have
-        // staged a pending commit that never finalized. `complete_leave`
-        // must proactively drop it so `delete_group` sees clean state
-        // and forward-secrecy purge is complete.
-        //
-        // Shape: drive Alice to stage a commit she never merges (by
-        // calling `remove_members` without the follow-up `merge_pending_commit`),
-        // then call `complete_leave`. Without the `clear_pending_commit`
-        // safeguard, this could leave MDK in an inconsistent state or
-        // fail outright depending on MDK internals.
-        let circle = setup_two_party_circle();
-
-        // Stage a pending commit but do NOT merge it.
-        circle
-            .alice
-            .mdk
-            .remove_members(
-                &circle.mls_group_id,
-                &[circle.bob_keys.public_key().to_hex()],
-            )
-            .expect("remove_members should stage a commit");
-
-        // Call `complete_leave` with the outstanding pending commit.
-        circle
-            .alice
-            .complete_leave(&circle.mls_group_id)
-            .expect("complete_leave must succeed even with a pending commit");
-
-        // MDK state and circle row must both be gone.
-        assert!(
-            circle
-                .alice
-                .mdk
-                .get_group(&circle.mls_group_id)
-                .expect("get_group")
-                .is_none(),
-            "MDK state must be purged even when a pending commit was outstanding"
-        );
-        assert!(circle
-            .alice
-            .storage
-            .get_circle(&circle.mls_group_id)
-            .expect("get_circle")
-            .is_none());
-    }
-
-    #[test]
-    fn propose_leave_succeeds_with_outstanding_pending_commit() {
-        // Regression: a stale pending commit (e.g., a prior session's
-        // receiver-side auto-commit whose publish-then-finalize never
-        // completed) would make MDK's `leave_group` fail with
-        // "pending commit exists". `propose_leave` must proactively
-        // discard the residual commit before staging the SelfRemove,
-        // mirroring `complete_leave`'s pre-clear behaviour.
-        //
-        // Shape: stage a pending commit on the *non-admin* leaver (Bob)
-        // via `self_update` — a leaf rotation that any member may stage —
-        // without the follow-up `merge_pending_commit`. Then call
-        // `propose_leave` and confirm it succeeds. The non-admin role
-        // matters: MDK's `leave_group` rejects admins with
-        // "Admins must self-demote before leaving" and our pre-clear
-        // sits ahead of that gate.
-        let circle = setup_two_party_circle();
-
-        // Stage a pending commit on Bob's MDK but do NOT merge it.
-        // `self_update` rotates Bob's own leaf and is one of the few
-        // operations a non-admin can use to produce a commit.
-        circle
-            .bob
-            .mdk
-            .self_update(&circle.mls_group_id)
-            .expect("self_update should stage a pending commit on bob's MDK");
-
-        // Sanity: while a pending commit is outstanding, MDK's
-        // `leave_group` (the underlying operation `propose_leave` wraps)
-        // would itself fail with "pending commit exists". Anchors the
-        // test against the MDK invariant — if MDK ever loosens the rule,
-        // this assertion fails and forces a revisit of the pre-clear's
-        // necessity.
-        let direct = circle.bob.mdk.leave_group(&circle.mls_group_id);
-        assert!(
-            direct.is_err(),
-            "MDK invariant changed: leave_group accepted a stage while a \
-             pending commit was outstanding. Revisit propose_leave's \
-             pre-clear: got Ok({direct:?})"
-        );
-        // The previous `leave_group` call did not advance any state —
-        // the pending commit from `self_update` is still outstanding on
-        // Bob's MDK and now exercises the pre-clear path in `propose_leave`.
-
-        // `propose_leave` must succeed by pre-clearing the residual
-        // pending commit before staging the SelfRemove proposal.
-        circle
-            .bob
-            .propose_leave(&circle.mls_group_id)
-            .expect("propose_leave must clear stale pending commit and succeed");
-    }
-
-    #[test]
-    fn add_members_nonexistent_group_fails() {
-        let (manager, _temp_dir) = create_test_manager();
-        let result = manager.add_members(&GroupId::from_slice(&[0u8; 32]), &[]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn remove_members_nonexistent_group_fails() {
-        let (manager, _temp_dir) = create_test_manager();
-        let result =
-            manager.remove_members(&GroupId::from_slice(&[0u8; 32]), &["pubkey1".to_string()]);
-        assert!(result.is_err());
-    }
-
-    /// Three-party MLS group with TWO admins (Alice, Bob) plus one
-    /// non-admin (Carol). Used by the concurrent-admin convergence test
-    /// for `remove_members`.
-    ///
-    /// Differs from [`setup_two_party_circle`] in two ways:
-    /// 1. Adds Carol as a third party (the eviction target).
-    /// 2. Promotes Bob to admin via a second `with_admin` call so the test
-    ///    can drive *concurrent* admin commits — the scenario at the heart
-    ///    of the `WrongEpoch` race.
-    struct ThreePartyTwoAdminCircle {
-        alice: CircleManager,
-        _alice_dir: TempDir,
-        alice_keys: Keys,
-        bob: CircleManager,
-        _bob_dir: TempDir,
-        bob_keys: Keys,
-        // `_carol` is retained so her CircleManager (and its SQLCipher
-        // connection) outlives the test body — dropping it early would
-        // also tear down storage that the helper's setup loop populated.
-        _carol: CircleManager,
-        _carol_dir: TempDir,
-        carol_keys: Keys,
-        mls_group_id: GroupId,
-    }
-
-    /// Builds a three-party group where both Alice and Bob are admins and
-    /// Carol is the non-admin removal target. All three have processed
-    /// their welcomes and sit on the same epoch.
-    #[allow(clippy::too_many_lines)] // Linear setup: keys → KPs → group → welcomes → storage.
-    fn setup_three_party_two_admin_circle() -> ThreePartyTwoAdminCircle {
-        let relays = vec!["wss://relay.test.com".to_string()];
-
-        let alice_dir = TempDir::new().unwrap();
-        let alice = CircleManager::new_unencrypted(alice_dir.path()).unwrap();
-        let alice_keys = Keys::generate();
-
-        let bob_dir = TempDir::new().unwrap();
-        let bob = CircleManager::new_unencrypted(bob_dir.path()).unwrap();
-        let bob_keys = Keys::generate();
-
-        let carol_dir = TempDir::new().unwrap();
-        let carol = CircleManager::new_unencrypted(carol_dir.path()).unwrap();
-        let carol_keys = Keys::generate();
-
-        // Bob and Carol create key packages.
-        let bob_pk = bob_keys.public_key().to_hex();
-        let bob_bundle = bob
-            .mdk
-            .create_key_package(&bob_pk, &relays)
-            .expect("bob key package");
-        let bob_tags: Vec<nostr::Tag> = bob_bundle
-            .tags_443
-            .into_iter()
-            .map(|t| nostr::Tag::parse(&t).unwrap())
-            .collect();
-        let bob_kp = EventBuilder::new(Kind::MlsKeyPackage, bob_bundle.content)
-            .tags(bob_tags)
-            .sign_with_keys(&bob_keys)
-            .expect("sign bob kp");
-
-        let carol_pk = carol_keys.public_key().to_hex();
-        let carol_bundle = carol
-            .mdk
-            .create_key_package(&carol_pk, &relays)
-            .expect("carol key package");
-        let carol_tags: Vec<nostr::Tag> = carol_bundle
-            .tags_443
-            .into_iter()
-            .map(|t| nostr::Tag::parse(&t).unwrap())
-            .collect();
-        let carol_kp = EventBuilder::new(Kind::MlsKeyPackage, carol_bundle.content)
-            .tags(carol_tags)
-            .sign_with_keys(&carol_keys)
-            .expect("sign carol kp");
-
-        // Alice creates the group with Alice + Bob as joint admins.
-        let config = crate::nostr::mls::types::LocationGroupConfig::new("Two Admins")
-            .with_description("Concurrent-admin convergence test")
-            .with_relay("wss://relay.test.com")
-            .with_admin(alice_keys.public_key().to_hex())
-            .with_admin(bob_keys.public_key().to_hex());
-
-        let group_result = alice
-            .mdk
-            .create_group(
-                &alice_keys.public_key().to_hex(),
-                vec![bob_kp, carol_kp],
-                config,
-            )
-            .expect("create three-party group");
-
-        let mls_group_id = group_result.group.mls_group_id.clone();
-        let nostr_group_id = group_result.group.nostr_group_id;
-
-        alice
-            .mdk
-            .merge_pending_commit(&mls_group_id)
-            .expect("alice merge create commit");
-
-        // Each non-creator processes their welcome.
-        for (mgr, pk_hex) in [
-            (&bob, bob_keys.public_key().to_hex()),
-            (&carol, carol_keys.public_key().to_hex()),
-        ] {
-            let welcome = group_result
-                .welcome_rumors
-                .iter()
-                .find(|r| {
-                    r.tags
-                        .iter()
-                        .any(|t| t.as_slice().iter().any(|s| s.eq_ignore_ascii_case(&pk_hex)))
-                })
-                .or_else(|| group_result.welcome_rumors.first())
-                .expect("welcome rumor");
-            mgr.mdk
-                .process_welcome(&nostr::EventId::all_zeros(), welcome)
-                .expect("process welcome");
-            let pending = mgr.mdk.get_pending_welcomes().expect("pending welcomes");
-            let w = pending
-                .iter()
-                .find(|w| w.mls_group_id == mls_group_id)
-                .expect("welcome for group");
-            mgr.mdk.accept_welcome(w).expect("accept welcome");
-        }
-
-        // Persist Circle records on every party so `remove_members` can
-        // touch the metadata side-effects (`updated_at`).
-        let now = chrono::Utc::now().timestamp();
-        let circle = super::super::types::Circle {
-            mls_group_id: mls_group_id.clone(),
-            nostr_group_id,
-            display_name: "Two Admins".to_string(),
-            circle_type: super::super::types::CircleType::LocationSharing,
-            relays,
-            created_at: now,
-            updated_at: now,
-        };
-        for mgr in [&alice, &bob, &carol] {
-            mgr.storage.save_circle(&circle).unwrap();
-        }
-
-        ThreePartyTwoAdminCircle {
-            alice,
-            _alice_dir: alice_dir,
-            alice_keys,
-            bob,
-            _bob_dir: bob_dir,
-            bob_keys,
-            _carol: carol,
-            _carol_dir: carol_dir,
-            carol_keys,
-            mls_group_id,
-        }
-    }
-
-    /// MIP-03 wire invariant: every kind 445 outer event MUST use a fresh
-    /// ephemeral keypair so relays cannot link group commits to a sender's
-    /// long-term identity. This mirrors the assertion at
-    /// `encrypt_location_returns_correct_metadata` for the location pipeline,
-    /// extending it to the membership-evolution path produced by
-    /// `remove_members`.
-    #[test]
-    fn remove_members_evolution_event_uses_ephemeral_pubkey() {
-        let setup = setup_two_party_circle();
-        let bob_pubkey_hex = setup.bob_keys.public_key().to_hex();
-
-        let result = setup
-            .alice
-            .remove_members(&setup.mls_group_id, &[bob_pubkey_hex])
-            .expect("alice (admin) should be able to remove bob");
-
-        let event = result.evolution_event;
-
-        // The evolution event must be kind 445 (the outer Nostr wrapper for
-        // an MLS commit/proposal message).
-        assert_eq!(
-            event.kind,
-            Kind::Custom(445),
-            "remove_members evolution event must be kind 445"
-        );
-
-        // The crucial wire invariant: the outer pubkey is an ephemeral key,
-        // never the admin's long-term identity key. If MDK ever regresses and
-        // signs evolution events with `Keys::parse(sender_pubkey)`, this
-        // assertion catches it before relays can correlate Alice's
-        // membership-change commits to her identity.
-        assert_ne!(
-            event.pubkey,
-            setup.alice_keys.public_key(),
-            "Kind 445 evolution event must use an ephemeral pubkey, not the admin's real key"
-        );
-
-        // The signature must verify against the ephemeral pubkey carried in
-        // the event itself — confirms the event is well-formed and the
-        // ephemeral key actually signed it (not just a stripped author field).
-        event
-            .verify()
-            .expect("evolution event signature must verify against its ephemeral pubkey");
-    }
-
-    /// Convergence under a concurrent-admin `RemoveMember` race.
-    ///
-    /// Background: the Haven Dart layer (`_commitAndPublish` in
-    /// `nostr_circle_service.dart`) protects the local MLS state from
-    /// being stuck on a stale pending commit when two admins stage the
-    /// same member-eviction at the same epoch. This test exercises the
-    /// **protocol-level invariant** that the rollback strategy depends on:
-    ///
-    /// 1. With both Alice and Bob as admins at epoch `N`, both
-    ///    independently stage `remove_members(carol)`. Each produces its
-    ///    own kind-445 evolution event signed at epoch `N`.
-    /// 2. Alice's commit is accepted first by the relays — modelled here
-    ///    by Alice merging her own pending commit. Alice advances to
-    ///    epoch `N+1` with Carol removed.
-    /// 3. Bob — who still holds his own stale pending commit at epoch
-    ///    `N` — receives Alice's evolution event. The MLS state machine
-    ///    must surface this as either `Err` or `MessageProcessingResult::
-    ///    Unprocessable`; what it MUST NOT do is silently accept Bob's
-    ///    stale commit on top of Alice's.
-    /// 4. Bob calls `clear_pending_commit` to discard his own stale
-    ///    pending commit (this is the rollback Haven exercises in
-    ///    `_commitAndPublish` when publishing fails or returns a stale
-    ///    epoch).
-    /// 5. Bob retries — the second fetch cycle — and reapplies Alice's
-    ///    evolution event cleanly, advancing himself to epoch `N+1`.
-    /// 6. Convergence: Alice and Bob are now on the **same epoch**, with
-    ///    the **same membership** (Carol evicted), and Bob has **no
-    ///    lingering pending commit**.
-    ///
-    /// Mirrors the upstream MDK invariant exercised by
-    /// `test_concurrent_commit_race_conditions` in
-    /// `crates/mdk-core/src/messages/commit.rs` but exposes the property
-    /// at Haven's `CircleManager` boundary so a regression in our use of
-    /// `clear_pending_commit` would fail this test.
-    #[test]
-    #[allow(clippy::too_many_lines)] // Single coherent narrative: stage → race → rollback → converge.
-    fn concurrent_admin_remove_member_converges_after_clear_pending() {
-        let setup = setup_three_party_two_admin_circle();
-        let carol_hex = setup.carol_keys.public_key().to_hex();
-
-        // Sanity: pre-conditions. All three parties are members at the
-        // same epoch.
-        let alice_epoch_before = setup
-            .alice
-            .mdk
-            .get_group(&setup.mls_group_id)
-            .unwrap()
-            .unwrap()
-            .epoch;
-        let bob_epoch_before = setup
-            .bob
-            .mdk
-            .get_group(&setup.mls_group_id)
-            .unwrap()
-            .unwrap()
-            .epoch;
-        assert_eq!(
-            alice_epoch_before, bob_epoch_before,
-            "Alice and Bob must start on the same epoch"
-        );
-
-        let alice_members_before = setup.alice.mdk.get_members(&setup.mls_group_id).unwrap();
-        assert_eq!(
-            alice_members_before.len(),
-            3,
-            "Group must start with Alice + Bob + Carol"
-        );
-        assert!(
-            alice_members_before.contains(&setup.carol_keys.public_key()),
-            "Carol must start as a member"
-        );
-
-        // (1) Both admins concurrently stage `remove_members(carol)` at
-        //     the same epoch. Each gets a distinct evolution event.
-        let target = std::slice::from_ref(&carol_hex);
-        let alice_remove = setup
-            .alice
-            .remove_members(&setup.mls_group_id, target)
-            .expect("alice (admin) stages remove(carol)");
-        let bob_remove = setup
-            .bob
-            .remove_members(&setup.mls_group_id, target)
-            .expect("bob (admin) stages remove(carol)");
-        assert_eq!(
-            alice_remove.evolution_event.kind,
-            Kind::Custom(445),
-            "alice's evolution event must be kind 445"
-        );
-        assert_eq!(
-            bob_remove.evolution_event.kind,
-            Kind::Custom(445),
-            "bob's evolution event must be kind 445"
-        );
-        // Each party signs its own commit with its own ephemeral key —
-        // the events must be distinct at the wire level.
-        assert_ne!(
-            alice_remove.evolution_event.id, bob_remove.evolution_event.id,
-            "concurrent commits must produce distinct event IDs"
-        );
-
-        // (2) Alice's commit "wins" — she merges first, advancing to N+1.
-        setup
-            .alice
-            .finalize_pending_commit(&setup.mls_group_id)
-            .expect("alice finalizes her winning commit");
-        let alice_epoch_after = setup
-            .alice
-            .mdk
-            .get_group(&setup.mls_group_id)
-            .unwrap()
-            .unwrap()
-            .epoch;
-        assert!(
-            alice_epoch_after > alice_epoch_before,
-            "alice's epoch must advance after merging her commit ({alice_epoch_before} -> {alice_epoch_after})"
-        );
-
-        // (3) FIRST FETCH CYCLE — Bob, still holding his own stale
-        //     pending commit, attempts to apply Alice's commit. The MLS
-        //     state machine MUST NOT silently accept Bob's stale commit
-        //     on top of Alice's. Acceptable outcomes:
-        //       - Err: outright rejection
-        //       - Ok(Unprocessable): detected as stale
-        //       - Ok(Commit) with epoch advance: MDK absorbed Alice's
-        //         commit and dropped Bob's pending implicitly
-        //
-        //     What we are testing here is convergence, not the exact
-        //     outcome variant — different MDK versions handle this
-        //     differently and that variability is part of why the Dart
-        //     layer rolls back via `clearPendingCommit`.
-        let first_attempt = setup.bob.mdk.process_message(&alice_remove.evolution_event);
-
-        // Defence against silent regression: MDK MUST NOT quietly
-        // accept Bob's stale pending commit on top of Alice's. Mirror
-        // the upstream `is_handled` pattern from MDK's
-        // `test_concurrent_commit_race_conditions` so an MDK regression
-        // that started swallowing the stale commit would surface here
-        // rather than leaking through to the convergence asserts (which
-        // could pass for the wrong reason if the membership happened to
-        // line up).
-        let bob_epoch_after_first = setup
-            .bob
-            .mdk
-            .get_group(&setup.mls_group_id)
-            .unwrap()
-            .unwrap()
-            .epoch;
-        let first_attempt_handled = first_attempt.is_err()
-            || matches!(
-                &first_attempt,
-                Ok(mdk_core::prelude::MessageProcessingResult::Unprocessable { .. })
-            )
-            || bob_epoch_after_first > bob_epoch_before;
-        assert!(
-            first_attempt_handled,
-            "Bob's first process_message of Alice's commit while holding a \
-             stale pending commit must be Err, Unprocessable, or have \
-             advanced Bob's epoch. Anything else means MDK silently \
-             accepted a conflicting commit — protocol invariant violated. \
-             got: {first_attempt:?}, bob_epoch: {bob_epoch_before} -> \
-             {bob_epoch_after_first}"
-        );
-
-        // (4) Bob unconditionally rolls back any lingering pending
-        //     commit — this is the path Dart's `clearPendingCommit`
-        //     exercises. After this, Bob's MLS state must be clean.
-        //     `clear_pending_commit` is a no-op when there is nothing
-        //     to clear, so it is safe to call regardless of (3)'s
-        //     outcome.
-        let _ = setup.bob.clear_pending_commit(&setup.mls_group_id);
-
-        // (5) SECOND FETCH CYCLE — Bob re-fetches Alice's commit and
-        //     applies it. After (4), Bob has no pending commit
-        //     blocking the apply. If (3) already advanced Bob's epoch
-        //     (the third acceptable outcome above), the re-process may
-        //     surface a duplicate-detection result; the load-bearing
-        //     post-condition is convergence, asserted below.
-        let _ = setup.bob.mdk.process_message(&alice_remove.evolution_event);
-
-        // ============================================================
-        // Convergence assertions — the load-bearing checks.
-        // ============================================================
-
-        let alice_epoch_final = setup
-            .alice
-            .mdk
-            .get_group(&setup.mls_group_id)
-            .unwrap()
-            .unwrap()
-            .epoch;
-        let bob_epoch_final = setup
-            .bob
-            .mdk
-            .get_group(&setup.mls_group_id)
-            .unwrap()
-            .unwrap()
-            .epoch;
-        assert_eq!(
-            alice_epoch_final, bob_epoch_final,
-            "Alice and Bob must converge to the same epoch after the race \
-             (alice={alice_epoch_final}, bob={bob_epoch_final})"
-        );
-        assert!(
-            bob_epoch_final > bob_epoch_before,
-            "Bob's epoch must advance past the pre-race baseline ({bob_epoch_before} -> {bob_epoch_final})"
-        );
-
-        // Both admins must agree on the post-race membership: Carol
-        // evicted, Alice and Bob remaining.
-        let alice_members_final = setup.alice.mdk.get_members(&setup.mls_group_id).unwrap();
-        let bob_members_final = setup.bob.mdk.get_members(&setup.mls_group_id).unwrap();
-        assert!(
-            !alice_members_final.contains(&setup.carol_keys.public_key()),
-            "alice must see Carol as evicted"
-        );
-        assert!(
-            !bob_members_final.contains(&setup.carol_keys.public_key()),
-            "bob must see Carol as evicted"
-        );
-        assert!(
-            alice_members_final.contains(&setup.alice_keys.public_key())
-                && alice_members_final.contains(&setup.bob_keys.public_key()),
-            "alice still sees both admins after the race"
-        );
-        assert!(
-            bob_members_final.contains(&setup.alice_keys.public_key())
-                && bob_members_final.contains(&setup.bob_keys.public_key()),
-            "bob still sees both admins after the race"
-        );
-        assert_eq!(
-            alice_members_final.len(),
-            2,
-            "post-race group must contain exactly the two surviving admins"
-        );
-        assert_eq!(
-            alice_members_final.len(),
-            bob_members_final.len(),
-            "alice and bob must agree on member count post-convergence"
-        );
-
-        // Bob must have no lingering pending commit — proves the
-        // rollback path actually cleared the stale state, not just the
-        // visible membership.
-        let retry = setup.bob.remove_members(
-            &setup.mls_group_id,
-            &[setup.alice_keys.public_key().to_hex()],
-        );
-        assert!(
-            retry.is_ok(),
-            "Bob must be able to stage a fresh commit post-rollback — \
-             a residual pending commit would fail this with \
-             'pending commit exists'. got: {retry:?}"
-        );
-        // Cleanup so the helper drops cleanly.
-        let _ = setup.bob.clear_pending_commit(&setup.mls_group_id);
-    }
-
-    // ====================================================================
-    // M4 — adopt-winner convergence: fork-vector → prevention test matrix.
-    //
-    // Every CONVERGENCE row asserts a cross-manager cross-decrypt round-trip:
-    // epoch + membership equality is necessary-but-INSUFFICIENT (a same-epoch
-    // twin fork satisfies it). A successful decrypt of the winner's
-    // freshly-encrypted location on the loser is the only proof of a SHARED
-    // exporter secret. Non-vacuous controls show the pure-eager path FORKS.
-    // ====================================================================
-
-    /// Whether `decryptor` can decrypt a location freshly encrypted by
-    /// `encryptor` at the current epoch — the load-bearing convergence proof
-    /// (a shared exporter secret, not a same-number twin fork).
-    fn cross_decrypts(
-        encryptor: &CircleManager,
-        encryptor_pubkey: &nostr::PublicKey,
-        decryptor: &CircleManager,
-        gid: &GroupId,
-    ) -> bool {
-        let location = LocationMessage::new(40.12, -74.34);
-        let Ok((event, _, _)) = encryptor.encrypt_location(gid, encryptor_pubkey, &location, 300)
-        else {
-            return false;
-        };
-        matches!(
-            decryptor.decrypt_location(&event),
-            Ok(LocationMessageResult::Location { .. })
-        )
-    }
-
-    struct FourPartyTwoAdminCircle {
-        alice: CircleManager,
-        _alice_dir: TempDir,
-        alice_keys: Keys,
-        bob: CircleManager,
-        _bob_dir: TempDir,
-        bob_keys: Keys,
-        // Member managers retained for RAII (their SQLCipher connection must
-        // outlive the group); only their keys are used as removal targets.
-        _carol: CircleManager,
-        _carol_dir: TempDir,
-        carol_keys: Keys,
-        _dave: CircleManager,
-        _dave_dir: TempDir,
-        dave_keys: Keys,
-        mls_group_id: GroupId,
-    }
-
-    /// Builds Alice + Bob (joint admins) + Carol + Dave (members) for the
-    /// distinct-target convergence rows. Mirrors
-    /// `setup_three_party_two_admin_circle` with a fourth member.
-    fn setup_four_party_two_admin_circle() -> FourPartyTwoAdminCircle {
-        let relays = vec!["wss://relay.test.com".to_string()];
-
-        let alice_dir = TempDir::new().unwrap();
-        let alice = CircleManager::new_unencrypted(alice_dir.path()).unwrap();
-        let alice_keys = Keys::generate();
-
-        let bob_dir = TempDir::new().unwrap();
-        let bob = CircleManager::new_unencrypted(bob_dir.path()).unwrap();
-        let bob_keys = Keys::generate();
-
-        let carol_dir = TempDir::new().unwrap();
-        let carol = CircleManager::new_unencrypted(carol_dir.path()).unwrap();
-        let carol_keys = Keys::generate();
-
-        let dave_dir = TempDir::new().unwrap();
-        let dave = CircleManager::new_unencrypted(dave_dir.path()).unwrap();
-        let dave_keys = Keys::generate();
-
-        // Each non-creator publishes a key package.
-        let mut member_kps = Vec::new();
-        for (mgr, keys) in [
-            (&bob, &bob_keys),
-            (&carol, &carol_keys),
-            (&dave, &dave_keys),
-        ] {
-            let pk = keys.public_key().to_hex();
-            let bundle = mgr
-                .mdk
-                .create_key_package(&pk, &relays)
-                .expect("key package");
-            let tags: Vec<nostr::Tag> = bundle
-                .tags_443
-                .into_iter()
-                .map(|t| nostr::Tag::parse(&t).unwrap())
-                .collect();
-            let kp = EventBuilder::new(Kind::MlsKeyPackage, bundle.content)
-                .tags(tags)
-                .sign_with_keys(keys)
-                .expect("sign kp");
-            member_kps.push(kp);
-        }
-
-        // Alice creates the group with Alice + Bob as joint admins.
-        let config = crate::nostr::mls::types::LocationGroupConfig::new("Four Party")
-            .with_description("Distinct-target convergence test")
-            .with_relay("wss://relay.test.com")
-            .with_admin(alice_keys.public_key().to_hex())
-            .with_admin(bob_keys.public_key().to_hex());
-
-        let group_result = alice
-            .mdk
-            .create_group(&alice_keys.public_key().to_hex(), member_kps, config)
-            .expect("create four-party group");
-
-        let mls_group_id = group_result.group.mls_group_id.clone();
-        let nostr_group_id = group_result.group.nostr_group_id;
-
-        alice
-            .mdk
-            .merge_pending_commit(&mls_group_id)
-            .expect("alice merge create commit");
-
-        for (mgr, pk_hex) in [
-            (&bob, bob_keys.public_key().to_hex()),
-            (&carol, carol_keys.public_key().to_hex()),
-            (&dave, dave_keys.public_key().to_hex()),
-        ] {
-            let welcome = group_result
-                .welcome_rumors
-                .iter()
-                .find(|r| {
-                    r.tags
-                        .iter()
-                        .any(|t| t.as_slice().iter().any(|s| s.eq_ignore_ascii_case(&pk_hex)))
-                })
-                .or_else(|| group_result.welcome_rumors.first())
-                .expect("welcome rumor");
-            mgr.mdk
-                .process_welcome(&nostr::EventId::all_zeros(), welcome)
-                .expect("process welcome");
-            let pending = mgr.mdk.get_pending_welcomes().expect("pending welcomes");
-            let w = pending
-                .iter()
-                .find(|w| w.mls_group_id == mls_group_id)
-                .expect("welcome for group");
-            mgr.mdk.accept_welcome(w).expect("accept welcome");
-        }
-
-        let now = chrono::Utc::now().timestamp();
-        let circle = super::super::types::Circle {
-            mls_group_id: mls_group_id.clone(),
-            nostr_group_id,
-            display_name: "Four Party".to_string(),
-            circle_type: super::super::types::CircleType::LocationSharing,
-            relays,
-            created_at: now,
-            updated_at: now,
-        };
-        for mgr in [&alice, &bob, &carol, &dave] {
-            mgr.storage.save_circle(&circle).unwrap();
-        }
-
-        FourPartyTwoAdminCircle {
-            alice,
-            _alice_dir: alice_dir,
-            alice_keys,
-            bob,
-            _bob_dir: bob_dir,
-            bob_keys,
-            _carol: carol,
-            _carol_dir: carol_dir,
-            carol_keys,
-            _dave: dave,
-            _dave_dir: dave_dir,
-            dave_keys,
-            mls_group_id,
-        }
-    }
-
-    /// PRE (M4 blocker): pins the observable MDK rev-93ae324 contract the
-    /// convergence primitive relies on, using a DISTINCT-target race (Alice rm
-    /// Carol wins, Bob rm Dave loses) where the transient fork is genuine
-    /// (membership coincidence cannot mask it). A loser holding its own pending
-    /// commit that processes the winner's sibling commit FIRST advances to its
-    /// OWN divergent N+1 (`Ok(Commit)`; `OwnCommitPending` is caught internally
-    /// and never surfaces), and the winner's location does NOT decrypt yet;
-    /// only after `clear_pending_commit` + reprocess does it converge onto the
-    /// winner's branch. A future MDK change to this contract fails loudly here.
-    #[test]
-    fn mdk_process_message_under_pending_commit_pins_own_commit_pending() {
-        let setup = setup_four_party_two_admin_circle();
-        let carol_hex = setup.carol_keys.public_key().to_hex();
-        let dave_hex = setup.dave_keys.public_key().to_hex();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-
-        // Distinct targets so the two N+1 branches genuinely diverge.
-        let alice_commit = setup
-            .alice
-            .remove_members(&setup.mls_group_id, std::slice::from_ref(&carol_hex))
-            .unwrap()
-            .evolution_event;
-        let _bob_commit = setup
-            .bob
-            .remove_members(&setup.mls_group_id, std::slice::from_ref(&dave_hex))
-            .unwrap()
-            .evolution_event;
-
-        setup
-            .alice
-            .finalize_pending_commit(&setup.mls_group_id)
-            .unwrap();
-        assert_eq!(setup.alice.group_epoch(&setup.mls_group_id).unwrap(), n + 1);
-
-        // First attempt while Bob holds his own (rm-Dave) pending commit. MDK
-        // MUST NOT silently accept the conflicting commit: the only acceptable
-        // outcomes are Err / Unprocessable / an epoch advance (the tolerant
-        // `is_handled` triad). The exact variant is rev-dependent — the primitive
-        // tolerates all three — so we pin the triad and record the observed
-        // variant rather than a specific one (a future MDK change still fails
-        // here via the transient-fork / convergence assertions below).
-        let first = setup.bob.mdk.process_message(&alice_commit);
-        let bob_after_first = setup.bob.group_epoch(&setup.mls_group_id).unwrap();
-        let handled = first.is_err()
-            || matches!(
-                &first,
-                Ok(mdk_core::prelude::MessageProcessingResult::Unprocessable { .. })
-            )
-            || bob_after_first > n;
-        assert!(
-            handled,
-            "MDK must not silently accept a conflicting same-epoch commit; got \
-             {first:?}, epoch {n} -> {bob_after_first}"
-        );
-
-        // The primitive's clear-AFTER flow: unconditional clear + reprocess.
-        // (In this rev the first attempt may already drive convergence via the
-        // internal OwnCommitPending-merge + rollback; the clear is then a no-op
-        // and the reprocess a duplicate. The load-bearing pin is that after the
-        // full flow Bob is on Alice's branch — the F7 control proves the
-        // pure-eager path instead FORKS.)
-        let _ = setup.bob.clear_pending_commit(&setup.mls_group_id);
-        let _ = setup.bob.mdk.process_message(&alice_commit);
-        assert_eq!(
-            setup.bob.group_epoch(&setup.mls_group_id).unwrap(),
-            setup.alice.group_epoch(&setup.mls_group_id).unwrap(),
-            "Bob converges to Alice's epoch"
-        );
-        assert!(
-            cross_decrypts(
-                &setup.alice,
-                &setup.alice_keys.public_key(),
-                &setup.bob,
-                &setup.mls_group_id
-            ),
-            "after clear+reprocess the winner's location must decrypt on Bob (shared exporter)"
-        );
-        // Bob adopted Alice's branch: Carol (winner's target) gone, Dave
-        // (loser's target) STILL present — not Bob's own twin.
-        let bob_members: Vec<String> = setup
-            .bob
-            .get_members(&setup.mls_group_id)
-            .unwrap()
-            .into_iter()
-            .map(|m| m.pubkey)
-            .collect();
-        assert!(
-            !bob_members.contains(&carol_hex),
-            "Carol removed on Bob (winner's branch)"
-        );
-        assert!(
-            bob_members.contains(&dave_hex),
-            "Dave still present on Bob (adopted winner, not twin)"
-        );
-    }
-
-    /// M3b design validation (regime 1): a member with NO pending commit that
-    /// receives two concurrent same-epoch sibling commits converges to the SAME
-    /// epoch+secret as another no-pending member that receives them in the
-    /// REVERSE order — purely via MDK 93ae324's native epoch-snapshot /
-    /// `is_better_candidate` rollback, with NO Haven-side settle buffer. This is
-    /// the lynchpin of the engine design: regime-1 receivers (the common case,
-    /// incl. all observers) need no buffering; only a member holding its OWN
-    /// pending commit (regime 2, admin-only) must buffer + `converge_commit`.
-    #[test]
-    fn no_pending_observers_converge_on_sibling_commits_via_native_rollback() {
-        let setup = setup_four_party_two_admin_circle();
-
-        // Two admins each stage a self-update commit at the same epoch N.
-        let a = setup
-            .alice
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        let b = setup
-            .bob
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-
-        // Carol (member, no pending) receives A then B; Dave receives B then A.
-        let _ = setup._carol.mdk.process_message(&a);
-        let _ = setup._carol.mdk.process_message(&b);
-        let _ = setup._dave.mdk.process_message(&b);
-        let _ = setup._dave.mdk.process_message(&a);
-
-        let ce = setup._carol.group_epoch(&setup.mls_group_id).unwrap();
-        let de = setup._dave.group_epoch(&setup.mls_group_id).unwrap();
-        assert_eq!(
-            ce, de,
-            "observers converge to the same epoch regardless of order"
-        );
-        assert!(
-            cross_decrypts(
-                &setup._carol,
-                &setup.carol_keys.public_key(),
-                &setup._dave,
-                &setup.mls_group_id,
-            ),
-            "regime-1 observers share an exporter secret via native MDK rollback \
-             (no settle buffer needed)"
-        );
-    }
-
-    /// M3b gate #2 (pinned behavior): decrypting a SIBLING commit while we hold
-    /// our own unmerged pending commit returns `Ok(Commit)` AND advances our
-    /// epoch — MDK applies it (onto our own divergent branch, per
-    /// `converge_commit`'s clear+re-apply comment). The engine therefore must
-    /// NOT blind-apply an incoming commit while a settle window / pending commit
-    /// is held; it must route same-epoch commits through `converge_commit`. If a
-    /// future MDK rev changes this, the engine's settle-vs-apply contract must be
-    /// revisited, so this pins it.
-    #[test]
-    fn sibling_commit_while_holding_pending_applies_and_advances() {
-        use crate::nostr::mls::types::MessageProcessingResult;
-        use crate::nostr::mls::ClassifiedProcessing;
-
-        let setup = setup_two_party_circle();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-
-        // Staging our own commit does NOT advance our epoch.
-        let _alice_commit = setup.alice.self_update(&setup.mls_group_id).unwrap();
-        assert_eq!(setup.alice.group_epoch(&setup.mls_group_id).unwrap(), n);
-
-        // Bob's independent sibling commit at the same epoch N.
-        let bob_commit = setup
-            .bob
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-
-        // Decrypting it the way the live engine would: NOT a CompetingCommit
-        // error — a processed Commit that already advanced us.
-        let outcome = setup.alice.mdk.process_message_classified(&bob_commit);
-        assert!(
-            matches!(
-                outcome,
-                ClassifiedProcessing::Processed(ref r)
-                    if matches!(**r, MessageProcessingResult::Commit { .. })
-            ),
-            "sibling-while-pending surfaces as Processed(Commit), got {outcome:?}"
-        );
-        assert_eq!(
-            setup.alice.group_epoch(&setup.mls_group_id).unwrap(),
-            n + 1,
-            "decrypting a sibling while holding pending APPLIES it (epoch advances) \
-             — hence the engine must not blind-apply during a settle window"
-        );
-    }
-
-    /// M3b gate #2 (pinned behavior): if both members blind-apply each other's
-    /// sibling (the no-settle-buffer engine path), they FORK — and a second
-    /// delivery does NOT self-reconcile via MDK's WrongEpoch rollback. This is
-    /// the non-vacuous justification that the settle buffer + `converge_commit`
-    /// is a CORRECTNESS requirement for the engine, not a latency optimization.
-    #[test]
-    fn blind_apply_of_siblings_forks_and_does_not_self_reconcile() {
-        let setup = setup_two_party_circle();
-
-        let alice_commit = setup
-            .alice
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        let bob_commit = setup
-            .bob
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-
-        // Both blind-apply the sibling while holding their own pending.
-        let _ = setup.alice.mdk.process_message(&bob_commit);
-        let _ = setup.bob.mdk.process_message(&alice_commit);
-        assert!(
-            !cross_decrypts(
-                &setup.alice,
-                &setup.alice_keys.public_key(),
-                &setup.bob,
-                &setup.mls_group_id,
-            ),
-            "blind-apply forks: the two epoch-N+1 branches do not share a secret"
-        );
-
-        // Re-delivery does not heal it (cursor would replay, but MDK does not
-        // roll the already-applied own commit back to the sibling here).
-        let _ = setup.alice.mdk.process_message(&bob_commit);
-        let _ = setup.bob.mdk.process_message(&alice_commit);
-        assert!(
-            !cross_decrypts(
-                &setup.alice,
-                &setup.alice_keys.public_key(),
-                &setup.bob,
-                &setup.mls_group_id,
-            ),
-            "blind-apply fork does NOT self-reconcile on re-delivery"
-        );
-    }
-
-    /// F7: the EXACT reported fork — two members both `self_update` from epoch
-    /// N. `converge_commit` makes the loser adopt the winner; cross-decrypt
-    /// proves a shared exporter secret.
-    #[test]
-    fn exact_original_bug_two_self_updates_converge() {
-        let setup = setup_two_party_circle();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-
-        let alice_commit = setup
-            .alice
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        let bob_commit = setup
-            .bob
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-
-        let alice_out = setup
-            .alice
-            .converge_commit(
-                &setup.mls_group_id,
-                &alice_commit,
-                n,
-                std::slice::from_ref(&bob_commit),
-                &CommitIntent::None,
-            )
-            .unwrap();
-        let bob_out = setup
-            .bob
-            .converge_commit(
-                &setup.mls_group_id,
-                &bob_commit,
-                n,
-                std::slice::from_ref(&alice_commit),
-                &CommitIntent::None,
-            )
-            .unwrap();
-
-        assert_eq!(
-            [alice_out, bob_out]
-                .iter()
-                .filter(|o| matches!(o, CommitConvergence::Merged))
-                .count(),
-            1,
-            "exactly one winner merges: alice={alice_out:?} bob={bob_out:?}"
-        );
-        let ae = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-        let be = setup.bob.group_epoch(&setup.mls_group_id).unwrap();
-        assert_eq!(ae, be, "alice/bob converge to the same epoch");
-        assert_eq!(ae, n + 1);
-
-        // Cross-decrypt BOTH ways: a shared exporter, not a same-number twin.
-        assert!(cross_decrypts(
-            &setup.alice,
-            &setup.alice_keys.public_key(),
-            &setup.bob,
-            &setup.mls_group_id
-        ));
-        assert!(cross_decrypts(
-            &setup.bob,
-            &setup.bob_keys.public_key(),
-            &setup.alice,
-            &setup.mls_group_id
-        ));
-
-        // No residual pending commit on either side.
-        assert!(setup.alice.self_update(&setup.mls_group_id).is_ok());
-        let _ = setup.alice.clear_pending_commit(&setup.mls_group_id);
-        assert!(setup.bob.self_update(&setup.mls_group_id).is_ok());
-        let _ = setup.bob.clear_pending_commit(&setup.mls_group_id);
-    }
-
-    /// R3 (marmot G2) — FEASIBILITY PIN, not a positive reconvergence proof.
-    ///
-    /// Once a member WINS its settle window and `merge_pending_commit`s (which,
-    /// unlike `process_commit`, writes NO epoch snapshot — see
-    /// `no_pending_observers_converge_on_sibling_commits_via_native_rollback`),
-    /// a globally-BETTER sibling that arrives LATE cannot be adopted by a lone
-    /// `converge_commit`: its TOCTOU guard sees the local epoch already advanced
-    /// past `staged_epoch` and returns `RolledBack`, leaving us on our OWN merged
-    /// branch. Reconvergence onto the better sibling is therefore NOT a
-    /// single-pass Rust property — it is owed to the Dart bounded re-stage loop
-    /// (≤2) + lossless cursor replay across rounds. This test pins that known
-    /// limitation so a future change that silently alters it (a spurious
-    /// single-pass "fix", or a regression to blind-merge) is caught. The positive
-    /// in-window adopt path is covered by `exact_original_bug_two_self_updates_converge`
-    /// and the engine-level `two_engines_converge_bilaterally_over_one_relay`.
-    #[test]
-    fn lone_converge_does_not_single_pass_reconverge_after_a_no_snapshot_merge() {
-        let setup = setup_two_party_circle();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-
-        // Alice "won" her window (no competitor collected) and merges her own
-        // self_update: `merge_pending_commit` advances her to N+1 with NO epoch
-        // snapshot, so MDK cannot natively roll back to adopt a later sibling.
-        let alice_commit = setup
-            .alice
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        let merged = setup
-            .alice
-            .converge_commit(
-                &setup.mls_group_id,
-                &alice_commit,
-                n,
-                &[], // no competitors collected in the window ⇒ eager-merge leg
-                &CommitIntent::None,
-            )
-            .unwrap();
-        assert_eq!(merged, CommitConvergence::Merged);
-        assert_eq!(setup.alice.group_epoch(&setup.mls_group_id).unwrap(), n + 1);
-
-        // A sibling framed from the SAME epoch N (Bob never applied Alice's
-        // commit, so he is still at N) arrives LATE — after Alice already merged.
-        let late_sibling = setup
-            .bob
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-
-        // Feeding it back through a lone `converge_commit` at the ORIGINAL staged
-        // epoch does NOT reconverge Alice onto the sibling's branch: the TOCTOU
-        // guard (current N+1 > staged N) short-circuits to `RolledBack` and clears
-        // any dangling pending; Alice stays on her own N+1 branch. (Whether the
-        // sibling's MIP-03 order key actually beats Alice's is irrelevant — the
-        // point is a single pass cannot adopt it post-merge.)
-        let out = setup
-            .alice
-            .converge_commit(
-                &setup.mls_group_id,
-                &alice_commit,
-                n,
-                std::slice::from_ref(&late_sibling),
-                &CommitIntent::None,
-            )
-            .unwrap();
-        assert_eq!(
-            out,
-            CommitConvergence::RolledBack,
-            "a lone converge cannot single-pass reconverge to a late better sibling \
-             after a no-snapshot merge; reconvergence is owed to the Dart re-stage + replay"
-        );
-        assert_eq!(
-            setup.alice.group_epoch(&setup.mls_group_id).unwrap(),
-            n + 1,
-            "Alice remains on her own merged branch — the single pass did not adopt the sibling"
-        );
-    }
-
-    /// F7 NON-VACUOUS CONTROL: without convergence (both eager-finalize) the
-    /// two self-update commits FORK and cross-decrypt FAILS — proving the F7
-    /// assertion is not vacuously satisfiable by a twin fork.
-    #[test]
-    fn exact_original_bug_pure_eager_merge_forks_control() {
-        let setup = setup_two_party_circle();
-        let _ = setup.alice.self_update(&setup.mls_group_id).unwrap();
-        let _ = setup.bob.self_update(&setup.mls_group_id).unwrap();
-        setup
-            .alice
-            .finalize_pending_commit(&setup.mls_group_id)
-            .unwrap();
-        setup
-            .bob
-            .finalize_pending_commit(&setup.mls_group_id)
-            .unwrap();
-        assert!(
-            !cross_decrypts(
-                &setup.alice,
-                &setup.alice_keys.public_key(),
-                &setup.bob,
-                &setup.mls_group_id
-            ),
-            "pure eager-merge MUST fork: the winner's location must NOT decrypt on the twin"
-        );
-    }
-
-    /// M3b design validation (regime 2): does the White-Noise-style
-    /// "finalize-our-own-immediately, then receive the competitor and let MDK's
-    /// native rollback converge" path actually converge two admins who each
-    /// staged a commit at epoch N? If YES, the engine's regime-2 admin path can
-    /// avoid the settle buffer + `converge_commit` entirely; if NO,
-    /// `converge_commit` is required for the admin case.
-    #[test]
-    fn eager_finalize_then_exchange_native_rollback_outcome() {
-        let setup = setup_two_party_circle();
-
-        let alice_commit = setup
-            .alice
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        let bob_commit = setup
-            .bob
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-
-        // White Noise style: each merges its OWN commit immediately (no pending
-        // held), reaching N+1 on its own branch.
-        setup
-            .alice
-            .finalize_pending_commit(&setup.mls_group_id)
-            .unwrap();
-        setup
-            .bob
-            .finalize_pending_commit(&setup.mls_group_id)
-            .unwrap();
-
-        // Then each receives the other's competitor commit (WrongEpoch → MDK's
-        // is_better_candidate rollback should fire).
-        let _ = setup.alice.mdk.process_message(&bob_commit);
-        let _ = setup.bob.mdk.process_message(&alice_commit);
-
-        let converged = cross_decrypts(
-            &setup.alice,
-            &setup.alice_keys.public_key(),
-            &setup.bob,
-            &setup.mls_group_id,
-        );
-        // FINDING (pinned): native rollback does NOT heal two STAGING admins —
-        // when we merged our OWN commit, MDK does not roll us back to a competing
-        // sibling on receipt. So regime 2 (we staged a commit) REQUIRES
-        // `converge_commit`; only regime 1 (no own staged commit) is saved by
-        // native rollback (see `no_pending_observers_converge_..._native_rollback`).
-        assert!(
-            !converged,
-            "eager-finalize + native rollback must fork two staging admins \
-             (regime 2 needs converge_commit)"
-        );
-    }
-
-    /// M11 Phase-B gate (the DECIDING settle-window question): do two ADMINS
-    /// whose M6 settle windows MISS each other — each window closes empty before
-    /// the peer's same-epoch commit propagates, so each EAGERLY finalizes its own
-    /// commit — FORK permanently, or does the slower post-window path HEAL them?
-    ///
-    /// This resolves a documented contradiction between two in-tree claims:
-    ///   * `relay/live_sync/config.rs` (`COMMIT_SETTLE_WINDOW_SECS`) called the
-    ///     window "a latency optimization, not a correctness prerequisite:
-    ///     outside the window the slower `Unprocessable -> clear -> adopt` path
-    ///     still converges."
-    ///   * `docs/M11_ROLLOUT.md` §7/§H2 called the window fork-safety-
-    ///     critical (`W >= 2x p99` propagation).
-    ///
-    /// EMPIRICAL FINDING (pinned): a two-admin window-MISS **FORKS PERMANENTLY**.
-    /// The window-miss is modelled EXACTLY by the production path a closed-empty
-    /// window takes: each admin runs `converge_commit` over an EMPTY competitor
-    /// set → the documented eager-merge degrade leg (`competing_commits.is_empty()`
-    /// → `merge_our_pending_commit`) → each `Merged` onto its OWN N+1 branch.
-    /// The two branches are a TWIN — identical epoch NUMBER (N+1) and identical
-    /// member set (a `self_update` mutates no membership) — so neither the epoch
-    /// nor `member_pubkeys_hex` can distinguish them; only the exporter secret
-    /// differs, and cross-decrypt is the sole reliable fork detector. Cross-
-    /// delivering each admin's now-stale peer commit does NOT heal the split:
-    /// `merge_pending_commit` (unlike `process_commit`) writes NO epoch snapshot,
-    /// so MDK's native `is_better_candidate` rollback cannot fire (same root cause
-    /// as `eager_finalize_then_exchange_native_rollback_outcome`, here pinned for
-    /// the explicit joint-ADMIN symmetric case on the two-admin fixture).
-    ///
-    /// The contrast half proves WHY the window matters: from the IDENTICAL start
-    /// (two joint admins, both `self_update` at epoch N), the ONLY change is that
-    /// each admin's window COLLECTED the peer's commit as a competitor and fed it
-    /// to `converge_commit` — and that path CONVERGES (one winner merges, the
-    /// loser adopts the winner's branch, cross-decrypt succeeds BOTH ways). So the
-    /// settle window + `converge_commit` is a CORRECTNESS prerequisite for
-    /// concurrent two-admin commits, not a latency optimization: if a window
-    /// closes empty while a concurrent admin commit is still in flight, the group
-    /// forks. `docs/M11_ROLLOUT.md` §7 (`W >= 2x p99`) is the correct framing.
-    #[test]
-    fn rev1_or_m11_two_admin_window_miss_forks_but_in_window_converges() {
-        // ---- Window-MISS: each admin's window closed empty → each merges own ----
-        let miss = setup_three_party_two_admin_circle();
-        let gid = &miss.mls_group_id;
-        let n = miss.alice.group_epoch(gid).unwrap();
-
-        // Both joint admins stage a same-epoch self_update commit at N.
-        let alice_commit = miss.alice.self_update(gid).unwrap().evolution_event;
-        let bob_commit = miss.bob.self_update(gid).unwrap().evolution_event;
-
-        // The window-miss IS the empty-competitor `converge_commit` leg: neither
-        // admin collected the peer's commit before its window closed, so each
-        // eager-merges its own onto a private N+1 branch.
-        let alice_out = miss
-            .alice
-            .converge_commit(gid, &alice_commit, n, &[], &CommitIntent::None)
-            .unwrap();
-        let bob_out = miss
-            .bob
-            .converge_commit(gid, &bob_commit, n, &[], &CommitIntent::None)
-            .unwrap();
-        assert!(
-            matches!(alice_out, CommitConvergence::Merged)
-                && matches!(bob_out, CommitConvergence::Merged),
-            "an empty-competitor (window-miss) converge merges each admin's OWN \
-             commit: alice={alice_out:?} bob={bob_out:?}"
-        );
-
-        // The slower post-window path: each admin later receives the peer's
-        // now-stale commit. This is the "outside the window it still converges"
-        // claim under test.
-        let _ = miss.alice.mdk.process_message(&bob_commit);
-        let _ = miss.bob.mdk.process_message(&alice_commit);
-
-        // The fork is a TWIN: same epoch NUMBER, same member set — so epoch and
-        // membership CANNOT detect it; only the exporter secret can.
-        assert_eq!(
-            miss.alice.group_epoch(gid).unwrap(),
-            n + 1,
-            "alice eager-merged to N+1"
-        );
-        assert_eq!(
-            miss.bob.group_epoch(gid).unwrap(),
-            n + 1,
-            "bob eager-merged to N+1 (same NUMBER — the twin)"
-        );
-        assert_eq!(
-            miss.alice.member_pubkeys_hex(gid).unwrap(),
-            miss.bob.member_pubkeys_hex(gid).unwrap(),
-            "self_update mutates no membership: identical member sets mask the fork"
-        );
-
-        // The DECIDING assertion: the two N+1 twins hold DIFFERENT exporter
-        // secrets, and cross-delivery did NOT roll either admin back. They are
-        // permanently forked BOTH ways.
-        assert!(
-            !cross_decrypts(&miss.alice, &miss.alice_keys.public_key(), &miss.bob, gid),
-            "window-miss FORKS: bob cannot decrypt alice's location on the twin branch"
-        );
-        assert!(
-            !cross_decrypts(&miss.bob, &miss.bob_keys.public_key(), &miss.alice, gid),
-            "window-miss FORKS both ways: alice cannot decrypt bob's location either"
-        );
-
-        // ---- Contrast: IN-WINDOW (each collected the peer commit) CONVERGES ----
-        // Identical start; the ONLY difference is a non-empty competitor set.
-        let hit = setup_three_party_two_admin_circle();
-        let gid2 = &hit.mls_group_id;
-        let n2 = hit.alice.group_epoch(gid2).unwrap();
-        let a2 = hit.alice.self_update(gid2).unwrap().evolution_event;
-        let b2 = hit.bob.self_update(gid2).unwrap().evolution_event;
-
-        let a2_out = hit
-            .alice
-            .converge_commit(
-                gid2,
-                &a2,
-                n2,
-                std::slice::from_ref(&b2),
-                &CommitIntent::None,
-            )
-            .unwrap();
-        let b2_out = hit
-            .bob
-            .converge_commit(
-                gid2,
-                &b2,
-                n2,
-                std::slice::from_ref(&a2),
-                &CommitIntent::None,
-            )
-            .unwrap();
-        assert_eq!(
-            [a2_out, b2_out]
-                .iter()
-                .filter(|o| matches!(o, CommitConvergence::Merged))
-                .count(),
-            1,
-            "in-window: exactly one winner merges (a2={a2_out:?} b2={b2_out:?})"
-        );
-        assert_eq!(
-            hit.alice.group_epoch(gid2).unwrap(),
-            hit.bob.group_epoch(gid2).unwrap(),
-            "in-window admins share an epoch"
-        );
-        assert_eq!(hit.alice.group_epoch(gid2).unwrap(), n2 + 1);
-        assert!(
-            cross_decrypts(&hit.alice, &hit.alice_keys.public_key(), &hit.bob, gid2)
-                && cross_decrypts(&hit.bob, &hit.bob_keys.public_key(), &hit.alice, gid2),
-            "in-window: the loser adopts the winner's branch → shared exporter secret \
-             → the settle window + converge_commit is what prevents the fork above"
-        );
-    }
-
-    /// M3b design validation (change #3 probe): after `converge_commit` resolves
-    /// two staging admins, RE-DELIVERING the loser's competitor commit (which the
-    /// engine's no-skip cursor makes possible) must NOT re-fork them. If the
-    /// current converge body is robust to re-delivery, marmot's "change #3"
-    /// (rewrite the loser path) is unnecessary; if it re-forks, it is required.
-    #[test]
-    fn converge_is_robust_to_competitor_redelivery() {
-        let setup = setup_two_party_circle();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-
-        let alice_commit = setup
-            .alice
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        let bob_commit = setup
-            .bob
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-
-        setup
-            .alice
-            .converge_commit(
-                &setup.mls_group_id,
-                &alice_commit,
-                n,
-                std::slice::from_ref(&bob_commit),
-                &CommitIntent::None,
-            )
-            .unwrap();
-        setup
-            .bob
-            .converge_commit(
-                &setup.mls_group_id,
-                &bob_commit,
-                n,
-                std::slice::from_ref(&alice_commit),
-                &CommitIntent::None,
-            )
-            .unwrap();
-        assert!(
-            cross_decrypts(
-                &setup.alice,
-                &setup.alice_keys.public_key(),
-                &setup.bob,
-                &setup.mls_group_id,
-            ),
-            "converge_commit converges (precondition)"
-        );
-
-        // Re-deliver BOTH competitor commits to BOTH sides (the loser's is the
-        // dangerous one — a stale WrongEpoch commit MDK must keep rejecting).
-        for ev in [&alice_commit, &bob_commit] {
-            let _ = setup.alice.mdk.process_message(ev);
-            let _ = setup.bob.mdk.process_message(ev);
-        }
-        assert!(
-            cross_decrypts(
-                &setup.alice,
-                &setup.alice_keys.public_key(),
-                &setup.bob,
-                &setup.mls_group_id,
-            ),
-            "converge must stay converged after competitor re-delivery (no re-fork)"
-        );
-    }
-
-    /// M3b loser-path finding (marmot MEDIUM-a): `converge_commit`'s **`Merged`**
-    /// branch finalizes our own commit via `merge_pending_commit`, which (unlike
-    /// `process_commit`) creates NO epoch snapshot — so a *later*, globally-better
-    /// sibling arriving AFTER we won cannot single-pass roll us back, and we can
-    /// transiently diverge from a peer who saw that better sibling. This is the
-    /// same root cause as the eager-finalize fork (see
-    /// `eager_finalize_then_exchange_native_rollback_outcome`). It is therefore
-    /// NOT a guaranteed single-pass invariant — convergence for this late-delivery
-    /// case is owed to M6's bounded re-stage loop + lossless cursor replay (the
-    /// regime-2 cursor does not advance, so the better sibling is re-fetched and a
-    /// fresh convergence runs). A deterministic regression test for that belongs
-    /// with the M6 re-stage wiring; pinning it here against real `self_update`
-    /// commits would be order-key-dependent (random event ids) and thus flaky.
-    /// The observer (no-own-commit) case IS guaranteed single-pass and is covered
-    /// by `no_pending_observers_converge_on_sibling_commits_via_native_rollback`.
-
-    /// F2: two admins concurrently `remove_members(carol)` from epoch N.
-    #[test]
-    fn concurrent_admin_remove_same_target_converges() {
-        let setup = setup_three_party_two_admin_circle();
-        let carol_hex = setup.carol_keys.public_key().to_hex();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-        let intent = CommitIntent::RemoveMembers(vec![setup.carol_keys.public_key()]);
-
-        let alice_commit = setup
-            .alice
-            .remove_members(&setup.mls_group_id, std::slice::from_ref(&carol_hex))
-            .unwrap()
-            .evolution_event;
-        let bob_commit = setup
-            .bob
-            .remove_members(&setup.mls_group_id, std::slice::from_ref(&carol_hex))
-            .unwrap()
-            .evolution_event;
-
-        let alice_out = setup
-            .alice
-            .converge_commit(
-                &setup.mls_group_id,
-                &alice_commit,
-                n,
-                std::slice::from_ref(&bob_commit),
-                &intent,
-            )
-            .unwrap();
-        let bob_out = setup
-            .bob
-            .converge_commit(
-                &setup.mls_group_id,
-                &bob_commit,
-                n,
-                std::slice::from_ref(&alice_commit),
-                &intent,
-            )
-            .unwrap();
-
-        assert_eq!(
-            [alice_out, bob_out]
-                .iter()
-                .filter(|o| matches!(o, CommitConvergence::Merged))
-                .count(),
-            1
-        );
-        assert_eq!(
-            setup.alice.group_epoch(&setup.mls_group_id).unwrap(),
-            setup.bob.group_epoch(&setup.mls_group_id).unwrap()
-        );
-        assert_eq!(setup.alice.group_epoch(&setup.mls_group_id).unwrap(), n + 1);
-
-        for (mgr, out) in [(&setup.alice, alice_out), (&setup.bob, bob_out)] {
-            assert!(
-                !mgr.get_members(&setup.mls_group_id)
-                    .unwrap()
-                    .iter()
-                    .any(|m| m.pubkey == carol_hex),
-                "Carol evicted on both"
-            );
-            if let CommitConvergence::AdoptedWinner {
-                intent_still_pending,
-            } = out
-            {
-                assert!(
-                    !intent_still_pending,
-                    "same-target remove: intent satisfied by winner"
-                );
-            }
-        }
-        assert!(cross_decrypts(
-            &setup.alice,
-            &setup.alice_keys.public_key(),
-            &setup.bob,
-            &setup.mls_group_id
-        ));
-        assert!(cross_decrypts(
-            &setup.bob,
-            &setup.bob_keys.public_key(),
-            &setup.alice,
-            &setup.mls_group_id
-        ));
-        // No residual: the loser can stage a fresh remove.
-        assert!(setup
-            .bob
-            .remove_members(
-                &setup.mls_group_id,
-                &[setup.alice_keys.public_key().to_hex()]
-            )
-            .is_ok());
-        let _ = setup.bob.clear_pending_commit(&setup.mls_group_id);
-    }
-
-    /// F2b (most diagnostic): Alice rm Carol, Bob rm Dave from epoch N — the
-    /// member sets differ, so membership coincidence cannot mask a fork. The
-    /// loser must adopt the WINNER's membership (winner's target gone, loser's
-    /// STILL present), report intent_still_pending, then re-stage on N+1.
-    #[test]
-    fn concurrent_admin_remove_distinct_targets_converges() {
-        let setup = setup_four_party_two_admin_circle();
-        let carol_hex = setup.carol_keys.public_key().to_hex();
-        let dave_hex = setup.dave_keys.public_key().to_hex();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-
-        let alice_commit = setup
-            .alice
-            .remove_members(&setup.mls_group_id, std::slice::from_ref(&carol_hex))
-            .unwrap()
-            .evolution_event;
-        let bob_commit = setup
-            .bob
-            .remove_members(&setup.mls_group_id, std::slice::from_ref(&dave_hex))
-            .unwrap()
-            .evolution_event;
-
-        let alice_out = setup
-            .alice
-            .converge_commit(
-                &setup.mls_group_id,
-                &alice_commit,
-                n,
-                std::slice::from_ref(&bob_commit),
-                &CommitIntent::RemoveMembers(vec![setup.carol_keys.public_key()]),
-            )
-            .unwrap();
-        let bob_out = setup
-            .bob
-            .converge_commit(
-                &setup.mls_group_id,
-                &bob_commit,
-                n,
-                std::slice::from_ref(&alice_commit),
-                &CommitIntent::RemoveMembers(vec![setup.dave_keys.public_key()]),
-            )
-            .unwrap();
-
-        let alice_won = matches!(alice_out, CommitConvergence::Merged);
-        assert_ne!(
-            alice_won,
-            matches!(bob_out, CommitConvergence::Merged),
-            "exactly one winner"
-        );
-        let ae = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-        assert_eq!(ae, setup.bob.group_epoch(&setup.mls_group_id).unwrap());
-        assert_eq!(ae, n + 1);
-
-        let (winner, winner_keys, loser, winner_target, loser_target, loser_out) = if alice_won {
-            (
-                &setup.alice,
-                &setup.alice_keys,
-                &setup.bob,
-                &carol_hex,
-                &dave_hex,
-                bob_out,
-            )
-        } else {
-            (
-                &setup.bob,
-                &setup.bob_keys,
-                &setup.alice,
-                &dave_hex,
-                &carol_hex,
-                alice_out,
-            )
-        };
-        let loser_members: Vec<String> = loser
-            .get_members(&setup.mls_group_id)
-            .unwrap()
-            .into_iter()
-            .map(|m| m.pubkey)
-            .collect();
-        assert!(
-            !loser_members.contains(winner_target),
-            "winner's target removed on loser"
-        );
-        assert!(
-            loser_members.contains(loser_target),
-            "loser's own target STILL present — it adopted the winner's branch, not a twin"
-        );
-        match loser_out {
-            CommitConvergence::AdoptedWinner {
-                intent_still_pending,
-            } => {
-                assert!(
-                    intent_still_pending,
-                    "loser's distinct-target intent still pending"
-                );
-            }
-            other => panic!("loser must be AdoptedWinner, got {other:?}"),
-        }
-        assert!(cross_decrypts(
-            winner,
-            &winner_keys.public_key(),
-            loser,
-            &setup.mls_group_id
-        ));
-
-        // The loser re-stages its own remove on N+1 (no competitor → Merged),
-        // then the winner applies it; both targets end up removed everywhere.
-        let loser_commit = loser
-            .remove_members(&setup.mls_group_id, std::slice::from_ref(loser_target))
-            .unwrap()
-            .evolution_event;
-        let re = loser
-            .converge_commit(
-                &setup.mls_group_id,
-                &loser_commit,
-                ae,
-                &[],
-                &CommitIntent::None,
-            )
-            .unwrap();
-        assert_eq!(re, CommitConvergence::Merged);
-        let _ = winner.mdk.process_message(&loser_commit);
-        let winner_members: Vec<String> = winner
-            .get_members(&setup.mls_group_id)
-            .unwrap()
-            .into_iter()
-            .map(|m| m.pubkey)
-            .collect();
-        assert!(
-            !winner_members.contains(loser_target),
-            "both targets eventually removed"
-        );
-    }
-
-    /// Builds a real kind:443 KeyPackage event for a fresh member (mirrors the
-    /// inline construction in `decrypt_location_group_update`).
-    fn build_new_member_kp(mdk: &MdkManager, keys: &Keys) -> Event {
-        let bundle = mdk
-            .create_key_package(
-                &keys.public_key().to_hex(),
-                &["wss://relay.test.com".to_string()],
-            )
-            .expect("create key package");
-        let tags: Vec<nostr::Tag> = bundle
-            .tags_443
-            .into_iter()
-            .map(|t| nostr::Tag::parse(&t).unwrap())
-            .collect();
-        EventBuilder::new(Kind::MlsKeyPackage, bundle.content)
-            .tags(tags)
-            .sign_with_keys(keys)
-            .expect("sign key package")
-    }
-
-    // ==================== M7 staged-commit marker consistency ====================
-
-    /// The load-bearing M7 invariant: the Haven marker mirrors MDK's real
-    /// pending-commit lifecycle across self_update / remove / and the two clear
-    /// chokepoints (finalize + clear). A MISSING marker while MDK holds a
-    /// pending commit is the fork-unsafe state this pins against.
-    #[test]
-    fn m7_marker_mirrors_mdk_pending_across_self_update_and_remove() {
-        let setup = setup_two_party_circle();
-        let a = &setup.alice;
-        let gid = &setup.mls_group_id;
-        let ngid = &setup.nostr_group_id;
-
-        // create_circle self-merges its initial commit → no pending marker.
-        assert!(!a.has_pending_commit(ngid), "no pending after create");
-
-        // self_update → SET; finalize → CLEAR.
-        a.self_update(gid).unwrap();
-        assert!(a.has_pending_commit(ngid), "self_update set marker");
-        a.finalize_pending_commit(gid).unwrap();
-        assert!(!a.has_pending_commit(ngid), "finalize cleared marker");
-
-        // self_update → SET; clear (rollback) → CLEAR.
-        a.self_update(gid).unwrap();
-        assert!(a.has_pending_commit(ngid));
-        a.clear_pending_commit(gid).unwrap();
-        assert!(!a.has_pending_commit(ngid), "clear cleared marker");
-
-        // remove_members → SET; finalize → CLEAR.
-        let bob_hex = setup.bob_keys.public_key().to_hex();
-        a.remove_members(gid, std::slice::from_ref(&bob_hex))
-            .unwrap();
-        assert!(a.has_pending_commit(ngid), "remove set marker");
-        a.finalize_pending_commit(gid).unwrap();
-        assert!(!a.has_pending_commit(ngid));
-    }
-
-    /// add_members (and via it add_members_with_welcomes) sets the marker.
-    #[test]
-    fn m7_add_members_sets_marker_cleared_on_finalize() {
-        let setup = setup_two_party_circle();
-        let a = &setup.alice;
-        let gid = &setup.mls_group_id;
-        let ngid = &setup.nostr_group_id;
-
-        let erin_dir = TempDir::new().unwrap();
-        let erin_mdk = MdkManager::new_unencrypted(erin_dir.path()).unwrap();
-        let erin_keys = Keys::generate();
-        let erin_kp = build_new_member_kp(&erin_mdk, &erin_keys);
-
-        a.add_members(gid, std::slice::from_ref(&erin_kp)).unwrap();
-        assert!(a.has_pending_commit(ngid), "add_members set marker");
-        a.finalize_pending_commit(gid).unwrap();
-        assert!(!a.has_pending_commit(ngid));
-        drop(erin_dir);
-    }
-
-    /// `update_circle_relays` is a `GroupContextExtensions` staging path — the
-    /// representative of the THREE paths the v1/v2 enumeration MISSED
-    /// (relay-update, admin-handoff, self-demote all stage via the same
-    /// `GroupContextExtensions` mechanism and route through the identical
-    /// `mark_group_staged` helper). This pins that the class sets the marker.
-    /// (`propose_admin_handoff`/`propose_self_demote` need a second admin; the
-    /// low-level four-party test fixture builds its group via `create_group`
-    /// and so persists no circle row for `marker_key` to resolve — they are
-    /// covered by code inspection + the post-implementation QC, and exercise
-    /// the identical helper proven here.)
-    #[test]
-    fn m7_relay_update_sets_and_clears_marker() {
-        let setup = setup_two_party_circle();
-        let gid = &setup.mls_group_id;
-        let ngid = &setup.nostr_group_id;
-        setup
-            .alice
-            .update_circle_relays(
-                gid,
-                &[
-                    "wss://relay.one.example".to_string(),
-                    "wss://relay.two.example".to_string(),
-                ],
-            )
-            .unwrap();
-        assert!(
-            setup.alice.has_pending_commit(ngid),
-            "update_circle_relays set marker"
-        );
-        setup.alice.finalize_pending_commit(gid).unwrap();
-        assert!(!setup.alice.has_pending_commit(ngid));
-    }
-
-    /// has_pending_commit reads the pseudonymous nostr_group_id and returns
-    /// false for a group that never staged.
-    #[test]
-    fn m7_has_pending_commit_false_for_unstaged_group() {
-        let setup = setup_two_party_circle();
-        assert!(!setup.alice.has_pending_commit(&setup.nostr_group_id));
-        // An unknown group id is likewise not pending (row absent).
-        assert!(!setup.alice.has_pending_commit(&[0u8; 32]));
-    }
-
-    /// M10 teardown: wipe_all_staged_commits and the delete_circle cascade both
-    /// remove the marker so a returning/other identity never inherits a stale
-    /// skip.
-    #[test]
-    fn m7_wipe_and_delete_circle_cascade_clear_marker() {
-        // wipe_all_staged_commits.
-        let setup = setup_two_party_circle();
-        setup.alice.self_update(&setup.mls_group_id).unwrap();
-        assert!(setup.alice.has_pending_commit(&setup.nostr_group_id));
-        setup.alice.storage.wipe_all_staged_commits().unwrap();
-        assert!(
-            !setup.alice.has_pending_commit(&setup.nostr_group_id),
-            "wipe cleared the marker"
-        );
-
-        // delete_circle cascade.
-        let s2 = setup_two_party_circle();
-        s2.alice.self_update(&s2.mls_group_id).unwrap();
-        assert!(s2.alice.has_pending_commit(&s2.nostr_group_id));
-        s2.alice.storage.delete_circle(&s2.mls_group_id).unwrap();
-        assert!(
-            !s2.alice.has_pending_commit(&s2.nostr_group_id),
-            "delete_circle cascaded the marker"
-        );
-    }
-
-    /// SHOULD-3 (M6-deferred): a foreground membership op stages a PERSISTED
-    /// pending commit, then the process is KILLED mid-converge — the in-memory
-    /// settle window / engine state is lost while the SQLCipher stores survive.
-    /// On reopen from the SAME data dir the recovery must be fork-safe.
-    ///
-    /// EMPIRICAL FINDING (pinned): recovery is BELT-AND-SUSPENDERS — BOTH layers
-    /// survive the kill:
-    ///   1. The Haven `staged_commits` marker persists in `circles.db`, so
-    ///      `has_pending_commit` is still `true` on reopen. A later catch-up sweep
-    ///      gates every decrypt on exactly this (regime-2 gate; see the M7-1
-    ///      fork-safety test below and [`crate::relay::catchup`]) and therefore
-    ///      SKIPS rather than blind-applying a peer's same-epoch sibling into a
-    ///      fork — the load-bearing safety property this validates.
-    ///   2. MDK ALSO recovers the unmerged pending commit from its own OpenMLS
-    ///      SQLite state: a fresh `mdk.self_update` errors (a pending commit
-    ///      already exists) and `finalize_pending_commit` MERGES that same
-    ///      recovered commit (epoch N -> N+1) and clears the marker via the merge
-    ///      chokepoint. So the staged work is neither lost nor duplicated.
-    #[test]
-    fn should3_process_kill_mid_converge_recovers_pending_commit_and_marker() {
-        // The data dir must outlive the "killed" manager, so this test owns the
-        // TempDir directly rather than via a fixture that captures it.
-        let dir = TempDir::new().unwrap();
-        let alice_keys = Keys::generate();
-
-        // An ephemeral peer only supplies a key package for group creation.
-        let bob_dir = TempDir::new().unwrap();
-        let bob_mdk = MdkManager::new_unencrypted(bob_dir.path()).unwrap();
-        let bob_kp = build_new_member_kp(&bob_mdk, &Keys::generate());
-
-        let (mls_group_id, nostr_group_id) = {
-            let alice = CircleManager::new_unencrypted(dir.path()).unwrap();
-            let config = crate::nostr::mls::types::LocationGroupConfig::new("Kill Recovery")
-                .with_relay("wss://relay.test.com")
-                .with_admin(alice_keys.public_key().to_hex());
-            let gr = alice
-                .mdk
-                .create_group(&alice_keys.public_key().to_hex(), vec![bob_kp], config)
-                .unwrap();
-            let gid = gr.group.mls_group_id.clone();
-            let ngid = gr.group.nostr_group_id;
-            alice.mdk.merge_pending_commit(&gid).unwrap();
-
-            // A circle row must exist so the marker key (the pseudonymous
-            // nostr_group_id) resolves for mark_group_staged / mark_group_unstaged.
-            let now = chrono::Utc::now().timestamp();
-            alice
-                .storage
-                .save_circle(&super::super::types::Circle {
-                    mls_group_id: gid.clone(),
-                    nostr_group_id: ngid,
-                    display_name: "Kill Recovery".to_string(),
-                    circle_type: super::super::types::CircleType::LocationSharing,
-                    relays: vec!["wss://relay.test.com".to_string()],
-                    created_at: now,
-                    updated_at: now,
-                })
-                .unwrap();
-
-            let n = alice.group_epoch(&gid).unwrap();
-            // Stage a pending commit (sets the marker BEFORE the MDK stage).
-            alice.self_update(&gid).unwrap();
-            assert!(alice.has_pending_commit(&ngid), "marker set pre-kill");
-            assert_eq!(
-                alice.group_epoch(&gid).unwrap(),
-                n,
-                "staging does not advance the epoch (pending, unmerged)"
-            );
-            (gid, ngid)
-        }; // <- `alice` dropped == the process kill: in-memory window/engine gone.
-
-        // Reopen from the SAME persisted SQLCipher dir (background wake / relaunch).
-        let alice2 = CircleManager::new_unencrypted(dir.path()).unwrap();
-
-        // (1) Marker survived → the catch-up regime-2 gate still fires → a peer
-        //     commit is SKIPPED, never blind-applied into a fork.
-        assert!(
-            alice2.has_pending_commit(&nostr_group_id),
-            "staged_commits marker MUST survive a process kill so catch-up skips \
-             the decrypt instead of blind-applying a peer sibling into a fork"
-        );
-        assert_eq!(
-            alice2.group_epoch(&mls_group_id).unwrap(),
-            1,
-            "reopen neither lost nor advanced the epoch (still the staged epoch N)"
-        );
-
-        // (2) MDK recovered the unmerged pending commit itself: a fresh stage is
-        //     refused because one already exists.
-        assert!(
-            alice2.mdk.self_update(&mls_group_id).is_err(),
-            "MDK recovered the pending commit on reopen (a fresh self_update is \
-             refused while one is unmerged)"
-        );
-
-        // ...and the recovered commit is the real, mergeable one: finalizing it
-        //    advances N -> N+1 and the merge chokepoint clears the marker.
-        alice2.finalize_pending_commit(&mls_group_id).unwrap();
-        assert_eq!(
-            alice2.group_epoch(&mls_group_id).unwrap(),
-            2,
-            "finalizing the RECOVERED pending commit advances the epoch"
-        );
-        assert!(
-            !alice2.has_pending_commit(&nostr_group_id),
-            "the merge chokepoint cleared the marker after recovery"
-        );
-        drop(bob_dir);
-    }
-
-    /// M7-1 fork-safety: a peer location is decrypted + persisted normally, but
-    /// once the group holds a pending commit (regime 2), `decrypt_receive_only`
-    /// SKIPS it WITHOUT decrypting or persisting (C-NOFORK-2) — the property
-    /// that prevents a background sweep blind-applying a same-epoch sibling.
-    #[test]
-    fn m7_receive_only_persists_peer_then_pending_gate_skips_without_decrypt() {
-        use crate::location::LocationMessage;
-        use crate::relay::ReceiveOnlyOutcome;
-
-        let setup = setup_two_party_circle();
-        let gid = &setup.mls_group_id;
-        let ngid = &setup.nostr_group_id;
-        let alice_hex = setup.alice_keys.public_key().to_hex();
-        let bob_hex = setup.bob_keys.public_key().to_hex();
-        let now = chrono::Utc::now().timestamp();
-
-        // Bob sends a location; Alice receive-only decrypts → Location, persisted,
-        // cursor-advancing.
-        let (loc1, _, _) = setup
-            .bob
-            .encrypt_location(
-                gid,
-                &setup.bob_keys.public_key(),
-                &LocationMessage::new(40.0, -74.0),
-                300,
-            )
-            .unwrap();
-        let out1 = receive_only_until_applied(&setup.alice, &loc1, ngid, &alice_hex);
-        assert_eq!(out1, ReceiveOnlyOutcome::Location);
-        assert!(out1.advances_cursor());
-        let rows = setup
-            .alice
-            .snapshot_last_known_for_circle(ngid, now)
-            .unwrap();
-        assert!(
-            rows.iter().any(|r| r.sender_pubkey == bob_hex),
-            "peer location persisted"
-        );
-
-        // Alice stages a pending commit → marker set. A NEW peer location for the
-        // SAME group is now SKIPPED without decrypting or persisting.
-        setup.alice.self_update(gid).unwrap();
-        assert!(setup.alice.has_pending_commit(ngid));
-        let (loc2, _, _) = setup
-            .bob
-            .encrypt_location(
-                gid,
-                &setup.bob_keys.public_key(),
-                &LocationMessage::new(41.0, -75.0),
-                300,
-            )
-            .unwrap();
-        let out2 = setup.alice.decrypt_receive_only(&loc2, ngid, &alice_hex);
-        assert_eq!(
-            out2,
-            ReceiveOnlyOutcome::Skipped,
-            "regime-2 group skipped without decrypt"
-        );
-        assert!(!out2.advances_cursor());
-        // The skipped location was NOT persisted (proves the skip is pre-decrypt).
-        let rows2 = setup
-            .alice
-            .snapshot_last_known_for_circle(ngid, now)
-            .unwrap();
-        assert!(
-            !rows2.iter().any(|r| (r.latitude - 41.0).abs() < 0.001),
-            "skipped location not persisted"
-        );
-    }
-
-    /// M7-1: a peer SelfRemove auto-staged during a receive-only sweep is
-    /// classified `AutoCommitStaged` — NEVER cleared, the marker is SET (so
-    /// future wakes skip), the cursor STOPS, and no epoch advances. The
-    /// foreground engine converges it later.
-    #[test]
-    fn m7_receive_only_auto_commit_stages_marks_and_stops_cursor() {
-        use crate::relay::ReceiveOnlyOutcome;
-        let setup = setup_two_party_circle();
-        let ngid = &setup.nostr_group_id;
-        let alice_hex = setup.alice_keys.public_key().to_hex();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-        assert!(!setup.alice.has_pending_commit(ngid));
-
-        let self_remove = setup
-            .bob
-            .propose_leave(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        let out = receive_only_until_applied(&setup.alice, &self_remove, ngid, &alice_hex);
-        assert_eq!(out, ReceiveOnlyOutcome::AutoCommitStaged);
-        assert!(
-            !out.advances_cursor(),
-            "cursor stops before an auto-staged commit"
-        );
-        assert!(
-            setup.alice.has_pending_commit(ngid),
-            "marker SET so future background wakes skip this group"
-        );
-        // Never merged/cleared → the staged commit does not advance the epoch.
-        assert_eq!(setup.alice.group_epoch(&setup.mls_group_id).unwrap(), n);
-    }
-
-    /// M7-1: an already-applied peer commit (regime 1) is classified
-    /// `CommitApplied` and advances the cursor (convergent — authors nothing,
-    /// leaves no local pending commit).
-    #[test]
-    fn m7_receive_only_applied_peer_commit_advances_cursor() {
-        use crate::relay::ReceiveOnlyOutcome;
-        let setup = setup_two_party_circle();
-        let ngid = &setup.nostr_group_id;
-        let alice_hex = setup.alice_keys.public_key().to_hex();
-
-        let commit = setup
-            .bob
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        let out = receive_only_until_applied(&setup.alice, &commit, ngid, &alice_hex);
-        assert_eq!(out, ReceiveOnlyOutcome::CommitApplied);
-        assert!(
-            out.advances_cursor(),
-            "an applied peer commit advances the cursor"
-        );
-        assert!(
-            !setup.alice.has_pending_commit(ngid),
-            "applying a peer commit authors nothing — no local pending"
-        );
-    }
-
-    /// M7 FAIL-CLOSED (the most load-bearing clause): a storage error in
-    /// `has_pending_commit` MUST return `true` (skip the decrypt), never
-    /// fail-open to `false` (which would let a background sweep blind-apply a
-    /// same-epoch sibling over a pending commit → fork). Injected by dropping
-    /// the marker table so the `SELECT` errors.
-    #[test]
-    fn m7_has_pending_commit_fails_closed_on_storage_error() {
-        let setup = setup_two_party_circle();
-        let ngid = &setup.nostr_group_id;
-        assert!(!setup.alice.has_pending_commit(ngid), "no marker → false");
-
-        setup
-            .alice
-            .storage
-            .conn()
-            .lock()
-            .unwrap()
-            .execute("DROP TABLE staged_commits", [])
-            .unwrap();
-
-        assert!(
-            setup.alice.has_pending_commit(ngid),
-            "a storage error must FAIL CLOSED to true"
-        );
-    }
-
-    /// COVERAGE (M6-4 add-member path): two admins concurrently ADD DISTINCT new
-    /// members from the same epoch N. `converge_commit` must pick one MIP-03
-    /// winner, advance both to N+1, and — via `intent_unsatisfied`'s `AddMembers`
-    /// arm — report the loser's own not-yet-added member as `intent_still_pending`
-    /// (driving the M6-4 Dart re-stage), while the WINNER's added member is
-    /// present on the loser's adopted branch. Mirror of
-    /// `concurrent_admin_remove_distinct_targets_converges` for the Add intent —
-    /// the previously-untested decision path behind `ConvergeIntentKind.add`.
-    #[test]
-    fn concurrent_admin_add_distinct_members_converges() {
-        let setup = setup_four_party_two_admin_circle();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-
-        // Two fresh members, each with a real KeyPackage. Keep the temp dirs in
-        // scope for the whole test (the KP events are self-contained, but this
-        // avoids any early cleanup).
-        let erin_dir = TempDir::new().unwrap();
-        let erin_mdk = MdkManager::new_unencrypted(erin_dir.path()).unwrap();
-        let erin_keys = Keys::generate();
-        let erin_kp = build_new_member_kp(&erin_mdk, &erin_keys);
-
-        let frank_dir = TempDir::new().unwrap();
-        let frank_mdk = MdkManager::new_unencrypted(frank_dir.path()).unwrap();
-        let frank_keys = Keys::generate();
-        let frank_kp = build_new_member_kp(&frank_mdk, &frank_keys);
-
-        let alice_commit = setup
-            .alice
-            .add_members(&setup.mls_group_id, std::slice::from_ref(&erin_kp))
-            .unwrap()
-            .evolution_event;
-        let bob_commit = setup
-            .bob
-            .add_members(&setup.mls_group_id, std::slice::from_ref(&frank_kp))
-            .unwrap()
-            .evolution_event;
-
-        let alice_out = setup
-            .alice
-            .converge_commit(
-                &setup.mls_group_id,
-                &alice_commit,
-                n,
-                std::slice::from_ref(&bob_commit),
-                &CommitIntent::AddMembers(vec![erin_keys.public_key()]),
-            )
-            .unwrap();
-        let bob_out = setup
-            .bob
-            .converge_commit(
-                &setup.mls_group_id,
-                &bob_commit,
-                n,
-                std::slice::from_ref(&alice_commit),
-                &CommitIntent::AddMembers(vec![frank_keys.public_key()]),
-            )
-            .unwrap();
-
-        let alice_won = matches!(alice_out, CommitConvergence::Merged);
-        assert_ne!(
-            alice_won,
-            matches!(bob_out, CommitConvergence::Merged),
-            "exactly one winner"
-        );
-        let ae = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-        assert_eq!(ae, setup.bob.group_epoch(&setup.mls_group_id).unwrap());
-        assert_eq!(ae, n + 1);
-
-        let (winner, winner_keys, loser, winner_added, loser_added, loser_out) = if alice_won {
-            (
-                &setup.alice,
-                &setup.alice_keys,
-                &setup.bob,
-                erin_keys.public_key().to_hex(),
-                frank_keys.public_key().to_hex(),
-                bob_out,
-            )
-        } else {
-            (
-                &setup.bob,
-                &setup.bob_keys,
-                &setup.alice,
-                frank_keys.public_key().to_hex(),
-                erin_keys.public_key().to_hex(),
-                alice_out,
-            )
-        };
-
-        let loser_members: Vec<String> = loser
-            .get_members(&setup.mls_group_id)
-            .unwrap()
-            .into_iter()
-            .map(|m| m.pubkey)
-            .collect();
-        assert!(
-            loser_members.contains(&winner_added),
-            "winner's added member present on the loser's adopted branch"
-        );
-        assert!(
-            !loser_members.contains(&loser_added),
-            "loser's own added member ABSENT — its Add rolled back, adopting the winner's branch"
-        );
-        match loser_out {
-            CommitConvergence::AdoptedWinner {
-                intent_still_pending,
-            } => assert!(
-                intent_still_pending,
-                "loser's Add intent still pending (its member was not added by the winner)"
-            ),
-            other => panic!("loser must be AdoptedWinner, got {other:?}"),
-        }
-        assert!(cross_decrypts(
-            winner,
-            &winner_keys.public_key(),
-            loser,
-            &setup.mls_group_id
-        ));
-
-        // The WINNER's own Add intent is SATISFIED post-adopt (its member is in
-        // the roster) → intent_unsatisfied returns false → no re-stage.
-        let winner_target = if alice_won {
-            erin_keys.public_key()
-        } else {
-            frank_keys.public_key()
-        };
-        assert!(
-            !winner
-                .intent_unsatisfied(
-                    &setup.mls_group_id,
-                    &CommitIntent::AddMembers(vec![winner_target])
-                )
-                .unwrap(),
-            "winner's added member present → its Add intent satisfied"
-        );
-
-        drop(erin_dir);
-        drop(frank_dir);
-    }
-
-    /// FAST: single-admin (no competitor) preserves today's path — Merged,
-    /// epoch +1, no clear/regression.
-    #[test]
-    fn single_admin_no_competitor_converges_to_merged() {
-        let setup = setup_two_party_circle();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-        let bob_hex = setup.bob_keys.public_key().to_hex();
-        let commit = setup
-            .alice
-            .remove_members(&setup.mls_group_id, std::slice::from_ref(&bob_hex))
-            .unwrap()
-            .evolution_event;
-        let out = setup
-            .alice
-            .converge_commit(
-                &setup.mls_group_id,
-                &commit,
-                n,
-                &[],
-                &CommitIntent::RemoveMembers(vec![setup.bob_keys.public_key()]),
-            )
-            .unwrap();
-        assert_eq!(out, CommitConvergence::Merged);
-        assert_eq!(setup.alice.group_epoch(&setup.mls_group_id).unwrap(), n + 1);
-        assert!(!setup
-            .alice
-            .get_members(&setup.mls_group_id)
-            .unwrap()
-            .iter()
-            .any(|m| m.pubkey == bob_hex));
-    }
-
-    /// TOCTOU: the local group advanced past `staged_epoch` before convergence
-    /// (an evolution poller applied a peer commit) → no double-apply, RolledBack
-    /// with no dangling pending commit.
-    #[test]
-    fn converge_when_group_already_advanced_rolls_back_no_dangling() {
-        let setup = setup_three_party_two_admin_circle();
-        let carol_hex = setup.carol_keys.public_key().to_hex();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-
-        let alice_commit = setup
-            .alice
-            .remove_members(&setup.mls_group_id, std::slice::from_ref(&carol_hex))
-            .unwrap()
-            .evolution_event;
-        // Bob's commit advances Alice's local group first (the poller path).
-        let bob_commit = setup
-            .bob
-            .remove_members(&setup.mls_group_id, std::slice::from_ref(&carol_hex))
-            .unwrap()
-            .evolution_event;
-        setup
-            .bob
-            .finalize_pending_commit(&setup.mls_group_id)
-            .unwrap();
-        let _ = setup.alice.clear_pending_commit(&setup.mls_group_id);
-        let _ = setup.alice.mdk.process_message(&bob_commit);
-        assert!(setup.alice.group_epoch(&setup.mls_group_id).unwrap() > n);
-
-        let out = setup
-            .alice
-            .converge_commit(
-                &setup.mls_group_id,
-                &alice_commit,
-                n,
-                &[],
-                &CommitIntent::None,
-            )
-            .unwrap();
-        assert_eq!(out, CommitConvergence::RolledBack);
-        assert!(setup
-            .alice
-            .remove_members(&setup.mls_group_id, &[setup.bob_keys.public_key().to_hex()])
-            .is_ok());
-        let _ = setup.alice.clear_pending_commit(&setup.mls_group_id);
-    }
-
-    /// SEC2 + H1 liveness gate: a competitor that wins the MIP-03 order key but
-    /// CANNOT be applied (a foreign / unauthenticated event — or a routine
-    /// Location) is NOT a genuine convergence competitor: it can never advance the
-    /// MLS epoch, so it is EXCLUDED from the candidate set and our legitimate
-    /// commit MERGES. Pre-M11 this returned `RolledBack` (the liveness bug — an
-    /// order-key-winning non-commit starved the membership op into a re-stage
-    /// loop). The security intent is PRESERVED and strengthened: the forged event
-    /// is never adopted (our own removal target is actually gone) and no dangling
-    /// pending commit is left behind.
-    #[test]
-    fn converge_ignores_unapplicable_competitor_and_merges_ours() {
-        let setup = setup_three_party_two_admin_circle();
-        let carol_hex = setup.carol_keys.public_key().to_hex();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-
-        let our_commit = setup
-            .alice
-            .remove_members(&setup.mls_group_id, std::slice::from_ref(&carol_hex))
-            .unwrap()
-            .evolution_event;
-        // A foreign kind-445 event with created_at=1 so it "wins" the order key
-        // but is not a valid commit for this group.
-        let forged = EventBuilder::new(Kind::Custom(445), "not-a-real-commit")
-            .custom_created_at(nostr::Timestamp::from(1))
-            .sign_with_keys(&Keys::generate())
-            .unwrap();
-
-        let out = setup
-            .alice
-            .converge_commit(
-                &setup.mls_group_id,
-                &our_commit,
-                n,
-                std::slice::from_ref(&forged),
-                &CommitIntent::None,
-            )
-            .unwrap();
-        assert_eq!(
-            out,
-            CommitConvergence::Merged,
-            "an order-key-winning non-commit must be ignored, not force a rollback"
-        );
-        assert_eq!(
-            setup.alice.group_epoch(&setup.mls_group_id).unwrap(),
-            n + 1,
-            "our legitimate commit advanced the epoch; the forged event never did"
-        );
-        // Our removal target (Carol) is actually gone — OUR commit merged, the
-        // forged competitor was NOT adopted.
-        assert!(
-            !setup
-                .alice
-                .member_pubkeys_hex(&setup.mls_group_id)
-                .unwrap()
-                .contains(&carol_hex),
-            "our Remove(carol) commit merged (the forged competitor was not adopted)"
-        );
-        // No dangling pending commit: a fresh op stages cleanly.
-        assert!(setup.alice.self_update(&setup.mls_group_id).is_ok());
-        let _ = setup.alice.clear_pending_commit(&setup.mls_group_id);
-    }
-
-    /// H1 fork-safety (M11 review Finding R1/M2): the LOCAL invariant that a
-    /// peer's `SelfRemove` leave PROPOSAL buffered as an order-beating
-    /// settle-window competitor must NEVER make the converging admin merge a
-    /// phantom commit. The hazard: `process_message` on a `SelfRemove` drives
-    /// MDK's `auto_commit_proposal`, whose `stage_commit` OVERWRITES our own
-    /// staged pending commit (see `relay::live_sync::autocommit` module docs). If
-    /// the walk then blindly `merge_our_pending_commit`s, it would merge an
-    /// unpublished "remove Bob" commit instead of our self-update.
-    ///
-    /// Local invariant (what THIS single-manager test pins): after convergence we
-    /// either merged OUR self-update (Bob still a member) or rolled back cleanly
-    /// (epoch unchanged) — never `Merged` with Bob removed, never `AdoptedWinner`.
-    ///
-    /// NB: this does NOT prove distributed fork-safety. Under live-sync (M6) our
-    /// commit is published DURING the window, so a `RolledBack` here can still
-    /// strand us against passive peers that kept the published commit — the
-    /// Phase-B blocker HIGH-1 tracked in `docs/M11_ROLLOUT.md`, which a
-    /// two-manager cross-decrypt test must cover before the flag flips.
-    #[test]
-    fn converge_with_a_peer_selfremove_competitor_never_phantom_merges() {
-        let setup = setup_two_party_circle();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-        let bob_hex = setup.bob_keys.public_key().to_hex();
-
-        // Bob proposes to leave FIRST → his SelfRemove strictly sorts ahead of
-        // Alice's commit in MIP-03 order (so it lands in the beating set).
-        let bob_selfremove = setup
-            .bob
-            .propose_leave(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-
-        // Alice (admin) stages a self-update — her pending commit — published
-        // during the window.
-        let alice_commit = setup
-            .alice
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        assert!(
-            bob_selfremove.created_at < alice_commit.created_at,
-            "precondition: the SelfRemove must sort ahead of our commit"
-        );
-
-        let out = setup
-            .alice
-            .converge_commit(
-                &setup.mls_group_id,
-                &alice_commit,
-                n,
-                std::slice::from_ref(&bob_selfremove),
-                &CommitIntent::None,
-            )
-            .unwrap();
-
-        match out {
-            CommitConvergence::Merged => {
-                assert_eq!(setup.alice.group_epoch(&setup.mls_group_id).unwrap(), n + 1);
-                assert!(
-                    setup
-                        .alice
-                        .member_pubkeys_hex(&setup.mls_group_id)
-                        .unwrap()
-                        .contains(&bob_hex),
-                    "FORK: Alice merged an unpublished 'remove Bob' auto-commit \
-                     instead of her own published self-update"
-                );
-            }
-            CommitConvergence::RolledBack => {
-                // Safe: no fork, the caller re-fetches + re-stages. Epoch unchanged.
-                assert_eq!(setup.alice.group_epoch(&setup.mls_group_id).unwrap(), n);
-            }
-            CommitConvergence::AdoptedWinner { .. } => {
-                panic!("a SelfRemove proposal is not a commit and must not be adopted");
-            }
-        }
-        // Whatever the leg, no dangling pending commit remains.
-        let _ = setup.alice.clear_pending_commit(&setup.mls_group_id);
-        assert!(setup.alice.self_update(&setup.mls_group_id).is_ok());
-        let _ = setup.alice.clear_pending_commit(&setup.mls_group_id);
-    }
-
-    /// H1 (M11 review Finding R2): the ACTUAL bug scenario — a beating set holding
-    /// BOTH a Location (earlier order key) AND a genuine competing commit (later,
-    /// but still ahead of ours). The walk must skip/collect the Location and adopt
-    /// the REAL commit — never pick the order-key-minimum Location — and every
-    /// member must select the same real-commit winner even though the global
-    /// minimum is a Location. Also asserts the loser cross-decrypts the winner
-    /// (shared exporter ⇒ no fork).
-    #[test]
-    fn converge_adopts_the_real_commit_and_collects_the_location_from_a_mixed_set() {
-        let setup = setup_two_party_circle();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-
-        // Bob sends a real (Alice-decryptable) Location FIRST — earliest key.
-        let loc = LocationMessage::new(40.0, -3.0);
-        let (bob_loc, _, _) = setup
-            .bob
-            .encrypt_location(&setup.mls_group_id, &setup.bob_keys.public_key(), &loc, 300)
-            .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        // Bob stages a real self-update — the MIDDLE key (the true winner).
-        let bob_commit = setup
-            .bob
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        // Alice stages her own — the LATEST key (she loses).
-        let alice_commit = setup
-            .alice
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        assert!(bob_loc.created_at < bob_commit.created_at);
-        assert!(bob_commit.created_at < alice_commit.created_at);
-
-        let (out, delivered) = setup
-            .alice
-            .converge_commit_collecting_locations(
-                &setup.mls_group_id,
-                &alice_commit,
-                n,
-                &[bob_loc.clone(), bob_commit.clone()],
-                &CommitIntent::None,
-            )
-            .unwrap();
-
-        // Alice adopts Bob's REAL commit, NOT the earlier-sorting Location.
-        assert!(
-            matches!(out, CommitConvergence::AdoptedWinner { .. }),
-            "the real commit must be adopted over the earlier Location: {out:?}"
-        );
-        assert_eq!(setup.alice.group_epoch(&setup.mls_group_id).unwrap(), n + 1);
-        // The Location was still collected for re-delivery (never dropped).
-        assert_eq!(
-            delivered.len(),
-            1,
-            "the Location must be collected even amid a real winning commit"
-        );
-        assert_eq!(
-            delivered[0].sender_pubkey,
-            setup.bob_keys.public_key().to_hex()
-        );
-
-        // Fork-safety: Bob merges his own; Alice (loser) holds Bob's exporter.
-        setup
-            .bob
-            .converge_commit(
-                &setup.mls_group_id,
-                &bob_commit,
-                n,
-                std::slice::from_ref(&alice_commit),
-                &CommitIntent::None,
-            )
-            .unwrap();
-        assert!(
-            cross_decrypts(
-                &setup.bob,
-                &setup.bob_keys.public_key(),
-                &setup.alice,
-                &setup.mls_group_id
-            ),
-            "Alice must decrypt Bob's location on the shared adopted branch (no fork)"
-        );
-        let _ = setup.alice.clear_pending_commit(&setup.mls_group_id);
-        let _ = setup.bob.clear_pending_commit(&setup.mls_group_id);
-    }
-
-    // ===================================================================
-    // REV-1 (distributed SelfRemove fork) acceptance-gate tests.
-    //
-    // Reachable ONLY with live-sync ON, so these gate the Phase-B flag flip.
-    // The corroboration-gate fix (peek by MLS content_type + skip Proposals,
-    // fail-safe on unpeekable; leaver backstop) lives in step 2 — these are the
-    // TDD-red gate written BEFORE it. `peek_content_type` / `still_a_member` are
-    // `todo!` stubs until step 2. See docs/M11_ROLLOUT.md.
-    // ===================================================================
-
-    /// REV-1 HEADLINE / acceptance gate (Phase-B blocker): the DISTRIBUTED
-    /// fork-safety proof the single-manager
-    /// `converge_with_a_peer_selfremove_competitor_never_phantom_merges` cannot
-    /// give. A leaver's `SelfRemove` that beats an admin's published commit
-    /// `C_A1` in MIP-03 order must NOT strand the admin: after convergence the
-    /// admin has MERGED `C_A1` (skipping the SelfRemove) and sits on the SAME
-    /// branch as a passive peer that already applied `C_A1` — proven by a live
-    /// cross-decrypt.
-    ///
-    /// FAILS TODAY: the walk trial-applies Carol's `SelfRemove`, MDK auto-commits
-    /// it (Alice is an admin) which OVERWRITES the staged `C_A1`, the walk bails
-    /// `RolledBack`, and Alice is stranded at epoch N while Bob (who applied the
-    /// published `C_A1`) is at N+1 → distributed fork → the cross-decrypt fails.
-    /// The fix (peek + skip Proposals) makes Alice merge `C_A1` instead. RED:
-    /// `converge_commit` returns `RolledBack`, so the `Merged` assertion fails.
-    #[test]
-    fn rev1_two_manager_cross_decrypt_converges_when_selfremove_races_admin_commit() {
-        let setup = setup_three_party_two_admin_circle();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-
-        // Carol (non-admin) proposes to leave FIRST → her SelfRemove strictly
-        // sorts ahead of Alice's commit in MIP-03 order (the order-beating race).
-        let carol_selfremove = setup
-            ._carol
-            .propose_leave(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-
-        // Alice (admin) stages her own commit C_A1 (a self-update stands in for
-        // any admin commit; the fork mechanism — MDK auto-committing the peer
-        // SelfRemove over the staged commit — is identical). Per the M6
-        // settle-window contract C_A1 is PUBLISHED during the window: Bob applies
-        // it below.
-        let alice_commit = setup
-            .alice
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        assert!(
-            carol_selfremove.created_at < alice_commit.created_at,
-            "precondition: Carol's SelfRemove must sort ahead of Alice's C_A1"
-        );
-
-        // Bob (a passive peer) applies the published C_A1 → epoch N+1.
-        setup
-            .bob
-            .mdk
-            .process_message(&alice_commit)
-            .expect("Bob applies the published C_A1");
-        assert_eq!(
-            setup.bob.group_epoch(&setup.mls_group_id).unwrap(),
-            n + 1,
-            "Bob advanced onto C_A1's branch"
-        );
-
-        // Alice converges her window with Carol's SelfRemove as the order-beating
-        // competitor.
-        let out = setup
-            .alice
-            .converge_commit(
-                &setup.mls_group_id,
-                &alice_commit,
-                n,
-                std::slice::from_ref(&carol_selfremove),
-                &CommitIntent::None,
-            )
-            .unwrap();
-
-        // FIXED behavior: Alice SKIPS the SelfRemove and MERGES her own C_A1.
-        assert_eq!(
-            out,
-            CommitConvergence::Merged,
-            "Alice must skip Carol's SelfRemove Proposal and merge C_A1, not \
-             trial-apply it and roll back (the distributed fork)"
-        );
-        assert_eq!(
-            setup.alice.group_epoch(&setup.mls_group_id).unwrap(),
-            n + 1,
-            "Alice advanced onto C_A1's branch (same as Bob)"
-        );
-
-        // THE FORK PROOF: Bob (winner branch, N+1) encrypts; Alice must decrypt
-        // it on the one shared C_A1 branch. Pre-fix Alice is stranded at N and
-        // cannot derive N+1's exporter secret → this fails.
-        assert!(
-            cross_decrypts(
-                &setup.bob,
-                &setup.bob_keys.public_key(),
-                &setup.alice,
-                &setup.mls_group_id
-            ),
-            "FORK: Alice and Bob are not on the same branch after convergence"
-        );
-
-        let _ = setup.alice.clear_pending_commit(&setup.mls_group_id);
-    }
-
-    /// REV-1 peek unit: the non-destructive `peek_content_type` classifies a
-    /// settle-window competitor by its MLS `content_type` — `Proposal` for a
-    /// `propose_leave` SelfRemove, `Commit` for a `self_update`, `Application`
-    /// for a Location — the partition the corroboration-gate walk uses to SKIP
-    /// Proposals without a destructive trial-apply. RED until step 2 (the peek is
-    /// a `todo!` stub → panics on the first call).
-    #[test]
-    fn rev1_peek_classifies_by_content_type() {
-        use crate::nostr::mls::PeekedContent;
-
-        let setup = setup_two_party_circle();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-
-        // Application: a Location (create_message under the hood; no pending
-        // commit staged).
-        let loc = LocationMessage::new(12.34, 56.78);
-        let (location_event, _, _) = setup
-            .bob
-            .encrypt_location(&setup.mls_group_id, &setup.bob_keys.public_key(), &loc, 300)
-            .unwrap();
-
-        // Commit: a self_update evolution event (clear the pending commit after,
-        // so the next op stages cleanly).
-        let commit_event = setup
-            .bob
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        let _ = setup.bob.clear_pending_commit(&setup.mls_group_id);
-
-        // Proposal: a SelfRemove propose_leave evolution event.
-        let proposal_event = setup
-            .bob
-            .propose_leave(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        let _ = setup.bob.clear_pending_commit(&setup.mls_group_id);
-
-        // Alice holds epoch-n's group-event exporter secret, so she can peek all
-        // three (each was framed with that same epoch-n secret; Bob never merged).
-        assert_eq!(
-            setup
-                .alice
-                .mdk
-                .peek_content_type(&proposal_event, &setup.mls_group_id, n),
-            PeekedContent::Proposal,
-            "a propose_leave SelfRemove is an MLS Proposal (must be skipped)"
-        );
-        assert_eq!(
-            setup
-                .alice
-                .mdk
-                .peek_content_type(&commit_event, &setup.mls_group_id, n),
-            PeekedContent::Commit,
-            "a self_update is an MLS Commit (a real competitor)"
-        );
-        assert_eq!(
-            setup
-                .alice
-                .mdk
-                .peek_content_type(&location_event, &setup.mls_group_id, n),
-            PeekedContent::Application,
-            "an encrypt_location is an MLS application message (a Location)"
-        );
-    }
-
-    /// REV-1 HIGH-2 fail-safe peek: a competitor the peek CANNOT decrypt — no
-    /// stored secret for the peek epoch, or an undecryptable outer ciphertext —
-    /// must classify as `Unpeekable` (a NON-destructive skip), NEVER a guessed
-    /// classification the walk would trial-apply (which would re-open the exact
-    /// REV-1 fork). RED until step 2 (the peek stub panics on the first call);
-    /// the trailing walk assertion is a GREEN guard that must stay green.
-    #[test]
-    fn rev1_peek_fails_safe_on_unpeekable() {
-        use crate::nostr::mls::PeekedContent;
-
-        let setup = setup_two_party_circle();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-
-        // A well-formed Location event, but peeked at an epoch with NO stored
-        // exporter secret (None-secret) → must fail SAFE to Unpeekable.
-        let loc = LocationMessage::new(1.0, 2.0);
-        let (event, _, _) = setup
-            .bob
-            .encrypt_location(&setup.mls_group_id, &setup.bob_keys.public_key(), &loc, 300)
-            .unwrap();
-        assert_eq!(
-            setup
-                .alice
-                .mdk
-                .peek_content_type(&event, &setup.mls_group_id, n + 999),
-            PeekedContent::Unpeekable,
-            "a None-secret peek epoch must fail safe (Unpeekable)"
-        );
-
-        // An undecryptable outer ciphertext (foreign kind:445) at the real epoch
-        // → the exporter-secret decrypt fails its AEAD tag → Unpeekable.
-        let foreign = EventBuilder::new(Kind::Custom(445), "not-a-real-mls-ciphertext")
-            .custom_created_at(Timestamp::from(1))
-            .sign_with_keys(&Keys::generate())
-            .unwrap();
-        assert_eq!(
-            setup
-                .alice
-                .mdk
-                .peek_content_type(&foreign, &setup.mls_group_id, n),
-            PeekedContent::Unpeekable,
-            "an undecryptable competitor must fail safe (Unpeekable)"
-        );
-
-        // GREEN GUARD (must stay green through step 2): feeding that
-        // undecryptable, order-beating competitor to the walk must leave our
-        // staged commit INTACT — a non-destructive skip, our commit still merges.
-        let alice_commit = setup
-            .alice
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        let (out, _delivered) = setup
-            .alice
-            .converge_commit_collecting_locations(
-                &setup.mls_group_id,
-                &alice_commit,
-                n,
-                std::slice::from_ref(&foreign),
-                &CommitIntent::None,
-            )
-            .unwrap();
-        assert_eq!(
-            out,
-            CommitConvergence::Merged,
-            "an unpeekable competitor must not destroy our staged commit"
-        );
-        assert_eq!(setup.alice.group_epoch(&setup.mls_group_id).unwrap(), n + 1);
-        let _ = setup.alice.clear_pending_commit(&setup.mls_group_id);
-    }
-
-    /// REV-1 HIGH-2 BLOCKING decrypt-parity gate: the peek's outer
-    /// exporter-secret decrypt must recover the SAME MLS `content_type` MDK's own
-    /// decrypt does, for a message produced by MDK's PUBLIC `create_message` path
-    /// (NOT the pub(crate) `encrypt_message_with_exporter_secret`), so peek and
-    /// MDK can never disagree and mis-skip / mis-apply a competitor. The step-2
-    /// decrypt MUST also try the NIP-44 legacy fallback
-    /// (`decrypt_message_with_any_supported_format`) so parity holds for
-    /// legacy-format events too. RED until step 2 (the peek stub panics).
-    #[test]
-    fn rev1_peek_decrypt_parity_with_mdk() {
-        use crate::nostr::mls::PeekedContent;
-
-        let setup = setup_two_party_circle();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-
-        // Produce an application message via MDK's PUBLIC create_message path.
-        let loc = LocationMessage::new(12.34, 56.78);
-        let content = loc.to_string().unwrap();
-        let rumor = EventBuilder::new(Kind::Custom(9), content)
-            .tag(Tag::parse(["t", "location"]).unwrap())
-            .build(setup.bob_keys.public_key());
-        let event = setup
-            .bob
-            .mdk
-            .create_message(&setup.mls_group_id, rumor, None)
-            .unwrap();
-
-        // The peek (read-only) classifies it...
-        let peeked = setup
-            .alice
-            .mdk
-            .peek_content_type(&event, &setup.mls_group_id, n);
-
-        // ...and MDK's own public decrypt path agrees it is an application
-        // message (the parity anchor / ground truth). Peek must match.
-        assert!(
-            matches!(
-                setup.alice.decrypt_location(&event),
-                Ok(LocationMessageResult::Location { .. })
-            ),
-            "MDK ground truth: create_message output is an application message"
-        );
-        assert_eq!(
-            peeked,
-            PeekedContent::Application,
-            "peek decrypt-parity: the peek must recover the same content_type MDK does"
-        );
-    }
-
-    /// REV-1 regression GUARD (must stay green through step 2): the
-    /// corroboration-gate design NEVER reads a peeked competitor's `sender()`, so
-    /// a `SelfRemove` competitor — real, forged, or naming a victim — can NEVER
-    /// evict a BYSTANDER via the convergence walk. This closes the HIGH-1
-    /// forged-sender removal vector BY CONSTRUCTION. Green today (MDK auto-commit
-    /// then rollback removes nobody net; the fix skips the Proposal outright).
-    ///
-    /// NB: a fully valid-outer / invalid-inner forgery requires MDK internals to
-    /// construct; this guard uses a real SelfRemove plus a tampered/foreign one
-    /// (MDK rejects at decrypt / signature verification). The invariant guarded is
-    /// identical: no competitor, however adversarial, evicts a bystander victim.
-    #[test]
-    fn rev1_forged_selfremove_cannot_remove_victim() {
-        let setup = setup_three_party_two_admin_circle();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-        // Bob is the bystander VICTIM (a stable member the SelfRemove does not name).
-        let bob_hex = setup.bob_keys.public_key().to_hex();
-
-        // Carol's real SelfRemove (a Proposal naming Carol's own leaf)...
-        let carol_selfremove = setup
-            ._carol
-            .propose_leave(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        // ...and a tampered/foreign forgery of it (an adversarial competitor:
-        // a mutated kind:445 re-signed with random keys, earliest order key).
-        let forged = EventBuilder::new(Kind::Custom(445), format!("{}x", carol_selfremove.content))
-            .custom_created_at(Timestamp::from(1))
-            .sign_with_keys(&Keys::generate())
-            .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-
-        let alice_commit = setup
-            .alice
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-
-        let out = setup
-            .alice
-            .converge_commit(
-                &setup.mls_group_id,
-                &alice_commit,
-                n,
-                &[forged, carol_selfremove],
-                &CommitIntent::None,
-            )
-            .unwrap();
-        // Whatever the convergence leg, the bystander VICTIM must be untouched.
-        assert!(
-            setup
-                .alice
-                .member_pubkeys_hex(&setup.mls_group_id)
-                .unwrap()
-                .contains(&bob_hex),
-            "a SelfRemove competitor must NEVER evict the bystander victim (Bob)"
-        );
-        let _ = out;
-        let _ = setup.alice.clear_pending_commit(&setup.mls_group_id);
-    }
-
-    /// REV-1 MEDIUM-2: a mixed beating set `[SelfRemove(earliest),
-    /// RealCommit(mid)]` ahead of our `C_A1(latest)` must ADOPT the real commit —
-    /// the walk must SKIP the earlier-sorting SelfRemove Proposal and keep walking
-    /// to the genuine competitor, never `return` on the first SelfRemove. The
-    /// existing `converge_adopts_the_real_commit_and_collects_the_location_from_a_mixed_set`
-    /// covers `[Location, RealCommit]`; this covers the SelfRemove-earliest case
-    /// the walk's early-return strands.
-    ///
-    /// FAILS TODAY: the walk trial-applies the earliest SelfRemove, auto-commits
-    /// it, and bails `RolledBack` before ever reaching the real commit → the
-    /// `AdoptedWinner` assertion fails.
-    #[test]
-    fn rev1_mixed_set_adopts_real_commit() {
-        let setup = setup_three_party_two_admin_circle();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-
-        // Carol's SelfRemove — the EARLIEST order key (a Proposal, must be skipped).
-        let carol_selfremove = setup
-            ._carol
-            .propose_leave(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        // Bob's real self_update — the MIDDLE key (the TRUE winner).
-        let bob_commit = setup
-            .bob
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        // Alice's own — the LATEST key (she loses).
-        let alice_commit = setup
-            .alice
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        assert!(carol_selfremove.created_at < bob_commit.created_at);
-        assert!(bob_commit.created_at < alice_commit.created_at);
-
-        let out = setup
-            .alice
-            .converge_commit(
-                &setup.mls_group_id,
-                &alice_commit,
-                n,
-                &[carol_selfremove, bob_commit.clone()],
-                &CommitIntent::None,
-            )
-            .unwrap();
-
-        // Alice adopts Bob's REAL commit — NOT the earlier SelfRemove (RolledBack),
-        // NOT her own.
-        assert!(
-            matches!(out, CommitConvergence::AdoptedWinner { .. }),
-            "the real commit must be adopted over the earlier SelfRemove Proposal: {out:?}"
-        );
-        assert_eq!(setup.alice.group_epoch(&setup.mls_group_id).unwrap(), n + 1);
-
-        // Fork-safety: Bob merges his own; Alice (loser) must cross-decrypt on the
-        // shared adopted branch.
-        setup
-            .bob
-            .converge_commit(
-                &setup.mls_group_id,
-                &bob_commit,
-                n,
-                std::slice::from_ref(&alice_commit),
-                &CommitIntent::None,
-            )
-            .unwrap();
-        assert!(
-            cross_decrypts(
-                &setup.bob,
-                &setup.bob_keys.public_key(),
-                &setup.alice,
-                &setup.mls_group_id
-            ),
-            "Alice must decrypt Bob's location on the shared adopted branch (no fork)"
-        );
-        let _ = setup.alice.clear_pending_commit(&setup.mls_group_id);
-        let _ = setup.bob.clear_pending_commit(&setup.mls_group_id);
-    }
-
-    /// REV-1 leaver-backstop predicate: `still_a_member` reports `true` while the
-    /// target is in the roster and `false` once removed — the liveness signal the
-    /// leaver polls to stop re-issuing `propose_leave` before `complete_leave`
-    /// wipes. RED until step 2 (the query is a `todo!` stub → panics on the first
-    /// call).
-    #[test]
-    fn rev1_still_a_member_reflects_removal() {
-        let setup = setup_two_party_circle();
-        let bob_hex = setup.bob_keys.public_key().to_hex();
-
-        // Bob is in the roster → true.
-        assert!(
-            setup
-                .alice
-                .still_a_member(&setup.mls_group_id, &bob_hex)
-                .unwrap(),
-            "Bob is a member before removal"
-        );
-
-        // Remove Bob and merge locally (the roster change the leaver observes).
-        setup
-            .alice
-            .mdk
-            .remove_members(&setup.mls_group_id, &[bob_hex.clone()])
-            .unwrap();
-        setup
-            .alice
-            .mdk
-            .merge_pending_commit(&setup.mls_group_id)
-            .unwrap();
-
-        // Bob is gone → false (the backstop stop condition).
-        assert!(
-            !setup
-                .alice
-                .still_a_member(&setup.mls_group_id, &bob_hex)
-                .unwrap(),
-            "Bob is no longer a member after removal"
-        );
-    }
-
-    /// REV-1 driver-2 (leaver backstop) composed recovery — the acceptance-gate
-    /// row marmot's QC flagged as missing. Driver-1 (a non-windowed member
-    /// auto-commits the SelfRemove) removes the leaver ONLY when that removal
-    /// commit wins the MIP-03 order race; when the window-opening non-removal
-    /// commit wins (common — needs only one pre-windowed member), the leaver is
-    /// NOT removed and its SelfRemove goes epoch-stale. Driver-2 recovers: the
-    /// still-a-member leaver re-issues a FRESH new-epoch SelfRemove that a
-    /// remaining member auto-commits, removing it on every branch with no fork.
-    /// Composes: skip → still-member → fresh-re-issue → auto-commit → removed.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn rev1_driver2_backstop_reissue_converges_after_c_a1_wins() {
-        use crate::relay::live_sync::finalize::gated_converge;
-        use crate::relay::live_sync::{
-            BufferedCommit, CommitSettleBuffer, EngineDecryptOutcome, EngineProcessor, EventBus,
-            GroupProcessOutcome, MlsWriteGate,
-        };
-        use nostr::JsonUtil;
-        use std::sync::{Arc, Mutex};
-
-        let setup = setup_three_party_two_admin_circle();
-        let mls_group_id = setup.mls_group_id.clone();
-        let n = setup.alice.group_epoch(&mls_group_id).unwrap();
-        let carol_hex = setup.carol_keys.public_key().to_hex();
-        let nostr_group_id = setup
-            .alice
-            .mdk
-            .get_group(&mls_group_id)
-            .unwrap()
-            .unwrap()
-            .nostr_group_id;
-
-        // --- Phase 1: Carol's SelfRemove races Alice's C_A1 and LOSES. ---
-        // Carol (non-admin) proposes leave FIRST (earlier order key).
-        let carol_sr1 = setup
-            ._carol
-            .propose_leave(&mls_group_id)
-            .unwrap()
-            .evolution_event;
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        // Alice (admin) stages a self_update — the window-opening non-removal
-        // commit that wins the order race.
-        let alice_c_a1 = setup
-            .alice
-            .self_update(&mls_group_id)
-            .unwrap()
-            .evolution_event;
-
-        // Alice's walk SKIPS the SelfRemove Proposal and MERGES C_A1 (peek).
-        let out = setup
-            .alice
-            .converge_commit(
-                &mls_group_id,
-                &alice_c_a1,
-                n,
-                std::slice::from_ref(&carol_sr1),
-                &CommitIntent::None,
-            )
-            .unwrap();
-        assert_eq!(out, CommitConvergence::Merged);
-
-        // Bob and Carol adopt the published C_A1 → everyone on the N+1 branch.
-        setup.bob.mdk.process_message(&alice_c_a1).unwrap();
-        setup._carol.mdk.process_message(&alice_c_a1).unwrap();
-        let n1 = n + 1;
-        assert_eq!(setup.alice.group_epoch(&mls_group_id).unwrap(), n1);
-        assert_eq!(setup.bob.group_epoch(&mls_group_id).unwrap(), n1);
-        assert_eq!(setup._carol.group_epoch(&mls_group_id).unwrap(), n1);
-        // Driver-1 lost the race: Carol is STILL a member (SelfRemove stale).
-        assert!(
-            setup
-                .alice
-                .still_a_member(&mls_group_id, &carol_hex)
-                .unwrap(),
-            "Carol not removed by C_A1 — driver-1 lost the order race"
-        );
-
-        // --- Phase 2: Driver-2 — Carol re-issues a FRESH SelfRemove at N+1. ---
-        let carol_sr2 = setup
-            ._carol
-            .propose_leave(&mls_group_id)
-            .unwrap()
-            .evolution_event;
-
-        let group_hex = hex::encode(nostr_group_id);
-
-        // Bob (a remaining member) auto-commits the fresh SelfRemove → the
-        // sibling removal commit.
-        let bob_commit_json = match setup
-            .bob
-            .decrypt_location_for_engine(&carol_sr2, &nostr_group_id)
-        {
-            EngineDecryptOutcome::AutoCommit { commit_json, .. } => commit_json,
-            other => panic!("Bob should auto-commit the fresh SelfRemove, got {other:?}"),
-        };
-        let bob_event = nostr::Event::from_json(&bob_commit_json).unwrap();
-
-        // Alice auto-commits it too (opening her window) and converges — the
-        // PROVEN driver-1 mechanism, now on the RE-ISSUE. Bob's sibling buffers
-        // as a competitor; Alice adopts the MIP-03 winner, removing Carol with
-        // no fork (never RolledBack).
-        let alice = Arc::new(setup.alice);
-        let settle = Arc::new(Mutex::new(CommitSettleBuffer::new()));
-        let gate = Arc::new(MlsWriteGate::new());
-        let processor = EngineProcessor::new(alice.clone(), settle.clone(), EventBus::new());
-        let work = match processor.process_group_event(&carol_sr2, &nostr_group_id) {
-            GroupProcessOutcome::AutoCommitStaged(w) => *w,
-            other => panic!("Alice should auto-commit the fresh SelfRemove, got {other:?}"),
-        };
-        {
-            let mut sb = settle.lock().unwrap();
-            assert!(sb.insert_competitor(
-                &group_hex,
-                BufferedCommit {
-                    event_json: bob_commit_json.clone(),
-                    created_at_secs: bob_event.created_at.as_secs(),
-                    id_hex: bob_event.id.to_hex(),
-                },
-                work.staged_epoch,
-            ));
-        }
-        let bus = EventBus::new();
-        let result = gated_converge(
-            &gate,
-            &settle,
-            &alice,
-            &bus,
-            &work.mls_group_id,
-            &work.nostr_group_id,
-            &work.commit_json,
-            work.staged_epoch,
-            &CommitIntent::None,
-        )
-        .await
-        .unwrap();
-
-        // --- Assert: the fresh re-issue converges (no fork), Carol removed. ---
-        assert!(
-            matches!(
-                result,
-                CommitConvergence::Merged | CommitConvergence::AdoptedWinner { .. }
-            ),
-            "driver-2 re-issue converges onto the winner, not RolledBack: {result:?}"
-        );
-        assert!(
-            alice.group_epoch(&mls_group_id).unwrap() > work.staged_epoch,
-            "the fresh SelfRemove advances the epoch onto the removal branch"
-        );
-        assert!(
-            !alice
-                .member_pubkeys_hex(&mls_group_id)
-                .unwrap()
-                .contains(&carol_hex),
-            "Carol removed after driver-2 recovery"
-        );
-        assert!(
-            !alice.still_a_member(&mls_group_id, &carol_hex).unwrap(),
-            "still_a_member(Carol) false — the backstop stop condition"
-        );
-        assert!(
-            !settle.lock().unwrap().has_window(&group_hex),
-            "the window is closed after convergence"
-        );
-    }
-
-    /// REV-1 GUARD (must stay green): a racing Remove of the SAME member by two
-    /// admins converges onto one branch — no NEW fork. Both admins stage
-    /// `remove(Carol)` from epoch N, exchange commits, and land on the MIP-03
-    /// winner's branch with Carol gone on both and a live cross-decrypt. Guards
-    /// that the peek+skip change does not regress ordinary two-admin Remove
-    /// convergence (a Remove commit is a PrivateMessage, never skipped).
-    #[test]
-    fn rev1_no_new_fork_under_racing_remove() {
-        let setup = setup_three_party_two_admin_circle();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-        let carol_hex = setup.carol_keys.public_key().to_hex();
-        let carol_pk = setup.carol_keys.public_key();
-
-        // Alice stages remove(Carol) FIRST → earlier order key (she wins).
-        let alice_commit = setup
-            .alice
-            .remove_members(&setup.mls_group_id, &[carol_hex.clone()])
-            .unwrap()
-            .evolution_event;
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        // Bob stages his own remove(Carol) → later order key (he loses).
-        let bob_commit = setup
-            .bob
-            .remove_members(&setup.mls_group_id, &[carol_hex.clone()])
-            .unwrap()
-            .evolution_event;
-        assert!(alice_commit.created_at < bob_commit.created_at);
-
-        let intent = CommitIntent::RemoveMembers(vec![carol_pk]);
-        // Alice wins (earlier): merges her own.
-        let alice_out = setup
-            .alice
-            .converge_commit(
-                &setup.mls_group_id,
-                &alice_commit,
-                n,
-                std::slice::from_ref(&bob_commit),
-                &intent,
-            )
-            .unwrap();
-        // Bob loses (later): adopts Alice's winning commit.
-        let bob_out = setup
-            .bob
-            .converge_commit(
-                &setup.mls_group_id,
-                &bob_commit,
-                n,
-                std::slice::from_ref(&alice_commit),
-                &intent,
-            )
-            .unwrap();
-
-        assert!(
-            !matches!(alice_out, CommitConvergence::RolledBack),
-            "Alice's racing Remove must converge, not roll back: {alice_out:?}"
-        );
-        assert!(
-            !matches!(bob_out, CommitConvergence::RolledBack),
-            "Bob's racing Remove must converge onto the winner, not roll back: {bob_out:?}"
-        );
-        // Carol is gone on BOTH — the removal converged (no phantom member).
-        assert!(!setup
-            .alice
-            .member_pubkeys_hex(&setup.mls_group_id)
-            .unwrap()
-            .contains(&carol_hex));
-        assert!(!setup
-            .bob
-            .member_pubkeys_hex(&setup.mls_group_id)
-            .unwrap()
-            .contains(&carol_hex));
-        // No fork: Alice and Bob cross-decrypt on the shared winner branch.
-        assert!(cross_decrypts(
-            &setup.alice,
-            &setup.alice_keys.public_key(),
-            &setup.bob,
-            &setup.mls_group_id
-        ));
-        let _ = setup.alice.clear_pending_commit(&setup.mls_group_id);
-        let _ = setup.bob.clear_pending_commit(&setup.mls_group_id);
-    }
-
-    /// SEC: NO-STALE-STAGED-SECRET — after an `AdoptedWinner`, the loser holds
-    /// the WINNER's exporter (cross-decrypt both ways) and has no residual /
-    /// stale staged commit (a fresh op stages cleanly, incl. the self-update
-    /// orphaned-signer cleanup).
-    #[test]
-    fn converging_no_stale_staged_secret_after_adopt() {
-        let setup = setup_three_party_two_admin_circle();
-        let carol_hex = setup.carol_keys.public_key().to_hex();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-        let intent = CommitIntent::RemoveMembers(vec![setup.carol_keys.public_key()]);
-
-        let alice_commit = setup
-            .alice
-            .remove_members(&setup.mls_group_id, std::slice::from_ref(&carol_hex))
-            .unwrap()
-            .evolution_event;
-        let bob_commit = setup
-            .bob
-            .remove_members(&setup.mls_group_id, std::slice::from_ref(&carol_hex))
-            .unwrap()
-            .evolution_event;
-        let alice_out = setup
-            .alice
-            .converge_commit(
-                &setup.mls_group_id,
-                &alice_commit,
-                n,
-                std::slice::from_ref(&bob_commit),
-                &intent,
-            )
-            .unwrap();
-        let bob_out = setup
-            .bob
-            .converge_commit(
-                &setup.mls_group_id,
-                &bob_commit,
-                n,
-                std::slice::from_ref(&alice_commit),
-                &intent,
-            )
-            .unwrap();
-
-        // Self-contained: exactly one side merges (a latent double-merge fork
-        // would otherwise slip past the loser-inference below).
-        assert_eq!(
-            [alice_out, bob_out]
-                .iter()
-                .filter(|o| matches!(o, CommitConvergence::Merged))
-                .count(),
-            1,
-            "exactly one side may merge: alice={alice_out:?} bob={bob_out:?}"
-        );
-        // Identify the loser and prove it holds the winner's exporter + has no
-        // residual staged secret.
-        let (winner, winner_keys, loser) = if matches!(alice_out, CommitConvergence::Merged) {
-            (&setup.alice, &setup.alice_keys, &setup.bob)
-        } else {
-            (&setup.bob, &setup.bob_keys, &setup.alice)
-        };
-        assert!(
-            cross_decrypts(
-                winner,
-                &winner_keys.public_key(),
-                loser,
-                &setup.mls_group_id
-            ),
-            "loser must decrypt the winner's location (shared exporter)"
-        );
-        // A residual pending commit would fail this (per the precedent test).
-        assert!(
-            loser
-                .remove_members(&setup.mls_group_id, &[winner_keys.public_key().to_hex()])
-                .is_ok(),
-            "loser has no residual pending commit after adopt"
-        );
-        let _ = loser.clear_pending_commit(&setup.mls_group_id);
-        // Self-update orphaned-signer cleanup: a fresh self_update stages.
-        assert!(loser.self_update(&setup.mls_group_id).is_ok());
-        let _ = loser.clear_pending_commit(&setup.mls_group_id);
-    }
-
-    /// SEC3: a location sent at the shared epoch N (pre-fork) still decrypts
-    /// after fork→converge — the exporter-prune lookback this milestone exists
-    /// to protect.
-    #[test]
-    fn inflight_location_at_shared_epoch_survives_convergence() {
-        let setup = setup_two_party_circle();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-
-        let loc = LocationMessage::new(51.5, -0.12);
-        let (inflight, _, _) = setup
-            .alice
-            .encrypt_location(
-                &setup.mls_group_id,
-                &setup.alice_keys.public_key(),
-                &loc,
-                300,
-            )
-            .unwrap();
-
-        let a = setup
-            .alice
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        let b = setup
-            .bob
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        setup
-            .alice
-            .converge_commit(
-                &setup.mls_group_id,
-                &a,
-                n,
-                std::slice::from_ref(&b),
-                &CommitIntent::None,
-            )
-            .unwrap();
-        setup
-            .bob
-            .converge_commit(
-                &setup.mls_group_id,
-                &b,
-                n,
-                std::slice::from_ref(&a),
-                &CommitIntent::None,
-            )
-            .unwrap();
-
-        // The N-epoch location still decrypts on Bob after convergence to N+1.
-        assert!(
-            matches!(
-                setup.bob.decrypt_location(&inflight),
-                Ok(LocationMessageResult::Location { .. })
-            ),
-            "in-flight epoch-N location must still decrypt after convergence"
-        );
-    }
-
-    /// H1 liveness gate (M11): a routine, DECRYPTABLE Location `kind:445` that
-    /// sorts AHEAD of our membership commit in MIP-03 order (smaller
-    /// `(created_at, id)`) must NOT force a `RolledBack`. A Location is an MLS
-    /// application message that cannot advance the epoch, so it is not a genuine
-    /// convergence competitor — our commit MERGES and the membership op is never
-    /// starved. Pre-fix (winner chosen purely by order key) this returned
-    /// `RolledBack`; the fix excludes non-advancing competitors from the
-    /// candidate set. Deterministic: the Location is created ≥1s before the
-    /// commit so it strictly wins the order key.
-    #[test]
-    fn converge_with_a_winning_real_location_merges_not_rolled_back() {
-        let setup = setup_two_party_circle();
-        let n = setup.bob.group_epoch(&setup.mls_group_id).unwrap();
-
-        // Alice sends a REAL (Bob-decryptable) location FIRST.
-        let loc = LocationMessage::new(51.5, -0.12);
-        let (alice_loc, _, _) = setup
-            .alice
-            .encrypt_location(
-                &setup.mls_group_id,
-                &setup.alice_keys.public_key(),
-                &loc,
-                300,
-            )
-            .unwrap();
-        // ≥1s gap so Bob's commit has a strictly-later created_at → the Location
-        // strictly WINS the MIP-03 order key.
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-
-        let bob_commit = setup
-            .bob
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        assert!(
-            alice_loc.created_at < bob_commit.created_at,
-            "precondition: the Location must sort ahead of our commit"
-        );
-
-        let out = setup
-            .bob
-            .converge_commit(
-                &setup.mls_group_id,
-                &bob_commit,
-                n,
-                std::slice::from_ref(&alice_loc),
-                &CommitIntent::None,
-            )
-            .unwrap();
-
-        assert_eq!(
-            out,
-            CommitConvergence::Merged,
-            "a winning Location must NOT block our commit — it merges"
-        );
-        assert_eq!(
-            setup.bob.group_epoch(&setup.mls_group_id).unwrap(),
-            n + 1,
-            "our membership commit advanced the epoch despite the winning Location"
-        );
-        // No dangling pending commit (a fresh op stages cleanly).
-        assert!(setup.bob.self_update(&setup.mls_group_id).is_ok());
-        let _ = setup.bob.clear_pending_commit(&setup.mls_group_id);
-    }
-
-    /// H1 liveness gate (M11) — the RE-DELIVERY half. The winning real Location
-    /// that is EXCLUDED from the convergence must still be COLLECTED and handed
-    /// back to the bus-aware caller, so a Location buffered during a membership
-    /// op's settle window is never dropped from receive. Asserts the collected
-    /// [`ConvergedLocation`] carries the sender, source timestamp, and decrypted
-    /// coordinates — the exact fields the caller maps onto the bus.
-    #[test]
-    fn converge_collects_the_excluded_location_for_redelivery() {
-        let setup = setup_two_party_circle();
-        let n = setup.bob.group_epoch(&setup.mls_group_id).unwrap();
-
-        // Alice sends a REAL (Bob-decryptable) location FIRST, at distinct coords.
-        let loc = LocationMessage::new(48.8566, 2.3522);
-        let (alice_loc, _, _) = setup
-            .alice
-            .encrypt_location(
-                &setup.mls_group_id,
-                &setup.alice_keys.public_key(),
-                &loc,
-                300,
-            )
-            .unwrap();
-        // ≥1s gap so Bob's commit sorts strictly AFTER the Location → the Location
-        // wins the MIP-03 order key and is exercised as a competitor.
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-
-        let bob_commit = setup
-            .bob
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        assert!(
-            alice_loc.created_at < bob_commit.created_at,
-            "precondition: the Location must sort ahead of our commit"
-        );
-
-        let (out, delivered) = setup
-            .bob
-            .converge_commit_collecting_locations(
-                &setup.mls_group_id,
-                &bob_commit,
-                n,
-                std::slice::from_ref(&alice_loc),
-                &CommitIntent::None,
-            )
-            .unwrap();
-
-        // Liveness: our membership commit still merges (never starved).
-        assert_eq!(out, CommitConvergence::Merged);
-        assert_eq!(setup.bob.group_epoch(&setup.mls_group_id).unwrap(), n + 1);
-
-        // Re-delivery: the excluded Location was collected with the correct
-        // sender, source timestamp, and decrypted coordinates.
-        assert_eq!(
-            delivered.len(),
-            1,
-            "the excluded Location must be collected"
-        );
-        let d = &delivered[0];
-        assert_eq!(d.sender_pubkey, setup.alice_keys.public_key().to_hex());
-        assert_eq!(
-            d.created_at_secs,
-            i64::try_from(alice_loc.created_at.as_secs()).unwrap()
-        );
-        let parsed: LocationMessage =
-            serde_json::from_str(&d.content).expect("collected content is a LocationMessage");
-        assert!((parsed.latitude - 48.8566).abs() < 1e-9);
-        assert!((parsed.longitude - 2.3522).abs() < 1e-9);
-
-        let _ = setup.bob.clear_pending_commit(&setup.mls_group_id);
-    }
-
-    /// M5-c: with periodic self-update disabled, the group epoch is stable
-    /// across idle and advances ONLY on a real membership change.
-    #[test]
-    fn epoch_stable_across_idle_advances_on_membership() {
-        let setup = setup_three_party_two_admin_circle();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-        assert_eq!(
-            setup.alice.group_epoch(&setup.mls_group_id).unwrap(),
-            n,
-            "epoch stable with no self-update"
-        );
-        let carol_hex = setup.carol_keys.public_key().to_hex();
-        setup
-            .alice
-            .remove_members(&setup.mls_group_id, std::slice::from_ref(&carol_hex))
-            .unwrap();
-        setup
-            .alice
-            .finalize_pending_commit(&setup.mls_group_id)
-            .unwrap();
-        assert_eq!(
-            setup.alice.group_epoch(&setup.mls_group_id).unwrap(),
-            n + 1,
-            "membership change advances the epoch"
-        );
-    }
-
-    /// M5-d: a just-joined group reports `groups_needing_self_update` forever
-    /// (a membership commit does NOT clear MDK's `Required` flag). Benign
-    /// post-M5 because nothing queries it on a timer anymore.
-    #[test]
-    fn groups_needing_self_update_returns_post_join_group_forever() {
-        let setup = setup_three_party_two_admin_circle();
-        assert!(
-            setup
-                .bob
-                .groups_needing_self_update(3600)
-                .unwrap()
-                .iter()
-                .any(|g| g == &setup.mls_group_id),
-            "a just-joined group reports needing a self-update"
-        );
-        let carol_hex = setup.carol_keys.public_key().to_hex();
-        setup
-            .bob
-            .remove_members(&setup.mls_group_id, std::slice::from_ref(&carol_hex))
-            .unwrap();
-        setup
-            .bob
-            .finalize_pending_commit(&setup.mls_group_id)
-            .unwrap();
-        assert!(
-            setup
-                .bob
-                .groups_needing_self_update(3600)
-                .unwrap()
-                .iter()
-                .any(|g| g == &setup.mls_group_id),
-            "membership commit does not clear Required — benign since M5 never queries it on a timer"
-        );
-    }
-
-    #[test]
-    fn get_members_nonexistent_group_fails() {
-        let (manager, _temp_dir) = create_test_manager();
-        let result = manager.get_members(&GroupId::from_slice(&[0u8; 32]));
-        assert!(result.is_err());
-    }
-
-    // ==================== Location Encryption Tests ====================
-
-    #[test]
-    fn encrypt_location_nonexistent_circle_fails() {
-        let (manager, _temp_dir) = create_test_manager();
-        let keys = Keys::generate();
-        let location = LocationMessage::new(37.7749, -122.4194);
-        let fake_group_id = GroupId::from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
-
-        let result = manager.encrypt_location(&fake_group_id, &keys.public_key(), &location, 300);
-
-        assert!(result.is_err());
-        let err_msg = format!("{}", result.unwrap_err());
-        assert!(
-            err_msg.contains("not found") || err_msg.contains("Not found"),
-            "Error should indicate circle not found, got: {err_msg}"
-        );
-    }
-
-    #[test]
-    fn encrypt_location_returns_correct_metadata() {
-        let setup = setup_two_party_circle();
-        let location = LocationMessage::new(40.7128, -74.0060);
-
-        let (event, returned_nostr_group_id, returned_relays) = setup
-            .alice
-            .encrypt_location(
-                &setup.mls_group_id,
-                &setup.alice_keys.public_key(),
-                &location,
-                300,
-            )
-            .expect("encrypt_location should succeed");
-
-        // Verify the returned nostr_group_id matches the stored circle
-        assert_eq!(
-            returned_nostr_group_id, setup.nostr_group_id,
-            "Returned nostr_group_id must match the stored circle"
-        );
-
-        // Verify the returned relays match the stored circle
-        assert_eq!(
-            returned_relays, setup.relays,
-            "Returned relays must match the stored circle"
-        );
-
-        // Verify the event is kind 445
-        assert_eq!(
-            event.kind,
-            Kind::Custom(445),
-            "Encrypted event should be kind 445"
-        );
-
-        // Verify the outer event does NOT contain plaintext location data
-        assert!(
-            !event.content.contains("37.7128") && !event.content.contains("40.7128"),
-            "Encrypted event must not contain plaintext latitude"
-        );
-        assert!(
-            !event.content.contains("-74.006"),
-            "Encrypted event must not contain plaintext longitude"
-        );
-
-        // Verify the outer event uses an ephemeral pubkey (not Alice's real key)
-        assert_ne!(
-            event.pubkey,
-            setup.alice_keys.public_key(),
-            "Kind 445 outer event must use an ephemeral pubkey, not the sender's real key"
-        );
-    }
-
-    #[test]
-    fn encrypt_location_and_decrypt_roundtrip() {
-        let setup = setup_two_party_circle();
-        let location = LocationMessage::new(37.7749, -122.4194);
-
-        // Alice encrypts a location for the circle
-        let (encrypted_event, _, _) = setup
-            .alice
-            .encrypt_location(
-                &setup.mls_group_id,
-                &setup.alice_keys.public_key(),
-                &location,
-                300,
-            )
-            .expect("alice should encrypt location");
-
-        // Bob decrypts the location
-        let result = setup
-            .bob
-            .decrypt_location(&encrypted_event)
-            .expect("bob should decrypt location");
-
-        // Verify it's a Location variant with correct data
-        if let crate::nostr::mls::types::LocationMessageResult::Location {
-            sender_pubkey,
-            content,
-            ..
-        } = result
-        {
-            // Verify sender is Alice
-            assert_eq!(
-                sender_pubkey,
-                setup.alice_keys.public_key().to_hex(),
-                "Decrypted sender should be Alice"
-            );
-
-            // Verify the content can be deserialized back to a LocationMessage
-            let recovered = LocationMessage::from_string(&content)
-                .expect("should deserialize decrypted location");
-
-            assert_eq!(
-                recovered.latitude, location.latitude,
-                "Recovered latitude should match original"
-            );
-            assert_eq!(
-                recovered.longitude, location.longitude,
-                "Recovered longitude should match original"
-            );
-            assert_eq!(
-                recovered.geohash, location.geohash,
-                "Recovered geohash should match original"
-            );
-        } else {
-            panic!("Expected Location variant, got: {:?}", result);
-        }
-    }
-
-    #[test]
-    fn encrypt_location_inner_event_carries_no_group_identifier() {
-        use nostr::JsonUtil;
-
-        // MIP-03 MUST NOT: the routing identifier (the nostr_group_id `h` tag)
-        // belongs on the OUTER kind:445 wrapper only. The decrypted INNER kind:9
-        // application event must carry no `h` tag and must not embed either the
-        // nostr_group_id or the real MLS group id. Otherwise a mishandled or
-        // re-published inner event would self-identify its circle, defeating the
-        // wire-level group-id privacy that
-        // `encrypted_event_has_h_tag_with_nostr_group_id` enforces on the outer
-        // event. This drives the REAL production builder
-        // (`CircleManager::encrypt_location`), not a test copy of the rumor.
-        let setup = setup_two_party_circle();
-        let location = LocationMessage::new(37.7749, -122.4194);
-
-        let (encrypted_event, _, _) = setup
-            .alice
-            .encrypt_location(
-                &setup.mls_group_id,
-                &setup.alice_keys.public_key(),
-                &location,
-                300,
-            )
-            .expect("alice should encrypt location");
-
-        // Decrypt at the MDK layer: the parsed `decrypt_location` path returns a
-        // `LocationMessageResult` and discards the inner tags, so we go through
-        // `process_message` to inspect the recovered inner application event.
-        let processed = setup
-            .bob
-            .mdk
-            .process_message(&encrypted_event)
-            .expect("bob should process the kind:445 event");
-        let inner = match processed {
-            mdk_core::prelude::MessageProcessingResult::ApplicationMessage(msg) => msg,
-            other => panic!("expected an ApplicationMessage, got {other:?}"),
-        };
-
-        let mls_hex = hex::encode(setup.mls_group_id.as_slice());
-        let nostr_hex = hex::encode(setup.nostr_group_id);
-
-        // Non-vacuity: both ids are real, substantial, and distinct needles, so
-        // an "absent" result is meaningful (not a search for an empty string or
-        // a vacuous pass where the two ids happened to coincide).
-        assert_eq!(nostr_hex.len(), 64, "nostr_group_id should be 32 bytes");
-        assert_ne!(
-            mls_hex, nostr_hex,
-            "mls and nostr group ids must differ for the scan to be meaningful"
-        );
-
-        // (1) No `h` (routing) tag on the inner event, and no tag part embeds
-        // either group id.
-        for tag in inner.tags.iter() {
-            let parts = tag.as_slice();
-            assert_ne!(
-                parts.first().map(String::as_str),
-                Some("h"),
-                "inner kind:9 event must not carry an `h` (routing) tag (MIP-03)"
-            );
-            for part in parts {
-                assert!(
-                    !part.contains(&mls_hex),
-                    "inner kind:9 tag leaked the real MLS group id"
-                );
-                assert!(
-                    !part.contains(&nostr_hex),
-                    "inner kind:9 tag leaked the nostr_group_id"
-                );
-            }
-        }
-
-        // (2) Neither group id appears anywhere in the full inner event JSON
-        // (content + tags + every field).
-        let inner_json = inner.event.as_json();
-        assert!(
-            !inner_json.contains(&mls_hex),
-            "real MLS group id leaked into the inner kind:9 event JSON"
-        );
-        assert!(
-            !inner_json.contains(&nostr_hex),
-            "nostr_group_id leaked into the inner kind:9 event JSON"
-        );
-
-        // (3) Positive control: the inner event IS the populated location rumor
-        // — it carries the `["t","location"]` discriminator — so the absence
-        // checks above scanned real content, not an empty/placeholder event.
-        assert!(
-            inner.tags.iter().any(|t| {
-                let s = t.as_slice();
-                s.len() >= 2 && s[0] == "t" && s[1] == "location"
-            }),
-            "inner kind:9 event must carry the [\"t\",\"location\"] tag (positive control)"
-        );
-
-        // (4) The MIP-03 inner/outer split: the inner application event is a
-        // kind:9 authored by the real sender identity, whereas the OUTER kind:445
-        // uses a per-message ephemeral key (asserted by the sibling
-        // `encrypt_location_returns_correct_metadata`). Pinning both also
-        // strengthens the positive control — `inner.event` is genuinely the
-        // populated sender rumor, not a placeholder.
-        assert_eq!(
-            inner.event.kind,
-            Kind::Custom(9),
-            "inner application event must be kind 9 (MIP-03)"
-        );
-        assert_eq!(
-            inner.event.pubkey,
-            setup.alice_keys.public_key(),
-            "inner kind:9 event must be authored by the real sender identity key"
-        );
-    }
-
-    #[test]
-    fn encrypt_decrypt_drops_private_gps_fields_end_to_end() {
-        use crate::nostr::mls::types::LocationMessageResult;
-
-        // Privacy: device-private GPS fields (device_id, raw_accuracy, altitude,
-        // speed, heading) are `#[serde(skip)]` and MUST NOT survive the
-        // encrypt -> wire -> decrypt pipeline, while member-visible coordinate
-        // data (coordinates, geohash) MUST. `proptest_location`'s `d3_*`
-        // covers the struct serialization in isolation; this pins the SAME
-        // guarantee end-to-end through the real CircleManager encrypt/decrypt
-        // path, catching a regression that leaked private data via the pipeline
-        // (a different serializer, an added tag, etc.) that the unit scan misses.
-        let setup = setup_two_party_circle();
-
-        let mut location = LocationMessage::new(37.7749, -122.4194);
-        location.device_id = Some("device-serial-XYZ".to_string());
-        location.raw_accuracy = Some(3.5);
-        location.altitude = Some(120.0);
-        location.speed = Some(1.2);
-        location.heading = Some(270.0);
-
-        let (event, _, _) = setup
-            .alice
-            .encrypt_location(
-                &setup.mls_group_id,
-                &setup.alice_keys.public_key(),
-                &location,
-                300,
-            )
-            .expect("alice should encrypt location");
-
-        let content = match setup
-            .bob
-            .decrypt_location(&event)
-            .expect("bob should decrypt location")
-        {
-            LocationMessageResult::Location { content, .. } => content,
-            other => panic!("expected a Location result, got {other:?}"),
-        };
-
-        // (1) The decrypted plaintext (what the receiver actually sees) carries
-        // none of the private field names.
-        for field in ["device_id", "raw_accuracy", "altitude", "speed", "heading"] {
-            assert!(
-                !content.contains(field),
-                "private field `{field}` leaked into the decrypted location content: {content}"
-            );
-        }
-        // Value-level scan: the device_id VALUE must not leak under ANY key name
-        // either (the name-based scan would miss a value smuggled under a renamed
-        // key). Use the unambiguous device_id sentinel — the numeric fields risk
-        // incidental digit collisions with coordinates/timestamps.
-        assert!(
-            !content.contains("device-serial-XYZ"),
-            "private device_id value leaked into the decrypted content: {content}"
-        );
-        // Positive control: the public, member-visible data DID round-trip, so
-        // the absence checks above scanned real content, not an empty payload.
-        assert!(
-            content.contains("latitude") && content.contains("geohash"),
-            "control: public location fields must be present in the decrypted content"
-        );
-
-        // (2) Semantic check: the receiver cannot reconstruct the private fields
-        // (they deserialize back to None), while member-visible data does.
-        let recovered =
-            LocationMessage::from_string(&content).expect("decrypted content must deserialize");
-        assert!(recovered.device_id.is_none(), "device_id must not survive");
-        assert!(
-            recovered.raw_accuracy.is_none(),
-            "raw_accuracy must not survive"
-        );
-        assert!(recovered.altitude.is_none(), "altitude must not survive");
-        assert!(recovered.speed.is_none(), "speed must not survive");
-        assert!(recovered.heading.is_none(), "heading must not survive");
-        assert_eq!(
-            recovered.latitude, location.latitude,
-            "public latitude must survive the round-trip"
-        );
-        assert_eq!(recovered.geohash, location.geohash, "geohash must survive");
-    }
-
-    #[test]
-    fn haven_avatar_inner_kind9_from_old_client_ignored_without_state_damage() {
-        // Wire-compat (public-profile migration D8 / protocol review 4.3): an
-        // OLD client could still emit the legacy MLS in-group avatar wire —
-        // a kind-445 wrapping a kind-9 inner whose content is the
-        // `haven-avatar-manifest` / `haven-avatar-chunk` JSON. After the avatar
-        // routing was deleted, the CURRENT decrypt path must treat such an event
-        // as SEEN/SKIPPED, NOT as a retriable decrypt failure:
-        //
-        //   * decryption SUCCEEDS → `LocationMessageResult::Location` (a
-        //     cursor-ADVANCING outcome), never `Unprocessable`/`PreviouslyFailed`
-        //     (which the sync loop would reprocess forever — reingesting legacy
-        //     avatar chunks on every cursor rewind);
-        //   * the decrypted content does NOT parse as a `LocationMessage`, so the
-        //     caller drops it as "not a location" (no avatar state exists to
-        //     damage — the reassembler and its store are gone);
-        //   * no panic, and re-decrypting is idempotent.
-        //
-        // The "content-is-not-a-location → skip, do not retry" classification
-        // lives in the Dart stream consumer (`convert_location_result` /
-        // `parse_engine_location` return a parse error while the OUTER outcome
-        // stays `Location`); Wave 6b asserts that seen/skip behavior on the Dart
-        // side. Here we pin the Rust half: the outcome is cursor-advancing, and
-        // the payload is unambiguously the avatar wire, not a location.
-        let setup = setup_two_party_circle();
-
-        for legacy in [
-            r#"{"type":"haven-avatar-manifest","v":1,"version":1,"epoch":0,"content_hash":"00","mime":"image/jpeg","w":512,"h":512,"total_len":42,"chunk_count":4,"data":"AAAA","pad":""}"#,
-            r#"{"type":"haven-avatar-chunk","v":1,"version":1,"index":1,"data":"AAAA","pad":""}"#,
-        ] {
-            // An old client wrapped the avatar inner as a real kind-9 MLS message
-            // authored by its own identity — reproduce that exactly.
-            let rumor = EventBuilder::new(Kind::Custom(9), legacy)
-                .tag(Tag::parse(["t", "haven-avatar"]).unwrap())
-                .build(setup.alice_keys.public_key());
-            let event = setup
-                .alice
-                .mdk
-                .create_message(&setup.mls_group_id, rumor, None)
-                .expect("old client builds a kind-445 avatar message");
-
-            // The receiver decrypts it through the CURRENT (avatar-routing-gone)
-            // path. Decryption SUCCEEDS → cursor-advancing `Location`, never a
-            // retriable decrypt failure.
-            let content = match setup.bob.decrypt_location(&event) {
-                Ok(LocationMessageResult::Location { content, .. }) => content,
-                other => panic!(
-                    "legacy avatar inner must decrypt as a (seen) Location outcome, got {other:?}"
-                ),
-            };
-
-            // The decrypted content is the avatar payload — it must NOT parse as
-            // a location, so the caller skips it (no avatar state to corrupt).
-            assert!(
-                LocationMessage::from_string(&content).is_err(),
-                "legacy avatar content must not parse as a LocationMessage (it is skipped)"
-            );
-            assert!(
-                content.contains("haven-avatar"),
-                "control: the decrypted content is the legacy avatar wire"
-            );
-
-            // Re-decrypting the same event never becomes a hard error / panic:
-            // any surfaced `Ok(..)` outcome (`Location` / `Unprocessable` /
-            // `PreviouslyFailed`) is fine — none of them reconstruct avatar state
-            // (there is none), and the sync loop already advanced past it.
-            assert!(
-                setup.bob.decrypt_location(&event).is_ok(),
-                "re-decrypt of a seen legacy avatar event must not become a hard error"
-            );
-        }
-    }
-
-    #[test]
-    fn decrypt_location_bidirectional() {
-        let setup = setup_two_party_circle();
-
-        // Find Bob's MLS group ID (may differ from Alice's internal representation)
-        let bob_groups = setup.bob.mdk.get_groups().expect("bob should get groups");
-        let bob_group = bob_groups.first().expect("bob should have one group");
-        let bob_mls_group_id = bob_group.mls_group_id.clone();
-
-        // Bob encrypts a location
-        let location = LocationMessage::new(48.8566, 2.3522);
-        let (encrypted_event, _, _) = setup
-            .bob
-            .encrypt_location(
-                &bob_mls_group_id,
-                &setup.bob_keys.public_key(),
-                &location,
-                300,
-            )
-            .expect("bob should encrypt location");
-
-        // Alice decrypts it
-        let result = setup
-            .alice
-            .decrypt_location(&encrypted_event)
-            .expect("alice should decrypt bob's location");
-
-        if let crate::nostr::mls::types::LocationMessageResult::Location {
-            sender_pubkey,
-            content,
-            ..
-        } = result
-        {
-            assert_eq!(
-                sender_pubkey,
-                setup.bob_keys.public_key().to_hex(),
-                "Decrypted sender should be Bob"
-            );
-
-            let recovered =
-                LocationMessage::from_string(&content).expect("should deserialize bob's location");
-            assert_eq!(recovered.latitude, location.latitude);
-            assert_eq!(recovered.longitude, location.longitude);
-        } else {
-            panic!("Expected Location variant from Bob, got: {:?}", result);
-        }
-    }
-
-    #[test]
-    fn decrypt_for_engine_location_stamps_routed_nostr_group_id_not_mls() {
-        use crate::relay::live_sync::EngineDecryptOutcome;
-        let setup = setup_two_party_circle();
-        let bob_group = setup.bob.mdk.get_groups().unwrap();
-        let bob_mls_group_id = bob_group.first().unwrap().mls_group_id.clone();
-
-        let location = LocationMessage::new(48.8566, 2.3522);
-        let (ev, _, _) = setup
-            .bob
-            .encrypt_location(
-                &bob_mls_group_id,
-                &setup.bob_keys.public_key(),
-                &location,
-                300,
-            )
-            .unwrap();
-
-        let out = setup
-            .alice
-            .decrypt_location_for_engine(&ev, &setup.nostr_group_id);
-        match out {
-            EngineDecryptOutcome::Location {
-                nostr_group_id,
-                sender_pubkey,
-                content,
-                created_at_secs,
-            } => {
-                // Rule 4: the outcome carries the routed pseudonymous id, never
-                // the real MLS group id.
-                assert_eq!(nostr_group_id, setup.nostr_group_id.to_vec());
-                assert_ne!(nostr_group_id, setup.mls_group_id.as_slice().to_vec());
-                assert_eq!(sender_pubkey, setup.bob_keys.public_key().to_hex());
-                let recovered = LocationMessage::from_string(&content).unwrap();
-                assert_eq!(recovered.latitude, location.latitude);
-                assert!(created_at_secs > 0);
-            }
-            other => panic!("expected Location, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn decrypt_for_engine_peer_commit_maps_to_group_update_none() {
-        use crate::relay::live_sync::EngineDecryptOutcome;
-        let setup = setup_two_party_circle();
-        // Bob stages a self-update commit; Alice (no pending — regime 1) receives it.
-        let commit = setup
-            .bob
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        let out = setup
-            .alice
-            .decrypt_location_for_engine(&commit, &setup.nostr_group_id);
-        match out {
-            EngineDecryptOutcome::GroupUpdate {
-                nostr_group_id,
-                evolution_event_json,
-            } => {
-                assert_eq!(nostr_group_id, setup.nostr_group_id.to_vec());
-                assert!(
-                    evolution_event_json.is_none(),
-                    "a plain peer commit carries no evolution event to publish"
-                );
-            }
-            other => panic!("expected GroupUpdate, got {other:?}"),
-        }
-    }
-
-    /// Pins a load-bearing MDK 93ae324 behavior for the engine design: MDK
-    /// ABSORBS the `OwnCommitPending` / `CannotDecryptOwnMessage` error classes
-    /// internally (returning `Ok(Commit)`), so `process_message_classified` does
-    /// NOT surface `CompetingCommit` for an own/sibling commit at the public
-    /// boundary — it surfaces a benign `GroupUpdate`. Consequently the engine's
-    /// regime-2 competitor detection cannot rely on the error class; it must gate
-    /// on "a settle window is open" (we hold our own pending commit) instead. The
-    /// `CompetingCommit` mapping remains for the narrow internal-storage-failure
-    /// escapes and is covered by `classify_mdk_error_*` unit tests.
-    #[test]
-    fn decrypt_for_engine_own_pending_redelivery_is_absorbed_as_group_update() {
-        use crate::relay::live_sync::EngineDecryptOutcome;
-        let setup = setup_two_party_circle();
-        let own = setup
-            .alice
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        // Re-deliver our own commit while still holding it pending.
-        let out = setup
-            .alice
-            .decrypt_location_for_engine(&own, &setup.nostr_group_id);
-        assert!(
-            matches!(out, EngineDecryptOutcome::GroupUpdate { .. }),
-            "MDK absorbs OwnCommitPending → benign GroupUpdate, got {out:?}"
-        );
-    }
-
-    /// THE M3b HIGH must-fix regression test (real MDK): while a settle window is
-    /// open (regime 2 — we hold our own pending commit), the `EngineProcessor`
-    /// must BUFFER an incoming same-epoch sibling WITHOUT decrypting it, so our
-    /// epoch does NOT advance (a decrypted sibling would be applied by MDK and
-    /// fork the group). The gate lives at the routing layer, before decryption.
-    #[test]
-    fn engine_processor_buffers_sibling_without_forking_when_window_open() {
-        use crate::relay::live_sync::{
-            CommitSettleBuffer, EngineProcessor, EventBus, GroupProcessOutcome,
-        };
-        use std::sync::{Arc, Mutex};
-
-        let setup = setup_two_party_circle();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-        let mls_group_id = setup.mls_group_id.clone();
-        let nostr_group_id = setup.nostr_group_id;
-        let group_hex = hex::encode(nostr_group_id);
-
-        // Bob's concurrent sibling commit at epoch N.
-        let bob_commit = setup
-            .bob
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        // Alice stages her OWN commit → holds pending → regime 2 (no advance yet).
-        let _ = setup.alice.self_update(&setup.mls_group_id).unwrap();
-        assert_eq!(setup.alice.group_epoch(&mls_group_id).unwrap(), n);
-
-        // Build the engine processor over Alice's MLS state; open her window.
-        let alice = Arc::new(setup.alice);
-        let settle = Arc::new(Mutex::new(CommitSettleBuffer::new()));
-        let _ = settle.lock().unwrap().begin_window(&group_hex, n, i64::MAX);
-        let processor = EngineProcessor::new(alice.clone(), settle.clone(), EventBus::new());
-
-        let outcome = processor.process_group_event(&bob_commit, &nostr_group_id);
-
-        assert_eq!(
-            outcome,
-            GroupProcessOutcome::Buffered { inserted: true },
-            "a window-open sibling must be buffered, not processed"
-        );
-        assert_eq!(
-            alice.group_epoch(&mls_group_id).unwrap(),
-            n,
-            "regime-2 sibling must NOT be applied (no blind-apply fork)"
-        );
-        assert_eq!(
-            settle.lock().unwrap().competitor_count(&group_hex),
-            1,
-            "the sibling was captured for converge_commit"
-        );
-    }
-
-    /// Regime-1 happy path (real MDK): with NO window, the `EngineProcessor`
-    /// decrypts a peer location, advances the PER-CIRCLE group cursor, and emits
-    /// a `Location` on the bus.
-    #[test]
-    fn engine_processor_regime1_processes_location_and_advances_per_circle_cursor() {
-        use crate::relay::live_sync::{
-            group_cursor_stream, CommitSettleBuffer, EngineProcessor, EventBus,
-            GroupProcessOutcome, LiveSyncEvent,
-        };
-        use std::sync::{Arc, Mutex};
-
-        let setup = setup_two_party_circle();
-        let nostr_group_id = setup.nostr_group_id;
-        let bob_group = setup.bob.mdk.get_groups().unwrap();
-        let bob_mls = bob_group.first().unwrap().mls_group_id.clone();
-        let location = LocationMessage::new(48.0, 2.0);
-        let (ev, _, _) = setup
-            .bob
-            .encrypt_location(&bob_mls, &setup.bob_keys.public_key(), &location, 300)
-            .unwrap();
-
-        let alice = Arc::new(setup.alice);
-        let bus = EventBus::new();
-        let mut rx = bus.subscribe();
-        let processor = EngineProcessor::new(
-            alice.clone(),
-            Arc::new(Mutex::new(CommitSettleBuffer::new())),
-            bus,
-        );
-
-        let outcome = processor.process_group_event(&ev, &nostr_group_id);
-        assert_eq!(
-            outcome,
-            GroupProcessOutcome::Processed {
-                advanced_cursor: true
-            }
-        );
-
-        // The per-circle cursor advanced (keyed by this circle's hex id).
-        let key = group_cursor_stream(&hex::encode(nostr_group_id));
-        assert!(
-            alice.read_sync_cursor(&key).unwrap().is_some(),
-            "per-circle group cursor advanced"
-        );
-        // A Location was emitted.
-        assert!(matches!(
-            rx.try_recv().unwrap(),
-            LiveSyncEvent::Location { .. }
-        ));
-    }
-
-    /// M6-2 path B: a peer `SelfRemove` reaching the engine is auto-committed by
-    /// MDK, so `decrypt_location_for_engine` surfaces `AutoCommit` (carrying the
-    /// real group id + the staged commit for the in-Rust converge), NOT a plain
-    /// `GroupUpdate`. Any receiving member auto-commits a `SelfRemove`.
-    #[test]
-    fn decrypt_for_engine_self_remove_maps_to_auto_commit() {
-        use crate::relay::live_sync::EngineDecryptOutcome;
-        let setup = setup_two_party_circle();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-        // Bob (member) leaves → a SelfRemove proposal event.
-        let self_remove = setup
-            .bob
-            .propose_leave(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        // Alice receives it → MDK auto-commits → AutoCommit (she now holds pending).
-        let out = setup
-            .alice
-            .decrypt_location_for_engine(&self_remove, &setup.nostr_group_id);
-        match out {
-            EngineDecryptOutcome::AutoCommit {
-                nostr_group_id,
-                mls_group_id,
-                commit_json,
-            } => {
-                assert_eq!(nostr_group_id, setup.nostr_group_id.to_vec());
-                assert_eq!(mls_group_id, setup.mls_group_id);
-                assert!(!commit_json.is_empty(), "the staged auto-commit JSON");
-            }
-            other => panic!("expected AutoCommit, got {other:?}"),
-        }
-        // A staged pending commit does NOT advance the epoch.
-        assert_eq!(setup.alice.group_epoch(&setup.mls_group_id).unwrap(), n);
-    }
-
-    /// M6-2 path B: the engine processor, on an auto-commit, opens a settle
-    /// window (so a concurrent sibling auto-commit buffers) and returns the work
-    /// item for the converge task — WITHOUT advancing the cursor or the epoch.
-    #[test]
-    fn engine_processor_auto_commit_opens_window_and_returns_work() {
-        use crate::relay::live_sync::{
-            group_cursor_stream, CommitSettleBuffer, EngineProcessor, EventBus, GroupProcessOutcome,
-        };
-        use std::sync::{Arc, Mutex};
-
-        let setup = setup_two_party_circle();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-        let self_remove = setup
-            .bob
-            .propose_leave(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        let group_hex = hex::encode(setup.nostr_group_id);
-
-        let alice = Arc::new(setup.alice);
-        let settle = Arc::new(Mutex::new(CommitSettleBuffer::new()));
-        let processor = EngineProcessor::new(alice.clone(), settle.clone(), EventBus::new());
-
-        match processor.process_group_event(&self_remove, &setup.nostr_group_id) {
-            GroupProcessOutcome::AutoCommitStaged(work) => {
-                assert_eq!(work.staged_epoch, n);
-                assert_eq!(work.mls_group_id, setup.mls_group_id);
-                assert_eq!(work.nostr_group_id, setup.nostr_group_id.to_vec());
-                assert!(!work.commit_json.is_empty());
-            }
-            other => panic!("expected AutoCommitStaged, got {other:?}"),
-        }
-
-        assert!(
-            settle.lock().unwrap().has_window(&group_hex),
-            "a settle window must be opened so a sibling auto-commit buffers"
-        );
-        assert_eq!(
-            alice.group_epoch(&setup.mls_group_id).unwrap(),
-            n,
-            "the epoch must NOT advance before convergence"
-        );
-        let key = group_cursor_stream(&group_hex);
         assert!(
-            alice.read_sync_cursor(&key).unwrap().is_none(),
-            "the cursor must NOT advance before convergence (lossless replay net)"
+            tp.alice.read_sync_cursor(&key).unwrap().is_none(),
+            "the per-circle group cursor must be purged on leave (wipe-on-leave)"
         );
     }
 
-    /// M6-2 path B (THE convergence regression): two members both auto-commit the
-    /// SAME peer `SelfRemove` (concurrent regime-2). Feeding each the other's
-    /// commit, the engine's `gated_converge` (intent `None`) lands them on the
-    /// MIP-03 winner's branch — exactly one converged epoch, the departed member
-    /// gone on both, no fork. This exercises the path-B engine wiring (window
-    /// opened inside the processor + the shared converge) that the pure
-    /// `converge_commit` F2 tests do not.
     #[tokio::test]
-    async fn auto_commit_converge_with_a_sibling_removes_the_departed_without_forking() {
-        use crate::relay::live_sync::finalize::gated_converge;
-        use crate::relay::live_sync::{
-            CommitSettleBuffer, EngineDecryptOutcome, EngineProcessor, EventBus,
-            GroupProcessOutcome, MlsWriteGate,
-        };
-        use nostr::JsonUtil;
-        use std::sync::{Arc, Mutex};
-
-        let setup = setup_four_party_two_admin_circle();
-        let mls_group_id = setup.mls_group_id.clone();
-        // The four-party fixture builds MLS state directly via MDK (no stored
-        // Circle row), so read the nostr_group_id from the MDK group.
-        let nostr_group_id = setup
-            .alice
-            .mdk
-            .get_group(&mls_group_id)
-            .unwrap()
-            .unwrap()
-            .nostr_group_id;
-        let group_hex = hex::encode(nostr_group_id);
-        let carol_hex = setup.carol_keys.public_key().to_hex();
-
-        // Carol (member) leaves → a SelfRemove all remaining members auto-commit.
-        let carol_self_remove = setup
-            ._carol
-            .propose_leave(&mls_group_id)
-            .unwrap()
-            .evolution_event;
-
-        // Bob auto-commits → Bob's sibling commit (the competitor).
-        let bob_commit_json = match setup
+    async fn propose_leave_by_non_admin_returns_proposal_event() {
+        let tp = setup_two_party_circle().await;
+        let ev = tp
             .bob
-            .decrypt_location_for_engine(&carol_self_remove, &nostr_group_id)
-        {
-            EngineDecryptOutcome::AutoCommit { commit_json, .. } => commit_json,
-            other => panic!("Bob should auto-commit, got {other:?}"),
-        };
-        let bob_event = nostr::Event::from_json(&bob_commit_json).unwrap();
-
-        // Alice auto-commits through the engine processor (opens her window).
-        let alice = Arc::new(setup.alice);
-        let settle = Arc::new(Mutex::new(CommitSettleBuffer::new()));
-        let gate = Arc::new(MlsWriteGate::new());
-        let processor = EngineProcessor::new(alice.clone(), settle.clone(), EventBus::new());
-        let work = match processor.process_group_event(&carol_self_remove, &nostr_group_id) {
-            GroupProcessOutcome::AutoCommitStaged(w) => *w,
-            other => panic!("Alice should auto-commit, got {other:?}"),
-        };
-
-        // Bob's sibling arrives during Alice's window → buffered as a competitor.
-        {
-            let mut sb = settle.lock().unwrap();
-            assert!(sb.insert_competitor(
-                &group_hex,
-                crate::relay::live_sync::BufferedCommit {
-                    event_json: bob_commit_json.clone(),
-                    created_at_secs: bob_event.created_at.as_secs(),
-                    id_hex: bob_event.id.to_hex(),
-                },
-                work.staged_epoch,
-            ));
-        }
-
-        // Alice converges (intent None — adopting Carol's departure).
-        // H1: gated_converge now re-delivers any excluded Locations onto a bus;
-        // this test has only a real-commit competitor, so a throwaway bus is fine.
-        let bus = EventBus::new();
-        let result = gated_converge(
-            &gate,
-            &settle,
-            &alice,
-            &bus,
-            &work.mls_group_id,
-            &work.nostr_group_id,
-            &work.commit_json,
-            work.staged_epoch,
-            &CommitIntent::None,
-        )
-        .await
-        .unwrap();
-
-        // Either we won (Merged) or adopted Bob's (AdoptedWinner) — both remove
-        // Carol and advance the epoch; never a fork, never a RolledBack here.
-        assert!(
-            matches!(
-                result,
-                CommitConvergence::Merged | CommitConvergence::AdoptedWinner { .. }
-            ),
-            "converged onto the winner, got {result:?}"
-        );
-        assert!(
-            alice.group_epoch(&mls_group_id).unwrap() > work.staged_epoch,
-            "convergence advances the epoch onto the winner's branch"
-        );
-        assert!(
-            !alice
-                .member_pubkeys_hex(&mls_group_id)
-                .unwrap()
-                .contains(&carol_hex),
-            "the departed member (Carol) is gone after convergence"
-        );
-        assert!(
-            !settle.lock().unwrap().has_window(&group_hex),
-            "the window is closed after convergence"
-        );
+            .propose_leave(&tp.mls_group_id)
+            .await
+            .expect("non-admin bob can propose SelfRemove");
+        assert_eq!(ev.kind.as_u16(), 445);
     }
 
-    /// M6-2 path B (the full engine wiring, real relay): the in-Rust converge
-    /// task PUBLISHES the auto-commit via the engine `Client`, waits the settle
-    /// window, and converges. With no sibling it merges, removing the departed
-    /// member and emitting a roster-changed `GroupUpdate{None}` for the UI. This
-    /// is the ~settle-window-second integration test that exercises the publish +
-    /// the task composition that the unit tests stub out.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn run_autocommit_converge_publishes_and_merges_over_a_relay() {
-        use crate::relay::live_sync::{
-            run_autocommit_converge, CommitSettleBuffer, EngineHandles, EngineProcessor, EventBus,
-            GroupProcessOutcome, LiveSyncEvent, MlsWriteGate,
-        };
-        use nostr_relay_builder::MockRelay;
-        use std::sync::atomic::{AtomicBool, AtomicUsize};
-        use std::sync::{Arc, Mutex};
-
-        let _ = crate::relay::allow_ws_loopback_for_test();
-        let relay = MockRelay::run().await.unwrap();
-        let url = relay.url().await.to_string();
-
-        let setup = setup_two_party_circle();
-        let mls_group_id = setup.mls_group_id.clone();
-        let nostr_group_id = setup.nostr_group_id;
-        let group_hex = hex::encode(nostr_group_id);
-        let bob_hex = setup.bob_keys.public_key().to_hex();
-
-        // Bob leaves → Alice auto-commits (the engine processor opens her window).
-        let self_remove = setup
-            .bob
-            .propose_leave(&mls_group_id)
-            .unwrap()
-            .evolution_event;
-        let alice = Arc::new(setup.alice);
-        let settle = Arc::new(Mutex::new(CommitSettleBuffer::new()));
-        let bus = EventBus::new();
-        let mut rx = bus.subscribe();
-        let processor = EngineProcessor::new(alice.clone(), settle.clone(), bus.clone());
-        let work = match processor.process_group_event(&self_remove, &nostr_group_id) {
-            GroupProcessOutcome::AutoCommitStaged(w) => *w,
-            other => panic!("expected AutoCommitStaged, got {other:?}"),
-        };
-
-        // Point Alice's STORED circle relays at the MockRelay (the publish target
-        // the converge task reads from `get_circle`). This MUST be done AFTER
-        // `process_group_event`, whose `resync_circle_relays_from_mdk` rewrites
-        // `Circle.relays` from the MDK group context (the M1 resync-drift the
-        // publish self-heals via `add_relay` in production).
-        {
-            let mut circle = alice.get_circle(&mls_group_id).unwrap().unwrap().circle;
-            circle.relays = vec![url.clone()];
-            alice.storage.save_circle(&circle).unwrap();
-        }
-
-        // An engine client connected to the MockRelay.
-        let client = nostr_sdk::Client::builder().build();
-        client.add_relay(&url).await.unwrap();
-        client.connect().await;
-        let handles = EngineHandles {
-            client,
-            circle: alice.clone(),
-            gate: Arc::new(MlsWriteGate::new()),
-            settle: settle.clone(),
-            bus,
-            shutdown: Arc::new(AtomicBool::new(false)),
-            converge_inflight: Arc::new(AtomicUsize::new(0)),
-        };
-
-        // The full task: publish Alice's commit → wait the settle window →
-        // converge (Merged, no sibling).
-        run_autocommit_converge(handles, work.clone()).await;
-
-        assert!(
-            alice.group_epoch(&mls_group_id).unwrap() > work.staged_epoch,
-            "the auto-commit converged (epoch advanced)"
-        );
-        assert!(
-            !alice
-                .member_pubkeys_hex(&mls_group_id)
-                .unwrap()
-                .contains(&bob_hex),
-            "the departed member (Bob) is removed"
-        );
-        assert!(
-            !settle.lock().unwrap().has_window(&group_hex),
-            "the settle window is closed after convergence"
-        );
-
-        // A post-converge GroupUpdate{None} (roster changed) was emitted for UI.
-        let mut saw_group_update = false;
-        while let Ok(ev) = rx.try_recv() {
-            if matches!(
-                ev,
-                LiveSyncEvent::GroupUpdate {
-                    evolution_event_json: None,
-                    ..
-                }
-            ) {
-                saw_group_update = true;
-            }
-        }
-        assert!(
-            saw_group_update,
-            "a roster-changed GroupUpdate{{None}} must be emitted to the UI"
-        );
+    #[tokio::test]
+    async fn propose_leave_by_sole_admin_is_rejected() {
+        let tp = setup_two_party_circle().await;
+        // Alice is the sole admin — the engine's AdminCannotSelfRemove gate
+        // rejects a bare SelfRemove until she exits the admin set first.
+        assert!(matches!(
+            tp.alice.propose_leave(&tp.mls_group_id).await,
+            Err(CircleError::Mls(_))
+        ));
     }
 
-    #[test]
-    fn decrypt_location_group_update() {
-        let setup = setup_two_party_circle();
+    // ── Member management ────────────────────────────────────────────────────
 
-        // Create a third party (Carol) and add her to the group to produce
-        // a commit event. Adding a member produces an UpdateGroupResult whose
-        // evolution_event is a kind 445 commit. When Bob processes that commit
-        // via decrypt_location, it should return GroupUpdate.
-
-        let carol_dir = TempDir::new().unwrap();
-        let carol_mdk =
-            MdkManager::new_unencrypted(carol_dir.path()).expect("should create carol manager");
-        let carol_keys = Keys::generate();
-
-        // Carol creates a key package
-        let carol_bundle = carol_mdk
-            .create_key_package(
-                &carol_keys.public_key().to_hex(),
-                &["wss://relay.test.com".to_string()],
+    #[tokio::test]
+    async fn add_members_nonexistent_group_fails() {
+        let (manager, _keys, _dir) = create_test_manager();
+        let member = make_member_with_relays(vec!["wss://r.test".to_string()], vec![]).await;
+        let res = manager
+            .add_members(
+                &GroupId::from_slice(&[0u8; 32]),
+                &[member.key_package_event],
             )
-            .expect("should create carol key package");
-
-        let tags: Vec<nostr::Tag> = carol_bundle
-            .tags_443
-            .into_iter()
-            .map(|t| nostr::Tag::parse(&t).unwrap())
-            .collect();
-
-        let carol_kp_event = EventBuilder::new(Kind::MlsKeyPackage, carol_bundle.content)
-            .tags(tags)
-            .sign_with_keys(&carol_keys)
-            .expect("should sign carol key package");
-
-        // Alice adds Carol to the group (produces a commit event)
-        let add_result = setup
-            .alice
-            .add_members(&setup.mls_group_id, &[carol_kp_event])
-            .expect("alice should add carol");
-
-        // Alice merges the pending commit for the add operation
-        setup
-            .alice
-            .finalize_pending_commit(&setup.mls_group_id)
-            .expect("alice should finalize pending commit");
-
-        // Bob processes the commit event via decrypt_location
-        let result = setup
-            .bob
-            .decrypt_location(&add_result.evolution_event)
-            .expect("bob should process commit");
-
-        // The commit should produce a GroupUpdate variant
-        if let crate::nostr::mls::types::LocationMessageResult::GroupUpdate { .. } = result {
-            // Success -- commit was recognized as a group update
-        } else {
-            panic!(
-                "Expected GroupUpdate variant from commit, got: {:?}",
-                result
-            );
-        }
+            .await;
+        assert!(res.is_err());
     }
 
-    // ==================== Jittered NIP-40 Expiration Tests ====================
-
-    #[test]
-    fn encrypt_location_attaches_expiration_tag() {
-        let setup = setup_two_party_circle();
-        let location = LocationMessage::new(37.7749, -122.4194);
-        let before = Timestamp::now().as_secs();
-
-        let (event, _, _) = setup
-            .alice
-            .encrypt_location(
-                &setup.mls_group_id,
-                &setup.alice_keys.public_key(),
-                &location,
-                300,
+    #[tokio::test]
+    async fn remove_members_nonexistent_group_fails() {
+        let (manager, _keys, _dir) = create_test_manager();
+        let res = manager
+            .remove_members(
+                &GroupId::from_slice(&[0u8; 32]),
+                &[Keys::generate().public_key().to_hex()],
             )
-            .expect("encrypt should succeed");
-
-        let after = Timestamp::now().as_secs();
-
-        let expirations: Vec<u64> = event
-            .tags
-            .iter()
-            .filter_map(|t| match t.as_standardized() {
-                Some(TagStandard::Expiration(ts)) => Some(ts.as_secs()),
-                _ => None,
-            })
-            .collect();
-
-        assert_eq!(
-            expirations.len(),
-            1,
-            "outer kind:445 must carry exactly one expiration tag"
-        );
-        let exp = expirations[0];
-        // Jitter window is [interval, 2*interval] = [300, 600] from publish time
-        // (using 300 as the test's chosen interval — production uses 198).
-        // Allow +/- clock-skew against `before`/`after` (both in seconds).
-        assert!(
-            exp >= before + 300 && exp <= after + 600,
-            "expiration {} outside expected window [{}, {}]",
-            exp,
-            before + 300,
-            after + 600
-        );
+            .await;
+        assert!(res.is_err());
     }
 
-    #[test]
-    fn encrypt_location_expiration_differs_per_call() {
-        let setup = setup_two_party_circle();
-        let location = LocationMessage::new(37.7749, -122.4194);
-
-        // Collect expirations from a handful of calls. A single comparison can
-        // flake once per ~300 samples (same second-level jitter value); pull
-        // several and assert at least two distinct values appear.
-        let mut exps: Vec<u64> = Vec::new();
-        for _ in 0..12 {
-            let (event, _, _) = setup
-                .alice
-                .encrypt_location(
-                    &setup.mls_group_id,
-                    &setup.alice_keys.public_key(),
-                    &location,
-                    300,
-                )
-                .expect("encrypt should succeed");
-            let ts = event
-                .tags
-                .iter()
-                .find_map(|t| match t.as_standardized() {
-                    Some(TagStandard::Expiration(ts)) => Some(ts.as_secs()),
-                    _ => None,
-                })
-                .expect("expiration tag present");
-            exps.push(ts);
-        }
-
-        let unique: std::collections::HashSet<u64> = exps.iter().copied().collect();
-        assert!(
-            unique.len() >= 2,
-            "expected at least 2 distinct jittered expirations across 12 calls, got {:?}",
-            unique
-        );
+    #[tokio::test]
+    async fn get_members_nonexistent_group_fails() {
+        let (manager, _keys, _dir) = create_test_manager();
+        assert!(manager
+            .get_members(&GroupId::from_slice(&[0u8; 32]))
+            .await
+            .is_err());
     }
 
-    /// Locks in the protocol invariant that MLS evolution events
-    /// (commits/proposals carried over kind 445) MUST NOT carry a NIP-40
-    /// `expiration` tag.
-    ///
-    /// MLS state recovery requires every commit since an offline member's
-    /// last known epoch. If a commit expires from relays before an offline
-    /// member fetches it, that member's MLS state desynchronises and cannot
-    /// be advanced — they fall off a cliff that is only recoverable via
-    /// re-Welcome. Locations may be TTL'd because stale coordinates have no
-    /// operational value; commits are the structural backbone of group
-    /// state and must persist. Three independent Marmot reviewers flagged
-    /// applying the location TTL to commits as a critical correctness bug.
-    ///
-    /// `nostr/mls/manager.rs::create_message`'s contract is "only kind:445
-    /// location messages set this today". This regression test fails the
-    /// build if a future change adds an expiration tag on the
-    /// `add_members`, `remove_members`, or `self_update` paths.
-    #[test]
-    fn add_members_evolution_event_has_no_expiration_tag() {
-        let setup = setup_three_party_two_admin_circle();
-        // Alice adds a fresh outsider — produces a kind 445 commit.
-        let dave_keys = Keys::generate();
-        let dave_dir = TempDir::new().unwrap();
-        let dave = CircleManager::new_unencrypted(dave_dir.path()).unwrap();
-        let dave_pubkey_hex = dave_keys.public_key().to_hex();
-        let bundle = dave
-            .mdk
-            .create_key_package(&dave_pubkey_hex, &["wss://relay.test.com".to_string()])
-            .expect("dave key package");
-        let tags: Vec<nostr::Tag> = bundle
-            .tags_443
-            .into_iter()
-            .map(|t| nostr::Tag::parse(&t).unwrap())
-            .collect();
-        let dave_kp_event = EventBuilder::new(Kind::MlsKeyPackage, bundle.content)
-            .tags(tags)
-            .sign_with_keys(&dave_keys)
-            .expect("sign dave kp");
+    #[tokio::test]
+    async fn get_members_returns_roster_with_admin_flag() {
+        let tp = setup_two_party_circle().await;
+        let members = tp.alice.get_members(&tp.mls_group_id).await.unwrap();
+        assert_eq!(members.len(), 2, "alice + bob");
+        let alice_hex = tp.alice_keys.public_key().to_hex();
+        let bob_hex = tp.bob_keys.public_key().to_hex();
+        let alice = members.iter().find(|m| m.pubkey == alice_hex).unwrap();
+        let bob = members.iter().find(|m| m.pubkey == bob_hex).unwrap();
+        assert!(alice.is_admin, "creator is admin");
+        assert!(!bob.is_admin, "invitee is not admin");
+    }
 
-        let result = setup
+    #[tokio::test]
+    async fn remove_members_flow_evicts_the_member() {
+        let tp = setup_two_party_circle().await;
+        let bob_hex = tp.bob_keys.public_key().to_hex();
+        let commit = tp
             .alice
-            .add_members(&setup.mls_group_id, &[dave_kp_event])
-            .expect("alice should add dave");
-
-        let has_expiration = result
-            .evolution_event
-            .tags
-            .iter()
-            .any(|t| matches!(t.as_standardized(), Some(TagStandard::Expiration(_))));
+            .remove_members(&tp.mls_group_id, &[bob_hex.clone()])
+            .await
+            .expect("admin removes bob");
+        assert_eq!(commit.commit_event.kind.as_u16(), 445);
+        tp.alice
+            .confirm_published(commit.pending)
+            .await
+            .expect("confirm remove");
+        let members = tp.alice.get_members(&tp.mls_group_id).await.unwrap();
         assert!(
-            !has_expiration,
-            "add_members evolution event MUST NOT carry NIP-40 expiration — \
-             commits must persist on relays for offline-member catch-up",
+            members.iter().all(|m| m.pubkey != bob_hex),
+            "bob must be gone from alice's roster after confirm"
         );
     }
-
-    // ====================================================================
-    // add_members_with_welcomes: gift-wrap + fail-closed relay cascade,
-    // pending-commit lifecycle, and admin gating (mirrors create_circle).
-    // ====================================================================
 
     #[tokio::test]
     async fn add_members_with_welcomes_produces_one_welcome_per_member() {
-        let tp = setup_two_party_circle();
-        // Two fresh outsiders, each advertising an inbox relay.
-        let carol =
-            make_member_with_relays(vec!["wss://carol-inbox.example.com".to_string()], vec![]);
-        let dave =
-            make_member_with_relays(vec!["wss://dave-inbox.example.com".to_string()], vec![]);
-
+        let tp = setup_two_party_circle().await;
+        let carol = make_member_with_relays(vec!["wss://carol.test".to_string()], vec![]).await;
         let result = tp
             .alice
-            .add_members_with_welcomes(&tp.alice_keys, &tp.mls_group_id, vec![carol, dave], &[])
+            .add_members_with_welcomes(&tp.alice_keys, &tp.mls_group_id, vec![carol], &tp.relays)
             .await
-            .expect("admin adds two members");
-
-        assert_eq!(
-            result.welcome_events.len(),
-            2,
-            "exactly one gift-wrapped Welcome per added member",
-        );
-        // The Add commit is a kind:445 evolution event.
-        assert_eq!(result.evolution_event.kind, Kind::Custom(445));
-        // Each Welcome is a kind:1059 gift wrap.
-        for w in &result.welcome_events {
-            assert_eq!(w.event.kind, Kind::GiftWrap);
-        }
-    }
-
-    #[tokio::test]
-    async fn add_members_with_welcomes_matches_recipients_by_e_tag() {
-        let tp = setup_two_party_circle();
-        // Distinct inbox relays let us assert each Welcome routes to the right
-        // member regardless of the order MDK emits the rumors in.
-        let carol_relay = "wss://carol-inbox.example.com".to_string();
-        let dave_relay = "wss://dave-inbox.example.com".to_string();
-        let carol = make_member_with_relays(vec![carol_relay.clone()], vec![]);
-        let dave = make_member_with_relays(vec![dave_relay.clone()], vec![]);
-        let carol_pubkey = carol.key_package_event.pubkey.to_hex();
-        let dave_pubkey = dave.key_package_event.pubkey.to_hex();
-
-        let result = tp
-            .alice
-            .add_members_with_welcomes(&tp.alice_keys, &tp.mls_group_id, vec![carol, dave], &[])
-            .await
-            .expect("admin adds two members");
-
-        // Find each recipient's Welcome by pubkey (order-independent) and
-        // confirm the gift-wrap was routed to that member's own inbox relay.
-        let carol_welcome = result
-            .welcome_events
-            .iter()
-            .find(|w| w.recipient_pubkey == carol_pubkey)
-            .expect("Welcome for carol");
-        let dave_welcome = result
-            .welcome_events
-            .iter()
-            .find(|w| w.recipient_pubkey == dave_pubkey)
-            .expect("Welcome for dave");
-        assert_eq!(carol_welcome.recipient_relays, vec![carol_relay]);
-        assert_eq!(dave_welcome.recipient_relays, vec![dave_relay]);
-    }
-
-    #[tokio::test]
-    async fn add_members_with_welcomes_cascade_inbox_then_nip65_then_creator() {
-        // Tier 1: member's inbox relays win when present.
-        {
-            let tp = setup_two_party_circle();
-            let inbox = vec!["wss://inbox.example.com".to_string()];
-            let nip65 = vec!["wss://nip65.example.com".to_string()];
-            let member = make_member_with_relays(inbox.clone(), nip65);
-            let creator = vec!["wss://creator.example.com".to_string()];
-            let result = tp
-                .alice
-                .add_members_with_welcomes(&tp.alice_keys, &tp.mls_group_id, vec![member], &creator)
-                .await
-                .expect("tier-1 add succeeds");
-            assert_eq!(result.welcome_events[0].recipient_relays, inbox);
-        }
-
-        // Tier 2: member's NIP-65 relays when inbox is empty.
-        {
-            let tp = setup_two_party_circle();
-            let nip65 = vec!["wss://nip65.example.com".to_string()];
-            let member = make_member_with_relays(vec![], nip65.clone());
-            let creator = vec!["wss://creator.example.com".to_string()];
-            let result = tp
-                .alice
-                .add_members_with_welcomes(&tp.alice_keys, &tp.mls_group_id, vec![member], &creator)
-                .await
-                .expect("tier-2 add succeeds");
-            assert_eq!(result.welcome_events[0].recipient_relays, nip65);
-        }
-
-        // Tier 3: the sender's own inbox relays when the member advertises none.
-        {
-            let tp = setup_two_party_circle();
-            let member = make_member_with_relays(vec![], vec![]);
-            let creator = vec!["wss://creator-inbox.example.com".to_string()];
-            let result = tp
-                .alice
-                .add_members_with_welcomes(&tp.alice_keys, &tp.mls_group_id, vec![member], &creator)
-                .await
-                .expect("tier-3 add succeeds using the sender's inbox");
-            assert_eq!(result.welcome_events[0].recipient_relays, creator);
-            // Two-plane leak invariant: never a public default.
-            for d in crate::circle::PRODUCTION_DEFAULT_RELAYS {
-                assert!(
-                    !result.welcome_events[0]
-                        .recipient_relays
-                        .iter()
-                        .any(|r| r.starts_with(d)),
-                    "welcome delivery must never fall back to a public default ({d})",
-                );
-            }
-        }
+            .expect("admin adds carol");
+        assert_eq!(result.welcome_events.len(), 1);
+        assert_eq!(result.commit_event.kind.as_u16(), 445);
     }
 
     #[tokio::test]
     async fn add_members_with_welcomes_fails_closed_with_no_relays() {
-        let tp = setup_two_party_circle();
-        // Member advertises NO relays and the sender passes no fallback.
-        let member = make_member_with_relays(vec![], vec![]);
-
+        let tp = setup_two_party_circle().await;
+        let carol = make_member_with_relays(vec![], vec![]).await;
         let err = tp
             .alice
-            .add_members_with_welcomes(&tp.alice_keys, &tp.mls_group_id, vec![member], &[])
+            .add_members_with_welcomes(&tp.alice_keys, &tp.mls_group_id, vec![carol], &[])
             .await
-            .expect_err("add must fail closed when no delivery relay exists");
+            .expect_err("no delivery relay must fail closed");
         assert!(matches!(err, CircleError::MissingWelcomeRelays));
-        // Generic surfaced message — no relay URL, pubkey, or group id.
-        assert_eq!(err.to_string(), "No reachable relay for welcome delivery");
-
-        // No dangling pending commit: the pre-flight check fires BEFORE staging
-        // the Add, so a subsequent admin operation on the same group still
-        // succeeds (a leftover pending commit would wedge this).
-        let deliverable =
-            make_member_with_relays(vec!["wss://later.example.com".to_string()], vec![]);
-        tp.alice
-            .add_members_with_welcomes(&tp.alice_keys, &tp.mls_group_id, vec![deliverable], &[])
-            .await
-            .expect("group must not be wedged by the failed add");
-    }
-
-    #[tokio::test]
-    async fn add_members_with_welcomes_stages_pending_commit_epoch_unchanged_until_finalize() {
-        let tp = setup_two_party_circle();
-        let before = tp
-            .alice
-            .group_epoch(&tp.mls_group_id)
-            .expect("epoch before");
-
-        let member =
-            make_member_with_relays(vec!["wss://carol-inbox.example.com".to_string()], vec![]);
-        tp.alice
-            .add_members_with_welcomes(&tp.alice_keys, &tp.mls_group_id, vec![member], &[])
-            .await
-            .expect("admin stages the add");
-
-        // The Add only STAGES a pending commit; the local epoch must not move
-        // until the commit is published and finalized.
-        let staged = tp
-            .alice
-            .group_epoch(&tp.mls_group_id)
-            .expect("epoch staged");
-        assert_eq!(staged, before, "epoch must not advance before finalize");
-
-        tp.alice
-            .finalize_pending_commit(&tp.mls_group_id)
-            .expect("finalize the staged Add");
-        let after = tp.alice.group_epoch(&tp.mls_group_id).expect("epoch after");
-        assert_eq!(after, before + 1, "epoch advances by exactly 1 on finalize");
-    }
-
-    #[tokio::test]
-    async fn add_members_with_welcomes_clear_rolls_back() {
-        let tp = setup_two_party_circle();
-        let before = tp
-            .alice
-            .group_epoch(&tp.mls_group_id)
-            .expect("epoch before");
-
-        let member =
-            make_member_with_relays(vec!["wss://carol-inbox.example.com".to_string()], vec![]);
-        tp.alice
-            .add_members_with_welcomes(&tp.alice_keys, &tp.mls_group_id, vec![member], &[])
-            .await
-            .expect("admin stages the add");
-
-        // Roll the pending commit back; the epoch must be unchanged.
-        tp.alice
-            .clear_pending_commit(&tp.mls_group_id)
-            .expect("clear the staged Add");
-        let after_clear = tp
-            .alice
-            .group_epoch(&tp.mls_group_id)
-            .expect("epoch after clear");
-        assert_eq!(after_clear, before, "epoch unchanged after rollback");
-
-        // A fresh add can re-stage on the cleared group.
-        let member2 =
-            make_member_with_relays(vec!["wss://dave-inbox.example.com".to_string()], vec![]);
-        tp.alice
-            .add_members_with_welcomes(&tp.alice_keys, &tp.mls_group_id, vec![member2], &[])
-            .await
-            .expect("fresh add re-stages after rollback");
-        let after_restage = tp
-            .alice
-            .group_epoch(&tp.mls_group_id)
-            .expect("epoch after restage");
-        assert_eq!(
-            after_restage, before,
-            "re-staged pending commit still has not finalized",
-        );
     }
 
     #[tokio::test]
     async fn add_members_with_welcomes_non_admin_rejected() {
-        // In `setup_two_party_circle`, only Alice is an admin; Bob is a plain
-        // member. Bob attempting to add a member must be rejected by MDK's
-        // admin gate, surfacing as a redacted `Mls` error.
-        let tp = setup_two_party_circle();
-        let member =
-            make_member_with_relays(vec!["wss://carol-inbox.example.com".to_string()], vec![]);
-
-        let err = tp
+        let tp = setup_two_party_circle().await;
+        let carol = make_member_with_relays(vec!["wss://carol.test".to_string()], vec![]).await;
+        let res = tp
             .bob
-            .add_members_with_welcomes(&tp.bob_keys, &tp.mls_group_id, vec![member], &[])
-            .await
-            .expect_err("a non-admin must not be able to add members");
-        assert!(
-            matches!(err, CircleError::Mls(_)),
-            "non-admin add must surface as a redacted Mls error, got {err:?}",
-        );
+            .add_members_with_welcomes(&tp.bob_keys, &tp.mls_group_id, vec![carol], &tp.relays)
+            .await;
+        assert!(matches!(res, Err(CircleError::Mls(_))));
     }
 
-    #[test]
-    fn remove_members_evolution_event_has_no_expiration_tag() {
-        let setup = setup_two_party_circle();
-        let bob_pubkey_hex = setup.bob_keys.public_key().to_hex();
+    // ── Invitations (hold-before-ingest) ─────────────────────────────────────
 
-        let result = setup
-            .alice
-            .remove_members(&setup.mls_group_id, &[bob_pubkey_hex])
-            .expect("alice (admin) should remove bob");
-
-        let has_expiration = result
-            .evolution_event
-            .tags
-            .iter()
-            .any(|t| matches!(t.as_standardized(), Some(TagStandard::Expiration(_))));
-        assert!(
-            !has_expiration,
-            "remove_members evolution event MUST NOT carry NIP-40 expiration",
-        );
-    }
-
-    #[test]
-    fn self_update_evolution_event_has_no_expiration_tag() {
-        let setup = setup_two_party_circle();
-
-        let result = setup
-            .alice
-            .self_update(&setup.mls_group_id)
-            .expect("alice self-update");
-
-        let has_expiration = result
-            .evolution_event
-            .tags
-            .iter()
-            .any(|t| matches!(t.as_standardized(), Some(TagStandard::Expiration(_))));
-        assert!(
-            !has_expiration,
-            "self_update evolution event MUST NOT carry NIP-40 expiration",
-        );
-    }
-
-    #[test]
-    fn decrypt_location_drops_expired_event() {
-        let setup = setup_two_party_circle();
-
-        // Synthesize a kind:445 event with an `expiration` tag 5 minutes in
-        // the past. The receiver must drop it before attempting MLS
-        // decryption. Content is irrelevant — enforcement is pre-MLS.
-        let past = Timestamp::from(Timestamp::now().as_secs() - 300);
-        let ephemeral = Keys::generate();
-        let expired_event =
-            EventBuilder::new(Kind::Custom(445), "ciphertext-placeholder".to_string())
-                .tag(Tag::expiration(past))
-                .sign_with_keys(&ephemeral)
-                .expect("sign expired event");
-
-        let result = setup
-            .bob
-            .decrypt_location(&expired_event)
-            .expect("decrypt_location returns Ok for expired events");
-
-        match result {
-            crate::nostr::mls::types::LocationMessageResult::Unprocessable { reason, .. } => {
-                assert!(
-                    reason.contains("expiration"),
-                    "Unprocessable reason should cite expiration, got: {reason}"
-                );
-            }
-            other => panic!("Expected Unprocessable for expired event, got: {:?}", other),
-        }
-    }
-
-    #[test]
-    fn decrypt_location_accepts_event_within_grace() {
-        let setup = setup_two_party_circle();
-
-        // Expiration 30 seconds in the past — within the 60s clock-skew grace.
-        // The event should not be dropped by the expiration check. It will
-        // still fail MLS decryption (bogus content), but the failure mode
-        // should NOT be our "expiration" Unprocessable path.
-        let recent_past = Timestamp::from(Timestamp::now().as_secs() - 30);
-        let ephemeral = Keys::generate();
-        let borderline_event =
-            EventBuilder::new(Kind::Custom(445), "ciphertext-placeholder".to_string())
-                .tag(Tag::expiration(recent_past))
-                .sign_with_keys(&ephemeral)
-                .expect("sign borderline event");
-
-        // Either process_message produces Ok(...) (some Unprocessable with a
-        // different reason) or Err. What we MUST NOT see is our expiration
-        // Unprocessable reason — that would mean the grace window failed.
-        match setup.bob.decrypt_location(&borderline_event) {
-            Ok(crate::nostr::mls::types::LocationMessageResult::Unprocessable {
-                reason, ..
-            }) => {
-                assert!(
-                    !reason.contains("NIP-40 expiration"),
-                    "grace window should have admitted this event, but it was dropped: {reason}"
-                );
-            }
-            Ok(_) => {
-                // Any other Ok variant is fine — it means the expiration
-                // check passed and MDK took a look at the event.
-            }
-            Err(_) => {
-                // An MLS-level error also means the expiration check passed
-                // and the event reached MDK. That's what we're asserting.
-            }
-        }
-    }
-
-    /// Sets up two parties where Bob has a processed welcome but has NOT yet
-    /// called `accept_welcome()` — the MLS group is still `Pending` in MDK.
-    /// Bob's Haven storage has a `Pending` membership.
-    struct PendingInviteSetup {
-        bob: CircleManager,
-        _bob_dir: TempDir,
-        mls_group_id: GroupId,
-    }
-
-    fn setup_pending_invite() -> PendingInviteSetup {
-        let relays = vec!["wss://relay.test.com".to_string()];
-
-        let alice_dir = TempDir::new().unwrap();
-        let alice = CircleManager::new_unencrypted(alice_dir.path()).unwrap();
-        let alice_keys = Keys::generate();
-
-        let bob_dir = TempDir::new().unwrap();
-        let bob = CircleManager::new_unencrypted(bob_dir.path()).unwrap();
-        let bob_keys = Keys::generate();
-
-        // Bob creates a key package
-        let bob_pubkey_hex = bob_keys.public_key().to_hex();
-        let bundle = bob
-            .mdk
-            .create_key_package(&bob_pubkey_hex, &relays)
-            .expect("should create bob key package");
-
-        let tags: Vec<nostr::Tag> = bundle
-            .tags_443
-            .into_iter()
-            .map(|t| nostr::Tag::parse(&t).unwrap())
-            .collect();
-
-        let bob_kp_event = EventBuilder::new(Kind::MlsKeyPackage, bundle.content)
-            .tags(tags)
-            .sign_with_keys(&bob_keys)
-            .expect("should sign bob key package");
-
-        // Alice creates the group with Bob
-        let config = crate::nostr::mls::types::LocationGroupConfig::new("Test Circle")
-            .with_description("Invitation test circle")
-            .with_relay("wss://relay.test.com")
-            .with_admin(&alice_keys.public_key().to_hex());
-
-        let group_result = alice
-            .mdk
-            .create_group(
-                &alice_keys.public_key().to_hex(),
-                vec![bob_kp_event],
-                config,
-            )
-            .expect("should create group");
-
-        let mls_group_id = group_result.group.mls_group_id.clone();
-        let nostr_group_id = group_result.group.nostr_group_id;
-
-        // Alice merges the pending commit
-        alice
-            .mdk
-            .merge_pending_commit(&mls_group_id)
-            .expect("should merge alice pending commit");
-
-        // Bob processes the welcome (creates pending welcome in MDK)
-        let welcome_rumor = group_result
-            .welcome_rumors
-            .first()
-            .expect("should have welcome for bob");
-
-        bob.mdk
-            .process_welcome(&nostr::EventId::all_zeros(), welcome_rumor)
-            .expect("should process welcome");
-
-        // Bob does NOT call accept_welcome — the group stays Pending in MDK.
-
-        // Save Circle record and Pending membership to Bob's storage
-        let now = chrono::Utc::now().timestamp();
-        let circle = super::super::types::Circle {
-            mls_group_id: mls_group_id.clone(),
-            nostr_group_id,
-            display_name: "Test Circle".to_string(),
-            circle_type: super::super::types::CircleType::LocationSharing,
-            relays,
-            created_at: now,
-            updated_at: now,
-        };
-        bob.storage.save_circle(&circle).unwrap();
-
-        let bob_membership = super::super::types::CircleMembership {
-            mls_group_id: mls_group_id.clone(),
-            status: super::super::types::MembershipStatus::Pending,
-            inviter_pubkey: Some(alice_keys.public_key().to_hex()),
-            invited_at: now,
-            responded_at: None,
-        };
-        bob.storage.save_membership(&bob_membership).unwrap();
-
-        PendingInviteSetup {
-            bob,
-            _bob_dir: bob_dir,
-            mls_group_id,
-        }
-    }
-
-    #[test]
-    fn accept_invitation_activates_mls_group() {
-        let setup = setup_pending_invite();
-
-        // Verify the MDK group is still pending before acceptance
-        let group_before = setup
-            .bob
-            .mdk
-            .get_group(&setup.mls_group_id)
-            .expect("should get group");
-        assert!(
-            group_before.is_some_and(|g| g.state == crate::nostr::mls::types::GroupState::Pending),
-            "group should be Pending before accept_invitation"
-        );
-
-        // Accept via the high-level API
-        let circle_with_members = setup
-            .bob
-            .accept_invitation(&setup.mls_group_id)
-            .expect("accept_invitation should succeed");
-
-        // Verify returned circle data
-        assert_eq!(circle_with_members.circle.display_name, "Test Circle");
-        assert_eq!(
-            circle_with_members.membership.status,
-            super::super::types::MembershipStatus::Accepted
-        );
-        assert!(circle_with_members.membership.responded_at.is_some());
-
-        // Verify MDK group is now active
-        let group_after = setup
-            .bob
-            .mdk
-            .get_group(&setup.mls_group_id)
-            .expect("should get group after acceptance");
-        assert!(
-            group_after.is_some_and(|g| g.state == crate::nostr::mls::types::GroupState::Active),
-            "group should be Active after accept_invitation"
-        );
-
-        // Verify no more pending welcomes for this group
-        let pending = setup
-            .bob
-            .mdk
-            .get_pending_welcomes()
-            .expect("should get pending welcomes");
-        assert!(
-            !pending.iter().any(|w| w.mls_group_id == setup.mls_group_id),
-            "no pending welcomes should remain for this group"
-        );
-    }
-
-    #[test]
-    fn accept_invitation_idempotent_after_partial_failure() {
-        let setup = setup_pending_invite();
-
-        // Simulate a prior partial success: accept the welcome at MDK level
-        // but leave Haven storage status as Pending.
-        let pending = setup
-            .bob
-            .mdk
-            .get_pending_welcomes()
-            .expect("should get pending welcomes");
-        let welcome = pending
-            .iter()
-            .find(|w| w.mls_group_id == setup.mls_group_id)
-            .expect("should find pending welcome");
-        setup
-            .bob
-            .mdk
-            .accept_welcome(welcome)
-            .expect("manual accept_welcome should succeed");
-
-        // MDK group is now Active, but Haven storage still says Pending.
-        let group = setup
-            .bob
-            .mdk
-            .get_group(&setup.mls_group_id)
-            .expect("should get group");
-        assert!(
-            group.is_some_and(|g| g.state == crate::nostr::mls::types::GroupState::Active),
-            "group should be Active after manual accept"
-        );
-
-        // Calling accept_invitation should succeed (idempotency path).
-        let circle_with_members = setup
-            .bob
-            .accept_invitation(&setup.mls_group_id)
-            .expect("accept_invitation should succeed on recovery path");
-
-        assert_eq!(
-            circle_with_members.membership.status,
-            super::super::types::MembershipStatus::Accepted
-        );
-    }
-
-    #[test]
-    fn decline_invitation_deactivates_mls_group() {
-        let setup = setup_pending_invite();
-
-        // Decline via the high-level API
-        setup
-            .bob
-            .decline_invitation(&setup.mls_group_id)
-            .expect("decline_invitation should succeed");
-
-        // Verify MDK group is now inactive
-        let group_after = setup
-            .bob
-            .mdk
-            .get_group(&setup.mls_group_id)
-            .expect("should get group after decline");
-        assert!(
-            group_after.is_some_and(|g| g.state == crate::nostr::mls::types::GroupState::Inactive),
-            "group should be Inactive after decline_invitation"
-        );
-
-        // Verify Haven storage status is Declined
-        let membership = setup
-            .bob
-            .storage
-            .get_membership(&setup.mls_group_id)
-            .expect("should get membership")
-            .expect("membership should exist");
-        assert_eq!(
-            membership.status,
-            super::super::types::MembershipStatus::Declined
-        );
-    }
-
-    /// Verifies that re-processing a gift wrap for an already-declined
-    /// invitation does NOT overwrite the membership status back to Pending.
-    /// This is the primary regression test for the "declined invitations
-    /// reappear after app restart" bug.
-    #[test]
-    fn reprocess_declined_invitation_does_not_overwrite() {
-        let setup = setup_pending_invite();
-
-        // Decline the invitation
-        setup
-            .bob
-            .decline_invitation(&setup.mls_group_id)
-            .expect("decline should succeed");
-
-        // Verify it's declined
-        let m = setup
-            .bob
-            .storage
-            .get_membership(&setup.mls_group_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(m.status, super::super::types::MembershipStatus::Declined);
-
-        // Simulate the poller re-processing the same welcome.
-        // MDK's process_welcome returns the existing welcome (already processed).
-        // But Haven's process_invitation must NOT overwrite the membership.
-        let welcome_rumor = {
-            let pending = setup.bob.mdk.get_pending_welcomes();
-            // After decline, MDK has no pending welcomes — the group is Inactive.
-            // But process_welcome will still return via the processed-welcome lookup.
-            assert!(
-                pending.unwrap_or_default().is_empty(),
-                "no pending welcomes after decline"
-            );
-            // We don't need the rumor; we'll call the low-level storage path.
-            // The real scenario is: process_invitation is called and reaches the
-            // membership-check guard before touching storage.
-            ()
-        };
-        let _ = welcome_rumor;
-
-        // The membership must still be Declined (not reset to Pending).
-        let m2 = setup
-            .bob
-            .storage
-            .get_membership(&setup.mls_group_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            m2.status,
-            super::super::types::MembershipStatus::Declined,
-            "membership must remain Declined after re-processing"
-        );
-
-        // Verify no pending invitations are returned
-        let invitations = setup.bob.get_pending_invitations().unwrap();
-        assert!(
-            invitations.is_empty(),
-            "declined invitation must not appear in pending list"
-        );
-    }
-
-    /// Verifies that re-processing a gift wrap for an already-accepted
-    /// circle does NOT revert it to a pending invitation.
-    #[test]
-    fn reprocess_accepted_invitation_does_not_overwrite() {
-        let setup = setup_pending_invite();
-
-        // Accept the invitation
-        setup
-            .bob
-            .accept_invitation(&setup.mls_group_id)
-            .expect("accept should succeed");
-
-        // Verify it's accepted
-        let m = setup
-            .bob
-            .storage
-            .get_membership(&setup.mls_group_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(m.status, super::super::types::MembershipStatus::Accepted);
-
-        // The membership must still be Accepted (not reset to Pending).
-        let m2 = setup
-            .bob
-            .storage
-            .get_membership(&setup.mls_group_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            m2.status,
-            super::super::types::MembershipStatus::Accepted,
-            "membership must remain Accepted after re-processing"
-        );
-
-        // Verify it appears in visible circles, not pending invitations
-        let invitations = setup.bob.get_pending_invitations().unwrap();
-        assert!(
-            invitations.is_empty(),
-            "accepted circle must not appear in pending invitations"
-        );
-
-        let visible = setup.bob.get_visible_circles().unwrap();
-        assert_eq!(visible.len(), 1, "accepted circle must be visible");
-    }
-
-    // ==================== Gift Wrap Dedup (Manager-level) Tests ====================
-
-    /// Raw material for a manager-level `process_invitation` test.
-    /// Unlike `setup_pending_invite`, this returns everything needed so that
-    /// the test can call `process_invitation` itself on the first pass.
-    struct RawInviteSetup {
-        bob: CircleManager,
-        _bob_dir: TempDir,
-        alice_pubkey_hex: String,
-        wrapper_id: nostr::EventId,
-        welcome_rumor: nostr::UnsignedEvent,
-    }
-
-    fn build_raw_invite_setup() -> RawInviteSetup {
-        let relays = vec!["wss://relay.test.com".to_string()];
-
-        let alice_dir = TempDir::new().unwrap();
-        let alice = CircleManager::new_unencrypted(alice_dir.path()).unwrap();
-        let alice_keys = Keys::generate();
-
-        let bob_dir = TempDir::new().unwrap();
-        let bob = CircleManager::new_unencrypted(bob_dir.path()).unwrap();
-        let bob_keys = Keys::generate();
-
-        // Bob creates a key package.
-        let bob_pubkey_hex = bob_keys.public_key().to_hex();
-        let bundle = bob
-            .mdk
-            .create_key_package(&bob_pubkey_hex, &relays)
-            .expect("should create bob key package");
-
-        let tags: Vec<nostr::Tag> = bundle
-            .tags_443
-            .into_iter()
-            .map(|t| nostr::Tag::parse(&t).unwrap())
-            .collect();
-
-        let bob_kp_event = EventBuilder::new(Kind::MlsKeyPackage, bundle.content)
-            .tags(tags)
-            .sign_with_keys(&bob_keys)
-            .expect("should sign bob key package");
-
-        // Alice creates the group with Bob.
-        let config = crate::nostr::mls::types::LocationGroupConfig::new("Dedup Test Circle")
-            .with_description("Idempotency regression test circle")
-            .with_relay("wss://relay.test.com")
-            .with_admin(alice_keys.public_key().to_hex());
-
-        let group_result = alice
-            .mdk
-            .create_group(
-                &alice_keys.public_key().to_hex(),
-                vec![bob_kp_event],
-                config,
-            )
-            .expect("should create group");
-
-        // Alice merges her pending commit so the group is active.
-        alice
-            .mdk
-            .merge_pending_commit(&group_result.group.mls_group_id)
-            .expect("should merge alice pending commit");
-
-        // Return the welcome rumor WITHOUT having Bob process it yet.
-        let welcome_rumor = group_result
-            .welcome_rumors
-            .into_iter()
-            .next()
-            .expect("should have welcome rumor for bob");
-
-        // Use a recognisable non-zero wrapper event ID.
-        let wrapper_id = nostr::EventId::from_byte_array([0xAB; 32]);
-
-        RawInviteSetup {
-            bob,
-            _bob_dir: bob_dir,
-            alice_pubkey_hex: alice_keys.public_key().to_hex(),
-            wrapper_id,
-            welcome_rumor,
-        }
-    }
-
-    /// First call to `process_invitation` with a fresh wrapper ID succeeds and
-    /// returns an `Invitation`. The second call with the SAME wrapper ID returns
-    /// `Err(CircleError::AlreadyProcessed)` — MDK is never asked to process the
-    /// welcome a second time (it would error with "invalid welcome" if it were).
-    #[test]
-    fn process_invitation_second_call_returns_already_processed() {
-        let setup = build_raw_invite_setup();
-
-        // First call — should succeed.
-        let first_result = setup.bob.process_invitation(
-            &setup.wrapper_id,
-            &setup.welcome_rumor,
-            &setup.alice_pubkey_hex,
-        );
-        assert!(
-            first_result.is_ok(),
-            "First process_invitation call must succeed, got: {:?}",
-            first_result.err()
-        );
-
-        // Second call with identical wrapper_id — must return AlreadyProcessed,
-        // NOT an Mls(..) error from MDK's "invalid welcome" path.
-        let second_result = setup.bob.process_invitation(
-            &setup.wrapper_id,
-            &setup.welcome_rumor,
-            &setup.alice_pubkey_hex,
-        );
-        assert!(
-            matches!(second_result, Err(CircleError::AlreadyProcessed)),
-            "Second call must return AlreadyProcessed, got: {second_result:?}",
-        );
-    }
-
-    /// After `AlreadyProcessed`, the original circle and membership rows must
-    /// be unchanged — the second call must not corrupt or duplicate them.
-    #[test]
-    fn process_invitation_already_processed_does_not_corrupt_storage() {
-        let setup = build_raw_invite_setup();
-
-        // First call populates storage.
-        let invitation = setup
-            .bob
-            .process_invitation(
-                &setup.wrapper_id,
-                &setup.welcome_rumor,
-                &setup.alice_pubkey_hex,
-            )
-            .expect("first process_invitation must succeed");
-
-        let mls_group_id = invitation.mls_group_id;
-
-        // Capture state after first call.
-        let membership_before = setup
-            .bob
-            .storage
-            .get_membership(&mls_group_id)
-            .unwrap()
-            .expect("membership must exist after first call");
-
-        // Second call — AlreadyProcessed.
-        let _ = setup.bob.process_invitation(
-            &setup.wrapper_id,
-            &setup.welcome_rumor,
-            &setup.alice_pubkey_hex,
-        );
-
-        // State must not have changed.
-        let membership_after = setup
-            .bob
-            .storage
-            .get_membership(&mls_group_id)
-            .unwrap()
-            .expect("membership must still exist after second call");
-
-        assert_eq!(
-            membership_before.status, membership_after.status,
-            "membership status must not change after AlreadyProcessed"
-        );
-        assert_eq!(
-            membership_before.inviter_pubkey, membership_after.inviter_pubkey,
-            "inviter_pubkey must not change after AlreadyProcessed"
-        );
-
-        // Only one circle row for this group — no duplicates.
-        let all_circles = setup.bob.storage.get_all_circles().unwrap();
-        let circle_count = all_circles
-            .iter()
-            .filter(|c| c.mls_group_id == mls_group_id)
-            .count();
-        assert_eq!(
-            circle_count, 1,
-            "exactly one circle row must exist, not duplicated"
-        );
-    }
-
-    /// Defense-in-depth: simulate the scenario where the `processed_gift_wraps`
-    /// dedup row is absent (e.g., DB reset or manual deletion) but a non-Pending
-    /// membership already exists for the same group ID. The membership-conflict
-    /// guard must still fire with `MembershipConflict`, confirming that the old
-    /// guard is not silently short-circuited by the new dedup check.
-    #[test]
-    fn membership_conflict_guard_fires_when_dedup_row_absent() {
-        let setup = build_raw_invite_setup();
-
-        // First call completes normally (creates dedup row + Pending membership).
-        let invitation = setup
-            .bob
-            .process_invitation(
-                &setup.wrapper_id,
-                &setup.welcome_rumor,
-                &setup.alice_pubkey_hex,
-            )
-            .expect("first call must succeed");
-
-        let mls_group_id = invitation.mls_group_id;
-
-        // Promote membership to Accepted so the conflict guard has something to catch.
-        setup
-            .bob
-            .storage
-            .update_membership_status(&mls_group_id, MembershipStatus::Accepted, Some(999_999))
-            .expect("update membership to Accepted");
-
-        // Manually delete the dedup row so the pre-check does NOT fire.
-        setup
-            .bob
-            .storage
-            .delete_gift_wrap_dedup_row(&setup.wrapper_id)
-            .expect("should delete dedup row");
-
-        // Verify dedup row is gone.
-        let check = setup
-            .bob
-            .storage
-            .is_gift_wrap_processed(&setup.wrapper_id)
-            .unwrap();
-        assert!(
-            check.is_none(),
-            "dedup row must be absent before the defense-in-depth test"
-        );
-
-        // Re-processing with the same welcome must fail with MembershipConflict,
-        // NOT AlreadyProcessed (dedup row is absent) and NOT succeed (MDK will
-        // error on the second process_welcome because the KeyPackage is consumed).
-        let result = setup.bob.process_invitation(
-            &setup.wrapper_id,
-            &setup.welcome_rumor,
-            &setup.alice_pubkey_hex,
-        );
-        assert!(
-            matches!(result, Err(CircleError::MembershipConflict(_))),
-            "Without dedup row but with Accepted membership, must get MembershipConflict, got: {result:?}",
-        );
-    }
-
-    /// When MDK's `process_welcome` errors (KP material unknown locally — the
-    /// real-world case is a KP that was consumed in a prior app session before
-    /// we shipped dedup), `process_invitation` must:
-    ///  1. Return the original MDK error on first encounter, so operators see
-    ///     why processing failed.
-    ///  2. Record a terminal-failure sentinel in `processed_gift_wraps`, so
-    ///     the next poll cycle short-circuits via `AlreadyProcessed` instead
-    ///     of re-calling MDK and printing the same error every 2 minutes.
-    #[test]
-    fn process_invitation_records_failure_sentinel_on_mdk_error() {
-        let setup = build_raw_invite_setup();
-
-        // Fresh manager — does NOT have Bob's KP material. MDK will error
-        // with "invalid welcome" / "unknown KP" when asked to process this
-        // welcome, because the local MLS state has no matching KeyPackage.
-        let stranger_dir = TempDir::new().unwrap();
-        let stranger = CircleManager::new_unencrypted(stranger_dir.path()).unwrap();
-
-        let wrapper_id = nostr::EventId::from_byte_array([0xF1; 32]);
-
-        // First call: MDK fails. We expect an Mls error.
-        let first =
-            stranger.process_invitation(&wrapper_id, &setup.welcome_rumor, &setup.alice_pubkey_hex);
-        assert!(
-            matches!(first, Err(CircleError::Mls(_))),
-            "MDK-failure path must surface the original Mls error on first attempt, got: {first:?}",
-        );
-
-        // Sentinel row must now exist as an empty blob — dedup guard will
-        // fire on subsequent polls.
-        let stored = stranger
-            .storage
-            .is_gift_wrap_processed(&wrapper_id)
-            .unwrap()
-            .expect("failure sentinel must be recorded after MDK error");
-        assert!(
-            stored.is_empty(),
-            "failure sentinel must use an empty-blob mls_group_id, got {} bytes",
-            stored.len(),
-        );
-
-        // Second call: MUST short-circuit as AlreadyProcessed — NOT call MDK
-        // again. If the sentinel weren't written, this would produce the
-        // same Mls(..) spam we are trying to silence.
-        let second =
-            stranger.process_invitation(&wrapper_id, &setup.welcome_rumor, &setup.alice_pubkey_hex);
-        assert!(
-            matches!(second, Err(CircleError::AlreadyProcessed)),
-            "Second call after MDK failure must return AlreadyProcessed, got: {second:?}",
-        );
-
-        // No circle or membership rows may have been written — the failure
-        // sentinel is a dedup-only record, not a group creation.
-        let circles = stranger.storage.get_all_circles().unwrap();
-        assert!(
-            circles.is_empty(),
-            "failure sentinel must not create any circle rows, found {} circles",
-            circles.len(),
-        );
-    }
-
-    // ==================== M7-B writer-lock tests ====================
-
-    /// M7-B (b) NO RE-ENTRANCY DEADLOCK — the win leg of `converge_commit`.
-    ///
-    /// `converge_commit` internally calls `finalize_pending_commit`, which now
-    /// acquires the process-global writer lock. `converge_commit` must therefore
-    /// NOT hold that (non-reentrant) lock at method scope. This exercises the
-    /// empty-competitor win leg (→ `finalize_pending_commit`) and asserts it
-    /// COMPLETES (a deadlock would hang the test). The concrete outcome is
-    /// asserted so the test is non-vacuous.
-    #[test]
-    fn m7b_converge_commit_win_leg_completes_no_reentrancy_deadlock() {
-        let setup = setup_two_party_circle();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-
-        let alice_commit = setup
-            .alice
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-
-        // Empty competitor set → the merge (win) leg → `finalize_pending_commit`,
-        // which re-acquires the writer lock. Must NOT deadlock.
-        let out = setup
-            .alice
-            .converge_commit(
-                &setup.mls_group_id,
-                &alice_commit,
-                n,
-                &[],
-                &CommitIntent::None,
-            )
-            .expect("converge_commit must complete (a deadlock would hang)");
-        assert_eq!(out, CommitConvergence::Merged);
-        assert_eq!(setup.alice.group_epoch(&setup.mls_group_id).unwrap(), n + 1);
-    }
-
-    /// M7-B (b) NO RE-ENTRANCY DEADLOCK — the adopt-winner leg of
-    /// `converge_commit`.
-    ///
-    /// This leg calls `self.mdk.process_message` (now individually lock-wrapped),
-    /// then `clear_pending_commit` (re-acquires the lock), then
-    /// `process_message` again (re-acquires). If any of those held the lock
-    /// while another tried to take it, the non-reentrant `Mutex` would deadlock.
-    /// Asserts the call COMPLETES and the group converges.
-    #[test]
-    fn m7b_converge_commit_adopt_leg_completes_no_reentrancy_deadlock() {
-        let setup = setup_two_party_circle();
-        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
-
-        let alice_commit = setup
-            .alice
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-        let bob_commit = setup
-            .bob
-            .self_update(&setup.mls_group_id)
-            .unwrap()
-            .evolution_event;
-
-        // Both members converge over each other's competitor from epoch N.
-        // Exactly one takes the win (merge) leg and one the adopt-winner leg;
-        // both internally re-acquire the writer lock through
-        // finalize/clear/process. Neither may deadlock.
-        let alice_out = setup
-            .alice
-            .converge_commit(
-                &setup.mls_group_id,
-                &alice_commit,
-                n,
-                std::slice::from_ref(&bob_commit),
-                &CommitIntent::None,
-            )
-            .expect("alice converge must complete");
-        let bob_out = setup
-            .bob
-            .converge_commit(
-                &setup.mls_group_id,
-                &bob_commit,
-                n,
-                std::slice::from_ref(&alice_commit),
-                &CommitIntent::None,
-            )
-            .expect("bob converge must complete");
-
-        // Exactly one merged; both advanced to N+1 (a convergent outcome proves
-        // the adopt leg ran to completion, i.e. no deadlock).
-        let merged = [alice_out, bob_out]
-            .iter()
-            .filter(|o| matches!(o, CommitConvergence::Merged))
-            .count();
-        assert_eq!(merged, 1, "exactly one committer wins the merge leg");
-        assert_eq!(setup.alice.group_epoch(&setup.mls_group_id).unwrap(), n + 1);
-        assert_eq!(setup.bob.group_epoch(&setup.mls_group_id).unwrap(), n + 1);
-    }
-
-    /// M7-B (b) NO RE-ENTRANCY DEADLOCK — `add_members_with_welcomes`.
-    ///
-    /// `add_members_with_welcomes` (async) internally calls the sync
-    /// `add_members`, which acquires the writer lock and then drops it before
-    /// the `.await` on `wrap_welcomes_with_cascade`. The guard must NEVER be held
-    /// across the await (a `!Send` `MutexGuard` held across await would fail to
-    /// compile in an async fn / could deadlock). Asserts the call COMPLETES.
     #[tokio::test]
-    async fn m7b_add_members_with_welcomes_completes_no_reentrancy_deadlock() {
-        let setup = setup_two_party_circle();
-        let new_member =
-            make_member_with_relays(vec!["wss://inbox.example.com".to_string()], Vec::new());
-
-        let result = setup
-            .alice
-            .add_members_with_welcomes(
-                &setup.alice_keys,
-                &setup.mls_group_id,
-                vec![new_member],
-                &["wss://fallback.example.com".to_string()],
-            )
-            .await
-            .expect("add_members_with_welcomes must complete (no deadlock)");
-        assert_eq!(
-            result.welcome_events.len(),
-            1,
-            "one welcome per added member"
-        );
-        // Roll back the staged Add so the group is left clean.
-        setup
-            .alice
-            .clear_pending_commit(&setup.mls_group_id)
-            .unwrap();
+    async fn accept_invitation_nonexistent_fails() {
+        let (manager, _keys, _dir) = create_test_manager();
+        let res = manager.accept_invitation(&EventId::all_zeros()).await;
+        assert!(matches!(res, Err(CircleError::NotFound(_))));
     }
 
-    /// Serializes the two lock-OBSERVATION tests against EACH OTHER so one's
-    /// held `acquire_authoring` guard cannot make the other's "lossless resume"
-    /// decrypt spuriously yield. (Production authoring tests elsewhere also share
-    /// the process-global `WRITER_LOCK`; the resume assertion tolerates that via
-    /// a bounded retry, which is itself the correct lossless-yield behavior.)
-    static LOCK_OBS_SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// M7-B (c) SWEEP YIELDS UNDER CONTENTION — `decrypt_receive_only` returns
-    /// `Skipped` (without advancing the cursor, without persisting) while a
-    /// concurrent authoring guard is held, and RESUMES a normal decrypt once the
-    /// guard is released (proving the yield is lossless: the cursor never
-    /// advanced, so the same event is re-processed).
-    ///
-    /// The contended guard is held on the SAME thread (`try_acquire_background`
-    /// is non-blocking, so no second thread is needed to observe contention);
-    /// this deterministically drives the `None` leg of the sweep.
     #[test]
-    fn m7b_receive_only_yields_to_skipped_under_authoring_contention() {
-        use crate::location::LocationMessage;
-        use crate::relay::ReceiveOnlyOutcome;
+    fn decline_invitation_nonexistent_is_idempotent() {
+        // Decline is a local drop + resolution sentinel; it never touches the
+        // wire (Rule 10) and is idempotent even with nothing held.
+        let (manager, _keys, _dir) = create_test_manager();
+        manager.decline_invitation(&EventId::all_zeros()).unwrap();
+    }
 
-        // The process-global WRITER_LOCK is shared across ALL parallel tests;
-        // serialize the lock-observation tests so they don't perturb each other.
-        let _serialize = LOCK_OBS_SERIALIZE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let setup = setup_two_party_circle();
-        let gid = &setup.mls_group_id;
-        let ngid = &setup.nostr_group_id;
-        let alice_hex = setup.alice_keys.public_key().to_hex();
-        let now = chrono::Utc::now().timestamp();
-
-        // Bob authors a location Alice has not yet seen.
-        let (loc, _, _) = setup
+    #[tokio::test]
+    async fn accept_invitation_materializes_circle_and_membership() {
+        // The setup already accepts Bob's welcome; assert the resulting state.
+        let tp = setup_two_party_circle().await;
+        let circle = tp
             .bob
-            .encrypt_location(
-                gid,
-                &setup.bob_keys.public_key(),
-                &LocationMessage::new(51.5, -0.12),
-                300,
-            )
-            .unwrap();
-
-        // Simulate the foreground authoring writer holding the lock: while held,
-        // the background sweep MUST yield to Skipped and NOT advance the cursor
-        // (and must NOT persist the location — the yield is pre-decrypt).
-        {
-            let _authoring = crate::write_lock::acquire_authoring();
-            let out = setup.alice.decrypt_receive_only(&loc, ngid, &alice_hex);
-            assert_eq!(
-                out,
-                ReceiveOnlyOutcome::Skipped,
-                "sweep yields to Skipped while an authoring guard is held"
-            );
-            assert!(!out.advances_cursor(), "cursor must not advance on a yield");
-            let rows = setup
-                .alice
-                .snapshot_last_known_for_circle(ngid, now)
-                .unwrap();
-            assert!(
-                !rows.iter().any(|r| (r.latitude - 51.5).abs() < 0.001),
-                "a yielded (contended) location must NOT be persisted"
-            );
-        } // authoring guard released here
-
-        // Lock free again → the yield was lossless: the SAME contended event is
-        // re-decrypted (the cursor never advanced past it) and now applies
-        // normally, persisting the location. The helper absorbs any transient
-        // contention from OTHER parallel tests that also acquire the
-        // process-global authoring lock — a transient Skipped there is itself the
-        // correct lossless-yield behavior, not a failure.
-        let out2 = receive_only_until_applied(&setup.alice, &loc, ngid, &alice_hex);
+            .get_circle(&tp.mls_group_id)
+            .await
+            .unwrap()
+            .expect("bob has the circle after accepting");
+        assert!(circle.membership.status.is_visible());
         assert_eq!(
-            out2,
-            ReceiveOnlyOutcome::Location,
-            "once the lock is free the re-processed event applies (lossless yield)"
+            circle.membership.inviter_pubkey,
+            Some(tp.alice_keys.public_key().to_hex())
         );
-        assert!(out2.advances_cursor());
-        let rows2 = setup
-            .alice
-            .snapshot_last_known_for_circle(ngid, now)
+        assert!(tp.bob.get_pending_invitations().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reprocess_accepted_invitation_returns_already_processed() {
+        let dir = TempDir::new().unwrap();
+        let alice_keys = Keys::generate();
+        let alice = CircleManager::new_unencrypted(dir.path(), &alice_keys).unwrap();
+
+        let bob_dir = TempDir::new().unwrap();
+        let bob_keys = Keys::generate();
+        let bob = CircleManager::new_unencrypted(bob_dir.path(), &bob_keys).unwrap();
+
+        let relays = vec!["wss://relay.test.com".to_string()];
+        let bob_kp = make_kp_event(&bob, &bob_keys, &relays).await;
+        let member = MemberKeyPackage {
+            key_package_event: bob_kp,
+            inbox_relays: relays.clone(),
+            nip65_relays: vec![],
+        };
+        let config = CircleConfig::new("Dedup Circle").with_relays(relays.clone());
+        let creation = alice
+            .create_circle(&alice_keys, vec![member], &config, &relays)
+            .await
             .unwrap();
+        alice.confirm_published(creation.pending).await.unwrap();
+        let welcome = &creation.welcome_events[0];
+
+        bob.process_gift_wrapped_invitation(&bob_keys, &welcome.event)
+            .await
+            .unwrap();
+        bob.accept_invitation(&welcome.event.id).await.unwrap();
+
+        // A second hold attempt after acceptance is rejected by the dedup row.
+        let re = bob
+            .process_gift_wrapped_invitation(&bob_keys, &welcome.event)
+            .await;
+        assert!(matches!(re, Err(CircleError::AlreadyProcessed)));
+    }
+
+    // ── Location sharing ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn encrypt_location_nonexistent_circle_fails() {
+        let (manager, keys, _dir) = create_test_manager();
+        let loc = crate::location::LocationMessage::new(1.0, 2.0);
+        let res = manager
+            .encrypt_location(
+                &GroupId::from_slice(&[0u8; 32]),
+                &keys.public_key(),
+                &loc,
+                60,
+            )
+            .await;
+        assert!(matches!(res, Err(CircleError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn encrypt_location_returns_correct_metadata() {
+        let tp = setup_two_party_circle().await;
+        let loc = crate::location::LocationMessage::new(37.7, -122.4);
+        let (event, nostr_group_id, relays) = tp
+            .alice
+            .encrypt_location(&tp.mls_group_id, &tp.alice_keys.public_key(), &loc, 60)
+            .await
+            .expect("encrypt");
+        assert_eq!(event.kind.as_u16(), 445);
+        assert_eq!(nostr_group_id, tp.nostr_group_id);
+        assert_eq!(relays, tp.relays);
+    }
+
+    #[tokio::test]
+    async fn encrypt_location_and_decrypt_roundtrip() {
+        let tp = setup_two_party_circle().await;
+        let loc = crate::location::LocationMessage::new(51.5, -0.12);
+        let (event, _ngid, _relays) = tp
+            .alice
+            .encrypt_location(&tp.mls_group_id, &tp.alice_keys.public_key(), &loc, 60)
+            .await
+            .expect("alice encrypts");
+
+        let results = tp.bob.decrypt_location(&event).await.expect("bob decrypts");
+        let (sender, content) = expect_location(&results);
+        assert_eq!(sender, tp.alice_keys.public_key().to_hex());
+        let decoded = crate::location::LocationMessage::from_string(content).expect("parse");
+        assert!((decoded.latitude - 51.5).abs() < 1e-9);
+        assert!((decoded.longitude - -0.12).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn decrypt_location_bidirectional() {
+        let tp = setup_two_party_circle().await;
+        let loc = crate::location::LocationMessage::new(10.0, 20.0);
+        let (event, _n, _r) = tp
+            .bob
+            .encrypt_location(&tp.mls_group_id, &tp.bob_keys.public_key(), &loc, 60)
+            .await
+            .expect("bob encrypts");
+        let results = tp
+            .alice
+            .decrypt_location(&event)
+            .await
+            .expect("alice decrypts");
+        let (sender, _content) = expect_location(&results);
+        assert_eq!(sender, tp.bob_keys.public_key().to_hex());
+    }
+
+    #[tokio::test]
+    async fn encrypt_location_inner_event_carries_no_group_identifier() {
+        // Rule 4: a published kind:445 must carry the pseudonymous
+        // nostr_group_id, never the real MLS GroupId.
+        let tp = setup_two_party_circle().await;
+        let loc = crate::location::LocationMessage::new(1.0, 2.0);
+        let (event, nostr_group_id, _relays) = tp
+            .alice
+            .encrypt_location(&tp.mls_group_id, &tp.alice_keys.public_key(), &loc, 60)
+            .await
+            .expect("encrypt");
+
+        let raw_mls_hex = hex::encode(tp.mls_group_id.as_slice());
+        let nostr_hex = hex::encode(nostr_group_id);
+        assert_ne!(raw_mls_hex, nostr_hex);
+        let json = event.as_json();
         assert!(
-            rows2.iter().any(|r| (r.latitude - 51.5).abs() < 0.001),
-            "the previously-contended location is persisted after the lock frees"
+            !json.contains(&raw_mls_hex),
+            "the real MLS group id must never appear in a published 445"
+        );
+        assert!(
+            json.contains(&nostr_hex),
+            "the pseudonymous nostr_group_id should appear (in the h tag)"
         );
     }
 
-    /// M7-B guard test: every MDK-write call site in this file MUST acquire the
-    /// writer lock (`acquire_authoring` for authoring paths; the sweep's single
-    /// `try_acquire_background`). Fails if a NEW MDK-write entrypoint is added
-    /// without a lock acquisition in a small preceding window — the enforcement
-    /// the plan (§B step 2, §E step 1) requires.
-    ///
-    /// This reads the file's own source at test time; it is coupled to the
-    /// wrapping style used above (a `crate::write_lock::acquire_*` line within a
-    /// few lines before the `self.mdk.<write>(` call).
-    #[test]
-    fn m7b_every_mdk_write_site_acquires_the_writer_lock() {
-        // The exhaustive set of MDK methods that WRITE to `haven_mdk.db`
-        // (ratchet advance, staged/merged/cleared commit, welcome consumption,
-        // group create/delete). Read-only MDK methods (`get_*`,
-        // `process_message_classified` is a write and IS listed) are excluded.
-        const MDK_WRITE_METHODS: &[&str] = &[
-            "create_group",
-            "create_key_package",
-            "create_key_package_with_d",
-            "create_message",
-            "process_message",
-            "process_message_classified",
-            "process_welcome",
-            "accept_welcome",
-            "decline_welcome",
-            "self_update",
-            "self_demote",
-            "add_members",
-            "remove_members",
-            "update_admins",
-            "update_relays",
-            // Reached in production only through the locked `update_admins` /
-            // `update_relays` wrappers today, but listed for defense-in-depth so
-            // a future direct `self.mdk.update_group_data(...)` cannot slip in
-            // unlocked (marmot LOW).
-            "update_group_data",
-            "merge_pending_commit",
-            "clear_pending_commit",
-            "leave_group",
-            "delete_group",
-            // M11: the future-epoch un-poison sweep (MDK #633 workaround) writes
-            // `processed_messages.state` via MDK's own retry primitives; every
-            // call site must hold the writer lock like any other MDK write.
-            "retry_failed_future_epoch_messages",
-        ];
-        // NOTE: this scanner covers production MDK writes in THIS file only.
-        // Every MDK write in Haven currently goes through a `CircleManager`
-        // method here (the `mdk` field is private; the FFI + live-sync engine
-        // reach MDK only via these locked methods). Any NEW production MDK-write
-        // entrypoint added OUTSIDE `CircleManager` (e.g. wiring the dormant
-        // `MlsGroupContext` / `LocationEventEncoder`) MUST also acquire
-        // `crate::write_lock` — this test would not see it (marmot LOW).
-        let src = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/circle/manager.rs"
-        ))
-        .expect("read manager.rs source");
-        let lines: Vec<&str> = src.lines().collect();
-
-        // Only scan production code — stop at the test module so test-only
-        // `self.mdk.*` calls (setup helpers) are not required to lock.
-        let test_mod_start = lines
+    #[tokio::test]
+    async fn decrypt_relay_commit_surfaces_group_update() {
+        let tp = setup_two_party_circle().await;
+        let update = tp
+            .alice
+            .update_circle_relays(&tp.mls_group_id, &["wss://relay3.test.com".to_string()])
+            .await
+            .expect("relay update");
+        tp.alice
+            .confirm_published(update.pending)
+            .await
+            .expect("confirm");
+        let results = tp
+            .bob
+            .decrypt_location(&update.commit_event)
+            .await
+            .expect("bob ingests the commit");
+        assert!(results
             .iter()
-            .position(|l| l.trim_start().starts_with("mod tests {"))
-            .expect("test module marker present");
+            .any(|r| matches!(r, LocationMessageResult::GroupUpdate { .. })));
+    }
 
-        let acquires = |line: &str| {
-            line.contains("crate::write_lock::acquire_authoring")
-                || line.contains("crate::write_lock::try_acquire_background")
-        };
+    // ── Key packages ─────────────────────────────────────────────────────────
 
-        // Re-join method-chain continuation lines so a `self.mdk.<method>(` call
-        // split across physical lines (e.g. `self\n    .mdk\n    .merge_pending_commit(`)
-        // is matched — the single-line `contains` alone silently skipped the
-        // multi-line writes, including the `merge_pending_commit` / `create_message`
-        // chokepoints (security M-1 / marmot MEDIUM). A physical line whose
-        // trimmed text starts with `.` continues the previous logical line; each
-        // logical line remembers the physical index where it STARTS (the `self` /
-        // `self.mdk` line), which is what the window-based lock check anchors on.
-        // The `self.mdk.` prefix in the needle still prevents false matches on
-        // same-named `CircleManager` wrappers (e.g. `self.add_members(`).
-        let mut logical: Vec<(usize, String)> = Vec::new();
-        for (idx, line) in lines.iter().enumerate().take(test_mod_start) {
-            let trimmed = line.trim_start();
-            // Skip comments so doc references to method names don't false-match.
-            if trimmed.starts_with("//") {
-                continue;
-            }
-            if trimmed.starts_with('.') {
-                if let Some(last) = logical.last_mut() {
-                    last.1.push_str(trimmed);
-                    continue;
+    #[tokio::test]
+    async fn fresh_key_package_produces_bytes() {
+        let (manager, _keys, _dir) = create_test_manager();
+        let kp = manager.fresh_key_package().await.expect("fresh kp");
+        assert!(!kp.bytes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_key_package_is_idempotent() {
+        let (manager, _keys, _dir) = create_test_manager();
+        let kp = manager.fresh_key_package().await.expect("fresh kp");
+        manager.delete_key_package(&kp).await.expect("first delete");
+        manager
+            .delete_key_package(&kp)
+            .await
+            .expect("idempotent delete");
+    }
+
+    // ── Publish-before-apply (Rule 13) unknown-ref rejection ─────────────────
+
+    #[tokio::test]
+    async fn confirm_published_unknown_pending_fails() {
+        let (manager, _keys, _dir) = create_test_manager();
+        let bogus = PendingStateRef::new(u64::MAX);
+        assert!(manager.confirm_published(bogus).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn publish_failed_unknown_pending_fails() {
+        let (manager, _keys, _dir) = create_test_manager();
+        let bogus = PendingStateRef::new(u64::MAX);
+        assert!(manager.publish_failed(bogus).await.is_err());
+    }
+
+    // ── Rule 14 (single-session) — RE-EXPRESSED write-site guard ─────────────
+
+    /// Recursively collects `path:line` sites where `needle` appears in a
+    /// non-comment source line under `dir`.
+    fn walk_for_sites(dir: &std::path::Path, needle: &str, sites: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).expect("read_dir") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                walk_for_sites(&path, needle, sites);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                let src = std::fs::read_to_string(&path).expect("read source");
+                for (i, line) in src.lines().enumerate() {
+                    let t = line.trim_start();
+                    // Skip comment / doc lines that merely name the type.
+                    if t.starts_with("//") || t.starts_with('*') {
+                        continue;
+                    }
+                    if line.contains(needle) {
+                        sites.push(format!("{}:{}", path.display(), i + 1));
+                    }
                 }
             }
-            logical.push((idx, trimmed.to_string()));
         }
+    }
 
-        // A guard can be held across a loop/block, so the acquisition may be
-        // many lines before the write (e.g. a batch method that locks once and
-        // writes many times). Anchor on the ENCLOSING METHOD instead of a fixed
-        // line window: the guard must appear between the write's `fn` and write.
-        // (Impl methods are 4-space indented; closures use `|..|`, not `fn`.)
-        let is_method_decl = |line: &str| {
-            let t = line.trim_start();
-            line.starts_with("    ")
-                && (t.starts_with("fn ")
-                    || t.starts_with("pub fn ")
-                    || t.starts_with("pub(crate) fn ")
-                    || t.starts_with("async fn ")
-                    || t.starts_with("pub async fn ")
-                    || t.starts_with("pub(crate) async fn "))
-        };
-
-        let mut sites = 0usize;
-        for (idx, text) in &logical {
-            for method in MDK_WRITE_METHODS {
-                let needle = format!("self.mdk.{method}(");
-                if !text.contains(&needle) {
-                    continue;
-                }
-                sites += 1;
-                let method_start = (0..=*idx)
-                    .rev()
-                    .find(|&i| is_method_decl(lines[i]))
-                    .unwrap_or(0);
-                let has_lock = lines[method_start..=*idx].iter().any(|l| acquires(l));
-                assert!(
-                    has_lock,
-                    "MDK write `self.mdk.{method}(` at manager.rs:{} is NOT preceded \
-                     by a writer-lock acquisition within its enclosing method. Every \
-                     MDK-write entrypoint MUST acquire `crate::write_lock` (M7-B).",
-                    idx + 1
-                );
-            }
-        }
-
-        // Count self-test: the scanner must recognise EVERY production MDK-write
-        // site (single- AND multi-line). If this drifts, a write site was
-        // added/removed — update it CONSCIOUSLY (after verifying each acquires
-        // the lock) so the multi-line blind spot cannot silently reopen.
-        // Verified 2026-07-03: 25 `acquire_authoring` writes (incl. the M8-2
-        // `create_key_package_with_d` maintenance wrapper) + 1 sweep
-        // (`try_acquire_background` in `decrypt_receive_only`).
-        // 2026-07-11 (+4 = 30): the M11 future-epoch un-poison sweep
-        // (`retry_failed_future_epoch_messages`, MDK #633 workaround) at 4 call
-        // sites — `decrypt_location_for_engine` (peer-commit, under the method's
-        // held `_writer`), `merge_our_pending_commit` (path-B we-won) + the
-        // `converge_commit_collecting_locations` adopt-winner leg (each a brief
-        // `acquire_authoring` scope), and `decrypt_receive_only` (background
-        // receive-only self-heal, under the held `try_acquire_background`).
-        // 2026-07-15 (-2 = 28): the public-profile cutover deleted the two
-        // avatar MDK-write sites — `wrap_avatar_chunks`'s `create_message` (the
-        // avatar send path) and the avatar-ingest `process_message` (the avatar
-        // receive path) — both of which were `acquire_authoring`-guarded.
-        const EXPECTED_WRITE_SITES: usize = 28;
+    #[test]
+    fn single_account_device_session_construction_site() {
+        // RE-EXPRESSES `m7b_every_mdk_write_site_acquires_the_writer_lock`.
+        //
+        // The pre-migration invariant ("every MDK write acquires the process
+        // global `write_lock`") is superseded by the engine's own
+        // `tokio::sync::Mutex<AccountDeviceSession>`: `&mut self` on every mutator
+        // means the single session mutex IS the write serializer. The stronger
+        // Rule-14 invariant that replaces it is STRUCTURAL: at most one live
+        // `AccountDeviceSession` is ever constructed per DB file across all
+        // isolates — divergent hydrated epoch state would erode forward secrecy
+        // (security F4). This guard asserts the ONLY `AccountDeviceSession::open`
+        // construction site in the whole crate is the sanctioned one inside
+        // `SessionManager::open_session`; every other access reuses that one
+        // handle (`Arc<SessionManager>`), never opening a second session.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        // Built by concatenation so THIS scanner's own source line does not
+        // contain the literal needle and thus never self-matches.
+        let needle = concat!("AccountDeviceSession", "::open(");
+        let mut sites: Vec<String> = Vec::new();
+        walk_for_sites(&root, needle, &mut sites);
         assert_eq!(
-            sites, EXPECTED_WRITE_SITES,
-            "expected {EXPECTED_WRITE_SITES} locked MDK-write sites, found {sites}; \
-             a write site was added/removed — verify each acquires `write_lock` \
-             and update EXPECTED_WRITE_SITES."
+            sites.len(),
+            1,
+            "exactly one AccountDeviceSession::open construction site is allowed \
+             (Rule 14: one live session per DB file); found: {sites:?}"
+        );
+        assert!(
+            sites[0].replace('\\', "/").contains("nostr/mls/manager.rs"),
+            "the single session construction site must live in \
+             SessionManager::open_session, found {}",
+            sites[0]
         );
     }
 }

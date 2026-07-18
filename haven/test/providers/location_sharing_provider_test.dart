@@ -99,16 +99,21 @@ void main() {
     final mockCircle = MockCircleService()
       ..decryptLocationResults = locations
           .map(
-            (loc) => DecryptResult(
-              location: DecryptedLocation(
-                senderPubkey: loc.pubkey,
-                latitude: loc.latitude,
-                longitude: loc.longitude,
-                geohash: loc.geohash,
-                timestamp: loc.timestamp,
-                expiresAt: loc.expiresAt,
+            (loc) => [
+              LocationEventResult(
+                kind: LocationEventKind.location,
+                location: DecryptedLocation(
+                  senderPubkey: loc.pubkey,
+                  latitude: loc.latitude,
+                  longitude: loc.longitude,
+                  geohash: loc.geohash,
+                  timestamp: loc.timestamp,
+                  expiresAt: loc.expiresAt,
+                ),
+                mlsGroupId: const [],
+                epoch: 0,
               ),
-            ),
+            ],
           )
           .toList();
 
@@ -520,6 +525,125 @@ void main() {
       },
     );
   });
+
+  // ---------------------------------------------------------------------------
+  // Group: Dark Matter cutover send-path exclusions (DM-4c, Security Rule 8 /
+  // §6 F10). A legacy-orphaned circle has no live MLS group to encrypt
+  // against, and a blocked (Unrecoverable) circle must never send/mutate —
+  // both must be excluded from the publish set before `encryptLocation` is
+  // ever reached, not merely fail loudly once reached.
+  // ---------------------------------------------------------------------------
+
+  group('locationPublisherProvider — Dark Matter cutover exclusions', () {
+    final gateIdentity = Identity(
+      pubkeyHex: _selfPubkey,
+      npub: 'npub1self',
+      createdAt: DateTime(2025),
+    );
+
+    setUp(() {
+      SharedPreferences.setMockInitialValues({
+        kLocationDisclosureAcceptedKey: true,
+      });
+    });
+
+    test(
+      'excludes a legacy-orphaned (accepted, no members) circle from publish',
+      () async {
+        final healthy = TestCircleFactory.createCircle(
+          mlsGroupId: const [1],
+          nostrGroupId: const [1],
+          members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+        );
+        // Default TestCircleFactory.createCircle(): accepted + no members —
+        // exactly the legacy-orphaned signature (Circle.isLegacyOrphaned).
+        final legacy = TestCircleFactory.createCircle(
+          mlsGroupId: const [2],
+          nostrGroupId: const [2],
+        );
+
+        final mockCircle = MockCircleService(circles: [healthy, legacy]);
+        final locationService = LocationSharingService(
+          circleService: mockCircle,
+          relayService: MockRelayService(),
+        );
+
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(
+              _MockIdentityService(identity: gateIdentity),
+            ),
+            locationServiceProvider.overrideWithValue(
+              _FixedLocationService(),
+            ),
+            circleServiceProvider.overrideWithValue(mockCircle),
+            locationSharingServiceProvider.overrideWithValue(locationService),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        final result = await container.read(locationPublisherProvider.future);
+
+        expect(
+          result,
+          1,
+          reason: 'only the healthy circle should be published to',
+        );
+        expect(
+          mockCircle.methodCalls.where((m) => m == 'encryptLocation').length,
+          1,
+          reason:
+              'the legacy-orphaned circle must never reach encryptLocation',
+        );
+      },
+    );
+
+    test(
+      'excludes a circle marked blocked (MLS Unrecoverable) from publish',
+      () async {
+        final healthy = TestCircleFactory.createCircle(
+          mlsGroupId: const [1],
+          nostrGroupId: const [1],
+          members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+        );
+        final blocked = TestCircleFactory.createCircle(
+          mlsGroupId: const [3],
+          nostrGroupId: const [3],
+          members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+        );
+
+        final mockCircle = MockCircleService(circles: [healthy, blocked])
+          ..markCircleBlocked(blocked.mlsGroupId);
+        final locationService = LocationSharingService(
+          circleService: mockCircle,
+          relayService: MockRelayService(),
+        );
+
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(
+              _MockIdentityService(identity: gateIdentity),
+            ),
+            locationServiceProvider.overrideWithValue(
+              _FixedLocationService(),
+            ),
+            circleServiceProvider.overrideWithValue(mockCircle),
+            locationSharingServiceProvider.overrideWithValue(locationService),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        final result = await container.read(locationPublisherProvider.future);
+
+        expect(result, 1);
+        expect(
+          mockCircle.methodCalls.where((m) => m == 'encryptLocation').length,
+          1,
+          reason: 'the blocked circle must never reach encryptLocation',
+        );
+      },
+    );
+  });
 }
 
 // =============================================================================
@@ -606,6 +730,41 @@ class _RecordingLocationService implements LocationService {
   @override
   Stream<Position> getLocationStream() async* {
     called = true;
+  }
+
+  @override
+  Future<bool> isLocationServiceEnabled() async => true;
+
+  @override
+  Future<bool> requestPermission() async => true;
+
+  @override
+  Future<LocationPermissionStatus> checkPermission() async =>
+      LocationPermissionStatus.always;
+}
+
+// =============================================================================
+// Local test double: a LocationService that always resolves a fixed fix
+// =============================================================================
+
+/// A [LocationService] test double that always resolves a fixed GPS fix,
+/// letting `locationPublisherProvider` run all the way through its
+/// per-circle publish loop (unlike [_RecordingLocationService], which throws
+/// after recording).
+class _FixedLocationService implements LocationService {
+  @override
+  Future<Position> getCurrentLocation() async => Position(
+    latitude: 37,
+    longitude: -122,
+    timestamp: DateTime.now(),
+  );
+
+  @override
+  Future<Position> getCurrentLocationFresh() async => getCurrentLocation();
+
+  @override
+  Stream<Position> getLocationStream() async* {
+    yield await getCurrentLocation();
   }
 
   @override

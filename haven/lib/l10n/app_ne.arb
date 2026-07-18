@@ -265,6 +265,7 @@
   "pendingMemberWarning": "चेतावनी",
   "pendingMemberCheckingAvailability": "उपलब्धता जाँच्दै...",
   "pendingMemberReadyToInvite": "निमन्त्रणा गर्न तयार",
+  "pendingMemberNeedsUpdate": "Haven अपडेट गर्नुपर्छ",
 
   "memberSearchHint": "सदस्य ID लेख्नुहोस्...",
   "memberSearchPasteTooltip": "क्लिपबोर्डबाट टाँस्नुहोस्",
@@ -316,6 +317,23 @@
   "leaveCircleIdentityUnavailable": "परिचय उपलब्ध छैन",
   "leaveCircleSuccess": "सर्कल सफलतापूर्वक छोडियो",
   "leaveCircleError": "सर्कल छोड्न सकिएन",
+  "leaveCircleAdminLimitationNote": "यो सर्कलको एडमिन भएकाले, अरू सबै सदस्यले छोडिसकेपछि मात्र तपाईंले यो छोड्न सक्नुहुन्छ। हामीलाई थाहा छ, यो असुविधाजनक छ — भविष्यको कुनै अपडेटले एडमिनहरूलाई आफ्नो भूमिका हस्तान्तरण गरेर सिधै छोड्न दिनेछ।",
+
+  "circleBlockedBannerTitle": "यो सर्कल अपडेट गर्न सकिँदैन",
+  "circleBlockedBannerBody": "यो सर्कलको इन्क्रिप्शनमा केही गडबड भयो, त्यसैले Haven ले अब यसमा अपडेट पठाउन वा प्राप्त गर्न सक्दैन। तपाईंले अन्तिम पटक थाहा पाएको कुरा तल अझै हेर्न सक्नुहुन्छ, वा सर्कल छोड्न सक्नुहुन्छ।",
+  "legacyCircleBannerTitle": "यो सर्कल फेरि बनाउनुपर्छ",
+  "legacyCircleBannerBody": "Haven को इन्क्रिप्शन इन्जिन अपग्रेड गरिएको छ, त्यसैले यो सर्कल अब प्रयोग गर्न सकिँदैन। उही व्यक्तिहरूसँग स्थान साझेदारी जारी राख्न यसलाई फेरि बनाउनुहोस् — तपाईंले तिनीहरूलाई फेरि निमन्त्रणा दिनुपर्नेछ।",
+  "legacyCircleRecreateCta": "सर्कल फेरि बनाउनुहोस्",
+  "legacyCircleRemoveCta": "हटाउनुहोस्",
+  "legacyCircleRemoveDialogTitle": "सर्कल हटाउने?",
+  "legacyCircleRemoveDialogBody": "यो सर्कल अब प्रयोग गर्न सकिँदैन र तपाईंको सूचीबाट हटाइनेछ। यसको सट्टा तपाईंले बनाउने कुनै पनि नयाँ सर्कललाई यसले असर गर्दैन।",
+  "legacyCircleRemoveConfirm": "हटाउनुहोस्",
+  "legacyCutoverExplainerTitle": "Haven अपडेट भएको छ",
+  "legacyCutoverExplainerIdentityUnchanged": "तपाईंको परिचय र सार्वजनिक प्रोफाइल जस्ताको तस्तै छन् — तिनका लागि तपाईंले केही गर्नुपर्दैन।",
+  "legacyCutoverExplainerCirclesNeedRecreation": "राम्रो सुरक्षाका लागि, तपाईंका सर्कलहरू फेरि बनाउनु र तिनका सदस्यहरूलाई फेरि निमन्त्रणा दिनुपर्नेछ; त्यसपछि मात्र तपाईंले तिनमा फेरि स्थान साझा गर्न सक्नुहुन्छ।",
+  "legacyCutoverExplainerAcknowledge": "बुझेँ",
+  "relaySettingsLegacyRetractionPending": "Haven ले भर्खरैको सुरक्षा अपडेटबाट केही डाटा अझै सफा गर्दै छ। तपाईं फेरि अनलाइन हुनासाथ यो स्वतः पूरा हुनेछ।",
+
 
   "circlesPanelCollapsedAnnouncement": "सर्कल प्यानल संक्षिप्त गरियो",
   "circlesPanelExpandedAnnouncement": "सर्कल प्यानल विस्तार गरियो",

@@ -1,4 +1,5 @@
-/// Tests for [evolutionPollerProvider] and [LocationSharingService.pollEvolutionEvents].
+/// Tests for [evolutionPollerProvider] and
+/// [LocationSharingService.pollEvolutionEvents].
 ///
 /// Verifies that:
 /// - pollEvolutionEvents fetches kind-445 events for each accepted circle
@@ -6,7 +7,6 @@
 /// - pollEvolutionEvents does not run concurrent polls
 /// - evolutionPollerProvider invalidates circlesProvider on group state change
 /// - evolutionPollerProvider returns false when no circles are present
-/// - the decrypt–publish–finalize sequence is invoked for auto-commit events
 library;
 
 import 'dart:async';
@@ -26,6 +26,25 @@ import '../mocks/mock_relay_service.dart';
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Builds a single-result decrypt outcome mirroring the pre-Dark-Matter
+/// `DecryptResult` shape this file's tests were written against.
+List<LocationEventResult> _fakeDecrypt({
+  DecryptedLocation? location,
+  bool groupUpdated = false,
+}) {
+  final kind = groupUpdated
+      ? LocationEventKind.groupUpdate
+      : LocationEventKind.location;
+  return [
+    LocationEventResult(
+      kind: kind,
+      location: kind == LocationEventKind.location ? location : null,
+      mlsGroupId: const [],
+      epoch: 0,
+    ),
+  ];
+}
 
 /// Builds an accepted [Circle] for use in tests.
 Circle _makeCircle({
@@ -148,7 +167,7 @@ void main() {
         groupMessages: const ['{"id":"evo1","kind":445,"content":"commit"}'],
       );
       mockCircleService.decryptLocationResults = [
-        const DecryptResult(groupUpdated: true),
+        _fakeDecrypt(groupUpdated: true),
       ];
       service = LocationSharingService(
         circleService: mockCircleService,
@@ -171,7 +190,7 @@ void main() {
         groupMessages: const ['{"id":"evo1","kind":445,"content":"loc"}'],
       );
       mockCircleService.decryptLocationResults = [
-        DecryptResult(
+        _fakeDecrypt(
           location: DecryptedLocation(
             senderPubkey: 'peer1',
             latitude: 1,
@@ -200,7 +219,7 @@ void main() {
 
       // Reset results so decryptLocation would return a new result if called.
       mockCircleService.decryptLocationResults = [
-        const DecryptResult(groupUpdated: true),
+        _fakeDecrypt(groupUpdated: true),
       ];
 
       // Second pass via evolution poller: same event ID → should be skipped.
@@ -248,7 +267,7 @@ void main() {
         groupMessages: const ['{"id":"evo1","kind":445,"content":"commit"}'],
       );
       mockCircleService.decryptLocationResults = [
-        const DecryptResult(groupUpdated: true),
+        _fakeDecrypt(groupUpdated: true),
       ];
       service = LocationSharingService(
         circleService: mockCircleService,
@@ -276,7 +295,7 @@ void main() {
           groupMessages: const ['{"id":"evo1","kind":445,"content":"loc"}'],
         );
         mockCircleService.decryptLocationResults = [
-          DecryptResult(
+          _fakeDecrypt(
             location: DecryptedLocation(
               senderPubkey: 'peer1',
               latitude: 1,
@@ -303,77 +322,15 @@ void main() {
       },
     );
 
-    test('invokes publish+finalize for auto-commit evolution events', () async {
-      const evolutionJson = '{"id":"commit1","kind":445,"content":"commit"}';
-      const mlsGroupId = [10, 20, 30];
-      final relay = MockRelayService(
-        groupMessages: const ['{"id":"evo1","kind":445,"content":"proposal"}'],
-      );
-      mockCircleService.decryptLocationResults = [
-        const DecryptResult(
-          groupUpdated: true,
-          evolutionEventJson: evolutionJson,
-          evolutionMlsGroupId: mlsGroupId,
-        ),
-      ];
-      service = LocationSharingService(
-        circleService: mockCircleService,
-        relayService: relay,
-      );
-
-      await service.pollEvolutionEvents(circles: [_makeCircle()]);
-
-      expect(
-        mockCircleService.publishEvolutionEventCalls,
-        hasLength(1),
-        reason: 'should publish the outbound evolution event',
-      );
-      expect(
-        mockCircleService.finalizePendingCommitCalledWith,
-        anyElement(equals(mlsGroupId)),
-        reason: 'should finalize the commit locally after successful publish',
-      );
-    });
-
-    test(
-      'calls clearPendingCommit when evolution event publish fails',
-      () async {
-        const evolutionJson = '{"id":"commit1","kind":445,"content":"commit"}';
-        const mlsGroupId = [10, 20, 30];
-        final relay = MockRelayService(
-          groupMessages: const [
-            '{"id":"evo1","kind":445,"content":"proposal"}',
-          ],
-        );
-        mockCircleService
-          ..decryptLocationResults = [
-            const DecryptResult(
-              groupUpdated: true,
-              evolutionEventJson: evolutionJson,
-              evolutionMlsGroupId: mlsGroupId,
-            ),
-          ]
-          ..publishEvolutionEventResults = [false];
-        service = LocationSharingService(
-          circleService: mockCircleService,
-          relayService: relay,
-        );
-
-        await service.pollEvolutionEvents(circles: [_makeCircle()]);
-
-        expect(
-          mockCircleService.clearPendingCommitCalledWith,
-          anyElement(equals(mlsGroupId)),
-          reason: 'should clear the pending commit when publish fails',
-        );
-        expect(
-          mockCircleService.finalizePendingCommitCalledWith,
-          isEmpty,
-          reason: 'should NOT finalize when publish fails',
-        );
-      },
-    );
-
+    // NOTE: "invokes publish+finalize for auto-commit evolution events" and
+    // "calls clearPendingCommit when evolution event publish fails" were
+    // removed (Dark Matter DM-4b). Both tested the pre-migration
+    // receiver-side auto-commit dance: `decryptLocation` no longer returns
+    // an outbound evolution event for a peer `SelfRemove` — the engine
+    // publishes and applies that commit internally — and
+    // `CircleService.publishEvolutionEvent` / `finalizePendingCommit` /
+    // `clearPendingCommit` no longer exist. There is no surviving subject
+    // for either test.
     test(
       'onAppPaused resets evolution cursor so resume re-fetches fully',
       () async {
@@ -417,7 +374,7 @@ void main() {
           groupMessages: const ['{"id":"evo2","kind":445,"content":"commit"}'],
         );
         mockCircleService.decryptLocationResults = [
-          const DecryptResult(groupUpdated: true),
+          _fakeDecrypt(groupUpdated: true),
         ];
         service = LocationSharingService(
           circleService: mockCircleService,
@@ -494,7 +451,7 @@ void main() {
       final mockRelay = MockRelayService(
         groupMessages: const ['{"id":"evo1","kind":445,"content":"commit"}'],
       );
-      mockCircle.decryptLocationResults = [const DecryptResult()];
+      mockCircle.decryptLocationResults = [_fakeDecrypt()];
       final locationService = LocationSharingService(
         circleService: mockCircle,
         relayService: mockRelay,
@@ -520,7 +477,7 @@ void main() {
         groupMessages: const ['{"id":"evo1","kind":445,"content":"commit"}'],
       );
       mockCircle.decryptLocationResults = [
-        const DecryptResult(groupUpdated: true),
+        _fakeDecrypt(groupUpdated: true),
       ];
       final locationService = LocationSharingService(
         circleService: mockCircle,
@@ -619,49 +576,14 @@ void main() {
       expect(result, isFalse);
     });
 
-    test('integration: decrypt–publish–finalize sequence is invoked', () async {
-      const evolutionJson = '{"id":"commit1","kind":445,"content":"commit"}';
-      const mlsGroupId = [10, 20, 30];
-
-      final accepted = _makeCircle();
-      final mockCircle = MockCircleService(circles: [accepted]);
-      final mockRelay = MockRelayService(
-        groupMessages: const ['{"id":"evo1","kind":445,"content":"proposal"}'],
-      );
-      mockCircle.decryptLocationResults = [
-        const DecryptResult(
-          groupUpdated: true,
-          evolutionEventJson: evolutionJson,
-          evolutionMlsGroupId: mlsGroupId,
-        ),
-      ];
-      final locationService = LocationSharingService(
-        circleService: mockCircle,
-        relayService: mockRelay,
-      );
-
-      final container = ProviderContainer(
-        overrides: [
-          circleServiceProvider.overrideWithValue(mockCircle),
-          locationSharingServiceProvider.overrideWithValue(locationService),
-        ],
-      );
-      addTearDown(container.dispose);
-
-      final result = await container.read(evolutionPollerProvider.future);
-
-      expect(result, isTrue);
-      expect(
-        mockCircle.publishEvolutionEventCalls,
-        hasLength(1),
-        reason: 'should publish the outbound evolution event',
-      );
-      expect(
-        mockCircle.finalizePendingCommitCalledWith,
-        anyElement(equals(mlsGroupId)),
-        reason: 'should finalize the commit locally',
-      );
-    });
+    // NOTE: "integration: decrypt–publish–finalize sequence is invoked" was
+    // removed (Dark Matter DM-4b) — its unique subject (asserting the
+    // receiver-side auto-commit publish+finalize calls) no longer exists;
+    // see the removal note in the `pollEvolutionEvents` group above. The
+    // surviving behaviour it also exercised — a `groupUpdate` result
+    // driving `evolutionPollerProvider`'s `true` return and
+    // `circlesProvider` invalidation — is already covered by
+    // "invalidates circlesProvider when group state changes" above.
   });
 }
 

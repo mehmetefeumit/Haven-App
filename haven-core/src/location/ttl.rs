@@ -38,6 +38,11 @@ pub const MAX_UPDATE_INTERVAL_SECS: u64 = 60 * 60;
 ///
 /// Events whose NIP-40 expiration is more than this window in the past
 /// are dropped before decryption, as defense-in-depth against relay replay.
+// Dark Matter: the per-send NIP-40 expiration was dropped when `create_message`
+// stopped taking an expiration (DM-2 deviation #2); message TTL now rides the
+// group-level `message-retention.v1` app component (DM-3/DM-4). Retained for the
+// TTL unit tests until the retention path re-wires it.
+#[allow(dead_code)]
 pub const RECEIVER_EXPIRATION_GRACE_SECS: u64 = 60;
 
 /// Publish-interval jitter spread in basis points (`10_000` = 100%).
@@ -60,6 +65,10 @@ pub const PUBLISH_INTERVAL_JITTER_FRACTION_BP: u16 = 4_000;
 ///
 /// Returns `None` for `interval == 0` so callers omit the expiration tag
 /// entirely instead of producing an already-expired event.
+// Dark Matter: unused in the lib build until the group-level
+// `message-retention.v1` path re-wires TTL (see `RECEIVER_EXPIRATION_GRACE_SECS`
+// above); its randomness/jitter properties are still covered by the unit tests.
+#[allow(dead_code)]
 #[must_use]
 pub fn compute_jittered_ttl_secs(update_interval_secs: u64) -> Option<u64> {
     if update_interval_secs == 0 {

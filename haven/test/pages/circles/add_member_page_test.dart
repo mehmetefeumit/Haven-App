@@ -57,8 +57,17 @@ final _testIdentity = Identity(
   createdAt: DateTime(2024),
 );
 
-/// Builds a [KeyPackageData] whose `eventJson` carries [pubkeyHex].
+/// Builds a [KeyPackageData] whose `eventJson` carries [pubkeyHex] under the
+/// current (Dark Matter, kind 30443) KeyPackage kind.
 KeyPackageData _makeKp(String pubkeyHex) => KeyPackageData(
+  pubkey: 'npub1newmember',
+  eventJson: jsonEncode({'kind': 30443, 'pubkey': pubkeyHex}),
+  relays: const ['wss://relay.example.com'],
+);
+
+/// Builds a [KeyPackageData] carrying the deprecated pre-Dark-Matter kind
+/// (443) — the peer is on an old Haven build (DM-4c, plan §6 F11).
+KeyPackageData _makeLegacyKp(String pubkeyHex) => KeyPackageData(
   pubkey: 'npub1newmember',
   eventJson: jsonEncode({'kind': 443, 'pubkey': pubkeyHex}),
   relays: const ['wss://relay.example.com'],
@@ -764,6 +773,41 @@ void main() {
         );
         // ...but the green security badge's lock icon is gone.
         expect(find.byIcon(LucideIcons.lock), findsNothing);
+      },
+    );
+
+    // -----------------------------------------------------------------------
+    // 12. Legacy (kind 443) KeyPackage — Dark Matter migration (DM-4c)
+    // -----------------------------------------------------------------------
+    testWidgets(
+      '12. legacy (kind 443) KeyPackage shows "needs update" status and '
+      'keeps confirm disabled',
+      (tester) async {
+        final mockRelay = MockRelayService(
+          keyPackageResult: _makeLegacyKp(_newMemberHex),
+        );
+        final mockCircle = MockCircleService();
+        final circle = _makeCircle();
+
+        await tester.pumpWidget(
+          _buildApp(
+            circle: circle,
+            mockRelay: mockRelay,
+            mockCircle: mockCircle,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await _addMember(tester, _newMemberNpub);
+        await tester.pumpAndSettle();
+
+        expect(find.byIcon(LucideIcons.circleCheck), findsNothing);
+        expect(find.text('Needs to update Haven'), findsOneWidget);
+
+        final button = tester.widget<FilledButton>(
+          find.byKey(WidgetKeys.addMemberConfirm),
+        );
+        expect(button.onPressed, isNull);
       },
     );
   });
