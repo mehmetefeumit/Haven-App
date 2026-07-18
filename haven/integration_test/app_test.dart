@@ -71,7 +71,6 @@ void main() {
             (ref) => OnboardingController(
               OnboardingFlags(
                 introSeen: completed,
-                displayNameSet: completed,
                 completed: completed,
               ),
             ),

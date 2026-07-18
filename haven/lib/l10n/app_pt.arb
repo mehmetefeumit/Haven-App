@@ -43,6 +43,9 @@
   "onboardingValueProp2Body": "O Haven não tem servidor central. Suas mensagens criptografadas trafegam por uma rede descentralizada de relays que você mesmo pode escolher, então nenhuma entidade isolada pode desligá-lo.",
   "onboardingValueProp3Title": "Não precisa de conta",
   "onboardingValueProp3Body": "Sem e-mail, sem telefone, sem cadastro. O Haven cria uma identidade privada que existe só no seu celular, sem nada que a ligue à sua pessoa real.",
+  "onboardingValueProp1Summary": "Encriptado no teu dispositivo, por isso só os círculos que escolheres o podem ler.",
+  "onboardingValueProp2Summary": "Sem servidor central — funciona numa rede de relays que escolhes.",
+  "onboardingValueProp3Summary": "Sem email, telefone ou registo. Nada o liga a ti.",
 
   "onboardingCreateIdentityTitle": "Crie sua identidade",
   "onboardingCreateIdentityBody": "O Haven vai criar uma identidade privada que existe só neste celular. É assim que os seus círculos reconhecem você.",
@@ -61,14 +64,8 @@
   "onboardingImportInvalid": "Isso não parece ser uma chave de backup válida. Confira e tente de novo.",
   "onboardingImportError": "Não foi possível importar essa chave. Confira e tente de novo.",
 
-  "onboardingDisplayNameTitle": "Escolha um nome",
-  "onboardingDisplayNameBody": "Defina como você vai aparecer para os seus círculos.",
   "onboardingDisplayNameHint": "ex.: Alex",
   "onboardingDisplayNameError": "Não foi possível salvar esse nome. Tente de novo.",
-
-  "onboardingReadyTitle": "Tudo pronto",
-  "onboardingReadyBody": "O Haven é organizado em círculos, que são grupos pequenos e privados onde você compartilha sua localização com pessoas em quem confia. Crie seu primeiro círculo ou aguarde um convite de alguém que você conhece.",
-  "onboardingReadyCta": "Entrar no Haven",
 
   "commonCancel": "Cancelar",
   "commonOpenSettings": "Abrir configurações",
@@ -339,7 +336,6 @@
   "legacyCutoverExplainerCirclesNeedRecreation": "Para maior segurança, seus círculos precisam ser recriados e seus membros convidados novamente antes que você possa voltar a compartilhar localização neles.",
   "legacyCutoverExplainerAcknowledge": "Entendi",
   "relaySettingsLegacyRetractionPending": "O Haven ainda está finalizando a limpeza de alguns dados da atualização de segurança recente. Isso será concluído automaticamente assim que você estiver online novamente.",
-
 
   "circlesPanelCollapsedAnnouncement": "Painel de círculos recolhido",
   "circlesPanelExpandedAnnouncement": "Painel de círculos expandido",

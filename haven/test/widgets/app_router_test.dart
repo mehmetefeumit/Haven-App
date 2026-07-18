@@ -70,7 +70,6 @@ void main() {
               (ref) => OnboardingController(
                 const OnboardingFlags(
                   introSeen: true,
-                  displayNameSet: true,
                   completed: false,
                 ),
               ),

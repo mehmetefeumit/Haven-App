@@ -328,8 +328,6 @@ void main() {
         final prefs = await SharedPreferences.getInstance();
         final flags = OnboardingFlags(
           introSeen: prefs.getBool(kOnboardingIntroSeenKey) ?? false,
-          displayNameSet:
-              prefs.getBool(kOnboardingDisplayNameSetKey) ?? false,
           completed: prefs.getBool(kOnboardingCompletedKey) ?? false,
         );
 

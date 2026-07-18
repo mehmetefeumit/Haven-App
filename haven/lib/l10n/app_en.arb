@@ -143,6 +143,18 @@
   "@onboardingValueProp3Body": {
     "description": "Body of the third onboarding value-prop card (also reused on the About page)."
   },
+  "onboardingValueProp1Summary": "Encrypted on your device, so only the circles you choose can read it.",
+  "@onboardingValueProp1Summary": {
+    "description": "Short one-line summary of the first value prop, shown under its title on the onboarding intro screen. The longer onboardingValueProp1Body is shown on the About page instead. Keep it to roughly one short sentence so the intro screen fits without scrolling."
+  },
+  "onboardingValueProp2Summary": "No central server — it runs on a relay network you choose.",
+  "@onboardingValueProp2Summary": {
+    "description": "Short one-line summary of the second value prop, shown under its title on the onboarding intro screen. Keep it to roughly one short sentence so the intro screen fits without scrolling."
+  },
+  "onboardingValueProp3Summary": "No email, phone, or sign-up. Nothing links it to you.",
+  "@onboardingValueProp3Summary": {
+    "description": "Short one-line summary of the third value prop, shown under its title on the onboarding intro screen. Keep it to roughly one short sentence so the intro screen fits without scrolling."
+  },
 
   "onboardingCreateIdentityTitle": "Create your identity",
   "@onboardingCreateIdentityTitle": {
@@ -206,14 +218,6 @@
     "description": "Generic error shown when importing an existing key fails."
   },
 
-  "onboardingDisplayNameTitle": "Pick a name",
-  "@onboardingDisplayNameTitle": {
-    "description": "Title of the onboarding display-name screen."
-  },
-  "onboardingDisplayNameBody": "Choose how you'll appear to your circles.",
-  "@onboardingDisplayNameBody": {
-    "description": "Body on the onboarding display-name screen, about the name field itself. Kept short and non-contradictory: the public-profile disclosure lives in the separate PublicProfileNotice shown just below on the same screen, so this line must not claim the name stays device-local (public-by-default, owner-directed 2026-07-16)."
-  },
   "onboardingDisplayNameHint": "e.g. Alex",
   "@onboardingDisplayNameHint": {
     "description": "Text-field hint on the onboarding display-name screen showing an example name."
@@ -221,19 +225,6 @@
   "onboardingDisplayNameError": "Couldn’t save that name. Please try again.",
   "@onboardingDisplayNameError": {
     "description": "Snackbar message shown when saving the display name fails."
-  },
-
-  "onboardingReadyTitle": "You’re ready",
-  "@onboardingReadyTitle": {
-    "description": "Title of the final onboarding ready screen."
-  },
-  "onboardingReadyBody": "Haven is organised into circles, which are small private groups where you share your location with people you trust. Create your first circle, or wait for an invitation from someone you know.",
-  "@onboardingReadyBody": {
-    "description": "Body on the onboarding ready screen explaining the circles mental model."
-  },
-  "onboardingReadyCta": "Enter Haven",
-  "@onboardingReadyCta": {
-    "description": "Primary call-to-action on the final onboarding ready screen that enters the main app."
   },
 
   "commonCancel": "Cancel",

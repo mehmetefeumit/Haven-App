@@ -21,24 +21,13 @@ abstract final class WidgetKeys {
   // Onboarding
   // ---------------------------------------------------------------------------
 
-  /// "Get Started" primary CTA on the welcome screen.
-  static const Key welcomeCta = Key('welcome_cta');
+  /// "Get Started" primary CTA on the intro screen (page 1 of 2).
+  static const Key introCta = Key('intro_cta');
 
-  /// "Continue" primary CTA on the value-props screen.
-  static const Key valuePropsCta = Key('value_props_cta');
-
-  /// "Create Identity" primary CTA on the identity-creation screen.
+  /// "Create My Identity" primary CTA on the identity-creation screen
+  /// (page 2 of 2) — the single tap that creates the identity, publishes the
+  /// public profile, runs the location disclosure, and enters the map shell.
   static const Key createIdentityCta = Key('create_identity_cta');
-
-  /// "Skip" secondary CTA on the display-name screen.
-  ///
-  /// Tests that exercise the rest of onboarding without exercising the
-  /// display-name input itself use this key to advance the state machine.
-  static const Key displayNameSkip = Key('display_name_skip');
-
-  /// "Enter Haven" primary CTA on the ready screen — the final tap that
-  /// transitions out of onboarding into the map shell.
-  static const Key readyCta = Key('ready_cta');
 
   // ---------------------------------------------------------------------------
   // Circle creation flow

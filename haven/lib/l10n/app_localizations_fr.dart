@@ -129,6 +129,18 @@ class AppLocalizationsFr extends AppLocalizations {
       'Pas d\'e-mail, pas de numéro de téléphone, pas d\'inscription. Haven crée une identité privée qui n\'existe que sur votre téléphone, sans rien qui la relie à votre véritable identité.';
 
   @override
+  String get onboardingValueProp1Summary =>
+      'Chiffrée sur ton appareil : seuls les cercles que tu choisis peuvent la lire.';
+
+  @override
+  String get onboardingValueProp2Summary =>
+      'Pas de serveur central : elle circule sur un réseau de relais que tu choisis.';
+
+  @override
+  String get onboardingValueProp3Summary =>
+      'Ni e-mail, ni téléphone, ni inscription. Rien ne te relie à elle.';
+
+  @override
   String get onboardingCreateIdentityTitle => 'Créez votre identité';
 
   @override
@@ -180,28 +192,11 @@ class AppLocalizationsFr extends AppLocalizations {
       'Nous n\'avons pas pu importer cette clé. Veuillez vérifier et réessayer.';
 
   @override
-  String get onboardingDisplayNameTitle => 'Choisissez un nom';
-
-  @override
-  String get onboardingDisplayNameBody =>
-      'Définissez comment vous apparaîtrez à vos cercles.';
-
-  @override
   String get onboardingDisplayNameHint => 'ex. Alex';
 
   @override
   String get onboardingDisplayNameError =>
       'Impossible d\'enregistrer ce nom. Veuillez réessayer.';
-
-  @override
-  String get onboardingReadyTitle => 'Vous êtes prêt';
-
-  @override
-  String get onboardingReadyBody =>
-      'Haven s\'organise en cercles, de petits groupes privés où vous partagez votre position avec les personnes en qui vous avez confiance. Créez votre premier cercle, ou attendez une invitation de quelqu\'un que vous connaissez.';
-
-  @override
-  String get onboardingReadyCta => 'Entrer dans Haven';
 
   @override
   String get commonCancel => 'Annuler';

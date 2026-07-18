@@ -126,6 +126,15 @@ class AppLocalizationsJa extends AppLocalizations {
       'メールアドレスも電話番号も、登録も不要です。Haven はあなたの端末の中だけに存在するプライベートな識別情報を作成します。実際のあなたと結びつくものは一切ありません。';
 
   @override
+  String get onboardingValueProp1Summary => '端末上で暗号化。あなたが選んだサークルだけが読めます。';
+
+  @override
+  String get onboardingValueProp2Summary => '中央サーバーなし。あなたが選ぶリレーネットワークで動作します。';
+
+  @override
+  String get onboardingValueProp3Summary => 'メール、電話番号、登録は不要。あなたと結びつく情報はありません。';
+
+  @override
   String get onboardingCreateIdentityTitle => '識別情報を作成';
 
   @override
@@ -174,26 +183,10 @@ class AppLocalizationsJa extends AppLocalizations {
   String get onboardingImportError => 'その鍵をインポートできませんでした。ご確認のうえ、もう一度お試しください。';
 
   @override
-  String get onboardingDisplayNameTitle => '名前を決める';
-
-  @override
-  String get onboardingDisplayNameBody => 'サークルのメンバーにどう表示されるかを選びましょう。';
-
-  @override
   String get onboardingDisplayNameHint => '例: アレックス';
 
   @override
   String get onboardingDisplayNameError => 'その名前を保存できませんでした。もう一度お試しください。';
-
-  @override
-  String get onboardingReadyTitle => '準備が整いました';
-
-  @override
-  String get onboardingReadyBody =>
-      'Haven は「サークル」という単位で構成されています。サークルとは、信頼できる相手と位置情報を共有する小さなプライベートグループです。最初のサークルを作成するか、知り合いからの招待を待ちましょう。';
-
-  @override
-  String get onboardingReadyCta => 'Haven を始める';
 
   @override
   String get commonCancel => 'キャンセル';

@@ -43,6 +43,9 @@
   "onboardingValueProp2Body": "لا يملك Haven خادمًا مركزيًا. تنتقل رسائلك المشفّرة عبر شبكة لامركزية من المُرحِّلات التي يمكنك اختيارها بنفسك، فلا تقدر أي جهة منفردة على إيقافه.",
   "onboardingValueProp3Title": "لا حاجة إلى حساب",
   "onboardingValueProp3Body": "لا بريد إلكتروني، ولا رقم هاتف، ولا تسجيل. يُنشئ Haven هوية خاصة تعيش على هاتفك وحده، دون أي شيء يربطها بشخصك الحقيقي.",
+  "onboardingValueProp1Summary": "مُشفَّر على جهازك، فلا يستطيع قراءته سوى الدوائر التي تختارها.",
+  "onboardingValueProp2Summary": "بلا خادم مركزي؛ يعمل عبر شبكة من المُرحِّلات تختارها بنفسك.",
+  "onboardingValueProp3Summary": "بلا بريد أو هاتف أو تسجيل، ولا شيء يربطه بك.",
 
   "onboardingCreateIdentityTitle": "أنشئ هويتك",
   "onboardingCreateIdentityBody": "سيُنشئ Haven هوية خاصة تعيش على هذا الهاتف وحده. هي الطريقة التي تتعرّف بها دوائرك عليك.",
@@ -61,14 +64,8 @@
   "onboardingImportInvalid": "لا يبدو هذا مفتاح نسخ احتياطي صالحًا. يُرجى التحقق وإعادة المحاولة.",
   "onboardingImportError": "تعذّر استيراد هذا المفتاح. يُرجى التحقق وإعادة المحاولة.",
 
-  "onboardingDisplayNameTitle": "اختر اسمًا",
-  "onboardingDisplayNameBody": "اختر كيف ستظهر لدوائرك.",
   "onboardingDisplayNameHint": "مثال: أليكس",
   "onboardingDisplayNameError": "تعذّر حفظ هذا الاسم. يُرجى إعادة المحاولة.",
-
-  "onboardingReadyTitle": "أنت جاهز",
-  "onboardingReadyBody": "يُنظَّم Haven في دوائر، وهي مجموعات خاصة صغيرة تشارك فيها موقعك مع أشخاص تثق بهم. أنشئ دائرتك الأولى، أو انتظر دعوة من شخص تعرفه.",
-  "onboardingReadyCta": "ادخل إلى Haven",
 
   "commonCancel": "إلغاء",
   "commonOpenSettings": "فتح الإعدادات",
@@ -339,7 +336,6 @@
   "legacyCutoverExplainerCirclesNeedRecreation": "لتحسين الأمان، يجب إعادة إنشاء دوائرك ودعوة أعضائها مجددًا قبل أن تتمكّن من مشاركة الموقع فيها من جديد.",
   "legacyCutoverExplainerAcknowledge": "فهمت",
   "relaySettingsLegacyRetractionPending": "لا يزال Haven ينظّف بعض البيانات المتبقّية من التحديث الأمني الأخير. سيكتمل ذلك تلقائيًا فور عودتك إلى الاتصال بالإنترنت.",
-
 
   "circlesPanelCollapsedAnnouncement": "لوحة الدوائر مطوية",
   "circlesPanelExpandedAnnouncement": "لوحة الدوائر مفتوحة",

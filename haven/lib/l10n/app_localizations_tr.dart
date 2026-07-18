@@ -128,6 +128,18 @@ class AppLocalizationsTr extends AppLocalizations {
       'E-posta yok, telefon numarası yok, kayıt yok. Haven yalnızca telefonunuzda yaşayan özel bir kimlik oluşturur; bu kimliği gerçek sizinle ilişkilendiren hiçbir şey yoktur.';
 
   @override
+  String get onboardingValueProp1Summary =>
+      'Cihazınızda şifrelenir; yalnızca seçtiğiniz çevreler görebilir.';
+
+  @override
+  String get onboardingValueProp2Summary =>
+      'Merkezi sunucu yok; seçtiğiniz aktarıcı ağı üzerinden çalışır.';
+
+  @override
+  String get onboardingValueProp3Summary =>
+      'E-posta, telefon veya kayıt yok. Hiçbir şey sizinle ilişkilendirilmez.';
+
+  @override
   String get onboardingCreateIdentityTitle => 'Kimliğinizi oluşturun';
 
   @override
@@ -180,28 +192,11 @@ class AppLocalizationsTr extends AppLocalizations {
       'Bu anahtarı içe aktaramadık. Lütfen kontrol edip tekrar deneyin.';
 
   @override
-  String get onboardingDisplayNameTitle => 'Bir ad seçin';
-
-  @override
-  String get onboardingDisplayNameBody =>
-      'Çevrelerinize nasıl görüneceğinizi seçin.';
-
-  @override
   String get onboardingDisplayNameHint => 'örn. Ali';
 
   @override
   String get onboardingDisplayNameError =>
       'Bu ad kaydedilemedi. Lütfen tekrar deneyin.';
-
-  @override
-  String get onboardingReadyTitle => 'Hazırsınız';
-
-  @override
-  String get onboardingReadyBody =>
-      'Haven çevreler hâlinde düzenlenir; çevreler, konumunuzu güvendiğiniz kişilerle paylaştığınız küçük, özel gruplardır. İlk çevrenizi oluşturun ya da tanıdığınız birinden gelecek bir daveti bekleyin.';
-
-  @override
-  String get onboardingReadyCta => 'Haven\'a Gir';
 
   @override
   String get commonCancel => 'İptal';

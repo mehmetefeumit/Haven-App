@@ -37,6 +37,9 @@
   "onboardingValueProp2Body": "Haven'ın merkezi bir sunucusu yoktur. Şifreli mesajlarınız, kendiniz seçebileceğiniz merkeziyetsiz bir aktarıcı ağı üzerinden iletilir; böylece tek bir kuruluş onu kapatamaz.",
   "onboardingValueProp3Title": "Hesaba gerek yok",
   "onboardingValueProp3Body": "E-posta yok, telefon numarası yok, kayıt yok. Haven yalnızca telefonunuzda yaşayan özel bir kimlik oluşturur; bu kimliği gerçek sizinle ilişkilendiren hiçbir şey yoktur.",
+  "onboardingValueProp1Summary": "Cihazınızda şifrelenir; yalnızca seçtiğiniz çevreler görebilir.",
+  "onboardingValueProp2Summary": "Merkezi sunucu yok; seçtiğiniz aktarıcı ağı üzerinden çalışır.",
+  "onboardingValueProp3Summary": "E-posta, telefon veya kayıt yok. Hiçbir şey sizinle ilişkilendirilmez.",
 
   "onboardingCreateIdentityTitle": "Kimliğinizi oluşturun",
   "onboardingCreateIdentityBody": "Haven yalnızca bu telefonda yaşayan özel bir kimlik oluşturacak. Çevreleriniz sizi bu sayede tanır.",
@@ -55,14 +58,8 @@
   "onboardingImportInvalid": "Bu geçerli bir yedek anahtara benzemiyor. Lütfen kontrol edip tekrar deneyin.",
   "onboardingImportError": "Bu anahtarı içe aktaramadık. Lütfen kontrol edip tekrar deneyin.",
 
-  "onboardingDisplayNameTitle": "Bir ad seçin",
-  "onboardingDisplayNameBody": "Çevrelerinize nasıl görüneceğinizi seçin.",
   "onboardingDisplayNameHint": "örn. Ali",
   "onboardingDisplayNameError": "Bu ad kaydedilemedi. Lütfen tekrar deneyin.",
-
-  "onboardingReadyTitle": "Hazırsınız",
-  "onboardingReadyBody": "Haven çevreler hâlinde düzenlenir; çevreler, konumunuzu güvendiğiniz kişilerle paylaştığınız küçük, özel gruplardır. İlk çevrenizi oluşturun ya da tanıdığınız birinden gelecek bir daveti bekleyin.",
-  "onboardingReadyCta": "Haven'a Gir",
 
   "commonCancel": "İptal",
   "commonOpenSettings": "Ayarları aç",
@@ -333,7 +330,6 @@
   "legacyCutoverExplainerCirclesNeedRecreation": "Güvenliği artırmak için, bu çevrelerde tekrar konum paylaşabilmenizden önce çevrelerinizin yeniden oluşturulması ve üyelerinin yeniden davet edilmesi gerekiyor.",
   "legacyCutoverExplainerAcknowledge": "Anladım",
   "relaySettingsLegacyRetractionPending": "Haven, son güvenlik güncellemesinden kalan bazı verileri hâlâ temizliyor. Tekrar çevrimiçi olduğunuzda bu işlem otomatik olarak tamamlanacak.",
-
 
   "circlesPanelCollapsedAnnouncement": "Çevreler paneli daraltıldı",
   "circlesPanelExpandedAnnouncement": "Çevreler paneli genişletildi",

@@ -128,6 +128,18 @@ class AppLocalizationsUr extends AppLocalizations {
       'نہ ای میل، نہ فون نمبر، نہ سائن اپ۔ Haven ایک نجی شناخت بناتا ہے جو صرف آپ کے فون پر رہتی ہے، اور کوئی چیز اسے حقیقی آپ سے نہیں جوڑتی۔';
 
   @override
+  String get onboardingValueProp1Summary =>
+      'آپ کے آلے پر خفیہ کردہ، تاکہ صرف آپ کے منتخب کردہ حلقے ہی اسے پڑھ سکیں۔';
+
+  @override
+  String get onboardingValueProp2Summary =>
+      'کوئی مرکزی سرور نہیں — یہ آپ کے منتخب کردہ ریلے نیٹ ورک پر چلتا ہے۔';
+
+  @override
+  String get onboardingValueProp3Summary =>
+      'نہ ای میل، نہ فون، نہ سائن اپ۔ کوئی چیز اسے آپ سے نہیں جوڑتی۔';
+
+  @override
   String get onboardingCreateIdentityTitle => 'اپنی شناخت بنائیں';
 
   @override
@@ -179,28 +191,11 @@ class AppLocalizationsUr extends AppLocalizations {
       'ہم وہ کلید درآمد نہ کر سکے۔ براہِ کرم جانچ کر دوبارہ کوشش کریں۔';
 
   @override
-  String get onboardingDisplayNameTitle => 'کوئی نام منتخب کریں';
-
-  @override
-  String get onboardingDisplayNameBody =>
-      'منتخب کریں کہ آپ اپنے حلقوں کو کیسے دکھائی دیں گے۔';
-
-  @override
   String get onboardingDisplayNameHint => 'مثلاً علی';
 
   @override
   String get onboardingDisplayNameError =>
       'وہ نام محفوظ نہ ہو سکا۔ براہِ کرم دوبارہ کوشش کریں۔';
-
-  @override
-  String get onboardingReadyTitle => 'آپ تیار ہیں';
-
-  @override
-  String get onboardingReadyBody =>
-      'Haven حلقوں میں منظم ہے، یعنی چھوٹے نجی گروہ جہاں آپ اپنا مقام اپنے قابلِ اعتماد لوگوں کے ساتھ شیئر کرتے ہیں۔ اپنا پہلا حلقہ بنائیں، یا کسی جاننے والے کی دعوت کا انتظار کریں۔';
-
-  @override
-  String get onboardingReadyCta => 'Haven میں داخل ہوں';
 
   @override
   String get commonCancel => 'منسوخ کریں';

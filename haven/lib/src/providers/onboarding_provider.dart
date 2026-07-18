@@ -1,10 +1,11 @@
 /// Onboarding state providers.
 ///
-/// Models first-run onboarding as two independent persisted flags plus
-/// a derived [OnboardingStep] for the UI. Deriving `identityReady` live
-/// from [identityProvider] eliminates a class of reconciliation bugs where
-/// a persisted "identity was created" step could disagree with the actual
-/// state of secure storage.
+/// Models first-run onboarding as two independent persisted flags plus a
+/// derived [OnboardingStep] for the UI. The flow is two screens: a merged
+/// intro screen and an identity-creation screen. The identity-creation
+/// screen's single action creates the identity, publishes the public profile,
+/// runs the location disclosure, and marks onboarding complete — so routing
+/// only ever needs `introSeen` and `completed`.
 ///
 /// # Persistence contract
 ///
@@ -24,14 +25,18 @@ library;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:haven/src/providers/identity_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// [SharedPreferences] key for the "user finished the intro screens" flag.
+/// [SharedPreferences] key for the "user finished the intro screen" flag.
 const String kOnboardingIntroSeenKey = 'haven.onboarding.intro_seen';
 
-/// [SharedPreferences] key for the "user set or explicitly skipped the
-/// display-name step" flag.
+/// Legacy [SharedPreferences] key for the old, separate display-name step.
+///
+/// The display-name step was merged into the identity-creation screen, so this
+/// flag is no longer read or written by [OnboardingFlags]. The constant is
+/// retained so (a) any value left on disk by a pre-consolidation install is
+/// harmlessly ignored, and (b) existing test / e2e fixtures that seed or clear
+/// it keep compiling. Do not repurpose it.
 const String kOnboardingDisplayNameSetKey = 'haven.onboarding.display_name_set';
 
 /// [SharedPreferences] key for the terminal "onboarding complete" flag.
@@ -40,22 +45,13 @@ const String kOnboardingDisplayNameSetKey = 'haven.onboarding.display_name_set';
 const String kOnboardingCompletedKey = 'haven.onboarding.completed';
 
 /// Total onboarding step-indicator slots.
-const int kOnboardingTotalSteps = 5;
+const int kOnboardingTotalSteps = 2;
 
-/// 1-based step-indicator number for the welcome screen.
-const int kOnboardingStepWelcome = 1;
-
-/// 1-based step-indicator number for the value-props screen.
-const int kOnboardingStepValueProps = 2;
+/// 1-based step-indicator number for the intro screen.
+const int kOnboardingStepIntro = 1;
 
 /// 1-based step-indicator number for the create-identity screen.
-const int kOnboardingStepCreateIdentity = 3;
-
-/// 1-based step-indicator number for the display-name screen.
-const int kOnboardingStepDisplayName = 4;
-
-/// 1-based step-indicator number for the ready screen.
-const int kOnboardingStepReady = 5;
+const int kOnboardingStepCreateIdentity = 2;
 
 /// Immutable snapshot of the persisted onboarding flags.
 @immutable
@@ -63,35 +59,29 @@ class OnboardingFlags {
   /// Creates a snapshot with the given flags.
   const OnboardingFlags({
     required this.introSeen,
-    required this.displayNameSet,
     required this.completed,
   });
 
   /// Convenience: all flags false (first-ever launch state).
   static const OnboardingFlags none = OnboardingFlags(
     introSeen: false,
-    displayNameSet: false,
     completed: false,
   );
 
-  /// True once the user has advanced past the value-prop intro screens.
+  /// True once the user has advanced past the intro screen.
   final bool introSeen;
 
-  /// True once the user has set a display name or explicitly skipped it.
-  final bool displayNameSet;
-
-  /// True once the user has reached and dismissed the final "ready" screen.
+  /// True once the user has finished the identity-creation screen — the
+  /// terminal step that also creates the identity and publishes the profile.
   final bool completed;
 
   /// Returns a new snapshot with selected fields replaced.
   OnboardingFlags copyWith({
     bool? introSeen,
-    bool? displayNameSet,
     bool? completed,
   }) {
     return OnboardingFlags(
       introSeen: introSeen ?? this.introSeen,
-      displayNameSet: displayNameSet ?? this.displayNameSet,
       completed: completed ?? this.completed,
     );
   }
@@ -101,45 +91,37 @@ class OnboardingFlags {
     if (identical(this, other)) return true;
     return other is OnboardingFlags &&
         other.introSeen == introSeen &&
-        other.displayNameSet == displayNameSet &&
         other.completed == completed;
   }
 
   @override
-  int get hashCode => Object.hash(introSeen, displayNameSet, completed);
+  int get hashCode => Object.hash(introSeen, completed);
 
   @override
   String toString() =>
-      'OnboardingFlags(introSeen: $introSeen, '
-      'displayNameSet: $displayNameSet, completed: $completed)';
+      'OnboardingFlags(introSeen: $introSeen, completed: $completed)';
 }
 
 /// Discrete UI states dispatched by the onboarding shell.
 ///
-/// The shell always enters the intro flow at [welcome]; the value-props
-/// screen is pushed onto that screen's local `Navigator` and is therefore
-/// not a distinct top-level routing state. [done] means the app router
-/// should render the main shell instead of the onboarding shell.
+/// [done] means the app router should render the main shell instead of the
+/// onboarding shell.
 enum OnboardingStep {
-  /// Hero screen with the primary value prop.
-  ///
-  /// Owns a local nested navigator that may push a value-props screen.
-  welcome,
+  /// Merged intro screen: hero (logo + tagline) plus the value-prop cards.
+  intro,
 
-  /// Identity generation / import screen.
+  /// Identity-creation screen. Its single action creates the identity,
+  /// publishes the public profile, runs the location disclosure, and completes
+  /// onboarding. A user who created an identity but was killed before
+  /// `completed` persisted resumes here; the screen detects the existing
+  /// identity and does not re-create it.
   createIdentity,
-
-  /// Local display-name capture.
-  displayName,
-
-  /// Confirmation screen gating entry into the main app.
-  ready,
 
   /// Onboarding is complete; the app router should render `MapShell`.
   done,
 }
 
-/// Pure function mapping flags + identity presence to the current step.
+/// Pure function mapping the persisted flags to the current step.
 ///
 /// This is the single source of truth for routing decisions. It is a pure
 /// function so it can be unit-tested exhaustively without any Riverpod or
@@ -148,23 +130,19 @@ enum OnboardingStep {
 /// The step ordering is:
 ///
 /// 1. `completed = true` → [OnboardingStep.done]
-/// 2. `introSeen = false` → [OnboardingStep.welcome] (the shell itself
-///    navigates locally to a value-props route owned by the welcome screen;
-///    only that route's Continue action flips `introSeen`).
-/// 3. `identityReady = false` → [OnboardingStep.createIdentity]
-/// 4. `displayNameSet = false` → [OnboardingStep.displayName]
-/// 5. otherwise → [OnboardingStep.ready]
+/// 2. `introSeen = false` → [OnboardingStep.intro]
+/// 3. otherwise → [OnboardingStep.createIdentity]
+///
+/// Identity presence is deliberately **not** an input: an identity created
+/// on a prior (interrupted) attempt is handled inside the create-identity
+/// screen, which is idempotent, rather than by the router.
 OnboardingStep resolveStep({
   required bool introSeen,
-  required bool identityReady,
-  required bool displayNameSet,
   required bool completed,
 }) {
   if (completed) return OnboardingStep.done;
-  if (!introSeen) return OnboardingStep.welcome;
-  if (!identityReady) return OnboardingStep.createIdentity;
-  if (!displayNameSet) return OnboardingStep.displayName;
-  return OnboardingStep.ready;
+  if (!introSeen) return OnboardingStep.intro;
+  return OnboardingStep.createIdentity;
 }
 
 /// Synchronous [StateNotifier] holding the current [OnboardingFlags].
@@ -179,22 +157,12 @@ class OnboardingController extends StateNotifier<OnboardingFlags> {
   /// flags pre-loaded from [SharedPreferences]. Tests may pass any value.
   OnboardingController(super.initial);
 
-  /// Marks the intro screens as complete and persists the flag.
+  /// Marks the intro screen as complete and persists the flag.
   Future<void> markIntroSeen() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(kOnboardingIntroSeenKey, true);
     if (!mounted) return;
     state = state.copyWith(introSeen: true);
-  }
-
-  /// Marks the display-name step as complete and persists the flag.
-  ///
-  /// Called whether the user entered a name or explicitly tapped "Skip".
-  Future<void> markDisplayNameSet() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(kOnboardingDisplayNameSetKey, true);
-    if (!mounted) return;
-    state = state.copyWith(displayNameSet: true);
   }
 
   /// Marks onboarding as fully complete and persists the flag.
@@ -214,6 +182,8 @@ class OnboardingController extends StateNotifier<OnboardingFlags> {
   Future<void> reset() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(kOnboardingIntroSeenKey, false);
+    // Legacy flag: cleared defensively so a downgrade to a pre-consolidation
+    // build doesn't see a stale `true` and skip the (now-merged) name step.
     await prefs.setBool(kOnboardingDisplayNameSetKey, false);
     await prefs.setBool(kOnboardingCompletedKey, false);
     if (!mounted) return;
@@ -239,20 +209,15 @@ final onboardingCompletedProvider = Provider<bool>(
   (ref) => ref.watch(onboardingControllerProvider).completed,
 );
 
-/// Derived [OnboardingStep] combining flags with live identity presence.
+/// Derived [OnboardingStep] from the persisted flags.
 ///
-/// Reads [identityProvider]. When identity loading is still pending this
-/// treats `identityReady` as false, so the shell shows the create-identity
-/// screen rather than a blank frame — the user sees a meaningful screen
-/// instantly and the step auto-advances once the identity future resolves.
+/// Routing no longer depends on live identity presence: resumption of an
+/// interrupted create-identity attempt is handled inside the create-identity
+/// screen (which is idempotent), not here.
 final onboardingStepProvider = Provider<OnboardingStep>((ref) {
   final flags = ref.watch(onboardingControllerProvider);
-  final identityAsync = ref.watch(identityProvider);
-  final identityReady = identityAsync.valueOrNull != null;
   return resolveStep(
     introSeen: flags.introSeen,
-    identityReady: identityReady,
-    displayNameSet: flags.displayNameSet,
     completed: flags.completed,
   );
 });

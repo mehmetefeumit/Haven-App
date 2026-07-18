@@ -1,8 +1,8 @@
 /// Widget tests for [OnboardingShell] dispatch.
 ///
 /// [OnboardingShell] watches [onboardingStepProvider] and renders one of the
-/// step-specific screens. We override the underlying flags + a stub
-/// [IdentityService] to drive the derived step to each value in turn.
+/// two step screens (or an empty placeholder when done). We drive the derived
+/// step by overriding the persisted flags.
 library;
 
 import 'dart:typed_data';
@@ -10,10 +10,8 @@ import 'dart:typed_data';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/pages/onboarding/create_identity_screen.dart';
-import 'package:haven/src/pages/onboarding/display_name_screen.dart';
+import 'package:haven/src/pages/onboarding/intro_screen.dart';
 import 'package:haven/src/pages/onboarding/onboarding_shell.dart';
-import 'package:haven/src/pages/onboarding/ready_screen.dart';
-import 'package:haven/src/pages/onboarding/welcome_screen.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
@@ -25,127 +23,62 @@ import '../../mocks/mock_circle_service.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  List<Override> buildOverrides({
-    required OnboardingFlags flags,
-    required Identity? identity,
-  }) {
+  setUp(() => SharedPreferences.setMockInitialValues(<String, Object>{}));
+
+  List<Override> buildOverrides(OnboardingFlags flags) {
     return [
       onboardingControllerProvider.overrideWith(
         (ref) => OnboardingController(flags),
       ),
-      identityServiceProvider.overrideWithValue(
-        _StubIdentityService(identity),
-      ),
+      identityServiceProvider.overrideWithValue(_StubIdentityService()),
       circleServiceProvider.overrideWithValue(MockCircleService()),
     ];
   }
 
-  testWidgets('welcome step renders WelcomeScreen', (tester) async {
-    SharedPreferences.setMockInitialValues({});
+  testWidgets('intro step renders IntroScreen', (tester) async {
     await pumpLocalized(
       tester,
       const OnboardingShell(),
-      overrides: buildOverrides(flags: OnboardingFlags.none, identity: null),
+      overrides: buildOverrides(OnboardingFlags.none),
     );
 
-    expect(find.byType(WelcomeScreen), findsOneWidget);
+    expect(find.byType(IntroScreen), findsOneWidget);
   });
 
   testWidgets('createIdentity step renders CreateIdentityScreen', (
     tester,
   ) async {
-    SharedPreferences.setMockInitialValues({});
     await pumpLocalized(
       tester,
       const OnboardingShell(),
       overrides: buildOverrides(
-        flags: const OnboardingFlags(
-          introSeen: true,
-          displayNameSet: false,
-          completed: false,
-        ),
-        identity: null,
+        const OnboardingFlags(introSeen: true, completed: false),
       ),
     );
 
     expect(find.byType(CreateIdentityScreen), findsOneWidget);
   });
 
-  testWidgets('displayName step renders DisplayNameScreen', (tester) async {
-    SharedPreferences.setMockInitialValues({});
-    await pumpLocalized(
-      tester,
-      const OnboardingShell(),
-      overrides: buildOverrides(
-        flags: const OnboardingFlags(
-          introSeen: true,
-          displayNameSet: false,
-          completed: false,
-        ),
-        identity: _stubIdentity,
-      ),
-    );
-
-    expect(find.byType(DisplayNameScreen), findsOneWidget);
-  });
-
-  testWidgets('ready step renders ReadyScreen', (tester) async {
-    SharedPreferences.setMockInitialValues({});
-    await pumpLocalized(
-      tester,
-      const OnboardingShell(),
-      overrides: buildOverrides(
-        flags: const OnboardingFlags(
-          introSeen: true,
-          displayNameSet: true,
-          completed: false,
-        ),
-        identity: _stubIdentity,
-      ),
-    );
-
-    expect(find.byType(ReadyScreen), findsOneWidget);
-  });
-
   testWidgets('done step renders an empty placeholder', (tester) async {
-    SharedPreferences.setMockInitialValues({});
     await pumpLocalized(
       tester,
       const OnboardingShell(),
       overrides: buildOverrides(
-        flags: const OnboardingFlags(
-          introSeen: true,
-          displayNameSet: true,
-          completed: true,
-        ),
-        identity: _stubIdentity,
+        const OnboardingFlags(introSeen: true, completed: true),
       ),
     );
 
-    expect(find.byType(WelcomeScreen), findsNothing);
+    expect(find.byType(IntroScreen), findsNothing);
     expect(find.byType(CreateIdentityScreen), findsNothing);
-    expect(find.byType(DisplayNameScreen), findsNothing);
-    expect(find.byType(ReadyScreen), findsNothing);
   });
 }
 
-final _stubIdentity = Identity(
-  pubkeyHex:
-      '1111111111111111111111111111111111111111111111111111111111111111',
-  npub: 'npub1stub',
-  createdAt: DateTime(2025),
-);
-
 class _StubIdentityService implements IdentityService {
-  _StubIdentityService(this._identity);
-
-  final Identity? _identity;
+  @override
+  Future<Identity?> getIdentity() async => null;
 
   @override
-  Future<Identity?> getIdentity() async => _identity;
-
-  @override
-  Future<bool> hasIdentity() async => _identity != null;
+  Future<bool> hasIdentity() async => false;
 
   @override
   Future<Identity> createIdentity() async => throw UnimplementedError();
@@ -165,8 +98,7 @@ class _StubIdentityService implements IdentityService {
       throw UnimplementedError();
 
   @override
-  Future<String> getPubkeyHex() async =>
-      _identity?.pubkeyHex ?? (throw UnimplementedError());
+  Future<String> getPubkeyHex() async => throw UnimplementedError();
 
   @override
   Future<List<int>> getSecretBytes() async => throw UnimplementedError();

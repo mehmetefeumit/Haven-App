@@ -37,6 +37,9 @@
   "onboardingValueProp2Body": "Haven کا کوئی مرکزی سرور نہیں ہے۔ آپ کے خفیہ پیغامات ریلے کے ایک غیر مرکزی نیٹ ورک سے گزرتے ہیں جنہیں آپ خود منتخب کر سکتے ہیں، چنانچہ کوئی واحد ادارہ اسے بند نہیں کر سکتا۔",
   "onboardingValueProp3Title": "کسی اکاؤنٹ کی ضرورت نہیں",
   "onboardingValueProp3Body": "نہ ای میل، نہ فون نمبر، نہ سائن اپ۔ Haven ایک نجی شناخت بناتا ہے جو صرف آپ کے فون پر رہتی ہے، اور کوئی چیز اسے حقیقی آپ سے نہیں جوڑتی۔",
+  "onboardingValueProp1Summary": "آپ کے آلے پر خفیہ کردہ، تاکہ صرف آپ کے منتخب کردہ حلقے ہی اسے پڑھ سکیں۔",
+  "onboardingValueProp2Summary": "کوئی مرکزی سرور نہیں — یہ آپ کے منتخب کردہ ریلے نیٹ ورک پر چلتا ہے۔",
+  "onboardingValueProp3Summary": "نہ ای میل، نہ فون، نہ سائن اپ۔ کوئی چیز اسے آپ سے نہیں جوڑتی۔",
 
   "onboardingCreateIdentityTitle": "اپنی شناخت بنائیں",
   "onboardingCreateIdentityBody": "Haven ایک نجی شناخت بنائے گا جو صرف اسی فون پر رہے گی۔ آپ کے حلقے اسی سے آپ کو پہچانتے ہیں۔",
@@ -55,14 +58,8 @@
   "onboardingImportInvalid": "یہ کوئی درست بیک اپ کلید معلوم نہیں ہوتی۔ براہِ کرم جانچ کر دوبارہ کوشش کریں۔",
   "onboardingImportError": "ہم وہ کلید درآمد نہ کر سکے۔ براہِ کرم جانچ کر دوبارہ کوشش کریں۔",
 
-  "onboardingDisplayNameTitle": "کوئی نام منتخب کریں",
-  "onboardingDisplayNameBody": "منتخب کریں کہ آپ اپنے حلقوں کو کیسے دکھائی دیں گے۔",
   "onboardingDisplayNameHint": "مثلاً علی",
   "onboardingDisplayNameError": "وہ نام محفوظ نہ ہو سکا۔ براہِ کرم دوبارہ کوشش کریں۔",
-
-  "onboardingReadyTitle": "آپ تیار ہیں",
-  "onboardingReadyBody": "Haven حلقوں میں منظم ہے، یعنی چھوٹے نجی گروہ جہاں آپ اپنا مقام اپنے قابلِ اعتماد لوگوں کے ساتھ شیئر کرتے ہیں۔ اپنا پہلا حلقہ بنائیں، یا کسی جاننے والے کی دعوت کا انتظار کریں۔",
-  "onboardingReadyCta": "Haven میں داخل ہوں",
 
   "commonCancel": "منسوخ کریں",
   "commonOpenSettings": "ترتیبات کھولیں",
@@ -333,7 +330,6 @@
   "legacyCutoverExplainerCirclesNeedRecreation": "بہتر سیکیورٹی کے لیے، آپ کے حلقوں کو دوبارہ بنانا اور ان کے ارکان کو دوبارہ دعوت دینا ضروری ہے، اس کے بعد ہی آپ ان میں دوبارہ مقام شیئر کر سکیں گے۔",
   "legacyCutoverExplainerAcknowledge": "ٹھیک ہے",
   "relaySettingsLegacyRetractionPending": "Haven ابھی بھی حالیہ سیکیورٹی اپ ڈیٹ سے کچھ ڈیٹا صاف کر رہا ہے۔ آپ کے دوبارہ آن لائن آتے ہی یہ خود بخود مکمل ہو جائے گا۔",
-
 
   "circlesPanelCollapsedAnnouncement": "حلقوں کا پینل سمیٹا گیا",
   "circlesPanelExpandedAnnouncement": "حلقوں کا پینل پھیلایا گیا",

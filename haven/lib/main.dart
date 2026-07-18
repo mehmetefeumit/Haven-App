@@ -240,7 +240,7 @@ Future<void> main() async {
     );
   }
 
-  final initialFlags = await _loadInitialOnboardingFlags(
+  final initialFlags = await loadInitialOnboardingFlags(
     hasIdentity: hasExistingIdentity,
   );
   final initialThemeMode = await loadInitialThemeMode();
@@ -364,34 +364,45 @@ Future<bool> _probeHasNostrIdentity() async {
 
 /// Loads the initial [OnboardingFlags] synchronously before `runApp`.
 ///
-/// Handles a one-time migration for users upgrading from versions that
-/// predate the onboarding feature: if no `completed` value is stored but
-/// [hasIdentity] is `true` (a secure-storage identity key is present — see
-/// [_probeHasNostrIdentity]), the user already has an identity and should
-/// not be routed back into onboarding. All flags are flipped to `true` in
-/// that case.
-Future<OnboardingFlags> _loadInitialOnboardingFlags({
+/// Handles a one-time migration for users upgrading from versions that predate
+/// the onboarding feature: a genuine pre-onboarding install has an identity but
+/// has NEVER written any onboarding flag. If neither `completed` nor
+/// `intro_seen` is stored yet [hasIdentity] is `true`, the user already
+/// onboarded before the feature existed and should skip straight to the main
+/// shell — all flags are flipped to `true`.
+///
+/// The `intro_seen == null` guard is load-bearing: a brand-new user on the
+/// current flow persists `intro_seen = true` before the create-identity screen
+/// renders, so a crash after identity creation but before `markCompleted`
+/// leaves `intro_seen = true` / `completed = null` with an identity present.
+/// That must NOT be mistaken for a legacy user — it falls through to the normal
+/// load and resumes at the (idempotent) create-identity step, preserving the
+/// display-name save, profile publish, relay seeding, and location disclosure.
+@visibleForTesting
+Future<OnboardingFlags> loadInitialOnboardingFlags({
   required bool hasIdentity,
 }) async {
   final prefs = await SharedPreferences.getInstance();
 
   final storedCompleted = prefs.getBool(kOnboardingCompletedKey);
-  if (storedCompleted == null && hasIdentity) {
-    // Existing users have already onboarded — flip every flag so they skip
-    // straight to the main shell.
+  final storedIntroSeen = prefs.getBool(kOnboardingIntroSeenKey);
+  if (storedCompleted == null && storedIntroSeen == null && hasIdentity) {
+    // Genuine pre-onboarding install (identity present, no onboarding flag
+    // ever written) — flip every flag so they skip straight to the main shell.
     await prefs.setBool(kOnboardingIntroSeenKey, true);
+    // Legacy flag (no longer read by OnboardingFlags): still written
+    // defensively so a downgrade to a pre-consolidation build doesn't drop
+    // the user back into the old display-name step.
     await prefs.setBool(kOnboardingDisplayNameSetKey, true);
     await prefs.setBool(kOnboardingCompletedKey, true);
     return const OnboardingFlags(
       introSeen: true,
-      displayNameSet: true,
       completed: true,
     );
   }
 
   return OnboardingFlags(
-    introSeen: prefs.getBool(kOnboardingIntroSeenKey) ?? false,
-    displayNameSet: prefs.getBool(kOnboardingDisplayNameSetKey) ?? false,
+    introSeen: storedIntroSeen ?? false,
     completed: storedCompleted ?? false,
   );
 }

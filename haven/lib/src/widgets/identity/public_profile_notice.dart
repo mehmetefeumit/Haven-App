@@ -7,8 +7,8 @@
 /// opt-in/consent toggle; this widget is the single, neutral disclosure of
 /// that fact, shown in exactly two places (same widget, so the copy never
 /// drifts):
-/// - Onboarding's `DisplayNameScreen` (`display_name_screen.dart`), near the
-///   name field.
+/// - Onboarding's `CreateIdentityScreen` (`create_identity_screen.dart`), near
+///   the pre-filled display-name field.
 /// - The Identity settings page (`identity_page.dart`), adjacent to the photo
 ///   header and the display-name card — the two editable fields the notice
 ///   describes.

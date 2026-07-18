@@ -1,47 +1,88 @@
-/// Widget tests for [CreateIdentityScreen].
+/// Widget tests for [CreateIdentityScreen] — the merged create-identity +
+/// display-name screen (page 2 of 2).
+///
+/// Covers the full "Create My Identity" sequence: create keypair (idempotent
+/// on resume), publish the public profile, run the location prominent
+/// disclosure, and complete onboarding — plus the pre-filled anonymous name,
+/// the empty-name fallback, and the existing-name preservation on resume.
 library;
 
 import 'dart:typed_data';
 
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/pages/onboarding/create_identity_screen.dart';
 import 'package:haven/src/pages/onboarding/import_nsec_screen.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
+import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/location_service.dart';
+import 'package:haven/src/test_keys.dart';
+import 'package:haven/src/widgets/identity/public_profile_notice.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../helpers/localized_app_harness.dart';
 import '../../mocks/mock_circle_service.dart';
+import '../../mocks/mock_profile_service.dart';
+import '../../mocks/mock_relay_preferences_service.dart';
 import '../../mocks/mock_relay_service.dart';
+
+final _namePattern = RegExp(r'^[A-Z][a-z]+ [A-Z][a-z]+$');
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  // createIdentity/importFromNsec now run the M10.1 pending-wipe reconcile,
-  // which reads SharedPreferences. Provide an (empty → no wipe pending) mock so
-  // the reconcile resolves in-test and the CTA's create call fires within pump.
+  // createIdentity runs the M10.1 pending-wipe reconcile, which reads
+  // SharedPreferences; an empty store means "no wipe pending".
   setUp(() => SharedPreferences.setMockInitialValues(<String, Object>{}));
 
-  List<Override> buildOverrides({required _RecordingIdentityService service}) {
+  List<Override> buildOverrides({
+    required _RecordingIdentityService service,
+    MockProfileService? profileService,
+    _FakeLocationService? locationService,
+  }) {
     return [
       identityServiceProvider.overrideWithValue(service),
       onboardingControllerProvider.overrideWith(
-        (ref) => OnboardingController(OnboardingFlags.none),
+        (ref) => OnboardingController(
+          const OnboardingFlags(introSeen: true, completed: false),
+        ),
       ),
       circleServiceProvider.overrideWithValue(MockCircleService()),
       relayServiceProvider.overrideWithValue(MockRelayService()),
+      profileServiceProvider.overrideWithValue(
+        profileService ?? MockProfileService(),
+      ),
+      relayPreferencesServiceProvider.overrideWith(
+        (ref) async => MockRelayPreferencesService(),
+      ),
+      locationServiceProvider.overrideWithValue(
+        locationService ?? _FakeLocationService(),
+      ),
     ];
   }
 
-  testWidgets('renders title, body, warning, and CTA', (tester) async {
-    final service = _RecordingIdentityService();
+  // The success path leaves the CTA spinner running forever (production swaps
+  // the screen away), so pumpAndSettle can't be used after a tap.
+  Future<void> pumpFrames(WidgetTester tester, [int frames = 16]) async {
+    for (var i = 0; i < frames; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+  }
 
+  String prefilledName(WidgetTester tester) =>
+      tester.widget<TextField>(find.byType(TextField)).controller!.text;
+
+  testWidgets('renders title, body, warning, disclosure, field, and CTA', (
+    tester,
+  ) async {
     await pumpLocalized(
       tester,
       const CreateIdentityScreen(),
-      overrides: buildOverrides(service: service),
+      overrides: buildOverrides(service: _RecordingIdentityService()),
     );
 
     expect(find.text('Create your identity'), findsOneWidget);
@@ -59,40 +100,230 @@ void main() {
       ),
       findsOneWidget,
     );
+    // The public-profile disclosure must be present since publishing is
+    // now mandatory and unskippable.
+    expect(find.byType(PublicProfileNotice), findsOneWidget);
+    expect(find.byType(TextField), findsOneWidget);
+    expect(find.byKey(WidgetKeys.createIdentityCta), findsOneWidget);
     expect(find.text('Create My Identity'), findsOneWidget);
   });
 
-  testWidgets('tapping the primary CTA invokes createIdentity', (tester) async {
+  testWidgets('the display-name field is pre-filled with an anonymous name', (
+    tester,
+  ) async {
+    await pumpLocalized(
+      tester,
+      const CreateIdentityScreen(),
+      overrides: buildOverrides(service: _RecordingIdentityService()),
+    );
+
+    expect(_namePattern.hasMatch(prefilledName(tester)), isTrue);
+  });
+
+  testWidgets('does not expose the import-existing-key affordance', (
+    tester,
+  ) async {
+    await pumpLocalized(
+      tester,
+      const CreateIdentityScreen(),
+      overrides: buildOverrides(service: _RecordingIdentityService()),
+    );
+
+    expect(find.textContaining('Import it instead'), findsNothing);
+    expect(find.byType(ImportNsecScreen), findsNothing);
+  });
+
+  testWidgets(
+    'accepting: creates identity, publishes profile, enables background, '
+    'and completes onboarding',
+    (tester) async {
+      final service = _RecordingIdentityService();
+      final profile = MockProfileService();
+      final location = _FakeLocationService();
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(
+          service: service,
+          profileService: profile,
+          locationService: location,
+        ),
+        settle: false,
+      );
+      await tester.pump();
+      final name = prefilledName(tester);
+
+      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+      await pumpFrames(tester);
+
+      // Disclosure-before-collection: the pop-up shows and nothing is
+      // requested until the user consents.
+      expect(find.byKey(WidgetKeys.locationDisclosureAgree), findsOneWidget);
+      expect(location.requestPermissionCalled, isFalse);
+
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await pumpFrames(tester);
+
+      expect(service.createIdentityCalls, 1);
+      expect(service.setDisplayNameCalls, [name]);
+      expect(
+        profile.methodCalls.map((c) => c.method),
+        contains('updateOwnProfile'),
+      );
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool(kOnboardingCompletedKey), isTrue);
+      expect(prefs.getBool(kBackgroundSharingKey), isTrue);
+      expect(location.requestPermissionCalled, isTrue);
+    },
+  );
+
+  testWidgets('an edited name is what gets saved and published', (tester) async {
+    final service = _RecordingIdentityService();
+    final profile = MockProfileService();
+
+    await pumpLocalized(
+      tester,
+      const CreateIdentityScreen(),
+      overrides: buildOverrides(service: service, profileService: profile),
+      settle: false,
+    );
+    await tester.pump();
+
+    await tester.enterText(find.byType(TextField), 'Wren Willow');
+    await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+    await pumpFrames(tester);
+    await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+    await pumpFrames(tester);
+
+    expect(service.setDisplayNameCalls, ['Wren Willow']);
+  });
+
+  testWidgets('declining the disclosure still completes onboarding', (
+    tester,
+  ) async {
+    final service = _RecordingIdentityService();
+    final location = _FakeLocationService();
+
+    await pumpLocalized(
+      tester,
+      const CreateIdentityScreen(),
+      overrides: buildOverrides(service: service, locationService: location),
+      settle: false,
+    );
+    await tester.pump();
+
+    await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+    await pumpFrames(tester);
+    expect(find.byKey(WidgetKeys.locationDisclosureNotNow), findsOneWidget);
+    await tester.tap(find.byKey(WidgetKeys.locationDisclosureNotNow));
+    await pumpFrames(tester);
+
+    final prefs = await SharedPreferences.getInstance();
+    // Identity is still created + name saved, and onboarding completes...
+    expect(service.createIdentityCalls, 1);
+    expect(service.setDisplayNameCalls, hasLength(1));
+    expect(prefs.getBool(kOnboardingCompletedKey), isTrue);
+    // ...but nothing was requested or enabled.
+    expect(prefs.getBool(kBackgroundSharingKey), isNot(true));
+    expect(location.requestPermissionCalled, isFalse);
+  });
+
+  testWidgets('a cleared field falls back to a generated name (never empty)', (
+    tester,
+  ) async {
     final service = _RecordingIdentityService();
 
     await pumpLocalized(
       tester,
       const CreateIdentityScreen(),
       overrides: buildOverrides(service: service),
+      settle: false,
     );
+    await tester.pump();
 
-    await tester.tap(find.text('Create My Identity'));
-    // Success leaves background work fire-and-forget; bounded pump avoids
-    // a pumpAndSettle hang on the spinner.
-    for (var i = 0; i < 10; i++) {
-      await tester.pump(const Duration(milliseconds: 50));
-    }
+    await tester.enterText(find.byType(TextField), '');
+    await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+    await pumpFrames(tester);
+    await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+    await pumpFrames(tester);
 
-    expect(service.createIdentityCalls, 1);
+    expect(service.setDisplayNameCalls, hasLength(1));
+    final saved = service.setDisplayNameCalls.single!;
+    expect(_namePattern.hasMatch(saved), isTrue, reason: 'saved: "$saved"');
   });
 
-  testWidgets('service failure surfaces a snackbar', (tester) async {
+  testWidgets(
+    'resume (identity already exists): does not re-create the keypair',
+    (tester) async {
+      final service = _RecordingIdentityService(hasIdentityValue: true);
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(service: service),
+        settle: false,
+      );
+      await tester.pump();
+
+      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+      await pumpFrames(tester);
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await pumpFrames(tester);
+
+      // The pre-existing identity is detected and never overwritten...
+      expect(service.createIdentityCalls, 0);
+      // ...but the rest of the sequence still runs.
+      expect(service.setDisplayNameCalls, hasLength(1));
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool(kOnboardingCompletedKey), isTrue);
+    },
+  );
+
+  testWidgets(
+    'resume with an existing chosen name preserves it (no clobber)',
+    (tester) async {
+      final service = _RecordingIdentityService(
+        hasIdentityValue: true,
+        existingDisplayName: 'Alice',
+      );
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(service: service),
+        settle: false,
+      );
+      // Let initState's async restore replace the random pre-fill with "Alice".
+      await tester.pump();
+      await tester.pump();
+      expect(prefilledName(tester), 'Alice');
+
+      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+      await pumpFrames(tester);
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await pumpFrames(tester);
+
+      // The existing name is saved as-is — not overwritten by a fresh random.
+      expect(service.setDisplayNameCalls, ['Alice']);
+    },
+  );
+
+  testWidgets('a create failure surfaces a snackbar and does not complete', (
+    tester,
+  ) async {
     final service = _RecordingIdentityService(throwOnCreate: true);
 
     await pumpLocalized(
       tester,
       const CreateIdentityScreen(),
       overrides: buildOverrides(service: service),
+      settle: false,
     );
+    await tester.pump();
 
-    await tester.tap(find.text('Create My Identity'));
-    await tester.pump();
-    await tester.pump();
+    await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+    await pumpFrames(tester);
 
     expect(
       find.text(
@@ -101,33 +332,41 @@ void main() {
       findsOneWidget,
     );
     expect(service.createIdentityCalls, 1);
+    // No disclosure, no name save, no completion.
+    expect(find.byKey(WidgetKeys.locationDisclosureAgree), findsNothing);
+    expect(service.setDisplayNameCalls, isEmpty);
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getBool(kOnboardingCompletedKey), isNot(true));
   });
-
-  testWidgets(
-    'does not expose the import-existing-key affordance (temporarily removed)',
-    (tester) async {
-      final service = _RecordingIdentityService();
-
-      await pumpLocalized(
-        tester,
-        const CreateIdentityScreen(),
-        overrides: buildOverrides(service: service),
-      );
-
-      // The "Import it instead" entry point into ImportNsecScreen is hidden
-      // until signer-app support lands. The backend importFromNsec path is
-      // intentionally retained; only the UI affordance is gone.
-      expect(find.textContaining('Import it instead'), findsNothing);
-      expect(find.byType(ImportNsecScreen), findsNothing);
-    },
-  );
 }
 
 class _RecordingIdentityService implements IdentityService {
-  _RecordingIdentityService({this.throwOnCreate = false});
+  _RecordingIdentityService({
+    this.hasIdentityValue = false,
+    this.existingDisplayName,
+    this.throwOnCreate = false,
+  });
 
+  final bool hasIdentityValue;
+  final String? existingDisplayName;
   final bool throwOnCreate;
+
   int createIdentityCalls = 0;
+  final List<String?> setDisplayNameCalls = [];
+
+  static final _identity = Identity(
+    pubkeyHex:
+        '1111111111111111111111111111111111111111111111111111111111111111',
+    npub: 'npub1stub',
+    createdAt: DateTime(2025),
+  );
+
+  @override
+  Future<bool> hasIdentity() async => hasIdentityValue;
+
+  @override
+  Future<Identity?> getIdentity() async =>
+      (hasIdentityValue || createIdentityCalls > 0) ? _identity : null;
 
   @override
   Future<Identity> createIdentity() async {
@@ -135,19 +374,16 @@ class _RecordingIdentityService implements IdentityService {
     if (throwOnCreate) {
       throw const IdentityServiceException('boom');
     }
-    return Identity(
-      pubkeyHex:
-          '1111111111111111111111111111111111111111111111111111111111111111',
-      npub: 'npub1stub',
-      createdAt: DateTime(2025),
-    );
+    return _identity;
   }
 
   @override
-  Future<Identity?> getIdentity() async => null;
+  Future<String?> getDisplayName() async => existingDisplayName;
 
   @override
-  Future<bool> hasIdentity() async => false;
+  Future<void> setDisplayName(String? name) async {
+    setDisplayNameCalls.add(name);
+  }
 
   @override
   Future<Identity> importFromNsec(String nsec) async =>
@@ -164,17 +400,39 @@ class _RecordingIdentityService implements IdentityService {
       throw UnimplementedError();
 
   @override
-  Future<String> getPubkeyHex() async => throw UnimplementedError();
+  Future<String> getPubkeyHex() async => _identity.pubkeyHex;
 
   @override
   Future<List<int>> getSecretBytes() async => throw UnimplementedError();
 
   @override
-  Future<String?> getDisplayName() async => null;
-
-  @override
-  Future<void> setDisplayName(String? name) async {}
-
-  @override
   Future<void> clearCache() async {}
+}
+
+/// Minimal [LocationService] fake. Onboarding only calls [requestPermission];
+/// every other member is unused and asserts if reached.
+class _FakeLocationService implements LocationService {
+  bool requestPermissionCalled = false;
+
+  @override
+  Future<bool> requestPermission() async {
+    requestPermissionCalled = true;
+    return true;
+  }
+
+  @override
+  Future<LocationPermissionStatus> checkPermission() =>
+      throw UnimplementedError();
+
+  @override
+  Future<Position> getCurrentLocation() => throw UnimplementedError();
+
+  @override
+  Future<Position> getCurrentLocationFresh() => throw UnimplementedError();
+
+  @override
+  Stream<Position> getLocationStream() => throw UnimplementedError();
+
+  @override
+  Future<bool> isLocationServiceEnabled() => throw UnimplementedError();
 }

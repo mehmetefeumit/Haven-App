@@ -128,6 +128,18 @@ class AppLocalizationsDe extends AppLocalizations {
       'Keine E-Mail-Adresse, keine Telefonnummer, keine Registrierung. Haven erstellt eine private Identität, die nur auf deinem Telefon lebt und durch nichts mit deiner realen Person verknüpft ist.';
 
   @override
+  String get onboardingValueProp1Summary =>
+      'Auf deinem Gerät verschlüsselt – lesbar nur für die Kreise, die du auswählst.';
+
+  @override
+  String get onboardingValueProp2Summary =>
+      'Kein zentraler Server – läuft über ein Relay-Netzwerk deiner Wahl.';
+
+  @override
+  String get onboardingValueProp3Summary =>
+      'Keine E-Mail, keine Telefonnummer, keine Anmeldung. Nichts verweist auf dich.';
+
+  @override
   String get onboardingCreateIdentityTitle => 'Erstelle deine Identität';
 
   @override
@@ -180,28 +192,11 @@ class AppLocalizationsDe extends AppLocalizations {
       'Wir konnten diesen Schlüssel nicht importieren. Bitte prüfe ihn und versuche es erneut.';
 
   @override
-  String get onboardingDisplayNameTitle => 'Wähle einen Namen';
-
-  @override
-  String get onboardingDisplayNameBody =>
-      'Lege fest, wie du in deinen Kreisen erscheinst.';
-
-  @override
   String get onboardingDisplayNameHint => 'z. B. Alex';
 
   @override
   String get onboardingDisplayNameError =>
       'Dieser Name konnte nicht gespeichert werden. Bitte versuche es erneut.';
-
-  @override
-  String get onboardingReadyTitle => 'Du bist startklar';
-
-  @override
-  String get onboardingReadyBody =>
-      'Haven ist in Kreise gegliedert – kleine private Gruppen, in denen du deinen Standort mit Menschen teilst, denen du vertraust. Erstelle deinen ersten Kreis oder warte auf eine Einladung von jemandem, den du kennst.';
-
-  @override
-  String get onboardingReadyCta => 'Haven betreten';
 
   @override
   String get commonCancel => 'Abbrechen';

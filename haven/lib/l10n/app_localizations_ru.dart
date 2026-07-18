@@ -129,6 +129,18 @@ class AppLocalizationsRu extends AppLocalizations {
       'Никакой почты, телефона или регистрации. Haven создаёт приватную личность, которая хранится только на вашем телефоне, и ничто не связывает её с вами настоящим.';
 
   @override
+  String get onboardingValueProp1Summary =>
+      'Шифруется на устройстве — прочитают только выбранные вами круги.';
+
+  @override
+  String get onboardingValueProp2Summary =>
+      'Без центрального сервера — работает через сеть реле, которую выбираете вы.';
+
+  @override
+  String get onboardingValueProp3Summary =>
+      'Ни почты, ни телефона, ни регистрации. Ничто не связывает это с вами.';
+
+  @override
   String get onboardingCreateIdentityTitle => 'Создайте свою личность';
 
   @override
@@ -180,28 +192,11 @@ class AppLocalizationsRu extends AppLocalizations {
       'Не удалось импортировать этот ключ. Проверьте и попробуйте снова.';
 
   @override
-  String get onboardingDisplayNameTitle => 'Выберите имя';
-
-  @override
-  String get onboardingDisplayNameBody =>
-      'Выберите, как вы будете отображаться в своих кругах.';
-
-  @override
   String get onboardingDisplayNameHint => 'например, Алекс';
 
   @override
   String get onboardingDisplayNameError =>
       'Не удалось сохранить имя. Пожалуйста, повторите попытку.';
-
-  @override
-  String get onboardingReadyTitle => 'Всё готово';
-
-  @override
-  String get onboardingReadyBody =>
-      'Haven строится вокруг кругов — небольших приватных групп, где вы делитесь местоположением с людьми, которым доверяете. Создайте первый круг или дождитесь приглашения от знакомого.';
-
-  @override
-  String get onboardingReadyCta => 'Войти в Haven';
 
   @override
   String get commonCancel => 'Отмена';

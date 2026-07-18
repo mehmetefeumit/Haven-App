@@ -43,6 +43,9 @@
   "onboardingValueProp2Body": "Haven هیچ سرور مرکزی ندارد. پیام‌های رمزگذاری‌شدهٔ تو از میان شبکه‌ای غیرمتمرکز از رله‌ها عبور می‌کنند که خودت می‌توانی انتخابشان کنی، پس هیچ نهاد واحدی نمی‌تواند آن را تعطیل کند.",
   "onboardingValueProp3Title": "نیازی به حساب کاربری نیست",
   "onboardingValueProp3Body": "بدون ایمیل، بدون شمارهٔ تلفن، بدون ثبت‌نام. Haven یک هویت خصوصی می‌سازد که فقط روی گوشی تو زندگی می‌کند و هیچ چیزی آن را به هویت واقعی‌ات گره نمی‌زند.",
+  "onboardingValueProp1Summary": "روی دستگاه شما رمزنگاری می‌شود؛ فقط حلقه‌هایی که انتخاب می‌کنید می‌توانند آن را ببینند.",
+  "onboardingValueProp2Summary": "بدون سرور مرکزی؛ روی شبکه‌ای از رله‌ها که خودتان انتخاب می‌کنید اجرا می‌شود.",
+  "onboardingValueProp3Summary": "بدون ایمیل، تلفن یا ثبت‌نام. هیچ چیز آن را به شما پیوند نمی‌دهد.",
 
   "onboardingCreateIdentityTitle": "هویت خود را بسازید",
   "onboardingCreateIdentityBody": "Haven یک هویت خصوصی می‌سازد که فقط روی همین گوشی زندگی می‌کند. حلقه‌هایت با همین هویت تو را می‌شناسند.",
@@ -61,14 +64,8 @@
   "onboardingImportInvalid": "این به یک کلید پشتیبان معتبر شبیه نیست. لطفاً بررسی کنید و دوباره تلاش کنید.",
   "onboardingImportError": "نتوانستیم آن کلید را وارد کنیم. لطفاً بررسی کنید و دوباره تلاش کنید.",
 
-  "onboardingDisplayNameTitle": "یک نام انتخاب کنید",
-  "onboardingDisplayNameBody": "انتخاب کن که چگونه برای حلقه‌هایت دیده شوی.",
   "onboardingDisplayNameHint": "مثلاً علی",
   "onboardingDisplayNameError": "نتوانستیم آن نام را ذخیره کنیم. لطفاً دوباره تلاش کنید.",
-
-  "onboardingReadyTitle": "آماده‌ای",
-  "onboardingReadyBody": "Haven بر پایهٔ حلقه‌ها سازمان‌دهی شده است؛ گروه‌های کوچک و خصوصی که در آن‌ها موقعیت مکانی‌ات را با افراد مورد اعتمادت به اشتراک می‌گذاری. نخستین حلقه‌ات را بساز، یا منتظر دعوتی از کسی که می‌شناسی بمان.",
-  "onboardingReadyCta": "ورود به Haven",
 
   "commonCancel": "لغو",
   "commonOpenSettings": "باز کردن تنظیمات",
@@ -339,7 +336,6 @@
   "legacyCutoverExplainerCirclesNeedRecreation": "برای امنیت بیشتر، باید حلقه‌هایت را از نو بسازی و اعضایشان را دوباره دعوت کنی تا بتوانی باز هم موقعیت مکانی‌ات را در آن‌ها به اشتراک بگذاری.",
   "legacyCutoverExplainerAcknowledge": "متوجه شدم",
   "relaySettingsLegacyRetractionPending": "Haven هنوز در حال پاک‌سازی برخی داده‌های به‌جامانده از به‌روزرسانی امنیتی اخیر است. این کار به‌محض اتصال دوباره‌ات به اینترنت به‌طور خودکار کامل خواهد شد.",
-
 
   "circlesPanelCollapsedAnnouncement": "پنل حلقه‌ها بسته شد",
   "circlesPanelExpandedAnnouncement": "پنل حلقه‌ها باز شد",

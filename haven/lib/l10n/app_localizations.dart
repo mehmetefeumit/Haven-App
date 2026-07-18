@@ -306,6 +306,24 @@ abstract class AppLocalizations {
   /// **'No email, no phone number, no sign-up. Haven creates a private identity that lives only on your phone, with nothing linking it to the real you.'**
   String get onboardingValueProp3Body;
 
+  /// Short one-line summary of the first value prop, shown under its title on the onboarding intro screen. The longer onboardingValueProp1Body is shown on the About page instead. Keep it to roughly one short sentence so the intro screen fits without scrolling.
+  ///
+  /// In en, this message translates to:
+  /// **'Encrypted on your device, so only the circles you choose can read it.'**
+  String get onboardingValueProp1Summary;
+
+  /// Short one-line summary of the second value prop, shown under its title on the onboarding intro screen. Keep it to roughly one short sentence so the intro screen fits without scrolling.
+  ///
+  /// In en, this message translates to:
+  /// **'No central server — it runs on a relay network you choose.'**
+  String get onboardingValueProp2Summary;
+
+  /// Short one-line summary of the third value prop, shown under its title on the onboarding intro screen. Keep it to roughly one short sentence so the intro screen fits without scrolling.
+  ///
+  /// In en, this message translates to:
+  /// **'No email, phone, or sign-up. Nothing links it to you.'**
+  String get onboardingValueProp3Summary;
+
   /// Title of the onboarding create-identity screen.
   ///
   /// In en, this message translates to:
@@ -396,18 +414,6 @@ abstract class AppLocalizations {
   /// **'We couldn’t import that key. Please check and try again.'**
   String get onboardingImportError;
 
-  /// Title of the onboarding display-name screen.
-  ///
-  /// In en, this message translates to:
-  /// **'Pick a name'**
-  String get onboardingDisplayNameTitle;
-
-  /// Body on the onboarding display-name screen, about the name field itself. Kept short and non-contradictory: the public-profile disclosure lives in the separate PublicProfileNotice shown just below on the same screen, so this line must not claim the name stays device-local (public-by-default, owner-directed 2026-07-16).
-  ///
-  /// In en, this message translates to:
-  /// **'Choose how you\'ll appear to your circles.'**
-  String get onboardingDisplayNameBody;
-
   /// Text-field hint on the onboarding display-name screen showing an example name.
   ///
   /// In en, this message translates to:
@@ -419,24 +425,6 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Couldn’t save that name. Please try again.'**
   String get onboardingDisplayNameError;
-
-  /// Title of the final onboarding ready screen.
-  ///
-  /// In en, this message translates to:
-  /// **'You’re ready'**
-  String get onboardingReadyTitle;
-
-  /// Body on the onboarding ready screen explaining the circles mental model.
-  ///
-  /// In en, this message translates to:
-  /// **'Haven is organised into circles, which are small private groups where you share your location with people you trust. Create your first circle, or wait for an invitation from someone you know.'**
-  String get onboardingReadyBody;
-
-  /// Primary call-to-action on the final onboarding ready screen that enters the main app.
-  ///
-  /// In en, this message translates to:
-  /// **'Enter Haven'**
-  String get onboardingReadyCta;
 
   /// Generic button that dismisses a dialog or sheet without taking the action.
   ///

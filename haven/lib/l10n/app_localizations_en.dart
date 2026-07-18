@@ -127,6 +127,18 @@ class AppLocalizationsEn extends AppLocalizations {
       'No email, no phone number, no sign-up. Haven creates a private identity that lives only on your phone, with nothing linking it to the real you.';
 
   @override
+  String get onboardingValueProp1Summary =>
+      'Encrypted on your device, so only the circles you choose can read it.';
+
+  @override
+  String get onboardingValueProp2Summary =>
+      'No central server — it runs on a relay network you choose.';
+
+  @override
+  String get onboardingValueProp3Summary =>
+      'No email, phone, or sign-up. Nothing links it to you.';
+
+  @override
   String get onboardingCreateIdentityTitle => 'Create your identity';
 
   @override
@@ -178,28 +190,11 @@ class AppLocalizationsEn extends AppLocalizations {
       'We couldn’t import that key. Please check and try again.';
 
   @override
-  String get onboardingDisplayNameTitle => 'Pick a name';
-
-  @override
-  String get onboardingDisplayNameBody =>
-      'Choose how you\'ll appear to your circles.';
-
-  @override
   String get onboardingDisplayNameHint => 'e.g. Alex';
 
   @override
   String get onboardingDisplayNameError =>
       'Couldn’t save that name. Please try again.';
-
-  @override
-  String get onboardingReadyTitle => 'You’re ready';
-
-  @override
-  String get onboardingReadyBody =>
-      'Haven is organised into circles, which are small private groups where you share your location with people you trust. Create your first circle, or wait for an invitation from someone you know.';
-
-  @override
-  String get onboardingReadyCta => 'Enter Haven';
 
   @override
   String get commonCancel => 'Cancel';

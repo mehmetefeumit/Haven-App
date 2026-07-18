@@ -436,7 +436,6 @@ void main() {
         final prefs = await SharedPreferences.getInstance();
         final flags = OnboardingFlags(
           introSeen: prefs.getBool(kOnboardingIntroSeenKey) ?? false,
-          displayNameSet: prefs.getBool(kOnboardingDisplayNameSetKey) ?? false,
           completed: prefs.getBool(kOnboardingCompletedKey) ?? false,
         );
 
@@ -4965,7 +4964,6 @@ Future<ProviderContainer> _m11PumpAliceLiveEngine(
   final prefs = await SharedPreferences.getInstance();
   final flags = OnboardingFlags(
     introSeen: prefs.getBool(kOnboardingIntroSeenKey) ?? false,
-    displayNameSet: prefs.getBool(kOnboardingDisplayNameSetKey) ?? false,
     completed: prefs.getBool(kOnboardingCompletedKey) ?? false,
   );
   if (_m11Superseded(generation)) throw const _M11ScenarioSuperseded();

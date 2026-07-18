@@ -130,6 +130,18 @@ class AppLocalizationsNe extends AppLocalizations {
       'इमेल छैन, फोन नम्बर छैन, साइन-अप छैन। Haven ले तपाईंको फोनमा मात्र रहने एउटा निजी परिचय बनाउँछ, जसलाई वास्तविक तपाईंसँग जोड्ने कुनै कुरा हुँदैन।';
 
   @override
+  String get onboardingValueProp1Summary =>
+      'तपाईंको यन्त्रमै इन्क्रिप्ट हुन्छ, त्यसैले तपाईंले छानेका सर्कलहरूले मात्र पढ्न सक्छन्।';
+
+  @override
+  String get onboardingValueProp2Summary =>
+      'कुनै केन्द्रीय सर्भर छैन — यो तपाईंले छानेको रिले नेटवर्कमा चल्छ।';
+
+  @override
+  String get onboardingValueProp3Summary =>
+      'इमेल, फोन वा साइन-अप छैन। केहीले पनि यसलाई तपाईंसँग जोड्दैन।';
+
+  @override
   String get onboardingCreateIdentityTitle => 'आफ्नो परिचय बनाउनुहोस्';
 
   @override
@@ -182,28 +194,11 @@ class AppLocalizationsNe extends AppLocalizations {
       'हामी त्यो कुञ्जी आयात गर्न सकेनौं। कृपया जाँचेर फेरि प्रयास गर्नुहोस्।';
 
   @override
-  String get onboardingDisplayNameTitle => 'नाम छान्नुहोस्';
-
-  @override
-  String get onboardingDisplayNameBody =>
-      'तपाईं आफ्ना सर्कलहरूलाई कसरी देखिनुहुन्छ भन्ने छान्नुहोस्।';
-
-  @override
   String get onboardingDisplayNameHint => 'जस्तै, Alex';
 
   @override
   String get onboardingDisplayNameError =>
       'त्यो नाम सुरक्षित गर्न सकिएन। कृपया फेरि प्रयास गर्नुहोस्।';
-
-  @override
-  String get onboardingReadyTitle => 'तपाईं तयार हुनुहुन्छ';
-
-  @override
-  String get onboardingReadyBody =>
-      'Haven सर्कलमा व्यवस्थित छ, जुन साना निजी समूह हुन् जहाँ तपाईंले विश्वास गर्ने मानिससँग आफ्नो स्थान साझा गर्नुहुन्छ। आफ्नो पहिलो सर्कल बनाउनुहोस्, वा आफ्ना चिनेको कसैको निमन्त्रणा पर्खनुहोस्।';
-
-  @override
-  String get onboardingReadyCta => 'Haven मा प्रवेश गर्नुहोस्';
 
   @override
   String get commonCancel => 'रद्द गर्नुहोस्';

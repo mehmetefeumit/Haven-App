@@ -43,6 +43,9 @@
   "onboardingValueProp2Body": "Haven には中央サーバーがありません。暗号化されたメッセージは、あなた自身が選べる分散型のリレーのネットワークを通じて届くため、特定の組織が単独でサービスを止めることはできません。",
   "onboardingValueProp3Title": "アカウントは不要",
   "onboardingValueProp3Body": "メールアドレスも電話番号も、登録も不要です。Haven はあなたの端末の中だけに存在するプライベートな識別情報を作成します。実際のあなたと結びつくものは一切ありません。",
+  "onboardingValueProp1Summary": "端末上で暗号化。あなたが選んだサークルだけが読めます。",
+  "onboardingValueProp2Summary": "中央サーバーなし。あなたが選ぶリレーネットワークで動作します。",
+  "onboardingValueProp3Summary": "メール、電話番号、登録は不要。あなたと結びつく情報はありません。",
 
   "onboardingCreateIdentityTitle": "識別情報を作成",
   "onboardingCreateIdentityBody": "Haven は、この端末の中だけに存在するプライベートな識別情報を作成します。これは、サークルのメンバーがあなたを見分けるためのものです。",
@@ -61,14 +64,8 @@
   "onboardingImportInvalid": "有効なバックアップ鍵ではないようです。ご確認のうえ、もう一度お試しください。",
   "onboardingImportError": "その鍵をインポートできませんでした。ご確認のうえ、もう一度お試しください。",
 
-  "onboardingDisplayNameTitle": "名前を決める",
-  "onboardingDisplayNameBody": "サークルのメンバーにどう表示されるかを選びましょう。",
   "onboardingDisplayNameHint": "例: アレックス",
   "onboardingDisplayNameError": "その名前を保存できませんでした。もう一度お試しください。",
-
-  "onboardingReadyTitle": "準備が整いました",
-  "onboardingReadyBody": "Haven は「サークル」という単位で構成されています。サークルとは、信頼できる相手と位置情報を共有する小さなプライベートグループです。最初のサークルを作成するか、知り合いからの招待を待ちましょう。",
-  "onboardingReadyCta": "Haven を始める",
 
   "commonCancel": "キャンセル",
   "commonOpenSettings": "設定を開く",
@@ -339,7 +336,6 @@
   "legacyCutoverExplainerCirclesNeedRecreation": "セキュリティ向上のため、位置情報を再び共有するには、サークルを再作成し、メンバーを改めて招待する必要があります。",
   "legacyCutoverExplainerAcknowledge": "わかりました",
   "relaySettingsLegacyRetractionPending": "Haven は最近のセキュリティアップデートに伴う一部のデータの整理をまだ続けています。オンラインに戻れば自動的に完了します。",
-
 
   "circlesPanelCollapsedAnnouncement": "サークルパネルを閉じました",
   "circlesPanelExpandedAnnouncement": "サークルパネルを開きました",

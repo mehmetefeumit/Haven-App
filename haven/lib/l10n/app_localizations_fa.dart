@@ -128,6 +128,18 @@ class AppLocalizationsFa extends AppLocalizations {
       'بدون ایمیل، بدون شمارهٔ تلفن، بدون ثبت‌نام. Haven یک هویت خصوصی می‌سازد که فقط روی گوشی تو زندگی می‌کند و هیچ چیزی آن را به هویت واقعی‌ات گره نمی‌زند.';
 
   @override
+  String get onboardingValueProp1Summary =>
+      'روی دستگاه شما رمزنگاری می‌شود؛ فقط حلقه‌هایی که انتخاب می‌کنید می‌توانند آن را ببینند.';
+
+  @override
+  String get onboardingValueProp2Summary =>
+      'بدون سرور مرکزی؛ روی شبکه‌ای از رله‌ها که خودتان انتخاب می‌کنید اجرا می‌شود.';
+
+  @override
+  String get onboardingValueProp3Summary =>
+      'بدون ایمیل، تلفن یا ثبت‌نام. هیچ چیز آن را به شما پیوند نمی‌دهد.';
+
+  @override
   String get onboardingCreateIdentityTitle => 'هویت خود را بسازید';
 
   @override
@@ -179,28 +191,11 @@ class AppLocalizationsFa extends AppLocalizations {
       'نتوانستیم آن کلید را وارد کنیم. لطفاً بررسی کنید و دوباره تلاش کنید.';
 
   @override
-  String get onboardingDisplayNameTitle => 'یک نام انتخاب کنید';
-
-  @override
-  String get onboardingDisplayNameBody =>
-      'انتخاب کن که چگونه برای حلقه‌هایت دیده شوی.';
-
-  @override
   String get onboardingDisplayNameHint => 'مثلاً علی';
 
   @override
   String get onboardingDisplayNameError =>
       'نتوانستیم آن نام را ذخیره کنیم. لطفاً دوباره تلاش کنید.';
-
-  @override
-  String get onboardingReadyTitle => 'آماده‌ای';
-
-  @override
-  String get onboardingReadyBody =>
-      'Haven بر پایهٔ حلقه‌ها سازمان‌دهی شده است؛ گروه‌های کوچک و خصوصی که در آن‌ها موقعیت مکانی‌ات را با افراد مورد اعتمادت به اشتراک می‌گذاری. نخستین حلقه‌ات را بساز، یا منتظر دعوتی از کسی که می‌شناسی بمان.';
-
-  @override
-  String get onboardingReadyCta => 'ورود به Haven';
 
   @override
   String get commonCancel => 'لغو';

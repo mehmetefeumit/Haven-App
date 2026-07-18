@@ -131,6 +131,18 @@ class AppLocalizationsAr extends AppLocalizations {
       'لا بريد إلكتروني، ولا رقم هاتف، ولا تسجيل. يُنشئ Haven هوية خاصة تعيش على هاتفك وحده، دون أي شيء يربطها بشخصك الحقيقي.';
 
   @override
+  String get onboardingValueProp1Summary =>
+      'مُشفَّر على جهازك، فلا يستطيع قراءته سوى الدوائر التي تختارها.';
+
+  @override
+  String get onboardingValueProp2Summary =>
+      'بلا خادم مركزي؛ يعمل عبر شبكة من المُرحِّلات تختارها بنفسك.';
+
+  @override
+  String get onboardingValueProp3Summary =>
+      'بلا بريد أو هاتف أو تسجيل، ولا شيء يربطه بك.';
+
+  @override
   String get onboardingCreateIdentityTitle => 'أنشئ هويتك';
 
   @override
@@ -182,27 +194,11 @@ class AppLocalizationsAr extends AppLocalizations {
       'تعذّر استيراد هذا المفتاح. يُرجى التحقق وإعادة المحاولة.';
 
   @override
-  String get onboardingDisplayNameTitle => 'اختر اسمًا';
-
-  @override
-  String get onboardingDisplayNameBody => 'اختر كيف ستظهر لدوائرك.';
-
-  @override
   String get onboardingDisplayNameHint => 'مثال: أليكس';
 
   @override
   String get onboardingDisplayNameError =>
       'تعذّر حفظ هذا الاسم. يُرجى إعادة المحاولة.';
-
-  @override
-  String get onboardingReadyTitle => 'أنت جاهز';
-
-  @override
-  String get onboardingReadyBody =>
-      'يُنظَّم Haven في دوائر، وهي مجموعات خاصة صغيرة تشارك فيها موقعك مع أشخاص تثق بهم. أنشئ دائرتك الأولى، أو انتظر دعوة من شخص تعرفه.';
-
-  @override
-  String get onboardingReadyCta => 'ادخل إلى Haven';
 
   @override
   String get commonCancel => 'إلغاء';
