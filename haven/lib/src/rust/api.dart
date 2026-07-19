@@ -910,9 +910,11 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Gets all pending invitations from the in-memory held-welcome store.
   ///
   /// Each [`InvitationFfi`] carries pre-join STAND-IN fields (the gift-wrap
-  /// event id as `mlsGroupId`, `"New Circle"` as the name, `memberCount == 0`)
-  /// because the real MLS group state lives inside the still-encrypted 1059
-  /// held until Accept (F3). The gift-wrap id is the key the caller passes to
+  /// event id as `mlsGroupId`, `"New Circle"` as the name) because the real
+  /// MLS group state lives inside the still-encrypted 1059 held until Accept
+  /// (F3). `memberCount` reports the provably-known members pre-join — the
+  /// NIP-59-seal-authenticated inviter, i.e. 1 — never the full roster. The
+  /// gift-wrap id is the key the caller passes to
   /// [`accept_invitation`](Self::accept_invitation) /
   /// [`decline_invitation`](Self::decline_invitation).
   Future<List<InvitationFfi>> getPendingInvitations();
@@ -1552,8 +1554,8 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
   /// Checks whether events of a given kind by an author exist on a relay.
   ///
   /// Queries a single relay for events matching the given kind and author.
-  /// Used to verify that KeyPackage (443) and relay list (10051) events
-  /// are published.
+  /// Used to verify that KeyPackage (30443) and relay list (10002 / 10050)
+  /// events are published.
   Future<RelayEventCheckFfi> checkEventOnRelay({
     required String relayUrl,
     required String authorPubkey,
@@ -1639,10 +1641,12 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
     int? limit,
   });
 
-  /// Fetches a user's key package (kind 30443 or legacy kind 443).
+  /// Fetches a user's key package (kind 30443; legacy 443 is detected but
+  /// never returned).
   ///
-  /// First fetches the user's key package relay list (kind 10051),
-  /// then fetches the most recent key package from those relays.
+  /// Resolves the user's relay lists (legacy kind 10051, then NIP-65 kind
+  /// 10002), then fetches the most recent key package from those relays,
+  /// falling back to the read-only discovery plane.
   ///
   /// # Arguments
   ///

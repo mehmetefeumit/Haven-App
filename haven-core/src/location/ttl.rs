@@ -38,12 +38,29 @@ pub const MAX_UPDATE_INTERVAL_SECS: u64 = 60 * 60;
 ///
 /// Events whose NIP-40 expiration is more than this window in the past
 /// are dropped before decryption, as defense-in-depth against relay replay.
-// Dark Matter: the per-send NIP-40 expiration was dropped when `create_message`
-// stopped taking an expiration (DM-2 deviation #2); message TTL now rides the
-// group-level `message-retention.v1` app component (DM-3/DM-4). Retained for the
-// TTL unit tests until the retention path re-wires it.
-#[allow(dead_code)]
+/// Enforced in `SessionManager::process_event`, the choke point every
+/// receive plane (poll drain, live-sync, background catch-up) funnels
+/// through.
 pub const RECEIVER_EXPIRATION_GRACE_SECS: u64 = 60;
+
+/// Group-level `message-retention.v1` value (seconds) stamped into every
+/// Haven circle at creation (Dark Matter app component `0x8005`).
+///
+/// The engine derives the outer kind-445 NIP-40 `expiration` tag as
+/// `inner_created_at + retention` for APPLICATION messages only
+/// (commits/proposals are never stamped — group history must outlive any
+/// TTL). `2 * (168 s max publish interval + 30 s network buffer)` keeps the
+/// pre-Dark-Matter TTL ceiling: the old per-send jitter sampled
+/// `[interval, 2 * interval]` with `interval = 198 s`, so `396` preserves
+/// the maximum relay residency while matching the engine's deterministic
+/// derivation. A fixed protocol-level constant is deliberately chosen over
+/// per-circle jitter: the outer event's stable `h` tag already identifies
+/// the circle, so a per-circle TTL adds no unlinkability, and a constant
+/// delta leaks less about publish cadence than the old jitter (whose TTL
+/// sample correlated with the publish interval). The constant remains a
+/// client-observable delta, but one shared with any Dark Matter client
+/// using the same engine derivation rather than a per-send Haven quirk.
+pub const LOCATION_MESSAGE_RETENTION_SECS: u64 = 396;
 
 /// Publish-interval jitter spread in basis points (`10_000` = 100%).
 ///
@@ -65,9 +82,10 @@ pub const PUBLISH_INTERVAL_JITTER_FRACTION_BP: u16 = 4_000;
 ///
 /// Returns `None` for `interval == 0` so callers omit the expiration tag
 /// entirely instead of producing an already-expired event.
-// Dark Matter: unused in the lib build until the group-level
-// `message-retention.v1` path re-wires TTL (see `RECEIVER_EXPIRATION_GRACE_SECS`
-// above); its randomness/jitter properties are still covered by the unit tests.
+// Dark Matter: superseded in the lib build — kind-445 TTL now rides the
+// group-level `message-retention.v1` component (`LOCATION_MESSAGE_RETENTION_SECS`
+// above), which the engine applies deterministically. Kept (with its unit
+// tests) as the reference jitter helper should a per-send TTL path return.
 #[allow(dead_code)]
 #[must_use]
 pub fn compute_jittered_ttl_secs(update_interval_secs: u64) -> Option<u64> {

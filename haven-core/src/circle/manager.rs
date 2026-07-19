@@ -1010,10 +1010,14 @@ impl CircleManager {
     /// Processes a gift-wrapped Welcome event (kind 1059) into a held pending
     /// welcome (hold-before-ingest, F3).
     ///
-    /// The still-encrypted 1059 is held locally and a non-secret preview (the
-    /// inviter identity only — group name / member count are unavailable
-    /// pre-join by design) is derived via a transient peel. Nothing is ingested
-    /// until [`Self::accept_invitation`]; declining leaves no on-wire trace
+    /// The still-encrypted 1059 is held locally and a non-secret preview is
+    /// derived via a transient peel. Pre-join, the kind-444 rumor carries only
+    /// the `KeyPackage` `e` tag and the `relays` tag, and the MLS Welcome's
+    /// `GroupInfo` is encrypted — so the full roster and group name are
+    /// unavailable by design. The one member the preview DOES prove is the
+    /// inviter (the NIP-59 seal author), so `member_count` reports the count
+    /// of provably-known members (1). Nothing is ingested until
+    /// [`Self::accept_invitation`]; declining leaves no on-wire trace
     /// (Rule 10).
     ///
     /// # Errors
@@ -1071,13 +1075,17 @@ impl CircleManager {
             // id. DM-4: the Dart accept path passes the gift-wrap id.
             mls_group_id: GroupId::from_slice(gift_wrap_event.id.as_bytes()),
             circle_name: "New Circle".to_string(),
+            member_count: known_member_count(&inviter_pubkey),
             inviter_pubkey,
-            member_count: 0,
             invited_at: now,
         })
     }
 
     /// Gets all pending invitations (from the held-welcome store).
+    ///
+    /// `member_count` reports the provably-known members pre-join (the
+    /// NIP-59-seal-authenticated inviter) — see
+    /// [`Self::process_gift_wrapped_invitation`].
     ///
     /// # Errors
     ///
@@ -1090,8 +1098,8 @@ impl CircleManager {
             .map(|(id, preview)| Invitation {
                 mls_group_id: GroupId::from_slice(id.as_bytes()),
                 circle_name: "New Circle".to_string(),
+                member_count: known_member_count(&preview.inviter_pubkey),
                 inviter_pubkey: preview.inviter_pubkey,
-                member_count: 0,
                 invited_at: 0,
             })
             .collect())
@@ -2044,6 +2052,17 @@ fn nostr_group_id_from_commit_event(event: &Event) -> Option<[u8; 32]> {
     bytes.try_into().ok()
 }
 
+/// Count of members provably in a group from a pending-welcome preview.
+///
+/// Pre-join, the Welcome's `GroupInfo` (and with it the roster) is encrypted;
+/// the only member the transient peel proves is the inviter — the NIP-59 seal
+/// author who committed the Add. A group with a valid Welcome therefore has
+/// at least one known member (the inviter); an empty inviter (never produced
+/// by the peeler today) yields 0 rather than inventing a member.
+fn known_member_count(inviter_pubkey: &str) -> usize {
+    usize::from(!inviter_pubkey.is_empty())
+}
+
 /// Result of circle creation.
 ///
 /// Publish-before-apply (Rule 13): publish `welcome_events`, then confirm
@@ -2561,6 +2580,49 @@ mod tests {
         assert!(manager.get_pending_invitations().unwrap().is_empty());
     }
 
+    #[tokio::test]
+    async fn pending_invitation_reports_known_inviter_member_count() {
+        // FE-2 regression pin: a processed-but-unaccepted welcome must report
+        // the provably-known members — the NIP-59-seal-authenticated inviter,
+        // never 0 — through BOTH the process return and the pending list.
+        let relays = vec!["wss://relay.test.com".to_string()];
+        let alice_dir = TempDir::new().unwrap();
+        let alice_keys = Keys::generate();
+        let alice = CircleManager::new_unencrypted(alice_dir.path(), &alice_keys).unwrap();
+        let bob_dir = TempDir::new().unwrap();
+        let bob_keys = Keys::generate();
+        let bob = CircleManager::new_unencrypted(bob_dir.path(), &bob_keys).unwrap();
+        let bob_kp_event = make_kp_event(&bob, &bob_keys, &relays).await;
+        let bob_member = MemberKeyPackage {
+            key_package_event: bob_kp_event,
+            inbox_relays: relays.clone(),
+            nip65_relays: vec![],
+        };
+        let config = CircleConfig::new("Test Circle").with_relays(relays.clone());
+        let creation = alice
+            .create_circle(&alice_keys, vec![bob_member], &config, &relays)
+            .await
+            .expect("create circle");
+        let welcome = creation.welcome_events.first().expect("one welcome");
+
+        let processed = bob
+            .process_gift_wrapped_invitation(&bob_keys, &welcome.event)
+            .await
+            .expect("bob holds welcome");
+        assert_eq!(
+            processed.member_count, 1,
+            "the invitation must count the authenticated inviter"
+        );
+        assert_eq!(processed.inviter_pubkey, alice_keys.public_key().to_hex());
+
+        let pending = bob.get_pending_invitations().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].member_count, 1,
+            "the pending list must preserve the known-inviter count"
+        );
+    }
+
     #[test]
     fn get_all_contacts_returns_empty_initially() {
         let (manager, _keys, _dir) = create_test_manager();
@@ -2970,11 +3032,27 @@ mod tests {
     async fn propose_leave_by_sole_admin_is_rejected() {
         let tp = setup_two_party_circle().await;
         // Alice is the sole admin — the engine's AdminCannotSelfRemove gate
-        // rejects a bare SelfRemove until she exits the admin set first.
-        assert!(matches!(
-            tp.alice.propose_leave(&tp.mls_group_id).await,
-            Err(CircleError::Mls(_))
-        ));
+        // rejects a bare SelfRemove until she exits the admin set first. The
+        // typed engine variant maps to Haven's stable AdminSelfDemoteRequired
+        // message, so the surfaced error must (a) name the self-demote
+        // remediation for UI/test routing and (b) never embed the group id.
+        let err = tp
+            .alice
+            .propose_leave(&tp.mls_group_id)
+            .await
+            .expect_err("sole-admin proposeLeave must be rejected");
+        assert!(matches!(err, CircleError::Mls(_)));
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("self-demote"),
+            "admin-gate error must name the self-demote remediation"
+        );
+        assert!(
+            !err.to_string()
+                .to_lowercase()
+                .contains(&hex::encode(tp.mls_group_id.as_slice())),
+            "admin-gate error must not embed the MLS group id"
+        );
     }
 
     // ── Member management ────────────────────────────────────────────────────
@@ -3245,6 +3323,126 @@ mod tests {
         assert!(
             json.contains(&nostr_hex),
             "the pseudonymous nostr_group_id should appear (in the h tag)"
+        );
+    }
+
+    #[tokio::test]
+    async fn encrypt_location_attaches_group_retention_expiration() {
+        // DM-2 deviation #2 re-wired: kind-445 APPLICATION messages carry a
+        // NIP-40 `expiration` derived from the group's `message-retention.v1`
+        // component — `inner_created_at + LOCATION_MESSAGE_RETENTION_SECS`,
+        // and the outer created_at is bound to the inner one — so location
+        // ciphertext cannot linger on relays indefinitely.
+        let tp = setup_two_party_circle().await;
+        let loc = crate::location::LocationMessage::new(10.0, 20.0);
+        let (event, _n, _r) = tp
+            .alice
+            .encrypt_location(&tp.mls_group_id, &tp.alice_keys.public_key(), &loc, 60)
+            .await
+            .expect("encrypt");
+        let expiration = event
+            .tags
+            .iter()
+            .find_map(|t| match t.as_standardized() {
+                Some(nostr::TagStandard::Expiration(ts)) => Some(ts.as_secs()),
+                _ => None,
+            })
+            .expect("kind-445 location event must carry a NIP-40 expiration tag");
+        assert_eq!(
+            expiration,
+            event.created_at.as_secs() + crate::location::ttl::LOCATION_MESSAGE_RETENTION_SECS,
+            "expiration must equal created_at + the group retention window"
+        );
+    }
+
+    #[tokio::test]
+    async fn evolution_commit_carries_no_expiration_tag() {
+        // Commits/proposals are group HISTORY — a NIP-40 relay would stop
+        // serving an expired commit and strand late joiners, so the engine
+        // must never stamp them. (Re-expressed from the deleted
+        // `*_evolution_event_has_no_expiration_tag` pre-Dark-Matter tests.)
+        let tp = setup_two_party_circle().await;
+        let update = tp
+            .alice
+            .update_circle_relays(&tp.mls_group_id, &["wss://relay3.test.com".to_string()])
+            .await
+            .expect("relay update");
+        assert!(
+            !update
+                .commit_event
+                .tags
+                .iter()
+                .any(|t| matches!(t.as_standardized(), Some(nostr::TagStandard::Expiration(_)))),
+            "an MLS evolution commit must not carry a NIP-40 expiration tag"
+        );
+        tp.alice
+            .confirm_published(update.pending)
+            .await
+            .expect("confirm");
+    }
+
+    #[tokio::test]
+    async fn decrypt_location_drops_expired_event() {
+        // Receiver-side NIP-40 enforcement (defense-in-depth vs relay
+        // replay, restored post-Dark-Matter): an otherwise-valid kind-445
+        // whose expiration (+60s grace) has passed is dropped before any
+        // engine processing — no results, no error.
+        let tp = setup_two_party_circle().await;
+        let loc = crate::location::LocationMessage::new(10.0, 20.0);
+        let (event, _n, _r) = tp
+            .bob
+            .encrypt_location(&tp.mls_group_id, &tp.bob_keys.public_key(), &loc, 60)
+            .await
+            .expect("bob encrypts");
+        // Rebuild the event with its expiration forced into the past (beyond
+        // the 60s grace), re-signed by a fresh throwaway key — the guard runs
+        // before any signature/AAD validation, mirroring a replaying relay.
+        let past = nostr::Timestamp::now().as_secs()
+            - crate::location::ttl::RECEIVER_EXPIRATION_GRACE_SECS
+            - 120;
+        let tags: Vec<nostr::Tag> = event
+            .tags
+            .iter()
+            .map(|t| match t.as_standardized() {
+                Some(nostr::TagStandard::Expiration(_)) => {
+                    nostr::Tag::expiration(nostr::Timestamp::from(past))
+                }
+                _ => t.clone(),
+            })
+            .collect();
+        let replayed = nostr::EventBuilder::new(event.kind, event.content.clone())
+            .tags(tags)
+            .sign_with_keys(&Keys::generate())
+            .expect("re-sign replayed event");
+        // Session-level oracle: only the receiver-side guard yields a Stale
+        // outcome with EMPTY effects for this event — without the guard the
+        // engine would either decrypt it (non-empty effects) or classify it
+        // PeelFailed, so this cannot pass vacuously.
+        let ingest = tp
+            .alice
+            .session()
+            .process_event(&replayed)
+            .await
+            .expect("expired event is dropped, not an error");
+        assert!(
+            matches!(
+                ingest.outcome,
+                crate::nostr::mls::types::IngestOutcome::Stale {
+                    reason: crate::nostr::mls::types::StaleReason::AlreadySeen
+                }
+            ),
+            "the expiration guard must classify the replay as Stale"
+        );
+        assert!(ingest.effects.events.is_empty(), "no effects may surface");
+        // Behavior-level check through the production drain API.
+        let results = tp
+            .alice
+            .decrypt_location(&replayed)
+            .await
+            .expect("expired event is dropped, not an error");
+        assert!(
+            results.is_empty(),
+            "an expired kind-445 must be dropped before decryption"
         );
     }
 

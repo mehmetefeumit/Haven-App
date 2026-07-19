@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
-use nostr::{Event, JsonUtil, Keys, Kind, PublicKey, Tag, UnsignedEvent};
+use nostr::{Event, JsonUtil, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use tokio::sync::Mutex;
@@ -45,7 +45,7 @@ use cgka_session::{
 };
 use cgka_traits::app_components::{
     encode_nostr_routing_v1, AppComponentData, NostrRoutingV1, GROUP_ADMIN_POLICY_COMPONENT_ID,
-    GROUP_PROFILE_COMPONENT_ID, NOSTR_ROUTING_COMPONENT_ID,
+    GROUP_MESSAGE_RETENTION_COMPONENT_ID, GROUP_PROFILE_COMPONENT_ID, NOSTR_ROUTING_COMPONENT_ID,
 };
 use cgka_traits::capabilities::{Capability, CapabilityRequirement, Feature, RequirementLevel};
 use cgka_traits::engine::{CreateGroupRequest, GroupEvent, KeyPackage, SendIntent};
@@ -173,14 +173,19 @@ impl SessionManager {
 
         let config = SessionConfig::new(db_path, key, identity, Box::new(peeler))
             .account_identity_proof_signer(proof_signer)
-            // Haven groups carry Nostr routing (0x8004) in addition to the
-            // default profile/admin-policy components; the KeyPackages Haven
-            // mints must advertise support for it so self-invite/create pass
-            // capability validation (W6/W7; §8 Q7).
+            // Haven groups carry Nostr routing (0x8004) and message retention
+            // (0x8005) in addition to the default profile/admin-policy
+            // components; the KeyPackages Haven mints must advertise support
+            // for them so self-invite/create pass capability validation
+            // (W6/W7; §8 Q7). Retention drives the engine's NIP-40
+            // `expiration` tag on kind-445 application messages (DM-2
+            // deviation #2 re-wired) — location ciphertexts must not linger
+            // on relays past their usefulness.
             .supported_app_components([
                 GROUP_PROFILE_COMPONENT_ID,
                 GROUP_ADMIN_POLICY_COMPONENT_ID,
                 NOSTR_ROUTING_COMPONENT_ID,
+                GROUP_MESSAGE_RETENTION_COMPONENT_ID,
             ])
             // Immediate settlement (no quiescence delay). The engine's stored
             // convergence replaces Haven's deleted 8s settle window; the engine's
@@ -317,10 +322,25 @@ impl SessionManager {
             description: config.description,
             members: member_key_packages,
             required_features: Vec::new(),
-            app_components: vec![AppComponentData {
-                component_id: NOSTR_ROUTING_COMPONENT_ID,
-                data: routing_bytes,
-            }],
+            app_components: vec![
+                AppComponentData {
+                    component_id: NOSTR_ROUTING_COMPONENT_ID,
+                    data: routing_bytes,
+                },
+                // `message-retention.v1`: the engine stamps every kind-445
+                // APPLICATION message with a NIP-40 `expiration` of
+                // `inner_created_at + retention` (commits/proposals are never
+                // stamped — group history must outlive any TTL). Bounds
+                // relay-side residency of location ciphertext to roughly two
+                // publish cycles, replacing the pre-Dark-Matter per-send
+                // jittered TTL (DM-2 deviation #2 re-wired).
+                AppComponentData {
+                    component_id: GROUP_MESSAGE_RETENTION_COMPONENT_ID,
+                    data: crate::location::ttl::LOCATION_MESSAGE_RETENTION_SECS
+                        .to_be_bytes()
+                        .to_vec(),
+                },
+            ],
             initial_admins,
         };
 
@@ -385,13 +405,26 @@ impl SessionManager {
     ///
     /// # Errors
     ///
-    /// Returns an error if the caller is an admin who must first leave the admin
-    /// set (`AdminCannotSelfRemove`) or the group is unknown.
+    /// Returns [`NostrError::AdminSelfDemoteRequired`] if the caller is still
+    /// an admin — matched on the engine's typed `AdminCannotSelfRemove`
+    /// variant (never its message text) so Haven's actionable "self-demote
+    /// first" routing signal is stable across upstream wording changes and
+    /// never carries the group id. Any other engine rejection (e.g. unknown
+    /// group) maps to the redacted MLS-error bucket.
     pub async fn leave_group(&self, group_id: &GroupId) -> Result<SessionEffects> {
-        self.send(SendIntent::Leave {
-            group_id: group_id.clone(),
-        })
-        .await
+        self.session
+            .lock()
+            .await
+            .send(SendIntent::Leave {
+                group_id: group_id.clone(),
+            })
+            .await
+            .map_err(|e| match e {
+                SessionError::Engine(EngineError::AdminCannotSelfRemove { .. }) => {
+                    NostrError::AdminSelfDemoteRequired
+                }
+                other => map_mls_err(other),
+            })
     }
 
     /// Replaces the group's Nostr routing relay set (keeps the existing
@@ -515,10 +548,46 @@ impl SessionManager {
 
     /// Converts a signed Nostr event into a transport message and ingests it.
     ///
+    /// Receiver-side NIP-40 expiration enforcement (restored post-Dark-Matter;
+    /// pre-migration this lived in `decrypt_location`): a well-behaved relay
+    /// drops expired events, but a malicious or buggy relay could replay stale
+    /// location ciphertext past its advertised TTL. Defense-in-depth: drop
+    /// locally too, with a small grace window for clock skew. Every receive
+    /// plane (poll drain, live-sync, background catch-up) funnels through this
+    /// method, so the guard covers all of them. Gift wraps (kind 1059) carry
+    /// no expiration tag and pass through untouched.
+    ///
     /// # Errors
     ///
     /// Returns an error if conversion or ingest fails hard.
     pub async fn process_event(&self, event: &Event) -> Result<IngestEffects> {
+        if let Some(expires_at) = event.tags.iter().find_map(|t| match t.as_standardized() {
+            Some(nostr::TagStandard::Expiration(ts)) => Some(*ts),
+            _ => None,
+        }) {
+            let grace = Timestamp::from(
+                expires_at
+                    .as_secs()
+                    .saturating_add(crate::location::ttl::RECEIVER_EXPIRATION_GRACE_SECS),
+            );
+            if Timestamp::now() > grace {
+                // Terminal for this event: report it as `Stale` with empty
+                // effects so every caller advances its cursor past it (the
+                // same contract as the engine's own dedup outcomes) and
+                // nothing is surfaced to decrypt.
+                return Ok(IngestEffects {
+                    outcome: super::types::IngestOutcome::Stale {
+                        reason: super::types::StaleReason::AlreadySeen,
+                    },
+                    effects: SessionEffects {
+                        events: Vec::new(),
+                        publish: Vec::new(),
+                        queued: Vec::new(),
+                        pending_convergence: Vec::new(),
+                    },
+                });
+            }
+        }
         let msg = Self::event_to_transport_message(event)?;
         self.ingest(msg).await
     }

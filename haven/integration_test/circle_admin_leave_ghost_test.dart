@@ -1,20 +1,25 @@
 /// FFI-level tripwire for MDK's MIP-03 admin-leave gate.
 ///
 /// MDK refuses to emit a raw `SelfRemove` proposal from a caller that is
-/// still an admin: `mdk-core/src/groups.rs::leave_group` errors with
-/// `"Admins must self-demote before leaving. Use self_demote() first."`.
-/// Haven's `LeavePlan` (`haven-core/src/circle/leave.rs`) honours that
-/// contract by issuing `propose_admin_handoff` and/or
-/// `propose_self_demote` before `propose_leave`, so admins can never
-/// reach `propose_leave` while admin themselves through production code.
-/// This test exists as a tripwire: if a future MDK rev quietly relaxes
-/// the gate, the call here will succeed and the test will fail, surfacing
-/// the upstream change before it can produce stale rosters in the field.
+/// still an admin: the Dark Matter engine rejects it with the typed
+/// `EngineError::AdminCannotSelfRemove` variant, which haven-core's
+/// `SessionManager::leave_group` maps (on the VARIANT, never upstream
+/// message text) to Haven's stable `NostrError::AdminSelfDemoteRequired` —
+/// whose message names the actionable `self-demote` remediation and never
+/// embeds the group id. Haven's `LeavePlan`
+/// (`haven-core/src/circle/leave.rs`) honours that contract by issuing
+/// `propose_admin_handoff` and/or `propose_self_demote` before
+/// `propose_leave`, so admins can never reach `propose_leave` while admin
+/// themselves through production code. This test exists as a tripwire: if
+/// a future MDK rev quietly relaxes the gate, the call here will succeed
+/// and the test will fail, surfacing the upstream change before it can
+/// produce stale rosters in the field.
 ///
 /// The scenario sets up two parties through `CircleManagerFfi` directly
 /// (no UI, no relay), and has Alice — the circle's sole admin, *still
 /// admin* — call `proposeLeave`. The assertion is that the call throws an
-/// error whose message contains `self-demote` / `self_demote`.
+/// error whose message contains `self-demote` / `self_demote` — satisfied
+/// by Haven's stable mapping regardless of upstream wording changes.
 ///
 /// ## Dark Matter DM-4b note — 2-admin variant descoped (GAP)
 ///

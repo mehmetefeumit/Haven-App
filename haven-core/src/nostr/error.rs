@@ -53,6 +53,14 @@ pub enum NostrError {
     #[error("MDK error: {0}")]
     MdkError(String),
 
+    /// A still-admin caller attempted to leave a group. Haven's stable
+    /// mapping of the engine's typed `AdminCannotSelfRemove` rejection
+    /// (matched on the variant, never on upstream message text): the message
+    /// names the actionable remediation — self-demote (leave the admin set)
+    /// first — so UI/tests can route on it, and carries no group id.
+    #[error("admin cannot leave the circle yet: self-demote (leave the admin set) first")]
+    AdminSelfDemoteRequired,
+
     /// Group not found.
     #[error("Group not found: {0}")]
     GroupNotFound(String),

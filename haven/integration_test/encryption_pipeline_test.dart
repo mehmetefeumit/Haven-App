@@ -465,14 +465,19 @@ void main() {
               'expected to find ["h","$nostrGroupIdHex"] in event JSON',
         );
 
-        // ---- Assertion 9: expiration tag within expected window ----
-        // updateIntervalSecs=198 was passed; Rust samples the NIP-40
-        // expiration tag uniformly in [interval, 2 * interval], so the
-        // absolute expiration Unix timestamp must fall in
-        // [nowSecs + 198, nowSecs + 396]. A 100 s tolerance covers the
-        // gap between `nowSecs` and the actual encrypt-side `Utc::now()`.
-        final updateIntervalSecs =
-            kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds;
+        // ---- Assertion 9: expiration tag from the group retention ----
+        // Dark Matter: the engine derives the NIP-40 expiration
+        // deterministically as `created_at + retention`, where retention is
+        // the group's `message-retention.v1` component haven-core stamps at
+        // circle creation — `2 * (kLocationPublishMaxInterval +
+        // kTtlNetworkBufferSeconds)` = 396 s, preserving the ceiling of the
+        // pre-Dark-Matter jittered window. (`updateIntervalSecs` passed to
+        // encryptLocation is retained for signature stability but no longer
+        // drives the TTL.) The event's own `created_at` anchors the exact
+        // check; the nowSecs bound catches a stale/backdated created_at.
+        final retentionSecs =
+            2 *
+            (kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds);
         final expirationMatch = RegExp(
           r'"expiration"\s*,\s*"(\d+)"',
         ).firstMatch(eventJson);
@@ -482,19 +487,29 @@ void main() {
           reason: 'kind 445 event must include an expiration tag',
         );
         final expirationTs = int.parse(expirationMatch!.group(1)!);
+        final createdAtMatch = RegExp(
+          r'"created_at"\s*:\s*(\d+)',
+        ).firstMatch(eventJson);
+        expect(
+          createdAtMatch,
+          isNotNull,
+          reason: 'kind 445 event JSON must expose created_at',
+        );
+        final createdAtTs = int.parse(createdAtMatch!.group(1)!);
         expect(
           expirationTs,
-          greaterThanOrEqualTo(nowSecs + updateIntervalSecs - 100),
+          equals(createdAtTs + retentionSecs),
           reason:
-              'Expiration timestamp must be at least nowSecs + interval - 100 '
-              '(updateIntervalSecs=$updateIntervalSecs with 100 s tolerance)',
+              'Expiration must equal created_at + the group retention '
+              'window ($retentionSecs s) — the message-retention.v1 '
+              'derivation the engine applies to application messages',
         );
         expect(
-          expirationTs,
-          lessThanOrEqualTo(nowSecs + 2 * updateIntervalSecs + 100),
+          (createdAtTs - nowSecs).abs(),
+          lessThanOrEqualTo(100),
           reason:
-              'Expiration timestamp must be at most nowSecs + 2*interval + 100 '
-              '(updateIntervalSecs=$updateIntervalSecs with 100 s tolerance)',
+              'created_at must anchor to roughly "now" (within 100 s) so '
+              'the retention-derived expiration is meaningful',
         );
 
         // ---- Assertion 10: positive ciphertext shape check ----

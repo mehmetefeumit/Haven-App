@@ -144,7 +144,7 @@
 library;
 
 import 'dart:async';
-import 'dart:convert' show jsonEncode;
+import 'dart:convert' show jsonDecode, jsonEncode;
 import 'dart:typed_data' show Uint8List;
 
 import 'package:flutter/foundation.dart' show debugPrint, listEquals;
@@ -537,10 +537,14 @@ void main() {
         // hold: she joins at epochBeforeAdd+1 via the Add Welcome, so
         // MDK never delivers the epoch-N symmetric key to her.
         //
-        // We capture the raw relay event NOW, confirm Bob CAN decrypt
-        // it (proving the event is valid and on the relay), then pass
-        // it into _carolAcceptsAndEpochCheck so Carol's negative
-        // assertion runs after she has accepted — Phase 3b (below).
+        // We capture the raw relay event NOW, confirm ALICE (the other
+        // init-epoch member) CAN decrypt it via the production pipeline
+        // (proving the event is valid, on the relay, and decryptable by
+        // any holder of the init-epoch exporter secret), then pass it
+        // into _carolAcceptsAndEpochCheck so Carol's negative assertion
+        // runs after she has accepted — Phase 3b (below). Bob himself
+        // cannot serve as the control: the Dark Matter engine dedups the
+        // echo of his own message as `Stale(OwnEcho)` (pinned below).
         //
         // Placement rationale: this MUST be BEFORE the AddMemberPage
         // UI gestures in _aliceAddsCarolViaUi so it does not
@@ -551,6 +555,14 @@ void main() {
         final mlsGroupId = bobCircle.circle.mlsGroupId;
         final nostrGroupIdHexForPreAdd = _hexLower(
           bobCircle.circle.nostrGroupId,
+        );
+
+        // Baseline for the epoch guard below: decrypting a pure application
+        // message must never advance an epoch, so Alice's epoch after the
+        // positive control must equal this pre-publish capture.
+        final aliceEpochBeforePreAdd = await _aliceEpochForTest(
+          tester,
+          mlsGroupId,
         );
 
         // Subscribe for the pre-add location event BEFORE Bob publishes
@@ -587,55 +599,101 @@ void main() {
               'or unexpected event arrived instead.',
         );
 
-        // Positive control: Bob IS a member at the init epoch and MUST
-        // be able to decrypt his own pre-add location event. Uses
-        // applyArrivalOrdered with the single captured event, the same
-        // path the production drain uses.
+        // Positive control: ALICE — a member at the init epoch who is NOT
+        // the sender — must decrypt Bob's pre-add location through the
+        // production pipeline (fetch/stream → decrypt → persist →
+        // memberLocationsProvider). This proves the captured event is a
+        // valid, decryptable init-epoch ciphertext, so Carol's later
+        // negative assertion cannot pass vacuously on a malformed event.
         //
-        // Bob just published this event via publishLocation; his MDK's
-        // seen-event cache has not processed it yet (encryptLocation does
-        // not mark events as seen; only decryptLocation does). The first
-        // call to applyArrivalOrdered therefore goes through the full
-        // decrypt path and Bob's sender pubkey appears in
-        // decryptedLocationSenders.
+        // Bob CANNOT be the control under Dark Matter: the engine records
+        // every sent message (transport id AND content-derived id) and
+        // classifies its own echo as `Stale(OwnEcho)` with no surfaced
+        // events — by design, since MLS consumes the sender ratchet secret
+        // at encryption. His own-echo no-op is pinned separately below.
+        //
+        // Probe shape follows the FE-3 de-flake pattern (see the Phase 4
+        // probe doc): pump a few frames for the app's own background
+        // pollers, then read the provider's CURRENT AsyncValue
+        // synchronously — no test-owned invalidate/await to orphan.
+        final preAddContainer = ProviderScope.containerOf(
+          tester.element(find.byType(HavenApp)),
+          listen: false,
+        );
+        var alicePreAddLocs = <MemberLocation>[];
+        await _pollUntil<bool>(
+          describe:
+              "alice: memberLocationsProvider surfacing Bob's PRE-ADD "
+              'location (positive control for the forward-secrecy '
+              'negative assertion)',
+          probe: () async {
+            await tester.pump(const Duration(milliseconds: 100));
+            await tester.pump(const Duration(milliseconds: 100));
+            await tester.pump(const Duration(milliseconds: 100));
+            alicePreAddLocs =
+                preAddContainer.read(memberLocationsProvider).valueOrNull ??
+                alicePreAddLocs;
+            return alicePreAddLocs.any(
+              (l) => l.pubkey.toLowerCase() == bob.pubkeyHex.toLowerCase(),
+            );
+          },
+          satisfied: (seen) => seen,
+        );
+        _assertMemberLocationCoordinates(
+          label: 'alice → bob (PRE-ADD positive control)',
+          locs: alicePreAddLocs,
+          senderPubkeyHex: bob.pubkeyHex,
+          expectedLatitude: bobFakeLatitude,
+          expectedLongitude: bobFakeLongitude,
+        );
+
+        // Guard: decrypting a pure application message must NOT advance
+        // Alice's MLS epoch (no auto-commit). A drift here would silently
+        // offset the epochBeforeAdd baseline captured below and make the
+        // subsequent "+1" epoch assertion vacuous.
+        final aliceEpochAfterPreAdd = await _aliceEpochForTest(
+          tester,
+          mlsGroupId,
+        );
+        expect(
+          aliceEpochAfterPreAdd,
+          equals(aliceEpochBeforePreAdd),
+          reason:
+              'PRE-ADD epoch baseline: Alice must not advance her MLS epoch '
+              "while decrypting Bob's pre-add location message "
+              '(before=$aliceEpochBeforePreAdd, '
+              'after=$aliceEpochAfterPreAdd). A drift means the engine '
+              'auto-committed during a pure application-message decrypt.',
+        );
+
+        // Own-echo pin: replaying Bob's OWN event into his engine must be a
+        // clean no-op — no decrypt (the engine dedups its own echo as
+        // `Stale(OwnEcho)`), no failure, and critically no group update
+        // that would advance his epoch and corrupt the bobEpochBeforeAdd
+        // baseline captured below.
         final preAddBobSummary = await bob.applyArrivalOrdered(
           <TestRelayEvent>[preAddEvent],
           relay: ctx.relay,
         );
         expect(
-          preAddBobSummary.decryptedLocationSenders.contains(
-            bob.pubkeyHex.toLowerCase(),
+          (
+            preAddBobSummary.locationsProcessed,
+            preAddBobSummary.decryptFailed,
+            preAddBobSummary.groupUpdatesProcessed,
           ),
-          isTrue,
+          equals((0, 0, 0)),
           reason:
-              'PRE-ADD positive control: Bob must decrypt his own pre-add '
-              'location event on the first applyArrivalOrdered call — he '
-              'is a member at the init epoch and holds the correct exporter '
-              'secret, and his MDK seen-cache has not yet processed this '
-              'freshly-published event. '
-              'decryptedSenders=${preAddBobSummary.decryptedLocationSenders} '
-              'decryptFailed=${preAddBobSummary.decryptFailed}',
-        );
-        // Guard: decrypting a location message must NOT trigger an MLS
-        // auto-commit. If MDK emitted a commit here it would advance Bob's
-        // epoch silently and corrupt the "+1" baseline we capture below.
-        // `groupUpdatesProcessed` counts committed MLS operations in this
-        // drain round; it must be 0 for a pure application message.
-        expect(
-          preAddBobSummary.groupUpdatesProcessed,
-          equals(0),
-          reason:
-              'PRE-ADD epoch baseline: Bob must not advance his MLS epoch '
-              'while decrypting his own pre-add location message. '
-              'groupUpdatesProcessed='
-              '${preAddBobSummary.groupUpdatesProcessed}. '
-              'A non-zero value means MDK auto-committed during the positive '
-              'control drain, which would silently offset bobEpochBeforeAdd '
-              'and make the subsequent +1 epoch assertion vacuous.',
+              "PRE-ADD own-echo pin: Bob's engine must treat the echo of "
+              'his own freshly-published event as a clean no-op '
+              '(Stale/OwnEcho dedup) — no location surfaced, no decrypt '
+              'failure, no group update. Got locations='
+              '${preAddBobSummary.locationsProcessed}, decryptFailed='
+              '${preAddBobSummary.decryptFailed}, groupUpdates='
+              '${preAddBobSummary.groupUpdatesProcessed}.',
         );
         debugPrint(
-          '[e2e_combined] PRE-ADD location publish + Bob-positive-control OK — '
-          'eventId=${_redactPk(preAddEventId)}',
+          '[e2e_combined] PRE-ADD location publish + Alice-positive-control '
+          '+ Bob own-echo pin OK — eventId=${_redactPk(preAddEventId)}',
         );
 
         final epochBeforeAdd = await _aliceEpochForTest(tester, mlsGroupId);
@@ -1329,23 +1387,28 @@ void main() {
             'inviter at minimum). A 0 here means the Welcome member-count '
             'parse regressed.',
       );
-      // Symmetric "did not auto-accept" invariant: Dave's circle must be
-      // absent from the visible set. `getVisibleCircles` admits Accepted
-      // memberships only (is_visible()), so a hit here would catch an
-      // auto-accept that the pending-list check alone could miss.
+      // Symmetric "did not auto-accept" invariant: Dave's visible set must
+      // be EMPTY. `getVisibleCircles` admits Accepted memberships only
+      // (is_visible()), so any entry here would prove an auto-accept the
+      // pending-list check alone could miss. The whole-set oracle is
+      // deliberate: pre-accept, `pendingInvitation.mlsGroupId` is the DM-4
+      // gift-wrap stand-in while an accepted circle would carry the REAL
+      // MLS group id, so a per-circle id comparison can never match and
+      // would be vacuously empty. Dave is a hermetic per-suite synthetic
+      // user whose ONLY potential circle is this invite, so an empty set is
+      // exactly "nothing was auto-accepted".
       final daveVisible =
           await fe2Dave.user.circleManager.getVisibleCircles();
-      final daveAccepted = daveVisible.where(
-        (c) => listEquals(c.circle.mlsGroupId, pendingInvitation!.mlsGroupId),
-      );
       expect(
-        daveAccepted,
+        daveVisible,
         isEmpty,
         reason:
-            "[FE-2] Dave's circle must not appear in the visible (Accepted) "
-            'set — the invite-ignore path must never auto-accept. '
-            'acceptInvitation was never called, so the circle must stay out '
-            'of the accepted set entirely.',
+            "[FE-2] Dave's visible (Accepted) circle set must be empty — "
+            'the invite-ignore path must never auto-accept. '
+            'acceptInvitation was never called and Dave holds no other '
+            'circles, so any visible circle here means the held welcome '
+            'was ingested without consent. '
+            'Got ${daveVisible.length} visible circle(s).',
       );
 
       // (b) Alice's roster: exactly 2 members (herself + Dave). Alice
@@ -1850,12 +1913,20 @@ void main() {
 
           // The engine's inbox plane (#p=Alice, 7-day lookback) delivers the
           // back-dated wrap → processGiftWrappedInvitation → invalidate
-          // pendingInvitationsProvider. Poll until it surfaces.
+          // pendingInvitationsProvider. Poll until it surfaces. DM-4:
+          // Alice's pending invitations are keyed by the GIFT-WRAP event id
+          // (the real MLS group id stays inside the still-encrypted welcome
+          // until Accept), so match on the exact wrap just published — a
+          // stronger oracle than a group-id match, since it pins THE event.
+          final fWrapId = hexToBytes(
+            (jsonDecode(aliceWelcome.eventJson) as Map<String, dynamic>)['id']
+                as String,
+          ).toList();
           await _m11PumpUntilInvitation(
             tester,
             container,
             generation,
-            mlsGroupId: creation.circle.mlsGroupId.toList(),
+            invitationKey: fWrapId,
           );
           debugPrint(
             '[M11:f] a back-dated Welcome surfaced in pendingInvitations via '
@@ -2266,20 +2337,24 @@ void main() {
             throw StateError('[M11:g] relay rejected the Welcome: $msg');
           }
 
+          // DM-4: match on the gift-wrap event id — the stand-in key pending
+          // invitations carry until Accept (see scenario f's doc).
+          final gWrapId = hexToBytes(
+            (jsonDecode(aliceWelcome.eventJson) as Map<String, dynamic>)['id']
+                as String,
+          ).toList();
           await _m11PumpUntilInvitation(
             tester,
             container,
             generation,
-            mlsGroupId: creation.circle.mlsGroupId.toList(),
+            invitationKey: gWrapId,
           );
           var invitations = await container.read(
             pendingInvitationsProvider.future,
           );
           expect(
             invitations
-                .where(
-                  (i) => listEquals(i.mlsGroupId, creation.circle.mlsGroupId),
-                )
+                .where((i) => listEquals(i.mlsGroupId, gWrapId))
                 .length,
             1,
           );
@@ -2295,9 +2370,7 @@ void main() {
           );
           expect(
             invitations
-                .where(
-                  (i) => listEquals(i.mlsGroupId, creation.circle.mlsGroupId),
-                )
+                .where((i) => listEquals(i.mlsGroupId, gWrapId))
                 .length,
             1,
             reason: '[M11:g] the SAME gift-wrap redelivered must not '
@@ -5355,15 +5428,21 @@ Future<void> _m11PumpUntilRosterDrops(
 }
 
 /// Pumps frames while polling `pendingInvitationsProvider` until an invitation
-/// for [mlsGroupId] surfaces, or [timeout] elapses. Under live-sync the
-/// invitation poller is OFF, so a surfaced invitation proves the engine's
+/// keyed by [invitationKey] surfaces, or [timeout] elapses. Under live-sync
+/// the invitation poller is OFF, so a surfaced invitation proves the engine's
 /// inbox #p stream delivered the (back-dated) Welcome and the router
 /// invalidated the provider (scenario f).
+///
+/// [invitationKey] is the GIFT-WRAP event id bytes (DM-4): pre-accept, a
+/// pending invitation's `mlsGroupId` is the gift-wrap id stand-in — the real
+/// MLS group id lives inside the still-encrypted welcome until Accept — so
+/// callers must pass the published wrap's id, never the inviter-side real
+/// group id (which can never match).
 Future<void> _m11PumpUntilInvitation(
   WidgetTester tester,
   ProviderContainer container,
   int generation, {
-  required List<int> mlsGroupId,
+  required List<int> invitationKey,
   Duration timeout = const Duration(seconds: 45),
 }) async {
   final deadline = DateTime.now().add(timeout);
@@ -5379,7 +5458,7 @@ Future<void> _m11PumpUntilInvitation(
           .read(pendingInvitationsProvider.future)
           .timeout(const Duration(seconds: 5));
       lastCount = invitations.length;
-      if (invitations.any((i) => listEquals(i.mlsGroupId, mlsGroupId))) {
+      if (invitations.any((i) => listEquals(i.mlsGroupId, invitationKey))) {
         return;
       }
     } on Object {

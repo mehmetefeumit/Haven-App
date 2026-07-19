@@ -3183,9 +3183,11 @@ impl CircleManagerFfi {
     /// Gets all pending invitations from the in-memory held-welcome store.
     ///
     /// Each [`InvitationFfi`] carries pre-join STAND-IN fields (the gift-wrap
-    /// event id as `mlsGroupId`, `"New Circle"` as the name, `memberCount == 0`)
-    /// because the real MLS group state lives inside the still-encrypted 1059
-    /// held until Accept (F3). The gift-wrap id is the key the caller passes to
+    /// event id as `mlsGroupId`, `"New Circle"` as the name) because the real
+    /// MLS group state lives inside the still-encrypted 1059 held until Accept
+    /// (F3). `memberCount` reports the provably-known members pre-join — the
+    /// NIP-59-seal-authenticated inviter, i.e. 1 — never the full roster. The
+    /// gift-wrap id is the key the caller passes to
     /// [`accept_invitation`](Self::accept_invitation) /
     /// [`decline_invitation`](Self::decline_invitation).
     pub async fn get_pending_invitations(&self) -> Result<Vec<InvitationFfi>, String> {
