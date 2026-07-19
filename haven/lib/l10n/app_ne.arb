@@ -60,6 +60,7 @@
 
   "onboardingDisplayNameHint": "जस्तै, Alex",
   "onboardingDisplayNameError": "त्यो नाम सुरक्षित गर्न सकिएन। कृपया फेरि प्रयास गर्नुहोस्।",
+  "onboardingAddPhotoOptional": "फोटो थप्नुहोस् (वैकल्पिक)",
 
   "commonCancel": "रद्द गर्नुहोस्",
   "commonOpenSettings": "सेटिङ खोल्नुहोस्",

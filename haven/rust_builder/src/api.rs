@@ -1155,8 +1155,11 @@ fn get_or_create_tiles_db_key() -> Result<zeroize::Zeroizing<String>, String> {
     // open the cache. No-op on every other target. Non-fatal: the migration
     // restores the key on any failure, so we log a redacted warning and return
     // the (unchanged) key.
-    if haven_core::keyring_policy::ensure_db_key_after_first_unlock(TILES_DB_SERVICE, TILES_DB_KEY_ID)
-        .is_err()
+    if haven_core::keyring_policy::ensure_db_key_after_first_unlock(
+        TILES_DB_SERVICE,
+        TILES_DB_KEY_ID,
+    )
+    .is_err()
     {
         // Static message (no interpolation): a tile-layer log line must never
         // embed a value (check_no_tile_cache_secrets). Non-fatal — the migration

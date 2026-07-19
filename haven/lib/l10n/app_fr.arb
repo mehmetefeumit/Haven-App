@@ -51,6 +51,7 @@
   "onboardingImportError": "Nous n'avons pas pu importer cette clé. Veuillez vérifier et réessayer.",
   "onboardingDisplayNameHint": "ex. Alex",
   "onboardingDisplayNameError": "Impossible d'enregistrer ce nom. Veuillez réessayer.",
+  "onboardingAddPhotoOptional": "Ajouter une photo (facultatif)",
   "commonCancel": "Annuler",
   "commonOpenSettings": "Ouvrir les réglages",
   "settingsTitle": "Réglages",

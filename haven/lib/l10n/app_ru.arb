@@ -60,6 +60,7 @@
 
   "onboardingDisplayNameHint": "например, Алекс",
   "onboardingDisplayNameError": "Не удалось сохранить имя. Пожалуйста, повторите попытку.",
+  "onboardingAddPhotoOptional": "Добавить фото (необязательно)",
 
   "commonCancel": "Отмена",
   "commonOpenSettings": "Открыть настройки",

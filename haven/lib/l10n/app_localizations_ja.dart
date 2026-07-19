@@ -189,6 +189,9 @@ class AppLocalizationsJa extends AppLocalizations {
   String get onboardingDisplayNameError => 'その名前を保存できませんでした。もう一度お試しください。';
 
   @override
+  String get onboardingAddPhotoOptional => '写真を追加（任意）';
+
+  @override
   String get commonCancel => 'キャンセル';
 
   @override

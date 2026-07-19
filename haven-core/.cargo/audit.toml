@@ -1,15 +1,17 @@
 # cargo-audit configuration
 #
 # Documents non-blocking RUSTSEC informational warnings (unmaintained / unsound)
-# that survive after the rustls-webpki bump. cargo-audit treats these as warnings
-# by default, but ignoring them here keeps the CI log focused on actionable
-# findings and forces us to revisit each one when bumping the upstream pin.
+# and upstream-pinned advisories in COMPILED-BUT-UNREACHED transitive crates.
+# cargo-audit treats these as errors/warnings by default; ignoring them here keeps
+# the CI log focused on actionable findings and forces us to revisit each one when
+# bumping the upstream pin.
 #
 # Each ignore MUST cite: (1) why it is acceptable today, (2) what would lift it.
-# Re-evaluate on every upstream bump (mdk, nostr-sdk, hpke-rs).
+# Re-evaluate on every upstream bump (mdk, nostr-sdk, openmls, hpke-rs).
 
 [advisories]
 ignore = [
+  # ── Pre-existing (unchanged) ─────────────────────────────────────────────
   # Unmaintained: `instant` 0.1.x.
   # Reachable via: nostr 0.44.x ← nostr-sdk 0.44.1 ← haven-core
   # Risk: none today (instant is a thin wrapper around std::time + js-sys; no CVE).
@@ -26,21 +28,41 @@ ignore = [
   # dependents to a fixed major.
   "RUSTSEC-2026-0097",
 
-  # Panic on overlong ciphertext buffer in `libcrux-chacha20poly1305` 0.0.7
-  # (severity 8.2 high). Fixed in 0.0.8.
-  # Reachable via: haven-core ← mdk-core 0.7.1 ← openmls_rust_crypto 0.5.1 ←
-  # hpke-rs 0.6.1 ← hpke-rs-libcrux 0.6.1 ← libcrux-aead 0.0.7 ←
-  # libcrux-chacha20poly1305 0.0.7.
-  # Risk in Haven: a malicious relay or peer that feeds a kind 445 ciphertext
-  # whose Welcome/MLS payload triggers an overlong decrypt buffer can crash
-  # the receiver thread (DoS). NOT key compromise; no confidentiality break.
-  # Patch path is blocked upstream: pinning a local override requires forking
-  # the entire libcrux-chacha20poly1305 / libcrux-aead / hpke-rs-libcrux
-  # chain (each crates.io release of the next layer pins the previous one
-  # with an exact 0.0.x requirement). Both `parres-hq/mdk` HEAD and
-  # `openmls/openmls` rev 04c50d7 still ship libcrux-aead 0.0.7.
-  # Lift when: openmls (and therefore mdk-core via openmls_rust_crypto)
-  # publishes a release that pulls hpke-rs-libcrux ≥ 0.6.2 with the
-  # libcrux-aead 0.0.8 bump. Track upstream MDK + openmls bumps.
+  # ── libcrux crypto family (MDK v0.9.4 chain) — COMPILED DEAD CODE ─────────
+  # Root cause (applies to every ID in this block): MDK cgka-engine 0.9.4 hardcodes
+  # `openmls_rust_crypto::RustCrypto` as the ONLY OpenMLS Crypto + Rand provider
+  # (crates/cgka-engine/src/provider.rs). For ciphersuite 0x0001
+  # (MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519) every primitive runs on RustCrypto
+  # (aes-gcm, sha2, hkdf/hmac, ed25519-dalek, hpke-rs-rust-crypto) and the outer
+  # kind-445 AEAD is RustCrypto chacha20poly1305 (transport-nostr-peeler). The libcrux
+  # crates are pulled ONLY as (a) openmls 0.8.1's UNUSED optional provider
+  # `openmls_libcrux_crypto 0.3.1`, and (b) hpke-rs 0.6.1's unconditional libcrux deps
+  # whose backend is never selected. None are instantiated at runtime, so NONE of
+  # these advisories are reachable on Haven's path — this is no-runtime-exposure,
+  # not accepted-live-risk.
+  # UNPATCHABLE: every layer pins the next with an exact 0.0.x requirement and no
+  # released fix is selectable; no [patch.crates-io] route (a patch must still satisfy
+  # the =0.0.x/^0.0.z requirement). Verified: `cargo update -p <leaf> --precise <fix>`
+  # fails "failed to select a version"; bumping intermediates → "Locking 0 packages".
+  # LIFT / MUST RE-AUDIT when EITHER: (1) MDK/openmls/hpke-rs publish releases pulling
+  # fixed libcrux (aead ≥0.0.8, sha3 fix, aesgcm fix, poly1305 ≥0.0.5, ed25519 ≥0.0.7,
+  # secrets ≥0.0.6); OR (2) — SECURITY-CRITICAL — MDK ever switches its OpenMLS
+  # CryptoProvider away from `openmls_rust_crypto::RustCrypto` (e.g. a libcrux-backed
+  # or post-quantum suite), which would make 0209/0211/0212/0075 LIVE and 0211 a real
+  # AES-GCM tag-verify timing oracle. Re-check on every `mdk` rev bump.
+  "RUSTSEC-2026-0073",  # libcrux-poly1305 0.0.4 standalone-MAC panic — via unused openmls_libcrux_crypto.
+  "RUSTSEC-2026-0075",  # libcrux-ed25519 0.0.6 all-zero key on RNG failure — Haven signs with ed25519-dalek.
+  "RUSTSEC-2026-0207",  # libcrux-sha3 0.0.8 SHAKE multi-squeeze correctness — 0x0001 uses SHA-256/HKDF-SHA256, no SHAKE.
+  "RUSTSEC-2026-0208",  # libcrux-sha3 0.0.8 AVX2 SHAKE-256 panic — same, SHA-3 path unreached.
+  "RUSTSEC-2026-0209",  # libcrux-aesgcm 0.0.7 AAD-length DoS — active AES-128-GCM is RustCrypto aes-gcm.
+  "RUSTSEC-2026-0211",  # libcrux-aesgcm 0.0.7 non-constant-time tag check — dead code; RustCrypto verify is constant-time.
+  "RUSTSEC-2026-0212",  # libcrux-secrets 0.0.5 aarch64 const-time swap — underlies only inactive libcrux primitives.
+
+  # libcrux-chacha20poly1305 0.0.7 panic on overlong ciphertext (fixed 0.0.8).
+  # Post-Dark-Matter correction: the old "mdk-core 0.7.1 ← openmls_rust_crypto 0.5.1"
+  # chain no longer exists. 0.0.7 is still in the graph via hpke-rs-libcrux 0.6.1 →
+  # libcrux-aead 0.0.7, but that HPKE backend is never selected (RustCrypto is) and the
+  # outer 445 chacha is RustCrypto — so it is DEAD CODE, not reachable. Same lift
+  # trigger as the libcrux block above.
   "RUSTSEC-2026-0124",
 ]

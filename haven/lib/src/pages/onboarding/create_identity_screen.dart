@@ -17,9 +17,13 @@ import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/anonymous_name_generator.dart';
+import 'package:haven/src/widgets/identity/avatar.dart';
+import 'package:haven/src/widgets/identity/avatar_initials.dart';
+import 'package:haven/src/widgets/identity/avatar_picker.dart';
 import 'package:haven/src/widgets/identity/public_profile_notice.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -39,19 +43,32 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 ///    create, as a backstop.)
 /// 2. Fire-and-forget the KeyPackage publish (kind 30443/443 + relay lists).
 /// 3. Save the display name locally.
-/// 4. Publish the display name as the user's public kind-0 profile
-///    (public-by-default, unconditional — owner-directed, matching White Noise;
-///    disclosed by [PublicProfileNotice] above the field).
+/// 4. Publish the display name — and the optional photo, if one was chosen —
+///    as the user's public kind-0 profile (public-by-default, unconditional —
+///    owner-directed, matching White Noise; disclosed by [PublicProfileNotice]
+///    above the field).
 /// 5. Seed default relays.
 /// 6. Run the background-location prominent disclosure → permission → enable
 ///    sequence (the sole Google Play "disclose before collection" point).
 /// 7. Mark onboarding complete; `AppRouter` swaps in the map shell.
 ///
-/// There is no "Skip": the name (pre-filled or edited) is always published. A
-/// photo picker is intentionally absent (a separate known issue).
+/// There is no "Skip": the name (pre-filled or edited) is always published.
+/// Adding a profile photo is optional — an avatar circle above the field opens
+/// the same gallery picker + square crop editor as the Identity settings page
+/// ([pickAndCropAvatar]). A chosen photo is held locally and, once the identity
+/// exists, published to Blossom + kind-0 chained *after* the name publish
+/// (never concurrently, so the two kind-0 writes can't race).
 class CreateIdentityScreen extends ConsumerStatefulWidget {
   /// Creates an identity-creation screen.
-  const CreateIdentityScreen({super.key});
+  const CreateIdentityScreen({super.key, this.pickPhoto = pickAndCropAvatar});
+
+  /// Gallery pick + crop function, injectable for widget tests that cannot
+  /// drive the native photo picker.
+  ///
+  /// Production leaves this at its default, [pickAndCropAvatar]; tests supply a
+  /// fake that returns fixed bytes (or `null` to simulate cancel).
+  @visibleForTesting
+  final Future<Uint8List?> Function(BuildContext context) pickPhoto;
 
   @override
   ConsumerState<CreateIdentityScreen> createState() =>
@@ -65,6 +82,11 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
   bool _userEdited = false;
   bool _selectedOnFirstFocus = false;
   Future<void>? _restoreFuture;
+
+  /// The optional profile photo the user picked, held locally until the
+  /// identity is created and it can be published (see [_finish]). `null` means
+  /// no photo was chosen — the profile is published without one.
+  Uint8List? _pickedPhoto;
 
   @override
   void initState() {
@@ -106,6 +128,19 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
       baseOffset: 0,
       extentOffset: _controller.text.length,
     );
+  }
+
+  /// Opens the gallery picker + square crop editor and holds the chosen bytes
+  /// locally.
+  ///
+  /// Nothing is uploaded here: the identity does not exist yet, and both the
+  /// Blossom upload and the kind-0 publish require the identity secret key. The
+  /// photo is published in [_finish], after the keypair is created. Cancelling
+  /// the picker/crop is a silent no-op (bytes stay unchanged).
+  Future<void> _onPickPhoto() async {
+    final bytes = await widget.pickPhoto(context);
+    if (!mounted || bytes == null) return;
+    setState(() => _pickedPhoto = bytes);
   }
 
   Future<void> _finish() async {
@@ -163,11 +198,30 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
       await ref.read(identityServiceProvider).setDisplayName(name);
       if (!mounted) return;
       ref.invalidate(displayNameProvider);
-      unawaited(
-        ref
-            .read(ownProfileControllerProvider.notifier)
-            .saveDisplayName(displayName: name),
-      );
+      // Publish the public kind-0 profile: the display name always, and the
+      // optional photo only if one was picked. With a photo, publish via the
+      // service directly and in series (name → photo) so (a) the two kind-0
+      // writes can't race and (b) the photo is gated on the name publish
+      // SUCCEEDING — the controller would swallow a name-publish failure
+      // (AsyncValue.guard) and let a photo-only kind-0 publish without the
+      // name. Fire-and-forget so a slow Blossom upload or unreachable relay
+      // never stalls entry into the app; the photo appears once it lands.
+      final photo = _pickedPhoto;
+      if (photo != null) {
+        unawaited(
+          _publishOnboardingProfileWithPhoto(
+            ref.read(profileServiceProvider),
+            name,
+            photo,
+          ),
+        );
+      } else {
+        unawaited(
+          ref
+              .read(ownProfileControllerProvider.notifier)
+              .saveDisplayName(displayName: name),
+        );
+      }
     } on IdentityServiceException {
       if (!mounted) return;
       setState(() => _busy = false);
@@ -255,7 +309,7 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
             style: theme.textTheme.headlineSmall,
             textAlign: TextAlign.center,
           ),
-          const SizedBox(height: HavenSpacing.base),
+          const SizedBox(height: HavenSpacing.md),
           Text(
             l10n.onboardingCreateIdentityBody,
             style: theme.textTheme.bodyMedium?.copyWith(
@@ -263,11 +317,22 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
             ),
             textAlign: TextAlign.center,
           ),
-          const SizedBox(height: HavenSpacing.base),
+          const SizedBox(height: HavenSpacing.md),
           _WarningCard(message: l10n.onboardingCreateIdentityWarning),
-          const SizedBox(height: HavenSpacing.base),
+          const SizedBox(height: HavenSpacing.md),
           const PublicProfileNotice(),
-          const SizedBox(height: HavenSpacing.base),
+          const SizedBox(height: HavenSpacing.sm),
+          Center(
+            child: _AvatarPicker(
+              photoBytes: _pickedPhoto,
+              nameController: _controller,
+              onTap: _busy ? null : _onPickPhoto,
+              onRemove: _pickedPhoto == null
+                  ? null
+                  : () => setState(() => _pickedPhoto = null),
+            ),
+          ),
+          const SizedBox(height: HavenSpacing.sm),
           TextField(
             controller: _controller,
             focusNode: _focusNode,
@@ -314,6 +379,165 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
   }
 }
 
+/// Publishes the onboarding public kind-0 profile — display name then photo —
+/// gated so the photo publishes only if the name publish SUCCEEDED.
+///
+/// Fire-and-forget: invoked without a live widget behind it, so it takes plain
+/// values (no `ref`/`context`). It calls the [ProfileService] directly rather
+/// than [OwnProfileController], whose `AsyncValue.guard` swallows a publish
+/// failure — which would let the avatar's kind-0 merge build on a base that
+/// never received the name. On any failure the name is still saved locally (by
+/// the caller) and republishes on the next profile edit. Errors are logged by
+/// runtime type only, never surfaced raw (Security Rule 8).
+Future<void> _publishOnboardingProfileWithPhoto(
+  ProfileService service,
+  String name,
+  Uint8List photo,
+) async {
+  try {
+    await service.updateOwnProfile(displayName: name);
+    await service.setOwnAvatar(photo);
+  } on Object catch (e) {
+    debugPrint(
+      'Onboarding profile publish with photo failed: ${e.runtimeType}',
+    );
+  }
+}
+
+/// Optional profile-photo picker shown above the display-name field.
+///
+/// Tapping the circle opens the same gallery picker + square crop editor used
+/// on the Identity settings page ([pickAndCropAvatar]); the chosen bytes are
+/// held by the parent and published after the identity is created. Shows the
+/// picked photo when set (with a "Remove" action), otherwise the name's
+/// initials behind a camera badge inviting the user to add one.
+///
+/// The whole 60dp circle is the tap target (well above the 48dp WCAG minimum);
+/// the camera badge is decorative ([IgnorePointer]) so it never steals the tap.
+/// The caption/Remove row sits in a fixed-height slot so it neither shifts the
+/// field below when a photo is chosen nor breaks the page's no-scroll budget.
+class _AvatarPicker extends StatelessWidget {
+  const _AvatarPicker({
+    required this.photoBytes,
+    required this.nameController,
+    required this.onTap,
+    required this.onRemove,
+  });
+
+  /// The picked photo bytes, or `null` when none has been chosen.
+  final Uint8List? photoBytes;
+
+  /// The display-name controller, watched so the fallback initials preview
+  /// tracks the name as it is edited or restored.
+  final TextEditingController nameController;
+
+  /// Opens the picker. `null` disables the control (e.g. while submitting).
+  final VoidCallback? onTap;
+
+  /// Clears the picked photo. `null` when there is nothing to remove.
+  final VoidCallback? onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final l10n = AppLocalizations.of(context);
+    final bytes = photoBytes;
+    final hasPhoto = bytes != null && bytes.isNotEmpty;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Semantics(
+          button: true,
+          enabled: onTap != null,
+          label: hasPhoto
+              ? l10n.photoHeaderChangePhotoSemantics
+              : l10n.photoHeaderAddPhotoSemantics,
+          // Announce only the clean button label — exclude HavenAvatar's own
+          // "user avatar" semantics (which would otherwise merge into a verbose
+          // composite) and re-declare the tap action the exclude would strip
+          // (mirrors PublicProfileNotice and the onboarding step indicator).
+          excludeSemantics: true,
+          onTap: onTap,
+          child: SizedBox(
+            width: 60,
+            height: 60,
+            child: Stack(
+              children: [
+                InkWell(
+                  onTap: onTap,
+                  customBorder: const CircleBorder(),
+                  child: ListenableBuilder(
+                    listenable: nameController,
+                    builder: (context, _) => HavenAvatar(
+                      imageBytes: bytes,
+                      initials: avatarInitials(nameController.text),
+                      diameter: 60,
+                    ),
+                  ),
+                ),
+                PositionedDirectional(
+                  end: 0,
+                  bottom: 0,
+                  child: IgnorePointer(
+                    child: Container(
+                      width: 24,
+                      height: 24,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: colorScheme.primary,
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: colorScheme.surface,
+                          width: 2,
+                        ),
+                      ),
+                      child: Icon(
+                        LucideIcons.camera,
+                        size: 13,
+                        color: colorScheme.onPrimary,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: HavenSpacing.xs),
+        // Fixed-height slot: the caption and the (taller) Remove button occupy
+        // the same vertical space, so choosing a photo neither nudges the field
+        // below nor grows the page past the no-scroll budget.
+        SizedBox(
+          height: 30,
+          child: Center(
+            child: hasPhoto
+                ? TextButton(
+                    onPressed: onRemove,
+                    style: TextButton.styleFrom(
+                      minimumSize: const Size(48, 30),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: HavenSpacing.sm,
+                      ),
+                    ),
+                    child: Text(l10n.photoHeaderRemove),
+                  )
+                : Text(
+                    l10n.onboardingAddPhotoOptional,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class _WarningCard extends StatelessWidget {
   const _WarningCard({required this.message});
 
@@ -323,7 +547,7 @@ class _WarningCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Container(
-      padding: const EdgeInsets.all(HavenSpacing.base),
+      padding: const EdgeInsets.all(HavenSpacing.sm),
       decoration: BoxDecoration(
         color: HavenSecurityColors.warning.withValues(alpha: 0.1),
         borderRadius: BorderRadius.circular(HavenSpacing.sm),

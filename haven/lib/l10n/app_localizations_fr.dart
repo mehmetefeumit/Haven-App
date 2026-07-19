@@ -199,6 +199,9 @@ class AppLocalizationsFr extends AppLocalizations {
       'Impossible d\'enregistrer ce nom. Veuillez réessayer.';
 
   @override
+  String get onboardingAddPhotoOptional => 'Ajouter une photo (facultatif)';
+
+  @override
   String get commonCancel => 'Annuler';
 
   @override

@@ -201,6 +201,9 @@ class AppLocalizationsAr extends AppLocalizations {
       'تعذّر حفظ هذا الاسم. يُرجى إعادة المحاولة.';
 
   @override
+  String get onboardingAddPhotoOptional => 'إضافة صورة (اختياري)';
+
+  @override
   String get commonCancel => 'إلغاء';
 
   @override

@@ -426,6 +426,12 @@ abstract class AppLocalizations {
   /// **'Couldn’t save that name. Please try again.'**
   String get onboardingDisplayNameError;
 
+  /// Caption below the avatar circle on the onboarding create-identity screen, inviting the user to optionally add a profile photo. Shown only when no photo has been chosen yet.
+  ///
+  /// In en, this message translates to:
+  /// **'Add a photo (optional)'**
+  String get onboardingAddPhotoOptional;
+
   /// Generic button that dismisses a dialog or sheet without taking the action.
   ///
   /// In en, this message translates to:

@@ -66,6 +66,7 @@
 
   "onboardingDisplayNameHint": "例: アレックス",
   "onboardingDisplayNameError": "その名前を保存できませんでした。もう一度お試しください。",
+  "onboardingAddPhotoOptional": "写真を追加（任意）",
 
   "commonCancel": "キャンセル",
   "commonOpenSettings": "設定を開く",

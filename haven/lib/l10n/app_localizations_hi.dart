@@ -197,6 +197,9 @@ class AppLocalizationsHi extends AppLocalizations {
       'वह नाम सहेजा नहीं जा सका। कृपया फिर कोशिश करें।';
 
   @override
+  String get onboardingAddPhotoOptional => 'फ़ोटो जोड़ें (वैकल्पिक)';
+
+  @override
   String get commonCancel => 'रद्द करें';
 
   @override

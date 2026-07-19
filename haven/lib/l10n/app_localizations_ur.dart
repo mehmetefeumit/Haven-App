@@ -198,6 +198,9 @@ class AppLocalizationsUr extends AppLocalizations {
       'وہ نام محفوظ نہ ہو سکا۔ براہِ کرم دوبارہ کوشش کریں۔';
 
   @override
+  String get onboardingAddPhotoOptional => 'تصویر شامل کریں (اختیاری)';
+
+  @override
   String get commonCancel => 'منسوخ کریں';
 
   @override

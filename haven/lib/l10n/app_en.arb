@@ -226,6 +226,10 @@
   "@onboardingDisplayNameError": {
     "description": "Snackbar message shown when saving the display name fails."
   },
+  "onboardingAddPhotoOptional": "Add a photo (optional)",
+  "@onboardingAddPhotoOptional": {
+    "description": "Caption below the avatar circle on the onboarding create-identity screen, inviting the user to optionally add a profile photo. Shown only when no photo has been chosen yet."
+  },
 
   "commonCancel": "Cancel",
   "@commonCancel": {

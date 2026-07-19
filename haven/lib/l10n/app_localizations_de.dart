@@ -199,6 +199,9 @@ class AppLocalizationsDe extends AppLocalizations {
       'Dieser Name konnte nicht gespeichert werden. Bitte versuche es erneut.';
 
   @override
+  String get onboardingAddPhotoOptional => 'Foto hinzufügen (optional)';
+
+  @override
   String get commonCancel => 'Abbrechen';
 
   @override

@@ -60,6 +60,7 @@
 
   "onboardingDisplayNameHint": "örn. Ali",
   "onboardingDisplayNameError": "Bu ad kaydedilemedi. Lütfen tekrar deneyin.",
+  "onboardingAddPhotoOptional": "Fotoğraf ekle (isteğe bağlı)",
 
   "commonCancel": "İptal",
   "commonOpenSettings": "Ayarları aç",

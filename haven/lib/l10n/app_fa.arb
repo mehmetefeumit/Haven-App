@@ -66,6 +66,7 @@
 
   "onboardingDisplayNameHint": "مثلاً علی",
   "onboardingDisplayNameError": "نتوانستیم آن نام را ذخیره کنیم. لطفاً دوباره تلاش کنید.",
+  "onboardingAddPhotoOptional": "افزودن عکس (اختیاری)",
 
   "commonCancel": "لغو",
   "commonOpenSettings": "باز کردن تنظیمات",

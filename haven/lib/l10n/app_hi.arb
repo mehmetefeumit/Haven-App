@@ -66,6 +66,7 @@
 
   "onboardingDisplayNameHint": "जैसे, आर्यन",
   "onboardingDisplayNameError": "वह नाम सहेजा नहीं जा सका। कृपया फिर कोशिश करें।",
+  "onboardingAddPhotoOptional": "फ़ोटो जोड़ें (वैकल्पिक)",
 
   "commonCancel": "रद्द करें",
   "commonOpenSettings": "सेटिंग खोलें",

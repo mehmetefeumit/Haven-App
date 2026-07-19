@@ -51,6 +51,7 @@
   "onboardingImportError": "Wir konnten diesen Schlüssel nicht importieren. Bitte prüfe ihn und versuche es erneut.",
   "onboardingDisplayNameHint": "z. B. Alex",
   "onboardingDisplayNameError": "Dieser Name konnte nicht gespeichert werden. Bitte versuche es erneut.",
+  "onboardingAddPhotoOptional": "Foto hinzufügen (optional)",
   "commonCancel": "Abbrechen",
   "commonOpenSettings": "Einstellungen öffnen",
   "settingsTitle": "Einstellungen",

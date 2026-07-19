@@ -66,6 +66,7 @@
 
   "onboardingDisplayNameHint": "ex.: Alex",
   "onboardingDisplayNameError": "Não foi possível salvar esse nome. Tente de novo.",
+  "onboardingAddPhotoOptional": "Adicionar uma foto (opcional)",
 
   "commonCancel": "Cancelar",
   "commonOpenSettings": "Abrir configurações",

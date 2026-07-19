@@ -198,6 +198,9 @@ class AppLocalizationsFa extends AppLocalizations {
       'نتوانستیم آن نام را ذخیره کنیم. لطفاً دوباره تلاش کنید.';
 
   @override
+  String get onboardingAddPhotoOptional => 'افزودن عکس (اختیاری)';
+
+  @override
   String get commonCancel => 'لغو';
 
   @override

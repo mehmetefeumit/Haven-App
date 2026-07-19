@@ -28,26 +28,24 @@ import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:image_cropper/image_cropper.dart';
 import 'package:image_picker/image_picker.dart';
 
-/// Picks an image from the system gallery, lets the user crop/rotate it to a
-/// square, and stores the result as the own public profile picture.
+/// Picks an image from the system gallery and lets the user crop/rotate it to a
+/// square, returning the raw cropped bytes — WITHOUT publishing anything.
 ///
-/// Publishing is unconditional (public-by-default, owner-directed
-/// 2026-07-16) — a tap goes straight to the picker, with no consent gate.
+/// This is the pick + crop half of [pickAndSetOwnAvatar], split out so a
+/// surface that has no identity yet — onboarding, before the keypair exists —
+/// can capture a chosen photo and hold it locally, then publish it later once
+/// an identity is available. (Blossom upload + kind-0 publishing both require
+/// the identity secret key, so they cannot run at pick time during onboarding.)
 ///
 /// Flow: open the permission-free system picker → square-locked crop/rotate
-/// editor → read the cropped bytes → delegate sanitize/upload/publish to
-/// [OwnProfileController.setAvatar]. Cancelling the picker OR the crop editor
-/// is a silent no-op. `requestFullMetadata: false` keeps EXIF/location
-/// metadata out of the picked bytes (the Rust pipeline strips it again and
-/// bakes orientation, defence in depth). The picker and cropper temp files
-/// are best-effort deleted once their bytes are read so avatar pixels do not
-/// linger on disk. Shows a success or generic-failure SnackBar; never
-/// surfaces raw errors to the user.
-Future<void> pickAndSetOwnAvatar(BuildContext context, WidgetRef ref) async {
-  // Capture localizations before the first await so the success message does
-  // not touch a possibly-unmounted context after the picker/crop round-trip.
-  final l10n = AppLocalizations.of(context);
-
+/// editor → read the cropped bytes. Returns the bytes, or `null` if the user
+/// cancelled the picker or the crop editor, or if an error occurred. Cancelling
+/// is a silent no-op; an error shows the single generic-failure SnackBar (never
+/// a raw error). `requestFullMetadata: false` keeps EXIF/location metadata out
+/// of the picked bytes (the Rust upload pipeline strips it again and bakes
+/// orientation, defence in depth). Both temp files are best-effort deleted once
+/// their bytes are read so avatar pixels do not linger on disk.
+Future<Uint8List?> pickAndCropAvatar(BuildContext context) async {
   // ── Stage 1: scoped, permission-free system picker ──────────────────────
   final picker = ImagePicker();
   final XFile? picked;
@@ -58,13 +56,13 @@ Future<void> pickAndSetOwnAvatar(BuildContext context, WidgetRef ref) async {
     );
   } on Object {
     if (context.mounted) _showGenericFailure(context);
-    return;
+    return null;
   }
-  if (picked == null) return; // user cancelled the picker
+  if (picked == null) return null; // user cancelled the picker
 
   if (!context.mounted) {
     await _deleteQuietly(picked.path);
-    return;
+    return null;
   }
 
   // ── Stage 2: square-locked crop / rotate editor ─────────────────────────
@@ -79,31 +77,48 @@ Future<void> pickAndSetOwnAvatar(BuildContext context, WidgetRef ref) async {
   } on Object {
     await _deleteQuietly(picked.path);
     if (context.mounted) _showGenericFailure(context);
-    return;
+    return null;
   }
   if (cropped == null) {
     // User cancelled the crop — silent no-op, but clean up the picked temp.
     await _deleteQuietly(picked.path);
-    return;
+    return null;
   }
 
   // ── Read the cropped bytes, then delete BOTH temp files (privacy) ───────
-  final Uint8List raw;
   try {
-    raw = await cropped.readAsBytes();
+    return await cropped.readAsBytes();
   } on Object {
     if (context.mounted) _showGenericFailure(context);
-    return;
+    return null;
   } finally {
     // Best-effort cleanup regardless of read outcome.
     await _deleteQuietly(cropped.path);
     await _deleteQuietly(picked.path);
   }
+}
 
-  if (!context.mounted) return;
+/// Picks an image from the system gallery, lets the user crop/rotate it to a
+/// square, and stores the result as the own public profile picture.
+///
+/// Publishing is unconditional (public-by-default, owner-directed
+/// 2026-07-16) — a tap goes straight to the picker, with no consent gate.
+///
+/// Flow: [pickAndCropAvatar] (permission-free system picker → square-locked
+/// crop/rotate editor → cropped bytes) → delegate sanitize/upload/publish to
+/// [OwnProfileController.setAvatar]. Cancelling the picker OR the crop editor
+/// is a silent no-op. Shows a success or generic-failure SnackBar; never
+/// surfaces raw errors to the user.
+Future<void> pickAndSetOwnAvatar(BuildContext context, WidgetRef ref) async {
+  // Capture localizations before the first await so the success message does
+  // not touch a possibly-unmounted context after the picker/crop round-trip.
+  final l10n = AppLocalizations.of(context);
 
-  // ── Stage 3: hand to the controller (Rust strips metadata, uploads to
-  //    Blossom, and republishes the public kind-0 profile) ────────────────
+  final raw = await pickAndCropAvatar(context);
+  if (raw == null || !context.mounted) return;
+
+  // ── Hand to the controller (Rust strips metadata, uploads to Blossom, and
+  //    republishes the public kind-0 profile) ──────────────────────────────
   try {
     await ref.read(ownProfileControllerProvider.notifier).setAvatar(raw);
     if (!context.mounted) return;

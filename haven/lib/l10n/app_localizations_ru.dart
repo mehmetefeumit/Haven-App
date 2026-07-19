@@ -199,6 +199,9 @@ class AppLocalizationsRu extends AppLocalizations {
       'Не удалось сохранить имя. Пожалуйста, повторите попытку.';
 
   @override
+  String get onboardingAddPhotoOptional => 'Добавить фото (необязательно)';
+
+  @override
   String get commonCancel => 'Отмена';
 
   @override

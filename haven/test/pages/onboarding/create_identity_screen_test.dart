@@ -21,6 +21,7 @@ import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/test_keys.dart';
+import 'package:haven/src/widgets/identity/avatar.dart';
 import 'package:haven/src/widgets/identity/public_profile_notice.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -337,6 +338,258 @@ void main() {
     expect(service.setDisplayNameCalls, isEmpty);
     final prefs = await SharedPreferences.getInstance();
     expect(prefs.getBool(kOnboardingCompletedKey), isNot(true));
+  });
+
+  // ── Optional profile photo ────────────────────────────────────────────────
+
+  testWidgets('shows the optional add-photo affordance, not a remove action', (
+    tester,
+  ) async {
+    await pumpLocalized(
+      tester,
+      const CreateIdentityScreen(),
+      overrides: buildOverrides(service: _RecordingIdentityService()),
+    );
+
+    // The avatar circle and the "optional" invitation are present; there is
+    // nothing to remove yet.
+    expect(find.byType(HavenAvatar), findsOneWidget);
+    expect(find.text('Add a photo (optional)'), findsOneWidget);
+    expect(find.text('Remove'), findsNothing);
+  });
+
+  testWidgets(
+    'a picked photo is published AFTER the name, with the picked bytes, and '
+    'onboarding completes',
+    (tester) async {
+      final service = _RecordingIdentityService();
+      final profile = MockProfileService();
+      final photoBytes = Uint8List.fromList([9, 8, 7, 6, 5]);
+
+      await pumpLocalized(
+        tester,
+        CreateIdentityScreen(pickPhoto: (_) async => photoBytes),
+        overrides: buildOverrides(service: service, profileService: profile),
+        settle: false,
+      );
+      await tester.pump();
+
+      // Pick a photo: tapping the avatar runs the injected pick+crop and holds
+      // the bytes locally (nothing is published yet — no identity exists).
+      await tester.tap(find.byType(HavenAvatar));
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('Remove'), findsOneWidget);
+      expect(
+        profile.methodCalls.map((c) => c.method),
+        isNot(contains('setOwnAvatar')),
+        reason: 'nothing is published until "Create My Identity" is tapped',
+      );
+
+      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+      await pumpFrames(tester);
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await pumpFrames(tester);
+
+      final methods = profile.methodCalls.map((c) => c.method).toList();
+      expect(methods, contains('updateOwnProfile'));
+      expect(methods, contains('setOwnAvatar'));
+      // The two kind-0 writes must not race: the name publishes first so the
+      // avatar upload merges into a kind-0 that already carries the name.
+      expect(
+        methods.indexOf('updateOwnProfile') < methods.indexOf('setOwnAvatar'),
+        isTrue,
+        reason: 'the display name must publish before the avatar',
+      );
+      // The exact picked bytes reach the avatar upload.
+      final avatarCall = profile.methodCalls.firstWhere(
+        (c) => c.method == 'setOwnAvatar',
+      );
+      expect(avatarCall.args['raw'], photoBytes);
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool(kOnboardingCompletedKey), isTrue);
+    },
+  );
+
+  testWidgets('without a picked photo, no avatar is published', (tester) async {
+    final service = _RecordingIdentityService();
+    final profile = MockProfileService();
+
+    await pumpLocalized(
+      tester,
+      const CreateIdentityScreen(),
+      overrides: buildOverrides(service: service, profileService: profile),
+      settle: false,
+    );
+    await tester.pump();
+
+    await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+    await pumpFrames(tester);
+    await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+    await pumpFrames(tester);
+
+    // The name is still published, but no avatar upload is attempted.
+    expect(
+      profile.methodCalls.map((c) => c.method),
+      contains('updateOwnProfile'),
+    );
+    expect(
+      profile.methodCalls.map((c) => c.method),
+      isNot(contains('setOwnAvatar')),
+    );
+  });
+
+  testWidgets('removing a picked photo publishes the profile without one', (
+    tester,
+  ) async {
+    final service = _RecordingIdentityService();
+    final profile = MockProfileService();
+    final photoBytes = Uint8List.fromList([1, 2, 3]);
+
+    await pumpLocalized(
+      tester,
+      CreateIdentityScreen(pickPhoto: (_) async => photoBytes),
+      overrides: buildOverrides(service: service, profileService: profile),
+      settle: false,
+    );
+    await tester.pump();
+
+    await tester.tap(find.byType(HavenAvatar));
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Remove'), findsOneWidget);
+
+    // Clear it: the invitation returns and the photo is dropped.
+    await tester.tap(find.text('Remove'));
+    await tester.pump();
+    expect(find.text('Add a photo (optional)'), findsOneWidget);
+    expect(find.text('Remove'), findsNothing);
+
+    await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+    await pumpFrames(tester);
+    await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+    await pumpFrames(tester);
+
+    expect(
+      profile.methodCalls.map((c) => c.method),
+      isNot(contains('setOwnAvatar')),
+    );
+  });
+
+  testWidgets('cancelling the picker leaves the state unchanged', (
+    tester,
+  ) async {
+    await pumpLocalized(
+      tester,
+      CreateIdentityScreen(pickPhoto: (_) async => null),
+      overrides: buildOverrides(service: _RecordingIdentityService()),
+      settle: false,
+    );
+    await tester.pump();
+
+    await tester.tap(find.byType(HavenAvatar));
+    await tester.pump();
+    await tester.pump();
+
+    // Nothing was captured: the add-photo invitation is still shown, and there
+    // is no Remove affordance.
+    expect(find.text('Add a photo (optional)'), findsOneWidget);
+    expect(find.text('Remove'), findsNothing);
+  });
+
+  testWidgets('if the name publish fails, the picked photo is NOT published', (
+    tester,
+  ) async {
+    final service = _RecordingIdentityService();
+    final profile = MockProfileService()..shouldThrowOnUpdateOwnProfile = true;
+    final photoBytes = Uint8List.fromList([4, 2]);
+
+    await pumpLocalized(
+      tester,
+      CreateIdentityScreen(pickPhoto: (_) async => photoBytes),
+      overrides: buildOverrides(service: service, profileService: profile),
+      settle: false,
+    );
+    await tester.pump();
+
+    await tester.tap(find.byType(HavenAvatar));
+    await tester.pump();
+    await tester.pump();
+
+    await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+    await pumpFrames(tester);
+    await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+    await pumpFrames(tester);
+
+    // The name publish threw, so the avatar upload is gated off — no
+    // picture-only kind-0 is published without the intended name.
+    final methods = profile.methodCalls.map((c) => c.method);
+    expect(methods, contains('updateOwnProfile'));
+    expect(methods, isNot(contains('setOwnAvatar')));
+    // Onboarding still completes (the profile publish is fire-and-forget).
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getBool(kOnboardingCompletedKey), isTrue);
+  });
+
+  testWidgets('does not scroll on a common phone viewport (390x844)', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await pumpLocalized(
+      tester,
+      const CreateIdentityScreen(),
+      overrides: buildOverrides(service: _RecordingIdentityService()),
+    );
+
+    expect(tester.takeException(), isNull);
+    final position = tester
+        .state<ScrollableState>(find.byType(Scrollable).first)
+        .position;
+    expect(
+      position.maxScrollExtent,
+      0,
+      reason:
+          'CreateIdentityScreen must fit without scrolling on 390x844 in its '
+          'resting (no-keyboard) state, even with the avatar picker present',
+    );
+  });
+
+  testWidgets('does not scroll on 390x844 with a photo picked (taller state)', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final photoBytes = Uint8List.fromList([1, 2, 3, 4]);
+    await pumpLocalized(
+      tester,
+      CreateIdentityScreen(pickPhoto: (_) async => photoBytes),
+      overrides: buildOverrides(service: _RecordingIdentityService()),
+      settle: false,
+    );
+    await tester.pump();
+    await tester.tap(find.byType(HavenAvatar));
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Remove'), findsOneWidget);
+
+    final position = tester
+        .state<ScrollableState>(find.byType(Scrollable).first)
+        .position;
+    expect(
+      position.maxScrollExtent,
+      0,
+      reason:
+          'the taller picked-photo state (with the Remove button) must also '
+          'fit without scrolling on 390x844',
+    );
   });
 }
 

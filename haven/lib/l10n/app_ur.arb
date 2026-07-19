@@ -60,6 +60,7 @@
 
   "onboardingDisplayNameHint": "مثلاً علی",
   "onboardingDisplayNameError": "وہ نام محفوظ نہ ہو سکا۔ براہِ کرم دوبارہ کوشش کریں۔",
+  "onboardingAddPhotoOptional": "تصویر شامل کریں (اختیاری)",
 
   "commonCancel": "منسوخ کریں",
   "commonOpenSettings": "ترتیبات کھولیں",

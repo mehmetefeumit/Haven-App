@@ -51,6 +51,7 @@
   "onboardingImportError": "No pudimos importar esa clave. Compruébala e inténtalo de nuevo.",
   "onboardingDisplayNameHint": "p. ej., Alex",
   "onboardingDisplayNameError": "No se pudo guardar ese nombre. Inténtalo de nuevo.",
+  "onboardingAddPhotoOptional": "Añadir una foto (opcional)",
   "commonCancel": "Cancelar",
   "commonOpenSettings": "Abrir ajustes",
   "settingsTitle": "Ajustes",

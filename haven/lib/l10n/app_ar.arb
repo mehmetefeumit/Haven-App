@@ -66,6 +66,7 @@
 
   "onboardingDisplayNameHint": "مثال: أليكس",
   "onboardingDisplayNameError": "تعذّر حفظ هذا الاسم. يُرجى إعادة المحاولة.",
+  "onboardingAddPhotoOptional": "إضافة صورة (اختياري)",
 
   "commonCancel": "إلغاء",
   "commonOpenSettings": "فتح الإعدادات",

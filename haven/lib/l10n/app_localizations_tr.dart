@@ -199,6 +199,9 @@ class AppLocalizationsTr extends AppLocalizations {
       'Bu ad kaydedilemedi. Lütfen tekrar deneyin.';
 
   @override
+  String get onboardingAddPhotoOptional => 'Fotoğraf ekle (isteğe bağlı)';
+
+  @override
   String get commonCancel => 'İptal';
 
   @override
