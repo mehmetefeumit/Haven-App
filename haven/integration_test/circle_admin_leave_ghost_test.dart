@@ -63,8 +63,9 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/rust/api.dart';
-import 'package:haven/src/rust/frb_generated.dart';
 import 'package:integration_test/integration_test.dart';
+
+import 'e2e/_lib/test_user.dart';
 
 /// Sentinel seeds — deterministic, public test values. Mirror the
 /// `aliceSeed` / `bobSeed` constants in
@@ -95,18 +96,17 @@ void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
   setUpAll(() async {
-    await RustLib.init();
-    // Hermetic in-memory keyring so the test doesn't need a platform
-    // Keystore/Keychain. Mirrors the e2e scenarios' bootstrap path.
-    await useInMemoryKeyringForTest();
-    // Allow `_testRelayUrl` ("ws://localhost:7777" by default) through
-    // any Rust call site that runs `validate_relay_urls`. The test
-    // currently uses `CircleManagerFfi` directly and does not touch the
-    // relay layer, but opting in defends against a future code path
-    // routing those URLs through the validator. Debug-only; release
-    // builds physically cannot reach this. See
-    // `haven-core/src/relay/manager.rs::allow_ws_loopback_for_test`.
-    allowWsLoopbackForTest();
+    // Full hermetic process bootstrap, shared with the e2e lanes
+    // (test_user.dart): Rust bridge init, in-memory keyring (so the test
+    // doesn't need a platform Keystore/Keychain), the debug-only
+    // loopback-`ws://` opt-in (so `_testRelayUrl` passes every Rust
+    // `validate_relay_urls` call site), and the default-relay override.
+    // The override is load-bearing for Dark Matter's KeyPackage discovery:
+    // `fetchKeypackage`'s cascade ends at the read-only discovery plane,
+    // which mirrors the default-relay override in debug builds — without
+    // it, the fetch below would consult the PUBLIC indexers (non-hermetic,
+    // and Bob's KeyPackage only exists on the local strfry → null).
+    await TestUser.bootstrapProcess(relays: [_testRelayUrl]);
   });
 
   group('Admin-leave gate (FFI)', () {

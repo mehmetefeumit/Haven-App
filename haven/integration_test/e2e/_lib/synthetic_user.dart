@@ -117,20 +117,30 @@ class SyntheticUser {
   /// Constructs a synthetic identity from [seed] and publishes its
   /// KeyPackage to [relay] before returning.
   ///
-  /// The published event uses **both** the canonical kind 30443
-  /// (addressable, MIP-00) and the legacy kind 443 — Haven's
-  /// [`NostrRelayService.fetchKeyPackage`] queries both kinds, and
-  /// publishing both maximises the chance the UI's KP lookup will
-  /// succeed regardless of which kind it prefers first.
+  /// The published event is the canonical kind 30443 (addressable,
+  /// Marmot v2) ONLY — the legacy kind 443 twin is retired under Dark
+  /// Matter, and Haven's KeyPackage selection is 30443-only.
   ///
-  /// Throws if the relay rejects either event (an indicator of a
+  /// [seedOffset] deterministically varies the trailing seed byte so
+  /// callers that bootstrap several users from the SAME base seed onto a
+  /// relay that is not reset between tests get a DISTINCT identity each
+  /// time. Reusing a pubkey on a still-populated relay makes the
+  /// maintenance tick ADOPT the earlier instance's on-relay 30443 slot
+  /// (action=seededD, nothing published) instead of publishing this
+  /// instance's KeyPackage — see the `relaysHealed` gate below.
+  ///
+  /// Throws if the relay rejects the event (an indicator of a
   /// strfry misconfiguration or a malformed event).
   static Future<SyntheticUser> bootstrap({
     required String label,
     required Uint8List seed,
     required TestRelay relay,
+    int seedOffset = 0,
   }) async {
-    final user = await TestUser.bootstrap(label: label, seed: seed);
+    final user = await TestUser.bootstrap(
+      label: label,
+      seed: _seedWithOffset(seed, seedOffset),
+    );
     try {
       // Dark Matter (DM-4): `maintain_key_package` is now the ONE publish
       // path for `KeyPackage` material (kind 30443 only — the legacy kind
@@ -153,10 +163,30 @@ class SyntheticUser {
           identitySecretBytes: secret,
         );
         if (outcome.relaysHealed < 1) {
+          // Test-runner diagnostic: name the usual culprit per action so a
+          // CI log alone pinpoints the cause. `seededD` with zero heals
+          // means the relay ALREADY serves a canonical 30443 for this
+          // pubkey; the tick adopted that `d` slot and published nothing —
+          // but the on-relay KeyPackage belongs to an EARLIER bootstrap of
+          // the same seed (its MLS private key lives in that instance's
+          // disposed storage), so this instance is NOT discoverable.
+          final hint = switch (outcome.action) {
+            KpMaintenanceActionFfi.seededD =>
+              ' Hint: action=seededD means a 30443 for this pubkey already '
+                  'exists on the relay — usually an earlier test in this '
+                  'process bootstrapped the SAME seed onto a relay that is '
+                  'not reset between tests. Pass a distinct seedOffset so '
+                  'each bootstrap owns its identity.',
+            KpMaintenanceActionFfi.alreadyHealthy =>
+              ' Hint: action=alreadyHealthy with zero heals means the probe '
+                  'saw a tracked slot served everywhere — unexpected for a '
+                  'fresh data dir; check for a reused dataDir.',
+            _ => '',
+          };
           throw StateError(
             "$label's KeyPackage maintenance did not reach the hermetic "
             'relay (action=${outcome.action.name}, '
-            'errors=${outcome.relayErrors})',
+            'errors=${outcome.relayErrors}).$hint',
           );
         }
         debugPrint(

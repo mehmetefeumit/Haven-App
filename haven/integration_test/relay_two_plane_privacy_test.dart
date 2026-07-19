@@ -1,5 +1,5 @@
 /// Integration tests proving Haven's TWO-PLANE relay privacy invariant at the
-/// SERVICE-FFI level: a relay-list event (kind 10050 / 10051) is published
+/// SERVICE-FFI level: a relay-list event (kind 10050 / 10002) is published
 /// ONLY to the user's own configured relays — NEVER force-unioned with the
 /// public default relays. A user who configures a private relay (and removes
 /// the public defaults) must not leak that private relay onto any public relay.
@@ -18,7 +18,7 @@
 /// The proof: seed `[R1]`, add `R2`, then REMOVE `R1` so the user's list is
 /// `[R2]` only. Under the OLD model `built.targets` would re-add R1 (the
 /// default) via the publish union; under the two-plane model `built.targets`
-/// is exactly `[R2]`, and the kind 10050/10051 event lands ONLY on R2 — never
+/// is exactly `[R2]`, and the kind 10050/10002 event lands ONLY on R2 — never
 /// on the public R1.
 ///
 /// ## Platform requirements
@@ -166,15 +166,20 @@ void main() {
       // POSITIVE: the private relay received the list event, and its relay
       // tags name the private relay. This must resolve FIRST so the negative
       // assertion below is anchored to a completed publish (no false pass on
-      // slow propagation).
+      // slow propagation). Tag form differs per kind: 10050 (MIP-00/NIP-17)
+      // carries ["relay", <url>] tags, while 10002 (NIP-65) carries
+      // ["r", <url>] tags.
       final r2Event = await onR2;
+      final relayTagName = listKind == 10002 ? 'r' : 'relay';
       final relayTags = r2Event.tags
-          .where((t) => t.isNotEmpty && t.first == 'relay')
+          .where((t) => t.isNotEmpty && t.first == relayTagName)
           .toList();
       expect(
         relayTags.any((t) => t.length >= 2 && t[1] == secondStrfryUrl),
         isTrue,
-        reason: '$label: the kind $listKind event on R2 must name R2.',
+        reason:
+            '$label: the kind $listKind event on R2 must name R2 in its '
+            "'$relayTagName' tags.",
       );
 
       // NEGATIVE (anchored): the PUBLIC relay R1 must NEVER receive a kind
@@ -215,11 +220,14 @@ void main() {
   );
 
   testWidgets(
-    'TP-KP: private-only KeyPackage list (10051) never leaks to the public relay',
+    'TP-KP: private-only KeyPackage list (10002) never leaks to the public relay',
     (tester) async {
+      // Dark Matter: the KeyPackage-discovery list is the NIP-65 kind 10002
+      // (the dedicated kind 10051 is retired), so the leak proof observes
+      // 10002 on the wire for the nip65 category.
       await runLeakProof(
         category: RelayTypeFfi.nip65,
-        listKind: 10051,
+        listKind: 10002,
         label: 'TP-KP',
       );
     },

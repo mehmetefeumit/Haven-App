@@ -29,7 +29,7 @@ const String defaultStrfryUrl = String.fromEnvironment(
 ///
 /// Distinct from [defaultStrfryUrl] (R1). The relay-customization tests add
 /// R2 to the user's relay preferences and then assert that events (kind 30443,
-/// 10051, 10050, 445) actually land on R2. Using a physically separate relay
+/// 10002, 10050, 445) actually land on R2. Using a physically separate relay
 /// process makes the proof definitive: if the production add-relay path
 /// silently failed, events would arrive on R1 only and every `firstWhere` on
 /// `r2` would time out, turning the test red. CI spins up a second strfry
@@ -313,7 +313,7 @@ class TestRelay {
   /// Publishes a pre-signed Nostr event JSON to the relay.
   ///
   /// Used by `SyntheticUser` to put a relay-only identity's events (e.g.
-  /// KeyPackage kind 443) on the wire so the system-under-test can fetch
+  /// KeyPackage kind 30443) on the wire so the system-under-test can fetch
   /// them through its normal relay-query path.
   ///
   /// [eventJson] must be a complete, signed Nostr event payload (the inner
@@ -463,17 +463,67 @@ class TestRelay {
 
     timer = Timer(timeout, () {
       if (completer.isCompleted) return;
-      completer.completeError(
-        TimeoutException(
-          'TestRelay.firstWhere timed out after ${timeout.inSeconds}s '
-          'with filter $filter',
-        ),
-      );
       cleanup();
+      // Enrich the failure with a test-runner-only snapshot of what the
+      // relay ACTUALLY holds for this filter's scope before surfacing the
+      // timeout. The probe is bounded (2s) and best-effort; the wait has
+      // already failed, so the added latency only affects the error path.
+      unawaited(
+        _timeoutDiagnostic(filter).then((diagnostic) {
+          if (completer.isCompleted) return;
+          completer.completeError(
+            TimeoutException(
+              'TestRelay.firstWhere timed out after ${timeout.inSeconds}s '
+              'with filter $filter.$diagnostic',
+            ),
+          );
+        }),
+      );
     });
 
     _sendReq(subId, filter);
     return completer.future;
+  }
+
+  /// Builds a test-runner-only diagnostic suffix for a [firstWhere]
+  /// timeout: a short snapshot of what the relay ACTUALLY holds for the
+  /// same author/tag scope with the kind constraint dropped.
+  ///
+  /// A wrong-kind wait (e.g. a filter still naming a retired wire kind
+  /// after a protocol migration) then reports "the relay holds kinds
+  /// {30443}" instead of an unexplained timeout, while an
+  /// empty snapshot points at the publisher never reaching the relay.
+  /// Best-effort: never throws, returns an empty string when there is no
+  /// author/tag scope to probe or the probe itself fails.
+  Future<String> _timeoutDiagnostic(Map<String, dynamic> filter) async {
+    try {
+      final probe = <String, dynamic>{'limit': 25};
+      for (final key in const <String>['authors', '#p', '#h', '#e']) {
+        final dynamic value = filter[key];
+        if (value != null) probe[key] = value;
+      }
+      if (probe.length == 1) {
+        // Kind-only filter — a whole-relay snapshot would be noise.
+        return '';
+      }
+      final held = await collectN(
+        count: 25,
+        filter: probe,
+        timeout: const Duration(seconds: 2),
+      );
+      if (held.isEmpty) {
+        return " Diagnostic: the relay holds NO events for this filter's "
+            'author/tag scope (kind constraint dropped) — the expected '
+            'publisher likely never reached the relay.';
+      }
+      final kinds = held.map((e) => e.kind).toSet().toList()..sort();
+      return ' Diagnostic: for the same author/tag scope the relay holds '
+          '${held.length} event(s) of kind(s) $kinds (kind constraint '
+          'dropped) — a mismatch against the waited-for kind usually means '
+          'the wait filters a stale/retired wire kind.';
+    } on Object {
+      return '';
+    }
   }
 
   /// Collects up to [count] distinct events matching [filter], or returns

@@ -448,32 +448,33 @@ void main() {
         const keyPackage = KeyPackageData(
           pubkey:
               'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-          eventJson: '{"kind":443,"content":"key_package_bytes"}',
+          eventJson: '{"kind":30443,"content":"key_package_bytes"}',
           relays: ['wss://relay.example.com'],
         );
 
         expect(keyPackage.pubkey.length, 64);
-        expect(keyPackage.eventJson, contains('"kind":443'));
+        expect(keyPackage.eventJson, contains('"kind":30443'));
         expect(keyPackage.relays, isNotEmpty);
       });
 
-      test('event is kind 443 KeyPackage', () {
+      test('event is kind 30443 KeyPackage', () {
         const keyPackage = KeyPackageData(
           pubkey:
               'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-          eventJson: '{"kind":443}',
+          eventJson: '{"kind":30443}',
           relays: ['wss://relay.example.com'],
         );
 
-        // Kind 443 is MIP-01 KeyPackage
-        expect(keyPackage.eventJson, contains('443'));
+        // Kind 30443 is the Marmot v2 addressable KeyPackage (legacy 443
+        // is retired by the Dark Matter migration).
+        expect(keyPackage.eventJson, contains('30443'));
       });
 
       test('nip65Relays defaults to empty list', () {
         const keyPackage = KeyPackageData(
           pubkey:
               'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-          eventJson: '{"kind":443}',
+          eventJson: '{"kind":30443}',
           relays: ['wss://relay.example.com'],
         );
 
@@ -484,7 +485,7 @@ void main() {
         const keyPackage = KeyPackageData(
           pubkey:
               'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-          eventJson: '{"kind":443}',
+          eventJson: '{"kind":30443}',
           relays: ['wss://inbox.example.com'],
           nip65Relays: ['wss://nip65.example.com'],
         );

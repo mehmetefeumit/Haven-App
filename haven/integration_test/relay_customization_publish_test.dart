@@ -290,43 +290,66 @@ void main() {
           final kp30443OnR2 = await r2Kp30443Future;
           final kpListOnR2 = await r2KpListFuture;
 
-          // ORACLE: the 30443 event must carry a multi-value `relays` tag
-          // that matches the user's configured KeyPackage-discovery list
-          // EXACTLY (kpRelays) — the two-plane leak invariant restated at
-          // the wire level, since `maintainKeyPackage` no longer returns
-          // the signed event for direct introspection. Per MIP-00 §3.2 the
-          // KeyPackage event MUST advertise all relays where it can be
-          // fetched so peers know where to query for it.
+          // ORACLE: the Dark Matter kind 30443 carries the Marmot v2 tag
+          // set EXACTLY — `d` (stable addressable slot),
+          // `mls_protocol_version`, `i`, `mls_ciphersuite`,
+          // `mls_extensions`, `mls_proposals`, `app_components` — and
+          // deliberately NO `relays` tag and NO `encoding` tag (the retired
+          // kind-443 MIP-00 §3.2 shape). Relay location is conveyed by the
+          // kind-10002 NIP-65 list instead, asserted below. Mirrors the
+          // Rust unit oracle in `relay/maintenance/key_package.rs` (the
+          // has-marmot-tag-set / no-encoding-or-relays test) at the wire
+          // level.
           final kpTags = kp30443OnR2.tags;
-          final relaysTag = kpTags
-              .where((t) => t.isNotEmpty && t.first == 'relays')
+          String? kpTagValue(String name) => kpTags
+              .where((t) => t.length >= 2 && t.first == name)
+              .map((t) => t[1])
               .firstOrNull;
           expect(
-            relaysTag,
+            kpTagValue('d'),
             isNotNull,
             reason:
-                "kind 30443 must carry a 'relays' tag (MIP-00 §3.2). "
-                'Without it peers cannot know where to fetch the KeyPackage.',
+                "kind 30443 must carry a non-empty 'd' tag — it is a NIP-33 "
+                'addressable event; without the stable slot, republishes '
+                'would accumulate instead of replacing.',
           );
           expect(
-            relaysTag,
-            contains(secondStrfryUrl),
-            reason:
-                "The 30443 'relays' tag must list R2 so peers know to query "
-                'R2 for this user’s KeyPackage.',
+            kpTagValue('d'),
+            isNotEmpty,
+            reason: "the 30443 'd' slot must not be the empty string.",
           );
-          expect(
-            relaysTag!.sublist(1).toSet(),
-            equals(kpRelays.toSet()),
-            reason:
-                'The kind 30443 KeyPackage event must embed exactly the '
-                "user's configured KeyPackage-discovery list — not a wider "
-                'public-default union — so peers fetch the KeyPackage only '
-                'from the relays the user advertised for it.',
-          );
+          for (final required in <String>[
+            'mls_protocol_version',
+            'mls_ciphersuite',
+            'mls_extensions',
+            'mls_proposals',
+          ]) {
+            expect(
+              kpTagValue(required),
+              isNotNull,
+              reason:
+                  "kind 30443 must carry an '$required' tag "
+                  '(Marmot v2 KeyPackage tag set).',
+            );
+          }
+          for (final retired in <String>['relays', 'encoding']) {
+            expect(
+              kpTagValue(retired),
+              isNull,
+              reason:
+                  "kind 30443 must NOT carry a '$retired' tag — that is the "
+                  'retired kind-443 wire shape. Peers locate KeyPackages via '
+                  "the kind-10002 NIP-65 'r' tags, never via an embedded "
+                  'relay list.',
+            );
+          }
 
           // ORACLE: the kind 10002 event must carry singular `r` tags (one
-          // per URL) per NIP-65 semantics.  It must contain R2.
+          // per URL) per NIP-65 semantics, and the full `r`-tag URL set must
+          // equal the user's configured KeyPackage-discovery list EXACTLY
+          // (kpRelays) — the two-plane leak invariant restated at the wire
+          // level, which the retired 30443 `relays` tag used to carry: no
+          // public-default union may widen what the user advertised.
           final listTags = kpListOnR2.tags;
           final relayTagsOnList = listTags
               .where((t) => t.isNotEmpty && t.first == 'r')
@@ -336,15 +359,17 @@ void main() {
             isNotEmpty,
             reason: "kind 10002 must carry at least one 'r' tag per NIP-65.",
           );
-          final r2RelayTag = relayTagsOnList
-              .where((t) => t.length >= 2 && t[1] == secondStrfryUrl)
-              .firstOrNull;
           expect(
-            r2RelayTag,
-            isNotNull,
+            relayTagsOnList
+                .where((t) => t.length >= 2)
+                .map((t) => t[1])
+                .toSet(),
+            equals(kpRelays.toSet()),
             reason:
-                "kind 10002 must carry an ['r', '$secondStrfryUrl'] tag "
-                'so peers know to query R2 for this user’s KeyPackages.',
+                "the kind 10002 'r'-tag URL set must equal the user's "
+                'configured KeyPackage-discovery list exactly — peers fetch '
+                'the 30443 from these relays, and a wider set would leak '
+                'relays the user never advertised (two-plane invariant).',
           );
           // Negative-control comment: if addUserRelay silently failed,
           // kpRelays would be [R1] only.  The 30443 publish would go to R1
@@ -786,15 +811,20 @@ void main() {
         );
 
         try {
-          // Use a distinct Bob seed so this circle's nostrGroupId differs
-          // from the one in FFI-445-POS, making the R2 negative-control
-          // filter unambiguous. Bootstrapping already publishes his
-          // KeyPackage via `maintainKeyPackage` (Dark Matter's ONE publish
-          // path), so Alice can fetch it from R1 below.
+          // Distinct Bob identity (seedOffset) so this circle's
+          // nostrGroupId differs from the one in FFI-445-POS, making the R2
+          // negative-control filter unambiguous — AND so the maintenance
+          // tick actually publishes: FFI-445-POS already put the base-seed
+          // Bob's 30443 on R1, and reusing that pubkey would make this
+          // bootstrap ADOPT the stale slot (action=seededD, nothing
+          // published) instead of publishing bob_neg's own KeyPackage.
+          // Bootstrapping publishes it via `maintainKeyPackage` (Dark
+          // Matter's ONE publish path), so Alice can fetch it from R1 below.
           final bob = await SyntheticUser.bootstrap(
             label: 'bob_neg',
             seed: bobSeed,
             relay: r1,
+            seedOffset: 1,
           );
           try {
             final relayMgrForKp = await RelayManagerFfi.newInstance();
@@ -976,13 +1006,17 @@ void main() {
         await aliceManager.seedRelayDefaultsIfUnseeded();
 
         try {
-          // Bootstrapping already publishes Bob's KeyPackage via
-          // `maintainKeyPackage` (Dark Matter's ONE publish path), so
-          // Alice can fetch it from R1 below.
+          // Distinct Bob identity (seedOffset 2 — base is FFI-445-POS,
+          // offset 1 is bob_neg) so the maintenance tick publishes this
+          // instance's KeyPackage instead of adopting a stale on-relay slot
+          // for a reused pubkey (action=seededD, nothing published).
+          // Bootstrapping publishes it via `maintainKeyPackage` (Dark
+          // Matter's ONE publish path), so Alice can fetch it from R1 below.
           final bob = await SyntheticUser.bootstrap(
             label: 'bob_snap',
             seed: bobSeed,
             relay: r1,
+            seedOffset: 2,
           );
           try {
             final relayMgrForKp = await RelayManagerFfi.newInstance();

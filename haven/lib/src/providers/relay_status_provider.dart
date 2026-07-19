@@ -1,7 +1,7 @@
 /// Relay status provider for monitoring event publication.
 ///
-/// Tracks per-relay publication status for KeyPackage (443) and
-/// relay list (10051) events.
+/// Tracks per-relay publication status for KeyPackage (30443) and
+/// relay list (10002) events.
 library;
 
 import 'package:flutter/foundation.dart';
@@ -64,8 +64,8 @@ class KindCheckResult {
   }
 }
 
-/// Per-relay event status for kinds 443 (KeyPackage), 10051 (KP relay
-/// list), and 10050 (Inbox relay list).
+/// Per-relay event status for kinds 30443 (KeyPackage), 10002 (NIP-65 KP
+/// discovery list), and 10050 (Inbox relay list).
 @immutable
 class RelayEventStatus {
   /// Creates a [RelayEventStatus].
@@ -79,10 +79,10 @@ class RelayEventStatus {
   /// The relay URL.
   final String relayUrl;
 
-  /// Status of kind 443 (KeyPackage) on this relay.
+  /// Status of kind 30443 (KeyPackage) on this relay.
   final KindCheckResult keyPackage;
 
-  /// Status of kind 10051 (KeyPackage relay list) on this relay.
+  /// Status of kind 10002 (NIP-65 KeyPackage-discovery list) on this relay.
   final KindCheckResult relayList;
 
   /// Status of kind 10050 (NIP-17 Inbox relay list) on this relay.
@@ -190,7 +190,8 @@ class RelayStatusNotifier extends AsyncNotifier<RelayStatusState> {
     // their relay lists, the status page rebuilds.
     ref.watch(relayStatusInvalidatorProvider);
     // Show exactly the relays the user has configured across both lists
-    // (kind 10050 inbox + kind 10051 KeyPackage). Two-plane model: public
+    // (kind 10050 inbox + kind 10002 KeyPackage-discovery). Two-plane model:
+    // public
     // defaults are NOT surfaced here — they are no longer force-added to
     // publishes, so listing them would misrepresent where the user's data
     // actually goes. If both lists are empty (pre-seed), show no rows.
@@ -282,8 +283,8 @@ class RelayStatusNotifier extends AsyncNotifier<RelayStatusState> {
     );
   }
 
-  /// Runs the three concurrent kind-checks (443 / 10051 / 10050) for one relay
-  /// and folds them back into an updated [`RelayEventStatus`].
+  /// Runs the three concurrent kind-checks (30443 / 10002 / 10050) for one
+  /// relay and folds them back into an updated [`RelayEventStatus`].
   Future<RelayEventStatus> _doCheckOne(
     RelayService relayService,
     RelayEventStatus relay,
@@ -295,13 +296,13 @@ class RelayStatusNotifier extends AsyncNotifier<RelayStatusState> {
         relayService,
         relay.relayUrl,
         identity.pubkeyHex,
-        eventKind: 443,
+        eventKind: 30443,
       ),
       _checkKind(
         relayService,
         relay.relayUrl,
         identity.pubkeyHex,
-        eventKind: 10051,
+        eventKind: 10002,
       ),
       _checkKind(
         relayService,

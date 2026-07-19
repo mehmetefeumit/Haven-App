@@ -48,18 +48,20 @@ Future<TestRelayEvent> waitForGroupMessage({
   timeout: timeout,
 );
 
-/// Waits until the relay reports at least one kind-443 (KeyPackage)
-/// authored by [authorPubkeyHex].
+/// Waits until the relay reports at least one kind-30443 (addressable
+/// KeyPackage, MIP-00 / Dark Matter) authored by [authorPubkeyHex].
 ///
 /// Used during circle-creation flows where Alice's instance needs to
 /// see Bob's published KeyPackage before invoking `createCircle`.
+/// The legacy kind 443 is retired: Haven publishes 30443 only, so
+/// waiting on 443 would time out against a correct publisher.
 Future<TestRelayEvent> waitForKeyPackage({
   required TestRelay relay,
   required String authorPubkeyHex,
   Duration timeout = const Duration(seconds: 30),
 }) => relay.firstWhere(
   filter: <String, dynamic>{
-    'kinds': <int>[443],
+    'kinds': <int>[30443],
     'authors': <String>[authorPubkeyHex],
     'limit': 5,
   },

@@ -205,9 +205,11 @@ void main() {
   });
 
   group('RelayService - KeyPackage Data', () {
-    test('event is kind 443', () {
-      const keyPackageJson = '{"kind":443,"content":"..."}';
-      expect(keyPackageJson, contains('"kind":443'));
+    test('event is kind 30443', () {
+      // 30443 is the Marmot v2 addressable KeyPackage kind (the legacy
+      // kind 443 is retired by the Dark Matter migration).
+      const keyPackageJson = '{"kind":30443,"content":"..."}';
+      expect(keyPackageJson, contains('"kind":30443'));
     });
 
     test('relay URLs use wss protocol', () {

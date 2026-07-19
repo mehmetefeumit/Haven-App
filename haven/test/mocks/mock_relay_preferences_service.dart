@@ -151,12 +151,15 @@ class MockRelayPreferencesService implements RelayPreferencesService {
     if (!enabled) {
       return const BuiltRelayListPublish(suppressed: true);
     }
+    // Mirrors the production wire kinds: inbox = 10050 (NIP-17), and the
+    // KeyPackage-discovery category = 10002 (NIP-65; the dedicated kind
+    // 10051 is retired by the Dark Matter migration).
     return BuiltRelayListPublish(
       suppressed: false,
-      eventJson: '{"kind":${category == RelayCategory.inbox ? 10050 : 10051}}',
+      eventJson: '{"kind":${category == RelayCategory.inbox ? 10050 : 10002}}',
       eventIdHex: '0' * 64,
       targets: await publishTargets(category),
-      kind: category == RelayCategory.inbox ? 10050 : 10051,
+      kind: category == RelayCategory.inbox ? 10050 : 10002,
       createdAtSecs: DateTime.now().millisecondsSinceEpoch ~/ 1000,
     );
   }

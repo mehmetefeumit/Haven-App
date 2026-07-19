@@ -380,9 +380,9 @@ void main() {
     await _prepareAlicePubkey();
 
     // Bob and Carol as in-process synthetic peers. Each construction
-    // publishes a KeyPackage (kind 30443 + legacy 443) to strfry so
-    // Alice's `CreateCirclePage` can resolve them when she types
-    // their npubs.
+    // publishes a KeyPackage (kind 30443, addressable — the legacy 443
+    // twin is retired) to strfry so Alice's `CreateCirclePage` can
+    // resolve them when she types their npubs.
     bob = await SyntheticUser.bob(ctx.relay);
     didInitBob = true;
     carol = await SyntheticUser.carol(ctx.relay);
@@ -419,15 +419,31 @@ void main() {
     'admin leave (handoff) → non-admin leave',
     (tester) async {
       // PRIVACY WATCH — start BEFORE anything is pumped or published so
-      // we observe every event for the whole run. Haven's privacy model
-      // forbids publishing kind-0 profiles (no relay-level username↔
-      // pubkey correlation). Buffer any kind-0 the relay sees from any
-      // author; assert empty at the end. Relay-layer, so robust to any
-      // UI change.
+      // we observe every event for the whole run. Public kind-0 profiles
+      // are published BY DESIGN since the public-profile migration
+      // (owner-directed; e2e_profile_sharing.dart holds the positive
+      // publish/resolve coverage), so kind-0 PRESENCE is no longer a
+      // violation. What must still never happen at the relay layer:
+      //
+      //   1. a kind-0 authored by anything but a participant's long-term
+      //      identity key — a profile signed by an ephemeral kind-445 key
+      //      would link that ephemeral key to an identity, deanonymizing
+      //      the group-message stream (asserted at the end of the run);
+      //   2. legacy Dark-Matter-retired wire kinds — 443 KeyPackages and
+      //      10051 KP relay lists. Haven's cutover actively retracts
+      //      them; a fresh one reappearing means a publish path regressed
+      //      to the old stack (asserted empty at the end of the run).
+      //
+      // Buffered for the whole run. Relay-layer, so robust to any UI
+      // change.
       final profileEvents = <TestRelayEvent>[];
       final profileWatch = ctx.relay
           .events(<String, dynamic>{'kinds': const <int>[0]})
           .listen(profileEvents.add);
+      final legacyKindEvents = <TestRelayEvent>[];
+      final legacyKindWatch = ctx.relay
+          .events(<String, dynamic>{'kinds': const <int>[443, 10051]})
+          .listen(legacyKindEvents.add);
       try {
         // -----------------------------------------------------------
         // PHASE 1 — pump HavenApp with the pre-seeded identity and
@@ -927,17 +943,43 @@ void main() {
           adminResidual: phase6.adminResidual,
         );
 
-        // Privacy model: NO kind-0 profile may have been published by
-        // anyone for the entire run (relays must never see a
-        // username↔pubkey mapping). Asserted at the very end so it
-        // covers identity load, circle creation, invites, locations,
-        // and both leave flows.
+        // Privacy model (post-public-profile migration): kind-0 profiles
+        // MAY appear, but every one observed for the entire run must be
+        // signed by a KNOWN long-term identity key. Any other author
+        // means either a profile signed by an ephemeral key (linking that
+        // key to an identity and deanonymizing the kind-445 stream) or an
+        // unexpected publisher on the hermetic relay. Asserted at the
+        // very end so it covers identity load, circle creation, invites,
+        // locations, and both leave flows.
+        final knownIdentityPubkeys = <String>{
+          _alicePubkeyHex().toLowerCase(),
+          bob.pubkeyHex.toLowerCase(),
+          carol.pubkeyHex.toLowerCase(),
+        };
+        for (final e in profileEvents) {
+          expect(
+            knownIdentityPubkeys.contains(e.pubkey.toLowerCase()),
+            isTrue,
+            reason:
+                'a kind-0 profile was authored by a NON-identity pubkey '
+                '(${_redactPk(e.pubkey)}) — profiles must only ever be '
+                'signed by a long-term identity key, never an ephemeral '
+                'kind-445 key (that would deanonymize the group stream).',
+          );
+        }
+
+        // Dark Matter retired kinds: no fresh kind-443 KeyPackage and no
+        // kind-10051 KP relay list may appear for the entire run — Haven
+        // publishes 30443/10002 only, and the cutover retracts legacy
+        // events rather than minting new ones.
         expect(
-          profileEvents,
+          legacyKindEvents,
           isEmpty,
           reason:
-              'Haven must never publish a kind-0 profile (privacy model) '
-              '— the relay observed ${profileEvents.length} during the run.',
+              'retired wire kind(s) observed on the relay '
+              '(${legacyKindEvents.map((e) => e.kind).toSet()}) — kinds '
+              '443/10051 are retired by the Dark Matter migration and must '
+              'never be republished.',
         );
 
         debugPrint('[e2e_combined] all phases complete ✓');
@@ -953,6 +995,7 @@ void main() {
         rethrow;
       } finally {
         await profileWatch.cancel();
+        await legacyKindWatch.cancel();
         // Explicit, AWAITED live-sync engine teardown. Flag-on,
         // MapShell.initState started the engine, which occupies the
         // process-global Rust SESSION slot. Do NOT rely on the next test's
@@ -1053,14 +1096,21 @@ void main() {
       fe2Relay = await TestRelay.connect();
       fe2DidInitRelay = true;
 
-      // Fresh Alice (own temp dir, own SQLCipher state). Uses aliceSeed
-      // so her pubkey is known-stable for log correlation. Her KP is
-      // published to the relay by `bootstrap` (not needed by this
-      // scenario but harmless).
+      // Fresh Alice (own temp dir, own SQLCipher state) in the aliceSeed
+      // family, but with a DISTINCT identity (seedOffset 1): the main
+      // scenario's app pumps the offset-0 aliceSeed identity and its
+      // mount-time maintain tick publishes that pubkey's 30443 to this
+      // same (un-reset) relay. Reusing the exact seed here would make
+      // this bootstrap ADOPT that stale on-relay slot (action=seededD,
+      // nothing published, relaysHealed=0) and throw — the KeyPackage
+      // private material belongs to the app instance, not this fresh
+      // dataDir. FE-2 only ever references fe2Alice.pubkeyHex
+      // dynamically, so the offset changes nothing it asserts.
       fe2Alice = await SyntheticUser.bootstrap(
         label: 'fe2_alice',
         seed: aliceSeed,
         relay: fe2Relay,
+        seedOffset: 1,
       );
       fe2DidInitAlice = true;
 
@@ -3063,7 +3113,7 @@ Future<void> _carolAcceptsAndEpochCheck({
   // KeyPackage rotation after a joiner accepts is production Flutter
   // behavior: `invitation_card.dart` calls `ref.invalidate(
   // keyPackagePublisherProvider)`, which triggers `startJoinerWatch`
-  // and republishes a fresh kind 443/30443 for the accepting user.
+  // and republishes a fresh kind-30443 for the accepting user.
   // That invalidate→rebuild flow is exercised by the widget/provider
   // unit tests:
   //
@@ -3077,7 +3127,7 @@ Future<void> _carolAcceptsAndEpochCheck({
   // touches `invitation_card.dart` or `keyPackagePublisherProvider`.
   // Alice (the only real Flutter app peer) is the circle creator and
   // never accepts an invitation, so the production republish path is
-  // not reachable here. Any poll-for-kind-443/30443 from Carol would
+  // not reachable here. Any poll-for-kind-30443 from Carol would
   // be satisfied immediately by her bootstrap KeyPackage published in
   // `setUpAll` — proving nothing about rotation.
   // -------------------------------------------------------------------
@@ -4033,11 +4083,13 @@ void _assertResidualGroupAfterHandoff({
 /// - **No real MLS group id on the wire** (Security Rule #4): only the
 ///   `nostr_group_id` (the `h` tag) may appear; the real MLS group id
 ///   must never leak into any tag.
-/// - **No forbidden event kinds on the wire**: no kind-0 profiles
-///   (pubkey-only identity), no kind-3 contact lists (no social-graph leak),
-///   and no kind-10002 NIP-65 relay lists (Haven uses 10050/10051 only); plus
+/// - **No forbidden event kinds on the wire**: no kind-3 contact lists (no
+///   social-graph leak) and no Dark-Matter-retired kinds (443 KeyPackages /
+///   10051 KP relay lists — Haven publishes 30443/10002 only); plus
 ///   **no bare kind-444 Welcomes** (they stay gift-wrapped inside kind-1059,
-///   and are unsigned per Security Rule #3).
+///   and are unsigned per Security Rule #3). Kind-0 profiles and kind-10002
+///   NIP-65 lists are published BY DESIGN post-migration and are therefore
+///   not forbidden here.
 Future<void> _assertWirePrivacyInvariants({
   required TestRelay relay,
   required CircleWithMembersFfi circle,
@@ -4146,20 +4198,27 @@ Future<void> _assertWirePrivacyInvariants({
     'ephemeral keys, no MLS group id on the wire, no recipient p-tags)',
   );
 
-  // These event kinds must NEVER reach a relay. Haven's privacy model publishes
-  // only pubkey-scoped group (445), gift-wrapped (1059), and relay-list
-  // (10050/10051) events. An explicit forbid-list {0, 3, 10002} is used rather
-  // than a closed allow-set so a future legitimate kind doesn't make this
-  // assertion spuriously fail on a cosmetic protocol addition.
-  //   - kind 0      profile: would correlate a username/avatar with a pubkey.
-  //   - kind 3      contact/following list: would expose the user's social graph.
-  //   - kind 10002  NIP-65 relay list: Haven publishes 10050/10051, never 10002.
+  // These event kinds must NEVER reach a relay. Haven publishes pubkey-scoped
+  // group (445), gift-wrapped (1059), KeyPackage (30443), relay-list
+  // (10050/10002), and — since the public-profile migration (owner-directed)
+  // — kind-0 profile events. An explicit forbid-list {3, 443, 10051} is used
+  // rather than a closed allow-set so a future legitimate kind doesn't make
+  // this assertion spuriously fail on a cosmetic protocol addition.
+  //   - kind 3      contact/following list: would expose the user's social
+  //                 graph. Haven never publishes one.
+  //   - kind 443    legacy KeyPackage: retired by Dark Matter (30443 only);
+  //                 the cutover retracts old ones, it never mints new ones.
+  //   - kind 10051  legacy KP relay list: retired for NIP-65 kind 10002 and
+  //                 likewise retracted, never republished.
+  // (Kind 0 and 10002 were forbidden pre-migration; both are now published
+  // by design. Their correctness is covered by the kind-0 identity-author
+  // watch in the main scenario and the e2e_profile lane.)
   // One combined REQ keeps the (empty-result) wait to a single timeout window
   // and reports the offending kind(s) on failure.
   final forbidden = await relay.collectN(
     count: 50,
     filter: <String, dynamic>{
-      'kinds': const <int>[0, 3, 10002],
+      'kinds': const <int>[3, 443, 10051],
       'limit': 50,
     },
     timeout: const Duration(seconds: 3),
@@ -4170,8 +4229,9 @@ Future<void> _assertWirePrivacyInvariants({
     isEmpty,
     reason:
         'forbidden event kind(s) $forbiddenKindsSeen reached the relay — '
-        'Haven must never publish kind-0 profiles, kind-3 contact lists, or '
-        'kind-10002 NIP-65 relay lists.',
+        'Haven must never publish kind-3 contact lists, and the retired '
+        'kinds 443/10051 must never reappear (Haven publishes '
+        '30443/10002 only).',
   );
 
   // A kind-444 Welcome must NEVER appear bare on the relay: it is always
@@ -4210,7 +4270,8 @@ Future<void> _assertWirePrivacyInvariants({
   );
   debugPrint(
     '[e2e_combined] wire-privacy invariants OK '
-    '(no kind-0/3/10002 events, no bare kind-444 Welcomes on the relay)',
+    '(no kind-3 events, no retired kind-443/10051 events, no bare '
+    'kind-444 Welcomes on the relay)',
   );
 }
 

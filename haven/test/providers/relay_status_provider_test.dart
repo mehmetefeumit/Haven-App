@@ -112,13 +112,13 @@ void main() {
       final now = DateTime.now();
       final checkResults = <String, RelayEventCheck>{};
       for (final relay in defaultRelays) {
-        checkResults['$relay:443'] = RelayEventCheck(
+        checkResults['$relay:30443'] = RelayEventCheck(
           relayUrl: relay,
           found: true,
           eventCount: 1,
           newestTimestamp: now,
         );
-        checkResults['$relay:10051'] = RelayEventCheck(
+        checkResults['$relay:10002'] = RelayEventCheck(
           relayUrl: relay,
           found: true,
           eventCount: 1,
@@ -329,7 +329,7 @@ void main() {
       // writes land incrementally rather than all at once on completion.
       final now = DateTime.now();
       final checkResults = <String, RelayEventCheck>{
-        for (final k in [443, 10051, 10050])
+        for (final k in [30443, 10002, 10050])
           'wss://a:$k': RelayEventCheck(
             relayUrl: 'wss://a',
             found: true,

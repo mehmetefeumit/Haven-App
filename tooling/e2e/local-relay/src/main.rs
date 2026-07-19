@@ -7,8 +7,9 @@
 //! the wire format is compatible), so there is no wire-format drift between
 //! the relay and the system under test. The default in-memory store retains
 //! every kind Haven exchanges
-//! (443/444/445/9/1059/10050/10051) — none are ephemeral — for the lifetime
-//! of the process, which is exactly one CI run.
+//! (0/9/444/445/1059/10002/10050/30443, plus the Dark-Matter-retired
+//! 443/10051 that privacy oracles assert stay ABSENT) — none are ephemeral —
+//! for the lifetime of the process, which is exactly one CI run.
 //!
 //! The port can be overridden with `HAVEN_RELAY_PORT`. The process runs until
 //! it receives Ctrl-C / SIGTERM (the CI teardown step).

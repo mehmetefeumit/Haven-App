@@ -50,8 +50,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/rust/api.dart';
-import 'package:haven/src/rust/frb_generated.dart';
 import 'package:integration_test/integration_test.dart';
+
+import 'e2e/_lib/test_user.dart';
 
 /// Synthetic relay URL stamped into MIP-00 KeyPackage and MIP-04 Welcome
 /// events. The test runs in-process between two `CircleManagerFfi`
@@ -139,18 +140,25 @@ void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
   setUpAll(() async {
-    await RustLib.init();
-    // Install a hermetic in-memory keyring up front so the plaintext-absence
-    // proof below runs UNCONDITIONALLY rather than skipping when a platform
-    // Keystore is unavailable. init_keyring_store() and
-    // use_in_memory_keyring_for_test() share one init guard, so the in-test
-    // initKeyringStore() call then returns Ok immediately and its
-    // markTestSkipped path is unreachable. The keyring backend only protects
-    // the SQLCipher DB key — it is orthogonal to what this test proves
-    // (no plaintext coordinates in the kind-445 event), so using the
-    // in-memory store does not weaken the assertion. Mirrors the e2e lanes'
-    // bootstrap (test_user.dart / synthetic_user.dart).
-    await useInMemoryKeyringForTest();
+    // Full hermetic process bootstrap, shared with the e2e lanes
+    // (test_user.dart): Rust bridge init, in-memory keyring, the debug-only
+    // loopback-`ws://` opt-in, and the default-relay override pointing every
+    // relay resolution — including the read-only discovery plane — at the
+    // local strfry. Dark Matter made both mandatory here: `addUserRelay`
+    // (the NIP-65 seeding step before `maintainKeyPackage`) rejects a plain
+    // `ws://` URL with "Use wss:// for security" unless the opt-in is armed,
+    // and `fetchKeypackage`'s discovery-plane fallback would consult the
+    // PUBLIC indexers (non-hermetic) without the override.
+    //
+    // The in-memory keyring means the plaintext-absence proof below runs
+    // UNCONDITIONALLY rather than skipping when a platform Keystore is
+    // unavailable. init_keyring_store() and use_in_memory_keyring_for_test()
+    // share one init guard, so the in-test initKeyringStore() call returns Ok
+    // immediately and its markTestSkipped path is unreachable. The keyring
+    // backend only protects the SQLCipher DB key — it is orthogonal to what
+    // this test proves (no plaintext coordinates in the kind-445 event), so
+    // using the in-memory store does not weaken the assertion.
+    await TestUser.bootstrapProcess(relays: [_testRelayUrl]);
   });
 
   group('Location encryption pipeline (FFI boundary)', () {
