@@ -440,7 +440,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'Im Hintergrund eingeschränkt. Setze in den Einstellungen für Haven den Standortzugriff auf „Immer“';
+      'Das Teilen läuft mit deiner aktuellen Berechtigung auch im Hintergrund weiter. Setze in den Einstellungen für Haven den Standortzugriff auf „Immer“, damit Aktualisierungen auch dann wieder anlaufen können, wenn iOS die App beendet.';
 
   @override
   String get locationSettingsAndroidHeader =>
@@ -460,7 +460,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get locationSettingsIosGuidance =>
-      'Setze für durchgängiges Teilen im Hintergrund in den Einstellungen für Haven den Standortzugriff auf „Immer“. iOS zeigt in der Statusleiste eine blaue Anzeige, während eine App deinen Standort im Hintergrund nutzt.';
+      'Solange das Teilen im Hintergrund aktiviert ist, hält Haven eine durchgehende Standortsitzung aufrecht, und iOS zeigt in der Statusleiste eine blaue Anzeige. Mit der Berechtigung „Immer“ kann Haven außerdem Verpasstes aus deinen Kreisen nachholen, nachdem iOS die App beendet hat.';
 
   @override
   String get mapStyleTitle => 'Kartenstil';

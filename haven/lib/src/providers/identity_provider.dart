@@ -13,6 +13,7 @@ import 'package:haven/src/providers/maintenance_scheduler_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/tile_prefetch_provider.dart';
 import 'package:haven/src/services/background_location_manager.dart';
+import 'package:haven/src/services/geolocator_location_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/pending_mls_wipe_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -255,6 +256,14 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
         'identity deletion — persisted last-known rows may survive the '
         'delete: ${e.runtimeType}\n$stack',
       );
+    }
+    // Clear the location service's in-memory stream-position cache so the
+    // pre-logout coordinate can never be served to a subsequently created
+    // identity (the service is a process-lifetime singleton that survives
+    // logout). Synchronous, cannot throw.
+    final locationServiceForWipe = ref.read(locationServiceProvider);
+    if (locationServiceForWipe is GeolocatorLocationService) {
+      locationServiceForWipe.clearCachedPosition();
     }
     // M7 teardown: reset all sync cursors so a returning (or different)
     // identity never inherits a stale cursor floor. (The pre-migration

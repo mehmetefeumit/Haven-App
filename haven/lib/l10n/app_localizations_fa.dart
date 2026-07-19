@@ -431,7 +431,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'در پس‌زمینه محدود است. در تنظیمات، موقعیت مکانی Haven را روی «همیشه» بگذار';
+      'اشتراک‌گذاری با همین مجوز فعلی همچنان در پس‌زمینه کار می‌کند. در تنظیمات، موقعیت مکانی Haven را روی «همیشه» بگذار تا پس از آنکه iOS برنامه را بست هم به‌روزرسانی‌ها از سر گرفته شوند.';
 
   @override
   String get locationSettingsAndroidHeader =>
@@ -451,7 +451,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get locationSettingsIosGuidance =>
-      'برای اشتراک‌گذاری پیوستهٔ پس‌زمینه، در تنظیمات موقعیت مکانی Haven را روی «همیشه» بگذار. iOS هنگامی که یک برنامه در پس‌زمینه از موقعیت مکانی تو استفاده می‌کند، یک نشانگر آبی در نوار وضعیت نمایش می‌دهد.';
+      'تا وقتی اشتراک‌گذاری در پس‌زمینه روشن است، Haven یک نشست پیوستهٔ موقعیت مکانی را فعال نگه می‌دارد و iOS یک نشانگر آبی در نوار وضعیت نمایش می‌دهد. اگر مجوز «همیشه» را هم بدهی، Haven می‌تواند پس از آنکه iOS برنامه را بست، خودش را با حلقه‌هایت به‌روز کند.';
 
   @override
   String get mapStyleTitle => 'سبک نقشه';

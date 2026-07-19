@@ -89,6 +89,20 @@ class DefaultGeolocatorWrapper implements GeolocatorWrapper {
 /// - **Accuracy**: Best - uses GPS for maximum precision
 /// - **Update frequency**: Continuous updates via stream
 /// - **User Experience**: Optimized for responsive, accurate location tracking
+///
+/// ## Single unified stream (iOS background invariant)
+///
+/// geolocator supports exactly ONE active position stream: the Dart side
+/// caches it (`GeolocatorApple._positionStream`) and silently returns the
+/// cached stream — old settings and all — to any later `getPositionStream`
+/// call, while the native side rejects a second concurrent listen outright.
+/// Therefore this service exposes a single [getLocationStream] whose iOS
+/// `AppleSettings` are chosen by the caller-supplied
+/// `backgroundSharingEnabled` intent at subscription time. There must never
+/// be a second stream-returning API: a "background variant" stream would
+/// silently inherit the foreground session's settings (the exact defect that
+/// broke iOS background publishing). CI pins this invariant
+/// (`scripts/ci/check_ios_background_publish.sh`).
 class GeolocatorLocationService implements LocationService {
   /// Creates a new [GeolocatorLocationService].
   ///
@@ -114,6 +128,40 @@ class GeolocatorLocationService implements LocationService {
   /// Timeout for location requests - balanced for accuracy and UX.
   static const Duration _locationTimeout = Duration(seconds: 30);
 
+  /// Latest position delivered by the unified stream ([getLocationStream]).
+  ///
+  /// Served by [getCurrentLocation] while fresher than
+  /// [kStreamPositionMaxAge] so publish cycles never depend on the one-shot
+  /// `getCurrentPosition` path while the app is backgrounded on iOS — the
+  /// plugin's one-time CLLocationManager hard-codes
+  /// `allowsBackgroundLocationUpdates = NO`, so a backgrounded one-shot can
+  /// only stall for [_locationTimeout] and fall back anyway. Cleared via
+  /// [clearCachedPosition] on logout and on background-sharing opt-out.
+  Position? _lastStreamPosition;
+
+  /// Whether the app UI is currently foregrounded.
+  ///
+  /// A plain synchronous in-memory seam set by `map_shell.dart`'s
+  /// `didChangeAppLifecycleState` (paused → false, resumed → true; the
+  /// transient `inactive`/`hidden` states are deliberately not distinct for
+  /// this purpose). Defaults to `true` so a freshly constructed instance
+  /// (cold start, tests, the Android FGS isolate) behaves as foreground.
+  /// Only consulted by [getCurrentLocation]'s iOS branch to avoid a doomed
+  /// backgrounded one-shot.
+  bool _foregroundActive = true;
+
+  /// Sets the foreground-active hint consulted by [getCurrentLocation].
+  // ignore: avoid_setters_without_getters
+  set foregroundActive(bool value) => _foregroundActive = value;
+
+  /// Clears the cached stream position.
+  ///
+  /// Called on logout (`deleteIdentity`) and when background sharing is
+  /// disabled, so plaintext coordinates never outlive the session intent
+  /// that produced them (mirrors `LocationSharingService.wipeAll`'s
+  /// cache-wiping posture).
+  void clearCachedPosition() => _lastStreamPosition = null;
+
   /// Builds the [geo.LocationSettings] for a one-shot position read,
   /// platform-correct: [geo.AppleSettings] on iOS, [geo.AndroidSettings]
   /// (forcing the platform LocationManager to bypass Google Play Services)
@@ -129,15 +177,44 @@ class GeolocatorLocationService implements LocationService {
     );
   }
 
-  /// Builds the [geo.LocationSettings] for the continuous foreground stream.
+  /// Builds the [geo.LocationSettings] for the single continuous stream.
   ///
   /// Mirrors [_currentPositionSettings] platform handling, both with a 1 m
   /// distance filter for responsive, precise tracking.
-  geo.LocationSettings _streamSettings() {
+  ///
+  /// On iOS the background-capable flags are a pure function of the user's
+  /// background-sharing intent, NOT of lifecycle state:
+  /// - `backgroundSharingEnabled: true` → `allowBackgroundLocationUpdates`
+  ///   and `showBackgroundLocationIndicator` are both `true`, so the
+  ///   CLLocationManager session (necessarily started while foregrounded —
+  ///   the toggle lives in foreground-only UI) keeps the process alive and
+  ///   publishing when the app is backgrounded, with the indicator giving
+  ///   the user continuous transparency. When-In-Use authorization
+  ///   suffices for this foreground-started continuation; "Always" is only
+  ///   needed for the receive-only SLC relaunch path.
+  /// - `backgroundSharingEnabled: false` → both flags are EXPLICITLY
+  ///   `false`. `AppleSettings` defaults `allowBackgroundLocationUpdates`
+  ///   to `true`, which before this fix silently kept every user's GPS and
+  ///   app process alive in the background regardless of consent; the
+  ///   explicit `false` makes opt-out users suspend normally.
+  ///
+  /// `pauseLocationUpdatesAutomatically` is unconditionally `false`: an
+  /// auto-paused session stops delivering and (for a When-In-Use app) may
+  /// never resume until relaunch.
+  geo.LocationSettings _streamSettings({
+    required bool backgroundSharingEnabled,
+  }) {
     if (_isIOS) {
       // Accuracy defaults to LocationAccuracy.best.
       return geo.AppleSettings(
         distanceFilter: 1, // Update when device moves 1+ meter for precision
+        allowBackgroundLocationUpdates: backgroundSharingEnabled,
+        showBackgroundLocationIndicator: backgroundSharingEnabled,
+        // Explicit (despite matching the plugin default) because an
+        // auto-paused session is a liveness hazard — see the doc above —
+        // and the CI guard pins this exact assignment.
+        // ignore: avoid_redundant_argument_values
+        pauseLocationUpdatesAutomatically: false,
       );
     }
     return geo.AndroidSettings(
@@ -149,6 +226,34 @@ class GeolocatorLocationService implements LocationService {
 
   @override
   Future<Position> getCurrentLocation() async {
+    // Serve the unified stream's latest fix while fresh — measured against
+    // the GPS fix time (`Position.timestamp`), not a Dart-side clock. This
+    // is the ONLY publish-path GPS source that works while backgrounded on
+    // iOS (see [_lastStreamPosition]).
+    final cached = _lastStreamPosition;
+    if (cached != null &&
+        DateTime.now().difference(cached.timestamp) <= kStreamPositionMaxAge) {
+      return cached;
+    }
+
+    // Backgrounded on iOS with no fresh stream fix: the one-shot below
+    // cannot deliver (its CLLocationManager never enables background
+    // updates) — skip straight to the last known fix instead of stalling
+    // for the 30 s timeout. Presence-only logging; never log coordinates.
+    if (_isIOS && !_foregroundActive) {
+      try {
+        final lastPosition = await _geolocator.getLastKnownPosition();
+        if (lastPosition != null) {
+          return _convertPosition(lastPosition);
+        }
+      } on Exception catch (e) {
+        debugPrint(
+          '[Location] backgrounded last-known lookup failed: ${e.runtimeType}',
+        );
+        // Fall through to the foreground chain as a final attempt.
+      }
+    }
+
     // Check if location services are enabled
     final serviceEnabled = await _geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) {
@@ -236,47 +341,31 @@ class GeolocatorLocationService implements LocationService {
     }
   }
 
+  /// Returns the single continuous position stream.
+  ///
+  /// [backgroundSharingEnabled] selects the iOS background-capable
+  /// `AppleSettings` (see [_streamSettings]); it is ignored on Android,
+  /// where background publishing is the foreground service's job. Adding an
+  /// optional named parameter to the parameterless
+  /// [LocationService.getLocationStream] contract is a legal override —
+  /// interface-typed callers are unaffected; `locationStreamProvider`
+  /// passes the toggle state through the concrete type.
+  ///
+  /// Every emission is teed into [_lastStreamPosition] so
+  /// [getCurrentLocation] can serve a warm fix without a one-shot request.
   @override
-  Stream<Position> getLocationStream() {
+  Stream<Position> getLocationStream({bool backgroundSharingEnabled = false}) {
     return _geolocator
-        .getPositionStream(locationSettings: _streamSettings())
-        .map(_convertPosition);
-  }
-
-  /// Returns a location stream configured for iOS background execution.
-  ///
-  /// On iOS, this stream uses [geo.AppleSettings] with
-  /// `allowBackgroundLocationUpdates: true` to keep the app process alive
-  /// when backgrounded. The blue status bar indicator is shown. A
-  /// [kBackgroundDistanceFilterMeters] distance filter avoids excessive
-  /// wakeups when stationary.
-  ///
-  /// On Android, falls back to the standard foreground stream since
-  /// background execution uses a foreground service instead.
-  Stream<Position> getBackgroundLocationStream() {
-    final geo.LocationSettings settings;
-
-    final distanceFilter = kBackgroundDistanceFilterMeters.toInt();
-
-    if (_isIOS) {
-      settings = geo.AppleSettings(
-        distanceFilter: distanceFilter,
-        allowBackgroundLocationUpdates: true,
-        showBackgroundLocationIndicator: true,
-        pauseLocationUpdatesAutomatically: false,
-      );
-    } else {
-      // Android: use standard settings — background is handled by the
-      // foreground service, not the location stream.
-      settings = geo.AndroidSettings(
-        distanceFilter: distanceFilter,
-        forceLocationManager: true,
-      );
-    }
-
-    return _geolocator
-        .getPositionStream(locationSettings: settings)
-        .map(_convertPosition);
+        .getPositionStream(
+          locationSettings: _streamSettings(
+            backgroundSharingEnabled: backgroundSharingEnabled,
+          ),
+        )
+        .map(_convertPosition)
+        .map((position) {
+          _lastStreamPosition = position;
+          return position;
+        });
   }
 
   @override

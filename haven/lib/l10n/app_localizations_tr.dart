@@ -434,7 +434,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'Arka planda sınırlı. Ayarlar\'da Haven için Konum\'u \'Her Zaman\' olarak ayarlayın';
+      'Paylaşım, mevcut izninizle arka planda çalışmaya devam eder. iOS uygulamayı kapatsa bile güncellemelerin sürebilmesi için Ayarlar\'da Haven için Konum\'u \'Her Zaman\' olarak ayarlayın.';
 
   @override
   String get locationSettingsAndroidHeader =>
@@ -454,7 +454,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get locationSettingsIosGuidance =>
-      'Sürekli arka plan paylaşımı için Ayarlar\'da Haven için Konum\'u \"Her Zaman\" olarak ayarlayın. iOS, bir uygulama arka planda konumunuzu kullanırken durum çubuğunda mavi bir gösterge gösterir.';
+      'Arka planda paylaşım açıkken Haven kesintisiz bir konum oturumu sürdürür ve iOS durum çubuğunda mavi bir gösterge görüntüler. Ayrıca \"Her Zaman\" iznini verirseniz Haven, iOS uygulamayı kapattıktan sonra da çevrelerinizdeki gelişmeleri yakalayabilir.';
 
   @override
   String get mapStyleTitle => 'Harita stili';

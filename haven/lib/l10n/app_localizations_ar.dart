@@ -440,7 +440,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'محدودة في الخلفية. اضبط الموقع على «دائمًا» لتطبيق Haven في الإعدادات';
+      'تظل المشاركة تعمل في الخلفية بإذنك الحالي. اختر «دائمًا» لتطبيق Haven في الإعدادات حتى تُستأنف التحديثات أيضًا بعد أن يُغلق iOS التطبيق.';
 
   @override
   String get locationSettingsAndroidHeader => 'إعدادات النظام للموثوقية';
@@ -459,7 +459,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get locationSettingsIosGuidance =>
-      'للمشاركة المتواصلة في الخلفية، اضبط الموقع على \"دائمًا\" لتطبيق Haven في الإعدادات. يُظهر iOS مؤشرًا أزرق في شريط الحالة أثناء استخدام تطبيق لموقعك في الخلفية.';
+      'ما دامت المشاركة في الخلفية مفعّلة، يحتفظ Haven بجلسة موقع متواصلة ويُظهر iOS مؤشرًا أزرق في شريط الحالة. ومنح إذن «دائمًا» يتيح لتطبيق Haven إضافةً إلى ذلك تدارك ما فاته من تحديثات دوائرك بعد أن يُغلق iOS التطبيق.';
 
   @override
   String get mapStyleTitle => 'نمط الخريطة';

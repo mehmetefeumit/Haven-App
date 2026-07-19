@@ -34,6 +34,14 @@ void main() {
       expect(kLocationPublishMinInterval.inSeconds, 72);
     });
 
+    test('kStreamPositionMaxAge equals kLocationPublishMaxInterval', () {
+      // The stream-position cache serves publish cycles; a fix bounded by
+      // the max jittered publish interval is never staler than what an
+      // on-time publish tick would have captured. Pinned so the iOS
+      // background publish path's freshness bound cannot silently drift.
+      expect(kStreamPositionMaxAge, kLocationPublishMaxInterval);
+    });
+
     test('kLocationPublishMaxInterval is 168s (nominal * 1.4)', () {
       expect(
         kLocationPublishMaxInterval,

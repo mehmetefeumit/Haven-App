@@ -85,6 +85,26 @@ class MapShell extends ConsumerStatefulWidget {
     required bool isIOS,
   }) => backgroundSharingEnabled && isIOS;
 
+  /// Whether the publish machinery (the jittered send scheduler and the
+  /// motion-trigger listener) should keep running while the app is paused.
+  ///
+  /// True only on the iOS background-sharing branch: the unified geolocator
+  /// stream (created with `allowBackgroundLocationUpdates: true` the moment
+  /// the toggle was enabled, necessarily while foregrounded) keeps the
+  /// process fully executable in the background, so Dart timers keep firing
+  /// and publishing continues on the normal cadence. Android hands
+  /// publishing off to the foreground-service isolate instead, and with
+  /// background sharing off the app must genuinely go idle.
+  ///
+  /// Same truth table as [shouldKeepRelayConnectedWhilePaused] today, but a
+  /// deliberately separate concept — if the two ever diverge, collapsing
+  /// them would make the divergence a silent bug.
+  @visibleForTesting
+  static bool shouldKeepPublishingWhilePaused({
+    required bool backgroundSharingEnabled,
+    required bool isIOS,
+  }) => backgroundSharingEnabled && isIOS;
+
   @override
   ConsumerState<MapShell> createState() => _MapShellState();
 }
@@ -153,16 +173,24 @@ class _MapShellState extends ConsumerState<MapShell>
   ProviderSubscription<AsyncValue<Position>>? _motionSub;
   Position? _lastMotionTriggerPosition;
 
-  // ---- iOS background location stream ----
+  // ---- iOS background publish keep-alive ----
   //
-  // On iOS, a continuous geolocator stream with
-  // `allowsBackgroundLocationUpdates: true` keeps the app process alive
-  // when backgrounded. The JitteredScheduler continues firing in the
-  // main isolate. On Android, the foreground service handles background
-  // publishing instead.
-  StreamSubscription<Position>? _backgroundLocationSub;
-  // Allow user-initiated bg-sharing disable to tear down the iOS retention
-  // stream without waiting for resume.
+  // On iOS with background sharing enabled, the SINGLE geolocator stream
+  // (see `locationStreamProvider`) carries `allowsBackgroundLocationUpdates:
+  // true`, so CoreLocation keeps this process fully executable while
+  // backgrounded: `_sendScheduler` keeps firing on its jittered cadence and
+  // `_motionSub` keeps delivering movement-driven publishes. There is no
+  // second "background stream" — geolocator supports exactly one stream, and
+  // a second request would silently inherit the first stream's settings
+  // (the defect that originally broke iOS background publishing). On
+  // Android, the foreground service handles background publishing instead.
+  //
+  // C4 (M7-A): installed on the iOS pause branch UNCONDITIONALLY (i.e. for
+  // both `liveSyncEnabled` states) so that toggling background sharing OFF
+  // while paused deterministically tears down every publish/receive driver
+  // (scheduler, motion trigger, receive timer, warm relay socket) instead of
+  // waiting for the OS to suspend the process. Closed on resume and on
+  // dispose.
   ProviderSubscription<bool>? _bgSharingPausedSub;
 
   @override
@@ -589,10 +617,27 @@ class _MapShellState extends ConsumerState<MapShell>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // `inactive`/`hidden`/`detached` are deliberately not distinct here:
+    // iOS always sandwiches `inactive` between the two authoritative
+    // states, so gating on paused/resumed alone cannot strand the
+    // foreground-active hint.
     if (state == AppLifecycleState.paused) {
+      _setForegroundActive(false);
       unawaited(_onPaused());
     } else if (state == AppLifecycleState.resumed) {
+      _setForegroundActive(true);
       unawaited(_onResumed());
+    }
+  }
+
+  /// Mirrors the pause/resume transition into
+  /// [GeolocatorLocationService.foregroundActive] so a backgrounded
+  /// `getCurrentLocation()` with a stale cache skips the one-shot GPS
+  /// request that iOS can never fulfil in the background.
+  void _setForegroundActive(bool active) {
+    final locationService = ref.read(locationServiceProvider);
+    if (locationService is GeolocatorLocationService) {
+      locationService.foregroundActive = active;
     }
   }
 
@@ -637,13 +682,46 @@ class _MapShellState extends ConsumerState<MapShell>
           text: 'Haven is sending and receiving location information',
         ),
       );
-    } else if (bgEnabled && Platform.isIOS) {
-      // iOS: keep _sendScheduler alive — the process stays running
-      // because the background location stream holds a CLLocationManager
-      // session. Cancel the motion trigger (replaced by the background
-      // stream's distance filter).
-      _stopMotionTrigger();
-      _startBackgroundLocationStream();
+    } else if (MapShell.shouldKeepPublishingWhilePaused(
+      backgroundSharingEnabled: bgEnabled,
+      isIOS: Platform.isIOS,
+    )) {
+      // iOS + background sharing on: nothing to stop. The unified
+      // `locationStreamProvider` stream already carries background-capable
+      // AppleSettings (it watches `backgroundSharingProvider` directly), so
+      // the CLLocationManager session that keeps this process executing was
+      // established the moment the toggle turned on — necessarily while
+      // foregrounded, as iOS requires. `_sendScheduler` and `_motionSub`
+      // keep running exactly as in the foreground, giving background
+      // publishing both a periodic floor and movement-driven
+      // responsiveness.
+      //
+      // C4: install the disable-while-paused watcher UNCONDITIONALLY here
+      // (not inside the `liveSyncEnabled`-gated receive-timer setup) so a
+      // mid-pause opt-out deterministically stops every publish/receive
+      // driver — the OS-suspension fallback alone would leave a
+      // non-deterministic seconds-to-minutes window of continued
+      // publishing after consent was withdrawn.
+      _bgSharingPausedSub?.close();
+      _bgSharingPausedSub = ref.listenManual<bool>(backgroundSharingProvider, (
+        _,
+        next,
+      ) {
+        if (next) return;
+        _sendScheduler?.cancel();
+        _stopMotionTrigger();
+        _receiveTimer?.cancel();
+        _receiveTimer = null;
+        // Parity with the pause-time relay decision: had the toggle been
+        // off at pause, `shouldKeepRelayConnectedWhilePaused` would have
+        // shut the socket down. The stream itself downgrades via the
+        // `locationStreamProvider` rebuild (its `backgroundSharingProvider`
+        // watch), removing the keep-alive so the process can suspend.
+        final relay = ref.read(relayServiceProvider);
+        if (relay is NostrRelayService) {
+          unawaited(relay.shutdown());
+        }
+      });
     } else {
       // Background sharing disabled — original behaviour.
       _sendScheduler?.cancel();
@@ -699,7 +777,8 @@ class _MapShellState extends ConsumerState<MapShell>
       //
       // The relay is kept connected on this branch (see
       // [shouldKeepRelayConnectedWhilePaused]) so the 90 s receive tick
-      // and the background-stream publishes below reuse a warm socket
+      // and the scheduler/motion publishes (still running — see
+      // [MapShell.shouldKeepPublishingWhilePaused]) reuse a warm socket
       // instead of racing a cold reconnect. Both `relayServiceProvider`
       // and the relay handle inside `locationSharingServiceProvider`
       // resolve to the same singleton, so the warm connection is shared.
@@ -731,10 +810,11 @@ class _MapShellState extends ConsumerState<MapShell>
   /// because that flag coordinates with the Android foreground service,
   /// which is not started on iOS.
   ///
-  /// C4 (M7-A): also subscribes to [backgroundSharingProvider] via a
-  /// [listenManual] subscription so that toggling background sharing OFF
-  /// while the app is paused cancels this timer immediately, without waiting
-  /// for the next resume.
+  /// C4 (M7-A): toggling background sharing OFF while the app is paused
+  /// cancels this timer immediately via the single `_bgSharingPausedSub`
+  /// watcher installed on `_onPaused`'s iOS branch (unconditionally, for
+  /// both `liveSyncEnabled` states) — this method no longer installs its
+  /// own watcher.
   void _startIosBackgroundReceiveTimer() {
     // When the live-sync engine is enabled it owns the (kept-alive) relay
     // connection and receives in background; this timer is the flag-OFF iOS
@@ -751,26 +831,11 @@ class _MapShellState extends ConsumerState<MapShell>
       _lastLocationFetchTime = now;
       unawaited(_runBackgroundCatchUp());
     });
-    // C4: watch for a mid-pause disable and cancel the timer immediately.
-    // Note: _bgSharingPausedSub may already exist from the
-    // _startBackgroundLocationStream() call on the same pause branch
-    // (both methods are called from the iOS pause path). We replace it here
-    // so that cancelling the receive timer is covered by the watcher even
-    // when _startBackgroundLocationStream created it first.
-    _bgSharingPausedSub?.close();
-    _bgSharingPausedSub = ref.listenManual<bool>(backgroundSharingProvider, (
-      _,
-      next,
-    ) {
-      if (!next) {
-        // User toggled background sharing OFF while we are backgrounded.
-        // Cancel both the receive timer and the location stream so zero
-        // further catch-up sweeps or publishes occur.
-        _receiveTimer?.cancel();
-        _receiveTimer = null;
-        _stopBackgroundLocationStream();
-      }
-    });
+    // C4 (mid-pause disable) is handled by the single `_bgSharingPausedSub`
+    // watcher installed unconditionally on `_onPaused`'s iOS branch — its
+    // callback cancels this timer too. Installing a second watcher here
+    // (as this method did pre-unification) would be reachable only in
+    // `liveSyncEnabled == false` builds and would shadow the unified one.
   }
 
   /// Runs a fork-safe, cursor-anchored receive-only catch-up sweep (M7).
@@ -791,6 +856,18 @@ class _MapShellState extends ConsumerState<MapShell>
   }
 
   Future<void> _onResumed() async {
+    // Close the pause-installed C4 watcher BEFORE the debounce early-return:
+    // a background→foreground→background→foreground cycle inside the 30 s
+    // debounce window would otherwise leave the watcher alive while
+    // foregrounded, and a FOREGROUND toggle-off would then silently kill the
+    // foreground publish scheduler (background sharing is not a foreground
+    // kill switch). The field is null on Android, so this is a safe no-op
+    // there; a subsequent pause re-installs it. `_startTimers()` below
+    // re-arms the scheduler in any case, including after a spurious
+    // mid-pause cancel from the notifier's transient-false rebuild.
+    _bgSharingPausedSub?.close();
+    _bgSharingPausedSub = null;
+
     // Debounce rapid resume cycles (e.g. notification shade pull on Android).
     if (_resumeStopwatch.isRunning &&
         _resumeStopwatch.elapsed < const Duration(seconds: 30)) {
@@ -827,9 +904,9 @@ class _MapShellState extends ConsumerState<MapShell>
       if (bgLastPublish != null) {
         _lastPublishTime = bgLastPublish;
       }
-    } else if (Platform.isIOS) {
-      _stopBackgroundLocationStream();
     }
+    // (The pause-installed C4 watcher was already closed at the top of this
+    // method, before the debounce — see the comment there.)
 
     // Restart all timers (cancelled on pause).
     _startTimers();
@@ -881,52 +958,6 @@ class _MapShellState extends ConsumerState<MapShell>
 
     // Prune on resume in case the device slept past the hourly tick.
     unawaited(_runPrune());
-  }
-
-  // ---- iOS background location stream helpers ----
-
-  void _startBackgroundLocationStream() {
-    _backgroundLocationSub?.cancel();
-    // Tear down any prior bg-sharing watcher up front, BEFORE the type guard,
-    // so a re-entrant call never leaks a stale `listenManual` subscription
-    // when `locationServiceProvider` is not a [GeolocatorLocationService]
-    // (e.g. a test-injected fake on the iOS background path).
-    _bgSharingPausedSub?.close();
-    _bgSharingPausedSub = null;
-    final locationService = ref.read(locationServiceProvider);
-    if (locationService is GeolocatorLocationService) {
-      _backgroundLocationSub = locationService
-          .getBackgroundLocationStream()
-          .listen((_) {
-            // Every OS-granted background wake performs a guarded publish.
-            // iOS gives no durable background isolate, so the
-            // JitteredScheduler can be starved while the process is
-            // suspended between location callbacks; publishing directly
-            // from each delivered fix ensures a movement-driven wake still
-            // emits a location. The overlap guard
-            // ([kLocationPublishOverlapGuard]) prevents double-publishing
-            // when the scheduler is also alive.
-            if (!mounted) return;
-            _guardedPublish();
-          });
-      debugPrint('[MapShell] iOS background location stream started');
-      // Allow user-initiated bg-sharing disable to tear down the iOS
-      // retention stream without waiting for resume. (Any prior subscription
-      // was already closed at the top of this method.)
-      _bgSharingPausedSub = ref.listenManual<bool>(backgroundSharingProvider, (
-        _,
-        next,
-      ) {
-        if (!next) _stopBackgroundLocationStream();
-      });
-    }
-  }
-
-  void _stopBackgroundLocationStream() {
-    _bgSharingPausedSub?.close();
-    _bgSharingPausedSub = null;
-    _backgroundLocationSub?.cancel();
-    _backgroundLocationSub = null;
   }
 
   // Sheet snap points mirrored from `circles/circles_bottom_sheet.dart`
@@ -998,7 +1029,6 @@ class _MapShellState extends ConsumerState<MapShell>
     _stopMotionTrigger();
     _bgSharingPausedSub?.close();
     _bgSharingPausedSub = null;
-    _stopBackgroundLocationStream();
     // Stop re-subscribing BEFORE tearing the engine down (B0): close the
     // circles listener and cancel any pending / in-flight restart so no
     // start-after-dispose can race the stop below.

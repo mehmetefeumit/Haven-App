@@ -435,7 +435,7 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'पृष्ठभूमिमा सीमित। सेटिङमा Haven का लागि स्थानलाई \'सधैँ\' मा सेट गर्नुहोस्';
+      'तपाईंको हालको अनुमतिमै साझेदारी पृष्ठभूमिमा पनि चलिरहन्छ। iOS ले एप बन्द गरेपछि पनि अपडेटहरू फेरि सुरु हुन सकून् भनेर सेटिङमा Haven का लागि स्थानलाई \'सधैँ\' मा सेट गर्नुहोस्।';
 
   @override
   String get locationSettingsAndroidHeader => 'भरपर्दोपनका लागि OS सेटिङ';
@@ -454,7 +454,7 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get locationSettingsIosGuidance =>
-      'निरन्तर पृष्ठभूमि साझेदारीका लागि, सेटिङमा Haven का लागि स्थानलाई \"सधैँ\" मा सेट गर्नुहोस्। कुनै एपले पृष्ठभूमिमा तपाईंको स्थान प्रयोग गर्दा iOS ले निलो स्थिति-पट्टी सूचक देखाउँछ।';
+      'पृष्ठभूमि साझेदारी सक्रिय हुँदा, Haven ले तपाईंको स्थान निरन्तर प्रयोग गरिरहन्छ र iOS ले निलो स्थिति-पट्टी सूचक देखाउँछ। \"सधैँ\" अनुमति दिनुभयो भने, iOS ले एप बन्द गरेपछि पनि Haven ले तपाईंका सर्कलका छुटेका अपडेटहरू ल्याउन सक्छ।';
 
   @override
   String get mapStyleTitle => 'नक्सा शैली';

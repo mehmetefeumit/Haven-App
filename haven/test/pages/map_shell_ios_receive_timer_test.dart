@@ -8,7 +8,7 @@
 /// and assert that after a background-sharing disable event the service's
 /// `runCatchup` count does not increase further.
 ///
-/// Note: `_startIosBackgroundReceiveTimer` is only called when
+/// Note: the iOS pause branch is only taken when
 /// `bgEnabled && Platform.isIOS` — on a Linux test runner `Platform.isIOS`
 /// is always false, so the production path cannot be pumped in a widget test.
 /// This test therefore verifies the design contracts at the
@@ -16,8 +16,13 @@
 /// actually enforce the privacy guarantee), where the seam is fully injectable:
 ///
 /// 1. A `BackgroundSharingNotifier` emits `false` when disabled.
-/// 2. The `_bgSharingPausedSub` listener in `_startIosBackgroundReceiveTimer`
-///    sees the `false` and cancels `_receiveTimer`.
+/// 2. The single `_bgSharingPausedSub` watcher — installed UNCONDITIONALLY
+///    (for both `liveSyncEnabled` states) on `_onPaused`'s iOS branch since
+///    the unified-stream fix — sees the `false` and cancels `_receiveTimer`
+///    AND `_sendScheduler` AND the motion trigger, and shuts the warm relay
+///    socket down. (Pre-unification this watcher lived in
+///    `_startIosBackgroundReceiveTimer`/`_startBackgroundLocationStream`,
+///    which left the default live-sync build with NO watcher at all.)
 /// 3. The `CatchupService` chokepoint (C3) also blocks any in-flight or
 ///    already-queued wake that arrived between the timer cancel and the sub
 ///    firing (belt-and-suspenders).

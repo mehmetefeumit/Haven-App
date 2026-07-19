@@ -442,7 +442,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'Limitado en segundo plano. Configura la Ubicación de Haven como «Siempre» en Ajustes';
+      'El uso compartido sigue funcionando en segundo plano con tu permiso actual. Configura la Ubicación de Haven como «Siempre» en Ajustes para que las actualizaciones también puedan reanudarse cuando iOS cierre la app.';
 
   @override
   String get locationSettingsAndroidHeader =>
@@ -462,7 +462,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get locationSettingsIosGuidance =>
-      'Para compartir en segundo plano de forma continua, configura la Ubicación de Haven como «Siempre» en Ajustes. iOS muestra un indicador azul en la barra de estado mientras una app usa tu ubicación en segundo plano.';
+      'Mientras compartir en segundo plano está activado, Haven mantiene una sesión de ubicación continua e iOS muestra un indicador azul en la barra de estado. Conceder «Siempre» permite además que Haven se ponga al día con tus círculos después de que iOS cierre la app.';
 
   @override
   String get mapStyleTitle => 'Estilo del mapa';

@@ -14,6 +14,7 @@ library;
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:geolocator/geolocator.dart' as geo;
+import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:mockito/annotations.dart';
@@ -749,26 +750,278 @@ void main() {
         expect(captureCurrentPositionSettings(), isA<geo.AppleSettings>());
       });
 
-      test('getLocationStream uses AppleSettings on iOS', () {
+      test(
+        'getLocationStream(backgroundSharingEnabled: true) sets '
+        'background-capable AppleSettings on iOS',
+        () {
+          stubStream();
+
+          serviceFor(
+            isIOS: true,
+          ).getLocationStream(backgroundSharingEnabled: true).listen((_) {});
+
+          final captured = captureStreamSettings();
+          expect(captured, isA<geo.AppleSettings>());
+          final settings = captured as geo.AppleSettings;
+          expect(settings.distanceFilter, 1);
+          expect(settings.allowBackgroundLocationUpdates, isTrue);
+          expect(settings.showBackgroundLocationIndicator, isTrue);
+          expect(settings.pauseLocationUpdatesAutomatically, isFalse);
+        },
+      );
+
+      test(
+        'getLocationStream(backgroundSharingEnabled: false) sets background '
+        'flags explicitly false on iOS (no accidental keep-alive)',
+        () {
+          stubStream();
+
+          serviceFor(
+            isIOS: true,
+          ).getLocationStream(backgroundSharingEnabled: false).listen((_) {});
+
+          final captured = captureStreamSettings();
+          expect(captured, isA<geo.AppleSettings>());
+          final settings = captured as geo.AppleSettings;
+          // AppleSettings DEFAULTS allowBackgroundLocationUpdates to true;
+          // the service must override it to false for opt-out users.
+          expect(settings.allowBackgroundLocationUpdates, isFalse);
+          expect(settings.showBackgroundLocationIndicator, isFalse);
+          expect(settings.pauseLocationUpdatesAutomatically, isFalse);
+        },
+      );
+
+      test('getLocationStream defaults to backgroundSharingEnabled: false',
+          () {
         stubStream();
 
-        serviceFor(isIOS: true).getLocationStream();
+        serviceFor(isIOS: true).getLocationStream().listen((_) {});
 
         final captured = captureStreamSettings();
-        expect(captured, isA<geo.AppleSettings>());
-        expect((captured as geo.AppleSettings).distanceFilter, 1);
+        expect(
+          (captured as geo.AppleSettings).allowBackgroundLocationUpdates,
+          isFalse,
+        );
       });
 
-      test('getBackgroundLocationStream keeps iOS alive flags', () {
+      test('getLocationStream ignores backgroundSharingEnabled on Android',
+          () {
         stubStream();
 
-        serviceFor(isIOS: true).getBackgroundLocationStream();
+        serviceFor(
+          isIOS: false,
+        ).getLocationStream(backgroundSharingEnabled: true).listen((_) {});
 
         final captured = captureStreamSettings();
-        expect(captured, isA<geo.AppleSettings>());
-        final settings = captured as geo.AppleSettings;
-        expect(settings.allowBackgroundLocationUpdates, isTrue);
-        expect(settings.pauseLocationUpdatesAutomatically, isFalse);
+        expect(captured, isA<geo.AndroidSettings>());
+        expect((captured as geo.AndroidSettings).forceLocationManager, isTrue);
+      });
+    });
+
+    group('stream-position cache (getCurrentLocation)', () {
+      geo.Position positionAt(DateTime timestamp) => geo.Position(
+        latitude: 51.5,
+        longitude: -0.12,
+        timestamp: timestamp,
+        accuracy: 5,
+        altitude: 0,
+        altitudeAccuracy: 1,
+        heading: 0,
+        headingAccuracy: 1,
+        speed: 0,
+        speedAccuracy: 1,
+      );
+
+      GeolocatorLocationService serviceFor({required bool isIOS}) =>
+          GeolocatorLocationService(geolocator: mockGeolocator, isIOS: isIOS);
+
+      void stubOneShot(geo.Position position) {
+        when(
+          mockGeolocator.isLocationServiceEnabled(),
+        ).thenAnswer((_) async => true);
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.whileInUse);
+        when(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenAnswer((_) async => position);
+      }
+
+      /// Pushes [position] through the service's unified stream so the tee
+      /// populates the cache, then completes.
+      Future<void> seedCache(
+        GeolocatorLocationService service,
+        geo.Position position,
+      ) async {
+        when(
+          mockGeolocator.getPositionStream(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenAnswer((_) => Stream.fromIterable([position]));
+        await service.getLocationStream().drain<void>();
+      }
+
+      test(
+        'returns the cached stream position without a one-shot when fresh',
+        () async {
+          final service = serviceFor(isIOS: true);
+          await seedCache(service, positionAt(DateTime.now()));
+
+          final result = await service.getCurrentLocation();
+
+          expect(result.latitude, 51.5);
+          expect(result.longitude, -0.12);
+          verifyNever(
+            mockGeolocator.getCurrentPosition(
+              locationSettings: anyNamed('locationSettings'),
+            ),
+          );
+        },
+      );
+
+      test(
+        'falls through to the one-shot when the cache is older than '
+        'kStreamPositionMaxAge',
+        () async {
+          final service = serviceFor(isIOS: true);
+          final stale = DateTime.now().subtract(
+            kStreamPositionMaxAge + const Duration(seconds: 1),
+          );
+          await seedCache(service, positionAt(stale));
+          stubOneShot(positionAt(DateTime.now()));
+
+          await service.getCurrentLocation();
+
+          verify(
+            mockGeolocator.getCurrentPosition(
+              locationSettings: anyNamed('locationSettings'),
+            ),
+          ).called(1);
+        },
+      );
+
+      test('falls through to the one-shot when no stream position exists',
+          () async {
+        final service = serviceFor(isIOS: true);
+        stubOneShot(positionAt(DateTime.now()));
+
+        await service.getCurrentLocation();
+
+        verify(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).called(1);
+      });
+
+      test('a stream error does not populate the cache', () async {
+        final service = serviceFor(isIOS: true);
+        when(
+          mockGeolocator.getPositionStream(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenAnswer(
+          (_) => Stream<geo.Position>.error(Exception('gps failure')),
+        );
+        await expectLater(
+          service.getLocationStream().drain<void>(),
+          throwsA(isA<Exception>()),
+        );
+        stubOneShot(positionAt(DateTime.now()));
+
+        await service.getCurrentLocation();
+
+        // Cache stayed empty → the one-shot ran.
+        verify(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).called(1);
+      });
+
+      test('clearCachedPosition drops the cache', () async {
+        final service = serviceFor(isIOS: true);
+        await seedCache(service, positionAt(DateTime.now()));
+        stubOneShot(positionAt(DateTime.now()));
+
+        service.clearCachedPosition();
+        await service.getCurrentLocation();
+
+        verify(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).called(1);
+      });
+
+      test(
+        'backgrounded on iOS with no cache: uses getLastKnownPosition and '
+        'never attempts the one-shot',
+        () async {
+          final service = serviceFor(isIOS: true)..foregroundActive = false;
+          when(
+            mockGeolocator.getLastKnownPosition(),
+          ).thenAnswer((_) async => positionAt(DateTime.now()));
+
+          final result = await service.getCurrentLocation();
+
+          expect(result.latitude, 51.5);
+          verifyNever(
+            mockGeolocator.getCurrentPosition(
+              locationSettings: anyNamed('locationSettings'),
+            ),
+          );
+        },
+      );
+
+      test(
+        'backgrounded on iOS with no last-known fix: falls through to the '
+        'foreground chain as a final attempt',
+        () async {
+          final service = serviceFor(isIOS: true)..foregroundActive = false;
+          when(
+            mockGeolocator.getLastKnownPosition(),
+          ).thenAnswer((_) async => null);
+          stubOneShot(positionAt(DateTime.now()));
+
+          await service.getCurrentLocation();
+
+          verify(
+            mockGeolocator.getCurrentPosition(
+              locationSettings: anyNamed('locationSettings'),
+            ),
+          ).called(1);
+        },
+      );
+
+      test('foregroundActive=false has no effect on Android', () async {
+        final service = serviceFor(isIOS: false)..foregroundActive = false;
+        stubOneShot(positionAt(DateTime.now()));
+
+        await service.getCurrentLocation();
+
+        verify(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).called(1);
+        verifyNever(mockGeolocator.getLastKnownPosition());
+      });
+
+      test('getCurrentLocationFresh ignores the cache entirely', () async {
+        final service = serviceFor(isIOS: true);
+        await seedCache(service, positionAt(DateTime.now()));
+        stubOneShot(positionAt(DateTime.now()));
+
+        await service.getCurrentLocationFresh();
+
+        verify(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).called(1);
       });
     });
 

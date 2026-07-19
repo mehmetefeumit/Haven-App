@@ -440,7 +440,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'Limité en arrière-plan. Réglez la Position sur « Toujours » pour Haven dans Réglages';
+      'Le partage continue de fonctionner en arrière-plan avec votre autorisation actuelle. Choisissez « Toujours » pour Haven dans Réglages afin que les mises à jour puissent aussi reprendre après qu\'iOS a fermé l\'application.';
 
   @override
   String get locationSettingsAndroidHeader =>
@@ -460,7 +460,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get locationSettingsIosGuidance =>
-      'Pour un partage en arrière-plan continu, réglez la Position sur « Toujours » pour Haven dans Réglages. iOS affiche un indicateur bleu dans la barre d\'état lorsqu\'une application utilise votre position en arrière-plan.';
+      'Tant que le partage en arrière-plan est activé, Haven maintient une session de localisation continue et iOS affiche un indicateur bleu dans la barre d\'état. Accorder « Toujours » permet en plus à Haven de récupérer les mises à jour de vos cercles après qu\'iOS a fermé l\'application.';
 
   @override
   String get mapStyleTitle => 'Style de carte';

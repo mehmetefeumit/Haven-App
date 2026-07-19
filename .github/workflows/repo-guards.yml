@@ -37,6 +37,14 @@
 #     proofs live in the E2E background catch-up lane; this covers only what
 #     a static check can prove.
 #
+#   iOS background publish            scripts/ci/check_ios_background_publish.sh
+#     The unified-stream invariants that keep iOS background location
+#     PUBLISHING alive (and keep opt-out users suspended): Info.plist
+#     `location` background mode, exactly one geolocator stream call site,
+#     AppleSettings background flags keyed off the background-sharing toggle
+#     (never hardcoded), the C4 disable-while-paused watcher installed
+#     outside the liveSync-gated path, presence-only location logging.
+#
 #   Locale stays device-local         scripts/ci/check_locale_privacy.sh
 #     The app language must remain a local preference and never be referenced
 #     from the service layer (nothing locale-shaped may reach a relay).
@@ -99,6 +107,10 @@ jobs:
       - name: Background-wake invariants
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_m7_native_wake_guards.sh
+
+      - name: iOS background publish
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_ios_background_publish.sh
 
       - name: Locale stays device-local
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

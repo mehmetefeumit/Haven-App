@@ -429,7 +429,7 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'बैकग्राउंड में सीमित। सेटिंग में Haven के लिए स्थान को \'हमेशा\' पर सेट करें';
+      'आपकी मौजूदा अनुमति के साथ भी साझाकरण बैकग्राउंड में चलता रहता है। सेटिंग में Haven के लिए स्थान को \'हमेशा\' पर सेट करें, ताकि iOS के ऐप बंद कर देने के बाद भी अपडेट फिर से शुरू हो सकें।';
 
   @override
   String get locationSettingsAndroidHeader =>
@@ -449,7 +449,7 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get locationSettingsIosGuidance =>
-      'लगातार बैकग्राउंड साझाकरण के लिए, सेटिंग में Haven के लिए स्थान को \"हमेशा\" पर सेट करें। जब कोई ऐप बैकग्राउंड में आपके स्थान का उपयोग कर रहा होता है तो iOS स्टेटस बार में एक नीला संकेतक दिखाता है।';
+      'जब बैकग्राउंड साझाकरण चालू होता है, तो Haven लगातार आपके स्थान का उपयोग करता रहता है और iOS स्टेटस बार में एक नीला संकेतक दिखाता है। साथ ही, \"हमेशा\" की अनुमति देने पर iOS के ऐप बंद कर देने के बाद भी Haven आपके सर्कलों के छूटे हुए अपडेट पा सकता है।';
 
   @override
   String get mapStyleTitle => 'मानचित्र शैली';

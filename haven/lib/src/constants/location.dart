@@ -125,12 +125,18 @@ const String kBackgroundIdleKey = 'haven.background_idle';
 /// forever by a stuck `true` boolean.
 const String kForegroundActiveAtMsKey = 'haven.foreground_active_at_ms';
 
-/// Distance filter (metres) for the iOS background location stream.
+/// Maximum age of a cached stream-delivered position that
+/// `GeolocatorLocationService.getCurrentLocation()` may serve instead of
+/// issuing a fresh one-shot GPS request.
 ///
-/// Only GPS updates that exceed this threshold trigger a delegate
-/// callback. Keeps the stream alive for process retention while
-/// avoiding excessive wakeups when stationary.
-const double kBackgroundDistanceFilterMeters = 50;
+/// Freshness is measured against the GPS fix time (`Position.timestamp`),
+/// not a Dart-side cached-at clock. Reuses [kLocationPublishMaxInterval]:
+/// a fix at most this old is no staler than what an on-time jittered
+/// publish tick would have captured anyway. This cache is what lets the
+/// iOS background publish path avoid the one-shot `getCurrentPosition`
+/// entirely — the plugin's one-time CLLocationManager never enables
+/// background delivery, so a backgrounded one-shot can only stall.
+const Duration kStreamPositionMaxAge = kLocationPublishMaxInterval;
 
 // ---------------------------------------------------------------------------
 // Prominent disclosure (Google Play "Prominent Disclosure & Consent")

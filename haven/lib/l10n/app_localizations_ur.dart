@@ -429,7 +429,7 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'پس منظر میں محدود۔ ترتیبات میں Haven کے لیے مقام کو \'Always\' پر مقرر کریں';
+      'آپ کی موجودہ اجازت کے ساتھ شیئرنگ پس منظر میں کام کرتی رہتی ہے۔ ترتیبات میں Haven کے لیے مقام کو \'Always\' پر مقرر کریں تاکہ iOS کے ایپ بند کر دینے کے بعد بھی اپ ڈیٹس دوبارہ شروع ہو سکیں۔';
 
   @override
   String get locationSettingsAndroidHeader => 'بھروسے کے لیے OS ترتیبات';
@@ -448,7 +448,7 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get locationSettingsIosGuidance =>
-      'مسلسل پس منظر شیئرنگ کے لیے ترتیبات میں Haven کے لیے مقام کو \"Always\" پر مقرر کریں۔ جب کوئی ایپ پس منظر میں آپ کا مقام استعمال کر رہی ہو تو iOS اسٹیٹس بار میں ایک نیلا اشارہ دکھاتا ہے۔';
+      'جب پس منظر میں شیئرنگ آن ہو تو Haven مقام کا ایک مسلسل سیشن جاری رکھتا ہے اور iOS اسٹیٹس بار میں ایک نیلا اشارہ دکھاتا ہے۔ \"Always\" کی اجازت دینے سے یہ اضافی سہولت ملتی ہے کہ iOS کے ایپ بند کر دینے کے بعد Haven آپ کے حلقوں کی تازہ صورت حال حاصل کر سکے۔';
 
   @override
   String get mapStyleTitle => 'نقشے کا انداز';

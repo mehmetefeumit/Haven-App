@@ -8,8 +8,8 @@ compile-time `backgroundCatchupEnabled` flag; **`liveSyncEnabled` (the persisten
 is M11-owned and stays `false`** — M7 does not flip it.
 
 Migration context: `docs/WN_RELAY_EPOCH_SYNC_MIGRATION.md` (M7 ≈ the self-owned background-delivery
-milestone). Siblings: `docs/M3_STREAMSINK_ENGINE.md`, `docs/M6_SEND_PATH_CONVERGENCE.md`,
-`docs/M8_SCHEDULED_RESILIENCE.md`, `docs/M11_ROLLOUT.md`, `docs/E2E_TROUBLESHOOTING.md`.
+milestone; the former M3/M6/M8 docs are now appendices in that master plan). Siblings:
+`docs/M11_ROLLOUT.md`, `docs/E2E_TROUBLESHOOTING.md`.
 
 Architecture at a glance: **OS-scheduled-wake, single-process, receive-only. MIP-05 push REJECTED
 on privacy.** The device wakes itself and fetches from the same relays it already uses — zero new
@@ -774,6 +774,24 @@ release.
 sharing enabled in Haven (Settings → Location); Always location permission granted; at least one
 circle with a peer who will publish a location.
 
+0. **Background PUBLISH continuity (the 2026-07-19 unified-stream fix).** With background sharing
+   ON and only **When-In-Use** granted (deliberately NOT Always — this proves the
+   foreground-started continuation path): open Haven, confirm a fix on the map, press Home (do
+   **not** force-quit), wait 5+ minutes stationary. **Expected:** the blue status-bar location
+   indicator stays visible the whole time, and a peer device keeps receiving this device's
+   location on the normal 72–168 s cadence with no gap after backgrounding (the send scheduler
+   keeps firing because the unified stream's `allowsBackgroundLocationUpdates` session keeps the
+   process executable — movement is NOT required). Then repeat with background sharing OFF:
+   **expected** — no blue indicator after backgrounding, the app suspends within the OS's normal
+   grace period, and peers stop receiving until reopen (the toggle-OFF stream now pins
+   `allowsBackgroundLocationUpdates: false` explicitly, so the pre-fix accidental keep-alive is
+   gone). While there, spot-check battery attribution over a longer backgrounded window — the
+   unified stream keeps the foreground 1 m distance filter in background (the old 50 m
+   background-only filter is gone; delegate-callback frequency while moving is higher by design).
+   Force-quit (swipe-kill) remains out of scope: no iOS app can continue timer-cadence publishing
+   after termination; only the receive-only SLC relaunch path (item 2) survives it, and only with
+   Always.
+
 1. **BGAppRefreshTask fires and runs a real catch-up.** Run from Xcode on the device; enable
    background sharing; confirm a peer can publish. Background the app (Home) — this calls
    `applicationDidEnterBackground`, which arms `scheduleNextCatchup()` (submits a
@@ -1034,3 +1052,17 @@ nostr_group_id_hex=?` in the `delete_circle` cascade (`storage.rs:824-877`) = wi
   Independent confirmation returned APPROVE-WITH-FIXES; amendments A1–A11 folded (Part II). Only
   remaining item: the physical-iPhone BGTask owner check (§6). `liveSyncEnabled` remains M11-owned and
   `false`.
+- 2026-07-19 — **iOS background PUBLISH fix (unified stream).** Part I's premise that "iOS keeps the
+  main isolate alive while actively sharing" was found broken in the field: geolocator supports only
+  ONE position stream (Dart-side cache + native single-listener), so the pause-time
+  `getBackgroundLocationStream()` silently returned the already-active foreground stream and the
+  background `AppleSettings` never reached CoreLocation; additionally the publish path's one-shot
+  `getCurrentPosition` uses a plugin CLLocationManager that never enables background delivery. Fix
+  (separate change, own plan/review cycle): ONE unified stream whose iOS AppleSettings are a pure
+  function of the background-sharing toggle (`locationStreamProvider` watches it; toggle-OFF now pins
+  `allowsBackgroundLocationUpdates:false` — removing an accidental keep-alive for non-consenting
+  users), publish cycles are served from the stream's cached fix, the send scheduler + motion trigger
+  keep running through an iOS pause, and the C4 mid-pause-disable watcher moved to `_onPaused`'s iOS
+  branch UNCONDITIONALLY (it was previously unreachable under the live `liveSyncEnabled` default —
+  found by independent review, fixed pre-implementation). CI: `check_ios_background_publish.sh` in
+  repo-guards + host tests; runtime proof = §6 item 0.

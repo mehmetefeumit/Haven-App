@@ -816,10 +816,10 @@ abstract class AppLocalizations {
   /// **'Keep sharing when the app is closed'**
   String get locationSettingsToggleSubtitle;
 
-  /// iOS-only note shown when background sharing is on but the location permission is only 'while in use'.
+  /// iOS-only note shown when background sharing is on but the location permission is only 'while in use'. Must stay honest in both directions: While-In-Use IS sufficient for continued background sharing while the app stays running (never claim 'Always' is required for that), and 'Always' still genuinely improves catch-up after iOS terminates the app (never present While-In-Use as loss-free).
   ///
   /// In en, this message translates to:
-  /// **'Limited in background. Set Location to \'Always\' for Haven in Settings'**
+  /// **'Sharing keeps working in the background with your current permission. Choose \'Always\' for Haven in Settings so updates can also resume after iOS closes the app.'**
   String get locationSettingsIosLimitedNote;
 
   /// Android-only heading above the reliability guidance card.
@@ -846,10 +846,10 @@ abstract class AppLocalizations {
   /// **'On Samsung devices, remove Haven from \"Sleeping apps\" (Device care → Battery → Background usage limits). On Xiaomi, enable Autostart for Haven.'**
   String get locationSettingsAndroidVendors;
 
-  /// iOS-only reliability guidance about setting Location permission to 'Always'.
+  /// iOS-only reliability guidance card. Explains that background sharing works via a continuous location session (with the visible blue indicator), and frames the 'Always' permission as an optional enhancement for catch-up after app termination — never as a requirement for background sharing.
   ///
   /// In en, this message translates to:
-  /// **'For continuous background sharing, set Location to \"Always\" for Haven in Settings. iOS shows a blue status-bar indicator while an app is using your location in the background.'**
+  /// **'While background sharing is on, Haven keeps a continuous location session and iOS shows a blue status-bar indicator. Granting \"Always\" additionally lets Haven catch up on your circles after iOS closes the app.'**
   String get locationSettingsIosGuidance;
 
   /// Title of the map-style settings page (AppBar).

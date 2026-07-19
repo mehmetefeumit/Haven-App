@@ -474,7 +474,10 @@ void main() {
         // Settle both _load() and the iosLocationPermissionProvider future.
         await tester.pumpAndSettle();
 
-        expect(find.textContaining('Limited in background'), findsOneWidget);
+        expect(
+          find.textContaining('with your current permission'),
+          findsOneWidget,
+        );
         expect(find.text('Open settings'), findsOneWidget);
       },
     );
@@ -496,7 +499,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.textContaining('Limited in background'), findsNothing);
+      expect(find.textContaining('with your current permission'), findsNothing);
     });
 
     // -------------------------------------------------------------------------
@@ -519,7 +522,10 @@ void main() {
         await tester.pumpAndSettle();
 
         // Initially OFF → the note is not shown.
-        expect(find.textContaining('Limited in background'), findsNothing);
+        expect(
+          find.textContaining('with your current permission'),
+          findsNothing,
+        );
 
         // Enable: disclosure accepted → setEnabled(true) → the success branch
         // invalidates iosLocationPermissionProvider, which re-reads the still
@@ -527,7 +533,10 @@ void main() {
         await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
         await tester.pumpAndSettle();
 
-        expect(find.textContaining('Limited in background'), findsOneWidget);
+        expect(
+          find.textContaining('with your current permission'),
+          findsOneWidget,
+        );
         expect(find.text('Open settings'), findsOneWidget);
       },
     );

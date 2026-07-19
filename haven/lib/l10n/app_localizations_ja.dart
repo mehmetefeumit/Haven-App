@@ -413,7 +413,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'バックグラウンドでは制限されています。設定で Haven の位置情報を「常に許可」にしてください';
+      '現在の権限のままでも、バックグラウンドでの共有は継続されます。設定で Haven の位置情報を「常に許可」にすると、iOS がアプリを終了した後も更新を再開できるようになります。';
 
   @override
   String get locationSettingsAndroidHeader => '確実に動かすためのOS設定';
@@ -432,7 +432,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get locationSettingsIosGuidance =>
-      'バックグラウンドで継続的に共有するには、設定で Haven の位置情報を「常に許可」にしてください。iOS では、アプリがバックグラウンドで位置情報を使用している間、ステータスバーに青い表示が出ます。';
+      'バックグラウンド共有がオンの間、Haven は位置情報の取得を継続するため、iOS のステータスバーに青い表示が出ます。さらに「常に許可」を選ぶと、iOS がアプリを終了した後も、Haven がサークルの更新に追いつけるようになります。';
 
   @override
   String get mapStyleTitle => '地図のスタイル';

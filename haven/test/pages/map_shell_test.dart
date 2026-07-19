@@ -53,4 +53,51 @@ void main() {
       );
     });
   });
+
+  group('MapShell.shouldKeepPublishingWhilePaused', () {
+    test('keeps publishing only on the iOS background branch', () {
+      // The unified background-capable location stream keeps the process
+      // executable, so the send scheduler and motion trigger stay live.
+      expect(
+        MapShell.shouldKeepPublishingWhilePaused(
+          backgroundSharingEnabled: true,
+          isIOS: true,
+        ),
+        isTrue,
+      );
+    });
+
+    test('stops on Android even with background sharing on', () {
+      // Android hands publishing to the foreground-service isolate; the
+      // foreground scheduler must stop (MLS single-writer handoff).
+      expect(
+        MapShell.shouldKeepPublishingWhilePaused(
+          backgroundSharingEnabled: true,
+          isIOS: false,
+        ),
+        isFalse,
+      );
+    });
+
+    test('stops on iOS when background sharing is off', () {
+      // The stream carries no keep-alive; the app genuinely goes idle.
+      expect(
+        MapShell.shouldKeepPublishingWhilePaused(
+          backgroundSharingEnabled: false,
+          isIOS: true,
+        ),
+        isFalse,
+      );
+    });
+
+    test('stops when neither condition holds', () {
+      expect(
+        MapShell.shouldKeepPublishingWhilePaused(
+          backgroundSharingEnabled: false,
+          isIOS: false,
+        ),
+        isFalse,
+      );
+    });
+  });
 }

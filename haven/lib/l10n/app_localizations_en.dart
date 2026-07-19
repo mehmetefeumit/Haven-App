@@ -428,7 +428,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'Limited in background. Set Location to \'Always\' for Haven in Settings';
+      'Sharing keeps working in the background with your current permission. Choose \'Always\' for Haven in Settings so updates can also resume after iOS closes the app.';
 
   @override
   String get locationSettingsAndroidHeader => 'OS settings for reliability';
@@ -447,7 +447,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get locationSettingsIosGuidance =>
-      'For continuous background sharing, set Location to \"Always\" for Haven in Settings. iOS shows a blue status-bar indicator while an app is using your location in the background.';
+      'While background sharing is on, Haven keeps a continuous location session and iOS shows a blue status-bar indicator. Granting \"Always\" additionally lets Haven catch up on your circles after iOS closes the app.';
 
   @override
   String get mapStyleTitle => 'Map style';
