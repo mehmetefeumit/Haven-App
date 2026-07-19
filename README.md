@@ -13,9 +13,9 @@
 
 Haven is an end-to-end encrypted location sharing app that requires no personal information at sign-up and uses no central server. 
 Your location is encrypted on your device before it is sent to decentralized Nostr relays. It can only be decrypted by members of 
-your location sharing circle after they fetch your latest location information from the relays. Since Haven runs no servers of its 
-own, so there's simply no data to sell, leak, or hand over. It requires no phone numbers, emails, or any personally identifiable 
-information before you can start using it. Haven is open-source, so all of its privacy guarantees are verifiable.
+your location sharing circle after they fetch your latest location information from the relays. You can select the relays you
+want to send location updates through, and/or run and use your own relays. Haven requires no phone numbers, emails, 
+or any personally identifiable information before you can start using it. It is open-source, so all of its privacy guarantees are verifiable.
 
 ## Why use Haven?
 
@@ -68,7 +68,7 @@ Haven was written entirely using AI. It was initially a vibe-coding experiment t
 could take me. I applied software development best practices which I know and use in my full-time job as a software developer,
 but did so entirely through AI agents. This also includes asking AI to check for privacy or security risks in the code.
 
-Since I have never seen Haven's code, I will never cut a 1.0 release until I get an official security audit from a 3rd party
+Since I have never seen Haven's code, I will never cut a 1.0 release until I get an official security audit from a 3rd party.
 
 Hence, until the official audit is in, please be aware that Haven has been entirely coded by AI, with me only steering it through prompts. For what it's worth, I prompted it A LOT for both implementing and validating Haven's privacy and security.
 
@@ -80,4 +80,4 @@ MIT. See [`LICENSE`](LICENSE).
 
 - More on Nostr — https://nostr.org/
 - Marmot Protocol specification — https://github.com/marmot-protocol/marmot
-- Marmot Development Kit (Rust SDK) — https://github.com/parres-hq/mdk
+- Marmot Development Kit (Rust SDK) — https://github.com/marmot-protocol/mdk
