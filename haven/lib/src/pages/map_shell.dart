@@ -28,6 +28,7 @@ import 'package:haven/src/providers/legacy_cutover_provider.dart';
 import 'package:haven/src/providers/legacy_retraction_provider.dart';
 import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/providers/location_provider.dart';
+import 'package:haven/src/providers/location_publish_scheduler_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/maintenance_scheduler_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
@@ -38,7 +39,6 @@ import 'package:haven/src/services/background_idle_waiter.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
-import 'package:haven/src/services/jittered_scheduler.dart';
 import 'package:haven/src/services/live_sync_resubscriber.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
@@ -114,14 +114,12 @@ class _MapShellState extends ConsumerState<MapShell>
   double _sheetExpansion = 0;
   final DraggableScrollableController _sheetController =
       DraggableScrollableController();
-  JitteredScheduler? _sendScheduler;
-  // Cached BigInt to avoid per-tick allocation on the FFI hot path.
-  static final BigInt _nominalPublishSecsBigInt = BigInt.from(
-    kLocationUpdateInterval.inSeconds,
-  );
-  // Cached LocationEventService so the scheduler rearm path does not
-  // allocate a fresh opaque handle on every tick.
-  final LocationEventService _locationEventService = LocationEventService();
+  // Recurring location publishing is driven by `locationPublishSchedulerProvider`
+  // (one independent jittered schedule PER circle, so a relay cannot correlate
+  // a device's circles by co-timing — privacy decorrelation). MapShell only
+  // starts/stops it across the app lifecycle; the per-circle timers live in the
+  // notifier. The one-shot "publish all now" burst still goes through
+  // `locationPublisherProvider` (cold-start / resume / motion / accept-create).
   Timer? _receiveTimer;
   Timer? _invitationTimer;
   Timer? _pruneTimer;
@@ -178,8 +176,9 @@ class _MapShellState extends ConsumerState<MapShell>
   // On iOS with background sharing enabled, the SINGLE geolocator stream
   // (see `locationStreamProvider`) carries `allowsBackgroundLocationUpdates:
   // true`, so CoreLocation keeps this process fully executable while
-  // backgrounded: `_sendScheduler` keeps firing on its jittered cadence and
-  // `_motionSub` keeps delivering movement-driven publishes. There is no
+  // backgrounded: the per-circle publish scheduler
+  // (`locationPublishSchedulerProvider`) keeps firing on its jittered cadences
+  // and `_motionSub` keeps delivering movement-driven publishes. There is no
   // second "background stream" — geolocator supports exactly one stream, and
   // a second request would silently inherit the first stream's settings
   // (the defect that originally broke iOS background publishing). On
@@ -417,7 +416,6 @@ class _MapShellState extends ConsumerState<MapShell>
     // Defensive cancellation: if called from the resume path while
     // timers are still live (e.g. rapid pause/resume cycles that slip
     // past the debounce), cancel existing timers to prevent accumulation.
-    _sendScheduler?.cancel();
     _receiveTimer?.cancel();
     _invitationTimer?.cancel();
     _pruneTimer?.cancel();
@@ -435,26 +433,15 @@ class _MapShellState extends ConsumerState<MapShell>
       unawaited(BackgroundLocationManager.markForegroundActive(active: true));
     });
 
-    // Publish location on a jittered cadence around
-    // `kLocationUpdateInterval` (nominal mean, ±40% via Rust-side CSPRNG,
-    // see `haven-core/src/location/ttl.rs`). Each tick rearms at a
-    // freshly sampled interval in
-    // `[kLocationPublishMinInterval, kLocationPublishMaxInterval]`.
-    // The overlap guard (`kLocationPublishOverlapGuard`) sits strictly
-    // below the min jittered interval, so genuine short-end ticks are
-    // never suppressed — the guard only defends against the
-    // resume-branch `ref.read` below which fires independently of the
-    // scheduler.
-    _sendScheduler = JitteredScheduler(
-      nominal: kLocationUpdateInterval,
-      sampleIntervalSecs: (_) => _locationEventService
-          .jitteredPublishIntervalSecs(nominalSecs: _nominalPublishSecsBigInt)
-          .toInt(),
-      onTick: () {
-        if (!mounted) return;
-        _guardedPublish();
-      },
-    )..start();
+    // Recurring location publishing: each accepted circle publishes on its OWN
+    // independent jittered cadence (nominal `kLocationUpdateInterval`, ±40% via
+    // Rust-side CSPRNG per tick), owned by `locationPublishSchedulerProvider`.
+    // Independent per-circle schedules mean a relay can't correlate a device's
+    // circles by co-timing (privacy decorrelation). Reading the notifier builds
+    // it (arming a schedule per current circle); `startScheduling` re-activates
+    // after a background pause. Cancelled on pause (below), on dispose
+    // (Ref.onDispose), and on `deleteIdentity`.
+    ref.read(locationPublishSchedulerProvider.notifier).startScheduling();
 
     // Motion-triggered publish: subscribe to the GPS stream that the map
     // page already consumes. No extra GPS cost — Riverpod shares the
@@ -663,7 +650,7 @@ class _MapShellState extends ConsumerState<MapShell>
       // `FOREGROUND_SERVICE_LOCATION` start requests issued from a
       // non-visible activity, so we deliberately do **not** start it
       // here.
-      _sendScheduler?.cancel();
+      ref.read(locationPublishSchedulerProvider.notifier).stopScheduling();
       _stopMotionTrigger();
       // Fix 6: Await in order — persist seed FIRST, then release
       // ownership. If the background isolate picks up active=false
@@ -691,9 +678,9 @@ class _MapShellState extends ConsumerState<MapShell>
       // AppleSettings (it watches `backgroundSharingProvider` directly), so
       // the CLLocationManager session that keeps this process executing was
       // established the moment the toggle turned on — necessarily while
-      // foregrounded, as iOS requires. `_sendScheduler` and `_motionSub`
-      // keep running exactly as in the foreground, giving background
-      // publishing both a periodic floor and movement-driven
+      // foregrounded, as iOS requires. The per-circle publish scheduler and
+      // `_motionSub` keep running exactly as in the foreground, giving
+      // background publishing both a periodic floor and movement-driven
       // responsiveness.
       //
       // C4: install the disable-while-paused watcher UNCONDITIONALLY here
@@ -708,7 +695,7 @@ class _MapShellState extends ConsumerState<MapShell>
         next,
       ) {
         if (next) return;
-        _sendScheduler?.cancel();
+        ref.read(locationPublishSchedulerProvider.notifier).stopScheduling();
         _stopMotionTrigger();
         _receiveTimer?.cancel();
         _receiveTimer = null;
@@ -724,7 +711,7 @@ class _MapShellState extends ConsumerState<MapShell>
       });
     } else {
       // Background sharing disabled — original behaviour.
-      _sendScheduler?.cancel();
+      ref.read(locationPublishSchedulerProvider.notifier).stopScheduling();
       _stopMotionTrigger();
     }
 
@@ -1020,7 +1007,11 @@ class _MapShellState extends ConsumerState<MapShell>
 
   @override
   void dispose() {
-    _sendScheduler?.cancel();
+    // The per-circle publish scheduler lives in
+    // `locationPublishSchedulerProvider` (container-scoped, like
+    // `maintenanceSchedulerProvider`): its timers are cancelled via
+    // Ref.onDispose + the explicit invalidate in `deleteIdentity`, NOT here
+    // (repo convention: no `ref` use in dispose()).
     _receiveTimer?.cancel();
     _invitationTimer?.cancel();
     _pruneTimer?.cancel();

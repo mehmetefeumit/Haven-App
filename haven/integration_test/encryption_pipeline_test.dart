@@ -469,15 +469,17 @@ void main() {
         // Dark Matter: the engine derives the NIP-40 expiration
         // deterministically as `created_at + retention`, where retention is
         // the group's `message-retention.v1` component haven-core stamps at
-        // circle creation — `2 * (kLocationPublishMaxInterval +
-        // kTtlNetworkBufferSeconds)` = 396 s, preserving the ceiling of the
-        // pre-Dark-Matter jittered window. (`updateIntervalSecs` passed to
+        // circle creation — `kLocationPublishMaxInterval +
+        // 2 * kTtlNetworkBufferSeconds` = 228 s (the data-minimizing point
+        // that still clears the 168 s max per-circle publish gap with a 60 s
+        // no-gap margin; mirrors LOCATION_MESSAGE_RETENTION_SECS in
+        // haven-core/src/location/ttl.rs). (`updateIntervalSecs` passed to
         // encryptLocation is retained for signature stability but no longer
         // drives the TTL.) The event's own `created_at` anchors the exact
         // check; the nowSecs bound catches a stale/backdated created_at.
         final retentionSecs =
-            2 *
-            (kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds);
+            kLocationPublishMaxInterval.inSeconds +
+            2 * kTtlNetworkBufferSeconds;
         final expirationMatch = RegExp(
           r'"expiration"\s*,\s*"(\d+)"',
         ).firstMatch(eventJson);

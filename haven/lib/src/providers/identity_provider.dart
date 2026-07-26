@@ -9,6 +9,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/live_sync_provider.dart';
+import 'package:haven/src/providers/location_publish_scheduler_provider.dart';
 import 'package:haven/src/providers/maintenance_scheduler_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/tile_prefetch_provider.dart';
@@ -290,6 +291,10 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
     // `closeAndInvalidate` below). The engine's own subscription was already
     // stopped above.
     ref.invalidate(maintenanceSchedulerProvider);
+    // Same H1 ordering for the per-circle location-publish scheduler: cancel
+    // its per-circle timers BEFORE the wipe so no publish tick can re-open
+    // circles.db mid/post-wipe (its `onDispose` fires on invalidate).
+    ref.invalidate(locationPublishSchedulerProvider);
     // M10: Wipe ALL MLS state (circles.db + haven_mdk.db files + keyring
     // keys). The close MUST precede the wipe so GC drops the SQLite fd
     // before the file is deleted (POSIX-safe unlink) — and it latches the

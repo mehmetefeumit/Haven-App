@@ -4,6 +4,8 @@
 /// Rust FFI or system keyring access.
 library;
 
+import 'dart:async';
+
 import 'package:haven/src/services/circle_service.dart';
 
 /// A mock [CircleService] for testing.
@@ -321,6 +323,16 @@ class MockCircleService implements CircleService {
   /// The update-interval hint captured from the last [encryptLocation] call.
   int? capturedUpdateIntervalSecs;
 
+  /// `mlsGroupId`s passed to [encryptLocation], in call order — lets a test
+  /// assert exactly WHICH circle(s) were published to (e.g. per-circle
+  /// scheduling).
+  final List<List<int>> encryptedMlsGroupIds = [];
+
+  /// Optional gate awaited at the START of every [encryptLocation] call (after
+  /// recording the call). Set it to an incomplete `Completer` to hold publishes
+  /// open and prove serialization; complete it to release them.
+  Completer<void>? encryptGate;
+
   @override
   Future<EncryptedLocation> encryptLocation({
     required List<int> mlsGroupId,
@@ -330,7 +342,11 @@ class MockCircleService implements CircleService {
     required int updateIntervalSecs,
   }) async {
     capturedUpdateIntervalSecs = updateIntervalSecs;
+    encryptedMlsGroupIds.add(mlsGroupId);
     methodCalls.add('encryptLocation');
+    if (encryptGate != null) {
+      await encryptGate!.future;
+    }
     if (_encryptIndex < encryptLocationResults.length) {
       return encryptLocationResults[_encryptIndex++];
     }

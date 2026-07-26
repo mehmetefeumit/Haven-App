@@ -29,15 +29,17 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:haven/src/constants/location.dart';
+import 'package:haven/src/providers/location_publish_scheduler_provider.dart'
+    show filterPublishEligibleCircles;
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/rust/frb_generated.dart';
 import 'package:haven/src/services/background_identity_service.dart';
 import 'package:haven/src/services/background_location_manager.dart';
-import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
+import 'package:haven/src/services/per_circle_due_tracker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Top-level callback required by [FlutterForegroundTask].
@@ -69,8 +71,19 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   /// rather than nulling services mid-cycle.
   Future<void>? _inFlightPublish;
 
-  /// Next allowed publish time (jitter target).
-  DateTime _nextPublishAt = DateTime.now();
+  /// Independent per-circle publish scheduling (privacy: decorrelation). Each
+  /// circle is registered "due now" when the background first owns publishing,
+  /// then re-armed on its OWN jittered cadence, so a relay can't correlate a
+  /// device's circles by co-timing. Cleared whenever the foreground owns
+  /// publishing so the handoff back re-seeds every circle due-now (bounding the
+  /// inter-publish gap to one cycle).
+  final PerCircleDueTracker _dueTracker = PerCircleDueTracker();
+
+  /// Last time the background ran the all-circles peer-location fetch.
+  /// Throttles the fetch to ~`kLocationUpdateInterval` so per-circle publish
+  /// decorrelation (which wakes more often) does not multiply background relay
+  /// round-trips by the circle count (battery parity — see `_publishCycle`).
+  DateTime? _lastBackgroundFetchAt;
 
   /// Number of completed publish cycles since the last prune. The bg
   /// isolate calls `pruneExpiredLastKnown` once every
@@ -216,14 +229,13 @@ class BackgroundLocationTaskHandler extends TaskHandler {
         );
       }
 
-      // 8. Seed the jitter target from the last foreground publish time.
-      final prefs = await SharedPreferences.getInstance();
-      final lastMs = prefs.getInt(kBackgroundLastPublishMsKey);
-      if (lastMs != null) {
-        final lastPublish = DateTime.fromMillisecondsSinceEpoch(lastMs);
-        final nextSecs = _sampleJitteredInterval();
-        _nextPublishAt = lastPublish.add(Duration(seconds: nextSecs));
-      }
+      // 8. Per-circle publish scheduling (privacy: decorrelation) is seeded
+      //    lazily in `_publishCycle` — each circle is registered "due now" the
+      //    first cycle the background actually owns publishing, then re-armed
+      //    on its own independent jittered cadence. No single seed timestamp is
+      //    needed (or read): seeding due-now bounds a circle's worst-case
+      //    inter-publish gap across the foreground→background handoff to one
+      //    background cycle, keeping the kind-445 TTL no-gap invariant intact.
 
       debugPrint(
         '[BackgroundTask] Initialized '
@@ -324,8 +336,9 @@ class BackgroundLocationTaskHandler extends TaskHandler {
 
   Future<void> _publishCycle(DateTime timestamp) async {
     try {
-      // 1. Jitter skip — wait until the sampled target time.
-      if (timestamp.isBefore(_nextPublishAt)) return;
+      // Per-circle jitter now lives in `_dueTracker` (step 7 below), so there
+      // is no single cycle-wide jitter gate here — the master `onRepeatEvent`
+      // cadence (`kBackgroundRepeatInterval`) is just the polling granularity.
 
       // 2. Abort if no identity is loaded.
       if (_pubkeyHex == null || _circleManager == null) return;
@@ -359,51 +372,65 @@ class BackgroundLocationTaskHandler extends TaskHandler {
         foregroundActive = await BackgroundLocationManager.isForegroundActive();
       }
       if (foregroundActive) {
-        // Reschedule so we don't immediately fire the moment the
-        // foreground goes inactive — let the jitter window apply.
-        _scheduleNext();
+        // The foreground owns publishing: keep NO per-circle schedule state so
+        // that the moment the foreground goes inactive, every circle is seeded
+        // "due now" (bounding the handoff gap to one background cycle).
+        _dueTracker.pruneToKeys(<String>{});
         return;
       }
 
-      // 4. Acquire a GPS fix.
-      final position = await _locationService!.getCurrentLocation();
-
-      // 7. Get accepted circles. Uses the Dart-side `CircleService` so
-      //    the same `Circle` value can be reused for the fetch step
-      //    below — `LocationSharingService.fetchMemberLocations` requires
-      //    the Dart abstraction (members + relays + nostrGroupId), not
-      //    the FFI struct.
-      if (_circleService == null) {
-        _scheduleNext();
-        return;
-      }
+      // 7. Get eligible circles. Uses the Dart-side `CircleService` so the same
+      //    `Circle` value can be reused for the fetch step below — and applies
+      //    the SAME eligibility filter as the foreground publisher
+      //    (`filterPublishEligibleCircles`): accepted, not a pre-cutover
+      //    orphan, not engine-blocked (Rule 8). (Previously it only filtered
+      //    on `accepted`, so it kept retrying orphaned/blocked circles that can
+      //    never succeed.)
+      if (_circleService == null) return;
       final circles = await _circleService!.getVisibleCircles();
-      final accepted = circles
-          .where((c) => c.membershipStatus == MembershipStatus.accepted)
+      final accepted = filterPublishEligibleCircles(circles, _circleService!);
+
+      if (accepted.isEmpty) return;
+
+      // Per-circle decorrelation: register each eligible circle "due now" the
+      // first time we see it while owning publishing, then publish only the
+      // circles whose own independent jittered time has come. Prune first so a
+      // left/blocked circle's schedule is dropped.
+      final eligibleKeys = <String>{
+        for (final c in accepted) _bgCircleKey(c.nostrGroupId),
+      };
+      _dueTracker.pruneToKeys(eligibleKeys);
+      for (final key in eligibleKeys) {
+        _dueTracker.seedIfAbsent(key, timestamp);
+      }
+      final dueCircles = accepted
+          .where(
+            (c) => _dueTracker.isDue(_bgCircleKey(c.nostrGroupId), timestamp),
+          )
           .toList();
 
-      if (accepted.isEmpty) {
-        _scheduleNext();
-        return;
-      }
+      // Nothing due this cycle → skip the GPS fix + publish entirely (battery:
+      // no wake cost when no circle is scheduled).
+      if (dueCircles.isEmpty) return;
 
-      // 8. Encrypt and publish to each circle (sequentially to avoid
-      //    MLS epoch counter races across groups — different groups are
-      //    independent but sequential is safer for DB locking).
-      //    Re-check foreground ownership immediately before each
-      //    encryptLocation call: the user can resume during any of the
-      //    preceding awaits (precision read, GPS fix, getVisibleCircles).
+      // 4. Acquire a GPS fix (only now that at least one circle is due).
+      final position = await _locationService!.getCurrentLocation();
+
+      // 8. Encrypt and publish to each DUE circle (sequentially to avoid MLS
+      //    epoch counter races across groups — different groups are independent
+      //    but sequential is safer for DB locking). Re-check foreground
+      //    ownership immediately before each encryptLocation call: the user can
+      //    resume during any of the preceding awaits (GPS fix, circle fetch).
       //    If the foreground reclaimed ownership, break out rather than
       //    advancing an MLS epoch concurrently.
       var publishCount = 0;
-      for (final circle in accepted) {
+      for (final circle in dueCircles) {
         // Fix 4: Re-check before each MLS epoch advance.
         if (await BackgroundLocationManager.isForegroundActive()) {
           debugPrint(
             '[BackgroundTask] Foreground reclaimed ownership mid-loop — '
             'aborting remaining circles.',
           );
-          _scheduleNext();
           return;
         }
 
@@ -423,6 +450,13 @@ class BackgroundLocationTaskHandler extends TaskHandler {
             relays: encrypted.relays,
           );
 
+          // Re-arm THIS circle on its own fresh jittered cadence (independent
+          // per circle — the decorrelation guarantee).
+          _dueTracker.markPublished(
+            _bgCircleKey(circle.nostrGroupId),
+            DateTime.now(),
+            _sampleJitteredInterval(),
+          );
           publishCount++;
         } on Object catch (e) {
           debugPrint(
@@ -438,6 +472,15 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       //    stale during long backgrounded sessions and the foreground
       //    rehydrates to old data on resume.
       //
+      //    Throttled to `kLocationUpdateInterval`: per-circle publish
+      //    decorrelation makes "a circle is due" fire more often than the
+      //    old single cycle-wide gate, but fetching ALL circles on every
+      //    such wake would multiply the background relay round-trips by the
+      //    circle count. Gating the fetch on its own ~nominal cadence keeps
+      //    background fetch frequency (and battery) at parity with the
+      //    pre-decorrelation behaviour regardless of how many circles the
+      //    user is in.
+      //
       //    Receiver-side auto-commit: `fetchMemberLocations` may
       //    publish + finalise an evolution event when MDK
       //    auto-commits a peer's `SelfRemove` proposal. The single-
@@ -449,7 +492,11 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       //    circle) and let the next cycle re-process the same proposal
       //    from a clean local epoch.
       var fetchCount = 0;
-      if (_locationSharingService != null) {
+      final fetchDue = _lastBackgroundFetchAt == null ||
+          timestamp.difference(_lastBackgroundFetchAt!) >=
+              kLocationUpdateInterval;
+      if (fetchDue && _locationSharingService != null) {
+        _lastBackgroundFetchAt = timestamp;
         for (final circle in accepted) {
           if (await BackgroundLocationManager.isForegroundActive()) {
             debugPrint(
@@ -497,18 +544,17 @@ class BackgroundLocationTaskHandler extends TaskHandler {
         }
       }
 
-      // 12. Schedule next publish.
-      _scheduleNext();
-
+      // Per-circle next-publish times were re-armed inline (markPublished) as
+      // each due circle published — there is no single cycle-wide reschedule.
       debugPrint(
-        '[BackgroundTask] Published to $publishCount/${accepted.length}, '
-        'fetched $fetchCount/${accepted.length} circle(s), next in '
-        '${_nextPublishAt.difference(DateTime.now()).inSeconds}s',
+        '[BackgroundTask] Published to $publishCount/${dueCircles.length} due '
+        'circle(s) (${accepted.length} eligible), fetched '
+        '$fetchCount/${accepted.length} circle(s).',
       );
     } on Object catch (e) {
       debugPrint('[BackgroundTask] Publish cycle FAILED: ${e.runtimeType}');
-      // Schedule next attempt even on failure.
-      _scheduleNext();
+      // Per-circle schedules re-arm on the next successful publish; a failed
+      // cycle leaves due circles due, so the next master tick retries them.
     }
   }
 
@@ -528,9 +574,9 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     }
   }
 
-  /// Schedules the next publish at a jittered offset from now.
-  void _scheduleNext() {
-    final nextSecs = _sampleJitteredInterval();
-    _nextPublishAt = DateTime.now().add(Duration(seconds: nextSecs));
-  }
+  /// Hex-encodes a `nostrGroupId` for use as a per-circle due-tracker key.
+  /// Matches the foreground `_circleKey` / `LocationSharingService._circleKey`
+  /// convention (the public `#h` value — never the real MLS group id, Rule 4).
+  static String _bgCircleKey(List<int> nostrGroupId) =>
+      nostrGroupId.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 }

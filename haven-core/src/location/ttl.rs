@@ -49,18 +49,35 @@ pub const RECEIVER_EXPIRATION_GRACE_SECS: u64 = 60;
 /// The engine derives the outer kind-445 NIP-40 `expiration` tag as
 /// `inner_created_at + retention` for APPLICATION messages only
 /// (commits/proposals are never stamped — group history must outlive any
-/// TTL). `2 * (168 s max publish interval + 30 s network buffer)` keeps the
-/// pre-Dark-Matter TTL ceiling: the old per-send jitter sampled
-/// `[interval, 2 * interval]` with `interval = 198 s`, so `396` preserves
-/// the maximum relay residency while matching the engine's deterministic
-/// derivation. A fixed protocol-level constant is deliberately chosen over
-/// per-circle jitter: the outer event's stable `h` tag already identifies
-/// the circle, so a per-circle TTL adds no unlinkability, and a constant
-/// delta leaks less about publish cadence than the old jitter (whose TTL
-/// sample correlated with the publish interval). The constant remains a
-/// client-observable delta, but one shared with any Dark Matter client
-/// using the same engine derivation rather than a per-send Haven quirk.
-pub const LOCATION_MESSAGE_RETENTION_SECS: u64 = 396;
+/// TTL).
+///
+/// Value = `168 s max publish interval + 2 * 30 s network buffer = 228 s`.
+/// This is the **data-minimizing** point that still satisfies the no-gap
+/// invariant: a member re-publishes at most every `168 s`
+/// (`kLocationPublishMaxInterval`, the ceiling of the ±40 % cadence jitter),
+/// and each member's circles now publish on INDEPENDENT per-circle schedules
+/// (`map_shell.dart` / `background_location_task.dart`), so a circle's
+/// worst-case inter-publish gap stays `168 s` — decorrelating circles does
+/// not inflate it. A `228 s` TTL therefore always leaves the relay holding a
+/// non-expired event from every active publisher, with a `60 s` margin
+/// (`2 * kTtlNetworkBufferSeconds`) absorbing relay/sender clock skew and
+/// propagation. Shortened from the earlier `396 s` (which was the *ceiling*
+/// of the retired per-send jitter range, i.e. ~2× the necessary residency):
+/// halving relay-side residency of location ciphertext is a direct
+/// data-minimization win.
+///
+/// A fixed protocol-level constant is deliberately chosen over per-circle
+/// jitter: the outer event's stable `h` tag already identifies the circle,
+/// so a per-circle TTL adds no unlinkability, and a constant delta leaks
+/// less about publish cadence than the old jitter (whose TTL sample
+/// correlated with the publish interval). The constant remains a
+/// client-observable delta, but one shared with any Dark Matter client using
+/// the same engine derivation rather than a per-send Haven quirk.
+///
+/// KEEP IN SYNC (no shared source of truth across the FFI): the Dart mirror
+/// in `haven/lib/src/constants/location.dart` and the
+/// `encryption_pipeline_test.dart` expectation both encode this value.
+pub const LOCATION_MESSAGE_RETENTION_SECS: u64 = 228;
 
 /// Publish-interval jitter spread in basis points (`10_000` = 100%).
 ///

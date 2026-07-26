@@ -7,36 +7,39 @@
 /// `[kLocationPublishMinInterval, kLocationPublishMaxInterval]` (nominal
 /// ± 40%, see `haven-core/src/location/ttl.rs::PUBLISH_INTERVAL_JITTER_FRACTION_BP`).
 ///
-/// ## Outer NIP-40 TTL — no-gap invariant
+/// ## Outer NIP-40 TTL — no-gap invariant (Dark Matter)
 ///
-/// The `updateIntervalSecs` passed to `CircleService.encryptLocation`
-/// feeds `compute_jittered_ttl_secs` in Rust, which samples the outer
-/// kind:445 `expiration` tag uniformly in `[interval, 2 * interval]`.
+/// The kind:445 `expiration` tag is derived by the MDK engine as
+/// `created_at + retention`, where retention is the group's
+/// `message-retention.v1` component haven-core stamps at circle creation:
+/// `LOCATION_MESSAGE_RETENTION_SECS = 228 s` =
+/// `kLocationPublishMaxInterval + 2 * kTtlNetworkBufferSeconds`
+/// (`haven-core/src/location/ttl.rs` — the two sides MUST stay in sync
+/// by hand; there is no shared source of truth across the FFI).
 ///
 /// For a relay to always have a non-expired event from every active
-/// publisher, the **minimum TTL must exceed the maximum publish delay**
-/// with a network-propagation buffer:
+/// publisher, the **TTL must exceed the maximum publish delay** with a
+/// network-propagation buffer:
 ///
 /// ```
-/// τ_min > δ_max  ⇒  updateIntervalSecs > kLocationPublishMaxInterval
+/// τ (228 s) > δ_max (kLocationPublishMaxInterval, 168 s) + 60 s buffer
 /// ```
 ///
-/// We pass `kLocationPublishMaxInterval.inSeconds + 30` (198 s) rather
-/// than the nominal 120 s to:
+/// A single circle's worst-case inter-publish gap is δ_max = 168 s (the
+/// ceiling of the ±40 % cadence jitter), so a 228 s TTL always leaves the
+/// relay holding a non-expired event per active publisher, with a 60 s
+/// margin for clock skew / propagation.
 ///
-///  1. Close the gap that would appear when a late publish (`δ = 168 s`)
-///     follows an event that drew the minimum TTL (`τ = 120 s`).
-///  2. Add a 30 s network-propagation buffer so L₁ reaches the relay
-///     before L₀'s TTL expires even under moderate latency.
-///
-/// The resulting on-wire TTL window is `[198, 396] s` and is part of the
-/// receiver contract — `RECEIVER_EXPIRATION_GRACE_SECS = 60 s` in
-/// `ttl.rs` sits on top as defense-in-depth against clock skew, not to
-/// cover the publish/TTL gap.
-///
-/// The two jitters (publish interval and TTL) remain sampled
-/// independently — only the *range parameter* of the TTL jitter is
-/// lifted from `nominal` to `publish_max + 30`.
+/// The pre-Dark-Matter per-send TTL jitter is gone: the engine derives
+/// the expiration deterministically, and the wrapped event is signed by
+/// an ephemeral key inside the engine's peeler, so no Haven-side
+/// per-message TTL variation is possible (or desirable — a jittered
+/// delta would single Haven out among engine-derived Marmot clients).
+/// `updateIntervalSecs` passed to `CircleService.encryptLocation` is
+/// retained for signature stability but no longer drives the TTL.
+/// `RECEIVER_EXPIRATION_GRACE_SECS = 60 s` in `ttl.rs` sits on top as
+/// defense-in-depth against clock skew, not to cover the publish/TTL
+/// gap.
 ///
 /// ## Overlap guard
 ///
