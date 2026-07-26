@@ -1776,12 +1776,6 @@ abstract class AppLocalizations {
   /// **'Failed to leave circle'**
   String get leaveCircleError;
 
-  /// Informational note shown only to a circle's admin, directly below the Leave Circle button in the circle-details sheet. Explains that MDK's current public API exposes no admin-policy component codec (mdk#755), so Haven cannot yet support admin hand-off or self-demotion: an admin can only leave once every other member already has (the sole-remaining-member 'abandon' path still works). Temporary, upstream-blocked limitation; never shown to non-admin members.
-  ///
-  /// In en, this message translates to:
-  /// **'As this circle\'s admin, you can only leave once every other member has left. We know that\'s inconvenient — a future update will let admins hand off and leave directly.'**
-  String get leaveCircleAdminLimitationNote;
-
   /// Title of the banner shown above a circle's member list when the encryption engine has flagged the circle as unrecoverable (Dark Matter migration, Security Rule 8). Never shows a raw internal error.
   ///
   /// In en, this message translates to:

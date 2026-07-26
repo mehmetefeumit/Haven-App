@@ -1230,10 +1230,6 @@
   "@leaveCircleError": {
     "description": "Error snackbar shown when leaving a circle fails."
   },
-  "leaveCircleAdminLimitationNote": "As this circle's admin, you can only leave once every other member has left. We know that's inconvenient — a future update will let admins hand off and leave directly.",
-  "@leaveCircleAdminLimitationNote": {
-    "description": "Informational note shown only to a circle's admin, directly below the Leave Circle button in the circle-details sheet. Explains that MDK's current public API exposes no admin-policy component codec (mdk#755), so Haven cannot yet support admin hand-off or self-demotion: an admin can only leave once every other member already has (the sole-remaining-member 'abandon' path still works). Temporary, upstream-blocked limitation; never shown to non-admin members."
-  },
 
   "circleBlockedBannerTitle": "This circle can’t be updated",
   "@circleBlockedBannerTitle": {

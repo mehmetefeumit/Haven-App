@@ -1091,10 +1091,6 @@ class AppLocalizationsNe extends AppLocalizations {
   String get leaveCircleError => 'सर्कल छोड्न सकिएन';
 
   @override
-  String get leaveCircleAdminLimitationNote =>
-      'यो सर्कलको एडमिन भएकाले, अरू सबै सदस्यले छोडिसकेपछि मात्र तपाईंले यो छोड्न सक्नुहुन्छ। हामीलाई थाहा छ, यो असुविधाजनक छ — भविष्यको कुनै अपडेटले एडमिनहरूलाई आफ्नो भूमिका हस्तान्तरण गरेर सिधै छोड्न दिनेछ।';
-
-  @override
   String get circleBlockedBannerTitle => 'यो सर्कल अपडेट गर्न सकिँदैन';
 
   @override

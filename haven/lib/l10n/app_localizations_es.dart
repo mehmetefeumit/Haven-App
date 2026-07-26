@@ -1119,10 +1119,6 @@ class AppLocalizationsEs extends AppLocalizations {
   String get leaveCircleError => 'No se pudo salir del círculo';
 
   @override
-  String get leaveCircleAdminLimitationNote =>
-      'Como administrador de este círculo, solo puedes salir una vez que todos los demás miembros se hayan ido. Sabemos que es un inconveniente — una futura actualización permitirá a los administradores transferir su rol y salir directamente.';
-
-  @override
   String get circleBlockedBannerTitle => 'Este círculo no se puede actualizar';
 
   @override

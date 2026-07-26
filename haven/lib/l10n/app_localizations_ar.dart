@@ -1121,10 +1121,6 @@ class AppLocalizationsAr extends AppLocalizations {
   String get leaveCircleError => 'تعذّرت مغادرة الدائرة';
 
   @override
-  String get leaveCircleAdminLimitationNote =>
-      'بصفتك مشرف هذه الدائرة، لا يمكنك مغادرتها إلا بعد أن يغادرها جميع الأعضاء الآخرين. نعلم أن هذا أمر غير مريح — سيتيح تحديث مستقبلي للمشرفين نقل الإشراف والمغادرة مباشرة.';
-
-  @override
   String get circleBlockedBannerTitle => 'لا يمكن تحديث هذه الدائرة';
 
   @override

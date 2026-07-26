@@ -548,38 +548,47 @@ impl CircleManager {
         plan_leave(&self.session, mls_group_id, self_pubkey).await
     }
 
-    /// Step 1 of admin handoff: promote `successor` to admin.
+    /// Step 1 of admin handoff: promote `successor` to admin via an
+    /// `UpdateAppComponents(admin-policy.v1)` commit.
     ///
-    /// # GAP (plan §5.2 #18)
+    /// The new policy is the group's current admin set plus `successor`, so a
+    /// handoff never drops an existing admin. The caller stays an admin here —
+    /// [`Self::propose_self_demote`] is the separate second commit — which keeps
+    /// the group admin-covered at every intermediate epoch: a crash between the
+    /// two commits leaves two admins, and `plan_leave` resumes cleanly on
+    /// [`LeavePlan::AdminDemote`](super::leave::LeavePlan::AdminDemote) without
+    /// re-promoting.
     ///
-    /// The Dark Matter v0.9.4 public API exposes no admin-policy component codec
-    /// (`GROUP_ADMIN_POLICY_COMPONENT_ID` exists but no encode/decode helper),
-    /// so Haven cannot construct the `UpdateAppComponents(admin-policy.v1)`
-    /// commit that would grant admin. Fails with a documented error until the
-    /// codec lands (tracked upstream alongside mdk#755).
-    ///
-    /// USER-FACING CONSEQUENCE: because an admin cannot hand off or self-demote,
-    /// a circle's admin can only leave once every *other* member has left (the
-    /// `Abandon` leg). This ships with an admin-only note beside the Leave Circle
-    /// button (`circles_bottom_sheet.dart`, l10n `leaveCircleAdminLimitationNote`).
-    /// Full write-up + removal steps: `docs/MDK_DARKMATTER_MIGRATION_PLAN.md` §11.1.
+    /// Publish-before-apply (Rule 13): publish [`CommitToPublish::commit_event`],
+    /// then [`Self::confirm_published`] on ≥1-relay ack or [`Self::publish_failed`]
+    /// on failure.
     ///
     /// # Errors
     ///
-    /// Always returns [`CircleError::Mls`] (admin-policy codec unavailable).
-    // `async` is retained for the admin-policy flow DM-4 wires once the codec
-    // lands (it will `session.send(UpdateAppComponents)`); today it only errors.
-    #[allow(clippy::unused_async)]
+    /// Returns [`CircleError::Mls`] if the caller is not an admin, if `successor`
+    /// holds no member leaf in the group (the engine refuses to mint an admin
+    /// who is not a member), or if the engine rejects the commit.
     pub async fn propose_admin_handoff(
         &self,
-        _mls_group_id: &GroupId,
-        _successor: &PublicKey,
+        mls_group_id: &GroupId,
+        successor: &PublicKey,
     ) -> Result<CommitToPublish> {
-        Err(CircleError::Mls(
-            "admin handoff requires the admin-policy component codec, which the \
-             Dark Matter v0.9.4 public API does not expose (GAP, plan §5.2 #18)"
-                .to_string(),
-        ))
+        let mut admins = self
+            .session
+            .admin_pubkeys(mls_group_id)
+            .await
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+        admins.push(successor.to_bytes());
+        let effects = self
+            .session
+            .update_admin_policy(mls_group_id, &admins)
+            .await
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+        let (commit_event, _welcomes, pending) = take_group_evolution(effects)?;
+        Ok(CommitToPublish {
+            commit_event,
+            pending,
+        })
     }
 
     /// Proposes an admin update of a circle's group relay list (MIP-01) via an
@@ -689,24 +698,51 @@ impl CircleManager {
         Ok(())
     }
 
-    /// Step 2 of admin handoff (or step 1 for `Abandon`): demote the caller from
-    /// the admin set.
+    /// Step 2 of admin handoff (or the sole step on the `AdminDemote` path):
+    /// drop the caller from the admin set via an
+    /// `UpdateAppComponents(admin-policy.v1)` commit.
     ///
-    /// # GAP (plan §5.2 #18)
+    /// The engine forbids an admin-less group, so this fails closed when the
+    /// caller is the only admin — a sole admin must promote a successor first
+    /// (that is exactly what [`LeavePlan::AdminHandoff`] sequences). Failing
+    /// here rather than emitting an empty policy is what keeps a circle from
+    /// being bricked into a state where nobody can add, remove, or re-key.
     ///
-    /// Same admin-policy-codec gap as [`Self::propose_admin_handoff`].
+    /// Publish-before-apply (Rule 13): publish [`CommitToPublish::commit_event`],
+    /// then [`Self::confirm_published`] on ≥1-relay ack or [`Self::publish_failed`]
+    /// on failure.
+    ///
+    /// [`LeavePlan::AdminHandoff`]: super::leave::LeavePlan::AdminHandoff
     ///
     /// # Errors
     ///
-    /// Always returns [`CircleError::Mls`] (admin-policy codec unavailable).
-    // See `propose_admin_handoff`: `async` is retained for the DM-4 wiring.
-    #[allow(clippy::unused_async)]
-    pub async fn propose_self_demote(&self, _mls_group_id: &GroupId) -> Result<CommitToPublish> {
-        Err(CircleError::Mls(
-            "self-demote requires the admin-policy component codec, which the \
-             Dark Matter v0.9.4 public API does not expose (GAP, plan §5.2 #18)"
-                .to_string(),
-        ))
+    /// Returns [`CircleError::Mls`] if the caller is not an admin, is the last
+    /// admin (no successor was promoted first), or the engine rejects the commit.
+    pub async fn propose_self_demote(&self, mls_group_id: &GroupId) -> Result<CommitToPublish> {
+        let self_id = self.session.self_id().await;
+        let admins: Vec<[u8; 32]> = self
+            .session
+            .admin_pubkeys(mls_group_id)
+            .await
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
+            .into_iter()
+            .filter(|admin| admin.as_slice() != self_id.as_slice())
+            .collect();
+        if admins.is_empty() {
+            return Err(CircleError::Mls(
+                "cannot demote the last admin — promote a successor first".to_string(),
+            ));
+        }
+        let effects = self
+            .session
+            .update_admin_policy(mls_group_id, &admins)
+            .await
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+        let (commit_event, _welcomes, pending) = take_group_evolution(effects)?;
+        Ok(CommitToPublish {
+            commit_event,
+            pending,
+        })
     }
 
     /// Final step of every non-abandoning leave: returns a `SelfRemove` proposal
@@ -2187,9 +2223,11 @@ mod tests {
     //!   `*_login_key_package_*` — the M8-2 gate + `create_key_package_with_d`
     //!   dissolve (last-resort KP semantics); KP lifetime tracking is DM-2b's
     //!   `relay/maintenance/key_package.rs` suite.
-    //! * `admin_handoff_end_to_end` — `propose_admin_handoff`/`propose_self_demote`
-    //!   are a documented GAP (no admin-policy component codec in v0.9.4); the GAP
-    //!   error is asserted below instead.
+    //! * (`admin_handoff_end_to_end` survives unchanged in spirit — it is
+    //!   re-expressed below over the engine's `admin_pubkeys` view, since
+    //!   `propose_admin_handoff`/`propose_self_demote` now ride
+    //!   `UpdateAppComponents(admin-policy.v1)` rather than the deleted
+    //!   pre-Dark-Matter admin API.)
     //! * `m7b_every_mdk_write_site_acquires_the_writer_lock` — the process-global
     //!   `write_lock` is superseded by the engine's single
     //!   `tokio::sync::Mutex<AccountDeviceSession>`; the invariant is re-expressed
@@ -2949,22 +2987,143 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn propose_admin_handoff_is_a_documented_gap() {
-        // RE-EXPRESSED from `admin_handoff_end_to_end`: v0.9.4 exposes no
-        // admin-policy component codec, so post-hoc admin grant / self-demote are
-        // a documented GAP that fails with a clear (redacted) error rather than
-        // silently succeeding.
+    async fn admin_handoff_end_to_end() {
+        // The full `LeavePlan::AdminHandoff` sequence: promote Bob, self-demote
+        // Alice, then leave. Each step is asserted through the engine's own
+        // admin view (`admin_pubkeys`) on BOTH sides, so a commit that Alice
+        // applies locally but that Bob cannot ingest would fail here.
         let tp = setup_two_party_circle().await;
-        assert!(matches!(
+        let alice_pk = tp.alice_keys.public_key().to_bytes();
+        let bob_pk = tp.bob_keys.public_key().to_bytes();
+
+        assert_eq!(
             tp.alice
-                .propose_admin_handoff(&tp.mls_group_id, &tp.bob_keys.public_key())
-                .await,
-            Err(CircleError::Mls(_))
-        ));
-        assert!(matches!(
-            tp.alice.propose_self_demote(&tp.mls_group_id).await,
-            Err(CircleError::Mls(_))
-        ));
+                .session()
+                .admin_pubkeys(&tp.mls_group_id)
+                .await
+                .expect("alice admins"),
+            vec![alice_pk],
+            "the creator starts as the sole admin"
+        );
+
+        // Step 1 — promote Bob. The policy is additive: Alice stays an admin so
+        // the group is never admin-less at an intermediate epoch.
+        let promote = tp
+            .alice
+            .propose_admin_handoff(&tp.mls_group_id, &tp.bob_keys.public_key())
+            .await
+            .expect("promote successor");
+        tp.alice
+            .confirm_published(promote.pending)
+            .await
+            .expect("confirm promote");
+        tp.bob
+            .decrypt_location(&promote.commit_event)
+            .await
+            .expect("bob ingests the promote commit");
+        for (who, mgr) in [("alice", &tp.alice), ("bob", &tp.bob)] {
+            let mut admins = mgr
+                .session()
+                .admin_pubkeys(&tp.mls_group_id)
+                .await
+                .unwrap_or_else(|e| panic!("{who} admins after promote: {e}"));
+            admins.sort_unstable();
+            let mut expected = vec![alice_pk, bob_pk];
+            expected.sort_unstable();
+            assert_eq!(admins, expected, "{who} must see BOTH admins after promote");
+        }
+
+        // Step 2 — Alice demotes herself, leaving Bob as sole admin.
+        let demote = tp
+            .alice
+            .propose_self_demote(&tp.mls_group_id)
+            .await
+            .expect("self demote");
+        tp.alice
+            .confirm_published(demote.pending)
+            .await
+            .expect("confirm demote");
+        tp.bob
+            .decrypt_location(&demote.commit_event)
+            .await
+            .expect("bob ingests the demote commit");
+        for (who, mgr) in [("alice", &tp.alice), ("bob", &tp.bob)] {
+            assert_eq!(
+                mgr.session()
+                    .admin_pubkeys(&tp.mls_group_id)
+                    .await
+                    .unwrap_or_else(|e| panic!("{who} admins after demote: {e}")),
+                vec![bob_pk],
+                "{who} must see Bob as the sole admin after Alice's self-demote"
+            );
+        }
+
+        // Step 3 — the SelfRemove the admin gate previously rejected now passes.
+        // This is the behavioral proof that the handoff actually cleared the
+        // `AdminCannotSelfRemove` gate, not merely that two commits landed.
+        tp.alice
+            .propose_leave(&tp.mls_group_id)
+            .await
+            .expect("a demoted admin may finally SelfRemove");
+    }
+
+    #[tokio::test]
+    async fn propose_self_demote_by_sole_admin_is_rejected() {
+        // The group must never be left admin-less: demoting without first
+        // promoting a successor fails closed rather than emitting an empty
+        // admin policy (which would brick every future membership commit).
+        let tp = setup_two_party_circle().await;
+        let err = tp
+            .alice
+            .propose_self_demote(&tp.mls_group_id)
+            .await
+            .expect_err("the last admin must not be able to demote herself");
+        assert!(matches!(err, CircleError::Mls(_)));
+        assert!(
+            !err.to_string()
+                .to_lowercase()
+                .contains(&hex::encode(tp.mls_group_id.as_slice())),
+            "the last-admin error must not embed the MLS group id"
+        );
+        // The admin set is untouched — the rejection is a no-op, not a partial
+        // apply that leaves the group in a half-demoted state.
+        assert_eq!(
+            tp.alice
+                .session()
+                .admin_pubkeys(&tp.mls_group_id)
+                .await
+                .expect("alice admins"),
+            vec![tp.alice_keys.public_key().to_bytes()],
+        );
+    }
+
+    #[tokio::test]
+    async fn propose_admin_handoff_rejects_a_non_member_successor() {
+        // Admin is a capability over group state; granting it to someone with no
+        // member leaf would create an admin nobody can remove and who holds no
+        // ratchet position. The engine fail-closes and Haven surfaces it
+        // redacted.
+        let tp = setup_two_party_circle().await;
+        let outsider = Keys::generate().public_key();
+        let err = tp
+            .alice
+            .propose_admin_handoff(&tp.mls_group_id, &outsider)
+            .await
+            .expect_err("a non-member must not be promotable to admin");
+        assert!(matches!(err, CircleError::Mls(_)));
+        assert!(
+            !err.to_string().to_lowercase().contains(&outsider.to_hex()),
+            "the rejection must not echo the candidate's pubkey"
+        );
+        assert_eq!(
+            tp.alice
+                .session()
+                .admin_pubkeys(&tp.mls_group_id)
+                .await
+                .expect("alice admins"),
+            vec![tp.alice_keys.public_key().to_bytes()],
+            "a rejected promotion must not change the admin set"
+        );
     }
 
     #[test]

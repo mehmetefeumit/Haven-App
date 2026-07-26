@@ -1109,10 +1109,6 @@ class AppLocalizationsRu extends AppLocalizations {
   String get leaveCircleError => 'Не удалось покинуть круг';
 
   @override
-  String get leaveCircleAdminLimitationNote =>
-      'Как администратор этого круга вы можете покинуть его только после того, как это сделают все остальные участники. Мы понимаем, что это неудобно, — в будущем обновлении администраторы смогут передавать свою роль и покидать круг напрямую.';
-
-  @override
   String get circleBlockedBannerTitle => 'Этот круг нельзя обновить';
 
   @override

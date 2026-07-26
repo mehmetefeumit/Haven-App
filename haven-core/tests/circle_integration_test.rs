@@ -1067,8 +1067,7 @@ mod mls_dependent_tests {
     //! identity == sender keys; KeyPackages via the DM-2b maintenance builder).
     //! Subject-gone tests are DELETED with a note: the `self_update_*` /
     //! `groups_needing_self_update_*` families (engine owns convergence, no
-    //! `self_update`); `admin_handoff_transfers_admin_*` (`propose_admin_handoff`
-    //! is a documented GAP — no admin-policy codec in v0.9.4); the basic
+    //! `self_update`); the basic
     //! create/add/remove/get-member/invitation/finalize/clear tests (covered by
     //! the `src/circle/manager.rs` inline suite). The UNIQUE, high-value coverage
     //! kept + re-expressed here is the welcome-delivery cascade, the create_circle
@@ -1408,10 +1407,160 @@ mod mls_dependent_tests {
         s.cleanup();
     }
 
-    // DELETED-WITH-SUBJECT: `admin_handoff_transfers_admin_and_group_stays_usable`
-    // — `propose_admin_handoff`/`propose_self_demote` are a documented GAP (no
-    // admin-policy component codec in v0.9.4); the inline suite asserts the GAP
-    // error. `self_update_produces_evolution_event_*`, `self_update_rollback_*`,
+    /// The full `LeavePlan::AdminHandoff` transfer, cross-party: Alice (sole
+    /// admin) promotes the planned successor, self-demotes, and the group is
+    /// still a working group afterwards — every party converges on the new admin
+    /// set, the successor can exercise an admin-only operation, the demoted
+    /// Alice cannot, and location messaging still round-trips at the new epoch.
+    ///
+    /// This is the cross-party counterpart to the inline
+    /// `admin_handoff_end_to_end`: that one pins the local admin-set
+    /// transitions, this one pins that the resulting group is not subtly bricked
+    /// (an admin-policy commit peers cannot apply, or an admin bit nobody holds,
+    /// would leave a circle that can never add, remove, or re-key again).
+    #[tokio::test]
+    async fn admin_handoff_transfers_admin_and_group_stays_usable() {
+        let c = setup_three_party_active_circle("admin_handoff").await;
+        let alice_pk = c.alice_keys.public_key();
+
+        let LeavePlan::AdminHandoff { successor } = c
+            .alice_manager
+            .plan_leave(&c.group_id, &alice_pk)
+            .await
+            .expect("plan_leave")
+        else {
+            panic!("a sole admin with peers must plan an AdminHandoff");
+        };
+        // The planner picks the lex-smallest non-self member; bind the matching
+        // manager so the assertions below follow whichever peer that is.
+        let (successor_manager, successor_keys, other_manager) =
+            if successor == c.bob_keys.public_key() {
+                (&c.bob_manager, &c.bob_keys, &c.charlie_manager)
+            } else {
+                (&c.charlie_manager, &c.charlie_keys, &c.bob_manager)
+            };
+
+        // ── Step 1: promote the successor, both peers apply the commit. ──
+        let promote = c
+            .alice_manager
+            .propose_admin_handoff(&c.group_id, &successor)
+            .await
+            .expect("promote successor");
+        c.alice_manager
+            .confirm_published(promote.pending)
+            .await
+            .expect("confirm promote");
+        for peer in [&c.bob_manager, &c.charlie_manager] {
+            peer.decrypt_location(&promote.commit_event)
+                .await
+                .expect("peer applies the promote commit");
+        }
+
+        // ── Step 2: Alice self-demotes, both peers apply the commit. ──
+        let demote = c
+            .alice_manager
+            .propose_self_demote(&c.group_id)
+            .await
+            .expect("self demote");
+        c.alice_manager
+            .confirm_published(demote.pending)
+            .await
+            .expect("confirm demote");
+        for peer in [&c.bob_manager, &c.charlie_manager] {
+            peer.decrypt_location(&demote.commit_event)
+                .await
+                .expect("peer applies the demote commit");
+        }
+
+        // ── Every party agrees the successor is now the sole admin. ──
+        for (who, manager) in [
+            ("alice", &c.alice_manager),
+            ("bob", &c.bob_manager),
+            ("charlie", &c.charlie_manager),
+        ] {
+            assert_eq!(
+                manager
+                    .session()
+                    .admin_pubkeys(&c.group_id)
+                    .await
+                    .unwrap_or_else(|e| panic!("{who} admin_pubkeys: {e}")),
+                vec![successor.to_bytes()],
+                "{who} must converge on the successor as the group's sole admin"
+            );
+        }
+
+        // ── Alice is now an ordinary member: her own plan says so. ──
+        assert!(
+            matches!(
+                c.alice_manager
+                    .plan_leave(&c.group_id, &alice_pk)
+                    .await
+                    .expect("plan_leave after demote"),
+                LeavePlan::NonAdmin
+            ),
+            "after handing off, the former admin must plan a plain NonAdmin leave"
+        );
+
+        // ── The admin bit really moved: only the successor can commit an
+        //    admin-only operation. Alice's attempt must fail, and must not
+        //    change group state — otherwise "handoff" would mean "both parties
+        //    keep admin", which is a privilege-escalation shape, not a transfer.
+        let epoch_before_probe = successor_manager
+            .group_epoch(&c.group_id)
+            .await
+            .expect("epoch");
+        c.alice_manager
+            .update_circle_relays(&c.group_id, &["wss://relay-alice.test.com".to_string()])
+            .await
+            .expect_err("a demoted admin must not be able to commit an admin-only update");
+        assert_eq!(
+            successor_manager
+                .group_epoch(&c.group_id)
+                .await
+                .expect("epoch"),
+            epoch_before_probe,
+            "a rejected admin-only attempt must not advance the group"
+        );
+
+        let relay_update = successor_manager
+            .update_circle_relays(&c.group_id, &["wss://relay-successor.test.com".to_string()])
+            .await
+            .expect("the new admin must be able to commit an admin-only update");
+        successor_manager
+            .finalize_relay_update(relay_update.pending, &c.group_id)
+            .await
+            .expect("new admin confirms the relay update");
+        for peer in [&c.alice_manager, other_manager] {
+            peer.decrypt_location(&relay_update.commit_event)
+                .await
+                .expect("peer applies the new admin's commit");
+        }
+
+        // ── The group is still usable: location still round-trips, in both
+        //    directions, at the post-handoff epoch.
+        let from_successor =
+            encrypt_location_event(successor_manager, successor_keys, &c.group_id, 51.0, -0.1)
+                .await;
+        assert_decrypts_to_location(
+            &c.alice_manager,
+            &from_successor,
+            successor_keys,
+            51.0,
+            -0.1,
+        )
+        .await;
+        assert_decrypts_to_location(other_manager, &from_successor, successor_keys, 51.0, -0.1)
+            .await;
+
+        let from_alice =
+            encrypt_location_event(&c.alice_manager, &c.alice_keys, &c.group_id, 48.9, 2.4).await;
+        assert_decrypts_to_location(successor_manager, &from_alice, &c.alice_keys, 48.9, 2.4).await;
+
+        c.cleanup();
+    }
+
+    // DELETED-WITH-SUBJECT:
+    // `self_update_produces_evolution_event_*`, `self_update_rollback_*`,
     // `groups_needing_self_update_reflects_rotation_state` — the engine owns
     // convergence; `self_update` is deleted. `manager_finalize_pending_commit` /
     // `clear_pending_commit_rolls_back_*` — re-expressed as

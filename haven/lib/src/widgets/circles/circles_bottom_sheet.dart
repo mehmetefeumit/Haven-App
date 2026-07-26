@@ -1440,44 +1440,6 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
               label: Text(l10n.circleDetailsLeaveCircle),
             ),
           ),
-          // Admin-only, temporary limitation: MDK v0.9.4's public API
-          // exposes no admin-policy component codec (tracked upstream as
-          // mdk#755), so Haven has no way to hand off or drop the admin
-          // bit within a live group. Until that lands, an admin can only
-          // leave once every OTHER member has already left — the
-          // sole-remaining-member "abandon" path above still works and
-          // must stay enabled, so this note must never disable the
-          // button, only inform the admin before they tap it. Non-admins
-          // never see this note; it would be irrelevant (and confusing)
-          // to them since the limitation doesn't apply to them.
-          // See docs/MDK_DARKMATTER_MIGRATION_PLAN.md. Remove this note
-          // once MDK ships admin hand-off/self-demote support.
-          if (isAdmin) ...[
-            const SizedBox(height: HavenSpacing.sm),
-            Semantics(
-              key: WidgetKeys.leaveCircleAdminLimitationNote,
-              container: true,
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Icon(
-                    LucideIcons.info,
-                    size: 14,
-                    color: scheme.onSurfaceVariant,
-                  ),
-                  const SizedBox(width: HavenSpacing.xs),
-                  Expanded(
-                    child: Text(
-                      l10n.leaveCircleAdminLimitationNote,
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: scheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
         ],
       ),
     );

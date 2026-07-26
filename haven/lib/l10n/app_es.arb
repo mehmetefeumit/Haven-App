@@ -286,7 +286,6 @@
   "leaveCircleIdentityUnavailable": "Identidad no disponible",
   "leaveCircleSuccess": "Saliste del círculo correctamente",
   "leaveCircleError": "No se pudo salir del círculo",
-  "leaveCircleAdminLimitationNote": "Como administrador de este círculo, solo puedes salir una vez que todos los demás miembros se hayan ido. Sabemos que es un inconveniente — una futura actualización permitirá a los administradores transferir su rol y salir directamente.",
 
   "circleBlockedBannerTitle": "Este círculo no se puede actualizar",
   "circleBlockedBannerBody": "Algo salió mal con el cifrado de este círculo, así que Haven ya no puede enviar ni recibir actualizaciones en él. Aún puedes ver más abajo la última información conocida, o salir del círculo.",

@@ -44,8 +44,9 @@ use cgka_session::{
     SessionError,
 };
 use cgka_traits::app_components::{
-    encode_nostr_routing_v1, AppComponentData, NostrRoutingV1, GROUP_ADMIN_POLICY_COMPONENT_ID,
-    GROUP_MESSAGE_RETENTION_COMPONENT_ID, GROUP_PROFILE_COMPONENT_ID, NOSTR_ROUTING_COMPONENT_ID,
+    encode_nostr_routing_v1, encode_quic_varint, AppComponentData, NostrRoutingV1,
+    GROUP_ADMIN_POLICY_COMPONENT_ID, GROUP_MESSAGE_RETENTION_COMPONENT_ID,
+    GROUP_PROFILE_COMPONENT_ID, NOSTR_ROUTING_COMPONENT_ID,
 };
 use cgka_traits::capabilities::{Capability, CapabilityRequirement, Feature, RequirementLevel};
 use cgka_traits::engine::{CreateGroupRequest, GroupEvent, KeyPackage, SendIntent};
@@ -450,6 +451,36 @@ impl SessionManager {
             updates: vec![AppComponentData {
                 component_id: NOSTR_ROUTING_COMPONENT_ID,
                 data: routing_bytes,
+            }],
+        })
+        .await
+    }
+
+    /// Replaces the group's admin set via an
+    /// `UpdateAppComponents(admin-policy.v1)` commit.
+    ///
+    /// `admins` are raw x-only pubkey bytes (Rule 4: the admin set is member
+    /// identity, never the MLS group id). The engine fail-closes on the caller
+    /// not being an admin (`NotGroupAdmin`), on an admin with no member leaf,
+    /// and on an empty set — so promotion and demotion are both gated
+    /// server-side by MLS state, not by Haven's own bookkeeping.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NostrError::InvalidEvent`] if `admins` is empty (a group must
+    /// always retain at least one admin), or a redacted MLS error if the engine
+    /// rejects the commit.
+    pub async fn update_admin_policy(
+        &self,
+        group_id: &GroupId,
+        admins: &[[u8; 32]],
+    ) -> Result<SessionEffects> {
+        let data = encode_admin_policy_v1(admins)?;
+        self.send(SendIntent::UpdateAppComponents {
+            group_id: group_id.clone(),
+            updates: vec![AppComponentData {
+                component_id: GROUP_ADMIN_POLICY_COMPONENT_ID,
+                data,
             }],
         })
         .await
@@ -1005,6 +1036,40 @@ fn validate_group_relays(relays: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Encodes an admin set into the `admin-policy.v1` app-component wire format.
+///
+/// The format is a QUIC varint byte-length prefix followed by the concatenated
+/// 32-byte x-only admin pubkeys, ascending byte order, no duplicates — the
+/// engine's decoder rejects trailing bytes, a non-multiple-of-32 length, and
+/// any unsorted/duplicated key, so the sort+dedup here is load-bearing rather
+/// than cosmetic. Keeping the codec Haven-side is what the pre-Dark-Matter
+/// stubs assumed impossible: the engine's own `encode_admin_policy` is
+/// `pub(crate)`, but every primitive it is built from
+/// (`GROUP_ADMIN_POLICY_COMPONENT_ID`, `AppComponentData`, `encode_quic_varint`)
+/// is public, and MDK's conformance simulator — an external crate — encodes it
+/// exactly this way.
+fn encode_admin_policy_v1(admins: &[[u8; 32]]) -> Result<Vec<u8>> {
+    let mut admins = admins.to_vec();
+    admins.sort_unstable();
+    admins.dedup();
+    if admins.is_empty() {
+        return Err(NostrError::InvalidEvent(
+            "admin policy must contain at least one admin".to_string(),
+        ));
+    }
+    let byte_len = admins
+        .len()
+        .checked_mul(32)
+        .and_then(|n| u64::try_from(n).ok())
+        .ok_or_else(|| NostrError::InvalidEvent("admin policy is too large".to_string()))?;
+    let mut out = Vec::new();
+    encode_quic_varint(byte_len, &mut out);
+    for admin in &admins {
+        out.extend_from_slice(admin);
+    }
+    Ok(out)
+}
+
 /// Extracts the inner `content` field from a `MarmotAppEvent` JSON payload,
 /// best-effort. Returns an empty string if the payload is not the expected
 /// unsigned-event JSON shape (the engine already validated it as a Marmot app
@@ -1035,6 +1100,54 @@ mod tests {
         let keys = Keys::generate();
         let manager = SessionManager::new_unencrypted(&dir, &keys).expect("open session");
         (manager, dir)
+    }
+
+    // ── admin-policy.v1 codec ────────────────────────────────────────────────
+    //
+    // Byte-level pins for `encode_admin_policy_v1`. The engine's `decode_admin_policy`
+    // is `pub(crate)`, so these assert the wire shape directly; the cross-party
+    // interop proof (a second session applying the resulting commit) lives in
+    // `circle::manager::tests::admin_handoff_end_to_end` and
+    // `tests/circle_integration_test.rs`.
+
+    #[test]
+    fn admin_policy_encodes_length_prefixed_sorted_keys() {
+        // Deliberately unsorted input: the decoder rejects unsorted or duplicated
+        // keys, so the encoder must normalise rather than pass them through.
+        let high = [0xFEu8; 32];
+        let low = [0x01u8; 32];
+        let encoded = encode_admin_policy_v1(&[high, low]).expect("encode two admins");
+        // 64 bytes of payload fits a 2-byte QUIC varint (0x4040), then the keys
+        // in ascending order.
+        let mut expected = Vec::new();
+        encode_quic_varint(64, &mut expected);
+        expected.extend_from_slice(&low);
+        expected.extend_from_slice(&high);
+        assert_eq!(encoded, expected);
+    }
+
+    #[test]
+    fn admin_policy_dedups_repeated_keys() {
+        let key = [0x07u8; 32];
+        let encoded = encode_admin_policy_v1(&[key, key, key]).expect("encode");
+        let mut expected = Vec::new();
+        encode_quic_varint(32, &mut expected);
+        expected.extend_from_slice(&key);
+        assert_eq!(
+            encoded, expected,
+            "a repeated admin must collapse to one entry — the decoder rejects duplicates"
+        );
+    }
+
+    #[test]
+    fn admin_policy_rejects_an_empty_admin_set() {
+        // A group with no admins can never add, remove, or re-key again. This is
+        // the encoder-level half of the fail-closed pair; the other half is
+        // `CircleManager::propose_self_demote` refusing to drop the last admin.
+        assert!(matches!(
+            encode_admin_policy_v1(&[]),
+            Err(NostrError::InvalidEvent(_))
+        ));
     }
 
     #[tokio::test]

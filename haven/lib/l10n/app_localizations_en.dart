@@ -1083,10 +1083,6 @@ class AppLocalizationsEn extends AppLocalizations {
   String get leaveCircleError => 'Failed to leave circle';
 
   @override
-  String get leaveCircleAdminLimitationNote =>
-      'As this circle\'s admin, you can only leave once every other member has left. We know that\'s inconvenient — a future update will let admins hand off and leave directly.';
-
-  @override
   String get circleBlockedBannerTitle => 'This circle can’t be updated';
 
   @override

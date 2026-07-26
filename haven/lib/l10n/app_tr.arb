@@ -315,7 +315,6 @@
   "leaveCircleIdentityUnavailable": "Kimlik kullanılamıyor",
   "leaveCircleSuccess": "Çevreden başarıyla ayrıldınız",
   "leaveCircleError": "Çevreden ayrılınamadı",
-  "leaveCircleAdminLimitationNote": "Bu çevrenin yöneticisi olarak, yalnızca diğer tüm üyeler ayrıldıktan sonra ayrılabilirsiniz. Bunun zahmetli olduğunu biliyoruz — gelecek bir güncellemede yöneticiler, görevlerini devredip doğrudan ayrılabilecek.",
 
   "circleBlockedBannerTitle": "Bu çevre güncellenemiyor",
   "circleBlockedBannerBody": "Bu çevrenin şifrelemesinde bir sorun oluştu, bu yüzden Haven bu çevrede artık güncelleme gönderemiyor ya da alamıyor. Aşağıda en son bildiklerinizi görmeye devam edebilir ya da çevreden ayrılabilirsiniz.",

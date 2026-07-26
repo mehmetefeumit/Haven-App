@@ -1091,10 +1091,6 @@ class AppLocalizationsFa extends AppLocalizations {
   String get leaveCircleError => 'ترک حلقه ناموفق بود';
 
   @override
-  String get leaveCircleAdminLimitationNote =>
-      'به‌عنوان مدیر این حلقه، تنها زمانی می‌توانی آن را ترک کنی که همهٔ اعضای دیگر آن را ترک کرده باشند. می‌دانیم که این ناخوشایند است — به‌روزرسانی‌ای در آینده به مدیران امکان می‌دهد نقش خود را واگذار کرده و مستقیماً حلقه را ترک کنند.';
-
-  @override
   String get circleBlockedBannerTitle => 'این حلقه قابل به‌روزرسانی نیست';
 
   @override

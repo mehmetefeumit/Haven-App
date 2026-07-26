@@ -1111,10 +1111,6 @@ class AppLocalizationsFr extends AppLocalizations {
   String get leaveCircleError => 'Échec de la sortie du cercle';
 
   @override
-  String get leaveCircleAdminLimitationNote =>
-      'En tant qu\'administrateur de ce cercle, vous ne pouvez le quitter qu\'une fois que tous les autres membres l\'ont quitté. Nous savons que c\'est contraignant — une future mise à jour permettra aux administrateurs de transmettre leur rôle et de quitter directement.';
-
-  @override
   String get circleBlockedBannerTitle =>
       'Ce cercle ne peut pas être mis à jour';
 

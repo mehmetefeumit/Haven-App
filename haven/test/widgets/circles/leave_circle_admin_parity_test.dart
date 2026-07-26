@@ -1,16 +1,19 @@
-/// Tests for the admin-only "can only leave last" note next to the Leave
-/// Circle button in CirclesBottomSheet.
+/// Tests that a circle's admin gets the SAME Leave Circle affordance as any
+/// other member in `CirclesBottomSheet`.
 ///
 /// Verifies that:
-/// - The note IS shown when the viewing user is the circle's admin.
-/// - The note is NOT shown to a non-admin member (it would be irrelevant
-///   and confusing, since the limitation does not apply to them).
+/// - An admin's Leave Circle CTA is present and enabled.
+/// - A non-admin member's Leave Circle CTA is present and enabled.
+/// - Neither viewer is shown a caveat/limitation note beside the CTA.
 ///
-/// Context (see `circles_bottom_sheet.dart` and
-/// `docs/MDK_DARKMATTER_MIGRATION_PLAN.md`): MDK v0.9.4's public API
-/// exposes no admin-policy component codec (upstream mdk#755), so an admin
-/// can currently only leave a circle once every other member has already
-/// left.
+/// Context: Haven previously shipped an admin-only note saying an admin could
+/// leave only after every other member had, because
+/// `propose_admin_handoff` / `propose_self_demote` were stubbed out on the
+/// assumption that MDK exposed no admin-policy component codec. It does — both
+/// now ride `UpdateAppComponents(admin-policy.v1)` and `LeavePlan.adminHandoff`
+/// completes end-to-end (`haven-core/src/circle/manager.rs`
+/// `admin_handoff_end_to_end`). This suite is the UI-side regression pin: an
+/// admin must never again be visually gated or warned off the leave flow.
 library;
 
 import 'package:flutter/material.dart';
@@ -79,58 +82,67 @@ Future<void> _openCircleDetails(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
+/// Fails if any text in the tree warns the viewer that leaving is conditional.
+/// Matches on meaning-bearing fragments rather than one exact string, so a
+/// reworded caveat cannot slip past the pin.
+void _expectNoLeaveCaveat() {
+  const forbidden = <String>[
+    'only leave once',
+    'can only leave',
+    'other member has left',
+    'hand off',
+  ];
+  for (final fragment in forbidden) {
+    expect(
+      find.textContaining(fragment),
+      findsNothing,
+      reason:
+          'The circle-details sheet must not warn any viewer that leaving is '
+          'conditional — admin handoff completes end-to-end, so a caveat '
+          'containing "$fragment" would be telling the user something false.',
+    );
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets(
-    'admin viewing their own circle sees the leave-limitation note',
-    (tester) async {
-      _setTallViewport(tester);
-      final circle = TestCircleFactory.createCircle(
-        displayName: 'Family',
-        members: [
-          // Default pubkey matches _testIdentity.pubkeyHex, so this is
-          // "self", and is the admin.
-          TestCircleFactory.createMember(displayName: 'Self', isAdmin: true),
-          TestCircleFactory.createMember(
-            pubkey: _otherPubkey,
-            displayName: 'Bob',
-          ),
-        ],
-      );
-      final mockService = MockCircleService(circles: [circle]);
-
-      await tester.pumpWidget(
-        _buildTestWidget(mockService: mockService, selectedCircle: circle),
-      );
-      await tester.pumpAndSettle();
-
-      await _openCircleDetails(tester);
-
-      expect(
-        find.byKey(WidgetKeys.leaveCircleAdminLimitationNote),
-        findsOneWidget,
-      );
-      expect(
-        find.text(
-          "As this circle's admin, you can only leave once every other "
-          "member has left. We know that's inconvenient — a future "
-          'update will let admins hand off and leave directly.',
+  testWidgets('admin viewing their own circle gets an enabled Leave CTA', (
+    tester,
+  ) async {
+    _setTallViewport(tester);
+    final circle = TestCircleFactory.createCircle(
+      displayName: 'Family',
+      members: [
+        // Default pubkey matches _testIdentity.pubkeyHex, so this is
+        // "self", and is the admin.
+        TestCircleFactory.createMember(displayName: 'Self', isAdmin: true),
+        TestCircleFactory.createMember(
+          pubkey: _otherPubkey,
+          displayName: 'Bob',
         ),
-        findsOneWidget,
-      );
+      ],
+    );
+    final mockService = MockCircleService(circles: [circle]);
 
-      // The Leave Circle button itself must remain enabled — the note is
-      // informational only and must never disable it (the sole-remaining
-      // -member "abandon" path still needs to work).
-      final leaveButton = tester.widget<OutlinedButton>(
-        find.byKey(WidgetKeys.leaveCircleCta),
-      );
-      expect(leaveButton.onPressed, isNotNull);
-    },
-  );
+    await tester.pumpWidget(
+      _buildTestWidget(mockService: mockService, selectedCircle: circle),
+    );
+    await tester.pumpAndSettle();
 
-  testWidgets('non-admin member does not see the leave-limitation note', (
+    await _openCircleDetails(tester);
+
+    // The admin's Leave Circle button must be present and ENABLED. A null
+    // onPressed here would mean the UI re-introduced a gate that the
+    // protocol no longer imposes.
+    final leaveButton = tester.widget<OutlinedButton>(
+      find.byKey(WidgetKeys.leaveCircleCta),
+    );
+    expect(leaveButton.onPressed, isNotNull);
+    _expectNoLeaveCaveat();
+  });
+
+  testWidgets('non-admin member gets the same enabled Leave CTA', (
     tester,
   ) async {
     _setTallViewport(tester);
@@ -156,12 +168,10 @@ void main() {
 
     await _openCircleDetails(tester);
 
-    // The Leave Circle button is still present and enabled for non-admins...
-    expect(find.byKey(WidgetKeys.leaveCircleCta), findsOneWidget);
-    // ...but the admin-only note must not be shown to them.
-    expect(
-      find.byKey(WidgetKeys.leaveCircleAdminLimitationNote),
-      findsNothing,
+    final leaveButton = tester.widget<OutlinedButton>(
+      find.byKey(WidgetKeys.leaveCircleCta),
     );
+    expect(leaveButton.onPressed, isNotNull);
+    _expectNoLeaveCaveat();
   });
 }

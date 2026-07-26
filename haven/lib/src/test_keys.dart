@@ -109,13 +109,6 @@ abstract final class WidgetKeys {
   /// also collides with the dialog title text under a text finder.
   static const Key leaveCircleConfirm = Key('leave_circle_confirm');
 
-  /// Admin-only informational note shown directly below the Leave Circle
-  /// CTA, explaining the temporary admin-can-only-leave-last limitation
-  /// (see `circles_bottom_sheet.dart`). Never present for non-admin members.
-  static const Key leaveCircleAdminLimitationNote = Key(
-    'leave_circle_admin_limitation_note',
-  );
-
   /// "Re-create Circle" CTA on the Dark Matter cutover legacy-circle banner
   /// (DM-4c).
   static const Key legacyCircleRecreateCta = Key('legacy_circle_recreate_cta');

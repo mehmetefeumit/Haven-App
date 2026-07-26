@@ -16,37 +16,30 @@
 /// produce stale rosters in the field.
 ///
 /// The scenario sets up two parties through `CircleManagerFfi` directly
-/// (no UI, no relay), and has Alice — the circle's sole admin, *still
-/// admin* — call `proposeLeave`. The assertion is that the call throws an
-/// error whose message contains `self-demote` / `self_demote` — satisfied
-/// by Haven's stable mapping regardless of upstream wording changes.
+/// (no UI, no relay), promotes Bob to admin so the admin set has TWO
+/// members, and then has Alice — *still admin* — call `proposeLeave`. The
+/// assertion is that the call throws an error whose message contains
+/// `self-demote` / `self_demote` — satisfied by Haven's stable mapping
+/// regardless of upstream wording changes.
 ///
-/// ## Dark Matter DM-4b note — 2-admin variant descoped (GAP)
+/// ## Why the 2-admin variant specifically
 ///
-/// The original scenario additionally promoted Bob to admin via
-/// `proposeAdminHandoff` first (so the admin set had two members) before
-/// Alice's still-admin `proposeLeave`, specifically to rule out a
-/// hypothetical "a second admin lets you bypass self-demote" loophole.
-/// Dark Matter v0.9.4's public API exposes no admin-policy component
-/// codec, so `propose_admin_handoff` / `propose_self_demote` now
-/// unconditionally fail closed with a documented error (plan §5.2 #18;
-/// mirrors haven-core's own re-expressed
-/// `propose_admin_handoff_is_a_documented_gap` Rust test) — there is no
-/// way to construct a real 2-admin group via the public FFI right now.
-/// This test is descoped to the sole-admin case (Alice is the only
-/// admin), which still exercises the load-bearing invariant: MDK's engine
-/// rejects a raw `SelfRemove` from ANY admin caller, not just a sole one.
-/// Restore the 2-admin variant once a go-signal (mdk#755-adjacent
-/// admin-policy codec work) lands — see
-/// `docs/MDK_DARKMATTER_MIGRATION_PLAN.md` §5.2 #18 / §3.1(5).
+/// A sole-admin rejection is ambiguous: the engine could be refusing
+/// because the group would be left admin-less (an `AdminDepletion`-shaped
+/// concern) rather than because *any* admin must self-demote before
+/// removing itself. Promoting Bob first removes that confound — the group
+/// would still have an admin after Alice leaves, so a rejection here can
+/// only be the self-demote gate. It rules out a hypothetical "a second
+/// admin lets you bypass self-demote" loophole, which is the exact shape
+/// the original ghost-admin bug took.
 ///
 /// ## FN-4: Admin precondition assertions
 ///
-/// Before Alice calls `proposeLeave`, the test now calls `getMembers` and
+/// Before Alice calls `proposeLeave`, the test calls `getMembers` and
 /// explicitly asserts:
 /// 1. Alice's own `CircleMemberFfi.isAdmin == true` — the tripwire only
 ///    makes sense if Alice is truly admin at test time.
-/// 2. The total admin count equals 1 (Alice is the circle's sole admin).
+/// 2. The total admin count equals 2 (the promotion landed).
 /// This ensures the test diagnoses "wrong admin count going in" separately
 /// from "MDK regressed its gate", so a future failure is actionable.
 ///
@@ -150,6 +143,8 @@ void main() {
 
           final bobIdent = await NostrIdentityManager.newInstance();
           final bobPub = await bobIdent.loadFromBytes(secretBytes: _bobSeed);
+          // Bob's pubkey is the successor Alice promotes to admin (step 4).
+          final bobPubkeyHex = bobPub.pubkeyHex;
           final bobSecret = await bobIdent.getSecretBytes();
 
           // --------------------------------------------------------------
@@ -232,20 +227,28 @@ void main() {
           await bobCircle.acceptInvitation(giftWrapId: invitation!.mlsGroupId);
 
           // --------------------------------------------------------------
-          // 4. Descoped (GAP, see the library doc comment above): the
-          //    original scenario promoted Bob to admin here via
-          //    `proposeAdminHandoff` — that call now unconditionally fails
-          //    closed (Dark Matter v0.9.4 exposes no admin-policy component
-          //    codec). Alice remains the circle's SOLE admin below.
+          // 4. Alice promotes Bob to admin via an
+          //    `UpdateAppComponents(admin-policy.v1)` commit, so the admin
+          //    set has TWO members when she attempts her still-admin
+          //    proposeLeave below (see the library doc comment for why the
+          //    2-admin shape is the load-bearing one). Nothing publishes in
+          //    this FFI-level test, so the pending commit is confirmed
+          //    directly — the same seam the circle creation above uses.
           // --------------------------------------------------------------
+          final promote = await aliceCircle.proposeAdminHandoff(
+            mlsGroupId: mlsGroupId,
+            successorHex: bobPubkeyHex,
+          );
+          await aliceCircle.confirmPublished(pending: promote.pending);
 
           // ==============================================================
           // FN-4: Admin precondition assertions.
           //
           // Before Alice calls proposeLeave, verify via getMembers that:
           // 1. Alice herself is admin (isAdmin == true).
-          // 2. The admin count is 1 (Alice is the circle's sole admin —
-          //    see the descoping note above).
+          // 2. The admin count is 2 (the promotion above landed), so the
+          //    rejection below cannot be explained by the group being left
+          //    admin-less.
           //
           // If either assertion fails, the test surfaces the setup
           // regression separately from the MDK gate being tested.
@@ -274,16 +277,18 @@ void main() {
                 'MDK would reject the call for a different reason.',
           );
 
-          // --- FN-4 precondition 2: exactly 1 admin (Alice, sole admin) ---
+          // --- FN-4 precondition 2: exactly 2 admins (Alice + Bob) ---
           final adminCount = members.where((m) => m.isAdmin).length;
           expect(
             adminCount,
-            equals(1),
+            equals(2),
             reason:
-                "FN-4: Alice must be the circle's sole admin (Bob was never "
-                'promoted — see the descoping note above). Got $adminCount. '
-                'A mismatch is a setup regression that would make the gate '
-                'assertion unreliable.',
+                'FN-4: the circle must have TWO admins (Alice + the promoted '
+                'Bob) before the gate assertion. Got $adminCount. A count of '
+                '1 means proposeAdminHandoff silently failed to grant admin, '
+                'which would make the rejection below ambiguous — it could '
+                'then be explained by the group being left admin-less rather '
+                'than by the self-demote gate this test exists to pin.',
           );
 
           debugPrint(

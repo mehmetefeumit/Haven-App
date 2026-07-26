@@ -1047,10 +1047,6 @@ class AppLocalizationsJa extends AppLocalizations {
   String get leaveCircleError => 'サークルを退出できませんでした';
 
   @override
-  String get leaveCircleAdminLimitationNote =>
-      'このサークルの管理者は、ほかのすべてのメンバーが退出するまで退出できません。ご不便をおかけしますが、今後のアップデートで、管理者をほかのメンバーに引き継いでそのまま退出できるようになる予定です。';
-
-  @override
   String get circleBlockedBannerTitle => 'このサークルは更新できません';
 
   @override

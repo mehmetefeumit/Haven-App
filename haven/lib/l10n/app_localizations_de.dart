@@ -1105,10 +1105,6 @@ class AppLocalizationsDe extends AppLocalizations {
   String get leaveCircleError => 'Kreis konnte nicht verlassen werden';
 
   @override
-  String get leaveCircleAdminLimitationNote =>
-      'Als Admin dieses Kreises kannst du ihn erst verlassen, wenn alle anderen Mitglieder ihn verlassen haben. Wir wissen, dass das unpraktisch ist – ein zukünftiges Update wird es Admins ermöglichen, die Rolle zu übergeben und den Kreis direkt zu verlassen.';
-
-  @override
   String get circleBlockedBannerTitle =>
       'Dieser Kreis kann nicht aktualisiert werden';
 

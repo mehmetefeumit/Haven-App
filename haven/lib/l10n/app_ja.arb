@@ -321,7 +321,6 @@
   "leaveCircleIdentityUnavailable": "識別情報を利用できません",
   "leaveCircleSuccess": "サークルを退出しました",
   "leaveCircleError": "サークルを退出できませんでした",
-  "leaveCircleAdminLimitationNote": "このサークルの管理者は、ほかのすべてのメンバーが退出するまで退出できません。ご不便をおかけしますが、今後のアップデートで、管理者をほかのメンバーに引き継いでそのまま退出できるようになる予定です。",
 
   "circleBlockedBannerTitle": "このサークルは更新できません",
   "circleBlockedBannerBody": "このサークルの暗号化で問題が発生したため、Haven はこのサークルで更新を送受信できなくなりました。以下で最後に確認できた情報は引き続き見られますが、サークルを退出することもできます。",

@@ -1085,10 +1085,6 @@ class AppLocalizationsUr extends AppLocalizations {
   String get leaveCircleError => 'حلقہ چھوڑنے میں ناکامی';
 
   @override
-  String get leaveCircleAdminLimitationNote =>
-      'اس حلقے کے منتظم کی حیثیت سے، آپ اسے تب ہی چھوڑ سکتے ہیں جب باقی تمام ارکان اسے چھوڑ چکے ہوں۔ ہمیں معلوم ہے کہ یہ زحمت کا باعث ہے — مستقبل کی ایک اپ ڈیٹ منتظمین کو اپنی ذمہ داری کسی اور کو سونپ کر براہِ راست حلقہ چھوڑنے کی سہولت دے گی۔';
-
-  @override
   String get circleBlockedBannerTitle => 'یہ حلقہ اپ ڈیٹ نہیں کیا جا سکتا';
 
   @override

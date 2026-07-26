@@ -2786,13 +2786,16 @@ impl CircleManagerFfi {
         })
     }
 
-    /// Step 1 of admin handoff: propose promoting `successor_hex` to admin.
+    /// Step 1 of admin handoff: propose promoting `successor_hex` to admin via
+    /// an `UpdateAppComponents(admin-policy.v1)` commit.
     ///
-    /// # GAP (plan §5.2 #18)
-    ///
-    /// The Dark Matter v0.9.4 public API exposes no admin-policy component
-    /// codec, so this currently returns a documented error (the core method
-    /// fails closed). Kept so the Dart leave state machine keeps its shape.
+    /// Additive — the caller stays admin, so the group is admin-covered at every
+    /// intermediate epoch. Returns a [`CommitToPublishFfi`]: publish
+    /// `commit_event_json` to the circle's relays, then
+    /// [`confirm_published`](Self::confirm_published) on a ≥1-relay ACK or
+    /// [`publish_failed`](Self::publish_failed) on failure (Rule 13). Admin
+    /// authorization and the "an admin must hold a member leaf" rule are both
+    /// enforced by the engine against live MLS state.
     pub async fn propose_admin_handoff(
         &self,
         mls_group_id: Vec<u8>,
@@ -2834,12 +2837,13 @@ impl CircleManagerFfi {
         convert_commit_to_publish(commit)
     }
 
-    /// Step 2 of admin handoff (or step 1 of `Abandon`): demote self from admin.
+    /// Step 2 of admin handoff (or the sole step on the `AdminDemote` path):
+    /// demote self from admin.
     ///
-    /// # GAP (plan §5.2 #18)
-    ///
-    /// Same admin-policy-codec gap as [`propose_admin_handoff`](Self::propose_admin_handoff);
-    /// the core method currently returns a documented error.
+    /// Same publish-then-confirm contract as
+    /// [`propose_admin_handoff`](Self::propose_admin_handoff). Fails closed when
+    /// the caller is the last admin — a sole admin must promote a successor
+    /// first, so a circle can never be left with an empty admin set.
     pub async fn propose_self_demote(
         &self,
         mls_group_id: Vec<u8>,

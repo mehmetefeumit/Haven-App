@@ -1091,10 +1091,6 @@ class AppLocalizationsTr extends AppLocalizations {
   String get leaveCircleError => 'Çevreden ayrılınamadı';
 
   @override
-  String get leaveCircleAdminLimitationNote =>
-      'Bu çevrenin yöneticisi olarak, yalnızca diğer tüm üyeler ayrıldıktan sonra ayrılabilirsiniz. Bunun zahmetli olduğunu biliyoruz — gelecek bir güncellemede yöneticiler, görevlerini devredip doğrudan ayrılabilecek.';
-
-  @override
   String get circleBlockedBannerTitle => 'Bu çevre güncellenemiyor';
 
   @override

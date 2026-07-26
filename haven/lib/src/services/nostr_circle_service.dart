@@ -630,11 +630,10 @@ class NostrCircleService implements CircleService {
           throw const CircleServiceException('Failed to leave circle');
         }
         stage = 'proposeAdminHandoff';
-        // GAP (Dark Matter plan §5.2 #18): the engine's public API exposes
-        // no admin-policy component codec yet, so `propose_admin_handoff`
-        // currently fails closed with a documented Rust-side error — admin
-        // handoff via leave is not yet functional upstream. The `catch`
-        // block below surfaces that as the same generic leave failure.
+        // Promotes the successor WITHOUT dropping us yet, so the circle keeps
+        // an admin at every intermediate epoch. If the self-demote below fails
+        // after this commit lands, `planLeave` re-enters on the `adminDemote`
+        // leg next time and resumes without re-promoting.
         final promote = await manager.proposeAdminHandoff(
           mlsGroupId: groupId,
           successorHex: successor,
@@ -655,8 +654,6 @@ class NostrCircleService implements CircleService {
       if (plan.kind == LeavePlanKindFfi.adminHandoff ||
           plan.kind == LeavePlanKindFfi.adminDemote) {
         stage = 'proposeSelfDemote';
-        // Same GAP as above — the self-demote step of the fallback path
-        // (adminDemote, multiple admins) shares the same upstream limit.
         final demote = await manager.proposeSelfDemote(mlsGroupId: groupId);
         stage = 'publish self-demote commit';
         if (!await _publishAndConfirm(
