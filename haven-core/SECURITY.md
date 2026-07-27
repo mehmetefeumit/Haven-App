@@ -12,8 +12,27 @@ If you discover a security vulnerability, please report it privately by emailing
 
 ## Known Vulnerabilities
 
-None currently tracked. New advisories are surfaced by the weekly
-`cargo audit` CI job; document them here as they appear.
+None currently open. New advisories are surfaced by the weekly `cargo audit` CI
+job; document them here as they appear. Advisories deliberately *not* blocking
+CI (unreachable transitive code, informational warnings) are justified
+individually in `haven-core/.cargo/audit.toml`, not here.
+
+### Resolved
+
+- **RUSTSEC-2026-0216** — `nostr` 0.44.2, remote DoS via a malformed NIP-44 v2
+  payload (CVSS 7.5; the version was also yanked). Directly relevant: NIP-44 v2
+  is the inner layer of the NIP-59 gift wraps Haven ingests from relays for
+  kind-444 Welcomes, so a hostile or malformed 1059 was a remote input to the
+  affected code. Fixed by resolving `nostr` to 0.44.6 in **both** lockfiles
+  (2026-07-27).
+- **RUSTSEC-2026-0049 / -0098 / -0099 / -0104** (`rustls-webpki` 0.103.9) and
+  **RUSTSEC-2026-0009** (`time` 0.3.46) — TLS certificate/CRL validation flaws
+  (incl. a reachable parser panic) and a stack-exhaustion DoS. These were
+  present ONLY in `haven/rust_builder/Cargo.lock` — the resolution that ships in
+  the app — while `haven-core` had already moved past them, and the audit job
+  scanned only `haven-core`, so they were never reported. Fixed by updating that
+  lockfile to `rustls-webpki` 0.103.13 / `time` 0.3.54, and the audit workflow
+  now scans both lockfiles (2026-07-27).
 
 ## Network Threat Model
 

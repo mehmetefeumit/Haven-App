@@ -15,7 +15,7 @@ import 'package:haven/src/pages/settings/map_style_settings_page.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
 import 'package:haven/src/providers/map_style_provider.dart';
-import 'package:haven/src/widgets/common/disclosure_chevron.dart';
+import 'package:haven/src/widgets/widgets.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Page displaying app settings.
@@ -35,7 +35,7 @@ class SettingsPage extends ConsumerWidget {
       appBar: AppBar(title: Text(l10n.settingsTitle)),
       body: ListView(
         children: [
-          _SettingsTile(
+          HavenSettingsTile(
             icon: LucideIcons.user,
             title: l10n.settingsIdentityTitle,
             subtitle: l10n.settingsIdentitySubtitle,
@@ -48,7 +48,7 @@ class SettingsPage extends ConsumerWidget {
               );
             },
           ),
-          _SettingsTile(
+          HavenSettingsTile(
             icon: LucideIcons.server,
             title: l10n.settingsRelaysTitle,
             subtitle: l10n.settingsRelaysSubtitle,
@@ -61,7 +61,7 @@ class SettingsPage extends ConsumerWidget {
               );
             },
           ),
-          _SettingsTile(
+          HavenSettingsTile(
             icon: LucideIcons.mapPin,
             title: l10n.settingsLocationTitle,
             subtitle: l10n.settingsLocationSubtitle,
@@ -74,7 +74,7 @@ class SettingsPage extends ConsumerWidget {
               );
             },
           ),
-          _SettingsTile(
+          HavenSettingsTile(
             icon: LucideIcons.layers,
             title: l10n.settingsMapStyleTitle,
             subtitle: mapStyleLabel(l10n, mapStyle),
@@ -87,7 +87,7 @@ class SettingsPage extends ConsumerWidget {
               );
             },
           ),
-          _SettingsTile(
+          HavenSettingsTile(
             icon: LucideIcons.palette,
             title: l10n.appearanceTitle,
             subtitle: l10n.settingsAppearanceSubtitle,
@@ -100,7 +100,7 @@ class SettingsPage extends ConsumerWidget {
               );
             },
           ),
-          _SettingsTile(
+          HavenSettingsTile(
             icon: LucideIcons.info,
             title: l10n.settingsAboutTitle,
             onTap: () {
@@ -128,33 +128,6 @@ class SettingsPage extends ConsumerWidget {
             ),
         ],
       ),
-    );
-  }
-}
-
-class _SettingsTile extends StatelessWidget {
-  const _SettingsTile({
-    required this.icon,
-    required this.title,
-    this.subtitle,
-    this.onTap,
-  });
-
-  final IconData icon;
-  final String title;
-  final String? subtitle;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-
-    return ListTile(
-      leading: Icon(icon, color: colorScheme.onSurfaceVariant),
-      title: Text(title),
-      subtitle: subtitle != null ? Text(subtitle!) : null,
-      trailing: onTap != null ? const DisclosureChevron() : null,
-      onTap: onTap,
     );
   }
 }

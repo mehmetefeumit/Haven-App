@@ -1,5 +1,17 @@
 # Reusable workflow: Dependency audit
 # Checks for known vulnerabilities in Rust dependencies
+#
+# BOTH Rust lockfiles are scanned. They are separate crates with separate
+# `Cargo.lock`s, and `rust_builder`'s is the one whose resolution actually ships
+# inside the app — auditing only `haven-core` let rust_builder drift unnoticed
+# (it sat on rustls-webpki 0.103.9 with four cert/CRL-validation advisories, and
+# time 0.3.46, long after haven-core had resolved past both).
+#
+# Both steps run from `haven-core` so cargo-audit picks up the single
+# `haven-core/.cargo/audit.toml` policy: that file reads relative to the working
+# directory, and it is where every ignored advisory is justified. Running the
+# second scan from `haven/rust_builder` instead would silently apply NO ignore
+# list, turning the documented-unreachable libcrux findings into hard failures.
 
 name: Dependency Audit
 
@@ -24,5 +36,10 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
-      - name: Run cargo audit
+      - name: Run cargo audit (haven-core)
         run: cargo audit
+
+      # Separate step (not `&&`) so a failure names WHICH lockfile is affected.
+      - name: Run cargo audit (rust_builder — the shipped FFI crate)
+        if: always()
+        run: cargo audit --file ../haven/rust_builder/Cargo.lock

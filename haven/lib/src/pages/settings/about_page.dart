@@ -8,10 +8,11 @@ import 'package:flutter/material.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/tiles.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/external_link.dart';
 import 'package:haven/src/widgets/common/disclosure_chevron.dart';
 import 'package:haven/src/widgets/common/haven_logo.dart';
+import 'package:haven/src/widgets/widgets.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 /// Page displaying Haven's privacy guarantees.
 ///
@@ -149,23 +150,6 @@ class AboutPage extends StatelessWidget {
 class _LegalLinks extends StatelessWidget {
   const _LegalLinks();
 
-  Future<void> _open(BuildContext context, String url) async {
-    final l10n = AppLocalizations.of(context);
-    final uri = Uri.tryParse(url);
-    if (uri == null) return;
-    try {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
-    } on Object catch (e) {
-      // Never surface raw errors; generic message + typed debug log only.
-      debugPrint('[About] link launch failed: ${e.runtimeType}');
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(l10n.aboutLinkOpenError)),
-        );
-      }
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
@@ -191,13 +175,18 @@ class _LegalLinks extends StatelessWidget {
                 leading: const Icon(LucideIcons.flag),
                 title: Text(l10n.aboutReportMapIssue),
                 trailing: const Icon(LucideIcons.externalLink),
-                onTap: () => _open(context, kOsmFixTheMapUrl),
+                onTap: () => openExternalLink(
+                  context,
+                  kOsmFixTheMapUrl,
+                  logTag: 'About',
+                ),
               ),
               ListTile(
                 leading: const Icon(LucideIcons.heart),
                 title: Text(l10n.aboutSupportOsm),
                 trailing: const Icon(LucideIcons.externalLink),
-                onTap: () => _open(context, kSupportOsmUrl),
+                onTap: () =>
+                    openExternalLink(context, kSupportOsmUrl, logTag: 'About'),
               ),
             ],
           ),
@@ -241,19 +230,19 @@ class _WhoCanSeeWhat extends StatelessWidget {
         const SizedBox(height: HavenSpacing.sm),
         Text(l10n.aboutWhoCanSeeIntro, style: bodyStyle),
         const SizedBox(height: HavenSpacing.md),
-        _Actor(
+        HavenActorRow(
           who: l10n.aboutActorCirclesWho,
           sees: l10n.aboutActorCirclesSees,
         ),
-        _Actor(
+        HavenActorRow(
           who: l10n.aboutActorRelaysWho,
           sees: l10n.aboutActorRelaysSees,
         ),
-        _Actor(
+        HavenActorRow(
           who: l10n.aboutActorMapWho,
           sees: l10n.aboutActorMapSees,
         ),
-        _Actor(
+        HavenActorRow(
           who: l10n.aboutActorDevelopersWho,
           sees: l10n.aboutActorDevelopersSees,
         ),
@@ -271,78 +260,13 @@ class _WhoCanSeeWhat extends StatelessWidget {
         Align(
           alignment: AlignmentDirectional.centerStart,
           child: TextButton.icon(
-            onPressed: () => _open(context, 'https://mullvad.net'),
+            onPressed: () =>
+                openExternalLink(context, kMullvadUrl, logTag: 'About'),
             icon: const Icon(LucideIcons.externalLink, size: 16),
             label: Text(l10n.aboutVpnLinkLabel),
           ),
         ),
       ],
-    );
-  }
-
-  /// Opens [url] in the external browser, swallowing failures with a generic
-  /// message (raw errors are never surfaced to the user).
-  Future<void> _open(BuildContext context, String url) async {
-    final l10n = AppLocalizations.of(context);
-    final uri = Uri.tryParse(url);
-    if (uri == null) return;
-    try {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
-    } on Object catch (e) {
-      debugPrint('[About] link launch failed: ${e.runtimeType}');
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(l10n.aboutLinkOpenError)),
-        );
-      }
-    }
-  }
-}
-
-/// A single actor row in [_WhoCanSeeWhat], rendered as a hanging bullet with
-/// the actor name in bold followed by what they can observe.
-class _Actor extends StatelessWidget {
-  const _Actor({required this.who, required this.sees});
-
-  /// The party being described (e.g. "Relay operators").
-  final String who;
-
-  /// Plain-language summary of what [who] can observe.
-  final String sees;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    final bodyStyle = theme.textTheme.bodyMedium?.copyWith(
-      color: scheme.onSurfaceVariant,
-    );
-
-    return Padding(
-      padding: const EdgeInsets.only(bottom: HavenSpacing.sm),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('•  ', style: bodyStyle),
-          Expanded(
-            child: Text.rich(
-              TextSpan(
-                style: bodyStyle,
-                children: [
-                  TextSpan(
-                    text: who,
-                    style: bodyStyle?.copyWith(
-                      color: scheme.onSurface,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  TextSpan(text: ': $sees'),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
     );
   }
 }

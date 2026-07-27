@@ -55,6 +55,13 @@ const String kStadiaTermsUrl = 'https://stadiamaps.com/terms-of-service/';
 /// Stadia Maps Data Processing Addendum (GDPR/UK-GDPR).
 const String kStadiaDpaUrl = 'https://stadiamaps.com/legal/data-processing-addendum/';
 
+/// Mullvad VPN home page — the VPN recommended in Haven's privacy guidance.
+///
+/// Named because a VPN is the only in-app-recommendable mitigation for the one
+/// exposure Haven cannot design away: relays, the tile provider, and any host
+/// serving a co-member's profile picture all observe the user's real IP.
+const String kMullvadUrl = 'https://mullvad.net';
+
 // ---------------------------------------------------------------------------
 // Stadia API key (build-time injected, never committed)
 // ---------------------------------------------------------------------------

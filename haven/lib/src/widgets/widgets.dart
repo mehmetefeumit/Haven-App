@@ -14,12 +14,16 @@ export 'circles/member_search_bar.dart';
 export 'circles/selected_members_list.dart';
 
 // Common widgets
+export 'common/actor_row.dart';
 export 'common/dim_overlay.dart';
 export 'common/empty_state.dart';
 export 'common/error_display.dart';
+export 'common/info_note.dart';
 export 'common/invitations_button.dart';
 export 'common/loading_indicator.dart';
+export 'common/section_header.dart';
 export 'common/settings_button.dart';
+export 'common/settings_tile.dart';
 export 'common/skeleton.dart';
 
 // Debug widgets

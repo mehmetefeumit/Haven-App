@@ -20,6 +20,7 @@ import 'package:haven/src/pages/settings/language_settings_page.dart';
 import 'package:haven/src/providers/locale_provider.dart';
 import 'package:haven/src/providers/theme_mode_provider.dart';
 import 'package:haven/src/widgets/common/disclosure_chevron.dart';
+import 'package:haven/src/widgets/widgets.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Page presenting the theme options and the language selector.
@@ -38,7 +39,7 @@ class AppearanceSettingsPage extends ConsumerWidget {
       appBar: AppBar(title: Text(l10n.appearanceTitle)),
       body: ListView(
         children: [
-          _SectionHeader(label: l10n.appearanceThemeHeader),
+          HavenSectionHeader(label: l10n.appearanceThemeHeader),
           RadioGroup<ThemeMode>(
             groupValue: selectedMode,
             onChanged: (mode) {
@@ -87,30 +88,6 @@ class AppearanceSettingsPage extends ConsumerWidget {
             },
           ),
         ],
-      ),
-    );
-  }
-}
-
-/// A list-section header styled per Material 3, exposed as a semantic header so
-/// screen readers can navigate by heading.
-class _SectionHeader extends StatelessWidget {
-  const _SectionHeader({required this.label});
-
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    final textTheme = Theme.of(context).textTheme;
-    final colorScheme = Theme.of(context).colorScheme;
-    return Padding(
-      padding: const EdgeInsetsDirectional.fromSTEB(16, 16, 16, 8),
-      child: Semantics(
-        header: true,
-        child: Text(
-          label,
-          style: textTheme.labelLarge?.copyWith(color: colorScheme.primary),
-        ),
       ),
     );
   }
