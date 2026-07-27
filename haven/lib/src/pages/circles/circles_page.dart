@@ -7,12 +7,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/pages/circles/create_circle_page.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/profile_refresh_trigger.dart';
 import 'package:haven/src/widgets/widgets.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -47,6 +49,13 @@ class CirclesPage extends ConsumerWidget {
             tooltip: l10n.circlesRefreshTooltip,
             onPressed: () {
               ref.invalidate(circlesProvider);
+              // The explicit-intent escape hatch for profile freshness:
+              // pressing refresh bypasses every staleness tier, so a member
+              // who just changed their name or photo shows up now rather
+              // than at the next tier window. Reuses this affordance instead
+              // of adding a second refresh button (and 13 locales of copy) —
+              // "refresh circles" reasonably covers who is in them.
+              triggerProfileRefresh(ref, maxAge: profileForceMaxAge);
             },
           ),
         ],

@@ -1054,28 +1054,49 @@ void main() {
       } finally {
         await profileWatch.cancel();
         await legacyKindWatch.cancel();
-        // Explicit, AWAITED live-sync engine teardown. Flag-on,
-        // MapShell.initState started the engine, which occupies the
-        // process-global Rust SESSION slot. Do NOT rely on the next test's
-        // pumpWidget() disposing MapShell (fire-and-forget
-        // `unawaited(_liveSync?.stop())`) to clear it: FE-2 never pumps
-        // HavenApp, so without this the engine lingers in SESSION and the first
-        // M11 scenario's start_session would otherwise have to replace a stale,
-        // mid-teardown slot. stop() is idempotent, so it is safe even if the
-        // engine never fully started (e.g. this scenario failed early).
-        if (liveSyncEnabled) {
-          try {
-            final container = ProviderScope.containerOf(
-              tester.element(find.byType(HavenApp)),
-              listen: false,
-            );
+        // Explicit, AWAITED teardown of the app instance this scenario pumped.
+        // Two DISTINCT process-global slots have to be handed back, in this
+        // order, or the M11 group cannot start:
+        //
+        //  1. the live-sync engine's Rust SESSION slot — MapShell.initState
+        //     started the engine flag-on. Do NOT rely on the next test's
+        //     pumpWidget() disposing MapShell (fire-and-forget
+        //     `unawaited(_liveSync?.stop())`) to clear it: FE-2 never pumps
+        //     HavenApp, so without this the engine lingers in SESSION and the
+        //     first M11 scenario's start_session would have to replace a stale,
+        //     mid-teardown slot.
+        //
+        //  2. the MLS DB's Rule-14 single-session slot, held by this app's
+        //     `CircleManagerFfi`. Stopping the engine does NOT release it — it
+        //     is owned by the circle service, and Riverpod disposing the
+        //     ProviderScope does not close it either (`circleServiceProvider`
+        //     has no onDispose, and the Rust `Drop` that releases the guard is
+        //     GC-timed). Leaving it held is what made every M11 scenario die on
+        //     "an MLS session is already open on this database": M11 pumps a
+        //     SECOND HavenApp, whose `NostrCircleService._runInitialization`
+        //     then fails closed. `closeAndInvalidate` now disposes the handle
+        //     deterministically. Engine first, service second: the engine holds
+        //     its own `Arc<CircleManager>` clone, so closing in the other order
+        //     would still leave the guard held.
+        //
+        // Both steps are idempotent, so they are safe even if this scenario
+        // failed early and the engine/service never fully came up. NOT wiped:
+        // Alice already left her circle in PHASE 5, so M11 starts from an empty
+        // circle set, and her identity/seed must survive for `f`/`g`.
+        try {
+          final container = ProviderScope.containerOf(
+            tester.element(find.byType(HavenApp)),
+            listen: false,
+          );
+          if (liveSyncEnabled) {
             await container.read(subscriptionServiceProvider).stop();
-          } on Object catch (e) {
-            debugPrint(
-              '[e2e_combined] main-scenario engine teardown failed: '
-              '${e.runtimeType}',
-            );
           }
+          await container.read(circleServiceProvider).closeAndInvalidate();
+        } on Object catch (e) {
+          debugPrint(
+            '[e2e_combined] main-scenario app teardown failed: '
+            '${e.runtimeType}',
+          );
         }
       }
     },

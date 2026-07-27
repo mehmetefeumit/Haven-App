@@ -6,7 +6,7 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_commit_to_publish`, `convert_location_result`, `current_cache`, `delete_circles_db_files`, `delete_db_files`, `delete_legacy_mls_db_files`, `delete_mls_session_db_files`, `delete_tile_db_files`, `event_secs_to_cursor_ms`, `from_cached`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `kp_event_d_tag`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `nip65_relay_list_urls`, `now_ms`, `platform_init_keyring`, `profile_now_secs`, `redact_profile_err`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `republish_key_package`, `run_blocking`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`
+// These functions are ignored because they are not marked as `pub`: `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_commit_to_publish`, `convert_location_result`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_legacy_mls_db_files`, `delete_mls_session_db_files`, `delete_tile_db_files`, `event_secs_to_cursor_ms`, `from_cached`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `kp_event_d_tag`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `nip65_relay_list_urls`, `now_ms`, `platform_init_keyring`, `profile_now_secs`, `redact_profile_err`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `republish_key_package`, `run_blocking`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
@@ -838,18 +838,28 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Resolves public profiles for the given member pubkeys, fetching stale or
   /// missing ones, and returns the merged set.
   ///
-  /// Callers pass the UNION of member pubkeys across all circles (plan §1.7).
-  /// With `force == false`, pubkeys whose cached row is still fresh within
-  /// `PROFILE_TTL_SECS` are served from cache and never refetched. Fetched
-  /// kind-0s are upserted; queried authors that return nothing are recorded as
-  /// `Unknown`. `has_picture` reflects whether picture BYTES are cached.
+  /// Callers pass the UNION of member pubkeys across all circles (plan §1.7) —
+  /// never a clean per-circle partition, which would hand the relay exact
+  /// co-membership clusters.
+  ///
+  /// `max_age_secs` is the caller's staleness tolerance: a pubkey whose cached
+  /// row was fetched more recently than this is served from cache and never
+  /// refetched. `0` forces a fetch for every pubkey; a negative value is
+  /// clamped to `0`. Each refresh trigger picks its own tier
+  /// (`PROFILE_INTERACTIVE_MAX_AGE_SECS` / `PROFILE_PERIODIC_MAX_AGE_SECS` /
+  /// forced), so one constant no longer has to serve every call site.
+  ///
+  /// Fetched kind-0s are upserted newest-wins; queried authors that return
+  /// nothing are recorded as `Unknown` (which suppresses refetch churn without
+  /// downgrading an existing `Known` row). `has_picture` reflects whether
+  /// CURRENT picture bytes are cached.
   ///
   /// # Errors
   ///
   /// Returns a redacted error string on relay or database failure.
   Future<List<ProfileMetadataFfi>> fetchMemberProfiles({
     required List<String> pubkeysHex,
-    required bool force,
+    required PlatformInt64 maxAgeSecs,
   });
 
   /// Fetches the local user's OWN kind-0 by pubkey, caches it, and returns it.
@@ -3080,6 +3090,15 @@ class ProfileMetadataFfi {
   /// Unix seconds when this profile was last fetched (TTL base; `0` = never).
   final PlatformInt64 fetchedAt;
 
+  /// Hex SHA-256 of the cached picture bytes, or `None` when no CURRENT bytes
+  /// are cached (always `None` whenever `has_picture` is false, so it can never
+  /// key a decode of stale bytes).
+  ///
+  /// Flutter uses this as the avatar decode-cache key. Blossom URLs are
+  /// content-addressed, so this changes exactly when the picture changes —
+  /// which is what makes a member's new photo actually re-render.
+  final String? pictureSha256Hex;
+
   const ProfileMetadataFfi({
     required this.pubkeyHex,
     required this.npub,
@@ -3089,6 +3108,7 @@ class ProfileMetadataFfi {
     required this.hasPicture,
     required this.isKnown,
     required this.fetchedAt,
+    this.pictureSha256Hex,
   });
 
   @override
@@ -3100,7 +3120,8 @@ class ProfileMetadataFfi {
       about.hashCode ^
       hasPicture.hashCode ^
       isKnown.hashCode ^
-      fetchedAt.hashCode;
+      fetchedAt.hashCode ^
+      pictureSha256Hex.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -3114,7 +3135,8 @@ class ProfileMetadataFfi {
           about == other.about &&
           hasPicture == other.hasPicture &&
           isKnown == other.isKnown &&
-          fetchedAt == other.fetchedAt;
+          fetchedAt == other.fetchedAt &&
+          pictureSha256Hex == other.pictureSha256Hex;
 }
 
 /// A reference to a stored profile picture (no bytes) returned after upload.

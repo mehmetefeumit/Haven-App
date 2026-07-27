@@ -136,6 +136,27 @@ class _ThrowingDataDirectoryProvider implements DataDirectoryProvider {
   }
 }
 
+/// A fake [CircleManagerFfi] that records whether its `RustOpaque` handle was
+/// released. Only `dispose`/`isDisposed` are implemented — the tests using it
+/// drive teardown only, and any other call is a bug this surfaces loudly.
+///
+/// Exists because the handle owns the MLS DB's Rule-14 `LiveSessionGuard`,
+/// which Rust releases on `Drop`. Dropping the Dart reference alone defers that
+/// to a GC that may never run before the next open, so teardown MUST dispose.
+class _FakeManager implements CircleManagerFfi {
+  bool disposed = false;
+
+  @override
+  void dispose() => disposed = true;
+
+  @override
+  bool get isDisposed => disposed;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw UnimplementedError('unexpected call: ${invocation.memberName}');
+}
+
 /// [DataDirectoryProvider] that appends a tag to a shared call-order list
 /// before throwing, so tests can verify execution order.
 class _OrderTrackingDataDirectoryProvider implements DataDirectoryProvider {
@@ -832,6 +853,39 @@ void main() {
             'initialize() must be refused before any keyring/DB re-open, so '
             'the keyring initializer must not run a second time',
       );
+    });
+
+    test(
+        'closeAndInvalidate DISPOSES the manager handle, releasing the '
+        'Rule-14 session slot deterministically', () async {
+      // The handle owns this DB's `LiveSessionGuard`; Rust releases it on
+      // `Drop`, which for a flutter_rust_bridge `RustOpaque` happens only when
+      // the Dart object is GARBAGE COLLECTED. Nulling the field therefore does
+      // not free the process-global single-session slot at any bounded time,
+      // and the next open of the same `session.sqlite` — a logout→login inside
+      // one process, or a second HavenApp pumped in one test process — fails
+      // closed with "an MLS session is already open on this database".
+      final manager = _FakeManager();
+      final service = NostrCircleService.withInjectedManager(
+        relayService: _StubRelayService(),
+        injectedManager: manager,
+      );
+
+      expect(manager.disposed, isFalse);
+      await service.closeAndInvalidate();
+      expect(
+        manager.disposed,
+        isTrue,
+        reason:
+            'closeAndInvalidate must release the RustOpaque Arc explicitly — '
+            'dropping the Dart reference leaves the Rule-14 session slot held '
+            'until an unbounded future GC',
+      );
+
+      // Idempotent: logout may close twice (M10.1 launch-retry), and
+      // `dispose()` must not double-release the Arc.
+      await service.closeAndInvalidate();
+      expect(manager.disposed, isTrue);
     });
 
     test(

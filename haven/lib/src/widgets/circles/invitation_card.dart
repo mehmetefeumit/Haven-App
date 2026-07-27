@@ -6,6 +6,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/providers/join_watcher_provider.dart';
@@ -15,6 +16,7 @@ import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/profile_refresh_trigger.dart';
 
 /// A card widget that displays a pending circle invitation.
 ///
@@ -124,6 +126,16 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
         ..invalidate(locationPublisherProvider)
         ..read(locationPublisherProvider)
         ..invalidate(memberLocationsProvider);
+
+      // Resolve the new co-members' public profiles. Their pubkeys have no
+      // cache row yet, so they bypass the staleness gate entirely — without
+      // this they render as a bare npub until some unrelated trigger fires.
+      //
+      // Deliberately NOT scoped to `acceptedCircle`: the refresh must cover
+      // the union of every circle (§1.7). Sending just this circle's roster
+      // would hand the relay an exact co-membership cluster. `circlesProvider`
+      // was invalidated above, so resolving it here picks up the new circle.
+      triggerProfileRefresh(ref, maxAge: profileInteractiveMaxAge);
 
       // Kick off the joiner-side burst-poll window so existing members'
       // locations land within seconds. Self-terminates after a jittered

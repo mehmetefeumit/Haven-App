@@ -214,6 +214,11 @@ class NostrCircleService implements CircleService {
       // deleteIdentity() runs AFTER closeAndInvalidate() drains this future.
       // Fail closed so no live manager escapes over a doomed DB.
       if (_wiped) {
+        // Release the handle we just opened rather than orphaning it: it holds
+        // this DB's Rule-14 `LiveSessionGuard`, so dropping it on GC alone
+        // would keep the process-global single-session slot occupied and make
+        // the NEXT legitimate open fail closed (see `closeAndInvalidate`).
+        manager.dispose();
         _manager = null;
         _initialized = false;
         _initCompleter = null;
@@ -1575,7 +1580,22 @@ class NostrCircleService implements CircleService {
         // Expected: the in-flight init rejects once `_wiped` is set.
       }
     }
-    // Drop the RustOpaque Arc so GC closes the SQLite fd before file deletion.
+    // Release the RustOpaque Arc DETERMINISTICALLY. Nulling the field alone
+    // only makes the handle GC-eligible, and the Rust `Drop` that actually
+    // closes the SQLite fds ALSO releases this DB's Rule-14 `LiveSessionGuard`
+    // — so a GC-timed drop leaves the process-global single-session slot
+    // occupied for an unbounded period. Anything reopening the same
+    // `session.sqlite` before that GC lands (a logout→login inside one process,
+    // or a second `HavenApp` pumped in the same test process) fails closed with
+    // "an MLS session is already open on this database". `dispose()` decrements
+    // the Arc exactly once and is idempotent, so the finalizer stays correct.
+    //
+    // In-flight Rust work is unaffected: `run_blocking` closures clone the
+    // `Arc<CircleManager>` for their duration, so this can never free state a
+    // running FFI call is using — it only drops OUR reference. The guard is
+    // released once the last clone goes, which is why logout stops the
+    // live-sync engine (it holds its own clone) BEFORE calling this.
+    _manager?.dispose();
     _manager = null;
     _initialized = false;
     _initCompleter = null;

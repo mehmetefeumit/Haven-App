@@ -17,6 +17,7 @@
 library;
 
 import 'package:flutter/foundation.dart';
+import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/profile_service.dart';
@@ -133,10 +134,11 @@ class NostrProfileService implements ProfileService {
         displayName: cached?.displayName,
         about: cached?.about,
         pictureBytes: pictureBytes,
-        // The sha256 is only available here, from the upload response —
-        // no other read path (`get_cached_profile`/`fetch_member_profiles`/
-        // `fetch_my_profile`) exposes it on `ProfileMetadataFfi`. See the
-        // Wave 3b summary for this known FFI-surface gap.
+        // Taken from the upload response rather than the cache read purely
+        // because it is already in hand here. Every read path now also
+        // exposes it (`ProfileMetadataFfi.pictureSha256Hex`), so this is no
+        // longer the only source — the two agree, both being the sha256 of
+        // the same stored bytes.
         pictureHash: ref.sha256Hex,
         knownAt: (cached?.isKnown ?? false)
             ? DateTime.fromMillisecondsSinceEpoch(
@@ -184,7 +186,7 @@ class NostrProfileService implements ProfileService {
       if (forceRefresh) {
         final fetched = await manager.fetchMemberProfiles(
           pubkeysHex: [pubkeyHex],
-          force: true,
+          maxAgeSecs: profileForceMaxAge.inSeconds,
         );
         ffi = fetched.isEmpty ? null : fetched.first;
       } else {
@@ -205,13 +207,13 @@ class NostrProfileService implements ProfileService {
   @override
   Future<Map<String, Profile>> refreshMemberProfiles(
     List<String> pubkeyHexes, {
-    bool force = false,
+    Duration maxAge = profileInteractiveMaxAge,
   }) async {
     try {
       final manager = await _circleManagerFactory();
       final ffiList = await manager.fetchMemberProfiles(
         pubkeysHex: pubkeyHexes,
-        force: force,
+        maxAgeSecs: maxAge.inSeconds,
       );
       final result = <String, Profile>{};
       for (final ffi in ffiList) {
@@ -287,6 +289,11 @@ class NostrProfileService implements ProfileService {
       displayName: ffi.displayName,
       about: ffi.about,
       pictureBytes: pictureBytes,
+      // The avatar decode-cache key. Rust returns this for every read path
+      // (not just uploads) and guarantees it is null whenever the cached bytes
+      // are stale, so a member swapping their photo yields a new hash and the
+      // marker layer re-decodes instead of serving the old avatar forever.
+      pictureHash: ffi.pictureSha256Hex,
       knownAt: ffi.isKnown
           ? DateTime.fromMillisecondsSinceEpoch(ffi.fetchedAt * 1000)
           : null,

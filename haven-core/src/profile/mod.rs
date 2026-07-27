@@ -50,7 +50,7 @@ pub use config::{
     blossom_server, profile_read_relays, profile_write_relays, self_merge_base_relays,
     set_blossom_server_for_test, AVATAR_MIME, BLOSSOM_AUTH_EXPIRY_SECS, BLOSSOM_TIMEOUT,
     DEFAULT_BLOSSOM_SERVER, PROFILE_FETCH_MAX_AUTHORS, PROFILE_FETCH_TIMEOUT,
-    PROFILE_PICTURE_MAX_DOWNLOAD_BYTES, PROFILE_TTL_SECS,
+    PROFILE_PICTURE_MAX_DOWNLOAD_BYTES,
 };
 pub use consent::has_published_profile;
 pub use error::{ProfileError, Result};

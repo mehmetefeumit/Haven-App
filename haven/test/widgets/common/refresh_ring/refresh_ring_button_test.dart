@@ -6,6 +6,8 @@
 /// reduced motion, disposal).
 library;
 
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
@@ -23,10 +25,14 @@ const Size _kPaintSize = Size(22, 22);
 const Offset _kCenter = Offset(11, 11);
 const double _kRadius = (22 - 3) / 2; // 9.5
 
+/// One recorded `drawArc` call: the stroke it was painted with, plus the
+/// centerline angles (radians) needed to reason about segment spacing.
+typedef _Arc = ({Color color, double strokeWidth, double start, double sweep});
+
 /// A fake [Canvas] that records the arc and line draw calls so the private ring
 /// painter can be inspected without a raster context.
 class _RecordingCanvas implements Canvas {
-  final List<({Color color, double strokeWidth})> arcs = [];
+  final List<_Arc> arcs = [];
   final List<({Offset p1, Offset p2, Color color})> lines = [];
 
   @override
@@ -37,7 +43,12 @@ class _RecordingCanvas implements Canvas {
     bool useCenter,
     Paint paint,
   ) {
-    arcs.add((color: paint.color, strokeWidth: paint.strokeWidth));
+    arcs.add((
+      color: paint.color,
+      strokeWidth: paint.strokeWidth,
+      start: startAngle,
+      sweep: sweepAngle,
+    ));
   }
 
   @override
@@ -117,11 +128,45 @@ _RecordingCanvas _record(WidgetTester tester) {
   return canvas;
 }
 
-Iterable<({Color color, double strokeWidth})> _mainArcs(_RecordingCanvas c) =>
+Iterable<_Arc> _mainArcs(_RecordingCanvas c) =>
     c.arcs.where((a) => a.strokeWidth < 4);
 
-Iterable<({Color color, double strokeWidth})> _haloArcs(_RecordingCanvas c) =>
+Iterable<_Arc> _haloArcs(_RecordingCanvas c) =>
     c.arcs.where((a) => a.strokeWidth >= 4);
+
+/// Arc-length (logical px) between the *centerline* end of each segment and the
+/// start of the next, wrap-around included.
+List<double> _centerlineGaps(Iterable<_Arc> arcs) {
+  final sorted = arcs.toList()..sort((a, b) => a.start.compareTo(b.start));
+  return [
+    for (var i = 0; i < sorted.length; i++)
+      ((i == sorted.length - 1
+                  ? sorted.first.start + 2 * math.pi
+                  : sorted[i + 1].start) -
+              (sorted[i].start + sorted[i].sweep)) *
+          _kRadius,
+  ];
+}
+
+/// The empty space a user actually sees between adjacent segments, in px.
+///
+/// `drawArc` reports the centerline sweep, but [StrokeCap.round] extends each
+/// end by half a stroke width — so the two caps facing across a gap consume one
+/// full stroke width of it.
+List<double> _visibleGaps(Iterable<_Arc> arcs) {
+  final sorted = arcs.toList()..sort((a, b) => a.start.compareTo(b.start));
+  final centerline = _centerlineGaps(sorted);
+  return [
+    for (var i = 0; i < sorted.length; i++)
+      centerline[i] - sorted[i].strokeWidth,
+  ];
+}
+
+/// Fraction of the full circle covered by painted segments, caps included.
+/// Guards the "still reads as a circle" half of the spacing trade-off.
+double _coverage(Iterable<_Arc> arcs) =>
+    arcs.fold<double>(0, (sum, a) => sum + a.sweep + a.strokeWidth / _kRadius) /
+    (2 * math.pi);
 
 void main() {
   group('RefreshRingButton idle & no-inbox', () {
@@ -274,6 +319,74 @@ void main() {
       final thin = c.arcs.where((a) => a.strokeWidth < 2.5).toList();
       expect(thin, hasLength(1));
       expect(thin.single.color.a, 1.0);
+    });
+  });
+
+  group('RefreshRingButton segment spacing', () {
+    /// Records the ring for [n] relays, all mid-flight (so every segment is a
+    /// solid arc with a halo behind it — the densest case).
+    Future<_RecordingCanvas> record(WidgetTester tester, int n) async {
+      await tester.pumpWidget(
+        _host(slots: List.filled(n, RelayRingSlotState.checking)),
+      );
+      await tester.pumpAndSettle();
+      return _record(tester);
+    }
+
+    testWidgets('adjacent segments never touch, at any relay count', (
+      tester,
+    ) async {
+      for (var n = 2; n <= 8; n++) {
+        final c = await record(tester, n);
+        final gaps = _visibleGaps(_mainArcs(c));
+        expect(gaps, hasLength(n), reason: 'n=$n');
+        for (final gap in gaps) {
+          // Strictly positive with room to read as a gap — a degrees-only
+          // constant regresses to <=0 here, because the round caps eat it.
+          expect(gap, greaterThanOrEqualTo(1), reason: 'n=$n');
+        }
+        // The translucent halo is wider than the arc it backs, so it is allowed
+        // to just kiss its neighbour — but only barely, or the ring picks up a
+        // dark smear where segments meet.
+        for (final gap in _visibleGaps(_haloArcs(c))) {
+          expect(gap, greaterThan(-1), reason: 'halo n=$n');
+        }
+      }
+    });
+
+    testWidgets('gaps are uniform and the ring still reads as a circle', (
+      tester,
+    ) async {
+      for (var n = 2; n <= 8; n++) {
+        final gaps = _visibleGaps(_mainArcs(await record(tester, n)));
+        for (final gap in gaps) {
+          expect(gap, closeTo(gaps.first, 0.001), reason: 'n=$n');
+        }
+        // Spacing must not win so hard that the segments read as loose dots.
+        expect(
+          _coverage(_mainArcs(_record(tester))),
+          greaterThan(0.7),
+          reason: 'n=$n',
+        );
+      }
+    });
+
+    testWidgets('a long relay list yields arcs, never inverted sweeps', (
+      tester,
+    ) async {
+      // Past the point where the ideal gap would consume the circle, the gap
+      // yields instead of driving the sweep negative (which would paint the
+      // arcs backwards over their neighbours).
+      for (final n in const [16, 40]) {
+        final arcs = _mainArcs(await record(tester, n));
+        expect(arcs, hasLength(n), reason: 'n=$n');
+        for (final arc in arcs) {
+          expect(arc.sweep, greaterThan(0), reason: 'n=$n');
+        }
+        for (final gap in _centerlineGaps(arcs)) {
+          expect(gap, greaterThanOrEqualTo(0), reason: 'n=$n');
+        }
+      }
     });
   });
 

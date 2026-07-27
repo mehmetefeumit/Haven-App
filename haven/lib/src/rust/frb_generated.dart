@@ -217,7 +217,7 @@ abstract class RustLibApi extends BaseApi {
   Future<List<ProfileMetadataFfi>> crateApiCircleManagerFfiFetchMemberProfiles({
     required CircleManagerFfi that,
     required List<String> pubkeysHex,
-    required bool force,
+    required PlatformInt64 maxAgeSecs,
   });
 
   Future<ProfileMetadataFfi> crateApiCircleManagerFfiFetchMyProfile({
@@ -1839,7 +1839,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Future<List<ProfileMetadataFfi>> crateApiCircleManagerFfiFetchMemberProfiles({
     required CircleManagerFfi that,
     required List<String> pubkeysHex,
-    required bool force,
+    required PlatformInt64 maxAgeSecs,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -1850,7 +1850,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             serializer,
           );
           sse_encode_list_String(pubkeysHex, serializer);
-          sse_encode_bool(force, serializer);
+          sse_encode_i_64(maxAgeSecs, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -1863,7 +1863,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCircleManagerFfiFetchMemberProfilesConstMeta,
-        argValues: [that, pubkeysHex, force],
+        argValues: [that, pubkeysHex, maxAgeSecs],
         apiImpl: this,
       ),
     );
@@ -1872,7 +1872,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiCircleManagerFfiFetchMemberProfilesConstMeta =>
       const TaskConstMeta(
         debugName: "CircleManagerFfi_fetch_member_profiles",
-        argNames: ["that", "pubkeysHex", "force"],
+        argNames: ["that", "pubkeysHex", "maxAgeSecs"],
       );
 
   @override
@@ -7510,8 +7510,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ProfileMetadataFfi dco_decode_profile_metadata_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 8)
-      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
+    if (arr.length != 9)
+      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
     return ProfileMetadataFfi(
       pubkeyHex: dco_decode_String(arr[0]),
       npub: dco_decode_String(arr[1]),
@@ -7521,6 +7521,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       hasPicture: dco_decode_bool(arr[5]),
       isKnown: dco_decode_bool(arr[6]),
       fetchedAt: dco_decode_i_64(arr[7]),
+      pictureSha256Hex: dco_decode_opt_String(arr[8]),
     );
   }
 
@@ -9097,6 +9098,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_hasPicture = sse_decode_bool(deserializer);
     var var_isKnown = sse_decode_bool(deserializer);
     var var_fetchedAt = sse_decode_i_64(deserializer);
+    var var_pictureSha256Hex = sse_decode_opt_String(deserializer);
     return ProfileMetadataFfi(
       pubkeyHex: var_pubkeyHex,
       npub: var_npub,
@@ -9106,6 +9108,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       hasPicture: var_hasPicture,
       isKnown: var_isKnown,
       fetchedAt: var_fetchedAt,
+      pictureSha256Hex: var_pictureSha256Hex,
     );
   }
 
@@ -10623,6 +10626,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.hasPicture, serializer);
     sse_encode_bool(self.isKnown, serializer);
     sse_encode_i_64(self.fetchedAt, serializer);
+    sse_encode_opt_String(self.pictureSha256Hex, serializer);
   }
 
   @protected
@@ -11365,22 +11369,32 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   /// Resolves public profiles for the given member pubkeys, fetching stale or
   /// missing ones, and returns the merged set.
   ///
-  /// Callers pass the UNION of member pubkeys across all circles (plan §1.7).
-  /// With `force == false`, pubkeys whose cached row is still fresh within
-  /// `PROFILE_TTL_SECS` are served from cache and never refetched. Fetched
-  /// kind-0s are upserted; queried authors that return nothing are recorded as
-  /// `Unknown`. `has_picture` reflects whether picture BYTES are cached.
+  /// Callers pass the UNION of member pubkeys across all circles (plan §1.7) —
+  /// never a clean per-circle partition, which would hand the relay exact
+  /// co-membership clusters.
+  ///
+  /// `max_age_secs` is the caller's staleness tolerance: a pubkey whose cached
+  /// row was fetched more recently than this is served from cache and never
+  /// refetched. `0` forces a fetch for every pubkey; a negative value is
+  /// clamped to `0`. Each refresh trigger picks its own tier
+  /// (`PROFILE_INTERACTIVE_MAX_AGE_SECS` / `PROFILE_PERIODIC_MAX_AGE_SECS` /
+  /// forced), so one constant no longer has to serve every call site.
+  ///
+  /// Fetched kind-0s are upserted newest-wins; queried authors that return
+  /// nothing are recorded as `Unknown` (which suppresses refetch churn without
+  /// downgrading an existing `Known` row). `has_picture` reflects whether
+  /// CURRENT picture bytes are cached.
   ///
   /// # Errors
   ///
   /// Returns a redacted error string on relay or database failure.
   Future<List<ProfileMetadataFfi>> fetchMemberProfiles({
     required List<String> pubkeysHex,
-    required bool force,
+    required PlatformInt64 maxAgeSecs,
   }) => RustLib.instance.api.crateApiCircleManagerFfiFetchMemberProfiles(
     that: this,
     pubkeysHex: pubkeysHex,
-    force: force,
+    maxAgeSecs: maxAgeSecs,
   );
 
   /// Fetches the local user's OWN kind-0 by pubkey, caches it, and returns it.

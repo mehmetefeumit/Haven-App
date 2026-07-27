@@ -1,15 +1,21 @@
 import 'dart:async';
 
 import 'package:fake_async/fake_async.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/constants/profile_refresh_tiers.dart';
+import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/maintenance_scheduler_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart';
+import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/maintenance_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 
+import '../mocks/mock_circle_service.dart';
+import '../mocks/mock_profile_service.dart';
 import '../mocks/mock_relay_service.dart';
 
 /// A fake circle-manager FFI handle (never actually invoked).
@@ -84,6 +90,14 @@ class _ThrowingHealthService extends _FakeMaintenanceService {
   }
 }
 
+/// Identity used by the profile anti-entropy tick's roster union.
+final _testIdentity = Identity(
+  pubkeyHex:
+      'dddd1234dddd1234dddd1234dddd1234dddd1234dddd1234dddd1234dddd1234',
+  npub: 'npub1test',
+  createdAt: DateTime(2024),
+);
+
 /// Builds a container overriding the maintenance service (with [fake]) AND the
 /// login-publish provider (so the first KeyPackage tick's causal handoff does
 /// not try to build the real publisher). [loginPublish] defaults to an
@@ -91,6 +105,7 @@ class _ThrowingHealthService extends _FakeMaintenanceService {
 ProviderContainer _containerWith(
   _FakeMaintenanceService fake, {
   Future<bool>? loginPublish,
+  MockProfileService? profileService,
 }) {
   return ProviderContainer(
     overrides: [
@@ -98,6 +113,17 @@ ProviderContainer _containerWith(
       keyPackagePublisherProvider.overrideWith(
         (ref) => loginPublish ?? Future.value(true),
       ),
+      // The profile anti-entropy tick resolves the roster union through the
+      // circle + identity providers. Without these the tick would reach the
+      // real keyring/FFI, so an unrelated scheduling assertion could fail on
+      // a secure-storage error that has nothing to do with scheduling.
+      profileServiceProvider.overrideWithValue(
+        profileService ?? MockProfileService(),
+      ),
+      circleServiceProvider.overrideWithValue(
+        MockCircleService(circles: [TestCircleFactory.createCircle()]),
+      ),
+      identityProvider.overrideWith((_) async => _testIdentity),
     ],
   );
 }
@@ -268,6 +294,225 @@ void main() {
         isTrue,
         reason: 'a throwing health tick still reschedules',
       );
+    });
+  });
+
+  group('MaintenanceScheduler — profile anti-entropy', () {
+    /// Counts batched profile refreshes reaching the service.
+    int refreshes(MockProfileService svc) =>
+        svc.methodCalls
+            .where((c) => c.method == 'refreshMemberProfiles')
+            .length;
+
+    test('does not fire before its initial settle delay', () {
+      fakeAsync((async) {
+        final svc = MockProfileService();
+        final container = _containerWith(
+          _FakeMaintenanceService(),
+          profileService: svc,
+        )..read(maintenanceSchedulerProvider.notifier);
+
+        // MapShell already fires a cold-start refresh ~5 s in, so an early
+        // tick here would be a guaranteed duplicate.
+        async
+          ..flushMicrotasks()
+          ..elapse(const Duration(minutes: 9));
+        expect(refreshes(svc), 0);
+
+        container.dispose();
+      });
+    });
+
+    test('fires after the initial delay and self-reschedules', () {
+      fakeAsync((async) {
+        final svc = MockProfileService();
+        final container = _containerWith(
+          _FakeMaintenanceService(),
+          profileService: svc,
+        )..read(maintenanceSchedulerProvider.notifier);
+
+        async
+          ..elapse(const Duration(minutes: 11))
+          ..flushMicrotasks();
+        expect(refreshes(svc), 1, reason: 'first tick at the 10 min settle');
+
+        // Nominal 45 min ±25 % → the next tick lands by 56.25 min at worst.
+        async
+          ..elapse(const Duration(minutes: 57))
+          ..flushMicrotasks();
+        expect(
+          refreshes(svc),
+          greaterThanOrEqualTo(2),
+          reason: 'the sweep must re-arm itself, not fire once',
+        );
+
+        container.dispose();
+      });
+    });
+
+    test('uses the periodic staleness tier, not a forced fetch', () {
+      fakeAsync((async) {
+        final svc = MockProfileService();
+        final container = _containerWith(
+          _FakeMaintenanceService(),
+          profileService: svc,
+        )..read(maintenanceSchedulerProvider.notifier);
+
+        async
+          ..elapse(const Duration(minutes: 11))
+          ..flushMicrotasks();
+
+        final call = svc.methodCalls.firstWhere(
+          (c) => c.method == 'refreshMemberProfiles',
+        );
+        expect(
+          call.args['maxAge'],
+          equals(profilePeriodicMaxAge),
+          reason: 'an automatic sweep must never force a refetch',
+        );
+
+        container.dispose();
+      });
+    });
+
+    test('jitters within ±25 % of the nominal interval', () {
+      // Pin the documented jitter envelope: successive ticks must never land
+      // on a fixed cadence (relay-correlation hardening), but must still stay
+      // inside the advertised window.
+      const step = Duration(seconds: 5);
+      final gaps = <Duration>[];
+      for (var run = 0; run < 12; run++) {
+        fakeAsync((async) {
+          final svc = MockProfileService();
+          final container = _containerWith(
+            _FakeMaintenanceService(),
+            profileService: svc,
+          )..read(maintenanceSchedulerProvider.notifier);
+
+          // Step from t=0 and record when each tick actually lands. Measuring
+          // between the two observed firings (rather than from an arbitrary
+          // elapse point) keeps the gap free of any initial-delay offset.
+          var elapsed = Duration.zero;
+          Duration? firstAt;
+          Duration? secondAt;
+          const deadline = Duration(minutes: 90);
+          while (secondAt == null && elapsed < deadline) {
+            async
+              ..elapse(step)
+              ..flushMicrotasks();
+            elapsed += step;
+            if (firstAt == null && refreshes(svc) >= 1) {
+              firstAt = elapsed;
+            } else if (firstAt != null && refreshes(svc) >= 2) {
+              secondAt = elapsed;
+            }
+          }
+          expect(secondAt, isNotNull, reason: 'a second tick must arrive');
+          gaps.add(secondAt! - firstAt!);
+          container.dispose();
+        });
+      }
+
+      const nominal = profileAntiEntropyInterval;
+      // ±1 sampling step of granularity on each bound.
+      final minAllowed = nominal * 0.75 - step;
+      final maxAllowed = nominal * 1.25 + step;
+      for (final gap in gaps) {
+        expect(gap, greaterThanOrEqualTo(minAllowed));
+        expect(gap, lessThanOrEqualTo(maxAllowed));
+      }
+      expect(
+        gaps.toSet().length,
+        greaterThan(1),
+        reason: 'a fixed cadence would be a relay-correlation regression',
+      );
+    });
+
+    test('skips the fetch while backgrounded but keeps re-arming', () async {
+      // MapShell is NOT disposed when the app backgrounds (the main isolate
+      // stays alive for background location sharing), so widget lifetime is not
+      // a foreground proxy. Without an explicit lifecycle check this sweep
+      // would
+      // contact discovery relays with no UI to render the result.
+      final binding = TestWidgetsFlutterBinding.ensureInitialized();
+      final svc = MockProfileService();
+      final container = _containerWith(
+        _FakeMaintenanceService(),
+        profileService: svc,
+      );
+      addTearDown(container.dispose);
+      final notifier = container.read(maintenanceSchedulerProvider.notifier);
+
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      addTearDown(
+        () => binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed),
+      );
+
+      await notifier.triggerProfileAntiEntropyTickForTest();
+      expect(
+        svc.methodCalls.where((c) => c.method == 'refreshMemberProfiles'),
+        isEmpty,
+        reason: 'a backgrounded tick must not contact any relay',
+      );
+      expect(
+        notifier.profileAntiEntropyArmedForTest,
+        isTrue,
+        reason: 'a skipped sweep must still re-arm for the next window',
+      );
+
+      // Foreground again → the very next tick does fetch.
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await notifier.triggerProfileAntiEntropyTickForTest();
+      // `refreshAll` dispatches a fire-and-forget batch; drain it.
+      for (var i = 0; i < 8; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      expect(
+        svc.methodCalls.where((c) => c.method == 'refreshMemberProfiles'),
+        hasLength(1),
+      );
+    });
+
+    test('a throwing tick does not kill its loop', () async {
+      final svc = MockProfileService()..shouldThrowOnRefreshMemberProfiles = true;
+      final container = _containerWith(
+        _FakeMaintenanceService(),
+        profileService: svc,
+      );
+      addTearDown(container.dispose);
+      final notifier = container.read(maintenanceSchedulerProvider.notifier);
+
+      await notifier.triggerProfileAntiEntropyTickForTest();
+      expect(
+        notifier.profileAntiEntropyArmedForTest,
+        isTrue,
+        reason: 'a failed sweep still reschedules',
+      );
+    });
+
+    test('is cancelled on dispose (no background profile fetches)', () {
+      fakeAsync((async) {
+        final svc = MockProfileService();
+        final container = _containerWith(
+          _FakeMaintenanceService(),
+          profileService: svc,
+        )..read(maintenanceSchedulerProvider.notifier);
+
+        async
+          ..elapse(const Duration(minutes: 11))
+          ..flushMicrotasks();
+        expect(refreshes(svc), 1);
+
+        // Tearing down the scheduler (logout / MapShell unmount) must stop
+        // the sweep — profile fetches are foreground-only by construction.
+        container.invalidate(maintenanceSchedulerProvider);
+        async
+          ..flushMicrotasks()
+          ..elapse(const Duration(hours: 2));
+        expect(refreshes(svc), 1, reason: 'no sweep after teardown');
+
+        container.dispose();
+      });
     });
   });
 

@@ -12,6 +12,7 @@ import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/pages/circles/create_circle_page.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
@@ -271,7 +272,11 @@ class _DropdownBodyState extends ConsumerState<_DropdownBody>
                     // circle-select (a no-op when re-selecting the same
                     // circle to close the dropdown).
                     if (!isSelected) {
-                      triggerProfileRefresh(ref, widget.circles);
+                      triggerProfileRefresh(
+                        ref,
+                        maxAge: profileInteractiveMaxAge,
+                        circles: widget.circles,
+                      );
                     }
                   },
                   onNewCircle: () {

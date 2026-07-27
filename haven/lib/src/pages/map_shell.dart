@@ -15,6 +15,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/constants/location.dart';
+import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/pages/map/map_page.dart';
 import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/providers/circles_provider.dart';
@@ -272,8 +273,28 @@ class _MapShellState extends ConsumerState<MapShell>
       // Startup sweep: prune any expired last-known-location rows so the
       // 1-day receiver retention window is honoured on disk.
       unawaited(_runPrune());
+      // Cold-start public-profile refresh. Haven holds no standing kind-0
+      // subscription, so launch is the one moment a rename or new photo is
+      // guaranteed to be picked up before the user looks at the map. Delayed
+      // by a short settle so it never competes with identity load, relay
+      // init, or engine bootstrap for the first frames; TTL-gated, so a
+      // kill-and-relaunch loop still costs at most one fetch per tier window.
+      _coldStartProfileRefreshTimer = Timer(_coldStartProfileRefreshDelay, () {
+        if (!mounted) return;
+        triggerProfileRefresh(
+          ref,
+          maxAge: profileInteractiveMaxAge,
+          circles: ref.read(circlesProvider).valueOrNull,
+        );
+      });
     });
   }
+
+  /// Settle delay before the cold-start profile refresh (see `initState`).
+  static const _coldStartProfileRefreshDelay = Duration(seconds: 5);
+
+  /// Cancelled on dispose so a rapid logout cannot fire a post-teardown fetch.
+  Timer? _coldStartProfileRefreshTimer;
 
   /// Per-tick jitter range for the invitation poll: nominal 120 s ±25 %
   /// → uniform [90 s, 150 s]. Sampled fresh on every tick so successive
@@ -641,6 +662,10 @@ class _MapShellState extends ConsumerState<MapShell>
     // bg-disabled paths the heartbeat has no consumer once the UI is
     // hidden.
     _foregroundHeartbeatTimer?.cancel();
+    // Public-profile freshness is a foreground concern: a launch that is
+    // backgrounded within the settle window must not fire a relay fetch with
+    // no UI to render it. Resume re-triggers the refresh anyway.
+    _coldStartProfileRefreshTimer?.cancel();
 
     if (bgEnabled && Platform.isAndroid) {
       // Android: hand off publishing to the already-running foreground
@@ -914,7 +939,8 @@ class _MapShellState extends ConsumerState<MapShell>
     // §6.2: refresh member/own public profiles on app resume.
     triggerProfileRefresh(
       ref,
-      ref.read(circlesProvider).valueOrNull ?? const [],
+      maxAge: profileInteractiveMaxAge,
+      circles: ref.read(circlesProvider).valueOrNull,
     );
     if (liveSyncEnabled) {
       // Re-anchor the engine's subscriptions (lossless offline-gap backfill);
@@ -1017,6 +1043,7 @@ class _MapShellState extends ConsumerState<MapShell>
     _pruneTimer?.cancel();
     _evolutionTimer?.cancel();
     _foregroundHeartbeatTimer?.cancel();
+    _coldStartProfileRefreshTimer?.cancel();
     _stopMotionTrigger();
     _bgSharingPausedSub?.close();
     _bgSharingPausedSub = null;

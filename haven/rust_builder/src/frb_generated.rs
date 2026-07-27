@@ -1492,7 +1492,7 @@ fn wire__crate__api__CircleManagerFfi_fetch_member_profiles_impl(
                 flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>,
             >>::sse_decode(&mut deserializer);
             let api_pubkeys_hex = <Vec<String>>::sse_decode(&mut deserializer);
-            let api_force = <bool>::sse_decode(&mut deserializer);
+            let api_max_age_secs = <i64>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, String>(
@@ -1517,7 +1517,7 @@ fn wire__crate__api__CircleManagerFfi_fetch_member_profiles_impl(
                         let output_ok = crate::api::CircleManagerFfi::fetch_member_profiles(
                             &*api_that_guard,
                             api_pubkeys_hex,
-                            api_force,
+                            api_max_age_secs,
                         )
                         .await?;
                         Ok(output_ok)
@@ -9202,6 +9202,7 @@ impl SseDecode for crate::api::ProfileMetadataFfi {
         let mut var_hasPicture = <bool>::sse_decode(deserializer);
         let mut var_isKnown = <bool>::sse_decode(deserializer);
         let mut var_fetchedAt = <i64>::sse_decode(deserializer);
+        let mut var_pictureSha256Hex = <Option<String>>::sse_decode(deserializer);
         return crate::api::ProfileMetadataFfi {
             pubkey_hex: var_pubkeyHex,
             npub: var_npub,
@@ -9211,6 +9212,7 @@ impl SseDecode for crate::api::ProfileMetadataFfi {
             has_picture: var_hasPicture,
             is_known: var_isKnown,
             fetched_at: var_fetchedAt,
+            picture_sha256_hex: var_pictureSha256Hex,
         };
     }
 }
@@ -10897,6 +10899,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::ProfileMetadataFfi {
             self.has_picture.into_into_dart().into_dart(),
             self.is_known.into_into_dart().into_dart(),
             self.fetched_at.into_into_dart().into_dart(),
+            self.picture_sha256_hex.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -12124,6 +12127,7 @@ impl SseEncode for crate::api::ProfileMetadataFfi {
         <bool>::sse_encode(self.has_picture, serializer);
         <bool>::sse_encode(self.is_known, serializer);
         <i64>::sse_encode(self.fetched_at, serializer);
+        <Option<String>>::sse_encode(self.picture_sha256_hex, serializer);
     }
 }
 

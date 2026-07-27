@@ -1857,14 +1857,18 @@ impl CircleManager {
         self.storage.get_profiles(pubkeys_hex)
     }
 
-    /// See [`CircleStorage::mark_profiles_unknown`].
+    /// See [`CircleStorage::touch_profiles_fetched_at`].
     ///
     /// # Errors
     ///
     /// Propagates database errors.
-    pub fn mark_profiles_unknown(&self, pubkeys_hex: &[String], now_unix_secs: i64) -> Result<()> {
+    pub fn touch_profiles_fetched_at(
+        &self,
+        pubkeys_hex: &[String],
+        now_unix_secs: i64,
+    ) -> Result<()> {
         self.storage
-            .mark_profiles_unknown(pubkeys_hex, now_unix_secs)
+            .touch_profiles_fetched_at(pubkeys_hex, now_unix_secs)
     }
 
     /// See [`CircleStorage::upsert_profile_picture`].
@@ -1916,6 +1920,15 @@ impl CircleManager {
     /// Propagates database errors.
     pub fn get_profile_picture_url(&self, pubkey_hex: &str) -> Result<Option<String>> {
         self.storage.get_profile_picture_url(pubkey_hex)
+    }
+
+    /// See [`CircleStorage::get_profile_picture_sha256_hex`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn get_profile_picture_sha256_hex(&self, pubkey_hex: &str) -> Result<Option<String>> {
+        self.storage.get_profile_picture_sha256_hex(pubkey_hex)
     }
 
     /// See [`CircleStorage::has_current_picture`].

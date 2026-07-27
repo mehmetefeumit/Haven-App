@@ -969,6 +969,15 @@ fn delete_legacy_mls_db_files(data_dir: &str) -> Result<(), String> {
 /// nothing for this function to `.take()`. (Rule 14: at most one live session
 /// per DB file — the handle drop closes it.)
 ///
+/// "Dropped" means the Dart side called `dispose()` on the handle, NOT merely
+/// nulled its reference: a `RustOpaque` that is only unreferenced is released
+/// whenever the Dart GC happens to finalize it, which leaves the Rule-14
+/// `LiveSessionGuard` — held by `SessionManager` for the manager's lifetime —
+/// registered for an unbounded period, so the next `SessionManager::new` on the
+/// same path fails closed. The live-sync engine keeps its OWN
+/// `Arc<CoreCircleManager>` clone, so it must be stopped and its handle
+/// disposed first or the guard survives the manager's own disposal.
+///
 /// This function is **idempotent**: deleting an already-gone file or key is not
 /// an error, so a partial prior wipe or a double-call both converge to "nothing
 /// left" and return `Ok(())` — the M10.1 launch-retry relies on this to avoid an
@@ -4368,7 +4377,7 @@ use haven_core::profile::{
     download_profile_picture, fetch_profiles, merge_edits, picture_sync_action,
     profile_read_relays, publish_metadata, resolve_write_relays, self_merge_base_relays,
     upload_profile_picture, CachedProfile, PictureSyncAction, ProfileEdits, ProfileMetadata,
-    ProfileState, PROFILE_TTL_SECS,
+    ProfileState,
 };
 
 /// Redacts hex sequences (>= 16 chars) from an error before it crosses the FFI.
@@ -4411,6 +4420,14 @@ pub struct ProfileMetadataFfi {
     pub is_known: bool,
     /// Unix seconds when this profile was last fetched (TTL base; `0` = never).
     pub fetched_at: i64,
+    /// Hex SHA-256 of the cached picture bytes, or `None` when no CURRENT bytes
+    /// are cached (always `None` whenever `has_picture` is false, so it can never
+    /// key a decode of stale bytes).
+    ///
+    /// Flutter uses this as the avatar decode-cache key. Blossom URLs are
+    /// content-addressed, so this changes exactly when the picture changes —
+    /// which is what makes a member's new photo actually re-render.
+    pub picture_sha256_hex: Option<String>,
 }
 
 /// Redacting `Debug`: `pubkey_hex`/`npub` are PUBLIC keys but, per Security Rule
@@ -4430,6 +4447,13 @@ impl std::fmt::Debug for ProfileMetadataFfi {
             .field("has_picture", &self.has_picture)
             .field("is_known", &self.is_known)
             .field("fetched_at", &self.fetched_at)
+            .field(
+                "picture_sha256_hex",
+                &self
+                    .picture_sha256_hex
+                    .as_deref()
+                    .map(haven_core::util::redact_hex_sequences),
+            )
             .finish()
     }
 }
@@ -4439,7 +4463,13 @@ impl ProfileMetadataFfi {
     ///
     /// `has_picture` is supplied by the caller (whether a `profile_pictures` row
     /// exists) since the picture bytes live in a separate table.
-    fn from_cached(cached: &CachedProfile, has_picture: bool) -> Self {
+    /// `picture_sha256_hex` MUST be `None` whenever `has_picture` is false — it
+    /// is force-cleared here so no caller can pair a hash with stale bytes.
+    fn from_cached(
+        cached: &CachedProfile,
+        has_picture: bool,
+        picture_sha256_hex: Option<String>,
+    ) -> Self {
         Self {
             pubkey_hex: cached.pubkey_hex.clone(),
             npub: hex_to_npub(&cached.pubkey_hex),
@@ -4449,6 +4479,11 @@ impl ProfileMetadataFfi {
             has_picture,
             is_known: cached.state == ProfileState::Known,
             fetched_at: cached.fetched_at,
+            picture_sha256_hex: if has_picture {
+                picture_sha256_hex
+            } else {
+                None
+            },
         }
     }
 
@@ -4463,6 +4498,7 @@ impl ProfileMetadataFfi {
             has_picture: false,
             is_known: false,
             fetched_at: 0,
+            picture_sha256_hex: None,
         }
     }
 }
@@ -4501,11 +4537,21 @@ impl CircleManagerFfi {
     /// Resolves public profiles for the given member pubkeys, fetching stale or
     /// missing ones, and returns the merged set.
     ///
-    /// Callers pass the UNION of member pubkeys across all circles (plan §1.7).
-    /// With `force == false`, pubkeys whose cached row is still fresh within
-    /// `PROFILE_TTL_SECS` are served from cache and never refetched. Fetched
-    /// kind-0s are upserted; queried authors that return nothing are recorded as
-    /// `Unknown`. `has_picture` reflects whether picture BYTES are cached.
+    /// Callers pass the UNION of member pubkeys across all circles (plan §1.7) —
+    /// never a clean per-circle partition, which would hand the relay exact
+    /// co-membership clusters.
+    ///
+    /// `max_age_secs` is the caller's staleness tolerance: a pubkey whose cached
+    /// row was fetched more recently than this is served from cache and never
+    /// refetched. `0` forces a fetch for every pubkey; a negative value is
+    /// clamped to `0`. Each refresh trigger picks its own tier
+    /// (`PROFILE_INTERACTIVE_MAX_AGE_SECS` / `PROFILE_PERIODIC_MAX_AGE_SECS` /
+    /// forced), so one constant no longer has to serve every call site.
+    ///
+    /// Fetched kind-0s are upserted newest-wins; queried authors that return
+    /// nothing are recorded as `Unknown` (which suppresses refetch churn without
+    /// downgrading an existing `Known` row). `has_picture` reflects whether
+    /// CURRENT picture bytes are cached.
     ///
     /// # Errors
     ///
@@ -4513,7 +4559,7 @@ impl CircleManagerFfi {
     pub async fn fetch_member_profiles(
         &self,
         pubkeys_hex: Vec<String>,
-        force: bool,
+        max_age_secs: i64,
     ) -> Result<Vec<ProfileMetadataFfi>, String> {
         let now = profile_now_secs();
 
@@ -4538,7 +4584,9 @@ impl CircleManagerFfi {
             return Ok(Vec::new());
         }
 
-        // Decide which need a network fetch: forced, uncached, or past TTL.
+        // Decide which need a network fetch: uncached, or staler than the
+        // caller's tolerance. `max_age_secs == 0` ⇒ every pubkey refetches.
+        let max_age_secs = max_age_secs.max(0);
         let cached = self
             .inner
             .get_profiles(&all_hex)
@@ -4546,12 +4594,15 @@ impl CircleManagerFfi {
         let to_fetch: Vec<nostr::PublicKey> = parsed
             .iter()
             .filter(|(hex, _)| {
-                if force {
+                // A forced refresh must never be skipped, even if a backwards
+                // clock jump left `fetched_at` in the future (which would make
+                // the age comparison below negative).
+                if max_age_secs == 0 {
                     return true;
                 }
                 match cached.iter().find(|c| &c.pubkey_hex == hex) {
-                    // Fresh within TTL ⇒ serve from cache (skip). Otherwise refetch.
-                    Some(c) => now.saturating_sub(c.fetched_at) >= PROFILE_TTL_SECS,
+                    // Fresh within tolerance ⇒ serve from cache (skip). Else refetch.
+                    Some(c) => now.saturating_sub(c.fetched_at) >= max_age_secs,
                     None => true,
                 }
             })
@@ -4571,16 +4622,18 @@ impl CircleManagerFfi {
                     .upsert_profile_if_newer(cp)
                     .map_err(redact_profile_err)?;
             }
-            // Authors that returned nothing → `Unknown` rows (suppress churn).
-            let returned: std::collections::HashSet<&str> =
-                fetched.iter().map(|c| c.pubkey_hex.as_str()).collect();
-            let missing: Vec<String> = to_fetch
-                .iter()
-                .map(|pk| pk.to_hex())
-                .filter(|h| !returned.contains(h.as_str()))
-                .collect();
+            // Record the ATTEMPT for every queried author, not only the ones
+            // that returned nothing. kind-0 is replaceable: an unchanged profile
+            // comes back with the same `created_at`, so `upsert_profile_if_newer`
+            // above correctly writes nothing — and without this touch,
+            // `fetched_at` would stay pinned to the first-ever fetch and every
+            // staleness tier would be dead, turning each trigger into a real
+            // relay REQ. The same statement inserts an `Unknown` row for an
+            // author that has never resolved (suppressing refetch churn) without
+            // downgrading an existing `Known` row.
+            let attempted: Vec<String> = to_fetch.iter().map(|pk| pk.to_hex()).collect();
             self.inner
-                .mark_profiles_unknown(&missing, now)
+                .touch_profiles_fetched_at(&attempted, now)
                 .map_err(redact_profile_err)?;
         }
 
@@ -4598,9 +4651,29 @@ impl CircleManagerFfi {
                 .inner
                 .has_current_picture(&cp.pubkey_hex, cp.metadata.picture())
                 .map_err(redact_profile_err)?;
-            out.push(ProfileMetadataFfi::from_cached(cp, has_picture));
+            let hash = self.current_picture_hash(&cp.pubkey_hex, has_picture)?;
+            out.push(ProfileMetadataFfi::from_cached(cp, has_picture, hash));
         }
         Ok(out)
+    }
+
+    /// Hex SHA-256 of a member's CURRENT cached picture bytes, or `None`.
+    ///
+    /// Short-circuits to `None` when `has_picture` is false (bytes absent, or
+    /// their recorded URL no longer matches the kind-0 `picture`), so a stale
+    /// byte cache can never surface a hash that would key a decode of the old
+    /// avatar.
+    fn current_picture_hash(
+        &self,
+        pubkey_hex: &str,
+        has_picture: bool,
+    ) -> Result<Option<String>, String> {
+        if !has_picture {
+            return Ok(None);
+        }
+        self.inner
+            .get_profile_picture_sha256_hex(pubkey_hex)
+            .map_err(redact_profile_err)
     }
 
     /// Reconciles a member's cached profile-picture bytes with their current
@@ -4697,7 +4770,12 @@ impl CircleManagerFfi {
             .inner
             .has_current_picture(&pubkey_hex, cached.metadata.picture())
             .map_err(redact_profile_err)?;
-        Ok(Some(ProfileMetadataFfi::from_cached(&cached, has_picture)))
+        let hash = self.current_picture_hash(&pubkey_hex, has_picture)?;
+        Ok(Some(ProfileMetadataFfi::from_cached(
+            &cached,
+            has_picture,
+            hash,
+        )))
     }
 
     /// Returns a member's cached profile-picture thumbnail bytes, or `None`.
@@ -4771,10 +4849,11 @@ impl CircleManagerFfi {
                 .inner
                 .has_current_picture(&own_hex, winner.metadata.picture())
                 .map_err(redact_profile_err)?;
-            Ok(ProfileMetadataFfi::from_cached(&winner, has_picture))
+            let hash = self.current_picture_hash(&own_hex, has_picture)?;
+            Ok(ProfileMetadataFfi::from_cached(&winner, has_picture, hash))
         } else {
             self.inner
-                .mark_profiles_unknown(std::slice::from_ref(&own_hex), now)
+                .touch_profiles_fetched_at(std::slice::from_ref(&own_hex), now)
                 .map_err(redact_profile_err)?;
             Ok(self
                 .inner
@@ -4782,7 +4861,7 @@ impl CircleManagerFfi {
                 .map_err(redact_profile_err)?
                 .map_or_else(
                     || ProfileMetadataFfi::unknown(own_hex.clone()),
-                    |cp| ProfileMetadataFfi::from_cached(&cp, false),
+                    |cp| ProfileMetadataFfi::from_cached(&cp, false, None),
                 ))
         }
     }
@@ -4882,7 +4961,8 @@ impl CircleManagerFfi {
             .inner
             .has_current_picture(&cached.pubkey_hex, cached.metadata.picture())
             .map_err(redact_profile_err)?;
-        Ok(ProfileMetadataFfi::from_cached(&cached, has_picture))
+        let hash = self.current_picture_hash(&cached.pubkey_hex, has_picture)?;
+        Ok(ProfileMetadataFfi::from_cached(&cached, has_picture, hash))
     }
 
     /// Uploads the local user's OWN profile picture and publishes it.
@@ -5031,7 +5111,7 @@ impl CircleManagerFfi {
                 .map_err(redact_profile_err)?
                 .map_or_else(
                     || ProfileMetadataFfi::unknown(own_hex.clone()),
-                    |cp| ProfileMetadataFfi::from_cached(&cp, false),
+                    |cp| ProfileMetadataFfi::from_cached(&cp, false, None),
                 ));
         }
 
@@ -5091,7 +5171,7 @@ impl CircleManagerFfi {
         self.inner
             .delete_profile_picture(&own_hex)
             .map_err(redact_profile_err)?;
-        Ok(ProfileMetadataFfi::from_cached(&cached, false))
+        Ok(ProfileMetadataFfi::from_cached(&cached, false, None))
     }
 
     /// Deletes the local user's OWN public profile (best-effort, plan D10).
@@ -7059,6 +7139,71 @@ impl std::fmt::Debug for RelayManagerFfi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Builds a `Known` cached profile row for the `from_cached` tests.
+    fn known_cached(pubkey_hex: &str) -> CachedProfile {
+        CachedProfile {
+            pubkey_hex: pubkey_hex.to_string(),
+            metadata: ProfileMetadata::from_metadata(nostr::Metadata::new().name("alice")),
+            state: ProfileState::Known,
+            event_created_at: 1,
+            fetched_at: 100,
+        }
+    }
+
+    #[test]
+    fn from_cached_surfaces_the_picture_hash_when_bytes_are_current() {
+        // This hash is the avatar decode-cache key on the Flutter side; before
+        // it was exposed on read paths, co-members' photos could never render
+        // on map markers regardless of how often profiles were refreshed.
+        let hex = "aa".repeat(32);
+        let ffi = ProfileMetadataFfi::from_cached(
+            &known_cached(&hex),
+            true,
+            Some("deadbeef".to_string()),
+        );
+        assert_eq!(ffi.picture_sha256_hex.as_deref(), Some("deadbeef"));
+        assert!(ffi.has_picture);
+    }
+
+    #[test]
+    fn from_cached_clears_the_hash_when_the_picture_is_not_current() {
+        // Invariant: a hash must NEVER accompany `has_picture == false`, or
+        // Flutter would key a decode off bytes whose URL no longer matches the
+        // kind-0 `picture` (i.e. render the member's OLD avatar).
+        let hex = "bb".repeat(32);
+        let ffi = ProfileMetadataFfi::from_cached(
+            &known_cached(&hex),
+            false,
+            Some("deadbeef".to_string()),
+        );
+        assert!(
+            ffi.picture_sha256_hex.is_none(),
+            "a stale byte cache must not surface a decode key"
+        );
+    }
+
+    #[test]
+    fn unknown_profile_has_no_picture_hash() {
+        let ffi = ProfileMetadataFfi::unknown("cc".repeat(32));
+        assert!(ffi.picture_sha256_hex.is_none());
+        assert!(!ffi.has_picture);
+        assert!(!ffi.is_known);
+    }
+
+    #[test]
+    fn profile_metadata_debug_redacts_the_picture_hash() {
+        // Security Rule #6/#8: the redacting Debug must cover the new field
+        // too — a 64-char content hash is exactly the shape `redact_hex_
+        // sequences` exists to elide.
+        let hex = "aa".repeat(32);
+        let ffi = ProfileMetadataFfi::from_cached(&known_cached(&hex), true, Some("ab".repeat(32)));
+        let debug = format!("{ffi:?}");
+        assert!(
+            !debug.contains(&"ab".repeat(32)),
+            "picture hash must not appear verbatim in Debug output: {debug}"
+        );
+    }
 
     #[test]
     fn parse_engine_location_reads_content_json() {

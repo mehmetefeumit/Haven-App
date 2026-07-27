@@ -13,13 +13,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/feature_flags.dart';
+import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/pages/identity_advanced_page.dart';
 import 'package:haven/src/pages/settings/qr_code_page.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
-import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/profile_refresh_trigger.dart';
 import 'package:haven/src/widgets/common/directional_arrow.dart';
 import 'package:haven/src/widgets/common/disclosure_chevron.dart';
 import 'package:haven/src/widgets/identity/display_name_card.dart';
@@ -51,8 +52,14 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
               key: WidgetKeys.identityRefreshButton,
               icon: const Icon(LucideIcons.refreshCw),
               tooltip: l10n.identityRefreshProfileTooltip,
+              // Deliberately the UNION refresh, not an own-pubkey-only fetch:
+              // a single-author kind-0 REQ to the same discovery relays labels
+              // which pubkey in every other (unlabelled) union request is the
+              // local user, letting a relay reconstruct the co-membership
+              // cluster §1.7 exists to prevent. `refreshRoster` invalidates
+              // `ownProfileProvider`, so this page still updates.
               onPressed: () =>
-                  ref.read(ownProfileControllerProvider.notifier).refresh(),
+                  triggerProfileRefresh(ref, maxAge: profileForceMaxAge),
             ),
         ],
       ),

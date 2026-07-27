@@ -37,6 +37,14 @@ class _FakeEngine implements LiveSyncFfi {
   int resumeCalls = 0;
   int subscribeCalls = 0;
   int unsubscribeCalls = 0;
+
+  /// Set by [dispose]. The engine handle owns an `Arc<CircleManager>` clone, so
+  /// until it is released the MLS DB's Rule-14 single-session slot stays held
+  /// and the next open of the same `session.sqlite` fails closed. Nulling the
+  /// field is not enough (that only makes it GC-eligible) — `stop()` must
+  /// dispose it.
+  bool disposed = false;
+
   bool _running = false;
 
   @override
@@ -83,6 +91,12 @@ class _FakeEngine implements LiveSyncFfi {
       throw Exception('boom for mls group deadbeefcafef00ddeadbeefcafef00d');
     }
   }
+
+  @override
+  void dispose() => disposed = true;
+
+  @override
+  bool get isDisposed => disposed;
 
   @override
   dynamic noSuchMethod(Invocation invocation) =>
@@ -190,6 +204,56 @@ void main() {
       expect(engine.controller.hasListener, isFalse, reason: 'sub cancelled');
       await service.stop(); // second stop is a no-op
       expect(engine.stopCalls, 1);
+    });
+
+    test('stop releases the engine handle (Rule-14 session slot)', () async {
+      final engine = _FakeEngine();
+      final service = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async => engine,
+      );
+      await service.start(groups: const [], inboxRelays: const []);
+      expect(engine.disposed, isFalse);
+      await service.stop();
+      // The handle owns an `Arc<CircleManager>` clone; dropping the Dart
+      // reference alone defers the Rust `Drop` — and with it the release of the
+      // MLS DB's Rule-14 `LiveSessionGuard` — to a GC that may never run before
+      // the next open. A logout→login in one process (or a second HavenApp
+      // pumped in one test process) then fails closed on "an MLS session is
+      // already open on this database".
+      expect(
+        engine.disposed,
+        isTrue,
+        reason: 'stop() must dispose the engine handle, not just null it',
+      );
+      // Ordering: the disposal must come AFTER stopSession()/stream cancel, so
+      // teardown never calls into an already-released handle.
+      expect(engine.stopCalls, 1);
+      expect(engine.controller.hasListener, isFalse);
+    });
+
+    test('a fresh start after stop builds a NEW engine, never the disposed '
+        'one', () async {
+      final engines = <_FakeEngine>[];
+      final service = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async {
+          final e = _FakeEngine();
+          engines.add(e);
+          return e;
+        },
+      );
+      await service.start(groups: const [], inboxRelays: const []);
+      await service.stop();
+      await service.start(groups: const [], inboxRelays: const []);
+      expect(engines, hasLength(2), reason: 'restart must re-run the factory');
+      expect(engines.first.disposed, isTrue);
+      expect(
+        engines.last.disposed,
+        isFalse,
+        reason: 'the live engine must not be disposed while it is running',
+      );
+      expect(engines.last.startCalls, 1);
     });
 
     test('events are handled in FIFO order', () async {

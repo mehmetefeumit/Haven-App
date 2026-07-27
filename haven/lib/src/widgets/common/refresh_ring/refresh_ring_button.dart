@@ -41,8 +41,27 @@ const double _kStrokeWidth = 3;
 /// Stroke width of the contrast halo painted behind each solid arc.
 const double _kHaloWidth = 5;
 
-/// Angular gap between adjacent arc segments, in degrees.
-const double _kGapDegrees = 6;
+/// Clear space left between the painted ends of adjacent arc segments, in
+/// logical pixels.
+///
+/// Specified in pixels rather than degrees because [StrokeCap.round] grows each
+/// arc by half a stroke width at *both* ends: a degrees-only gap is silently
+/// swallowed by the caps, which is why the segments used to run together (at
+/// this radius the old 6° gap left them overlapping by ~2dp). [_RingPainter]
+/// converts this to an angle at paint time, adding the cap overhang back on so
+/// the space the user actually sees is this wide.
+///
+/// Measured against the solid arc, not the wider halo behind it — the halo is
+/// translucent, and buying it clearance too costs so much of the circle that
+/// the segments read as loose dots rather than a ring.
+const double _kGapPixels = 1.5;
+
+/// Floor on a single segment's centerline sweep, in degrees.
+///
+/// With a long relay list the ideal gap would eat the arcs entirely; past this
+/// point the gap gives way instead, so the control keeps reading as a ring of
+/// arcs rather than a ring of dots.
+const double _kMinSweepDegrees = 10;
 
 /// Crossfade between the icon and the ring (and between ring states).
 const Duration _kCrossfadeDuration = Duration(milliseconds: 180);
@@ -535,6 +554,20 @@ class _RingPainter extends CustomPainter {
   static const double _tickInnerExtent = 3.5;
   static const double _tickOuterExtent = 1;
 
+  /// The angular gap to leave between segments, in degrees, such that
+  /// [_kGapPixels] of clear space survives the round caps facing across it.
+  /// Narrows below the ideal only once holding it would push the arcs under
+  /// [_kMinSweepDegrees].
+  static double _gapDegrees(int n, double radius) {
+    if (radius <= 0) return 0;
+    // Each of the two neighbouring caps reaches half a stroke into the gap, so
+    // one full stroke width is spent before any of the gap becomes visible.
+    final ideal = (_kGapPixels + _kStrokeWidth) / radius / _degToRad;
+    final widest = (360 - n * _kMinSweepDegrees) / n;
+    if (widest <= 0) return 0;
+    return ideal < widest ? ideal : widest;
+  }
+
   @override
   void paint(Canvas canvas, Size size) {
     final n = slots.length;
@@ -542,7 +575,8 @@ class _RingPainter extends CustomPainter {
     final center = size.center(Offset.zero);
     final radius = (size.shortestSide - _kStrokeWidth) / 2;
     final rect = Rect.fromCircle(center: center, radius: radius);
-    final sweepDeg = (360 - n * _kGapDegrees) / n;
+    final gapDeg = _gapDegrees(n, radius);
+    final sweepDeg = (360 - n * gapDeg) / n;
     final sweepRad = sweepDeg * _degToRad;
 
     for (var i = 0; i < n; i++) {
@@ -552,7 +586,7 @@ class _RingPainter extends CustomPainter {
           ? tweens[i]
           : _SlotTween(from: state.color, to: state.color);
       final color = Color.lerp(tween.from, tween.to, value) ?? state.color;
-      final startRad = (-90 + i * (sweepDeg + _kGapDegrees)) * _degToRad;
+      final startRad = (-90 + i * (sweepDeg + gapDeg)) * _degToRad;
 
       if (state == RelayRingSlotState.pending) {
         // Thin, full-opacity gray arc — a "not yet active" shape cue distinct

@@ -166,5 +166,14 @@ class NostrSubscriptionService implements SubscriptionService {
       // ignore — tearing down anyway
     }
     _sub = null;
+    // Release the engine handle's RustOpaque Arc deterministically, LAST — it
+    // holds its own `Arc<CircleManager>` clone, so until it drops, the MLS
+    // DB's Rule-14 `LiveSessionGuard` stays held and the next open of the same
+    // `session.sqlite` fails closed. Nulling `_engine` above only makes it
+    // GC-eligible; `dispose()` drops it now. Deliberately after the stream
+    // cancel so the load-bearing stopSession()-then-cancel ordering documented
+    // above is untouched, and a `start()` after this always builds a fresh
+    // engine via `_engineFactory` rather than reusing a disposed handle.
+    engine?.dispose();
   }
 }

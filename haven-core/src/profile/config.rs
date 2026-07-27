@@ -12,9 +12,20 @@ use std::time::Duration;
 /// use the same re-encode format as the avatar pipeline.
 pub use crate::avatar::AVATAR_MIME;
 
-/// Time-to-live for a cached profile before a fetch is considered stale
-/// (6 hours, in seconds). Matches the White Noise refresh cadence.
-pub const PROFILE_TTL_SECS: i64 = 6 * 3600;
+// Profile staleness tolerance is NOT configured here. `fetch_member_profiles`
+// takes a per-call `max_age_secs`, so each refresh trigger states its own tier
+// (interactive / periodic anti-entropy / forced). Those tiers live in Dart
+// (`haven/lib/src/constants/profile_refresh_tiers.dart`) next to the timer that
+// drives them — the same "Dart owns cadence, Rust owns logic" split the
+// maintenance scheduler already uses.
+//
+// For the record, because a previous constant here claimed otherwise: this is
+// NOT White Noise parity. White Noise has no TTL for real users at all — it
+// keeps a standing kind-0 subscription over every locally known pubkey and
+// re-pulls only when metadata is entirely unknown. Haven is deliberately
+// pull-only (no standing kind-0 subscription — see
+// `docs/PUBLIC_PROFILE_MIGRATION_PLAN.md` §1.6/D3), so freshness here comes
+// from tiered polling instead.
 
 /// Maximum authors per batched kind-0 `REQ`. The union of all known member
 /// pubkeys is chunked into requests of at most this size (defensive bound
@@ -157,11 +168,6 @@ pub fn self_merge_base_relays(write_relays: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn ttl_is_six_hours() {
-        assert_eq!(PROFILE_TTL_SECS, 21_600);
-    }
 
     #[test]
     fn default_blossom_server_is_https() {

@@ -6,8 +6,10 @@
 /// `ProviderScope(overrides: [...])`.
 library;
 
+import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/services/profile_service.dart';
 
 /// A mock [ProfileService] for testing.
@@ -71,6 +73,14 @@ class MockProfileService implements ProfileService {
 
   /// Set to make [refreshMemberProfiles] throw.
   bool shouldThrowOnRefreshMemberProfiles = false;
+
+  /// When set, [refreshMemberProfiles] blocks on this until it completes,
+  /// holding the call in flight deterministically.
+  ///
+  /// Preferred over a wall-clock delay for coalescing tests: it makes the
+  /// in-flight window explicit rather than racing the scheduler, so the test
+  /// cannot flake under parallel load.
+  Completer<void>? refreshGate;
 
   /// Every `shouldThrowOn*` flag throws this exact exception, matching
   /// the real implementation's convention of never leaking a raw `$e` /
@@ -149,12 +159,14 @@ class MockProfileService implements ProfileService {
   @override
   Future<Map<String, Profile>> refreshMemberProfiles(
     List<String> pubkeyHexes, {
-    bool force = false,
+    Duration maxAge = profileInteractiveMaxAge,
   }) async {
     methodCalls.add((
       method: 'refreshMemberProfiles',
-      args: {'pubkeyHexes': List<String>.of(pubkeyHexes), 'force': force},
+      args: {'pubkeyHexes': List<String>.of(pubkeyHexes), 'maxAge': maxAge},
     ));
+    final gate = refreshGate;
+    if (gate != null && !gate.isCompleted) await gate.future;
     if (shouldThrowOnRefreshMemberProfiles) throw _genericError;
     return {
       for (final pubkeyHex in pubkeyHexes)

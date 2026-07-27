@@ -11,6 +11,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/providers/location_publish_scheduler_provider.dart';
 import 'package:haven/src/providers/maintenance_scheduler_provider.dart';
+import 'package:haven/src/providers/member_profile_refresh_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/tile_prefetch_provider.dart';
 import 'package:haven/src/services/background_location_manager.dart';
@@ -290,17 +291,30 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
     // refused a re-open by the circle service's `_wiped` latch (set in
     // `closeAndInvalidate` below). The engine's own subscription was already
     // stopped above.
-    ref.invalidate(maintenanceSchedulerProvider);
-    // Same H1 ordering for the per-circle location-publish scheduler: cancel
-    // its per-circle timers BEFORE the wipe so no publish tick can re-open
-    // circles.db mid/post-wipe (its `onDispose` fires on invalidate).
-    ref.invalidate(locationPublishSchedulerProvider);
+    ref
+      ..invalidate(maintenanceSchedulerProvider)
+      // Same H1 ordering for the per-circle location-publish scheduler: cancel
+      // its per-circle timers BEFORE the wipe so no publish tick can re-open
+      // circles.db mid/post-wipe (its `onDispose` fires on invalidate).
+      ..invalidate(locationPublishSchedulerProvider)
+      // Same ordering for the public-profile refresh notifier: it is
+      // non-autoDispose and holds a coalescing queue plus a captured roster in
+      // a live closure, so without this a queued follow-up could issue a
+      // kind-0 REQ for the deleted identity's social graph *after* the user
+      // asked for it to be erased. The `_wiped` latch already prevents
+      // circles.db resurrection; this closes the residual metadata exposure.
+      ..invalidate(memberProfileRefreshProvider);
     // M10: Wipe ALL MLS state (circles.db + haven_mdk.db files + keyring
-    // keys). The close MUST precede the wipe so GC drops the SQLite fd
-    // before the file is deleted (POSIX-safe unlink) — and it latches the
-    // service so no in-flight caller can re-open the DB mid-wipe. Best-effort —
-    // a storage failure must never block the primary objective of deleting the
-    // identity key.
+    // keys). The close MUST precede the wipe: it disposes the RustOpaque handle
+    // — closing the SQLite fds before the file is deleted (POSIX-safe unlink)
+    // and releasing the MLS DB's Rule-14 single-session slot, so a re-login in
+    // THIS process can open a session instead of failing closed on "an MLS
+    // session is already open on this database" — and it latches the service so
+    // no in-flight caller can re-open the DB mid-wipe. (The release is explicit,
+    // not GC-timed; see `NostrCircleService.closeAndInvalidate`. It is why the
+    // engine stop above must come first — the engine holds its own
+    // `Arc<CircleManager>` clone.) Best-effort — a storage failure must never
+    // block the primary objective of deleting the identity key.
     final circleServiceForWipe = ref.read(circleServiceProvider);
     try {
       await circleServiceForWipe.closeAndInvalidate();

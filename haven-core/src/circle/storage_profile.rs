@@ -41,7 +41,7 @@ impl CircleStorage {
     ///
     /// This write is unconditional; callers gate freshness with
     /// [`Self::newer_than_cached`] before invoking it. A miss (no kind-0 for a
-    /// pubkey) is recorded via [`Self::mark_profiles_unknown`], not here, so a
+    /// pubkey) is recorded via [`Self::touch_profiles_fetched_at`], not here, so a
     /// transient empty fetch cannot downgrade a `Known` row.
     ///
     /// # Errors
@@ -155,17 +155,28 @@ impl CircleStorage {
         Ok(out)
     }
 
-    /// Records a miss (no kind-0 resolved) for each pubkey as an `Unknown` row,
-    /// or — if a row already exists — refreshes only its `fetched_at`.
+    /// Records that a fetch was ATTEMPTED for each pubkey at `now_unix_secs`,
+    /// inserting an `Unknown` row for a pubkey that has never resolved.
     ///
     /// The `ON CONFLICT` clause updates **only** `fetched_at`, never `state` or
-    /// `metadata_json`, so a transient empty fetch resets the TTL clock without
-    /// downgrading a previously-`Known` profile.
+    /// `metadata_json`, so this resets the staleness clock without downgrading a
+    /// previously-`Known` profile.
+    ///
+    /// This MUST be called for every queried author, not only the ones that
+    /// returned nothing. kind-0 is replaceable, so an unchanged profile comes
+    /// back with the same `created_at`, [`Self::upsert_profile_if_newer`]
+    /// correctly declines to rewrite the row, and `fetched_at` would otherwise
+    /// stay pinned to the first-ever fetch — permanently defeating every
+    /// staleness tier and turning each refresh trigger into a real relay `REQ`.
     ///
     /// # Errors
     ///
     /// As [`Self::upsert_profile`].
-    pub fn mark_profiles_unknown(&self, pubkeys_hex: &[String], now_unix_secs: i64) -> Result<()> {
+    pub fn touch_profiles_fetched_at(
+        &self,
+        pubkeys_hex: &[String],
+        now_unix_secs: i64,
+    ) -> Result<()> {
         if pubkeys_hex.is_empty() {
             return Ok(());
         }
@@ -290,6 +301,38 @@ impl CircleStorage {
         )
         .optional()
         .map_err(Into::into)
+    }
+
+    /// Returns the hex SHA-256 content hash of the cached picture bytes, or
+    /// `None` when no bytes are cached for this pubkey.
+    ///
+    /// This is the decode-cache key Flutter's marker avatar layer keys off
+    /// (`Profile.pictureHash`). Blossom URLs are content-addressed, so the hash
+    /// changes exactly when the picture does — making it a correct cache key
+    /// AND a correct invalidation signal.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::upsert_profile`].
+    pub fn get_profile_picture_sha256_hex(&self, pubkey_hex: &str) -> Result<Option<String>> {
+        let conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        let sha256 = conn
+            .query_row(
+                "SELECT sha256 FROM profile_pictures WHERE pubkey = ?1",
+                params![pubkey_hex],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        Ok(sha256.map(|bytes| {
+            use std::fmt::Write as _;
+            bytes.iter().fold(String::new(), |mut acc, b| {
+                let _ = write!(acc, "{b:02x}");
+                acc
+            })
+        }))
     }
 
     /// Whether cached picture bytes exist AND their recorded URL still equals the
@@ -548,7 +591,7 @@ mod tests {
     fn mark_unknown() {
         let storage = CircleStorage::in_memory().unwrap();
         storage
-            .mark_profiles_unknown(&["zz".to_string()], 7_000)
+            .touch_profiles_fetched_at(&["zz".to_string()], 7_000)
             .unwrap();
         let got = storage
             .get_profile("zz")
@@ -569,7 +612,7 @@ mod tests {
             .upsert_profile(&known_profile("aa", "alice", 1_000, 5_000))
             .unwrap();
         storage
-            .mark_profiles_unknown(&["aa".to_string()], 9_000)
+            .touch_profiles_fetched_at(&["aa".to_string()], 9_000)
             .unwrap();
         let got = storage.get_profile("aa").unwrap().unwrap();
         assert_eq!(got.state, ProfileState::Known, "must stay Known");
@@ -810,6 +853,118 @@ mod tests {
     }
 
     #[test]
+    fn touch_advances_fetched_at_for_an_unchanged_profile() {
+        // The staleness gate reads `fetched_at`, but `upsert_profile_if_newer`
+        // only writes when the event is STRICTLY newer — so for the common case
+        // (member has not changed their kind-0) the relay returns the same
+        // event, no row is written, and `fetched_at` would freeze at the first
+        // fetch forever. That silently kills every staleness tier: each trigger
+        // would issue a real relay REQ no matter how recently one ran.
+        let storage = CircleStorage::in_memory().unwrap();
+        let hex = "ab".repeat(32);
+
+        // First fetch at t=100.
+        storage
+            .upsert_profile(&known_profile(&hex, "alice", 5, 100))
+            .unwrap();
+        assert_eq!(storage.get_profile(&hex).unwrap().unwrap().fetched_at, 100);
+
+        // Refetch at t=1000 returns the SAME event (created_at unchanged).
+        let same_event = known_profile(&hex, "alice", 5, 1000);
+        assert!(
+            !storage.upsert_profile_if_newer(&same_event).unwrap(),
+            "an equal-timestamp event must not rewrite the content row"
+        );
+        assert_eq!(
+            storage.get_profile(&hex).unwrap().unwrap().fetched_at,
+            100,
+            "content write is correctly skipped, leaving fetched_at stale"
+        );
+
+        // Touching the attempt is what keeps the tier gate alive.
+        storage
+            .touch_profiles_fetched_at(&[hex.clone()], 1000)
+            .unwrap();
+        let row = storage.get_profile(&hex).unwrap().unwrap();
+        assert_eq!(row.fetched_at, 1000, "the fetch attempt must be recorded");
+        assert_eq!(row.state, ProfileState::Known, "state must not downgrade");
+        assert_eq!(
+            row.metadata.name().map(ToString::to_string),
+            Some("alice".to_string()),
+            "content must survive a touch"
+        );
+        assert_eq!(row.event_created_at, 5, "newer-wins base must survive");
+    }
+
+    #[test]
+    fn touch_inserts_an_unknown_row_for_a_never_seen_pubkey() {
+        // Same statement also covers authors that returned nothing, so one call
+        // records the attempt for the whole batch.
+        let storage = CircleStorage::in_memory().unwrap();
+        let hex = "cd".repeat(32);
+        storage
+            .touch_profiles_fetched_at(&[hex.clone()], 700)
+            .unwrap();
+        let row = storage.get_profile(&hex).unwrap().unwrap();
+        assert_eq!(row.state, ProfileState::Unknown);
+        assert_eq!(row.fetched_at, 700);
+    }
+
+    #[test]
+    fn get_profile_picture_sha256_hex_returns_lowercase_hex() {
+        let storage = CircleStorage::in_memory().unwrap();
+        assert!(storage
+            .get_profile_picture_sha256_hex("aa")
+            .unwrap()
+            .is_none());
+        let mut sha = [0x00_u8; 32];
+        sha[0] = 0x0a;
+        sha[31] = 0xff;
+        storage
+            .upsert_profile_picture("aa", "https://x/cur", &sha, b"c", b"t", 1)
+            .unwrap();
+        let hex = storage
+            .get_profile_picture_sha256_hex("aa")
+            .unwrap()
+            .expect("hash present once bytes are cached");
+        // 32 bytes → 64 hex chars, zero-padded per byte, lowercase.
+        assert_eq!(hex.len(), 64);
+        assert!(hex.starts_with("0a00"));
+        assert!(hex.ends_with("ff"));
+        assert_eq!(hex, hex.to_lowercase());
+    }
+
+    #[test]
+    fn picture_sha256_hex_changes_when_picture_changes() {
+        // The whole point of surfacing this hash: it is the avatar decode-cache
+        // key, so a member swapping their photo MUST produce a different value
+        // or the old avatar keeps rendering from cache.
+        let storage = CircleStorage::in_memory().unwrap();
+        storage
+            .upsert_profile_picture("aa", "https://x/one", &[0x11; 32], b"c", b"t", 1)
+            .unwrap();
+        let first = storage.get_profile_picture_sha256_hex("aa").unwrap();
+        storage
+            .upsert_profile_picture("aa", "https://x/two", &[0x22; 32], b"c2", b"t2", 2)
+            .unwrap();
+        let second = storage.get_profile_picture_sha256_hex("aa").unwrap();
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn picture_sha256_hex_is_none_after_delete() {
+        let storage = CircleStorage::in_memory().unwrap();
+        storage
+            .upsert_profile_picture("aa", "https://x/cur", &[0x33; 32], b"c", b"t", 1)
+            .unwrap();
+        storage.delete_profile_picture("aa").unwrap();
+        assert!(storage
+            .get_profile_picture_sha256_hex("aa")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn profile_rows_are_keyed_by_lowercase_hex() {
         // LOW-6 contract: rows are keyed by canonical lowercase `to_hex()`, so a
         // raw uppercase query MISSES its row — hence the FFI must normalize the
@@ -898,7 +1053,7 @@ mod tests {
         // superseded by any resolved Known — even one whose created_at is 0.
         let storage = CircleStorage::in_memory().unwrap();
         storage
-            .mark_profiles_unknown(&["aa".to_string()], 5_000)
+            .touch_profiles_fetched_at(&["aa".to_string()], 5_000)
             .unwrap();
         let mut resolved = known_profile("aa", "resolved", 0, 6_000);
         resolved.state = ProfileState::Known;

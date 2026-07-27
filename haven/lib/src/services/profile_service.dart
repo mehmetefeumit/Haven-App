@@ -20,6 +20,7 @@
 library;
 
 import 'package:flutter/foundation.dart';
+import 'package:haven/src/constants/profile_refresh_tiers.dart';
 
 /// Exception thrown when profile operations fail.
 class ProfileServiceException implements Exception {
@@ -234,8 +235,13 @@ abstract class ProfileService {
   /// Callers should pass the **union** of all known member pubkeys across
   /// every circle — never a clean per-circle roster partition, which
   /// would hand the relay exact co-membership clusters (migration plan
-  /// §1.7). Pass [force] to bypass the TTL cache and re-fetch even fresh
-  /// entries.
+  /// §1.7).
+  ///
+  /// [maxAge] is the caller's staleness tolerance: a pubkey whose cached
+  /// entry is younger than this is served from cache and never refetched.
+  /// Pass [profileForceMaxAge] (`Duration.zero`) to re-fetch everything.
+  /// Pick a tier from `constants/profile_refresh_tiers.dart` rather than an
+  /// ad-hoc value, so refresh cadence stays reviewable in one place.
   ///
   /// Returns a map of pubkeyHex to the resolved [Profile] for every
   /// pubkey with a cache entry after the refresh; a pubkey that was never
@@ -249,6 +255,6 @@ abstract class ProfileService {
   /// to swallow partial per-pubkey failures and return whatever resolved.
   Future<Map<String, Profile>> refreshMemberProfiles(
     List<String> pubkeyHexes, {
-    bool force = false,
+    Duration maxAge = profileInteractiveMaxAge,
   });
 }

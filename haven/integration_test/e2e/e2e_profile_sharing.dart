@@ -474,7 +474,7 @@ void main() {
         // -------------------------------------------------------------------
         final resolved = await bob.user.circleManager.fetchMemberProfiles(
           pubkeysHex: <String>[aliceHex],
-          force: true,
+          maxAgeSecs: 0,
         );
         final aliceProfile = resolved.firstWhere(
           (p) => p.pubkeyHex.toLowerCase() == aliceHex.toLowerCase(),
@@ -497,6 +497,27 @@ void main() {
           reason: "Bob must download Alice's photo bytes from Blossom.",
         );
         expect(bobPhotoBefore!.isNotEmpty, isTrue);
+        // The avatar decode-cache key must reach Flutter on a plain read path,
+        // not only on the uploader's own upload response. Without it, Bob's map
+        // marker for Alice can never render her photo — it skips the decode
+        // entirely when the hash is null — no matter how fresh the profile is.
+        final aliceAfterDownload = await bob.user.circleManager
+            .fetchMemberProfiles(pubkeysHex: <String>[aliceHex], maxAgeSecs: 0);
+        final aliceWithPicture = aliceAfterDownload.firstWhere(
+          (p) => p.pubkeyHex.toLowerCase() == aliceHex.toLowerCase(),
+        );
+        expect(
+          aliceWithPicture.hasPicture,
+          isTrue,
+          reason: 'cached bytes match the current kind-0 picture URL',
+        );
+        expect(
+          aliceWithPicture.pictureSha256Hex,
+          isNotNull,
+          reason:
+              'a member with current cached bytes must expose the decode key',
+        );
+        expect(aliceWithPicture.pictureSha256Hex, hasLength(64));
         debugPrint('[e2e_profile] STEP 3 — Bob resolved name + photo OK');
 
         // -------------------------------------------------------------------
@@ -524,7 +545,7 @@ void main() {
         // B side: forced re-fetch shows the new name AND still has the photo.
         final reResolved = await bob.user.circleManager.fetchMemberProfiles(
           pubkeysHex: <String>[aliceHex],
-          force: true,
+          maxAgeSecs: 0,
         );
         final aliceAfterEdit = reResolved.firstWhere(
           (p) => p.pubkeyHex.toLowerCase() == aliceHex.toLowerCase(),
@@ -561,7 +582,7 @@ void main() {
 
         final afterDelete = await bob.user.circleManager.fetchMemberProfiles(
           pubkeysHex: <String>[aliceHex],
-          force: true,
+          maxAgeSecs: 0,
         );
         // A blank kind-0 is state=Known but carries no display fields, so the
         // member tile would render the npub prefix + initials. The entry may be

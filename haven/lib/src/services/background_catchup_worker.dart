@@ -509,10 +509,13 @@ Future<void> _runCatchupViaWorkerBootstrap() async {
     identitySecretBytes: identitySecretBytes,
   );
 
-  // 6. Relay service.
+  // 6. Relay service. Its initialize() is INSIDE the try so a throw there
+  //    still reaches the teardown below — otherwise it would strand the
+  //    just-opened circleManager, leaving the Rule-14 session slot held for the
+  //    rest of the process's life (see the finally).
   final relayService = NostrRelayService();
-  await relayService.initialize();
   try {
+    await relayService.initialize();
     debugPrint(kCatchupWorkerBootstrapOkMarker);
     // 7. Terminate in the M7 chokepoint — receive-only sweep, NOT the FGS
     //    authoring cycle. isBackgroundWake:true re-checks consent inside
@@ -553,6 +556,20 @@ Future<void> _runCatchupViaWorkerBootstrap() async {
       await relayService.shutdown();
     } on Object catch (_) {
       // Best-effort teardown (FGS template's onDestroy discipline).
+    }
+    // Hand the MLS DB's Rule-14 single-session slot back before this isolate
+    // goes away. Rust statics — including the `LIVE_SESSIONS` registry backing
+    // that rule — are shared by EVERY Dart isolate in the one loaded `.so`, and
+    // the guard is released only when Rust drops the manager. Letting the
+    // handle fall out of scope defers that to a GC in a short-lived isolate
+    // that is about to be torn down, so the slot can stay registered after this
+    // task is done and lock the FOREGROUND out of its own database ("an MLS
+    // session is already open on this database") until the process dies.
+    // `dispose()` is idempotent and this is the last use of the handle.
+    try {
+      circleManager.dispose();
+    } on Object catch (_) {
+      // Best-effort, like the relay shutdown above.
     }
   }
 }

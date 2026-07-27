@@ -1,6 +1,6 @@
 /// M8 scheduled-resilience maintenance driver (M8-0 / M8-4 / M8-5).
 ///
-/// Owns three self-rescheduling timers that periodically ask the Rust core to
+/// Owns four self-rescheduling timers that periodically ask the Rust core to
 /// keep the user reachable:
 ///
 /// - **`KeyPackage`** (kinds 30443 + 443) — republish-if-missing so a peer can
@@ -12,6 +12,13 @@
 ///   by re-anchoring subscriptions at their cursors. Nominal 15 min. Engine-
 ///   coupled: its FFI self-gates on the engine `SESSION`, so it is an inert
 ///   no-op while `liveSyncEnabled` is off (the engine is never started).
+/// - **Public-profile anti-entropy** — bound how stale a co-member's kind-0
+///   name/photo can get in a long session where no resume or circle-select
+///   ever fires. Nominal 45 min, and the only task gated on the app being
+///   foregrounded (see `_appIsForegrounded`). Unlike the other three, this one
+///   *dispatches* work rather than awaiting it: overlap protection lives in
+///   `MemberProfileRefreshNotifier`, so `_profileAntiEntropyInFlight` does not
+///   bound the fetch's duration the way the other in-flight flags do.
 ///
 /// ## Why Dart-timer-driven (not a Rust cron)
 ///
@@ -58,7 +65,7 @@
 /// ## Lifetime + teardown
 ///
 /// Anchored once in `MapShell` via `ref.read(maintenanceSchedulerProvider
-/// .notifier)`. Both timers are cancelled on dispose ([Ref.onDispose]) and the
+/// .notifier)`. All timers are cancelled on dispose ([Ref.onDispose]) and the
 /// provider is explicitly invalidated in `IdentityNotifier.deleteIdentity`, so
 /// no *new* secret-bearing republish tick is armed after logout. A tick that is
 /// already mid-FFI when logout fires completes with its already-scrubbed secret
@@ -75,10 +82,12 @@ library;
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
+import 'package:haven/src/providers/member_profile_refresh_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 
 // ---------------------------------------------------------------------------
@@ -106,6 +115,13 @@ const Duration _relayListInitialDelay = Duration(minutes: 1);
 /// Initial settle delay before the first subscription-health tick.
 const Duration _healthInitialDelay = Duration(seconds: 90);
 
+/// Initial settle delay before the first public-profile anti-entropy tick.
+///
+/// Deliberately later than the other tasks: `MapShell` already fires a
+/// cold-start profile refresh ~5 s in, so an early tick here would be a
+/// guaranteed no-op. This is the *idle-session* safety net.
+const Duration _profileAntiEntropyInitialDelay = Duration(minutes: 10);
+
 /// Cap on how long the first `KeyPackage` tick waits for the login publish to
 /// settle before proceeding regardless (a wedged publish must not stall
 /// maintenance forever).
@@ -115,9 +131,9 @@ const Duration _loginPublishSettleTimeout = Duration(seconds: 60);
 // Notifier
 // ---------------------------------------------------------------------------
 
-/// Owns the two maintenance timers for the foreground session.
+/// Owns the four maintenance timers for the foreground session.
 ///
-/// Created once and kept alive for the session; on dispose both timers are
+/// Created once and kept alive for the session; on dispose all timers are
 /// cancelled. Each task self-reschedules after every fire (one-shot timers, so
 /// the next tick is only armed once the current one settles — the no-overlap
 /// guard additionally protects against any external/concurrent trigger).
@@ -125,10 +141,12 @@ class MaintenanceSchedulerNotifier extends Notifier<void> {
   Timer? _keyPackageTimer;
   Timer? _relayListTimer;
   Timer? _healthTimer;
+  Timer? _profileAntiEntropyTimer;
 
   bool _keyPackageInFlight = false;
   bool _relayListInFlight = false;
   bool _healthInFlight = false;
+  bool _profileAntiEntropyInFlight = false;
   bool _disposed = false;
 
   /// Whether the first `KeyPackage` tick of the current generation still owes
@@ -159,6 +177,7 @@ class MaintenanceSchedulerNotifier extends Notifier<void> {
     _keyPackageInFlight = false;
     _relayListInFlight = false;
     _healthInFlight = false;
+    _profileAntiEntropyInFlight = false;
     _awaitedLoginPublish = false;
     final generation = ++_generation;
 
@@ -174,6 +193,12 @@ class MaintenanceSchedulerNotifier extends Notifier<void> {
     // self-gates on the engine SESSION), so the timer is always armed — the
     // tick is a cheap no-op while `liveSyncEnabled` is off.
     _armHealth(_healthInitialDelay, generation);
+    // Public-profile anti-entropy: the only trigger that bounds staleness in a
+    // long foreground session where no resume or circle-select ever fires.
+    // The tick itself checks the app lifecycle (see `_appIsForegrounded`) —
+    // widget lifetime is NOT a foreground proxy, since `MapShell` survives
+    // backgrounding while location sharing keeps the isolate alive.
+    _armProfileAntiEntropy(_profileAntiEntropyInitialDelay, generation);
   }
 
   void _cancelAll() {
@@ -183,6 +208,8 @@ class MaintenanceSchedulerNotifier extends Notifier<void> {
     _relayListTimer = null;
     _healthTimer?.cancel();
     _healthTimer = null;
+    _profileAntiEntropyTimer?.cancel();
+    _profileAntiEntropyTimer = null;
   }
 
   /// Whether [generation] is still the live lifecycle and we are not disposed.
@@ -207,6 +234,15 @@ class MaintenanceSchedulerNotifier extends Notifier<void> {
   void _armHealth(Duration delay, int generation) {
     _healthTimer?.cancel();
     _healthTimer = Timer(delay, () => _runHealthTick(generation));
+  }
+
+  /// Arms (or re-arms) the public-profile anti-entropy timer for [generation].
+  void _armProfileAntiEntropy(Duration delay, int generation) {
+    _profileAntiEntropyTimer?.cancel();
+    _profileAntiEntropyTimer = Timer(
+      delay,
+      () => _runProfileAntiEntropyTick(generation),
+    );
   }
 
   /// Samples a jittered delay in `[nominal*0.75, nominal*1.25]`.
@@ -332,7 +368,79 @@ class MaintenanceSchedulerNotifier extends Notifier<void> {
     }
   }
 
+  // --- Public-profile anti-entropy task -------------------------------------
+
+  /// Whether the app is currently foregrounded.
+  ///
+  /// `MapShell` (which anchors this scheduler) is NOT disposed when the app is
+  /// backgrounded — only on logout/route teardown — and the main isolate stays
+  /// alive while background location sharing holds its session. So widget
+  /// lifetime is not a foreground proxy: without this check the profile sweep
+  /// would fire while backgrounded, contacting discovery relays with no UI to
+  /// render the result.
+  ///
+  /// A null `lifecycleState` (before the first lifecycle event, i.e. startup,
+  /// and in unit tests) counts as foregrounded.
+  static bool _appIsForegrounded() {
+    try {
+      final state = WidgetsBinding.instance.lifecycleState;
+      return state == null || state == AppLifecycleState.resumed;
+    } on Object {
+      // No binding (pure-Dart test context) — nothing to defer to.
+      return true;
+    }
+  }
+
+  Future<void> _runProfileAntiEntropyTick(int generation) async {
+    if (!_isCurrent(generation)) return;
+    if (_profileAntiEntropyInFlight) {
+      return;
+    }
+    if (!_appIsForegrounded()) {
+      // Backgrounded: re-arm without contacting any relay. Profile freshness is
+      // a foreground concern — app resume already refreshes on the way back in.
+      debugPrint(
+        '[Maintenance] profile anti-entropy tick skipped (background)',
+      );
+      _armProfileAntiEntropy(_jittered(profileAntiEntropyInterval), generation);
+      return;
+    }
+    _profileAntiEntropyInFlight = true;
+    try {
+      // Staleness-gated on the periodic tier, so a tick landing shortly after
+      // an interactive refresh costs nothing. The refresh notifier owns the
+      // all-circles union, own-pubkey inclusion, and concurrency coalescing.
+      await ref
+          .read(memberProfileRefreshProvider.notifier)
+          .refreshAll(maxAge: profilePeriodicMaxAge);
+      debugPrint('[Maintenance] profile anti-entropy tick dispatched');
+    } on Object catch (e) {
+      debugPrint(
+        '[Maintenance] profile anti-entropy tick threw: ${e.runtimeType}',
+      );
+    } finally {
+      // Reset ONLY for the current generation (see the KeyPackage tick's note).
+      if (_isCurrent(generation)) {
+        _profileAntiEntropyInFlight = false;
+        _armProfileAntiEntropy(
+          _jittered(profileAntiEntropyInterval),
+          generation,
+        );
+      }
+    }
+  }
+
   // --- Test seams -----------------------------------------------------------
+
+  /// [visibleForTesting] — runs a public-profile anti-entropy tick immediately.
+  @visibleForTesting
+  Future<void> triggerProfileAntiEntropyTickForTest() =>
+      _runProfileAntiEntropyTick(_generation);
+
+  /// [visibleForTesting] — whether the anti-entropy timer is currently armed.
+  @visibleForTesting
+  bool get profileAntiEntropyArmedForTest =>
+      _profileAntiEntropyTimer?.isActive ?? false;
 
   /// [visibleForTesting] — runs a `KeyPackage` tick immediately (incl. the
   /// no-overlap guard + reschedule), without waiting for the real timer.
@@ -364,7 +472,8 @@ class MaintenanceSchedulerNotifier extends Notifier<void> {
   bool get hasArmedTimersForTest =>
       (_keyPackageTimer?.isActive ?? false) ||
       (_relayListTimer?.isActive ?? false) ||
-      (_healthTimer?.isActive ?? false);
+      (_healthTimer?.isActive ?? false) ||
+      (_profileAntiEntropyTimer?.isActive ?? false);
 }
 
 /// Provider owning the M8 maintenance timers.

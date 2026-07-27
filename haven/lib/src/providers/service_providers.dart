@@ -4,13 +4,17 @@
 /// Override these in tests with mock implementations using ProviderScope.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
+import 'package:haven/src/providers/member_profile_refresh_provider.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/catchup_service.dart';
 import 'package:haven/src/services/circle_service.dart';
@@ -195,6 +199,18 @@ final subscriptionServiceProvider = Provider<SubscriptionService>((ref) {
       _safeInvalidate(
         () => ref.invalidate(memberLocationsProvider),
         'memberLocations',
+      );
+      // A roster change usually means members we have never resolved. Those
+      // pubkeys have no cache row, so they bypass the staleness gate and this
+      // is what stops a newly added member rendering as a bare npub.
+      // Union-scoped (§1.7) — the notifier rebuilds it from `circlesProvider`.
+      _safeInvalidate(
+        () => unawaited(
+          ref
+              .read(memberProfileRefreshProvider.notifier)
+              .refreshAll(maxAge: profileInteractiveMaxAge),
+        ),
+        'memberProfiles',
       );
     },
     onInvitationReceived: () {

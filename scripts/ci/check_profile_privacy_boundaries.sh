@@ -586,4 +586,37 @@ if [[ -n "${gate_violations}" ]]; then
   fail "retraction footprint without its has_published_profile() no-op gate — an allowlisted retraction builder must be structurally bound to has_published_profile() so it never CREATES a first public event"
 fi
 
-log "OK: public-profile privacy boundaries hold — no Image.network, no circle/group tokens, import boundary intact, kind-0 confined to the profile module, HTTPS-only Blossom, retraction no-op gate bound at every retraction call site."
+# ---------------------------------------------------------------------------
+# Check 7: the §1.7 union invariant — kind-0 fetches must cover the union of
+# ALL circles' members, never a per-circle roster partition (which would hand
+# the relay exact co-membership clusters).
+#
+# The union is built in exactly one place (`refreshAll`). Enforce that by
+# confining the two lower-level, arbitrary-pubkey-list entry points to their
+# owning files, so a future call site cannot pass `circle.members.map(...)`.
+# ---------------------------------------------------------------------------
+log "Scanning haven/lib for kind-0 fetch calls outside their owning module (§1.7 union invariant) ..."
+
+union_violations=""
+
+roster_hits="$(grep -rn 'refreshRoster(' "${LIB_DIR}" \
+  --include='*.dart' 2>/dev/null \
+  | grep -v '/providers/member_profile_refresh_provider\.dart:' || true)"
+if [[ -n "${roster_hits}" ]]; then
+  union_violations+="${roster_hits}"$'\n'
+fi
+
+fetch_hits="$(grep -rn 'fetchMemberProfiles(' "${LIB_DIR}" \
+  --include='*.dart' 2>/dev/null \
+  | grep -v '/services/nostr_profile_service\.dart:' \
+  | grep -v '/rust/' || true)"
+if [[ -n "${fetch_hits}" ]]; then
+  union_violations+="${fetch_hits}"$'\n'
+fi
+
+if [[ -n "${union_violations}" ]]; then
+  printf '%s' "${union_violations}" >&2
+  fail "kind-0 fetch entry point used outside its owning module — call MemberProfileRefreshNotifier.refreshAll() (or triggerProfileRefresh) instead, so every fetch carries the union of ALL circles' members and never a per-circle roster partition (migration plan §1.7)"
+fi
+
+log "OK: public-profile privacy boundaries hold — no Image.network, no circle/group tokens, import boundary intact, kind-0 confined to the profile module, HTTPS-only Blossom, retraction no-op gate bound at every retraction call site, union-only kind-0 fetch entry points."

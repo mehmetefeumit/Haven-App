@@ -7,6 +7,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/utils/profile_refresh_trigger.dart';
@@ -48,10 +49,12 @@ class CircleListTile extends ConsumerWidget {
       onTap: () {
         // Set the selected circle in the provider
         ref.read(selectedCircleIdProvider.notifier).state = circle.mlsGroupId;
-        // §6.2: refresh member/own public profiles on circle-select.
+        // §6.2: refresh member/own public profiles on circle-select — the
+        // strongest signal that the user is about to look at these members.
         triggerProfileRefresh(
           ref,
-          ref.read(circlesProvider).valueOrNull ?? const [],
+          maxAge: profileInteractiveMaxAge,
+          circles: ref.read(circlesProvider).valueOrNull,
         );
       },
     );
