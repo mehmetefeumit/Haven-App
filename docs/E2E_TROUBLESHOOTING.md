@@ -364,6 +364,57 @@ after a force-stop — `ForceStopRunnable` eats that run. Re-issue the force-run
 the now-initialized (resident, thawed) process, and gate on the worker *starting*
 (not just its final marker) so you know exactly when to stop hammering.
 
+## Failure mode 9 — leave never converges: "converging on Alice's handoff burst" times out
+
+**Symptom.** A leave scenario (admin handoff or non-admin) runs cleanly — the
+leave publishes, `[Leave] completed`, the leaver's own circle list empties — but
+a remaining peer never drops the leaver. The drain log repeats
+`groupUpdates=0 … publishedCommits=0` round after round until the 60s
+convergence budget expires. No error is raised anywhere.
+
+**Cause.** A bare `SelfRemove` is a PROPOSAL (RFC 9420 §12.1.2). It becomes a
+removal only when a remaining member publishes the commit their engine stages
+for it. The engine hands that commit back as
+`DecryptLocationOutcomeFfi.autoCommits` — it cannot publish it itself, because
+the Rust `CircleManagerFfi` holds no relay handle. Two Dart ingest APIs exist and
+only one is safe on a receive path:
+
+| API | Receive-side auto-commit |
+|---|---|
+| `decryptLocationCollectingCommits` | **surfaced** for the caller to publish, then confirm on a ≥1-relay ack |
+| `decryptLocation` | **rolled back** (`publish_failed`) |
+
+Ingesting a peer's `SelfRemove` through the shim discards the eviction on
+arrival. The proposal is consumed, nothing is published, and the leaver stays in
+the roster permanently — silently, which is why the only symptom is a timeout far
+downstream. This bit the E2E synthetic peer: its drain used the shim, so every
+leave scenario deadlocked.
+
+**Fix / check.** The receiving side must run the full dance: publish once,
+`confirmPublished` on an ack, `publishFailed` otherwise — never confirm before an
+ack, never drop the pending ref. Production does this in
+`LocationSharingService._publishAutoCommits` (foreground poll); live-sync and
+background catch-up publish it in-Rust via
+`haven_core::relay::auto_commit::resolve_receive_publish_work`. The E2E synthetic
+peer mirrors it in `SyntheticUser._publishAutoCommits`.
+
+Two guards keep this from recurring without an emulator lane:
+`haven/test/lints/receive_side_auto_commit_test.dart` (scans for the shim CALL —
+a substring search for the safe name is not enough, the file also documents it)
+and `haven-core/tests/circle_integration_test.rs`
+`peer_self_remove_surfaces_a_receive_side_auto_commit` (pins both APIs on the
+same proposal).
+
+**Expected side effect, not a bug.** Once the contract is honoured, EVERY
+remaining member auto-commits the proposal — a real concurrent-commit fork, just
+as in production when someone leaves a 3+-person circle. The engine resolves it
+(deterministic `CommitOrderingKey` branch selection; the loser rolls back and
+adopts the winner), but resolution needs all peers to keep ingesting after the
+loser's commit lands. Poll to the convergence predicate itself (leaver gone from
+BOTH peers **and** equal epochs), re-snapshotting the shared inbox each round;
+polling each peer to its own state and then sampling epoch equality once can
+observe a mid-convergence instant and fail spuriously.
+
 ## What these lanes do NOT cover
 
 The iOS simulator keeps the app alive and the VM-service attached, so it does

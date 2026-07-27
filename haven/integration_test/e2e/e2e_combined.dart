@@ -4005,31 +4005,57 @@ _reconcileHandoff({
   // buffer independently and the engine is expected to converge them
   // without any Dart-side coordination.
   //
-  // KNOWN GAP TO CONFIRM (flagged for the haven-core owner): a bare
-  // `SelfRemove` PROPOSAL (`propose_leave`'s return, RFC 9420 §12.1.2)
-  // still needs exactly one remaining member's engine to COMMIT it before
-  // anyone converges — `haven_core::circle::manager::decrypt_location`
-  // folds `ingest.effects.events` into `LocationMessageResult`s but does
-  // not appear to surface an engine-emitted `AutoPublish` `PublishWork`
-  // item (if the engine emits one) for Haven's relay layer to publish. If
-  // that surfacing is genuinely absent, NEITHER peer below will ever
-  // observe Alice's removal and this poll will time out — which is the
-  // correct, honest failure mode rather than a silently-passing test.
-  await _pollUntil<CircleWithMembersFfi?>(
-    describe: "${bob.label} converging on Alice's handoff burst",
+  // GAP CONFIRMED AND CLOSED (2026-07-26): a bare `SelfRemove` PROPOSAL
+  // (`propose_leave`'s return, RFC 9420 §12.1.2) does need a remaining
+  // member's engine to COMMIT it before anyone converges, and the engine
+  // DOES emit that commit as a `PublishWork::AutoPublish` — it just cannot
+  // publish it itself (the Rust `CircleManagerFfi` holds no relay handle).
+  // `SyntheticUser.applyArrivalOrdered` previously ingested via the
+  // `decryptLocation` shim, which ROLLS BACK that auto-commit, so the
+  // eviction was silently discarded and Alice stayed in both peers'
+  // rosters forever. The drain now uses
+  // `decryptLocationCollectingCommits` + publish-then-confirm, mirroring
+  // production `LocationSharingService._publishAutoCommits`.
+  //
+  // Consequence, and why the poll below drives BOTH peers together: with
+  // the contract honoured, Bob AND Carol each auto-commit Alice's
+  // SelfRemove — a genuine concurrent-commit fork, exactly what happens in
+  // production when a member leaves a 3-person circle. The Dark Matter
+  // engine resolves it (deterministic `CommitOrderingKey` branch
+  // selection; the loser rolls back and adopts the winner), but resolution
+  // needs BOTH peers to keep ingesting the growing buffer after the
+  // loser's commit lands. Polling each peer to its own "Alice is gone"
+  // state and then sampling epoch equality once can therefore observe a
+  // mid-convergence instant and fail spuriously. So this polls straight to
+  // the real convergence predicate — Alice gone from both AND equal epochs
+  // — re-snapshotting the inbox each round so each peer sees whatever the
+  // other just published. The assertion is unchanged; only the moment it
+  // is sampled is now gated on the work being finished.
+  final converged = await _pollUntil<_HandoffConvergence>(
+    describe: "${bob.label} + ${carol.label} converging on Alice's "
+        'handoff burst (both peers auto-commit the SelfRemove; the engine '
+        'must resolve the resulting fork onto ONE branch)',
     probe: () async {
+      // Re-snapshot per peer: Bob's publish inside his own drain must be
+      // visible to Carol on the very next line, not a round later.
       await bob.applyArrivalOrdered(inbox.snapshot(), relay: relay);
-      return bob.getCircle(mlsGroupId);
-    },
-    satisfied: (circle) => circle != null && !circleHasAlice(circle),
-  );
-  await _pollUntil<CircleWithMembersFfi?>(
-    describe: "${carol.label} converging on Alice's handoff burst",
-    probe: () async {
       await carol.applyArrivalOrdered(inbox.snapshot(), relay: relay);
-      return carol.getCircle(mlsGroupId);
+      final bobCircleNow = await bob.getCircle(mlsGroupId);
+      final carolCircleNow = await carol.getCircle(mlsGroupId);
+      return (
+        bobHasAlice: bobCircleNow == null || circleHasAlice(bobCircleNow),
+        carolHasAlice:
+            carolCircleNow == null || circleHasAlice(carolCircleNow),
+        bobEpoch: await bob.currentEpoch(mlsGroupId),
+        carolEpoch: await carol.currentEpoch(mlsGroupId),
+      );
     },
-    satisfied: (circle) => circle != null && !circleHasAlice(circle),
+    satisfied: (s) =>
+        !s.bobHasAlice && !s.carolHasAlice && s.bobEpoch == s.carolEpoch,
+  );
+  debugPrint(
+    '[e2e_combined] handoff convergence poll satisfied — '
+    'bobEpoch=${converged.bobEpoch} carolEpoch=${converged.carolEpoch}',
   );
 
   // Non-gating sanity check only — NOT the convergence signal (see the
@@ -4090,6 +4116,17 @@ _reconcileHandoff({
   );
   return (bob: bobFinal, carol: carolFinal);
 }
+
+/// One convergence sample of both remaining peers during the admin
+/// handoff: whether each still sees Alice, and each one's MLS epoch.
+/// Primitive fields only, so `_pollUntil`'s timeout message renders the
+/// actual state rather than an opaque instance.
+typedef _HandoffConvergence = ({
+  bool bobHasAlice,
+  bool carolHasAlice,
+  int bobEpoch,
+  int carolEpoch,
+});
 
 /// True when [circle] shows the expected post-handoff residual: Alice
 /// gone, exactly two members, exactly one admin.

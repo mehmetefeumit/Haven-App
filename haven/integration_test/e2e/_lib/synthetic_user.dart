@@ -91,14 +91,20 @@ typedef DecryptedCoords = ({double latitude, double longitude});
 /// future refactor — keeping them out of CI artifacts is cheap
 /// forward defence.
 ///
-/// `publishedCommitEventIds` and `withheldPendingCommit` are VESTIGIAL
-/// under Dark Matter — always empty / `false`, respectively. They backed
-/// the pre-migration receiver-side auto-commit publish/finalize dance and
-/// the single-committer election built on top of it; the Dark Matter
-/// engine now owns publish-before-apply AND commit-ordering/convergence
-/// entirely internally, so there is nothing left for a Dart-side decrypt
-/// loop to publish, finalize, or withhold. See [applyArrivalOrdered]'s
-/// `finalizeAutoCommit` doc.
+/// `publishedCommitEventIds` carries the kind-445 event id of every
+/// RECEIVE-SIDE auto-commit this drain published and confirmed — in
+/// practice, the commit that evicts a peer who published a `SelfRemove`
+/// proposal. The Dark Matter engine owns publish-before-apply for every
+/// SEND-side commit internally, but a receive-side auto-commit is the one
+/// case it hands back to the caller (the Rust `CircleManagerFfi` holds no
+/// relay handle), exactly as it does for the production foreground poll
+/// path. A drain that ingests a peer's `SelfRemove` and publishes nothing
+/// here has silently dropped the eviction — see [SyntheticUser
+/// .applyArrivalOrdered]'s `finalizeAutoCommit` doc.
+///
+/// `withheldPendingCommit` is VESTIGIAL under Dark Matter — always
+/// `false`. It backed the pre-migration single-committer election, which
+/// the engine's own commit-ordering/convergence replaces.
 typedef ApplyEventsSummary = ({
   int locationsProcessed,
   int groupUpdatesProcessed,
@@ -568,23 +574,28 @@ class SyntheticUser {
   /// returns `Ok(None)`), so callers may re-pass a growing buffer
   /// across retry rounds.
   ///
-  /// [finalizeAutoCommit] is VESTIGIAL under Dark Matter — kept only so
-  /// existing call sites across the E2E suite do not all need to change
-  /// their signature at once — and has NO effect. The pre-migration MDK
-  /// stack staged a receiver-side auto-commit in Dart-visible pending
-  /// state that a caller could choose to leave uncommitted (the
+  /// [finalizeAutoCommit] no longer selects between "commit" and
+  /// "withhold" — it is kept only so existing call sites do not all need
+  /// to change their signature at once, and has NO effect. The
+  /// pre-migration MDK stack let a caller leave a receiver-side
+  /// auto-commit staged-but-uncommitted, which powered the
   /// single-committer election `_reconcileHandoff` used to referee a
-  /// concurrent admin-handoff leave). The Dark Matter engine now owns
-  /// publish-before-apply AND commit-ordering/convergence entirely
-  /// internally — there is no Dart-visible pending receiver-side commit
-  /// left to withhold, publish, or clear. [ApplyEventsSummary
-  /// .withheldPendingCommit] is therefore always `false` and
-  /// [ApplyEventsSummary.publishedCommitEventIds] is always empty; any
-  /// scenario that relied on the old election (checking those fields, or
-  /// clearing a "loser" peer's withheld commit) needs the engine's own
-  /// convergence to settle instead — see `MDK_DARKMATTER_MIGRATION_PLAN.md`
-  /// §2.1/§2.2 (out-of-order-commit / concurrent-commit-fork handling
-  /// moves into the engine).
+  /// concurrent admin-handoff leave; the Dark Matter engine owns
+  /// commit-ordering and convergence internally, so there is no fork left
+  /// for Dart to referee and nothing to withhold.
+  ///
+  /// What the engine does NOT own is the last hop for a RECEIVE-side
+  /// auto-commit. When a peer's `SelfRemove` proposal is ingested, the
+  /// engine stages the eviction commit and hands it back as
+  /// `DecryptLocationOutcomeFfi.autoCommits`, because the Rust
+  /// `CircleManagerFfi` holds no relay handle of its own. Somebody has to
+  /// publish it and confirm on a ≥1-relay ack (Rule 13) or the proposal
+  /// never becomes a commit and the leaver stays in everyone's roster
+  /// forever. Production does this in
+  /// `LocationSharingService._publishAutoCommits`; this drain is its
+  /// synthetic-peer mirror, so a scenario driving a leave through
+  /// synthetic peers exercises the same contract instead of quietly
+  /// diverging from it.
   Future<ApplyEventsSummary> applyArrivalOrdered(
     List<TestRelayEvent> events, {
     required TestRelay relay,
@@ -616,19 +627,30 @@ class SyntheticUser {
     // the same event return an empty result, so callers must accumulate
     // across drain rounds.
     final decryptedLocations = <String, DecryptedCoords>{};
-    // Dark Matter: the engine owns publish-before-apply for every commit
-    // internally, so a decrypt/ingest never hands back an outbound event
-    // for a receiver to publish/finalize — these stay permanently empty/
-    // false. See [ApplyEventsSummary]'s field docs and
-    // [applyArrivalOrdered]'s `finalizeAutoCommit` doc.
-    const publishedCommitEventIds = <String>[];
+    // Receive-side auto-commits this drain published + confirmed (a peer's
+    // `SelfRemove` eviction). See [ApplyEventsSummary]'s field docs.
+    final publishedCommitEventIds = <String>[];
+    // Vestigial under Dark Matter — the engine owns commit ordering, so
+    // there is no Dart-side election left to withhold a commit for.
     const withheldPendingCommit = false;
     for (final event in events) {
       final eventJson = jsonEncode(event.raw);
       try {
-        final results = await user.circleManager.decryptLocation(
-          eventJson: eventJson,
+        // `decryptLocationCollectingCommits`, NOT `decryptLocation`: the
+        // latter is a shim that ROLLS BACK any receive-side auto-commit the
+        // engine staged. Using it here made a synthetic peer silently
+        // discard the eviction commit for a peer's `SelfRemove`, so the
+        // leaver never left anyone's roster and every leave scenario
+        // deadlocked (Rule 13 — publish, then confirm on an ack).
+        final outcome = await user.circleManager
+            .decryptLocationCollectingCommits(eventJson: eventJson);
+        await _publishAutoCommits(
+          outcome.autoCommits,
+          relay: relay,
+          context: context,
+          publishedIds: publishedCommitEventIds,
         );
+        final results = outcome.results;
         for (final result in results) {
           switch (result.kind) {
             case LocationMessageResultKindFfi.location:
@@ -682,6 +704,73 @@ class SyntheticUser {
       publishedCommitEventIds: publishedCommitEventIds,
       withheldPendingCommit: withheldPendingCommit,
     );
+  }
+
+  /// Publishes every receive-side auto-commit the engine surfaced during a
+  /// decrypt, then confirms it on a ≥1-relay OK-ack or rolls it back.
+  ///
+  /// This is the synthetic-peer mirror of
+  /// `LocationSharingService._publishAutoCommits` and, one level down, of
+  /// `haven_core::relay::auto_commit::resolve_receive_publish_work` (the
+  /// in-Rust publisher the live-sync and background-catch-up planes use).
+  /// ONE publish attempt per entry, matching both references — this drain
+  /// is itself re-run by the polling callers, and that cadence is the
+  /// retry.
+  ///
+  /// Rule 13 is the whole point: NEVER confirm before an ack (that would
+  /// apply an epoch no peer can reach), and NEVER drop an entry silently
+  /// (that would strand the pending ref and leave the departing peer in
+  /// the roster). A failure is logged, not thrown, so one bad commit
+  /// cannot abort the surrounding decrypt loop — the pending ref is rolled
+  /// back and the engine re-surfaces a fresh attempt on the next drain.
+  Future<void> _publishAutoCommits(
+    List<CommitToPublishFfi> autoCommits, {
+    required TestRelay relay,
+    required String context,
+    required List<String> publishedIds,
+  }) async {
+    for (final commit in autoCommits) {
+      var published = false;
+      try {
+        final (accepted, msg) = await relay.publishAndAwaitOk(
+          commit.commitEventJson,
+        );
+        published = accepted;
+        if (!accepted) {
+          debugPrint(
+            '[SyntheticUser:$label] $context: relay rejected '
+            'receive-side auto-commit: $msg',
+          );
+        }
+      } on Object catch (e) {
+        debugPrint(
+          '[SyntheticUser:$label] $context: auto-commit publish '
+          'failed: ${e.runtimeType}',
+        );
+      }
+
+      try {
+        if (published) {
+          await user.circleManager.confirmPublished(pending: commit.pending);
+          final decoded = jsonDecode(commit.commitEventJson);
+          final id = decoded is Map<String, dynamic>
+              ? decoded['id'] as String?
+              : null;
+          if (id != null) publishedIds.add(id);
+          debugPrint(
+            '[SyntheticUser:$label] $context: published + confirmed '
+            'receive-side auto-commit evt=${_redactPk(id ?? "?")}',
+          );
+        } else {
+          await user.circleManager.publishFailed(pending: commit.pending);
+        }
+      } on Object catch (e) {
+        debugPrint(
+          '[SyntheticUser:$label] $context: auto-commit '
+          '${published ? "confirm" : "rollback"} failed: ${e.runtimeType}',
+        );
+      }
+    }
   }
 
   // ===========================================================================

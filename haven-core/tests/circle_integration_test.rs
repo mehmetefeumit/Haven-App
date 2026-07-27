@@ -1407,6 +1407,103 @@ mod mls_dependent_tests {
         s.cleanup();
     }
 
+    /// A peer's bare `SelfRemove` PROPOSAL only becomes a removal once a
+    /// remaining member publishes and confirms the auto-commit the engine
+    /// stages for it — and the ONLY API that hands that commit back is
+    /// [`CircleManager::decrypt_location_collecting_commits`]. The
+    /// `decrypt_location` shim rolls it back instead.
+    ///
+    /// This pin exists because getting that wrong is silent and total: an E2E
+    /// synthetic peer ingested leave proposals through the shim, so every
+    /// leave scenario deadlocked with the leaver stuck in every roster and no
+    /// error anywhere. Asserting BOTH paths side by side, on two independent
+    /// receivers of the SAME proposal, makes the difference impossible to
+    /// misread — and catches a regression in seconds instead of a 20-minute
+    /// emulator lane.
+    #[tokio::test]
+    async fn peer_self_remove_surfaces_a_receive_side_auto_commit() {
+        let c = setup_three_party_active_circle("self_remove_autocommit").await;
+        let bob_hex = c.bob_keys.public_key().to_hex();
+
+        // Bob leaves: a bare proposal, no `PendingStateRef` of his own.
+        let proposal = c
+            .bob_manager
+            .propose_leave(&c.group_id)
+            .await
+            .expect("bob proposes leave");
+
+        // ── Receiver A (Alice): the production contract. ──
+        let ingest = c
+            .alice_manager
+            .decrypt_location_collecting_commits(&proposal)
+            .await
+            .expect("alice ingests bob's SelfRemove");
+        assert_eq!(
+            ingest.auto_commits.len(),
+            1,
+            "ingesting a peer's SelfRemove proposal must surface exactly one \
+             receive-side auto-commit for the caller to publish (Rule 13); \
+             got {}",
+            ingest.auto_commits.len()
+        );
+
+        // NOTE on publish-before-apply, since it is easy to assume otherwise:
+        // the engine's ROSTER projection already reflects the staged eviction
+        // HERE, before any confirm (verified — Bob is absent from
+        // `get_members` at this point). The projection tracks the staged
+        // commit and is reverted by `publish_failed`, which is exactly why
+        // Charlie's roster below still shows Bob after the shim rolls back.
+        // So the roster is NOT a usable "did the caller honour Rule 13" probe
+        // on its own; the load-bearing assertion is the one above — the commit
+        // was HANDED BACK to be published, and a caller that drops it strands
+        // the whole group.
+
+        let auto_commit = ingest.auto_commits.into_iter().next().unwrap();
+        c.alice_manager
+            .confirm_published(auto_commit.pending)
+            .await
+            .expect("alice confirms the eviction commit");
+        let alice_members = member_hex_set(&c.alice_manager, &c.group_id).await;
+        assert!(
+            !alice_members.contains(&bob_hex),
+            "after publish+confirm, the leaver must be gone from the roster"
+        );
+        assert_eq!(alice_members.len(), 2, "alice and charlie remain");
+
+        // ── Receiver B (Charlie): the shim, on the SAME proposal. ──
+        // `decrypt_location` rolls the staged auto-commit back rather than
+        // surfacing it, so Charlie's roster is UNCHANGED. This is the trap:
+        // no error, no result, no removal — just a leaver who never leaves.
+        c.charlie_manager
+            .decrypt_location(&proposal)
+            .await
+            .expect("charlie ingests the same proposal via the shim");
+        assert!(
+            member_hex_set(&c.charlie_manager, &c.group_id)
+                .await
+                .contains(&bob_hex),
+            "the `decrypt_location` shim must roll the auto-commit back — if \
+             this ever starts removing the peer, the shim has begun applying \
+             an unpublished commit (a Rule-13 violation), and the receive \
+             paths that rely on the rollback need revisiting"
+        );
+
+        // Charlie converges the normal way: by applying Alice's PUBLISHED
+        // eviction commit. This proves the rollback above stranded nothing —
+        // the group still converges through the one confirmed branch.
+        c.charlie_manager
+            .decrypt_location(&auto_commit.commit_event)
+            .await
+            .expect("charlie applies alice's published eviction commit");
+        assert_eq!(
+            member_hex_set(&c.charlie_manager, &c.group_id).await,
+            alice_members,
+            "charlie must converge on alice's post-eviction roster"
+        );
+
+        c.cleanup();
+    }
+
     /// The full `LeavePlan::AdminHandoff` transfer, cross-party: Alice (sole
     /// admin) promotes the planned successor, self-demotes, and the group is
     /// still a working group afterwards — every party converges on the new admin
