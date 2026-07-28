@@ -1092,6 +1092,216 @@ abstract class AppLocalizations {
   /// **'Version {version}'**
   String aboutFooterVersion(String version);
 
+  /// Title of the Privacy section: both the Settings row (directly above About) and the Privacy hub page's app bar.
+  ///
+  /// In en, this message translates to:
+  /// **'Privacy'**
+  String get privacyTitle;
+
+  /// Subtitle of the Privacy row in the Settings menu. Sets the expectation that this section explains the technology as well as the privacy consequences.
+  ///
+  /// In en, this message translates to:
+  /// **'How Haven works and what others can see'**
+  String get privacySubtitle;
+
+  /// Always-visible summary paragraph at the top of the Privacy hub — the thirty-second answer for a reader who taps nothing else. Audience: non-technical, no Nostr knowledge assumed. Must promise honesty about limits, not only reassurance. Keep sentences under 25 words.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven shares your location only with the small groups you choose, and encrypts it on your phone before it leaves. There is no company account and no Haven server. The pages below explain how that works, in plain language, and are honest about what it does not protect.'**
+  String get privacyHubSummary;
+
+  /// Header for the first group of Privacy topics on the hub (what Haven is, your keys, your public profile).
+  ///
+  /// In en, this message translates to:
+  /// **'The basics'**
+  String get privacyGroupBasicsHeading;
+
+  /// Fixed label introducing the practical takeaway at the end of every Privacy topic page. Appears on every topic, so it must read naturally as a recurring heading.
+  ///
+  /// In en, this message translates to:
+  /// **'What this means for you'**
+  String get privacyMeansForYouLabel;
+
+  /// Header of the collapsed region holding technical depth at the end of a Privacy topic page. Should invite a curious reader without implying the main text was incomplete.
+  ///
+  /// In en, this message translates to:
+  /// **'In more detail'**
+  String get privacyMoreDetailLabel;
+
+  /// Screen-reader action hint on the collapsed 'In more detail' header, describing what activating it does.
+  ///
+  /// In en, this message translates to:
+  /// **'Show the technical detail'**
+  String get privacyMoreDetailExpandHint;
+
+  /// Screen-reader action hint on the expanded 'In more detail' header, describing what activating it does.
+  ///
+  /// In en, this message translates to:
+  /// **'Hide the technical detail'**
+  String get privacyMoreDetailCollapseHint;
+
+  /// Screen-reader announcement fired when the 'In more detail' region is expanded. Announces the resulting state, not the action.
+  ///
+  /// In en, this message translates to:
+  /// **'Technical detail shown'**
+  String get privacyMoreDetailExpandedAnnouncement;
+
+  /// Screen-reader announcement fired when the 'In more detail' region is collapsed. Announces the resulting state, not the action.
+  ///
+  /// In en, this message translates to:
+  /// **'Technical detail hidden'**
+  String get privacyMoreDetailCollapsedAnnouncement;
+
+  /// Title of the Privacy topic covering Haven's shape: no account, no Haven servers, no analytics. Front-loaded with the distinguishing words so screen-reader users scanning headings hear what differs first.
+  ///
+  /// In en, this message translates to:
+  /// **'What Haven is, and why there\'s no account'**
+  String get privacyWhatHavenIsTitle;
+
+  /// One-line preview shown under the topic title on the Privacy hub.
+  ///
+  /// In en, this message translates to:
+  /// **'No sign-up, no company server'**
+  String get privacyWhatHavenIsSubtitle;
+
+  /// Body paragraph, Privacy → What Haven is. Audience: non-technical. 'circle' is Haven's own term for a sharing group — keep it consistent with how circles are named elsewhere in the app. Sentences under 20 words.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven shares your location with small groups you choose, called circles. There is no account behind it. You never give an email address, a phone number, or a password.'**
+  String get privacyWhatHavenIsNoAccount;
+
+  /// Body paragraph, Privacy → What Haven is. Introduces 'relay' with a plain-language handhold BEFORE the term ('independent servers called relays'), which is the pattern used throughout this section. 'relay' is a Nostr term of art — keep it recognizable; do not translate it to a generic word for 'server'.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven also runs no servers of its own. Your encrypted location updates pass through independent servers called relays, run by other people. Haven\'s developers cannot see your location and collect nothing about how you use the app.'**
+  String get privacyWhatHavenIsNoServers;
+
+  /// The practical takeaway for Privacy → What Haven is. Deliberately pairs the benefit with its cost. The quoted phrase is the title of another Privacy topic — translate it identically to privacyYourKeysTitle so the cross-reference matches.
+  ///
+  /// In en, this message translates to:
+  /// **'There is nobody to ask for your data, because nobody is holding it. The other side of that is that nobody can restore your account either. See “Your two keys” for what to back up.'**
+  String get privacyWhatHavenIsMeansForYou;
+
+  /// Technical-detail paragraph (collapsed by default), Privacy → What Haven is. Register may be more technical than the main body.
+  ///
+  /// In en, this message translates to:
+  /// **'The app contains no analytics, crash reporting, or advertising code. Because Haven is open source, that can be checked rather than taken on trust.'**
+  String get privacyWhatHavenIsDetailNoTelemetry;
+
+  /// Technical-detail paragraph (collapsed by default), Privacy → What Haven is. Explains a deliberate omission, so the reasoning matters more than the feature.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven also has no push notifications, on purpose. A notification service would have to be told whenever anyone in your circles had something to deliver, which would reveal more about your habits than the relays do.'**
+  String get privacyWhatHavenIsDetailNoPush;
+
+  /// Title of the Privacy topic covering the secret/public key pair. Also quoted inside privacyWhatHavenIsMeansForYou — keep both translations identical.
+  ///
+  /// In en, this message translates to:
+  /// **'Your two keys: one secret, one to share'**
+  String get privacyYourKeysTitle;
+
+  /// One-line preview shown under the topic title on the Privacy hub.
+  ///
+  /// In en, this message translates to:
+  /// **'What identifies you, and what to back up'**
+  String get privacyYourKeysSubtitle;
+
+  /// Body paragraph, Privacy → Your two keys. Audience: non-technical; the username/password comparison is the handhold and should be kept.
+  ///
+  /// In en, this message translates to:
+  /// **'Instead of a username and password, you have a pair of keys. The secret key proves you are you. The public key is what others use to find and invite you.'**
+  String get privacyYourKeysWhatTheyAre;
+
+  /// Body paragraph, Privacy → Your two keys.
+  ///
+  /// In en, this message translates to:
+  /// **'Your secret key is kept only on this phone, in storage the operating system protects. Haven never sends it anywhere — not to a relay, not to us.'**
+  String get privacyYourKeysSecretStaysHere;
+
+  /// Body paragraph, Privacy → Your two keys.
+  ///
+  /// In en, this message translates to:
+  /// **'Your public key is safe to hand out. It works like a username you can post anywhere. Sharing it cannot reveal where you are.'**
+  String get privacyYourKeysPublicIsSafe;
+
+  /// The practical takeaway for Privacy → Your two keys — the one genuinely actionable instruction in this group. 'Settings → Identity → Advanced' is a navigation path: translate the screen names to match those screens' own titles in this locale, and keep the arrows.
+  ///
+  /// In en, this message translates to:
+  /// **'Back up your secret key if you want to keep this identity. You can view it under Settings → Identity → Advanced. If you lose the phone without a backup, the identity is gone for good, and no one can bring it back.'**
+  String get privacyYourKeysMeansForYou;
+
+  /// Warning callout, Privacy → Your two keys. This is a limitation the reader can act on, so it is styled as a warning rather than a neutral note. Keep the imperative force in translation.
+  ///
+  /// In en, this message translates to:
+  /// **'Anyone who gets your secret key becomes you. They could join circles as you or publish under your name. Never paste it into another app, a message, or a website.'**
+  String get privacyYourKeysNeverShareSecret;
+
+  /// Technical-detail paragraph (collapsed by default), Privacy → Your two keys. 'secp256k1', 'Nostr', 'npub1…' and 'nsec1…' are intentionally English (algorithm name, protocol name, and literal key prefixes users will see verbatim).
+  ///
+  /// In en, this message translates to:
+  /// **'The pair is an secp256k1 key, shown in the standard Nostr formats: npub1… for the public key and nsec1… for the secret one. Signing happens inside the app, and the secret bytes are wiped from memory after each use.'**
+  String get privacyYourKeysDetailFormats;
+
+  /// Technical-detail paragraph (collapsed by default), Privacy → Your two keys. Describes MLS/Nostr key separation without naming the protocols. Do NOT strengthen this into a claim that a leaked identity key is harmless.
+  ///
+  /// In en, this message translates to:
+  /// **'The keys that encrypt your circles\' messages are separate from this identity key, and are held only by the app. That separation is deliberate: the key that names you is not the key that unlocks what you sent.'**
+  String get privacyYourKeysDetailSeparation;
+
+  /// Title of the Privacy topic covering the public profile. States the conclusion in the title rather than hedging, because a reader who reads nothing else should still learn this.
+  ///
+  /// In en, this message translates to:
+  /// **'Your name and photo are public'**
+  String get privacyPublicProfileTitle;
+
+  /// One-line preview shown under the topic title on the Privacy hub.
+  ///
+  /// In en, this message translates to:
+  /// **'Visible to anyone, not just your circles'**
+  String get privacyPublicProfileSubtitle;
+
+  /// Body paragraph, Privacy → Your name and photo are public. 'Nostr' is intentionally English (protocol name), though the surrounding sentence is translatable.
+  ///
+  /// In en, this message translates to:
+  /// **'The display name and photo you set are published to the wider Nostr network. Anyone can look them up, not only the people in your circles.'**
+  String get privacyPublicProfileIsPublic;
+
+  /// Body paragraph, Privacy → Your name and photo are public. States that publishing is unconditional — there is deliberately no consent toggle. Do not soften this into 'may be published'.
+  ///
+  /// In en, this message translates to:
+  /// **'This happens the moment you save them. There is no setting that keeps them private, and no way to share a name with your circles only.'**
+  String get privacyPublicProfileOnSave;
+
+  /// Body paragraph, Privacy → Your name and photo are public. The quoted example “Quiet Wanderer” is intentionally English and MUST be kept verbatim in every locale: the generator's word lists (lib/src/utils/anonymous_name_words.dart) are English ASCII only, so this is literally the kind of name a user of any locale will see pre-filled. Translating it would describe a name the app never generates.
+  ///
+  /// In en, this message translates to:
+  /// **'New installs start with a made-up name such as “Quiet Wanderer”, which says nothing about you. You can keep it, or replace it with whatever you like.'**
+  String get privacyPublicProfilePseudonym;
+
+  /// The practical takeaway for Privacy → Your name and photo are public.
+  ///
+  /// In en, this message translates to:
+  /// **'Pick a name and photo you are happy to show in public. If you would rather not be recognised, keep the made-up name you were given and skip the photo.'**
+  String get privacyPublicProfileMeansForYou;
+
+  /// Warning callout, Privacy → Your name and photo are public. Factually load-bearing: Haven issues no delete request for the hosted image, so the copy must not imply deletion. Keep 'does not unpublish' unambiguous.
+  ///
+  /// In en, this message translates to:
+  /// **'Removing your photo later does not unpublish it. Haven replaces your profile with an empty one, but the image file stays on the server that hosts it, and any copy already downloaded stays out there. Treat anything you publish as permanent.'**
+  String get privacyPublicProfileRemovalIsNotDeletion;
+
+  /// Technical-detail paragraph (collapsed by default), Privacy → Your name and photo are public. 'Nostr', 'kind 0', 'Blossom' and 'blossom.primal.net' are intentionally English (protocol name, event-kind identifier, protocol name, hostname).
+  ///
+  /// In en, this message translates to:
+  /// **'The profile is a Nostr “kind 0” event signed by your identity key. Photos are uploaded to a Blossom host — blossom.primal.net unless you change it — which sees the image, your public key, and your IP address.'**
+  String get privacyPublicProfileDetailKindZero;
+
+  /// Technical-detail paragraph (collapsed by default), Privacy → Your name and photo are public. Describes EXIF/GPS stripping without naming EXIF. 'GPS' is intentionally English (widely-understood initialism).
+  ///
+  /// In en, this message translates to:
+  /// **'Before uploading, Haven re-encodes the picture and drops the hidden data cameras attach, including the GPS position where the photo was taken. That matters here: a holiday snapshot can otherwise carry the coordinates of your home.'**
+  String get privacyPublicProfileDetailExifStripped;
+
   /// Generic button that clears all selected items in a list.
   ///
   /// In en, this message translates to:

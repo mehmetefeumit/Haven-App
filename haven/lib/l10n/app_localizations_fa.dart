@@ -594,6 +594,135 @@ class AppLocalizationsFa extends AppLocalizations {
   }
 
   @override
+  String get privacyTitle => 'حریم خصوصی';
+
+  @override
+  String get privacySubtitle =>
+      'Haven چگونه کار می‌کند و دیگران چه چیزی را می‌بینند';
+
+  @override
+  String get privacyHubSummary =>
+      'Haven موقعیت مکانی‌ات را فقط با همان حلقه‌های کوچکی که خودت انتخاب می‌کنی به اشتراک می‌گذارد و پیش از خروج از گوشی رمزگذاری‌اش می‌کند. نه حساب شرکتی هست و نه سروری از آنِ Haven. صفحه‌های زیر با زبان ساده توضیح می‌دهند که این کار چگونه انجام می‌شود، و صادقانه می‌گویند چه چیزی را محافظت نمی‌کند.';
+
+  @override
+  String get privacyGroupBasicsHeading => 'مبانی';
+
+  @override
+  String get privacyMeansForYouLabel => 'این برای تو چه معنایی دارد';
+
+  @override
+  String get privacyMoreDetailLabel => 'با جزئیات بیشتر';
+
+  @override
+  String get privacyMoreDetailExpandHint => 'نمایش جزئیات فنی';
+
+  @override
+  String get privacyMoreDetailCollapseHint => 'پنهان کردن جزئیات فنی';
+
+  @override
+  String get privacyMoreDetailExpandedAnnouncement =>
+      'جزئیات فنی نمایش داده شد';
+
+  @override
+  String get privacyMoreDetailCollapsedAnnouncement => 'جزئیات فنی پنهان شد';
+
+  @override
+  String get privacyWhatHavenIsTitle => 'Haven چیست و چرا حساب کاربری ندارد';
+
+  @override
+  String get privacyWhatHavenIsSubtitle => 'بدون ثبت‌نام، بدون سرور شرکتی';
+
+  @override
+  String get privacyWhatHavenIsNoAccount =>
+      'Haven موقعیت مکانی‌ات را با گروه‌های کوچکی که خودت انتخاب می‌کنی به اشتراک می‌گذارد؛ به آن‌ها حلقه می‌گوییم. هیچ حساب کاربری پشت این کار نیست. هرگز ایمیل، شمارهٔ تلفن یا گذرواژه نمی‌دهی.';
+
+  @override
+  String get privacyWhatHavenIsNoServers =>
+      'Haven هیچ سروری از خودش هم اجرا نمی‌کند. به‌روزرسانی‌های رمزگذاری‌شدهٔ موقعیت مکانی تو از میان سرورهای مستقلی می‌گذرند که رله نامیده می‌شوند و دیگران آن‌ها را اجرا می‌کنند. توسعه‌دهندگان Haven نمی‌توانند موقعیت مکانی‌ات را ببینند و هیچ چیزی دربارهٔ نحوهٔ استفاده‌ات از برنامه جمع نمی‌کنند.';
+
+  @override
+  String get privacyWhatHavenIsMeansForYou =>
+      'کسی نیست که داده‌هایت را از او بخواهی، چون کسی آن‌ها را نگه نمی‌دارد. روی دیگر این سکه آن است که کسی هم نمی‌تواند حسابت را بازیابی کند. برای اینکه بدانی از چه چیزی باید پشتیبان بگیری، «دو کلید تو» را ببین.';
+
+  @override
+  String get privacyWhatHavenIsDetailNoTelemetry =>
+      'برنامه هیچ کدی برای آمارگیری، گزارش خرابی یا تبلیغات ندارد. چون Haven متن‌باز است، می‌شود این را بررسی کرد و لازم نیست فقط به آن اعتماد کنی.';
+
+  @override
+  String get privacyWhatHavenIsDetailNoPush =>
+      'Haven به‌عمد اعلان فوری هم ندارد. یک سرویس اعلان باید هر بار که کسی در حلقه‌هایت چیزی برای رساندن داشت باخبر می‌شد، و این بیش از رله‌ها از عادت‌های تو پرده برمی‌داشت.';
+
+  @override
+  String get privacyYourKeysTitle => 'دو کلید تو: یکی خصوصی، یکی برای اشتراک';
+
+  @override
+  String get privacyYourKeysSubtitle =>
+      'چه چیزی تو را شناسایی می‌کند و از چه چیزی پشتیبان بگیری';
+
+  @override
+  String get privacyYourKeysWhatTheyAre =>
+      'به‌جای نام کاربری و گذرواژه، یک جفت کلید داری. کلید خصوصی ثابت می‌کند که تو خودتی. کلید عمومی همان چیزی است که دیگران با آن تو را پیدا و دعوت می‌کنند.';
+
+  @override
+  String get privacyYourKeysSecretStaysHere =>
+      'کلید خصوصی‌ات فقط روی همین گوشی نگه داشته می‌شود، در فضای ذخیره‌سازی‌ای که سیستم‌عامل از آن محافظت می‌کند. Haven هرگز آن را جایی نمی‌فرستد — نه به یک رله، نه به ما.';
+
+  @override
+  String get privacyYourKeysPublicIsSafe =>
+      'دادن کلید عمومی‌ات به دیگران بی‌خطر است. مثل نام کاربری کار می‌کند که هر جا بخواهی می‌توانی منتشرش کنی. به اشتراک گذاشتنش نمی‌تواند لو بدهد کجایی.';
+
+  @override
+  String get privacyYourKeysMeansForYou =>
+      'اگر می‌خواهی این هویت را نگه داری، از کلید خصوصی‌ات پشتیبان بگیر. می‌توانی آن را در تنظیمات ← هویت ← پیشرفته ببینی. اگر گوشی را بدون پشتیبان از دست بدهی، این هویت برای همیشه از بین می‌رود و هیچ‌کس نمی‌تواند آن را برگرداند.';
+
+  @override
+  String get privacyYourKeysNeverShareSecret =>
+      'هر کسی کلید خصوصی‌ات را به دست بیاورد، تبدیل به تو می‌شود. می‌تواند به‌جای تو به حلقه‌ها بپیوندد یا به نام تو مطلب منتشر کند. هرگز آن را در برنامهٔ دیگری، در یک پیام یا در یک وب‌سایت جای‌گذاری نکن.';
+
+  @override
+  String get privacyYourKeysDetailFormats =>
+      'این جفت، یک کلید secp256k1 است که در قالب‌های استاندارد Nostr نشان داده می‌شود: کلید عمومی با npub1 آغاز می‌شود و کلید خصوصی با nsec1. امضا داخل برنامه انجام می‌شود و بایت‌های کلید خصوصی پس از هر استفاده از حافظه پاک می‌شوند.';
+
+  @override
+  String get privacyYourKeysDetailSeparation =>
+      'کلیدهایی که پیام‌های حلقه‌هایت را رمزگذاری می‌کنند از این کلید هویت جدا هستند و فقط خود برنامه آن‌ها را نگه می‌دارد. این جدایی عمدی است: کلیدی که نام تو را حمل می‌کند همان کلیدی نیست که آنچه فرستاده‌ای را باز می‌کند.';
+
+  @override
+  String get privacyPublicProfileTitle => 'نام و عکس تو عمومی‌اند';
+
+  @override
+  String get privacyPublicProfileSubtitle =>
+      'برای هر کسی دیده می‌شوند، نه فقط حلقه‌هایت';
+
+  @override
+  String get privacyPublicProfileIsPublic =>
+      'نام نمایشی و عکسی که تعیین می‌کنی روی شبکهٔ گستردهٔ Nostr منتشر می‌شوند. هر کسی می‌تواند آن‌ها را جست‌وجو کند، نه فقط افرادِ حلقه‌هایت.';
+
+  @override
+  String get privacyPublicProfileOnSave =>
+      'این کار همان لحظه‌ای که ذخیره‌شان می‌کنی انجام می‌شود. هیچ تنظیمی نیست که آن‌ها را خصوصی نگه دارد، و هیچ راهی نیست که نامی را فقط با حلقه‌هایت به اشتراک بگذاری.';
+
+  @override
+  String get privacyPublicProfilePseudonym =>
+      'نصب‌های تازه با یک نام ساختگی مثل «Quiet Wanderer» شروع می‌شوند که هیچ چیزی دربارهٔ تو نمی‌گوید. می‌توانی نگهش داری یا با هر چه دوست داری عوضش کنی.';
+
+  @override
+  String get privacyPublicProfileMeansForYou =>
+      'نام و عکسی را انتخاب کن که از نشان دادنشان در فضای عمومی خوشحال باشی. اگر ترجیح می‌دهی شناخته نشوی، همان نام ساختگی را که به تو داده شده نگه دار و از عکس بگذر.';
+
+  @override
+  String get privacyPublicProfileRemovalIsNotDeletion =>
+      'برداشتن عکست در آینده آن را از حالت منتشرشده بیرون نمی‌آورد. Haven نمایه‌ات را با یک نمایهٔ خالی جایگزین می‌کند، اما فایل تصویر روی سروری که میزبانش است می‌ماند، و هر نسخه‌ای که پیش‌تر دانلود شده دست دیگران می‌ماند. هر چه را منتشر می‌کنی دائمی در نظر بگیر.';
+
+  @override
+  String get privacyPublicProfileDetailKindZero =>
+      'نمایه یک رویداد «kind 0» در Nostr است که با کلید هویتت امضا می‌شود. عکس‌ها روی یک میزبان Blossom بارگذاری می‌شوند — blossom.primal.net مگر آن را عوض کنی — که تصویر، کلید عمومی و آدرس IP تو را می‌بیند.';
+
+  @override
+  String get privacyPublicProfileDetailExifStripped =>
+      'Haven پیش از بارگذاری، تصویر را دوباره کدگذاری می‌کند و داده‌های پنهانی را که دوربین‌ها به آن می‌چسبانند حذف می‌کند، از جمله موقعیت GPS جایی که عکس گرفته شده است. این موضوع اینجا مهم است: وگرنه یک عکس تعطیلات می‌تواند مختصات خانه‌ات را با خود حمل کند.';
+
+  @override
   String get commonClearAll => 'پاک کردن همه';
 
   @override

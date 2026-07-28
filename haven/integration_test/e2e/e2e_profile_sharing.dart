@@ -106,6 +106,7 @@ import 'package:haven/src/services/nostr_circle_service.dart'
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '_lib/circle_creation.dart' show createCircleConfirmed;
 import '_lib/coordination.dart';
 import '_lib/fake_location_service.dart';
 import '_lib/pump_helpers.dart';
@@ -385,25 +386,26 @@ void main() {
           );
         }
 
-        final creation = await aliceManager.createCircle(
+        // Publishes Bob's Welcome and CONFIRMS the staged create (Security
+        // Rule 13) — an unconfirmed create pins the group in MDK's
+        // `PendingPublish`, where every inbound kind-445 buffers forever. See
+        // `createCircleConfirmed`'s doc.
+        final creation = await createCircleConfirmed(
+          manager: aliceManager,
+          relay: ctx.relay,
           identitySecretBytes: Uint8List.fromList(aliceSeed),
           members: <MemberKeyPackageFfi>[bobKp],
           name: _circleName,
           circleType: 'location_sharing',
           relays: <String>[ctx.relay.url],
           creatorFallbackRelays: <String>[ctx.relay.url],
+          label: 'e2e_profile',
         );
-        final bobWelcome = creation.welcomeEvents.firstWhere(
+        if (!creation.welcomeEvents.any(
           (e) => e.recipientPubkey.toLowerCase() == bob.pubkeyHex.toLowerCase(),
-          orElse: () => throw StateError(
-            '[e2e_profile] createCircle produced no Welcome for Bob.',
-          ),
-        );
-        final (welcomeOk, welcomeMsg) =
-            await ctx.relay.publishAndAwaitOk(bobWelcome.eventJson);
-        if (!welcomeOk) {
+        )) {
           throw StateError(
-            '[e2e_profile] relay rejected Bob Welcome: $welcomeMsg',
+            '[e2e_profile] createCircle produced no Welcome for Bob.',
           );
         }
         // Default accept timeout is already 90 s (== _relayWaitDeadline).

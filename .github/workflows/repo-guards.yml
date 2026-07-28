@@ -59,6 +59,13 @@
 #     no forbidden uniffi/app/account/QUIC/agent crates, no legacy mdk-*
 #     crates, and a single libsqlite3-sys version.
 #
+#   E2E publish-before-apply          scripts/ci/check_e2e_publish_before_apply.sh
+#     An integration test that calls createCircle() must also resolve the
+#     staged create (confirmPublished / publishFailed, Security Rule 13).
+#     Skipping it pins the group in MDK's PendingPublish, where every inbound
+#     kind-445 buffers forever and the scenario fails on the receive path with
+#     nothing pointing back at the create.
+#
 #   E2E harness self-tests            tooling/e2e/ci/*.sh --self-test
 #     The bash guards embedded in the E2E tooling must not silently rot: the
 #     connect-flake retry predicate must never retry a genuine test failure,
@@ -123,6 +130,10 @@ jobs:
       - name: MDK supply-chain shape
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_mdk_supply_chain.sh
+
+      - name: E2E publish-before-apply (staged creates resolved)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_e2e_publish_before_apply.sh
 
       - name: E2E harness self-test (connect-flake predicate)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

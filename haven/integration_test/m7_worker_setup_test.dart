@@ -79,6 +79,7 @@ import 'package:haven/src/services/data_directory_provider.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'e2e/_lib/circle_creation.dart' show createCircleConfirmed;
 import 'e2e/_lib/coordination.dart';
 import 'e2e/_lib/m7_worker_ci_oneoff.dart' show registerM7CiOneOffCatchup;
 import 'e2e/_lib/scenario_harness.dart';
@@ -163,9 +164,15 @@ void main() {
       }
 
       final aliceSecret = await aliceIdentity.getSecretBytes();
+      // Publishes Bob's gift-wrapped Welcome so he can accept over the relay,
+      // then CONFIRMS the staged create (Security Rule 13) — an unconfirmed
+      // create pins the group in MDK's `PendingPublish`, where every inbound
+      // kind-445 buffers forever. See `createCircleConfirmed`'s doc.
       final CircleCreationResultFfi creation;
       try {
-        creation = await aliceManager.createCircle(
+        creation = await createCircleConfirmed(
+          manager: aliceManager,
+          relay: relay,
           identitySecretBytes: aliceSecret,
           members: <MemberKeyPackageFfi>[bobKp],
           name: 'M7 Catch-up Circle',
@@ -175,6 +182,7 @@ void main() {
           // Welcome-delivery cascade needs the admin's own relay as a fallback
           // (mirrors the production admin flow / the FE-2 scenario).
           creatorFallbackRelays: <String>[defaultStrfryUrl],
+          label: 'm7-setup',
         );
       } finally {
         for (var i = 0; i < aliceSecret.length; i++) {
@@ -182,18 +190,11 @@ void main() {
         }
       }
 
-      // Publish Bob's gift-wrapped Welcome so he can accept over the relay.
-      final bobWelcome = creation.welcomeEvents.firstWhere(
+      if (!creation.welcomeEvents.any(
         (e) => e.recipientPubkey.toLowerCase() == bob.pubkeyHex.toLowerCase(),
-        orElse: () => throw StateError(
-          '[m7-setup] createCircle produced no gift-wrap for Bob.',
-        ),
-      );
-      final (welcomeAccepted, welcomeMsg) =
-          await relay.publishAndAwaitOk(bobWelcome.eventJson);
-      if (!welcomeAccepted) {
+      )) {
         throw StateError(
-          '[m7-setup] relay rejected the Welcome for Bob: $welcomeMsg',
+          '[m7-setup] createCircle produced no gift-wrap for Bob.',
         );
       }
 

@@ -184,6 +184,20 @@ abstract final class WidgetKeys {
   static const Key backgroundSharingTile = Key('background_sharing_tile');
 
   // ---------------------------------------------------------------------------
+  // Settings — privacy
+  // ---------------------------------------------------------------------------
+
+  /// The Privacy row in the Settings menu (sits directly above About).
+  static const Key privacyTile = Key('privacy_tile');
+
+  /// A topic row on the Privacy hub, keyed by `PrivacyTopic.name`.
+  ///
+  /// Keyed rather than text-matched so navigation tests survive both copy
+  /// edits and locale changes.
+  static Key privacyTopicTile(String topicName) =>
+      ValueKey('privacy_topic_tile_$topicName');
+
+  // ---------------------------------------------------------------------------
   // Settings — identity
   // ---------------------------------------------------------------------------
 

@@ -601,6 +601,139 @@ class AppLocalizationsPt extends AppLocalizations {
   }
 
   @override
+  String get privacyTitle => 'Privacidade';
+
+  @override
+  String get privacySubtitle =>
+      'Como o Haven funciona e o que os outros podem ver';
+
+  @override
+  String get privacyHubSummary =>
+      'O Haven compartilha sua localização apenas com os pequenos grupos que você escolher, e a criptografa no seu telefone antes de ela sair do aparelho. Não existe conta de empresa nem servidor do Haven. As páginas abaixo explicam como isso funciona, em linguagem simples, e são honestas sobre o que o Haven não protege.';
+
+  @override
+  String get privacyGroupBasicsHeading => 'O básico';
+
+  @override
+  String get privacyMeansForYouLabel => 'O que isso significa para você';
+
+  @override
+  String get privacyMoreDetailLabel => 'Em mais detalhes';
+
+  @override
+  String get privacyMoreDetailExpandHint => 'Mostrar os detalhes técnicos';
+
+  @override
+  String get privacyMoreDetailCollapseHint => 'Ocultar os detalhes técnicos';
+
+  @override
+  String get privacyMoreDetailExpandedAnnouncement =>
+      'Detalhes técnicos exibidos';
+
+  @override
+  String get privacyMoreDetailCollapsedAnnouncement =>
+      'Detalhes técnicos ocultos';
+
+  @override
+  String get privacyWhatHavenIsTitle =>
+      'O que é o Haven e por que não existe conta';
+
+  @override
+  String get privacyWhatHavenIsSubtitle =>
+      'Sem cadastro, sem servidor de empresa';
+
+  @override
+  String get privacyWhatHavenIsNoAccount =>
+      'O Haven compartilha sua localização com pequenos grupos que você escolhe, chamados círculos. Não existe conta por trás disso. Você nunca informa e-mail, telefone nem senha.';
+
+  @override
+  String get privacyWhatHavenIsNoServers =>
+      'O Haven também não opera servidores próprios. Suas atualizações de localização criptografadas passam por servidores independentes chamados relays, mantidos por outras pessoas. Os desenvolvedores do Haven não conseguem ver sua localização e não coletam nada sobre como você usa o app.';
+
+  @override
+  String get privacyWhatHavenIsMeansForYou =>
+      'Não há a quem pedir seus dados, porque ninguém os guarda. O outro lado disso é que também não há quem restaure sua conta. Veja “Suas duas chaves” para saber do que fazer backup.';
+
+  @override
+  String get privacyWhatHavenIsDetailNoTelemetry =>
+      'O app não contém código de análise, de relatório de falhas nem de publicidade. Como o Haven é de código aberto, isso pode ser verificado, e não apenas aceito com base na confiança.';
+
+  @override
+  String get privacyWhatHavenIsDetailNoPush =>
+      'O Haven também não tem notificações push, de propósito. Um serviço de notificações precisaria ser avisado sempre que alguém dos seus círculos tivesse algo a entregar, o que revelaria mais sobre seus hábitos do que os relays revelam.';
+
+  @override
+  String get privacyYourKeysTitle =>
+      'Suas duas chaves: uma secreta, outra para compartilhar';
+
+  @override
+  String get privacyYourKeysSubtitle =>
+      'O que identifica você e do que fazer backup';
+
+  @override
+  String get privacyYourKeysWhatTheyAre =>
+      'Em vez de nome de usuário e senha, você tem um par de chaves. A chave secreta prova que você é você. A chave pública é o que os outros usam para encontrar e convidar você.';
+
+  @override
+  String get privacyYourKeysSecretStaysHere =>
+      'Sua chave secreta fica guardada só neste telefone, em um armazenamento protegido pelo sistema operacional. O Haven nunca a envia para lugar nenhum — nem para um relay, nem para nós.';
+
+  @override
+  String get privacyYourKeysPublicIsSafe =>
+      'Sua chave pública pode ser entregue sem risco. Ela funciona como um nome de usuário que você pode publicar em qualquer lugar. Compartilhá-la não revela onde você está.';
+
+  @override
+  String get privacyYourKeysMeansForYou =>
+      'Faça backup da sua chave secreta se quiser manter esta identidade. Você pode vê-la em Configurações → Identidade → Avançado. Se perder o telefone sem um backup, a identidade é perdida para sempre, e ninguém pode trazê-la de volta.';
+
+  @override
+  String get privacyYourKeysNeverShareSecret =>
+      'Qualquer pessoa que obtenha sua chave secreta passa a ser você. Poderia entrar em círculos no seu lugar ou publicar em seu nome. Nunca cole essa chave em outro app, em uma mensagem ou em um site.';
+
+  @override
+  String get privacyYourKeysDetailFormats =>
+      'O par é uma chave secp256k1, exibida nos formatos padrão do Nostr: npub1… para a chave pública e nsec1… para a secreta. A assinatura acontece dentro do app, e os bytes secretos são apagados da memória depois de cada uso.';
+
+  @override
+  String get privacyYourKeysDetailSeparation =>
+      'As chaves que criptografam as mensagens dos seus círculos são separadas desta chave de identidade e ficam apenas com o app. Essa separação é intencional: a chave que diz quem você é não é a chave que abre o que você enviou.';
+
+  @override
+  String get privacyPublicProfileTitle => 'Seu nome e sua foto são públicos';
+
+  @override
+  String get privacyPublicProfileSubtitle =>
+      'Visíveis para qualquer pessoa, não só para seus círculos';
+
+  @override
+  String get privacyPublicProfileIsPublic =>
+      'O nome de exibição e a foto que você definir são publicados na rede Nostr como um todo. Qualquer pessoa pode consultá-los, não apenas quem está nos seus círculos.';
+
+  @override
+  String get privacyPublicProfileOnSave =>
+      'Isso acontece no momento em que você os salva. Não existe configuração que os mantenha privados, nem forma de compartilhar um nome só com seus círculos.';
+
+  @override
+  String get privacyPublicProfilePseudonym =>
+      'Novas instalações começam com um nome inventado, como “Quiet Wanderer”, que não diz nada sobre você. Você pode mantê-lo ou trocá-lo pelo que quiser.';
+
+  @override
+  String get privacyPublicProfileMeansForYou =>
+      'Escolha um nome e uma foto que você não se incomode de mostrar em público. Se preferir que não te reconheçam, mantenha o nome inventado que você recebeu e não coloque foto.';
+
+  @override
+  String get privacyPublicProfileRemovalIsNotDeletion =>
+      'Remover sua foto depois não a tira do ar. O Haven substitui seu perfil por um perfil vazio, mas o arquivo da imagem continua no servidor que a hospeda, e qualquer cópia já baixada continua por aí. Trate tudo o que você publica como permanente.';
+
+  @override
+  String get privacyPublicProfileDetailKindZero =>
+      'O perfil é um evento Nostr “kind 0” assinado pela sua chave de identidade. As fotos são enviadas para um host Blossom — blossom.primal.net, a menos que você mude — que vê a imagem, sua chave pública e seu endereço IP.';
+
+  @override
+  String get privacyPublicProfileDetailExifStripped =>
+      'Antes de enviar, o Haven recodifica a imagem e descarta os dados ocultos que as câmeras anexam, incluindo a posição GPS onde a foto foi tirada. Isso importa aqui: caso contrário, uma foto de viagem pode carregar as coordenadas da sua casa.';
+
+  @override
   String get commonClearAll => 'Limpar tudo';
 
   @override

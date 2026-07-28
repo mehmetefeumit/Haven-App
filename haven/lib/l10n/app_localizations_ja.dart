@@ -343,7 +343,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get relaySettingsExplainerMarmot =>
-      'Marmot プロトコルは、MLS（Messaging Layer Security）という標準を用いて、メッセージが端末を離れる前にこの端末上で暗号化します。各サークルはそれぞれ固有の鍵を持つ独立した暗号化グループであり、別々のサークルが互いに結びつけられることはありません。これらの鍵は時間とともに更新され続けます。これは前方秘匿性（forward secrecy）と呼ばれる性質で、たとえ後から鍵が漏れても、それ以前のメッセージを解読することはできません。';
+      'Marmot プロトコルは、MLS（Messaging Layer Security）という標準を用いて、メッセージがこの端末を離れる前に、端末内で暗号化します。各サークルはそれぞれ固有の鍵を持つ独立した暗号化グループであり、別々のサークルが互いに結びつけられることはありません。これらの鍵は時間とともに更新され続けます。これは前方秘匿性（forward secrecy）と呼ばれる性質で、たとえ後から鍵が漏れても、それ以前のメッセージを解読することはできません。';
 
   @override
   String get relaySettingsExplainerMetadata =>
@@ -566,6 +566,131 @@ class AppLocalizationsJa extends AppLocalizations {
   String aboutFooterVersion(String version) {
     return 'バージョン $version';
   }
+
+  @override
+  String get privacyTitle => 'プライバシー';
+
+  @override
+  String get privacySubtitle => 'Haven がどう動くか、ほかの人に何が見えるか';
+
+  @override
+  String get privacyHubSummary =>
+      'Haven は、あなたが選んだ少人数のグループにだけ位置情報を共有し、端末を離れる前にこの端末上で暗号化します。企業のアカウントも、Haven のサーバーもありません。以下のページでは、その仕組みをやさしい言葉で説明し、守れないことについても率直にお伝えします。';
+
+  @override
+  String get privacyGroupBasicsHeading => '基本';
+
+  @override
+  String get privacyMeansForYouLabel => 'あなたにとっての意味';
+
+  @override
+  String get privacyMoreDetailLabel => 'もっと詳しく';
+
+  @override
+  String get privacyMoreDetailExpandHint => '技術的な詳細を表示';
+
+  @override
+  String get privacyMoreDetailCollapseHint => '技術的な詳細を隠す';
+
+  @override
+  String get privacyMoreDetailExpandedAnnouncement => '技術的な詳細を表示しました';
+
+  @override
+  String get privacyMoreDetailCollapsedAnnouncement => '技術的な詳細を隠しました';
+
+  @override
+  String get privacyWhatHavenIsTitle => 'アカウントがない理由と、Haven の仕組み';
+
+  @override
+  String get privacyWhatHavenIsSubtitle => '登録も、企業のサーバーもありません';
+
+  @override
+  String get privacyWhatHavenIsNoAccount =>
+      'Haven は、あなたが選んだ少人数のグループ、つまりサークルに位置情報を共有します。その背後にアカウントはありません。メールアドレスや電話番号、パスワードを渡すことは一切ありません。';
+
+  @override
+  String get privacyWhatHavenIsNoServers =>
+      'Haven 自身もサーバーを運用していません。暗号化された位置情報の更新は、ほかの人たちが運用する独立したサーバー、いわゆる「リレー」を経由します。Haven の開発者があなたの位置情報を見ることはできず、アプリの使い方についても何も収集しません。';
+
+  @override
+  String get privacyWhatHavenIsMeansForYou =>
+      'あなたのデータを持っている人がいないので、開示を求める相手もいません。その裏返しとして、あなたのアカウントを復元できる人もいません。何をバックアップすればよいかは「2つの鍵」をご覧ください。';
+
+  @override
+  String get privacyWhatHavenIsDetailNoTelemetry =>
+      'アプリには分析、クラッシュレポート、広告のコードが一切含まれていません。Haven はオープンソースなので、これは信頼に頼るのではなく、実際に確認できます。';
+
+  @override
+  String get privacyWhatHavenIsDetailNoPush =>
+      'Haven にはプッシュ通知もありません。これは意図的です。通知サービスを使うとなると、あなたのサークルの誰かに届けるものがあるたびに、その事実をサービス側に伝えなければなりません。それはリレー以上に、あなたの生活習慣を明らかにしてしまいます。';
+
+  @override
+  String get privacyYourKeysTitle => '2つの鍵: ひとつは秘密、ひとつは共有用';
+
+  @override
+  String get privacyYourKeysSubtitle => 'あなたを示すものと、バックアップすべきもの';
+
+  @override
+  String get privacyYourKeysWhatTheyAre =>
+      'ユーザー名とパスワードの代わりに、あなたは1組の鍵を持ちます。秘密鍵は、あなたがあなたであることを証明します。公開鍵は、ほかの人があなたを見つけて招待するために使うものです。';
+
+  @override
+  String get privacyYourKeysSecretStaysHere =>
+      '秘密鍵はこの端末の中だけに、OS が保護する領域に保管されます。Haven がそれをどこかに送ることはありません。リレーにも、私たちにも送りません。';
+
+  @override
+  String get privacyYourKeysPublicIsSafe =>
+      '公開鍵は人に渡しても安全です。どこにでも掲載できるユーザー名のようなものです。共有しても、あなたの居場所が明らかになることはありません。';
+
+  @override
+  String get privacyYourKeysMeansForYou =>
+      'この識別情報を持ち続けたい場合は、秘密鍵をバックアップしてください。設定 → 識別情報 → 詳細設定 で確認できます。バックアップのないまま端末を失うと、その識別情報は永久に失われ、誰も取り戻すことはできません。';
+
+  @override
+  String get privacyYourKeysNeverShareSecret =>
+      '秘密鍵を手に入れた人は、あなたになりすませます。あなたとしてサークルに参加したり、あなたの名前で公開したりできてしまいます。ほかのアプリやメッセージ、ウェブサイトに貼り付けることは絶対にしないでください。';
+
+  @override
+  String get privacyYourKeysDetailFormats =>
+      'この鍵の組は secp256k1 の鍵で、標準的な Nostr の形式で表示されます。公開鍵は npub1…、秘密鍵は nsec1… です。署名はアプリの中で行われ、秘密の値は使用ごとにメモリから消去されます。';
+
+  @override
+  String get privacyYourKeysDetailSeparation =>
+      'サークルのメッセージを暗号化する鍵は、この識別情報の鍵とは別のもので、アプリだけが保持します。この分離は意図的なものです。あなたを名指しする鍵は、あなたが送った内容を開ける鍵ではありません。';
+
+  @override
+  String get privacyPublicProfileTitle => 'あなたの名前と写真は公開されます';
+
+  @override
+  String get privacyPublicProfileSubtitle => 'サークルのメンバーだけでなく、誰からも見えます';
+
+  @override
+  String get privacyPublicProfileIsPublic =>
+      '設定した表示名と写真は、より広い Nostr ネットワークに公開されます。あなたのサークルのメンバーだけでなく、誰でも調べることができます。';
+
+  @override
+  String get privacyPublicProfileOnSave =>
+      'これは保存した時点で起こります。非公開のままにする設定はなく、名前をサークルの中だけで共有する方法もありません。';
+
+  @override
+  String get privacyPublicProfilePseudonym =>
+      '新しくインストールすると、「Quiet Wanderer」のような、あなたについて何も語らない架空の名前から始まります。そのまま使っても、好きな名前に変えてもかまいません。';
+
+  @override
+  String get privacyPublicProfileMeansForYou =>
+      '公開しても差し支えない名前と写真を選んでください。誰だと気づかれたくない場合は、最初に与えられた架空の名前をそのまま使い、写真は設定しないでおきましょう。';
+
+  @override
+  String get privacyPublicProfileRemovalIsNotDeletion =>
+      'あとで写真を削除しても、公開が取り消されるわけではありません。Haven はプロフィールを空のものに置き換えますが、画像ファイルはそれを預かっているサーバーに残り、すでにダウンロードされたコピーも世の中に残ります。公開したものは元に戻せないと考えてください。';
+
+  @override
+  String get privacyPublicProfileDetailKindZero =>
+      'プロフィールは、あなたの識別情報の鍵で署名された Nostr の「kind 0」イベントです。写真は Blossom のホストにアップロードされます。変更しなければ blossom.primal.net です。そのホストには、画像、あなたの公開鍵、IPアドレスが見えます。';
+
+  @override
+  String get privacyPublicProfileDetailExifStripped =>
+      'アップロードの前に、Haven は画像を再エンコードし、カメラが埋め込む隠れたデータを取り除きます。写真を撮った GPS の位置も、そこに含まれます。これは重要な点です。そうでなければ、旅行先のスナップ写真が自宅の座標を持ち歩くことになりかねません。';
 
   @override
   String get commonClearAll => 'すべてクリア';

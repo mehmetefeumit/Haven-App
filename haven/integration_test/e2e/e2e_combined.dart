@@ -189,6 +189,7 @@ import 'package:haven/src/test_keys.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '_lib/circle_creation.dart' show createCircleConfirmed;
 import '_lib/coordination.dart';
 import '_lib/diagnostics.dart';
 import '_lib/fake_location_service.dart';
@@ -5231,9 +5232,16 @@ Future<CircleFfi> _m11AliceCreatesCircle({
   final secret = Uint8List.fromList(
     await container.read(identityNotifierProvider.notifier).getSecretBytes(),
   );
+  // Publishes the Welcomes and CONFIRMS the staged create (Security Rule 13).
+  // Without the confirm the group stays in MDK's `PendingPublish`, where every
+  // inbound kind-445 returns `Buffered` — Bob's location would never surface
+  // and each scenario would time out on the receive path. See
+  // `createCircleConfirmed`'s doc.
   final CircleCreationResultFfi result;
   try {
-    result = await manager.createCircle(
+    result = await createCircleConfirmed(
+      manager: manager,
+      relay: relay,
       identitySecretBytes: secret,
       members: members,
       name: name,
@@ -5243,18 +5251,10 @@ Future<CircleFfi> _m11AliceCreatesCircle({
       // inbox (the hermetic relay) as the Welcome-delivery fallback — exactly
       // what the production admin flow does (see the FE-2 note).
       creatorFallbackRelays: <String>[relay.url],
+      label: 'M11',
     );
   } finally {
     secret.fillRange(0, secret.length, 0);
-  }
-
-  // Publish every gift-wrapped Welcome so the invitees can accept off the
-  // relay.
-  for (final welcome in result.welcomeEvents) {
-    final (ok, msg) = await relay.publishAndAwaitOk(welcome.eventJson);
-    if (!ok) {
-      throw StateError('[M11] relay rejected a Welcome: $msg');
-    }
   }
 
   // Mirror the UI's post-create provider mutation: refresh circlesProvider (so

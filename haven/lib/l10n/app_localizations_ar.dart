@@ -598,6 +598,131 @@ class AppLocalizationsAr extends AppLocalizations {
   }
 
   @override
+  String get privacyTitle => 'الخصوصية';
+
+  @override
+  String get privacySubtitle => 'كيف يعمل Haven وما يستطيع الآخرون رؤيته';
+
+  @override
+  String get privacyHubSummary =>
+      'لا يشارك Haven موقعك إلا مع الدوائر الصغيرة التي تختارها، ويُشفّره على هاتفك قبل أن يغادره. لا يوجد حساب لدى شركة ولا خادم يملكه Haven. تشرح الصفحات التالية كيف يعمل ذلك بلغة بسيطة، وتكون صريحة معك بشأن ما لا يحميه.';
+
+  @override
+  String get privacyGroupBasicsHeading => 'الأساسيات';
+
+  @override
+  String get privacyMeansForYouLabel => 'ما يعنيه هذا لك';
+
+  @override
+  String get privacyMoreDetailLabel => 'بمزيد من التفصيل';
+
+  @override
+  String get privacyMoreDetailExpandHint => 'إظهار التفاصيل التقنية';
+
+  @override
+  String get privacyMoreDetailCollapseHint => 'إخفاء التفاصيل التقنية';
+
+  @override
+  String get privacyMoreDetailExpandedAnnouncement => 'التفاصيل التقنية ظاهرة';
+
+  @override
+  String get privacyMoreDetailCollapsedAnnouncement => 'التفاصيل التقنية مخفية';
+
+  @override
+  String get privacyWhatHavenIsTitle => 'ما هو Haven، ولماذا لا يوجد حساب';
+
+  @override
+  String get privacyWhatHavenIsSubtitle => 'لا تسجيل، ولا خادم لشركة';
+
+  @override
+  String get privacyWhatHavenIsNoAccount =>
+      'يشارك Haven موقعك مع مجموعات صغيرة تختارها بنفسك، تُسمّى دوائر. لا يوجد حساب خلف ذلك. لن تعطي بريدًا إلكترونيًا، ولا رقم هاتف، ولا كلمة مرور.';
+
+  @override
+  String get privacyWhatHavenIsNoServers =>
+      'ولا يشغّل Haven أي خوادم خاصة به. تمرّ تحديثات موقعك المشفّرة عبر خوادم مستقلة تُسمّى مُرحِّلات، يشغّلها أشخاص آخرون. لا يستطيع مطوّرو Haven رؤية موقعك، ولا يجمعون أي شيء عن طريقة استخدامك للتطبيق.';
+
+  @override
+  String get privacyWhatHavenIsMeansForYou =>
+      'لا يوجد أحد تطلب منه بياناتك، لأنه لا أحد يحتفظ بها. والوجه الآخر لذلك أن لا أحد يستطيع استعادة حسابك أيضًا. راجع «مفتاحاك» لمعرفة ما يجب أن تنسخه احتياطيًا.';
+
+  @override
+  String get privacyWhatHavenIsDetailNoTelemetry =>
+      'لا يحتوي التطبيق على أي كود للتحليلات أو الإبلاغ عن الأعطال أو الإعلانات. ولأن Haven مفتوح المصدر، يمكن التحقق من ذلك بدلًا من الاكتفاء بالثقة.';
+
+  @override
+  String get privacyWhatHavenIsDetailNoPush =>
+      'كذلك لا توجد في Haven إشعارات فورية، وذلك عن قصد. فخدمة الإشعارات سيلزم إبلاغها كلما كان لدى أحد في دوائرك ما يوصله إليك، وهذا سيكشف عن عاداتك أكثر مما تكشفه المُرحِّلات.';
+
+  @override
+  String get privacyYourKeysTitle => 'مفتاحاك: أحدهما سري والآخر للمشاركة';
+
+  @override
+  String get privacyYourKeysSubtitle => 'ما يعرّفك، وما يجب أن تنسخه احتياطيًا';
+
+  @override
+  String get privacyYourKeysWhatTheyAre =>
+      'بدلًا من اسم مستخدم وكلمة مرور، لديك زوج من المفاتيح. المفتاح السري يُثبت أنك أنت. والمفتاح العام هو ما يستخدمه الآخرون ليجدوك ويدعوك.';
+
+  @override
+  String get privacyYourKeysSecretStaysHere =>
+      'يُحفَظ مفتاحك السري على هذا الهاتف وحده، في مخزن يحميه نظام التشغيل. ولا يُرسله Haven إلى أي مكان — لا إلى مُرحِّل، ولا إلينا.';
+
+  @override
+  String get privacyYourKeysPublicIsSafe =>
+      'مفتاحك العام آمن لتوزيعه. يعمل كاسم مستخدم يمكنك نشره في أي مكان. ومشاركته لا تكشف مكانك.';
+
+  @override
+  String get privacyYourKeysMeansForYou =>
+      'انسخ مفتاحك السري احتياطيًا إن أردت الاحتفاظ بهذه الهوية. يمكنك عرضه في الإعدادات ← الهوية ← متقدّم. وإن فقدت الهاتف دون نسخة احتياطية، فستضيع الهوية إلى الأبد، ولا يستطيع أحد إعادتها.';
+
+  @override
+  String get privacyYourKeysNeverShareSecret =>
+      'من يحصل على مفتاحك السري يصبح هو أنت. يستطيع الانضمام إلى الدوائر بصفتك أو النشر باسمك. لا تلصقه أبدًا في تطبيق آخر، ولا في رسالة، ولا في موقع ويب.';
+
+  @override
+  String get privacyYourKeysDetailFormats =>
+      'هذا الزوج مفتاح secp256k1، ويُعرَض بصيغتَي Nostr المعتادتين: المفتاح العام يبدأ بـ npub1 والمفتاح السري يبدأ بـ nsec1. يحدث التوقيع داخل التطبيق، وتُمحى بايتات المفتاح السري من الذاكرة بعد كل استخدام.';
+
+  @override
+  String get privacyYourKeysDetailSeparation =>
+      'المفاتيح التي تُشفّر رسائل دوائرك منفصلة عن مفتاح الهوية هذا، ولا يحتفظ بها إلا التطبيق. هذا الفصل مقصود: فالمفتاح الذي يحمل اسمك ليس المفتاح الذي يفتح ما أرسلته.';
+
+  @override
+  String get privacyPublicProfileTitle => 'اسمك وصورتك عامّان';
+
+  @override
+  String get privacyPublicProfileSubtitle => 'مرئيان لأي شخص، لا لدوائرك فقط';
+
+  @override
+  String get privacyPublicProfileIsPublic =>
+      'يُنشَر الاسم المعروض والصورة التي تضبطهما على شبكة Nostr الأوسع. يستطيع أي شخص البحث عنهما، لا الأشخاص الذين في دوائرك فقط.';
+
+  @override
+  String get privacyPublicProfileOnSave =>
+      'يحدث هذا في اللحظة التي تحفظهما فيها. لا يوجد إعداد يُبقيهما خاصَّين، ولا طريقة لمشاركة اسم مع دوائرك وحدها.';
+
+  @override
+  String get privacyPublicProfilePseudonym =>
+      'تبدأ التثبيتات الجديدة باسم مُختلق مثل «Quiet Wanderer»، لا يقول عنك شيئًا. يمكنك الاحتفاظ به، أو استبداله بما تشاء.';
+
+  @override
+  String get privacyPublicProfileMeansForYou =>
+      'اختر اسمًا وصورة ترتاح لعرضهما علنًا. وإن كنت تفضّل ألّا يُتعرَّف عليك، فاحتفظ بالاسم المُختلق الذي أُعطي لك، وتجاوز الصورة.';
+
+  @override
+  String get privacyPublicProfileRemovalIsNotDeletion =>
+      'إزالة صورتك لاحقًا لا تُلغي نشرها. يستبدل Haven ملفك الشخصي بملف فارغ، لكن ملف الصورة يبقى على الخادم الذي يستضيفه، وأي نسخة نُزِّلت منه بالفعل تبقى في أيدي من نزّلها. اعتبر كل ما تنشره دائمًا.';
+
+  @override
+  String get privacyPublicProfileDetailKindZero =>
+      'الملف الشخصي هو حدث Nostr من نوع \"kind 0\" موقَّع بمفتاح هويتك. وتُرفع الصور إلى مستضيف Blossom — وهو blossom.primal.net إن لم تغيّره — فيرى الصورة ومفتاحك العام وعنوان IP الخاص بك.';
+
+  @override
+  String get privacyPublicProfileDetailExifStripped =>
+      'قبل الرفع، يعيد Haven ترميز الصورة ويُسقط البيانات المخفية التي ترفقها الكاميرات، ومنها موقع GPS الذي التُقطت فيه الصورة. وهذا مهم هنا: فصورة من رحلة قد تحمل، بغير ذلك، إحداثيات منزلك.';
+
+  @override
   String get commonClearAll => 'مسح الكل';
 
   @override

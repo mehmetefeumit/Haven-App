@@ -111,7 +111,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get onboardingValueProp1Body =>
-      'Dein Standort wird auf deinem Gerät verschlüsselt, bevor er es verlässt, sodass nur die Kreise, die du auswählst, ihn lesen können – niemals Haven oder jemand anderes. Da Haven quelloffen ist, kann das jeder überprüfen.';
+      'Dein Standort wird auf deinem Gerät verschlüsselt, bevor er das Gerät verlässt, sodass nur die Kreise, die du auswählst, ihn lesen können – niemals Haven oder jemand anderes. Da Haven quelloffen ist, kann das jeder überprüfen.';
 
   @override
   String get onboardingValueProp2Title => 'Niemand kann es abschalten';
@@ -600,6 +600,139 @@ class AppLocalizationsDe extends AppLocalizations {
   String aboutFooterVersion(String version) {
     return 'Version $version';
   }
+
+  @override
+  String get privacyTitle => 'Privatsphäre';
+
+  @override
+  String get privacySubtitle =>
+      'Wie Haven funktioniert und was andere sehen können';
+
+  @override
+  String get privacyHubSummary =>
+      'Haven teilt deinen Standort nur mit den kleinen Gruppen, die du auswählst, und verschlüsselt ihn auf deinem Handy, bevor er es verlässt. Es gibt kein Firmenkonto und keinen Haven-Server. Die folgenden Seiten erklären in einfachen Worten, wie das funktioniert – und sagen ehrlich, wovor es nicht schützt.';
+
+  @override
+  String get privacyGroupBasicsHeading => 'Die Grundlagen';
+
+  @override
+  String get privacyMeansForYouLabel => 'Was das für dich bedeutet';
+
+  @override
+  String get privacyMoreDetailLabel => 'Genauer betrachtet';
+
+  @override
+  String get privacyMoreDetailExpandHint => 'Technische Details einblenden';
+
+  @override
+  String get privacyMoreDetailCollapseHint => 'Technische Details ausblenden';
+
+  @override
+  String get privacyMoreDetailExpandedAnnouncement =>
+      'Technische Details eingeblendet';
+
+  @override
+  String get privacyMoreDetailCollapsedAnnouncement =>
+      'Technische Details ausgeblendet';
+
+  @override
+  String get privacyWhatHavenIsTitle =>
+      'Was Haven ist – und warum es kein Konto gibt';
+
+  @override
+  String get privacyWhatHavenIsSubtitle => 'Keine Anmeldung, kein Firmenserver';
+
+  @override
+  String get privacyWhatHavenIsNoAccount =>
+      'Haven teilt deinen Standort mit kleinen Gruppen, die du selbst auswählst – Kreise genannt. Dahinter steht kein Konto. Du gibst niemals eine E-Mail-Adresse, eine Telefonnummer oder ein Passwort an.';
+
+  @override
+  String get privacyWhatHavenIsNoServers =>
+      'Haven betreibt auch keine eigenen Server. Deine verschlüsselten Standortmeldungen laufen über unabhängige Server – Relays genannt –, die andere Menschen betreiben. Havens Entwickler können deinen Standort nicht sehen und sammeln nichts darüber, wie du die App nutzt.';
+
+  @override
+  String get privacyWhatHavenIsMeansForYou =>
+      'Es gibt niemanden, den man nach deinen Daten fragen könnte, weil niemand sie hat. Die Kehrseite davon ist, dass auch niemand dein Konto wiederherstellen kann. Unter „Deine zwei Schlüssel“ steht, was du sichern solltest.';
+
+  @override
+  String get privacyWhatHavenIsDetailNoTelemetry =>
+      'Die App enthält keinen Code für Analysen, Absturzberichte oder Werbung. Da Haven quelloffen ist, lässt sich das überprüfen und muss nicht auf Vertrauen beruhen.';
+
+  @override
+  String get privacyWhatHavenIsDetailNoPush =>
+      'Haven hat außerdem absichtlich keine Push-Benachrichtigungen. Ein Benachrichtigungsdienst müsste jedes Mal erfahren, wenn jemand aus deinen Kreisen etwas zuzustellen hat – und würde damit mehr über deine Gewohnheiten verraten als die Relays.';
+
+  @override
+  String get privacyYourKeysTitle =>
+      'Deine zwei Schlüssel: einer geheim, einer zum Teilen';
+
+  @override
+  String get privacyYourKeysSubtitle =>
+      'Was dich ausweist und was du sichern solltest';
+
+  @override
+  String get privacyYourKeysWhatTheyAre =>
+      'Anstelle von Benutzername und Passwort hast du ein Schlüsselpaar. Der geheime Schlüssel beweist, dass du es wirklich bist. Den öffentlichen Schlüssel nutzen andere, um dich zu finden und einzuladen.';
+
+  @override
+  String get privacyYourKeysSecretStaysHere =>
+      'Dein geheimer Schlüssel bleibt nur auf diesem Handy, in einem Speicher, den das Betriebssystem schützt. Haven sendet ihn nirgendwohin – nicht an ein Relay und nicht an uns.';
+
+  @override
+  String get privacyYourKeysPublicIsSafe =>
+      'Deinen öffentlichen Schlüssel kannst du gefahrlos weitergeben. Er funktioniert wie ein Benutzername, den du überall veröffentlichen darfst. Wenn du ihn teilst, verrät das nicht, wo du bist.';
+
+  @override
+  String get privacyYourKeysMeansForYou =>
+      'Sichere deinen geheimen Schlüssel, wenn du diese Identität behalten willst. Du kannst ihn unter Einstellungen → Identität → Erweitert ansehen. Verlierst du das Handy ohne Sicherung, ist die Identität endgültig verloren, und niemand kann sie zurückholen.';
+
+  @override
+  String get privacyYourKeysNeverShareSecret =>
+      'Wer deinen geheimen Schlüssel bekommt, wird zu dir: Diese Person könnte in deinem Namen Kreisen beitreten oder unter deinem Namen veröffentlichen. Füge ihn niemals in eine andere App, eine Nachricht oder eine Website ein.';
+
+  @override
+  String get privacyYourKeysDetailFormats =>
+      'Das Paar ist ein secp256k1-Schlüssel und wird in den üblichen Nostr-Formaten angezeigt: npub1… für den öffentlichen und nsec1… für den geheimen Schlüssel. Signiert wird innerhalb der App, und die geheimen Bytes werden nach jeder Nutzung aus dem Speicher gelöscht.';
+
+  @override
+  String get privacyYourKeysDetailSeparation =>
+      'Die Schlüssel, mit denen die Nachrichten deiner Kreise verschlüsselt werden, sind von diesem Identitätsschlüssel getrennt und liegen nur bei der App. Diese Trennung ist Absicht: Der Schlüssel, der dich benennt, ist nicht der Schlüssel, mit dem sich öffnen lässt, was du gesendet hast.';
+
+  @override
+  String get privacyPublicProfileTitle =>
+      'Dein Name und dein Foto sind öffentlich';
+
+  @override
+  String get privacyPublicProfileSubtitle =>
+      'Für alle sichtbar, nicht nur für deine Kreise';
+
+  @override
+  String get privacyPublicProfileIsPublic =>
+      'Der Anzeigename und das Foto, die du festlegst, werden im gesamten Nostr-Netzwerk veröffentlicht. Jeder kann sie nachschlagen, nicht nur die Menschen in deinen Kreisen.';
+
+  @override
+  String get privacyPublicProfileOnSave =>
+      'Das geschieht in dem Moment, in dem du sie speicherst. Es gibt keine Einstellung, die sie privat hält, und keine Möglichkeit, einen Namen nur mit deinen Kreisen zu teilen.';
+
+  @override
+  String get privacyPublicProfilePseudonym =>
+      'Neue Installationen starten mit einem erfundenen Namen wie „Quiet Wanderer“, der nichts über dich verrät. Du kannst ihn behalten oder durch einen beliebigen anderen ersetzen.';
+
+  @override
+  String get privacyPublicProfileMeansForYou =>
+      'Wähle einen Namen und ein Foto, die du gerne öffentlich zeigst. Wenn du nicht erkannt werden möchtest, behalte den erfundenen Namen, den du bekommen hast, und lass das Foto weg.';
+
+  @override
+  String get privacyPublicProfileRemovalIsNotDeletion =>
+      'Dein Foto später zu entfernen macht die Veröffentlichung nicht rückgängig. Haven ersetzt dein Profil durch ein leeres, aber die Bilddatei bleibt auf dem Server liegen, der sie bereitstellt, und jede bereits heruntergeladene Kopie bleibt im Umlauf. Betrachte alles, was du veröffentlichst, als dauerhaft.';
+
+  @override
+  String get privacyPublicProfileDetailKindZero =>
+      'Das Profil ist ein Nostr-Ereignis vom Typ „kind 0“, das mit deinem Identitätsschlüssel signiert wird. Fotos werden zu einem Blossom-Host hochgeladen – blossom.primal.net, sofern du das nicht änderst –, der das Bild, deinen öffentlichen Schlüssel und deine IP-Adresse sieht.';
+
+  @override
+  String get privacyPublicProfileDetailExifStripped =>
+      'Vor dem Hochladen kodiert Haven das Bild neu und entfernt die verborgenen Daten, die Kameras anhängen – darunter die GPS-Position, an der das Foto entstanden ist. Das ist hier wichtig: Ein Urlaubsschnappschuss kann sonst die Koordinaten deines Zuhauses mitführen.';
 
   @override
   String get commonClearAll => 'Alle löschen';

@@ -595,6 +595,138 @@ class AppLocalizationsTr extends AppLocalizations {
   }
 
   @override
+  String get privacyTitle => 'Gizlilik';
+
+  @override
+  String get privacySubtitle =>
+      'Haven nasıl çalışır ve başkaları neyi görebilir';
+
+  @override
+  String get privacyHubSummary =>
+      'Haven konumunuzu yalnızca seçtiğiniz küçük gruplarla paylaşır ve telefonunuzdan çıkmadan önce şifreler. Arkasında bir şirket hesabı ya da Haven sunucusu yoktur. Aşağıdaki sayfalar bunun nasıl işlediğini sade bir dille anlatır ve neyi korumadığı konusunda da dürüsttür.';
+
+  @override
+  String get privacyGroupBasicsHeading => 'Temel bilgiler';
+
+  @override
+  String get privacyMeansForYouLabel => 'Bunun sizin için anlamı';
+
+  @override
+  String get privacyMoreDetailLabel => 'Daha ayrıntılı bilgi';
+
+  @override
+  String get privacyMoreDetailExpandHint => 'Teknik ayrıntıları göster';
+
+  @override
+  String get privacyMoreDetailCollapseHint => 'Teknik ayrıntıları gizle';
+
+  @override
+  String get privacyMoreDetailExpandedAnnouncement =>
+      'Teknik ayrıntılar gösterildi';
+
+  @override
+  String get privacyMoreDetailCollapsedAnnouncement =>
+      'Teknik ayrıntılar gizlendi';
+
+  @override
+  String get privacyWhatHavenIsTitle => 'Haven nedir ve neden hesap yok';
+
+  @override
+  String get privacyWhatHavenIsSubtitle => 'Kayıt yok, şirket sunucusu yok';
+
+  @override
+  String get privacyWhatHavenIsNoAccount =>
+      'Haven konumunuzu, çevre adı verilen ve kendi seçtiğiniz küçük gruplarla paylaşır. Arkasında bir hesap yoktur. Hiçbir zaman e-posta adresi, telefon numarası ya da parola vermezsiniz.';
+
+  @override
+  String get privacyWhatHavenIsNoServers =>
+      'Haven\'ın kendi sunucuları da yoktur. Şifreli konum güncellemeleriniz, başkalarının işlettiği ve aktarıcı adı verilen bağımsız sunucular üzerinden geçer. Haven\'ın geliştiricileri konumunuzu göremez ve uygulamayı nasıl kullandığınıza dair hiçbir şey toplamaz.';
+
+  @override
+  String get privacyWhatHavenIsMeansForYou =>
+      'Verilerinizi isteyebileceğiniz kimse yok, çünkü kimse onları tutmuyor. Madalyonun öbür yüzü de şu: hesabınızı geri getirebilecek kimse de yok. Neleri yedeklemeniz gerektiğini “İki anahtarınız” bölümünde bulabilirsiniz.';
+
+  @override
+  String get privacyWhatHavenIsDetailNoTelemetry =>
+      'Uygulamada analitik, çökme bildirimi ya da reklam kodu bulunmaz. Haven açık kaynak olduğu için buna güvenmek zorunda değilsiniz; kendiniz doğrulayabilirsiniz.';
+
+  @override
+  String get privacyWhatHavenIsDetailNoPush =>
+      'Haven\'da anlık bildirim de yoktur; bu bilinçli bir seçimdir. Çevrelerinizdeki birinin size iletecek bir şeyi olduğunda bunun bir bildirim servisine haber verilmesi gerekirdi; bu da alışkanlıklarınız hakkında aktarıcıların gördüğünden fazlasını açığa çıkarırdı.';
+
+  @override
+  String get privacyYourKeysTitle =>
+      'İki anahtarınız: biri gizli, biri paylaşmak için';
+
+  @override
+  String get privacyYourKeysSubtitle =>
+      'Sizi tanımlayan şey ve yedeklemeniz gerekenler';
+
+  @override
+  String get privacyYourKeysWhatTheyAre =>
+      'Kullanıcı adı ve parola yerine bir anahtar çiftiniz olur. Gizli anahtar, sizin siz olduğunuzu kanıtlar. Açık anahtar ise başkalarının sizi bulmak ve davet etmek için kullandığı anahtardır.';
+
+  @override
+  String get privacyYourKeysSecretStaysHere =>
+      'Gizli anahtarınız yalnızca bu telefonda, işletim sisteminin koruduğu bir depolama alanında tutulur. Haven onu hiçbir yere göndermez — ne bir aktarıcıya ne de bize.';
+
+  @override
+  String get privacyYourKeysPublicIsSafe =>
+      'Açık anahtarınızı paylaşmanız güvenlidir. Her yerde paylaşabileceğiniz bir kullanıcı adı gibi çalışır. Onu paylaşmak nerede olduğunuzu açığa çıkarmaz.';
+
+  @override
+  String get privacyYourKeysMeansForYou =>
+      'Bu kimliği korumak istiyorsanız gizli anahtarınızı yedekleyin. Onu Ayarlar → Kimlik → Gelişmiş bölümünde görebilirsiniz. Telefonu yedek almadan kaybederseniz kimliğiniz kalıcı olarak kaybolur ve kimse onu geri getiremez.';
+
+  @override
+  String get privacyYourKeysNeverShareSecret =>
+      'Gizli anahtarınızı ele geçiren herkes siz olur. Sizin adınıza çevrelere katılabilir ya da sizin adınıza içerik yayımlayabilir. Onu asla başka bir uygulamaya, bir mesaja ya da bir web sitesine yapıştırmayın.';
+
+  @override
+  String get privacyYourKeysDetailFormats =>
+      'Bu çift bir secp256k1 anahtarıdır; standart Nostr biçimlerinde, açık anahtar npub1… ve gizli anahtar nsec1… olarak gösterilir. İmzalama uygulamanın içinde yapılır ve gizli baytlar her kullanımdan sonra bellekten silinir.';
+
+  @override
+  String get privacyYourKeysDetailSeparation =>
+      'Çevrelerinizin mesajlarını şifreleyen anahtarlar bu kimlik anahtarından ayrıdır ve yalnızca uygulamada tutulur. Bu ayrım bilinçlidir: sizi adlandıran anahtar, gönderdiklerinizi açan anahtar değildir.';
+
+  @override
+  String get privacyPublicProfileTitle =>
+      'Adınız ve fotoğrafınız herkese açıktır';
+
+  @override
+  String get privacyPublicProfileSubtitle =>
+      'Yalnızca çevrelerinize değil, herkese görünür';
+
+  @override
+  String get privacyPublicProfileIsPublic =>
+      'Belirlediğiniz görünen ad ve fotoğraf, daha geniş Nostr ağına yayımlanır. Bunları yalnızca çevrelerinizdeki kişiler değil, herkes arayıp bulabilir.';
+
+  @override
+  String get privacyPublicProfileOnSave =>
+      'Bu, onları kaydettiğiniz anda gerçekleşir. Bunları gizli tutan bir ayar yoktur ve bir adı yalnızca çevrelerinizle paylaşmanın bir yolu da yoktur.';
+
+  @override
+  String get privacyPublicProfilePseudonym =>
+      'Yeni kurulumlar, sizinle ilgili hiçbir şey söylemeyen “Quiet Wanderer” gibi uydurma bir adla başlar. Bunu olduğu gibi bırakabilir ya da istediğiniz bir adla değiştirebilirsiniz.';
+
+  @override
+  String get privacyPublicProfileMeansForYou =>
+      'Herkese göstermekte sakınca görmeyeceğiniz bir ad ve fotoğraf seçin. Tanınmamayı tercih ediyorsanız size verilen uydurma adı olduğu gibi bırakın ve fotoğraf eklemeyin.';
+
+  @override
+  String get privacyPublicProfileRemovalIsNotDeletion =>
+      'Fotoğrafınızı sonradan kaldırmanız onu yayından çıkarmaz. Haven profilinizi boş bir profille değiştirir, ama görsel dosyası onu barındıran sunucuda kalır ve daha önce indirilmiş her kopya ortada dolaşmaya devam eder. Yayımladığınız her şeyi kalıcı sayın.';
+
+  @override
+  String get privacyPublicProfileDetailKindZero =>
+      'Profil, kimlik anahtarınızla imzalanmış bir Nostr “kind 0” olayıdır. Fotoğraflar bir Blossom sunucusuna yüklenir — değiştirmediyseniz blossom.primal.net — ve bu sunucu görseli, açık anahtarınızı ve IP adresinizi görür.';
+
+  @override
+  String get privacyPublicProfileDetailExifStripped =>
+      'Haven, yüklemeden önce resmi yeniden kodlar ve kameraların eklediği gizli verileri, fotoğrafın çekildiği GPS konumu da dahil, kaldırır. Bu burada önemlidir: aksi halde bir tatil fotoğrafı evinizin koordinatlarını taşıyabilir.';
+
+  @override
   String get commonClearAll => 'Tümünü Temizle';
 
   @override
