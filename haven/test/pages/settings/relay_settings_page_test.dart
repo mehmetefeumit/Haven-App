@@ -246,7 +246,7 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(
-          find.textContaining('still cleaning up some data'),
+          find.textContaining('still asking relays to drop'),
           findsOneWidget,
         );
       },
@@ -279,7 +279,7 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(
-          find.textContaining('still cleaning up some data'),
+          find.textContaining('still asking relays to drop'),
           findsNothing,
         );
       },

@@ -70,6 +70,66 @@ void main() {
       },
     );
 
+    testWidgets(
+      'names every third party the encrypted location reaches',
+      (tester) async {
+        // This dialog is the Google Play Prominent Disclosure and the record of
+        // the user's consent. It previously claimed location was seen by
+        // "never Haven, and never any other entity", which was false: encrypted
+        // updates transit third-party relays, and drawing the map sends tile
+        // coordinates derived from members' positions to an outside provider.
+        // A disclosure must name third-party transmission, not deny it.
+        final result = ValueNotifier<bool?>(null);
+        await tester.pumpWidget(
+          buildHost(includeBackground: false, result: result),
+        );
+        await tester.tap(find.text('Show dialog'));
+        await tester.pumpAndSettle();
+
+        expect(find.textContaining('relays run by other people'), findsOneWidget);
+        expect(find.textContaining('Stadia Maps'), findsAtLeastNWidgets(1));
+        // Attributed, with the retention window: never shortened to a
+        // 'no logging' claim, which their policy does not support.
+        expect(
+          find.textContaining('does not sell or trade personal information'),
+          findsOneWidget,
+        );
+        expect(find.textContaining('server logs'), findsOneWidget);
+        // The absolute must never come back.
+        expect(find.textContaining('never any other entity'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'states that foreground sharing cannot be paused, in BOTH scopes',
+      (tester) async {
+        // `background`/`manage` render only in the background scope, so the
+        // foreground fact has to live in an always-shown string — otherwise a
+        // foreground-only consent advertises a toggle the user does not get.
+        for (final includeBackground in [false, true]) {
+          final result = ValueNotifier<bool?>(null);
+          await tester.pumpWidget(
+            buildHost(includeBackground: includeBackground, result: result),
+          );
+          await tester.tap(find.text('Show dialog'));
+          await tester.pumpAndSettle();
+
+          expect(
+            find.textContaining('There is no pause'),
+            findsOneWidget,
+            reason: 'missing with includeBackground=$includeBackground',
+          );
+          expect(
+            find.textContaining('leave it'),
+            findsOneWidget,
+            reason: 'no way to stop given (includeBackground=$includeBackground)',
+          );
+          await tester.tap(find.byKey(WidgetKeys.locationDisclosureNotNow));
+          await tester.pumpAndSettle();
+        }
+      },
+    );
+
     testWidgets('tapping Agree resolves the future to true', (tester) async {
       final result = ValueNotifier<bool?>(null);
       await tester.pumpWidget(

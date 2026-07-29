@@ -118,7 +118,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get onboardingValueProp2Body =>
-      'Haven\'ın merkezi bir sunucusu yoktur. Şifreli mesajlarınız, kendiniz seçebileceğiniz merkeziyetsiz bir aktarıcı ağı üzerinden iletilir; böylece tek bir kuruluş onu kapatamaz.';
+      'Haven\'ın merkezi bir sunucusu yoktur. Şifreli mesajlarınız, aktarıcı adı verilen bağımsız sunucular üzerinden iletilir ve hangilerini kullanacağınızı siz seçersiniz. Tek bir şirket ya da hükümet bu ağı kapatamaz.';
 
   @override
   String get onboardingValueProp3Title => 'Hesaba gerek yok';
@@ -133,7 +133,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get onboardingValueProp2Summary =>
-      'Merkezi sunucu yok; seçtiğiniz aktarıcı ağı üzerinden çalışır.';
+      'Merkezi sunucu yok. Seçtiğiniz bir aktarıcı ağı üzerinde çalışır.';
 
   @override
   String get onboardingValueProp3Summary =>
@@ -144,7 +144,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get onboardingCreateIdentityBody =>
-      'Haven yalnızca bu telefonda yaşayan özel bir kimlik oluşturacak. Çevreleriniz sizi bu sayede tanır.';
+      'Haven anahtarlarınızı bu telefonda oluşturur. Gizli olan telefondan hiçbir zaman çıkmaz.';
 
   @override
   String get onboardingCreateIdentityWarning =>
@@ -272,7 +272,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get relaySettingsKeyPackageSubtitle =>
-      'kind 10002, davet edilenlerin şifreleme anahtarlarınızı bulduğu yer';
+      'kind 10002, davet edenlerin anahtarlarınızı bulduğu ve herkese açık profilinizin yayımlandığı yer';
 
   @override
   String get relaySettingsLoadRelaysError => 'Aktarıcılar yüklenemedi.';
@@ -370,7 +370,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'Arka planda paylaşım açıkken, Haven kapalı olsa bile çevreleriniz anlık konumunuzu görmeye devam eder.';
+      'Haven, uygulama açık olduğu sürece konumunuzu çevrelerinizle paylaşır. Bunu açarsanız Haven arka plandayken de çevreleriniz konumunuzu görmeye devam eder; sistem Haven\'ı kapatırsa güncellemeler, siz hareket ettiğinizde ya da sistem uygulamayı bir sonraki uyandırışında yeniden başlar.';
 
   @override
   String get locationSettingsToggleTitle => 'Arka planda paylaş';
@@ -497,7 +497,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyHubSummary =>
-      'Haven konumunuzu yalnızca seçtiğiniz küçük gruplarla paylaşır ve telefonunuzdan çıkmadan önce şifreler. Arkasında bir şirket hesabı ya da Haven sunucusu yoktur. Aşağıdaki sayfalar bunun nasıl işlediğini sade bir dille anlatır ve neyi korumadığı konusunda da dürüsttür.';
+      'Haven konumunuzu yalnızca kendi seçtiğiniz küçük gruplarla paylaşır; bu gruplara çevre denir. Konumunuz telefonunuzdan çıkmadan önce şifrelenir. Ne bir kayıt vardır ne de bir Haven sunucusu. Herkese açık olan tek şey, belirlediğiniz görünen ad ve fotoğraftır. Aşağıdaki sayfalar bunu ve geri kalan her şeyi sade bir dille anlatır.';
 
   @override
   String get privacyGroupBasicsHeading => 'Temel bilgiler';
@@ -534,11 +534,11 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyWhatHavenIsNoServers =>
-      'Haven\'ın kendi sunucuları da yoktur. Şifreli konum güncellemeleriniz, başkalarının işlettiği ve aktarıcı adı verilen bağımsız sunucular üzerinden geçer. Haven\'ın geliştiricileri konumunuzu göremez ve uygulamayı nasıl kullandığınıza dair hiçbir şey toplamaz.';
+      'Haven\'ın da kendine ait sunucuları yoktur. Şifreli konum güncellemeleriniz, başkalarının işlettiği ve aktarıcı adı verilen bağımsız sunucular üzerinden geçer. Haven\'ın geliştiricileri konumunuzu göremez ve uygulamaya hiçbir izleme kodu koymamıştır. Görebildikleri tek şey, haritanın toplamda ne kadar kullanıldığıdır: harita karoları tek bir ortak erişim anahtarıyla çekilir, kimin çektiği hiçbir zaman görünmez.';
 
   @override
   String get privacyWhatHavenIsMeansForYou =>
-      'Verilerinizi isteyebileceğiniz kimse yok, çünkü kimse onları tutmuyor. Madalyonun öbür yüzü de şu: hesabınızı geri getirebilecek kimse de yok. Neleri yedeklemeniz gerektiğini “İki anahtarınız” bölümünde bulabilirsiniz.';
+      'Kimse verilerinizi teslim etmeye zorlanamaz, çünkü onları tutan kimse yok. Bunun bedeli, kimliğinizi sizin için geri getirebilecek kimsenin de olmamasıdır. Neleri yedeklemeniz gerektiğini “İki anahtarınız” bölümünde bulabilirsiniz.';
 
   @override
   String get privacyWhatHavenIsDetailNoTelemetry =>
@@ -562,7 +562,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyYourKeysSecretStaysHere =>
-      'Gizli anahtarınız yalnızca bu telefonda, işletim sisteminin koruduğu bir depolama alanında tutulur. Haven onu hiçbir yere göndermez — ne bir aktarıcıya ne de bize.';
+      'Gizli anahtarınız yalnızca bu telefonda, işletim sisteminin koruduğu bir depolama alanında tutulur. Haven onu hiçbir yere göndermez: ne herhangi bir sunucuya ne de bize.';
 
   @override
   String get privacyYourKeysPublicIsSafe =>
@@ -570,7 +570,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyYourKeysMeansForYou =>
-      'Bu kimliği korumak istiyorsanız gizli anahtarınızı yedekleyin. Onu Ayarlar → Kimlik → Gelişmiş bölümünde görebilirsiniz. Telefonu yedek almadan kaybederseniz kimliğiniz kalıcı olarak kaybolur ve kimse onu geri getiremez.';
+      'Bu kimliği korumak için yedekleyin. Ayarlar → Kimlik → Gelişmiş yolunu izleyin, Gizli Anahtarı Göster\'e dokunun ve anahtarı parola yöneticisi gibi güvenli bir yere kaydedin. Bu yedek olmadan telefonu kaybetmek, kimliği kalıcı olarak kaybetmek demektir.';
 
   @override
   String get privacyYourKeysNeverShareSecret =>
@@ -578,7 +578,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyYourKeysDetailFormats =>
-      'Bu çift bir secp256k1 anahtarıdır; standart Nostr biçimlerinde, açık anahtar npub1… ve gizli anahtar nsec1… olarak gösterilir. İmzalama uygulamanın içinde yapılır ve gizli baytlar her kullanımdan sonra bellekten silinir.';
+      'Her iki anahtar da secp256k1\'dir; standart Nostr biçimlerinde, açık anahtar npub1… ve gizli anahtar nsec1… olarak gösterilir. İmzalama uygulamanın içinde yapılır ve gizli anahtar, onu doğrudan işleyen bölümlerden kullanıldığı anda temizlenir.';
 
   @override
   String get privacyYourKeysDetailSeparation =>
@@ -594,11 +594,11 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyPublicProfileIsPublic =>
-      'Belirlediğiniz görünen ad ve fotoğraf, daha geniş Nostr ağına yayımlanır. Bunları yalnızca çevrelerinizdeki kişiler değil, herkes arayıp bulabilir.';
+      'Belirlediğiniz görünen ad ve fotoğraf, Haven\'ın üzerinde çalıştığı açık ve herkese açık ağ olan Nostr\'a yayımlanır. Bunları yalnızca çevrelerinizdeki kişiler değil, herkes arayıp bulabilir.';
 
   @override
   String get privacyPublicProfileOnSave =>
-      'Bu, onları kaydettiğiniz anda gerçekleşir. Bunları gizli tutan bir ayar yoktur ve bir adı yalnızca çevrelerinizle paylaşmanın bir yolu da yoktur.';
+      'Adınız ve fotoğrafınız, onları kaydettiğiniz anda herkese açık hale gelir. Bunları gizli tutan bir ayar yoktur ve bir adı yalnızca çevrelerinizle paylaşmanın bir yolu da yoktur.';
 
   @override
   String get privacyPublicProfilePseudonym =>
@@ -610,11 +610,11 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyPublicProfileRemovalIsNotDeletion =>
-      'Fotoğrafınızı sonradan kaldırmanız onu yayından çıkarmaz. Haven profilinizi boş bir profille değiştirir, ama görsel dosyası onu barındıran sunucuda kalır ve daha önce indirilmiş her kopya ortada dolaşmaya devam eder. Yayımladığınız her şeyi kalıcı sayın.';
+      'Fotoğrafınızı sonradan kaldırmanız, sunucudaki kopyayı silmez. Haven profilinizi boş bir profille değiştirir. Görsel dosyası barındırıldığı yerde kalır ve daha önce indirilmiş her kopya da ortada kalmaya devam eder. Yayımladığınız her şeyi kalıcı sayın.';
 
   @override
   String get privacyPublicProfileDetailKindZero =>
-      'Profil, kimlik anahtarınızla imzalanmış bir Nostr “kind 0” olayıdır. Fotoğraflar bir Blossom sunucusuna yüklenir — değiştirmediyseniz blossom.primal.net — ve bu sunucu görseli, açık anahtarınızı ve IP adresinizi görür.';
+      'Profil, kimlik anahtarınızla imzalanmış bir Nostr “kind 0” olayıdır. Fotoğraflar herkese açık bir görsel barındırma hizmetine, blossom.primal.net adresine yüklenir; bu hizmet görseli, açık anahtarınızı ve ağ adresinizi görür. Haven şimdilik başka bir barındırıcı seçmenize izin vermiyor.';
 
   @override
   String get privacyPublicProfileDetailExifStripped =>
@@ -637,15 +637,15 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyRelaysWhyMany =>
-      'Birden fazla aktarıcı kullandığınızda hiçbiri tek başına bağlantınızı kesemez. Biri çevrimdışı olursa diğerleri çalışmaya devam eder. Hangi aktarıcıları kullanacağınızı siz seçersiniz ve bunları istediğiniz zaman değiştirebilirsiniz.';
+      'Haven birden fazla aktarıcı kullanır; böylece hiçbiri tek başına bağlantınızı kesemez. Biri çevrimdışı olursa diğerleri çalışmaya devam eder. Davetlerin size ulaştığı aktarıcıları siz seçersiniz; bir çevrenin kullandığı aktarıcılar ise o çevre oluşturulurken belirlenir.';
 
   @override
   String get privacyRelaysTwoLists =>
-      'Haven sizin için iki liste tutar. Davetler, gelen kutusu aktarıcılarınıza ulaşır. Sizi davet etmek için gereken anahtarları ise başkaları KeyPackage aktarıcılarınızdan alır. Her çevrenin de kendi listesi vardır; o çevrenin şifreli güncellemeleri bu listeden geçer.';
+      'Haven sizin için iki liste tutar. Davetler, gelen kutusu aktarıcılarınıza ulaşır. Sizi davet etmek için gereken anahtarları başkaları KeyPackage aktarıcılarınızdan alır. Her çevrenin de kendi listesi vardır ve o çevrenin şifreli güncellemeleri bu listedeki aktarıcılardan geçer.';
 
   @override
   String get privacyRelaysMeansForYou =>
-      'Burada yanlış yapıp riske girebileceğiniz bir şey yok: bir aktarıcı yalnızca şifreli veri görür. Ama erişilebilir en az bir aktarıcıya ihtiyacınız var; yoksa kimse sizi davet edemez ve çevreleriniz sessizleşir.';
+      'Bir aktarıcı konumunuzu hiçbir zaman görmez, çünkü konum telefonunuzdan çıkmadan önce şifrelenir. Görebildiği şey, insanların size ulaşabilmesi için herkese açık olması gerekenlerdir: adınız ve fotoğrafınız, başkalarının sizi davet etmek için ihtiyaç duyduğu anahtarlar ve aktarıcı listenizin kendisi. Haven size çalışır durumda aktarıcılarla başlar; değiştirmeniz gereken bir şey yoktur.';
 
   @override
   String get privacyRelaysDetailIndexers =>
@@ -653,14 +653,14 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyRelaysDetailKeyListIsPublic =>
-      'KeyPackage aktarıcı listeniz de başkalarının onu bulabilmesi için kimlik anahtarınızla imzalanarak ağa yayımlanır. Bu listeye özel bir aktarıcı eklerseniz onun adresi herkese açık olur ve sizinle ilişkilendirilir. Yalnızca tek bir çevrenin kendi listesinde kullanılan bir aktarıcı ise böyle duyurulmaz.';
+      'KeyPackage aktarıcı listeniz kimlik anahtarınızla imzalanır ve halihazırda listede bulunan aktarıcılara yayımlanır. Bu listeye özel bir aktarıcı eklerseniz onun adresi herkese açık olur ve sizinle ilişkilendirilir. Bu listedeki bir aktarıcıyı gizli tutmanın hiçbir yolu yoktur.';
 
   @override
   String get privacyEncryptionTitle => 'Şifreleme nasıl çalışır';
 
   @override
   String get privacyEncryptionSubtitle =>
-      'Her çevrenin kendi anahtarları; biri katıldığında veya ayrıldığında ne değişir';
+      'Her çevreye bir anahtar; biri katıldığında veya ayrıldığında ne değişir';
 
   @override
   String get privacyEncryptionPerCircle =>
@@ -672,15 +672,15 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyEncryptionWhenSomeoneLeaves =>
-      'Biri ayrıldığında ya da çıkarıldığında çevre yine yeni bir anahtara geçer. En fazla birkaç dakika içinde o kişi artık yeni hiçbir şeyi okuyamaz.';
+      'Biri bir çevreden ayrıldığında çevre yine yeni bir anahtara geçer. Çevrenin geri kalanı bu değişikliği aldığında o kişi artık yeni hiçbir şeyi okuyamaz; bu genellikle birkaç dakika sürer, o sırada çevrimdışı olanlar için daha uzun.';
 
   @override
   String get privacyEncryptionKeysChangeOnMembership =>
-      'Anahtarlar yalnızca çevrenin üyeleri değiştiğinde değişir; belirli aralıklarla ya da zaman geçtikçe kendiliğinden değişmez. Bu değişiklikler arasında gönderilen her şey tek bir anahtarla korunur. Bu yüzden uzun süredir aynı kalan bir çevreden çıkardığınız biri, üye olduğu sırada kaydettiği mesajları — haftalar öncesine ait olanları bile — hâlâ açabilir. Ayrıldıktan sonra gönderilenlerin hiçbirini açamaz.';
+      'Bir çevreden ayrılmanız, üyelerinin daha önce kaydettiklerini geri almaz. Haven anahtarları yalnızca biri katıldığında ya da ayrıldığında değiştirir; belirli aralıklarla asla değiştirmez. Bu yüzden tek bir anahtar haftalarca süren mesajları kapsayabilir ve bir üyenin o süre içinde kaydettiği her şey onun için okunabilir kalır. Yine de o üye, ayrıldıktan sonra gönderilen hiçbir şeyi açamaz.';
 
   @override
   String get privacyEncryptionMeansForYou =>
-      'Şifreleme sizi çevrelerinizin dışındaki herkese karşı korur. Bir zamanlar çevrenizin içinde olmuş birine karşı koruyamaz. Biriyle ilişkinizi tamamen kesmek istiyorsanız, onu eski bir çevreden çıkarmak yerine yeni bir çevre kurmak daha güvenlidir.';
+      'Şifreleme sizi çevrelerinizin dışındaki herkese karşı korur. Bir zamanlar içeride olmuş birine karşı koruyamaz. Belirli bir kişiyle paylaşmayı durdurmak için, onunla paylaştığınız çevreden ayrılın ve onsuz yeni bir çevre kurun.';
 
   @override
   String get privacyEncryptionDetailMls =>
@@ -688,7 +688,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyEncryptionDetailEpochs =>
-      'Her anahtar dönemine epoch denir. Cihazınız yalnızca son birkaç epoch\'tan hâlâ yolda olan mesajları çözmeye yetecek kadar anahtar malzemesi tutar, sonra bunu atar. Haven\'ın eski mesajlarınızı ilke olarak bile geri getirememesinin nedeni budur.';
+      'Her anahtar dönemine epoch denir ve bir çevre yeni bir epoch\'a yalnızca üyeleri değiştiğinde geçer. Cihazınız, hâlâ gelmekte olan mesajları açmaya yetecek kadarını, yani içinde bulunduğu epoch ile son birkaç epoch\'un anahtarlarını tutar; gerisini atar. Üyeleri aylardır değişmemiş bir çevre, hâlâ başladığı epoch\'tadır.';
 
   @override
   String get privacyWhatOthersSeeTitle =>
@@ -707,7 +707,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeCannotPause =>
-      'Haven açık olduğu ve bir çevrede bulunduğunuz sürece konumunuz birkaç dakikada bir kendiliğinden gönderilir. Duraklatma düğmesi yoktur. Değiştirebileceğiniz tek şey, uygulamadan çıktıktan sonra paylaşımın sürüp sürmeyeceğidir.';
+      'Haven açıkken ve bir çevrede bulunuyorken konumunuz birkaç dakikada bir kendiliğinden gönderilir. Duraklatma düğmesi yoktur: Konum sayfasındaki ayar yalnızca uygulamayı kapattıktan sonra bunun sürüp sürmeyeceğini belirler. Bir çevreyle paylaşmayı durdurmak için o çevreyi açın ve Çevreden Ayrıl\'ı seçin.';
 
   @override
   String get privacyWhatOthersSeeMembersLearnKey =>
@@ -715,22 +715,22 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeCoMemberIp =>
-      'Bir üyenin profil fotoğrafı, o üyenin seçtiği bir sunucudan indirilir. Fotoğraf yüklenirken ağ adresiniz — dolayısıyla dünyanın kabaca hangi bölgesinde olduğunuz — o sunucuyu işleten kişiye açılır. Bu, siz hiçbir şeye dokunmadan kendiliğinden olur.';
+      'Telefonunuz, her üyenin profil fotoğrafını o üyenin seçtiği bir sunucudan indirir; bunun için hiçbir şeye dokunmanız gerekmez. O sunucu böylece ağ adresinizi görür ve bu adres sizi haritada kabaca konumlandırır. Bunu bir VPN gizler; başka hiçbir şey gizlemez.';
 
   @override
   String get privacyWhatOthersSeeRelaysHeading => 'Aktarıcı işletmecileri';
 
   @override
   String get privacyWhatOthersSeeRelaysCannot =>
-      'Aktarıcı işletmecileri konumunuzu, mesajlarınızı, çevrenizin adını ya da üye listesini okuyamazlar. Her mesaj onlara tek kullanımlık taze bir gönderim adresinden ulaşır; bu yüzden hangi üyenin gönderdiğini anlayamazlar.';
+      'Güncellemelerinizin üzerinden geçtiği bağımsız sunucular olan aktarıcılar; konumunuzu, mesajlarınızı, çevrenizin adını ya da üye listesini okuyamaz. Konum güncellemeleriniz, açık anahtarınız yerine tek kullanımlık taze bir gönderim adresi taşır. Profiliniz, davetleriniz ve aktarıcı listeleriniz ise açık anahtarınızı taşır; bu yüzden ikisini birden gören bir aktarıcı, içeride hiçbir şey okumadan bir çevrede olduğunuzu çoğu zaman anlayabilir.';
 
   @override
   String get privacyWhatOthersSeeRelaysCan =>
-      'Buna karşılık ağ adresinizi, çevrimiçi olduğunuz zamanları ve trafiğinizin ne kadar büyük ve ne sıklıkta olduğunu görürler. Her çevre rastgele bir etiket taşır; bu sayede bir aktarıcı tek bir çevrenin mesajlarını bir arada toplayıp içinde kaç kişi olduğunu tahmin edebilir — hiçbirinin kim olduğunu öğrenmeden.';
+      'Buna karşılık ağ adresinizi, çevrimiçi olduğunuz zamanları ve trafiğinizin ne kadar büyük ve ne sıklıkta olduğunu görürler. Her çevre rastgele bir etiket taşır. Bir aktarıcı, tek bir çevrenin mesajlarını bu etikete göre bir arada toplayıp içinde kaç kişi olduğunu tahmin edebilir; bunların hiçbirinin kim olduğunu öğrenmeden.';
 
   @override
   String get privacyWhatOthersSeeMeansForYou =>
-      'Bir çevreyi, ev adresinizi verebileceğiniz kişiler olarak düşünün. Aktarıcılara ve dışarıdakilere karşı şifreleme sizi korur; ağ adresi boşluğunu da bir VPN kapatır. Ekran görüntüsü alan bir üyeye karşı ise hiçbir şey korumaz.';
+      'Yalnızca ev adresinizi verebileceğiniz kişilerle bir çevreye girin. Şifreleme aktarıcılara ve dışarıdakilere karşı dayanır; bir VPN de telefonunuzun bağlandığı adresi gizler. Ekran görüntüsü alan bir üyeye karşı sizi hiçbir şey korumaz.';
 
   @override
   String get privacyWhatOthersSeeDetailTag =>
@@ -741,11 +741,11 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get relaySettingsBackendCaption =>
-      'Haven\'ın kendine ait bir sunucusu yok. Şifreli güncellemeleriniz bağımsız sunuculardan geçer; bunlara aktarıcı denir ve ne konumunuzu ne de çevrelerinizde kimlerin olduğunu görebilirler.';
+      'Haven\'ın kendine ait bir sunucusu yok. Şifreli güncellemeleriniz, aktarıcı adı verilen bağımsız sunucular üzerinden geçer; bu sunucular ne konumunuzu ne de mesajlarınızı okuyabilir.';
 
   @override
   String get privacyWhatOthersSeeScreenshots =>
-      'Ekran görüntüsü almak platforma bağlıdır ve iki platform bu konuda birbirinden farklıdır. Android\'de Haven, uygulamanın tamamında ekran görüntüsü almayı ve ekran kaydını engeller. iPhone\'da ise bunu yapamaz: Haven yalnızca uygulama değiştiricideki önizlemeyi bulanıklaştırır; bir üye ekranda görünenlerin görüntüsünü yine de alabilir.';
+      'Bu, telefonunuza bağlıdır. Android\'de Haven, uygulamanın tamamında ekran görüntüsü almayı ve ekran kaydını engeller. iPhone\'da ise bunu yapamaz: Haven uygulama değiştiricideki önizlemeyi bulanıklaştırır, ama bir üye ekranda görünenleri yine de yakalayabilir.';
 
   @override
   String get privacyWhatOthersSeeDetailExpiry =>
@@ -763,22 +763,22 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyInferenceWhatIsMetadata =>
-      'Şifreleme ne gönderdiğinizi gizler. Bir şey gönderdiğinizi gizleyemez. Bir mesajın etrafındaki örüntü — ne zaman çıktığı, ne kadar büyük olduğu, hangi sunuculara bağlı olduğunuz — üst veri olarak adlandırılır ve içerik görünmez olduğunda bile görünür kalır.';
+      'Şifreleme ne gönderdiğinizi gizler. Bir şey gönderdiğinizi gizleyemez. Geriye kalan bu ize üst veri denir: bir mesajın ne zaman çıktığı, ne kadar büyük olduğu ve hangi sunuculara bağlı olduğunuz. İçerik görünmez olduğunda bile bunlar görünür kalır.';
 
   @override
   String get privacyInferenceActivityPattern =>
-      'Bu örüntüden, kullandığınız bir aktarıcı kabaca ne zaman ve ne sıklıkta etkin olduğunuzu anlayabilir. Haven ayrıca yaklaşık yüz metreden fazla hareket ettiğinizde ek bir güncelleme gönderir; bu yüzden yeterince uzun bir kayıt, yolda mı olduğunuzu yoksa bir yerde mi kaldığınızı sezdirebilir — nerede olduğunuzu hiçbir zaman göstermeden.';
+      'Bu örüntüden, kullandığınız bir aktarıcı kabaca ne zaman ve ne sıklıkta etkin olduğunuzu anlayabilir. Haven ayrıca yaklaşık yüz metre hareket ettiğinizde ek bir güncelleme gönderir. Saatler boyunca bu, bir aktarıcıya yolda mı olduğunuzu yoksa bir yerde mi kaldığınızı gösterebilir. Nerede olduğunuzu ise hiçbir zaman göstermez.';
 
   @override
   String get privacyInferencePresence =>
-      'Haven çalışırken aktarıcılarınıza açık bir bağlantı tutar; bu yüzden onlar da çevrimiçi olduğunuzu ve hangi çevreleri izlediğinizi görebilir. Güncellemelerin dakikalar değil saniyeler içinde gelmesinin bedeli bu.';
+      'Haven çalışırken aktarıcılarınıza açık bir bağlantı tutar. Onlar çevrimiçi olduğunuzu ve hangi çevre etiketlerini izlediğinizi görebilir; bir çevrenin adını ya da içinde kimlerin olduğunu asla göremez. Güncellemelerin dakikalar değil saniyeler içinde gelmesinin bedeli budur.';
 
   @override
   String get privacyInferenceIpHeading => 'Ağ adresiniz';
 
   @override
   String get privacyInferenceIpAddress =>
-      'Haven\'ın konuştuğu her sunucu, telefonunuzun bağlandığı ağ adresini görür: aktarıcılarınız, harita sağlayıcısı ve bir üyenin profil fotoğrafını barındıran sunucu. İnternet sağlayıcınız bu sunuculardan hangilerine ne zaman ulaştığınızı görür. Haven, kendi başına bunların hiçbirini gizlemek için bir şey yapmaz.';
+      'Haven\'ın konuştuğu her sunucu, telefonunuzun bağlandığı adresi, yani IP adresinizi görür: aktarıcılarınız, harita sağlayıcısı ve bir üyenin profil fotoğrafını barındıran taraf. İnternet sağlayıcınız bu sunuculardan hangilerine ne zaman ulaştığınızı görür. Haven kendi başına bunların hiçbirini gizlemek için bir şey yapmaz.';
 
   @override
   String get privacyInferenceVpnHeading => 'VPN kullanmalı mısınız?';
@@ -793,7 +793,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyInferenceMeansForYou =>
-      'Sizi haritaya bir kişinin değil bir ağ işletmecisinin yerleştirmesinden kaygılanıyorsanız, ekleyebileceğiniz en yararlı tek şey bir VPN\'dir. Kaygılandığınız şey çevrelerinizdeki kişilerse, VPN hiç işe yaramaz.';
+      'Aktarıcılardan, internet sağlayıcınızdan ya da sizi haritaya yerleştiren harita sunucularından mı kaygılanıyorsunuz? Ekleyebileceğiniz en yararlı tek şey bir VPN\'dir. Çevrelerinizdeki kişilerden mi kaygılanıyorsunuz? O zaman hiç işe yaramaz.';
 
   @override
   String get privacyInferenceDetailJitter =>
@@ -801,7 +801,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyInferenceDetailOutOfScope =>
-      'Bazı şeyler Haven\'ın çözebileceği alanın tamamen dışındadır. Aynı anda pek çok aktarıcıyı izleyebilen bir gözlemci ya da başkasının denetimine geçmiş kendi telefonunuz, buradaki hiçbir tasarım kararının düzeltebileceği şeyler değildir.';
+      'İki şey buradaki hiçbir tasarım kararının erişemeyeceği yerdedir: aynı anda pek çok aktarıcıyı izleyebilen bir gözlemci ve başkasının denetimine geçtikten sonra kendi telefonunuz.';
 
   @override
   String get commonClearAll => 'Tümünü Temizle';
@@ -895,7 +895,8 @@ class AppLocalizationsTr extends AppLocalizations {
   String get createCircleNoIdInQr => 'QR kodunda geçerli bir kimlik bulunamadı';
 
   @override
-  String get createCircleNoAccountFound => 'Haven hesabı bulunamadı';
+  String get createCircleNoAccountFound =>
+      'Bu tanımlayıcı için Haven hesabı bulunamadı';
 
   @override
   String get createCircleCouldNotVerify => 'Üye doğrulanamadı';
@@ -935,7 +936,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get nameCircleSharingInfo =>
-      'Bu çevredeki herkes birbirinin konumunu ve görünen adını görebilir. Görünen adınız, Ayarlar → Kimlik bölümünde belirlediğiniz addır. Bu çevre, içinde bulunduğunuz diğerlerinden ayrı kalır; bu nedenle üyeleri diğer çevrelerinizi ya da kimlerin olduğunu göremez.';
+      'Bu çevredeki herkes birbirinin konumunu, herkese açık adını ve fotoğrafını görebilir. Adınız ve fotoğrafınız Nostr ağında herkese açıktır; bu çevreye özel değildir. Bu çevre, içinde bulunduğunuz diğerlerinden ayrı kalır; bu nedenle üyeleri diğer çevrelerinizi ya da onlarda kimlerin olduğunu göremez.';
 
   @override
   String get nameCircleCreateCta => 'Çevre Oluştur';
@@ -993,7 +994,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get addMemberInfo =>
-      'Yeni üyeler, daveti kabul ettiklerinde bu çevrenin şifreli konumlarını görebilir.';
+      'Daveti kabul ettikleri andan itibaren herkesin konumunu görürler; katılmadan önce gönderilmiş hiçbir şeyi göremezler. Ayrıca bu çevrede halihazırda bulunan herkesin açık anahtarını da görürler.';
 
   @override
   String get addMemberAlreadyInCircle => 'Zaten bu çevrede';
@@ -1091,7 +1092,7 @@ class AppLocalizationsTr extends AppLocalizations {
   String get pendingMemberRetryTooltip => 'Doğrulamayı yeniden dene';
 
   @override
-  String get pendingMemberRemoveTooltip => 'Üyeyi kaldır';
+  String get pendingMemberRemoveTooltip => 'Listeden kaldır';
 
   @override
   String get pendingMemberValidating => 'Doğrulanıyor';
@@ -1272,7 +1273,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get circleDetailsRelaysNote =>
-      'Bu aktarıcılar, çevre oluşturulurken seçilmiştir ve henüz kullanıcı tarafından düzenlenemez. Kişisel aktarıcı ayarlarınızdan bağımsızdır.';
+      'Bu aktarıcılar, çevre oluşturulurken gelen kutusu aktarıcılarınızdan kopyalanmıştır ve henüz değiştirilemez. Kişisel aktarıcı listenizde sonradan yaptığınız değişiklikler bunları etkilemez.';
 
   @override
   String get circleDetailsAddMember => 'Üye ekle';
@@ -1285,7 +1286,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get leaveCircleDialogBody =>
-      'Bu çevreden ayrılmak istediğinizden emin misiniz? Artık üyelerinden konum güncellemeleri almayacaksınız. Bu işlem geri alınamaz.';
+      'Bu çevreden ayrılmak istiyor musunuz? Konumunuzu üyelerine göndermeyi ve onlarınkini görmeyi bırakacaksınız. Gönderdiğiniz son konum, bir güne kadar onların telefonlarında kalır. Bu işlem geri alınamaz: yeniden katılmak için yeni bir davet gerekir.';
 
   @override
   String get leaveCircleConfirm => 'Ayrıl';
@@ -1312,7 +1313,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get legacyCircleBannerBody =>
-      'Haven\'ın şifreleme motoru güncellendi, bu yüzden bu çevre artık kullanılamıyor. Aynı kişilerle konum paylaşmaya devam etmek için çevreyi yeniden oluşturun — onları tekrar davet etmeniz gerekecek.';
+      'Haven\'ın şifreleme motoru güncellendi, bu yüzden bu çevre artık kullanılamıyor. Aynı kişilerle konum paylaşmaya devam etmek için çevreyi yeniden oluşturun. Onları tekrar davet etmeniz gerekecek.';
 
   @override
   String get legacyCircleRecreateCta => 'Çevreyi Yeniden Oluştur';
@@ -1335,7 +1336,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get legacyCutoverExplainerIdentityUnchanged =>
-      'Kimliğiniz ve herkese açık profiliniz değişmedi — bunlar için yapmanız gereken bir şey yok.';
+      'Kimliğiniz ve herkese açık profiliniz değişmedi. Bunlar için yapmanız gereken bir şey yok.';
 
   @override
   String get legacyCutoverExplainerCirclesNeedRecreation =>
@@ -1346,7 +1347,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get relaySettingsLegacyRetractionPending =>
-      'Haven, son güvenlik güncellemesinden kalan bazı verileri hâlâ temizliyor. Tekrar çevrimiçi olduğunuzda bu işlem otomatik olarak tamamlanacak.';
+      'Haven hâlâ aktarıcılardan, son güvenlik güncellemesinden kalan bazı eski verileri silmelerini istiyor.';
 
   @override
   String get circlesPanelCollapsedAnnouncement => 'Çevreler paneli daraltıldı';
@@ -1560,7 +1561,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get identityAdvancedDeleteBody =>
-      'Bu işlem kimliğinizi kalıcı olarak siler. Geri kurtarmak istiyorsanız gizli anahtarınızı yedeklediğinizden emin olun.';
+      'Bu işlem, kimliğinizi ve tüm çevre verilerinizi bu telefondan siler. Bu kimlikle daha önce yayımlanmış her şey, adınız, fotoğrafınız ve anahtarlarınız dahil, onlara sahip aktarıcılarda kalır. Geri kurtarmak istiyorsanız gizli anahtarınızı yedeklediğinizden emin olun.';
 
   @override
   String get identityAdvancedDeleteConfirm => 'Sil';
@@ -1634,7 +1635,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get qrCodeExplainerUsername =>
-      'Açık anahtarınız, paylaşılması güvenli bir kullanıcı adı gibi çalışır. İnsanlar sizi bir çevreye davet etmek için bu kodu tarar ya da açık anahtarınızı yapıştırır. Bunu paylaşmak konumunuzu açığa çıkaramaz; konumunuz yalnızca katıldığınız çevrelerin üyelerine görünür. Görünen adınız ve fotoğrafınız ise zaten herkese açık; bu kodu paylaşmak onlar hakkında yeni bir şey açığa çıkarmaz.';
+      'Açık anahtarınız, paylaşılması güvenli bir kullanıcı adı gibi çalışır. İnsanlar sizi bir çevreye davet etmek için bu kodu tarar ya da açık anahtarınızı yapıştırır. Bunu paylaşmak nerede olduğunuzu açığa çıkaramaz. Görünen adınız ve fotoğrafınız zaten herkese açık olduğundan bu, onlara bir şey eklemez.';
 
   @override
   String get displayNameCardTitle => 'Görünen Ad';
@@ -1751,7 +1752,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get photoHeaderRemoveBody =>
-      'Bu işlem, fotoğrafınızı herkese açık profilinizden kaldırır.';
+      'Bu işlem, fotoğrafınızı herkese açık profilinizden kaldırır. Görsel dosyası onu barındıran sunucuda kalır ve başkalarının daha önce indirdiği kopyalar onlarda kalmaya devam eder.';
 
   @override
   String get photoHeaderEditPhoto => 'Fotoğrafı Düzenle';
@@ -1770,7 +1771,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get avatarPickerPhotoUpdated =>
-      'Fotoğraf güncellendi — herkese açık Nostr profilinize yayımlandı.';
+      'Fotoğraf güncellendi. Herkese açık Nostr profilinize yayımlandı.';
 
   @override
   String get avatarPickerPhotoRemoved => 'Fotoğraf kaldırıldı.';

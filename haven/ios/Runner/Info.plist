@@ -60,7 +60,7 @@
 	<key>NSCameraUsageDescription</key>
 	<string>Haven uses the camera only to scan a QR code when you add someone to a circle. No photos or video are taken or stored.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>Haven reads a photo you choose to use as your profile picture. The photo is end-to-end encrypted on your device before it is shared with your circles. Haven never uploads it to any server.</string>
+	<string>Haven reads a photo you choose to use as your profile picture. It is published to your public Nostr profile and uploaded to a public image host, so anyone can see it. Choose one you are happy to make public.</string>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<!-- M7-D: BGAppRefreshTask identifier for the receive-only catch-up floor.

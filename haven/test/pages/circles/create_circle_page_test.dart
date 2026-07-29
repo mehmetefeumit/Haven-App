@@ -97,7 +97,7 @@ void main() {
 
       // Should show warning icon and "No Haven account found"
       expect(find.byIcon(LucideIcons.triangleAlert), findsOneWidget);
-      expect(find.text('No Haven account found'), findsOneWidget);
+      expect(find.text("Couldn't find a Haven account for this ID"), findsOneWidget);
 
       // No retry button for permanent failures
       expect(find.byIcon(LucideIcons.refreshCw), findsNothing);
@@ -271,7 +271,7 @@ void main() {
         // Distinct icon/status from both "valid" and "invalid" (no-account).
         expect(find.byIcon(LucideIcons.circleCheck), findsNothing);
         expect(find.text('Ready to invite'), findsNothing);
-        expect(find.text('No Haven account found'), findsNothing);
+        expect(find.text("Couldn't find a Haven account for this ID"), findsNothing);
         expect(find.text('Needs to update Haven'), findsOneWidget);
 
         final button = tester.widget<FilledButton>(

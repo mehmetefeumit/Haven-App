@@ -118,7 +118,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get onboardingValueProp2Body =>
-      'Haven hat keinen zentralen Server. Deine verschlüsselten Nachrichten laufen über ein dezentrales Netzwerk aus Relays, die du selbst wählen kannst, sodass keine einzelne Stelle es abschalten kann.';
+      'Haven hat keinen zentralen Server. Deine verschlüsselten Nachrichten laufen über unabhängige Server, Relays genannt, und du wählst selbst, welche du nutzt. Kein einzelnes Unternehmen und keine Regierung kann das Netzwerk abschalten.';
 
   @override
   String get onboardingValueProp3Title => 'Kein Konto erforderlich';
@@ -133,7 +133,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get onboardingValueProp2Summary =>
-      'Kein zentraler Server – läuft über ein Relay-Netzwerk deiner Wahl.';
+      'Kein zentraler Server. Es läuft über ein Relay-Netzwerk deiner Wahl.';
 
   @override
   String get onboardingValueProp3Summary =>
@@ -144,7 +144,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get onboardingCreateIdentityBody =>
-      'Haven erstellt eine private Identität, die nur auf diesem Telefon lebt. Daran erkennen dich deine Kreise.';
+      'Haven erstellt deine Schlüssel auf diesem Handy. Der geheime verlässt es nie.';
 
   @override
   String get onboardingCreateIdentityWarning =>
@@ -267,14 +267,14 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get relaySettingsInboxSubtitle =>
-      'kind 10050, wo Einladungen dich erreichen';
+      'Wo Einladungen dich erreichen (kind 10050)';
 
   @override
   String get relaySettingsKeyPackageTitle => 'Meine KeyPackage-Relays';
 
   @override
   String get relaySettingsKeyPackageSubtitle =>
-      'kind 10002, wo Eingeladene deine Verschlüsselungsschlüssel finden';
+      'Wo Eingeladene deine Schlüssel finden und dein öffentliches Profil veröffentlicht wird (kind 10002)';
 
   @override
   String get relaySettingsLoadRelaysError =>
@@ -376,7 +376,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'Wenn das Teilen im Hintergrund aktiviert ist, sehen deine Kreise deinen Live-Standort weiterhin, selbst wenn Haven geschlossen ist.';
+      'Haven teilt deinen Standort mit deinen Kreisen, sobald die App geöffnet ist. Schaltest du das hier ein, sehen deine Kreise ihn auch weiter, während Haven im Hintergrund läuft; beendet das System Haven, laufen die Aktualisierungen wieder an, sobald du dich bewegst oder das System die App das nächste Mal aufweckt.';
 
   @override
   String get locationSettingsToggleTitle => 'Im Hintergrund teilen';
@@ -504,7 +504,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get privacyHubSummary =>
-      'Haven teilt deinen Standort nur mit den kleinen Gruppen, die du auswählst, und verschlüsselt ihn auf deinem Handy, bevor er es verlässt. Es gibt kein Firmenkonto und keinen Haven-Server. Die folgenden Seiten erklären in einfachen Worten, wie das funktioniert – und sagen ehrlich, wovor es nicht schützt.';
+      'Haven teilt deinen Standort nur mit kleinen Gruppen deiner Wahl, den sogenannten Kreisen, und verschlüsselt ihn auf deinem Handy, bevor er es verlässt. Es gibt keine Anmeldung und keinen Haven-Server. Öffentlich ist nur eines: der Anzeigename und das Foto, die du festlegst. Die folgenden Seiten erklären das und alles Weitere in einfachen Worten.';
 
   @override
   String get privacyGroupBasicsHeading => 'Die Grundlagen';
@@ -542,11 +542,11 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get privacyWhatHavenIsNoServers =>
-      'Haven betreibt auch keine eigenen Server. Deine verschlüsselten Standortmeldungen laufen über unabhängige Server – Relays genannt –, die andere Menschen betreiben. Havens Entwickler können deinen Standort nicht sehen und sammeln nichts darüber, wie du die App nutzt.';
+      'Haven betreibt auch keine eigenen Server. Deine verschlüsselten Standortmeldungen laufen über unabhängige Server, Relays genannt, die andere Menschen betreiben. Havens Entwickler können deinen Standort nicht sehen und haben keinerlei Tracking in die App eingebaut. Sie sehen nur eines: wie stark die Karte insgesamt genutzt wird, denn die Kartenkacheln werden mit einem einzigen gemeinsamen Schlüssel abgerufen. Wer sie abgerufen hat, bleibt ihnen verborgen.';
 
   @override
   String get privacyWhatHavenIsMeansForYou =>
-      'Es gibt niemanden, den man nach deinen Daten fragen könnte, weil niemand sie hat. Die Kehrseite davon ist, dass auch niemand dein Konto wiederherstellen kann. Unter „Deine zwei Schlüssel“ steht, was du sichern solltest.';
+      'Niemand kann gezwungen werden, deine Daten herauszugeben, weil niemand sie hat. Der Preis dafür ist, dass auch niemand deine Identität für dich wiederherstellen kann. Unter „Deine zwei Schlüssel“ steht, was du sichern solltest.';
 
   @override
   String get privacyWhatHavenIsDetailNoTelemetry =>
@@ -570,7 +570,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get privacyYourKeysSecretStaysHere =>
-      'Dein geheimer Schlüssel bleibt nur auf diesem Handy, in einem Speicher, den das Betriebssystem schützt. Haven sendet ihn nirgendwohin – nicht an ein Relay und nicht an uns.';
+      'Dein geheimer Schlüssel bleibt nur auf diesem Handy, in einem Speicher, den das Betriebssystem schützt. Haven sendet ihn nirgendwohin: nicht an einen Server, nicht an uns.';
 
   @override
   String get privacyYourKeysPublicIsSafe =>
@@ -578,7 +578,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get privacyYourKeysMeansForYou =>
-      'Sichere deinen geheimen Schlüssel, wenn du diese Identität behalten willst. Du kannst ihn unter Einstellungen → Identität → Erweitert ansehen. Verlierst du das Handy ohne Sicherung, ist die Identität endgültig verloren, und niemand kann sie zurückholen.';
+      'Willst du diese Identität behalten, sichere sie. Gehe zu Einstellungen → Identität → Erweitert, tippe auf „Geheimen Schlüssel anzeigen“ und speichere ihn an einem sicheren Ort, zum Beispiel in einem Passwortmanager. Ohne diese Sicherung ist die Identität endgültig verloren, wenn du das Handy verlierst.';
 
   @override
   String get privacyYourKeysNeverShareSecret =>
@@ -586,7 +586,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get privacyYourKeysDetailFormats =>
-      'Das Paar ist ein secp256k1-Schlüssel und wird in den üblichen Nostr-Formaten angezeigt: npub1… für den öffentlichen und nsec1… für den geheimen Schlüssel. Signiert wird innerhalb der App, und die geheimen Bytes werden nach jeder Nutzung aus dem Speicher gelöscht.';
+      'Beide Schlüssel sind secp256k1 und werden in den üblichen Nostr-Formaten angezeigt: npub1… für den öffentlichen und nsec1… für den geheimen Schlüssel. Signiert wird innerhalb der App, und der geheime Schlüssel wird in den Teilen, die ihn direkt verarbeiten, gleich nach der Nutzung gelöscht.';
 
   @override
   String get privacyYourKeysDetailSeparation =>
@@ -602,11 +602,11 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get privacyPublicProfileIsPublic =>
-      'Der Anzeigename und das Foto, die du festlegst, werden im gesamten Nostr-Netzwerk veröffentlicht. Jeder kann sie nachschlagen, nicht nur die Menschen in deinen Kreisen.';
+      'Der Anzeigename und das Foto, die du festlegst, werden auf Nostr veröffentlicht, dem offenen öffentlichen Netzwerk, auf dem Haven läuft. Jeder kann sie nachschlagen, nicht nur die Menschen in deinen Kreisen.';
 
   @override
   String get privacyPublicProfileOnSave =>
-      'Das geschieht in dem Moment, in dem du sie speicherst. Es gibt keine Einstellung, die sie privat hält, und keine Möglichkeit, einen Namen nur mit deinen Kreisen zu teilen.';
+      'Dein Name und dein Foto werden in dem Moment öffentlich, in dem du sie speicherst. Es gibt keine Einstellung, die sie privat hält, und keine Möglichkeit, einen Namen nur mit deinen Kreisen zu teilen.';
 
   @override
   String get privacyPublicProfilePseudonym =>
@@ -618,11 +618,11 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get privacyPublicProfileRemovalIsNotDeletion =>
-      'Dein Foto später zu entfernen macht die Veröffentlichung nicht rückgängig. Haven ersetzt dein Profil durch ein leeres, aber die Bilddatei bleibt auf dem Server liegen, der sie bereitstellt, und jede bereits heruntergeladene Kopie bleibt im Umlauf. Betrachte alles, was du veröffentlichst, als dauerhaft.';
+      'Dein Foto später zu entfernen, löscht nicht die Kopie auf dem Server. Haven ersetzt dein Profil durch ein leeres. Die Bilddatei bleibt dort liegen, wo sie gehostet wird, und jede bereits heruntergeladene Kopie bleibt im Umlauf. Betrachte alles, was du veröffentlichst, als dauerhaft.';
 
   @override
   String get privacyPublicProfileDetailKindZero =>
-      'Das Profil ist ein Nostr-Ereignis vom Typ „kind 0“, das mit deinem Identitätsschlüssel signiert wird. Fotos werden zu einem Blossom-Host hochgeladen – blossom.primal.net, sofern du das nicht änderst –, der das Bild, deinen öffentlichen Schlüssel und deine IP-Adresse sieht.';
+      'Das Profil ist ein Nostr-Ereignis vom Typ „kind 0“, das mit deinem Identitätsschlüssel signiert wird. Fotos werden zu einem öffentlichen Bild-Host hochgeladen, blossom.primal.net, der das Bild, deinen öffentlichen Schlüssel und deine Netzwerkadresse sieht. Einen anderen Host kannst du in Haven bisher nicht wählen.';
 
   @override
   String get privacyPublicProfileDetailExifStripped =>
@@ -646,7 +646,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get privacyRelaysWhyMany =>
-      'Mehrere Relays zu nutzen heißt, dass dich keines allein vom Netz trennen kann. Geht eines offline, arbeiten die anderen weiter. Du wählst selbst, welche Relays du nutzt, und kannst sie jederzeit ändern.';
+      'Haven nutzt mehrere Relays, damit dich keines allein vom Netz trennen kann. Geht eines offline, arbeiten die übrigen weiter. Du wählst selbst die Relays, über die dich Einladungen erreichen; die Relays eines Kreises stehen fest, sobald er erstellt ist.';
 
   @override
   String get privacyRelaysTwoLists =>
@@ -654,7 +654,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get privacyRelaysMeansForYou =>
-      'Hier kannst du nichts Riskantes falsch machen: Ein Relay sieht immer nur verschlüsselte Daten. Du brauchst aber mindestens ein erreichbares Relay – sonst kann dich niemand einladen und deine Kreise verstummen.';
+      'Ein Relay sieht deinen Standort nie, denn er wird verschlüsselt, bevor er dein Handy verlässt. Es sieht aber, was öffentlich sein muss, damit andere dich erreichen können: deinen Namen und dein Foto, die Schlüssel, die andere zum Einladen brauchen, und deine Relay-Liste selbst. Haven bringt von Anfang an funktionierende Relays mit, du musst also nichts ändern.';
 
   @override
   String get privacyRelaysDetailIndexers =>
@@ -662,18 +662,18 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get privacyRelaysDetailKeyListIsPublic =>
-      'Deine Liste der KeyPackage-Relays wird selbst im Netzwerk veröffentlicht, signiert mit deinem Identitätsschlüssel, damit andere sie finden können. Fügst du dieser Liste ein privates Relay hinzu, wird seine Adresse öffentlich und mit dir verknüpft. Ein Relay, das nur in der eigenen Liste eines Kreises steht, wird nicht auf diese Weise bekannt gemacht.';
+      'Deine Liste der KeyPackage-Relays wird mit deinem Identitätsschlüssel signiert und auf den Relays veröffentlicht, die bereits darin stehen. Fügst du dort ein privates Relay hinzu, wird seine Adresse öffentlich und mit dir verknüpft. Es gibt keine Möglichkeit, ein Relay auf dieser Liste privat zu halten.';
 
   @override
   String get privacyEncryptionTitle => 'Wie die Verschlüsselung funktioniert';
 
   @override
   String get privacyEncryptionSubtitle =>
-      'Schlüssel pro Kreis, und was sich bei Beitritt oder Austritt ändert';
+      'Ein Schlüssel pro Kreis, und was sich bei Beitritt oder Austritt ändert';
 
   @override
   String get privacyEncryptionPerCircle =>
-      'Dein Standort wird auf deinem Handy verschlüsselt, bevor er es verlässt – mit einem offenen Standard namens MLS. Jeder Kreis ist seine eigene verschlüsselte Gruppe mit eigenen Schlüsseln. Niemand außerhalb eines Kreises kann lesen, was darin gesendet wird: kein Relay, nicht Haven und kein anderer Kreis, dem du angehörst.';
+      'Dein Standort wird auf deinem Handy verschlüsselt, bevor er es verlässt, und zwar mit einem offenen Standard namens MLS. Jeder Kreis ist seine eigene verschlüsselte Gruppe mit eigenen Schlüsseln. Niemand außerhalb eines Kreises kann lesen, was darin gesendet wird: kein Relay, nicht Haven und kein anderer Kreis, dem du angehörst.';
 
   @override
   String get privacyEncryptionWhenSomeoneJoins =>
@@ -681,15 +681,15 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get privacyEncryptionWhenSomeoneLeaves =>
-      'Verlässt jemand den Kreis oder wird entfernt, wechselt der Kreis auf einen weiteren neuen Schlüssel. Nach höchstens wenigen Minuten kann diese Person nichts Neues mehr lesen.';
+      'Verlässt jemand einen Kreis, wechselt dieser auf einen weiteren neuen Schlüssel. Sobald der Rest des Kreises nachgezogen ist, kann diese Person nichts Neues mehr lesen. Das dauert meist wenige Minuten und länger, wenn jemand zu diesem Zeitpunkt offline war.';
 
   @override
   String get privacyEncryptionKeysChangeOnMembership =>
-      'Die Schlüssel wechseln, wenn sich die Mitgliederliste ändert – nicht nach einem Zeitplan. Zwischen diesen Wechseln deckt ein einziger Schlüssel alles ab, was gesendet wird. Entfernst du also jemanden aus einem lange unveränderten Kreis, kann diese Person weiterhin alle Nachrichten öffnen, die sie sich als Mitglied gespeichert hat – auch Wochen alte. Nichts, was nach ihrem Ausscheiden gesendet wird, kann sie öffnen.';
+      'Einen Kreis zu verlassen, nimmt nicht zurück, was seine Mitglieder bereits gespeichert haben. Haven wechselt die Schlüssel nur, wenn jemand beitritt oder geht, nie nach einem Zeitplan. Ein einziger Schlüssel kann daher Wochen von Nachrichten abdecken, und alles, was ein Mitglied in dieser Zeit gespeichert hat, bleibt für diese Person lesbar. Was nach ihrem Austritt gesendet wird, kann sie trotzdem nicht öffnen.';
 
   @override
   String get privacyEncryptionMeansForYou =>
-      'Die Verschlüsselung schützt dich vor allen außerhalb deiner Kreise. Sie schützt dich nicht vor jemandem, der einmal drin war. Willst du mit einer Person einen klaren Schlussstrich ziehen, ist ein frischer Kreis sicherer, als sie aus einem alten zu entfernen.';
+      'Die Verschlüsselung schützt dich vor allen außerhalb deiner Kreise. Sie schützt dich nicht vor jemandem, der einmal drin war. Willst du mit einer bestimmten Person nicht mehr teilen, verlasse den Kreis, über den du mit ihr teilst, und erstelle einen neuen ohne sie.';
 
   @override
   String get privacyEncryptionDetailMls =>
@@ -697,7 +697,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get privacyEncryptionDetailEpochs =>
-      'Der Zeitraum, in dem ein Schlüssel gilt, heißt Epoche. Dein Gerät behält nur so viel Schlüsselmaterial, wie es braucht, um noch nicht angekommene Nachrichten aus den letzten Epochen zu entschlüsseln, und verwirft es dann – deshalb kann Haven deine älteren Nachrichten nicht einmal im Prinzip wiederherstellen.';
+      'Jeder Schlüsselzeitraum heißt Epoche, und ein Kreis wechselt nur dann in eine neue, wenn sich seine Mitglieder ändern. Dein Gerät behält die Schlüssel der aktuellen und einiger weniger vorheriger Epochen, gerade genug für Nachrichten, die noch eintreffen, und verwirft den Rest. Ein Kreis, dessen Mitglieder sich seit Monaten nicht geändert haben, ist noch in der Epoche, mit der er begonnen hat.';
 
   @override
   String get privacyWhatOthersSeeTitle =>
@@ -717,7 +717,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeCannotPause =>
-      'Solange Haven geöffnet ist und du zu einem Kreis gehörst, wird dein Standort alle paar Minuten von allein gesendet. Pausieren ist nicht möglich. Der einzige Schalter legt fest, ob das Teilen weiterläuft, sobald du die App verlässt.';
+      'Solange Haven geöffnet ist und du zu einem Kreis gehörst, wird dein Standort alle paar Minuten von allein gesendet. Einen Pausenknopf gibt es nicht: Der Schalter auf der Seite „Standort“ legt nur fest, ob das weiterläuft, nachdem du die App geschlossen hast. Willst du mit einem Kreis nicht mehr teilen, öffne ihn und wähle „Kreis verlassen“.';
 
   @override
   String get privacyWhatOthersSeeMembersLearnKey =>
@@ -725,22 +725,22 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeCoMemberIp =>
-      'Das Profilfoto eines Mitglieds wird von einem Server geladen, den diese Person selbst wählt. Beim Laden erfährt der Betreiber dieses Servers deine Netzwerkadresse – und damit ungefähr, wo auf der Welt du bist. Das passiert von allein, ohne dass du irgendwo tippst.';
+      'Dein Handy lädt das Profilfoto jedes Mitglieds von einem Server, den dieses Mitglied gewählt hat, ohne dass du irgendwo tippst. Dieser Server sieht dabei deine Netzwerkadresse und verortet dich damit ungefähr auf der Karte. Ein VPN verbirgt das; sonst nichts.';
 
   @override
   String get privacyWhatOthersSeeRelaysHeading => 'Die Relay-Betreiber';
 
   @override
   String get privacyWhatOthersSeeRelaysCannot =>
-      'Relay-Betreiber können deinen Standort, deine Nachrichten, den Namen deines Kreises und dessen Mitgliederliste nicht lesen. Jede Nachricht erreicht sie von einer frischen, einmalig genutzten Absenderadresse – sie können also nicht erkennen, welches Mitglied sie gesendet hat.';
+      'Relays, die unabhängigen Server, über die deine Aktualisierungen laufen, können weder deinen Standort noch deine Nachrichten, den Namen deines Kreises oder dessen Mitgliederliste lesen. Deine Standortmeldungen tragen statt deines öffentlichen Schlüssels eine frische, nur einmal genutzte Absenderadresse. Dein Profil, Einladungen und Relay-Listen tragen ihn dagegen sehr wohl. Ein Relay, das beides abwickelt, kann daher oft erkennen, dass du zu einem Kreis gehörst, ohne etwas von den Inhalten zu lesen.';
 
   @override
   String get privacyWhatOthersSeeRelaysCan =>
-      'Die Betreiber sehen aber deine Netzwerkadresse, wann du online bist und wie groß und wie häufig dein Datenverkehr ist. Jeder Kreis trägt ein zufälliges Kennzeichen, sodass ein Relay die Nachrichten eines Kreises gruppieren und abschätzen kann, wie viele Menschen darin sind – ohne zu erfahren, wer sie sind.';
+      'Sie sehen aber deine Netzwerkadresse, wann du online bist und wie groß und wie häufig dein Datenverkehr ist. Jeder Kreis trägt ein zufälliges Kennzeichen. Über dieses Kennzeichen kann ein Relay die Nachrichten eines Kreises gruppieren und abschätzen, wie viele Menschen darin sind, ohne zu erfahren, wer sie sind.';
 
   @override
   String get privacyWhatOthersSeeMeansForYou =>
-      'Behandle einen Kreis wie Menschen, denen du deine Wohnadresse geben würdest. Gegen Relays und Außenstehende hält die Verschlüsselung, und ein VPN schließt die Lücke bei der Netzwerkadresse. Gegen ein Mitglied, das einen Screenshot speichert, hilft nichts.';
+      'Tritt einem Kreis nur mit Menschen bei, denen du deine Wohnadresse geben würdest. Gegen Relays und Außenstehende hält die Verschlüsselung, und ein VPN verbirgt die Adresse, von der aus sich dein Handy verbindet. Vor einem Mitglied, das einen Screenshot macht, schützt dich nichts.';
 
   @override
   String get privacyWhatOthersSeeDetailTag =>
@@ -751,11 +751,11 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get relaySettingsBackendCaption =>
-      'Haven hat keinen eigenen Server. Deine verschlüsselten Aktualisierungen laufen über unabhängige Server, die man Relays nennt – sie sehen weder deinen Standort noch, wer in deinen Kreisen ist.';
+      'Haven hat keinen eigenen Server. Deine verschlüsselten Aktualisierungen laufen über unabhängige Server, Relays genannt, die deinen Standort und deine Nachrichten nicht lesen können.';
 
   @override
   String get privacyWhatOthersSeeScreenshots =>
-      'Ob Screenshots möglich sind, entscheidet die Plattform – und die beiden Plattformen unterscheiden sich hier. Unter Android blockiert Haven Screenshots und Bildschirmaufnahmen in der gesamten App. Auf dem iPhone kann Haven das nicht: Es macht nur die Vorschau im App-Umschalter unscharf, aber ein Mitglied kann trotzdem aufnehmen, was auf dem Bildschirm zu sehen ist.';
+      'Das hängt von deinem Handy ab. Unter Android blockiert Haven Screenshots und Bildschirmaufnahmen in der gesamten App. Auf dem iPhone kann Haven das nicht: Es macht die Vorschau im App-Umschalter unscharf, aber ein Mitglied kann trotzdem aufnehmen, was auf dem Bildschirm zu sehen ist.';
 
   @override
   String get privacyWhatOthersSeeDetailExpiry =>
@@ -774,22 +774,22 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get privacyInferenceWhatIsMetadata =>
-      'Die Verschlüsselung verbirgt, was du sendest. Sie kann nicht verbergen, dass du überhaupt etwas gesendet hast. Das Muster um eine Nachricht herum – wann sie hinausging, wie groß sie war, mit welchen Servern du verbunden warst – nennt man Metadaten, und es bleibt sichtbar, auch wenn der Inhalt es nicht ist.';
+      'Die Verschlüsselung verbirgt, was du sendest. Sie kann nicht verbergen, dass du überhaupt etwas gesendet hast. Diese zurückbleibende Spur nennt man Metadaten: wann eine Nachricht hinausging, wie groß sie war und mit welchen Servern du verbunden warst. Sie bleibt sichtbar, auch wenn der Inhalt es nicht ist.';
 
   @override
   String get privacyInferenceActivityPattern =>
-      'Aus diesem Muster kann ein Relay, das du nutzt, ungefähr ablesen, wann du aktiv bist und wie oft. Haven sendet außerdem eine zusätzliche Aktualisierung, sobald du dich mehr als etwa hundert Meter bewegst. Eine ausreichend lange Aufzeichnung kann also andeuten, ob du unterwegs warst oder an einem Ort geblieben bist – ohne je zu zeigen, wo.';
+      'Aus diesem Muster kann ein Relay, das du nutzt, ungefähr ablesen, wann du aktiv bist und wie oft. Haven sendet außerdem eine zusätzliche Aktualisierung, sobald du dich etwa hundert Meter bewegst. Über Stunden hinweg kann das einem Relay zeigen, ob du unterwegs warst oder an einem Ort geblieben bist. Wo das war, zeigt es nie.';
 
   @override
   String get privacyInferencePresence =>
-      'Solange Haven läuft, hält es eine offene Verbindung zu deinen Relays. Sie sehen dadurch auch, dass du online bist, und welche Kreise du beobachtest. Das ist der Preis dafür, dass Aktualisierungen in Sekunden statt in Minuten ankommen.';
+      'Solange Haven läuft, hält es eine offene Verbindung zu deinen Relays. Sie sehen dadurch, dass du online bist, und welchen Kreis-Kennzeichen du folgst, nie aber den Namen eines Kreises oder wer darin ist. Das ist der Preis dafür, dass Aktualisierungen in Sekunden statt in Minuten ankommen.';
 
   @override
   String get privacyInferenceIpHeading => 'Deine Netzwerkadresse';
 
   @override
   String get privacyInferenceIpAddress =>
-      'Jeder Server, mit dem Haven spricht, sieht die Adresse, von der aus sich dein Handy verbindet: deine Relays, der Kartenanbieter und der Server, auf dem das Profilfoto eines Mitglieds liegt. Dein Internetanbieter sieht, welche dieser Server du erreicht hast und wann. Haven verbirgt von sich aus weder das eine noch das andere.';
+      'Jeder Server, mit dem Haven spricht, sieht die Adresse, von der aus sich dein Handy verbindet, also seine IP-Adresse: deine Relays, der Kartenanbieter und wer auch immer das Profilfoto eines Mitglieds hostet. Dein Internetanbieter sieht, welche dieser Server du erreicht hast und wann. Haven verbirgt von sich aus weder das eine noch das andere.';
 
   @override
   String get privacyInferenceVpnHeading => 'Ob ein VPN sinnvoll ist';
@@ -804,7 +804,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get privacyInferenceMeansForYou =>
-      'Wenn du befürchtest, dass ein Netzbetreiber dich auf einer Karte verortet – und nicht ein Mensch –, ist ein VPN das Wirksamste, was du hinzufügen kannst. Sind es die Menschen in deinen Kreisen, die dir Sorgen machen, hilft es überhaupt nicht.';
+      'Sorgst du dich davor, dass Relays, dein Internetanbieter oder die Kartenserver dich auf einer Karte verorten? Dann ist ein VPN das Wirksamste, was du hinzufügen kannst. Sorgst du dich vor den Menschen in deinen Kreisen? Dann hilft es überhaupt nicht.';
 
   @override
   String get privacyInferenceDetailJitter =>
@@ -812,7 +812,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get privacyInferenceDetailOutOfScope =>
-      'Manches liegt einfach außerhalb dessen, was Haven leisten kann. Ein Beobachter, der viele Relays gleichzeitig überwachen kann, oder dein eigenes Handy, sobald jemand anders es kontrolliert – dagegen hilft keine Gestaltungsentscheidung in dieser App.';
+      'Zwei Dinge liegen jenseits jeder Gestaltungsentscheidung hier: ein Beobachter, der viele Relays gleichzeitig überwachen kann, und dein eigenes Handy, sobald jemand anders es kontrolliert.';
 
   @override
   String get commonClearAll => 'Alle löschen';
@@ -908,7 +908,8 @@ class AppLocalizationsDe extends AppLocalizations {
   String get createCircleNoIdInQr => 'Keine gültige ID im QR-Code gefunden';
 
   @override
-  String get createCircleNoAccountFound => 'Kein Haven-Konto gefunden';
+  String get createCircleNoAccountFound =>
+      'Für diese ID wurde kein Haven-Konto gefunden';
 
   @override
   String get createCircleCouldNotVerify =>
@@ -950,7 +951,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get nameCircleSharingInfo =>
-      'Alle in diesem Kreis können den Standort und Anzeigenamen der anderen sehen. Dein Anzeigename ist der, den du unter Einstellungen → Identität festlegst. Dieser Kreis bleibt von allen anderen, in denen du bist, getrennt, sodass seine Mitglieder deine anderen Kreise oder deren Mitglieder nicht sehen können.';
+      'Alle in diesem Kreis können den Standort sowie den öffentlichen Namen und das Foto der anderen sehen. Dein Name und dein Foto sind im Nostr-Netzwerk öffentlich und nicht auf diesen Kreis beschränkt. Dieser Kreis bleibt von allen anderen, in denen du bist, getrennt, sodass seine Mitglieder deine anderen Kreise oder deren Mitglieder nicht sehen können.';
 
   @override
   String get nameCircleCreateCta => 'Kreis erstellen';
@@ -1008,7 +1009,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get addMemberInfo =>
-      'Neue Mitglieder können die verschlüsselten Standorte dieses Kreises sehen, sobald sie die Einladung annehmen.';
+      'Sobald die Person annimmt, sieht sie ab diesem Zeitpunkt die Standorte aller, nie aber etwas, das vor ihrem Beitritt gesendet wurde. Sie sieht außerdem die öffentlichen Schlüssel aller, die bereits in diesem Kreis sind.';
 
   @override
   String get addMemberAlreadyInCircle => 'Bereits in diesem Kreis';
@@ -1108,7 +1109,7 @@ class AppLocalizationsDe extends AppLocalizations {
   String get pendingMemberRetryTooltip => 'Überprüfung wiederholen';
 
   @override
-  String get pendingMemberRemoveTooltip => 'Mitglied entfernen';
+  String get pendingMemberRemoveTooltip => 'Aus Liste entfernen';
 
   @override
   String get pendingMemberValidating => 'Wird überprüft';
@@ -1290,7 +1291,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get circleDetailsRelaysNote =>
-      'Diese Relays wurden bei der Erstellung dieses Kreises ausgewählt und sind noch nicht bearbeitbar. Sie sind unabhängig von deinen persönlichen Relay-Einstellungen.';
+      'Diese Relays wurden bei der Erstellung dieses Kreises aus deinen Posteingangs-Relays übernommen und lassen sich noch nicht ändern. Spätere Änderungen an deiner persönlichen Relay-Liste wirken sich nicht auf sie aus.';
 
   @override
   String get circleDetailsAddMember => 'Mitglied hinzufügen';
@@ -1303,7 +1304,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get leaveCircleDialogBody =>
-      'Möchtest du diesen Kreis wirklich verlassen? Du erhältst dann keine Standortaktualisierungen seiner Mitglieder mehr. Diese Aktion kann nicht rückgängig gemacht werden.';
+      'Diesen Kreis verlassen? Du sendest seinen Mitgliedern dann keinen Standort mehr und siehst ihren auch nicht mehr. Der zuletzt gesendete Standort bleibt bis zu einem Tag lang auf ihren Handys. Das lässt sich nicht rückgängig machen: Für eine Rückkehr bräuchtest du eine neue Einladung.';
 
   @override
   String get leaveCircleConfirm => 'Verlassen';
@@ -1330,7 +1331,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get legacyCircleBannerBody =>
-      'Havens Verschlüsselungs-Engine wurde aktualisiert, daher kann dieser Kreis nicht mehr verwendet werden. Erstelle ihn neu, um den Standort weiterhin mit denselben Personen zu teilen – du musst sie erneut einladen.';
+      'Havens Verschlüsselungs-Engine wurde aktualisiert, daher kann dieser Kreis nicht mehr verwendet werden. Erstelle ihn neu, um den Standort weiterhin mit denselben Personen zu teilen. Du musst sie erneut einladen.';
 
   @override
   String get legacyCircleRecreateCta => 'Kreis neu erstellen';
@@ -1353,7 +1354,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get legacyCutoverExplainerIdentityUnchanged =>
-      'Deine Identität und dein öffentliches Profil sind unverändert – dafür musst du nichts tun.';
+      'Deine Identität und dein öffentliches Profil sind unverändert. Dafür musst du nichts tun.';
 
   @override
   String get legacyCutoverExplainerCirclesNeedRecreation =>
@@ -1364,7 +1365,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get relaySettingsLegacyRetractionPending =>
-      'Haven räumt noch einige Daten vom letzten Sicherheitsupdate auf. Das wird automatisch abgeschlossen, sobald du wieder online bist.';
+      'Haven bittet die Relays noch, einige alte Daten aus dem jüngsten Sicherheitsupdate zu verwerfen.';
 
   @override
   String get circlesPanelCollapsedAnnouncement => 'Kreis-Panel eingeklappt';
@@ -1578,7 +1579,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get identityAdvancedDeleteBody =>
-      'Dadurch wird deine Identität dauerhaft gelöscht. Stelle sicher, dass du deinen geheimen Schlüssel gesichert hast, falls du sie wiederherstellen möchtest.';
+      'Dadurch werden deine Identität und alle Kreisdaten von diesem Handy gelöscht. Alles, was bereits darunter veröffentlicht wurde, auch dein Name, dein Foto und deine Schlüssel, bleibt auf den Relays, die es haben. Stelle sicher, dass du deinen geheimen Schlüssel gesichert hast, falls du sie wiederherstellen möchtest.';
 
   @override
   String get identityAdvancedDeleteConfirm => 'Löschen';
@@ -1656,7 +1657,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get qrCodeExplainerUsername =>
-      'Dein öffentlicher Schlüssel funktioniert wie ein Benutzername, der gefahrlos geteilt werden kann. Andere scannen diesen Code oder fügen deinen öffentlichen Schlüssel ein, um dich zu einem Kreis einzuladen. Durch das Teilen wird dein Standort nicht preisgegeben; er ist nur für Mitglieder der Kreise sichtbar, denen du beigetreten bist. Dein Anzeigename und dein Foto sind ohnehin schon öffentlich – das Teilen dieses Codes gibt darüber also nichts Neues preis.';
+      'Dein öffentlicher Schlüssel funktioniert wie ein Benutzername, den du gefahrlos teilen kannst. Andere scannen diesen Code oder fügen deinen öffentlichen Schlüssel ein, um dich zu einem Kreis einzuladen. Durch das Teilen wird nicht preisgegeben, wo du bist. Dein Anzeigename und dein Foto sind ohnehin schon öffentlich, hier kommt also nichts hinzu.';
 
   @override
   String get displayNameCardTitle => 'Anzeigename';
@@ -1777,7 +1778,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get photoHeaderRemoveBody =>
-      'Dadurch wird dein Foto aus deinem öffentlichen Profil entfernt.';
+      'Dadurch wird dein Foto aus deinem öffentlichen Profil entfernt. Die Bilddatei bleibt auf dem Server, der sie hostet, und bereits heruntergeladene Kopien bleiben bei denen, die sie haben.';
 
   @override
   String get photoHeaderEditPhoto => 'Foto bearbeiten';
@@ -1796,7 +1797,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get avatarPickerPhotoUpdated =>
-      'Foto aktualisiert – in deinem öffentlichen Nostr-Profil veröffentlicht.';
+      'Foto aktualisiert. In deinem öffentlichen Nostr-Profil veröffentlicht.';
 
   @override
   String get avatarPickerPhotoRemoved => 'Foto entfernt.';

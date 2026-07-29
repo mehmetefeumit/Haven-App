@@ -116,7 +116,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get onboardingValueProp2Body =>
-      'Haven には中央サーバーがありません。暗号化されたメッセージは、あなた自身が選べる分散型のリレーのネットワークを通じて届くため、特定の組織が単独でサービスを止めることはできません。';
+      'Haven には中央サーバーがありません。暗号化されたメッセージは、「リレー」と呼ばれる独立したサーバーを経由して届き、どのリレーを使うかはあなたが選びます。特定の企業や政府が単独でこのネットワークを止めることはできません。';
 
   @override
   String get onboardingValueProp3Title => 'アカウントは不要';
@@ -140,7 +140,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get onboardingCreateIdentityBody =>
-      'Haven は、この端末の中だけに存在するプライベートな識別情報を作成します。これは、サークルのメンバーがあなたを見分けるためのものです。';
+      'Haven はこの端末の中であなたの鍵を作成します。秘密鍵がこの端末を離れることはありません。';
 
   @override
   String get onboardingCreateIdentityWarning =>
@@ -253,14 +253,14 @@ class AppLocalizationsJa extends AppLocalizations {
   String get relaySettingsInboxTitle => '受信トレイのリレー';
 
   @override
-  String get relaySettingsInboxSubtitle => 'kind 10050。招待があなたに届く経路です';
+  String get relaySettingsInboxSubtitle => '招待があなたに届く場所（kind 10050）';
 
   @override
   String get relaySettingsKeyPackageTitle => 'KeyPackage リレー';
 
   @override
   String get relaySettingsKeyPackageSubtitle =>
-      'kind 10002。招待者があなたの暗号鍵を見つける経路です';
+      'あなたを招待する人が鍵を見つけ、あなたの公開プロフィールが公開される場所（kind 10002）';
 
   @override
   String get relaySettingsLoadRelaysError => 'リレーを読み込めませんでした。';
@@ -354,7 +354,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'バックグラウンド共有がオンのとき、Haven を閉じていても、サークルのメンバーはあなたの現在地をリアルタイムで見続けられます。';
+      'Haven は、アプリを開いている間は常に、あなたの位置情報をサークルに共有します。これをオンにすると、Haven がバックグラウンドにある間もサークルのメンバーは位置情報を見続けられます。システムが Haven を終了させた場合は、あなたが移動したとき、またはシステムが次にアプリを起動したときに更新が再開されます。';
 
   @override
   String get locationSettingsToggleTitle => 'バックグラウンドで共有';
@@ -473,7 +473,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get privacyHubSummary =>
-      'Haven は、あなたが選んだ少人数のグループにだけ位置情報を共有し、端末を離れる前にこの端末上で暗号化します。企業のアカウントも、Haven のサーバーもありません。以下のページでは、その仕組みをやさしい言葉で説明し、守れないことについても率直にお伝えします。';
+      'Haven は、あなたが選んだ少人数のグループ、つまりサークルにだけ位置情報を共有し、端末を離れる前にこの端末上で暗号化します。登録の手続きはなく、Haven のサーバーもありません。公開されるものは、あなたが設定した表示名と写真だけです。以下のページでは、その点も含め、すべてをやさしい言葉で説明します。';
 
   @override
   String get privacyGroupBasicsHeading => '基本';
@@ -508,11 +508,11 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get privacyWhatHavenIsNoServers =>
-      'Haven 自身もサーバーを運用していません。暗号化された位置情報の更新は、ほかの人たちが運用する独立したサーバー、いわゆる「リレー」を経由します。Haven の開発者があなたの位置情報を見ることはできず、アプリの使い方についても何も収集しません。';
+      'Haven 自身もサーバーを運用していません。暗号化された位置情報の更新は、ほかの人たちが運用する独立したサーバー、いわゆる「リレー」を経由します。Haven の開発者があなたの位置情報を見ることはできず、アプリに追跡の仕組みも入れていません。開発者に分かるのは、地図が全体でどれだけ使われたかという合計だけです。地図のタイルは全員で共有する1つのキーで取得されるため、誰が取得したのかは分かりません。';
 
   @override
   String get privacyWhatHavenIsMeansForYou =>
-      'あなたのデータを持っている人がいないので、開示を求める相手もいません。その裏返しとして、あなたのアカウントを復元できる人もいません。何をバックアップすればよいかは「2つの鍵」をご覧ください。';
+      'あなたのデータを持っている人がいないので、それを渡すよう強制できる相手もいません。その代償として、あなたの識別情報を復元してくれる人もいません。何をバックアップすればよいかは「2つの鍵」をご覧ください。';
 
   @override
   String get privacyWhatHavenIsDetailNoTelemetry =>
@@ -534,7 +534,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get privacyYourKeysSecretStaysHere =>
-      '秘密鍵はこの端末の中だけに、OS が保護する領域に保管されます。Haven がそれをどこかに送ることはありません。リレーにも、私たちにも送りません。';
+      '秘密鍵はこの端末の中だけに、OS が保護する領域に保管されます。Haven がそれをどこかに送ることはありません: どのサーバーにも、私たちにも送りません。';
 
   @override
   String get privacyYourKeysPublicIsSafe =>
@@ -542,7 +542,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get privacyYourKeysMeansForYou =>
-      'この識別情報を持ち続けたい場合は、秘密鍵をバックアップしてください。設定 → 識別情報 → 詳細設定 で確認できます。バックアップのないまま端末を失うと、その識別情報は永久に失われ、誰も取り戻すことはできません。';
+      'この識別情報を持ち続けたい場合は、バックアップしてください。設定 → 識別情報 → 詳細設定 と進み、「秘密鍵を表示」をタップして、パスワードマネージャーなど安全な場所に保存します。そのバックアップがないまま端末を失うと、その識別情報は永久に失われます。';
 
   @override
   String get privacyYourKeysNeverShareSecret =>
@@ -550,7 +550,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get privacyYourKeysDetailFormats =>
-      'この鍵の組は secp256k1 の鍵で、標準的な Nostr の形式で表示されます。公開鍵は npub1…、秘密鍵は nsec1… です。署名はアプリの中で行われ、秘密の値は使用ごとにメモリから消去されます。';
+      'どちらの鍵も secp256k1 で、標準的な Nostr の形式で表示されます: 公開鍵は npub1…、秘密鍵は nsec1… です。署名はアプリの中で行われ、秘密の値は、それを直接扱う部分から使用後ただちに消去されます。';
 
   @override
   String get privacyYourKeysDetailSeparation =>
@@ -564,11 +564,11 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get privacyPublicProfileIsPublic =>
-      '設定した表示名と写真は、より広い Nostr ネットワークに公開されます。あなたのサークルのメンバーだけでなく、誰でも調べることができます。';
+      '設定した表示名と写真は、Haven が動作している開かれた公開ネットワーク、Nostr に公開されます。あなたのサークルのメンバーだけでなく、誰でも調べることができます。';
 
   @override
   String get privacyPublicProfileOnSave =>
-      'これは保存した時点で起こります。非公開のままにする設定はなく、名前をサークルの中だけで共有する方法もありません。';
+      'あなたの名前と写真は、保存した時点で公開されます。非公開のままにする設定はなく、名前をサークルの中だけで共有する方法もありません。';
 
   @override
   String get privacyPublicProfilePseudonym =>
@@ -580,11 +580,11 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get privacyPublicProfileRemovalIsNotDeletion =>
-      'あとで写真を削除しても、公開が取り消されるわけではありません。Haven はプロフィールを空のものに置き換えますが、画像ファイルはそれを預かっているサーバーに残り、すでにダウンロードされたコピーも世の中に残ります。公開したものは元に戻せないと考えてください。';
+      'あとで写真を削除しても、サーバー上のコピーが消えるわけではありません。Haven はあなたのプロフィールを空のものに置き換えるだけです。画像ファイルはそれを預かっている場所に残り、すでにダウンロードされたコピーも世の中に残ります。公開したものは元に戻せないと考えてください。';
 
   @override
   String get privacyPublicProfileDetailKindZero =>
-      'プロフィールは、あなたの識別情報の鍵で署名された Nostr の「kind 0」イベントです。写真は Blossom のホストにアップロードされます。変更しなければ blossom.primal.net です。そのホストには、画像、あなたの公開鍵、IPアドレスが見えます。';
+      'プロフィールは、あなたの識別情報の鍵で署名された Nostr の「kind 0」イベントです。写真は、公開の画像ホストである blossom.primal.net にアップロードされます。そのホストには、画像、あなたの公開鍵、あなたのネットワークアドレスが見えます。Haven では、まだ別のホストを選ぶことはできません。';
 
   @override
   String get privacyPublicProfileDetailExifStripped =>
@@ -605,7 +605,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get privacyRelaysWhyMany =>
-      '複数のリレーを使うので、どれか1つがあなたを遮断することはできません。1つがオフラインになっても、ほかは動き続けます。どのリレーを使うかはあなたが選べますし、いつでも変更できます。';
+      'Haven は複数のリレーを使うので、どれか1つがあなたを遮断することはできません。1つがオフラインになっても、ほかは動き続けます。招待が届くリレーはあなたが選べますが、サークルが使うリレーは、そのサークルの作成時に決まります。';
 
   @override
   String get privacyRelaysTwoLists =>
@@ -613,7 +613,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get privacyRelaysMeansForYou =>
-      'ここには、間違えると危険になるような設定はありません。リレーに見えるのは、常に暗号化されたデータだけです。ただし、つながるリレーが少なくとも1つは必要です。そうでないと、誰もあなたを招待できず、サークルの更新も届かなくなります。';
+      'リレーがあなたの位置情報を見ることはありません。端末を離れる前に暗号化されているからです。一方で、ほかの人があなたに連絡するために公開が必要なものは見えています: あなたの名前と写真、ほかの人があなたを招待するために必要な鍵、そしてあなたのリレーのリストそのものです。Haven には最初から使えるリレーが設定されているので、あなたが変更しなければならないものはありません。';
 
   @override
   String get privacyRelaysDetailIndexers =>
@@ -621,17 +621,17 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get privacyRelaysDetailKeyListIsPublic =>
-      'KeyPackage リレーのリスト自体も、ほかの人が見つけられるように、あなたの識別情報の鍵で署名してネットワークに公開されます。そのリストに非公開のリレーを追加すると、そのアドレスは公開され、あなたと結びつきます。1つのサークルのリストの中だけで使われるリレーが、そのように公表されることはありません。';
+      'あなたの KeyPackage リレーのリストは、あなたの識別情報の鍵で署名され、すでにそのリストに入っているリレーへ公開されます。そこに非公開のリレーを追加すると、そのアドレスは公開され、あなたと結びつきます。このリストに載せたリレーを非公開のままにしておく方法はありません。';
 
   @override
   String get privacyEncryptionTitle => '暗号化の仕組み';
 
   @override
-  String get privacyEncryptionSubtitle => 'サークルごとの鍵と、人が出入りしたときに変わること';
+  String get privacyEncryptionSubtitle => 'サークルにつき鍵は1つ。人が出入りしたときに変わること';
 
   @override
   String get privacyEncryptionPerCircle =>
-      'あなたの位置情報は、MLS というオープンな標準を使って、この端末を離れる前に端末内で暗号化されます。各サークルは、それぞれ固有の鍵を持つ独立した暗号化グループです。サークルの外にいる人が、その中で送られた内容を読むことはできません。リレーも、Haven も、あなたが参加しているほかのサークルも読めません。';
+      'あなたの位置情報は、MLS というオープンな標準を使って、この端末を離れる前に端末内で暗号化されます。各サークルは、それぞれ固有の鍵を持つ独立した暗号化グループです。サークルの外にいる人が、その中で送られた内容を読むことはできません: リレーも、Haven も、あなたが参加しているほかのサークルも読めません。';
 
   @override
   String get privacyEncryptionWhenSomeoneJoins =>
@@ -639,15 +639,15 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get privacyEncryptionWhenSomeoneLeaves =>
-      '誰かが抜けたり削除されたりすると、サークルはまた別の新しい鍵に切り替わります。遅くとも数分のうちに、その人は新しいものを読めなくなります。';
+      '誰かがサークルを抜けると、そのサークルはまた別の新しい鍵に切り替わります。その人が新しいものを読めなくなるのは、サークルの残りのメンバーが追いついた時点です。通常は数分のうちですが、そのときオフラインだった人がいると、もっと時間がかかります。';
 
   @override
   String get privacyEncryptionKeysChangeOnMembership =>
-      '鍵が変わるのは、メンバーの構成が変わったときだけです。一定時間ごとに変わるわけではありません。その変更から次の変更までの間は、送られたものすべてを1つの鍵がカバーします。そのため、長く構成が変わっていないサークルから誰かを削除しても、その人がメンバーだった間に保存したメッセージは、何週間も前のものであっても開くことができます。抜けたあとに送られたものは開けません。';
+      'サークルを抜けても、メンバーがすでに保存したものを取り戻すことはできません。Haven が鍵を変えるのは、誰かが参加するか抜けたときだけで、一定時間ごとに変わることはありません。そのため、1つの鍵が何週間分ものメッセージをカバーすることがあり、その間にメンバーが保存したものは、その人にとって読める状態のまま残ります。ただし、その人が抜けたあとに送られたものは開けません。';
 
   @override
   String get privacyEncryptionMeansForYou =>
-      '暗号化は、サークルの外にいるすべての人からあなたを守ります。かつて中にいた人から守ることはできません。ある人ときれいに縁を切りたい場合は、古いサークルからその人を削除するよりも、新しいサークルを作り直すほうが安全です。';
+      '暗号化は、サークルの外にいるすべての人からあなたを守ります。かつて中にいた人から守ることはできません。特定の相手との共有をやめたい場合は、その人と共有しているサークルを退出し、その人を入れずに新しいサークルを作ってください。';
 
   @override
   String get privacyEncryptionDetailMls =>
@@ -655,7 +655,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get privacyEncryptionDetailEpochs =>
-      '鍵が有効な各期間は「エポック」と呼ばれます。この端末は、直近のいくつかのエポックから届く途中のメッセージを復号できる分だけを保持し、あとは破棄します。そのため Haven は、原理的にも、あなたの古いメッセージを取り戻すことができません。';
+      '鍵が有効な各期間は「エポック」と呼ばれ、サークルが新しいエポックに移るのは、メンバーの構成が変わったときだけです。この端末は、現在のエポックと直近のいくつかのエポックの鍵、つまり届く途中のメッセージを開けるだけの分を保持し、残りは破棄します。数か月間メンバーの構成が変わっていないサークルは、今も最初のエポックのままです。';
 
   @override
   String get privacyWhatOthersSeeTitle => 'メンバーに見えるもの、リレーに見えるもの';
@@ -672,7 +672,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeCannotPause =>
-      'Haven を開いていて、どこかのサークルに参加している間は、数分ごとに自動であなたの位置が送信されます。一時停止するボタンはありません。切り替えられるのは、アプリを離れたあとも共有を続けるかどうかだけです。';
+      'Haven を開いていて、どこかのサークルに参加している間は、数分ごとに自動であなたの位置が送信されます。一時停止するボタンはありません: 「位置情報」ページのスイッチは、アプリを閉じたあとも共有を続けるかどうかだけを切り替えます。あるサークルとの共有をやめるには、そのサークルを開いて「サークルを退出」を選んでください。';
 
   @override
   String get privacyWhatOthersSeeMembersLearnKey =>
@@ -680,22 +680,22 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeCoMemberIp =>
-      'メンバーのプロフィール写真は、その人が選んだサーバーから取得されます。写真を読み込むと、あなたのネットワークアドレスと、そこから分かるおおまかな居場所が、そのサーバーの運営者に伝わります。これは、あなたが何もタップしなくても自動的に起こります。';
+      'あなたの端末は、各メンバーのプロフィール写真を、そのメンバーが選んだサーバーから取得します。これは、あなたが何もタップしなくても自動的に起こります。すると、そのサーバーにはあなたのネットワークアドレスが見え、そこからおおよその居場所が地図上で分かってしまいます。これを隠せるのは VPN だけで、ほかに防ぐ手立てはありません。';
 
   @override
   String get privacyWhatOthersSeeRelaysHeading => 'リレーの運営者';
 
   @override
   String get privacyWhatOthersSeeRelaysCannot =>
-      'リレーの運営者は、あなたの位置情報、メッセージ、サークルの名前、メンバーの一覧を読めません。すべてのメッセージは、その都度新しい使い捨ての送信アドレスから届くため、どのメンバーが送ったのかは分かりません。';
+      'あなたの更新が経由する独立したサーバー、つまりリレーは、あなたの位置情報、メッセージ、サークルの名前、メンバーの一覧を読めません。位置情報の更新には、あなたの公開鍵ではなく、その都度新しい使い捨ての送信アドレスが使われます。ただし、あなたのプロフィール、招待、リレーのリストには公開鍵がそのまま入ります。そのため、その両方を扱うリレーは、中身を一切読まなくても、あなたがどこかのサークルに参加していることを推測できる場合があります。';
 
   @override
   String get privacyWhatOthersSeeRelaysCan =>
-      '一方で、あなたのネットワークアドレス、オンラインになっている時間帯、通信の大きさと頻度は見えています。各サークルにはランダムなタグが付いているため、リレーは1つのサークルのメッセージをまとめ、そこに何人いるかを推測できます。ただし、それが誰なのかは分かりません。';
+      '一方で、あなたのネットワークアドレス、オンラインになっている時間帯、通信の大きさと頻度は見えています。各サークルにはランダムなタグが付いています。リレーはそのタグで1つのサークルのメッセージをまとめ、そこに何人いるかを推測できます。ただし、それが誰なのかは分かりません。';
 
   @override
   String get privacyWhatOthersSeeMeansForYou =>
-      'サークルには、自宅の住所を教えてもよい相手だけを入れてください。リレーや外部の相手に対しては暗号化が守ってくれますし、VPN を使えばネットワークアドレスの穴もふさげます。しかし、スクリーンショットを保存するメンバーに対しては、何も守ってくれません。';
+      'サークルに参加するのは、自宅の住所を教えてもよい相手とだけにしてください。リレーや外部の相手に対しては暗号化が守ってくれますし、VPN を使えば端末が接続してくるアドレスを隠せます。しかし、スクリーンショットを撮るメンバーからは、何もあなたを守ってくれません。';
 
   @override
   String get privacyWhatOthersSeeDetailTag =>
@@ -706,11 +706,11 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get relaySettingsBackendCaption =>
-      'Haven には自前のサーバーがありません。暗号化されたあなたの更新は、「リレー」と呼ばれる独立したサーバーを経由します。リレーが、あなたの位置情報や、サークルに誰がいるかを知ることはありません。';
+      'Haven には自前のサーバーがありません。暗号化されたあなたの更新は、「リレー」と呼ばれる独立したサーバーを経由します。リレーが、あなたの位置情報やメッセージを読むことはできません。';
 
   @override
   String get privacyWhatOthersSeeScreenshots =>
-      'スクリーンショットへの対応は OS によって決まり、2つの OS では事情が異なります。Android では、Haven がアプリ全体でスクリーンショットと画面録画をブロックします。iPhone ではそれができません。Haven はアプリスイッチャーのプレビューをぼかしますが、メンバーが画面に映っているものを撮影することは依然として可能です。';
+      'これは端末によって異なります。Android では、Haven がアプリ全体でスクリーンショットと画面録画をブロックします。iPhone ではそれができません: Haven はアプリスイッチャーのプレビューをぼかしますが、メンバーが画面に映っているものを撮影することは依然として可能です。';
 
   @override
   String get privacyWhatOthersSeeDetailExpiry =>
@@ -727,22 +727,22 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get privacyInferenceWhatIsMetadata =>
-      '暗号化は、あなたが送る内容を隠します。しかし、あなたが何かを送ったという事実は隠せません。メッセージのまわりにできるパターン、つまり、いつ送られたか、どのくらいの大きさだったか、どのサーバーに接続していたかは、「メタデータ」と呼ばれます。中身が見えなくなっても、これは見えたままです。';
+      '暗号化は、あなたが送る内容を隠します。しかし、あなたが何かを送ったという事実は隠せません。そこに残る痕跡は「メタデータ」と呼ばれます: メッセージがいつ送られたか、どのくらいの大きさだったか、どのサーバーに接続していたか、といった情報です。中身が見えなくなっても、これは見えたままです。';
 
   @override
   String get privacyInferenceActivityPattern =>
-      'そのパターンから、あなたが使うリレーは、あなたがいつ、どのくらいの頻度で活動しているかをおおまかに知ることができます。Haven は、あなたが約100メートル以上移動したときにも追加の更新を送ります。そのため、十分に長い記録があれば、移動していたのか、同じ場所にとどまっていたのかを推測できます。ただし、どこにいたかが分かることは決してありません。';
+      'そのパターンから、あなたが使うリレーは、あなたがいつ、どのくらいの頻度で活動しているかをおおまかに知ることができます。Haven は、あなたが約100メートル移動するたびに追加の更新も送ります。何時間分もの記録があれば、リレーは、あなたが移動していたのか、同じ場所にとどまっていたのかを見分けられます。ただし、どこにいたかが分かることは決してありません。';
 
   @override
   String get privacyInferencePresence =>
-      'Haven が動いている間は、あなたのリレーへの接続を開いたままにします。そのためリレーには、あなたがオンラインであること、そしてどのサークルを見ているかも分かります。これは、更新が数分ではなく数秒で届くことの代償です。';
+      'Haven が動いている間は、あなたのリレーへの接続を開いたままにします。そのためリレーには、あなたがオンラインであること、そしてあなたがどのサークルのタグを追っているかが分かります。サークルの名前や、そこに誰がいるかが分かることはありません。これは、更新が数分ではなく数秒で届くことの代償です。';
 
   @override
   String get privacyInferenceIpHeading => 'あなたのネットワークアドレス';
 
   @override
   String get privacyInferenceIpAddress =>
-      'Haven が通信するすべてのサーバーには、あなたの端末が接続してくるアドレスが見えます。あなたのリレー、地図プロバイダー、そしてメンバーのプロフィール写真を預かっているサーバーです。インターネットプロバイダーには、そのうちどのサーバーにいつ接続したかが見えます。Haven だけでは、そのどちらも隠せません。';
+      'Haven が通信するすべてのサーバーには、あなたの端末が接続してくるアドレス、つまり IP アドレスが見えます: あなたのリレー、地図プロバイダー、そしてメンバーのプロフィール写真を預かっているサーバーです。インターネットプロバイダーには、そのうちどのサーバーにいつ接続したかが見えます。Haven だけでは、そのどちらも隠せません。';
 
   @override
   String get privacyInferenceVpnHeading => 'VPN を使うかどうか';
@@ -757,7 +757,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get privacyInferenceMeansForYou =>
-      '人ではなく、ネットワークを運営する側に地図の上に居場所を示されることが心配なのであれば、VPN は追加できるもののなかで最も役に立ちます。心配なのがサークルの中の人たちであれば、VPN はまったく役に立ちません。';
+      'リレーやインターネットプロバイダー、地図のサーバーに地図上の居場所を突き止められることが心配ですか？その場合、VPN は追加できるもののなかで最も役に立ちます。心配なのがサークルの中の人たちであれば、VPN はまったく役に立ちません。';
 
   @override
   String get privacyInferenceDetailJitter =>
@@ -765,7 +765,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get privacyInferenceDetailOutOfScope =>
-      'Haven では手の届かないこともあります。多くのリレーを同時に監視できる相手や、ほかの人に乗っ取られたあなた自身の端末は、ここでどのような設計を選んでも解決できる問題ではありません。';
+      'ここでどのような設計を選んでも解決できないことが2つあります: 多くのリレーを同時に監視できる相手と、ほかの人に乗っ取られたあなた自身の端末です。';
 
   @override
   String get commonClearAll => 'すべてクリア';
@@ -854,7 +854,7 @@ class AppLocalizationsJa extends AppLocalizations {
   String get createCircleNoIdInQr => 'QRコードに有効なIDが見つかりませんでした';
 
   @override
-  String get createCircleNoAccountFound => 'Haven のアカウントが見つかりませんでした';
+  String get createCircleNoAccountFound => 'この ID の Haven アカウントが見つかりませんでした';
 
   @override
   String get createCircleCouldNotVerify => 'メンバーを確認できませんでした';
@@ -893,7 +893,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get nameCircleSharingInfo =>
-      'このサークルのメンバーは、互いの位置情報と表示名を見られます。表示名は、設定 → 識別情報 で設定したものが使われます。このサークルは参加中のほかのサークルとは分離されているため、メンバーがあなたのほかのサークルやそのメンバーを見ることはできません。';
+      'このサークルのメンバーは、互いの位置情報と、互いの公開の名前と写真を見られます。あなたの名前と写真は Nostr ネットワーク上で公開されており、このサークルの中だけのものではありません。このサークルは参加中のほかのサークルとは分離されているため、メンバーがあなたのほかのサークルやそのメンバーを見ることはできません。';
 
   @override
   String get nameCircleCreateCta => 'サークルを作成';
@@ -948,7 +948,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get addMemberInfo =>
-      '新しいメンバーは、招待を承認すると、このサークルの暗号化された位置情報を見られるようになります。';
+      '相手が承認すると、その時点から先の全員の位置情報が見えるようになります。参加前に送られたものが見えることはありません。また、このサークルにすでにいる全員の公開鍵も見えるようになります。';
 
   @override
   String get addMemberAlreadyInCircle => 'すでにこのサークルのメンバーです';
@@ -1042,7 +1042,7 @@ class AppLocalizationsJa extends AppLocalizations {
   String get pendingMemberRetryTooltip => '確認を再試行';
 
   @override
-  String get pendingMemberRemoveTooltip => 'メンバーを削除';
+  String get pendingMemberRemoveTooltip => 'リストから削除';
 
   @override
   String get pendingMemberValidating => '確認中';
@@ -1219,7 +1219,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get circleDetailsRelaysNote =>
-      'これらのリレーはこのサークルの作成時に選ばれたもので、まだ編集できません。あなた個人のリレー設定とは独立しています。';
+      'これらのリレーは、このサークルの作成時にあなたの受信トレイのリレーからコピーされたもので、まだ変更できません。あとから個人のリレーのリストを編集しても、これらは変わりません。';
 
   @override
   String get circleDetailsAddMember => 'メンバーを追加';
@@ -1232,7 +1232,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get leaveCircleDialogBody =>
-      'このサークルを退出してもよろしいですか？メンバーの位置情報の更新を受け取れなくなります。この操作は元に戻せません。';
+      'このサークルを退出しますか？メンバーへの位置情報の送信は止まり、メンバーの位置情報も見えなくなります。最後に送った位置は、最大で1日ほど相手の端末に残ります。この操作は元に戻せません: 再び参加するには、新しい招待が必要になります。';
 
   @override
   String get leaveCircleConfirm => '退出';
@@ -1281,7 +1281,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get legacyCutoverExplainerIdentityUnchanged =>
-      'あなたの識別情報と公開プロフィールは変更されていません。これらについて特に何かをする必要はありません。';
+      'あなたの識別情報と公開プロフィールは変更されていません。これらについて何かをする必要はありません。';
 
   @override
   String get legacyCutoverExplainerCirclesNeedRecreation =>
@@ -1292,7 +1292,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get relaySettingsLegacyRetractionPending =>
-      'Haven は最近のセキュリティアップデートに伴う一部のデータの整理をまだ続けています。オンラインに戻れば自動的に完了します。';
+      'Haven は、最近のセキュリティアップデートに伴う一部の古いデータを破棄するよう、まだリレーに求めています。';
 
   @override
   String get circlesPanelCollapsedAnnouncement => 'サークルパネルを閉じました';
@@ -1494,7 +1494,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get identityAdvancedDeleteBody =>
-      'これにより識別情報が完全に削除されます。後で復元したい場合は、秘密鍵をバックアップ済みであることを必ず確認してください。';
+      'これにより、この端末から識別情報とすべてのサークルのデータが削除されます。その識別情報ですでに公開したものは、名前や写真、鍵も含めて、それらを保持しているリレーに残ります。あとで復元したい場合は、秘密鍵をバックアップ済みであることを必ず確認してください。';
 
   @override
   String get identityAdvancedDeleteConfirm => '削除';
@@ -1566,7 +1566,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get qrCodeExplainerUsername =>
-      'あなたの公開鍵は、共有しても安全なユーザー名のように働きます。人々はこのコードをスキャンするか、あなたの公開鍵を貼り付けて、あなたをサークルに招待します。これを共有しても、あなたの位置情報が明らかになることはありません。位置情報が見えるのは、あなたが参加したサークルのメンバーだけです。あなたの表示名と写真はすでに公開されているので、これを共有しても、それらについて新たに分かることはありません。';
+      'あなたの公開鍵は、共有しても安全なユーザー名のように働きます。人々はこのコードをスキャンするか、あなたの公開鍵を貼り付けて、あなたをサークルに招待します。これを共有しても、あなたの居場所が明らかになることはありません。あなたの表示名と写真はすでに公開されているので、これによって新たに分かることはありません。';
 
   @override
   String get displayNameCardTitle => '表示名';
@@ -1679,7 +1679,8 @@ class AppLocalizationsJa extends AppLocalizations {
   String get photoHeaderRemoveTitle => 'プロフィール写真を削除しますか？';
 
   @override
-  String get photoHeaderRemoveBody => 'これにより、あなたの公開プロフィールから写真が削除されます。';
+  String get photoHeaderRemoveBody =>
+      'これにより、あなたの公開プロフィールから写真が外されます。画像ファイルはそれを預かっているサーバーに残り、ほかの人がすでにダウンロードしたコピーも、その人たちの手元に残ります。';
 
   @override
   String get photoHeaderEditPhoto => '写真を編集';
@@ -1698,7 +1699,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get avatarPickerPhotoUpdated =>
-      '写真を更新しました — あなたの公開 Nostr プロフィールに公開されました。';
+      '写真を更新しました。あなたの公開 Nostr プロフィールに公開されました。';
 
   @override
   String get avatarPickerPhotoRemoved => '写真を削除しました。';

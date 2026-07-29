@@ -141,7 +141,7 @@ class RelayListMaintenanceResult {
   /// The inbox (kind 10050) category outcome.
   final RelayListCategoryResult inbox;
 
-  /// The `KeyPackage` (kind 10051) category outcome.
+  /// The `KeyPackage`-discovery (kind 10002 NIP-65) category outcome.
   final RelayListCategoryResult keyPackage;
 }
 
@@ -462,26 +462,14 @@ abstract class RelayService {
     required List<int> identitySecretBytes,
   });
 
-  /// Runs an M8 relay-list maintenance tick (kind 10050 inbox + 10051
-  /// `KeyPackage`).
+  /// Runs an M8 relay-list maintenance tick (kind 10050 inbox + kind 10002
+  /// NIP-65 `KeyPackage`-discovery list).
   ///
   /// Network-probes the user's OWN relays for each list and republishes to
   /// own relays only when missing/drifted, honoring the per-category privacy
-  /// toggle. Never NIP-65/kind-10002. `circle` is the circle-manager FFI
+  /// toggle. `circle` is the circle-manager FFI
   /// handle; the secret bytes are consumed by the FFI and zeroized Rust-side.
-  ///
-  /// KNOWN INCONSISTENCY — the kind numbers above are accurate, do not "fix"
-  /// them. This tick republishes the KeyPackage list as **kind 10051**: it
-  /// calls the core `RelayType::KeyPackage`, whose `to_kind()` is
-  /// `Kind::MlsKeyPackageRelays` (10051), rather than `RelayTypeFfi::Nip65`
-  /// (10002) that every other publish path now uses
-  /// (`key_package_provider.dart`, `buildRelayListPublish`). Under Dark Matter
-  /// the kind-10051 list is retired and the once-only cutover retraction
-  /// (`retractLegacyKeyPackages`) deletes it — so a maintenance tick firing
-  /// after that retraction can republish the very list the cutover removed.
-  /// Fixing it means changing the Rust side (`maintain_relay_list` passing
-  /// `RelayType::KeyPackage`), so it is recorded here rather than papered over
-  /// in the doc comment.
+
   ///
   /// Best-effort — returns a [RelayListMaintenanceResult.empty] on failure
   /// rather than throwing.

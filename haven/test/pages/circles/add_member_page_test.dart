@@ -360,7 +360,7 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(find.byIcon(LucideIcons.triangleAlert), findsOneWidget);
-        expect(find.text('No Haven account found'), findsOneWidget);
+        expect(find.text("Couldn't find a Haven account for this ID"), findsOneWidget);
 
         final button = tester.widget<FilledButton>(
           find.byKey(WidgetKeys.addMemberConfirm),
@@ -768,7 +768,7 @@ void main() {
 
         // The useful copy is preserved verbatim...
         expect(
-          find.textContaining("New members can see this circle's encrypted"),
+          find.textContaining("Once they accept, they will see everyone's location"),
           findsOneWidget,
         );
         // ...but the green security badge's lock icon is gone.

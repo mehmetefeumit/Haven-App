@@ -22,8 +22,14 @@ import '../../helpers/localized_app_harness.dart';
 
 /// Scrolls [finder] into view, tolerating a target that is already visible.
 Future<void> _reveal(WidgetTester tester, Finder finder) async {
-  if (finder.evaluate().isNotEmpty) return;
-  await tester.scrollUntilVisible(finder, 200);
+  if (finder.evaluate().isEmpty) {
+    await tester.scrollUntilVisible(finder, 200);
+  }
+  // scrollUntilVisible stops as soon as the target is attached, which can
+  // leave it flush with the viewport edge and untappable. ensureVisible pulls
+  // it fully into view.
+  await tester.ensureVisible(finder);
+  await tester.pumpAndSettle();
 }
 
 /// Drags the page back to the top so a subsequent search starts from a known

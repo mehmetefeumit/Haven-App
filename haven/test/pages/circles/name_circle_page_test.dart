@@ -34,11 +34,11 @@ void main() {
     // The useful disclosure is present: mutual location + name visibility,
     // the name's source, and cross-circle isolation.
     expect(
-      find.textContaining('can see each other’s location and display name'),
+      find.textContaining('public name and photo'),
       findsOneWidget,
     );
     expect(
-      find.textContaining('you set in Settings → Identity'),
+      find.textContaining('public on the Nostr network'),
       findsOneWidget,
     );
     expect(

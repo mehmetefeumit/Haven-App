@@ -39,7 +39,7 @@ void main() {
       expect(find.text('Haven has been updated'), findsOneWidget);
       expect(
         find.text(
-          'Your identity and public profile are unchanged — there is '
+          'Your identity and public profile are unchanged. There is '
           'nothing you need to do for those.',
         ),
         findsOneWidget,

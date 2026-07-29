@@ -89,8 +89,8 @@ void main() {
     expect(find.text('Create your identity'), findsOneWidget);
     expect(
       find.text(
-        'Haven will create a private identity that lives only on this '
-        'phone. It’s how your circles recognise you.',
+        'Haven creates your keys on this phone. The secret one never leaves '
+        'it.',
       ),
       findsOneWidget,
     );

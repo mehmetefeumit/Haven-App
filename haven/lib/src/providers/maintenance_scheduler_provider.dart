@@ -5,7 +5,7 @@
 ///
 /// - **`KeyPackage`** (kinds 30443 + 443) — republish-if-missing so a peer can
 ///   always fetch fresh init-key material to invite the user. Nominal 10 min.
-/// - **Relay list** (kind 10050 inbox + 10051 `KeyPackage`) — republish-if-
+/// - **Relay list** (kind 10050 inbox + kind 10002 NIP-65 `KeyPackage`) — republish-if-
 ///   drifted so the user's own relays keep advertising where to reach them.
 ///   Nominal 30 min.
 /// - **Subscription health** (M8-4) — heal dropped live-sync relay connections
@@ -23,7 +23,7 @@
 /// ## Why Dart-timer-driven (not a Rust cron)
 ///
 /// The identity secret lives only in Dart (Flutter secure storage) and the two
-/// publishing tasks must sign (10050/10051/30443/443). A core-resident
+/// publishing tasks must sign (10050/10002/30443). A core-resident
 /// scheduler cannot sign, and threading the secret into a long-lived Rust task
 /// would violate Security Rule 9. So Dart owns the *cadence + secret*; Rust
 /// owns the *logic* (probe, live-material gate, stable-`d` seeding, sign,
@@ -69,7 +69,7 @@
 /// provider is explicitly invalidated in `IdentityNotifier.deleteIdentity`, so
 /// no *new* secret-bearing republish tick is armed after logout. A tick that is
 /// already mid-FFI when logout fires completes with its already-scrubbed secret
-/// buffer (bounded, publishes only the user's own public 30443/10050/10051 to
+/// buffer (bounded, publishes only the user's own public 30443/10050/10002 to
 /// their own relays — no secret survives).
 ///
 /// Riverpod reuses the *same* notifier instance across an `invalidate`+re-read

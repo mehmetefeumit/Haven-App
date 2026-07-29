@@ -131,7 +131,7 @@ void main() {
       await openLeaveCircleDialog(tester);
 
       // Confirmation dialog should appear.
-      expect(find.textContaining('Are you sure'), findsOneWidget);
+      expect(find.textContaining('Leave this circle?'), findsOneWidget);
       expect(find.text('Cancel'), findsOneWidget);
       expect(find.text('Leave'), findsOneWidget);
     });

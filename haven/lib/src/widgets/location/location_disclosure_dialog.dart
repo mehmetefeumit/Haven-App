@@ -3,7 +3,7 @@
 /// Satisfies Google Play's "Prominent Disclosure & Consent" requirement: an
 /// affirmative, in-app disclosure of WHY/WHAT/HOW location is used, shown
 /// BEFORE the OS runtime permission prompt. It does not itself request any
-/// permission — it only records the user's informed consent.
+/// permission; it only records the user's informed consent.
 library;
 
 import 'package:flutter/material.dart';
@@ -26,11 +26,45 @@ abstract final class LocationDisclosureStrings {
       'choose, and shows you theirs on the map. To do this, Haven needs '
       'permission to use your device’s precise location.';
 
-  /// HOW the data is protected and who it is (and is not) shared with.
+  /// HOW the data is protected, and every third party it reaches.
+  ///
+  /// An earlier version ended "never Haven, and never any other entity."
+  /// That was false, and false inside the artefact that records consent:
+  /// encrypted location transits third-party relays (three public operators
+  /// by default) that also see the user's network address, and drawing the
+  /// map sends tile coordinates derived from circle members' positions to an
+  /// outside map provider. A Prominent Disclosure has to name third-party
+  /// transmission, not deny it. Do not reintroduce an absolute here.
+  ///
+  /// The Stadia Maps sentence is attributed to their published policy on
+  /// purpose, and states the log-retention window. Verified 2026-07-29 at
+  /// [kStadiaPrivacyUrl]: they do not sell/rent/trade personal information,
+  /// set no cookies for end users of apps built on their services, and keep
+  /// server logs ~7-14 days. Their IP-anonymisation commitment covers their
+  /// ANALYTICS system, NOT API request logs, so this must never be shortened
+  /// to a 'no logging' or 'anonymous' claim, which would be false.
   static const String how =
-      'Your location is end-to-end encrypted on your device. Only the '
-      'members of the circles you choose can see it, never Haven, and '
-      'never any other entity.';
+      'Your location is end-to-end encrypted on your device, so only the '
+      'members of the circles you choose can read it, not Haven. Haven runs '
+      'no servers of its own: your encrypted updates pass through independent '
+      'relays run by other people, which see your network address but never '
+      'where you are. Drawing the map asks Stadia Maps for the areas around '
+      'you and your circle, so it learns roughly where that is, but never '
+      'your name, your key, or who is in your circles. Under its published '
+      'privacy policy Stadia Maps does not sell or trade personal '
+      'information and sets no cookies on your device, and it keeps server '
+      'logs for about two weeks.';
+
+  /// WHEN sharing happens, and the only way to stop it.
+  ///
+  /// Always shown, unlike [background] and [manage], which render only in the
+  /// background scope. Foreground sharing is unconditional and there is no
+  /// pause, so a dialog that offered only the background toggle as "control"
+  /// would advertise a switch while withholding the main behaviour.
+  static const String sharing =
+      'While Haven is open and you are in a circle, your location is sent '
+      'automatically every couple of minutes. There is no pause. To stop '
+      'sharing with a circle, leave it.';
 
   /// Background-use sentence. Shown only when background sharing is being
   /// requested. Says "uses" rather than the Play sample's "collects": Haven
@@ -106,6 +140,11 @@ class LocationDisclosureDialog extends StatelessWidget {
               const SizedBox(height: HavenSpacing.base),
               Text(
                 LocationDisclosureStrings.how,
+                style: theme.textTheme.bodyMedium,
+              ),
+              const SizedBox(height: HavenSpacing.base),
+              Text(
+                LocationDisclosureStrings.sharing,
                 style: theme.textTheme.bodyMedium,
               ),
               if (includeBackground) ...[

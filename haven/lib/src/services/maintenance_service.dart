@@ -52,7 +52,7 @@ class MaintenanceService {
     );
   }
 
-  /// Runs a relay-list maintenance tick (kind 10050 inbox + 10051
+  /// Runs a relay-list maintenance tick (kind 10050 inbox + kind 10002
   /// `KeyPackage`).
   ///
   /// Returns [RelayListMaintenanceResult.empty] on any failure — never throws.
@@ -70,7 +70,7 @@ class MaintenanceService {
   /// Runs the Dark Matter cutover's once-only legacy-KeyPackage retraction
   /// tick (plan §6 step 5 / security F10a/F10b): retracts this account's
   /// stale pre-migration KeyPackage advertisements (legacy kind-443 twins +
-  /// the kind-10051 relay list).
+  /// the kind-10002 NIP-65 relay list).
   ///
   /// Self-gates on a persisted Rust-side sentinel, so calling this on every
   /// app session (or relay reconnect) is safe — after the first successful

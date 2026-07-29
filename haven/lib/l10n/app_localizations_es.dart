@@ -119,7 +119,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get onboardingValueProp2Body =>
-      'Haven no tiene servidor central. Tus mensajes cifrados viajan a través de una red descentralizada de relés que tú mismo puedes elegir, así que ninguna entidad por sí sola puede cerrarlo.';
+      'Haven no tiene servidor central. Tus mensajes cifrados viajan por servidores independientes llamados relés, y tú eliges cuáles usar. Ninguna empresa ni ningún gobierno puede apagar la red.';
 
   @override
   String get onboardingValueProp3Title => 'No necesitas cuenta';
@@ -134,7 +134,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get onboardingValueProp2Summary =>
-      'Sin servidor central: funciona en una red de relés que tú eliges.';
+      'Sin servidor central. Funciona en una red de relés que tú eliges.';
 
   @override
   String get onboardingValueProp3Summary =>
@@ -145,7 +145,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get onboardingCreateIdentityBody =>
-      'Haven creará una identidad privada que vive solo en este teléfono. Así es como tus círculos te reconocen.';
+      'Haven crea tus claves en este teléfono. La secreta no sale nunca de él.';
 
   @override
   String get onboardingCreateIdentityWarning =>
@@ -268,14 +268,14 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get relaySettingsInboxSubtitle =>
-      'kind 10050, por donde te llegan las invitaciones';
+      'Por donde te llegan las invitaciones (kind 10050)';
 
   @override
   String get relaySettingsKeyPackageTitle => 'Mis relés de KeyPackage';
 
   @override
   String get relaySettingsKeyPackageSubtitle =>
-      'kind 10002, donde los invitados descubren tus claves de cifrado';
+      'Donde los invitados encuentran tus claves y se publica tu perfil público (kind 10002)';
 
   @override
   String get relaySettingsLoadRelaysError => 'No se pudieron cargar los relés.';
@@ -378,7 +378,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'Cuando compartir en segundo plano está activado, tus círculos siguen viendo tu ubicación en directo incluso cuando Haven está cerrado.';
+      'Haven comparte tu ubicación con tus círculos siempre que la app está abierta. Activa esto y tus círculos la seguirán viendo mientras Haven está en segundo plano; si el sistema cierra Haven, las actualizaciones se reanudan cuando te mueves o cuando el sistema vuelve a despertar la app.';
 
   @override
   String get locationSettingsToggleTitle => 'Compartir en segundo plano';
@@ -506,7 +506,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get privacyHubSummary =>
-      'Haven comparte tu ubicación solo con los grupos pequeños que elijas, y la cifra en tu teléfono antes de que salga del teléfono. No hay ninguna cuenta de empresa ni ningún servidor de Haven. Las páginas siguientes explican cómo funciona, en lenguaje claro, y dicen con honestidad de qué no te protege Haven.';
+      'Haven comparte tu ubicación solo con los grupos pequeños que tú eliges, llamados círculos, y la cifra en tu teléfono antes de que salga de él. No hay registro ni servidor de Haven. Lo único que es público es el nombre visible y la foto que configuras. Las páginas siguientes explican eso, y todo lo demás, en lenguaje claro.';
 
   @override
   String get privacyGroupBasicsHeading => 'Lo básico';
@@ -544,11 +544,11 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get privacyWhatHavenIsNoServers =>
-      'Haven tampoco gestiona servidores propios. Tus actualizaciones de ubicación cifradas pasan por servidores independientes llamados relés, gestionados por otras personas. Los desarrolladores de Haven no pueden ver tu ubicación y no recopilan nada sobre cómo usas la app.';
+      'Haven tampoco gestiona servidores propios. Tus actualizaciones de ubicación cifradas pasan por servidores independientes llamados relés, gestionados por otras personas. Los desarrolladores de Haven no pueden ver tu ubicación y no han puesto ningún rastreador en la app. Lo único que sí ven es cuánto se usa el mapa en total, porque las teselas del mapa se piden con una única clave compartida. Nunca ven quién las pidió.';
 
   @override
   String get privacyWhatHavenIsMeansForYou =>
-      'No hay a quién pedirle tus datos, porque nadie los tiene. La otra cara es que nadie puede restaurar tu cuenta. Consulta «Tus dos claves» para saber qué respaldar.';
+      'A nadie se le puede obligar a entregar tus datos, porque nadie los tiene. El precio es que tampoco hay nadie que pueda restaurarte la identidad. Consulta «Tus dos claves» para saber qué respaldar.';
 
   @override
   String get privacyWhatHavenIsDetailNoTelemetry =>
@@ -572,7 +572,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get privacyYourKeysSecretStaysHere =>
-      'Tu clave secreta se guarda solo en este teléfono, en un almacenamiento que protege el sistema operativo. Haven no la envía a ningún sitio: ni a un relé, ni a nosotros.';
+      'Tu clave secreta se guarda solo en este teléfono, en un almacenamiento que protege el sistema operativo. Haven no la envía a ningún sitio: ni a un servidor, ni a nosotros.';
 
   @override
   String get privacyYourKeysPublicIsSafe =>
@@ -580,7 +580,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get privacyYourKeysMeansForYou =>
-      'Respalda tu clave secreta si quieres conservar esta identidad. Puedes verla en Ajustes → Identidad → Avanzado. Si pierdes el teléfono sin respaldo, la identidad se pierde para siempre y nadie puede recuperarla.';
+      'Para conservar esta identidad, haz una copia de seguridad. Ve a Ajustes → Identidad → Avanzado, toca «Mostrar clave secreta» y guárdala en un sitio seguro, por ejemplo en un gestor de contraseñas. Sin esa copia, perder el teléfono es perder la identidad para siempre.';
 
   @override
   String get privacyYourKeysNeverShareSecret =>
@@ -588,7 +588,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get privacyYourKeysDetailFormats =>
-      'El par es una clave secp256k1, mostrada en los formatos habituales de Nostr: npub1… para la clave pública y nsec1… para la secreta. La firma ocurre dentro de la app, y los bytes secretos se borran de la memoria después de cada uso.';
+      'Ambas claves son secp256k1 y se muestran en los formatos habituales de Nostr: npub1… para la clave pública y nsec1… para la secreta. La firma ocurre dentro de la app, y la clave secreta se borra de las partes que la manejan directamente en cuanto se usa.';
 
   @override
   String get privacyYourKeysDetailSeparation =>
@@ -603,11 +603,11 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get privacyPublicProfileIsPublic =>
-      'El nombre visible y la foto que configuras se publican en toda la red Nostr. Cualquiera puede consultarlos, no solo las personas de tus círculos.';
+      'El nombre visible y la foto que configuras se publican en Nostr, la red pública y abierta sobre la que funciona Haven. Cualquiera puede consultarlos, no solo las personas de tus círculos.';
 
   @override
   String get privacyPublicProfileOnSave =>
-      'Esto ocurre en el momento en que los guardas. No hay ningún ajuste que los mantenga privados, ni forma de compartir un nombre solo con tus círculos.';
+      'Tu nombre y tu foto se hacen públicos en el momento en que los guardas. No hay ningún ajuste que los mantenga privados, ni forma de compartir un nombre solo con tus círculos.';
 
   @override
   String get privacyPublicProfilePseudonym =>
@@ -619,11 +619,11 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get privacyPublicProfileRemovalIsNotDeletion =>
-      'Quitar tu foto más tarde no anula su publicación. Haven sustituye tu perfil por uno vacío, pero el archivo de imagen sigue en el servidor que lo aloja, y cualquier copia ya descargada sigue circulando. Considera permanente todo lo que publiques.';
+      'Quitar tu foto más tarde no borra la copia que hay en el servidor. Haven sustituye tu perfil por uno vacío. El archivo de imagen sigue donde está alojado, y cualquier copia ya descargada sigue por ahí. Considera permanente todo lo que publiques.';
 
   @override
   String get privacyPublicProfileDetailKindZero =>
-      'El perfil es un evento Nostr «kind 0» firmado con tu clave de identidad. Las fotos se suben a un servidor Blossom —blossom.primal.net, salvo que lo cambies— que ve la imagen, tu clave pública y tu dirección IP.';
+      'El perfil es un evento Nostr «kind 0» firmado con tu clave de identidad. Las fotos se suben a un alojamiento público de imágenes, blossom.primal.net, que ve la imagen, tu clave pública y tu dirección de red. Haven todavía no te deja elegir otro alojamiento.';
 
   @override
   String get privacyPublicProfileDetailExifStripped =>
@@ -647,7 +647,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get privacyRelaysWhyMany =>
-      'Usar varios significa que ninguno puede dejarte aislado por su cuenta. Si uno se desconecta, los demás siguen funcionando. Tú eliges qué relés usas y puedes cambiarlos cuando quieras.';
+      'Haven usa varios relés, así que ninguno puede dejarte aislado por su cuenta. Si uno se desconecta, los demás siguen funcionando. Tú eliges los relés por los que te llegan las invitaciones; los relés que usa un círculo quedan fijados al crearlo.';
 
   @override
   String get privacyRelaysTwoLists =>
@@ -655,7 +655,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get privacyRelaysMeansForYou =>
-      'Aquí no hay nada arriesgado que puedas hacer mal: un relé solo ve datos cifrados. Pero sí necesitas al menos un relé alcanzable; si no, nadie puede invitarte y tus círculos se quedan en silencio.';
+      'Un relé nunca ve tu ubicación, porque se cifra antes de salir de tu teléfono. Sí ve lo que tiene que ser público para que otras personas puedan llegar hasta ti: tu nombre y tu foto, las claves que los demás necesitan para invitarte y tu propia lista de relés. Haven te da desde el principio relés que funcionan, así que no tienes que cambiar nada.';
 
   @override
   String get privacyRelaysDetailIndexers =>
@@ -663,14 +663,14 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get privacyRelaysDetailKeyListIsPublic =>
-      'Tu lista de relés de KeyPackage se publica en la red, firmada con tu clave de identidad, para que los demás puedan encontrarla. Si añades un relé privado a esa lista, su dirección se vuelve pública y queda ligada a ti. Un relé que solo aparece en la lista propia de un círculo no se anuncia así.';
+      'Tu lista de relés de KeyPackage va firmada con tu clave de identidad y se publica en los relés que ya figuran en ella. Si añades ahí un relé privado, su dirección se vuelve pública y queda ligada a ti. No hay forma de mantener privado un relé que esté en esa lista.';
 
   @override
   String get privacyEncryptionTitle => 'Cómo funciona el cifrado';
 
   @override
   String get privacyEncryptionSubtitle =>
-      'Claves por círculo, y qué cambia cuando alguien entra o sale';
+      'Una clave por círculo, y qué cambia cuando alguien entra o sale';
 
   @override
   String get privacyEncryptionPerCircle =>
@@ -682,15 +682,15 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get privacyEncryptionWhenSomeoneLeaves =>
-      'Cuando alguien se va o lo retiran del círculo, este pasa a otra clave nueva. Al cabo de unos pocos minutos como máximo, esa persona deja de poder leer nada nuevo.';
+      'Cuando alguien sale de un círculo, este pasa a otra clave nueva. Esa persona deja de poder leer nada nuevo en cuanto el resto del círculo se pone al día. Eso suele tardar unos minutos, y más si alguien estaba sin conexión en ese momento.';
 
   @override
   String get privacyEncryptionKeysChangeOnMembership =>
-      'Las claves cambian cuando cambian los miembros, no a intervalos fijos. Entre esos cambios, una sola clave cubre todo lo que se envía. Así que alguien a quien retires de un círculo que llevaba mucho tiempo sin cambios puede seguir abriendo cualquier mensaje que guardara mientras era miembro, incluso de semanas antes. No puede abrir nada de lo enviado después de su salida.';
+      'Salir de un círculo no recupera lo que sus miembros ya hayan guardado. Haven cambia las claves solo cuando alguien entra o sale, nunca según un temporizador. Por eso una sola clave puede cubrir semanas de mensajes, y todo lo que un miembro haya guardado en ese tiempo le sigue siendo legible. Aun así, no puede abrir nada de lo enviado después de su salida.';
 
   @override
   String get privacyEncryptionMeansForYou =>
-      'El cifrado te protege de todos los que están fuera de tus círculos. No puede protegerte de quien alguna vez estuvo dentro. Si quieres cortar limpiamente con una persona, empezar un círculo nuevo es más seguro que quitarla de uno antiguo.';
+      'El cifrado te protege de todos los que están fuera de tus círculos. No puede protegerte de quien alguna vez estuvo dentro. Para dejar de compartir con una persona en concreto, sal del círculo que compartes con ella y crea uno nuevo sin esa persona.';
 
   @override
   String get privacyEncryptionDetailMls =>
@@ -698,7 +698,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get privacyEncryptionDetailEpochs =>
-      'El tiempo que dura cada clave se llama época. Tu dispositivo guarda solo el material justo para descifrar los mensajes de las últimas épocas que aún están en camino, y luego lo descarta; por eso Haven no puede recuperarte los mensajes antiguos, ni siquiera en principio.';
+      'Cada periodo de clave se llama época, y un círculo pasa a una nueva solo cuando cambian sus miembros. Tu dispositivo guarda las claves de la época actual y de unas pocas recientes, las suficientes para abrir los mensajes que aún están llegando, y descarta el resto. Un círculo cuyos miembros no han cambiado en meses sigue en la época con la que empezó.';
 
   @override
   String get privacyWhatOthersSeeTitle =>
@@ -718,7 +718,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeCannotPause =>
-      'Mientras Haven está abierto y perteneces a un círculo, tu ubicación sale por sí sola cada dos o tres minutos. No hay botón de pausa. El único interruptor decide si se sigue compartiendo cuando cierras la app.';
+      'Mientras Haven está abierto y perteneces a un círculo, tu ubicación sale por sí sola cada dos o tres minutos. No hay botón de pausa: el interruptor de la página Ubicación solo decide si eso continúa después de cerrar la app. Para dejar de compartir con un círculo, ábrelo y elige «Salir del círculo».';
 
   @override
   String get privacyWhatOthersSeeMembersLearnKey =>
@@ -726,22 +726,22 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeCoMemberIp =>
-      'La foto de perfil de un miembro se descarga de un servidor que esa persona elige. Al cargarla, quien gestiona ese servidor conoce tu dirección de red y, con ella, más o menos en qué parte del mundo estás. Esto ocurre por sí solo, sin que toques nada.';
+      'Tu teléfono descarga la foto de perfil de cada miembro desde un servidor que ha elegido esa persona, sin que tú toques nada. Ese servidor ve entonces tu dirección de red, que te sitúa a grandes rasgos en el mapa. Una VPN lo oculta; nada más lo hace.';
 
   @override
   String get privacyWhatOthersSeeRelaysHeading => 'Los operadores de relés';
 
   @override
   String get privacyWhatOthersSeeRelaysCannot =>
-      'Los operadores de relés no pueden leer tu ubicación, tus mensajes, el nombre de tu círculo ni su lista de miembros. Cada mensaje les llega desde una dirección de envío nueva y de un solo uso, así que no pueden saber qué miembro lo envió.';
+      'Los relés, los servidores independientes por los que pasan tus actualizaciones, no pueden leer tu ubicación, tus mensajes, el nombre de tu círculo ni su lista de miembros. Tus actualizaciones de ubicación llevan una dirección de envío nueva y de un solo uso en lugar de tu clave pública. Tu perfil, tus invitaciones y tus listas de relés sí la llevan, así que un relé que gestione ambas cosas suele poder deducir que estás en un círculo, sin leer nada de lo que hay dentro.';
 
   @override
   String get privacyWhatOthersSeeRelaysCan =>
-      'Sí ven tu dirección de red, cuándo estás en línea y el tamaño y la frecuencia de tu tráfico. Cada círculo lleva una etiqueta aleatoria, así que un relé puede agrupar los mensajes de un mismo círculo y estimar cuántas personas hay en él, sin llegar a saber quiénes son.';
+      'Sí ven tu dirección de red, cuándo estás en línea y el tamaño y la frecuencia de tu tráfico. Cada círculo lleva una etiqueta aleatoria. Con esa etiqueta, un relé puede agrupar los mensajes de un mismo círculo y estimar cuántas personas hay en él, sin llegar a saber quiénes son.';
 
   @override
   String get privacyWhatOthersSeeMeansForYou =>
-      'Trata un círculo como las personas a las que darías tu dirección de casa. Frente a los relés y a los de fuera, el cifrado aguanta, y una VPN cierra el hueco de la dirección de red. Frente a un miembro que guarda una captura de pantalla, no aguanta nada.';
+      'Únete a un círculo solo con personas a las que les darías la dirección de tu casa. Frente a los relés y a los de fuera, el cifrado aguanta, y una VPN oculta la dirección desde la que se conecta tu teléfono. Nada te protege de un miembro que hace una captura de pantalla.';
 
   @override
   String get privacyWhatOthersSeeDetailTag =>
@@ -752,11 +752,11 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get relaySettingsBackendCaption =>
-      'Haven no tiene servidor propio. Tus actualizaciones cifradas pasan por servidores independientes que se llaman relés, y que nunca ven tu ubicación ni quién está en tus círculos.';
+      'Haven no tiene servidor propio. Tus actualizaciones cifradas pasan por servidores independientes llamados relés, que no pueden leer tu ubicación ni tus mensajes.';
 
   @override
   String get privacyWhatOthersSeeScreenshots =>
-      'Las capturas de pantalla dependen de la plataforma, y las dos no se comportan igual. En Android, Haven bloquea las capturas de pantalla y la grabación de pantalla en toda la app. En iPhone no puede: Haven solo difumina la vista previa del selector de apps, pero un miembro todavía puede capturar lo que hay en la pantalla.';
+      'Esto depende de tu teléfono. En Android, Haven bloquea las capturas de pantalla y la grabación de pantalla en toda la app. En iPhone no puede: Haven difumina la vista previa del selector de apps, pero un miembro todavía puede capturar lo que hay en la pantalla.';
 
   @override
   String get privacyWhatOthersSeeDetailExpiry =>
@@ -774,22 +774,22 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get privacyInferenceWhatIsMetadata =>
-      'El cifrado oculta lo que envías. No puede ocultar que has enviado algo. El patrón que rodea un mensaje —cuándo salió, qué tamaño tenía, a qué servidores estabas conectado— es lo que se llama metadatos, y sigue a la vista aunque el contenido no lo esté.';
+      'El cifrado oculta lo que envías. No puede ocultar que has enviado algo. Ese rastro que queda se llama metadatos: cuándo salió un mensaje, qué tamaño tenía y a qué servidores estabas conectado. Sigue a la vista aunque el contenido no lo esté.';
 
   @override
   String get privacyInferenceActivityPattern =>
-      'A partir de ese patrón, un relé que uses puede deducir aproximadamente cuándo estás activo y con qué frecuencia. Haven envía además una actualización extra en cuanto te mueves más de unos cien metros. Con un registro lo bastante largo, eso puede dar pistas sobre si te estabas desplazando o si seguías en el mismo sitio, sin mostrar nunca dónde.';
+      'A partir de ese rastro, un relé que uses puede deducir aproximadamente cuándo estás activo y con qué frecuencia. Haven envía además una actualización extra cada vez que te mueves unos cien metros. A lo largo de varias horas, eso puede mostrarle a un relé si te estabas desplazando o si seguías en el mismo sitio. Nunca muestra dónde.';
 
   @override
   String get privacyInferencePresence =>
-      'Mientras Haven está funcionando mantiene una conexión abierta con tus relés, así que también ven que estás en línea y qué círculos estás siguiendo. Es el precio de que las actualizaciones lleguen en segundos y no en minutos.';
+      'Mientras Haven está funcionando mantiene una conexión abierta con tus relés. Pueden ver que estás en línea y qué etiquetas de círculo estás siguiendo, nunca el nombre de un círculo ni quién está en él. Es el precio de que las actualizaciones lleguen en segundos y no en minutos.';
 
   @override
   String get privacyInferenceIpHeading => 'Tu dirección de red';
 
   @override
   String get privacyInferenceIpAddress =>
-      'Todos los servidores con los que habla Haven ven la dirección desde la que se conecta tu teléfono: tus relés, el proveedor del mapa y quien aloje la foto de perfil de un miembro. Tu proveedor de internet ve a cuáles de esos servidores accediste y cuándo. Haven, por sí solo, no hace nada por ocultar ni lo uno ni lo otro.';
+      'Todos los servidores con los que habla Haven ven la dirección desde la que se conecta tu teléfono, su dirección IP: tus relés, el proveedor del mapa y quien aloje la foto de perfil de un miembro. Tu proveedor de internet ve a cuáles de esos servidores accediste y cuándo. Haven, por sí solo, no hace nada por ocultar ni lo uno ni lo otro.';
 
   @override
   String get privacyInferenceVpnHeading => '¿Conviene usar una VPN?';
@@ -804,7 +804,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get privacyInferenceMeansForYou =>
-      'Si lo que te preocupa es que un operador de red te sitúe en un mapa, y no una persona, una VPN es lo más útil que puedes añadir. Si lo que te preocupa son las personas de tus círculos, no te va a ayudar en absoluto.';
+      '¿Te preocupa que los relés, tu proveedor de internet o los servidores del mapa te sitúen en un mapa? Una VPN es lo más útil que puedes añadir. ¿Te preocupan las personas de tus círculos? No te va a ayudar en absoluto.';
 
   @override
   String get privacyInferenceDetailJitter =>
@@ -812,7 +812,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get privacyInferenceDetailOutOfScope =>
-      'Algunas cosas quedan simplemente fuera de lo que Haven puede resolver. Alguien capaz de vigilar muchos relés a la vez, o tu propio teléfono en cuanto lo controla otra persona, quedan más allá de lo que cualquier decisión de diseño de esta app podría arreglar.';
+      'Dos cosas quedan más allá de cualquier decisión de diseño de esta app: alguien capaz de vigilar muchos relés a la vez, y tu propio teléfono en cuanto lo controla otra persona.';
 
   @override
   String get commonClearAll => 'Borrar todo';
@@ -911,7 +911,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get createCircleNoAccountFound =>
-      'No se encontró ninguna cuenta de Haven';
+      'No se encontró ninguna cuenta de Haven para este ID';
 
   @override
   String get createCircleCouldNotVerify => 'No se pudo verificar al miembro';
@@ -953,7 +953,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get nameCircleSharingInfo =>
-      'Todos en este círculo pueden ver la ubicación y el nombre visible de los demás. Tu nombre visible es el que configuras en Ajustes → Identidad. Este círculo permanece separado de cualquier otro en el que estés, así que sus miembros no pueden ver tus otros círculos ni quién está en ellos.';
+      'Todos en este círculo pueden ver la ubicación, el nombre público y la foto de los demás. Tu nombre y tu foto son públicos en la red Nostr, no son privados de este círculo. Este círculo permanece separado de cualquier otro en el que estés, así que sus miembros no pueden ver tus otros círculos ni quién está en ellos.';
 
   @override
   String get nameCircleCreateCta => 'Crear círculo';
@@ -1013,7 +1013,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get addMemberInfo =>
-      'Los nuevos miembros pueden ver las ubicaciones cifradas de este círculo una vez que aceptan la invitación.';
+      'En cuanto acepte, verá la ubicación de todos a partir de ese momento, nunca nada de lo enviado antes de que se uniera. También verá las claves públicas de todas las personas que ya están en este círculo.';
 
   @override
   String get addMemberAlreadyInCircle => 'Ya está en este círculo';
@@ -1115,7 +1115,7 @@ class AppLocalizationsEs extends AppLocalizations {
   String get pendingMemberRetryTooltip => 'Reintentar validación';
 
   @override
-  String get pendingMemberRemoveTooltip => 'Quitar miembro';
+  String get pendingMemberRemoveTooltip => 'Quitar de la lista';
 
   @override
   String get pendingMemberValidating => 'Validando';
@@ -1301,7 +1301,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get circleDetailsRelaysNote =>
-      'Estos relés se eligieron al crear el círculo y aún no son editables por el usuario. Son independientes de tus ajustes de relés personales.';
+      'Estos relés se copiaron de tus relés de bandeja de entrada al crear este círculo y todavía no se pueden cambiar. Los cambios que hagas después en tu lista de relés personal no los modifican.';
 
   @override
   String get circleDetailsAddMember => 'Añadir miembro';
@@ -1314,7 +1314,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get leaveCircleDialogBody =>
-      '¿Seguro que quieres salir de este círculo? Dejarás de recibir actualizaciones de ubicación de sus miembros. Esta acción no se puede deshacer.';
+      '¿Salir de este círculo? Dejarás de enviar tu ubicación a sus miembros y de ver la suya. La última ubicación que enviaste se queda en sus teléfonos durante un día como máximo. Esto no se puede deshacer: necesitarías una invitación nueva para volver.';
 
   @override
   String get leaveCircleConfirm => 'Salir';
@@ -1340,7 +1340,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get legacyCircleBannerBody =>
-      'El motor de cifrado de Haven se actualizó, así que este círculo ya no se puede usar. Vuelve a crearlo para seguir compartiendo ubicación con las mismas personas — tendrás que invitarlas de nuevo.';
+      'El motor de cifrado de Haven se actualizó, así que este círculo ya no se puede usar. Vuelve a crearlo para seguir compartiendo ubicación con las mismas personas. Tendrás que invitarlas de nuevo.';
 
   @override
   String get legacyCircleRecreateCta => 'Volver a crear círculo';
@@ -1363,7 +1363,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get legacyCutoverExplainerIdentityUnchanged =>
-      'Tu identidad y tu perfil público no han cambiado — no necesitas hacer nada con ellos.';
+      'Tu identidad y tu perfil público no han cambiado. No necesitas hacer nada con ellos.';
 
   @override
   String get legacyCutoverExplainerCirclesNeedRecreation =>
@@ -1374,7 +1374,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get relaySettingsLegacyRetractionPending =>
-      'Haven todavía está terminando de limpiar algunos datos de la reciente actualización de seguridad. Esto se completará automáticamente en cuanto vuelvas a estar en línea.';
+      'Haven todavía está pidiendo a los relés que descarten algunos datos antiguos de la reciente actualización de seguridad.';
 
   @override
   String get circlesPanelCollapsedAnnouncement => 'Panel de círculos contraído';
@@ -1593,7 +1593,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get identityAdvancedDeleteBody =>
-      'Esto eliminará tu identidad de forma permanente. Asegúrate de haber respaldado tu clave secreta si quieres poder recuperarla.';
+      'Esto elimina tu identidad y todos los datos de tus círculos de este teléfono. Todo lo que ya se haya publicado con ella, incluidos tu nombre, tu foto y tus claves, sigue en los relés que lo tengan. Asegúrate de haber respaldado tu clave secreta si quieres poder recuperarla.';
 
   @override
   String get identityAdvancedDeleteConfirm => 'Eliminar';
@@ -1668,7 +1668,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get qrCodeExplainerUsername =>
-      'Tu clave pública funciona como un nombre de usuario que es seguro compartir. Las personas escanean este código, o pegan tu clave pública, para invitarte a un círculo. Compartirla no puede revelar tu ubicación, que solo es visible para los miembros de los círculos a los que te has unido. Tu nombre visible y tu foto ya son públicos, así que compartir este código no revela nada más sobre ellos.';
+      'Tu clave pública funciona como un nombre de usuario que es seguro compartir. Las personas escanean este código, o pegan tu clave pública, para invitarte a un círculo. Compartirla no puede revelar dónde estás. Tu nombre visible y tu foto ya son públicos, así que esto no añade nada.';
 
   @override
   String get displayNameCardTitle => 'Nombre visible';
@@ -1785,7 +1785,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get photoHeaderRemoveBody =>
-      'Esto quita tu foto de tu perfil público.';
+      'Esto quita tu foto de tu perfil público. El archivo de imagen sigue en el servidor que lo aloja, y las copias que otras personas ya hayan descargado se quedan con ellas.';
 
   @override
   String get photoHeaderEditPhoto => 'Editar foto';
@@ -1804,7 +1804,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get avatarPickerPhotoUpdated =>
-      'Foto actualizada — publicada en tu perfil público de Nostr.';
+      'Foto actualizada. Publicada en tu perfil público de Nostr.';
 
   @override
   String get avatarPickerPhotoRemoved => 'Foto quitada.';
