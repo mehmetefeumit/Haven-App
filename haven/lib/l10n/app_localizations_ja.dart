@@ -123,7 +123,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get onboardingValueProp3Body =>
-      'メールアドレスも電話番号も、登録も不要です。Haven はあなたの端末の中だけに存在するプライベートな識別情報を作成します。実際のあなたと結びつくものは一切ありません。';
+      'メールアドレスも電話番号も、登録も不要です。Haven が作る識別情報の秘密鍵は、あなたの端末から外に出ることがありません。だから、誰かが引き渡せるアカウントそのものが存在しません。';
 
   @override
   String get onboardingValueProp1Summary => '端末上で暗号化。あなたが選んだサークルだけが読めます。';
@@ -132,7 +132,8 @@ class AppLocalizationsJa extends AppLocalizations {
   String get onboardingValueProp2Summary => '中央サーバーなし。あなたが選ぶリレーネットワークで動作します。';
 
   @override
-  String get onboardingValueProp3Summary => 'メール、電話番号、登録は不要。あなたと結びつく情報はありません。';
+  String get onboardingValueProp3Summary =>
+      'メール、電話番号、登録は不要。秘密鍵が端末から出ることはありません。';
 
   @override
   String get onboardingCreateIdentityTitle => '識別情報を作成';
@@ -259,7 +260,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get relaySettingsKeyPackageSubtitle =>
-      'kind 10051。招待者があなたの暗号鍵を見つける経路です';
+      'kind 10002。招待者があなたの暗号鍵を見つける経路です';
 
   @override
   String get relaySettingsLoadRelaysError => 'リレーを読み込めませんでした。';
@@ -330,56 +331,6 @@ class AppLocalizationsJa extends AppLocalizations {
   @override
   String get relaySettingsEmptyMessage =>
       'ほかの人があなたに連絡できるよう、リレーが少なくとも1件必要です。下をタップして Haven のデフォルトに戻してください。';
-
-  @override
-  String get relaySettingsExplainerSemantics => 'Haven のリレーの仕組み';
-
-  @override
-  String get relaySettingsExplainerHeading => '仕組み';
-
-  @override
-  String get relaySettingsExplainerNostr =>
-      'Haven には中央サーバーがありません。2つのオープンな技術の上で動いています。Nostr は、誰でも運用できる「リレー」と呼ばれる独立したサーバーのネットワークです。リレーはあなたのメッセージを受け取り、一時的に保管し、連絡先が要求したときに渡します。どのリレーも不可欠ではないため、1つがオフラインになってもほかのリレーが機能し続けます。また、リレーが提出を求められうるものは、常に暗号化されたデータだけです。';
-
-  @override
-  String get relaySettingsExplainerMarmot =>
-      'Marmot プロトコルは、MLS（Messaging Layer Security）という標準を用いて、メッセージがこの端末を離れる前に、端末内で暗号化します。各サークルはそれぞれ固有の鍵を持つ独立した暗号化グループであり、別々のサークルが互いに結びつけられることはありません。これらの鍵は時間とともに更新され続けます。これは前方秘匿性（forward secrecy）と呼ばれる性質で、たとえ後から鍵が漏れても、それ以前のメッセージを解読することはできません。';
-
-  @override
-  String get relaySettingsExplainerMetadata =>
-      'このため、リレーがあなたの位置情報、メッセージ、サークルのメンバー、あるいはそれらのメッセージ上のあなたの識別情報を知ることはありません。各メッセージは、その都度新しい使い捨ての送信アドレスから公開されるため、メッセージの中にあなたのアカウントと結びつくものはありません。ただし、リレーは一部のメタデータは見ることができます。サークルごとのランダムなタグ、通信のタイミングとサイズ、そしてあなたが接続するネットワークアドレスです。';
-
-  @override
-  String get relaySettingsExplainerInboxTerm => '受信トレイのリレー';
-
-  @override
-  String get relaySettingsExplainerInboxBody =>
-      'は、あなたのメールボックスにあたります。サークルへの招待が、それ自体も暗号化されたうえで届けられ、あなたが受け取れる場所です。誰かがあなたを招待するには、これらのリレーのいずれかに到達できる必要があります。';
-
-  @override
-  String get relaySettingsExplainerKeyPackageTerm => 'KeyPackage リレー';
-
-  @override
-  String get relaySettingsExplainerKeyPackageBody =>
-      'は、共有しても安全な公開鍵の小さなまとまりを公開しておく場所です。あなたのアカウントを知っている人が、サークルに追加するためにこれらのリレーから取得します。';
-
-  @override
-  String get relaySettingsExplainerOwnRelayTerm => '自分のリレーを使う。';
-
-  @override
-  String get relaySettingsExplainerOwnRelayBody =>
-      ' 各サークルも独自のリレーリストを持ち、メンバーが参加するときに全員と共有されます。サークルの継続的な暗号化された更新が流れるのは、あなたの受信トレイではなく、このリストです。そのため、公開リレーを避けたい場合は、自分のリレーを運用してサークルをそこに向けることができます。全員が参加したあとは、そのサークルの通信をそのリレーだけで流すことができます。';
-
-  @override
-  String get relaySettingsExplainerReachabilityTerm => '注意点は到達性です。';
-
-  @override
-  String get relaySettingsExplainerReachabilityBody =>
-      ' すべてのメンバーがそのリレーに接続できる必要があります。また、最初に誰かを招待するときは、お互いが到達できるリレーが2人の間に必要です（たとえば、全員の受信トレイと KeyPackage のリレーとして同じプライベートリレーを指定する、など）。プライベートリレーも、ほかのリレーと同じく暗号化された通信とそのタイミングは見えます。違いは、誰が運用するかをあなたが管理できる点だけです。';
-
-  @override
-  String get relaySettingsExplainerFooter =>
-      'どちらのリストでも、いつでもリレーを追加・削除できます。リレーが多いほどあなたに連絡しやすくなり、少ないほど暗号化された通信の経路をより自分で管理できます。';
 
   @override
   String get locationSettingsTitle => '位置情報';
@@ -502,59 +453,6 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get aboutLinkOpenError => 'リンクを開けませんでした';
-
-  @override
-  String get aboutWhoCanSeeTitle => '誰が何を見られるか';
-
-  @override
-  String get aboutWhoCanSeeIntro =>
-      'あなたの正確な位置情報を読めるのは、あなたが選んだ相手だけです。主な関係者がそれぞれ何を見られて、何を見られないのかを以下に示します。';
-
-  @override
-  String get aboutActorCirclesWho => '共有先のサークルのメンバー';
-
-  @override
-  String get aboutActorCirclesSees =>
-      'あなたの正確な位置情報と、あなたが選んだ表示名。ただし共有しているサークルの中でだけで、ほかのサークルには見えません。';
-
-  @override
-  String get aboutActorRelaysWho => 'リレーの運用者';
-
-  @override
-  String get aboutActorRelaysSees =>
-      'あなたのメッセージを中継するサーバーです。あなたのIPアドレス、あなたが公開に使う公開鍵（名前ではなくランダムなID）、通信のサイズとタイミング、そして誰かを検索したときにどのアカウントを探したかが見えます。あなたの位置情報、メッセージ、サークル名、サークルのメンバーを読むことは決してできません。';
-
-  @override
-  String get aboutActorMapWho => '地図プロバイダー（Stadia Maps）';
-
-  @override
-  String get aboutActorMapSees =>
-      '地図を開いている間だけ、あなたのIPアドレスと表示中の範囲が見えます。正しい地図画像を送るためです。あなたのサークルや共有中の位置情報は決して見えません。Stadia はIPアドレスを匿名化し、あなたのデータを販売しません。';
-
-  @override
-  String get aboutActorDevelopersWho => 'Haven の開発者';
-
-  @override
-  String get aboutActorDevelopersSees =>
-      '何も見えません。Haven はサーバーを一切運用せず、分析データも収集しません。開発者が見られるのはリレーの運用者と同じものだけで、しかもその開発者がたまたま運用しているリレーをあなたが使った場合に限られます。';
-
-  @override
-  String get aboutWhoCanSeeMetadataNote =>
-      'とはいえ、あなたの活動が完全に見えないわけではありません。あなたが使うリレーや、ネットワークを監視している人は、接続のタイミングやメッセージのサイズから、あなたが活動していること、おおよその時間帯、頻度を知ることができます。';
-
-  @override
-  String get aboutScreenshotTitle => 'スクリーンショット保護';
-
-  @override
-  String get aboutScreenshotBody =>
-      'Android では、Haven は位置情報の意図しない流出を防ぐため、アプリ全体でスクリーンショットと画面録画をブロックします。これはシステムレベルの保護（FLAG_SECURE）で、地図やメンバー一覧を含むアプリのすべての画面に適用されます。';
-
-  @override
-  String get aboutVpnTitle => 'VPN でさらにプライバシーを高める';
-
-  @override
-  String get aboutVpnBody =>
-      'リレーや地図プロバイダーにはあなたのIPアドレスが見え、インターネットプロバイダーにはあなたがどのサーバーに接続したかが見えます。信頼できる VPN を使えば、これらの相手からIPアドレスを隠せます。おすすめは Mullvad です。VPN を使ってもサークルのメンバーに見える内容は変わらず、信頼の対象が VPN プロバイダーに移るだけです。';
 
   @override
   String get aboutVpnLinkLabel => 'mullvad.net';
@@ -691,6 +589,183 @@ class AppLocalizationsJa extends AppLocalizations {
   @override
   String get privacyPublicProfileDetailExifStripped =>
       'アップロードの前に、Haven は画像を再エンコードし、カメラが埋め込む隠れたデータを取り除きます。写真を撮った GPS の位置も、そこに含まれます。これは重要な点です。そうでなければ、旅行先のスナップ写真が自宅の座標を持ち歩くことになりかねません。';
+
+  @override
+  String get privacyGroupHowLocationTravelsHeading => '位置情報がたどる経路';
+
+  @override
+  String get privacyRelaysTitle => 'リレー: メッセージを受け渡すサーバー';
+
+  @override
+  String get privacyRelaysSubtitle => 'あなたの更新が誰のコンピューターを通るのか';
+
+  @override
+  String get privacyRelaysWhatIsARelay =>
+      'Haven には自前のサーバーがありません。そのため、あなたの更新はほかの人たちのサーバーを経由します。これらは、誰でも運用できる小さな独立したサーバーで、「リレー」と呼ばれます。リレーは暗号化されたメッセージを短い時間だけ預かり、あなたのサークルが求めたときに次へ渡します。';
+
+  @override
+  String get privacyRelaysWhyMany =>
+      '複数のリレーを使うので、どれか1つがあなたを遮断することはできません。1つがオフラインになっても、ほかは動き続けます。どのリレーを使うかはあなたが選べますし、いつでも変更できます。';
+
+  @override
+  String get privacyRelaysTwoLists =>
+      'Haven はあなたのために2つのリストを保持します。受信トレイのリレーは、招待があなたに届く場所です。KeyPackage リレーは、あなたを招待するために必要な鍵を、ほかの人が取得する場所です。さらに、各サークルも独自のリストを持っており、そのサークルの暗号化された更新はそこを通ります。';
+
+  @override
+  String get privacyRelaysMeansForYou =>
+      'ここには、間違えると危険になるような設定はありません。リレーに見えるのは、常に暗号化されたデータだけです。ただし、つながるリレーが少なくとも1つは必要です。そうでないと、誰もあなたを招待できず、サークルの更新も届かなくなります。';
+
+  @override
+  String get privacyRelaysDetailIndexers =>
+      'あなた自身のリストとは別に、Haven はほかの人のプロフィールや鍵を調べるために、公開されている少数のディレクトリ用リレーに問い合わせます。自分用に非公開のリレーだけを設定していても、これらには接続します。そこには、あなたのネットワークアドレスと、どのアカウントについて尋ねたかが見えます。';
+
+  @override
+  String get privacyRelaysDetailKeyListIsPublic =>
+      'KeyPackage リレーのリスト自体も、ほかの人が見つけられるように、あなたの識別情報の鍵で署名してネットワークに公開されます。そのリストに非公開のリレーを追加すると、そのアドレスは公開され、あなたと結びつきます。1つのサークルのリストの中だけで使われるリレーが、そのように公表されることはありません。';
+
+  @override
+  String get privacyEncryptionTitle => '暗号化の仕組み';
+
+  @override
+  String get privacyEncryptionSubtitle => 'サークルごとの鍵と、人が出入りしたときに変わること';
+
+  @override
+  String get privacyEncryptionPerCircle =>
+      'あなたの位置情報は、MLS というオープンな標準を使って、この端末を離れる前に端末内で暗号化されます。各サークルは、それぞれ固有の鍵を持つ独立した暗号化グループです。サークルの外にいる人が、その中で送られた内容を読むことはできません。リレーも、Haven も、あなたが参加しているほかのサークルも読めません。';
+
+  @override
+  String get privacyEncryptionWhenSomeoneJoins =>
+      '誰かが参加すると、そのサークルは新しい鍵に切り替わります。参加したあとに送られたものは読めますが、それ以前のものは読めません。Haven が新しいメンバーに過去の位置情報を送ることはありません。';
+
+  @override
+  String get privacyEncryptionWhenSomeoneLeaves =>
+      '誰かが抜けたり削除されたりすると、サークルはまた別の新しい鍵に切り替わります。遅くとも数分のうちに、その人は新しいものを読めなくなります。';
+
+  @override
+  String get privacyEncryptionKeysChangeOnMembership =>
+      '鍵が変わるのは、メンバーの構成が変わったときだけです。一定時間ごとに変わるわけではありません。その変更から次の変更までの間は、送られたものすべてを1つの鍵がカバーします。そのため、長く構成が変わっていないサークルから誰かを削除しても、その人がメンバーだった間に保存したメッセージは、何週間も前のものであっても開くことができます。抜けたあとに送られたものは開けません。';
+
+  @override
+  String get privacyEncryptionMeansForYou =>
+      '暗号化は、サークルの外にいるすべての人からあなたを守ります。かつて中にいた人から守ることはできません。ある人ときれいに縁を切りたい場合は、古いサークルからその人を削除するよりも、新しいサークルを作り直すほうが安全です。';
+
+  @override
+  String get privacyEncryptionDetailMls =>
+      'MLS（Messaging Layer Security）は、ほかの安全なメッセージアプリでも使われている IETF の標準です。Haven は Marmot プロトコルを通じて Nostr ネットワークに接続します。Marmot は、MLS のグループがリレー上をどう流れるかを定めた仕様です。各サークルが署名に使う鍵は、公開されている Nostr の識別情報の鍵とは別のものです。';
+
+  @override
+  String get privacyEncryptionDetailEpochs =>
+      '鍵が有効な各期間は「エポック」と呼ばれます。この端末は、直近のいくつかのエポックから届く途中のメッセージを復号できる分だけを保持し、あとは破棄します。そのため Haven は、原理的にも、あなたの古いメッセージを取り戻すことができません。';
+
+  @override
+  String get privacyWhatOthersSeeTitle => 'メンバーに見えるもの、リレーに見えるもの';
+
+  @override
+  String get privacyWhatOthersSeeSubtitle => '共有する相手と、その間にあるサーバー';
+
+  @override
+  String get privacyWhatOthersSeeMembersHeading => 'サークルにいる人たち';
+
+  @override
+  String get privacyWhatOthersSeeMembersExact =>
+      'サークルのメンバー全員に、地図上のあなたの正確な位置が見えます。おおまかな範囲ではありません。一部のメンバーにはぼかした位置を、ほかのメンバーには正確な位置を共有する、といった設定はありません。';
+
+  @override
+  String get privacyWhatOthersSeeCannotPause =>
+      'Haven を開いていて、どこかのサークルに参加している間は、数分ごとに自動であなたの位置が送信されます。一時停止するボタンはありません。切り替えられるのは、アプリを離れたあとも共有を続けるかどうかだけです。';
+
+  @override
+  String get privacyWhatOthersSeeMembersLearnKey =>
+      'サークルに参加すると、あなたの公開鍵もメンバー全員に見えます。メンバーはそれを使って、あなたの公開プロフィールや、その鍵でこれまでに公開したすべてのものを調べられます。';
+
+  @override
+  String get privacyWhatOthersSeeCoMemberIp =>
+      'メンバーのプロフィール写真は、その人が選んだサーバーから取得されます。写真を読み込むと、あなたのネットワークアドレスと、そこから分かるおおまかな居場所が、そのサーバーの運営者に伝わります。これは、あなたが何もタップしなくても自動的に起こります。';
+
+  @override
+  String get privacyWhatOthersSeeRelaysHeading => 'リレーの運営者';
+
+  @override
+  String get privacyWhatOthersSeeRelaysCannot =>
+      'リレーの運営者は、あなたの位置情報、メッセージ、サークルの名前、メンバーの一覧を読めません。すべてのメッセージは、その都度新しい使い捨ての送信アドレスから届くため、どのメンバーが送ったのかは分かりません。';
+
+  @override
+  String get privacyWhatOthersSeeRelaysCan =>
+      '一方で、あなたのネットワークアドレス、オンラインになっている時間帯、通信の大きさと頻度は見えています。各サークルにはランダムなタグが付いているため、リレーは1つのサークルのメッセージをまとめ、そこに何人いるかを推測できます。ただし、それが誰なのかは分かりません。';
+
+  @override
+  String get privacyWhatOthersSeeMeansForYou =>
+      'サークルには、自宅の住所を教えてもよい相手だけを入れてください。リレーや外部の相手に対しては暗号化が守ってくれますし、VPN を使えばネットワークアドレスの穴もふさげます。しかし、スクリーンショットを保存するメンバーに対しては、何も守ってくれません。';
+
+  @override
+  String get privacyWhatOthersSeeDetailTag =>
+      'サークルのタグは、そのサークルが存在する間ずっと同じです。そのため、リレーはそのサークルのメッセージをいつまでも結びつけられます。これは土台となるプロトコルの性質であり、Haven が変えられるものではありません。';
+
+  @override
+  String get commonLearnMore => '詳しく見る';
+
+  @override
+  String get relaySettingsBackendCaption =>
+      'Haven には自前のサーバーがありません。暗号化されたあなたの更新は、「リレー」と呼ばれる独立したサーバーを経由します。リレーが、あなたの位置情報や、サークルに誰がいるかを知ることはありません。';
+
+  @override
+  String get privacyWhatOthersSeeScreenshots =>
+      'スクリーンショットへの対応は OS によって決まり、2つの OS では事情が異なります。Android では、Haven がアプリ全体でスクリーンショットと画面録画をブロックします。iPhone ではそれができません。Haven はアプリスイッチャーのプレビューをぼかしますが、メンバーが画面に映っているものを撮影することは依然として可能です。';
+
+  @override
+  String get privacyWhatOthersSeeDetailExpiry =>
+      'Haven はリレーに対し、位置情報のメッセージを約4分後に破棄するよう求めます。これはあくまで要望であり、リレーはそれより長く保持することもできます。招待には有効期限が一切なく、受信トレイのリレーにいつまでも残る可能性があります。';
+
+  @override
+  String get privacyGroupTheLimitsHeading => '限界';
+
+  @override
+  String get privacyInferenceTitle => 'それでも推測できてしまうこと';
+
+  @override
+  String get privacyInferenceSubtitle => '暗号化では隠せない痕跡';
+
+  @override
+  String get privacyInferenceWhatIsMetadata =>
+      '暗号化は、あなたが送る内容を隠します。しかし、あなたが何かを送ったという事実は隠せません。メッセージのまわりにできるパターン、つまり、いつ送られたか、どのくらいの大きさだったか、どのサーバーに接続していたかは、「メタデータ」と呼ばれます。中身が見えなくなっても、これは見えたままです。';
+
+  @override
+  String get privacyInferenceActivityPattern =>
+      'そのパターンから、あなたが使うリレーは、あなたがいつ、どのくらいの頻度で活動しているかをおおまかに知ることができます。Haven は、あなたが約100メートル以上移動したときにも追加の更新を送ります。そのため、十分に長い記録があれば、移動していたのか、同じ場所にとどまっていたのかを推測できます。ただし、どこにいたかが分かることは決してありません。';
+
+  @override
+  String get privacyInferencePresence =>
+      'Haven が動いている間は、あなたのリレーへの接続を開いたままにします。そのためリレーには、あなたがオンラインであること、そしてどのサークルを見ているかも分かります。これは、更新が数分ではなく数秒で届くことの代償です。';
+
+  @override
+  String get privacyInferenceIpHeading => 'あなたのネットワークアドレス';
+
+  @override
+  String get privacyInferenceIpAddress =>
+      'Haven が通信するすべてのサーバーには、あなたの端末が接続してくるアドレスが見えます。あなたのリレー、地図プロバイダー、そしてメンバーのプロフィール写真を預かっているサーバーです。インターネットプロバイダーには、そのうちどのサーバーにいつ接続したかが見えます。Haven だけでは、そのどちらも隠せません。';
+
+  @override
+  String get privacyInferenceVpnHeading => 'VPN を使うかどうか';
+
+  @override
+  String get privacyInferenceVpnHelps =>
+      'VPN は、あなたのアドレスを VPN 自身のアドレスに置き換えます。そのため、リレーやほかのサーバーには、あなたがどこから接続しているかが見えなくなります。どのサーバーに接続したかを、インターネットプロバイダーから隠すこともできます。おすすめは Mullvad です。';
+
+  @override
+  String get privacyInferenceVpnLimits =>
+      '万能ではありません。VPN を使っても、サークルのメンバーに見える内容は何も変わりません。やり取りしているリレーに対して、通信のタイミングやサイズを隠すこともできません。また、誰も信頼しなくてよくなるわけではなく、信頼の対象が VPN プロバイダーに移るだけです。';
+
+  @override
+  String get privacyInferenceMeansForYou =>
+      '人ではなく、ネットワークを運営する側に地図の上に居場所を示されることが心配なのであれば、VPN は追加できるもののなかで最も役に立ちます。心配なのがサークルの中の人たちであれば、VPN はまったく役に立ちません。';
+
+  @override
+  String get privacyInferenceDetailJitter =>
+      'Haven は更新の間隔をわざとばらつかせているので、短い時間の記録ではきれいな規則性が見えません。それでも、何時間も平均すれば、もとの頻度は推定できます。メッセージのサイズも一定にそろえてはおらず、位置情報の更新は狭いサイズの範囲に収まるため、位置情報の更新だと見分けられます。';
+
+  @override
+  String get privacyInferenceDetailOutOfScope =>
+      'Haven では手の届かないこともあります。多くのリレーを同時に監視できる相手や、ほかの人に乗っ取られたあなた自身の端末は、ここでどのような設計を選んでも解決できる問題ではありません。';
 
   @override
   String get commonClearAll => 'すべてクリア';
@@ -1491,7 +1566,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get qrCodeExplainerUsername =>
-      'あなたの公開鍵は、共有しても安全なユーザー名のように働きます。人々はこのコードをスキャンするか、あなたの公開鍵を貼り付けて、あなたをサークルに招待します。これを共有しても、あなたの位置情報が明らかになることはありません。位置情報が見えるのは、あなたが参加したサークルのメンバーだけです。あなたの名前と写真も明らかにはなりません。これらは、あなたが公開プロフィールを公開することを選ばないかぎり、この端末の中にとどまります。';
+      'あなたの公開鍵は、共有しても安全なユーザー名のように働きます。人々はこのコードをスキャンするか、あなたの公開鍵を貼り付けて、あなたをサークルに招待します。これを共有しても、あなたの位置情報が明らかになることはありません。位置情報が見えるのは、あなたが参加したサークルのメンバーだけです。あなたの表示名と写真はすでに公開されているので、これを共有しても、それらについて新たに分かることはありません。';
 
   @override
   String get displayNameCardTitle => '表示名';

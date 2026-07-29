@@ -10,6 +10,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart' as geo;
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/pages/settings/privacy_content.dart';
+import 'package:haven/src/pages/settings/privacy_topic_page.dart';
 import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/providers/location_disclosure_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
@@ -153,7 +155,17 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
               color: scheme.onSurfaceVariant,
             ),
           ),
-          const SizedBox(height: HavenSpacing.base),
+          Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: TextButton(
+              onPressed: () => Navigator.push(
+                context,
+                PrivacyTopicPage.route(PrivacyTopic.whatOthersSee),
+              ),
+              child: Text(l10n.commonLearnMore),
+            ),
+          ),
+          const SizedBox(height: HavenSpacing.sm),
 
           // Toggle card.
           Card(

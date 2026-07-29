@@ -13,6 +13,15 @@ import 'package:haven/src/test_keys.dart';
 
 import '../../helpers/localized_app_harness.dart';
 
+/// Scrolls [finder] into view, tolerating a target that is already visible.
+///
+/// The hub grows a tile per topic, so it outgrows one viewport; a [ListView]
+/// builds no element for an off-screen child.
+Future<void> _reveal(WidgetTester tester, Finder finder) async {
+  if (finder.evaluate().isNotEmpty) return;
+  await tester.scrollUntilVisible(finder, 200);
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -42,11 +51,9 @@ void main() {
     expect(listed.toSet(), PrivacyTopic.values.toSet());
 
     for (final topic in listed) {
-      expect(
-        find.byKey(WidgetKeys.privacyTopicTile(topic.name)),
-        findsOneWidget,
-        reason: 'missing hub tile for ${topic.name}',
-      );
+      final tile = find.byKey(WidgetKeys.privacyTopicTile(topic.name));
+      await _reveal(tester, tile);
+      expect(tile, findsOneWidget, reason: 'no hub tile for ${topic.name}');
       expect(find.text(privacyTopicTitle(l10n, topic)), findsOneWidget);
     }
   });
@@ -56,8 +63,20 @@ void main() {
     final l10n = l10nOf(tester, PrivacyPage);
 
     for (final group in privacyTopicGroups) {
-      expect(find.text(group.heading(l10n)), findsOneWidget);
+      final heading = find.text(group.heading(l10n));
+      await _reveal(tester, heading);
+      expect(heading, findsOneWidget);
     }
+  });
+
+  testWidgets('groups partition the topics with no gaps or duplicates', (
+    tester,
+  ) async {
+    // Guards the two ways the hub can silently misrepresent the content model:
+    // a topic listed twice, or a topic in the enum that no group surfaces.
+    final listed = privacyTopicGroups.expand((g) => g.topics).toList();
+    expect(listed.length, listed.toSet().length, reason: 'duplicate tile');
+    expect(listed.toSet(), PrivacyTopic.values.toSet());
   });
 
   for (final topic in PrivacyTopic.values) {
@@ -66,7 +85,9 @@ void main() {
     ) async {
       await pumpLocalized(tester, const PrivacyPage());
 
-      await tester.tap(find.byKey(WidgetKeys.privacyTopicTile(topic.name)));
+      final tile = find.byKey(WidgetKeys.privacyTopicTile(topic.name));
+      await _reveal(tester, tile);
+      await tester.tap(tile);
       await tester.pumpAndSettle();
 
       final page = tester.widget<PrivacyTopicPage>(

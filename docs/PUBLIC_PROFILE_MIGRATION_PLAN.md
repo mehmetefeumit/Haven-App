@@ -137,7 +137,7 @@ upstream (restructured spec). In-app visibility copy (§6.5), onboarding copy.
 |---|---|---|
 | D1 | Opt-in | Default OFF. Consent flag persisted **Rust-side** in `circles.db` (`user_settings` key `profile_publish_opt_in`); publish FFI hard-errors without it (never a silent no-op); Flutter shows the consent dialog and reads the flag via FFI. Retraction (`remove_my_profile_picture`, `delete_my_public_profile`) is never consent-gated but is a **no-op unless a profile/picture was actually published** (gated on `published_events` kind-0 row / cached Known picture — it must never mint a first public event for a never-consented pubkey). |
 | D2 | Fetch transport | **All network I/O in Rust** (relay fetch/publish via existing `RelayManager`; Blossom via HTTP in core). Flutter renders bytes via existing `HavenAvatar`/`Image.memory`; **no URL ever crosses the FFI** (download resolves the URL from the Rust cache row). The `Image.network` ban stays true and enforced. Downloads are size-capped, sha256-verified, decode-bomb re-validated, **connect-time IP-filtered (anti-SSRF)**, cached in SQLCipher. |
-| D3 | Refresh strategy | Bounded one-shot batched fetch + TTL cache (default 6 h). Triggers: circle open, app resume when stale, explicit refresh. No standing subscription; profile fetch never rides the live-sync engine. |
+| D3 | Refresh strategy | Bounded one-shot batched fetch + **per-caller staleness tiers** (`fetch_member_profiles(pubkeys, max_age_secs)`; tiers in `haven/lib/src/constants/profile_refresh_tiers.dart` — interactive 15 min, periodic 30 min, forced 0). Triggers: cold start, circle select, app resume, roster change (invite accept + live-sync `GroupUpdate`), a foreground-only anti-entropy sweep (45 min ±25 %), and an explicit forced refresh. Concurrent triggers coalesce (in-flight guard + one queued follow-up, strictest tier wins). Own profile rides the member batch rather than a separate forced fetch. Still **no standing subscription**; profile fetch never rides the live-sync engine and never runs in the background catch-up lane. *(Superseded the original single 6 h TTL — that value's "White Noise parity" rationale was wrong: WN has no TTL for real users, it holds a standing kind-0 subscription instead, which §1.6 forbids here.)* |
 | D4 | Relay sets | Reads: `discovery_relays()` (existing AUTH-free plane; fetch path never answers NIP-42 AUTH — test-pinned). Writes: user's NIP-65 **write** relays if configured (new `extract_nip65_write_relays` helper), else discovery relays. **Fail-closed** if the effective set is empty. Never a circle's relays. |
 | D5 | Blossom server | Single default `https://blossom.primal.net` (WN parity), constant in `profile/config.rs`. User-configurable override + kind-10063 publishing deferred (v2). Hash-fallback URL parsing implemented on read. |
 | D6 | Local nicknames | `contacts.display_name` becomes a purely user-set petname override (auto-populate from location messages is deleted). Precedence for **other members**: local nickname → kind-0 `display_name` → kind-0 `name` → npub prefix + initials. **The self row keeps its dedicated resolution path** (today's `isSelfMember` branch) and never goes through the generic resolver, so the member list and Identity page always agree (Flutter review F3). |
@@ -375,12 +375,20 @@ the coverage run).
 - `member_profile_refresh_provider.dart`: **non-autoDispose** (the
   `OwnAvatarController` precedent — a fire-and-forget Future that later calls
   `ref.invalidate` must not hold a disposable ref; Flutter review F5).
-  `refreshRoster({force})` batches the **union of all circles' member pubkeys** (§1.7)
-  in one FFI call → invalidate the family. No periodic timer.
-- Refresh triggers: circle-select sites (`circle_list_tile.dart`,
-  `circle_selector.dart`), `map_shell.dart` `_onResumed()` (alongside existing
-  invalidations), refresh icon on Identity page + circle sheet header
-  (RefreshRingButton reuse deferred — needs a per-relay-outcome FFI shape).
+  `refreshAll({maxAge})` builds the **union of all circles' member pubkeys plus the
+  own pubkey** (§1.7) and hands it to `refreshRoster({maxAge})`, which batches it
+  into one FFI call → invalidate the `memberProfileProvider` family +
+  `ownProfileProvider`. An in-flight guard coalesces overlapping triggers into one
+  fetch plus a single queued follow-up (strictest pending tier wins), so a circle
+  select landing on an anti-entropy tick costs one round trip, not two.
+- Refresh triggers: cold start (`map_shell.dart` `initState`, 5 s settle),
+  circle-select sites (`circle_list_tile.dart`, `circle_selector.dart`),
+  `map_shell.dart` `_onResumed()`, roster change (`invitation_card.dart` accept
+  path + `onGroupUpdated` in `service_providers.dart`), the foreground-only
+  anti-entropy timer (4th timer in `maintenance_scheduler_provider.dart`), and the
+  forced "Refresh circles" action on `circles_page.dart`. The Identity-page refresh
+  icon still forces an own-profile-only fetch (it needs the NIP-65 write-relay
+  merge base). No trigger runs in the background catch-up lane.
 
 ### 6.3 UI
 

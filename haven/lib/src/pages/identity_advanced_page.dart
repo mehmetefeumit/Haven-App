@@ -304,13 +304,21 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
             ),
             const SizedBox(height: HavenSpacing.md),
             if (!_showNsec)
+              // The caution colour rides the icon, not the label.
+              // `HavenSecurityColors.warning` measures 3.19:1 against the light
+              // surface: enough for a non-text element (WCAG 1.4.11 needs 3:1)
+              // but short of the 4.5:1 that body text needs (WCAG 1.4.3), and
+              // a button label is text. It clears 4.5:1 in the dark theme, so
+              // tinting the label would have been a light-theme-only failure —
+              // exactly the kind that survives review. The label therefore
+              // takes the theme's default foreground in both themes.
               OutlinedButton.icon(
                 onPressed: _exportNsec,
-                icon: const Icon(LucideIcons.eye),
-                label: Text(l10n.identityAdvancedRevealSecretKey),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: HavenSecurityColors.warning,
+                icon: const Icon(
+                  LucideIcons.eye,
+                  color: HavenSecurityColors.warning,
                 ),
+                label: Text(l10n.identityAdvancedRevealSecretKey),
               )
             else
               Column(

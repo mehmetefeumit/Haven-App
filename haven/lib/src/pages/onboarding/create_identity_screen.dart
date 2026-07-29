@@ -171,8 +171,8 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
       }
     }
 
-    // (2) Fire-and-forget the KeyPackage publish (kind 30443/443 + kind-10051
-    // KeyPackage-relay list + kind-10050 inbox list). Idempotent: re-firing on
+    // (2) Fire-and-forget the KeyPackage publish (kind 30443/443 + the kind-10002
+    // NIP-65 KeyPackage-relay list + kind-10050 inbox list). Idempotent: re-firing on
     // a resume rotates the KeyPackage rather than duplicating it.
     ref
       ..invalidate(keyPackagePublisherProvider)

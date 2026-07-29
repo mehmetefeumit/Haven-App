@@ -1,52 +1,39 @@
 {
   "@@locale": "ar",
-
   "appearanceTitle": "المظهر",
-
   "appearanceThemeHeader": "السمة",
-
   "appearanceThemeSystem": "الافتراضي للنظام",
   "appearanceThemeSystemSubtitle": "مطابقة إعدادات جهازك",
-
   "appearanceThemeLight": "فاتح",
   "appearanceThemeLightSubtitle": "استخدام السمة الفاتحة دائمًا",
-
   "appearanceThemeDark": "داكن",
   "appearanceThemeDarkSubtitle": "استخدام السمة الداكنة دائمًا",
-
   "appearanceLanguageTitle": "اللغة",
-
   "languageSystemDefault": "الافتراضي للنظام",
-
   "commonTryAgain": "إعادة المحاولة",
   "commonDismiss": "تجاهل",
   "commonSettings": "الإعدادات",
   "commonInvitations": "الدعوات",
   "commonPendingInvitations": "{count, plural, zero{لا دعوات معلّقة} one{دعوة معلّقة واحدة} two{دعوتان معلّقتان} few{{count} دعوات معلّقة} many{{count} دعوة معلّقة} other{{count} دعوة معلّقة}}",
-
   "commonBack": "رجوع",
   "commonContinue": "متابعة",
   "commonSkip": "تخطٍّ",
   "commonRetry": "إعادة المحاولة",
-
   "onboardingStepOf": "الخطوة {current} من {total}",
-
   "onboardingAppName": "Haven",
   "onboardingWelcomeHeadline": "شارِك موقعك بخصوصية، فقط مع من تريد.",
   "onboardingWelcomeHeadlineEmphasis": "فقط",
   "onboardingWelcomeCta": "ابدأ الآن",
-
   "onboardingValuePropsTitle": "ما الذي يميّز Haven",
   "onboardingValueProp1Title": "دوائرك وحدها تستطيع رؤيتك",
   "onboardingValueProp1Body": "يُشفَّر موقعك على جهازك قبل أن يغادره، بحيث لا يقدر على قراءته سوى الدوائر التي تختارها، ولا تقدر على ذلك Haven ولا أي جهة أخرى. ولأن Haven مفتوح المصدر، يمكن لأي شخص التحقق من ذلك.",
   "onboardingValueProp2Title": "لا يستطيع أحد إيقافه",
   "onboardingValueProp2Body": "لا يملك Haven خادمًا مركزيًا. تنتقل رسائلك المشفّرة عبر شبكة لامركزية من المُرحِّلات التي يمكنك اختيارها بنفسك، فلا تقدر أي جهة منفردة على إيقافه.",
   "onboardingValueProp3Title": "لا حاجة إلى حساب",
-  "onboardingValueProp3Body": "لا بريد إلكتروني، ولا رقم هاتف، ولا تسجيل. يُنشئ Haven هوية خاصة تعيش على هاتفك وحده، دون أي شيء يربطها بشخصك الحقيقي.",
+  "onboardingValueProp3Body": "لا بريد إلكتروني، ولا رقم هاتف، ولا تسجيل. يُنشئ Haven هوية مفتاحها السري لا يغادر هاتفك أبدًا، فلا يوجد حساب يستطيع أحد تسليمه.",
   "onboardingValueProp1Summary": "مُشفَّر على جهازك، فلا يستطيع قراءته سوى الدوائر التي تختارها.",
   "onboardingValueProp2Summary": "بلا خادم مركزي؛ يعمل عبر شبكة من المُرحِّلات تختارها بنفسك.",
-  "onboardingValueProp3Summary": "بلا بريد أو هاتف أو تسجيل، ولا شيء يربطه بك.",
-
+  "onboardingValueProp3Summary": "بلا بريد أو هاتف أو تسجيل. مفتاحك السري لا يغادر هاتفك أبدًا.",
   "onboardingCreateIdentityTitle": "أنشئ هويتك",
   "onboardingCreateIdentityBody": "سيُنشئ Haven هوية خاصة تعيش على هذا الهاتف وحده. هي الطريقة التي تتعرّف بها دوائرك عليك.",
   "onboardingCreateIdentityWarning": "إن فقدت هذا الهاتف أو حذفت التطبيق، فستضيع هويتك. وليس لدى Haven أي وسيلة لاستعادتها لك.",
@@ -55,7 +42,6 @@
   "onboardingCreateIdentityImportPrompt": "لديك مفتاح بالفعل؟",
   "onboardingCreateIdentityImportLink": "استورده بدلًا من ذلك",
   "onboardingCreateIdentityError": "حدث خطأ ما أثناء إنشاء هويتك. يُرجى إعادة المحاولة.",
-
   "onboardingImportTitle": "استورد مفتاحك الحالي",
   "onboardingImportBody": "الصق المفتاح السري الذي نسخته احتياطيًا من تطبيق آخر متوافق مع Haven.",
   "onboardingImportHint": "nsec1…",
@@ -63,14 +49,11 @@
   "onboardingImportLoading": "جارٍ الاستيراد…",
   "onboardingImportInvalid": "لا يبدو هذا مفتاح نسخ احتياطي صالحًا. يُرجى التحقق وإعادة المحاولة.",
   "onboardingImportError": "تعذّر استيراد هذا المفتاح. يُرجى التحقق وإعادة المحاولة.",
-
   "onboardingDisplayNameHint": "مثال: أليكس",
   "onboardingDisplayNameError": "تعذّر حفظ هذا الاسم. يُرجى إعادة المحاولة.",
   "onboardingAddPhotoOptional": "إضافة صورة (اختياري)",
-
   "commonCancel": "إلغاء",
   "commonOpenSettings": "فتح الإعدادات",
-
   "settingsTitle": "الإعدادات",
   "settingsIdentityTitle": "الهوية",
   "settingsIdentitySubtitle": "الملف الشخصي والمفاتيح ومشاركة الصور",
@@ -83,7 +66,6 @@
   "settingsAboutTitle": "حول",
   "settingsDebugOverlayTitle": "تراكب سجلّ التصحيح",
   "settingsDebugOverlaySubtitle": "إظهار مخرجات السجلّ على الشاشة",
-
   "relaySettingsTitle": "المُرحِّلات",
   "relaySettingsCheckRelaysTooltip": "فحص المُرحِّلات",
   "relaySettingsNoIdentityTitle": "لا توجد هوية",
@@ -92,7 +74,7 @@
   "relaySettingsInboxTitle": "مُرحِّلات صندوق الوارد",
   "relaySettingsInboxSubtitle": "kind 10050، حيث تصلك الدعوات",
   "relaySettingsKeyPackageTitle": "مُرحِّلات KeyPackage الخاصة بي",
-  "relaySettingsKeyPackageSubtitle": "kind 10051، حيث يكتشف المدعوون مفاتيح تشفيرك",
+  "relaySettingsKeyPackageSubtitle": "kind 10002، حيث يكتشف المدعوون مفاتيح تشفيرك",
   "relaySettingsLoadRelaysError": "تعذّر تحميل المُرحِّلات.",
   "relaySettingsAddRelay": "إضافة مُرحِّل",
   "relaySettingsRestoreDefaults": "استعادة الإعدادات الافتراضية",
@@ -111,21 +93,6 @@
   "relaySettingsStatusSemantics": "حالة المُرحِّل: {status}",
   "relaySettingsEmptyTitle": "لا توجد مُرحِّلات مُهيّأة",
   "relaySettingsEmptyMessage": "تحتاج إلى مُرحِّل واحد على الأقل ليتمكّن الآخرون من الوصول إليك. اضغط أدناه لاستعادة إعدادات Haven الافتراضية.",
-  "relaySettingsExplainerSemantics": "كيف تعمل مُرحِّلات Haven",
-  "relaySettingsExplainerHeading": "كيف يعمل هذا",
-  "relaySettingsExplainerNostr": "لا يملك Haven خادمًا مركزيًا. يعمل على تقنيتين مفتوحتين. Nostr شبكة من الخوادم المستقلة تُسمّى المُرحِّلات يمكن لأي شخص تشغيلها؛ تستقبل رسائلك وتحتفظ بها لفترة وجيزة ثم تمرّرها عندما يطلبها جهات اتصالك. لا غنى عن أي مُرحِّل بعينه، فإن توقّف أحدها واصلت البقية العمل، وكل ما قد يُجبَر مُرحِّل على تسليمه ليس سوى بيانات مشفّرة.",
-  "relaySettingsExplainerMarmot": "يُشفِّر بروتوكول Marmot رسائلك على جهازك قبل أن تغادره، مستخدمًا معيار MLS (Messaging Layer Security). كل دائرة هي مجموعتها المشفّرة الخاصة بمفاتيحها الخاصة، فلا يمكن ربط الدوائر المنفصلة ببعضها. وتظل تلك المفاتيح تتقدّم مع الوقت، وهي خاصية تُسمّى السرّية الأمامية، فحتى المفتاح الذي يُكشَف لاحقًا لا يستطيع فتح رسائلك السابقة.",
-  "relaySettingsExplainerMetadata": "لذلك، لا يرى المُرحِّل أبدًا موقعك، ولا رسائلك، ولا من في دوائرك، ولا هويتك على تلك الرسائل. تُنشَر كل رسالة من عنوان إرسال جديد لمرة واحدة، فلا شيء في الرسالة يربطها بحسابك. ومع ذلك، لا يزال المُرحِّل يرى بعض البيانات الوصفية: وسمًا عشوائيًا لكل دائرة، وتوقيت حركة بياناتك وحجمها، وعنوان الشبكة الذي تتصل منه.",
-  "relaySettingsExplainerInboxTerm": "مُرحِّلات صندوق الوارد",
-  "relaySettingsExplainerInboxBody": " هي صندوق بريدك: حيث تُسلَّم إليك الدعوات للانضمام إلى دائرة، وهي بدورها مشفّرة، لتستلمها. لكي يدعوك أحدهم، يجب أن يكون قادرًا على الوصول إلى أحد هذه المُرحِّلات.",
-  "relaySettingsExplainerKeyPackageTerm": "مُرحِّلات KeyPackage",
-  "relaySettingsExplainerKeyPackageBody": " هي حيث تنشر حزمة صغيرة من مفاتيحك العامة، وهي آمنة للمشاركة. يجلبها من يعرف حسابك من هذه المُرحِّلات ليضيفك إلى دائرة.",
-  "relaySettingsExplainerOwnRelayTerm": "استخدام مُرحِّلك الخاص.",
-  "relaySettingsExplainerOwnRelayBody": " تحمل كل دائرة أيضًا قائمة المُرحِّلات الخاصة بها، تُشارَك مع كل عضو عند انضمامه؛ تلك القائمة، لا صندوق وارِدك، هي حيث تنتقل التحديثات المشفّرة المستمرّة للدائرة. لذا إن كنت تفضّل تجنّب المُرحِّلات العامة، يمكنك تشغيل مُرحِّلك الخاص وتوجيه دائرة إليه: فبعد أن ينضمّ الجميع، يمكن أن تتدفّق حركة تلك الدائرة عبره وحده.",
-  "relaySettingsExplainerReachabilityTerm": "العقبة هي إمكانية الوصول.",
-  "relaySettingsExplainerReachabilityBody": " يجب أن يتمكّن كل عضو من الاتصال بذلك المُرحِّل، وعندما تدعو أحدهم أول مرة، تحتاجان كلاكما إلى مُرحِّل يمكنكما الوصول إليه (على سبيل المثال، المُرحِّل الخاص نفسه المُدرَج بوصفه مُرحِّل صندوق الوارد وKeyPackage للجميع). ولا يزال المُرحِّل الخاص يرى حركة البيانات المشفّرة وتوقيتها نفسها التي يراها أي مُرحِّل آخر؛ غير أنك تتحكّم بمن يشغّله.",
-  "relaySettingsExplainerFooter": "يمكنك إضافة المُرحِّلات أو إزالتها من أي قائمة في أي وقت. المُرحِّلات الأكثر تجعل الوصول إليك أسهل؛ والأقل تمنحك تحكّمًا أكبر بوجهة حركة بياناتك المشفّرة.",
-
   "locationSettingsTitle": "الموقع",
   "locationSettingsDisabledSnack": "تم تعطيل المشاركة في الخلفية",
   "locationSettingsEnabledSnack": "تم تفعيل المشاركة في الخلفية",
@@ -141,7 +108,6 @@
   "locationSettingsAndroidBattery": "للمشاركة الموثوقة في الخلفية، استثنِ Haven أيضًا من تحسين البطارية. انتقل إلى الإعدادات ← التطبيقات ← Haven ← البطارية ← السماح طوال الوقت.",
   "locationSettingsAndroidVendors": "على أجهزة Samsung، أزِل Haven من \"التطبيقات النائمة\" (Device care ← Battery ← Background usage limits). على Xiaomi، فعّل Autostart لتطبيق Haven.",
   "locationSettingsIosGuidance": "ما دامت المشاركة في الخلفية مفعّلة، يحتفظ Haven بجلسة موقع متواصلة ويُظهر iOS مؤشرًا أزرق في شريط الحالة. ومنح إذن «دائمًا» يتيح لتطبيق Haven إضافةً إلى ذلك تدارك ما فاته من تحديثات دوائرك بعد أن يُغلق iOS التطبيق.",
-
   "mapStyleTitle": "نمط الخريطة",
   "mapStyleMinimalTitle": "بسيط",
   "mapStyleMinimalSubtitle": "لوحة هادئة قليلة التفاصيل تتبع سمتك الفاتحة أو الداكنة",
@@ -155,7 +121,6 @@
   "mapStylePreviewSemantics": "معاينة الخريطة ({scene}): {style}",
   "mapStylePreviewUnavailableSemantics": "معاينة الخريطة غير متاحة في هذا الإصدار",
   "mapStylePreviewUnavailableLabel": "تظهر المعاينة المباشرة في إصدارات النشر",
-
   "aboutTitle": "حول",
   "aboutHeroName": "Haven",
   "aboutHeroTagline": "مشاركة موقع خاصة ومقاوِمة للرقابة.",
@@ -165,25 +130,9 @@
   "aboutSupportOsm": "دعم OpenStreetMap",
   "aboutMapAttribution": "© Stadia Maps · © OpenMapTiles · © OpenStreetMap contributors\nMap data licensed under ODbL",
   "aboutLinkOpenError": "تعذّر فتح الرابط",
-  "aboutWhoCanSeeTitle": "من يرى ماذا",
-  "aboutWhoCanSeeIntro": "موقعك الدقيق قابل للقراءة فقط من قِبل الأشخاص الذين تختارهم. إليك ما تستطيع الأطراف الرئيسية رؤيته وما لا تستطيع.",
-  "aboutActorCirclesWho": "أعضاء الدائرة الذين تشارك معهم",
-  "aboutActorCirclesSees": "موقعك الدقيق والاسم المعروض الذي تختاره، لكن فقط داخل الدوائر التي تشاركهم فيها، ولا يرون أبدًا دوائرك الأخرى.",
-  "aboutActorRelaysWho": "مشغّلو المُرحِّلات",
-  "aboutActorRelaysSees": "الخوادم التي تمرّر رسائلك. ترى عنوان IP الخاص بك، والمفتاح العام الذي تنشر تحته (معرّف عشوائي، لا اسمك)، وحجم حركة بياناتك وتوقيتها، وأي حساب بحثت عنه عند البحث عن شخص. ولا يمكنها أبدًا قراءة موقعك، أو رسائلك، أو أسماء دوائرك، أو من في دوائرك.",
-  "aboutActorMapWho": "مزوّد الخرائط (Stadia Maps)",
-  "aboutActorMapSees": "فقط أثناء فتح الخريطة: عنوان IP الخاص بك والمنطقة التي تعرضها، ليتمكّن من إرسال صور الخريطة الصحيحة. ولا يرى أبدًا دوائرك أو موقعك المشترك. تُخفي Stadia هوية عناوين IP ولا تبيع بياناتك.",
-  "aboutActorDevelopersWho": "مطوّرو Haven",
-  "aboutActorDevelopersSees": "لا شيء. لا يشغّل Haven أي خوادم ولا يجمع أي تحليلات. لا يستطيع المطوّر رؤية سوى ما يراه مشغّل المُرحِّل، وذلك فقط إن استخدمت مُرحِّلًا يصادف أنه يشغّله.",
-  "aboutWhoCanSeeMetadataNote": "ومع ذلك، نشاطك ليس خفيًا تمامًا. يستطيع مُرحِّل تستخدمه، أو أي شخص يراقب شبكتك، أن يعرف أنك نشط، ومتى تقريبًا، وكم مرة، من توقيت الاتصال وأحجام الرسائل.",
-  "aboutScreenshotTitle": "حماية لقطات الشاشة",
-  "aboutScreenshotBody": "على Android، يحظر Haven لقطات الشاشة وتسجيل الشاشة على مستوى التطبيق كله لمنع كشف الموقع عن طريق الخطأ. هذه حماية على مستوى النظام (FLAG_SECURE) تنطبق على كل شاشة في التطبيق، بما في ذلك الخريطة وقوائم الأعضاء.",
-  "aboutVpnTitle": "كن أكثر خصوصية مع شبكة VPN",
-  "aboutVpnBody": "ترى المُرحِّلات ومزوّد الخرائط عنوان IP الخاص بك، ويرى مزوّد الإنترنت أي خوادم تصل إليها. تُخفي شبكة VPN موثوقة عنوان IP الخاص بك عنهم. نوصي بـ Mullvad. لا يُغيّر ذلك ما يراه أعضاء دائرتك، وينقل الثقة إلى مزوّد VPN.",
   "aboutVpnLinkLabel": "mullvad.net",
   "aboutFooterLicense": "مُرخَّص بموجب MIT License",
   "aboutFooterVersion": "الإصدار {version}",
-
   "privacyTitle": "الخصوصية",
   "privacySubtitle": "كيف يعمل Haven وما يستطيع الآخرون رؤيته",
   "privacyHubSummary": "لا يشارك Haven موقعك إلا مع الدوائر الصغيرة التي تختارها، ويُشفّره على هاتفك قبل أن يغادره. لا يوجد حساب لدى شركة ولا خادم يملكه Haven. تشرح الصفحات التالية كيف يعمل ذلك بلغة بسيطة، وتكون صريحة معك بشأن ما لا يحميه.",
@@ -219,7 +168,54 @@
   "privacyPublicProfileRemovalIsNotDeletion": "إزالة صورتك لاحقًا لا تُلغي نشرها. يستبدل Haven ملفك الشخصي بملف فارغ، لكن ملف الصورة يبقى على الخادم الذي يستضيفه، وأي نسخة نُزِّلت منه بالفعل تبقى في أيدي من نزّلها. اعتبر كل ما تنشره دائمًا.",
   "privacyPublicProfileDetailKindZero": "الملف الشخصي هو حدث Nostr من نوع \"kind 0\" موقَّع بمفتاح هويتك. وتُرفع الصور إلى مستضيف Blossom — وهو blossom.primal.net إن لم تغيّره — فيرى الصورة ومفتاحك العام وعنوان IP الخاص بك.",
   "privacyPublicProfileDetailExifStripped": "قبل الرفع، يعيد Haven ترميز الصورة ويُسقط البيانات المخفية التي ترفقها الكاميرات، ومنها موقع GPS الذي التُقطت فيه الصورة. وهذا مهم هنا: فصورة من رحلة قد تحمل، بغير ذلك، إحداثيات منزلك.",
-
+  "privacyGroupHowLocationTravelsHeading": "كيف ينتقل موقعك",
+  "privacyRelaysTitle": "المُرحِّلات: الخوادم التي تمرّر الرسائل",
+  "privacyRelaysSubtitle": "عبر حواسيب مَن تمرّ تحديثاتك",
+  "privacyRelaysWhatIsARelay": "لا يملك Haven خادمًا خاصًا به، فتمرّ تحديثاتك عبر خوادم يملكها آخرون. تُسمّى هذه الخوادم مُرحِّلات: خوادم صغيرة مستقلة يمكن لأي شخص تشغيلها. يحتفظ المُرحِّل بالرسالة المشفّرة لفترة وجيزة، ثم يمرّرها عندما تطلبها دائرتك.",
+  "privacyRelaysWhyMany": "استخدام عدة مُرحِّلات يعني أنّه لا يستطيع أيٌّ منها عزلك. فإن توقّف أحدها، واصلت البقية العمل. وأنت تختار المُرحِّلات التي تستخدمها، ويمكنك تغييرها متى شئت.",
+  "privacyRelaysTwoLists": "يحفظ Haven لك قائمتين. مُرحِّلات صندوق الوارد هي حيث تصلك الدعوات. ومُرحِّلات KeyPackage هي حيث يجلب الآخرون المفاتيح التي يحتاجونها لدعوتك. وتحمل كل دائرة أيضًا قائمتها الخاصة، وعبرها تنتقل تحديثات الدائرة المشفّرة.",
+  "privacyRelaysMeansForYou": "ليس هنا ما قد تخطئ فيه فيضرّك: فالمُرحِّل لا يرى سوى بيانات مشفّرة. لكنك تحتاج إلى مُرحِّل واحد على الأقل يمكن الوصول إليه، وإلا لن يستطيع أحد دعوتك وستصمت دوائرك.",
+  "privacyRelaysDetailIndexers": "بمعزل عن قوائمك الخاصة، يستعلم Haven من مجموعة صغيرة من مُرحِّلات الدليل العامة ليبحث عن ملفات الآخرين الشخصية ومفاتيحهم. ويتصل بها حتى إن لم تضبط لنفسك سوى مُرحِّلات خاصة. وهي ترى عنوان الشبكة الذي تتصل منه والحسابات التي سألت عنها.",
+  "privacyRelaysDetailKeyListIsPublic": "قائمة مُرحِّلات KeyPackage تُنشَر هي نفسها على الشبكة، موقَّعة بمفتاح هويتك، ليتمكّن الآخرون من إيجادها. فإن أضفت مُرحِّلًا خاصًا إلى تلك القائمة، صار عنوانه عامًا ومرتبطًا بك. أما المُرحِّل المستخدَم داخل قائمة دائرة واحدة فقط، فلا يُعلَن عنه بهذه الطريقة.",
+  "privacyEncryptionTitle": "كيف يعمل التشفير",
+  "privacyEncryptionSubtitle": "مفاتيح لكل دائرة، وما يتغيّر عند انضمام الناس أو خروجهم",
+  "privacyEncryptionPerCircle": "يُشفَّر موقعك على هاتفك قبل أن يغادره، بمعيار مفتوح اسمه MLS. وكل دائرة هي مجموعتها المشفّرة الخاصة بمفاتيحها الخاصة. ولا يستطيع أحد من خارج الدائرة قراءة ما يُرسَل داخلها — لا مُرحِّل، ولا Haven نفسه، ولا دائرة أخرى أنت فيها.",
+  "privacyEncryptionWhenSomeoneJoins": "عندما ينضمّ شخص، تنتقل الدائرة إلى مفتاح جديد. يستطيع قراءة ما يُرسَل بعد وصوله، ولا شيء مما سبقه. ولا يُرسِل Haven إلى العضو الجديد أي مواقع سابقة أبدًا.",
+  "privacyEncryptionWhenSomeoneLeaves": "عندما يخرج شخص أو يُزال، تنتقل الدائرة إلى مفتاح جديد آخر. وفي غضون دقائق قليلة على الأكثر، لا يعود قادرًا على قراءة أي شيء جديد.",
+  "privacyEncryptionKeysChangeOnMembership": "تتغيّر المفاتيح عند تغيّر العضوية — لا وفق مؤقّت. وفي ما بين تلك التغييرات، يغطّي مفتاح واحد كل ما يُرسَل. لذا فمن تُزيله من دائرة مستقرّة منذ زمن طويل يبقى قادرًا على فتح أي رسائل حفظها وهو عضو، حتى رسائل من أسابيع مضت. لكنه لا يستطيع فتح أي شيء أُرسِل بعد خروجه.",
+  "privacyEncryptionMeansForYou": "يحميك التشفير من كل من هم خارج دوائرك. ولا يستطيع حمايتك من شخص كان يومًا داخل إحداها. فإن أردت قطيعة تامة مع شخص، فإنشاء دائرة جديدة أكثر أمانًا من إزالته من دائرة قديمة.",
+  "privacyEncryptionDetailMls": "إن معيار MLS (Messaging Layer Security) هو المعيار نفسه الصادر عن IETF والمستخدَم في تطبيقات مراسلة آمنة أخرى. ويصل Haven إلى شبكة Nostr من خلال بروتوكول Marmot الذي يحدّد كيف تنتقل مجموعات MLS عبر المُرحِّلات. ومفتاح هويتك العام في شبكة Nostr منفصل عن المفتاح الذي تُوقِّع به كل دائرة.",
+  "privacyEncryptionDetailEpochs": "تُسمّى كل فترة يعمل فيها مفتاح واحد «حقبة». ولا يحتفظ جهازك إلا بما يكفي لفكّ تشفير الرسائل التي لا تزال في الطريق من الحقبات القليلة الأخيرة، ثم يتخلّص منه — ولهذا لا يستطيع Haven استعادة رسائلك الأقدم لك، ولا حتى من حيث المبدأ.",
+  "privacyWhatOthersSeeTitle": "ما يراه الأعضاء، وما تراه المُرحِّلات",
+  "privacyWhatOthersSeeSubtitle": "الأشخاص الذين تشارك معهم، والخوادم التي بينكم",
+  "privacyWhatOthersSeeMembersHeading": "الأشخاص الذين في دوائرك",
+  "privacyWhatOthersSeeMembersExact": "يرى كل فرد في الدائرة موقعك بدقّة على الخريطة، لا منطقة تقريبية. ولا يوجد إعداد يشارك موقعًا غامضًا مع بعض الأعضاء وموقعًا دقيقًا مع آخرين.",
+  "privacyWhatOthersSeeCannotPause": "ما دام Haven مفتوحًا وأنت في دائرة، يُرسَل موقعك من تلقاء نفسه كل دقيقتين تقريبًا. لا يوجد زرّ إيقاف مؤقّت. والإعداد الوحيد الذي تتحكّم به هو ما إذا كانت المشاركة تستمرّ بعد خروجك من التطبيق.",
+  "privacyWhatOthersSeeMembersLearnKey": "الانضمام إلى دائرة يُظهر أيضًا مفتاحك العام لكل عضو فيها. وعبره يستطيعون البحث عن ملفك الشخصي العام، وعن كل ما نشرته يومًا تحت ذلك المفتاح.",
+  "privacyWhatOthersSeeCoMemberIp": "تُجلَب صورة ملف العضو الشخصي من خادم يختاره هو. وتحميلها يكشف عنوان شبكتك — وبالتالي مكانك التقريبي في العالم — لمن يشغّل ذلك الخادم. يحدث هذا من تلقاء نفسه، دون أن تضغط على أي شيء.",
+  "privacyWhatOthersSeeRelaysHeading": "مشغّلو المُرحِّلات",
+  "privacyWhatOthersSeeRelaysCannot": "لا يستطيع مشغّلو المُرحِّلات قراءة موقعك، ولا رسائلك، ولا اسم دائرتك، ولا قائمة أعضائها. وتصلهم كل رسالة من عنوان إرسال جديد لمرة واحدة، فلا يستطيعون معرفة أي عضو أرسلها.",
+  "privacyWhatOthersSeeRelaysCan": "لكنهم يرون عنوان الشبكة الذي تتصل منه، ومتى تكون متصلًا، وحجم حركة بياناتك وتكرارها. وتحمل كل دائرة وسمًا عشوائيًا، فيستطيع المُرحِّل جمع رسائل الدائرة الواحدة معًا وتقدير عدد من فيها — دون أن يعرف هوية أي منهم.",
+  "privacyWhatOthersSeeMeansForYou": "اعتبر الدائرة أشخاصًا تعطيهم عنوان منزلك. في مواجهة المُرحِّلات ومن هم في الخارج يصمد التشفير، ويسدّ VPN ثغرة عنوان الشبكة. أما في مواجهة عضو يحفظ لقطة شاشة، فلا شيء يصمد.",
+  "privacyWhatOthersSeeDetailTag": "يبقى وسم الدائرة كما هو مدى عمر تلك الدائرة، فيستطيع المُرحِّل ربط كل رسائلها معًا إلى أجل غير مسمّى. وهذه خاصية في البروتوكول الأساسي نفسه، وليست شيئًا يستطيع Haven تغييره.",
+  "privacyWhatOthersSeeDetailExpiry": "يطلب Haven من المُرحِّلات إسقاط رسائل الموقع بعد نحو أربع دقائق. وهذا الطلب استرشادي: فللمُرحِّل أن يحتفظ بها مدة أطول. أما الدعوات فلا تحمل أي مدة انتهاء، وقد تبقى على مُرحِّل صندوق وارِدك إلى أجل غير مسمّى.",
+  "commonLearnMore": "اعرف المزيد",
+  "relaySettingsBackendCaption": "لا يملك Haven خادمًا خاصًا به. تمرّ تحديثاتك المشفّرة عبر خوادم مستقلة تُسمّى مُرحِّلات، وهي لا ترى أبدًا موقعك ولا مَن في دوائرك.",
+  "privacyWhatOthersSeeScreenshots": "لقطات الشاشة مسألة تعتمد على نظام التشغيل، والنظامان يختلفان. على Android يمنع Haven لقطات الشاشة وتسجيل الشاشة في كل شاشات التطبيق. أما على iPhone فلا يستطيع ذلك: يجعل Haven معاينة مبدّل التطبيقات ضبابية، لكن يستطيع أي عضو أن يأخذ لقطة لما يظهر على الشاشة.",
+  "privacyGroupTheLimitsHeading": "حدود الحماية",
+  "privacyInferenceTitle": "ما لا يزال يمكن استنتاجه عنك",
+  "privacyInferenceSubtitle": "الآثار التي لا يحجبها التشفير",
+  "privacyInferenceWhatIsMetadata": "يُخفي التشفير ما تُرسله. لكنه لا يستطيع أن يخفي أنك أرسلت شيئًا. أما النمط المحيط بالرسالة — متى خرجت، وما حجمها، وبأي خوادم كنت متصلًا — فيُسمّى البيانات الوصفية، ويبقى مرئيًا حتى عندما لا يكون المحتوى كذلك.",
+  "privacyInferenceActivityPattern": "ومن هذا النمط، يستطيع مُرحِّل تستخدمه أن يعرف تقريبًا متى تكون نشطًا وكم مرة. ويُرسل Haven أيضًا تحديثًا إضافيًا كلما تحرّكت أكثر من مئة متر تقريبًا. لذا قد يُلمِّح سجل طويل بما يكفي إلى ما إذا كنت متنقّلًا أم ثابتًا في مكانك — دون أن يكشف المكان أبدًا.",
+  "privacyInferencePresence": "وما دام Haven يعمل، فهو يُبقي اتصالًا مفتوحًا بمُرحِّلاتك، فتستطيع هي أيضًا أن ترى أنك متصل، وأي الدوائر تُتابع. وهذا هو ثمن وصول التحديثات في ثوانٍ بدلًا من دقائق.",
+  "privacyInferenceIpHeading": "عنوان شبكتك",
+  "privacyInferenceIpAddress": "كل خادم يتحدّث إليه Haven يرى عنوان الشبكة الذي يتصل منه هاتفك: مُرحِّلاتك، ومزوّد الخرائط، ومن يستضيف صورة الملف الشخصي لأي عضو. ويرى مزوّد الإنترنت أي هذه الخوادم وصلت إليه ومتى. ولا يفعل Haven من تلقاء نفسه أي شيء لإخفاء أيٍّ من هذين الأمرين.",
+  "privacyInferenceVpnHeading": "هل تحتاج إلى شبكة VPN؟",
+  "privacyInferenceVpnHelps": "تستبدل شبكة VPN عنوان شبكتك بعنوانها، فلا ترى المُرحِّلات ولا الخوادم الأخرى من أين تتصل. وتخفي أيضًا عن مزوّد الإنترنت أي الخوادم تصل إليها. نوصي بـ Mullvad.",
+  "privacyInferenceVpnLimits": "لكنها ليست دواءً لكل داء. لا تُغيّر شبكة VPN شيئًا مما يراه أعضاء دائرتك، ولا تُخفي توقيت حركة بياناتك ولا حجمها عن مُرحِّل تتحدّث إليه. وهي تنقل ثقتك إلى شركة VPN بدلًا من أن تُغنيك عن الحاجة إلى الثقة بأحد.",
+  "privacyInferenceMeansForYou": "إن كان ما يقلقك أن تضعك جهةٌ تُشغّل شبكةً أو خادمًا على خريطة، لا أن يفعل ذلك شخص، فشبكة VPN هي أنفع شيء واحد يمكنك إضافته. وإن كان ما يقلقك هو الأشخاص الذين في دوائرك، فهي لن تساعدك على الإطلاق.",
+  "privacyInferenceDetailJitter": "يُغيّر Haven الفاصل الزمني بين التحديثات عن قصد، فلا يُظهر تسجيل قصير أي إيقاع منتظم. لكن عند حساب المتوسّط على مدى ساعات طويلة، يبقى تقدير الوتيرة الأساسية ممكنًا. ولا يُضاف حشو إلى أحجام الرسائل أيضًا، وتقع تحديثات الموقع في نطاق حجم ضيّق، وهذا ما يجعل التعرّف عليها بوصفها تحديثات موقع ممكنًا.",
+  "privacyInferenceDetailOutOfScope": "بعض الأمور تقع بكل بساطة خارج ما يستطيع Haven معالجته. فمراقبٌ يستطيع أن يرصد مُرحِّلات كثيرة في الوقت نفسه، أو هاتفك أنت بعد أن يسيطر عليه شخص آخر، أمران يتجاوزان ما يمكن أن يُصلحه أي قرار تصميمي هنا.",
   "commonClearAll": "مسح الكل",
   "commonMemberCount": "{count, plural, zero{لا أعضاء} one{عضو واحد} two{عضوان} few{{count} أعضاء} many{{count} عضوًا} other{{count} عضو}}",
   "commonNumber": "{count}",
@@ -233,7 +229,6 @@
   "compassSouthWest": "الجنوب الغربي",
   "compassWest": "الغرب",
   "compassNorthWest": "الشمال الغربي",
-
   "circlesTitle": "الدوائر",
   "circlesRefreshTooltip": "تحديث الدوائر",
   "circlesRequiresIdentity": "يتطلّب إنشاء الدائرة إعداد الهوية أولًا",
@@ -245,7 +240,6 @@
   "circlesLoadError": "تعذّر تحميل الدوائر",
   "circlesSelectToView": "اختر دائرة لعرض الأعضاء",
   "circlesNoMembers": "لا أعضاء في هذه الدائرة",
-
   "createCircleTitle": "إضافة أعضاء",
   "createCircleSelectedCount": "المُحدَّد ({count})",
   "createCircleEmptyTitle": "أضف أعضاء الدائرة",
@@ -256,7 +250,6 @@
   "createCircleNoAccountFound": "لم يُعثَر على حساب Haven",
   "createCircleCouldNotVerify": "تعذّر التحقق من العضو",
   "createCircleSomethingWentWrong": "حدث خطأ ما",
-
   "nameCircleTitle": "سمِّ دائرتك",
   "nameCircleMembersToInvite": "{count, plural, zero{لن يُدعى أحد} one{ستُرسَل دعوة إلى عضو واحد} two{ستُرسَل دعوة إلى عضوين} few{ستُرسَل دعوة إلى {count} أعضاء} many{ستُرسَل دعوة إلى {count} عضوًا} other{ستُرسَل دعوة إلى {count} عضو}}",
   "nameCircleNameLabel": "اسم الدائرة",
@@ -273,7 +266,6 @@
   "nameCircleCreatedSnack": "{count, plural, zero{تم إنشاء الدائرة \"{name}\"! لم تُرسَل دعوات.} one{تم إنشاء الدائرة \"{name}\"! أُرسلت دعوة واحدة.} two{تم إنشاء الدائرة \"{name}\"! أُرسلت دعوتان.} few{تم إنشاء الدائرة \"{name}\"! أُرسلت {count} دعوات.} many{تم إنشاء الدائرة \"{name}\"! أُرسلت {count} دعوة.} other{تم إنشاء الدائرة \"{name}\"! أُرسلت {count} دعوة.}}",
   "nameCircleIdentityError": "خطأ في الهوية. يُرجى التحقق من إعداد هويتك.",
   "nameCircleCreateError": "تعذّر إنشاء الدائرة. يُرجى إعادة المحاولة.",
-
   "addMemberTitle": "إضافة إلى {circleName}",
   "addMemberInfo": "يستطيع الأعضاء الجدد رؤية مواقع هذه الدائرة المشفّرة بمجرّد قبولهم الدعوة.",
   "addMemberAlreadyInCircle": "موجود في هذه الدائرة بالفعل",
@@ -282,13 +274,11 @@
   "addMemberSentToCircle": "{count, plural, zero{أُرسلت الدعوة إلى {circleName}} one{أُرسلت الدعوة إلى {circleName}} two{أُرسلت الدعوتان إلى {circleName}} few{أُرسلت الدعوات إلى {circleName}} many{أُرسلت الدعوات إلى {circleName}} other{أُرسلت الدعوات إلى {circleName}}}",
   "addMemberPartialDelivery": "أُرسلت الدعوات ({sent} من {total}). التسليم معلّق للبقية.",
   "addMemberError": "تعذّرت إضافة العضو. يُرجى إعادة المحاولة.",
-
   "qrScannerTitle": "مسح رمز QR",
   "qrScannerToggleFlash": "تبديل الفلاش",
   "qrScannerSwitchCamera": "تبديل الكاميرا",
   "qrScannerInstruction": "ضع رمز QR داخل الإطار",
   "qrScannerScanning": "جارٍ المسح...",
-
   "circleMemberInvitationPending": "الدعوة معلّقة",
   "circleMemberNoRecentLocation": "لا موقع حديث",
   "circleMemberRemoveTooltip": "إزالة من الدائرة",
@@ -297,7 +287,6 @@
   "circleMemberHintNoLocation": "لا موقع متاح",
   "circleMemberHintMember": "عضو",
   "circleMemberHintTapToCenter": "اضغط لتوسيط الخريطة على موقعه",
-
   "pendingMemberRetryTooltip": "إعادة محاولة التحقق",
   "pendingMemberRemoveTooltip": "إزالة العضو",
   "pendingMemberValidating": "جارٍ التحقق",
@@ -306,7 +295,6 @@
   "pendingMemberCheckingAvailability": "جارٍ التحقق من التوفّر...",
   "pendingMemberReadyToInvite": "جاهز للدعوة",
   "pendingMemberNeedsUpdate": "بحاجة إلى تحديث Haven",
-
   "memberSearchHint": "أدخل معرّف العضو...",
   "memberSearchPasteTooltip": "لصق من الحافظة",
   "memberSearchAddTooltip": "إضافة عضو",
@@ -314,14 +302,11 @@
   "memberSearchHelper": "اطلب من جهات اتصالك رمز Haven QR أو المعرّف الخاص بهم",
   "memberSearchNoValidId": "لم يُعثَر على معرّف Haven صالح",
   "memberSearchAlreadyAdded": "العضو مُضاف بالفعل",
-
   "selectedMembersMore": "+{count} آخرون",
-
   "invitationStatusPending": "الدعوة معلّقة",
   "invitationStatusActive": "نشط",
   "invitationStatusDeclined": "مرفوضة",
   "invitationStatusSemantics": "حالة الدعوة: {label}",
-
   "invitationCardSemantics": "دعوة للانضمام إلى {circleName}، بدعوة من {inviter}، {count} أعضاء",
   "invitationCardInvitedBySemantics": "بدعوة من المعرّف التشفيري {inviter}",
   "invitationCardInvitedBy": "بدعوة من: {inviter}",
@@ -336,14 +321,12 @@
   "invitationDeclinedSnack": "رُفضت الدعوة",
   "invitationAcceptError": "تعذّر قبول الدعوة. يُرجى إعادة المحاولة.",
   "invitationDeclineError": "تعذّر رفض الدعوة. يُرجى إعادة المحاولة.",
-
   "circleSelectorLabel": "مُحدِّد الدائرة",
   "circleSelectorPlaceholder": "اختر دائرة",
   "circleSelectorNewCircle": "دائرة جديدة",
   "circleSelectorLoadError": "تعذّر تحميل الدوائر",
   "circleSelectorExpandedAnnouncement": "قائمة الدوائر مفتوحة",
   "circleSelectorCollapsedAnnouncement": "قائمة الدوائر مطوية",
-
   "circleDetailsButtonTooltip": "تفاصيل الدائرة",
   "circleDetailsTitle": "تفاصيل الدائرة",
   "circleDetailsRelaysHeading": "مُرحِّلات هذه الدائرة",
@@ -357,7 +340,6 @@
   "leaveCircleIdentityUnavailable": "الهوية غير متاحة",
   "leaveCircleSuccess": "تمت مغادرة الدائرة بنجاح",
   "leaveCircleError": "تعذّرت مغادرة الدائرة",
-
   "circleBlockedBannerTitle": "لا يمكن تحديث هذه الدائرة",
   "circleBlockedBannerBody": "حدث خلل في تشفير هذه الدائرة، فلم يعد Haven قادرًا على إرسال التحديثات فيها أو استقبالها. يمكنك مع ذلك الاطلاع على آخر ما عرفته أدناه، أو مغادرة الدائرة.",
   "legacyCircleBannerTitle": "يجب إعادة إنشاء هذه الدائرة",
@@ -372,19 +354,16 @@
   "legacyCutoverExplainerCirclesNeedRecreation": "لتحسين الأمان، يجب إعادة إنشاء دوائرك ودعوة أعضائها مجددًا قبل أن تتمكّن من مشاركة الموقع فيها من جديد.",
   "legacyCutoverExplainerAcknowledge": "فهمت",
   "relaySettingsLegacyRetractionPending": "لا يزال Haven ينظّف بعض البيانات المتبقّية من التحديث الأمني الأخير. سيكتمل ذلك تلقائيًا فور عودتك إلى الاتصال بالإنترنت.",
-
   "circlesPanelCollapsedAnnouncement": "لوحة الدوائر مطوية",
   "circlesPanelExpandedAnnouncement": "لوحة الدوائر مفتوحة",
   "circlesPanelSlightlyOpenAnnouncement": "لوحة الدوائر مفتوحة قليلًا",
   "circlesPanelHalfOpenAnnouncement": "لوحة الدوائر مفتوحة نصفيًا",
   "circleMemberAnnouncementSelf": "أنت",
   "circleMemberAnnouncementFallback": "عضو",
-
   "invitationsRefreshTooltip": "تحديث الدعوات",
   "invitationsLoadError": "تعذّر تحميل الدعوات",
   "invitationsEmptyTitle": "لا توجد دعوات",
   "invitationsEmptyMessage": "عندما يدعوك أحدهم إلى دائرة، ستظهر هنا.",
-
   "refreshRingSemanticNoInbox": "لا يوجد صندوق وارد مُهيَّأ، يفتح إعدادات المُرحِّلات",
   "refreshRingSemanticChecking": "{total, plural, zero{تم فحص {checked} من أصل {total} مُرحِّل} one{تم فحص {checked} من أصل مُرحِّل واحد} two{تم فحص {checked} من أصل مُرحِّلَين} few{تم فحص {checked} من أصل {total} مُرحِّلات} many{تم فحص {checked} من أصل {total} مُرحِّلًا} other{تم فحص {checked} من أصل {total} مُرحِّل}}",
   "refreshRingSemanticAllOk": "{total, plural, zero{استجابت جميع المُرحِّلات} one{استجاب المُرحِّل} two{استجاب المُرحِّلان} few{استجابت {total} مُرحِّلات} many{استجاب {total} مُرحِّلًا} other{استجابت {total} مُرحِّل}}",
@@ -401,7 +380,6 @@
   "refreshRingAnnouncementAllFound": "جميع المُرحِّلات تحتوي على بياناتك",
   "refreshRingAnnouncementPartialFound": "{ok} من أصل {total} مُرحِّل يحتوي على بياناتك",
   "refreshRingAnnouncementNoneFound": "لا يوجد مُرحِّل يحتوي على بياناتك",
-
   "identityTitle": "الهوية",
   "identityLoadError": "حدث خطأ ما أثناء تحميل هويتك. يُرجى إعادة المحاولة.",
   "identityMissingTitle": "لا توجد هوية",
@@ -411,11 +389,9 @@
   "identityPublicKeyQrSubtitle": "كيف يدعوك الآخرون إلى الدوائر",
   "identityAdvancedTitle": "متقدّم",
   "identityAdvancedSubtitle": "المفتاح العام، المفتاح السري، الحذف",
-
   "profileIsPublicNoticeTitle": "ملفك الشخصي عام",
   "profileIsPublicNoticeBody": "اسمك المعروض وصورتك مرئيان لأي شخص على شبكة Nostr، لا لأعضاء دوائرك فقط. شارِك فقط ما ترتاح لجعله عامًا.",
   "identityRefreshProfileTooltip": "تحديث الملف الشخصي العام",
-
   "identityAdvancedExportError": "تعذّر تصدير المفتاح السري. يُرجى إعادة المحاولة.",
   "identityAdvancedDeleteTitle": "حذف الهوية؟",
   "identityAdvancedDeleteBody": "سيؤدي هذا إلى حذف هويتك نهائيًا. تأكّد من أنك نسخت مفتاحك السري احتياطيًا إن كنت تريد استعادتها.",
@@ -436,13 +412,11 @@
   "identityAdvancedHideSecretKey": "إخفاء المفتاح السري",
   "identityAdvancedCopySecretKeyTooltip": "نسخ المفتاح السري",
   "identityAdvancedDeleteIdentityCta": "حذف الهوية",
-
   "qrCodeLoadError": "حدث خطأ ما أثناء تحميل مفتاحك العام. يُرجى إعادة المحاولة.",
   "qrCodeYourPublicKeyLabel": "مفتاحك العام",
   "qrCodeWhatIsThisTitle": "ما هذا؟",
   "qrCodeExplainerKeys": "يعمل Haven على Nostr، وهي شبكة مفتوحة لا يقف خلفها حساب شركة ولا تسجيل. هويتك مجرّد زوج من المفاتيح: مفتاح سري تحتفظ به أنت وحدك، وهذا المفتاح العام المُشتقّ منه.",
-  "qrCodeExplainerUsername": "يعمل مفتاحك العام كاسم مستخدم آمن للمشاركة. يمسح الناس هذا الرمز، أو يلصقون مفتاحك العام، لدعوتك إلى دائرة. ومشاركته لا يمكن أن تكشف موقعك، الذي لا يظهر إلا لأعضاء الدوائر التي انضممت إليها، ولا اسمك وصورتك، اللذين يبقيان على هذا الجهاز ما لم تختر نشر ملف شخصي عام.",
-
+  "qrCodeExplainerUsername": "يعمل مفتاحك العام كاسم مستخدم آمن للمشاركة. يمسح الناس هذا الرمز، أو يلصقون مفتاحك العام، لدعوتك إلى دائرة. ومشاركته لا يمكن أن تكشف موقعك، الذي لا يظهر إلا لأعضاء الدوائر التي انضممت إليها. أما اسمك المعروض وصورتك فهما علنيان بالفعل، لذا لا تكشف مشاركة هذا الرمز عنهما أي شيء إضافي.",
   "displayNameCardTitle": "الاسم المعروض",
   "displayNameCardLoadError": "تعذّر تحميل اسمك المعروض. حاول لاحقًا.",
   "displayNameCardHint": "أدخل اسمك المعروض",
@@ -452,7 +426,6 @@
   "displayNameCardRetryLabel": "فشل الحفظ. أعد المحاولة",
   "displayNameCardSavedAnnouncement": "تم حفظ الاسم المعروض",
   "displayNameCardSaveFailedAnnouncement": "فشل الحفظ، أعد المحاولة",
-
   "keyDisplayCopiedToClipboard": "تم نسخ {label} إلى الحافظة",
   "keyDisplaySemantics": "{label}: {state}",
   "keyDisplayStateRevealed": "ظاهر",
@@ -462,7 +435,6 @@
   "keyDisplayCopyTooltip": "نسخ",
   "keyDisplayCompactCopied": "تم نسخ المفتاح إلى الحافظة",
   "keyDisplayCompactTapToCopy": "اضغط للنسخ",
-
   "npubQrCopiedSnack": "تم نسخ المفتاح العام إلى الحافظة",
   "npubQrCopyButton": "نسخ المفتاح العام",
   "circleMemberPublicKeyCopied": "تم نسخ المفتاح العام إلى الحافظة",
@@ -479,7 +451,6 @@
   "memberNicknameSheetClearedAnnouncement": "تم مسح الاسم المستعار",
   "npubQrScanLabel": "امسح لإضافتي",
   "npubQrSemanticsLabel": "رمز QR لهويتك العامة",
-
   "photoHeaderRemoveTitle": "إزالة صورة الملف الشخصي؟",
   "photoHeaderRemoveBody": "يؤدي هذا إلى إزالة صورتك من ملفك الشخصي العام.",
   "photoHeaderEditPhoto": "تعديل الصورة",
@@ -487,7 +458,6 @@
   "photoHeaderViewPhotoSemantics": "عرض صورة الملف الشخصي",
   "photoHeaderAddPhotoSemantics": "إضافة صورة ملف شخصي",
   "photoHeaderChangePhotoSemantics": "تغيير صورة الملف الشخصي",
-
   "avatarPickerPhotoUpdated": "تم تحديث الصورة — نُشرت في ملفك الشخصي العام على Nostr.",
   "avatarPickerPhotoRemoved": "تمت إزالة الصورة.",
   "avatarPickerRemoveError": "تعذّرت إزالة صورتك. يُرجى إعادة المحاولة.",
@@ -495,11 +465,9 @@
   "avatarPickerCropTitle": "اقتصاص الصورة",
   "avatarPickerCropDone": "تم",
   "avatarPickerCropCancel": "إلغاء",
-
   "avatarFullscreenClose": "إغلاق",
   "avatarFullscreenSemantics": "صورة الملف الشخصي، ملء الشاشة",
   "avatarFullscreenLoadError": "تعذّر تحميل الصورة",
-
   "mapInitializing": "جارٍ التهيئة...",
   "mapInitFailedTitle": "فشلت التهيئة",
   "mapInitFailedMessage": "تعذّرت تهيئة خدمات الموقع.",
@@ -516,17 +484,13 @@
   "mapOpenInAppleMapsBody": "تُرسَل إحداثيات الخريطة فقط إلى Apple Maps، ولا يُرسَل أبدًا اسم أو هوية.",
   "mapOpenInAppleMapsConfirm": "فتح في Apple Maps",
   "mapOpenMapsError": "تعذّر فتح Maps",
-
   "mapControlsZoomIn": "تكبير",
   "mapControlsZoomOut": "تصغير",
   "mapControlsRecenter": "إعادة التوسيط",
   "mapControlsRecenterFab": "إعادة التوسيط على موقعي",
-
   "mapAttributionCreditsButton": "حقوق الخريطة والترخيص",
-
   "userLocationMarkerSemantics": "علامة موقعك{accuracy}",
   "userLocationMarkerAccuracy": ". الدقة: {meters} مترًا",
-
   "memberMarkerMinutesShort": "{count}m",
   "memberMarkerHoursShort": "{count}h",
   "memberMarkerDaysShort": "{count}d",

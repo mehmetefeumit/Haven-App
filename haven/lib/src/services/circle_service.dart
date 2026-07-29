@@ -756,7 +756,7 @@ abstract class CircleService {
   // flow lives on `RelayPreferencesService.buildRelayListPublish`,
   // which atomically gates on the user's publish toggle and resolves
   // targets. Exposing a parallel sign-only method left a way to publish
-  // kind 10050/10051 without consulting the toggle. New code MUST use
+  // kind 10050/10002 without consulting the toggle. New code MUST use
   // the relay-preferences flow instead.
 
   /// Signs a NIP-09 event deletion event (kind 5).

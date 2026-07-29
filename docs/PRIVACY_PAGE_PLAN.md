@@ -489,6 +489,25 @@ sequencing that lands removals *after* content.
 
 ---
 
+## OWNER DECISION — 2026-07-28: "Your phone" topic DROPPED
+
+Group 4 (topic 8, "Your phone": screenshots + device loss + on-device storage) is
+**removed from the plan** at the owner's direction. The section is 7 topics, not 8.
+
+Consequence handled: `aboutScreenshotTitle`/`aboutScreenshotBody` lived inside the
+`_WhoCanSeeWhat` block that PR 6 deletes, and were the app's ONLY mention of screenshot
+protection. Rather than lose the disclosure — and with it the Android/iOS asymmetry, which
+was one of the six identified copy errors — it survives as a single warning note inside the
+existing "What members see" topic (`privacyWhatOthersSeeScreenshots`). That topic's takeaway
+already ends "Against a member who saves a screenshot, nothing does", so it is the natural
+home. It is one note, not a section.
+
+Dropped with the topic, and NOT disclosed anywhere in the app as a result:
+device loss / seizure (incl. the iOS `AfterFirstUnlockThisDeviceOnly` tradeoff), the three
+SQLCipher databases and OS-keyring key storage, that `SharedPreferences` is app-private but
+NOT encrypted, and that logout/delete is best-effort with a `haven.display_name.<pubkeyHex>`
+plaintext residue. If any of that should be user-visible, it needs a new home.
+
 ## OWNER DECISIONS — LOCKED 2026-07-27
 
 1. **Topic granularity: 8 merged topics.** ~1,200 translated values. Accepted trade-off: topics 7 and

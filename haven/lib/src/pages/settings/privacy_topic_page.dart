@@ -10,8 +10,10 @@ import 'package:flutter/material.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/settings/privacy_content.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/external_link.dart';
 import 'package:haven/src/widgets/common/info_note.dart';
 import 'package:haven/src/widgets/common/more_detail_section.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// A single Privacy topic page.
 ///
@@ -118,6 +120,18 @@ class _PrivacyBlockView extends StatelessWidget {
           tone: tone,
           density: HavenInfoNoteDensity.comfortable,
           mergeSemantics: false,
+        ),
+      ),
+      PrivacyLink(:final label, :final url) => Padding(
+        padding: const EdgeInsets.only(bottom: HavenSpacing.md),
+        child: Align(
+          alignment: AlignmentDirectional.centerStart,
+          child: TextButton.icon(
+            onPressed: () =>
+                openExternalLink(context, url, logTag: 'Privacy'),
+            icon: const Icon(LucideIcons.externalLink, size: 16),
+            label: Text(label),
+          ),
         ),
       ),
       PrivacyMoreDetail(:final paragraphs) => Padding(

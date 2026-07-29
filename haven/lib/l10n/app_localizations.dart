@@ -303,7 +303,7 @@ abstract class AppLocalizations {
   /// Body of the third onboarding value-prop card (also reused on the About page).
   ///
   /// In en, this message translates to:
-  /// **'No email, no phone number, no sign-up. Haven creates a private identity that lives only on your phone, with nothing linking it to the real you.'**
+  /// **'No email, no phone number, no sign-up. Haven creates an identity whose secret key never leaves your phone, so there is no account for anyone to hand over.'**
   String get onboardingValueProp3Body;
 
   /// Short one-line summary of the first value prop, shown under its title on the onboarding intro screen. The longer onboardingValueProp1Body is shown on the About page instead. Keep it to roughly one short sentence so the intro screen fits without scrolling.
@@ -318,10 +318,10 @@ abstract class AppLocalizations {
   /// **'No central server — it runs on a relay network you choose.'**
   String get onboardingValueProp2Summary;
 
-  /// Short one-line summary of the third value prop, shown under its title on the onboarding intro screen. Keep it to roughly one short sentence so the intro screen fits without scrolling.
+  /// Short one-line summary of the third value prop, shown under its title on the onboarding intro screen. Keep it to roughly one short sentence so the intro screen fits without scrolling. Must stay consistent with onboardingValueProp3Body, which it summarises: an earlier version claimed 'nothing links it to you', which over-claimed (the user's network address is visible to every relay, and the same key carries a renameable public profile). Keep the claim narrowed to key custody.
   ///
   /// In en, this message translates to:
-  /// **'No email, phone, or sign-up. Nothing links it to you.'**
+  /// **'No email, phone, or sign-up. Your secret key never leaves your phone.'**
   String get onboardingValueProp3Summary;
 
   /// Title of the onboarding create-identity screen.
@@ -564,10 +564,10 @@ abstract class AppLocalizations {
   /// **'My KeyPackage Relays'**
   String get relaySettingsKeyPackageTitle;
 
-  /// Subtitle of the KeyPackage relays section. 'kind 10051' is a Nostr event-kind identifier, intentionally English (not translated).
+  /// Subtitle of the KeyPackage relays section. 'kind 10002' is a Nostr event-kind identifier, intentionally English (not translated).
   ///
   /// In en, this message translates to:
-  /// **'kind 10051, where invitees discover your encryption keys'**
+  /// **'kind 10002, where invitees discover your encryption keys'**
   String get relaySettingsKeyPackageSubtitle;
 
   /// Empty-state message shown when a relay category's list could not be loaded.
@@ -677,90 +677,6 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'You need at least one relay so others can reach you. Tap below to restore Haven defaults.'**
   String get relaySettingsEmptyMessage;
-
-  /// Accessibility container label for the footer note explaining how Haven's relay backend works.
-  ///
-  /// In en, this message translates to:
-  /// **'How Haven relays work'**
-  String get relaySettingsExplainerSemantics;
-
-  /// Heading of the footer note explaining how Haven's relay backend works.
-  ///
-  /// In en, this message translates to:
-  /// **'How this works'**
-  String get relaySettingsExplainerHeading;
-
-  /// First paragraph of the relay backend explainer note. 'Nostr' is a protocol name, intentionally English (not translated).
-  ///
-  /// In en, this message translates to:
-  /// **'Haven has no central server. It runs on two open technologies. Nostr is a network of independent servers called relays that anyone can run; they receive your messages, hold them briefly, and hand them on when your contacts ask. No single relay is essential, so if one goes offline the others keep working, and anything a relay could be forced to hand over is only ever encrypted data.'**
-  String get relaySettingsExplainerNostr;
-
-  /// Second paragraph of the relay backend explainer note. 'Marmot' and 'MLS (Messaging Layer Security)' are protocol/standard names, intentionally English.
-  ///
-  /// In en, this message translates to:
-  /// **'The Marmot protocol encrypts your messages on your device before they leave it, using the MLS (Messaging Layer Security) standard. Each circle is its own encrypted group with its own keys, so separate circles cannot be linked together. Those keys also keep advancing over time, a property called forward secrecy, so even a key exposed later cannot unlock your earlier messages.'**
-  String get relaySettingsExplainerMarmot;
-
-  /// Third paragraph of the relay backend explainer note, on what metadata a relay can still observe.
-  ///
-  /// In en, this message translates to:
-  /// **'Because of this, a relay never sees your location, your messages, who is in your circles, or your identity on those messages. Each message is published from a fresh, single-use sending address, so nothing in the message ties it to your account. A relay still sees some metadata, though: a random per-circle tag, the timing and size of your traffic, and the network address you connect from.'**
-  String get relaySettingsExplainerMetadata;
-
-  /// Bold lead-in term for the Inbox-relays explainer sentence.
-  ///
-  /// In en, this message translates to:
-  /// **'Inbox relays'**
-  String get relaySettingsExplainerInboxTerm;
-
-  /// Explainer sentence following the bold 'Inbox relays' term. Begins with a leading space so it joins the bold term inline.
-  ///
-  /// In en, this message translates to:
-  /// **' are your mailbox: where invitations to join a circle, themselves encrypted, are delivered for you to collect. For someone to invite you, they must be able to reach one of these relays.'**
-  String get relaySettingsExplainerInboxBody;
-
-  /// Bold lead-in term for the KeyPackage-relays explainer sentence.
-  ///
-  /// In en, this message translates to:
-  /// **'KeyPackage relays'**
-  String get relaySettingsExplainerKeyPackageTerm;
-
-  /// Explainer sentence following the bold 'KeyPackage relays' term. Begins with a leading space so it joins the bold term inline.
-  ///
-  /// In en, this message translates to:
-  /// **' are where you publish a small bundle of your public keys, which is safe to share. Someone who knows your account fetches it from these relays to add you to a circle.'**
-  String get relaySettingsExplainerKeyPackageBody;
-
-  /// Bold lead-in term for the run-your-own-relay explainer sentence.
-  ///
-  /// In en, this message translates to:
-  /// **'Using your own relay.'**
-  String get relaySettingsExplainerOwnRelayTerm;
-
-  /// Explainer sentence following the bold 'Using your own relay.' term. Begins with a leading space so it joins the bold term inline.
-  ///
-  /// In en, this message translates to:
-  /// **' Each circle also carries its own relay list, shared with every member when they join; that list, not your inbox, is where the circle’s ongoing encrypted updates travel. So if you would rather avoid public relays, you can run your own and point a circle at it: once everyone has joined, that circle’s traffic can flow through it alone.'**
-  String get relaySettingsExplainerOwnRelayBody;
-
-  /// Bold lead-in term for the reachability-tradeoff explainer sentence.
-  ///
-  /// In en, this message translates to:
-  /// **'The catch is reachability.'**
-  String get relaySettingsExplainerReachabilityTerm;
-
-  /// Explainer sentence following the bold 'The catch is reachability.' term. Begins with a leading space so it joins the bold term inline.
-  ///
-  /// In en, this message translates to:
-  /// **' Every member must be able to connect to that relay, and when you first invite someone, the two of you need a relay you can both reach (for example, the same private relay listed as everyone’s inbox and KeyPackage relay). A private relay still sees the same encrypted traffic and timing as any other; you simply control who runs it.'**
-  String get relaySettingsExplainerReachabilityBody;
-
-  /// Closing paragraph of the relay backend explainer note.
-  ///
-  /// In en, this message translates to:
-  /// **'You can add or remove relays in either list at any time. More relays make you easier to reach; fewer give you more control over where your encrypted traffic goes.'**
-  String get relaySettingsExplainerFooter;
 
   /// Title of the location settings page (AppBar).
   ///
@@ -983,96 +899,6 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Could not open link'**
   String get aboutLinkOpenError;
-
-  /// Heading of the 'who can see what' disclosure section on the About page.
-  ///
-  /// In en, this message translates to:
-  /// **'Who can see what'**
-  String get aboutWhoCanSeeTitle;
-
-  /// Intro paragraph of the 'who can see what' disclosure section.
-  ///
-  /// In en, this message translates to:
-  /// **'Your exact location is readable only by the people you choose. Here is what the main parties can and cannot see.'**
-  String get aboutWhoCanSeeIntro;
-
-  /// Bold actor name: circle members you share your location with.
-  ///
-  /// In en, this message translates to:
-  /// **'Circle members you share with'**
-  String get aboutActorCirclesWho;
-
-  /// What circle members can observe, in the 'who can see what' list.
-  ///
-  /// In en, this message translates to:
-  /// **'Your exact location and the display name you pick, but only inside the circles you share with them, never your other circles.'**
-  String get aboutActorCirclesSees;
-
-  /// Bold actor name: the operators of the relay servers.
-  ///
-  /// In en, this message translates to:
-  /// **'Relay operators'**
-  String get aboutActorRelaysWho;
-
-  /// What relay operators can observe, in the 'who can see what' list.
-  ///
-  /// In en, this message translates to:
-  /// **'The servers that pass your messages along. They see your IP address, the public key you publish under (a random ID, not your name), the size and timing of your traffic, and which account you searched for when you look someone up. They can never read your location, your messages, your circle names, or who is in your circles.'**
-  String get aboutActorRelaysSees;
-
-  /// Bold actor name: the map tile provider. 'Stadia Maps' is intentionally English (brand name).
-  ///
-  /// In en, this message translates to:
-  /// **'The map provider (Stadia Maps)'**
-  String get aboutActorMapWho;
-
-  /// What the map provider can observe, in the 'who can see what' list. 'Stadia' is intentionally English (brand name).
-  ///
-  /// In en, this message translates to:
-  /// **'Only while the map is open: your IP address and the area you are viewing, so it can send the right map images. Never your circles or your shared location. Stadia anonymizes IP addresses and does not sell your data.'**
-  String get aboutActorMapSees;
-
-  /// Bold actor name: Haven's developers.
-  ///
-  /// In en, this message translates to:
-  /// **'Haven’s developers'**
-  String get aboutActorDevelopersWho;
-
-  /// What Haven's developers can observe, in the 'who can see what' list.
-  ///
-  /// In en, this message translates to:
-  /// **'Nothing. Haven runs no servers and collects no analytics. A developer could only see what a relay operator sees, and only if you used a relay they happen to run.'**
-  String get aboutActorDevelopersSees;
-
-  /// Closing metadata caveat after the 'who can see what' actor list.
-  ///
-  /// In en, this message translates to:
-  /// **'Even so, your activity is not invisible. A relay you use, or anyone watching your network, can tell that you are active, roughly when, and how often, from connection timing and message sizes.'**
-  String get aboutWhoCanSeeMetadataNote;
-
-  /// Heading of the screenshot-protection paragraph on the About page.
-  ///
-  /// In en, this message translates to:
-  /// **'Screenshot protection'**
-  String get aboutScreenshotTitle;
-
-  /// Body of the screenshot-protection paragraph. 'Android' and 'FLAG_SECURE' are intentionally English (platform/API names).
-  ///
-  /// In en, this message translates to:
-  /// **'On Android, Haven blocks screenshots and screen recording app-wide to prevent accidental location exposure. This is a system-level protection (FLAG_SECURE) that applies to every screen in the app, including the map and member lists.'**
-  String get aboutScreenshotBody;
-
-  /// Heading of the VPN-recommendation paragraph on the About page.
-  ///
-  /// In en, this message translates to:
-  /// **'Stay more private with a VPN'**
-  String get aboutVpnTitle;
-
-  /// Body of the VPN-recommendation paragraph. 'Mullvad' is intentionally English (brand name).
-  ///
-  /// In en, this message translates to:
-  /// **'Relays and the map provider see your IP address, and your internet provider sees which servers you reach. A trusted VPN hides your IP address from them. We recommend Mullvad. It does not change what your circle members see, and it shifts trust to the VPN provider.'**
-  String get aboutVpnBody;
 
   /// Link label for the Mullvad VPN website. A domain name, intentionally English (not translated).
   ///
@@ -1301,6 +1127,294 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Before uploading, Haven re-encodes the picture and drops the hidden data cameras attach, including the GPS position where the photo was taken. That matters here: a holiday snapshot can otherwise carry the coordinates of your home.'**
   String get privacyPublicProfileDetailExifStripped;
+
+  /// Header for the second group of Privacy topics on the hub (relays, how the encryption works, what members and relay operators see).
+  ///
+  /// In en, this message translates to:
+  /// **'How your location travels'**
+  String get privacyGroupHowLocationTravelsHeading;
+
+  /// Title of the Privacy topic explaining what a relay is. Front-loaded with the distinguishing word so screen-reader users scanning headings hear it first. 'Relays' is a Nostr term of art — keep it recognizable; do not translate it to a generic word for 'server' unless this locale's file already does so consistently.
+  ///
+  /// In en, this message translates to:
+  /// **'Relays: the servers that pass messages along'**
+  String get privacyRelaysTitle;
+
+  /// One-line preview shown under the topic title on the Privacy hub.
+  ///
+  /// In en, this message translates to:
+  /// **'Whose computers your updates pass through'**
+  String get privacyRelaysSubtitle;
+
+  /// Body paragraph, Privacy → Relays. Introduces 'relay' with the plain-language handhold BEFORE the term, which is the pattern used throughout this section. Audience: non-technical, no Nostr knowledge.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven has no server of its own, so your updates travel through other people\'s. These are called relays: small, independent servers that anyone can run. A relay holds an encrypted message briefly, then hands it on when your circle asks for it.'**
+  String get privacyRelaysWhatIsARelay;
+
+  /// Body paragraph, Privacy → Relays, on why Haven uses more than one relay.
+  ///
+  /// In en, this message translates to:
+  /// **'Using several means no single one can cut you off. If one goes offline, the rest keep working. You choose which relays you use, and can change them whenever you like.'**
+  String get privacyRelaysWhyMany;
+
+  /// Body paragraph, Privacy → Relays, explaining the two user-editable relay lists plus the per-circle list. 'KeyPackage' is intentionally English and is deliberately NOT simplified to plain language here: the reader has to find this list on the Relay settings page, which is labelled with that exact term (relaySettingsKeyPackageTitle), so findability outranks register. The sentence itself carries the plain-language gloss. Keep 'inbox relays' matching relaySettingsInboxTitle in this locale.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven keeps two lists for you. Your inbox relays are where invitations reach you. Your KeyPackage relays are where people fetch the keys they need in order to invite you. Each circle also carries its own list, and that is where the circle\'s encrypted updates travel.'**
+  String get privacyRelaysTwoLists;
+
+  /// The practical takeaway for Privacy → Relays. Reassuring rather than actionable, deliberately — there is no setting the reader must change.
+  ///
+  /// In en, this message translates to:
+  /// **'There is nothing risky to get wrong here: a relay only ever sees encrypted data. But you do need at least one reachable relay, or nobody can invite you and your circles go quiet.'**
+  String get privacyRelaysMeansForYou;
+
+  /// Technical-detail paragraph (collapsed by default), Privacy → Relays. Discloses the unconditional discovery-relay lookups, which are not surfaced anywhere else in the app. Do NOT soften 'even if you have configured only private relays' — that is the point of the paragraph.
+  ///
+  /// In en, this message translates to:
+  /// **'Separately from your own lists, Haven queries a small set of public directory relays to look up other people\'s profiles and keys. It contacts these even if you have configured only private relays of your own. They see your network address and which accounts you asked about.'**
+  String get privacyRelaysDetailIndexers;
+
+  /// Technical-detail paragraph (collapsed by default), Privacy → Relays. Warns that following the app's own 'use your own private relay' advice publishes that relay's address. Factually load-bearing — do not weaken to 'may become public'.
+  ///
+  /// In en, this message translates to:
+  /// **'Your KeyPackage-relay list is itself published to the network, signed by your identity key, so others can find it. If you add a private relay to that list, its address becomes public and tied to you. A relay used only inside one circle\'s own list is not advertised that way.'**
+  String get privacyRelaysDetailKeyListIsPublic;
+
+  /// Title of the Privacy topic explaining MLS/Marmot encryption in plain language.
+  ///
+  /// In en, this message translates to:
+  /// **'How the encryption works'**
+  String get privacyEncryptionTitle;
+
+  /// One-line preview shown under the topic title on the Privacy hub.
+  ///
+  /// In en, this message translates to:
+  /// **'Per-circle keys, and what changes when people join or leave'**
+  String get privacyEncryptionSubtitle;
+
+  /// Body paragraph, Privacy → How the encryption works. 'MLS' is intentionally English (standard name). Do NOT rewrite this to imply two independent layers of encryption protect message contents — there is one strong layer.
+  ///
+  /// In en, this message translates to:
+  /// **'Your location is encrypted on your phone before it leaves, using an open standard called MLS. Each circle is its own encrypted group with its own keys. Nobody outside a circle can read what is sent inside it — not a relay, not Haven, not another circle you belong to.'**
+  String get privacyEncryptionPerCircle;
+
+  /// Body paragraph, Privacy → How the encryption works. This claim is firm and verified: a joiner gets only current-epoch keys and no history is transferred.
+  ///
+  /// In en, this message translates to:
+  /// **'When someone joins, the circle moves to a new key. They can read what is sent after they arrive, and nothing from before it. Haven never sends a new member any past locations.'**
+  String get privacyEncryptionWhenSomeoneJoins;
+
+  /// Body paragraph, Privacy → How the encryption works. 'Within a few minutes at most' is deliberate and must not become 'immediately' — the real cutoff waits for the next published update. The important caveat about saved messages follows in privacyEncryptionKeysChangeOnMembership.
+  ///
+  /// In en, this message translates to:
+  /// **'When someone leaves or is removed, the circle moves to another new key. Within a few minutes at most, they stop being able to read anything new.'**
+  String get privacyEncryptionWhenSomeoneLeaves;
+
+  /// Warning callout, Privacy → How the encryption works. THE most factually load-bearing string in the Privacy section. Haven disables periodic key rotation (an owner-accepted deviation documented in haven-core/SECURITY.md), so keys rotate ONLY on membership change and one key covers a whole epoch. Never translate this in a way that implies keys rotate regularly, and never use this locale's term for 'forward secrecy' here.
+  ///
+  /// In en, this message translates to:
+  /// **'Keys change when the membership changes — not on a timer. Between those changes, one key covers everything sent. So a person you remove from a long-settled circle can still open any messages they saved while they were a member, even ones from weeks earlier. They cannot open anything sent after they left.'**
+  String get privacyEncryptionKeysChangeOnMembership;
+
+  /// The practical takeaway for Privacy → How the encryption works, and the actionable consequence of the epoch caveat above.
+  ///
+  /// In en, this message translates to:
+  /// **'The encryption protects you from everyone outside your circles. It cannot protect you from someone who was once inside one. If you want a clean break with a person, starting a fresh circle is safer than removing them from an old one.'**
+  String get privacyEncryptionMeansForYou;
+
+  /// Technical-detail paragraph (collapsed by default), Privacy → How the encryption works. 'MLS (Messaging Layer Security)', 'IETF', 'Nostr' and 'Marmot' are intentionally English (standard, body and protocol names).
+  ///
+  /// In en, this message translates to:
+  /// **'MLS (Messaging Layer Security) is the same IETF standard used by other secure messengers. Haven reaches the Nostr network through the Marmot protocol, which defines how MLS groups travel over relays. The key each circle signs with is separate from your public Nostr identity key.'**
+  String get privacyEncryptionDetailMls;
+
+  /// Technical-detail paragraph (collapsed by default), Privacy → How the encryption works. 'epoch' is a term of art; introduce it as the paragraph does rather than replacing it.
+  ///
+  /// In en, this message translates to:
+  /// **'Each key period is called an epoch. Your device keeps only enough material to decrypt messages still in flight from the last few epochs, then discards it — which is why Haven cannot recover your older messages for you even in principle.'**
+  String get privacyEncryptionDetailEpochs;
+
+  /// Title of the Privacy topic contrasting what circle members can observe with what relay operators can observe. The two are deliberately on one page so the contrast is unmissable.
+  ///
+  /// In en, this message translates to:
+  /// **'What members see, and what relays see'**
+  String get privacyWhatOthersSeeTitle;
+
+  /// One-line preview shown under the topic title on the Privacy hub.
+  ///
+  /// In en, this message translates to:
+  /// **'The people you share with, and the servers in between'**
+  String get privacyWhatOthersSeeSubtitle;
+
+  /// Section heading within the Privacy topic, introducing what circle members can observe. Rendered as a navigable screen-reader heading.
+  ///
+  /// In en, this message translates to:
+  /// **'The people in your circles'**
+  String get privacyWhatOthersSeeMembersHeading;
+
+  /// Body paragraph, Privacy → What members see. Factually load-bearing: Haven shares full-precision GPS and the obfuscation tiers were removed, so do not imply any approximate mode exists.
+  ///
+  /// In en, this message translates to:
+  /// **'Everyone in a circle sees your exact position on the map, not a rough area. There is no setting that shares a vaguer location with some members and a precise one with others.'**
+  String get privacyWhatOthersSeeMembersExact;
+
+  /// Body paragraph, Privacy → What members see. Factually load-bearing and easy to get wrong: only BACKGROUND sharing is toggleable (locationSettingsToggleTitle); foreground sharing is unconditional. Do not imply a pause or ghost mode exists.
+  ///
+  /// In en, this message translates to:
+  /// **'While Haven is open and you belong to a circle, your position goes out every couple of minutes on its own. There is no pause button. The only switch is whether sharing keeps going once you leave the app.'**
+  String get privacyWhatOthersSeeCannotPause;
+
+  /// Body paragraph, Privacy → What members see.
+  ///
+  /// In en, this message translates to:
+  /// **'Joining a circle also shows every member your public key. Through it they can look up your public profile, and anything else you have ever published under that key.'**
+  String get privacyWhatOthersSeeMembersLearnKey;
+
+  /// Warning callout, Privacy → What members see. Discloses co-member IP harvesting via an attacker-controlled kind-0 picture URL, which Haven's own source names as a risk and which is disclosed nowhere else in the app. Keep 'without you tapping anything' — the automatic nature is the point.
+  ///
+  /// In en, this message translates to:
+  /// **'A member\'s profile photo is fetched from a server of their choosing. Loading it reveals your network address — and so roughly where in the world you are — to whoever runs that server. This happens on its own, without you tapping anything.'**
+  String get privacyWhatOthersSeeCoMemberIp;
+
+  /// Section heading within the Privacy topic, introducing what relay operators can observe. Rendered as a navigable screen-reader heading.
+  ///
+  /// In en, this message translates to:
+  /// **'The relay operators'**
+  String get privacyWhatOthersSeeRelaysHeading;
+
+  /// Body paragraph, Privacy → What relays see. All four 'cannot' items are verified. The single-use sender address is real (a new key per message) — but note the following paragraph deliberately walks back what it does NOT hide, so do not merge the two.
+  ///
+  /// In en, this message translates to:
+  /// **'Relay operators cannot read your location, your messages, your circle\'s name, or its member list. Every message reaches them from a fresh, single-use sender address, so they cannot tell which member sent it.'**
+  String get privacyWhatOthersSeeRelaysCannot;
+
+  /// Body paragraph, Privacy → What relays see. The honest counterweight to the previous paragraph. Do not soften: activity timing, message sizes and the per-circle tag are all genuinely observable.
+  ///
+  /// In en, this message translates to:
+  /// **'They do see your network address, when you are online, and how large and how frequent your traffic is. Each circle carries a random tag, so a relay can group one circle\'s messages together and estimate how many people are in it — without learning who any of them are.'**
+  String get privacyWhatOthersSeeRelaysCan;
+
+  /// The practical takeaway for Privacy → What members see and what relays see. The blunt final sentence is deliberate — it is the one thing on this page a reader must not miss.
+  ///
+  /// In en, this message translates to:
+  /// **'Treat a circle as people you would give your address to. Against relays and outsiders the encryption holds, and a VPN closes the network-address gap. Against a member who saves a screenshot, nothing does.'**
+  String get privacyWhatOthersSeeMeansForYou;
+
+  /// Technical-detail paragraph (collapsed by default), Privacy → What members see and what relays see. Describes the stable per-circle routing tag without naming the 'h' tag or the group ID.
+  ///
+  /// In en, this message translates to:
+  /// **'A circle\'s tag stays the same for the life of that circle, so a relay can link all of its messages together indefinitely. That is a property of the underlying protocol, not something Haven can change.'**
+  String get privacyWhatOthersSeeDetailTag;
+
+  /// Shared label for a link that opens the matching Privacy topic for a fuller explanation. Used on the Relay settings, Public key QR and Location settings pages. Keep it short — it sits under a paragraph as a TextButton.
+  ///
+  /// In en, this message translates to:
+  /// **'Learn more'**
+  String get commonLearnMore;
+
+  /// Two-sentence caption below the relay lists on the Relay settings page, replacing a much longer explainer that moved to the Privacy section. Keeps just enough framing to make the 'Inbox' and 'KeyPackage' section headers meaningful. 'relay' is a Nostr term of art — match this locale's rendering in privacyRelaysWhatIsARelay.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven has no server of its own. Your encrypted updates pass through independent servers called relays, which never see your location or who is in your circles.'**
+  String get relaySettingsBackendCaption;
+
+  /// Warning callout, Privacy → What members see. Factually load-bearing and asymmetric: Android sets FLAG_SECURE app-wide (MainActivity.kt), whereas iOS has no equivalent and only the app-switcher snapshot is blurred (AppDelegate.swift). Do NOT flatten this into a single claim covering both platforms, and never imply iOS blocks in-app screenshots.
+  ///
+  /// In en, this message translates to:
+  /// **'Screenshots are a platform matter, and the two differ. On Android, Haven blocks screenshots and screen recording on every screen. On iPhone it cannot: Haven blurs the app-switcher preview, but a member can still capture what is on screen.'**
+  String get privacyWhatOthersSeeScreenshots;
+
+  /// Technical-detail paragraph (collapsed by default), Privacy → What members see and what relays see. 'Advisory' is essential — the expiry is a NIP-40 hint a relay may ignore, so never phrase this as a guarantee that messages are deleted.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven asks relays to drop location messages after about four minutes. That request is advisory: a relay is free to keep them for longer. Invitations carry no expiry at all, and may sit on your inbox relay indefinitely.'**
+  String get privacyWhatOthersSeeDetailExpiry;
+
+  /// Header for the third group of Privacy topics on the hub — the honest disclosures about what Haven does not protect. Grouping them under one candid heading is deliberate: it reads as candour, where scattering the same caveats through the reassuring topics would read as hedging.
+  ///
+  /// In en, this message translates to:
+  /// **'The limits'**
+  String get privacyGroupTheLimitsHeading;
+
+  /// Title of the Privacy topic on metadata, traffic patterns, IP address and VPNs. Front-loaded with the distinguishing words. Deliberately says 'still' — it follows the topics that explain what IS protected.
+  ///
+  /// In en, this message translates to:
+  /// **'What can still be worked out about you'**
+  String get privacyInferenceTitle;
+
+  /// One-line preview shown under the topic title on the Privacy hub.
+  ///
+  /// In en, this message translates to:
+  /// **'The traces encryption cannot cover'**
+  String get privacyInferenceSubtitle;
+
+  /// Body paragraph, Privacy → What can still be worked out. Defines 'metadata' at first use, which is the single most misunderstood word in this section — keep the definition, and use this locale's established word for the concept if the app already has one.
+  ///
+  /// In en, this message translates to:
+  /// **'Encryption hides what you send. It cannot hide that you sent something. The pattern around a message — when it went out, how big it was, which servers you were connected to — is called metadata, and it stays visible even when the contents do not.'**
+  String get privacyInferenceWhatIsMetadata;
+
+  /// Body paragraph, Privacy → What can still be worked out. Discloses that motion-triggered publishes make moving-vs-stationary inferable, which is a real activity-level leak and is disclosed nowhere else in the app. Keep the closing 'without ever showing where' — it bounds the claim.
+  ///
+  /// In en, this message translates to:
+  /// **'From that pattern, a relay you use can tell roughly when you are active and how often. Haven also sends an extra update when you move more than about a hundred metres, so a long enough record can hint at whether you were travelling or staying put — without ever showing where.'**
+  String get privacyInferenceActivityPattern;
+
+  /// Body paragraph, Privacy → What can still be worked out. Discloses the continuous online-presence signal created by the live connection, and names the benefit it buys so the disclosure is not merely alarming.
+  ///
+  /// In en, this message translates to:
+  /// **'While Haven is running it keeps an open connection to your relays, so they can also see that you are online, and which circles you are watching. That is the price of updates arriving in seconds rather than minutes.'**
+  String get privacyInferencePresence;
+
+  /// Section heading within the Privacy topic, introducing IP-address exposure. Rendered as a navigable screen-reader heading. Prefer this locale's plain-language phrase over the initialism 'IP' if one reads naturally.
+  ///
+  /// In en, this message translates to:
+  /// **'Your network address'**
+  String get privacyInferenceIpHeading;
+
+  /// Body paragraph, Privacy → What can still be worked out. Names all three classes of server that observe the user's address, including the photo host — an earlier version of this disclosure named only relays and the map provider, which was incomplete.
+  ///
+  /// In en, this message translates to:
+  /// **'Every server Haven talks to sees the address your phone connects from: your relays, the map provider, and whoever hosts a member\'s profile photo. Your internet provider sees which of those servers you reached, and when. Haven does nothing to hide either of those on its own.'**
+  String get privacyInferenceIpAddress;
+
+  /// Section heading within the Privacy topic, introducing the VPN recommendation. Rendered as a navigable screen-reader heading. 'VPN' is intentionally English (widely-understood initialism).
+  ///
+  /// In en, this message translates to:
+  /// **'Whether to use a VPN'**
+  String get privacyInferenceVpnHeading;
+
+  /// Body paragraph, Privacy → What can still be worked out. 'VPN' and 'Mullvad' are intentionally English (initialism and brand name).
+  ///
+  /// In en, this message translates to:
+  /// **'A VPN replaces your address with its own, so relays and the other servers no longer see where you connect from. It also hides which servers you reach from your internet provider. We recommend Mullvad.'**
+  String get privacyInferenceVpnHelps;
+
+  /// Body paragraph, Privacy → What can still be worked out. All three limits are real and must survive translation: members are unaffected, traffic analysis by the relay is unaffected, and trust is shifted rather than eliminated.
+  ///
+  /// In en, this message translates to:
+  /// **'It is not a cure-all. A VPN changes nothing about what your circle members see, and it does not hide the timing or size of your traffic from a relay you are talking to. It also moves your trust to the VPN company rather than removing the need to trust anyone.'**
+  String get privacyInferenceVpnLimits;
+
+  /// The practical takeaway for Privacy → What can still be worked out. Deliberately splits the advice by threat model rather than giving one blanket recommendation.
+  ///
+  /// In en, this message translates to:
+  /// **'If what worries you is being placed on a map by a network operator rather than by a person, a VPN is the single most useful thing you can add. If what worries you is the people in your circles, it will not help at all.'**
+  String get privacyInferenceMeansForYou;
+
+  /// Technical-detail paragraph (collapsed by default), Privacy → What can still be worked out. Honest about the limits of the jitter defence: it defeats short-window fingerprinting but not long-run averaging. Do not present the jitter as defeating traffic analysis outright.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven varies the gap between updates on purpose, so a short recording shows no clean rhythm. Averaged over many hours the underlying rate can still be estimated. Message sizes are not padded either, and location updates fall in a narrow size range, which makes them recognisable as location updates.'**
+  String get privacyInferenceDetailJitter;
+
+  /// Technical-detail paragraph (collapsed by default), Privacy → What can still be worked out. States the threat model's boundary plainly rather than leaving the reader to assume total coverage.
+  ///
+  /// In en, this message translates to:
+  /// **'Some things are simply outside what Haven can address. An observer able to watch many relays at once, or your own phone once someone else controls it, are beyond what any design choice here could fix.'**
+  String get privacyInferenceDetailOutOfScope;
 
   /// Generic button that clears all selected items in a list.
   ///
@@ -2445,7 +2559,7 @@ abstract class AppLocalizations {
   /// Second explainer paragraph on the Public Key QR page.
   ///
   /// In en, this message translates to:
-  /// **'Your public key works like a username that is safe to share. People scan this code, or paste your public key, to invite you to a circle. Sharing it cannot reveal your location, which is only visible to members of circles you\'ve joined, nor your name and photo, which stay on this device unless you choose to publish a public profile.'**
+  /// **'Your public key works like a username that is safe to share. People scan this code, or paste your public key, to invite you to a circle. Sharing it cannot reveal your location, which is only visible to members of circles you\'ve joined. Your display name and photo are already public, so sharing this reveals nothing further about them.'**
   String get qrCodeExplainerUsername;
 
   /// Section title of the display-name card on the Identity page. Reused as the display-name TextField's InputDecoration.labelText so the field's purpose is still announced by screen readers once text has been entered and the hint is no longer visible.

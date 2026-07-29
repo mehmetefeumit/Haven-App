@@ -2,9 +2,9 @@
 // gen_pseudo_arb.dart — generate a pseudo-localized ARB for layout/overflow and
 // un-extracted-string testing. Pure Dart, no pub deps.
 //
-// Reads the English template and writes a pseudo locale (`en-XA`) where every
+// Reads the English template and writes a pseudo locale (`en_XA`) where every
 // translatable message is accented and ~40% longer. Switch a debug build to
-// en-XA to catch, BEFORE real translations land:
+// en_XA to catch, BEFORE real translations land:
 //   * any still-hardcoded English string (it shows un-accented);
 //   * any layout that overflows / clips once strings grow.
 //
@@ -46,11 +46,20 @@ void main(List<String> args) {
     exit(2);
   }
 
+  // Derive the locale tag from the OUTPUT filename rather than hard-coding it.
+  // gen-l10n compares `@@locale` against the locale parsed from the ARB
+  // filename and, when they disagree, prints a warning and skips the file —
+  // so the pseudo locale never joins `supportedLocales` and the sweep reports
+  // a false pass against ordinary English. This generator previously emitted
+  // `en-XA` while the documented output name was `app_en_XA.arb`, which is
+  // exactly that mismatch. Deriving the tag makes it unrepresentable.
+  final locale = _localeFromArbPath(args[1]);
+
   final src = jsonDecode(template.readAsStringSync()) as Map<String, dynamic>;
   final out = <String, dynamic>{};
   for (final entry in src.entries) {
     if (entry.key == '@@locale') {
-      out['@@locale'] = 'en-XA';
+      out['@@locale'] = locale;
     } else if (entry.key.startsWith('@')) {
       out[entry.key] = entry.value; // metadata copied verbatim
     } else if (entry.value is String) {
@@ -62,7 +71,26 @@ void main(List<String> args) {
 
   const encoder = JsonEncoder.withIndent('  ');
   File(args[1]).writeAsStringSync('${encoder.convert(out)}\n');
-  stdout.writeln('Wrote pseudo locale en-XA -> ${args[1]}');
+  stdout.writeln('Wrote pseudo locale $locale -> ${args[1]}');
+}
+
+/// Extracts the locale tag from an ARB path, e.g. `lib/l10n/app_en_XA.arb`
+/// -> `en_XA`.
+///
+/// Exits non-zero on a name gen-l10n could not parse, so a typo fails loudly
+/// here instead of silently producing a locale the toolchain ignores.
+String _localeFromArbPath(String path) {
+  final name = path.split(RegExp(r'[/\\]')).last;
+  final match = RegExp(r'^app_(.+)\.arb$').firstMatch(name);
+  if (match == null) {
+    stderr.writeln(
+      'ERROR: output must be named app_<locale>.arb (gen-l10n parses the '
+      'locale from the filename and skips files whose @@locale disagrees); '
+      'got: $name',
+    );
+    exit(2);
+  }
+  return match.group(1)!;
 }
 
 /// Accents brace-depth-0 letters and pads the result ~40% longer. Anything

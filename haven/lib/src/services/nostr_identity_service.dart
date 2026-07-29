@@ -54,20 +54,30 @@ const String identityStorageKeyForTesting = _storageKey;
 class NostrIdentityService implements IdentityService {
   /// Creates a new [NostrIdentityService].
   ///
-  /// Optionally accepts a [FlutterSecureStorage] instance for testing, and a
+  /// Optionally accepts a [FlutterSecureStorage] instance for testing, a
   /// [wipeTileCache] override so the logout tile-cache wipe can be faked in
-  /// tests (it defaults to the real [tileCacheWipe] FFI call).
+  /// tests (it defaults to the real [tileCacheWipe] FFI call), and a
+  /// [managerFactory] override so the storage-retry contract can be tested
+  /// without the Rust bridge.
   NostrIdentityService({
     FlutterSecureStorage? storage,
     Future<void> Function()? wipeTileCache,
+    @visibleForTesting Future<NostrIdentityManager> Function()? managerFactory,
   }) : _storage = storage ?? _createSecureStorage(),
-       _wipeTileCache = wipeTileCache ?? tileCacheWipe;
+       _wipeTileCache = wipeTileCache ?? tileCacheWipe,
+       _managerFactory = managerFactory ?? NostrIdentityManager.newInstance;
 
   final FlutterSecureStorage _storage;
 
   /// Wipes the encrypted map-tile cache. Injectable for testing; defaults to
   /// the [tileCacheWipe] FFI function.
   final Future<void> Function() _wipeTileCache;
+
+  /// Builds the Rust identity manager. Injectable so [_ensureInitialized]'s
+  /// retry contract is unit-testable without the FFI bridge; defaults to the
+  /// real [NostrIdentityManager.newInstance].
+  final Future<NostrIdentityManager> Function() _managerFactory;
+
   NostrIdentityManager? _manager;
   bool _initialized = false;
 
@@ -81,29 +91,51 @@ class NostrIdentityService implements IdentityService {
   }
 
   /// Ensures the manager is initialized and identity is loaded from storage.
+  ///
+  /// **Only a load that actually produced an identity latches.**
+  /// [_initialized] short-circuits every later call, so latching a load that
+  /// yielded nothing would strand the whole process in a logged-out state:
+  /// `MapShell` would never start the receive plane (no live-sync engine, no
+  /// KeyPackage publish), and nothing would re-read storage until the app
+  /// restarted.
+  ///
+  /// A secure-storage read is not reliably definitive. An iOS Keychain entry
+  /// written with `first_unlock_this_device` can read back `null` while
+  /// protected data is momentarily unavailable — before first unlock, on a
+  /// cold boot, or when several `FlutterSecureStorage` instances race (the
+  /// observed iOS CI failure: the identity was present, one read returned
+  /// null, and the session never recovered). Treating that as "no identity,
+  /// forever" is the bug; retrying costs one extra read per call while
+  /// genuinely logged out, and the flag latches the moment a key is resident.
   Future<NostrIdentityManager> _ensureInitialized() async {
-    if (_manager != null && _initialized) {
-      return _manager!;
+    final cached = _manager;
+    if (cached != null && _initialized) {
+      return cached;
     }
 
-    // Create the Rust manager
-    _manager = await NostrIdentityManager.newInstance();
+    // Reuse the manager across retries — it owns the in-memory
+    // (`ZeroizeOnDrop`) keypair, so rebuilding it per attempt would churn Rust
+    // state and could drop an identity a previous attempt already loaded.
+    final manager = _manager ??= await _managerFactory();
 
-    // Try to load existing identity from secure storage
-    final storedBytes = await _storage.read(key: _storageKey);
-    if (storedBytes != null) {
-      try {
-        final bytes = base64Decode(storedBytes);
-        await _manager!.loadFromBytes(secretBytes: bytes);
-      } on Exception catch (_) {
-        // If loading fails, the stored data might be corrupted
-        // Log but don't throw - let the app handle no identity state
-        debugPrint('Warning: Failed to load identity from storage');
+    try {
+      final storedBytes = await _storage.read(key: _storageKey);
+      if (storedBytes != null) {
+        await manager.loadFromBytes(secretBytes: base64Decode(storedBytes));
       }
+    } on Object catch (e) {
+      // Security Rule 6/8: runtimeType only — never let key material or
+      // internal state reach a log. Leaving `_initialized` false is the point:
+      // a corrupt-or-unreadable read must be retried, not cached.
+      debugPrint(
+        'Warning: identity load failed (${e.runtimeType}); '
+        'retrying on next access',
+      );
+      return manager;
     }
 
-    _initialized = true;
-    return _manager!;
+    _initialized = manager.hasIdentity();
+    return manager;
   }
 
   /// Converts a Rust timestamp to DateTime.
@@ -151,6 +183,10 @@ class NostrIdentityService implements IdentityService {
       // Get secret bytes and persist to secure storage
       final secretBytes = await manager.getSecretBytes();
       await _storage.write(key: _storageKey, value: base64Encode(secretBytes));
+      // A key is now resident: latch so `_ensureInitialized` stops re-reading
+      // storage on every access (it deliberately does not latch a load that
+      // produced nothing — see its doc).
+      _initialized = true;
 
       return Identity(
         pubkeyHex: rustIdentity.pubkeyHex,
@@ -174,6 +210,8 @@ class NostrIdentityService implements IdentityService {
       // Get secret bytes and persist to secure storage
       final secretBytes = await manager.getSecretBytes();
       await _storage.write(key: _storageKey, value: base64Encode(secretBytes));
+      // A key is now resident — see `createIdentity` for why this latches.
+      _initialized = true;
 
       return Identity(
         pubkeyHex: rustIdentity.pubkeyHex,
@@ -240,9 +278,26 @@ class NostrIdentityService implements IdentityService {
     }
   }
 
+  /// SharedPreferences key holding the display name for [pubkeyHex].
+  ///
+  /// Centralised because it is built in three places; a drifting literal here
+  /// would silently orphan the value on delete.
+  static String _displayNameKey(String pubkeyHex) =>
+      'haven.display_name.$pubkeyHex';
+
   @override
   Future<void> deleteIdentity() async {
     final manager = await _ensureInitialized();
+
+    // Read the pubkey BEFORE the identity is destroyed: the display-name
+    // preference is keyed by it, and once the manager is wiped there is no way
+    // left to derive the key to remove.
+    String? pubkeyHex;
+    try {
+      pubkeyHex = manager.pubkeyHex();
+    } on Object catch (e) {
+      debugPrint('[Identity] pubkey read before delete failed: ${e.runtimeType}');
+    }
 
     try {
       // Delete from Rust manager
@@ -250,6 +305,20 @@ class NostrIdentityService implements IdentityService {
 
       // Delete from secure storage
       await _storage.delete(key: _storageKey);
+
+      // The display name lives in plain SharedPreferences — app-private, but
+      // NOT encrypted, and not covered by the SQLCipher wipe. Left behind it
+      // outlives "delete identity" as a plaintext record of who the user was,
+      // alongside their pubkey in the key itself. Best-effort and isolated so
+      // a preferences failure can neither block nor fail the deletion.
+      if (pubkeyHex != null) {
+        try {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.remove(_displayNameKey(pubkeyHex));
+        } on Object catch (e) {
+          debugPrint('[Identity] display-name purge failed: ${e.runtimeType}');
+        }
+      }
 
       // Wipe the encrypted map-tile cache so a new identity never inherits the
       // prior identity's cached map areas (the cache is a record of everywhere
@@ -273,7 +342,7 @@ class NostrIdentityService implements IdentityService {
     final identity = await getIdentity();
     if (identity == null) return null;
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getString('haven.display_name.${identity.pubkeyHex}');
+    return prefs.getString(_displayNameKey(identity.pubkeyHex));
   }
 
   @override
@@ -281,7 +350,7 @@ class NostrIdentityService implements IdentityService {
     final identity = await getIdentity();
     if (identity == null) return;
     final prefs = await SharedPreferences.getInstance();
-    final key = 'haven.display_name.${identity.pubkeyHex}';
+    final key = _displayNameKey(identity.pubkeyHex);
     final trimmed = name?.trim();
     if (trimmed == null || trimmed.isEmpty) {
       await prefs.remove(key);

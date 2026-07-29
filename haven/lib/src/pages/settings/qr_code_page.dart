@@ -8,6 +8,8 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/pages/settings/privacy_content.dart';
+import 'package:haven/src/pages/settings/privacy_topic_page.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/theme/theme.dart';
@@ -117,6 +119,16 @@ class QrCodePage extends ConsumerWidget {
                 Text(l10n.qrCodeExplainerKeys, style: bodyStyle),
                 const SizedBox(height: HavenSpacing.sm),
                 Text(l10n.qrCodeExplainerUsername, style: bodyStyle),
+                Align(
+                  alignment: AlignmentDirectional.centerStart,
+                  child: TextButton(
+                    onPressed: () => Navigator.push(
+                      context,
+                      PrivacyTopicPage.route(PrivacyTopic.yourKeys),
+                    ),
+                    child: Text(l10n.commonLearnMore),
+                  ),
+                ),
               ],
             ),
           ),

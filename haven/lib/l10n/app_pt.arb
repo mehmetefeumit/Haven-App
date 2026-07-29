@@ -1,52 +1,39 @@
 {
   "@@locale": "pt",
-
   "appearanceTitle": "Aparência",
-
   "appearanceThemeHeader": "Tema",
-
   "appearanceThemeSystem": "Padrão do sistema",
   "appearanceThemeSystemSubtitle": "Acompanhar as configurações do dispositivo",
-
   "appearanceThemeLight": "Claro",
   "appearanceThemeLightSubtitle": "Usar sempre o tema claro",
-
   "appearanceThemeDark": "Escuro",
   "appearanceThemeDarkSubtitle": "Usar sempre o tema escuro",
-
   "appearanceLanguageTitle": "Idioma",
-
   "languageSystemDefault": "Padrão do sistema",
-
   "commonTryAgain": "Tentar de novo",
   "commonDismiss": "Dispensar",
   "commonSettings": "Configurações",
   "commonInvitations": "Convites",
   "commonPendingInvitations": "{count, plural, one{1 convite pendente} many{{count} de convites pendentes} other{{count} convites pendentes}}",
-
   "commonBack": "Voltar",
   "commonContinue": "Continuar",
   "commonSkip": "Pular",
   "commonRetry": "Tentar de novo",
-
   "onboardingStepOf": "Etapa {current} de {total}",
-
   "onboardingAppName": "Haven",
   "onboardingWelcomeHeadline": "Compartilhe sua localização com privacidade, só com quem você quiser.",
   "onboardingWelcomeHeadlineEmphasis": "só",
   "onboardingWelcomeCta": "Começar",
-
   "onboardingValuePropsTitle": "O que torna o Haven diferente",
   "onboardingValueProp1Title": "Só os seus círculos podem ver você",
   "onboardingValueProp1Body": "Sua localização é criptografada no seu dispositivo antes de sair dele, então só os círculos que você escolher podem lê-la, nunca o Haven nem ninguém mais. Como o Haven é de código aberto, qualquer pessoa pode verificar isso.",
   "onboardingValueProp2Title": "Ninguém pode desligá-lo",
   "onboardingValueProp2Body": "O Haven não tem servidor central. Suas mensagens criptografadas trafegam por uma rede descentralizada de relays que você mesmo pode escolher, então nenhuma entidade isolada pode desligá-lo.",
   "onboardingValueProp3Title": "Não precisa de conta",
-  "onboardingValueProp3Body": "Sem e-mail, sem telefone, sem cadastro. O Haven cria uma identidade privada que existe só no seu celular, sem nada que a ligue à sua pessoa real.",
+  "onboardingValueProp3Body": "Sem e-mail, sem telefone, sem cadastro. O Haven cria uma identidade cuja chave secreta nunca sai do seu celular, então não existe nenhuma conta que alguém possa entregar.",
   "onboardingValueProp1Summary": "Encriptado no teu dispositivo, por isso só os círculos que escolheres o podem ler.",
   "onboardingValueProp2Summary": "Sem servidor central — funciona numa rede de relays que escolhes.",
-  "onboardingValueProp3Summary": "Sem email, telefone ou registo. Nada o liga a ti.",
-
+  "onboardingValueProp3Summary": "Sem email, telefone ou registo. A tua chave secreta nunca sai do teu telefone.",
   "onboardingCreateIdentityTitle": "Crie sua identidade",
   "onboardingCreateIdentityBody": "O Haven vai criar uma identidade privada que existe só neste celular. É assim que os seus círculos reconhecem você.",
   "onboardingCreateIdentityWarning": "Se você perder este celular ou apagar o app, sua identidade desaparece. O Haven não tem como recuperá-la para você.",
@@ -55,7 +42,6 @@
   "onboardingCreateIdentityImportPrompt": "Já tem uma chave?",
   "onboardingCreateIdentityImportLink": "Importe-a em vez disso",
   "onboardingCreateIdentityError": "Algo deu errado ao criar sua identidade. Tente de novo.",
-
   "onboardingImportTitle": "Importe sua chave existente",
   "onboardingImportBody": "Cole a chave secreta que você guardou de outro app compatível com o Haven.",
   "onboardingImportHint": "nsec1…",
@@ -63,14 +49,11 @@
   "onboardingImportLoading": "Importando…",
   "onboardingImportInvalid": "Isso não parece ser uma chave de backup válida. Confira e tente de novo.",
   "onboardingImportError": "Não foi possível importar essa chave. Confira e tente de novo.",
-
   "onboardingDisplayNameHint": "ex.: Alex",
   "onboardingDisplayNameError": "Não foi possível salvar esse nome. Tente de novo.",
   "onboardingAddPhotoOptional": "Adicionar uma foto (opcional)",
-
   "commonCancel": "Cancelar",
   "commonOpenSettings": "Abrir configurações",
-
   "settingsTitle": "Configurações",
   "settingsIdentityTitle": "Identidade",
   "settingsIdentitySubtitle": "Perfil, chaves e compartilhamento de foto",
@@ -83,7 +66,6 @@
   "settingsAboutTitle": "Sobre",
   "settingsDebugOverlayTitle": "Sobreposição de log de depuração",
   "settingsDebugOverlaySubtitle": "Mostrar a saída de log na tela",
-
   "relaySettingsTitle": "Relays",
   "relaySettingsCheckRelaysTooltip": "Verificar relays",
   "relaySettingsNoIdentityTitle": "Sem identidade",
@@ -92,7 +74,7 @@
   "relaySettingsInboxTitle": "Meus relays de caixa de entrada",
   "relaySettingsInboxSubtitle": "kind 10050, onde os convites chegam até você",
   "relaySettingsKeyPackageTitle": "Meus relays de KeyPackage",
-  "relaySettingsKeyPackageSubtitle": "kind 10051, onde os convidados descobrem suas chaves de criptografia",
+  "relaySettingsKeyPackageSubtitle": "kind 10002, onde os convidados descobrem suas chaves de criptografia",
   "relaySettingsLoadRelaysError": "Falha ao carregar os relays.",
   "relaySettingsAddRelay": "Adicionar relay",
   "relaySettingsRestoreDefaults": "Restaurar padrões",
@@ -111,21 +93,6 @@
   "relaySettingsStatusSemantics": "Status do relay: {status}",
   "relaySettingsEmptyTitle": "Nenhum relay configurado",
   "relaySettingsEmptyMessage": "Você precisa de pelo menos um relay para que outras pessoas possam alcançar você. Toque abaixo para restaurar os padrões do Haven.",
-  "relaySettingsExplainerSemantics": "Como funcionam os relays do Haven",
-  "relaySettingsExplainerHeading": "Como isso funciona",
-  "relaySettingsExplainerNostr": "O Haven não tem servidor central. Ele funciona com base em duas tecnologias abertas. O Nostr é uma rede de servidores independentes chamados relays que qualquer pessoa pode operar; eles recebem suas mensagens, guardam-nas por pouco tempo e as repassam quando seus contatos as solicitam. Nenhum relay isolado é essencial, então, se um sair do ar, os outros continuam funcionando, e tudo o que um relay poderia ser forçado a entregar é apenas dado criptografado.",
-  "relaySettingsExplainerMarmot": "O protocolo Marmot criptografa suas mensagens no seu dispositivo antes de elas saírem dele, usando o padrão MLS (Messaging Layer Security). Cada círculo é seu próprio grupo criptografado, com suas próprias chaves, então círculos diferentes não podem ser vinculados entre si. Essas chaves também continuam avançando ao longo do tempo, uma propriedade chamada sigilo futuro, então mesmo uma chave exposta mais tarde não consegue desbloquear suas mensagens anteriores.",
-  "relaySettingsExplainerMetadata": "Por causa disso, um relay nunca vê sua localização, suas mensagens, quem está nos seus círculos nem sua identidade nessas mensagens. Cada mensagem é publicada a partir de um endereço de envio novo e de uso único, então nada na mensagem a liga à sua conta. Mesmo assim, um relay ainda vê alguns metadados: uma etiqueta aleatória por círculo, o momento e o tamanho do seu tráfego e o endereço de rede de onde você se conecta.",
-  "relaySettingsExplainerInboxTerm": "Relays de caixa de entrada",
-  "relaySettingsExplainerInboxBody": " são sua caixa de correio: onde os convites para entrar em um círculo, eles próprios criptografados, são entregues para você recolher. Para alguém convidar você, essa pessoa precisa conseguir alcançar um desses relays.",
-  "relaySettingsExplainerKeyPackageTerm": "Relays de KeyPackage",
-  "relaySettingsExplainerKeyPackageBody": " são onde você publica um pequeno conjunto das suas chaves públicas, que é seguro compartilhar. Alguém que conhece sua conta o busca nesses relays para adicionar você a um círculo.",
-  "relaySettingsExplainerOwnRelayTerm": "Usando seu próprio relay.",
-  "relaySettingsExplainerOwnRelayBody": " Cada círculo também carrega sua própria lista de relays, compartilhada com cada membro quando ele entra; é por essa lista, e não pela sua caixa de entrada, que viajam as atualizações criptografadas contínuas do círculo. Então, se você preferir evitar relays públicos, pode operar o seu próprio e apontar um círculo para ele: depois que todos tiverem entrado, o tráfego desse círculo pode fluir somente por ele.",
-  "relaySettingsExplainerReachabilityTerm": "O detalhe é a acessibilidade.",
-  "relaySettingsExplainerReachabilityBody": " Cada membro precisa conseguir se conectar a esse relay e, quando você convida alguém pela primeira vez, vocês dois precisam de um relay que ambos consigam alcançar (por exemplo, o mesmo relay privado listado como relay de caixa de entrada e de KeyPackage de todos). Um relay privado ainda vê o mesmo tráfego criptografado e o mesmo momento de envio que qualquer outro; você apenas controla quem o opera.",
-  "relaySettingsExplainerFooter": "Você pode adicionar ou remover relays de qualquer uma das listas a qualquer momento. Mais relays tornam você mais fácil de alcançar; menos relays dão a você mais controle sobre para onde vai seu tráfego criptografado.",
-
   "locationSettingsTitle": "Localização",
   "locationSettingsDisabledSnack": "Compartilhamento em segundo plano desativado",
   "locationSettingsEnabledSnack": "Compartilhamento em segundo plano ativado",
@@ -141,7 +108,6 @@
   "locationSettingsAndroidBattery": "Para um compartilhamento em segundo plano confiável, exclua também o Haven da otimização de bateria. Vá em Configurações → Apps → Haven → Bateria → Permitir o tempo todo.",
   "locationSettingsAndroidVendors": "Em aparelhos Samsung, remova o Haven dos \"Apps em suspensão\" (Cuidados com o dispositivo → Bateria → Limites de uso em segundo plano). Na Xiaomi, ative a Inicialização automática para o Haven.",
   "locationSettingsIosGuidance": "Enquanto o compartilhamento em segundo plano está ativado, o Haven mantém uma sessão de localização contínua e o iOS mostra um indicador azul na barra de status. Conceder \"Sempre\" também permite que o Haven recupere as atualizações dos seus círculos depois que o iOS fechar o app.",
-
   "mapStyleTitle": "Estilo do mapa",
   "mapStyleMinimalTitle": "Minimalista",
   "mapStyleMinimalSubtitle": "Tela tranquila e com poucos detalhes que acompanha seu tema claro ou escuro",
@@ -155,7 +121,6 @@
   "mapStylePreviewSemantics": "Prévia do mapa ({scene}): {style}",
   "mapStylePreviewUnavailableSemantics": "Prévia do mapa indisponível nesta versão",
   "mapStylePreviewUnavailableLabel": "A prévia ao vivo aparece nas versões de lançamento",
-
   "aboutTitle": "Sobre",
   "aboutHeroName": "Haven",
   "aboutHeroTagline": "Compartilhamento de localização privado e resistente à censura.",
@@ -165,25 +130,9 @@
   "aboutSupportOsm": "Apoiar o OpenStreetMap",
   "aboutMapAttribution": "© Stadia Maps · © OpenMapTiles · © OpenStreetMap contributors\nDados do mapa licenciados sob a ODbL",
   "aboutLinkOpenError": "Não foi possível abrir o link",
-  "aboutWhoCanSeeTitle": "Quem pode ver o quê",
-  "aboutWhoCanSeeIntro": "Sua localização exata só pode ser lida pelas pessoas que você escolher. Veja a seguir o que as principais partes podem e não podem ver.",
-  "aboutActorCirclesWho": "Os membros do círculo com quem você compartilha",
-  "aboutActorCirclesSees": "Sua localização exata e o nome de exibição que você escolher, mas apenas dentro dos círculos que você compartilha com eles, nunca os seus outros círculos.",
-  "aboutActorRelaysWho": "Os operadores dos relays",
-  "aboutActorRelaysSees": "Os servidores que repassam suas mensagens. Eles veem seu endereço IP, a chave pública sob a qual você publica (um ID aleatório, não o seu nome), o tamanho e o momento do seu tráfego e qual conta você procurou ao buscar alguém. Eles nunca conseguem ler sua localização, suas mensagens, os nomes dos seus círculos nem quem está neles.",
-  "aboutActorMapWho": "O provedor do mapa (Stadia Maps)",
-  "aboutActorMapSees": "Apenas enquanto o mapa está aberto: seu endereço IP e a área que você está visualizando, para que ele possa enviar as imagens corretas do mapa. Nunca seus círculos nem sua localização compartilhada. A Stadia anonimiza os endereços IP e não vende seus dados.",
-  "aboutActorDevelopersWho": "Os desenvolvedores do Haven",
-  "aboutActorDevelopersSees": "Nada. O Haven não opera servidores e não coleta análises. Um desenvolvedor só poderia ver o que um operador de relay vê, e apenas se você usasse um relay que ele por acaso operasse.",
-  "aboutWhoCanSeeMetadataNote": "Ainda assim, sua atividade não é invisível. Um relay que você usa, ou qualquer pessoa observando sua rede, pode perceber que você está ativo, mais ou menos quando e com que frequência, a partir do momento das conexões e do tamanho das mensagens.",
-  "aboutScreenshotTitle": "Proteção contra capturas de tela",
-  "aboutScreenshotBody": "No Android, o Haven bloqueia capturas de tela e gravação de tela em todo o app para evitar a exposição acidental da localização. Trata-se de uma proteção em nível de sistema (FLAG_SECURE) que se aplica a todas as telas do app, incluindo o mapa e as listas de membros.",
-  "aboutVpnTitle": "Tenha mais privacidade com uma VPN",
-  "aboutVpnBody": "Os relays e o provedor do mapa veem seu endereço IP, e seu provedor de internet vê quais servidores você acessa. Uma VPN confiável oculta seu endereço IP deles. Recomendamos a Mullvad. Ela não muda o que os membros do seu círculo veem, e transfere a confiança para o provedor da VPN.",
   "aboutVpnLinkLabel": "mullvad.net",
   "aboutFooterLicense": "Licenciado sob a MIT License",
   "aboutFooterVersion": "Versão {version}",
-
   "privacyTitle": "Privacidade",
   "privacySubtitle": "Como o Haven funciona e o que os outros podem ver",
   "privacyHubSummary": "O Haven compartilha sua localização apenas com os pequenos grupos que você escolher, e a criptografa no seu telefone antes de ela sair do aparelho. Não existe conta de empresa nem servidor do Haven. As páginas abaixo explicam como isso funciona, em linguagem simples, e são honestas sobre o que o Haven não protege.",
@@ -219,7 +168,54 @@
   "privacyPublicProfileRemovalIsNotDeletion": "Remover sua foto depois não a tira do ar. O Haven substitui seu perfil por um perfil vazio, mas o arquivo da imagem continua no servidor que a hospeda, e qualquer cópia já baixada continua por aí. Trate tudo o que você publica como permanente.",
   "privacyPublicProfileDetailKindZero": "O perfil é um evento Nostr “kind 0” assinado pela sua chave de identidade. As fotos são enviadas para um host Blossom — blossom.primal.net, a menos que você mude — que vê a imagem, sua chave pública e seu endereço IP.",
   "privacyPublicProfileDetailExifStripped": "Antes de enviar, o Haven recodifica a imagem e descarta os dados ocultos que as câmeras anexam, incluindo a posição GPS onde a foto foi tirada. Isso importa aqui: caso contrário, uma foto de viagem pode carregar as coordenadas da sua casa.",
-
+  "privacyGroupHowLocationTravelsHeading": "O caminho da sua localização",
+  "privacyRelaysTitle": "Relays: os servidores que repassam as mensagens",
+  "privacyRelaysSubtitle": "Por quais computadores suas atualizações passam",
+  "privacyRelaysWhatIsARelay": "O Haven não tem servidor próprio, então suas atualizações passam pelos servidores de outras pessoas. Eles são chamados de relays: servidores pequenos e independentes que qualquer pessoa pode operar. Um relay guarda a mensagem criptografada por pouco tempo e a repassa quando seu círculo a solicita.",
+  "privacyRelaysWhyMany": "Usar vários significa que nenhum deles pode deixar você sem comunicação. Se um sair do ar, os outros continuam funcionando. Você escolhe quais relays usa e pode trocá-los quando quiser.",
+  "privacyRelaysTwoLists": "O Haven mantém duas listas para você. Os convites chegam até você pelos seus relays de caixa de entrada. Nos seus relays de KeyPackage, as pessoas buscam as chaves de que precisam para convidar você. Cada círculo também tem a sua própria lista, e é por ela que passam as atualizações criptografadas daquele círculo.",
+  "privacyRelaysMeansForYou": "Não há como errar de forma arriscada aqui: um relay só vê dado criptografado. Mas você precisa de pelo menos um relay acessível; sem isso, ninguém consegue convidar você e seus círculos ficam em silêncio.",
+  "privacyRelaysDetailIndexers": "Além das suas próprias listas, o Haven consulta um pequeno conjunto de relays públicos de diretório para procurar perfis e chaves de outras pessoas. Ele entra em contato com esses relays mesmo que você tenha configurado apenas relays privados seus. Eles veem seu endereço de rede e sobre quais contas você perguntou.",
+  "privacyRelaysDetailKeyListIsPublic": "Sua lista de relays de KeyPackage também é publicada na rede, assinada com a sua chave de identidade, para que os outros a encontrem. Se você adicionar um relay privado a essa lista, o endereço dele se torna público e ligado a você. Um relay usado apenas na lista de um único círculo não é anunciado desse jeito.",
+  "privacyEncryptionTitle": "Como funciona a criptografia",
+  "privacyEncryptionSubtitle": "Chaves por círculo e o que muda quando alguém entra ou sai",
+  "privacyEncryptionPerCircle": "Sua localização é criptografada no seu telefone antes de sair dele, com um padrão aberto chamado MLS. Cada círculo é seu próprio grupo criptografado, com suas próprias chaves. Ninguém de fora de um círculo consegue ler o que é enviado dentro dele: nem um relay, nem o Haven, nem outro círculo do qual você participa.",
+  "privacyEncryptionWhenSomeoneJoins": "Quando alguém entra, o círculo passa a usar uma chave nova. Essa pessoa pode ler o que for enviado depois da chegada dela, e nada do que veio antes. O Haven nunca envia localizações antigas a um novo membro.",
+  "privacyEncryptionWhenSomeoneLeaves": "Quando alguém sai ou é removido, o círculo passa a usar outra chave nova. Em no máximo alguns minutos, essa pessoa deixa de conseguir ler qualquer coisa nova.",
+  "privacyEncryptionKeysChangeOnMembership": "As chaves mudam quando a composição do círculo muda; elas não mudam sozinhas com o passar do tempo. Entre uma mudança e outra, uma única chave cobre tudo o que é enviado. Por isso, alguém que você remove de um círculo estável há muito tempo ainda consegue abrir as mensagens que salvou enquanto era membro, mesmo as de semanas atrás. Essa pessoa não consegue abrir nada do que for enviado depois de sair.",
+  "privacyEncryptionMeansForYou": "A criptografia protege você de todos que estão fora dos seus círculos. Ela não protege você de quem já esteve dentro de um deles. Se quiser cortar os laços com alguém, criar um círculo novo é mais seguro do que remover a pessoa de um antigo.",
+  "privacyEncryptionDetailMls": "MLS (Messaging Layer Security) é o mesmo padrão do IETF usado por outros mensageiros seguros. O Haven chega à rede Nostr pelo protocolo Marmot, que define como os grupos MLS viajam pelos relays. A chave com que cada círculo assina é separada da sua chave pública de identidade do Nostr.",
+  "privacyEncryptionDetailEpochs": "Cada período de chave é chamado de epoch. Seu aparelho guarda apenas o material necessário para descriptografar as mensagens ainda em trânsito dos últimos epochs e depois o descarta — é por isso que o Haven não consegue recuperar suas mensagens antigas nem em princípio.",
+  "privacyWhatOthersSeeTitle": "O que os membros veem e o que os relays veem",
+  "privacyWhatOthersSeeSubtitle": "As pessoas com quem você compartilha e os servidores no meio do caminho",
+  "privacyWhatOthersSeeMembersHeading": "As pessoas dos seus círculos",
+  "privacyWhatOthersSeeMembersExact": "Todos em um círculo veem sua posição exata no mapa, não uma área aproximada. Não existe configuração que compartilhe uma localização vaga com alguns membros e uma precisa com outros.",
+  "privacyWhatOthersSeeCannotPause": "Enquanto o Haven está aberto e você participa de um círculo, sua posição sai sozinha a cada poucos minutos. Não há botão de pausa. A única opção que você controla é se o compartilhamento continua depois que você fecha o app.",
+  "privacyWhatOthersSeeMembersLearnKey": "Entrar em um círculo também mostra sua chave pública a todos os membros. Por meio dela, eles podem consultar seu perfil público e tudo o mais que você já publicou com essa chave.",
+  "privacyWhatOthersSeeCoMemberIp": "A foto de perfil de um membro é baixada de um servidor escolhido por ele. Carregá-la revela seu endereço de rede — e, portanto, mais ou menos em que parte do mundo você está — a quem administra esse servidor. Isso acontece sozinho, sem que você toque em nada.",
+  "privacyWhatOthersSeeRelaysHeading": "Os operadores dos relays",
+  "privacyWhatOthersSeeRelaysCannot": "Quem administra os relays não consegue ler sua localização, suas mensagens, o nome do seu círculo nem a lista de membros dele. Cada mensagem chega até essas pessoas a partir de um endereço de envio novo e de uso único, então elas não têm como saber qual membro a enviou.",
+  "privacyWhatOthersSeeRelaysCan": "O que essas pessoas veem é seu endereço de rede, quando você está online e o tamanho e a frequência do seu tráfego. Cada círculo carrega uma etiqueta aleatória, então um relay consegue agrupar as mensagens de um mesmo círculo e estimar quantas pessoas há nele — sem descobrir quem são.",
+  "privacyWhatOthersSeeMeansForYou": "Trate um círculo como pessoas a quem você daria o endereço da sua casa. Contra relays e gente de fora, a criptografia se mantém, e uma VPN fecha a brecha do endereço de rede. Contra um membro que salva uma captura de tela, nada se mantém.",
+  "privacyWhatOthersSeeDetailTag": "A etiqueta de um círculo permanece a mesma por toda a vida dele, então um relay pode ligar todas as mensagens dele entre si por tempo indeterminado. Isso é uma característica do protocolo subjacente, não algo que o Haven possa mudar.",
+  "privacyWhatOthersSeeDetailExpiry": "O Haven pede aos relays que descartem as mensagens de localização depois de cerca de quatro minutos. Esse pedido é apenas uma recomendação: o relay tem liberdade para guardá-las por mais tempo. Os convites não têm prazo nenhum e podem ficar no seu relay de caixa de entrada por tempo indeterminado.",
+  "commonLearnMore": "Saiba mais",
+  "relaySettingsBackendCaption": "O Haven não tem servidor próprio. Suas atualizações criptografadas passam por servidores independentes chamados de relays, que nunca veem sua localização nem quem está nos seus círculos.",
+  "privacyWhatOthersSeeScreenshots": "As capturas de tela dependem da plataforma, e as duas não se comportam da mesma forma. No Android, o Haven bloqueia capturas de tela e gravação de tela em todo o app. No iPhone, ele não consegue: o Haven apenas desfoca a pré-visualização no alternador de apps, mas um membro ainda pode capturar o que está na tela.",
+  "privacyGroupTheLimitsHeading": "Os limites",
+  "privacyInferenceTitle": "O que ainda dá para deduzir sobre você",
+  "privacyInferenceSubtitle": "Os rastros que a criptografia não oculta",
+  "privacyInferenceWhatIsMetadata": "A criptografia oculta o que você envia. Ela não consegue ocultar que você enviou algo. O que acompanha uma mensagem — quando ela saiu, que tamanho tinha, a quais servidores você estava conectado — tem um nome: metadados. Isso continua visível mesmo quando o conteúdo não está.",
+  "privacyInferenceActivityPattern": "A partir desses metadados, um relay que você usa consegue perceber mais ou menos quando você está ativo e com que frequência. O Haven também envia uma atualização extra sempre que você se desloca mais de uns cem metros. Com um registro longo o suficiente, isso pode sugerir se você estava em movimento ou parado em um lugar — sem nunca mostrar onde.",
+  "privacyInferencePresence": "Enquanto o Haven está funcionando, ele mantém uma conexão aberta com seus relays. Por isso eles também veem que você está online e quais círculos você acompanha. Esse é o preço de as atualizações chegarem em segundos, e não em minutos.",
+  "privacyInferenceIpHeading": "Seu endereço de rede",
+  "privacyInferenceIpAddress": "Todo servidor com que o Haven fala vê o endereço de onde seu telefone se conecta: seus relays, o provedor do mapa e quem hospeda a foto de perfil de um membro. Seu provedor de internet vê quais desses servidores você acessou, e quando. O Haven, por si só, não faz nada para ocultar nenhuma das duas coisas.",
+  "privacyInferenceVpnHeading": "Vale a pena usar uma VPN?",
+  "privacyInferenceVpnHelps": "Uma VPN substitui seu endereço pelo dela, então os relays e os outros servidores não veem mais de onde você se conecta. Ela também oculta do seu provedor de internet quais servidores você acessa. Recomendamos a Mullvad.",
+  "privacyInferenceVpnLimits": "Ela não resolve tudo. Uma VPN não muda nada do que os membros do seu círculo veem. E, para o relay com o qual você está conversando, ela não oculta o momento nem o tamanho do seu tráfego. Ela também apenas transfere sua confiança para o provedor da VPN, em vez de eliminar a necessidade de confiar em alguém.",
+  "privacyInferenceMeansForYou": "Se o que te preocupa é ser colocado no mapa por quem opera a rede, e não por uma pessoa, uma VPN é a coisa mais útil que você pode acrescentar. Se o que te preocupa são as pessoas dos seus círculos, ela não vai ajudar em nada.",
+  "privacyInferenceDetailJitter": "O Haven varia de propósito o intervalo entre as atualizações, então uma gravação curta não mostra nenhum ritmo claro. Na média de muitas horas, a frequência real ainda pode ser estimada. As mensagens também não recebem preenchimento para igualar o tamanho, e as atualizações de localização ficam em uma faixa estreita de tamanho, o que as torna reconhecíveis como atualizações de localização.",
+  "privacyInferenceDetailOutOfScope": "Algumas coisas simplesmente estão fora do que o Haven pode resolver. Alguém capaz de observar muitos relays ao mesmo tempo, ou seu próprio telefone depois que outra pessoa passa a controlá-lo, estão além do que qualquer decisão de design aqui poderia corrigir.",
   "commonClearAll": "Limpar tudo",
   "commonMemberCount": "{count, plural, one{1 membro} many{{count} de membros} other{{count} membros}}",
   "commonNumber": "{count}",
@@ -233,7 +229,6 @@
   "compassSouthWest": "sudoeste",
   "compassWest": "oeste",
   "compassNorthWest": "noroeste",
-
   "circlesTitle": "Círculos",
   "circlesRefreshTooltip": "Atualizar círculos",
   "circlesRequiresIdentity": "Criar um círculo exige antes a configuração da identidade",
@@ -245,7 +240,6 @@
   "circlesLoadError": "Não foi possível carregar os círculos",
   "circlesSelectToView": "Selecione um círculo para ver os membros",
   "circlesNoMembers": "Nenhum membro neste círculo",
-
   "createCircleTitle": "Adicionar membros",
   "createCircleSelectedCount": "Selecionados ({count})",
   "createCircleEmptyTitle": "Adicione membros ao círculo",
@@ -256,7 +250,6 @@
   "createCircleNoAccountFound": "Nenhuma conta do Haven encontrada",
   "createCircleCouldNotVerify": "Não foi possível verificar o membro",
   "createCircleSomethingWentWrong": "Algo deu errado",
-
   "nameCircleTitle": "Dê um nome ao seu círculo",
   "nameCircleMembersToInvite": "{count, plural, one{1 membro será convidado} many{{count} de membros serão convidados} other{{count} membros serão convidados}}",
   "nameCircleNameLabel": "Nome do círculo",
@@ -273,7 +266,6 @@
   "nameCircleCreatedSnack": "{count, plural, one{Círculo \"{name}\" criado! 1 convite enviado.} many{Círculo \"{name}\" criado! {count} de convites enviados.} other{Círculo \"{name}\" criado! {count} convites enviados.}}",
   "nameCircleIdentityError": "Erro de identidade. Verifique a configuração da sua identidade.",
   "nameCircleCreateError": "Falha ao criar o círculo. Tente de novo.",
-
   "addMemberTitle": "Adicionar a {circleName}",
   "addMemberInfo": "Os novos membros poderão ver as localizações criptografadas deste círculo assim que aceitarem o convite.",
   "addMemberAlreadyInCircle": "Já está neste círculo",
@@ -282,13 +274,11 @@
   "addMemberSentToCircle": "{count, plural, one{Convite enviado para {circleName}} many{Convites enviados para {circleName}} other{Convites enviados para {circleName}}}",
   "addMemberPartialDelivery": "Convites enviados ({sent} de {total}). Entrega pendente para os demais.",
   "addMemberError": "Falha ao adicionar o membro. Tente de novo.",
-
   "qrScannerTitle": "Escanear QR code",
   "qrScannerToggleFlash": "Alternar flash",
   "qrScannerSwitchCamera": "Trocar de câmera",
   "qrScannerInstruction": "Posicione o QR code dentro do quadro",
   "qrScannerScanning": "Escaneando...",
-
   "circleMemberInvitationPending": "Convite pendente",
   "circleMemberNoRecentLocation": "Sem localização recente",
   "circleMemberRemoveTooltip": "Remover do círculo",
@@ -297,7 +287,6 @@
   "circleMemberHintNoLocation": "nenhuma localização disponível",
   "circleMemberHintMember": "membro",
   "circleMemberHintTapToCenter": "toque para centralizar o mapa na localização da pessoa",
-
   "pendingMemberRetryTooltip": "Tentar validar de novo",
   "pendingMemberRemoveTooltip": "Remover membro",
   "pendingMemberValidating": "Validando",
@@ -306,7 +295,6 @@
   "pendingMemberCheckingAvailability": "Verificando disponibilidade...",
   "pendingMemberReadyToInvite": "Pronto para convidar",
   "pendingMemberNeedsUpdate": "Precisa atualizar o Haven",
-
   "memberSearchHint": "Digite o ID do membro...",
   "memberSearchPasteTooltip": "Colar da área de transferência",
   "memberSearchAddTooltip": "Adicionar membro",
@@ -314,14 +302,11 @@
   "memberSearchHelper": "Peça aos contatos o QR code ou o ID do Haven deles",
   "memberSearchNoValidId": "Nenhum ID do Haven válido encontrado",
   "memberSearchAlreadyAdded": "Membro já adicionado",
-
   "selectedMembersMore": "+{count} a mais",
-
   "invitationStatusPending": "Convite pendente",
   "invitationStatusActive": "Ativo",
   "invitationStatusDeclined": "Recusado",
   "invitationStatusSemantics": "Status do convite: {label}",
-
   "invitationCardSemantics": "Convite para entrar em {circleName}, enviado por {inviter}, {count} membros",
   "invitationCardInvitedBySemantics": "Convidado pelo identificador criptográfico {inviter}",
   "invitationCardInvitedBy": "Convidado por: {inviter}",
@@ -336,14 +321,12 @@
   "invitationDeclinedSnack": "Convite recusado",
   "invitationAcceptError": "Falha ao aceitar o convite. Tente de novo.",
   "invitationDeclineError": "Falha ao recusar o convite. Tente de novo.",
-
   "circleSelectorLabel": "Seletor de círculo",
   "circleSelectorPlaceholder": "Selecione um círculo",
   "circleSelectorNewCircle": "Novo círculo",
   "circleSelectorLoadError": "Falha ao carregar os círculos",
   "circleSelectorExpandedAnnouncement": "Lista de círculos expandida",
   "circleSelectorCollapsedAnnouncement": "Lista de círculos recolhida",
-
   "circleDetailsButtonTooltip": "Detalhes do círculo",
   "circleDetailsTitle": "Detalhes do círculo",
   "circleDetailsRelaysHeading": "Relays deste círculo",
@@ -357,7 +340,6 @@
   "leaveCircleIdentityUnavailable": "Identidade indisponível",
   "leaveCircleSuccess": "Você saiu do círculo",
   "leaveCircleError": "Falha ao sair do círculo",
-
   "circleBlockedBannerTitle": "Este círculo não pode ser atualizado",
   "circleBlockedBannerBody": "Algo deu errado com a criptografia deste círculo, então o Haven não consegue mais enviar nem receber atualizações nele. Você ainda pode ver abaixo as últimas informações que tinha, ou sair do círculo.",
   "legacyCircleBannerTitle": "Este círculo precisa ser recriado",
@@ -372,19 +354,16 @@
   "legacyCutoverExplainerCirclesNeedRecreation": "Para maior segurança, seus círculos precisam ser recriados e seus membros convidados novamente antes que você possa voltar a compartilhar localização neles.",
   "legacyCutoverExplainerAcknowledge": "Entendi",
   "relaySettingsLegacyRetractionPending": "O Haven ainda está finalizando a limpeza de alguns dados da atualização de segurança recente. Isso será concluído automaticamente assim que você estiver online novamente.",
-
   "circlesPanelCollapsedAnnouncement": "Painel de círculos recolhido",
   "circlesPanelExpandedAnnouncement": "Painel de círculos expandido",
   "circlesPanelSlightlyOpenAnnouncement": "Painel de círculos levemente aberto",
   "circlesPanelHalfOpenAnnouncement": "Painel de círculos meio aberto",
   "circleMemberAnnouncementSelf": "você",
   "circleMemberAnnouncementFallback": "membro",
-
   "invitationsRefreshTooltip": "Atualizar convites",
   "invitationsLoadError": "Não foi possível carregar os convites",
   "invitationsEmptyTitle": "Nenhum convite",
   "invitationsEmptyMessage": "Quando alguém convidar você para um círculo, aparecerá aqui.",
-
   "refreshRingSemanticNoInbox": "Nenhuma caixa de entrada configurada, abre as configurações de relays",
   "refreshRingSemanticChecking": "{total, plural, =1{{checked} de 1 relay verificado} many{{checked} de {total} relays verificados} other{{checked} de {total} relays verificados}}",
   "refreshRingSemanticAllOk": "{total, plural, =1{O relay respondeu} many{Todos os {total} relays responderam} other{Todos os {total} relays responderam}}",
@@ -401,7 +380,6 @@
   "refreshRingAnnouncementAllFound": "Todos os relays têm os seus dados",
   "refreshRingAnnouncementPartialFound": "{ok} de {total} relays têm os seus dados",
   "refreshRingAnnouncementNoneFound": "Nenhum relay tem os seus dados",
-
   "identityTitle": "Identidade",
   "identityLoadError": "Algo deu errado ao carregar sua identidade. Tente de novo.",
   "identityMissingTitle": "Sem identidade",
@@ -411,11 +389,9 @@
   "identityPublicKeyQrSubtitle": "Como os outros convidam você para círculos",
   "identityAdvancedTitle": "Avançado",
   "identityAdvancedSubtitle": "Chave pública, chave secreta, excluir",
-
   "profileIsPublicNoticeTitle": "Seu perfil é público",
   "profileIsPublicNoticeBody": "Seu nome de exibição e sua foto ficam visíveis para qualquer pessoa na rede Nostr, não apenas para os membros dos seus círculos. Compartilhe apenas o que você se sentir à vontade para tornar público.",
   "identityRefreshProfileTooltip": "Atualizar perfil público",
-
   "identityAdvancedExportError": "Falha ao exportar a chave secreta. Tente de novo.",
   "identityAdvancedDeleteTitle": "Excluir identidade?",
   "identityAdvancedDeleteBody": "Isso excluirá sua identidade permanentemente. Certifique-se de ter feito o backup da sua chave secreta caso queira recuperá-la.",
@@ -436,13 +412,11 @@
   "identityAdvancedHideSecretKey": "Ocultar chave secreta",
   "identityAdvancedCopySecretKeyTooltip": "Copiar chave secreta",
   "identityAdvancedDeleteIdentityCta": "Excluir identidade",
-
   "qrCodeLoadError": "Algo deu errado ao carregar sua chave pública. Tente de novo.",
   "qrCodeYourPublicKeyLabel": "Sua chave pública",
   "qrCodeWhatIsThisTitle": "O que é isso?",
   "qrCodeExplainerKeys": "O Haven funciona com base no Nostr, uma rede aberta sem nenhuma conta de empresa ou cadastro por trás. Sua identidade é apenas um par de chaves: uma chave secreta que só você guarda e esta chave pública gerada a partir dela.",
-  "qrCodeExplainerUsername": "Sua chave pública funciona como um nome de usuário que é seguro compartilhar. As pessoas escaneiam este código, ou colam sua chave pública, para convidar você para um círculo. Compartilhá-la não pode revelar sua localização, que só é visível para os membros dos círculos dos quais você participa, nem seu nome e sua foto, que permanecem neste dispositivo, a menos que você opte por publicar um perfil público.",
-
+  "qrCodeExplainerUsername": "Sua chave pública funciona como um nome de usuário que é seguro compartilhar. As pessoas escaneiam este código, ou colam sua chave pública, para convidar você para um círculo. Compartilhá-la não pode revelar sua localização, que só é visível para os membros dos círculos dos quais você participa. Seu nome de exibição e sua foto já são públicos, então compartilhar este código não revela nada mais sobre eles.",
   "displayNameCardTitle": "Nome de exibição",
   "displayNameCardLoadError": "Não foi possível carregar seu nome de exibição. Tente mais tarde.",
   "displayNameCardHint": "Digite seu nome de exibição",
@@ -452,7 +426,6 @@
   "displayNameCardRetryLabel": "Falha ao salvar. Tente de novo",
   "displayNameCardSavedAnnouncement": "Nome de exibição salvo",
   "displayNameCardSaveFailedAnnouncement": "Falha ao salvar, tente de novo",
-
   "keyDisplayCopiedToClipboard": "{label} copiada para a área de transferência",
   "keyDisplaySemantics": "{label}: {state}",
   "keyDisplayStateRevealed": "revelada",
@@ -462,7 +435,6 @@
   "keyDisplayCopyTooltip": "Copiar",
   "keyDisplayCompactCopied": "Chave copiada para a área de transferência",
   "keyDisplayCompactTapToCopy": "Toque para copiar",
-
   "npubQrCopiedSnack": "Chave pública copiada para a área de transferência",
   "npubQrCopyButton": "Copiar chave pública",
   "circleMemberPublicKeyCopied": "Chave pública copiada para a área de transferência",
@@ -479,7 +451,6 @@
   "memberNicknameSheetClearedAnnouncement": "Apelido removido",
   "npubQrScanLabel": "Escaneie para me adicionar",
   "npubQrSemanticsLabel": "QR code da sua identidade pública",
-
   "photoHeaderRemoveTitle": "Remover a foto de perfil?",
   "photoHeaderRemoveBody": "Isso remove sua foto do seu perfil público.",
   "photoHeaderEditPhoto": "Editar foto",
@@ -487,7 +458,6 @@
   "photoHeaderViewPhotoSemantics": "Ver foto de perfil",
   "photoHeaderAddPhotoSemantics": "Adicionar foto de perfil",
   "photoHeaderChangePhotoSemantics": "Alterar foto de perfil",
-
   "avatarPickerPhotoUpdated": "Foto atualizada — publicada no seu perfil público do Nostr.",
   "avatarPickerPhotoRemoved": "Foto removida.",
   "avatarPickerRemoveError": "Não foi possível remover sua foto. Tente de novo.",
@@ -495,11 +465,9 @@
   "avatarPickerCropTitle": "Cortar foto",
   "avatarPickerCropDone": "Concluir",
   "avatarPickerCropCancel": "Cancelar",
-
   "avatarFullscreenClose": "Fechar",
   "avatarFullscreenSemantics": "Foto de perfil, tela cheia",
   "avatarFullscreenLoadError": "Não foi possível carregar a foto",
-
   "mapInitializing": "Inicializando...",
   "mapInitFailedTitle": "Falha na inicialização",
   "mapInitFailedMessage": "Falha ao inicializar os serviços de localização.",
@@ -516,17 +484,13 @@
   "mapOpenInAppleMapsBody": "Apenas a coordenada do mapa é enviada ao Apple Maps, nunca um nome ou identidade.",
   "mapOpenInAppleMapsConfirm": "Abrir no Apple Maps",
   "mapOpenMapsError": "Não foi possível abrir o Maps",
-
   "mapControlsZoomIn": "Aproximar",
   "mapControlsZoomOut": "Afastar",
   "mapControlsRecenter": "Recentralizar",
   "mapControlsRecenterFab": "Recentralizar na minha localização",
-
   "mapAttributionCreditsButton": "Créditos e licença do mapa",
-
   "userLocationMarkerSemantics": "Marcador da sua localização{accuracy}",
   "userLocationMarkerAccuracy": ". Precisão: {meters} metros",
-
   "memberMarkerMinutesShort": "{count}m",
   "memberMarkerHoursShort": "{count}h",
   "memberMarkerDaysShort": "{count}d",
@@ -545,7 +509,6 @@
   "addRelaySheetErrorInsecureScheme": "Use wss:// para que o tráfego até este relay seja criptografado.",
   "addRelaySheetErrorHasCredentials": "A URL do relay não pode conter credenciais.",
   "addRelaySheetErrorInvalidFormat": "Informe um endereço de relay como wss://relay.example.com.",
-
   "avatarSemanticsLabel": "Avatar do usuário",
   "avatarSemanticsFor": "de {initials}",
   "avatarSemanticsOnline": "on-line",

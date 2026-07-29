@@ -126,7 +126,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get onboardingValueProp3Body =>
-      'Sin correo, sin número de teléfono, sin registro. Haven crea una identidad privada que vive solo en tu teléfono, sin nada que la vincule a la persona real que eres.';
+      'Sin correo, sin número de teléfono, sin registro. Haven crea una identidad cuya clave secreta nunca sale de tu teléfono, así que no hay ninguna cuenta que nadie pueda entregar.';
 
   @override
   String get onboardingValueProp1Summary =>
@@ -138,7 +138,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get onboardingValueProp3Summary =>
-      'Sin correo, teléfono ni registro. Nada te vincula con ella.';
+      'Sin correo, teléfono ni registro. Tu clave secreta nunca sale de tu teléfono.';
 
   @override
   String get onboardingCreateIdentityTitle => 'Crea tu identidad';
@@ -275,7 +275,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get relaySettingsKeyPackageSubtitle =>
-      'kind 10051, donde los invitados descubren tus claves de cifrado';
+      'kind 10002, donde los invitados descubren tus claves de cifrado';
 
   @override
   String get relaySettingsLoadRelaysError => 'No se pudieron cargar los relés.';
@@ -353,59 +353,6 @@ class AppLocalizationsEs extends AppLocalizations {
   @override
   String get relaySettingsEmptyMessage =>
       'Necesitas al menos un relé para que otros puedan localizarte. Toca abajo para restaurar los predeterminados de Haven.';
-
-  @override
-  String get relaySettingsExplainerSemantics =>
-      'Cómo funcionan los relés de Haven';
-
-  @override
-  String get relaySettingsExplainerHeading => 'Cómo funciona';
-
-  @override
-  String get relaySettingsExplainerNostr =>
-      'Haven no tiene servidor central. Funciona sobre dos tecnologías abiertas. Nostr es una red de servidores independientes llamados relés que cualquiera puede gestionar; reciben tus mensajes, los guardan brevemente y los entregan cuando tus contactos los solicitan. Ningún relé es imprescindible, así que si uno se desconecta los demás siguen funcionando, y cualquier cosa que un relé pudiera verse obligado a entregar son siempre datos cifrados.';
-
-  @override
-  String get relaySettingsExplainerMarmot =>
-      'El protocolo Marmot cifra tus mensajes en tu dispositivo antes de que salgan de él, usando el estándar MLS (Messaging Layer Security). Cada círculo es su propio grupo cifrado con sus propias claves, de modo que distintos círculos no pueden vincularse entre sí. Esas claves también siguen avanzando con el tiempo, una propiedad llamada confidencialidad hacia adelante, así que ni siquiera una clave expuesta más tarde puede desbloquear tus mensajes anteriores.';
-
-  @override
-  String get relaySettingsExplainerMetadata =>
-      'Por eso, un relé nunca ve tu ubicación, tus mensajes, quién está en tus círculos ni tu identidad en esos mensajes. Cada mensaje se publica desde una dirección de envío nueva y de un solo uso, así que nada en el mensaje lo vincula a tu cuenta. Aun así, un relé sí ve algunos metadatos: una etiqueta aleatoria por círculo, el momento y el tamaño de tu tráfico, y la dirección de red desde la que te conectas.';
-
-  @override
-  String get relaySettingsExplainerInboxTerm =>
-      'Los relés de bandeja de entrada';
-
-  @override
-  String get relaySettingsExplainerInboxBody =>
-      ' son tu buzón: donde se entregan, también cifradas, las invitaciones para unirte a un círculo, para que las recojas. Para que alguien pueda invitarte, debe poder alcanzar uno de estos relés.';
-
-  @override
-  String get relaySettingsExplainerKeyPackageTerm => 'Los relés de KeyPackage';
-
-  @override
-  String get relaySettingsExplainerKeyPackageBody =>
-      ' son donde publicas un pequeño paquete de tus claves públicas, que es seguro compartir. Alguien que conozca tu cuenta lo obtiene de estos relés para añadirte a un círculo.';
-
-  @override
-  String get relaySettingsExplainerOwnRelayTerm => 'Usar tu propio relé.';
-
-  @override
-  String get relaySettingsExplainerOwnRelayBody =>
-      ' Cada círculo también lleva su propia lista de relés, compartida con cada miembro al unirse; es esa lista, no tu bandeja de entrada, por donde viajan las actualizaciones cifradas continuas del círculo. Así que si prefieres evitar los relés públicos, puedes gestionar el tuyo y dirigir un círculo hacia él: una vez que todos se hayan unido, el tráfico de ese círculo puede fluir solo a través de él.';
-
-  @override
-  String get relaySettingsExplainerReachabilityTerm =>
-      'El inconveniente es la accesibilidad.';
-
-  @override
-  String get relaySettingsExplainerReachabilityBody =>
-      ' Cada miembro debe poder conectarse a ese relé y, cuando invitas a alguien por primera vez, ambos necesitáis un relé que los dos podáis alcanzar (por ejemplo, el mismo relé privado indicado como relé de bandeja de entrada y de KeyPackage de todos). Un relé privado ve el mismo tráfico cifrado y los mismos tiempos que cualquier otro; simplemente tú controlas quién lo gestiona.';
-
-  @override
-  String get relaySettingsExplainerFooter =>
-      'Puedes añadir o quitar relés en cualquiera de las listas en cualquier momento. Más relés te hacen más fácil de localizar; menos te dan más control sobre dónde va tu tráfico cifrado.';
 
   @override
   String get locationSettingsTitle => 'Ubicación';
@@ -538,60 +485,6 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get aboutLinkOpenError => 'No se pudo abrir el enlace';
-
-  @override
-  String get aboutWhoCanSeeTitle => 'Quién puede ver qué';
-
-  @override
-  String get aboutWhoCanSeeIntro =>
-      'Tu ubicación exacta solo la pueden leer las personas que tú elijas. Esto es lo que las principales partes pueden y no pueden ver.';
-
-  @override
-  String get aboutActorCirclesWho =>
-      'Los miembros del círculo con quienes compartes';
-
-  @override
-  String get aboutActorCirclesSees =>
-      'Tu ubicación exacta y el nombre visible que elijas, pero solo dentro de los círculos que compartes con ellos, nunca tus otros círculos.';
-
-  @override
-  String get aboutActorRelaysWho => 'Los operadores de relés';
-
-  @override
-  String get aboutActorRelaysSees =>
-      'Los servidores que transmiten tus mensajes. Ven tu dirección IP, la clave pública con la que publicas (un identificador aleatorio, no tu nombre), el tamaño y el momento de tu tráfico, y qué cuenta buscaste al consultar a alguien. Nunca pueden leer tu ubicación, tus mensajes, los nombres de tus círculos ni quién está en ellos.';
-
-  @override
-  String get aboutActorMapWho => 'El proveedor del mapa (Stadia Maps)';
-
-  @override
-  String get aboutActorMapSees =>
-      'Solo mientras el mapa está abierto: tu dirección IP y la zona que estás viendo, para poder enviar las imágenes de mapa correctas. Nunca tus círculos ni tu ubicación compartida. Stadia anonimiza las direcciones IP y no vende tus datos.';
-
-  @override
-  String get aboutActorDevelopersWho => 'Los desarrolladores de Haven';
-
-  @override
-  String get aboutActorDevelopersSees =>
-      'Nada. Haven no gestiona ningún servidor ni recopila analíticas. Un desarrollador solo podría ver lo que ve un operador de relés, y únicamente si usaste un relé que él gestione.';
-
-  @override
-  String get aboutWhoCanSeeMetadataNote =>
-      'Aun así, tu actividad no es invisible. Un relé que uses, o cualquiera que vigile tu red, puede deducir que estás activo, aproximadamente cuándo y con qué frecuencia, a partir de los tiempos de conexión y los tamaños de los mensajes.';
-
-  @override
-  String get aboutScreenshotTitle => 'Protección contra capturas de pantalla';
-
-  @override
-  String get aboutScreenshotBody =>
-      'En Android, Haven bloquea las capturas de pantalla y la grabación de pantalla en toda la app para evitar exponer la ubicación por accidente. Es una protección a nivel de sistema (FLAG_SECURE) que se aplica a todas las pantallas de la app, incluidos el mapa y las listas de miembros.';
-
-  @override
-  String get aboutVpnTitle => 'Sé aún más privado con una VPN';
-
-  @override
-  String get aboutVpnBody =>
-      'Los relés y el proveedor del mapa ven tu dirección IP, y tu proveedor de internet ve a qué servidores accedes. Una VPN de confianza les oculta tu dirección IP. Recomendamos Mullvad. No cambia lo que ven los miembros de tu círculo y traslada la confianza al proveedor de la VPN.';
 
   @override
   String get aboutVpnLinkLabel => 'mullvad.net';
@@ -735,6 +628,191 @@ class AppLocalizationsEs extends AppLocalizations {
   @override
   String get privacyPublicProfileDetailExifStripped =>
       'Antes de subir la foto, Haven vuelve a codificarla y elimina los datos ocultos que añaden las cámaras, incluida la posición GPS donde se tomó la foto. Aquí eso importa: una foto de vacaciones podría, de lo contrario, llevar las coordenadas de tu casa.';
+
+  @override
+  String get privacyGroupHowLocationTravelsHeading =>
+      'El camino de tu ubicación';
+
+  @override
+  String get privacyRelaysTitle =>
+      'Los relés: los servidores que transmiten tus mensajes';
+
+  @override
+  String get privacyRelaysSubtitle =>
+      'Los equipos de otras personas por los que pasan tus actualizaciones';
+
+  @override
+  String get privacyRelaysWhatIsARelay =>
+      'Haven no tiene servidor propio, así que tus actualizaciones viajan por los de otras personas. Se llaman relés: servidores pequeños e independientes que cualquiera puede gestionar. Un relé guarda brevemente un mensaje cifrado y lo entrega cuando tu círculo lo pide.';
+
+  @override
+  String get privacyRelaysWhyMany =>
+      'Usar varios significa que ninguno puede dejarte aislado por su cuenta. Si uno se desconecta, los demás siguen funcionando. Tú eliges qué relés usas y puedes cambiarlos cuando quieras.';
+
+  @override
+  String get privacyRelaysTwoLists =>
+      'Haven mantiene dos listas para ti. Tus relés de bandeja de entrada son por donde te llegan las invitaciones. Tus relés de KeyPackage son donde los demás recogen las claves que necesitan para invitarte. Cada círculo lleva además su propia lista, y por ella viajan las actualizaciones cifradas del círculo.';
+
+  @override
+  String get privacyRelaysMeansForYou =>
+      'Aquí no hay nada arriesgado que puedas hacer mal: un relé solo ve datos cifrados. Pero sí necesitas al menos un relé alcanzable; si no, nadie puede invitarte y tus círculos se quedan en silencio.';
+
+  @override
+  String get privacyRelaysDetailIndexers =>
+      'Al margen de tus propias listas, Haven consulta un pequeño conjunto de relés de directorio públicos para buscar los perfiles y las claves de otras personas. Los contacta incluso si solo has configurado relés privados tuyos. Ven tu dirección de red y qué cuentas has consultado.';
+
+  @override
+  String get privacyRelaysDetailKeyListIsPublic =>
+      'Tu lista de relés de KeyPackage se publica en la red, firmada con tu clave de identidad, para que los demás puedan encontrarla. Si añades un relé privado a esa lista, su dirección se vuelve pública y queda ligada a ti. Un relé que solo aparece en la lista propia de un círculo no se anuncia así.';
+
+  @override
+  String get privacyEncryptionTitle => 'Cómo funciona el cifrado';
+
+  @override
+  String get privacyEncryptionSubtitle =>
+      'Claves por círculo, y qué cambia cuando alguien entra o sale';
+
+  @override
+  String get privacyEncryptionPerCircle =>
+      'Tu ubicación se cifra en tu teléfono antes de salir de él, con un estándar abierto llamado MLS. Cada círculo es su propio grupo cifrado con sus propias claves. Nadie fuera de un círculo puede leer lo que se envía dentro: ni un relé, ni Haven, ni otro círculo al que pertenezcas.';
+
+  @override
+  String get privacyEncryptionWhenSomeoneJoins =>
+      'Cuando alguien se une, el círculo pasa a una clave nueva. Esa persona puede leer lo que se envía después de su llegada, y nada de antes. Haven nunca envía a un miembro nuevo ubicaciones pasadas.';
+
+  @override
+  String get privacyEncryptionWhenSomeoneLeaves =>
+      'Cuando alguien se va o lo retiran del círculo, este pasa a otra clave nueva. Al cabo de unos pocos minutos como máximo, esa persona deja de poder leer nada nuevo.';
+
+  @override
+  String get privacyEncryptionKeysChangeOnMembership =>
+      'Las claves cambian cuando cambian los miembros, no a intervalos fijos. Entre esos cambios, una sola clave cubre todo lo que se envía. Así que alguien a quien retires de un círculo que llevaba mucho tiempo sin cambios puede seguir abriendo cualquier mensaje que guardara mientras era miembro, incluso de semanas antes. No puede abrir nada de lo enviado después de su salida.';
+
+  @override
+  String get privacyEncryptionMeansForYou =>
+      'El cifrado te protege de todos los que están fuera de tus círculos. No puede protegerte de quien alguna vez estuvo dentro. Si quieres cortar limpiamente con una persona, empezar un círculo nuevo es más seguro que quitarla de uno antiguo.';
+
+  @override
+  String get privacyEncryptionDetailMls =>
+      'MLS (Messaging Layer Security) es el mismo estándar del IETF que usan otras mensajerías seguras. Haven llega a la red Nostr a través del protocolo Marmot, que define cómo viajan los grupos MLS por los relés. La clave con la que firma cada círculo es distinta de tu clave pública de identidad de Nostr.';
+
+  @override
+  String get privacyEncryptionDetailEpochs =>
+      'El tiempo que dura cada clave se llama época. Tu dispositivo guarda solo el material justo para descifrar los mensajes de las últimas épocas que aún están en camino, y luego lo descarta; por eso Haven no puede recuperarte los mensajes antiguos, ni siquiera en principio.';
+
+  @override
+  String get privacyWhatOthersSeeTitle =>
+      'Qué ven los miembros y qué ven los relés';
+
+  @override
+  String get privacyWhatOthersSeeSubtitle =>
+      'Con quién compartes y los servidores que hay en medio';
+
+  @override
+  String get privacyWhatOthersSeeMembersHeading =>
+      'Las personas de tus círculos';
+
+  @override
+  String get privacyWhatOthersSeeMembersExact =>
+      'Todos en un círculo ven tu ubicación exacta en el mapa, no una zona aproximada. No hay ningún ajuste que comparta una ubicación imprecisa con unos miembros y otra precisa con otros.';
+
+  @override
+  String get privacyWhatOthersSeeCannotPause =>
+      'Mientras Haven está abierto y perteneces a un círculo, tu ubicación sale por sí sola cada dos o tres minutos. No hay botón de pausa. El único interruptor decide si se sigue compartiendo cuando cierras la app.';
+
+  @override
+  String get privacyWhatOthersSeeMembersLearnKey =>
+      'Unirte a un círculo también muestra tu clave pública a todos sus miembros. Con ella pueden consultar tu perfil público y todo lo demás que hayas publicado alguna vez con esa clave.';
+
+  @override
+  String get privacyWhatOthersSeeCoMemberIp =>
+      'La foto de perfil de un miembro se descarga de un servidor que esa persona elige. Al cargarla, quien gestiona ese servidor conoce tu dirección de red y, con ella, más o menos en qué parte del mundo estás. Esto ocurre por sí solo, sin que toques nada.';
+
+  @override
+  String get privacyWhatOthersSeeRelaysHeading => 'Los operadores de relés';
+
+  @override
+  String get privacyWhatOthersSeeRelaysCannot =>
+      'Los operadores de relés no pueden leer tu ubicación, tus mensajes, el nombre de tu círculo ni su lista de miembros. Cada mensaje les llega desde una dirección de envío nueva y de un solo uso, así que no pueden saber qué miembro lo envió.';
+
+  @override
+  String get privacyWhatOthersSeeRelaysCan =>
+      'Sí ven tu dirección de red, cuándo estás en línea y el tamaño y la frecuencia de tu tráfico. Cada círculo lleva una etiqueta aleatoria, así que un relé puede agrupar los mensajes de un mismo círculo y estimar cuántas personas hay en él, sin llegar a saber quiénes son.';
+
+  @override
+  String get privacyWhatOthersSeeMeansForYou =>
+      'Trata un círculo como las personas a las que darías tu dirección de casa. Frente a los relés y a los de fuera, el cifrado aguanta, y una VPN cierra el hueco de la dirección de red. Frente a un miembro que guarda una captura de pantalla, no aguanta nada.';
+
+  @override
+  String get privacyWhatOthersSeeDetailTag =>
+      'La etiqueta de un círculo se mantiene igual durante toda la vida de ese círculo, así que un relé puede vincular indefinidamente todos sus mensajes entre sí. Eso es una propiedad del protocolo subyacente, no algo que Haven pueda cambiar.';
+
+  @override
+  String get commonLearnMore => 'Más información';
+
+  @override
+  String get relaySettingsBackendCaption =>
+      'Haven no tiene servidor propio. Tus actualizaciones cifradas pasan por servidores independientes que se llaman relés, y que nunca ven tu ubicación ni quién está en tus círculos.';
+
+  @override
+  String get privacyWhatOthersSeeScreenshots =>
+      'Las capturas de pantalla dependen de la plataforma, y las dos no se comportan igual. En Android, Haven bloquea las capturas de pantalla y la grabación de pantalla en toda la app. En iPhone no puede: Haven solo difumina la vista previa del selector de apps, pero un miembro todavía puede capturar lo que hay en la pantalla.';
+
+  @override
+  String get privacyWhatOthersSeeDetailExpiry =>
+      'Haven pide a los relés que descarten los mensajes de ubicación al cabo de unos cuatro minutos. Esa petición es solo orientativa: un relé puede quedárselos más tiempo. Las invitaciones no llevan ninguna caducidad y pueden quedarse indefinidamente en tu relé de bandeja de entrada.';
+
+  @override
+  String get privacyGroupTheLimitsHeading => 'Los límites';
+
+  @override
+  String get privacyInferenceTitle => 'Lo que aún se puede deducir de ti';
+
+  @override
+  String get privacyInferenceSubtitle =>
+      'Los rastros que el cifrado no puede ocultar';
+
+  @override
+  String get privacyInferenceWhatIsMetadata =>
+      'El cifrado oculta lo que envías. No puede ocultar que has enviado algo. El patrón que rodea un mensaje —cuándo salió, qué tamaño tenía, a qué servidores estabas conectado— es lo que se llama metadatos, y sigue a la vista aunque el contenido no lo esté.';
+
+  @override
+  String get privacyInferenceActivityPattern =>
+      'A partir de ese patrón, un relé que uses puede deducir aproximadamente cuándo estás activo y con qué frecuencia. Haven envía además una actualización extra en cuanto te mueves más de unos cien metros. Con un registro lo bastante largo, eso puede dar pistas sobre si te estabas desplazando o si seguías en el mismo sitio, sin mostrar nunca dónde.';
+
+  @override
+  String get privacyInferencePresence =>
+      'Mientras Haven está funcionando mantiene una conexión abierta con tus relés, así que también ven que estás en línea y qué círculos estás siguiendo. Es el precio de que las actualizaciones lleguen en segundos y no en minutos.';
+
+  @override
+  String get privacyInferenceIpHeading => 'Tu dirección de red';
+
+  @override
+  String get privacyInferenceIpAddress =>
+      'Todos los servidores con los que habla Haven ven la dirección desde la que se conecta tu teléfono: tus relés, el proveedor del mapa y quien aloje la foto de perfil de un miembro. Tu proveedor de internet ve a cuáles de esos servidores accediste y cuándo. Haven, por sí solo, no hace nada por ocultar ni lo uno ni lo otro.';
+
+  @override
+  String get privacyInferenceVpnHeading => '¿Conviene usar una VPN?';
+
+  @override
+  String get privacyInferenceVpnHelps =>
+      'Una VPN sustituye tu dirección por la suya, así que los relés y los demás servidores ya no ven desde dónde te conectas. También oculta a tu proveedor de internet a qué servidores accedes. Recomendamos Mullvad.';
+
+  @override
+  String get privacyInferenceVpnLimits =>
+      'No es una solución milagrosa. Una VPN no cambia nada de lo que ven los miembros de tu círculo. Y no oculta el momento ni el tamaño de tu tráfico al relé con el que estás hablando. Además solo traslada tu confianza al proveedor de la VPN: no te libra de tener que confiar en alguien.';
+
+  @override
+  String get privacyInferenceMeansForYou =>
+      'Si lo que te preocupa es que un operador de red te sitúe en un mapa, y no una persona, una VPN es lo más útil que puedes añadir. Si lo que te preocupa son las personas de tus círculos, no te va a ayudar en absoluto.';
+
+  @override
+  String get privacyInferenceDetailJitter =>
+      'Haven varía a propósito el intervalo entre actualizaciones, así que una grabación corta no muestra ningún ritmo claro. Promediada a lo largo de muchas horas, la frecuencia real sí se puede estimar. Los mensajes tampoco se rellenan para igualar su tamaño, y las actualizaciones de ubicación caen en un rango estrecho de tamaños, lo que las hace reconocibles como tales.';
+
+  @override
+  String get privacyInferenceDetailOutOfScope =>
+      'Algunas cosas quedan simplemente fuera de lo que Haven puede resolver. Alguien capaz de vigilar muchos relés a la vez, o tu propio teléfono en cuanto lo controla otra persona, quedan más allá de lo que cualquier decisión de diseño de esta app podría arreglar.';
 
   @override
   String get commonClearAll => 'Borrar todo';
@@ -1590,7 +1668,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get qrCodeExplainerUsername =>
-      'Tu clave pública funciona como un nombre de usuario que es seguro compartir. Las personas escanean este código, o pegan tu clave pública, para invitarte a un círculo. Compartirla no puede revelar tu ubicación, que solo es visible para los miembros de los círculos a los que te has unido, ni tu nombre y tu foto, que permanecen en este dispositivo a menos que elijas publicar un perfil público.';
+      'Tu clave pública funciona como un nombre de usuario que es seguro compartir. Las personas escanean este código, o pegan tu clave pública, para invitarte a un círculo. Compartirla no puede revelar tu ubicación, que solo es visible para los miembros de los círculos a los que te has unido. Tu nombre visible y tu foto ya son públicos, así que compartir este código no revela nada más sobre ellos.';
 
   @override
   String get displayNameCardTitle => 'Nombre visible';

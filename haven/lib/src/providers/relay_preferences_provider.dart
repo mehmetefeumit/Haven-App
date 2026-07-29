@@ -45,7 +45,7 @@ final relayPreferencesServiceProvider = FutureProvider<RelayPreferencesService>(
     }
     final manager = await circleService.getCircleManagerFfi();
     final service = NostrRelayPreferencesService(manager: manager);
-    // Publishing of kind 10050 / 10051 is always on. Force-enable the
+    // Publishing of kind 10050 / 10002 is always on. Force-enable the
     // underlying FFI toggle so the build path never returns suppressed.
     for (final category in RelayCategory.values) {
       try {
@@ -215,7 +215,7 @@ class InboxRelaysNotifier extends AsyncNotifier<List<String>>
     // marker ALONE is not enough: `keyPackagePublisherProvider` is a
     // listener-less FutureProvider, so a marker change only marks it dirty;
     // the trailing `read` is what actually drives the rebuild that
-    // republishes kind 30443/10051/10050 to the updated relay set. Every
+    // republishes kind 30443/10002/10050 to the updated relay set. Every
     // other republish call site (map_shell, invitation_card,
     // name_circle_page, onboarding) pairs the invalidate with a read for
     // the same reason; without the read, an added inbox relay would not be
@@ -228,7 +228,7 @@ class InboxRelaysNotifier extends AsyncNotifier<List<String>>
   }
 }
 
-/// Notifier for the user's `KeyPackage` (kind 10051) relay list.
+/// Notifier for the user's `KeyPackage` (kind 10002) relay list.
 class KeyPackageRelaysNotifier extends AsyncNotifier<List<String>>
     implements RelayCategoryNotifier {
   @override
@@ -294,12 +294,12 @@ class KeyPackageRelaysNotifier extends AsyncNotifier<List<String>>
   }
 
   void _invalidateDownstream() {
-    // KeyPackage list changes affect the kind 30443/10051 publisher.
+    // KeyPackage list changes affect the kind 30443/10002 publisher.
     // Invalidating the marker ALONE is not enough: keyPackagePublisher
     // Provider is a listener-less FutureProvider, so a marker change only
     // marks it dirty; the trailing `read` is what actually drives the
     // rebuild that republishes the KeyPackage (30443) and its relay list
-    // (10051) to the updated relay set — matching every other republish
+    // (10002) to the updated relay set — matching every other republish
     // call site. Without the read, an added KeyPackage relay would not
     // receive the user's KeyPackage until the next app resume.
     ref
@@ -315,7 +315,7 @@ final inboxRelaysProvider =
       InboxRelaysNotifier.new,
     );
 
-/// User's `KeyPackage` (kind 10051) relay list.
+/// User's `KeyPackage` (kind 10002) relay list.
 final keyPackageRelaysProvider =
     AsyncNotifierProvider<KeyPackageRelaysNotifier, List<String>>(
       KeyPackageRelaysNotifier.new,

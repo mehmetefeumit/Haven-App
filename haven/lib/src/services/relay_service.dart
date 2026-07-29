@@ -331,7 +331,12 @@ class RelayGiftWrapFetch {
 ///
 /// Handles fetching KeyPackages and publishing events via Nostr relays.
 abstract class RelayService {
-  /// Fetches a user's KeyPackage relay list (kind 10051).
+  /// Fetches a user's KeyPackage relay list.
+  ///
+  /// Resolves through the Dark Matter discovery cascade: the legacy kind-10051
+  /// list first, then the kind-10002 NIP-65 list that replaced it. Both tiers
+  /// are still consulted so an account that has not re-published since the
+  /// cutover stays reachable.
   ///
   /// Returns the list of relay URLs where the user publishes KeyPackages.
   /// Returns an empty list if no relay list is found.
@@ -351,8 +356,9 @@ abstract class RelayService {
 
   /// Fetches the latest KeyPackage (kind 443) for a user.
   ///
-  /// First fetches the user's KeyPackage relay list (kind 10051),
-  /// then fetches the KeyPackage from those relays.
+  /// First resolves the user's KeyPackage relay list through the discovery
+  /// cascade (legacy kind 10051, then kind-10002 NIP-65, then defaults), then
+  /// fetches the KeyPackage from those relays.
   ///
   /// Returns `null` if no KeyPackage is found (user may not have Haven).
   ///
@@ -463,6 +469,19 @@ abstract class RelayService {
   /// own relays only when missing/drifted, honoring the per-category privacy
   /// toggle. Never NIP-65/kind-10002. `circle` is the circle-manager FFI
   /// handle; the secret bytes are consumed by the FFI and zeroized Rust-side.
+  ///
+  /// KNOWN INCONSISTENCY — the kind numbers above are accurate, do not "fix"
+  /// them. This tick republishes the KeyPackage list as **kind 10051**: it
+  /// calls the core `RelayType::KeyPackage`, whose `to_kind()` is
+  /// `Kind::MlsKeyPackageRelays` (10051), rather than `RelayTypeFfi::Nip65`
+  /// (10002) that every other publish path now uses
+  /// (`key_package_provider.dart`, `buildRelayListPublish`). Under Dark Matter
+  /// the kind-10051 list is retired and the once-only cutover retraction
+  /// (`retractLegacyKeyPackages`) deletes it — so a maintenance tick firing
+  /// after that retraction can republish the very list the cutover removed.
+  /// Fixing it means changing the Rust side (`maintain_relay_list` passing
+  /// `RelayType::KeyPackage`), so it is recorded here rather than papered over
+  /// in the doc comment.
   ///
   /// Best-effort — returns a [RelayListMaintenanceResult.empty] on failure
   /// rather than throwing.

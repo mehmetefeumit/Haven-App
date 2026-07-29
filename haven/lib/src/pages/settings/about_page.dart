@@ -1,7 +1,13 @@
 /// About page for Haven.
 ///
-/// Consolidates privacy, security, and technology information
-/// into a single informational page accessible from Settings.
+/// Identity, attribution and legal information: the app's value propositions,
+/// open-source licenses, the OpenStreetMap/Stadia attribution links, and the
+/// version footer.
+///
+/// The privacy and technology explanations that used to live here now sit in
+/// the Privacy section (`privacy_page.dart`), one level above About in
+/// Settings, so there is exactly one place in the app that answers "what can
+/// others see". Do not reintroduce a second copy here.
 library;
 
 import 'package:flutter/material.dart';
@@ -11,14 +17,21 @@ import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/external_link.dart';
 import 'package:haven/src/widgets/common/disclosure_chevron.dart';
 import 'package:haven/src/widgets/common/haven_logo.dart';
-import 'package:haven/src/widgets/widgets.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Page displaying Haven's privacy guarantees.
+/// Page displaying Haven's identity, attribution and legal information.
 ///
-/// Hero at top, info cards in the middle, footer pinned at the bottom via
-/// [Spacer] when the content fits the viewport. On shorter screens the
-/// content scrolls instead of overflowing.
+/// Hero, then info cards, then legal actions, then the version footer — one
+/// plain scrolling column.
+///
+/// The footer is deliberately NOT pinned to the bottom of the viewport. This
+/// page used to do that with `ConstrainedBox(minHeight:) + IntrinsicHeight +
+/// Spacer`, which is the usual idiom for it, but `IntrinsicHeight` reports the
+/// wrong height once `Text` wraps: the page overflowed by 48px at 100% text
+/// scale on a 320dp surface and by 288px at 200%. `SliverFillRemaining` does
+/// not fix it either, because `Spacer` needs a bounded height and this content
+/// legitimately exceeds the viewport. Pinning is cosmetic; not clipping the
+/// licenses and attribution is not.
 class AboutPage extends StatelessWidget {
   /// Creates the about page.
   const AboutPage({super.key});
@@ -32,15 +45,9 @@ class AboutPage extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(title: Text(l10n.aboutTitle)),
       body: SafeArea(
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            return SingleChildScrollView(
-              child: ConstrainedBox(
-                constraints: BoxConstraints(minHeight: constraints.maxHeight),
-                child: IntrinsicHeight(
-                  child: Padding(
-                    padding: const EdgeInsets.all(HavenSpacing.base),
-                    child: Column(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(HavenSpacing.base),
+          child: Column(
                       children: [
                         _HeroSection(
                           colorScheme: colorScheme,
@@ -65,19 +72,12 @@ class AboutPage extends StatelessWidget {
                           title: l10n.onboardingValueProp3Title,
                           description: l10n.onboardingValueProp3Body,
                         ),
-                        const SizedBox(height: HavenSpacing.base),
-                        const _WhoCanSeeWhat(),
                         const SizedBox(height: HavenSpacing.sm),
                         const _LegalLinks(),
-                        const Spacer(),
+                        const SizedBox(height: HavenSpacing.xl),
                         _Footer(colorScheme: colorScheme, textTheme: textTheme),
                       ],
-                    ),
-                  ),
-                ),
-              ),
-            );
-          },
+          ),
         ),
       ),
     );
@@ -144,9 +144,13 @@ class AboutPage extends StatelessWidget {
 // Private sub-widgets
 // ---------------------------------------------------------------------------
 
-/// Legal & attribution actions: privacy policy, open-source licenses
-/// (including the OSM/ODbL and Stadia entries), and the OpenStreetMap
-/// "report a map issue" / "support" links, plus the compound attribution line.
+/// Legal & attribution actions: open-source licenses (including the OSM/ODbL
+/// and Stadia entries) and the OpenStreetMap "report a map issue" / "support"
+/// links, plus the compound attribution line.
+///
+/// Note: there is deliberately no privacy-policy entry here, because Haven has
+/// no published privacy policy yet (`kHavenWebsiteUrl` is still a placeholder).
+/// An earlier version of this comment claimed one was rendered; it never was.
 class _LegalLinks extends StatelessWidget {
   const _LegalLinks();
 
@@ -198,73 +202,6 @@ class _LegalLinks extends StatelessWidget {
             color: theme.colorScheme.onSurfaceVariant,
           ),
           textAlign: TextAlign.center,
-        ),
-      ],
-    );
-  }
-}
-
-/// Non-boxed "who can see what" disclosure.
-///
-/// Lists each outside party in Haven's location-sharing pipeline and exactly
-/// what they can observe, then recommends a VPN. The claims are verified
-/// against the Marmot/Nostr protocol and Haven's implementation: relays and
-/// the map provider see only network metadata (IP, timing, sizes), never
-/// location plaintext or circle membership.
-class _WhoCanSeeWhat extends StatelessWidget {
-  const _WhoCanSeeWhat();
-
-  @override
-  Widget build(BuildContext context) {
-    final l10n = AppLocalizations.of(context);
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    final bodyStyle = theme.textTheme.bodyMedium?.copyWith(
-      color: scheme.onSurfaceVariant,
-    );
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(l10n.aboutWhoCanSeeTitle, style: theme.textTheme.titleMedium),
-        const SizedBox(height: HavenSpacing.sm),
-        Text(l10n.aboutWhoCanSeeIntro, style: bodyStyle),
-        const SizedBox(height: HavenSpacing.md),
-        HavenActorRow(
-          who: l10n.aboutActorCirclesWho,
-          sees: l10n.aboutActorCirclesSees,
-        ),
-        HavenActorRow(
-          who: l10n.aboutActorRelaysWho,
-          sees: l10n.aboutActorRelaysSees,
-        ),
-        HavenActorRow(
-          who: l10n.aboutActorMapWho,
-          sees: l10n.aboutActorMapSees,
-        ),
-        HavenActorRow(
-          who: l10n.aboutActorDevelopersWho,
-          sees: l10n.aboutActorDevelopersSees,
-        ),
-        const SizedBox(height: HavenSpacing.sm),
-        Text(l10n.aboutWhoCanSeeMetadataNote, style: bodyStyle),
-        const SizedBox(height: HavenSpacing.md),
-        Text(l10n.aboutScreenshotTitle, style: theme.textTheme.titleSmall),
-        const SizedBox(height: HavenSpacing.xs),
-        Text(l10n.aboutScreenshotBody, style: bodyStyle),
-        const SizedBox(height: HavenSpacing.md),
-        Text(l10n.aboutVpnTitle, style: theme.textTheme.titleSmall),
-        const SizedBox(height: HavenSpacing.xs),
-        Text(l10n.aboutVpnBody, style: bodyStyle),
-        const SizedBox(height: HavenSpacing.xs),
-        Align(
-          alignment: AlignmentDirectional.centerStart,
-          child: TextButton.icon(
-            onPressed: () =>
-                openExternalLink(context, kMullvadUrl, logTag: 'About'),
-            icon: const Icon(LucideIcons.externalLink, size: 16),
-            label: Text(l10n.aboutVpnLinkLabel),
-          ),
         ),
       ],
     );

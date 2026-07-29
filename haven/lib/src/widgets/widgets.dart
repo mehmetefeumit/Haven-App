@@ -14,7 +14,6 @@ export 'circles/member_search_bar.dart';
 export 'circles/selected_members_list.dart';
 
 // Common widgets
-export 'common/actor_row.dart';
 export 'common/dim_overlay.dart';
 export 'common/empty_state.dart';
 export 'common/error_display.dart';

@@ -1,52 +1,39 @@
 {
   "@@locale": "ja",
-
   "appearanceTitle": "外観",
-
   "appearanceThemeHeader": "テーマ",
-
   "appearanceThemeSystem": "システムの設定に合わせる",
   "appearanceThemeSystemSubtitle": "デバイスの設定に従います",
-
   "appearanceThemeLight": "ライト",
   "appearanceThemeLightSubtitle": "常にライトテーマを使用します",
-
   "appearanceThemeDark": "ダーク",
   "appearanceThemeDarkSubtitle": "常にダークテーマを使用します",
-
   "appearanceLanguageTitle": "言語",
-
   "languageSystemDefault": "システムの設定に合わせる",
-
   "commonTryAgain": "再試行",
   "commonDismiss": "閉じる",
   "commonSettings": "設定",
   "commonInvitations": "招待",
   "commonPendingInvitations": "{count, plural, other{保留中の招待{count}件}}",
-
   "commonBack": "戻る",
   "commonContinue": "続ける",
   "commonSkip": "スキップ",
   "commonRetry": "再試行",
-
   "onboardingStepOf": "ステップ {current} / {total}",
-
   "onboardingAppName": "Haven",
   "onboardingWelcomeHeadline": "あなたの位置情報を、共有したい相手だけに、プライベートに共有しましょう。",
   "onboardingWelcomeHeadlineEmphasis": "だけ",
   "onboardingWelcomeCta": "はじめる",
-
   "onboardingValuePropsTitle": "Haven が選ばれる理由",
   "onboardingValueProp1Title": "あなたを見られるのはサークルのメンバーだけ",
   "onboardingValueProp1Body": "位置情報は端末を離れる前にこの端末上で暗号化されるため、読み取れるのはあなたが選んだサークルだけです。Haven も含め、ほかの誰にも読めません。Haven はオープンソースなので、そのことは誰でも確認できます。",
   "onboardingValueProp2Title": "誰にも止められない",
   "onboardingValueProp2Body": "Haven には中央サーバーがありません。暗号化されたメッセージは、あなた自身が選べる分散型のリレーのネットワークを通じて届くため、特定の組織が単独でサービスを止めることはできません。",
   "onboardingValueProp3Title": "アカウントは不要",
-  "onboardingValueProp3Body": "メールアドレスも電話番号も、登録も不要です。Haven はあなたの端末の中だけに存在するプライベートな識別情報を作成します。実際のあなたと結びつくものは一切ありません。",
+  "onboardingValueProp3Body": "メールアドレスも電話番号も、登録も不要です。Haven が作る識別情報の秘密鍵は、あなたの端末から外に出ることがありません。だから、誰かが引き渡せるアカウントそのものが存在しません。",
   "onboardingValueProp1Summary": "端末上で暗号化。あなたが選んだサークルだけが読めます。",
   "onboardingValueProp2Summary": "中央サーバーなし。あなたが選ぶリレーネットワークで動作します。",
-  "onboardingValueProp3Summary": "メール、電話番号、登録は不要。あなたと結びつく情報はありません。",
-
+  "onboardingValueProp3Summary": "メール、電話番号、登録は不要。秘密鍵が端末から出ることはありません。",
   "onboardingCreateIdentityTitle": "識別情報を作成",
   "onboardingCreateIdentityBody": "Haven は、この端末の中だけに存在するプライベートな識別情報を作成します。これは、サークルのメンバーがあなたを見分けるためのものです。",
   "onboardingCreateIdentityWarning": "この端末を紛失したりアプリを削除したりすると、識別情報は失われます。Haven がそれを復元する方法はありません。",
@@ -55,7 +42,6 @@
   "onboardingCreateIdentityImportPrompt": "すでに鍵をお持ちですか？",
   "onboardingCreateIdentityImportLink": "代わりにインポートする",
   "onboardingCreateIdentityError": "識別情報の作成中に問題が発生しました。もう一度お試しください。",
-
   "onboardingImportTitle": "既存の鍵をインポート",
   "onboardingImportBody": "ほかの Haven 対応アプリでバックアップした秘密鍵を貼り付けてください。",
   "onboardingImportHint": "nsec1…",
@@ -63,14 +49,11 @@
   "onboardingImportLoading": "インポートしています…",
   "onboardingImportInvalid": "有効なバックアップ鍵ではないようです。ご確認のうえ、もう一度お試しください。",
   "onboardingImportError": "その鍵をインポートできませんでした。ご確認のうえ、もう一度お試しください。",
-
   "onboardingDisplayNameHint": "例: アレックス",
   "onboardingDisplayNameError": "その名前を保存できませんでした。もう一度お試しください。",
   "onboardingAddPhotoOptional": "写真を追加（任意）",
-
   "commonCancel": "キャンセル",
   "commonOpenSettings": "設定を開く",
-
   "settingsTitle": "設定",
   "settingsIdentityTitle": "識別情報",
   "settingsIdentitySubtitle": "プロフィール、鍵、写真の共有",
@@ -83,7 +66,6 @@
   "settingsAboutTitle": "このアプリについて",
   "settingsDebugOverlayTitle": "デバッグログのオーバーレイ",
   "settingsDebugOverlaySubtitle": "ログ出力を画面に表示します",
-
   "relaySettingsTitle": "リレー",
   "relaySettingsCheckRelaysTooltip": "リレーを確認",
   "relaySettingsNoIdentityTitle": "識別情報がありません",
@@ -92,7 +74,7 @@
   "relaySettingsInboxTitle": "受信トレイのリレー",
   "relaySettingsInboxSubtitle": "kind 10050。招待があなたに届く経路です",
   "relaySettingsKeyPackageTitle": "KeyPackage リレー",
-  "relaySettingsKeyPackageSubtitle": "kind 10051。招待者があなたの暗号鍵を見つける経路です",
+  "relaySettingsKeyPackageSubtitle": "kind 10002。招待者があなたの暗号鍵を見つける経路です",
   "relaySettingsLoadRelaysError": "リレーを読み込めませんでした。",
   "relaySettingsAddRelay": "リレーを追加",
   "relaySettingsRestoreDefaults": "デフォルトに戻す",
@@ -111,21 +93,6 @@
   "relaySettingsStatusSemantics": "リレーの状態: {status}",
   "relaySettingsEmptyTitle": "リレーが設定されていません",
   "relaySettingsEmptyMessage": "ほかの人があなたに連絡できるよう、リレーが少なくとも1件必要です。下をタップして Haven のデフォルトに戻してください。",
-  "relaySettingsExplainerSemantics": "Haven のリレーの仕組み",
-  "relaySettingsExplainerHeading": "仕組み",
-  "relaySettingsExplainerNostr": "Haven には中央サーバーがありません。2つのオープンな技術の上で動いています。Nostr は、誰でも運用できる「リレー」と呼ばれる独立したサーバーのネットワークです。リレーはあなたのメッセージを受け取り、一時的に保管し、連絡先が要求したときに渡します。どのリレーも不可欠ではないため、1つがオフラインになってもほかのリレーが機能し続けます。また、リレーが提出を求められうるものは、常に暗号化されたデータだけです。",
-  "relaySettingsExplainerMarmot": "Marmot プロトコルは、MLS（Messaging Layer Security）という標準を用いて、メッセージがこの端末を離れる前に、端末内で暗号化します。各サークルはそれぞれ固有の鍵を持つ独立した暗号化グループであり、別々のサークルが互いに結びつけられることはありません。これらの鍵は時間とともに更新され続けます。これは前方秘匿性（forward secrecy）と呼ばれる性質で、たとえ後から鍵が漏れても、それ以前のメッセージを解読することはできません。",
-  "relaySettingsExplainerMetadata": "このため、リレーがあなたの位置情報、メッセージ、サークルのメンバー、あるいはそれらのメッセージ上のあなたの識別情報を知ることはありません。各メッセージは、その都度新しい使い捨ての送信アドレスから公開されるため、メッセージの中にあなたのアカウントと結びつくものはありません。ただし、リレーは一部のメタデータは見ることができます。サークルごとのランダムなタグ、通信のタイミングとサイズ、そしてあなたが接続するネットワークアドレスです。",
-  "relaySettingsExplainerInboxTerm": "受信トレイのリレー",
-  "relaySettingsExplainerInboxBody": "は、あなたのメールボックスにあたります。サークルへの招待が、それ自体も暗号化されたうえで届けられ、あなたが受け取れる場所です。誰かがあなたを招待するには、これらのリレーのいずれかに到達できる必要があります。",
-  "relaySettingsExplainerKeyPackageTerm": "KeyPackage リレー",
-  "relaySettingsExplainerKeyPackageBody": "は、共有しても安全な公開鍵の小さなまとまりを公開しておく場所です。あなたのアカウントを知っている人が、サークルに追加するためにこれらのリレーから取得します。",
-  "relaySettingsExplainerOwnRelayTerm": "自分のリレーを使う。",
-  "relaySettingsExplainerOwnRelayBody": " 各サークルも独自のリレーリストを持ち、メンバーが参加するときに全員と共有されます。サークルの継続的な暗号化された更新が流れるのは、あなたの受信トレイではなく、このリストです。そのため、公開リレーを避けたい場合は、自分のリレーを運用してサークルをそこに向けることができます。全員が参加したあとは、そのサークルの通信をそのリレーだけで流すことができます。",
-  "relaySettingsExplainerReachabilityTerm": "注意点は到達性です。",
-  "relaySettingsExplainerReachabilityBody": " すべてのメンバーがそのリレーに接続できる必要があります。また、最初に誰かを招待するときは、お互いが到達できるリレーが2人の間に必要です（たとえば、全員の受信トレイと KeyPackage のリレーとして同じプライベートリレーを指定する、など）。プライベートリレーも、ほかのリレーと同じく暗号化された通信とそのタイミングは見えます。違いは、誰が運用するかをあなたが管理できる点だけです。",
-  "relaySettingsExplainerFooter": "どちらのリストでも、いつでもリレーを追加・削除できます。リレーが多いほどあなたに連絡しやすくなり、少ないほど暗号化された通信の経路をより自分で管理できます。",
-
   "locationSettingsTitle": "位置情報",
   "locationSettingsDisabledSnack": "バックグラウンド共有をオフにしました",
   "locationSettingsEnabledSnack": "バックグラウンド共有をオンにしました",
@@ -141,7 +108,6 @@
   "locationSettingsAndroidBattery": "バックグラウンド共有を確実にするため、Haven をバッテリー最適化の対象からも除外してください。設定 → アプリ → Haven → バッテリー → 常に許可 と進みます。",
   "locationSettingsAndroidVendors": "Samsung 端末では、Haven を「スリープ状態のアプリ」から外してください（デバイスケア → バッテリー → バックグラウンドでの使用制限）。Xiaomi 端末では、Haven の自動起動を有効にしてください。",
   "locationSettingsIosGuidance": "バックグラウンド共有がオンの間、Haven は位置情報の取得を継続するため、iOS のステータスバーに青い表示が出ます。さらに「常に許可」を選ぶと、iOS がアプリを終了した後も、Haven がサークルの更新に追いつけるようになります。",
-
   "mapStyleTitle": "地図のスタイル",
   "mapStyleMinimalTitle": "ミニマル",
   "mapStyleMinimalSubtitle": "ライト／ダークのテーマに合わせた、落ち着いたシンプルな地図",
@@ -155,7 +121,6 @@
   "mapStylePreviewSemantics": "地図のプレビュー（{scene}）: {style}",
   "mapStylePreviewUnavailableSemantics": "このビルドでは地図のプレビューを利用できません",
   "mapStylePreviewUnavailableLabel": "ライブプレビューはリリースビルドで表示されます",
-
   "aboutTitle": "このアプリについて",
   "aboutHeroName": "Haven",
   "aboutHeroTagline": "プライベートで、検閲に強い位置情報共有。",
@@ -165,25 +130,9 @@
   "aboutSupportOsm": "OpenStreetMap を支援する",
   "aboutMapAttribution": "© Stadia Maps · © OpenMapTiles · © OpenStreetMap contributors\n地図データは ODbL に基づいて提供されています",
   "aboutLinkOpenError": "リンクを開けませんでした",
-  "aboutWhoCanSeeTitle": "誰が何を見られるか",
-  "aboutWhoCanSeeIntro": "あなたの正確な位置情報を読めるのは、あなたが選んだ相手だけです。主な関係者がそれぞれ何を見られて、何を見られないのかを以下に示します。",
-  "aboutActorCirclesWho": "共有先のサークルのメンバー",
-  "aboutActorCirclesSees": "あなたの正確な位置情報と、あなたが選んだ表示名。ただし共有しているサークルの中でだけで、ほかのサークルには見えません。",
-  "aboutActorRelaysWho": "リレーの運用者",
-  "aboutActorRelaysSees": "あなたのメッセージを中継するサーバーです。あなたのIPアドレス、あなたが公開に使う公開鍵（名前ではなくランダムなID）、通信のサイズとタイミング、そして誰かを検索したときにどのアカウントを探したかが見えます。あなたの位置情報、メッセージ、サークル名、サークルのメンバーを読むことは決してできません。",
-  "aboutActorMapWho": "地図プロバイダー（Stadia Maps）",
-  "aboutActorMapSees": "地図を開いている間だけ、あなたのIPアドレスと表示中の範囲が見えます。正しい地図画像を送るためです。あなたのサークルや共有中の位置情報は決して見えません。Stadia はIPアドレスを匿名化し、あなたのデータを販売しません。",
-  "aboutActorDevelopersWho": "Haven の開発者",
-  "aboutActorDevelopersSees": "何も見えません。Haven はサーバーを一切運用せず、分析データも収集しません。開発者が見られるのはリレーの運用者と同じものだけで、しかもその開発者がたまたま運用しているリレーをあなたが使った場合に限られます。",
-  "aboutWhoCanSeeMetadataNote": "とはいえ、あなたの活動が完全に見えないわけではありません。あなたが使うリレーや、ネットワークを監視している人は、接続のタイミングやメッセージのサイズから、あなたが活動していること、おおよその時間帯、頻度を知ることができます。",
-  "aboutScreenshotTitle": "スクリーンショット保護",
-  "aboutScreenshotBody": "Android では、Haven は位置情報の意図しない流出を防ぐため、アプリ全体でスクリーンショットと画面録画をブロックします。これはシステムレベルの保護（FLAG_SECURE）で、地図やメンバー一覧を含むアプリのすべての画面に適用されます。",
-  "aboutVpnTitle": "VPN でさらにプライバシーを高める",
-  "aboutVpnBody": "リレーや地図プロバイダーにはあなたのIPアドレスが見え、インターネットプロバイダーにはあなたがどのサーバーに接続したかが見えます。信頼できる VPN を使えば、これらの相手からIPアドレスを隠せます。おすすめは Mullvad です。VPN を使ってもサークルのメンバーに見える内容は変わらず、信頼の対象が VPN プロバイダーに移るだけです。",
   "aboutVpnLinkLabel": "mullvad.net",
   "aboutFooterLicense": "MIT License のもとで提供されています",
   "aboutFooterVersion": "バージョン {version}",
-
   "privacyTitle": "プライバシー",
   "privacySubtitle": "Haven がどう動くか、ほかの人に何が見えるか",
   "privacyHubSummary": "Haven は、あなたが選んだ少人数のグループにだけ位置情報を共有し、端末を離れる前にこの端末上で暗号化します。企業のアカウントも、Haven のサーバーもありません。以下のページでは、その仕組みをやさしい言葉で説明し、守れないことについても率直にお伝えします。",
@@ -194,7 +143,6 @@
   "privacyMoreDetailCollapseHint": "技術的な詳細を隠す",
   "privacyMoreDetailExpandedAnnouncement": "技術的な詳細を表示しました",
   "privacyMoreDetailCollapsedAnnouncement": "技術的な詳細を隠しました",
-
   "privacyWhatHavenIsTitle": "アカウントがない理由と、Haven の仕組み",
   "privacyWhatHavenIsSubtitle": "登録も、企業のサーバーもありません",
   "privacyWhatHavenIsNoAccount": "Haven は、あなたが選んだ少人数のグループ、つまりサークルに位置情報を共有します。その背後にアカウントはありません。メールアドレスや電話番号、パスワードを渡すことは一切ありません。",
@@ -202,7 +150,6 @@
   "privacyWhatHavenIsMeansForYou": "あなたのデータを持っている人がいないので、開示を求める相手もいません。その裏返しとして、あなたのアカウントを復元できる人もいません。何をバックアップすればよいかは「2つの鍵」をご覧ください。",
   "privacyWhatHavenIsDetailNoTelemetry": "アプリには分析、クラッシュレポート、広告のコードが一切含まれていません。Haven はオープンソースなので、これは信頼に頼るのではなく、実際に確認できます。",
   "privacyWhatHavenIsDetailNoPush": "Haven にはプッシュ通知もありません。これは意図的です。通知サービスを使うとなると、あなたのサークルの誰かに届けるものがあるたびに、その事実をサービス側に伝えなければなりません。それはリレー以上に、あなたの生活習慣を明らかにしてしまいます。",
-
   "privacyYourKeysTitle": "2つの鍵: ひとつは秘密、ひとつは共有用",
   "privacyYourKeysSubtitle": "あなたを示すものと、バックアップすべきもの",
   "privacyYourKeysWhatTheyAre": "ユーザー名とパスワードの代わりに、あなたは1組の鍵を持ちます。秘密鍵は、あなたがあなたであることを証明します。公開鍵は、ほかの人があなたを見つけて招待するために使うものです。",
@@ -212,7 +159,6 @@
   "privacyYourKeysNeverShareSecret": "秘密鍵を手に入れた人は、あなたになりすませます。あなたとしてサークルに参加したり、あなたの名前で公開したりできてしまいます。ほかのアプリやメッセージ、ウェブサイトに貼り付けることは絶対にしないでください。",
   "privacyYourKeysDetailFormats": "この鍵の組は secp256k1 の鍵で、標準的な Nostr の形式で表示されます。公開鍵は npub1…、秘密鍵は nsec1… です。署名はアプリの中で行われ、秘密の値は使用ごとにメモリから消去されます。",
   "privacyYourKeysDetailSeparation": "サークルのメッセージを暗号化する鍵は、この識別情報の鍵とは別のもので、アプリだけが保持します。この分離は意図的なものです。あなたを名指しする鍵は、あなたが送った内容を開ける鍵ではありません。",
-
   "privacyPublicProfileTitle": "あなたの名前と写真は公開されます",
   "privacyPublicProfileSubtitle": "サークルのメンバーだけでなく、誰からも見えます",
   "privacyPublicProfileIsPublic": "設定した表示名と写真は、より広い Nostr ネットワークに公開されます。あなたのサークルのメンバーだけでなく、誰でも調べることができます。",
@@ -222,7 +168,54 @@
   "privacyPublicProfileRemovalIsNotDeletion": "あとで写真を削除しても、公開が取り消されるわけではありません。Haven はプロフィールを空のものに置き換えますが、画像ファイルはそれを預かっているサーバーに残り、すでにダウンロードされたコピーも世の中に残ります。公開したものは元に戻せないと考えてください。",
   "privacyPublicProfileDetailKindZero": "プロフィールは、あなたの識別情報の鍵で署名された Nostr の「kind 0」イベントです。写真は Blossom のホストにアップロードされます。変更しなければ blossom.primal.net です。そのホストには、画像、あなたの公開鍵、IPアドレスが見えます。",
   "privacyPublicProfileDetailExifStripped": "アップロードの前に、Haven は画像を再エンコードし、カメラが埋め込む隠れたデータを取り除きます。写真を撮った GPS の位置も、そこに含まれます。これは重要な点です。そうでなければ、旅行先のスナップ写真が自宅の座標を持ち歩くことになりかねません。",
-
+  "privacyGroupHowLocationTravelsHeading": "位置情報がたどる経路",
+  "privacyRelaysTitle": "リレー: メッセージを受け渡すサーバー",
+  "privacyRelaysSubtitle": "あなたの更新が誰のコンピューターを通るのか",
+  "privacyRelaysWhatIsARelay": "Haven には自前のサーバーがありません。そのため、あなたの更新はほかの人たちのサーバーを経由します。これらは、誰でも運用できる小さな独立したサーバーで、「リレー」と呼ばれます。リレーは暗号化されたメッセージを短い時間だけ預かり、あなたのサークルが求めたときに次へ渡します。",
+  "privacyRelaysWhyMany": "複数のリレーを使うので、どれか1つがあなたを遮断することはできません。1つがオフラインになっても、ほかは動き続けます。どのリレーを使うかはあなたが選べますし、いつでも変更できます。",
+  "privacyRelaysTwoLists": "Haven はあなたのために2つのリストを保持します。受信トレイのリレーは、招待があなたに届く場所です。KeyPackage リレーは、あなたを招待するために必要な鍵を、ほかの人が取得する場所です。さらに、各サークルも独自のリストを持っており、そのサークルの暗号化された更新はそこを通ります。",
+  "privacyRelaysMeansForYou": "ここには、間違えると危険になるような設定はありません。リレーに見えるのは、常に暗号化されたデータだけです。ただし、つながるリレーが少なくとも1つは必要です。そうでないと、誰もあなたを招待できず、サークルの更新も届かなくなります。",
+  "privacyRelaysDetailIndexers": "あなた自身のリストとは別に、Haven はほかの人のプロフィールや鍵を調べるために、公開されている少数のディレクトリ用リレーに問い合わせます。自分用に非公開のリレーだけを設定していても、これらには接続します。そこには、あなたのネットワークアドレスと、どのアカウントについて尋ねたかが見えます。",
+  "privacyRelaysDetailKeyListIsPublic": "KeyPackage リレーのリスト自体も、ほかの人が見つけられるように、あなたの識別情報の鍵で署名してネットワークに公開されます。そのリストに非公開のリレーを追加すると、そのアドレスは公開され、あなたと結びつきます。1つのサークルのリストの中だけで使われるリレーが、そのように公表されることはありません。",
+  "privacyEncryptionTitle": "暗号化の仕組み",
+  "privacyEncryptionSubtitle": "サークルごとの鍵と、人が出入りしたときに変わること",
+  "privacyEncryptionPerCircle": "あなたの位置情報は、MLS というオープンな標準を使って、この端末を離れる前に端末内で暗号化されます。各サークルは、それぞれ固有の鍵を持つ独立した暗号化グループです。サークルの外にいる人が、その中で送られた内容を読むことはできません。リレーも、Haven も、あなたが参加しているほかのサークルも読めません。",
+  "privacyEncryptionWhenSomeoneJoins": "誰かが参加すると、そのサークルは新しい鍵に切り替わります。参加したあとに送られたものは読めますが、それ以前のものは読めません。Haven が新しいメンバーに過去の位置情報を送ることはありません。",
+  "privacyEncryptionWhenSomeoneLeaves": "誰かが抜けたり削除されたりすると、サークルはまた別の新しい鍵に切り替わります。遅くとも数分のうちに、その人は新しいものを読めなくなります。",
+  "privacyEncryptionKeysChangeOnMembership": "鍵が変わるのは、メンバーの構成が変わったときだけです。一定時間ごとに変わるわけではありません。その変更から次の変更までの間は、送られたものすべてを1つの鍵がカバーします。そのため、長く構成が変わっていないサークルから誰かを削除しても、その人がメンバーだった間に保存したメッセージは、何週間も前のものであっても開くことができます。抜けたあとに送られたものは開けません。",
+  "privacyEncryptionMeansForYou": "暗号化は、サークルの外にいるすべての人からあなたを守ります。かつて中にいた人から守ることはできません。ある人ときれいに縁を切りたい場合は、古いサークルからその人を削除するよりも、新しいサークルを作り直すほうが安全です。",
+  "privacyEncryptionDetailMls": "MLS（Messaging Layer Security）は、ほかの安全なメッセージアプリでも使われている IETF の標準です。Haven は Marmot プロトコルを通じて Nostr ネットワークに接続します。Marmot は、MLS のグループがリレー上をどう流れるかを定めた仕様です。各サークルが署名に使う鍵は、公開されている Nostr の識別情報の鍵とは別のものです。",
+  "privacyEncryptionDetailEpochs": "鍵が有効な各期間は「エポック」と呼ばれます。この端末は、直近のいくつかのエポックから届く途中のメッセージを復号できる分だけを保持し、あとは破棄します。そのため Haven は、原理的にも、あなたの古いメッセージを取り戻すことができません。",
+  "privacyWhatOthersSeeTitle": "メンバーに見えるもの、リレーに見えるもの",
+  "privacyWhatOthersSeeSubtitle": "共有する相手と、その間にあるサーバー",
+  "privacyWhatOthersSeeMembersHeading": "サークルにいる人たち",
+  "privacyWhatOthersSeeMembersExact": "サークルのメンバー全員に、地図上のあなたの正確な位置が見えます。おおまかな範囲ではありません。一部のメンバーにはぼかした位置を、ほかのメンバーには正確な位置を共有する、といった設定はありません。",
+  "privacyWhatOthersSeeCannotPause": "Haven を開いていて、どこかのサークルに参加している間は、数分ごとに自動であなたの位置が送信されます。一時停止するボタンはありません。切り替えられるのは、アプリを離れたあとも共有を続けるかどうかだけです。",
+  "privacyWhatOthersSeeMembersLearnKey": "サークルに参加すると、あなたの公開鍵もメンバー全員に見えます。メンバーはそれを使って、あなたの公開プロフィールや、その鍵でこれまでに公開したすべてのものを調べられます。",
+  "privacyWhatOthersSeeCoMemberIp": "メンバーのプロフィール写真は、その人が選んだサーバーから取得されます。写真を読み込むと、あなたのネットワークアドレスと、そこから分かるおおまかな居場所が、そのサーバーの運営者に伝わります。これは、あなたが何もタップしなくても自動的に起こります。",
+  "privacyWhatOthersSeeRelaysHeading": "リレーの運営者",
+  "privacyWhatOthersSeeRelaysCannot": "リレーの運営者は、あなたの位置情報、メッセージ、サークルの名前、メンバーの一覧を読めません。すべてのメッセージは、その都度新しい使い捨ての送信アドレスから届くため、どのメンバーが送ったのかは分かりません。",
+  "privacyWhatOthersSeeRelaysCan": "一方で、あなたのネットワークアドレス、オンラインになっている時間帯、通信の大きさと頻度は見えています。各サークルにはランダムなタグが付いているため、リレーは1つのサークルのメッセージをまとめ、そこに何人いるかを推測できます。ただし、それが誰なのかは分かりません。",
+  "privacyWhatOthersSeeMeansForYou": "サークルには、自宅の住所を教えてもよい相手だけを入れてください。リレーや外部の相手に対しては暗号化が守ってくれますし、VPN を使えばネットワークアドレスの穴もふさげます。しかし、スクリーンショットを保存するメンバーに対しては、何も守ってくれません。",
+  "privacyWhatOthersSeeDetailTag": "サークルのタグは、そのサークルが存在する間ずっと同じです。そのため、リレーはそのサークルのメッセージをいつまでも結びつけられます。これは土台となるプロトコルの性質であり、Haven が変えられるものではありません。",
+  "privacyWhatOthersSeeDetailExpiry": "Haven はリレーに対し、位置情報のメッセージを約4分後に破棄するよう求めます。これはあくまで要望であり、リレーはそれより長く保持することもできます。招待には有効期限が一切なく、受信トレイのリレーにいつまでも残る可能性があります。",
+  "commonLearnMore": "詳しく見る",
+  "relaySettingsBackendCaption": "Haven には自前のサーバーがありません。暗号化されたあなたの更新は、「リレー」と呼ばれる独立したサーバーを経由します。リレーが、あなたの位置情報や、サークルに誰がいるかを知ることはありません。",
+  "privacyWhatOthersSeeScreenshots": "スクリーンショットへの対応は OS によって決まり、2つの OS では事情が異なります。Android では、Haven がアプリ全体でスクリーンショットと画面録画をブロックします。iPhone ではそれができません。Haven はアプリスイッチャーのプレビューをぼかしますが、メンバーが画面に映っているものを撮影することは依然として可能です。",
+  "privacyGroupTheLimitsHeading": "限界",
+  "privacyInferenceTitle": "それでも推測できてしまうこと",
+  "privacyInferenceSubtitle": "暗号化では隠せない痕跡",
+  "privacyInferenceWhatIsMetadata": "暗号化は、あなたが送る内容を隠します。しかし、あなたが何かを送ったという事実は隠せません。メッセージのまわりにできるパターン、つまり、いつ送られたか、どのくらいの大きさだったか、どのサーバーに接続していたかは、「メタデータ」と呼ばれます。中身が見えなくなっても、これは見えたままです。",
+  "privacyInferenceActivityPattern": "そのパターンから、あなたが使うリレーは、あなたがいつ、どのくらいの頻度で活動しているかをおおまかに知ることができます。Haven は、あなたが約100メートル以上移動したときにも追加の更新を送ります。そのため、十分に長い記録があれば、移動していたのか、同じ場所にとどまっていたのかを推測できます。ただし、どこにいたかが分かることは決してありません。",
+  "privacyInferencePresence": "Haven が動いている間は、あなたのリレーへの接続を開いたままにします。そのためリレーには、あなたがオンラインであること、そしてどのサークルを見ているかも分かります。これは、更新が数分ではなく数秒で届くことの代償です。",
+  "privacyInferenceIpHeading": "あなたのネットワークアドレス",
+  "privacyInferenceIpAddress": "Haven が通信するすべてのサーバーには、あなたの端末が接続してくるアドレスが見えます。あなたのリレー、地図プロバイダー、そしてメンバーのプロフィール写真を預かっているサーバーです。インターネットプロバイダーには、そのうちどのサーバーにいつ接続したかが見えます。Haven だけでは、そのどちらも隠せません。",
+  "privacyInferenceVpnHeading": "VPN を使うかどうか",
+  "privacyInferenceVpnHelps": "VPN は、あなたのアドレスを VPN 自身のアドレスに置き換えます。そのため、リレーやほかのサーバーには、あなたがどこから接続しているかが見えなくなります。どのサーバーに接続したかを、インターネットプロバイダーから隠すこともできます。おすすめは Mullvad です。",
+  "privacyInferenceVpnLimits": "万能ではありません。VPN を使っても、サークルのメンバーに見える内容は何も変わりません。やり取りしているリレーに対して、通信のタイミングやサイズを隠すこともできません。また、誰も信頼しなくてよくなるわけではなく、信頼の対象が VPN プロバイダーに移るだけです。",
+  "privacyInferenceMeansForYou": "人ではなく、ネットワークを運営する側に地図の上に居場所を示されることが心配なのであれば、VPN は追加できるもののなかで最も役に立ちます。心配なのがサークルの中の人たちであれば、VPN はまったく役に立ちません。",
+  "privacyInferenceDetailJitter": "Haven は更新の間隔をわざとばらつかせているので、短い時間の記録ではきれいな規則性が見えません。それでも、何時間も平均すれば、もとの頻度は推定できます。メッセージのサイズも一定にそろえてはおらず、位置情報の更新は狭いサイズの範囲に収まるため、位置情報の更新だと見分けられます。",
+  "privacyInferenceDetailOutOfScope": "Haven では手の届かないこともあります。多くのリレーを同時に監視できる相手や、ほかの人に乗っ取られたあなた自身の端末は、ここでどのような設計を選んでも解決できる問題ではありません。",
   "commonClearAll": "すべてクリア",
   "commonMemberCount": "{count, plural, other{{count}人のメンバー}}",
   "commonNumber": "{count}",
@@ -236,7 +229,6 @@
   "compassSouthWest": "南西",
   "compassWest": "西",
   "compassNorthWest": "北西",
-
   "circlesTitle": "サークル",
   "circlesRefreshTooltip": "サークルを更新",
   "circlesRequiresIdentity": "サークルを作成するには、まず識別情報の設定が必要です",
@@ -248,7 +240,6 @@
   "circlesLoadError": "サークルを読み込めませんでした",
   "circlesSelectToView": "メンバーを表示するサークルを選択してください",
   "circlesNoMembers": "このサークルにはメンバーがいません",
-
   "createCircleTitle": "メンバーを追加",
   "createCircleSelectedCount": "選択中（{count}）",
   "createCircleEmptyTitle": "サークルのメンバーを追加",
@@ -259,7 +250,6 @@
   "createCircleNoAccountFound": "Haven のアカウントが見つかりませんでした",
   "createCircleCouldNotVerify": "メンバーを確認できませんでした",
   "createCircleSomethingWentWrong": "問題が発生しました",
-
   "nameCircleTitle": "サークルに名前を付ける",
   "nameCircleMembersToInvite": "{count, plural, other{{count}人のメンバーを招待します}}",
   "nameCircleNameLabel": "サークル名",
@@ -276,7 +266,6 @@
   "nameCircleCreatedSnack": "{count, plural, other{サークル「{name}」を作成しました！招待を{count}件送信しました。}}",
   "nameCircleIdentityError": "識別情報のエラーです。識別情報の設定をご確認ください。",
   "nameCircleCreateError": "サークルを作成できませんでした。もう一度お試しください。",
-
   "addMemberTitle": "{circleName} に追加",
   "addMemberInfo": "新しいメンバーは、招待を承認すると、このサークルの暗号化された位置情報を見られるようになります。",
   "addMemberAlreadyInCircle": "すでにこのサークルのメンバーです",
@@ -285,13 +274,11 @@
   "addMemberSentToCircle": "{count, plural, other{{circleName} に招待を送信しました}}",
   "addMemberPartialDelivery": "招待を送信しました（{total}件中{sent}件）。残りは配信待ちです。",
   "addMemberError": "メンバーを追加できませんでした。もう一度お試しください。",
-
   "qrScannerTitle": "QRコードをスキャン",
   "qrScannerToggleFlash": "フラッシュの切り替え",
   "qrScannerSwitchCamera": "カメラの切り替え",
   "qrScannerInstruction": "QRコードを枠の中に合わせてください",
   "qrScannerScanning": "スキャン中...",
-
   "circleMemberInvitationPending": "招待保留中",
   "circleMemberNoRecentLocation": "最近の位置情報はありません",
   "circleMemberRemoveTooltip": "サークルから削除",
@@ -300,7 +287,6 @@
   "circleMemberHintNoLocation": "位置情報がありません",
   "circleMemberHintMember": "メンバー",
   "circleMemberHintTapToCenter": "タップすると地図をその位置に合わせます",
-
   "pendingMemberRetryTooltip": "確認を再試行",
   "pendingMemberRemoveTooltip": "メンバーを削除",
   "pendingMemberValidating": "確認中",
@@ -309,7 +295,6 @@
   "pendingMemberCheckingAvailability": "利用可能か確認しています...",
   "pendingMemberReadyToInvite": "招待できます",
   "pendingMemberNeedsUpdate": "Haven のアップデートが必要です",
-
   "memberSearchHint": "メンバーIDを入力...",
   "memberSearchPasteTooltip": "クリップボードから貼り付け",
   "memberSearchAddTooltip": "メンバーを追加",
@@ -317,14 +302,11 @@
   "memberSearchHelper": "連絡先に Haven のQRコードまたはIDを聞いてください",
   "memberSearchNoValidId": "有効な Haven のIDが見つかりませんでした",
   "memberSearchAlreadyAdded": "このメンバーはすでに追加されています",
-
   "selectedMembersMore": "ほか{count}人",
-
   "invitationStatusPending": "招待保留中",
   "invitationStatusActive": "アクティブ",
   "invitationStatusDeclined": "辞退済み",
   "invitationStatusSemantics": "招待の状態: {label}",
-
   "invitationCardSemantics": "{circleName} への招待。招待者は {inviter}、メンバー{count}人",
   "invitationCardInvitedBySemantics": "暗号識別子 {inviter} からの招待",
   "invitationCardInvitedBy": "招待者: {inviter}",
@@ -339,14 +321,12 @@
   "invitationDeclinedSnack": "招待を辞退しました",
   "invitationAcceptError": "招待を承認できませんでした。もう一度お試しください。",
   "invitationDeclineError": "招待を辞退できませんでした。もう一度お試しください。",
-
   "circleSelectorLabel": "サークルの選択",
   "circleSelectorPlaceholder": "サークルを選択",
   "circleSelectorNewCircle": "新しいサークル",
   "circleSelectorLoadError": "サークルを読み込めませんでした",
   "circleSelectorExpandedAnnouncement": "サークルの一覧を開きました",
   "circleSelectorCollapsedAnnouncement": "サークルの一覧を閉じました",
-
   "circleDetailsButtonTooltip": "サークルの詳細",
   "circleDetailsTitle": "サークルの詳細",
   "circleDetailsRelaysHeading": "このサークルのリレー",
@@ -360,7 +340,6 @@
   "leaveCircleIdentityUnavailable": "識別情報を利用できません",
   "leaveCircleSuccess": "サークルを退出しました",
   "leaveCircleError": "サークルを退出できませんでした",
-
   "circleBlockedBannerTitle": "このサークルは更新できません",
   "circleBlockedBannerBody": "このサークルの暗号化で問題が発生したため、Haven はこのサークルで更新を送受信できなくなりました。以下で最後に確認できた情報は引き続き見られますが、サークルを退出することもできます。",
   "legacyCircleBannerTitle": "このサークルは再作成が必要です",
@@ -375,19 +354,16 @@
   "legacyCutoverExplainerCirclesNeedRecreation": "セキュリティ向上のため、位置情報を再び共有するには、サークルを再作成し、メンバーを改めて招待する必要があります。",
   "legacyCutoverExplainerAcknowledge": "わかりました",
   "relaySettingsLegacyRetractionPending": "Haven は最近のセキュリティアップデートに伴う一部のデータの整理をまだ続けています。オンラインに戻れば自動的に完了します。",
-
   "circlesPanelCollapsedAnnouncement": "サークルパネルを閉じました",
   "circlesPanelExpandedAnnouncement": "サークルパネルを開きました",
   "circlesPanelSlightlyOpenAnnouncement": "サークルパネルを少し開きました",
   "circlesPanelHalfOpenAnnouncement": "サークルパネルを半分開きました",
   "circleMemberAnnouncementSelf": "あなた",
   "circleMemberAnnouncementFallback": "メンバー",
-
   "invitationsRefreshTooltip": "招待を更新",
   "invitationsLoadError": "招待を読み込めませんでした",
   "invitationsEmptyTitle": "招待はありません",
   "invitationsEmptyMessage": "誰かがあなたをサークルに招待すると、ここに表示されます。",
-
   "refreshRingSemanticNoInbox": "受信トレイが未設定です。タップでリレー設定を開きます",
   "refreshRingSemanticChecking": "{total, plural, other{{total} 件中 {checked} 件のリレーを確認しました}}",
   "refreshRingSemanticAllOk": "{total, plural, other{すべての {total} 件のリレーが応答しました}}",
@@ -404,7 +380,6 @@
   "refreshRingAnnouncementAllFound": "すべてのリレーにあなたのデータがあります",
   "refreshRingAnnouncementPartialFound": "{total} 件中 {ok} 件のリレーにあなたのデータがあります",
   "refreshRingAnnouncementNoneFound": "あなたのデータを持つリレーはありません",
-
   "identityTitle": "識別情報",
   "identityLoadError": "識別情報の読み込み中に問題が発生しました。もう一度お試しください。",
   "identityMissingTitle": "識別情報がありません",
@@ -414,11 +389,9 @@
   "identityPublicKeyQrSubtitle": "ほかの人があなたをサークルに招待する方法",
   "identityAdvancedTitle": "詳細設定",
   "identityAdvancedSubtitle": "公開鍵、秘密鍵、削除",
-
   "profileIsPublicNoticeTitle": "プロフィールは公開されます",
   "profileIsPublicNoticeBody": "あなたの表示名と写真は、サークルのメンバーだけでなく、Nostr ネットワーク上の誰からも見えます。公開しても差し支えないものだけを共有してください。",
   "identityRefreshProfileTooltip": "公開プロフィールを更新",
-
   "identityAdvancedExportError": "秘密鍵を書き出せませんでした。もう一度お試しください。",
   "identityAdvancedDeleteTitle": "識別情報を削除しますか？",
   "identityAdvancedDeleteBody": "これにより識別情報が完全に削除されます。後で復元したい場合は、秘密鍵をバックアップ済みであることを必ず確認してください。",
@@ -439,13 +412,11 @@
   "identityAdvancedHideSecretKey": "秘密鍵を隠す",
   "identityAdvancedCopySecretKeyTooltip": "秘密鍵をコピー",
   "identityAdvancedDeleteIdentityCta": "識別情報を削除",
-
   "qrCodeLoadError": "公開鍵の読み込み中に問題が発生しました。もう一度お試しください。",
   "qrCodeYourPublicKeyLabel": "あなたの公開鍵",
   "qrCodeWhatIsThisTitle": "これは何ですか？",
   "qrCodeExplainerKeys": "Haven は Nostr というオープンなネットワーク上で動いています。その背後に企業のアカウントや登録はありません。あなたの識別情報は、ただ1組の鍵です。あなただけが持つ秘密鍵と、そこから作られるこの公開鍵です。",
-  "qrCodeExplainerUsername": "あなたの公開鍵は、共有しても安全なユーザー名のように働きます。人々はこのコードをスキャンするか、あなたの公開鍵を貼り付けて、あなたをサークルに招待します。これを共有しても、あなたの位置情報が明らかになることはありません。位置情報が見えるのは、あなたが参加したサークルのメンバーだけです。あなたの名前と写真も明らかにはなりません。これらは、あなたが公開プロフィールを公開することを選ばないかぎり、この端末の中にとどまります。",
-
+  "qrCodeExplainerUsername": "あなたの公開鍵は、共有しても安全なユーザー名のように働きます。人々はこのコードをスキャンするか、あなたの公開鍵を貼り付けて、あなたをサークルに招待します。これを共有しても、あなたの位置情報が明らかになることはありません。位置情報が見えるのは、あなたが参加したサークルのメンバーだけです。あなたの表示名と写真はすでに公開されているので、これを共有しても、それらについて新たに分かることはありません。",
   "displayNameCardTitle": "表示名",
   "displayNameCardLoadError": "表示名を読み込めませんでした。後でもう一度お試しください。",
   "displayNameCardHint": "表示名を入力してください",
@@ -455,7 +426,6 @@
   "displayNameCardRetryLabel": "保存に失敗しました。再試行",
   "displayNameCardSavedAnnouncement": "表示名を保存しました",
   "displayNameCardSaveFailedAnnouncement": "保存に失敗しました。もう一度お試しください",
-
   "keyDisplayCopiedToClipboard": "{label}をクリップボードにコピーしました",
   "keyDisplaySemantics": "{label}: {state}",
   "keyDisplayStateRevealed": "表示中",
@@ -465,7 +435,6 @@
   "keyDisplayCopyTooltip": "コピー",
   "keyDisplayCompactCopied": "鍵をクリップボードにコピーしました",
   "keyDisplayCompactTapToCopy": "タップしてコピー",
-
   "npubQrCopiedSnack": "公開鍵をクリップボードにコピーしました",
   "npubQrCopyButton": "公開鍵をコピー",
   "circleMemberPublicKeyCopied": "公開鍵をクリップボードにコピーしました",
@@ -482,7 +451,6 @@
   "memberNicknameSheetClearedAnnouncement": "ニックネームを消去しました",
   "npubQrScanLabel": "スキャンして追加",
   "npubQrSemanticsLabel": "あなたの公開識別情報のQRコード",
-
   "photoHeaderRemoveTitle": "プロフィール写真を削除しますか？",
   "photoHeaderRemoveBody": "これにより、あなたの公開プロフィールから写真が削除されます。",
   "photoHeaderEditPhoto": "写真を編集",
@@ -490,7 +458,6 @@
   "photoHeaderViewPhotoSemantics": "プロフィール写真を表示",
   "photoHeaderAddPhotoSemantics": "プロフィール写真を追加",
   "photoHeaderChangePhotoSemantics": "プロフィール写真を変更",
-
   "avatarPickerPhotoUpdated": "写真を更新しました — あなたの公開 Nostr プロフィールに公開されました。",
   "avatarPickerPhotoRemoved": "写真を削除しました。",
   "avatarPickerRemoveError": "写真を削除できませんでした。もう一度お試しください。",
@@ -498,11 +465,9 @@
   "avatarPickerCropTitle": "写真を切り抜く",
   "avatarPickerCropDone": "完了",
   "avatarPickerCropCancel": "キャンセル",
-
   "avatarFullscreenClose": "閉じる",
   "avatarFullscreenSemantics": "プロフィール写真、全画面",
   "avatarFullscreenLoadError": "写真を読み込めませんでした",
-
   "mapInitializing": "初期化しています...",
   "mapInitFailedTitle": "初期化に失敗しました",
   "mapInitFailedMessage": "位置情報サービスを初期化できませんでした。",
@@ -519,17 +484,13 @@
   "mapOpenInAppleMapsBody": "Apple Maps に送られるのは地図上の座標だけで、名前や識別情報は送られません。",
   "mapOpenInAppleMapsConfirm": "Apple Maps で開く",
   "mapOpenMapsError": "Maps を開けませんでした",
-
   "mapControlsZoomIn": "拡大",
   "mapControlsZoomOut": "縮小",
   "mapControlsRecenter": "中央に戻す",
   "mapControlsRecenterFab": "自分の位置を中央に表示",
-
   "mapAttributionCreditsButton": "地図のクレジットとライセンス",
-
   "userLocationMarkerSemantics": "あなたの位置マーカー{accuracy}",
   "userLocationMarkerAccuracy": "。精度: {meters}メートル",
-
   "memberMarkerMinutesShort": "{count}m",
   "memberMarkerHoursShort": "{count}h",
   "memberMarkerDaysShort": "{count}d",
@@ -548,7 +509,6 @@
   "addRelaySheetErrorInsecureScheme": "このリレーへの通信が暗号化されるよう、wss:// を使用してください。",
   "addRelaySheetErrorHasCredentials": "リレーのURLに認証情報を含めることはできません。",
   "addRelaySheetErrorInvalidFormat": "wss://relay.example.com のようなリレーのアドレスを入力してください。",
-
   "avatarSemanticsLabel": "ユーザーのアバター",
   "avatarSemanticsFor": "{initials} さんの",
   "avatarSemanticsOnline": "オンライン",

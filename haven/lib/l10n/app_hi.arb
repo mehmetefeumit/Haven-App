@@ -1,52 +1,39 @@
 {
   "@@locale": "hi",
-
   "appearanceTitle": "दिखावट",
-
   "appearanceThemeHeader": "थीम",
-
   "appearanceThemeSystem": "सिस्टम डिफ़ॉल्ट",
   "appearanceThemeSystemSubtitle": "अपने डिवाइस की सेटिंग के अनुसार",
-
   "appearanceThemeLight": "हल्का",
   "appearanceThemeLightSubtitle": "हमेशा हल्की थीम इस्तेमाल करें",
-
   "appearanceThemeDark": "गहरा",
   "appearanceThemeDarkSubtitle": "हमेशा गहरी थीम इस्तेमाल करें",
-
   "appearanceLanguageTitle": "भाषा",
-
   "languageSystemDefault": "सिस्टम डिफ़ॉल्ट",
-
   "commonTryAgain": "फिर कोशिश करें",
   "commonDismiss": "बंद करें",
   "commonSettings": "सेटिंग",
   "commonInvitations": "निमंत्रण",
   "commonPendingInvitations": "{count, plural, one{1 लंबित निमंत्रण} other{{count} लंबित निमंत्रण}}",
-
   "commonBack": "वापस",
   "commonContinue": "जारी रखें",
   "commonSkip": "छोड़ें",
   "commonRetry": "फिर कोशिश करें",
-
   "onboardingStepOf": "चरण {current}/{total}",
-
   "onboardingAppName": "Haven",
   "onboardingWelcomeHeadline": "अपना स्थान निजी तौर पर साझा करें, केवल उन्हीं के साथ जिन्हें आप चाहते हैं।",
   "onboardingWelcomeHeadlineEmphasis": "केवल",
   "onboardingWelcomeCta": "शुरू करें",
-
   "onboardingValuePropsTitle": "Haven को क्या अलग बनाता है",
   "onboardingValueProp1Title": "केवल आपके सर्कल आपको देख सकते हैं",
   "onboardingValueProp1Body": "आपका स्थान आपके डिवाइस को छोड़ने से पहले ही उस पर एन्क्रिप्ट हो जाता है, इसलिए इसे केवल वही सर्कल पढ़ सकते हैं जिन्हें आप चुनते हैं, न Haven और न ही कोई और। चूँकि Haven ओपन सोर्स है, कोई भी इसकी पुष्टि कर सकता है।",
   "onboardingValueProp2Title": "इसे कोई बंद नहीं कर सकता",
   "onboardingValueProp2Body": "Haven का कोई केंद्रीय सर्वर नहीं है। आपके एन्क्रिप्टेड संदेश रिले के एक विकेंद्रीकृत नेटवर्क से होकर जाते हैं, जिन्हें आप खुद चुन सकते हैं, इसलिए कोई भी अकेली संस्था इसे बंद नहीं कर सकती।",
   "onboardingValueProp3Title": "किसी खाते की ज़रूरत नहीं",
-  "onboardingValueProp3Body": "न ईमेल, न फ़ोन नंबर, न साइन-अप। Haven एक निजी पहचान बनाता है जो केवल आपके फ़ोन पर रहती है, और जिसे असली आपसे जोड़ने वाली कोई चीज़ नहीं होती।",
+  "onboardingValueProp3Body": "न ईमेल, न फ़ोन नंबर, न साइन-अप। Haven ऐसी पहचान बनाता है जिसकी गुप्त कुंजी कभी आपके फ़ोन से बाहर नहीं जाती, इसलिए ऐसा कोई खाता ही नहीं होता जिसे कोई किसी को सौंप सके।",
   "onboardingValueProp1Summary": "आपके डिवाइस पर एन्क्रिप्टेड, ताकि इसे केवल आपके चुने हुए सर्कल ही पढ़ सकें।",
   "onboardingValueProp2Summary": "कोई केंद्रीय सर्वर नहीं — यह आपके चुने हुए रिले नेटवर्क पर चलता है।",
-  "onboardingValueProp3Summary": "न ईमेल, न फ़ोन, न साइन-अप। कुछ भी इसे आपसे नहीं जोड़ता।",
-
+  "onboardingValueProp3Summary": "न ईमेल, न फ़ोन, न साइन-अप। आपकी गुप्त कुंजी कभी आपके फ़ोन से बाहर नहीं जाती।",
   "onboardingCreateIdentityTitle": "अपनी पहचान बनाएँ",
   "onboardingCreateIdentityBody": "Haven एक निजी पहचान बनाएगा जो केवल इसी फ़ोन पर रहेगी। इसी से आपके सर्कल आपको पहचानते हैं।",
   "onboardingCreateIdentityWarning": "अगर यह फ़ोन खो गया या आपने ऐप हटा दिया, तो आपकी पहचान चली जाएगी। Haven के पास इसे वापस पाने का कोई तरीका नहीं है।",
@@ -55,7 +42,6 @@
   "onboardingCreateIdentityImportPrompt": "पहले से कोई कुंजी है?",
   "onboardingCreateIdentityImportLink": "उसे इंपोर्ट करें",
   "onboardingCreateIdentityError": "आपकी पहचान बनाने में कुछ गड़बड़ हो गई। कृपया फिर कोशिश करें।",
-
   "onboardingImportTitle": "अपनी मौजूदा कुंजी इंपोर्ट करें",
   "onboardingImportBody": "किसी अन्य Haven-संगत ऐप से बैकअप की हुई गुप्त कुंजी यहाँ पेस्ट करें।",
   "onboardingImportHint": "nsec1…",
@@ -63,14 +49,11 @@
   "onboardingImportLoading": "इंपोर्ट हो रहा है…",
   "onboardingImportInvalid": "यह एक मान्य बैकअप कुंजी नहीं लगती। कृपया जाँचें और फिर कोशिश करें।",
   "onboardingImportError": "हम वह कुंजी इंपोर्ट नहीं कर सके। कृपया जाँचें और फिर कोशिश करें।",
-
   "onboardingDisplayNameHint": "जैसे, आर्यन",
   "onboardingDisplayNameError": "वह नाम सहेजा नहीं जा सका। कृपया फिर कोशिश करें।",
   "onboardingAddPhotoOptional": "फ़ोटो जोड़ें (वैकल्पिक)",
-
   "commonCancel": "रद्द करें",
   "commonOpenSettings": "सेटिंग खोलें",
-
   "settingsTitle": "सेटिंग",
   "settingsIdentityTitle": "पहचान",
   "settingsIdentitySubtitle": "प्रोफ़ाइल, कुंजियाँ और फ़ोटो साझाकरण",
@@ -83,7 +66,6 @@
   "settingsAboutTitle": "परिचय",
   "settingsDebugOverlayTitle": "डीबग लॉग ओवरले",
   "settingsDebugOverlaySubtitle": "स्क्रीन पर लॉग आउटपुट दिखाएँ",
-
   "relaySettingsTitle": "रिले",
   "relaySettingsCheckRelaysTooltip": "रिले जाँचें",
   "relaySettingsNoIdentityTitle": "कोई पहचान नहीं",
@@ -92,7 +74,7 @@
   "relaySettingsInboxTitle": "मेरे इनबॉक्स रिले",
   "relaySettingsInboxSubtitle": "kind 10050, जहाँ निमंत्रण आप तक पहुँचते हैं",
   "relaySettingsKeyPackageTitle": "मेरे KeyPackage रिले",
-  "relaySettingsKeyPackageSubtitle": "kind 10051, जहाँ आमंत्रित लोग आपकी एन्क्रिप्शन कुंजियाँ खोजते हैं",
+  "relaySettingsKeyPackageSubtitle": "kind 10002, जहाँ आमंत्रित लोग आपकी एन्क्रिप्शन कुंजियाँ खोजते हैं",
   "relaySettingsLoadRelaysError": "रिले लोड नहीं हो सके।",
   "relaySettingsAddRelay": "रिले जोड़ें",
   "relaySettingsRestoreDefaults": "डिफ़ॉल्ट बहाल करें",
@@ -111,21 +93,6 @@
   "relaySettingsStatusSemantics": "रिले स्थिति: {status}",
   "relaySettingsEmptyTitle": "कोई रिले कॉन्फ़िगर नहीं है",
   "relaySettingsEmptyMessage": "आपको कम से कम एक रिले चाहिए ताकि दूसरे आप तक पहुँच सकें। Haven डिफ़ॉल्ट बहाल करने के लिए नीचे टैप करें।",
-  "relaySettingsExplainerSemantics": "Haven के रिले कैसे काम करते हैं",
-  "relaySettingsExplainerHeading": "यह कैसे काम करता है",
-  "relaySettingsExplainerNostr": "Haven का कोई केंद्रीय सर्वर नहीं है। यह दो खुली तकनीकों पर चलता है। Nostr स्वतंत्र सर्वरों का एक नेटवर्क है जिन्हें रिले कहा जाता है और जिन्हें कोई भी चला सकता है; ये आपके संदेश पाते हैं, उन्हें थोड़ी देर रखते हैं, और जब आपके संपर्क माँगते हैं तो आगे पहुँचा देते हैं। कोई भी अकेला रिले ज़रूरी नहीं है, इसलिए अगर एक ऑफ़लाइन हो जाए तो बाकी चलते रहते हैं, और कोई रिले अधिक से अधिक जो दे सकता है वह केवल एन्क्रिप्टेड डेटा होता है।",
-  "relaySettingsExplainerMarmot": "Marmot प्रोटोकॉल आपके संदेशों को MLS (Messaging Layer Security) मानक का उपयोग करके आपके डिवाइस को छोड़ने से पहले ही उस पर एन्क्रिप्ट कर देता है। हर सर्कल अपनी खुद की कुंजियों वाला एक अलग एन्क्रिप्टेड समूह होता है, इसलिए अलग-अलग सर्कल आपस में जोड़े नहीं जा सकते। ये कुंजियाँ समय के साथ आगे बढ़ती रहती हैं, इस गुण को फ़ॉरवर्ड सीक्रेसी कहते हैं, इसलिए बाद में उजागर हुई कोई कुंजी भी आपके पुराने संदेशों को नहीं खोल सकती।",
-  "relaySettingsExplainerMetadata": "इसी वजह से, कोई रिले कभी आपका स्थान, आपके संदेश, आपके सर्कल में कौन है, या उन संदेशों पर आपकी पहचान नहीं देख पाता। हर संदेश एक नए, एक-बार इस्तेमाल होने वाले भेजने वाले पते से प्रकाशित होता है, इसलिए संदेश में कुछ भी उसे आपके खाते से नहीं जोड़ता। फिर भी एक रिले कुछ मेटाडेटा देखता है: हर सर्कल का एक यादृच्छिक टैग, आपके ट्रैफ़िक का समय और आकार, और वह नेटवर्क पता जहाँ से आप कनेक्ट होते हैं।",
-  "relaySettingsExplainerInboxTerm": "इनबॉक्स रिले",
-  "relaySettingsExplainerInboxBody": " आपके डाकघर की तरह हैं: जहाँ किसी सर्कल में शामिल होने के निमंत्रण, जो खुद भी एन्क्रिप्टेड होते हैं, आपके लेने के लिए पहुँचाए जाते हैं। किसी को आपको आमंत्रित करने के लिए इनमें से किसी एक रिले तक पहुँच पाना ज़रूरी है।",
-  "relaySettingsExplainerKeyPackageTerm": "KeyPackage रिले",
-  "relaySettingsExplainerKeyPackageBody": " वहाँ हैं जहाँ आप अपनी सार्वजनिक कुंजियों का एक छोटा बंडल प्रकाशित करते हैं, जिसे साझा करना सुरक्षित है। जो आपका खाता जानता है, वह आपको किसी सर्कल में जोड़ने के लिए इन रिले से इसे ले लेता है।",
-  "relaySettingsExplainerOwnRelayTerm": "अपना खुद का रिले इस्तेमाल करना।",
-  "relaySettingsExplainerOwnRelayBody": " हर सर्कल अपनी खुद की रिले सूची भी रखता है, जो हर सदस्य के शामिल होने पर उसके साथ साझा की जाती है; वही सूची, न कि आपका इनबॉक्स, वह जगह है जहाँ से सर्कल के चलते रहने वाले एन्क्रिप्टेड अपडेट जाते हैं। इसलिए अगर आप सार्वजनिक रिले से बचना चाहते हैं, तो आप अपना खुद का चला सकते हैं और किसी सर्कल को उसी पर लगा सकते हैं: एक बार सब शामिल हो जाएँ, तो उस सर्कल का ट्रैफ़िक अकेले उसी से होकर जा सकता है।",
-  "relaySettingsExplainerReachabilityTerm": "पेच है पहुँच का।",
-  "relaySettingsExplainerReachabilityBody": " हर सदस्य को उस रिले से कनेक्ट हो पाना चाहिए, और जब आप किसी को पहली बार आमंत्रित करते हैं, तो आप दोनों को एक ऐसा रिले चाहिए जहाँ आप दोनों पहुँच सकें (उदाहरण के लिए, वही निजी रिले जो हर किसी के इनबॉक्स और KeyPackage रिले के रूप में सूचीबद्ध हो)। एक निजी रिले भी किसी अन्य की तरह ही वही एन्क्रिप्टेड ट्रैफ़िक और समय देखता है; बस आप यह तय करते हैं कि उसे कौन चलाए।",
-  "relaySettingsExplainerFooter": "आप किसी भी सूची में कभी भी रिले जोड़ या हटा सकते हैं। ज़्यादा रिले आप तक पहुँचना आसान बनाते हैं; कम रिले आपके एन्क्रिप्टेड ट्रैफ़िक की दिशा पर आपको ज़्यादा नियंत्रण देते हैं।",
-
   "locationSettingsTitle": "स्थान",
   "locationSettingsDisabledSnack": "बैकग्राउंड साझाकरण बंद किया गया",
   "locationSettingsEnabledSnack": "बैकग्राउंड साझाकरण चालू किया गया",
@@ -141,7 +108,6 @@
   "locationSettingsAndroidBattery": "भरोसेमंद बैकग्राउंड साझाकरण के लिए, Haven को बैटरी ऑप्टिमाइज़ेशन से भी बाहर रखें। सेटिंग → ऐप्स → Haven → बैटरी → हर समय अनुमति दें पर जाएँ।",
   "locationSettingsAndroidVendors": "Samsung डिवाइस पर, Haven को \"Sleeping apps\" से हटाएँ (Device care → Battery → Background usage limits)। Xiaomi पर, Haven के लिए Autostart चालू करें।",
   "locationSettingsIosGuidance": "जब बैकग्राउंड साझाकरण चालू होता है, तो Haven लगातार आपके स्थान का उपयोग करता रहता है और iOS स्टेटस बार में एक नीला संकेतक दिखाता है। साथ ही, \"हमेशा\" की अनुमति देने पर iOS के ऐप बंद कर देने के बाद भी Haven आपके सर्कलों के छूटे हुए अपडेट पा सकता है।",
-
   "mapStyleTitle": "मानचित्र शैली",
   "mapStyleMinimalTitle": "सादा",
   "mapStyleMinimalSubtitle": "शांत, कम विवरण वाला कैनवास जो आपकी हल्की या गहरी थीम के अनुसार चलता है",
@@ -155,7 +121,6 @@
   "mapStylePreviewSemantics": "मानचित्र पूर्वावलोकन ({scene}): {style}",
   "mapStylePreviewUnavailableSemantics": "इस बिल्ड में मानचित्र पूर्वावलोकन उपलब्ध नहीं है",
   "mapStylePreviewUnavailableLabel": "लाइव पूर्वावलोकन रिलीज़ बिल्ड में दिखता है",
-
   "aboutTitle": "परिचय",
   "aboutHeroName": "Haven",
   "aboutHeroTagline": "निजी और सेंसरशिप-प्रतिरोधी स्थान साझाकरण।",
@@ -165,25 +130,9 @@
   "aboutSupportOsm": "OpenStreetMap का समर्थन करें",
   "aboutMapAttribution": "© Stadia Maps · © OpenMapTiles · © OpenStreetMap contributors\nMap data licensed under ODbL",
   "aboutLinkOpenError": "लिंक नहीं खुल सका",
-  "aboutWhoCanSeeTitle": "कौन क्या देख सकता है",
-  "aboutWhoCanSeeIntro": "आपका सटीक स्थान केवल वही लोग पढ़ सकते हैं जिन्हें आप चुनते हैं। मुख्य पक्ष क्या देख सकते हैं और क्या नहीं, यह यहाँ बताया गया है।",
-  "aboutActorCirclesWho": "वे सर्कल सदस्य जिनके साथ आप साझा करते हैं",
-  "aboutActorCirclesSees": "आपका सटीक स्थान और आपका चुना हुआ प्रदर्शन नाम, पर केवल उन्हीं सर्कलों के भीतर जिनमें आप उनके साथ साझा करते हैं, कभी आपके अन्य सर्कलों में नहीं।",
-  "aboutActorRelaysWho": "रिले संचालक",
-  "aboutActorRelaysSees": "वे सर्वर जो आपके संदेश आगे पहुँचाते हैं। वे आपका IP पता, वह सार्वजनिक कुंजी जिसके तहत आप प्रकाशित करते हैं (एक यादृच्छिक ID, आपका नाम नहीं), आपके ट्रैफ़िक का आकार और समय, और जब आप किसी को खोजते हैं तो किस खाते को खोजा, यह देखते हैं। वे कभी आपका स्थान, आपके संदेश, आपके सर्कल के नाम, या आपके सर्कल में कौन है, यह नहीं पढ़ सकते।",
-  "aboutActorMapWho": "मानचित्र प्रदाता (Stadia Maps)",
-  "aboutActorMapSees": "केवल तब जब मानचित्र खुला हो: आपका IP पता और वह क्षेत्र जिसे आप देख रहे हैं, ताकि वह सही मानचित्र छवियाँ भेज सके। कभी आपके सर्कल या आपका साझा किया हुआ स्थान नहीं। Stadia IP पतों को गुमनाम बनाता है और आपका डेटा नहीं बेचता।",
-  "aboutActorDevelopersWho": "Haven के डेवलपर",
-  "aboutActorDevelopersSees": "कुछ नहीं। Haven कोई सर्वर नहीं चलाता और कोई एनालिटिक्स इकट्ठा नहीं करता। एक डेवलपर केवल वही देख सकता है जो एक रिले संचालक देखता है, और वह भी तभी जब आपने ऐसा रिले इस्तेमाल किया हो जिसे संयोग से वही चलाते हों।",
-  "aboutWhoCanSeeMetadataNote": "फिर भी, आपकी गतिविधि अदृश्य नहीं है। आपका इस्तेमाल किया हुआ कोई रिले, या आपके नेटवर्क पर नज़र रखने वाला कोई भी, कनेक्शन के समय और संदेशों के आकार से यह जान सकता है कि आप सक्रिय हैं, मोटे तौर पर कब, और कितनी बार।",
-  "aboutScreenshotTitle": "स्क्रीनशॉट सुरक्षा",
-  "aboutScreenshotBody": "Android पर, स्थान के गलती से उजागर होने से रोकने के लिए Haven पूरे ऐप में स्क्रीनशॉट और स्क्रीन रिकॉर्डिंग को ब्लॉक करता है। यह एक सिस्टम-स्तरीय सुरक्षा (FLAG_SECURE) है जो ऐप की हर स्क्रीन पर लागू होती है, जिसमें मानचित्र और सदस्य सूचियाँ भी शामिल हैं।",
-  "aboutVpnTitle": "VPN के साथ और भी निजी रहें",
-  "aboutVpnBody": "रिले और मानचित्र प्रदाता आपका IP पता देखते हैं, और आपका इंटरनेट प्रदाता देखता है कि आप किन सर्वरों तक पहुँचते हैं। एक भरोसेमंद VPN उनसे आपका IP पता छिपा देता है। हम Mullvad की सलाह देते हैं। यह नहीं बदलता कि आपके सर्कल सदस्य क्या देखते हैं, और यह भरोसे को VPN प्रदाता पर स्थानांतरित कर देता है।",
   "aboutVpnLinkLabel": "mullvad.net",
   "aboutFooterLicense": "MIT License के तहत लाइसेंस प्राप्त",
   "aboutFooterVersion": "संस्करण {version}",
-
   "privacyTitle": "गोपनीयता",
   "privacySubtitle": "Haven कैसे काम करता है और दूसरे क्या देख सकते हैं",
   "privacyHubSummary": "Haven आपका स्थान केवल उन छोटे समूहों के साथ साझा करता है जिन्हें आप चुनते हैं, और आपके फ़ोन को छोड़ने से पहले ही उसे उसी पर एन्क्रिप्ट कर देता है। इसके पीछे कोई कंपनी खाता नहीं है और कोई Haven सर्वर नहीं है। नीचे दिए गए पन्ने सरल भाषा में बताते हैं कि यह कैसे होता है, और यह भी ईमानदारी से बताते हैं कि यह किससे नहीं बचाता।",
@@ -194,7 +143,6 @@
   "privacyMoreDetailCollapseHint": "तकनीकी विवरण छिपाएँ",
   "privacyMoreDetailExpandedAnnouncement": "तकनीकी विवरण दिखाया गया है",
   "privacyMoreDetailCollapsedAnnouncement": "तकनीकी विवरण छिपा है",
-
   "privacyWhatHavenIsTitle": "Haven क्या है, और इसमें कोई खाता क्यों नहीं होता",
   "privacyWhatHavenIsSubtitle": "कोई साइन-अप नहीं, कोई कंपनी सर्वर नहीं",
   "privacyWhatHavenIsNoAccount": "Haven आपका स्थान उन छोटे समूहों के साथ साझा करता है जिन्हें आप चुनते हैं और जिन्हें सर्कल कहा जाता है। इसके पीछे कोई खाता नहीं होता। आप कभी कोई ईमेल पता, फ़ोन नंबर या पासवर्ड नहीं देते।",
@@ -202,7 +150,6 @@
   "privacyWhatHavenIsMeansForYou": "आपका डेटा माँगने के लिए कोई नहीं है, क्योंकि किसी के पास वह नहीं है। इसका दूसरा पहलू यह है कि आपका खाता बहाल भी कोई नहीं कर सकता। क्या बैकअप करना है, यह जानने के लिए \"आपकी दो कुंजियाँ\" देखें।",
   "privacyWhatHavenIsDetailNoTelemetry": "ऐप में कोई एनालिटिक्स, क्रैश रिपोर्टिंग या विज्ञापन कोड नहीं है। चूँकि Haven ओपन सोर्स है, इसे भरोसे पर छोड़ने के बजाय जाँचा जा सकता है।",
   "privacyWhatHavenIsDetailNoPush": "Haven में पुश नोटिफ़िकेशन भी जान-बूझकर नहीं रखे गए हैं। किसी नोटिफ़िकेशन सेवा को हर बार यह बताना पड़ता कि आपके सर्कलों में किसी के पास आपके लिए कुछ पहुँचाने को है, और इससे रिले की तुलना में आपकी आदतों के बारे में ज़्यादा पता चल जाता।",
-
   "privacyYourKeysTitle": "आपकी दो कुंजियाँ: एक गुप्त, एक साझा करने के लिए",
   "privacyYourKeysSubtitle": "आपकी पहचान क्या बनाता है, और क्या बैकअप करना है",
   "privacyYourKeysWhatTheyAre": "उपयोगकर्ता नाम और पासवर्ड की जगह आपके पास कुंजियों की एक जोड़ी होती है। गुप्त कुंजी यह साबित करती है कि आप ही आप हैं। सार्वजनिक कुंजी वह है जिससे दूसरे आपको खोजते और आमंत्रित करते हैं।",
@@ -212,7 +159,6 @@
   "privacyYourKeysNeverShareSecret": "जिसे भी आपकी गुप्त कुंजी मिल जाए, वह आप बन जाता है। वह आपके नाम से सर्कलों में शामिल हो सकता है या आपके नाम से कुछ प्रकाशित कर सकता है। इसे कभी किसी दूसरे ऐप, संदेश या वेबसाइट में पेस्ट न करें।",
   "privacyYourKeysDetailFormats": "यह जोड़ी एक secp256k1 कुंजी है, जो मानक Nostr स्वरूपों में दिखाई जाती है: सार्वजनिक कुंजी के लिए npub1… और गुप्त कुंजी के लिए nsec1…। हस्ताक्षर ऐप के भीतर ही होते हैं, और गुप्त बाइट हर उपयोग के बाद मेमोरी से मिटा दिए जाते हैं।",
   "privacyYourKeysDetailSeparation": "आपके सर्कलों के संदेशों को एन्क्रिप्ट करने वाली कुंजियाँ इस पहचान कुंजी से अलग होती हैं और केवल ऐप के पास रहती हैं। यह अलगाव जान-बूझकर है: जो कुंजी आपका नाम बताती है, वह वह कुंजी नहीं है जो आपके भेजे हुए को खोलती है।",
-
   "privacyPublicProfileTitle": "आपका नाम और फ़ोटो सार्वजनिक हैं",
   "privacyPublicProfileSubtitle": "किसी को भी दिखते हैं, केवल आपके सर्कलों को ही नहीं",
   "privacyPublicProfileIsPublic": "आपका सेट किया हुआ प्रदर्शन नाम और फ़ोटो व्यापक Nostr नेटवर्क पर प्रकाशित होते हैं। इन्हें कोई भी खोज सकता है, केवल आपके सर्कलों के लोग ही नहीं।",
@@ -222,7 +168,54 @@
   "privacyPublicProfileRemovalIsNotDeletion": "बाद में अपनी फ़ोटो हटाने से वह अप्रकाशित नहीं हो जाती। Haven आपकी प्रोफ़ाइल को एक खाली प्रोफ़ाइल से बदल देता है, पर छवि फ़ाइल उस सर्वर पर बनी रहती है जो उसे रखता है, और जो प्रतियाँ पहले डाउनलोड हो चुकी हैं वे कहीं न कहीं मौजूद रहती हैं। आप जो कुछ प्रकाशित करते हैं, उसे स्थायी मानें।",
   "privacyPublicProfileDetailKindZero": "प्रोफ़ाइल एक Nostr \"kind 0\" इवेंट है जिस पर आपकी पहचान कुंजी से हस्ताक्षर होते हैं। फ़ोटो किसी Blossom होस्ट पर अपलोड होती हैं — जब तक आप उसे बदलें नहीं, blossom.primal.net पर — और वह होस्ट छवि, आपकी सार्वजनिक कुंजी और आपका IP पता देखता है।",
   "privacyPublicProfileDetailExifStripped": "अपलोड करने से पहले Haven तस्वीर को दोबारा एनकोड करता है और कैमरे जो छिपा हुआ डेटा जोड़ते हैं उसे हटा देता है, जिसमें वह GPS स्थिति भी शामिल है जहाँ फ़ोटो ली गई थी। यहाँ इसका महत्व है: वरना छुट्टियों की एक तस्वीर आपके घर के निर्देशांक साथ ले जा सकती है।",
-
+  "privacyGroupHowLocationTravelsHeading": "आपका स्थान किस रास्ते जाता है",
+  "privacyRelaysTitle": "रिले: वे सर्वर जो संदेश आगे पहुँचाते हैं",
+  "privacyRelaysSubtitle": "आपके अपडेट किसके कंप्यूटरों से होकर जाते हैं",
+  "privacyRelaysWhatIsARelay": "Haven का अपना कोई सर्वर नहीं है, इसलिए आपके अपडेट दूसरे लोगों के सर्वरों से होकर जाते हैं। इन्हें रिले कहा जाता है: छोटे, स्वतंत्र सर्वर जिन्हें कोई भी चला सकता है। एक रिले किसी एन्क्रिप्टेड संदेश को थोड़ी देर रखता है, और जब आपका सर्कल माँगता है तो उसे आगे पहुँचा देता है।",
+  "privacyRelaysWhyMany": "कई रिले होने का मतलब है कि उनमें से कोई अकेला आपको काट नहीं सकता। अगर एक ऑफ़लाइन हो जाए, तो बाकी चलते रहते हैं। आप तय करते हैं कि कौन-से रिले इस्तेमाल हों, और उन्हें जब चाहें बदल सकते हैं।",
+  "privacyRelaysTwoLists": "Haven आपके लिए दो सूचियाँ रखता है। आपके इनबॉक्स रिले वे हैं जहाँ निमंत्रण आप तक पहुँचते हैं। आपके KeyPackage रिले वे हैं जहाँ से लोग आपको आमंत्रित करने के लिए ज़रूरी कुंजियाँ लेते हैं। हर सर्कल की भी अपनी एक सूची होती है, और उसी से उस सर्कल के एन्क्रिप्टेड अपडेट गुज़रते हैं।",
+  "privacyRelaysMeansForYou": "यहाँ ऐसा कुछ नहीं है जिसे गलत करने से जोखिम हो: एक रिले को हमेशा केवल एन्क्रिप्टेड डेटा ही दिखता है। पर आपके पास कम से कम एक ऐसा रिले होना चाहिए जहाँ तक पहुँचा जा सके, वरना कोई आपको आमंत्रित नहीं कर पाएगा और आपके सर्कलों से कोई अपडेट नहीं आएगा।",
+  "privacyRelaysDetailIndexers": "आपकी अपनी सूचियों से अलग, Haven दूसरे लोगों की प्रोफ़ाइल और कुंजियाँ खोजने के लिए कुछ सार्वजनिक डायरेक्टरी रिले से पूछता है। आपने अपने लिए केवल निजी रिले सेट किए हों, तब भी यह उनसे संपर्क करता है। उन्हें आपका नेटवर्क पता दिखता है, और यह भी कि आपने किन खातों के बारे में पूछा।",
+  "privacyRelaysDetailKeyListIsPublic": "आपकी KeyPackage रिले सूची खुद भी आपकी पहचान कुंजी से हस्ताक्षरित होकर नेटवर्क पर प्रकाशित होती है, ताकि दूसरे इसे पा सकें। अगर आप उस सूची में कोई निजी रिले जोड़ते हैं, तो उसका पता सार्वजनिक हो जाता है और आपसे जुड़ जाता है। जो रिले केवल किसी एक सर्कल की अपनी सूची में इस्तेमाल होता है, उसका इस तरह प्रचार नहीं होता।",
+  "privacyEncryptionTitle": "एन्क्रिप्शन कैसे काम करता है",
+  "privacyEncryptionSubtitle": "हर सर्कल की अपनी कुंजियाँ, और लोगों के आने-जाने पर क्या बदलता है",
+  "privacyEncryptionPerCircle": "आपके फ़ोन से निकलने से पहले ही आपका स्थान उसी पर एन्क्रिप्ट हो जाता है; इसके लिए MLS नाम का एक खुला मानक इस्तेमाल होता है। हर सर्कल अपनी खुद की कुंजियों वाला एक अलग एन्क्रिप्टेड समूह है। सर्कल के बाहर कोई यह नहीं पढ़ सकता कि उसके भीतर क्या भेजा गया — न कोई रिले, न Haven, न कोई दूसरा सर्कल जिसमें आप हैं।",
+  "privacyEncryptionWhenSomeoneJoins": "जब कोई शामिल होता है, तो सर्कल एक नई कुंजी पर चला जाता है। वह अपने आने के बाद भेजी गई बातें पढ़ सकता है, और उससे पहले की कोई नहीं। Haven किसी नए सदस्य को पिछले स्थान कभी नहीं भेजता।",
+  "privacyEncryptionWhenSomeoneLeaves": "जब कोई छोड़ता है या हटाया जाता है, तो सर्कल एक और नई कुंजी पर चला जाता है। ज़्यादा से ज़्यादा कुछ मिनटों में वह कुछ भी नया पढ़ नहीं पाता।",
+  "privacyEncryptionKeysChangeOnMembership": "कुंजियाँ तब बदलती हैं जब सदस्यता बदलती है, न कि किसी तय अंतराल पर। दो बदलावों के बीच जो कुछ भेजा जाता है, वह सब एक ही कुंजी के दायरे में आता है। इसलिए जिस सर्कल में लंबे समय से कोई बदलाव नहीं हुआ, उसमें से किसी को हटाने पर भी वह व्यक्ति सदस्य रहते हुए उसने जो भी संदेश सहेजे थे, वे सब खोल सकता है — हफ़्तों पुराने संदेश भी। उसके जाने के बाद भेजा गया कुछ भी वह नहीं खोल सकता।",
+  "privacyEncryptionMeansForYou": "एन्क्रिप्शन आपको आपके सर्कलों के बाहर के हर व्यक्ति से बचाता है। जो कभी किसी सर्कल के भीतर रहा हो, उससे यह नहीं बचा सकता। अगर आप किसी से पूरी तरह नाता तोड़ना चाहते हैं, तो उसे पुराने सर्कल से हटाने के बजाय एक नया सर्कल शुरू करना ज़्यादा सुरक्षित है।",
+  "privacyEncryptionDetailMls": "MLS (Messaging Layer Security) वही IETF मानक है जो दूसरे सुरक्षित मैसेंजर इस्तेमाल करते हैं। Haven जिस Marmot प्रोटोकॉल से Nostr नेटवर्क तक पहुँचता है, वही तय करता है कि MLS समूह रिले पर होकर कैसे चलते हैं। हर सर्कल जिस कुंजी से हस्ताक्षर करता है, वह आपकी सार्वजनिक Nostr पहचान कुंजी से अलग होती है।",
+  "privacyEncryptionDetailEpochs": "कुंजी की हर अवधि को एपोक कहा जाता है। आपका फ़ोन पिछली कुछ एपोक से रास्ते में आ रहे संदेशों को खोलने भर की सामग्री रखता है, और उसके बाद उसे मिटा देता है — इसीलिए Haven आपके पुराने संदेश आपके लिए वापस नहीं ला सकता, सिद्धांत रूप में भी नहीं।",
+  "privacyWhatOthersSeeTitle": "सदस्य क्या देखते हैं, और रिले क्या देखते हैं",
+  "privacyWhatOthersSeeSubtitle": "वे लोग जिनके साथ आप साझा करते हैं, और बीच के सर्वर",
+  "privacyWhatOthersSeeMembersHeading": "आपके सर्कलों के लोग",
+  "privacyWhatOthersSeeMembersExact": "सर्कल में हर कोई मानचित्र पर आपका सटीक स्थान देखता है, न कि कोई अनुमानित इलाका। ऐसी कोई सेटिंग नहीं है जो कुछ सदस्यों के साथ धुँधला स्थान और दूसरों के साथ सटीक स्थान साझा करे।",
+  "privacyWhatOthersSeeCannotPause": "जब तक Haven खुला है और आप किसी सर्कल में हैं, आपका स्थान हर दो-तीन मिनट में अपने आप चला जाता है। रोकने का कोई बटन नहीं है। बस एक ही स्विच है: ऐप से बाहर निकलने के बाद साझा करना चलता रहे या नहीं।",
+  "privacyWhatOthersSeeMembersLearnKey": "किसी सर्कल में शामिल होने पर हर सदस्य को आपकी सार्वजनिक कुंजी भी दिख जाती है। उसके ज़रिये वे आपकी सार्वजनिक प्रोफ़ाइल देख सकते हैं, और वह सब भी जो आपने कभी उस कुंजी से प्रकाशित किया है।",
+  "privacyWhatOthersSeeCoMemberIp": "किसी सदस्य की प्रोफ़ाइल फ़ोटो उसी के चुने हुए सर्वर से आती है। उसे लोड करने पर आपका नेटवर्क पता — और इससे मोटे तौर पर यह भी कि आप दुनिया में कहाँ हैं — उस सर्वर को चलाने वाले तक पहुँच जाता है। यह अपने आप होता है, आपके कुछ भी टैप किए बिना।",
+  "privacyWhatOthersSeeRelaysHeading": "रिले चलाने वाले",
+  "privacyWhatOthersSeeRelaysCannot": "रिले चलाने वाले आपका स्थान, आपके संदेश, आपके सर्कल का नाम या उसके सदस्यों की सूची नहीं पढ़ सकते। हर संदेश उनके पास एक नए, एक-बार इस्तेमाल होने वाले भेजने वाले पते से पहुँचता है, इसलिए वे यह नहीं बता सकते कि उसे किस सदस्य ने भेजा।",
+  "privacyWhatOthersSeeRelaysCan": "उन्हें आपका नेटवर्क पता दिखता है, यह भी कि आप कब ऑनलाइन हैं, और आपका ट्रैफ़िक कितना बड़ा और कितनी बार होता है। हर सर्कल के साथ एक यादृच्छिक टैग चलता है, इसलिए एक रिले उस सर्कल के सारे संदेश एक साथ रख सकता है और अंदाज़ा लगा सकता है कि उसमें कितने लोग हैं — यह जाने बिना कि वे कौन हैं।",
+  "privacyWhatOthersSeeMeansForYou": "सर्कल में उन्हीं लोगों को रखें जिन्हें आप अपने घर का पता भी दे देते हों। रिले और सर्कल के बाहर के लोगों के सामने एन्क्रिप्शन टिकता है, और एक VPN नेटवर्क पते की इस कमी को ढक देता है। जो सदस्य स्क्रीनशॉट सहेज ले, उसके सामने कुछ नहीं टिकता।",
+  "privacyWhatOthersSeeDetailTag": "किसी सर्कल का टैग उसके पूरे जीवन भर वही रहता है, इसलिए एक रिले उसके सारे संदेशों को अनिश्चित काल तक आपस में जोड़ सकता है। यह उस प्रोटोकॉल का गुण है जिस पर यह सब बना है, ऐसी चीज़ नहीं जिसे Haven बदल सके।",
+  "privacyWhatOthersSeeDetailExpiry": "Haven रिले से कहता है कि स्थान संदेशों को करीब चार मिनट बाद हटा दें। यह कहना केवल एक अनुरोध है: कोई रिले उन्हें और देर तक रख सकता है। निमंत्रणों पर कोई समय-सीमा ही नहीं होती, और वे आपके इनबॉक्स रिले पर अनिश्चित काल तक पड़े रह सकते हैं।",
+  "commonLearnMore": "और जानें",
+  "relaySettingsBackendCaption": "Haven का अपना कोई सर्वर नहीं है। आपके एन्क्रिप्टेड अपडेट स्वतंत्र सर्वरों से होकर जाते हैं, जिन्हें रिले कहा जाता है। ये न आपका स्थान देखते हैं और न यह कि आपके सर्कलों में कौन है।",
+  "privacyWhatOthersSeeScreenshots": "स्क्रीनशॉट का मामला ऑपरेटिंग सिस्टम पर निर्भर करता है, और दोनों सिस्टम इसमें अलग हैं। Android पर Haven पूरे ऐप में स्क्रीनशॉट और स्क्रीन रिकॉर्डिंग रोक देता है। iPhone पर वह ऐसा नहीं कर सकता: Haven ऐप स्विचर के पूर्वावलोकन को धुँधला कर देता है, पर कोई सदस्य फिर भी स्क्रीन पर दिख रही चीज़ को कैप्चर कर सकता है।",
+  "privacyGroupTheLimitsHeading": "सीमाएँ",
+  "privacyInferenceTitle": "आपके बारे में फिर भी क्या पता चल सकता है",
+  "privacyInferenceSubtitle": "वे निशान जिन्हें एन्क्रिप्शन नहीं ढक सकता",
+  "privacyInferenceWhatIsMetadata": "एन्क्रिप्शन यह छिपाता है कि आप क्या भेजते हैं। यह इस बात को नहीं छिपा सकता कि आपने कुछ भेजा है। संदेश के आस-पास बनने वाला पैटर्न — वह कब गया, कितना बड़ा था, आप किन सर्वरों से जुड़े हुए थे — मेटाडेटा कहलाता है, और सामग्री न दिखने पर भी यह दिखता रहता है।",
+  "privacyInferenceActivityPattern": "उसी पैटर्न से, आप जिस रिले का इस्तेमाल करते हैं, वह मोटे तौर पर जान सकता है कि आप कब सक्रिय रहते हैं और कितनी बार। Haven एक अतिरिक्त अपडेट तब भी भेजता है जब आप करीब सौ मीटर से ज़्यादा दूर चले जाते हैं, इसलिए काफ़ी लंबे रिकॉर्ड से इसका संकेत मिल सकता है कि आप चल रहे थे या एक ही जगह टिके थे — पर कहाँ थे, यह कभी नहीं दिखता।",
+  "privacyInferencePresence": "जब तक Haven चल रहा है, वह आपके रिले से एक खुला कनेक्शन बनाए रखता है, इसलिए उन्हें यह भी दिखता है कि आप ऑनलाइन हैं और आप किन सर्कलों पर नज़र रख रहे हैं। अपडेट मिनटों की जगह सेकंडों में पहुँचें, इसकी यही कीमत है।",
+  "privacyInferenceIpHeading": "आपका नेटवर्क पता",
+  "privacyInferenceIpAddress": "Haven जिस भी सर्वर से बात करता है, उसे वह पता दिखता है जहाँ से आपका फ़ोन जुड़ता है: आपके रिले, मानचित्र प्रदाता, और वह जो किसी सदस्य की प्रोफ़ाइल फ़ोटो रखता है। आपका इंटरनेट प्रदाता देखता है कि आप इनमें से किन सर्वरों तक पहुँचे, और कब। Haven खुद इन दोनों में से किसी को भी नहीं छिपाता।",
+  "privacyInferenceVpnHeading": "VPN इस्तेमाल करें या नहीं",
+  "privacyInferenceVpnHelps": "VPN आपके पते की जगह अपना पता रख देता है, इसलिए रिले और बाकी सर्वरों को यह नहीं दिखता कि आप कहाँ से जुड़ रहे हैं। यह आपके इंटरनेट प्रदाता से यह भी छिपाता है कि आप किन सर्वरों तक पहुँचते हैं। हम Mullvad की सलाह देते हैं।",
+  "privacyInferenceVpnLimits": "यह हर मर्ज़ की दवा नहीं है। VPN से यह ज़रा भी नहीं बदलता कि आपके सर्कल सदस्य क्या देखते हैं, और जिस रिले से आप बात कर रहे हैं, उससे यह आपके ट्रैफ़िक का समय और आकार नहीं छिपाता। यह किसी पर भरोसा करने की ज़रूरत खत्म नहीं करता, बल्कि आपका भरोसा VPN प्रदाता पर स्थानांतरित कर देता है।",
+  "privacyInferenceMeansForYou": "अगर आपको यह चिंता है कि कोई व्यक्ति नहीं, बल्कि नेटवर्क चलाने वाला कोई आपको मानचित्र पर रख देगा, तो VPN वह एक चीज़ है जो सबसे ज़्यादा काम आएगी। और अगर आपको अपने सर्कलों के लोगों की चिंता है, तो इससे ज़रा भी मदद नहीं मिलेगी।",
+  "privacyInferenceDetailJitter": "Haven जान-बूझकर अपडेट के बीच का अंतराल बदलता रहता है, इसलिए थोड़ी देर के रिकॉर्ड में कोई साफ़ लय नहीं दिखती। फिर भी कई घंटों का औसत निकालकर अपडेट की असली दर का अंदाज़ा लगाया जा सकता है। संदेशों का आकार बराबर करने के लिए उनमें कुछ भरा भी नहीं जाता, और स्थान अपडेट आकार के एक सँकरे दायरे में आते हैं, जिससे उन्हें स्थान अपडेट के रूप में पहचाना जा सकता है।",
+  "privacyInferenceDetailOutOfScope": "कुछ चीज़ें ऐसी हैं जिनके बारे में Haven कुछ नहीं कर सकता। एक साथ कई रिले पर नज़र रख सकने वाला कोई पक्ष, या आपका अपना फ़ोन जब वह किसी और के काबू में आ जाए — ये ऐसी बातें हैं जिन्हें यहाँ किसी भी डिज़ाइन से ठीक नहीं किया जा सकता।",
   "commonClearAll": "सभी साफ़ करें",
   "commonMemberCount": "{count, plural, one{1 सदस्य} other{{count} सदस्य}}",
   "commonNumber": "{count}",
@@ -236,7 +229,6 @@
   "compassSouthWest": "दक्षिण-पश्चिम",
   "compassWest": "पश्चिम",
   "compassNorthWest": "उत्तर-पश्चिम",
-
   "circlesTitle": "सर्कल",
   "circlesRefreshTooltip": "सर्कल रीफ़्रेश करें",
   "circlesRequiresIdentity": "सर्कल बनाने के लिए पहले पहचान सेटअप करनी होगी",
@@ -248,7 +240,6 @@
   "circlesLoadError": "सर्कल लोड नहीं हो सके",
   "circlesSelectToView": "सदस्य देखने के लिए कोई सर्कल चुनें",
   "circlesNoMembers": "इस सर्कल में कोई सदस्य नहीं है",
-
   "createCircleTitle": "सदस्य जोड़ें",
   "createCircleSelectedCount": "चयनित ({count})",
   "createCircleEmptyTitle": "सर्कल सदस्य जोड़ें",
@@ -259,7 +250,6 @@
   "createCircleNoAccountFound": "कोई Haven खाता नहीं मिला",
   "createCircleCouldNotVerify": "सदस्य की पुष्टि नहीं हो सकी",
   "createCircleSomethingWentWrong": "कुछ गड़बड़ हो गई",
-
   "nameCircleTitle": "अपने सर्कल को नाम दें",
   "nameCircleMembersToInvite": "{count, plural, one{1 सदस्य को आमंत्रित किया जाएगा} other{{count} सदस्यों को आमंत्रित किया जाएगा}}",
   "nameCircleNameLabel": "सर्कल का नाम",
@@ -276,7 +266,6 @@
   "nameCircleCreatedSnack": "{count, plural, one{सर्कल \"{name}\" बन गया! 1 निमंत्रण भेजा गया।} other{सर्कल \"{name}\" बन गया! {count} निमंत्रण भेजे गए।}}",
   "nameCircleIdentityError": "पहचान संबंधी त्रुटि। कृपया अपना पहचान सेटअप जाँचें।",
   "nameCircleCreateError": "सर्कल बनाने में विफल। कृपया फिर कोशिश करें।",
-
   "addMemberTitle": "{circleName} में जोड़ें",
   "addMemberInfo": "नए सदस्य निमंत्रण स्वीकार करने के बाद इस सर्कल के एन्क्रिप्टेड स्थान देख सकते हैं।",
   "addMemberAlreadyInCircle": "पहले से इस सर्कल में है",
@@ -285,13 +274,11 @@
   "addMemberSentToCircle": "{count, plural, one{{circleName} को निमंत्रण भेजा गया} other{{circleName} को निमंत्रण भेजे गए}}",
   "addMemberPartialDelivery": "निमंत्रण भेजे गए ({total} में से {sent})। बाकी की डिलीवरी लंबित है।",
   "addMemberError": "सदस्य जोड़ने में विफल। कृपया फिर कोशिश करें।",
-
   "qrScannerTitle": "QR कोड स्कैन करें",
   "qrScannerToggleFlash": "फ़्लैश चालू/बंद करें",
   "qrScannerSwitchCamera": "कैमरा बदलें",
   "qrScannerInstruction": "QR कोड को फ़्रेम के भीतर रखें",
   "qrScannerScanning": "स्कैन हो रहा है...",
-
   "circleMemberInvitationPending": "निमंत्रण लंबित",
   "circleMemberNoRecentLocation": "कोई हालिया स्थान नहीं",
   "circleMemberRemoveTooltip": "सर्कल से हटाएँ",
@@ -300,7 +287,6 @@
   "circleMemberHintNoLocation": "कोई स्थान उपलब्ध नहीं",
   "circleMemberHintMember": "सदस्य",
   "circleMemberHintTapToCenter": "उनके स्थान पर मानचित्र केंद्रित करने के लिए टैप करें",
-
   "pendingMemberRetryTooltip": "पुष्टि फिर से करें",
   "pendingMemberRemoveTooltip": "सदस्य हटाएँ",
   "pendingMemberValidating": "पुष्टि हो रही है",
@@ -309,7 +295,6 @@
   "pendingMemberCheckingAvailability": "उपलब्धता जाँची जा रही है...",
   "pendingMemberReadyToInvite": "आमंत्रित करने के लिए तैयार",
   "pendingMemberNeedsUpdate": "Haven अपडेट करना होगा",
-
   "memberSearchHint": "सदस्य ID दर्ज करें...",
   "memberSearchPasteTooltip": "क्लिपबोर्ड से पेस्ट करें",
   "memberSearchAddTooltip": "सदस्य जोड़ें",
@@ -317,14 +302,11 @@
   "memberSearchHelper": "संपर्कों से उनका Haven QR कोड या ID माँगें",
   "memberSearchNoValidId": "कोई मान्य Haven ID नहीं मिली",
   "memberSearchAlreadyAdded": "सदस्य पहले से जोड़ा गया है",
-
   "selectedMembersMore": "+{count} और",
-
   "invitationStatusPending": "निमंत्रण लंबित",
   "invitationStatusActive": "सक्रिय",
   "invitationStatusDeclined": "अस्वीकृत",
   "invitationStatusSemantics": "निमंत्रण स्थिति: {label}",
-
   "invitationCardSemantics": "{circleName} में शामिल होने का निमंत्रण, {inviter} द्वारा आमंत्रित, {count} सदस्य",
   "invitationCardInvitedBySemantics": "क्रिप्टोग्राफ़िक पहचानकर्ता {inviter} द्वारा आमंत्रित",
   "invitationCardInvitedBy": "आमंत्रित करने वाला: {inviter}",
@@ -339,14 +321,12 @@
   "invitationDeclinedSnack": "निमंत्रण अस्वीकार किया गया",
   "invitationAcceptError": "निमंत्रण स्वीकार करने में विफल। कृपया फिर कोशिश करें।",
   "invitationDeclineError": "निमंत्रण अस्वीकार करने में विफल। कृपया फिर कोशिश करें।",
-
   "circleSelectorLabel": "सर्कल चयनकर्ता",
   "circleSelectorPlaceholder": "कोई सर्कल चुनें",
   "circleSelectorNewCircle": "नया सर्कल",
   "circleSelectorLoadError": "सर्कल लोड नहीं हो सके",
   "circleSelectorExpandedAnnouncement": "सर्कल सूची विस्तृत हुई",
   "circleSelectorCollapsedAnnouncement": "सर्कल सूची संक्षिप्त हुई",
-
   "circleDetailsButtonTooltip": "सर्कल विवरण",
   "circleDetailsTitle": "सर्कल विवरण",
   "circleDetailsRelaysHeading": "इस सर्कल के लिए रिले",
@@ -360,7 +340,6 @@
   "leaveCircleIdentityUnavailable": "पहचान उपलब्ध नहीं",
   "leaveCircleSuccess": "सर्कल सफलतापूर्वक छोड़ा गया",
   "leaveCircleError": "सर्कल छोड़ने में विफल",
-
   "circleBlockedBannerTitle": "यह सर्कल अपडेट नहीं किया जा सकता",
   "circleBlockedBannerBody": "इस सर्कल की एन्क्रिप्शन में कुछ गड़बड़ हो गई, इसलिए Haven अब इसमें न तो अपडेट भेज सकता है और न ही प्राप्त कर सकता है। आपको आख़िरी बार जो पता था, वह आप अभी भी नीचे देख सकते हैं, या यह सर्कल छोड़ सकते हैं।",
   "legacyCircleBannerTitle": "इस सर्कल को फिर से बनाना ज़रूरी है",
@@ -375,19 +354,16 @@
   "legacyCutoverExplainerCirclesNeedRecreation": "बेहतर सुरक्षा के लिए, आपके सर्कल फिर से बनाने होंगे और उनके सदस्यों को दोबारा आमंत्रित करना होगा, तभी आप उनमें फिर से स्थान साझा कर पाएँगे।",
   "legacyCutoverExplainerAcknowledge": "ठीक है",
   "relaySettingsLegacyRetractionPending": "Haven अभी भी हाल के सुरक्षा अपडेट से कुछ डेटा साफ़ कर रहा है। आपके फिर से ऑनलाइन आते ही यह अपने आप पूरा हो जाएगा।",
-
   "circlesPanelCollapsedAnnouncement": "सर्कल पैनल संक्षिप्त हुआ",
   "circlesPanelExpandedAnnouncement": "सर्कल पैनल विस्तृत हुआ",
   "circlesPanelSlightlyOpenAnnouncement": "सर्कल पैनल थोड़ा खुला",
   "circlesPanelHalfOpenAnnouncement": "सर्कल पैनल आधा खुला",
   "circleMemberAnnouncementSelf": "आप",
   "circleMemberAnnouncementFallback": "सदस्य",
-
   "invitationsRefreshTooltip": "निमंत्रण रीफ़्रेश करें",
   "invitationsLoadError": "निमंत्रण लोड नहीं हो सके",
   "invitationsEmptyTitle": "कोई निमंत्रण नहीं",
   "invitationsEmptyMessage": "जब कोई आपको किसी सर्कल में आमंत्रित करेगा, तो वह यहाँ दिखेगा।",
-
   "refreshRingSemanticNoInbox": "कोई इनबॉक्स कॉन्फ़िगर नहीं है, रिले सेटिंग्स खोलता है",
   "refreshRingSemanticChecking": "{total, plural, =1{{total} में से {checked} रिले जाँचा गया} other{{total} में से {checked} रिले जाँचे गए}}",
   "refreshRingSemanticAllOk": "{total, plural, =1{रिले ने जवाब दिया} other{सभी {total} रिले ने जवाब दिया}}",
@@ -404,7 +380,6 @@
   "refreshRingAnnouncementAllFound": "सभी रिले में आपका डेटा है",
   "refreshRingAnnouncementPartialFound": "{total} में से {ok} रिले में आपका डेटा है",
   "refreshRingAnnouncementNoneFound": "किसी भी रिले में आपका डेटा नहीं है",
-
   "identityTitle": "पहचान",
   "identityLoadError": "आपकी पहचान लोड करने में कुछ गड़बड़ हो गई। कृपया फिर कोशिश करें।",
   "identityMissingTitle": "कोई पहचान नहीं",
@@ -417,7 +392,6 @@
   "profileIsPublicNoticeTitle": "प्रोफ़ाइल सार्वजनिक है",
   "profileIsPublicNoticeBody": "आपका प्रदर्शन नाम और फ़ोटो Nostr नेटवर्क पर किसी को भी दिखते हैं, केवल आपके सर्कलों के सदस्यों को ही नहीं। वही साझा करें जिसे सार्वजनिक करने में आप सहज हों।",
   "identityRefreshProfileTooltip": "सार्वजनिक प्रोफ़ाइल रीफ़्रेश करें",
-
   "identityAdvancedExportError": "गुप्त कुंजी निर्यात करने में विफल। कृपया फिर कोशिश करें।",
   "identityAdvancedDeleteTitle": "पहचान हटाएँ?",
   "identityAdvancedDeleteBody": "इससे आपकी पहचान स्थायी रूप से हट जाएगी। अगर आप इसे वापस पाना चाहते हैं तो सुनिश्चित करें कि आपने अपनी गुप्त कुंजी का बैकअप ले लिया है।",
@@ -438,13 +412,11 @@
   "identityAdvancedHideSecretKey": "गुप्त कुंजी छिपाएँ",
   "identityAdvancedCopySecretKeyTooltip": "गुप्त कुंजी कॉपी करें",
   "identityAdvancedDeleteIdentityCta": "पहचान हटाएँ",
-
   "qrCodeLoadError": "आपकी सार्वजनिक कुंजी लोड करने में कुछ गड़बड़ हो गई। कृपया फिर कोशिश करें।",
   "qrCodeYourPublicKeyLabel": "आपकी सार्वजनिक कुंजी",
   "qrCodeWhatIsThisTitle": "यह क्या है?",
   "qrCodeExplainerKeys": "Haven, Nostr पर चलता है, जो एक खुला नेटवर्क है जिसके पीछे कोई कंपनी खाता या साइन-अप नहीं है। आपकी पहचान बस कुंजियों की एक जोड़ी है: एक गुप्त कुंजी जो केवल आपके पास होती है, और इसी से बनी यह सार्वजनिक कुंजी।",
-  "qrCodeExplainerUsername": "आपकी सार्वजनिक कुंजी एक ऐसे उपयोगकर्ता नाम की तरह काम करती है जिसे साझा करना सुरक्षित है। लोग आपको किसी सर्कल में आमंत्रित करने के लिए यह कोड स्कैन करते हैं, या आपकी सार्वजनिक कुंजी पेस्ट करते हैं। इसे साझा करने से न तो आपका स्थान उजागर हो सकता है, जो केवल उन सर्कलों के सदस्यों को दिखता है जिनमें आप शामिल हुए हैं, और न ही आपका नाम और फ़ोटो, जो तब तक इसी डिवाइस पर रहते हैं जब तक आप कोई सार्वजनिक प्रोफ़ाइल प्रकाशित करना न चुनें।",
-
+  "qrCodeExplainerUsername": "आपकी सार्वजनिक कुंजी एक ऐसे उपयोगकर्ता नाम की तरह काम करती है जिसे साझा करना सुरक्षित है। लोग आपको किसी सर्कल में आमंत्रित करने के लिए यह कोड स्कैन करते हैं, या आपकी सार्वजनिक कुंजी पेस्ट करते हैं। इसे साझा करने से आपका स्थान उजागर नहीं हो सकता, जो केवल उन सर्कलों के सदस्यों को दिखता है जिनमें आप शामिल हुए हैं। आपका प्रदर्शन नाम और फ़ोटो पहले से ही सार्वजनिक हैं, इसलिए इसे साझा करने से उनके बारे में और कुछ उजागर नहीं होता।",
   "displayNameCardTitle": "प्रदर्शन नाम",
   "displayNameCardLoadError": "आपका प्रदर्शन नाम लोड नहीं हो सका। बाद में फिर कोशिश करें।",
   "displayNameCardHint": "अपना प्रदर्शन नाम दर्ज करें",
@@ -454,7 +426,6 @@
   "displayNameCardRetryLabel": "सहेजना विफल। फिर कोशिश करें",
   "displayNameCardSavedAnnouncement": "प्रदर्शन नाम सहेजा गया",
   "displayNameCardSaveFailedAnnouncement": "सहेजना विफल, फिर कोशिश करें",
-
   "keyDisplayCopiedToClipboard": "{label} क्लिपबोर्ड पर कॉपी किया गया",
   "keyDisplaySemantics": "{label}: {state}",
   "keyDisplayStateRevealed": "दिखाई गई",
@@ -464,7 +435,6 @@
   "keyDisplayCopyTooltip": "कॉपी करें",
   "keyDisplayCompactCopied": "कुंजी क्लिपबोर्ड पर कॉपी की गई",
   "keyDisplayCompactTapToCopy": "कॉपी करने के लिए टैप करें",
-
   "npubQrCopiedSnack": "सार्वजनिक कुंजी क्लिपबोर्ड पर कॉपी की गई",
   "npubQrCopyButton": "सार्वजनिक कुंजी कॉपी करें",
   "circleMemberPublicKeyCopied": "सार्वजनिक कुंजी क्लिपबोर्ड पर कॉपी की गई",
@@ -481,7 +451,6 @@
   "memberNicknameSheetClearedAnnouncement": "उपनाम हटाया गया",
   "npubQrScanLabel": "मुझे जोड़ने के लिए स्कैन करें",
   "npubQrSemanticsLabel": "आपकी सार्वजनिक पहचान का QR कोड",
-
   "photoHeaderRemoveTitle": "प्रोफ़ाइल फ़ोटो हटाएँ?",
   "photoHeaderRemoveBody": "इससे आपकी फ़ोटो आपकी सार्वजनिक प्रोफ़ाइल से हट जाती है।",
   "photoHeaderEditPhoto": "फ़ोटो संपादित करें",
@@ -489,7 +458,6 @@
   "photoHeaderViewPhotoSemantics": "प्रोफ़ाइल फ़ोटो देखें",
   "photoHeaderAddPhotoSemantics": "प्रोफ़ाइल फ़ोटो जोड़ें",
   "photoHeaderChangePhotoSemantics": "प्रोफ़ाइल फ़ोटो बदलें",
-
   "avatarPickerPhotoUpdated": "फ़ोटो अपडेट हुई — आपकी सार्वजनिक Nostr प्रोफ़ाइल पर प्रकाशित।",
   "avatarPickerPhotoRemoved": "फ़ोटो हटाई गई।",
   "avatarPickerRemoveError": "आपकी फ़ोटो हटाई नहीं जा सकी। कृपया फिर कोशिश करें।",
@@ -497,11 +465,9 @@
   "avatarPickerCropTitle": "फ़ोटो क्रॉप करें",
   "avatarPickerCropDone": "हो गया",
   "avatarPickerCropCancel": "रद्द करें",
-
   "avatarFullscreenClose": "बंद करें",
   "avatarFullscreenSemantics": "प्रोफ़ाइल फ़ोटो, पूरी स्क्रीन",
   "avatarFullscreenLoadError": "फ़ोटो लोड नहीं हो सकी",
-
   "mapInitializing": "आरंभ हो रहा है...",
   "mapInitFailedTitle": "आरंभ विफल",
   "mapInitFailedMessage": "स्थान सेवाएँ आरंभ करने में विफल।",
@@ -518,17 +484,13 @@
   "mapOpenInAppleMapsBody": "Apple Maps को केवल मानचित्र निर्देशांक भेजा जाता है, कभी कोई नाम या पहचान नहीं।",
   "mapOpenInAppleMapsConfirm": "Apple Maps में खोलें",
   "mapOpenMapsError": "Maps नहीं खुल सका",
-
   "mapControlsZoomIn": "ज़ूम इन करें",
   "mapControlsZoomOut": "ज़ूम आउट करें",
   "mapControlsRecenter": "फिर केंद्रित करें",
   "mapControlsRecenterFab": "मेरे स्थान पर फिर केंद्रित करें",
-
   "mapAttributionCreditsButton": "मानचित्र क्रेडिट और लाइसेंस",
-
   "userLocationMarkerSemantics": "आपके स्थान का मार्कर{accuracy}",
   "userLocationMarkerAccuracy": ". सटीकता: {meters} मीटर",
-
   "memberMarkerMinutesShort": "{count}m",
   "memberMarkerHoursShort": "{count}h",
   "memberMarkerDaysShort": "{count}d",
@@ -547,7 +509,6 @@
   "addRelaySheetErrorInsecureScheme": "wss:// इस्तेमाल करें ताकि इस रिले तक का ट्रैफ़िक एन्क्रिप्टेड रहे।",
   "addRelaySheetErrorHasCredentials": "रिले URL में क्रेडेंशियल नहीं होने चाहिए।",
   "addRelaySheetErrorInvalidFormat": "wss://relay.example.com जैसा रिले पता दर्ज करें।",
-
   "avatarSemanticsLabel": "उपयोगकर्ता अवतार",
   "avatarSemanticsFor": "{initials} के लिए",
   "avatarSemanticsOnline": "ऑनलाइन",

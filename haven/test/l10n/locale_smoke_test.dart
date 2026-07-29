@@ -34,11 +34,13 @@ const _rtlLanguages = {'ar', 'fa', 'ur'};
 /// Deliberately a subset, and worth stating plainly: the Privacy topic pages
 /// are the most prose-heavy surfaces in the app, so sweeping every topic in
 /// every locale would multiply this suite several times over for little added
-/// signal. These four are the worst cases — de and ru run 20–35% longer than
-/// English, ar and fa add RTL on top of length. The Privacy *hub* is still
-/// swept in every locale below, and every topic is covered at 320dp / 200%
-/// scale in `privacy_topic_page_test.dart`.
-const _privacyTopicSweepLanguages = ['de', 'ru', 'ar', 'fa'];
+/// signal. These five are the worst cases — de and ru run 20–35% longer than
+/// English, ar and fa add RTL on top of length, and fr currently holds the
+/// longest topic title in the app (`privacyRelaysTitle`, 55 characters), which
+/// is what stresses the app-bar rather than the body. The Privacy *hub* is
+/// still swept in every locale below, and every topic is covered at 320dp /
+/// 200% scale in `privacy_topic_page_test.dart`.
+const _privacyTopicSweepLanguages = ['de', 'ru', 'fr', 'ar', 'fa'];
 
 /// A narrow phone surface (logical 360×690) — overflow is far likelier here
 /// than on the 800×600 test default, so this is where long translations bite.
@@ -150,9 +152,10 @@ void main() {
   });
 
   // The longest-rendering locales at a large accessibility font scale — the
-  // worst case for clipping. German compounds run long; Arabic adds RTL.
+  // worst case for clipping. German compounds run long; Arabic adds RTL; French
+  // carries the longest Privacy topic title, so it stresses the app bar.
   group('large text scale (1.5x)', () {
-    for (final code in const ['de', 'ar']) {
+    for (final code in const ['de', 'ar', 'fr']) {
       final matches = AppLocalizations.supportedLocales.where(
         (l) => l.languageCode == code,
       );

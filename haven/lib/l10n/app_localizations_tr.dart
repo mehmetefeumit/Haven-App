@@ -125,7 +125,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get onboardingValueProp3Body =>
-      'E-posta yok, telefon numarası yok, kayıt yok. Haven yalnızca telefonunuzda yaşayan özel bir kimlik oluşturur; bu kimliği gerçek sizinle ilişkilendiren hiçbir şey yoktur.';
+      'E-posta yok, telefon numarası yok, kayıt yok. Haven, gizli anahtarı telefonunuzdan hiç çıkmayan bir kimlik oluşturur; bu yüzden kimsenin teslim edebileceği bir hesap da yoktur.';
 
   @override
   String get onboardingValueProp1Summary =>
@@ -137,7 +137,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get onboardingValueProp3Summary =>
-      'E-posta, telefon veya kayıt yok. Hiçbir şey sizinle ilişkilendirilmez.';
+      'E-posta, telefon veya kayıt yok. Gizli anahtarınız telefonunuzdan hiç çıkmaz.';
 
   @override
   String get onboardingCreateIdentityTitle => 'Kimliğinizi oluşturun';
@@ -272,7 +272,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get relaySettingsKeyPackageSubtitle =>
-      'kind 10051, davet edilenlerin şifreleme anahtarlarınızı bulduğu yer';
+      'kind 10002, davet edilenlerin şifreleme anahtarlarınızı bulduğu yer';
 
   @override
   String get relaySettingsLoadRelaysError => 'Aktarıcılar yüklenemedi.';
@@ -347,59 +347,6 @@ class AppLocalizationsTr extends AppLocalizations {
   @override
   String get relaySettingsEmptyMessage =>
       'Başkalarının size ulaşabilmesi için en az bir aktarıcıya ihtiyacınız var. Haven varsayılanlarını geri yüklemek için aşağıya dokunun.';
-
-  @override
-  String get relaySettingsExplainerSemantics =>
-      'Haven aktarıcıları nasıl çalışır';
-
-  @override
-  String get relaySettingsExplainerHeading => 'Bu nasıl çalışır';
-
-  @override
-  String get relaySettingsExplainerNostr =>
-      'Haven\'ın merkezi bir sunucusu yoktur. İki açık teknolojiyle çalışır. Nostr, herkesin işletebileceği, aktarıcı adı verilen bağımsız sunuculardan oluşan bir ağdır; mesajlarınızı alır, kısa süre tutar ve kişileriniz istediğinde onlara iletir. Hiçbir aktarıcı vazgeçilmez değildir; biri çevrimdışı olsa bile diğerleri çalışmaya devam eder ve bir aktarıcının teslim etmek zorunda kalabileceği her şey yalnızca şifreli veridir.';
-
-  @override
-  String get relaySettingsExplainerMarmot =>
-      'Marmot protokolü, mesajlarınızı cihazınızdan çıkmadan önce MLS (Messaging Layer Security) standardını kullanarak şifreler. Her çevre, kendi anahtarlarına sahip ayrı bir şifreli gruptur; böylece farklı çevreler birbirine bağlanamaz. Bu anahtarlar zamanla ilerlemeye de devam eder; ileri gizlilik denen bu özellik sayesinde, sonradan ele geçen bir anahtar bile daha önceki mesajlarınızı açamaz.';
-
-  @override
-  String get relaySettingsExplainerMetadata =>
-      'Bu nedenle bir aktarıcı; konumunuzu, mesajlarınızı, çevrelerinizde kimlerin olduğunu ya da bu mesajlardaki kimliğinizi asla görmez. Her mesaj, tek kullanımlık taze bir gönderim adresinden yayımlanır; böylece mesajdaki hiçbir şey onu hesabınıza bağlamaz. Yine de bir aktarıcı bazı üst verileri görür: çevre başına rastgele bir etiket, trafiğinizin zamanlaması ve boyutu ile bağlandığınız ağ adresi.';
-
-  @override
-  String get relaySettingsExplainerInboxTerm => 'Gelen kutusu aktarıcıları';
-
-  @override
-  String get relaySettingsExplainerInboxBody =>
-      ' posta kutunuzdur: bir çevreye katılma davetlerinizin, kendileri de şifrelenmiş halde, sizin almanız için iletildiği yerdir. Birinin sizi davet edebilmesi için bu aktarıcılardan birine ulaşabilmesi gerekir.';
-
-  @override
-  String get relaySettingsExplainerKeyPackageTerm => 'KeyPackage aktarıcıları';
-
-  @override
-  String get relaySettingsExplainerKeyPackageBody =>
-      ' açık anahtarlarınızdan oluşan ve paylaşılması güvenli olan küçük bir paketi yayımladığınız yerdir. Hesabınızı bilen biri, sizi bir çevreye eklemek için bunu bu aktarıcılardan alır.';
-
-  @override
-  String get relaySettingsExplainerOwnRelayTerm =>
-      'Kendi aktarıcınızı kullanmak.';
-
-  @override
-  String get relaySettingsExplainerOwnRelayBody =>
-      ' Her çevre, katıldıklarında her üyeyle paylaşılan kendi aktarıcı listesini de taşır; çevrenin süregelen şifreli güncellemeleri, gelen kutunuzdan değil, bu listeden geçer. Yani genel aktarıcılardan kaçınmayı tercih ederseniz kendi aktarıcınızı işletip bir çevreyi ona yönlendirebilirsiniz: herkes katıldıktan sonra o çevrenin trafiği yalnızca onun üzerinden akabilir.';
-
-  @override
-  String get relaySettingsExplainerReachabilityTerm =>
-      'Burada püf nokta ulaşılabilirliktir.';
-
-  @override
-  String get relaySettingsExplainerReachabilityBody =>
-      ' Her üyenin o aktarıcıya bağlanabilmesi gerekir ve birini ilk kez davet ettiğinizde, ikinizin de ulaşabileceği bir aktarıcıya (örneğin herkesin gelen kutusu ve KeyPackage aktarıcısı olarak listelenen aynı özel aktarıcı) ihtiyacınız olur. Özel bir aktarıcı da diğerleriyle aynı şifreli trafiği ve zamanlamayı görür; siz yalnızca onu kimin işlettiğini denetlersiniz.';
-
-  @override
-  String get relaySettingsExplainerFooter =>
-      'Her iki listeye de istediğiniz zaman aktarıcı ekleyebilir ya da kaldırabilirsiniz. Daha fazla aktarıcı size ulaşmayı kolaylaştırır; daha azı ise şifreli trafiğinizin nereye gittiği üzerinde size daha fazla denetim verir.';
 
   @override
   String get locationSettingsTitle => 'Konum';
@@ -529,59 +476,6 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get aboutLinkOpenError => 'Bağlantı açılamadı';
-
-  @override
-  String get aboutWhoCanSeeTitle => 'Kim neyi görebilir';
-
-  @override
-  String get aboutWhoCanSeeIntro =>
-      'Tam konumunuzu yalnızca seçtiğiniz kişiler okuyabilir. Başlıca tarafların neyi görüp neyi göremediği aşağıdadır.';
-
-  @override
-  String get aboutActorCirclesWho => 'Paylaştığınız çevre üyeleri';
-
-  @override
-  String get aboutActorCirclesSees =>
-      'Tam konumunuzu ve seçtiğiniz görünen adı görür; ancak yalnızca onlarla paylaştığınız çevrelerin içinde, asla diğer çevrelerinizde değil.';
-
-  @override
-  String get aboutActorRelaysWho => 'Aktarıcı işletmecileri';
-
-  @override
-  String get aboutActorRelaysSees =>
-      'Mesajlarınızı ileten sunuculardır. IP adresinizi, altında yayım yaptığınız açık anahtarı (adınız değil, rastgele bir kimlik), trafiğinizin boyutunu ve zamanlamasını ve birini ararken hangi hesabı aradığınızı görürler. Konumunuzu, mesajlarınızı, çevre adlarınızı ya da çevrelerinizde kimlerin olduğunu asla okuyamazlar.';
-
-  @override
-  String get aboutActorMapWho => 'Harita sağlayıcısı (Stadia Maps)';
-
-  @override
-  String get aboutActorMapSees =>
-      'Yalnızca harita açıkken: doğru harita görüntülerini gönderebilmesi için IP adresinizi ve görüntülediğiniz alanı görür. Çevrelerinizi ya da paylaştığınız konumu asla görmez. Stadia, IP adreslerini anonimleştirir ve verilerinizi satmaz.';
-
-  @override
-  String get aboutActorDevelopersWho => 'Haven\'ın geliştiricileri';
-
-  @override
-  String get aboutActorDevelopersSees =>
-      'Hiçbir şey. Haven hiçbir sunucu işletmez ve hiçbir analiz verisi toplamaz. Bir geliştirici, ancak bir aktarıcı işletmecisinin gördüğünü görebilir ve yalnızca işlettikleri bir aktarıcıyı kullandıysanız.';
-
-  @override
-  String get aboutWhoCanSeeMetadataNote =>
-      'Yine de etkinliğiniz görünmez değildir. Kullandığınız bir aktarıcı ya da ağınızı izleyen biri; bağlantı zamanlamasından ve mesaj boyutlarından etkin olduğunuzu, kabaca ne zaman ve ne sıklıkta olduğunu anlayabilir.';
-
-  @override
-  String get aboutScreenshotTitle => 'Ekran görüntüsü koruması';
-
-  @override
-  String get aboutScreenshotBody =>
-      'Android\'de Haven, kazara konum açığa çıkmasını önlemek için ekran görüntüsü almayı ve ekran kaydını uygulama genelinde engeller. Bu, uygulamadaki her ekrana (harita ve üye listeleri dahil) uygulanan bir sistem düzeyi korumadır (FLAG_SECURE).';
-
-  @override
-  String get aboutVpnTitle => 'Bir VPN ile daha gizli kalın';
-
-  @override
-  String get aboutVpnBody =>
-      'Aktarıcılar ve harita sağlayıcısı IP adresinizi görür, internet sağlayıcınız da hangi sunuculara ulaştığınızı görür. Güvenilir bir VPN, IP adresinizi onlardan gizler. Mullvad\'ı öneririz. Çevre üyelerinizin gördüğünü değiştirmez ve güveni VPN sağlayıcısına kaydırır.';
 
   @override
   String get aboutVpnLinkLabel => 'mullvad.net';
@@ -725,6 +619,189 @@ class AppLocalizationsTr extends AppLocalizations {
   @override
   String get privacyPublicProfileDetailExifStripped =>
       'Haven, yüklemeden önce resmi yeniden kodlar ve kameraların eklediği gizli verileri, fotoğrafın çekildiği GPS konumu da dahil, kaldırır. Bu burada önemlidir: aksi halde bir tatil fotoğrafı evinizin koordinatlarını taşıyabilir.';
+
+  @override
+  String get privacyGroupHowLocationTravelsHeading =>
+      'Konumunuzun izlediği yol';
+
+  @override
+  String get privacyRelaysTitle => 'Aktarıcılar: mesajları ileten sunucular';
+
+  @override
+  String get privacyRelaysSubtitle =>
+      'Güncellemeleriniz kimin bilgisayarlarından geçiyor';
+
+  @override
+  String get privacyRelaysWhatIsARelay =>
+      'Haven\'ın kendine ait bir sunucusu yok; bu yüzden güncellemeleriniz başkalarının sunucularından geçer. Bunlara aktarıcı denir: herkesin işletebileceği küçük, bağımsız sunucular. Bir aktarıcı şifreli bir mesajı kısa süre tutar, sonra çevreniz istediğinde onu iletir.';
+
+  @override
+  String get privacyRelaysWhyMany =>
+      'Birden fazla aktarıcı kullandığınızda hiçbiri tek başına bağlantınızı kesemez. Biri çevrimdışı olursa diğerleri çalışmaya devam eder. Hangi aktarıcıları kullanacağınızı siz seçersiniz ve bunları istediğiniz zaman değiştirebilirsiniz.';
+
+  @override
+  String get privacyRelaysTwoLists =>
+      'Haven sizin için iki liste tutar. Davetler, gelen kutusu aktarıcılarınıza ulaşır. Sizi davet etmek için gereken anahtarları ise başkaları KeyPackage aktarıcılarınızdan alır. Her çevrenin de kendi listesi vardır; o çevrenin şifreli güncellemeleri bu listeden geçer.';
+
+  @override
+  String get privacyRelaysMeansForYou =>
+      'Burada yanlış yapıp riske girebileceğiniz bir şey yok: bir aktarıcı yalnızca şifreli veri görür. Ama erişilebilir en az bir aktarıcıya ihtiyacınız var; yoksa kimse sizi davet edemez ve çevreleriniz sessizleşir.';
+
+  @override
+  String get privacyRelaysDetailIndexers =>
+      'Haven, kendi listelerinizden bağımsız olarak, başkalarının profillerini ve anahtarlarını aramak için herkese açık az sayıda dizin aktarıcısına başvurur. Yalnızca kendinize ait özel aktarıcılar tanımlamış olsanız bile bunlara bağlanır. Bu aktarıcılar ağ adresinizi ve hangi hesapları sorduğunuzu görür.';
+
+  @override
+  String get privacyRelaysDetailKeyListIsPublic =>
+      'KeyPackage aktarıcı listeniz de başkalarının onu bulabilmesi için kimlik anahtarınızla imzalanarak ağa yayımlanır. Bu listeye özel bir aktarıcı eklerseniz onun adresi herkese açık olur ve sizinle ilişkilendirilir. Yalnızca tek bir çevrenin kendi listesinde kullanılan bir aktarıcı ise böyle duyurulmaz.';
+
+  @override
+  String get privacyEncryptionTitle => 'Şifreleme nasıl çalışır';
+
+  @override
+  String get privacyEncryptionSubtitle =>
+      'Her çevrenin kendi anahtarları; biri katıldığında veya ayrıldığında ne değişir';
+
+  @override
+  String get privacyEncryptionPerCircle =>
+      'Konumunuz, MLS adlı açık bir standart kullanılarak telefonunuzdan çıkmadan önce şifrelenir. Her çevre, kendi anahtarlarına sahip ayrı bir şifreli gruptur. Bir çevrenin dışındaki hiç kimse onun içinde gönderilenleri okuyamaz: ne bir aktarıcı, ne Haven, ne de üyesi olduğunuz başka bir çevre.';
+
+  @override
+  String get privacyEncryptionWhenSomeoneJoins =>
+      'Biri katıldığında çevre yeni bir anahtara geçer. Yeni üye, geldikten sonra gönderilenleri okuyabilir; gelişinden öncesine ait hiçbir şeyi okuyamaz. Haven yeni bir üyeye geçmiş konumları hiçbir zaman göndermez.';
+
+  @override
+  String get privacyEncryptionWhenSomeoneLeaves =>
+      'Biri ayrıldığında ya da çıkarıldığında çevre yine yeni bir anahtara geçer. En fazla birkaç dakika içinde o kişi artık yeni hiçbir şeyi okuyamaz.';
+
+  @override
+  String get privacyEncryptionKeysChangeOnMembership =>
+      'Anahtarlar yalnızca çevrenin üyeleri değiştiğinde değişir; belirli aralıklarla ya da zaman geçtikçe kendiliğinden değişmez. Bu değişiklikler arasında gönderilen her şey tek bir anahtarla korunur. Bu yüzden uzun süredir aynı kalan bir çevreden çıkardığınız biri, üye olduğu sırada kaydettiği mesajları — haftalar öncesine ait olanları bile — hâlâ açabilir. Ayrıldıktan sonra gönderilenlerin hiçbirini açamaz.';
+
+  @override
+  String get privacyEncryptionMeansForYou =>
+      'Şifreleme sizi çevrelerinizin dışındaki herkese karşı korur. Bir zamanlar çevrenizin içinde olmuş birine karşı koruyamaz. Biriyle ilişkinizi tamamen kesmek istiyorsanız, onu eski bir çevreden çıkarmak yerine yeni bir çevre kurmak daha güvenlidir.';
+
+  @override
+  String get privacyEncryptionDetailMls =>
+      'MLS (Messaging Layer Security), başka güvenli mesajlaşma uygulamalarının da kullandığı IETF standardıdır. Haven, Nostr ağına Marmot protokolü üzerinden bağlanır; bu protokol, MLS gruplarının aktarıcılar üzerinden nasıl taşındığını tanımlar. Her çevrenin imzalarken kullandığı anahtar, herkese açık Nostr kimlik anahtarınızdan ayrıdır.';
+
+  @override
+  String get privacyEncryptionDetailEpochs =>
+      'Her anahtar dönemine epoch denir. Cihazınız yalnızca son birkaç epoch\'tan hâlâ yolda olan mesajları çözmeye yetecek kadar anahtar malzemesi tutar, sonra bunu atar. Haven\'ın eski mesajlarınızı ilke olarak bile geri getirememesinin nedeni budur.';
+
+  @override
+  String get privacyWhatOthersSeeTitle =>
+      'Üyeler neyi görür, aktarıcılar neyi görür';
+
+  @override
+  String get privacyWhatOthersSeeSubtitle =>
+      'Paylaştığınız kişiler ve aradaki sunucular';
+
+  @override
+  String get privacyWhatOthersSeeMembersHeading => 'Çevrelerinizdeki kişiler';
+
+  @override
+  String get privacyWhatOthersSeeMembersExact =>
+      'Bir çevredeki herkes haritada tam konumunuzu görür, yaklaşık bir alanı değil. Bazı üyelerle daha belirsiz, bazılarıyla kesin bir konum paylaşmanızı sağlayan bir ayar yoktur.';
+
+  @override
+  String get privacyWhatOthersSeeCannotPause =>
+      'Haven açık olduğu ve bir çevrede bulunduğunuz sürece konumunuz birkaç dakikada bir kendiliğinden gönderilir. Duraklatma düğmesi yoktur. Değiştirebileceğiniz tek şey, uygulamadan çıktıktan sonra paylaşımın sürüp sürmeyeceğidir.';
+
+  @override
+  String get privacyWhatOthersSeeMembersLearnKey =>
+      'Bir çevreye katılmak, açık anahtarınızı da her üyeye gösterir. Bunun üzerinden herkese açık profilinize ve o anahtarla şimdiye kadar yayımladığınız her şeye ulaşabilirler.';
+
+  @override
+  String get privacyWhatOthersSeeCoMemberIp =>
+      'Bir üyenin profil fotoğrafı, o üyenin seçtiği bir sunucudan indirilir. Fotoğraf yüklenirken ağ adresiniz — dolayısıyla dünyanın kabaca hangi bölgesinde olduğunuz — o sunucuyu işleten kişiye açılır. Bu, siz hiçbir şeye dokunmadan kendiliğinden olur.';
+
+  @override
+  String get privacyWhatOthersSeeRelaysHeading => 'Aktarıcı işletmecileri';
+
+  @override
+  String get privacyWhatOthersSeeRelaysCannot =>
+      'Aktarıcı işletmecileri konumunuzu, mesajlarınızı, çevrenizin adını ya da üye listesini okuyamazlar. Her mesaj onlara tek kullanımlık taze bir gönderim adresinden ulaşır; bu yüzden hangi üyenin gönderdiğini anlayamazlar.';
+
+  @override
+  String get privacyWhatOthersSeeRelaysCan =>
+      'Buna karşılık ağ adresinizi, çevrimiçi olduğunuz zamanları ve trafiğinizin ne kadar büyük ve ne sıklıkta olduğunu görürler. Her çevre rastgele bir etiket taşır; bu sayede bir aktarıcı tek bir çevrenin mesajlarını bir arada toplayıp içinde kaç kişi olduğunu tahmin edebilir — hiçbirinin kim olduğunu öğrenmeden.';
+
+  @override
+  String get privacyWhatOthersSeeMeansForYou =>
+      'Bir çevreyi, ev adresinizi verebileceğiniz kişiler olarak düşünün. Aktarıcılara ve dışarıdakilere karşı şifreleme sizi korur; ağ adresi boşluğunu da bir VPN kapatır. Ekran görüntüsü alan bir üyeye karşı ise hiçbir şey korumaz.';
+
+  @override
+  String get privacyWhatOthersSeeDetailTag =>
+      'Bir çevrenin etiketi, o çevre var olduğu sürece aynı kalır; bu nedenle bir aktarıcı onun bütün mesajlarını süresiz olarak birbirine bağlayabilir. Bu, temeldeki protokolün bir özelliğidir; Haven\'ın değiştirebileceği bir şey değildir.';
+
+  @override
+  String get commonLearnMore => 'Daha fazla bilgi';
+
+  @override
+  String get relaySettingsBackendCaption =>
+      'Haven\'ın kendine ait bir sunucusu yok. Şifreli güncellemeleriniz bağımsız sunuculardan geçer; bunlara aktarıcı denir ve ne konumunuzu ne de çevrelerinizde kimlerin olduğunu görebilirler.';
+
+  @override
+  String get privacyWhatOthersSeeScreenshots =>
+      'Ekran görüntüsü almak platforma bağlıdır ve iki platform bu konuda birbirinden farklıdır. Android\'de Haven, uygulamanın tamamında ekran görüntüsü almayı ve ekran kaydını engeller. iPhone\'da ise bunu yapamaz: Haven yalnızca uygulama değiştiricideki önizlemeyi bulanıklaştırır; bir üye ekranda görünenlerin görüntüsünü yine de alabilir.';
+
+  @override
+  String get privacyWhatOthersSeeDetailExpiry =>
+      'Haven, aktarıcılardan konum mesajlarını yaklaşık dört dakika sonra silmelerini ister. Bu istek yalnızca bir tavsiyedir: bir aktarıcı onları daha uzun süre tutabilir. Davetlerin ise hiç geçerlilik süresi yoktur; gelen kutusu aktarıcınızda süresiz olarak kalabilirler.';
+
+  @override
+  String get privacyGroupTheLimitsHeading => 'Korumanın sınırları';
+
+  @override
+  String get privacyInferenceTitle =>
+      'Yine de sizinle ilgili neler anlaşılabilir';
+
+  @override
+  String get privacyInferenceSubtitle => 'Şifrelemenin gizleyemediği izler';
+
+  @override
+  String get privacyInferenceWhatIsMetadata =>
+      'Şifreleme ne gönderdiğinizi gizler. Bir şey gönderdiğinizi gizleyemez. Bir mesajın etrafındaki örüntü — ne zaman çıktığı, ne kadar büyük olduğu, hangi sunuculara bağlı olduğunuz — üst veri olarak adlandırılır ve içerik görünmez olduğunda bile görünür kalır.';
+
+  @override
+  String get privacyInferenceActivityPattern =>
+      'Bu örüntüden, kullandığınız bir aktarıcı kabaca ne zaman ve ne sıklıkta etkin olduğunuzu anlayabilir. Haven ayrıca yaklaşık yüz metreden fazla hareket ettiğinizde ek bir güncelleme gönderir; bu yüzden yeterince uzun bir kayıt, yolda mı olduğunuzu yoksa bir yerde mi kaldığınızı sezdirebilir — nerede olduğunuzu hiçbir zaman göstermeden.';
+
+  @override
+  String get privacyInferencePresence =>
+      'Haven çalışırken aktarıcılarınıza açık bir bağlantı tutar; bu yüzden onlar da çevrimiçi olduğunuzu ve hangi çevreleri izlediğinizi görebilir. Güncellemelerin dakikalar değil saniyeler içinde gelmesinin bedeli bu.';
+
+  @override
+  String get privacyInferenceIpHeading => 'Ağ adresiniz';
+
+  @override
+  String get privacyInferenceIpAddress =>
+      'Haven\'ın konuştuğu her sunucu, telefonunuzun bağlandığı ağ adresini görür: aktarıcılarınız, harita sağlayıcısı ve bir üyenin profil fotoğrafını barındıran sunucu. İnternet sağlayıcınız bu sunuculardan hangilerine ne zaman ulaştığınızı görür. Haven, kendi başına bunların hiçbirini gizlemek için bir şey yapmaz.';
+
+  @override
+  String get privacyInferenceVpnHeading => 'VPN kullanmalı mısınız?';
+
+  @override
+  String get privacyInferenceVpnHelps =>
+      'Bir VPN, ağ adresinizin yerine kendi adresini koyar; böylece aktarıcılar ve diğer sunucular nereden bağlandığınızı artık görmez. Hangi sunuculara ulaştığınızı da internet sağlayıcınızdan gizler. Mullvad\'ı öneririz.';
+
+  @override
+  String get privacyInferenceVpnLimits =>
+      'VPN her sorunun ilacı değildir. Çevre üyelerinizin gördüklerinde hiçbir şeyi değiştirmez ve konuştuğunuz bir aktarıcıdan trafiğinizin zamanlamasını ya da boyutunu gizlemez. Ayrıca birine güvenme ihtiyacınızı ortadan kaldırmaz; güveninizi yalnızca VPN şirketine kaydırır.';
+
+  @override
+  String get privacyInferenceMeansForYou =>
+      'Sizi haritaya bir kişinin değil bir ağ işletmecisinin yerleştirmesinden kaygılanıyorsanız, ekleyebileceğiniz en yararlı tek şey bir VPN\'dir. Kaygılandığınız şey çevrelerinizdeki kişilerse, VPN hiç işe yaramaz.';
+
+  @override
+  String get privacyInferenceDetailJitter =>
+      'Haven, güncellemeler arasındaki süreyi bilerek değiştirir; böylece kısa bir kayıtta düzenli bir ritim görünmez. Yine de saatler boyunca ortalama alındığında temeldeki güncelleme sıklığı tahmin edilebilir. Mesaj boyutları da dolgu ile eşitlenmez ve konum güncellemeleri dar bir boyut aralığına düştüğü için konum güncellemesi oldukları anlaşılabilir.';
+
+  @override
+  String get privacyInferenceDetailOutOfScope =>
+      'Bazı şeyler Haven\'ın çözebileceği alanın tamamen dışındadır. Aynı anda pek çok aktarıcıyı izleyebilen bir gözlemci ya da başkasının denetimine geçmiş kendi telefonunuz, buradaki hiçbir tasarım kararının düzeltebileceği şeyler değildir.';
 
   @override
   String get commonClearAll => 'Tümünü Temizle';
@@ -1557,7 +1634,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get qrCodeExplainerUsername =>
-      'Açık anahtarınız, paylaşılması güvenli bir kullanıcı adı gibi çalışır. İnsanlar sizi bir çevreye davet etmek için bu kodu tarar ya da açık anahtarınızı yapıştırır. Bunu paylaşmak konumunuzu açığa çıkaramaz; konumunuz yalnızca katıldığınız çevrelerin üyelerine görünür. Adınızı ve fotoğrafınızı da açığa çıkaramaz; bunlar, herkese açık bir profil yayımlamayı seçmediğiniz sürece bu cihazda kalır.';
+      'Açık anahtarınız, paylaşılması güvenli bir kullanıcı adı gibi çalışır. İnsanlar sizi bir çevreye davet etmek için bu kodu tarar ya da açık anahtarınızı yapıştırır. Bunu paylaşmak konumunuzu açığa çıkaramaz; konumunuz yalnızca katıldığınız çevrelerin üyelerine görünür. Görünen adınız ve fotoğrafınız ise zaten herkese açık; bu kodu paylaşmak onlar hakkında yeni bir şey açığa çıkarmaz.';
 
   @override
   String get displayNameCardTitle => 'Görünen Ad';

@@ -158,7 +158,7 @@ import 'package:haven/src/pages/circles/name_circle_page.dart';
 import 'package:haven/src/pages/map_shell.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart'
-    show identityNotifierProvider;
+    show identityNotifierProvider, identityProvider;
 import 'package:haven/src/providers/invitation_provider.dart'
     show pendingInvitationsProvider;
 import 'package:haven/src/providers/key_package_provider.dart'
@@ -5186,6 +5186,25 @@ Future<ProviderContainer> _m11PumpAliceLiveEngine(
   );
   final container = _m11AliceContainer(tester);
   if (_m11Superseded(generation)) throw const _M11ScenarioSuperseded();
+  // Alice's identity MUST be resolved before the scenario proceeds: MapShell's
+  // startup sequence (relay init, KeyPackage publish, `_startLiveSync`) is
+  // gated on it, so a scenario that runs without one has no receive plane and
+  // fails 20s later on an unrelated "peer location never surfaced" timeout
+  // that says nothing about the real cause. A transient secure-storage miss
+  // can produce exactly that (observed on the iOS simulator's Keychain); the
+  // production service now retries rather than latching the miss, so pump a
+  // bounded window and let it self-heal — then name the precondition if it
+  // genuinely never resolves.
+  await pumpUntilCondition(
+    tester,
+    () => container.read(identityProvider).valueOrNull != null,
+    description:
+        'Alice identity resolved (MapShell startup gate; without it the '
+        'live-sync engine never starts and the scenario times out on the '
+        'receive path instead)',
+    timeout: const Duration(seconds: 10),
+    shouldAbort: () => _m11Superseded(generation),
+  );
   await container.read(keyPackagePublisherProvider.future);
   return container;
 }

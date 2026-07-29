@@ -126,7 +126,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get onboardingValueProp3Body =>
-      'Pas d\'e-mail, pas de numéro de téléphone, pas d\'inscription. Haven crée une identité privée qui n\'existe que sur votre téléphone, sans rien qui la relie à votre véritable identité.';
+      'Pas d\'e-mail, pas de numéro de téléphone, pas d\'inscription. Haven crée une identité dont la clé secrète ne quitte jamais votre téléphone : il n\'existe donc aucun compte que quiconque pourrait remettre à un tiers.';
 
   @override
   String get onboardingValueProp1Summary =>
@@ -138,7 +138,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get onboardingValueProp3Summary =>
-      'Ni e-mail, ni téléphone, ni inscription. Rien ne te relie à elle.';
+      'Ni e-mail, ni téléphone, ni inscription. Ta clé secrète ne quitte jamais ton téléphone.';
 
   @override
   String get onboardingCreateIdentityTitle => 'Créez votre identité';
@@ -274,7 +274,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get relaySettingsKeyPackageSubtitle =>
-      'kind 10051, là où les personnes invitées découvrent vos clés de chiffrement';
+      'kind 10002, là où les personnes invitées découvrent vos clés de chiffrement';
 
   @override
   String get relaySettingsLoadRelaysError => 'Échec du chargement des relais.';
@@ -352,59 +352,6 @@ class AppLocalizationsFr extends AppLocalizations {
   @override
   String get relaySettingsEmptyMessage =>
       'Vous avez besoin d\'au moins un relais pour que les autres puissent vous joindre. Appuyez ci-dessous pour rétablir les valeurs par défaut de Haven.';
-
-  @override
-  String get relaySettingsExplainerSemantics =>
-      'Comment fonctionnent les relais de Haven';
-
-  @override
-  String get relaySettingsExplainerHeading => 'Comment cela fonctionne';
-
-  @override
-  String get relaySettingsExplainerNostr =>
-      'Haven n\'a pas de serveur central. Il repose sur deux technologies ouvertes. Nostr est un réseau de serveurs indépendants appelés relais que n\'importe qui peut héberger ; ils reçoivent vos messages, les conservent brièvement et les transmettent lorsque vos contacts les demandent. Aucun relais n\'est essentiel à lui seul : si l\'un se déconnecte, les autres continuent de fonctionner, et tout ce qu\'un relais pourrait être contraint de remettre n\'est jamais que des données chiffrées.';
-
-  @override
-  String get relaySettingsExplainerMarmot =>
-      'Le protocole Marmot chiffre vos messages sur votre appareil avant qu\'ils ne le quittent, à l\'aide de la norme MLS (Messaging Layer Security). Chaque cercle est son propre groupe chiffré avec ses propres clés, de sorte que des cercles distincts ne peuvent pas être reliés entre eux. Ces clés évoluent aussi continuellement au fil du temps, une propriété appelée confidentialité persistante, de sorte qu\'une clé exposée ultérieurement ne peut pas déchiffrer vos messages antérieurs.';
-
-  @override
-  String get relaySettingsExplainerMetadata =>
-      'De ce fait, un relais ne voit jamais votre position, vos messages, qui se trouve dans vos cercles, ni votre identité sur ces messages. Chaque message est publié depuis une adresse d\'envoi neuve et à usage unique, de sorte que rien dans le message ne le relie à votre compte. Un relais voit tout de même certaines métadonnées : une étiquette aléatoire propre à chaque cercle, le rythme et la taille de votre trafic, et l\'adresse réseau depuis laquelle vous vous connectez.';
-
-  @override
-  String get relaySettingsExplainerInboxTerm => 'Relais de réception';
-
-  @override
-  String get relaySettingsExplainerInboxBody =>
-      ' sont votre boîte aux lettres : là où les invitations à rejoindre un cercle, elles-mêmes chiffrées, sont déposées pour que vous les récupériez. Pour vous inviter, une personne doit pouvoir joindre l\'un de ces relais.';
-
-  @override
-  String get relaySettingsExplainerKeyPackageTerm => 'Relais KeyPackage';
-
-  @override
-  String get relaySettingsExplainerKeyPackageBody =>
-      ' sont là où vous publiez un petit ensemble de vos clés publiques, qu\'il est sûr de partager. Une personne qui connaît votre compte le récupère sur ces relais pour vous ajouter à un cercle.';
-
-  @override
-  String get relaySettingsExplainerOwnRelayTerm =>
-      'Utiliser votre propre relais.';
-
-  @override
-  String get relaySettingsExplainerOwnRelayBody =>
-      ' Chaque cercle possède aussi sa propre liste de relais, partagée avec chaque membre lorsqu\'il rejoint le cercle ; c\'est par cette liste, et non par votre boîte de réception, que transitent les mises à jour chiffrées continues du cercle. Ainsi, si vous préférez éviter les relais publics, vous pouvez héberger le vôtre et y diriger un cercle : une fois que tout le monde a rejoint le cercle, son trafic peut transiter par lui seul.';
-
-  @override
-  String get relaySettingsExplainerReachabilityTerm =>
-      'Le hic, c\'est l\'accessibilité.';
-
-  @override
-  String get relaySettingsExplainerReachabilityBody =>
-      ' Chaque membre doit pouvoir se connecter à ce relais, et lorsque vous invitez quelqu\'un pour la première fois, vous avez tous les deux besoin d\'un relais que vous pouvez joindre l\'un et l\'autre (par exemple, le même relais privé indiqué comme relais de réception et KeyPackage de chacun). Un relais privé voit le même trafic chiffré et les mêmes horaires que n\'importe quel autre ; vous contrôlez simplement qui l\'héberge.';
-
-  @override
-  String get relaySettingsExplainerFooter =>
-      'Vous pouvez ajouter ou retirer des relais de l\'une ou l\'autre liste à tout moment. Plus vous avez de relais, plus il est facile de vous joindre ; moins vous en avez, plus vous contrôlez la destination de votre trafic chiffré.';
 
   @override
   String get locationSettingsTitle => 'Position';
@@ -535,60 +482,6 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get aboutLinkOpenError => 'Impossible d\'ouvrir le lien';
-
-  @override
-  String get aboutWhoCanSeeTitle => 'Qui voit quoi';
-
-  @override
-  String get aboutWhoCanSeeIntro =>
-      'Votre position exacte n\'est lisible que par les personnes que vous choisissez. Voici ce que les principales parties peuvent voir et ne peuvent pas voir.';
-
-  @override
-  String get aboutActorCirclesWho =>
-      'Les membres du cercle avec qui vous partagez';
-
-  @override
-  String get aboutActorCirclesSees =>
-      'Votre position exacte et le nom d\'affichage que vous choisissez, mais uniquement au sein des cercles que vous partagez avec eux, jamais vos autres cercles.';
-
-  @override
-  String get aboutActorRelaysWho => 'Les opérateurs de relais';
-
-  @override
-  String get aboutActorRelaysSees =>
-      'Les serveurs qui transmettent vos messages. Ils voient votre adresse IP, la clé publique sous laquelle vous publiez (un identifiant aléatoire, pas votre nom), la taille et le rythme de votre trafic, ainsi que le compte que vous avez recherché lorsque vous cherchez quelqu\'un. Ils ne peuvent jamais lire votre position, vos messages, les noms de vos cercles, ni qui se trouve dans vos cercles.';
-
-  @override
-  String get aboutActorMapWho => 'Le fournisseur de cartes (Stadia Maps)';
-
-  @override
-  String get aboutActorMapSees =>
-      'Uniquement lorsque la carte est ouverte : votre adresse IP et la zone que vous consultez, afin de pouvoir envoyer les bonnes images de carte. Jamais vos cercles ni votre position partagée. Stadia anonymise les adresses IP et ne vend pas vos données.';
-
-  @override
-  String get aboutActorDevelopersWho => 'Les développeurs de Haven';
-
-  @override
-  String get aboutActorDevelopersSees =>
-      'Rien. Haven n\'exploite aucun serveur et ne collecte aucune statistique. Un développeur ne pourrait voir que ce que voit un opérateur de relais, et uniquement si vous utilisiez un relais qu\'il héberge.';
-
-  @override
-  String get aboutWhoCanSeeMetadataNote =>
-      'Malgré tout, votre activité n\'est pas invisible. Un relais que vous utilisez, ou quiconque surveille votre réseau, peut déduire que vous êtes actif, à peu près quand et à quelle fréquence, à partir du moment des connexions et de la taille des messages.';
-
-  @override
-  String get aboutScreenshotTitle => 'Protection contre les captures d\'écran';
-
-  @override
-  String get aboutScreenshotBody =>
-      'Sur Android, Haven bloque les captures d\'écran et l\'enregistrement de l\'écran dans toute l\'application afin d\'éviter une exposition accidentelle de la position. Il s\'agit d\'une protection au niveau du système (FLAG_SECURE) qui s\'applique à chaque écran de l\'application, y compris la carte et les listes de membres.';
-
-  @override
-  String get aboutVpnTitle => 'Restez plus privé avec un VPN';
-
-  @override
-  String get aboutVpnBody =>
-      'Les relais et le fournisseur de cartes voient votre adresse IP, et votre fournisseur d\'accès à Internet voit quels serveurs vous joignez. Un VPN de confiance leur masque votre adresse IP. Nous recommandons Mullvad. Cela ne change rien à ce que voient les membres de votre cercle, et cela transfère la confiance vers le fournisseur de VPN.';
 
   @override
   String get aboutVpnLinkLabel => 'mullvad.net';
@@ -734,6 +627,191 @@ class AppLocalizationsFr extends AppLocalizations {
   @override
   String get privacyPublicProfileDetailExifStripped =>
       'Avant l\'envoi, Haven réencode l\'image et supprime les données cachées que les appareils photo y attachent, dont la position GPS où la photo a été prise. C\'est important ici : un cliché de vacances peut sinon transporter les coordonnées de votre domicile.';
+
+  @override
+  String get privacyGroupHowLocationTravelsHeading =>
+      'Le trajet de votre position';
+
+  @override
+  String get privacyRelaysTitle =>
+      'Les relais : les serveurs qui transmettent vos messages';
+
+  @override
+  String get privacyRelaysSubtitle => 'Chez qui transitent vos mises à jour';
+
+  @override
+  String get privacyRelaysWhatIsARelay =>
+      'Haven n\'a pas de serveur à lui, vos mises à jour passent donc par ceux d\'autres personnes. On les appelle des relais : de petits serveurs indépendants que n\'importe qui peut héberger. Un relais conserve brièvement un message chiffré, puis le transmet lorsque votre cercle le demande.';
+
+  @override
+  String get privacyRelaysWhyMany =>
+      'Recourir à plusieurs relais signifie qu\'aucun ne peut vous couper du réseau à lui seul. Si l\'un se déconnecte, les autres continuent de fonctionner. Vous choisissez les relais que vous utilisez et pouvez les changer quand vous le voulez.';
+
+  @override
+  String get privacyRelaysTwoLists =>
+      'Haven tient deux listes pour vous. Vos relais de réception sont là où les invitations vous parviennent. Vos relais KeyPackage sont là où l\'on récupère les clés nécessaires pour vous inviter. Chaque cercle porte aussi sa propre liste, et c\'est par elle que circulent ses mises à jour chiffrées.';
+
+  @override
+  String get privacyRelaysMeansForYou =>
+      'Rien ici ne présente de risque si vous vous trompez : un relais ne voit jamais que des données chiffrées. Il vous faut cependant au moins un relais joignable, sans quoi personne ne peut vous inviter et vos cercles restent muets.';
+
+  @override
+  String get privacyRelaysDetailIndexers =>
+      'Indépendamment de vos propres listes, Haven interroge un petit ensemble de relais d\'annuaire publics pour rechercher les profils et les clés d\'autres personnes. Il les contacte même si vous n\'avez configuré que des relais privés. Ils voient votre adresse réseau et quels comptes vous avez recherchés.';
+
+  @override
+  String get privacyRelaysDetailKeyListIsPublic =>
+      'Votre liste de relais KeyPackage est elle-même publiée sur le réseau, signée par votre clé d\'identité, afin que les autres puissent la trouver. Si vous ajoutez un relais privé à cette liste, son adresse devient publique et associée à vous. Un relais qui ne figure que dans la liste propre à un cercle n\'est pas annoncé ainsi.';
+
+  @override
+  String get privacyEncryptionTitle => 'Comment fonctionne le chiffrement';
+
+  @override
+  String get privacyEncryptionSubtitle =>
+      'Des clés propres à chaque cercle, et ce qui change quand quelqu\'un arrive ou part';
+
+  @override
+  String get privacyEncryptionPerCircle =>
+      'Votre position est chiffrée sur votre téléphone avant de le quitter, à l\'aide d\'une norme ouverte appelée MLS. Chaque cercle est son propre groupe chiffré avec ses propres clés. Personne à l\'extérieur d\'un cercle ne peut lire ce qui y est envoyé : ni un relais, ni Haven, ni un autre cercle dont vous faites partie.';
+
+  @override
+  String get privacyEncryptionWhenSomeoneJoins =>
+      'Quand une personne rejoint le cercle, celui-ci passe à une nouvelle clé. Elle peut lire ce qui est envoyé après son arrivée, et rien de ce qui précède. Haven n\'envoie jamais à un nouveau membre les positions passées.';
+
+  @override
+  String get privacyEncryptionWhenSomeoneLeaves =>
+      'Quand une personne quitte le cercle ou en est retirée, celui-ci change encore de clé. Au bout de quelques minutes au plus, elle ne peut plus rien lire de nouveau.';
+
+  @override
+  String get privacyEncryptionKeysChangeOnMembership =>
+      'Les clés changent quand la composition du cercle change, et non à intervalles réguliers. Entre ces changements, une seule clé couvre tout ce qui est envoyé. Ainsi, une personne que vous retirez d\'un cercle stable depuis longtemps peut encore ouvrir tous les messages qu\'elle a enregistrés du temps où elle en était membre, même ceux de plusieurs semaines auparavant. Elle ne peut rien ouvrir de ce qui a été envoyé après son départ.';
+
+  @override
+  String get privacyEncryptionMeansForYou =>
+      'Le chiffrement vous protège de toute personne extérieure à vos cercles. Il ne peut pas vous protéger de quelqu\'un qui en a fait partie. Si vous voulez rompre nettement avec une personne, créer un nouveau cercle est plus sûr que de la retirer d\'un ancien.';
+
+  @override
+  String get privacyEncryptionDetailMls =>
+      'MLS (Messaging Layer Security) est la même norme IETF que celle utilisée par d\'autres messageries sécurisées. Haven rejoint le réseau Nostr par le protocole Marmot, qui définit comment les groupes MLS circulent sur les relais. La clé avec laquelle chaque cercle signe est distincte de votre clé d\'identité Nostr publique.';
+
+  @override
+  String get privacyEncryptionDetailEpochs =>
+      'La période pendant laquelle une clé est valable s\'appelle une époque. Votre appareil ne conserve que les clés nécessaires pour déchiffrer les messages des dernières époques encore en transit, puis il les supprime : c\'est pourquoi Haven ne peut pas, même en principe, retrouver vos anciens messages.';
+
+  @override
+  String get privacyWhatOthersSeeTitle =>
+      'Ce que voient les membres, et ce que voient les relais';
+
+  @override
+  String get privacyWhatOthersSeeSubtitle =>
+      'Les personnes avec qui vous partagez, et les serveurs entre vous';
+
+  @override
+  String get privacyWhatOthersSeeMembersHeading =>
+      'Les personnes de vos cercles';
+
+  @override
+  String get privacyWhatOthersSeeMembersExact =>
+      'Tous les membres d\'un cercle voient votre position exacte sur la carte, pas une zone approximative. Aucun réglage ne permet de partager une position vague avec certains membres et une position précise avec d\'autres.';
+
+  @override
+  String get privacyWhatOthersSeeCannotPause =>
+      'Tant que Haven est ouvert et que vous appartenez à un cercle, votre position part toute seule toutes les deux ou trois minutes. Il n\'y a pas de bouton pause. La seule chose que vous pouvez régler, c\'est si le partage continue lorsque l\'application est fermée.';
+
+  @override
+  String get privacyWhatOthersSeeMembersLearnKey =>
+      'Rejoindre un cercle montre aussi votre clé publique à chaque membre. Elle leur permet de consulter votre profil public, et tout ce que vous avez déjà publié sous cette clé.';
+
+  @override
+  String get privacyWhatOthersSeeCoMemberIp =>
+      'La photo de profil d\'un membre est récupérée sur un serveur de son choix. La charger révèle votre adresse réseau, et donc à peu près où vous vous trouvez dans le monde, à la personne qui héberge ce serveur. Cela se produit tout seul, sans que vous ayez à toucher quoi que ce soit.';
+
+  @override
+  String get privacyWhatOthersSeeRelaysHeading => 'Les opérateurs de relais';
+
+  @override
+  String get privacyWhatOthersSeeRelaysCannot =>
+      'Les opérateurs de relais ne peuvent lire ni votre position, ni vos messages, ni le nom de votre cercle, ni sa liste de membres. Chaque message leur parvient depuis une adresse d\'envoi neuve et à usage unique : ils ne peuvent donc pas savoir quel membre l\'a envoyé.';
+
+  @override
+  String get privacyWhatOthersSeeRelaysCan =>
+      'Ils voient en revanche votre adresse réseau, les moments où vous êtes en ligne, ainsi que la taille et la fréquence de votre trafic. Chaque cercle porte une étiquette aléatoire : un relais peut donc regrouper les messages d\'un même cercle et estimer combien de personnes s\'y trouvent, sans savoir qui elles sont.';
+
+  @override
+  String get privacyWhatOthersSeeMeansForYou =>
+      'Traitez un cercle comme des personnes à qui vous donneriez votre adresse personnelle. Face aux relais et aux tiers, le chiffrement tient, et un VPN comble la faille de l\'adresse réseau. Face à un membre qui enregistre une capture d\'écran, rien ne tient.';
+
+  @override
+  String get privacyWhatOthersSeeDetailTag =>
+      'L\'étiquette d\'un cercle reste la même pendant toute la vie de ce cercle : un relais peut donc relier indéfiniment tous ses messages entre eux. C\'est une propriété du protocole sous-jacent, et non quelque chose que Haven peut changer.';
+
+  @override
+  String get commonLearnMore => 'En savoir plus';
+
+  @override
+  String get relaySettingsBackendCaption =>
+      'Haven n\'a pas de serveur à lui. Vos mises à jour chiffrées passent par des serveurs indépendants qu\'on appelle des relais, qui ne voient jamais votre position ni qui fait partie de vos cercles.';
+
+  @override
+  String get privacyWhatOthersSeeScreenshots =>
+      'Les captures d\'écran dépendent de la plateforme, et les deux ne se comportent pas de la même façon. Sur Android, Haven bloque les captures d\'écran et l\'enregistrement de l\'écran dans toute l\'application. Sur iPhone, il ne peut pas : Haven floute seulement l\'aperçu du sélecteur d\'applications, mais un membre peut tout de même capturer ce qui est affiché à l\'écran.';
+
+  @override
+  String get privacyWhatOthersSeeDetailExpiry =>
+      'Haven demande aux relais de supprimer les messages de position au bout d\'environ quatre minutes. Cette demande est indicative : un relais reste libre de les conserver plus longtemps. Les invitations, elles, ne portent aucune expiration et peuvent rester indéfiniment sur votre relais de réception.';
+
+  @override
+  String get privacyGroupTheLimitsHeading => 'Les limites';
+
+  @override
+  String get privacyInferenceTitle =>
+      'Ce qu\'on peut encore déduire à votre sujet';
+
+  @override
+  String get privacyInferenceSubtitle =>
+      'Les traces que le chiffrement ne peut pas masquer';
+
+  @override
+  String get privacyInferenceWhatIsMetadata =>
+      'Le chiffrement masque ce que vous envoyez. Il ne peut pas masquer le fait que vous avez envoyé quelque chose. Ce qui entoure un message — le moment de son départ, sa taille, les serveurs auxquels vous étiez connecté — porte un nom : les métadonnées. Elles restent visibles même quand le contenu ne l\'est pas.';
+
+  @override
+  String get privacyInferenceActivityPattern =>
+      'À partir de ces métadonnées, un relais que vous utilisez peut déduire à peu près quand vous êtes actif et à quelle fréquence. Haven envoie en plus une mise à jour dès que vous vous déplacez de plus d\'une centaine de mètres. Un relevé assez long peut donc laisser entrevoir si vous étiez en déplacement ou immobile, sans jamais montrer où.';
+
+  @override
+  String get privacyInferencePresence =>
+      'Tant que Haven fonctionne, il garde une connexion ouverte vers vos relais. Ils voient donc aussi que vous êtes en ligne, et quels cercles vous suivez. C\'est le prix des mises à jour qui arrivent en quelques secondes plutôt qu\'en quelques minutes.';
+
+  @override
+  String get privacyInferenceIpHeading => 'Votre adresse réseau';
+
+  @override
+  String get privacyInferenceIpAddress =>
+      'Chaque serveur auquel Haven parle voit l\'adresse depuis laquelle votre téléphone se connecte : vos relais, le fournisseur de cartes, et celui qui héberge la photo de profil d\'un membre. Votre fournisseur d\'accès à Internet voit lesquels de ces serveurs vous avez joints, et quand. À lui seul, Haven ne fait rien pour masquer ni l\'un ni l\'autre.';
+
+  @override
+  String get privacyInferenceVpnHeading => 'Faut-il utiliser un VPN ?';
+
+  @override
+  String get privacyInferenceVpnHelps =>
+      'Un VPN remplace votre adresse par la sienne : les relais et les autres serveurs ne voient plus d\'où vous vous connectez. Il masque aussi à votre fournisseur d\'accès à Internet quels serveurs vous joignez. Nous recommandons Mullvad.';
+
+  @override
+  String get privacyInferenceVpnLimits =>
+      'Ce n\'est pas une solution miracle. Un VPN ne change rien à ce que voient les membres de votre cercle. Et il ne masque ni le rythme ni la taille de votre trafic au relais avec lequel vous échangez. Il transfère seulement votre confiance vers le fournisseur de VPN : il ne vous dispense pas de faire confiance à quelqu\'un.';
+
+  @override
+  String get privacyInferenceMeansForYou =>
+      'Si votre crainte est d\'être localisé sur une carte par un opérateur de réseau plutôt que par une personne, un VPN est ce que vous pouvez ajouter de plus utile. Si votre crainte, ce sont les personnes de vos cercles, il ne vous aidera pas du tout.';
+
+  @override
+  String get privacyInferenceDetailJitter =>
+      'Haven fait varier exprès l\'intervalle entre les mises à jour : un enregistrement court n\'y montre aucune cadence régulière. Moyennée sur de longues heures, la fréquence réelle peut malgré tout être estimée. La taille des messages n\'est pas uniformisée non plus, et les mises à jour de position tiennent dans une plage de tailles étroite, ce qui les rend reconnaissables comme telles.';
+
+  @override
+  String get privacyInferenceDetailOutOfScope =>
+      'Certaines choses échappent simplement à ce que Haven peut corriger. Un observateur capable de surveiller de nombreux relais à la fois, ou votre propre téléphone dès que quelqu\'un d\'autre en a le contrôle : aucun choix de conception ici n\'y changerait quoi que ce soit.';
 
   @override
   String get commonClearAll => 'Tout effacer';
@@ -1587,7 +1665,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get qrCodeExplainerUsername =>
-      'Votre clé publique fonctionne comme un nom d\'utilisateur qu\'il est sûr de partager. Les gens scannent ce code, ou collent votre clé publique, pour vous inviter à un cercle. La partager ne peut révéler ni votre position, qui n\'est visible que par les membres des cercles que vous avez rejoints, ni votre nom et votre photo, qui restent sur cet appareil à moins que vous ne choisissiez de publier un profil public.';
+      'Votre clé publique fonctionne comme un nom d\'utilisateur qu\'il est sûr de partager. Les gens scannent ce code, ou collent votre clé publique, pour vous inviter à un cercle. La partager ne peut pas révéler votre position, qui n\'est visible que par les membres des cercles que vous avez rejoints. Votre nom d\'affichage et votre photo sont déjà publics : partager ce code ne révèle donc rien de plus à leur sujet.';
 
   @override
   String get displayNameCardTitle => 'Nom d\'affichage';

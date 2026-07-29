@@ -2,7 +2,7 @@
 ///
 /// Provides a mockable API for managing the user's two relay categories
 /// (Inbox / `KeyPackage`) plus the privacy toggles that gate publishing
-/// of kind 10050 / 10051 events. The production implementation
+/// of kind 10050 / 10002 events. The production implementation
 /// (`NostrRelayPreferencesService`) delegates to `CircleManagerFfi`'s
 /// storage methods; tests inject mocks via Riverpod.
 ///
@@ -18,13 +18,13 @@ import 'package:flutter/foundation.dart';
 ///
 /// Mirrors `RelayType` in haven-core: each variant maps to a distinct
 /// Nostr replaceable event kind (10050 for [`RelayCategory.inbox`],
-/// 10051 for [`RelayCategory.keyPackage`]). The two lists are stored
+/// 10002 for [`RelayCategory.keyPackage`]). The two lists are stored
 /// independently — adding a relay to one does NOT add it to the other.
 enum RelayCategory {
   /// Inbox relays (kind 10050, NIP-17) — where Welcomes are delivered.
   inbox,
 
-  /// `KeyPackage` relays (kind 10051, MIP-00) — where this user's MLS
+  /// `KeyPackage` relays (kind 10002, MIP-00) — where this user's MLS
   /// `KeyPackage` events are published.
   keyPackage,
 }
@@ -96,7 +96,7 @@ class BuiltRelayListPublish {
   /// relay is never published to a public relay.
   final List<String> targets;
 
-  /// Numeric Nostr kind (10050 or 10051).
+  /// Numeric Nostr kind (10050 or 10002).
   final int? kind;
 
   /// Unix-seconds `created_at` from the signed event. Pass back to
@@ -188,7 +188,7 @@ abstract class RelayPreferencesService {
   /// and bakes in the toggle check.
   Future<List<String>> publishTargets(RelayCategory category);
 
-  /// Atomically reads the privacy toggle, signs a kind 10050/10051
+  /// Atomically reads the privacy toggle, signs a kind 10050/10002
   /// event, and resolves the publish targets. The only path through
   /// which the UI may publish a relay list event.
   Future<BuiltRelayListPublish> buildRelayListPublish({

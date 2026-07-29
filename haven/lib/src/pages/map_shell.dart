@@ -40,6 +40,7 @@ import 'package:haven/src/services/background_idle_waiter.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
+import 'package:haven/src/services/identity_service.dart' show Identity;
 import 'package:haven/src/services/live_sync_resubscriber.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
@@ -211,82 +212,124 @@ class _MapShellState extends ConsumerState<MapShell>
       // future resolves — `valueOrNull` returns null in the brief window
       // between `ref.read` triggering the load and the storage IO
       // completing. Awaiting `.future` collapses that window: by the
-      // time the assertion runs, the load is fully done. If it then
-      // resolved to null, AppRouter's invariant is genuinely broken
-      // and the assertion fires in debug builds.
+      // time the check runs, the load is fully done.
       if (!mounted) return;
       await ref.read(identityProvider.future);
       if (!mounted) return;
-      assert(
-        ref.read(identityProvider).valueOrNull != null,
-        'MapShell mounted without identity; AppRouter gate failed',
-      );
-      final relay = ref.read(relayServiceProvider);
-      if (relay is NostrRelayService) {
-        await relay.initialize();
-      }
-      // The widget may have been disposed during the async relay init (rapid
-      // logout); don't read providers (incl. the maintenance scheduler) if so.
-      if (!mounted) return;
-      // DM-4c: show the one-time Dark Matter cutover explainer if this
-      // launch's cutover guard (main.dart, before runApp) newly destroyed
-      // legacy MLS state. Flip the flag back immediately so a later
-      // rebuild (hot reload, an unrelated provider invalidation cascade)
-      // never re-shows it within the same app session.
-      if (ref.read(legacyCutoverExplainerProvider)) {
-        ref.read(legacyCutoverExplainerProvider.notifier).state = false;
-        unawaited(LegacyCutoverExplainerDialog.show(context));
-      }
-      ref
-        ..read(keyPackagePublisherProvider)
-        ..read(locationPublisherProvider)
-        // DM-4c (plan §6 F10a/F10b): once-only retraction of this account's
-        // stale pre-migration KeyPackage advertisements, now that relays are
-        // connected. Self-gates on a Rust sentinel, so reading it here every
-        // app session is safe — it becomes a fast no-op after the first
-        // successful run.
-        ..read(legacyRetractionProvider)
-        // M8: start the scheduled resilience timers (KeyPackage + relay-list
-        // republish-if-missing). Engine-independent — active regardless of
-        // `liveSyncEnabled`. Cancelled on dispose + explicitly invalidated in
-        // `deleteIdentity` so no secret-bearing tick runs after logout.
-        ..read(maintenanceSchedulerProvider.notifier);
-      // Receive plane: the live-sync engine (when enabled) replaces the
-      // invitation + evolution pollers; otherwise start those pollers.
-      if (liveSyncEnabled) {
-        unawaited(_startLiveSync());
-        // REV-1: finish any leave a prior session interrupted mid-backstop
-        // (crash / kill). Best-effort, live-sync only — leave markers are only
-        // ever set inside the backstop, so this no-ops otherwise.
-        unawaited(_resumePendingLeaves());
-      } else {
-        ref
-          ..read(invitationPollerProvider)
-          ..read(evolutionPollerProvider);
-      }
-      // Periodic + post-join leaf-key rotation is disabled (M5,
-      // `enablePeriodicSelfUpdate`): leaderless self-update is the dominant
-      // fork generator. Gated, not deleted, so it re-enables cleanly post-M3/M4.
-      if (enablePeriodicSelfUpdate) {
-        ref.read(selfUpdateProvider);
-      }
-      // Startup sweep: prune any expired last-known-location rows so the
-      // 1-day receiver retention window is honoured on disk.
-      unawaited(_runPrune());
-      // Cold-start public-profile refresh. Haven holds no standing kind-0
-      // subscription, so launch is the one moment a rename or new photo is
-      // guaranteed to be picked up before the user looks at the map. Delayed
-      // by a short settle so it never competes with identity load, relay
-      // init, or engine bootstrap for the first frames; TTL-gated, so a
-      // kill-and-relaunch loop still costs at most one fetch per tier window.
-      _coldStartProfileRefreshTimer = Timer(_coldStartProfileRefreshDelay, () {
-        if (!mounted) return;
-        triggerProfileRefresh(
-          ref,
-          maxAge: profileInteractiveMaxAge,
-          circles: ref.read(circlesProvider).valueOrNull,
+      if (ref.read(identityProvider).valueOrNull == null) {
+        // This used to be a bare `assert`. In any assertions-enabled build
+        // (debug/profile, and every integration test) throwing here aborted
+        // the REST of this callback — relay init, KeyPackage publish, the
+        // location publisher, the maintenance scheduler AND `_startLiveSync()`
+        // — so a single transient secure-storage miss left the app with no
+        // receive plane for the whole session and no way back. That is exactly
+        // the iOS live-sync CI failure: one null Keychain read, and the engine
+        // never started.
+        //
+        // Report the broken invariant, then re-arm instead of giving up. The
+        // identity service no longer latches a load that produced nothing (see
+        // `NostrIdentityService._ensureInitialized`), so a later resolution is
+        // reachable and runs startup exactly once.
+        debugPrint(
+          '[MapShell] mounted without an identity — deferring startup until '
+          'one resolves (the AppRouter gate should have prevented this)',
         );
-      });
+        _deferredStartupSub?.close();
+        _deferredStartupSub = ref.listenManual<AsyncValue<Identity?>>(
+          identityProvider,
+          (_, next) {
+            if (next.valueOrNull != null) unawaited(_runStartupTasks());
+          },
+        );
+        return;
+      }
+      await _runStartupTasks();
+    });
+  }
+
+  /// Guards [_runStartupTasks] to exactly one run per mount. The deferred
+  /// identity path can re-enter it, and starting a SECOND live-sync engine
+  /// would break the single-`AccountDeviceSession` invariant (Security
+  /// Rule 14), so the flag is set before the first `await`.
+  bool _startupTasksStarted = false;
+
+  /// Watches for a late identity when MapShell mounted without one. Closed as
+  /// soon as startup runs, and on dispose.
+  ProviderSubscription<AsyncValue<Identity?>>? _deferredStartupSub;
+
+  /// Runs the one-shot startup sequence: relay pre-warm, KeyPackage publish,
+  /// location publisher, maintenance timers and — under `liveSyncEnabled` —
+  /// the receive engine. Requires a resolved identity; see `initState`.
+  Future<void> _runStartupTasks() async {
+    if (_startupTasksStarted || !mounted) return;
+    _startupTasksStarted = true;
+    _deferredStartupSub?.close();
+    _deferredStartupSub = null;
+    final relay = ref.read(relayServiceProvider);
+    if (relay is NostrRelayService) {
+      await relay.initialize();
+    }
+    // The widget may have been disposed during the async relay init (rapid
+    // logout); don't read providers (incl. the maintenance scheduler) if so.
+    if (!mounted) return;
+    // DM-4c: show the one-time Dark Matter cutover explainer if this
+    // launch's cutover guard (main.dart, before runApp) newly destroyed
+    // legacy MLS state. Flip the flag back immediately so a later
+    // rebuild (hot reload, an unrelated provider invalidation cascade)
+    // never re-shows it within the same app session.
+    if (ref.read(legacyCutoverExplainerProvider)) {
+      ref.read(legacyCutoverExplainerProvider.notifier).state = false;
+      unawaited(LegacyCutoverExplainerDialog.show(context));
+    }
+    ref
+      ..read(keyPackagePublisherProvider)
+      ..read(locationPublisherProvider)
+      // DM-4c (plan §6 F10a/F10b): once-only retraction of this account's
+      // stale pre-migration KeyPackage advertisements, now that relays are
+      // connected. Self-gates on a Rust sentinel, so reading it here every
+      // app session is safe — it becomes a fast no-op after the first
+      // successful run.
+      ..read(legacyRetractionProvider)
+      // M8: start the scheduled resilience timers (KeyPackage + relay-list
+      // republish-if-missing). Engine-independent — active regardless of
+      // `liveSyncEnabled`. Cancelled on dispose + explicitly invalidated in
+      // `deleteIdentity` so no secret-bearing tick runs after logout.
+      ..read(maintenanceSchedulerProvider.notifier);
+    // Receive plane: the live-sync engine (when enabled) replaces the
+    // invitation + evolution pollers; otherwise start those pollers.
+    if (liveSyncEnabled) {
+      unawaited(_startLiveSync());
+      // REV-1: finish any leave a prior session interrupted mid-backstop
+      // (crash / kill). Best-effort, live-sync only — leave markers are only
+      // ever set inside the backstop, so this no-ops otherwise.
+      unawaited(_resumePendingLeaves());
+    } else {
+      ref
+        ..read(invitationPollerProvider)
+        ..read(evolutionPollerProvider);
+    }
+    // Periodic + post-join leaf-key rotation is disabled (M5,
+    // `enablePeriodicSelfUpdate`): leaderless self-update is the dominant
+    // fork generator. Gated, not deleted, so it re-enables cleanly post-M3/M4.
+    if (enablePeriodicSelfUpdate) {
+      ref.read(selfUpdateProvider);
+    }
+    // Startup sweep: prune any expired last-known-location rows so the
+    // 1-day receiver retention window is honoured on disk.
+    unawaited(_runPrune());
+    // Cold-start public-profile refresh. Haven holds no standing kind-0
+    // subscription, so launch is the one moment a rename or new photo is
+    // guaranteed to be picked up before the user looks at the map. Delayed
+    // by a short settle so it never competes with identity load, relay
+    // init, or engine bootstrap for the first frames; TTL-gated, so a
+    // kill-and-relaunch loop still costs at most one fetch per tier window.
+    _coldStartProfileRefreshTimer = Timer(_coldStartProfileRefreshDelay, () {
+      if (!mounted) return;
+      triggerProfileRefresh(
+        ref,
+        maxAge: profileInteractiveMaxAge,
+        circles: ref.read(circlesProvider).valueOrNull,
+      );
     });
   }
 
@@ -1045,6 +1088,10 @@ class _MapShellState extends ConsumerState<MapShell>
     _foregroundHeartbeatTimer?.cancel();
     _coldStartProfileRefreshTimer?.cancel();
     _stopMotionTrigger();
+    // Deferred-startup watcher: a late identity must never run startup against
+    // a torn-down tree.
+    _deferredStartupSub?.close();
+    _deferredStartupSub = null;
     _bgSharingPausedSub?.close();
     _bgSharingPausedSub = null;
     // Stop re-subscribing BEFORE tearing the engine down (B0): close the

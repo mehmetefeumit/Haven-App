@@ -1,15 +1,16 @@
 /// Editable relay settings page for Haven.
 ///
 /// Shows two independent relay categories (Inbox kind 10050 + KeyPackage
-/// kind 10051) with add/remove/restore controls.
-/// A footer note explains, in plain language, how Haven's relay-based backend
-/// works and what the Inbox and KeyPackage relay lists are for.
+/// kind 10002) with add/remove/restore controls, plus a short caption linking
+/// to Privacy ▸ Relays for the full explanation.
 library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/settings/add_relay_sheet.dart';
+import 'package:haven/src/pages/settings/privacy_content.dart';
+import 'package:haven/src/pages/settings/privacy_topic_page.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/legacy_retraction_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
@@ -97,7 +98,7 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
         ),
         const SizedBox(height: HavenSpacing.lg),
         const _LegacyRetractionPendingNote(),
-        const _BackendExplainerNote(),
+        const _BackendCaption(),
         const SizedBox(height: HavenSpacing.base),
       ],
     );
@@ -458,114 +459,43 @@ class _EmptyCategoryState extends ConsumerWidget {
   }
 }
 
-/// Footer note explaining, in plain language, how Haven's relay-based backend
-/// works and what the Inbox and KeyPackage relay lists are for.
+/// Short caption below the two relay sections, with a link into the Privacy
+/// section for the full explanation.
 ///
-/// Sits below the two relay sections so the abstract "Inbox" / "KeyPackage"
-/// headers have a concrete, accurate explanation. Deliberately avoids raw
-/// protocol jargon (kind numbers, MLS) while staying technically correct:
-/// relays only ever see end-to-end-encrypted data, never location or circle
-/// membership.
-class _BackendExplainerNote extends StatelessWidget {
-  const _BackendExplainerNote();
+/// This page is a *control* surface, so it keeps only enough framing to make
+/// the abstract "Inbox" / "KeyPackage" headers meaningful. The long-form
+/// explanation of what a relay is, which lists Haven keeps, and what a relay
+/// operator can observe now lives in Privacy ▸ Relays — one place, not two, so
+/// the two copies cannot drift apart.
+class _BackendCaption extends StatelessWidget {
+  const _BackendCaption();
 
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final bodyStyle = theme.textTheme.bodySmall?.copyWith(
-      color: scheme.onSurfaceVariant,
-    );
-    final termStyle = bodyStyle?.copyWith(
-      color: scheme.onSurface,
-      fontWeight: FontWeight.bold,
-    );
-    return Semantics(
-      label: l10n.relaySettingsExplainerSemantics,
-      container: true,
-      explicitChildNodes: true,
-      child: Container(
-        padding: const EdgeInsets.all(HavenSpacing.base),
-        decoration: BoxDecoration(
-          color: scheme.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(12),
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          l10n.relaySettingsBackendCaption,
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: scheme.onSurfaceVariant,
+          ),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Semantics(
-              header: true,
-              child: Text(
-                l10n.relaySettingsExplainerHeading,
-                style: theme.textTheme.titleSmall?.copyWith(
-                  color: scheme.onSurface,
-                ),
-              ),
+        Align(
+          alignment: AlignmentDirectional.centerStart,
+          child: TextButton(
+            onPressed: () => Navigator.push(
+              context,
+              PrivacyTopicPage.route(PrivacyTopic.relays),
             ),
-            const SizedBox(height: HavenSpacing.sm),
-            Text(l10n.relaySettingsExplainerNostr, style: bodyStyle),
-            const SizedBox(height: HavenSpacing.sm),
-            Text(l10n.relaySettingsExplainerMarmot, style: bodyStyle),
-            const SizedBox(height: HavenSpacing.sm),
-            Text(l10n.relaySettingsExplainerMetadata, style: bodyStyle),
-            const SizedBox(height: HavenSpacing.sm),
-            Text.rich(
-              TextSpan(
-                style: bodyStyle,
-                children: [
-                  TextSpan(
-                    text: l10n.relaySettingsExplainerInboxTerm,
-                    style: termStyle,
-                  ),
-                  TextSpan(text: l10n.relaySettingsExplainerInboxBody),
-                ],
-              ),
-            ),
-            const SizedBox(height: HavenSpacing.sm),
-            Text.rich(
-              TextSpan(
-                style: bodyStyle,
-                children: [
-                  TextSpan(
-                    text: l10n.relaySettingsExplainerKeyPackageTerm,
-                    style: termStyle,
-                  ),
-                  TextSpan(text: l10n.relaySettingsExplainerKeyPackageBody),
-                ],
-              ),
-            ),
-            const SizedBox(height: HavenSpacing.sm),
-            Text.rich(
-              TextSpan(
-                style: bodyStyle,
-                children: [
-                  TextSpan(
-                    text: l10n.relaySettingsExplainerOwnRelayTerm,
-                    style: termStyle,
-                  ),
-                  TextSpan(text: l10n.relaySettingsExplainerOwnRelayBody),
-                ],
-              ),
-            ),
-            const SizedBox(height: HavenSpacing.sm),
-            Text.rich(
-              TextSpan(
-                style: bodyStyle,
-                children: [
-                  TextSpan(
-                    text: l10n.relaySettingsExplainerReachabilityTerm,
-                    style: termStyle,
-                  ),
-                  TextSpan(text: l10n.relaySettingsExplainerReachabilityBody),
-                ],
-              ),
-            ),
-            const SizedBox(height: HavenSpacing.sm),
-            Text(l10n.relaySettingsExplainerFooter, style: bodyStyle),
-          ],
+            child: Text(l10n.commonLearnMore),
+          ),
         ),
-      ),
+      ],
     );
   }
 }

@@ -15,6 +15,7 @@ library;
 
 import 'package:flutter/widgets.dart';
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/constants/tiles.dart';
 import 'package:haven/src/widgets/common/info_note.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -28,6 +29,18 @@ enum PrivacyTopic {
 
   /// That the display name and photo are published publicly and permanently.
   publicProfile,
+
+  /// What a relay is, which lists Haven keeps, and the discovery lookups.
+  relays,
+
+  /// MLS/Marmot in plain language, including the membership-change caveat.
+  encryption,
+
+  /// What circle members can observe, contrasted with what relays can.
+  whatOthersSee,
+
+  /// Metadata, traffic patterns, network address, and whether a VPN helps.
+  inference,
 }
 
 /// A group of related [PrivacyTopic]s, shown under one header on the hub.
@@ -56,9 +69,27 @@ const List<PrivacyTopicGroup> privacyTopicGroups = [
       PrivacyTopic.publicProfile,
     ],
   ),
+  PrivacyTopicGroup(
+    heading: _howLocationTravelsHeading,
+    topics: [
+      PrivacyTopic.relays,
+      PrivacyTopic.encryption,
+      PrivacyTopic.whatOthersSee,
+    ],
+  ),
+  PrivacyTopicGroup(
+    heading: _theLimitsHeading,
+    topics: [PrivacyTopic.inference],
+  ),
 ];
 
 String _basicsHeading(AppLocalizations l10n) => l10n.privacyGroupBasicsHeading;
+
+String _howLocationTravelsHeading(AppLocalizations l10n) =>
+    l10n.privacyGroupHowLocationTravelsHeading;
+
+String _theLimitsHeading(AppLocalizations l10n) =>
+    l10n.privacyGroupTheLimitsHeading;
 
 // ---------------------------------------------------------------------------
 // Block types
@@ -117,6 +148,23 @@ final class PrivacyNote extends PrivacyBlock {
   final HavenInfoNoteTone tone;
 }
 
+/// An outbound link to a named third party.
+///
+/// Kept a distinct block type rather than an inline span so the affordance is
+/// a real button with a button role for assistive technology, and so the URL
+/// lives in `constants/` rather than inside a translatable string.
+final class PrivacyLink extends PrivacyBlock {
+  /// Creates a [PrivacyLink].
+  const PrivacyLink({required this.label, required this.url});
+
+  /// Visible label — typically the bare hostname, so the destination is
+  /// legible before the reader taps.
+  final String label;
+
+  /// Destination URL. Never localized.
+  final String url;
+}
+
 /// The collapsed tier-3 region holding technical depth.
 final class PrivacyMoreDetail extends PrivacyBlock {
   /// Creates a [PrivacyMoreDetail].
@@ -139,6 +187,12 @@ IconData privacyTopicIcon(PrivacyTopic topic) => switch (topic) {
   PrivacyTopic.whatHavenIs => LucideIcons.shieldCheck,
   PrivacyTopic.yourKeys => LucideIcons.key,
   PrivacyTopic.publicProfile => LucideIcons.globe,
+  // Reuses the glyphs those concepts already carry elsewhere in the app:
+  // `server` is the Settings → Relays icon, `lock` the encryption value prop.
+  PrivacyTopic.relays => LucideIcons.server,
+  PrivacyTopic.encryption => LucideIcons.lock,
+  PrivacyTopic.whatOthersSee => LucideIcons.eye,
+  PrivacyTopic.inference => LucideIcons.activity,
 };
 
 /// Returns [topic]'s hub tile title.
@@ -150,6 +204,10 @@ String privacyTopicTitle(AppLocalizations l10n, PrivacyTopic topic) =>
       PrivacyTopic.whatHavenIs => l10n.privacyWhatHavenIsTitle,
       PrivacyTopic.yourKeys => l10n.privacyYourKeysTitle,
       PrivacyTopic.publicProfile => l10n.privacyPublicProfileTitle,
+      PrivacyTopic.relays => l10n.privacyRelaysTitle,
+      PrivacyTopic.encryption => l10n.privacyEncryptionTitle,
+      PrivacyTopic.whatOthersSee => l10n.privacyWhatOthersSeeTitle,
+      PrivacyTopic.inference => l10n.privacyInferenceTitle,
     };
 
 /// Returns [topic]'s hub tile subtitle — a one-line preview of the answer.
@@ -158,6 +216,10 @@ String privacyTopicSubtitle(AppLocalizations l10n, PrivacyTopic topic) =>
       PrivacyTopic.whatHavenIs => l10n.privacyWhatHavenIsSubtitle,
       PrivacyTopic.yourKeys => l10n.privacyYourKeysSubtitle,
       PrivacyTopic.publicProfile => l10n.privacyPublicProfileSubtitle,
+      PrivacyTopic.relays => l10n.privacyRelaysSubtitle,
+      PrivacyTopic.encryption => l10n.privacyEncryptionSubtitle,
+      PrivacyTopic.whatOthersSee => l10n.privacyWhatOthersSeeSubtitle,
+      PrivacyTopic.inference => l10n.privacyInferenceSubtitle,
     };
 
 /// Returns the ordered content blocks for [topic].
@@ -202,6 +264,80 @@ List<PrivacyBlock> privacyBlocksFor(
     PrivacyMoreDetail([
       l10n.privacyPublicProfileDetailKindZero,
       l10n.privacyPublicProfileDetailExifStripped,
+    ]),
+  ],
+  PrivacyTopic.relays => [
+    PrivacyPara(l10n.privacyRelaysWhatIsARelay),
+    PrivacyPara(l10n.privacyRelaysWhyMany),
+    PrivacyPara(l10n.privacyRelaysTwoLists),
+    PrivacyMeansForYou(l10n.privacyRelaysMeansForYou),
+    PrivacyMoreDetail([
+      l10n.privacyRelaysDetailIndexers,
+      l10n.privacyRelaysDetailKeyListIsPublic,
+    ]),
+  ],
+  PrivacyTopic.encryption => [
+    PrivacyPara(l10n.privacyEncryptionPerCircle),
+    PrivacyPara(l10n.privacyEncryptionWhenSomeoneJoins),
+    PrivacyPara(l10n.privacyEncryptionWhenSomeoneLeaves),
+    // A warning rather than a plain paragraph because it is the one place the
+    // reader could otherwise walk away with a false belief: Haven rotates keys
+    // only on membership change, so one key covers a whole epoch and a removed
+    // member keeps whatever they archived from it.
+    PrivacyNote(
+      l10n.privacyEncryptionKeysChangeOnMembership,
+      tone: HavenInfoNoteTone.warning,
+    ),
+    PrivacyMeansForYou(l10n.privacyEncryptionMeansForYou),
+    PrivacyMoreDetail([
+      l10n.privacyEncryptionDetailMls,
+      l10n.privacyEncryptionDetailEpochs,
+    ]),
+  ],
+  PrivacyTopic.whatOthersSee => [
+    // Two actors on one page, each under its own navigable heading, so the
+    // contrast between "the people you chose" and "the servers in between"
+    // cannot be missed by someone who reads only one half.
+    PrivacyHeading(l10n.privacyWhatOthersSeeMembersHeading),
+    PrivacyPara(l10n.privacyWhatOthersSeeMembersExact),
+    PrivacyPara(l10n.privacyWhatOthersSeeCannotPause),
+    PrivacyPara(l10n.privacyWhatOthersSeeMembersLearnKey),
+    PrivacyNote(
+      l10n.privacyWhatOthersSeeCoMemberIp,
+      tone: HavenInfoNoteTone.warning,
+    ),
+    // Platform-asymmetric, and the only place in the app that states it: this
+    // note is why the "Your phone" topic could be dropped without losing the
+    // screenshot disclosure entirely.
+    PrivacyNote(
+      l10n.privacyWhatOthersSeeScreenshots,
+      tone: HavenInfoNoteTone.warning,
+    ),
+    PrivacyHeading(l10n.privacyWhatOthersSeeRelaysHeading),
+    PrivacyPara(l10n.privacyWhatOthersSeeRelaysCannot),
+    PrivacyPara(l10n.privacyWhatOthersSeeRelaysCan),
+    PrivacyMeansForYou(l10n.privacyWhatOthersSeeMeansForYou),
+    PrivacyMoreDetail([
+      l10n.privacyWhatOthersSeeDetailTag,
+      l10n.privacyWhatOthersSeeDetailExpiry,
+    ]),
+  ],
+  PrivacyTopic.inference => [
+    PrivacyPara(l10n.privacyInferenceWhatIsMetadata),
+    PrivacyPara(l10n.privacyInferenceActivityPattern),
+    PrivacyPara(l10n.privacyInferencePresence),
+    PrivacyHeading(l10n.privacyInferenceIpHeading),
+    PrivacyPara(l10n.privacyInferenceIpAddress),
+    PrivacyHeading(l10n.privacyInferenceVpnHeading),
+    PrivacyPara(l10n.privacyInferenceVpnHelps),
+    // The label is the bare hostname so the destination is legible before the
+    // tap; the URL itself lives in constants, never in a translated string.
+    PrivacyLink(label: l10n.aboutVpnLinkLabel, url: kMullvadUrl),
+    PrivacyPara(l10n.privacyInferenceVpnLimits),
+    PrivacyMeansForYou(l10n.privacyInferenceMeansForYou),
+    PrivacyMoreDetail([
+      l10n.privacyInferenceDetailJitter,
+      l10n.privacyInferenceDetailOutOfScope,
     ]),
   ],
 };

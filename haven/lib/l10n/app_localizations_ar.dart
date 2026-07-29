@@ -128,7 +128,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get onboardingValueProp3Body =>
-      'لا بريد إلكتروني، ولا رقم هاتف، ولا تسجيل. يُنشئ Haven هوية خاصة تعيش على هاتفك وحده، دون أي شيء يربطها بشخصك الحقيقي.';
+      'لا بريد إلكتروني، ولا رقم هاتف، ولا تسجيل. يُنشئ Haven هوية مفتاحها السري لا يغادر هاتفك أبدًا، فلا يوجد حساب يستطيع أحد تسليمه.';
 
   @override
   String get onboardingValueProp1Summary =>
@@ -140,7 +140,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get onboardingValueProp3Summary =>
-      'بلا بريد أو هاتف أو تسجيل، ولا شيء يربطه بك.';
+      'بلا بريد أو هاتف أو تسجيل. مفتاحك السري لا يغادر هاتفك أبدًا.';
 
   @override
   String get onboardingCreateIdentityTitle => 'أنشئ هويتك';
@@ -272,7 +272,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get relaySettingsKeyPackageSubtitle =>
-      'kind 10051، حيث يكتشف المدعوون مفاتيح تشفيرك';
+      'kind 10002، حيث يكتشف المدعوون مفاتيح تشفيرك';
 
   @override
   String get relaySettingsLoadRelaysError => 'تعذّر تحميل المُرحِّلات.';
@@ -355,57 +355,6 @@ class AppLocalizationsAr extends AppLocalizations {
   @override
   String get relaySettingsEmptyMessage =>
       'تحتاج إلى مُرحِّل واحد على الأقل ليتمكّن الآخرون من الوصول إليك. اضغط أدناه لاستعادة إعدادات Haven الافتراضية.';
-
-  @override
-  String get relaySettingsExplainerSemantics => 'كيف تعمل مُرحِّلات Haven';
-
-  @override
-  String get relaySettingsExplainerHeading => 'كيف يعمل هذا';
-
-  @override
-  String get relaySettingsExplainerNostr =>
-      'لا يملك Haven خادمًا مركزيًا. يعمل على تقنيتين مفتوحتين. Nostr شبكة من الخوادم المستقلة تُسمّى المُرحِّلات يمكن لأي شخص تشغيلها؛ تستقبل رسائلك وتحتفظ بها لفترة وجيزة ثم تمرّرها عندما يطلبها جهات اتصالك. لا غنى عن أي مُرحِّل بعينه، فإن توقّف أحدها واصلت البقية العمل، وكل ما قد يُجبَر مُرحِّل على تسليمه ليس سوى بيانات مشفّرة.';
-
-  @override
-  String get relaySettingsExplainerMarmot =>
-      'يُشفِّر بروتوكول Marmot رسائلك على جهازك قبل أن تغادره، مستخدمًا معيار MLS (Messaging Layer Security). كل دائرة هي مجموعتها المشفّرة الخاصة بمفاتيحها الخاصة، فلا يمكن ربط الدوائر المنفصلة ببعضها. وتظل تلك المفاتيح تتقدّم مع الوقت، وهي خاصية تُسمّى السرّية الأمامية، فحتى المفتاح الذي يُكشَف لاحقًا لا يستطيع فتح رسائلك السابقة.';
-
-  @override
-  String get relaySettingsExplainerMetadata =>
-      'لذلك، لا يرى المُرحِّل أبدًا موقعك، ولا رسائلك، ولا من في دوائرك، ولا هويتك على تلك الرسائل. تُنشَر كل رسالة من عنوان إرسال جديد لمرة واحدة، فلا شيء في الرسالة يربطها بحسابك. ومع ذلك، لا يزال المُرحِّل يرى بعض البيانات الوصفية: وسمًا عشوائيًا لكل دائرة، وتوقيت حركة بياناتك وحجمها، وعنوان الشبكة الذي تتصل منه.';
-
-  @override
-  String get relaySettingsExplainerInboxTerm => 'مُرحِّلات صندوق الوارد';
-
-  @override
-  String get relaySettingsExplainerInboxBody =>
-      ' هي صندوق بريدك: حيث تُسلَّم إليك الدعوات للانضمام إلى دائرة، وهي بدورها مشفّرة، لتستلمها. لكي يدعوك أحدهم، يجب أن يكون قادرًا على الوصول إلى أحد هذه المُرحِّلات.';
-
-  @override
-  String get relaySettingsExplainerKeyPackageTerm => 'مُرحِّلات KeyPackage';
-
-  @override
-  String get relaySettingsExplainerKeyPackageBody =>
-      ' هي حيث تنشر حزمة صغيرة من مفاتيحك العامة، وهي آمنة للمشاركة. يجلبها من يعرف حسابك من هذه المُرحِّلات ليضيفك إلى دائرة.';
-
-  @override
-  String get relaySettingsExplainerOwnRelayTerm => 'استخدام مُرحِّلك الخاص.';
-
-  @override
-  String get relaySettingsExplainerOwnRelayBody =>
-      ' تحمل كل دائرة أيضًا قائمة المُرحِّلات الخاصة بها، تُشارَك مع كل عضو عند انضمامه؛ تلك القائمة، لا صندوق وارِدك، هي حيث تنتقل التحديثات المشفّرة المستمرّة للدائرة. لذا إن كنت تفضّل تجنّب المُرحِّلات العامة، يمكنك تشغيل مُرحِّلك الخاص وتوجيه دائرة إليه: فبعد أن ينضمّ الجميع، يمكن أن تتدفّق حركة تلك الدائرة عبره وحده.';
-
-  @override
-  String get relaySettingsExplainerReachabilityTerm =>
-      'العقبة هي إمكانية الوصول.';
-
-  @override
-  String get relaySettingsExplainerReachabilityBody =>
-      ' يجب أن يتمكّن كل عضو من الاتصال بذلك المُرحِّل، وعندما تدعو أحدهم أول مرة، تحتاجان كلاكما إلى مُرحِّل يمكنكما الوصول إليه (على سبيل المثال، المُرحِّل الخاص نفسه المُدرَج بوصفه مُرحِّل صندوق الوارد وKeyPackage للجميع). ولا يزال المُرحِّل الخاص يرى حركة البيانات المشفّرة وتوقيتها نفسها التي يراها أي مُرحِّل آخر؛ غير أنك تتحكّم بمن يشغّله.';
-
-  @override
-  String get relaySettingsExplainerFooter =>
-      'يمكنك إضافة المُرحِّلات أو إزالتها من أي قائمة في أي وقت. المُرحِّلات الأكثر تجعل الوصول إليك أسهل؛ والأقل تمنحك تحكّمًا أكبر بوجهة حركة بياناتك المشفّرة.';
 
   @override
   String get locationSettingsTitle => 'الموقع';
@@ -532,59 +481,6 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get aboutLinkOpenError => 'تعذّر فتح الرابط';
-
-  @override
-  String get aboutWhoCanSeeTitle => 'من يرى ماذا';
-
-  @override
-  String get aboutWhoCanSeeIntro =>
-      'موقعك الدقيق قابل للقراءة فقط من قِبل الأشخاص الذين تختارهم. إليك ما تستطيع الأطراف الرئيسية رؤيته وما لا تستطيع.';
-
-  @override
-  String get aboutActorCirclesWho => 'أعضاء الدائرة الذين تشارك معهم';
-
-  @override
-  String get aboutActorCirclesSees =>
-      'موقعك الدقيق والاسم المعروض الذي تختاره، لكن فقط داخل الدوائر التي تشاركهم فيها، ولا يرون أبدًا دوائرك الأخرى.';
-
-  @override
-  String get aboutActorRelaysWho => 'مشغّلو المُرحِّلات';
-
-  @override
-  String get aboutActorRelaysSees =>
-      'الخوادم التي تمرّر رسائلك. ترى عنوان IP الخاص بك، والمفتاح العام الذي تنشر تحته (معرّف عشوائي، لا اسمك)، وحجم حركة بياناتك وتوقيتها، وأي حساب بحثت عنه عند البحث عن شخص. ولا يمكنها أبدًا قراءة موقعك، أو رسائلك، أو أسماء دوائرك، أو من في دوائرك.';
-
-  @override
-  String get aboutActorMapWho => 'مزوّد الخرائط (Stadia Maps)';
-
-  @override
-  String get aboutActorMapSees =>
-      'فقط أثناء فتح الخريطة: عنوان IP الخاص بك والمنطقة التي تعرضها، ليتمكّن من إرسال صور الخريطة الصحيحة. ولا يرى أبدًا دوائرك أو موقعك المشترك. تُخفي Stadia هوية عناوين IP ولا تبيع بياناتك.';
-
-  @override
-  String get aboutActorDevelopersWho => 'مطوّرو Haven';
-
-  @override
-  String get aboutActorDevelopersSees =>
-      'لا شيء. لا يشغّل Haven أي خوادم ولا يجمع أي تحليلات. لا يستطيع المطوّر رؤية سوى ما يراه مشغّل المُرحِّل، وذلك فقط إن استخدمت مُرحِّلًا يصادف أنه يشغّله.';
-
-  @override
-  String get aboutWhoCanSeeMetadataNote =>
-      'ومع ذلك، نشاطك ليس خفيًا تمامًا. يستطيع مُرحِّل تستخدمه، أو أي شخص يراقب شبكتك، أن يعرف أنك نشط، ومتى تقريبًا، وكم مرة، من توقيت الاتصال وأحجام الرسائل.';
-
-  @override
-  String get aboutScreenshotTitle => 'حماية لقطات الشاشة';
-
-  @override
-  String get aboutScreenshotBody =>
-      'على Android، يحظر Haven لقطات الشاشة وتسجيل الشاشة على مستوى التطبيق كله لمنع كشف الموقع عن طريق الخطأ. هذه حماية على مستوى النظام (FLAG_SECURE) تنطبق على كل شاشة في التطبيق، بما في ذلك الخريطة وقوائم الأعضاء.';
-
-  @override
-  String get aboutVpnTitle => 'كن أكثر خصوصية مع شبكة VPN';
-
-  @override
-  String get aboutVpnBody =>
-      'ترى المُرحِّلات ومزوّد الخرائط عنوان IP الخاص بك، ويرى مزوّد الإنترنت أي خوادم تصل إليها. تُخفي شبكة VPN موثوقة عنوان IP الخاص بك عنهم. نوصي بـ Mullvad. لا يُغيّر ذلك ما يراه أعضاء دائرتك، وينقل الثقة إلى مزوّد VPN.';
 
   @override
   String get aboutVpnLinkLabel => 'mullvad.net';
@@ -721,6 +617,186 @@ class AppLocalizationsAr extends AppLocalizations {
   @override
   String get privacyPublicProfileDetailExifStripped =>
       'قبل الرفع، يعيد Haven ترميز الصورة ويُسقط البيانات المخفية التي ترفقها الكاميرات، ومنها موقع GPS الذي التُقطت فيه الصورة. وهذا مهم هنا: فصورة من رحلة قد تحمل، بغير ذلك، إحداثيات منزلك.';
+
+  @override
+  String get privacyGroupHowLocationTravelsHeading => 'كيف ينتقل موقعك';
+
+  @override
+  String get privacyRelaysTitle => 'المُرحِّلات: الخوادم التي تمرّر الرسائل';
+
+  @override
+  String get privacyRelaysSubtitle => 'عبر حواسيب مَن تمرّ تحديثاتك';
+
+  @override
+  String get privacyRelaysWhatIsARelay =>
+      'لا يملك Haven خادمًا خاصًا به، فتمرّ تحديثاتك عبر خوادم يملكها آخرون. تُسمّى هذه الخوادم مُرحِّلات: خوادم صغيرة مستقلة يمكن لأي شخص تشغيلها. يحتفظ المُرحِّل بالرسالة المشفّرة لفترة وجيزة، ثم يمرّرها عندما تطلبها دائرتك.';
+
+  @override
+  String get privacyRelaysWhyMany =>
+      'استخدام عدة مُرحِّلات يعني أنّه لا يستطيع أيٌّ منها عزلك. فإن توقّف أحدها، واصلت البقية العمل. وأنت تختار المُرحِّلات التي تستخدمها، ويمكنك تغييرها متى شئت.';
+
+  @override
+  String get privacyRelaysTwoLists =>
+      'يحفظ Haven لك قائمتين. مُرحِّلات صندوق الوارد هي حيث تصلك الدعوات. ومُرحِّلات KeyPackage هي حيث يجلب الآخرون المفاتيح التي يحتاجونها لدعوتك. وتحمل كل دائرة أيضًا قائمتها الخاصة، وعبرها تنتقل تحديثات الدائرة المشفّرة.';
+
+  @override
+  String get privacyRelaysMeansForYou =>
+      'ليس هنا ما قد تخطئ فيه فيضرّك: فالمُرحِّل لا يرى سوى بيانات مشفّرة. لكنك تحتاج إلى مُرحِّل واحد على الأقل يمكن الوصول إليه، وإلا لن يستطيع أحد دعوتك وستصمت دوائرك.';
+
+  @override
+  String get privacyRelaysDetailIndexers =>
+      'بمعزل عن قوائمك الخاصة، يستعلم Haven من مجموعة صغيرة من مُرحِّلات الدليل العامة ليبحث عن ملفات الآخرين الشخصية ومفاتيحهم. ويتصل بها حتى إن لم تضبط لنفسك سوى مُرحِّلات خاصة. وهي ترى عنوان الشبكة الذي تتصل منه والحسابات التي سألت عنها.';
+
+  @override
+  String get privacyRelaysDetailKeyListIsPublic =>
+      'قائمة مُرحِّلات KeyPackage تُنشَر هي نفسها على الشبكة، موقَّعة بمفتاح هويتك، ليتمكّن الآخرون من إيجادها. فإن أضفت مُرحِّلًا خاصًا إلى تلك القائمة، صار عنوانه عامًا ومرتبطًا بك. أما المُرحِّل المستخدَم داخل قائمة دائرة واحدة فقط، فلا يُعلَن عنه بهذه الطريقة.';
+
+  @override
+  String get privacyEncryptionTitle => 'كيف يعمل التشفير';
+
+  @override
+  String get privacyEncryptionSubtitle =>
+      'مفاتيح لكل دائرة، وما يتغيّر عند انضمام الناس أو خروجهم';
+
+  @override
+  String get privacyEncryptionPerCircle =>
+      'يُشفَّر موقعك على هاتفك قبل أن يغادره، بمعيار مفتوح اسمه MLS. وكل دائرة هي مجموعتها المشفّرة الخاصة بمفاتيحها الخاصة. ولا يستطيع أحد من خارج الدائرة قراءة ما يُرسَل داخلها — لا مُرحِّل، ولا Haven نفسه، ولا دائرة أخرى أنت فيها.';
+
+  @override
+  String get privacyEncryptionWhenSomeoneJoins =>
+      'عندما ينضمّ شخص، تنتقل الدائرة إلى مفتاح جديد. يستطيع قراءة ما يُرسَل بعد وصوله، ولا شيء مما سبقه. ولا يُرسِل Haven إلى العضو الجديد أي مواقع سابقة أبدًا.';
+
+  @override
+  String get privacyEncryptionWhenSomeoneLeaves =>
+      'عندما يخرج شخص أو يُزال، تنتقل الدائرة إلى مفتاح جديد آخر. وفي غضون دقائق قليلة على الأكثر، لا يعود قادرًا على قراءة أي شيء جديد.';
+
+  @override
+  String get privacyEncryptionKeysChangeOnMembership =>
+      'تتغيّر المفاتيح عند تغيّر العضوية — لا وفق مؤقّت. وفي ما بين تلك التغييرات، يغطّي مفتاح واحد كل ما يُرسَل. لذا فمن تُزيله من دائرة مستقرّة منذ زمن طويل يبقى قادرًا على فتح أي رسائل حفظها وهو عضو، حتى رسائل من أسابيع مضت. لكنه لا يستطيع فتح أي شيء أُرسِل بعد خروجه.';
+
+  @override
+  String get privacyEncryptionMeansForYou =>
+      'يحميك التشفير من كل من هم خارج دوائرك. ولا يستطيع حمايتك من شخص كان يومًا داخل إحداها. فإن أردت قطيعة تامة مع شخص، فإنشاء دائرة جديدة أكثر أمانًا من إزالته من دائرة قديمة.';
+
+  @override
+  String get privacyEncryptionDetailMls =>
+      'إن معيار MLS (Messaging Layer Security) هو المعيار نفسه الصادر عن IETF والمستخدَم في تطبيقات مراسلة آمنة أخرى. ويصل Haven إلى شبكة Nostr من خلال بروتوكول Marmot الذي يحدّد كيف تنتقل مجموعات MLS عبر المُرحِّلات. ومفتاح هويتك العام في شبكة Nostr منفصل عن المفتاح الذي تُوقِّع به كل دائرة.';
+
+  @override
+  String get privacyEncryptionDetailEpochs =>
+      'تُسمّى كل فترة يعمل فيها مفتاح واحد «حقبة». ولا يحتفظ جهازك إلا بما يكفي لفكّ تشفير الرسائل التي لا تزال في الطريق من الحقبات القليلة الأخيرة، ثم يتخلّص منه — ولهذا لا يستطيع Haven استعادة رسائلك الأقدم لك، ولا حتى من حيث المبدأ.';
+
+  @override
+  String get privacyWhatOthersSeeTitle =>
+      'ما يراه الأعضاء، وما تراه المُرحِّلات';
+
+  @override
+  String get privacyWhatOthersSeeSubtitle =>
+      'الأشخاص الذين تشارك معهم، والخوادم التي بينكم';
+
+  @override
+  String get privacyWhatOthersSeeMembersHeading => 'الأشخاص الذين في دوائرك';
+
+  @override
+  String get privacyWhatOthersSeeMembersExact =>
+      'يرى كل فرد في الدائرة موقعك بدقّة على الخريطة، لا منطقة تقريبية. ولا يوجد إعداد يشارك موقعًا غامضًا مع بعض الأعضاء وموقعًا دقيقًا مع آخرين.';
+
+  @override
+  String get privacyWhatOthersSeeCannotPause =>
+      'ما دام Haven مفتوحًا وأنت في دائرة، يُرسَل موقعك من تلقاء نفسه كل دقيقتين تقريبًا. لا يوجد زرّ إيقاف مؤقّت. والإعداد الوحيد الذي تتحكّم به هو ما إذا كانت المشاركة تستمرّ بعد خروجك من التطبيق.';
+
+  @override
+  String get privacyWhatOthersSeeMembersLearnKey =>
+      'الانضمام إلى دائرة يُظهر أيضًا مفتاحك العام لكل عضو فيها. وعبره يستطيعون البحث عن ملفك الشخصي العام، وعن كل ما نشرته يومًا تحت ذلك المفتاح.';
+
+  @override
+  String get privacyWhatOthersSeeCoMemberIp =>
+      'تُجلَب صورة ملف العضو الشخصي من خادم يختاره هو. وتحميلها يكشف عنوان شبكتك — وبالتالي مكانك التقريبي في العالم — لمن يشغّل ذلك الخادم. يحدث هذا من تلقاء نفسه، دون أن تضغط على أي شيء.';
+
+  @override
+  String get privacyWhatOthersSeeRelaysHeading => 'مشغّلو المُرحِّلات';
+
+  @override
+  String get privacyWhatOthersSeeRelaysCannot =>
+      'لا يستطيع مشغّلو المُرحِّلات قراءة موقعك، ولا رسائلك، ولا اسم دائرتك، ولا قائمة أعضائها. وتصلهم كل رسالة من عنوان إرسال جديد لمرة واحدة، فلا يستطيعون معرفة أي عضو أرسلها.';
+
+  @override
+  String get privacyWhatOthersSeeRelaysCan =>
+      'لكنهم يرون عنوان الشبكة الذي تتصل منه، ومتى تكون متصلًا، وحجم حركة بياناتك وتكرارها. وتحمل كل دائرة وسمًا عشوائيًا، فيستطيع المُرحِّل جمع رسائل الدائرة الواحدة معًا وتقدير عدد من فيها — دون أن يعرف هوية أي منهم.';
+
+  @override
+  String get privacyWhatOthersSeeMeansForYou =>
+      'اعتبر الدائرة أشخاصًا تعطيهم عنوان منزلك. في مواجهة المُرحِّلات ومن هم في الخارج يصمد التشفير، ويسدّ VPN ثغرة عنوان الشبكة. أما في مواجهة عضو يحفظ لقطة شاشة، فلا شيء يصمد.';
+
+  @override
+  String get privacyWhatOthersSeeDetailTag =>
+      'يبقى وسم الدائرة كما هو مدى عمر تلك الدائرة، فيستطيع المُرحِّل ربط كل رسائلها معًا إلى أجل غير مسمّى. وهذه خاصية في البروتوكول الأساسي نفسه، وليست شيئًا يستطيع Haven تغييره.';
+
+  @override
+  String get commonLearnMore => 'اعرف المزيد';
+
+  @override
+  String get relaySettingsBackendCaption =>
+      'لا يملك Haven خادمًا خاصًا به. تمرّ تحديثاتك المشفّرة عبر خوادم مستقلة تُسمّى مُرحِّلات، وهي لا ترى أبدًا موقعك ولا مَن في دوائرك.';
+
+  @override
+  String get privacyWhatOthersSeeScreenshots =>
+      'لقطات الشاشة مسألة تعتمد على نظام التشغيل، والنظامان يختلفان. على Android يمنع Haven لقطات الشاشة وتسجيل الشاشة في كل شاشات التطبيق. أما على iPhone فلا يستطيع ذلك: يجعل Haven معاينة مبدّل التطبيقات ضبابية، لكن يستطيع أي عضو أن يأخذ لقطة لما يظهر على الشاشة.';
+
+  @override
+  String get privacyWhatOthersSeeDetailExpiry =>
+      'يطلب Haven من المُرحِّلات إسقاط رسائل الموقع بعد نحو أربع دقائق. وهذا الطلب استرشادي: فللمُرحِّل أن يحتفظ بها مدة أطول. أما الدعوات فلا تحمل أي مدة انتهاء، وقد تبقى على مُرحِّل صندوق وارِدك إلى أجل غير مسمّى.';
+
+  @override
+  String get privacyGroupTheLimitsHeading => 'حدود الحماية';
+
+  @override
+  String get privacyInferenceTitle => 'ما لا يزال يمكن استنتاجه عنك';
+
+  @override
+  String get privacyInferenceSubtitle => 'الآثار التي لا يحجبها التشفير';
+
+  @override
+  String get privacyInferenceWhatIsMetadata =>
+      'يُخفي التشفير ما تُرسله. لكنه لا يستطيع أن يخفي أنك أرسلت شيئًا. أما النمط المحيط بالرسالة — متى خرجت، وما حجمها، وبأي خوادم كنت متصلًا — فيُسمّى البيانات الوصفية، ويبقى مرئيًا حتى عندما لا يكون المحتوى كذلك.';
+
+  @override
+  String get privacyInferenceActivityPattern =>
+      'ومن هذا النمط، يستطيع مُرحِّل تستخدمه أن يعرف تقريبًا متى تكون نشطًا وكم مرة. ويُرسل Haven أيضًا تحديثًا إضافيًا كلما تحرّكت أكثر من مئة متر تقريبًا. لذا قد يُلمِّح سجل طويل بما يكفي إلى ما إذا كنت متنقّلًا أم ثابتًا في مكانك — دون أن يكشف المكان أبدًا.';
+
+  @override
+  String get privacyInferencePresence =>
+      'وما دام Haven يعمل، فهو يُبقي اتصالًا مفتوحًا بمُرحِّلاتك، فتستطيع هي أيضًا أن ترى أنك متصل، وأي الدوائر تُتابع. وهذا هو ثمن وصول التحديثات في ثوانٍ بدلًا من دقائق.';
+
+  @override
+  String get privacyInferenceIpHeading => 'عنوان شبكتك';
+
+  @override
+  String get privacyInferenceIpAddress =>
+      'كل خادم يتحدّث إليه Haven يرى عنوان الشبكة الذي يتصل منه هاتفك: مُرحِّلاتك، ومزوّد الخرائط، ومن يستضيف صورة الملف الشخصي لأي عضو. ويرى مزوّد الإنترنت أي هذه الخوادم وصلت إليه ومتى. ولا يفعل Haven من تلقاء نفسه أي شيء لإخفاء أيٍّ من هذين الأمرين.';
+
+  @override
+  String get privacyInferenceVpnHeading => 'هل تحتاج إلى شبكة VPN؟';
+
+  @override
+  String get privacyInferenceVpnHelps =>
+      'تستبدل شبكة VPN عنوان شبكتك بعنوانها، فلا ترى المُرحِّلات ولا الخوادم الأخرى من أين تتصل. وتخفي أيضًا عن مزوّد الإنترنت أي الخوادم تصل إليها. نوصي بـ Mullvad.';
+
+  @override
+  String get privacyInferenceVpnLimits =>
+      'لكنها ليست دواءً لكل داء. لا تُغيّر شبكة VPN شيئًا مما يراه أعضاء دائرتك، ولا تُخفي توقيت حركة بياناتك ولا حجمها عن مُرحِّل تتحدّث إليه. وهي تنقل ثقتك إلى شركة VPN بدلًا من أن تُغنيك عن الحاجة إلى الثقة بأحد.';
+
+  @override
+  String get privacyInferenceMeansForYou =>
+      'إن كان ما يقلقك أن تضعك جهةٌ تُشغّل شبكةً أو خادمًا على خريطة، لا أن يفعل ذلك شخص، فشبكة VPN هي أنفع شيء واحد يمكنك إضافته. وإن كان ما يقلقك هو الأشخاص الذين في دوائرك، فهي لن تساعدك على الإطلاق.';
+
+  @override
+  String get privacyInferenceDetailJitter =>
+      'يُغيّر Haven الفاصل الزمني بين التحديثات عن قصد، فلا يُظهر تسجيل قصير أي إيقاع منتظم. لكن عند حساب المتوسّط على مدى ساعات طويلة، يبقى تقدير الوتيرة الأساسية ممكنًا. ولا يُضاف حشو إلى أحجام الرسائل أيضًا، وتقع تحديثات الموقع في نطاق حجم ضيّق، وهذا ما يجعل التعرّف عليها بوصفها تحديثات موقع ممكنًا.';
+
+  @override
+  String get privacyInferenceDetailOutOfScope =>
+      'بعض الأمور تقع بكل بساطة خارج ما يستطيع Haven معالجته. فمراقبٌ يستطيع أن يرصد مُرحِّلات كثيرة في الوقت نفسه، أو هاتفك أنت بعد أن يسيطر عليه شخص آخر، أمران يتجاوزان ما يمكن أن يُصلحه أي قرار تصميمي هنا.';
 
   @override
   String get commonClearAll => 'مسح الكل';
@@ -1590,7 +1666,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get qrCodeExplainerUsername =>
-      'يعمل مفتاحك العام كاسم مستخدم آمن للمشاركة. يمسح الناس هذا الرمز، أو يلصقون مفتاحك العام، لدعوتك إلى دائرة. ومشاركته لا يمكن أن تكشف موقعك، الذي لا يظهر إلا لأعضاء الدوائر التي انضممت إليها، ولا اسمك وصورتك، اللذين يبقيان على هذا الجهاز ما لم تختر نشر ملف شخصي عام.';
+      'يعمل مفتاحك العام كاسم مستخدم آمن للمشاركة. يمسح الناس هذا الرمز، أو يلصقون مفتاحك العام، لدعوتك إلى دائرة. ومشاركته لا يمكن أن تكشف موقعك، الذي لا يظهر إلا لأعضاء الدوائر التي انضممت إليها. أما اسمك المعروض وصورتك فهما علنيان بالفعل، لذا لا تكشف مشاركة هذا الرمز عنهما أي شيء إضافي.';
 
   @override
   String get displayNameCardTitle => 'الاسم المعروض';
