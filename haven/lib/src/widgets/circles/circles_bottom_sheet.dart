@@ -1328,6 +1328,19 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
     final isBlocked = ref
         .read(circleServiceProvider)
         .isCircleBlocked(circle.mlsGroupId);
+    // Discreet sync diagnostic: the member count carries the circle's current
+    // MLS epoch as a suffix. Members of a converged circle all report the same
+    // number, so comparing two devices reveals the epoch desync that stops
+    // messages decrypting — but it stays on the dimmest line of the sheet so
+    // it never competes with the actions below. `valueOrNull` collapses both
+    // "still loading" and "no live MLS group" to null, so the line silently
+    // degrades to a bare member count: no spinner, no error text, no layout
+    // shift (Security Rule 8 — never surface a raw FFI failure).
+    final memberCount = l10n.commonMemberCount(circle.members.length);
+    final epoch = ref.watch(circleEpochProvider(circle)).valueOrNull;
+    final membersLine = epoch == null
+        ? memberCount
+        : l10n.circleDetailsMembersWithEpoch(memberCount, epoch);
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         HavenSpacing.base,
@@ -1353,7 +1366,8 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
           Text(l10n.circleDetailsTitle, style: theme.textTheme.titleMedium),
           const SizedBox(height: HavenSpacing.sm),
           Text(
-            l10n.commonMemberCount(circle.members.length),
+            membersLine,
+            key: WidgetKeys.circleDetailsMembers,
             style: theme.textTheme.bodySmall?.copyWith(
               color: scheme.onSurfaceVariant,
             ),

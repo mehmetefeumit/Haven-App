@@ -129,7 +129,7 @@
 ///   validation for Bob.
 /// - `CircleManagerFfi.acceptInvitation` — Bob's MDK member-set
 ///   assertion fails (still 1 member after accept); Carol similarly.
-/// - `CircleManagerFfi.groupEpochForTest` — epoch-delta assertions throw.
+/// - `CircleManagerFfi.groupEpoch` — epoch-delta assertions throw.
 /// - `encryptLocation` — Alice's relay-side wait for kind-445 fires.
 /// - `decryptLocation` — neither side surfaces the other's location;
 ///   Carol's forward-secrecy cross-check fails.
@@ -2660,7 +2660,7 @@ Future<Set<String>> _giftWrapIdSnapshot(
 ///   advance confirmed via the on-wire path.
 ///
 /// The epoch counter lives inside the NIP-44-encrypted kind-445 payload and
-/// is NOT visible on the wire. The `groupEpochForTest` FFI method reads it
+/// is NOT visible on the wire. The `groupEpoch` FFI method reads it
 /// from each peer's own MDK instance — this is the only way to assert key
 /// rotation without decrypting group messages.
 Future<CircleWithMembersFfi> _aliceAddsCarolViaUi({
@@ -4972,8 +4972,9 @@ String _redactPk(String hex) =>
 /// in the widget pump). If the cast fails it throws `TypeError` immediately
 /// — an unambiguous signal that the service was swapped out.
 ///
-/// `groupEpochForTest` is debug-gated (compiled out of release builds); it is
-/// safe to call only in tests and debug builds.
+/// `groupEpoch` is compiled into release builds too — the circle-details sheet
+/// renders it — so this helper exercises the same production accessor rather
+/// than a test-only seam.
 ///
 /// Throws if the group does not exist in Alice's MDK instance or the FFI call
 /// fails.
@@ -4992,7 +4993,7 @@ Future<int> _aliceEpochForTest(
   final circleService =
       container.read(circleServiceProvider) as NostrCircleService;
   final manager = await circleService.getCircleManagerFfi();
-  final epoch = await manager.groupEpochForTest(mlsGroupId: mlsGroupId);
+  final epoch = await manager.groupEpoch(mlsGroupId: mlsGroupId);
   return epoch.toInt();
 }
 

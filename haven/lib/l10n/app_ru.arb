@@ -329,6 +329,7 @@
   "circleSelectorCollapsedAnnouncement": "Список кругов свёрнут",
   "circleDetailsButtonTooltip": "Сведения о круге",
   "circleDetailsTitle": "Сведения о круге",
+  "circleDetailsMembersWithEpoch": "{members} · эпоха {epoch}",
   "circleDetailsRelaysHeading": "Реле для этого круга",
   "circleDetailsNoRelays": "(не указаны)",
   "circleDetailsRelaysNote": "Эти реле были скопированы из ваших входящих реле при создании круга, и изменить их пока нельзя. Изменения, которые вы позже внесёте в свой личный список реле, на них не влияют.",

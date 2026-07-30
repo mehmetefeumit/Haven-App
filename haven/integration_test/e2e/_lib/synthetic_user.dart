@@ -874,14 +874,15 @@ class SyntheticUser {
   /// kind-445 payload), so reading it per-manager here is the only way to
   /// assert key-rotation progress without decrypting group messages.
   ///
-  /// Compiled out of release builds by the debug-assertions gate on the Rust
-  /// side. Throws if the group does not exist in this peer's MDK instance.
+  /// Backed by the same `groupEpoch` accessor the circle-details sheet uses,
+  /// so this reads exactly what production reads. Throws if the group does not
+  /// exist in this peer's MDK instance.
   ///
   /// Returns an [int] rather than [BigInt] for ergonomic arithmetic in
   /// assertion helpers; MLS epochs are unsigned 64-bit but realistic test
   /// groups stay well within 2^53 (Dart's safe integer range).
   Future<int> currentEpoch(List<int> mlsGroupId) async {
-    final epoch = await user.circleManager.groupEpochForTest(
+    final epoch = await user.circleManager.groupEpoch(
       mlsGroupId: mlsGroupId,
     );
     return epoch.toInt();

@@ -1260,6 +1260,15 @@ class AppLocalizationsUr extends AppLocalizations {
   String get circleDetailsTitle => 'حلقے کی تفصیلات';
 
   @override
+  String circleDetailsMembersWithEpoch(String members, int epoch) {
+    final intl.NumberFormat epochNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String epochString = epochNumberFormat.format(epoch);
+
+    return '$members · دور $epochString';
+  }
+
+  @override
   String get circleDetailsRelaysHeading => 'اس حلقے کے ریلے';
 
   @override

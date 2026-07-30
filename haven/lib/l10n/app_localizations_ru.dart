@@ -1286,6 +1286,15 @@ class AppLocalizationsRu extends AppLocalizations {
   String get circleDetailsTitle => 'Сведения о круге';
 
   @override
+  String circleDetailsMembersWithEpoch(String members, int epoch) {
+    final intl.NumberFormat epochNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String epochString = epochNumberFormat.format(epoch);
+
+    return '$members · эпоха $epochString';
+  }
+
+  @override
   String get circleDetailsRelaysHeading => 'Реле для этого круга';
 
   @override

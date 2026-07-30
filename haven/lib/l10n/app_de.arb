@@ -329,6 +329,7 @@
   "circleSelectorCollapsedAnnouncement": "Kreisliste eingeklappt",
   "circleDetailsButtonTooltip": "Kreisdetails",
   "circleDetailsTitle": "Kreisdetails",
+  "circleDetailsMembersWithEpoch": "{members} · Epoche {epoch}",
   "circleDetailsRelaysHeading": "Relays für diesen Kreis",
   "circleDetailsNoRelays": "(keine erfasst)",
   "circleDetailsRelaysNote": "Diese Relays wurden bei der Erstellung dieses Kreises aus deinen Posteingangs-Relays übernommen und lassen sich noch nicht ändern. Spätere Änderungen an deiner persönlichen Relay-Liste wirken sich nicht auf sie aus.",

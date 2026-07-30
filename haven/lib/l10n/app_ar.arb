@@ -329,6 +329,7 @@
   "circleSelectorCollapsedAnnouncement": "قائمة الدوائر مطوية",
   "circleDetailsButtonTooltip": "تفاصيل الدائرة",
   "circleDetailsTitle": "تفاصيل الدائرة",
+  "circleDetailsMembersWithEpoch": "{members} · الحقبة {epoch}",
   "circleDetailsRelaysHeading": "مُرحِّلات هذه الدائرة",
   "circleDetailsNoRelays": "(لا شيء مسجّل)",
   "circleDetailsRelaysNote": "نُسِخت هذه المُرحِّلات من مُرحِّلات صندوق الوارد لديك عند إنشاء هذه الدائرة، ولا يمكن تغييرها بعد. والتعديلات اللاحقة على قائمة مُرحِّلاتك الشخصية لا تغيّرها.",

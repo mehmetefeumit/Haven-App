@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 529189239;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 527590828;
 
 // Section: executor
 
@@ -2285,7 +2285,7 @@ fn wire__crate__api__CircleManagerFfi_get_visible_circles_impl(
         },
     )
 }
-fn wire__crate__api__CircleManagerFfi_group_epoch_for_test_impl(
+fn wire__crate__api__CircleManagerFfi_group_epoch_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -2293,7 +2293,7 @@ fn wire__crate__api__CircleManagerFfi_group_epoch_for_test_impl(
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "CircleManagerFfi_group_epoch_for_test",
+            debug_name: "CircleManagerFfi_group_epoch",
             port: Some(port_),
             mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
         },
@@ -2332,7 +2332,7 @@ fn wire__crate__api__CircleManagerFfi_group_epoch_for_test_impl(
                             }
                         }
                         let api_that_guard = api_that_guard.unwrap();
-                        let output_ok = crate::api::CircleManagerFfi::group_epoch_for_test(
+                        let output_ok = crate::api::CircleManagerFfi::group_epoch(
                             &*api_that_guard,
                             api_mls_group_id,
                         )
@@ -9694,12 +9694,9 @@ fn pde_ffi_dispatcher_primary_impl(
             rust_vec_len,
             data_len,
         ),
-        38 => wire__crate__api__CircleManagerFfi_group_epoch_for_test_impl(
-            port,
-            ptr,
-            rust_vec_len,
-            data_len,
-        ),
+        38 => {
+            wire__crate__api__CircleManagerFfi_group_epoch_impl(port, ptr, rust_vec_len, data_len)
+        }
         39 => wire__crate__api__CircleManagerFfi_list_user_relays_impl(
             port,
             ptr,

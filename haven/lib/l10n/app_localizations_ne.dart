@@ -1266,6 +1266,15 @@ class AppLocalizationsNe extends AppLocalizations {
   String get circleDetailsTitle => 'सर्कल विवरण';
 
   @override
+  String circleDetailsMembersWithEpoch(String members, int epoch) {
+    final intl.NumberFormat epochNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String epochString = epochNumberFormat.format(epoch);
+
+    return '$members · एपोक $epochString';
+  }
+
+  @override
   String get circleDetailsRelaysHeading => 'यस सर्कलका रिलेहरू';
 
   @override

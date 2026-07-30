@@ -329,6 +329,7 @@
   "circleSelectorCollapsedAnnouncement": "فهرست حلقه‌ها بسته شد",
   "circleDetailsButtonTooltip": "جزئیات حلقه",
   "circleDetailsTitle": "جزئیات حلقه",
+  "circleDetailsMembersWithEpoch": "{members} · دوره {epoch}",
   "circleDetailsRelaysHeading": "رله‌های این حلقه",
   "circleDetailsNoRelays": "(چیزی ثبت نشده)",
   "circleDetailsRelaysNote": "این رله‌ها هنگام ساخته شدن این حلقه از رله‌های صندوق ورودی‌ات رونوشت شده‌اند و هنوز نمی‌شود عوضشان کرد. ویرایش‌های بعدیِ فهرست رلهٔ شخصی‌ات آن‌ها را تغییر نمی‌دهد.",

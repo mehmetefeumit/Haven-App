@@ -329,6 +329,7 @@
   "circleSelectorCollapsedAnnouncement": "حلقوں کی فہرست سمیٹی گئی",
   "circleDetailsButtonTooltip": "حلقے کی تفصیلات",
   "circleDetailsTitle": "حلقے کی تفصیلات",
+  "circleDetailsMembersWithEpoch": "{members} · دور {epoch}",
   "circleDetailsRelaysHeading": "اس حلقے کے ریلے",
   "circleDetailsNoRelays": "(کوئی درج نہیں)",
   "circleDetailsRelaysNote": "یہ ریلے اس حلقے کے بننے کے وقت آپ کے اِن باکس ریلے سے نقل کیے گئے تھے، اور ابھی انہیں بدلا نہیں جا سکتا۔ آپ کی ذاتی ریلے فہرست میں بعد کی ترامیم انہیں تبدیل نہیں کرتیں۔",

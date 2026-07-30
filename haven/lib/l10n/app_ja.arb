@@ -329,6 +329,7 @@
   "circleSelectorCollapsedAnnouncement": "サークルの一覧を閉じました",
   "circleDetailsButtonTooltip": "サークルの詳細",
   "circleDetailsTitle": "サークルの詳細",
+  "circleDetailsMembersWithEpoch": "{members}・エポック{epoch}",
   "circleDetailsRelaysHeading": "このサークルのリレー",
   "circleDetailsNoRelays": "（記録なし）",
   "circleDetailsRelaysNote": "これらのリレーは、このサークルの作成時にあなたの受信トレイのリレーからコピーされたもので、まだ変更できません。あとから個人のリレーのリストを編集しても、これらは変わりません。",

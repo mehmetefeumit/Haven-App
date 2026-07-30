@@ -159,6 +159,61 @@ mod circle_manager_lifecycle_tests {
         cleanup_dir(&dir);
     }
 
+    /// Rule 4 (Group ID Privacy): `group_epoch` is compiled into release
+    /// builds — the circle-details sheet renders its result — so its error
+    /// surface is a production path, not a test-only seam. A lookup miss must
+    /// never echo the queried MLS group ID back to the caller, because that
+    /// string crosses the FFI boundary as `Result<u64, String>`.
+    #[tokio::test]
+    async fn group_epoch_error_never_leaks_the_queried_group_id() {
+        // Independent detector for a contiguous hex run >= 16 chars (the shape
+        // of an MLS group id). Written from scratch — NOT via the redactor —
+        // so it cannot mask a redactor regression.
+        fn has_hex_run_ge16(s: &str) -> bool {
+            let mut run = 0usize;
+            for b in s.bytes() {
+                if b.is_ascii_hexdigit() {
+                    run += 1;
+                    if run >= 16 {
+                        return true;
+                    }
+                } else {
+                    run = 0;
+                }
+            }
+            false
+        }
+
+        let dir = unique_temp_dir("mgr_epoch_no_leak");
+        let manager = CircleManager::new_unencrypted(&dir, &nostr::Keys::generate())
+            .expect("should create manager");
+
+        // A group this manager has never seen, so the lookup misses.
+        let unknown = [0xab_u8; 32];
+        let unknown_hex = hex::encode(unknown);
+        assert!(
+            has_hex_run_ge16(&unknown_hex),
+            "detector sanity: a 32-byte group id is a >=16 hex run"
+        );
+
+        let err = manager
+            .group_epoch(&GroupId::from_slice(&unknown))
+            .await
+            .expect_err("an unknown group must not resolve to an epoch");
+        let surfaced = err.to_string();
+
+        assert!(
+            !surfaced.contains(&unknown_hex),
+            "group_epoch must not echo the queried group id: {surfaced}"
+        );
+        assert!(
+            !has_hex_run_ge16(&surfaced),
+            "group_epoch error must contain no >=16 hex run: {surfaced}"
+        );
+
+        cleanup_dir(&dir);
+    }
+
     #[tokio::test]
     async fn manager_get_visible_circles_returns_empty_initially() {
         let dir = unique_temp_dir("mgr_empty_visible");

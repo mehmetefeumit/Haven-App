@@ -329,6 +329,7 @@
   "circleSelectorCollapsedAnnouncement": "Lista de círculos contraída",
   "circleDetailsButtonTooltip": "Detalles del círculo",
   "circleDetailsTitle": "Detalles del círculo",
+  "circleDetailsMembersWithEpoch": "{members} · época {epoch}",
   "circleDetailsRelaysHeading": "Relés de este círculo",
   "circleDetailsNoRelays": "(ninguno registrado)",
   "circleDetailsRelaysNote": "Estos relés se copiaron de tus relés de bandeja de entrada al crear este círculo y todavía no se pueden cambiar. Los cambios que hagas después en tu lista de relés personal no los modifican.",

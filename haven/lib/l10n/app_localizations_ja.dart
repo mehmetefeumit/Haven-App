@@ -1212,6 +1212,15 @@ class AppLocalizationsJa extends AppLocalizations {
   String get circleDetailsTitle => 'サークルの詳細';
 
   @override
+  String circleDetailsMembersWithEpoch(String members, int epoch) {
+    final intl.NumberFormat epochNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String epochString = epochNumberFormat.format(epoch);
+
+    return '$members・エポック$epochString';
+  }
+
+  @override
   String get circleDetailsRelaysHeading => 'このサークルのリレー';
 
   @override

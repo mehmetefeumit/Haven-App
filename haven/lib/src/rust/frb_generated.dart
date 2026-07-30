@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 529189239;
+  int get rustContentHash => 527590828;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -282,7 +282,7 @@ abstract class RustLibApi extends BaseApi {
     required CircleManagerFfi that,
   });
 
-  Future<BigInt> crateApiCircleManagerFfiGroupEpochForTest({
+  Future<BigInt> crateApiCircleManagerFfiGroupEpoch({
     required CircleManagerFfi that,
     required List<int> mlsGroupId,
   });
@@ -2359,7 +2359,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<BigInt> crateApiCircleManagerFfiGroupEpochForTest({
+  Future<BigInt> crateApiCircleManagerFfiGroupEpoch({
     required CircleManagerFfi that,
     required List<int> mlsGroupId,
   }) {
@@ -2383,16 +2383,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeSuccessData: sse_decode_u_64,
           decodeErrorData: sse_decode_String,
         ),
-        constMeta: kCrateApiCircleManagerFfiGroupEpochForTestConstMeta,
+        constMeta: kCrateApiCircleManagerFfiGroupEpochConstMeta,
         argValues: [that, mlsGroupId],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiCircleManagerFfiGroupEpochForTestConstMeta =>
+  TaskConstMeta get kCrateApiCircleManagerFfiGroupEpochConstMeta =>
       const TaskConstMeta(
-        debugName: "CircleManagerFfi_group_epoch_for_test",
+        debugName: "CircleManagerFfi_group_epoch",
         argNames: ["that", "mlsGroupId"],
       );
 
@@ -11524,24 +11524,30 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   Future<List<CircleWithMembersFfi>> getVisibleCircles() => RustLib.instance.api
       .crateApiCircleManagerFfiGetVisibleCircles(that: this);
 
-  /// Returns this manager's current MLS epoch for a group (debug-only).
+  /// Returns this manager's current MLS epoch for a group.
   ///
-  /// Each E2E peer (the production UI plus the synthetic FFI peers) owns its
+  /// Each peer (the production UI plus the synthetic E2E FFI peers) owns its
   /// own MDK instance, so the epoch must be read per-manager — hence a method
-  /// on [`CircleManagerFfi`] rather than a free function. Used to assert
-  /// real key rotation: after an Add/remove/self-update commit is finalized
-  /// (or a peer processes one), the epoch MUST advance by exactly 1. The
-  /// epoch counter is not secret; this seam is compiled out of release
-  /// builds (see the sibling stub).
+  /// on [`CircleManagerFfi`] rather than a free function.
+  ///
+  /// Two consumers:
+  /// - E2E asserts real key rotation: after an Add/remove/self-update commit
+  ///   is finalized (or a peer processes one), the epoch MUST advance by
+  ///   exactly 1.
+  /// - The circle-details sheet renders it discreetly, so members can compare
+  ///   epochs across devices when messages stop decrypting.
+  ///
+  /// The epoch counter is not secret — it is a commit counter carrying no key
+  /// material and no group identifier — so, unlike the other test seams, this
+  /// one is compiled into release builds.
   ///
   /// # Errors
   ///
   /// Returns an error if the group does not exist or the MDK query fails.
-  Future<BigInt> groupEpochForTest({required List<int> mlsGroupId}) =>
-      RustLib.instance.api.crateApiCircleManagerFfiGroupEpochForTest(
-        that: this,
-        mlsGroupId: mlsGroupId,
-      );
+  Future<BigInt> groupEpoch({required List<int> mlsGroupId}) => RustLib
+      .instance
+      .api
+      .crateApiCircleManagerFfiGroupEpoch(that: this, mlsGroupId: mlsGroupId);
 
   /// Returns the user's relays for one category, ordered by insertion time.
   Future<List<String>> listUserRelays({required RelayTypeFfi relayType}) =>

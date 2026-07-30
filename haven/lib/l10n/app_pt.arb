@@ -329,6 +329,7 @@
   "circleSelectorCollapsedAnnouncement": "Lista de círculos recolhida",
   "circleDetailsButtonTooltip": "Detalhes do círculo",
   "circleDetailsTitle": "Detalhes do círculo",
+  "circleDetailsMembersWithEpoch": "{members} · epoch {epoch}",
   "circleDetailsRelaysHeading": "Relays deste círculo",
   "circleDetailsNoRelays": "(nenhum registrado)",
   "circleDetailsRelaysNote": "Esses relays foram copiados dos seus relays de caixa de entrada quando este círculo foi criado, e ainda não podem ser alterados. Mudanças posteriores na sua lista pessoal de relays não os alteram.",

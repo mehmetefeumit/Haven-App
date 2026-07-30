@@ -329,6 +329,7 @@
   "circleSelectorCollapsedAnnouncement": "Çevre listesi daraltıldı",
   "circleDetailsButtonTooltip": "Çevre ayrıntıları",
   "circleDetailsTitle": "Çevre ayrıntıları",
+  "circleDetailsMembersWithEpoch": "{members} · epoch {epoch}",
   "circleDetailsRelaysHeading": "Bu çevre için aktarıcılar",
   "circleDetailsNoRelays": "(kayıtlı yok)",
   "circleDetailsRelaysNote": "Bu aktarıcılar, çevre oluşturulurken gelen kutusu aktarıcılarınızdan kopyalanmıştır ve henüz değiştirilemez. Kişisel aktarıcı listenizde sonradan yaptığınız değişiklikler bunları etkilemez.",

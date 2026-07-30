@@ -329,6 +329,7 @@
   "circleSelectorCollapsedAnnouncement": "Liste des cercles réduite",
   "circleDetailsButtonTooltip": "Détails du cercle",
   "circleDetailsTitle": "Détails du cercle",
+  "circleDetailsMembersWithEpoch": "{members} · époque {epoch}",
   "circleDetailsRelaysHeading": "Relais de ce cercle",
   "circleDetailsNoRelays": "(aucun enregistré)",
   "circleDetailsRelaysNote": "Ces relais ont été copiés depuis vos relais de réception à la création de ce cercle et ne sont pas encore modifiables. Les modifications ultérieures de votre liste de relais personnelle ne les changent pas.",

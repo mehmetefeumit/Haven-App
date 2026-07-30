@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/nostr_circle_service.dart';
 
 /// Provider for the list of visible circles.
 ///
@@ -32,6 +33,42 @@ final circlesProvider = FutureProvider<List<Circle>>((ref) async {
   catch (e) {
     debugPrint('Failed to load circles: ${e.runtimeType}');
     return [];
+  }
+});
+
+/// The local MLS epoch for one circle, or `null` when it cannot be read.
+///
+/// The epoch is a monotonic commit counter: it advances by exactly one for
+/// every applied MLS commit (a membership change or a key update). Members of
+/// a converged circle all report the same number, so a persistent mismatch
+/// between two devices is the signature of the desync that stops messages
+/// decrypting. The circle-details sheet surfaces it for that diagnosis.
+///
+/// Resolves to `null` — never to an error — when there is no live MLS group
+/// for the circle (legacy/orphaned pre-cutover rows, see
+/// [CircleLegacyStatus.isLegacyOrphaned]) or the manager is unavailable.
+/// Callers hide the epoch entirely in that case rather than surfacing a
+/// failure, so the line degrades to a bare member count.
+///
+/// Keyed by [Circle], whose equality and `hashCode` are both derived from
+/// `mlsGroupId` alone — so the cache entry is per-group and survives roster
+/// changes. `autoDispose` makes each re-open of the sheet re-read the epoch
+/// instead of serving a stale number.
+final AutoDisposeFutureProviderFamily<int?, Circle> circleEpochProvider =
+    FutureProvider.autoDispose.family<int?, Circle>((ref, circle) async {
+  final circleService = ref.read(circleServiceProvider);
+  if (circleService is! NostrCircleService) return null;
+  try {
+    final manager = await circleService.getCircleManagerFfi();
+    final epoch = await manager.groupEpoch(mlsGroupId: circle.mlsGroupId);
+    return epoch.toInt();
+  }
+  // FFI errors may not extend Exception, so a bare catch clause is required.
+  // A missing group is an expected outcome here, not an anomaly.
+  // ignore: avoid_catches_without_on_clauses
+  catch (e) {
+    debugPrint('Failed to read circle epoch: ${e.runtimeType}');
+    return null;
   }
 });
 

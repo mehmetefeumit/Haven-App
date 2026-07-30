@@ -95,6 +95,12 @@ abstract final class WidgetKeys {
   /// (user-facing, translatable) "Circle details" tooltip text.
   static const Key circleDetailsButton = Key('circle_details_button');
 
+  /// The member-count subtitle inside the circle-details bottom sheet, which
+  /// also carries the circle's MLS epoch suffix once it resolves. Keyed so
+  /// tests can assert the epoch appears (and that it degrades to a bare
+  /// member count when unavailable) without matching translated text.
+  static const Key circleDetailsMembers = Key('circle_details_members');
+
   /// "Add member" CTA inside the circle-details bottom sheet (admin only).
   static const Key addMemberCta = Key('add_member_cta');
 

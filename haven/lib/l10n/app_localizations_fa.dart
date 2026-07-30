@@ -1262,6 +1262,15 @@ class AppLocalizationsFa extends AppLocalizations {
   String get circleDetailsTitle => 'جزئیات حلقه';
 
   @override
+  String circleDetailsMembersWithEpoch(String members, int epoch) {
+    final intl.NumberFormat epochNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String epochString = epochNumberFormat.format(epoch);
+
+    return '$members · دوره $epochString';
+  }
+
+  @override
   String get circleDetailsRelaysHeading => 'رله‌های این حلقه';
 
   @override

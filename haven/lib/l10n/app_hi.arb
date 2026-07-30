@@ -329,6 +329,7 @@
   "circleSelectorCollapsedAnnouncement": "सर्कल सूची संक्षिप्त हुई",
   "circleDetailsButtonTooltip": "सर्कल विवरण",
   "circleDetailsTitle": "सर्कल विवरण",
+  "circleDetailsMembersWithEpoch": "{members} · एपोक {epoch}",
   "circleDetailsRelaysHeading": "इस सर्कल के लिए रिले",
   "circleDetailsNoRelays": "(कोई दर्ज नहीं)",
   "circleDetailsRelaysNote": "ये रिले इस सर्कल के बनने के समय आपके इनबॉक्स रिले से कॉपी किए गए थे, और इन्हें अभी बदला नहीं जा सकता। बाद में आपकी निजी रिले सूची में किए गए बदलाव इन्हें नहीं बदलते।",

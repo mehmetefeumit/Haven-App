@@ -72,6 +72,15 @@ Future<void> useInMemoryKeyringForTest() =>
 /// nothing for this function to `.take()`. (Rule 14: at most one live session
 /// per DB file — the handle drop closes it.)
 ///
+/// "Dropped" means the Dart side called `dispose()` on the handle, NOT merely
+/// nulled its reference: a `RustOpaque` that is only unreferenced is released
+/// whenever the Dart GC happens to finalize it, which leaves the Rule-14
+/// `LiveSessionGuard` — held by `SessionManager` for the manager's lifetime —
+/// registered for an unbounded period, so the next `SessionManager::new` on the
+/// same path fails closed. The live-sync engine keeps its OWN
+/// `Arc<CoreCircleManager>` clone, so it must be stopped and its handle
+/// disposed first or the guard survives the manager's own disposal.
+///
 /// This function is **idempotent**: deleting an already-gone file or key is not
 /// an error, so a partial prior wipe or a double-call both converge to "nothing
 /// left" and return `Ok(())` — the M10.1 launch-retry relies on this to avoid an
@@ -950,20 +959,27 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Gets visible circles (excludes declined invitations).
   Future<List<CircleWithMembersFfi>> getVisibleCircles();
 
-  /// Returns this manager's current MLS epoch for a group (debug-only).
+  /// Returns this manager's current MLS epoch for a group.
   ///
-  /// Each E2E peer (the production UI plus the synthetic FFI peers) owns its
+  /// Each peer (the production UI plus the synthetic E2E FFI peers) owns its
   /// own MDK instance, so the epoch must be read per-manager — hence a method
-  /// on [`CircleManagerFfi`] rather than a free function. Used to assert
-  /// real key rotation: after an Add/remove/self-update commit is finalized
-  /// (or a peer processes one), the epoch MUST advance by exactly 1. The
-  /// epoch counter is not secret; this seam is compiled out of release
-  /// builds (see the sibling stub).
+  /// on [`CircleManagerFfi`] rather than a free function.
+  ///
+  /// Two consumers:
+  /// - E2E asserts real key rotation: after an Add/remove/self-update commit
+  ///   is finalized (or a peer processes one), the epoch MUST advance by
+  ///   exactly 1.
+  /// - The circle-details sheet renders it discreetly, so members can compare
+  ///   epochs across devices when messages stop decrypting.
+  ///
+  /// The epoch counter is not secret — it is a commit counter carrying no key
+  /// material and no group identifier — so, unlike the other test seams, this
+  /// one is compiled into release builds.
   ///
   /// # Errors
   ///
   /// Returns an error if the group does not exist or the MDK query fails.
-  Future<BigInt> groupEpochForTest({required List<int> mlsGroupId});
+  Future<BigInt> groupEpoch({required List<int> mlsGroupId});
 
   /// Returns the user's relays for one category, ordered by insertion time.
   Future<List<String>> listUserRelays({required RelayTypeFfi relayType});

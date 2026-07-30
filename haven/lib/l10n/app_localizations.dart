@@ -2034,6 +2034,12 @@ abstract class AppLocalizations {
   /// **'Circle details'**
   String get circleDetailsTitle;
 
+  /// Subtitle of the circle-details sheet, combining the member count with the circle's current encryption epoch, e.g. '3 members · epoch 14'. Deliberately understated: most users never need it, but members comparing two devices use it to tell whether their circles are in sync. 'epoch' is the cryptographic protocol term for the period between two key changes — use the established technical term in your language rather than a literal word for 'era', and keep it lowercase if your language allows. The separator can be changed to whatever punctuation reads naturally.
+  ///
+  /// In en, this message translates to:
+  /// **'{members} · epoch {epoch}'**
+  String circleDetailsMembersWithEpoch(String members, int epoch);
+
   /// Heading above the list of relays in the circle-details sheet.
   ///
   /// In en, this message translates to:

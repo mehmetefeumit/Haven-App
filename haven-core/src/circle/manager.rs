@@ -159,13 +159,18 @@ impl CircleManager {
         &self.session
     }
 
-    /// Returns the current MLS epoch for a group (test/feature-only).
+    /// Returns the current MLS epoch for a group.
+    ///
+    /// The epoch is a monotonic commit counter: it advances by exactly one for
+    /// every applied commit (membership change or key update). It carries no
+    /// key material and no group identifier, so it is safe to surface in the
+    /// UI — the circle-details sheet shows it so members can compare epochs
+    /// when messages stop decrypting.
     ///
     /// # Errors
     ///
     /// Returns [`CircleError::NotFound`] if the group does not exist, or
     /// [`CircleError::Mls`] if the query fails.
-    #[cfg(any(test, feature = "test-utils", debug_assertions))]
     pub async fn group_epoch(&self, mls_group_id: &GroupId) -> Result<u64> {
         let group = self
             .session

@@ -1266,6 +1266,15 @@ class AppLocalizationsTr extends AppLocalizations {
   String get circleDetailsTitle => 'Çevre ayrıntıları';
 
   @override
+  String circleDetailsMembersWithEpoch(String members, int epoch) {
+    final intl.NumberFormat epochNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String epochString = epochNumberFormat.format(epoch);
+
+    return '$members · epoch $epochString';
+  }
+
+  @override
   String get circleDetailsRelaysHeading => 'Bu çevre için aktarıcılar';
 
   @override
