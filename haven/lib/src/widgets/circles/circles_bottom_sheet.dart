@@ -1341,7 +1341,15 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
     final membersLine = epoch == null
         ? memberCount
         : l10n.circleDetailsMembersWithEpoch(memberCount, epoch);
-    return Padding(
+    // Scrolls rather than clips. This column is the whole modal body, and it
+    // grows with text scale, translation length and relay count — at 1.5x-2.0x
+    // with a few relays it exceeds a short phone's usable height, which
+    // previously overflowed and cut the Leave Circle button off the bottom
+    // (invisible to the suite, because every circles test pumps a 5000px-tall
+    // viewport). `mainAxisSize.min` keeps the sheet content-sized at normal
+    // scale, so this only engages when the content genuinely does not fit.
+    // Same pattern as `_LegacyCircleBannerState.build` above.
+    return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(
         HavenSpacing.base,
         HavenSpacing.sm,
