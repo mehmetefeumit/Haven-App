@@ -13,6 +13,15 @@
 //!
 //! The port can be overridden with `HAVEN_RELAY_PORT`. The process runs until
 //! it receives Ctrl-C / SIGTERM (the CI teardown step).
+//!
+//! # argv is deliberately ignored
+//!
+//! `tooling/e2e/ci/start-local-relay.sh` launches every instance with a
+//! `--haven-relay-instance=<name>` marker argument so teardown can `pkill -f`
+//! ONE instance out of several running side by side (the profile lane runs a
+//! circle relay plus a disjoint profile-plane pool on one runner). This binary
+//! must therefore keep ignoring argv — adding an argument parser that rejects
+//! unknown flags would make every CI relay exit at startup.
 
 use std::net::{IpAddr, Ipv4Addr};
 

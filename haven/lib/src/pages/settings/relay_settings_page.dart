@@ -1,8 +1,17 @@
 /// Editable relay settings page for Haven.
 ///
-/// Shows two independent relay categories (Inbox kind 10050 + KeyPackage
-/// kind 10002) with add/remove/restore controls, plus a short caption linking
-/// to Privacy ▸ Relays for the full explanation.
+/// Shows three independent relay categories — Inbox (kind 10050), KeyPackage
+/// (kind 10002), and Profile (kind-0, local-only policy — never published)
+/// — with add/remove/restore controls, plus a short caption linking to
+/// Privacy ▸ Relays for the full explanation. The Profile section also shows
+/// an advisory, non-blocking warning on any row whose relay already carries
+/// this account's location-plane traffic — circle, inbox, KeyPackage or
+/// discovery-plane lookups (see
+/// `profileRelayContaminationProvider`), and — distinct from that per-row
+/// warning — a banner when the pool has underflowed entirely: too few
+/// usable Profile relays remain to look up anyone's profile, so member
+/// names/photos silently stop updating with no other visible signal (see
+/// `_ProfilePoolUnderflowBanner`, `profilePoolStatusProvider`).
 library;
 
 import 'package:flutter/material.dart';
@@ -97,6 +106,12 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
           subtitle: l10n.relaySettingsKeyPackageSubtitle,
         ),
         const SizedBox(height: HavenSpacing.lg),
+        _RelaySection(
+          category: RelayCategory.profile,
+          title: l10n.relaySettingsProfileTitle,
+          subtitle: l10n.relaySettingsProfileSubtitle,
+        ),
+        const SizedBox(height: HavenSpacing.lg),
         const _LegacyRetractionPendingNote(),
         const _BackendCaption(),
         const SizedBox(height: HavenSpacing.base),
@@ -164,6 +179,12 @@ class _RelaySection extends ConsumerWidget {
     final theme = Theme.of(context);
     final relays = ref.watch(_listProviderFor(category));
     final status = ref.watch(relayStatusProvider).value;
+    // Contamination warning is advisory and Profile-only (task requirement):
+    // only watch the set when this section IS the Profile category, so the
+    // Inbox/KeyPackage sections neither pay for nor rebuild on it.
+    final contaminated = category == RelayCategory.profile
+        ? ref.watch(profileRelayContaminationProvider)
+        : const <String>{};
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -181,6 +202,10 @@ class _RelaySection extends ConsumerWidget {
             color: theme.colorScheme.onSurfaceVariant,
           ),
         ),
+        if (category == RelayCategory.profile) ...[
+          const SizedBox(height: HavenSpacing.sm),
+          const _ProfilePoolUnderflowBanner(),
+        ],
         const SizedBox(height: HavenSpacing.sm),
         relays.when(
           data: (urls) {
@@ -197,6 +222,9 @@ class _RelaySection extends ConsumerWidget {
                           url: urls[i],
                           status: _statusFor(status, urls[i]),
                           onRemove: () => _removeRelay(context, ref, urls[i]),
+                          isContaminated: contaminated.contains(
+                            normalizeRelayUrlForComparison(urls[i]),
+                          ),
                         ),
                         if (i < urls.length - 1)
                           const Divider(height: 1, indent: HavenSpacing.base),
@@ -318,6 +346,7 @@ RelayCategoryNotifier _notifierFor(WidgetRef ref, RelayCategory category) =>
     switch (category) {
       RelayCategory.inbox => ref.read(inboxRelaysProvider.notifier),
       RelayCategory.keyPackage => ref.read(keyPackageRelaysProvider.notifier),
+      RelayCategory.profile => ref.read(profileRelaysProvider.notifier),
     };
 
 ProviderListenable<AsyncValue<List<String>>> _listProviderFor(
@@ -325,6 +354,7 @@ ProviderListenable<AsyncValue<List<String>>> _listProviderFor(
 ) => switch (category) {
   RelayCategory.inbox => inboxRelaysProvider,
   RelayCategory.keyPackage => keyPackageRelaysProvider,
+  RelayCategory.profile => profileRelaysProvider,
 };
 
 RelayEventStatus? _statusFor(RelayStatusState? state, String url) {
@@ -340,11 +370,19 @@ class _EditableRelayRow extends StatelessWidget {
     required this.url,
     required this.status,
     required this.onRemove,
+    this.isContaminated = false,
   });
 
   final String url;
   final RelayEventStatus? status;
   final VoidCallback onRemove;
+
+  /// Advisory-only: `true` when this relay also carries the account's
+  /// location-plane traffic — circle, inbox, KeyPackage or discovery-plane
+  /// lookups (see `profileRelayContaminationProvider`).
+  /// Only ever set for Profile-section rows. Never gates [onRemove] or the
+  /// Add-relay flow — it is purely informational.
+  final bool isContaminated;
 
   @override
   Widget build(BuildContext context) {
@@ -354,12 +392,121 @@ class _EditableRelayRow extends StatelessWidget {
     return ListTile(
       leading: _StatusDot(status: status),
       title: Text(displayUrl, style: theme.textTheme.bodyMedium),
-      trailing: IconButton(
-        tooltip: l10n.relaySettingsRemoveTooltip(displayUrl),
-        icon: const Icon(LucideIcons.trash2),
-        onPressed: onRemove,
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (isContaminated) _ContaminationWarningIcon(url: displayUrl),
+          IconButton(
+            tooltip: l10n.relaySettingsRemoveTooltip(displayUrl),
+            icon: const Icon(LucideIcons.trash2),
+            onPressed: onRemove,
+          ),
+        ],
       ),
     );
+  }
+}
+
+/// Advisory warning icon shown next to a Profile-relay row whose URL also
+/// carries the account's circle or inbox traffic.
+///
+/// Follows the same [Tooltip] + [Semantics] pattern as [_StatusDot]: a short
+/// visible tooltip plus a fuller screen-reader label that names the relay so
+/// the warning is understandable out of visual context.
+class _ContaminationWarningIcon extends StatelessWidget {
+  const _ContaminationWarningIcon({required this.url});
+
+  /// Display URL (`wss://` stripped), named in the accessibility label.
+  final String url;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
+    return Tooltip(
+      message: l10n.relaySettingsProfileContaminationTooltip,
+      child: Semantics(
+        label: l10n.relaySettingsProfileContaminationSemantics(url),
+        child: const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 4),
+          child: Icon(
+            LucideIcons.triangleAlert,
+            color: HavenSecurityColors.warning,
+            size: 18,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Warning banner shown at the top of the Profile section when the
+/// profile-plane relay pool has underflowed
+/// ([ProfilePoolStatus.isUnderflow] — see that type's doc for why only
+/// counts, never URLs, ever reach this layer). Absent for every other
+/// status, including while the status is still loading or failed to load,
+/// so most users never see it.
+///
+/// An underflow otherwise has no visible signal at all: the Rust-side
+/// profile fetch (`fetchMemberProfiles`) silently falls back to cached rows
+/// and skips the network, so members' names and photos just quietly stop
+/// updating. This banner exists specifically to surface that and offer the
+/// fix.
+class _ProfilePoolUnderflowBanner extends ConsumerWidget {
+  const _ProfilePoolUnderflowBanner();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final status = ref.watch(profilePoolStatusProvider).valueOrNull;
+    if (status == null || !status.isUnderflow) {
+      return const SizedBox.shrink();
+    }
+    final l10n = AppLocalizations.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: HavenSpacing.sm),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          HavenInfoNote(
+            icon: LucideIcons.triangleAlert,
+            tone: HavenInfoNoteTone.warning,
+            title: l10n.relaySettingsProfileUnderflowTitle,
+            paragraphs: [l10n.relaySettingsProfileUnderflowMessage],
+          ),
+          const SizedBox(height: HavenSpacing.sm),
+          Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: TextButton.icon(
+              icon: const Icon(LucideIcons.rotateCcw, size: 16),
+              label: Text(l10n.relaySettingsProfileUnderflowRestoreButton),
+              onPressed: () => _onRestore(context, ref),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _onRestore(BuildContext context, WidgetRef ref) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final l10n = AppLocalizations.of(context);
+    try {
+      final service = await ref.read(relayPreferencesServiceProvider.future);
+      await service.restoreDefaultProfileRelays();
+      // Refresh both the visible Profile relay list (the recovery action
+      // adds back curated relays directly at the storage layer, bypassing
+      // `ProfileRelaysNotifier`'s own mutation methods) and the status this
+      // banner watches, so a successful recovery clears itself immediately.
+      ref
+        ..invalidate(profileRelaysProvider)
+        ..invalidate(profilePoolStatusProvider);
+      messenger.showSnackBar(
+        SnackBar(content: Text(l10n.relaySettingsRestoreSuccess)),
+      );
+    } on Object {
+      messenger.showSnackBar(
+        SnackBar(content: Text(l10n.relaySettingsRestoreError)),
+      );
+    }
   }
 }
 

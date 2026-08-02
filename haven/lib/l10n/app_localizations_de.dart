@@ -274,7 +274,25 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get relaySettingsKeyPackageSubtitle =>
-      'Wo Eingeladene deine Schlüssel finden und dein öffentliches Profil veröffentlicht wird (kind 10002)';
+      'Wo andere die Schlüssel finden, die sie brauchen, um dich einzuladen (kind 10002)';
+
+  @override
+  String get relaySettingsProfileTitle => 'Meine Profil-Relays';
+
+  @override
+  String get relaySettingsProfileSubtitle =>
+      'Wo dein öffentliches Profil nachgeschlagen und veröffentlicht wird. Diese Relays bleiben von deinen übrigen Relays getrennt, und die Liste der Profil-Relays wird nie veröffentlicht (kind 0)';
+
+  @override
+  String get relaySettingsProfileUnderflowTitle => 'Profilabfragen pausiert';
+
+  @override
+  String get relaySettingsProfileUnderflowMessage =>
+      'Es sind zu wenige Profil-Relays übrig, deshalb werden Namen und Fotos der Mitglieder nicht mehr aktualisiert.';
+
+  @override
+  String get relaySettingsProfileUnderflowRestoreButton =>
+      'Standard-Profil-Relays wiederherstellen';
 
   @override
   String get relaySettingsLoadRelaysError =>
@@ -352,6 +370,15 @@ class AppLocalizationsDe extends AppLocalizations {
   @override
   String get relaySettingsEmptyMessage =>
       'Du brauchst mindestens ein Relay, damit andere dich erreichen können. Tippe unten, um die Haven-Standardwerte wiederherzustellen.';
+
+  @override
+  String get relaySettingsProfileContaminationTooltip =>
+      'Hier läuft auch anderer Haven-Datenverkehr';
+
+  @override
+  String relaySettingsProfileContaminationSemantics(String url) {
+    return 'Warnung: Über $url läuft auch dein übriger Haven-Datenverkehr, sodass dieses Relay dein Profil mit diesem Datenverkehr verknüpfen könnte';
+  }
 
   @override
   String get locationSettingsTitle => 'Standort';
@@ -649,8 +676,8 @@ class AppLocalizationsDe extends AppLocalizations {
       'Haven nutzt mehrere Relays, damit dich keines allein vom Netz trennen kann. Geht eines offline, arbeiten die übrigen weiter. Du wählst selbst die Relays, über die dich Einladungen erreichen; die Relays eines Kreises stehen fest, sobald er erstellt ist.';
 
   @override
-  String get privacyRelaysTwoLists =>
-      'Haven führt zwei Listen für dich. Über deine Posteingangs-Relays erreichen dich Einladungen. Von deinen KeyPackage-Relays holen andere die Schlüssel, die sie brauchen, um dich einzuladen. Jeder Kreis führt außerdem seine eigene Liste, und über sie laufen die verschlüsselten Aktualisierungen des Kreises.';
+  String get privacyRelaysYourLists =>
+      'Haven führt drei Listen für dich. Über deine Posteingangs-Relays erreichen dich Einladungen, und von deinen KeyPackage-Relays holen andere die Schlüssel, die sie brauchen, um dich einzuladen – beide Listen veröffentlicht Haven, damit andere sie finden. Deine Profil-Relays sind anders: Dort werden dein Name und dein Foto nachgeschlagen und veröffentlicht, die Liste selbst bleibt aber auf deinem Gerät und wird nie veröffentlicht. Ein Relay, über das nur deine Standortmeldungen oder Einladungen laufen, hat daher keine öffentliche Liste, die ihm verrät, welche Relays du für dein Profil nutzt. Jeder Kreis führt außerdem seine eigene Liste, und über sie laufen die verschlüsselten Aktualisierungen des Kreises.';
 
   @override
   String get privacyRelaysMeansForYou =>
@@ -2047,6 +2074,9 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get addRelaySheetTitleKeyPackage => 'KeyPackage-Relay hinzufügen';
+
+  @override
+  String get addRelaySheetTitleProfile => 'Profil-Relay hinzufügen';
 
   @override
   String get addRelaySheetHint => 'wss://relay.example.com';

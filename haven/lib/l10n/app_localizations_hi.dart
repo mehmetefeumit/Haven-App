@@ -269,7 +269,26 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get relaySettingsKeyPackageSubtitle =>
-      'जहाँ आमंत्रित करने वाले आपकी कुंजियाँ पाते हैं और आपकी सार्वजनिक प्रोफ़ाइल प्रकाशित होती है (kind 10002)';
+      'जहाँ दूसरे लोग आपको आमंत्रित करने के लिए ज़रूरी कुंजियाँ पाते हैं (kind 10002)';
+
+  @override
+  String get relaySettingsProfileTitle => 'मेरे प्रोफ़ाइल रिले';
+
+  @override
+  String get relaySettingsProfileSubtitle =>
+      'जहाँ आपकी सार्वजनिक प्रोफ़ाइल खोजी जाती है और प्रकाशित होती है। ये रिले आपके बाकी रिले से अलग रखे जाते हैं, और इन रिले की सूची कभी प्रकाशित नहीं होती (kind 0)';
+
+  @override
+  String get relaySettingsProfileUnderflowTitle =>
+      'प्रोफ़ाइल खोज फ़िलहाल रुकी हुई है';
+
+  @override
+  String get relaySettingsProfileUnderflowMessage =>
+      'प्रोफ़ाइल रिले बहुत कम बचे हैं, इसलिए सदस्यों के नाम और फ़ोटो अपडेट होने बंद हो जाएँगे।';
+
+  @override
+  String get relaySettingsProfileUnderflowRestoreButton =>
+      'डिफ़ॉल्ट प्रोफ़ाइल रिले बहाल करें';
 
   @override
   String get relaySettingsLoadRelaysError => 'रिले लोड नहीं हो सके।';
@@ -343,6 +362,15 @@ class AppLocalizationsHi extends AppLocalizations {
   @override
   String get relaySettingsEmptyMessage =>
       'आपको कम से कम एक रिले चाहिए ताकि दूसरे आप तक पहुँच सकें। Haven डिफ़ॉल्ट बहाल करने के लिए नीचे टैप करें।';
+
+  @override
+  String get relaySettingsProfileContaminationTooltip =>
+      'इस पर Haven का दूसरा ट्रैफ़िक भी जाता है';
+
+  @override
+  String relaySettingsProfileContaminationSemantics(String url) {
+    return 'चेतावनी: $url पर आपका दूसरा Haven ट्रैफ़िक भी जाता है, जिससे यह रिले आपकी प्रोफ़ाइल को उस ट्रैफ़िक से जोड़ सकता है';
+  }
 
   @override
   String get locationSettingsTitle => 'स्थान';
@@ -635,8 +663,8 @@ class AppLocalizationsHi extends AppLocalizations {
       'Haven कई रिले इस्तेमाल करता है, इसलिए उनमें से कोई अकेला आपको काट नहीं सकता। अगर एक ऑफ़लाइन हो जाए, तो बाकी चलते रहते हैं। जिन रिले पर निमंत्रण आप तक पहुँचते हैं, वे आप चुनते हैं; किसी सर्कल के रिले उसके बनने के समय तय हो जाते हैं।';
 
   @override
-  String get privacyRelaysTwoLists =>
-      'Haven आपके लिए दो सूचियाँ रखता है। आपके इनबॉक्स रिले वे हैं जहाँ निमंत्रण आप तक पहुँचते हैं। आपके KeyPackage रिले वे हैं जहाँ से लोग आपको आमंत्रित करने के लिए ज़रूरी कुंजियाँ लेते हैं। हर सर्कल की भी अपनी एक सूची होती है, और उसी से उस सर्कल के एन्क्रिप्टेड अपडेट गुज़रते हैं।';
+  String get privacyRelaysYourLists =>
+      'Haven आपके लिए तीन सूचियाँ रखता है। आपके इनबॉक्स रिले वे हैं जहाँ निमंत्रण आप तक पहुँचते हैं, और आपके KeyPackage रिले वे हैं जहाँ से लोग आपको आमंत्रित करने के लिए ज़रूरी कुंजियाँ लेते हैं। ये दोनों सूचियाँ Haven प्रकाशित करता है, ताकि दूसरे लोग इन्हें ढूँढ़ सकें। आपके प्रोफ़ाइल रिले इनसे अलग हैं: वहीं आपका नाम और फ़ोटो खोजे और प्रकाशित किए जाते हैं, लेकिन वह सूची खुद आपके फ़ोन पर ही रहती है और कभी प्रकाशित नहीं होती। इसलिए जिस रिले से सिर्फ़ आपके स्थान के अपडेट या निमंत्रण गुज़रते हैं, उसके पास ऐसी कोई सार्वजनिक सूची नहीं होती जो बताए कि आप अपनी प्रोफ़ाइल के लिए कौन-से रिले इस्तेमाल करते हैं। हर सर्कल की भी अपनी एक सूची होती है, और उसी से उस सर्कल के एन्क्रिप्टेड अपडेट गुज़रते हैं।';
 
   @override
   String get privacyRelaysMeansForYou =>
@@ -2016,6 +2044,9 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get addRelaySheetTitleKeyPackage => 'KeyPackage रिले जोड़ें';
+
+  @override
+  String get addRelaySheetTitleProfile => 'प्रोफ़ाइल रिले जोड़ें';
 
   @override
   String get addRelaySheetHint => 'wss://relay.example.com';

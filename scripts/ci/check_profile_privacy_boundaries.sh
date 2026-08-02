@@ -356,10 +356,10 @@ scan_profile_paths \
 # plan's four tokens, bare `circle::` / `mls::` path segments are also banned
 # (catches grouped `use crate::{circle, ...}` imports and inline paths).
 # ---------------------------------------------------------------------------
-log "Scanning haven-core/src/profile for circle/MLS/mdk import-boundary breaches ..."
+log "Scanning haven-core/src/profile for circle/MLS/mdk/discovery import-boundary breaches ..."
 scan_profile_paths \
-  "import-boundary breach in haven-core/src/profile — the profile module must not reach crate::circle / crate::nostr::mls / mdk / exporter_secret (key separation, security review F3)" \
-  'crate::circle\b|crate::nostr::mls\b|\bcircle::|\bmls::|\bmdk|Mdk|MDK|exporter_secret' \
+  "import-boundary breach in haven-core/src/profile — the profile module must not reach crate::circle / crate::nostr::mls / mdk / exporter_secret (key separation, security review F3), nor the DISCOVERY plane (plane separation: the discovery relay set is a strict superset of the account-seed relays, i.e. exactly the relays that carry this user's kind-445 and kind-1059 traffic — routing kind-0 there is the cross-plane join the profile pool exists to prevent; use crate::profile::relay_pool instead)" \
+  'crate::circle\b|crate::nostr::mls\b|\bcircle::|\bmls::|\bmdk|Mdk|MDK|exporter_secret|discovery_relays|relay::discovery|\bdiscovery\b' \
   'core'
 
 # ---------------------------------------------------------------------------
@@ -619,4 +619,300 @@ if [[ -n "${union_violations}" ]]; then
   fail "kind-0 fetch entry point used outside its owning module — call MemberProfileRefreshNotifier.refreshAll() (or triggerProfileRefresh) instead, so every fetch carries the union of ALL circles' members and never a per-circle roster partition (migration plan §1.7)"
 fi
 
-log "OK: public-profile privacy boundaries hold — no Image.network, no circle/group tokens, import boundary intact, kind-0 confined to the profile module, HTTPS-only Blossom, retraction no-op gate bound at every retraction call site, union-only kind-0 fetch entry points."
+# ---------------------------------------------------------------------------
+# Check 8: NO BATCHED kind-0 FILTER. Each member's kind-0 must be requested
+# from exactly ONE relay with exactly ONE author per REQ.
+#
+# A k-author filter hands a single relay a k-clique of the user's social graph
+# in one request — precisely the disclosure Haven refuses to make as a kind-3
+# contact list. `.authors(` is the plural (batched) builder; `.author(` is the
+# singular one the assigned-fetch path uses. `PROFILE_FETCH_MAX_AUTHORS` was
+# the 500-author chunk size of the old broadcast model and must not come back
+# under a "for efficiency" refactor.
+# ---------------------------------------------------------------------------
+log "Scanning all profile code paths (core + FFI) for batched multi-author kind-0 filters ..."
+scan_profile_paths \
+  "batched multi-author kind-0 filter in a profile code path (haven-core/src/profile or the api.rs profile block) — each member's kind-0 must be requested from exactly ONE relay with exactly ONE author per REQ (a k-author filter discloses a k-clique of the user's social graph to one relay). Use Filter::author() singular; see profile::assignment" \
+  '\.authors\(|PROFILE_FETCH_MAX_AUTHORS'
+
+# The chunk constant must also be gone from the FFI and the Dart side, or a
+# future caller will re-batch against a still-live symbol.
+stale_chunk="$(grep -rn 'PROFILE_FETCH_MAX_AUTHORS' \
+  "${API_FILE}" "${LIB_DIR}" 2>/dev/null || true)"
+if [[ -n "${stale_chunk}" ]]; then
+  printf '%s\n' "${stale_chunk}" >&2
+  fail "stale PROFILE_FETCH_MAX_AUTHORS reference — the 500-author chunking of the old broadcast fetch model was removed; batching kind-0 authors re-creates the social-graph disclosure (check 8)"
+fi
+
+# ---------------------------------------------------------------------------
+# Check 9: CSPRNG-ONLY inside the profile module.
+#
+# Three privacy controls here depend on unpredictability to a relay observer:
+# the per-install relay-assignment salt, the per-cycle shuffling of REQ order
+# within a relay, and the inter-request jitter. A seedable or non-crypto RNG
+# would make any of them predictable — and a predictable assignment lets a
+# relay compute which OTHER relays hold the rest of the user's roster.
+# Mirrors haven-core/clippy.toml's thread_rng ban, but covers the seeded
+# generators clippy does not name.
+# ---------------------------------------------------------------------------
+log "Scanning all profile code paths (core + FFI) for non-CSPRNG randomness ..."
+scan_profile_paths \
+  "non-CSPRNG RNG in a profile code path (haven-core/src/profile or the api.rs profile block) — the relay-assignment salt, REQ shuffling and inter-request jitter must be unpredictable to a relay observer; use rand::rngs::OsRng (mirrors haven-core/clippy.toml's thread_rng ban)" \
+  'thread_rng|SmallRng|StdRng|ChaCha[0-9]*Rng|from_seed|seed_from_u64'
+
+# ---------------------------------------------------------------------------
+# Check 10: NO NIP-65 RELAY LIST FOR THE PROFILE PLANE.
+#
+# Publishing a kind-10002 that names the profile relays would hand any
+# observer — including a circle relay operator who already sees this account's
+# gift wraps and KeyPackages — a SIGNED, public pointer from the identity to
+# the profile plane. That single event reconstructs the exact cross-plane join
+# this redesign exists to break, and does it better than traffic analysis
+# could. Profile relays are local-only policy, forever.
+# ---------------------------------------------------------------------------
+log "Scanning profile code paths for a profile-plane relay-list publish ..."
+scan_profile_paths \
+  "profile-plane NIP-65 relay list — publishing a kind-10002 naming the profile relays would hand observers a signed pointer joining the identity to its profile plane, re-creating the cross-plane link the pool exists to break. Profile relays are LOCAL-ONLY (RelayType::Profile has no wire kind by construction)" \
+  'Kind::RelayList|build_nip65_relay_list_event|Kind\.relayList' \
+  'core'
+
+# ---------------------------------------------------------------------------
+# Check 11: the named plane-separation tests must EXIST.
+#
+# Every invariant above that a grep cannot express is carried by a specific
+# test. Deleting one would silently retire the invariant while leaving this
+# script green, so the test NAMES are pinned here. Each missing name is
+# reported individually so one red run lists them all.
+# ---------------------------------------------------------------------------
+readonly -a REQUIRED_PROFILE_TESTS=(
+  # profile/assignment.rs — the salted rendezvous assignment
+  assignment_is_deterministic_for_same_salt_and_pool
+  assignment_is_independent_of_pool_input_order
+  assignment_differs_across_salts
+  assignment_distribution_is_balanced_across_pool
+  removing_a_relay_only_moves_its_own_assignments
+  retry_ladder_never_exceeds_two_relays
+  salt_debug_is_redacted
+  salt_implements_zeroize_on_drop
+  # profile/relay_pool.rs — the pool and its exclusion filter
+  pool_entries_are_wss_and_unique
+  exclusion_removes_injected_contaminated_relay
+  exclusion_matches_across_url_normalization
+  exclusion_underflow_errors_and_never_falls_back_to_discovery
+  underflow_error_carries_no_urls
+  # tests/profile_plane_separation.rs — disjointness (lives outside the
+  # module because asserting it requires naming crate::circle, which check 3
+  # forbids inside profile/)
+  pool_is_disjoint_from_account_seed_defaults
+  pool_is_disjoint_from_discovery_plane
+  contaminated_reference_sets_are_non_empty
+  # The only test that proves what the fetch path actually DIALS. The three
+  # above compare relay CONSTANTS — a fetch that ignored the pool entirely
+  # would leave all of them green. This one stands up two in-process relays and
+  # counts, relay-side, the REQs each was asked to serve: the contaminated
+  # relay must see zero, and the profile relay must see at least one (the
+  # non-vacuity half, without which a dead socket passes trivially).
+  profile_plane_never_touches_circle_relays_e2e
+  # Proves the hermetic override actually REACHES the pool resolver. Without
+  # it, a runtime reader that used `production_profile_relays()` instead of
+  # `profile_relay_pool_default()` would pull the eight real public relays back
+  # in even with an override installed — so the E2E lane would dial hosts it
+  # never intended to contact and keep passing while proving nothing.
+  installed_override_reaches_usable_profile_relays
+  # relay/url_norm.rs — one canonical form, or set subtraction fails OPEN
+  agrees_with_the_storage_layer_normalizer
+  # profile/fetch.rs — one author per REQ
+  filter_has_exactly_one_author
+  each_author_maps_to_its_assigned_relay_only
+  batch_deadline_leaves_authors_unattempted_not_missed
+  # circle/storage_profile.rs — the miss-aware negative cache and the salt
+  miss_schedules_second_relay_retry
+  miss_does_not_stamp_fetched_at_like_a_hit
+  profile_relay_salt_is_cleared_by_wipe_all_profiles
+  # circle/contamination.rs + storage_contamination.rs + manager.rs — the
+  # append-only ledger. These were UNPINNED until the review caught it, and
+  # they are precisely the ones a "clean up stale rows" refactor would delete:
+  # the ledger is append-only ON PURPOSE (a relay that carried kind-445 last
+  # month still saw it), and normalization must match on the insert and compare
+  # sides or a contaminated relay survives exclusion — failing OPEN.
+  contaminated_ledger_is_append_only
+  contaminated_ledger_normalizes_before_insert_and_compare
+  welcome_cascade_relays_are_recorded_as_contaminated
+  profile_relays_are_not_recorded_as_contaminated
+  # The discovery plane is a contamination SOURCE, not a neutral read path:
+  # `fetch_relay_list` / `fetch_member_keypackage` ask those relays for a named
+  # pubkey's NIP-65 list and kind-30443 KeyPackage, which is a stronger
+  # co-membership signal than a kind-0 lookup (an invitation is imminent). It
+  # has no per-event write site — the set is a process constant — so the ONLY
+  # thing recording it is the startup fold, and deleting either test would
+  # retire the write site silently. The second test is the regression guard on
+  # the fold itself: it must stay a no-op for a DEFAULT-configured user's pool
+  # (the curated pool is disjoint from the discovery plane), or the hardening
+  # would instead be eating the pool toward the terminal PoolUnderflow floor.
+  discovery_relays_are_recorded_as_contaminated
+  default_profile_pool_does_not_underflow_after_the_discovery_fold
+  # circle/relay_prefs.rs — profile relays are structurally unpublishable
+  profile_relay_type_has_no_publishable_kind
+  profile_category_seeds_from_the_profile_pool_not_the_account_seed
+  # tests/profile_relay_override_semantics.rs — the override's own semantics.
+  # It lives in an integration binary (its own process) because the OnceLock is
+  # install-once and no LIB test may install it; see Check 12.
+  installed_override_shadows_only_the_effective_pool_and_stays_subject_to_exclusion
+  # circle/storage_profile.rs — logout destroys the assignment salt by deleting
+  # circles.db, NOT via wipe_all_profiles (which only `delete_public_profile`
+  # reaches). Nothing else pins that, so this test does: the salt must live in
+  # that file and nowhere else.
+  profile_relay_salt_does_not_outlive_the_circles_db_file
+)
+
+log "Verifying the named plane-separation tests still exist ..."
+missing_tests=""
+for t in "${REQUIRED_PROFILE_TESTS[@]}"; do
+  if ! grep -rqE "fn[[:space:]]+${t}\b" \
+      "${CORE_PROFILE_DIR}" \
+      "${REPO_ROOT}/haven-core/tests" \
+      "${REPO_ROOT}/haven-core/src/relay/url_norm.rs" \
+      "${REPO_ROOT}/haven-core/src/circle/storage_profile.rs" \
+      "${REPO_ROOT}/haven-core/src/circle/relay_prefs.rs" \
+      "${REPO_ROOT}/haven-core/src/circle/storage_relay_prefs.rs" \
+      "${REPO_ROOT}/haven-core/src/circle/contamination.rs" \
+      "${REPO_ROOT}/haven-core/src/circle/storage_contamination.rs" \
+      "${REPO_ROOT}/haven-core/src/circle/manager.rs" 2>/dev/null; then
+    missing_tests+="  missing: ${t}"$'\n'
+  fi
+done
+if [[ -n "${missing_tests}" ]]; then
+  printf '%s' "${missing_tests}" >&2
+  fail "plane-separation test(s) removed or renamed — each pins an invariant no grep can express (assignment stability, churn bound, retry-ladder cap, negative-cache correctness, pool disjointness). Restore the test or, if the invariant genuinely changed, update this list in the SAME commit so the change is reviewable"
+fi
+
+# ---------------------------------------------------------------------------
+# Check 12: NO LIB UNIT TEST MAY INSTALL THE PROFILE-POOL OVERRIDE.
+#
+# `set_profile_relays_for_test` writes a process-global `OnceLock`. All of
+# `haven-core`'s `#[cfg(test)]` modules share ONE test binary whose tests run in
+# parallel in an unspecified order, so an install anywhere in `src/` silently
+# mutates global state that unrelated tests read: several `circle::` tests
+# assert the profile category seeds from `production_profile_relays()`, and
+# those only stay green while libtest happens to schedule them before the
+# installing test. A module rename or a slow overlapping test flips them red
+# non-deterministically — and the obvious repair (comparing against the
+# effective accessor instead) would silently retire
+# `profile_category_seeds_from_the_profile_pool_not_the_account_seed`, a pinned
+# plane-separation invariant, while still passing.
+#
+# The override therefore belongs to integration binaries only (one process, one
+# install each): tests/profile_relay_override_wiring.rs and
+# tests/profile_relay_override_semantics.rs.
+#
+# Allowed in haven-core/src: the two `fn set_profile_relays_for_test(` defs
+# (debug + release stub) and the empty-list rejection probe, spelled exactly
+# `set_profile_relays_for_test(vec![])`, which returns before the `OnceLock` is
+# touched and therefore installs nothing. Anything else is an install.
+# ---------------------------------------------------------------------------
+log "Scanning haven-core/src for a lib-test install of the profile-pool override ..."
+override_installs="$(grep -rnE --include='*.rs' \
+  'set_profile_relays_for_test[[:space:]]*\(' "${CORE_SRC_DIR}" 2>/dev/null \
+  | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' \
+  | grep -vE 'fn[[:space:]]+set_profile_relays_for_test[[:space:]]*\(' \
+  | grep -vE 'set_profile_relays_for_test[[:space:]]*\([[:space:]]*vec!\[[[:space:]]*\][[:space:]]*\)' \
+  || true)"
+if [[ -n "${override_installs}" ]]; then
+  printf '%s\n' "${override_installs}" >&2
+  fail "the profile-pool override is installed from haven-core/src — the OnceLock is process-global and the lib tests share ONE parallel binary, so this makes every unit test that compares the profile pool against production_profile_relays() order-dependent (and invites a 'fix' that would retire profile_category_seeds_from_the_profile_pool_not_the_account_seed). Install it only from an integration binary: haven-core/tests/profile_relay_override_{wiring,semantics}.rs"
+fi
+
+# ---------------------------------------------------------------------------
+# Check 13: the Dart fallback relay lists MUST mirror their Rust constants.
+#
+# `haven/lib/src/constants/relays.dart` carries three compile-time lists whose
+# doc comments claim they "MUST agree" with a Rust constant. Nothing enforced
+# that, so the claim read like a checked invariant while drift was free. It
+# matters most for `fallbackDefaultProfileRelays`: the profile plane
+# deliberately exposes NO runtime FFI getter (no profile relay URL crosses the
+# boundary outside direct CRUD), so that constant is not a fallback for a live
+# value — it IS the only Dart-side value, used by `ProfileRelaysNotifier` when
+# the storage seed transiently fails. A drifted entry there would put a URL
+# into the profile UI that the Rust pool never contains, and — if the drift
+# ever imported an account-seed or discovery relay — would show the user a
+# location-plane relay as a profile relay.
+#
+# The sibling lists are checked too: `fallbackDiscoveryRelays` now decides,
+# via `discoveryRelays`, whether `profileRelayContaminationProvider` warns on a
+# Profile row in any build where the FFI is not initialized.
+#
+# Both sides are plain literal arrays of quoted `wss://` URLs, so the
+# comparison is a pure grep: pull the quoted strings between the constant's
+# declaration and its closing `];` and diff them in order.
+# ---------------------------------------------------------------------------
+DART_RELAY_CONSTANTS="${REPO_ROOT}/haven/lib/src/constants/relays.dart"
+[[ -f "${DART_RELAY_CONSTANTS}" ]] || {
+  echo "ERROR: ${DART_RELAY_CONSTANTS} not found" >&2; exit 2; }
+
+# Extracts the quoted `wss://` entries of a literal list constant, one per
+# line, from the declaration marker down to the closing `];`.
+#
+# Whole-line comments are skipped so a commented-out entry never counts. A
+# char-level `//` stripper is deliberately NOT used: every entry here contains
+# `//` inside its scheme, so that would truncate each URL to `wss:`.
+#
+# $1 = file, $2 = literal declaration marker (matched with grep -F).
+extract_list_entries() {
+  local file="$1" marker="$2" start
+  start="$(grep -nF "${marker}" "${file}" | head -n1 | cut -d: -f1 || true)"
+  [[ -n "${start}" ]] || return 1
+  awk -v s="${start}" '
+    NR < s { next }
+    /^[[:space:]]*(\/\/|\*)/ { next }
+    { line = $0
+      while (match(line, /["'"'"'][^"'"'"']*["'"'"']/)) {
+        e = substr(line, RSTART + 1, RLENGTH - 2)
+        if (e ~ /^wss:\/\//) print e
+        line = substr(line, RSTART + RLENGTH)
+      }
+    }
+    /\];/ { exit }
+  ' "${file}"
+}
+
+check_relay_mirror() {
+  # $1 = human label, $2 = dart marker, $3 = rust file, $4 = rust marker
+  local label="$1" dart_marker="$2" rust_file="$3" rust_marker="$4"
+  local dart_list rust_list
+  if ! dart_list="$(extract_list_entries "${DART_RELAY_CONSTANTS}" "${dart_marker}")"; then
+    echo "ERROR: could not locate '${dart_marker}' in ${DART_RELAY_CONSTANTS}" >&2
+    exit 2
+  fi
+  if ! rust_list="$(extract_list_entries "${rust_file}" "${rust_marker}")"; then
+    echo "ERROR: could not locate '${rust_marker}' in ${rust_file}" >&2
+    exit 2
+  fi
+  if [[ -z "${dart_list}" || -z "${rust_list}" ]]; then
+    echo "ERROR: ${label} extraction produced an empty list (dart=$(printf '%s' "${dart_list}" | wc -l), rust=$(printf '%s' "${rust_list}" | wc -l)) — the guard would pass vacuously" >&2
+    exit 2
+  fi
+  if [[ "${dart_list}" != "${rust_list}" ]]; then
+    printf 'Dart (%s):\n%s\n' "${dart_marker}" "${dart_list}" >&2
+    printf 'Rust (%s):\n%s\n' "${rust_marker}" "${rust_list}" >&2
+    fail "${label} has drifted from its Rust constant — the two lists must agree entry for entry and in order"
+  fi
+}
+
+log "Checking the Dart fallback relay lists still mirror their Rust constants ..."
+check_relay_mirror \
+  "fallbackDefaultProfileRelays" \
+  'const fallbackDefaultProfileRelays' \
+  "${CORE_PROFILE_DIR}/relay_pool.rs" \
+  'pub const PRODUCTION_PROFILE_RELAYS'
+check_relay_mirror \
+  "fallbackDiscoveryRelays" \
+  'const fallbackDiscoveryRelays' \
+  "${REPO_ROOT}/haven-core/src/relay/discovery.rs" \
+  'pub const PRODUCTION_DISCOVERY_RELAYS'
+check_relay_mirror \
+  "fallbackDefaultRelays" \
+  'const fallbackDefaultRelays' \
+  "${REPO_ROOT}/haven-core/src/circle/types.rs" \
+  'pub const PRODUCTION_DEFAULT_RELAYS'
+
+log "OK: public-profile privacy boundaries hold — no Image.network, no circle/group tokens, import boundary intact (incl. no discovery plane), kind-0 confined to the profile module, HTTPS-only Blossom, retraction no-op gate bound at every retraction call site, union-only kind-0 fetch entry points, one author per kind-0 REQ, CSPRNG-only randomness, no profile-plane NIP-65, every named plane-separation test present, no lib-test install of the profile-pool override, and the Dart fallback relay lists still mirror their Rust constants."

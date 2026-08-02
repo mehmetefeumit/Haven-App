@@ -28,16 +28,19 @@
 //! - [`CircleMember`]: A member with resolved contact info
 //! - [`Invitation`]: A pending invitation to join a circle
 
+pub mod contamination;
 mod error;
 mod leave;
 mod manager;
 pub mod relay_prefs;
 mod storage;
+mod storage_contamination;
 mod storage_key_packages;
 mod storage_profile;
-mod storage_relay_prefs;
+pub(crate) mod storage_relay_prefs;
 pub mod types;
 
+pub use contamination::ContaminationSource;
 pub use error::{CircleError, Result};
 pub use leave::LeavePlan;
 pub use manager::{

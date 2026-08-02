@@ -260,7 +260,24 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get relaySettingsKeyPackageSubtitle =>
-      'あなたを招待する人が鍵を見つけ、あなたの公開プロフィールが公開される場所（kind 10002）';
+      'あなたを招待するために必要な鍵を、ほかの人が見つける場所（kind 10002）';
+
+  @override
+  String get relaySettingsProfileTitle => 'プロフィールリレー';
+
+  @override
+  String get relaySettingsProfileSubtitle =>
+      'あなたの公開プロフィールを取得・公開する場所。これらのリレーはあなたのほかのリレーとは分けられており、プロフィールリレーのリスト自体が公開されることはありません（kind 0）';
+
+  @override
+  String get relaySettingsProfileUnderflowTitle => 'プロフィールの取得を一時停止中';
+
+  @override
+  String get relaySettingsProfileUnderflowMessage =>
+      'プロフィールリレーが少なくなりすぎたため、メンバーの名前と写真が更新されなくなります。';
+
+  @override
+  String get relaySettingsProfileUnderflowRestoreButton => 'デフォルトのプロフィールリレーを復元';
 
   @override
   String get relaySettingsLoadRelaysError => 'リレーを読み込めませんでした。';
@@ -331,6 +348,14 @@ class AppLocalizationsJa extends AppLocalizations {
   @override
   String get relaySettingsEmptyMessage =>
       'ほかの人があなたに連絡できるよう、リレーが少なくとも1件必要です。下をタップして Haven のデフォルトに戻してください。';
+
+  @override
+  String get relaySettingsProfileContaminationTooltip => 'Haven のほかの通信も中継します';
+
+  @override
+  String relaySettingsProfileContaminationSemantics(String url) {
+    return '警告: $url は Haven でのあなたのほかの通信も中継しているため、このリレーがあなたのプロフィールとその通信を結び付ける可能性があります';
+  }
 
   @override
   String get locationSettingsTitle => '位置情報';
@@ -608,8 +633,8 @@ class AppLocalizationsJa extends AppLocalizations {
       'Haven は複数のリレーを使うので、どれか1つがあなたを遮断することはできません。1つがオフラインになっても、ほかは動き続けます。招待が届くリレーはあなたが選べますが、サークルが使うリレーは、そのサークルの作成時に決まります。';
 
   @override
-  String get privacyRelaysTwoLists =>
-      'Haven はあなたのために2つのリストを保持します。受信トレイのリレーは、招待があなたに届く場所です。KeyPackage リレーは、あなたを招待するために必要な鍵を、ほかの人が取得する場所です。さらに、各サークルも独自のリストを持っており、そのサークルの暗号化された更新はそこを通ります。';
+  String get privacyRelaysYourLists =>
+      'Haven はあなたのために3つのリストを保持します。受信トレイのリレーは、招待があなたに届く場所です。KeyPackage リレーは、あなたを招待するために必要な鍵を、ほかの人が取得する場所です。この2つのリストは、ほかの人が見つけられるように Haven が公開します。プロフィールリレーはこれらとは異なり、あなたの名前と写真を取得・公開する場所ですが、リスト自体は端末内にとどまり、公開されることはありません。そのため、あなたの位置情報の更新や招待だけを扱うリレーには、あなたがプロフィールにどのリレーを使っているかを示す公開リストはありません。さらに、各サークルも独自のリストを持っており、そのサークルの暗号化された更新はそこを通ります。';
 
   @override
   String get privacyRelaysMeansForYou =>
@@ -1941,6 +1966,9 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get addRelaySheetTitleKeyPackage => 'KeyPackage リレーを追加';
+
+  @override
+  String get addRelaySheetTitleProfile => 'プロフィールリレーを追加';
 
   @override
   String get addRelaySheetHint => 'wss://relay.example.com';

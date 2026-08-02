@@ -938,6 +938,114 @@ full historical design notes (padding/burst residuals, sticky-avatar forward
 secrecy, per-circle salted blob keys, `FLAG_SECURE`), see this section in git
 history prior to 2026-07-14.
 
+### Profile-plane relay separation — accepted deviations
+
+Haven routes kind-0 profile traffic to a curated relay pool
+(`profile::relay_pool`) that is disjoint from every relay carrying the user's
+kind-445 / kind-1059 traffic, and requests each member's kind-0 from exactly
+ONE pool relay chosen by a stable salted rendezvous hash
+(`profile::assignment`). A relay therefore sees either the user's encrypted
+location traffic or their profile queries — never both. The residuals below are
+owner-accepted; they are deviations of record, not open bugs.
+
+#### The guarantee is bounded — collisions are expected (P1)
+
+**Achieved:** the two planes are relay-disjoint; no single REQ ever discloses a
+co-membership set (one author per REQ); no relay observes a whole roster; each
+pool relay sees an install-specific ~`1/N` sample of the *blended union across
+all circles*, which it cannot partition back into circles.
+
+**NOT achieved:** "no relay ever learns two members of the same circle."
+Assignment hashes the pubkey, so collisions follow the birthday bound — roughly
+**79 %** for a 5-member roster over an 8-relay pool. Collision-free-per-roster
+assignment would require the profile module to know roster membership, which
+its import boundary forbids by design (that boundary is what keeps circle
+identifiers out of the profile plane). What a collision leaks is "this install
+is interested in these two pubkeys" — **not** "these two pubkeys share a
+circle", because the queried set is the cross-circle union. Do not restate this
+guarantee more strongly than the code delivers.
+
+#### Publish fans out to the whole pool (P2)
+
+A peer's assignment salt is private to their install, so Haven cannot know
+which pool relay a peer will read it from. Publishing the user's own kind-0 to
+a subset would make them invisible to every peer assigned elsewhere, so publish
+targets the **entire** usable pool. Consequence: every pool relay learns
+`(our pubkey, our IP)`, and the one that also serves our reads can link our
+identity to our ~`1/N` contact sample. Reads remain unauthenticated — the fetch
+path is built with no signer and structurally cannot answer a NIP-42 challenge
+— so this is IP-level linkage only, never an authenticated one.
+
+#### No kind-10002 for the profile plane (P3)
+
+Haven deliberately publishes **no** NIP-65 relay list naming the profile pool.
+Such an event is signed by the identity key and publicly fetchable, so it would
+hand any observer — including a circle relay operator who already sees this
+account's gift wraps and KeyPackages — a pointer joining the identity to its
+profile plane, reconstructing the exact cross-plane link the pool exists to
+break, and more reliably than traffic analysis could. Accepted cost:
+outbox-model external clients (Damus, Amethyst) may fail to resolve a Haven
+user's profile; mitigated by biasing the pool toward widely-polled indexers.
+Enforced by `check_profile_privacy_boundaries.sh` (Check 10) and by
+`RelayType::Profile::to_kind()` returning `None`.
+
+#### Merge-base narrowing reverses MEDIUM-4 (P4)
+
+The kind-0 merge base is now fetched from the pool only. Haven will therefore
+stop seeing kind-0 edits another client made on relays outside the pool, so a
+Haven save can drop fields set elsewhere. This is a **deliberate reversal** of
+the earlier MEDIUM-4 fix (`self_merge_base_relays`, now deleted), which existed
+precisely to prevent that. It is accepted because the alternative — reading the
+merge base from the user's NIP-65 write relays — is the cross-plane read this
+redesign eliminates. Do not "re-fix" MEDIUM-4 by widening the merge-base relay
+set.
+
+#### The assignment salt is never rotated (P5)
+
+Rotation looks privacy-preserving and is strictly worse in aggregate: each
+rotation discloses every contact to an **additional** relay, so after `k`
+rotations up to `min(k, N)` relays know each contact, converging on full
+disclosure. A stable per-install salt fixes each author's relay for the life of
+the install, so the disclosure set never grows. Accepted cost: the assigned
+relay accumulates a durable "this IP is persistently interested in this pubkey"
+observation. The salt is zeroized on drop, redacted in `Debug`, and never
+crosses the FFI.
+
+It must also not outlive the identity: a second identity on the same device that
+inherited the first's salt would reuse its assignment, and any pool relay serving
+both could link them. Two distinct paths destroy it, and they are proven by two
+distinct tests — do not read either as covering the other:
+
+* **Profile delete** (`delete_my_public_profile`) calls `wipe_all_profiles`,
+  which drops the salt row inside its own transaction. Pinned by
+  `profile_relay_salt_is_cleared_by_wipe_all_profiles`.
+* **Logout** does *not* reach `wipe_all_profiles` at all. It deletes the whole
+  `circles.db` file plus its WAL/SHM/journal sidecars (`delete_circles_db_files`
+  in the FFI wipe), which takes the salt with it *because the `user_settings`
+  row is the salt's only persistence* — there is no keyring entry and no sidecar
+  copy. That is the load-bearing property, and it is what
+  `profile_relay_salt_does_not_outlive_the_circles_db_file` pins: it mints a
+  salt in a file-backed database, deletes the same file set the logout wipe
+  deletes, reopens, and requires an independently minted salt.
+
+#### IP-level linkage is out of scope (P6)
+
+Haven ships no Tor or proxy support. A pool relay observes the user's IP on
+both publish and read. The salted partition limits **what** a relay learns, not
+**who** it is talking to. Any future claim of network-level unlinkability needs
+transport work, not assignment work.
+
+#### Historical contamination is unrecoverable (P7)
+
+The contamination ledger (`circle::contamination`) is append-only precisely
+because contamination is historical: a relay that routed a circle's kind-445
+last month saw those events, and leaving the circle does not un-see them. But
+Welcome-delivery relays were persisted **nowhere** before this change — the
+cascade resolves them from the invitee's KeyPackage at send time — so relays
+that received a Welcome before the upgrade cannot be folded in by
+`refresh_contamination_ledger` and will not be excluded. Circle-routing and
+user-relay contamination backfills correctly; the Welcome set does not.
+
 ## Dependency Auditing
 
 Run security audits regularly:

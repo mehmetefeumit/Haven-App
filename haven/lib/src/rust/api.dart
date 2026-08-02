@@ -6,10 +6,10 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_commit_to_publish`, `convert_location_result`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_legacy_mls_db_files`, `delete_mls_session_db_files`, `delete_tile_db_files`, `event_secs_to_cursor_ms`, `from_cached`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `kp_event_d_tag`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `nip65_relay_list_urls`, `now_ms`, `platform_init_keyring`, `profile_now_secs`, `redact_profile_err`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `republish_key_package`, `run_blocking`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
-// These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
+// These functions are ignored because they are not marked as `pub`: `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_commit_to_publish`, `convert_location_result`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_legacy_mls_db_files`, `delete_mls_session_db_files`, `delete_tile_db_files`, `event_secs_to_cursor_ms`, `fetch_own_profile_across_pool`, `from_cached`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `kp_event_d_tag`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `nip65_relay_list_urls`, `now_ms`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `redact_profile_err`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `republish_key_package`, `run_blocking`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`, `usable_profile_pool`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`, `ProfileStampLists`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`, `default`
 
 /// Initializes the platform-specific keyring credential store.
 ///
@@ -339,6 +339,47 @@ List<String> discoveryRelays() =>
 ///   returns an error.
 void setDiscoveryRelaysForTest({required List<String> relays}) =>
     RustLib.instance.api.crateApiSetDiscoveryRelaysForTest(relays: relays);
+
+/// Overrides the profile-plane relay pool for E2E tests.
+///
+/// Forwards to [`haven_core::profile::set_profile_relays_for_test`] (debug
+/// builds) or returns an error in release builds. Intended to be called from a
+/// Patrol scenario's `setUpAll` (alongside [`set_default_relays_for_test`]) so
+/// kind-0 traffic resolves to hermetic local relays instead of the curated
+/// public pool.
+///
+/// This is the ONLY hook that retargets the profile plane.
+/// [`set_discovery_relays_for_test`] does not: the profile module is forbidden
+/// from reading the discovery plane at all (CI-enforced by
+/// `check_profile_privacy_boundaries.sh` check 3), because those relays already
+/// carry this account's kind-445 / kind-1059 traffic and routing kind-0 there is
+/// the cross-plane join the pool exists to break.
+///
+/// Two properties the caller must not expect to be relaxed, both inherited from
+/// the haven-core function this forwards to:
+///
+/// * The installed list is NOT exempt from contamination exclusion. An exempt
+///   override would make the E2E lane pass even if exclusion were broken.
+/// * Install at least [`haven_core::profile::PROFILE_POOL_MIN`] entries that
+///   survive normalization AND deduplication (the same local relay spelled three
+///   ways collapses to one). A shorter usable pool is accepted here and fails
+///   closed later with `PoolUnderflow`, which stops the plane resolving entirely.
+///
+/// There is deliberately no sibling READ accessor on this boundary: no
+/// profile-plane relay URL ever crosses the FFI (see [`ProfilePoolStatusFfi`],
+/// which reports counts only). A harness verifies propagation by this call
+/// returning `Ok` — the underlying `OnceLock` is install-once, so `Ok` means
+/// this list, and nothing else, is now the pool.
+///
+/// # Errors
+///
+/// * Returns an error if the override has already been installed (the
+///   underlying `OnceLock` is install-once per process).
+/// * Returns an error if `relays` is empty.
+/// * In release builds this function is unreachable; the sibling stub always
+///   returns an error.
+void setProfileRelaysForTest({required List<String> relays}) =>
+    RustLib.instance.api.crateApiSetProfileRelaysForTest(relays: relays);
 
 /// Opt in to plaintext `ws://` URLs targeting loopback / emulator-host
 /// aliases for hermetic E2E tests.
@@ -807,6 +848,44 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Returns a redacted error string on download or database failure.
   Future<void> downloadMemberPicture({required String pubkeyHex});
 
+  /// Reconciles a BATCH of members' profile pictures on a shuffled, paced
+  /// schedule, and returns the pubkeys that were reconciled.
+  ///
+  /// # Why this exists
+  ///
+  /// [`Self::download_member_picture`] is correct per member but wrong per
+  /// roster: looping it from Dart fires the whole set back-to-back at one
+  /// Blossom host — frequently run by the same operator as a default circle
+  /// relay — so the burst is directly readable as "these N people are in this
+  /// user's circles", in roster order, at a moment that correlates with the
+  /// app coming to the foreground. The single-author kind-0 fetch would have
+  /// been pointless if the avatar fetch handed the same set over anyway.
+  ///
+  /// So this call:
+  /// * **shuffles** the order every cycle from the OS CSPRNG (`rand::OsRng`;
+  ///   `thread_rng` is banned), so arrival order carries no roster ordering
+  ///   and a newly added member does not appear at a stable position;
+  /// * runs the downloads **one at a time**, never concurrently, so there is
+  ///   no burst to fingerprint;
+  /// * sleeps a **CSPRNG-sampled** [`profile_picture_delay`] between requests,
+  ///   so the remaining inter-arrival pattern carries no exploitable
+  ///   regularity;
+  /// * bounds the whole batch by [`PROFILE_PICTURE_BATCH_DEADLINE`], and each
+  ///   individual download by whatever is left of it.
+  ///
+  /// Per-member failures (timeout, dead host, oversized blob) are absorbed:
+  /// one member's picture must not deny every other member theirs. Members
+  /// not reached inside the deadline are simply omitted from the result and
+  /// retried on the next refresh — nothing is recorded against them.
+  ///
+  /// # Errors
+  ///
+  /// Returns a redacted error string only on a failure that affects the whole
+  /// batch; individual download failures are absorbed.
+  Future<List<String>> downloadMemberPictures({
+    required List<String> pubkeysHex,
+  });
+
   /// Encrypts a location for a circle.
   ///
   /// Creates an MLS-encrypted kind 445 event containing the location data.
@@ -858,10 +937,25 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// (`PROFILE_INTERACTIVE_MAX_AGE_SECS` / `PROFILE_PERIODIC_MAX_AGE_SECS` /
   /// forced), so one constant no longer has to serve every call site.
   ///
-  /// Fetched kind-0s are upserted newest-wins; queried authors that return
-  /// nothing are recorded as `Unknown` (which suppresses refetch churn without
-  /// downgrading an existing `Known` row). `has_picture` reflects whether
-  /// CURRENT picture bytes are cached.
+  /// # One relay per author
+  ///
+  /// Due authors are NOT broadcast to a read set. Each is pinned by a salted
+  /// rendezvous hash to exactly ONE relay of the profile pool and asked for
+  /// alone, so no relay ever observes a co-membership set. The pool is the
+  /// curated profile plane minus every relay in the contamination ledger, and
+  /// it fails closed: on pool underflow the network fetch is SKIPPED (cached
+  /// rows are still returned) rather than falling back onto a relay that
+  /// already carries this account's location traffic. Dart surfaces that state
+  /// via [`Self::profile_pool_status`].
+  ///
+  /// # Stamping
+  ///
+  /// Fetched kind-0s are upserted newest-wins and stamped as HITS; authors
+  /// their assigned relay answered nothing for are stamped as MISSES (which
+  /// advances the bounded retry ladder without resetting the staleness clock).
+  /// Authors the cycle never reached — dropped at the batch deadline, or on a
+  /// relay that turned out to be unusable — are stamped **not at all**.
+  /// `has_picture` reflects whether CURRENT picture bytes are cached.
   ///
   /// # Errors
   ///
@@ -876,6 +970,9 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Reads need no signer (security review F7): the pubkey identifies the
   /// profile; no secret crosses the FFI. A missing kind-0 yields an `Unknown`
   /// result rather than an error (offline-tolerant, plan D7).
+  ///
+  /// Reads from the WHOLE profile pool rather than one salted-assignment
+  /// relay — see [`fetch_own_profile_across_pool`].
   ///
   /// # Errors
   ///
@@ -954,6 +1051,13 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
 
   /// Returns whether this user wants to publish their relay list for the
   /// given category. Defaults to `true` when never set.
+  ///
+  /// # Errors
+  ///
+  /// Fails closed for [`RelayTypeFfi::Profile`]: that category has no
+  /// publish toggle because it has no publishable form. A toggle would imply
+  /// the plane *could* be advertised and invite a future "just default it to
+  /// on" change.
   Future<bool> getPublishRelayList({required RelayTypeFfi relayType});
 
   /// Gets visible circles (excludes declined invitations).
@@ -1045,6 +1149,17 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
   });
+
+  /// Health of the profile-plane relay pool, as counts only.
+  ///
+  /// Lets Flutter show "profile lookups are paused" instead of a silently
+  /// empty roster when contamination has eaten the pool. **No relay URL ever
+  /// crosses this boundary** — see [`ProfilePoolStatusFfi`].
+  ///
+  /// # Errors
+  ///
+  /// Returns a redacted error string on database failure.
+  Future<ProfilePoolStatusFfi> profilePoolStatus();
 
   /// Step 1 of admin handoff: propose promoting `successor_hex` to admin via
   /// an `UpdateAppComponents(admin-policy.v1)` commit.
@@ -1141,6 +1256,17 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Exposed for the relay-status UI. The publish flow uses the same
   /// computation internally; do NOT use this method to compute publish
   /// targets in Dart — call [`Self::build_relay_list_publish`] instead.
+  ///
+  /// # Errors
+  ///
+  /// Fails closed for [`RelayTypeFfi::Profile`], like every other method on
+  /// this publish-plane surface. The profile category is local-only: there
+  /// are no "publish targets" for it, and a Dart caller that received a list
+  /// here would hold exactly the input a `publish_event` loop wants. The
+  /// sentence above ("do NOT use this to compute publish targets") is a
+  /// convention; this arm is the guarantee, and it also keeps the whole
+  /// `RelayTypeFfi` surface uniformly fail-closed so no future reader has to
+  /// wonder which member is the exception.
   Future<List<String>> relayPublishTargets({required RelayTypeFfi relayType});
 
   /// Removes every last-known location row for a circle.
@@ -1195,6 +1321,16 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// floor. Errors are redacted.
   Future<void> resetAllSyncCursors();
 
+  /// Restores the curated profile pool non-destructively (adds back any
+  /// missing curated entry; keeps the user's own additions).
+  ///
+  /// The recovery action for a pool that has underflowed.
+  ///
+  /// # Errors
+  ///
+  /// Returns a redacted error string on database failure.
+  Future<void> restoreDefaultProfileRelays();
+
   /// Restores defaults for a category **non-destructively**.
   ///
   /// Adds any missing default relays via `INSERT OR IGNORE`. Existing
@@ -1237,6 +1373,11 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
 
   /// Sets whether this user wants to publish their relay list for the
   /// given category.
+  ///
+  /// # Errors
+  ///
+  /// Fails closed for [`RelayTypeFfi::Profile`] — see
+  /// [`Self::get_publish_relay_list`].
   Future<void> setPublishRelayList({
     required RelayTypeFfi relayType,
     required bool value,
@@ -3184,6 +3325,56 @@ class ProfilePictureRefFfi {
           sha256Hex == other.sha256Hex;
 }
 
+/// Health of the profile-plane relay pool, as **counts only**.
+///
+/// Deliberately carries no URLs. Dart needs exactly one thing — whether the
+/// plane can still operate — and a URL list crossing the FFI would give the UI
+/// (and any crash/analytics sink it feeds) a copy of which relays this install
+/// resolves profiles from. That set is the profile plane; naming it in Dart
+/// re-creates in the app layer the very pointer Haven refuses to publish.
+class ProfilePoolStatusFfi {
+  /// Distinct relays configured for the profile category (curated pool
+  /// unioned with the user's own additions).
+  final int configured;
+
+  /// How many of those are excluded because they also carry this account's
+  /// location-plane traffic (the append-only contamination ledger).
+  final int excluded;
+
+  /// Relays that survive exclusion and may serve kind-0 lookups.
+  final int usable;
+
+  /// `true` when too few survive to operate the plane. Profile lookups are
+  /// then skipped entirely (fail-closed: the plane NEVER falls back onto a
+  /// location relay), so the roster shows cached names only until the user
+  /// adds an uncontaminated profile relay.
+  final bool isUnderflow;
+
+  const ProfilePoolStatusFfi({
+    required this.configured,
+    required this.excluded,
+    required this.usable,
+    required this.isUnderflow,
+  });
+
+  @override
+  int get hashCode =>
+      configured.hashCode ^
+      excluded.hashCode ^
+      usable.hashCode ^
+      isUnderflow.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ProfilePoolStatusFfi &&
+          runtimeType == other.runtimeType &&
+          configured == other.configured &&
+          excluded == other.excluded &&
+          usable == other.usable &&
+          isUnderflow == other.isUnderflow;
+}
+
 /// Public identity information (FFI-friendly).
 ///
 /// Contains only public data that can be safely stored and shared.
@@ -3476,6 +3667,7 @@ class RelayRejectionFfi {
 /// - [`RelayTypeFfi::Nip65`] → kind 10002 (NIP-65; KeyPackage discovery under
 ///   Dark Matter). Persisted under the same slot the retired kind-10051
 ///   `KeyPackage` list used, so no relay-preference data migrates.
+/// - [`RelayTypeFfi::Profile`] → **no wire kind at all** (local-only policy).
 enum RelayTypeFfi {
   /// Inbox relays (kind 10050, NIP-17).
   inbox,
@@ -3484,6 +3676,21 @@ enum RelayTypeFfi {
   /// discoverable under Dark Matter (W2, replacing the retired kind-10051
   /// list). Stored under the `RelayType::KeyPackage` slot.
   nip65,
+
+  /// Profile-plane relays (kind-0 lookups + own-profile publish).
+  ///
+  /// **Local-only policy — structurally unpublishable.** Unlike the other two
+  /// categories this one has NO relay-list kind, and every relay-list code
+  /// path below carries an explicit fail-closed arm that returns an error for
+  /// it (never a default, never a fallthrough). Advertising this list would
+  /// hand any observer — including a circle relay operator who already sees
+  /// this account's gift wraps and KeyPackages — a signed, public pointer
+  /// joining the identity to its profile plane, reconstructing the exact
+  /// cross-plane join the profile/location separation exists to break.
+  ///
+  /// Mapping this onto [`RelayTypeFfi::Nip65`] "so it compiles" would publish
+  /// the profile plane as a kind-10002 and defeat the entire feature. Do not.
+  profile,
 }
 
 /// Signed location event (FFI wrapper for outer event kind 445).

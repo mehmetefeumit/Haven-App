@@ -32,6 +32,7 @@
 //!
 //! [`redact_hex_sequences`]: crate::util::redact_hex_sequences
 
+pub mod assignment;
 pub mod blossom;
 pub mod config;
 pub mod consent;
@@ -41,25 +42,33 @@ pub mod merge;
 pub mod parse;
 pub mod picture_cache;
 pub mod publish;
+pub mod relay_pool;
 pub mod types;
 
+pub use assignment::{
+    assigned_relay, assigned_relay_for_attempt, rank_relays, ProfileRelaySalt,
+    PROFILE_MAX_RELAY_RANK,
+};
 pub use blossom::{
     allow_private_blossom_for_test, download_profile_picture, require_https, upload_profile_picture,
 };
 pub use config::{
-    blossom_server, profile_read_relays, profile_write_relays, self_merge_base_relays,
-    set_blossom_server_for_test, AVATAR_MIME, BLOSSOM_AUTH_EXPIRY_SECS, BLOSSOM_TIMEOUT,
-    DEFAULT_BLOSSOM_SERVER, PROFILE_FETCH_MAX_AUTHORS, PROFILE_FETCH_TIMEOUT,
-    PROFILE_PICTURE_MAX_DOWNLOAD_BYTES,
+    blossom_server, set_blossom_server_for_test, AVATAR_MIME, BLOSSOM_AUTH_EXPIRY_SECS,
+    BLOSSOM_TIMEOUT, DEFAULT_BLOSSOM_SERVER, PROFILE_AUTHOR_FETCH_TIMEOUT, PROFILE_BATCH_DEADLINE,
+    PROFILE_FETCH_TIMEOUT, PROFILE_INTER_REQ_JITTER_MS, PROFILE_MAX_INFLIGHT_RELAYS,
+    PROFILE_PER_AUTHOR_LIMIT, PROFILE_PICTURE_MAX_DOWNLOAD_BYTES,
 };
 pub use consent::has_published_profile;
 pub use error::{ProfileError, Result};
-pub use fetch::fetch_profiles;
+pub use fetch::{fetch_profiles_assigned, AssignedFetch};
 pub use merge::{enforce_name_rule, merge_edits};
 pub use parse::parse_newest_metadata;
 pub use picture_cache::{picture_is_current, picture_sync_action, PictureSyncAction};
 pub use publish::{
     build_blank_metadata_event, build_metadata_event, build_nip09_deletion, publish_metadata,
-    resolve_write_relays,
+};
+pub use relay_pool::{
+    production_profile_relays, profile_relay_pool_default, resolve_profile_pool,
+    set_profile_relays_for_test, PRODUCTION_PROFILE_RELAYS, PROFILE_POOL_MIN,
 };
 pub use types::{CachedProfile, ProfileEdits, ProfileMetadata, ProfilePicture, ProfileState};

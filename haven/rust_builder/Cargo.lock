@@ -1388,6 +1388,7 @@ dependencies = [
  "futures",
  "geohash",
  "hex",
+ "hmac",
  "image",
  "keyring-core",
  "libsqlite3-sys",

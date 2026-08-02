@@ -271,7 +271,26 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get relaySettingsKeyPackageSubtitle =>
-      'kind 10002: здесь находят ваши ключи для приглашения и размещается ваш публичный профиль';
+      'kind 10002: здесь другие находят ключи, которые нужны, чтобы вас пригласить';
+
+  @override
+  String get relaySettingsProfileTitle => 'Мои реле профиля';
+
+  @override
+  String get relaySettingsProfileSubtitle =>
+      'kind 0: здесь ищут и публикуют ваш публичный профиль. Эти реле отделены от остальных ваших реле, а сам список реле профиля никогда не публикуется';
+
+  @override
+  String get relaySettingsProfileUnderflowTitle =>
+      'Запросы профилей приостановлены';
+
+  @override
+  String get relaySettingsProfileUnderflowMessage =>
+      'Осталось слишком мало реле профиля, поэтому имена и фото участников перестанут обновляться.';
+
+  @override
+  String get relaySettingsProfileUnderflowRestoreButton =>
+      'Восстановить реле профиля по умолчанию';
 
   @override
   String get relaySettingsLoadRelaysError => 'Не удалось загрузить реле.';
@@ -351,6 +370,15 @@ class AppLocalizationsRu extends AppLocalizations {
   @override
   String get relaySettingsEmptyMessage =>
       'Нужно хотя бы одно реле, чтобы вас могли найти. Нажмите ниже, чтобы восстановить реле Haven по умолчанию.';
+
+  @override
+  String get relaySettingsProfileContaminationTooltip =>
+      'Через это реле идёт и другой трафик Haven';
+
+  @override
+  String relaySettingsProfileContaminationSemantics(String url) {
+    return 'Предупреждение: через $url идёт и другой ваш трафик Haven, поэтому это реле может связать ваш профиль с этим трафиком';
+  }
 
   @override
   String get locationSettingsTitle => 'Местоположение';
@@ -643,8 +671,8 @@ class AppLocalizationsRu extends AppLocalizations {
       'Haven использует несколько реле, поэтому ни одно из них не может отрезать вас от связи. Если одно отключится, остальные продолжат работать. Реле, на которые приходят приглашения, выбираете вы; реле, которыми пользуется круг, задаются при его создании.';
 
   @override
-  String get privacyRelaysTwoLists =>
-      'Haven ведёт для вас два списка. На ваши входящие реле приходят приглашения. С ваших реле KeyPackage другие берут ключи, которые нужны, чтобы вас пригласить. У каждого круга есть ещё и свой список, и именно по нему идут зашифрованные обновления этого круга.';
+  String get privacyRelaysYourLists =>
+      'Haven ведёт для вас три списка. На ваши входящие реле приходят приглашения, а с ваших реле KeyPackage другие берут ключи, которые нужны, чтобы вас пригласить, — оба этих списка Haven публикует, чтобы их можно было найти. С реле профиля всё иначе: на них ищут и публикуют ваше имя и фото, но сам список остаётся на вашем устройстве и никогда не публикуется. Поэтому у реле, через которое идёт только ваш трафик местоположения или приглашения, нет публичного списка, который подсказал бы ему, какими реле вы пользуетесь для профиля. У каждого круга есть ещё и свой список, и именно по нему идут зашифрованные обновления этого круга.';
 
   @override
   String get privacyRelaysMeansForYou =>
@@ -2046,6 +2074,9 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get addRelaySheetTitleKeyPackage => 'Добавить реле KeyPackage';
+
+  @override
+  String get addRelaySheetTitleProfile => 'Добавить реле профиля';
 
   @override
   String get addRelaySheetHint => 'wss://relay.example.com';

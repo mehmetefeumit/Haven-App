@@ -391,18 +391,42 @@ proptest! {
 }
 
 // ============================================================================
-// RP-9: no RelayType variant advertises NIP-65 (kind 10002)
+// RP-9: the CORE RelayType → Kind mapping never acquires NIP-65 (kind 10002)
+//
+// NOT an app-level claim: Haven publishes 10002 by design for KeyPackage
+// discovery, via the FFI's Nip65 route, which bypasses `to_kind()` entirely.
 // ============================================================================
 
-/// Guards the documented privacy invariant in `relay_prefs.rs:18-21`: Haven
-/// never advertises a NIP-65 relay list (kind 10002), which would expand the
-/// user's relay-side metadata footprint. Every `RelayType` variant must map
-/// to its protocol-specific kind (10050 inbox / 10051 key-package) and never
-/// to 10002.
+/// Pins the CORE `RelayType → Kind` mapping. Read the scope note carefully:
+/// this is no longer an app-level "Haven never publishes 10002" claim.
+///
+/// # Scope (corrected post-Dark-Matter)
+///
+/// Haven DOES publish kind 10002 — it is the NIP-65 relay list used for
+/// KeyPackage discovery, and it retired kind 10051 for that purpose (see the
+/// protocol table in `CLAUDE.md`). That publish goes through the FFI's
+/// `RelayTypeFfi::Nip65` route, which calls
+/// [`haven_core::relay::build_nip65_relay_list_event`] directly and never
+/// consults `RelayType::to_kind()`.
+///
+/// So what this test guards is narrower and still worth guarding: the CORE
+/// enum's mapping must not silently acquire 10002. The mapping feeds exactly
+/// two live builders — `build_relay_list_event` and `build_unpublish_event`
+/// — and the only surviving production caller for the KeyPackage arm is the
+/// legacy-retraction path (`relay/maintenance/key_package.rs`), which
+/// publishes an EMPTY kind-10051 to scrub a pre-Dark-Matter list. That is why
+/// `RelayType::KeyPackage → 10051` below is correct and must stay: 10051 is
+/// the kind being retracted, not a kind Haven advertises. Re-pointing it at
+/// 10002 would make the cutover scrub the user's live NIP-65 list instead.
+///
+/// `RelayType::Profile` maps to `None`: the profile plane is local-only, and a
+/// signed relay list naming its relays would hand observers a public pointer
+/// joining the identity to that plane.
 ///
 /// The exhaustive `match` makes this fail to COMPILE if a new `RelayType`
 /// variant is added without being considered here — forcing a privacy review
-/// of any future relay category.
+/// of any future relay category. It has already fired once, for
+/// `RelayType::Profile`.
 #[test]
 fn no_relay_type_maps_to_nip65_kind_10002() {
     const NIP65_KIND: u16 = 10002;
@@ -412,21 +436,37 @@ fn no_relay_type_maps_to_nip65_kind_10002() {
         "sanity: NIP-65 is 10002"
     );
 
-    let all_variants = [RelayType::Inbox, RelayType::KeyPackage];
+    let all_variants = [RelayType::Inbox, RelayType::KeyPackage, RelayType::Profile];
     for variant in all_variants {
         // Exhaustiveness guard: adding a variant breaks compilation here.
         match variant {
-            RelayType::Inbox | RelayType::KeyPackage => {}
+            RelayType::Inbox | RelayType::KeyPackage | RelayType::Profile => {}
         }
-        let kind = variant.to_kind();
-        assert_ne!(
-            kind.as_u16(),
-            NIP65_KIND,
-            "{variant:?} must not advertise NIP-65 (kind 10002)"
-        );
+        // A category with no wire kind advertises nothing at all, which
+        // satisfies "never 10002" more strongly than any other kind could.
+        if let Some(kind) = variant.to_kind() {
+            assert_ne!(
+                kind.as_u16(),
+                NIP65_KIND,
+                "{variant:?} must not advertise NIP-65 (kind 10002)"
+            );
+        }
     }
 
     // Pin the expected mapping so a silent re-point to 10002 also fails.
-    assert_eq!(RelayType::Inbox.to_kind(), Kind::InboxRelays);
-    assert_eq!(RelayType::KeyPackage.to_kind(), Kind::MlsKeyPackageRelays);
+    assert_eq!(RelayType::Inbox.to_kind(), Some(Kind::InboxRelays));
+    assert_eq!(
+        RelayType::KeyPackage.to_kind(),
+        Some(Kind::MlsKeyPackageRelays)
+    );
+    // The profile plane is structurally unpublishable: there is no `Kind` to
+    // hand an `EventBuilder`, so no present or future caller can advertise it
+    // by forgetting a policy check. Giving it ANY kind — 10002 or otherwise —
+    // would hand observers a signed, public pointer from this identity to the
+    // relays carrying its kind-0 traffic, which is precisely the cross-plane
+    // join the profile/location separation exists to break.
+    assert!(
+        RelayType::Profile.to_kind().is_none(),
+        "RelayType::Profile must have NO wire kind — profile relays are local-only policy",
+    );
 }

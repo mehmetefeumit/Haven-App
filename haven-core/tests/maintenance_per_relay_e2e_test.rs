@@ -112,8 +112,17 @@ async fn list_snapshot(
     configured: &[String],
     publish_enabled: bool,
 ) -> RelayListSnapshot {
+    // `to_kind()` is `None` for the local-only `RelayType::Profile`, which has
+    // no wire kind by construction. This probe only ever runs for the
+    // PUBLISHABLE categories (inbox / key package) — a relay-list snapshot of a
+    // category that is never published is meaningless — so unwrap loudly rather
+    // than substituting a placeholder kind, which would silently probe (and,
+    // read the other way, invite publishing) the profile plane.
     let filter = nostr::Filter::new()
-        .kind(relay_type.to_kind())
+        .kind(relay_type.to_kind().expect(
+            "relay-list maintenance only probes publishable categories; \
+             RelayType::Profile is local-only and has no wire kind",
+        ))
         .author(author)
         .limit(4);
     let per_relay = mgr

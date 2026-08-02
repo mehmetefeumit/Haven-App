@@ -19,20 +19,60 @@
 //!   returned to callers are `Zeroizing`.
 //! * Publishing a public profile is unconditional (public-by-default); there is
 //!   no persisted consent flag. The only publish-side invariant kept here is the
-//!   retraction no-op gate ([`Self::has_published_profile`]).
+//!   retraction no-op gate ([`CircleStorage::has_published_profile`]).
+//! * The per-install profile-relay salt lives in `user_settings` and is wiped
+//!   together with the cache — see
+//!   [`CircleStorage::get_or_create_profile_relay_salt`].
 
 // Mirror `storage.rs`: each method acquires the connection lock once at the top
 // and holds it for the whole (single-statement or transactional) operation.
 #![allow(clippy::significant_drop_tightening)]
 
 use nostr::{JsonUtil, Metadata, PublicKey};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use zeroize::Zeroizing;
 
 use super::error::{CircleError, Result};
 use super::storage::CircleStorage;
 use crate::profile::picture_is_current;
 use crate::profile::types::{CachedProfile, ProfileMetadata, ProfileState};
+use crate::profile::ProfileRelaySalt;
+
+/// `user_settings` key holding the per-install profile-relay salt as 64
+/// lowercase hex characters.
+const PROFILE_RELAY_SALT_KEY: &str = "profile_relay_salt_v1";
+
+/// Retry ladder (seconds) for an author whose kind-0 MISSED on its assigned
+/// relay: `30s → 2min → 8min → 30min → 6h`, then 6h forever.
+///
+/// Indexed by the author's `miss_count` **before** the miss being recorded is
+/// counted (equivalently `new_miss_count - 1`), saturating at the last rung, so
+/// the first miss schedules the first entry.
+///
+/// # Why the first rung is only 30 seconds
+///
+/// Under one-relay-per-member assignment a miss means "*that* relay did not
+/// have it", not "nobody has it" — the member very likely exists and is simply
+/// not mirrored there. The retry walks to the next-ranked relay
+/// (`assigned_relay_for_attempt`), so a short first rung is what turns a
+/// transient `Unknown` into a resolved name inside one UI session instead of
+/// pinning the member as `Unknown` for a staleness tier. The ladder then grows
+/// quickly, so an author whose kind-0 genuinely does not exist costs at most a
+/// handful of REQs per day (and, per `PROFILE_MAX_RELAY_RANK`, is disclosed to
+/// a bounded number of relays no matter how long the ladder runs).
+pub const PROFILE_MISS_BACKOFF_SECS: &[i64] = &[30, 120, 480, 1_800, 21_600];
+
+/// The backoff to apply after a miss, given the author's `miss_count` *before*
+/// the increment. Saturates on the last rung of [`PROFILE_MISS_BACKOFF_SECS`].
+fn miss_backoff_secs(prior_miss_count: i64) -> i64 {
+    // The ladder is a non-empty compile-time constant, so `len() - 1` and the
+    // subsequent index are both in range.
+    let last = PROFILE_MISS_BACKOFF_SECS.len().saturating_sub(1);
+    let index = usize::try_from(prior_miss_count.max(0))
+        .unwrap_or(last)
+        .min(last);
+    PROFILE_MISS_BACKOFF_SECS.get(index).copied().unwrap_or(0)
+}
 
 impl CircleStorage {
     // ==================== kind-0 metadata cache ====================
@@ -41,7 +81,7 @@ impl CircleStorage {
     ///
     /// This write is unconditional; callers gate freshness with
     /// [`Self::newer_than_cached`] before invoking it. A miss (no kind-0 for a
-    /// pubkey) is recorded via [`Self::touch_profiles_fetched_at`], not here, so a
+    /// pubkey) is recorded via [`Self::record_profile_misses`], not here, so a
     /// transient empty fetch cannot downgrade a `Known` row.
     ///
     /// # Errors
@@ -155,28 +195,39 @@ impl CircleStorage {
         Ok(out)
     }
 
-    /// Records that a fetch was ATTEMPTED for each pubkey at `now_unix_secs`,
-    /// inserting an `Unknown` row for a pubkey that has never resolved.
+    // NOTE: there is deliberately no blanket "stamp every ATTEMPTED author"
+    // method. `touch_profiles_fetched_at` was exactly that, and it was DELETED
+    // rather than deprecated: it stamped hits and misses alike, which was
+    // correct only while one filter fanned out to the whole read set (a miss
+    // then really did mean "nobody has it"). Under one-relay-per-member
+    // assignment a miss means "*that* relay lacked it", and stamping it resets
+    // the staleness clock and pins the member `Unknown` for a whole tier. Use
+    // the split below — `touch_profiles_hit` for authors the relay answered
+    // for, `record_profile_misses` for the rest — and stamp an author the cycle
+    // never reached in NEITHER (see `profile_stamp_lists` in the FFI crate).
+
+    /// Records a profile fetch **HIT** for each pubkey at `now_unix_secs`:
+    /// advances the staleness clock and clears the miss state.
     ///
-    /// The `ON CONFLICT` clause updates **only** `fetched_at`, never `state` or
-    /// `metadata_json`, so this resets the staleness clock without downgrading a
-    /// previously-`Known` profile.
+    /// Call this for every author whose kind-0 the assigned relay actually
+    /// returned — including one whose content did not change. kind-0 is
+    /// replaceable, so an unchanged profile comes back with the same
+    /// `created_at`, [`Self::upsert_profile_if_newer`] correctly declines to
+    /// rewrite the row, and `fetched_at` would otherwise stay pinned to the
+    /// first-ever fetch, permanently defeating every staleness tier.
     ///
-    /// This MUST be called for every queried author, not only the ones that
-    /// returned nothing. kind-0 is replaceable, so an unchanged profile comes
-    /// back with the same `created_at`, [`Self::upsert_profile_if_newer`]
-    /// correctly declines to rewrite the row, and `fetched_at` would otherwise
-    /// stay pinned to the first-ever fetch — permanently defeating every
-    /// staleness tier and turning each refresh trigger into a real relay `REQ`.
+    /// Authors the relay did NOT answer for go to [`Self::record_profile_misses`]
+    /// instead. Splitting the two is the whole point: stamping a miss as if it
+    /// were a hit is what pins a member `Unknown` for a full staleness tier.
+    ///
+    /// The `ON CONFLICT` clause updates only `fetched_at`, `miss_count` and
+    /// `next_retry_at` — never `state` or `metadata_json` — so recording a hit
+    /// can never downgrade cached content.
     ///
     /// # Errors
     ///
     /// As [`Self::upsert_profile`].
-    pub fn touch_profiles_fetched_at(
-        &self,
-        pubkeys_hex: &[String],
-        now_unix_secs: i64,
-    ) -> Result<()> {
+    pub fn touch_profiles_hit(&self, pubkeys_hex: &[String], now_unix_secs: i64) -> Result<()> {
         if pubkeys_hex.is_empty() {
             return Ok(());
         }
@@ -187,9 +238,14 @@ impl CircleStorage {
         let tx = conn.transaction()?;
         {
             let mut stmt = tx.prepare(
-                "INSERT INTO profiles (pubkey, metadata_json, state, event_created_at, fetched_at)
-                 VALUES (?1, '{}', 0, 0, ?2)
-                 ON CONFLICT(pubkey) DO UPDATE SET fetched_at = excluded.fetched_at",
+                "INSERT INTO profiles
+                     (pubkey, metadata_json, state, event_created_at, fetched_at,
+                      miss_count, next_retry_at)
+                 VALUES (?1, '{}', 0, 0, ?2, 0, 0)
+                 ON CONFLICT(pubkey) DO UPDATE SET
+                     fetched_at    = excluded.fetched_at,
+                     miss_count    = 0,
+                     next_retry_at = 0",
             )?;
             for pubkey_hex in pubkeys_hex {
                 stmt.execute(params![pubkey_hex, now_unix_secs])?;
@@ -198,6 +254,228 @@ impl CircleStorage {
         tx.commit()?;
         Ok(())
     }
+
+    /// Records a **MISS** on the assigned relay for each pubkey: bumps
+    /// `miss_count` and schedules the next retry from
+    /// [`PROFILE_MISS_BACKOFF_SECS`].
+    ///
+    /// This deliberately does **not** touch `fetched_at`, `state` or
+    /// `metadata_json`. Under one-relay-per-member assignment a miss carries far
+    /// less information than it did when the filter fanned out to the whole
+    /// read set: it means "the relay this author hashes to did not have it", not
+    /// "no relay has it". Stamping it like a hit would (a) reset the staleness
+    /// clock of an already-`Known` row, suppressing the retry that would have
+    /// resolved it, and (b) leave a never-resolved author displayed as
+    /// `Unknown` until a full staleness tier elapsed. The retry schedule lives
+    /// in `next_retry_at` precisely so the miss does not have to lie about
+    /// `fetched_at` to be remembered.
+    ///
+    /// A pubkey with no row yet gets an `Unknown` row seeded with
+    /// `miss_count = 1`; its `fetched_at` is set to `now_unix_secs` because a
+    /// brand-new row has no prior value to preserve (and seeding `0` would make
+    /// any staleness-based caller treat it as infinitely stale, defeating the
+    /// backoff it is being given).
+    ///
+    /// Duplicate entries in `pubkeys_hex` are counted once per occurrence;
+    /// callers pass the normalized, de-duplicated list they queried.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::upsert_profile`].
+    pub fn record_profile_misses(&self, pubkeys_hex: &[String], now_unix_secs: i64) -> Result<()> {
+        if pubkeys_hex.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        let tx = conn.transaction()?;
+        {
+            // Read-then-write (rather than computing the schedule in SQL) keeps
+            // the backoff ladder in Rust as the single source of truth instead
+            // of duplicating it as a CASE expression. It is atomic: one lock,
+            // one transaction. The write is a single UPSERT whose `fetched_at`
+            // therefore applies to the INSERT path ONLY — the `DO UPDATE` arm
+            // deliberately leaves an existing row's `fetched_at` / `state` /
+            // `metadata_json` untouched.
+            let mut read = tx.prepare("SELECT miss_count FROM profiles WHERE pubkey = ?1")?;
+            let mut write = tx.prepare(
+                "INSERT INTO profiles
+                     (pubkey, metadata_json, state, event_created_at, fetched_at,
+                      miss_count, next_retry_at)
+                 VALUES (?1, '{}', 0, 0, ?2, ?3, ?4)
+                 ON CONFLICT(pubkey) DO UPDATE SET
+                     miss_count    = excluded.miss_count,
+                     next_retry_at = excluded.next_retry_at",
+            )?;
+            for pubkey_hex in pubkeys_hex {
+                // Absent row → prior count 0, so both paths schedule the first
+                // ladder rung and land on `miss_count = 1`.
+                let prior_miss_count: i64 = read
+                    .query_row(params![pubkey_hex], |r| r.get(0))
+                    .optional()?
+                    .unwrap_or(0)
+                    .max(0);
+                let retry_at = now_unix_secs.saturating_add(miss_backoff_secs(prior_miss_count));
+                write.execute(params![
+                    pubkey_hex,
+                    now_unix_secs,
+                    prior_miss_count.saturating_add(1),
+                    retry_at
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The subset of `pubkeys_hex` that is due a kind-0 fetch, paired with the
+    /// **attempt index** to fetch it at.
+    ///
+    /// The attempt index feeds
+    /// [`assigned_relay_for_attempt`](crate::profile::assigned_relay_for_attempt),
+    /// which walks the author's rendezvous ranking so a repeated miss retries on
+    /// the next-ranked relay instead of hammering the one that already answered
+    /// "no" (capped at
+    /// [`PROFILE_MAX_RELAY_RANK`](crate::profile::PROFILE_MAX_RELAY_RANK), so
+    /// per-author disclosure stays bounded).
+    ///
+    /// The predicate, in order:
+    ///
+    /// | row state | condition | attempt |
+    /// |---|---|---|
+    /// | any (`max_age_secs == 0`, forced) | always due | `miss_count` |
+    /// | no row | always due | `0` |
+    /// | `Known` | `now - fetched_at >= max_age_secs` | `0` |
+    /// | `Unknown` | `now >= next_retry_at` | `miss_count` |
+    /// | otherwise | not due | — |
+    ///
+    /// A `Known` row is retried at attempt `0` because its assigned relay
+    /// demonstrably serves that author; only an unresolved author walks the
+    /// ladder. Output preserves input order, one entry per due input element;
+    /// callers pass the normalized, de-duplicated list.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::upsert_profile`].
+    pub fn profiles_due(
+        &self,
+        pubkeys_hex: &[String],
+        now_unix_secs: i64,
+        max_age_secs: i64,
+    ) -> Result<Vec<(String, u8)>> {
+        if pubkeys_hex.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        let mut stmt = conn.prepare(
+            "SELECT state, fetched_at, miss_count, next_retry_at
+             FROM profiles WHERE pubkey = ?1",
+        )?;
+        let mut due = Vec::new();
+        for pubkey_hex in pubkeys_hex {
+            let row = stmt
+                .query_row(params![pubkey_hex], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                })
+                .optional()?;
+            if let Some(attempt) = Self::due_attempt(row, now_unix_secs, max_age_secs) {
+                due.push((pubkey_hex.clone(), attempt));
+            }
+        }
+        Ok(due)
+    }
+
+    // ==================== profile-relay salt ====================
+
+    /// Reads the per-install profile-relay salt, minting one on first use.
+    ///
+    /// The salt keys the rendezvous hash that assigns each author's kind-0 to
+    /// exactly one pool relay (`crate::profile::assignment`). It must be
+    /// **stable for the life of the install**: every change re-assigns authors
+    /// and therefore discloses them to an ADDITIONAL relay, so repeated
+    /// rotation converges on "every pool relay has seen every contact". This
+    /// method is consequently the only mint site, and it never rotates an
+    /// existing, well-formed salt.
+    ///
+    /// The read and the conditional insert happen under a single acquisition of
+    /// the connection lock, and the insert is `INSERT OR IGNORE` followed by a
+    /// re-read, so two concurrent first-uses converge on ONE salt (the loser
+    /// adopts the winner's) rather than each minting their own and silently
+    /// re-assigning half the contact set.
+    ///
+    /// An unparseable stored value (only reachable through corruption or
+    /// tampering — nothing else writes this key) is replaced with a fresh salt
+    /// and logged without echoing the value: the previous mapping is
+    /// unrecoverable either way, and failing closed here would permanently
+    /// disable profile resolution.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CircleError::Storage`] on lock poisoning or if the just-written
+    /// row cannot be read back, [`CircleError::Database`] on `SQLite` failure,
+    /// and [`CircleError::InvalidData`] if the re-read value is malformed. No
+    /// error ever carries the salt or any part of it.
+    pub fn get_or_create_profile_relay_salt(&self) -> Result<ProfileRelaySalt> {
+        let conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        // Fast path: a well-formed salt is already stored — never rotate it.
+        let stored = Self::read_salt_hex(&conn)?;
+        if let Some(salt) = stored
+            .as_ref()
+            .and_then(|hex| ProfileRelaySalt::from_hex(hex).ok())
+        {
+            return Ok(salt);
+        }
+
+        let fresh = ProfileRelaySalt::generate();
+        let fresh_hex = fresh.to_hex();
+
+        if stored.is_some() {
+            // A row exists but is unusable: overwrite it. The message never
+            // includes the stored value (it is an install fingerprint).
+            conn.execute(
+                "INSERT INTO user_settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![PROFILE_RELAY_SALT_KEY, fresh_hex.as_str()],
+            )?;
+            log::warn!("profile relay salt was unreadable; minted a replacement");
+            return Ok(fresh);
+        }
+
+        // First use. `OR IGNORE` + re-read makes a concurrent first-use
+        // converge on a single salt instead of clobbering one another.
+        conn.execute(
+            "INSERT OR IGNORE INTO user_settings (key, value) VALUES (?1, ?2)",
+            params![PROFILE_RELAY_SALT_KEY, fresh_hex.as_str()],
+        )?;
+        let winner = Self::read_salt_hex(&conn)?.ok_or_else(|| {
+            CircleError::Storage("profile relay salt missing immediately after insert".to_string())
+        })?;
+        ProfileRelaySalt::from_hex(&winner)
+            .map_err(|_| CircleError::InvalidData("profile relay salt is malformed".to_string()))
+    }
+
+    // NOTE: there is deliberately no standalone `clear_profile_relay_salt`.
+    // Only two things ever destroy the salt, and neither needs one:
+    //
+    // * profile DELETE — [`Self::wipe_all_profiles`], which drops the row inside
+    //   its own transaction;
+    // * LOGOUT — the `circles.db` file (and its sidecars) are deleted wholesale
+    //   by the FFI wipe, which takes the salt with them because `user_settings`
+    //   is the salt's ONLY persistence (no keyring entry, no sidecar file).
+    //   Pinned by `profile_relay_salt_does_not_outlive_the_circles_db_file`.
+    //
+    // A public "clear the salt" method with no caller previously documented
+    // itself as the logout path, which was wrong in a way that mattered:
+    // it made the logout guarantee look tested when nothing tested it.
 
     /// Whether an incoming kind-0 with `event_created_at` is newer than the
     /// cached row — the newer-wins gate.
@@ -411,8 +689,30 @@ impl CircleStorage {
         ))
     }
 
-    /// Wipes all cached profiles and pictures (account wipe / logout). Mirrors
-    /// [`Self::wipe_all_avatars`].
+    /// Wipes all cached profiles and pictures **and the profile-relay salt**.
+    ///
+    /// # Which path reaches this — and which does not
+    ///
+    /// This is the PROFILE-DELETE path (the FFI `delete_my_public_profile`
+    /// retraction), not the logout path. Logout deletes the whole `circles.db`
+    /// file instead, so it destroys the same rows without calling anything here.
+    /// Do not describe this method as "the account wipe": a reader who believes
+    /// that will also believe logout's salt destruction is covered by
+    /// `profile_relay_salt_is_cleared_by_wipe_all_profiles`, and it is not — see
+    /// `profile_relay_salt_does_not_outlive_the_circles_db_file` for the test
+    /// that actually pins logout.
+    ///
+    /// # Why the salt goes too
+    ///
+    /// Dropping the salt is not housekeeping, it is a linkability fix: a
+    /// surviving salt gives the next identity on this device the previous
+    /// identity's per-author relay assignment, so a pool relay that served both
+    /// would see one install's stable assignment fingerprint span two pubkeys
+    /// and could link them.
+    ///
+    /// The delete is issued inside this method's transaction, via the shared
+    /// [`Self::delete_salt_row`] statement, so it cannot drift from the salt
+    /// key the reader/minter uses.
     ///
     /// # Errors
     ///
@@ -425,11 +725,72 @@ impl CircleStorage {
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM profiles", [])?;
         tx.execute("DELETE FROM profile_pictures", [])?;
+        Self::delete_salt_row(&tx)?;
         tx.commit()?;
         Ok(())
     }
 
     // ---- private helpers ----
+
+    /// Deletes the stored profile-relay salt on an already-locked connection.
+    ///
+    /// Takes the connection rather than re-locking so [`Self::wipe_all_profiles`]
+    /// can issue it inside its own transaction (the connection mutex is not
+    /// reentrant), and keeps the `DELETE` in one place so it cannot drift from
+    /// the key [`Self::read_salt_hex`] reads.
+    fn delete_salt_row(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute(
+            "DELETE FROM user_settings WHERE key = ?1",
+            params![PROFILE_RELAY_SALT_KEY],
+        )?;
+        Ok(())
+    }
+
+    /// Reads the raw salt hex, wrapped in [`Zeroizing`] so the plaintext
+    /// encoding does not linger after parsing.
+    fn read_salt_hex(conn: &Connection) -> rusqlite::Result<Option<Zeroizing<String>>> {
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT value FROM user_settings WHERE key = ?1",
+                params![PROFILE_RELAY_SALT_KEY],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(raw.map(Zeroizing::new))
+    }
+
+    /// The pure due-predicate behind [`Self::profiles_due`], split out so every
+    /// branch is unit-testable without a database.
+    ///
+    /// `row` is `(state, fetched_at, miss_count, next_retry_at)`, or `None` when
+    /// the author has no cached row at all.
+    fn due_attempt(row: Option<(i64, i64, i64, i64)>, now: i64, max_age_secs: i64) -> Option<u8> {
+        let Some((state, fetched_at, miss_count, next_retry_at)) = row else {
+            // Never attempted: due now, at the top-ranked relay.
+            return Some(0);
+        };
+        if max_age_secs == 0 {
+            // Forced refresh (user-initiated). Resume the ladder where the
+            // recorded misses left off rather than re-asking the relay that
+            // already answered "no".
+            return Some(Self::attempt_index(miss_count));
+        }
+        if state == ProfileState::Known.as_db_value() {
+            // Resolved content: plain staleness, and its assigned relay
+            // demonstrably serves this author, so stay at rank 0.
+            return (now.saturating_sub(fetched_at) >= max_age_secs).then_some(0);
+        }
+        // Unresolved: the backoff schedule is authoritative, NOT `fetched_at`.
+        (now >= next_retry_at).then(|| Self::attempt_index(miss_count))
+    }
+
+    /// Clamps a stored `miss_count` into the `u8` attempt index. A negative
+    /// value (only reachable by hand-editing the database) reads as zero; a
+    /// huge one saturates, and is capped again by `PROFILE_MAX_RELAY_RANK`
+    /// when it reaches the assignment ladder.
+    fn attempt_index(miss_count: i64) -> u8 {
+        u8::try_from(miss_count.max(0)).unwrap_or(u8::MAX)
+    }
 
     /// Writes (insert-or-replace) a profile row on an already-locked connection.
     ///
@@ -503,6 +864,46 @@ impl CircleStorage {
 mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind};
+
+    /// Reads the raw miss-cache columns for a pubkey (`None` when no row).
+    fn miss_state(storage: &CircleStorage, pubkey_hex: &str) -> Option<(i64, i64)> {
+        let conn = storage.conn().lock().unwrap();
+        conn.query_row(
+            "SELECT miss_count, next_retry_at FROM profiles WHERE pubkey = ?1",
+            params![pubkey_hex],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    /// The `profiles` column names, in declaration order.
+    fn profile_columns(storage: &CircleStorage) -> Vec<String> {
+        let conn = storage.conn().lock().unwrap();
+        let mut stmt = conn.prepare("PRAGMA table_info(profiles)").unwrap();
+        let cols = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        cols
+    }
+
+    /// The raw stored salt hex, or `None`.
+    fn stored_salt_hex(storage: &CircleStorage) -> Option<String> {
+        let conn = storage.conn().lock().unwrap();
+        conn.query_row(
+            "SELECT value FROM user_settings WHERE key = ?1",
+            params![PROFILE_RELAY_SALT_KEY],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    fn one(pubkey_hex: &str) -> Vec<String> {
+        vec![pubkey_hex.to_string()]
+    }
 
     fn known_profile(
         pubkey_hex: &str,
@@ -588,37 +989,21 @@ mod tests {
     }
 
     #[test]
-    fn mark_unknown() {
-        let storage = CircleStorage::in_memory().unwrap();
-        storage
-            .touch_profiles_fetched_at(&["zz".to_string()], 7_000)
-            .unwrap();
-        let got = storage
-            .get_profile("zz")
-            .unwrap()
-            .expect("unknown row present");
-        assert_eq!(got.state, ProfileState::Unknown);
-        assert_eq!(got.event_created_at, 0);
-        assert_eq!(got.fetched_at, 7_000);
-        assert_eq!(got.metadata, ProfileMetadata::default());
-    }
-
-    #[test]
-    fn mark_unknown_does_not_downgrade_known() {
-        // A transient empty fetch must not clobber a previously-Known profile —
-        // only its fetched_at (TTL clock) is refreshed.
+    fn hit_does_not_downgrade_known() {
+        // A hit on an unchanged profile must not clobber the cached content —
+        // only its fetched_at (staleness clock) moves.
         let storage = CircleStorage::in_memory().unwrap();
         storage
             .upsert_profile(&known_profile("aa", "alice", 1_000, 5_000))
             .unwrap();
         storage
-            .touch_profiles_fetched_at(&["aa".to_string()], 9_000)
+            .touch_profiles_hit(&["aa".to_string()], 9_000)
             .unwrap();
         let got = storage.get_profile("aa").unwrap().unwrap();
         assert_eq!(got.state, ProfileState::Known, "must stay Known");
         assert_eq!(got.metadata.name(), Some("alice"));
         assert_eq!(got.event_created_at, 1_000);
-        assert_eq!(got.fetched_at, 9_000, "TTL clock refreshed");
+        assert_eq!(got.fetched_at, 9_000, "staleness clock refreshed");
     }
 
     #[test]
@@ -881,12 +1266,10 @@ mod tests {
             "content write is correctly skipped, leaving fetched_at stale"
         );
 
-        // Touching the attempt is what keeps the tier gate alive.
-        storage
-            .touch_profiles_fetched_at(&[hex.clone()], 1000)
-            .unwrap();
+        // Recording the HIT is what keeps the tier gate alive.
+        storage.touch_profiles_hit(&[hex.clone()], 1000).unwrap();
         let row = storage.get_profile(&hex).unwrap().unwrap();
-        assert_eq!(row.fetched_at, 1000, "the fetch attempt must be recorded");
+        assert_eq!(row.fetched_at, 1000, "the answered fetch must be recorded");
         assert_eq!(row.state, ProfileState::Known, "state must not downgrade");
         assert_eq!(
             row.metadata.name().map(ToString::to_string),
@@ -898,16 +1281,23 @@ mod tests {
 
     #[test]
     fn touch_inserts_an_unknown_row_for_a_never_seen_pubkey() {
-        // Same statement also covers authors that returned nothing, so one call
-        // records the attempt for the whole batch.
+        // A hit is normally accompanied by an `upsert_profile*` that lands the
+        // content; the row this statement inserts on its own is the placeholder
+        // that carries the staleness clock, so it must be `Unknown` with an
+        // empty metadata blob rather than a fabricated "known-but-blank" row.
         let storage = CircleStorage::in_memory().unwrap();
         let hex = "cd".repeat(32);
-        storage
-            .touch_profiles_fetched_at(&[hex.clone()], 700)
-            .unwrap();
+        storage.touch_profiles_hit(&[hex.clone()], 700).unwrap();
         let row = storage.get_profile(&hex).unwrap().unwrap();
         assert_eq!(row.state, ProfileState::Unknown);
         assert_eq!(row.fetched_at, 700);
+        assert_eq!(row.event_created_at, 0, "no newer-wins base is invented");
+        assert_eq!(row.metadata, ProfileMetadata::default());
+        assert_eq!(
+            miss_state(&storage, &hex),
+            Some((0, 0)),
+            "a hit seeds no backoff"
+        );
     }
 
     #[test]
@@ -1047,13 +1437,565 @@ mod tests {
             .unwrap());
     }
 
+    // ---- miss-aware negative cache -----------------------------------------
+
+    #[test]
+    fn miss_schedules_second_relay_retry() {
+        // A miss on the assigned relay must (a) be counted and (b) schedule the
+        // retry on the NEXT-ranked relay after the first ladder rung — not
+        // re-ask the relay that already answered "no", and not wait a full
+        // staleness tier.
+        let storage = CircleStorage::in_memory().unwrap();
+        let now = 1_000;
+
+        storage.record_profile_misses(&one("aa"), now).unwrap();
+
+        let (miss_count, next_retry_at) = miss_state(&storage, "aa").expect("miss row inserted");
+        assert_eq!(miss_count, 1, "the miss must be counted");
+        assert_eq!(
+            next_retry_at,
+            now + PROFILE_MISS_BACKOFF_SECS[0],
+            "first miss schedules the 30s rung"
+        );
+        assert_eq!(
+            next_retry_at,
+            now + 30,
+            "the 30s rung is what keeps UX sane"
+        );
+
+        // One second early: still backed off.
+        assert!(
+            storage
+                .profiles_due(&one("aa"), now + 29, 900)
+                .unwrap()
+                .is_empty(),
+            "must not be due before next_retry_at"
+        );
+
+        // At the scheduled instant: due, and at attempt 1 → the SECOND-ranked
+        // relay in the author's rendezvous ranking.
+        assert_eq!(
+            storage.profiles_due(&one("aa"), now + 30, 900).unwrap(),
+            vec![("aa".to_string(), 1)],
+        );
+    }
+
+    #[test]
+    fn miss_does_not_stamp_fetched_at_like_a_hit() {
+        // THE bug this split fixes. The old `touch_profiles_fetched_at` stamped
+        // every attempted author, so a miss on the one assigned relay reset the
+        // staleness clock of a Known row and suppressed the retry that would
+        // have resolved it.
+        let storage = CircleStorage::in_memory().unwrap();
+        storage
+            .upsert_profile(&known_profile("aa", "alice", 1_000, 5_000))
+            .unwrap();
+
+        storage.record_profile_misses(&one("aa"), 9_000).unwrap();
+
+        let got = storage.get_profile("aa").unwrap().unwrap();
+        assert_eq!(got.fetched_at, 5_000, "a miss must NOT advance fetched_at");
+        assert_eq!(got.state, ProfileState::Known, "a miss must not downgrade");
+        assert_eq!(
+            got.metadata.name(),
+            Some("alice"),
+            "a miss must not clobber cached metadata"
+        );
+        assert_eq!(got.event_created_at, 1_000, "newer-wins base must survive");
+
+        // The miss WAS recorded — just in the backoff columns, not by lying
+        // about `fetched_at`.
+        assert_eq!(miss_state(&storage, "aa"), Some((1, 9_030)));
+    }
+
+    #[test]
+    fn hit_clears_miss_backoff() {
+        let storage = CircleStorage::in_memory().unwrap();
+        storage
+            .upsert_profile(&known_profile("aa", "alice", 1_000, 5_000))
+            .unwrap();
+
+        // Two misses put the author deep in the ladder.
+        storage.record_profile_misses(&one("aa"), 6_000).unwrap();
+        storage.record_profile_misses(&one("aa"), 6_030).unwrap();
+        assert_eq!(miss_state(&storage, "aa"), Some((2, 6_030 + 120)));
+
+        // A hit resets both the counter and the schedule, and advances the
+        // staleness clock.
+        storage.touch_profiles_hit(&one("aa"), 7_000).unwrap();
+        assert_eq!(miss_state(&storage, "aa"), Some((0, 0)));
+        let got = storage.get_profile("aa").unwrap().unwrap();
+        assert_eq!(got.fetched_at, 7_000, "a hit advances the staleness clock");
+        assert_eq!(got.state, ProfileState::Known, "a hit never downgrades");
+        assert_eq!(got.metadata.name(), Some("alice"));
+
+        // Back to plain staleness: not due again until the tier elapses, and
+        // then at attempt 0 (its assigned relay demonstrably serves it).
+        assert!(storage
+            .profiles_due(&one("aa"), 7_899, 900)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            storage.profiles_due(&one("aa"), 7_900, 900).unwrap(),
+            vec![("aa".to_string(), 0)],
+        );
+    }
+
+    #[test]
+    fn repeated_misses_walk_the_backoff_ladder_then_saturate() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let mut now = 0;
+        for (i, rung) in PROFILE_MISS_BACKOFF_SECS.iter().enumerate() {
+            storage.record_profile_misses(&one("aa"), now).unwrap();
+            let (miss_count, next_retry_at) = miss_state(&storage, "aa").unwrap();
+            assert_eq!(miss_count, i64::try_from(i).unwrap() + 1);
+            assert_eq!(next_retry_at, now + rung, "rung {i} mismatch");
+            now = next_retry_at;
+        }
+        // Past the end of the ladder it saturates on the last rung forever.
+        let last = *PROFILE_MISS_BACKOFF_SECS.last().unwrap();
+        for _ in 0..3 {
+            storage.record_profile_misses(&one("aa"), now).unwrap();
+            let (_, next_retry_at) = miss_state(&storage, "aa").unwrap();
+            assert_eq!(next_retry_at, now + last, "ladder must saturate, not panic");
+            now = next_retry_at;
+        }
+    }
+
+    #[test]
+    fn miss_on_an_unseen_pubkey_seeds_an_unknown_row() {
+        let storage = CircleStorage::in_memory().unwrap();
+        storage.record_profile_misses(&one("zz"), 700).unwrap();
+        let got = storage.get_profile("zz").unwrap().expect("row seeded");
+        assert_eq!(got.state, ProfileState::Unknown);
+        assert_eq!(got.event_created_at, 0);
+        assert_eq!(got.metadata, ProfileMetadata::default());
+        assert_eq!(miss_state(&storage, "zz"), Some((1, 730)));
+    }
+
+    #[test]
+    fn empty_batches_are_no_ops() {
+        let storage = CircleStorage::in_memory().unwrap();
+        storage.touch_profiles_hit(&[], 1).unwrap();
+        storage.record_profile_misses(&[], 1).unwrap();
+        assert!(storage.profiles_due(&[], 1, 900).unwrap().is_empty());
+    }
+
+    #[test]
+    fn hit_on_an_unseen_pubkey_inserts_a_clean_row() {
+        let storage = CircleStorage::in_memory().unwrap();
+        storage.touch_profiles_hit(&one("aa"), 700).unwrap();
+        let got = storage.get_profile("aa").unwrap().expect("row inserted");
+        assert_eq!(got.fetched_at, 700);
+        assert_eq!(miss_state(&storage, "aa"), Some((0, 0)));
+    }
+
+    // ---- profiles_due: every branch of the predicate ------------------------
+
+    #[test]
+    fn profiles_due_returns_attempt_zero_for_an_unseen_pubkey() {
+        let storage = CircleStorage::in_memory().unwrap();
+        assert_eq!(
+            storage.profiles_due(&one("aa"), 1_000, 900).unwrap(),
+            vec![("aa".to_string(), 0)],
+            "never attempted → due now at the top-ranked relay"
+        );
+    }
+
+    #[test]
+    fn profiles_due_uses_staleness_for_known_rows() {
+        let storage = CircleStorage::in_memory().unwrap();
+        storage
+            .upsert_profile(&known_profile("aa", "alice", 1, 1_000))
+            .unwrap();
+        // Inside the tier → not due.
+        assert!(storage
+            .profiles_due(&one("aa"), 1_899, 900)
+            .unwrap()
+            .is_empty());
+        // Exactly at the tier boundary → due (the predicate is `>=`).
+        assert_eq!(
+            storage.profiles_due(&one("aa"), 1_900, 900).unwrap(),
+            vec![("aa".to_string(), 0)],
+        );
+    }
+
+    #[test]
+    fn profiles_due_uses_the_retry_schedule_for_unknown_rows() {
+        let storage = CircleStorage::in_memory().unwrap();
+        // Unknown row with a pending backoff.
+        storage.record_profile_misses(&one("aa"), 1_000).unwrap();
+        // `fetched_at` is irrelevant here — only next_retry_at gates it.
+        assert!(storage
+            .profiles_due(&one("aa"), 1_029, 900)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            storage.profiles_due(&one("aa"), 1_030, 900).unwrap(),
+            vec![("aa".to_string(), 1)],
+        );
+    }
+
+    #[test]
+    fn profiles_due_forced_refresh_bypasses_every_gate() {
+        let storage = CircleStorage::in_memory().unwrap();
+        // A brand-new Known row that no staleness tier would refetch...
+        storage
+            .upsert_profile(&known_profile("aa", "alice", 1, 1_000))
+            .unwrap();
+        // ...and an Unknown row deep in backoff.
+        storage.record_profile_misses(&one("bb"), 1_000).unwrap();
+        storage.record_profile_misses(&one("bb"), 1_000).unwrap();
+
+        let due = storage
+            .profiles_due(&[String::from("aa"), String::from("bb")], 1_001, 0)
+            .unwrap();
+        assert_eq!(
+            due,
+            vec![("aa".to_string(), 0), ("bb".to_string(), 2)],
+            "forced: both due, each resuming the ladder at its own miss_count"
+        );
+    }
+
+    #[test]
+    fn profiles_due_preserves_input_order_and_filters() {
+        let storage = CircleStorage::in_memory().unwrap();
+        // `aa` fresh (not due), `bb` never seen (due), `cc` stale (due).
+        storage
+            .upsert_profile(&known_profile("aa", "alice", 1, 1_000))
+            .unwrap();
+        storage
+            .upsert_profile(&known_profile("cc", "carol", 1, 10))
+            .unwrap();
+        let due = storage
+            .profiles_due(
+                &[String::from("aa"), String::from("bb"), String::from("cc")],
+                1_500,
+                900,
+            )
+            .unwrap();
+        assert_eq!(
+            due,
+            vec![("bb".to_string(), 0), ("cc".to_string(), 0)],
+            "due subset, in input order"
+        );
+    }
+
+    #[test]
+    fn due_attempt_clamps_a_corrupt_miss_count() {
+        // Hand-edited/corrupt values must not panic or overflow the u8 attempt.
+        assert_eq!(
+            CircleStorage::due_attempt(Some((0, 0, -5, 0)), 10, 900),
+            Some(0)
+        );
+        assert_eq!(
+            CircleStorage::due_attempt(Some((0, 0, i64::MAX, 0)), 10, 900),
+            Some(u8::MAX)
+        );
+    }
+
+    // ---- profile-relay salt -------------------------------------------------
+
+    #[test]
+    fn profile_relay_salt_is_stable_across_reads() {
+        // Rotation is not privacy-preserving: every change re-assigns authors
+        // and discloses them to an ADDITIONAL relay. So a minted salt must come
+        // back byte-identical forever.
+        let storage = CircleStorage::in_memory().unwrap();
+        let first = storage
+            .get_or_create_profile_relay_salt()
+            .unwrap()
+            .to_hex()
+            .as_str()
+            .to_owned();
+        assert_eq!(first.len(), 64, "64 lowercase hex characters");
+        assert!(first.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(first, first.to_lowercase());
+
+        for _ in 0..3 {
+            let again = storage
+                .get_or_create_profile_relay_salt()
+                .unwrap()
+                .to_hex()
+                .as_str()
+                .to_owned();
+            assert_eq!(again, first, "the salt must never rotate on read");
+        }
+        assert_eq!(
+            stored_salt_hex(&storage).as_deref(),
+            Some(first.as_str()),
+            "and it is persisted under the documented key"
+        );
+    }
+
+    #[test]
+    fn concurrent_first_use_mints_exactly_one_salt() {
+        // The read-then-conditional-insert happens under ONE acquisition of the
+        // connection lock (and the insert is OR IGNORE + re-read), so racing
+        // first-uses converge instead of each minting a salt and silently
+        // re-assigning half the contact set.
+        use std::sync::{Arc, Barrier};
+
+        let storage = Arc::new(CircleStorage::in_memory().unwrap());
+        let threads = 8;
+        let barrier = Arc::new(Barrier::new(threads));
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                let storage = Arc::clone(&storage);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    storage
+                        .get_or_create_profile_relay_salt()
+                        .unwrap()
+                        .to_hex()
+                        .as_str()
+                        .to_owned()
+                })
+            })
+            .collect();
+        let minted: Vec<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let first = minted.first().expect("threads ran").clone();
+        assert!(
+            minted.iter().all(|hex| *hex == first),
+            "every concurrent first-use must observe the SAME salt"
+        );
+        assert_eq!(stored_salt_hex(&storage).as_deref(), Some(first.as_str()));
+    }
+
+    #[test]
+    fn profile_relay_salt_is_cleared_by_wipe_all_profiles() {
+        // Scope: this is the PROFILE-DELETE path (`delete_my_public_profile`),
+        // the only caller of `wipe_all_profiles`. Logout does NOT come through
+        // here — it deletes circles.db wholesale — so this test does not, and
+        // must not be read to, prove anything about logout. That guarantee is
+        // pinned separately by
+        // `profile_relay_salt_does_not_outlive_the_circles_db_file`.
+        //
+        // Either way the stake is the same: a surviving salt would hand the
+        // NEXT identity on this device the previous identity's relay
+        // assignment, letting any pool relay that served both link them to one
+        // install.
+        let storage = CircleStorage::in_memory().unwrap();
+
+        // Wiping with nothing stored is a harmless no-op (the retraction path
+        // can run on a never-published, never-fetched install).
+        storage.wipe_all_profiles().unwrap();
+        assert_eq!(stored_salt_hex(&storage), None);
+
+        let before = storage
+            .get_or_create_profile_relay_salt()
+            .unwrap()
+            .to_hex()
+            .as_str()
+            .to_owned();
+
+        storage.wipe_all_profiles().unwrap();
+
+        assert_eq!(
+            stored_salt_hex(&storage),
+            None,
+            "wipe_all_profiles must drop the salt row"
+        );
+        let after = storage
+            .get_or_create_profile_relay_salt()
+            .unwrap()
+            .to_hex()
+            .as_str()
+            .to_owned();
+        assert_ne!(
+            after, before,
+            "the next identity must get a freshly minted salt"
+        );
+    }
+
+    #[test]
+    fn profile_relay_salt_does_not_outlive_the_circles_db_file() {
+        // Logout's salt destruction rests ENTIRELY on "the circles.db file is
+        // deleted" (the FFI wipe removes the base file plus every WAL/SHM/
+        // journal sidecar). Nothing calls `wipe_all_profiles` on that path, so
+        // the only thing that can betray the guarantee is the salt acquiring a
+        // second home — a keyring entry, a sidecar, a settings file. Pin it by
+        // reproducing the real mechanism against a file-backed database: mint,
+        // delete the files, reopen, and require a DIFFERENT salt.
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let db_path = dir.path().join("circles.db");
+
+        let before = {
+            let storage = CircleStorage::new(&db_path, None).expect("open");
+            storage
+                .get_or_create_profile_relay_salt()
+                .unwrap()
+                .to_hex()
+                .as_str()
+                .to_owned()
+        }; // dropped: the connection closes and any WAL is checkpointed.
+
+        assert!(
+            db_path.exists(),
+            "the salt must have been persisted on disk"
+        );
+        // Exactly what `delete_circles_db_files` removes on logout.
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let path = if suffix.is_empty() {
+                db_path.clone()
+            } else {
+                std::path::PathBuf::from(format!("{}{suffix}", db_path.display()))
+            };
+            let _ = std::fs::remove_file(path);
+        }
+        assert!(!db_path.exists());
+
+        let storage = CircleStorage::new(&db_path, None).expect("reopen a fresh database");
+        assert_eq!(
+            stored_salt_hex(&storage),
+            None,
+            "the salt must not survive deletion of circles.db — if this fails, it \
+             is being persisted somewhere the logout wipe does not reach, and the \
+             next identity on this device inherits the previous one's relay \
+             assignment"
+        );
+        let after = storage
+            .get_or_create_profile_relay_salt()
+            .unwrap()
+            .to_hex()
+            .as_str()
+            .to_owned();
+        assert_ne!(
+            after, before,
+            "a post-logout install must mint an independent salt"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_salt_row_is_replaced_rather_than_bricking_the_plane() {
+        let storage = CircleStorage::in_memory().unwrap();
+        {
+            let conn = storage.conn().lock().unwrap();
+            conn.execute(
+                "INSERT INTO user_settings (key, value) VALUES (?1, 'not-hex')",
+                params![PROFILE_RELAY_SALT_KEY],
+            )
+            .unwrap();
+        }
+        let salt = storage
+            .get_or_create_profile_relay_salt()
+            .unwrap()
+            .to_hex()
+            .as_str()
+            .to_owned();
+        assert_eq!(salt.len(), 64);
+        assert_eq!(
+            stored_salt_hex(&storage).as_deref(),
+            Some(salt.as_str()),
+            "the unusable row is replaced in place"
+        );
+        // And it is stable from then on.
+        assert_eq!(
+            storage
+                .get_or_create_profile_relay_salt()
+                .unwrap()
+                .to_hex()
+                .as_str(),
+            salt
+        );
+    }
+
+    // ---- schema shape / migration ------------------------------------------
+
+    #[test]
+    fn contaminated_relays_table_has_no_circle_or_group_column() {
+        // The contamination ledger is a FLAT URL SET on purpose: a per-circle
+        // ledger would record which relays carry which group, i.e. exactly the
+        // co-membership routing metadata the profile plane exists to avoid —
+        // even locally.
+        let storage = CircleStorage::in_memory().unwrap();
+        let conn = storage.conn().lock().unwrap();
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(contaminated_relays)")
+            .unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(
+            cols,
+            vec![
+                "url".to_string(),
+                "source".to_string(),
+                "first_seen".to_string()
+            ],
+            "the ledger must stay exactly (url, source, first_seen)"
+        );
+        for col in &cols {
+            let lower = col.to_ascii_lowercase();
+            assert!(
+                !lower.contains("circle") && !lower.contains("group") && !lower.contains("mls"),
+                "contaminated_relays must not carry a circle/group column, found `{col}`"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_miss_columns_migration_preserves_existing_rows() {
+        // `CREATE TABLE IF NOT EXISTS` does not alter an existing table, so the
+        // columns arrive by ALTER. Dropping and recreating `profiles` instead
+        // would blank every cached display name on upgrade and trigger a
+        // refetch storm on first launch.
+        let storage = CircleStorage::in_memory().unwrap();
+        storage
+            .upsert_profile(&known_profile("aa", "alice", 1_000, 5_000))
+            .unwrap();
+
+        // Rewind to a database written by a build that predates the columns.
+        storage
+            .downgrade_profiles_to_pre_miss_columns_for_test()
+            .unwrap();
+        let before = profile_columns(&storage);
+        assert!(!before.contains(&"miss_count".to_string()));
+        assert!(!before.contains(&"next_retry_at".to_string()));
+
+        // Upgrade.
+        storage.reinitialize_for_test().unwrap();
+
+        let after = profile_columns(&storage);
+        assert!(after.contains(&"miss_count".to_string()));
+        assert!(after.contains(&"next_retry_at".to_string()));
+
+        // Every pre-existing row survived, content intact...
+        let got = storage.get_profile("aa").unwrap().expect("row survived");
+        assert_eq!(got.metadata.name(), Some("alice"), "no cache blanking");
+        assert_eq!(got.state, ProfileState::Known);
+        assert_eq!(got.event_created_at, 1_000);
+        assert_eq!(got.fetched_at, 5_000);
+
+        // ...with the defaults that make it behave exactly as before: no
+        // recorded miss, no pending backoff, so it is due purely on staleness.
+        assert_eq!(miss_state(&storage, "aa"), Some((0, 0)));
+        assert!(storage
+            .profiles_due(&one("aa"), 5_899, 900)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            storage.profiles_due(&one("aa"), 5_900, 900).unwrap(),
+            vec![("aa".to_string(), 0)],
+        );
+
+        // Re-running schema init is a no-op (sentinel), not a duplicate-column
+        // error.
+        storage.reinitialize_for_test().unwrap();
+        assert_eq!(miss_state(&storage, "aa"), Some((0, 0)));
+    }
+
     #[test]
     fn upsert_if_newer_always_allows_unknown_to_known() {
         // An Unknown row (a recorded miss, event_created_at = 0) must be
         // superseded by any resolved Known — even one whose created_at is 0.
         let storage = CircleStorage::in_memory().unwrap();
         storage
-            .touch_profiles_fetched_at(&["aa".to_string()], 5_000)
+            .record_profile_misses(&["aa".to_string()], 5_000)
             .unwrap();
         let mut resolved = known_profile("aa", "resolved", 0, 6_000);
         resolved.state = ProfileState::Known;

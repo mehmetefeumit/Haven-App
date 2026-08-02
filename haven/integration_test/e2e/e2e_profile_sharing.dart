@@ -19,23 +19,40 @@
 ///     Alice's public profile by pubkey via `fetchMemberProfiles` +
 ///     `downloadMemberPicture`.
 ///
-/// Both share the local strfry and the local Blossom. This mirrors the
-/// single-process pattern the consolidated `e2e_combined.dart` scenario
-/// established (one runner drives one UI role; other roles participate via
-/// their FFI surfaces) — see that file's header for the full rationale.
+/// Both share the local Blossom, but NOT a relay: the circle plane and the
+/// profile plane run on physically separate strfry instances (see below). This
+/// mirrors the single-process pattern the consolidated `e2e_combined.dart`
+/// scenario established (one runner drives one UI role; other roles participate
+/// via their FFI surfaces) — see that file's header for the full rationale.
 ///
 /// ## How the hermetic hosts are reached (traced before writing)
 ///
-///   * **Relay.** `ScenarioHarness.bootstrap` → `TestUser.bootstrapProcess`
-///     installs the loopback-`ws://` opt-in (`allowWsLoopbackForTest`) and the
-///     DEFAULT-relay override (`setDefaultRelaysForTest`) pointing at strfry.
-///   * **Discovery plane.** Public-profile fetch/publish never rides a
-///     circle's relays — reads use `profile_read_relays()` ==
-///     `discovery_relays()` and writes fall back to the discovery plane when
-///     the user has no NIP-65 write relays (which Alice does not). Both are the
-///     SEPARATE discovery override, so this scenario additionally calls
-///     `setDiscoveryRelaysForTest` to point the discovery plane at the same
-///     strfry — that is what lets B fetch A's kind-0 and A publish it.
+///   * **Circle relay.** `ScenarioHarness.bootstrap` →
+///     `TestUser.bootstrapProcess` installs the loopback-`ws://` opt-in
+///     (`allowWsLoopbackForTest`) and the DEFAULT-relay override
+///     (`setDefaultRelaysForTest`) pointing at strfry.
+///     That relay carries the CIRCLE plane only — KeyPackages, the gift-wrapped
+///     Welcome, kind-445 — and never a byte of kind-0 (asserted at the end of
+///     the scenario).
+///   * **Profile plane (DISJOINT, three relays).** kind-0 does not ride the
+///     circle's relays, and — unlike when this scenario was first written — it
+///     does not ride the discovery plane either: `haven-core/src/profile/` is
+///     structurally forbidden from naming it (CI check 3 in
+///     `check_profile_privacy_boundaries.sh`), because the discovery set is a
+///     superset of the relays already carrying this account's kind-445/1059.
+///     Every profile read AND write resolves through
+///     `CircleManager::usable_profile_relays()` = the curated pool minus the
+///     append-only contamination ledger, so this scenario installs
+///     `setProfileRelaysForTest` with the hermetic pool from
+///     `HAVEN_E2E_PROFILE_RELAYS`. THREE relays, not one: `PROFILE_POOL_MIN` is
+///     3 and `resolve_profile_pool` dedupes after normalization, so a shorter
+///     *distinct* pool is a terminal `PoolUnderflow` and the plane stops
+///     resolving entirely (fail-closed by design — there is no fallback).
+///   * **Discovery plane.** Still installed, but now serving only the CIRCLE
+///     plane: `fetchMemberKeypackage` resolves Bob's kind-10002 / 10050 / 10051
+///     relay lists off `discovery_relays()` (haven-core `relay/manager.rs`), so
+///     without the override step 0 cannot find his KeyPackage.
+///     `setDiscoveryRelaysForTest` is INERT for kind-0.
 ///   * **Blossom.** A's picture upload targets the server returned by
 ///     `blossom_server()`; `setBlossomServerForTest` redirects it from the
 ///     production default to the hermetic Blossom. B's DOWNLOAD path applies a
@@ -79,8 +96,12 @@
 /// - `fetch_profiles` / `download_profile_picture` — step 3's B-side name /
 ///   photo assertions fail.
 /// - `delete_public_profile` — step 5's blank-profile assertion fails.
+/// - `set_profile_relays_for_test` / `profile_relay_pool_default` — `setUpAll`
+///   throws, or every kind-0 wait times out because the plane resolved onto the
+///   curated PUBLIC pool instead of the hermetic one.
 library;
 
+import 'dart:async' show StreamSubscription;
 import 'dart:convert' show jsonDecode;
 import 'dart:io' show HttpClient;
 import 'dart:typed_data' show Uint8List;
@@ -100,7 +121,8 @@ import 'package:haven/src/rust/api.dart'
         RelayManagerFfi,
         allowPrivateBlossomForTest,
         setBlossomServerForTest,
-        setDiscoveryRelaysForTest;
+        setDiscoveryRelaysForTest,
+        setProfileRelaysForTest;
 import 'package:haven/src/services/nostr_circle_service.dart'
     show NostrCircleService;
 import 'package:integration_test/integration_test.dart';
@@ -112,7 +134,7 @@ import '_lib/fake_location_service.dart';
 import '_lib/pump_helpers.dart';
 import '_lib/scenario_harness.dart';
 import '_lib/synthetic_user.dart' show SyntheticUser;
-import '_lib/test_relay.dart' show TestRelayEvent, defaultStrfryUrl;
+import '_lib/test_relay.dart' show TestRelay, TestRelayEvent, defaultStrfryUrl;
 import '_lib/test_user.dart';
 
 // =============================================================================
@@ -128,6 +150,39 @@ const String _blossomUrl = String.fromEnvironment(
   'HAVEN_E2E_BLOSSOM_URL',
   defaultValue: 'http://localhost:3000',
 );
+
+/// The hermetic profile-plane relay pool, comma-separated. Baked into the APK /
+/// test binary via `--dart-define` by `e2e-profile.yml`; CI passes
+/// `ws://10.0.2.2:{7778,7779,7780}` (Android emulator) or
+/// `ws://localhost:{7778,7779,7780}` (iOS simulator / host). The default keeps a
+/// local run pointed at the three host-native `local-relay` processes
+/// `tooling/e2e/ci/start-profile-relays.sh native 7778 7779 7780` starts.
+///
+/// DISJOINT from [defaultStrfryUrl] by construction — see [_profileRelayUrls].
+const String _profileRelaysRaw = String.fromEnvironment(
+  'HAVEN_E2E_PROFILE_RELAYS',
+  defaultValue: 'ws://localhost:7778,ws://localhost:7779,ws://localhost:7780',
+);
+
+/// The FIRST pool member alone, as the workflow also exports it.
+///
+/// Nothing in this scenario needs a single profile relay — the plane is only
+/// ever addressed as a whole — so this exists purely as a drift check against
+/// [_profileRelaysRaw]: `e2e-profile.yml` sets `HAVEN_E2E_PROFILE_RELAY` and
+/// `HAVEN_E2E_PROFILE_RELAYS` as two independent `env:` entries, and a
+/// hand-edit that renumbers one port but not the other would go unnoticed until
+/// some future single-URL hook silently dialled a relay nobody started.
+const String _profileRelayFirst = String.fromEnvironment(
+  'HAVEN_E2E_PROFILE_RELAY',
+);
+
+/// Minimum DISTINCT relays the profile plane needs to operate.
+///
+/// Mirrors `haven_core::profile::PROFILE_POOL_MIN`. Duplicated as a literal
+/// because the constant is deliberately not exported over the FFI; if it ever
+/// changes upstream this scenario fails loudly in `setUpAll` (pool too small)
+/// rather than mysteriously, at the first kind-0 wait.
+const int _profilePoolMin = 3;
 
 /// Circle name Alice + Bob share (co-membership context; not load-bearing for
 /// the profile assertions — profile resolution is by pubkey — but faithful to
@@ -242,6 +297,171 @@ String _redactPk(String hex) =>
     hex.length <= 8 ? hex : '${hex.substring(0, 8)}…';
 
 // =============================================================================
+// Profile-plane pool
+// =============================================================================
+
+/// The parsed, validated hermetic profile-plane pool.
+///
+/// Lazily initialised on first read, which is `setUpAll` — so a bad
+/// `--dart-define` surfaces there, before anything can publish.
+final List<String> _profileRelayUrls =
+    _parseProfileRelayPool(_profileRelaysRaw);
+
+/// Splits, trims and validates [_profileRelaysRaw] into the pool this scenario
+/// installs via `setProfileRelaysForTest`.
+///
+/// Four checks, each guarding a distinct failure mode that would otherwise
+/// surface far from its cause (or, in the first case, not surface at all):
+///
+///  1. **Loopback only.** Mirrors `TestUser.bootstrapProcess`'s guard on the
+///     circle relay. Without it a mistyped `--dart-define` would make the lane
+///     publish a real kind-0 — display name and Blossom picture URL — for the
+///     sentinel `aliceSeed` pubkey to a PUBLIC Nostr relay, where kind-0 is
+///     replaceable but not retractable. That is a permanent public artifact of
+///     a CI run, so it is checked before the pool is installed rather than
+///     after something fails.
+///  2. **At least [_profilePoolMin] DISTINCT entries.** `resolve_profile_pool`
+///     dedupes after normalization, so three spellings of one host collapse to
+///     one and the plane fails closed with `PoolUnderflow`: no fetch, no
+///     publish, and every later kind-0 wait timing out for a reason that looks
+///     nothing like its cause.
+///  3. **Disjoint from [defaultStrfryUrl].** The circle relay is contaminated
+///     by construction (it routes the Family circle's Welcome and kind-445),
+///     so the append-only ledger subtracts it. Including it would both shrink
+///     the usable pool and quietly defeat the plane-separation proof.
+///  4. **`HAVEN_E2E_PROFILE_RELAY` agrees with the head of the list**, when the
+///     workflow set it — see [_profileRelayFirst].
+List<String> _parseProfileRelayPool(String raw) {
+  final urls = raw
+      .split(',')
+      .map((s) => s.trim())
+      .where((s) => s.isNotEmpty)
+      .toList(growable: false);
+
+  for (final url in urls) {
+    if (!_isLoopbackUrl(url)) {
+      throw StateError(
+        '[e2e_profile] HAVEN_E2E_PROFILE_RELAYS entry "$url" is not a '
+        'loopback / emulator-host URL. The profile plane PUBLISHES a kind-0 '
+        'for Alice to every pool member, so a non-loopback entry would put a '
+        'sentinel-seed public profile on a real relay. Refusing to install.',
+      );
+    }
+  }
+
+  final distinct = urls.map(_normalizeForCompare).toSet();
+  if (distinct.length < _profilePoolMin) {
+    throw StateError(
+      '[e2e_profile] HAVEN_E2E_PROFILE_RELAYS resolved to '
+      '${distinct.length} distinct relay(s) ($urls) but the profile plane '
+      'needs at least $_profilePoolMin. Fewer is a terminal PoolUnderflow: '
+      'resolve_profile_pool fails closed instead of degrading, so kind-0 '
+      'would neither publish nor resolve. Start (and pass) three relays.',
+    );
+  }
+
+  final circleRelay = _normalizeForCompare(defaultStrfryUrl);
+  if (distinct.contains(circleRelay)) {
+    throw StateError(
+      '[e2e_profile] HAVEN_E2E_PROFILE_RELAYS contains the CIRCLE relay '
+      '($defaultStrfryUrl). That relay carries the account Welcome and '
+      'kind-445 traffic, so the contamination ledger excludes it from the '
+      'profile pool — including it shrinks the usable pool and defeats the '
+      'plane-separation proof this lane exists to make.',
+    );
+  }
+
+  if (_profileRelayFirst.isNotEmpty &&
+      _normalizeForCompare(_profileRelayFirst) !=
+          _normalizeForCompare(urls.first)) {
+    throw StateError(
+      '[e2e_profile] HAVEN_E2E_PROFILE_RELAY ("$_profileRelayFirst") is not '
+      'the first member of HAVEN_E2E_PROFILE_RELAYS ("${urls.first}"). The '
+      'two dart-defines are set independently in e2e-profile.yml; they have '
+      'drifted apart.',
+    );
+  }
+
+  return urls;
+}
+
+/// Case- and trailing-slash-insensitive form used for the set comparisons
+/// above. Deliberately coarse: Rust's `normalize_relay_url` is the real
+/// canonicalizer, and these checks only need to catch two spellings of the
+/// same hermetic URL.
+String _normalizeForCompare(String url) {
+  final lower = url.trim().toLowerCase();
+  return lower.endsWith('/') ? lower.substring(0, lower.length - 1) : lower;
+}
+
+/// `true` when [url] resolves to a loopback / emulator-host alias. Mirrors the
+/// private guard in `TestUser.bootstrapProcess`.
+bool _isLoopbackUrl(String url) {
+  final Uri uri;
+  try {
+    uri = Uri.parse(url);
+  } on FormatException {
+    return false;
+  }
+  return uri.host == 'localhost' ||
+      uri.host == '127.0.0.1' ||
+      uri.host == '10.0.2.2' || // Android emulator host-loopback alias
+      uri.host == '::1';
+}
+
+/// Waits until [relay] serves a kind-0 authored by [authorHex] that satisfies
+/// [matcher], attributing a timeout to the specific pool member that never
+/// produced it.
+Future<TestRelayEvent> _awaitKind0(
+  TestRelay relay,
+  String authorHex,
+  bool Function(TestRelayEvent event) matcher,
+  String step,
+) async {
+  try {
+    return await relay.firstWhere(
+      filter: <String, dynamic>{
+        'kinds': const <int>[0],
+        'authors': <String>[authorHex],
+      },
+      matcher: matcher,
+      timeout: _relayWaitDeadline,
+    );
+  } on Object catch (e) {
+    throw StateError(
+      '[e2e_profile] $step: profile relay ${relay.url} never served a '
+      'matching kind-0 for Alice within ${_relayWaitDeadline.inSeconds}s. '
+      'Every publish path targets the WHOLE usable pool, so a single lagging '
+      'member means either that relay is not running (check '
+      'start-profile-relays.sh) or the publish fan-out regressed to a '
+      'subset — never a benign timing artifact: $e',
+    );
+  }
+}
+
+/// Waits for a matching kind-0 on EVERY pool member and returns them in pool
+/// order.
+///
+/// This is how the scenario defuses the salt lottery. Each peer resolves an
+/// author from that author's top-ranked pool relay under a rendezvous hash over
+/// a RANDOM per-install salt, and the three hermetic relays have INDEPENDENT
+/// stores — so an assertion made after only one member has the event is a ~1/3
+/// coin flip on whichever relay Bob's salt happens to pick. Waiting for the
+/// whole pool makes Bob's choice irrelevant, and doubles as the empirical proof
+/// that the production publish path really does fan out to every pool member
+/// (`publish_metadata` returns as soon as ONE relay acks, so "published" alone
+/// would not establish it).
+Future<List<TestRelayEvent>> _awaitKind0AcrossPool(
+  List<TestRelay> pool,
+  String authorHex,
+  bool Function(TestRelayEvent event) matcher,
+  String step,
+) =>
+    Future.wait(
+      pool.map((r) => _awaitKind0(r, authorHex, matcher, step)),
+    );
+
+// =============================================================================
 // Entry point
 // =============================================================================
 
@@ -251,6 +471,7 @@ void main() {
   late ScenarioContext ctx;
   late SyntheticUser bob;
   late String aliceHex;
+  final profilePool = <TestRelay>[];
   var didInitCtx = false;
   var didInitPreSeed = false;
   var didInitBob = false;
@@ -263,13 +484,47 @@ void main() {
     ctx = await ScenarioHarness.bootstrap();
     didInitCtx = true;
 
-    // Point the SEPARATE discovery plane at the same strfry so profile
-    // reads/writes (kind-0) are hermetic, and relax the two Blossom debug
-    // opt-ins so A's upload targets — and B's download reaches — the local
-    // Blossom. All three are install-once, called exactly once here.
+    // Point the PROFILE plane at its own three hermetic relays. This is the
+    // only hook that retargets kind-0: `profile/` may not name the discovery
+    // plane at all, so `setDiscoveryRelaysForTest` (below) has no effect on it.
+    //
+    // Must happen BEFORE the first `CircleManagerFfi` is constructed — Alice's
+    // via `HavenApp`, Bob's via `SyntheticUser.bob` — because a fresh DB seeds
+    // its `RelayType::Profile` rows from `profile_relay_pool_default()`, and
+    // `usable_profile_relays()` UNIONS those rows back in. Seeding first would
+    // leave the eight curated PUBLIC relays permanently in both users' pools,
+    // where the assignment hash would send real kind-0 REQs to them.
+    //
+    // `_profileRelayUrls` validates loopback-only, >= PROFILE_POOL_MIN distinct
+    // entries, and disjointness from the circle relay before we get here. The
+    // call itself is the propagation check: the override is an install-once
+    // `OnceLock`, so returning without throwing means this list — and nothing
+    // else — is now the pool. (There is deliberately no read-back accessor: no
+    // profile-plane relay URL crosses the FFI.)
+    //
+    // The pool sits exactly ON the PROFILE_POOL_MIN floor, so it has zero
+    // contamination headroom: if any of these three ever also carried circle
+    // traffic the ledger would subtract it and the plane would fail closed. The
+    // disjointness check above is what keeps that from happening silently.
+    setProfileRelaysForTest(relays: _profileRelayUrls);
+
+    // The discovery plane still serves the CIRCLE plane:
+    // `fetchMemberKeypackage` resolves Bob's kind-10002 / 10050 / 10051 relay
+    // lists through `discovery_relays()`, so step 0 cannot find his KeyPackage
+    // without this. It is INERT for kind-0 — kept for what it still does.
     setDiscoveryRelaysForTest(relays: <String>[defaultStrfryUrl]);
+
+    // Relax the two Blossom debug opt-ins so A's upload targets — and B's
+    // download reaches — the local Blossom. Both install-once, called once.
     allowPrivateBlossomForTest();
     setBlossomServerForTest(url: _blossomUrl);
+
+    // Probe sockets on every pool member. Step 1 asserts all three are clean
+    // for a fresh Alice; steps 2/4/5 wait for her kind-0 on ALL of them, which
+    // is what makes Bob's salted relay choice irrelevant.
+    for (final url in _profileRelayUrls) {
+      profilePool.add(await TestRelay.connect(url: url));
+    }
 
     // Pre-seed Alice's identity and skip onboarding — the production identity
     // load + KeyPackagePublisher providers run exactly as in a real install.
@@ -287,7 +542,9 @@ void main() {
 
     debugPrint(
       '[e2e_profile:setUpAll] alice=${_redactPk(aliceHex)} '
-      'bob=${_redactPk(bob.pubkeyHex)} blossom=$_blossomUrl',
+      'bob=${_redactPk(bob.pubkeyHex)} blossom=$_blossomUrl '
+      'circleRelay=$defaultStrfryUrl '
+      'profilePool=${_profileRelayUrls.length} relays',
     );
   });
 
@@ -301,6 +558,12 @@ void main() {
         TestUser.clearPreSeededIdentity,
       );
     }
+    for (final relay in profilePool) {
+      await _boundedTeardown(
+        'profileRelay(${relay.url}).dispose',
+        relay.dispose,
+      );
+    }
     if (didInitCtx) {
       await _boundedTeardown('ctx.relay.dispose', ctx.relay.dispose);
     }
@@ -310,16 +573,34 @@ void main() {
     'Alice UI/providers + Bob FFI: public profile publish → resolve → '
     'name-only edit (photo preserved) → delete → npub fallback',
     (tester) async {
-      // Relay-layer privacy/consent watch: buffer EVERY kind-0 the relay sees
-      // authored by Alice, from before anything is pumped. Consent defaults
-      // OFF, so this MUST stay empty until step 2 grants it.
-      final aliceKind0 = <TestRelayEvent>[];
-      final kind0Watch = ctx.relay
+      // Plane-separation watch: buffer EVERY kind-0 the CIRCLE relay sees
+      // authored by Alice, from before anything is pumped. That relay carries
+      // her Welcome and kind-445, so a kind-0 landing there is exactly the
+      // cross-plane join the pool exists to break — this buffer must be empty
+      // at step 1 AND still empty after the publish/edit/delete cycle.
+      final aliceKind0OnCircleRelay = <TestRelayEvent>[];
+      final circleRelayKind0Watch = ctx.relay
           .events(<String, dynamic>{
             'kinds': const <int>[0],
             'authors': <String>[aliceHex],
           })
-          .listen(aliceKind0.add);
+          .listen(aliceKind0OnCircleRelay.add);
+
+      // Freshness watch on the PROFILE plane, one buffer per pool member.
+      // Publishing is unconditional, so what keeps these empty through step 1
+      // is simply that Alice has not saved a name or photo yet.
+      final aliceKind0OnPool = <int, List<TestRelayEvent>>{
+        for (var i = 0; i < profilePool.length; i++) i: <TestRelayEvent>[],
+      };
+      final poolKind0Watches = <StreamSubscription<TestRelayEvent>>[
+        for (var i = 0; i < profilePool.length; i++)
+          profilePool[i]
+              .events(<String, dynamic>{
+                'kinds': const <int>[0],
+                'authors': <String>[aliceHex],
+              })
+              .listen(aliceKind0OnPool[i]!.add),
+      ];
 
       try {
         // -------------------------------------------------------------------
@@ -424,15 +705,24 @@ void main() {
         // clean simply because Alice has not yet called
         // updateOwnProfile/setOwnAvatar.
         // -------------------------------------------------------------------
+        for (var i = 0; i < profilePool.length; i++) {
+          expect(
+            aliceKind0OnPool[i],
+            isEmpty,
+            reason: 'Profile relay ${profilePool[i].url} must observe ZERO '
+                'kind-0 for a fresh Alice who has not yet set a name or photo '
+                '(so ZERO blob can exist on Blossom).',
+          );
+        }
         expect(
-          aliceKind0,
+          aliceKind0OnCircleRelay,
           isEmpty,
-          reason: 'Relay must observe ZERO kind-0 for a fresh Alice who has '
-              'not yet set a name or photo (so ZERO blob can exist on '
-              'Blossom).',
+          reason: 'The circle relay must observe ZERO kind-0 for Alice — '
+              'ever, but especially before she has published anything.',
         );
         debugPrint(
-          '[e2e_profile] STEP 1 — fresh user verified (no kind-0 yet)',
+          '[e2e_profile] STEP 1 — fresh user verified (no kind-0 yet, on any '
+          'of the ${profilePool.length} pool relays or the circle relay)',
         );
 
         // -------------------------------------------------------------------
@@ -448,19 +738,33 @@ void main() {
           reason: 'setOwnAvatar must return the uploaded blob sha256.',
         );
 
-        // (a) A kind-0 with the name AND a picture URL landed on strfry.
-        final publishedKind0 = await ctx.relay.firstWhere(
-          filter: <String, dynamic>{
-            'kinds': const <int>[0],
-            'authors': <String>[aliceHex],
-          },
-          matcher: (e) {
+        // (a) A kind-0 with the name AND a picture URL landed on EVERY relay in
+        // the profile pool — not just the first one to ack. `publish_metadata`
+        // returns as soon as one relay accepts, so waiting on the whole pool is
+        // the fan-out proof AND what makes the two downstream steps
+        // deterministic: step 3 reads from whichever member Bob's private salt
+        // assigns him, and step 4's fetch-merge-publish rebuilds the kind-0
+        // from the freshest copy it finds across the pool — a member still
+        // holding the pre-picture event could be merged onto, dropping
+        // `picture`.
+        final publishedKind0s = await _awaitKind0AcrossPool(
+          profilePool,
+          aliceHex,
+          (e) {
             final c = _contentJson(e);
             return c['display_name'] == _aliceName &&
                 ((c['picture'] as String?)?.isNotEmpty ?? false);
           },
-          timeout: _relayWaitDeadline,
+          'STEP 2 (name + picture publish)',
         );
+        // One signed event, broadcast — so every member must be serving the
+        // SAME event, not merely something that matches.
+        expect(
+          publishedKind0s.map((e) => e.id).toSet(),
+          hasLength(1),
+          reason: 'All pool relays must hold the same published kind-0.',
+        );
+        final publishedKind0 = publishedKind0s.first;
         final originalPictureUrl =
             _contentJson(publishedKind0)['picture'] as String;
         expect(originalPictureUrl, isNotEmpty);
@@ -528,21 +832,23 @@ void main() {
         await profileService.updateOwnProfile(displayName: _aliceEditedName);
 
         // On-relay proof the fetch-merge-publish preserved `picture`: the
-        // newest kind-0 carries the NEW name AND the ORIGINAL picture URL.
-        final editedKind0 = await ctx.relay.firstWhere(
-          filter: <String, dynamic>{
-            'kinds': const <int>[0],
-            'authors': <String>[aliceHex],
-          },
-          matcher: (e) =>
-              _contentJson(e)['display_name'] == _aliceEditedName,
-          timeout: _relayWaitDeadline,
+        // newest kind-0 carries the NEW name AND the ORIGINAL picture URL — on
+        // every pool member, so Bob's re-fetch below cannot read a member that
+        // still holds the pre-edit event.
+        final editedKind0s = await _awaitKind0AcrossPool(
+          profilePool,
+          aliceHex,
+          (e) => _contentJson(e)['display_name'] == _aliceEditedName,
+          'STEP 4 (name-only edit)',
         );
-        expect(
-          _contentJson(editedKind0)['picture'],
-          originalPictureUrl,
-          reason: 'Name-only edit must not clobber the picture URL (merge).',
-        );
+        for (var i = 0; i < editedKind0s.length; i++) {
+          expect(
+            _contentJson(editedKind0s[i])['picture'],
+            originalPictureUrl,
+            reason: 'Name-only edit must not clobber the picture URL (merge) '
+                '— violated on ${profilePool[i].url}.',
+          );
+        }
 
         // B side: forced re-fetch shows the new name AND still has the photo.
         final reResolved = await bob.user.circleManager.fetchMemberProfiles(
@@ -582,6 +888,24 @@ void main() {
           identitySecretBytes: Uint8List.fromList(aliceSeed),
         );
 
+        // The retraction is a blank (`{}`) kind-0 that supersedes the profile
+        // under NIP-01 replaceable-event semantics. Wait for it on EVERY pool
+        // member before asking Bob: a retraction that reached only a subset
+        // would leave the deleted profile live on precisely the relays some
+        // peers are assigned to read from — and here it would make the
+        // assertion below a coin flip on Bob's salt.
+        await _awaitKind0AcrossPool(
+          profilePool,
+          aliceHex,
+          (e) {
+            final c = _contentJson(e);
+            return c['display_name'] == null &&
+                c['name'] == null &&
+                c['picture'] == null;
+          },
+          'STEP 5 (blank retraction republish)',
+        );
+
         final afterDelete = await bob.user.circleManager.fetchMemberProfiles(
           pubkeysHex: <String>[aliceHex],
           maxAgeSecs: 0,
@@ -601,8 +925,32 @@ void main() {
           }
         }
         debugPrint('[e2e_profile] STEP 5 — delete → npub fallback OK');
+
+        // -------------------------------------------------------------------
+        // PLANE SEPARATION — after a full publish → edit → delete cycle, the
+        // circle relay must STILL have seen no kind-0 from Alice. It routed
+        // her Welcome and her circle's kind-445, so a kind-0 there would let
+        // one operator join "who this IP shares location with" against "who
+        // this IP is" — the join the disjoint pool exists to prevent. Asserted
+        // last, when the app has had every opportunity to get it wrong.
+        // -------------------------------------------------------------------
+        expect(
+          aliceKind0OnCircleRelay,
+          isEmpty,
+          reason: 'The circle relay must NEVER observe a kind-0 from Alice: '
+              'the profile plane is disjoint from every relay carrying her '
+              'kind-445 / kind-1059 traffic, and the contamination ledger '
+              'subtracts it from the pool.',
+        );
+        debugPrint(
+          '[e2e_profile] PLANE SEPARATION — circle relay saw 0 kind-0 for '
+          'Alice across the whole cycle',
+        );
       } finally {
-        await kind0Watch.cancel();
+        await circleRelayKind0Watch.cancel();
+        for (final w in poolKind0Watches) {
+          await w.cancel();
+        }
       }
     },
     timeout: const Timeout(_outerTestTimeout),

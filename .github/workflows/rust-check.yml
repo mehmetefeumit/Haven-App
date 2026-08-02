@@ -78,5 +78,20 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
+      # `--all-targets` so `#[cfg(test)]` code is COMPILED and linted here.
+      # Bare `cargo clippy` selects --lib/--bins only, so before this the FFI
+      # test modules were never type-checked by CI at all — a test that did not
+      # even compile would still have gone green.
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+
+      # The FFI boundary's own tests. Nothing in CI executed them before, which
+      # left the Rule 4/6/8 `Debug`-redaction oracles
+      # (circle_member_ffi_debug_redacts_keys_and_name,
+      # profile_metadata_debug_redacts_the_picture_hash,
+      # location_message_result_ffi_debug_redacts_secrets,
+      # ffi_relay_event_debug_is_presence_only) and the M10 logout-wipe tests
+      # decorative. coverage.yml's rust job is `working-directory: haven-core`
+      # and does NOT reach this crate.
+      - name: Run tests
+        run: cargo test

@@ -16,10 +16,12 @@ import 'package:flutter/foundation.dart';
 
 /// Category of relay preference managed per user.
 ///
-/// Mirrors `RelayType` in haven-core: each variant maps to a distinct
-/// Nostr replaceable event kind (10050 for [`RelayCategory.inbox`],
-/// 10002 for [`RelayCategory.keyPackage`]). The two lists are stored
-/// independently — adding a relay to one does NOT add it to the other.
+/// Mirrors `RelayType` in haven-core: [`RelayCategory.inbox`] and
+/// [`RelayCategory.keyPackage`] each map to a distinct Nostr replaceable
+/// event kind (10050 / 10002 respectively); [`RelayCategory.profile`] maps
+/// to none — it is a **local-only** policy list that is never published.
+/// All three lists are stored independently — adding a relay to one does
+/// NOT add it to another.
 enum RelayCategory {
   /// Inbox relays (kind 10050, NIP-17) — where Welcomes are delivered.
   inbox,
@@ -27,6 +29,17 @@ enum RelayCategory {
   /// `KeyPackage` relays (kind 10002, MIP-00) — where this user's MLS
   /// `KeyPackage` events are published.
   keyPackage,
+
+  /// Profile-plane relays (kind-0 lookups + own-profile publish).
+  ///
+  /// **Local-only — structurally unpublishable.** Disjoint by design from
+  /// every relay carrying this account's kind-445/kind-1059 traffic, so a
+  /// relay operator who already sees the encrypted location-plane traffic
+  /// cannot also be handed a signed pointer to the profile plane. Never
+  /// pass this to [`getPublishRelayList`], [`setPublishRelayList`],
+  /// [`buildRelayListPublish`], [`buildUnpublishRelayList`], or
+  /// [`buildRelayRemovalScrub`] — the Rust side throws for all five.
+  profile,
 }
 
 /// Thrown when a user-supplied relay URL is invalid.
@@ -58,6 +71,42 @@ class RelayPreferencesException implements Exception {
 
   @override
   String toString() => 'RelayPreferencesException: $message';
+}
+
+/// Health of the profile-plane relay pool, as **counts only**.
+///
+/// Mirrors `ProfilePoolStatusFfi` on the Dart side of the service
+/// abstraction (this file deliberately does not import `dart:ffi` types —
+/// see the library doc). Deliberately carries no relay URLs: a URL list
+/// reaching this far up the stack would give the UI layer (and any
+/// crash/analytics sink it feeds) a copy of which relays this install
+/// resolves profiles from, undoing the point of never publishing that list.
+@immutable
+class ProfilePoolStatus {
+  /// Creates a [ProfilePoolStatus].
+  const ProfilePoolStatus({
+    required this.configured,
+    required this.excluded,
+    required this.usable,
+    required this.isUnderflow,
+  });
+
+  /// Distinct relays configured for the profile category (curated pool
+  /// unioned with the user's own additions).
+  final int configured;
+
+  /// How many of those are excluded because they also carry this account's
+  /// location-plane traffic (the append-only contamination ledger).
+  final int excluded;
+
+  /// Relays that survive exclusion and may serve kind-0 lookups.
+  final int usable;
+
+  /// `true` when too few survive to operate the plane. Profile lookups are
+  /// then skipped entirely (fail-closed — never falls back onto a location
+  /// relay), so the roster shows cached names only until the user restores
+  /// or adds an uncontaminated profile relay.
+  final bool isUnderflow;
 }
 
 /// Outcome of building a relay-list publish request.
@@ -234,4 +283,22 @@ abstract class RelayPreferencesService {
     required RelayCategory category,
     required List<String> droppedRelays,
   });
+
+  /// Health of the profile-plane relay pool, as counts only (never URLs).
+  ///
+  /// Lets the UI show "profile lookups are paused" instead of a silently
+  /// stale roster when contamination and/or removals have eaten the pool.
+  Future<ProfilePoolStatus> profilePoolStatus();
+
+  /// Restores the curated profile pool non-destructively (adds back any
+  /// missing curated entry; keeps the user's own additions).
+  ///
+  /// The recovery action for a pool that has underflowed — distinct from
+  /// [restoreDefaults], which is the generic per-category top-up used by
+  /// this page's section-level "Restore defaults" buttons. Both end up
+  /// calling the same Rust storage operation for
+  /// [RelayCategory.profile], but this method exists as its own named
+  /// entry point so the underflow-recovery call site does not have to
+  /// route through the category-generic API.
+  Future<void> restoreDefaultProfileRelays();
 }

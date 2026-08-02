@@ -230,4 +230,238 @@ void main() {
       expect(after, isNot(contains('wss://custom.example.com')));
     });
   });
+
+  group('ProfileRelaysNotifier', () {
+    test(
+      'self-heals empty storage by seeding profile-plane defaults',
+      () async {
+        final list = await container.read(profileRelaysProvider.future);
+        expect(mock.didSeed, isTrue);
+        expect(list, isNotEmpty);
+      },
+    );
+
+    test('returns existing list without seeding when not empty', () async {
+      final pre = MockRelayPreferencesService(
+        initialRelays: const {
+          RelayCategory.profile: ['wss://existing-profile.example.com'],
+        },
+      );
+      final c = ProviderContainer(
+        overrides: [
+          relayPreferencesServiceProvider.overrideWith((ref) async => pre),
+          relayServiceProvider.overrideWithValue(MockRelayService()),
+        ],
+      );
+      addTearDown(c.dispose);
+      final list = await c.read(profileRelaysProvider.future);
+      expect(pre.didSeed, isFalse);
+      expect(list, ['wss://existing-profile.example.com']);
+    });
+
+    test('addRelay updates state', () async {
+      await container.read(profileRelaysProvider.future);
+      final notifier = container.read(profileRelaysProvider.notifier);
+      await notifier.addRelay('wss://added-profile.example.com');
+      final after = await container.read(profileRelaysProvider.future);
+      expect(after, contains('wss://added-profile.example.com'));
+    });
+
+    test('removeRelay refuses to delete the last relay', () async {
+      final pre = MockRelayPreferencesService(
+        initialRelays: const {
+          RelayCategory.profile: ['wss://only-profile.example.com'],
+        },
+      );
+      final c = ProviderContainer(
+        overrides: [
+          relayPreferencesServiceProvider.overrideWith((ref) async => pre),
+          relayServiceProvider.overrideWithValue(MockRelayService()),
+        ],
+      );
+      addTearDown(c.dispose);
+      await c.read(profileRelaysProvider.future);
+      expect(
+        () => c
+            .read(profileRelaysProvider.notifier)
+            .removeRelay('wss://only-profile.example.com'),
+        throwsA(isA<RelayValidationError>()),
+      );
+    });
+
+    test(
+      'removeRelay does NOT scrub and does NOT disconnect — diverges from '
+      'Inbox/KeyPackage because the profile list is never published',
+      () async {
+        final pre = MockRelayPreferencesService(
+          initialRelays: const {
+            RelayCategory.profile: [
+              'wss://keep-profile.example.com',
+              'wss://drop-profile.example.com',
+            ],
+          },
+        );
+        final mockRelay = MockRelayService();
+        final c = ProviderContainer(
+          overrides: [
+            relayPreferencesServiceProvider.overrideWith((ref) async => pre),
+            relayServiceProvider.overrideWithValue(mockRelay),
+            // A working identity is available (scrub COULD run if the
+            // notifier attempted it) — proves the omission is deliberate,
+            // not merely a side-effect of a missing secret.
+            identityNotifierProvider.overrideWith(_FakeIdentityNotifier.new),
+          ],
+        );
+        addTearDown(c.dispose);
+        await c.read(profileRelaysProvider.future);
+
+        final removed = await c
+            .read(profileRelaysProvider.notifier)
+            .removeRelay('wss://drop-profile.example.com');
+        expect(removed, isTrue);
+
+        // No two-plane NIP-09 removal scrub was built for the dropped
+        // relay — there is no published list to have a stale copy of.
+        expect(
+          pre.log,
+          isNot(contains('scrub:profile:wss://drop-profile.example.com')),
+        );
+        // No persistent-socket disconnect either — profile reads/writes go
+        // through a throwaway per-call relay manager, never the persistent
+        // `RelayService` client Inbox/KeyPackage ride. In fact RelayService
+        // is never touched at all for a profile removal.
+        expect(mockRelay.methodCalls, isEmpty);
+      },
+    );
+
+    test('restoreDefaults preserves existing custom entries', () async {
+      final pre = MockRelayPreferencesService(
+        initialRelays: const {
+          RelayCategory.profile: ['wss://custom-profile.example.com'],
+        },
+      );
+      final c = ProviderContainer(
+        overrides: [
+          relayPreferencesServiceProvider.overrideWith((ref) async => pre),
+          relayServiceProvider.overrideWithValue(MockRelayService()),
+        ],
+      );
+      addTearDown(c.dispose);
+      await c.read(profileRelaysProvider.future);
+      await c.read(profileRelaysProvider.notifier).restoreDefaults();
+      final after = await c.read(profileRelaysProvider.future);
+      expect(after, contains('wss://custom-profile.example.com'));
+      expect(after, contains('wss://default-a'));
+    });
+
+    test('wipeAndReset removes user customizations', () async {
+      final pre = MockRelayPreferencesService(
+        initialRelays: const {
+          RelayCategory.profile: ['wss://custom-profile.example.com'],
+        },
+      );
+      final c = ProviderContainer(
+        overrides: [
+          relayPreferencesServiceProvider.overrideWith((ref) async => pre),
+          relayServiceProvider.overrideWithValue(MockRelayService()),
+        ],
+      );
+      addTearDown(c.dispose);
+      await c.read(profileRelaysProvider.future);
+      await c.read(profileRelaysProvider.notifier).wipeAndReset();
+      final after = await c.read(profileRelaysProvider.future);
+      expect(after, isNot(contains('wss://custom-profile.example.com')));
+    });
+  });
+
+  group('profilePoolStatusProvider', () {
+    test('surfaces the service-reported status', () async {
+      final pre = MockRelayPreferencesService(
+        poolStatus: const ProfilePoolStatus(
+          configured: 5,
+          excluded: 3,
+          usable: 2,
+          isUnderflow: true,
+        ),
+      );
+      final c = ProviderContainer(
+        overrides: [
+          relayPreferencesServiceProvider.overrideWith((ref) async => pre),
+          relayServiceProvider.overrideWithValue(MockRelayService()),
+        ],
+      );
+      addTearDown(c.dispose);
+
+      final status = await c.read(profilePoolStatusProvider.future);
+      expect(status.configured, 5);
+      expect(status.excluded, 3);
+      expect(status.usable, 2);
+      expect(status.isUnderflow, isTrue);
+    });
+
+    test('defaults to a healthy (non-underflow) pool', () async {
+      final status = await container.read(profilePoolStatusProvider.future);
+      expect(status.isUnderflow, isFalse);
+    });
+
+    test('recomputes when the Profile relay list changes', () async {
+      final pre = MockRelayPreferencesService(
+        initialRelays: const {
+          RelayCategory.profile: ['wss://only-profile.example.com'],
+        },
+      );
+      final c = ProviderContainer(
+        overrides: [
+          relayPreferencesServiceProvider.overrideWith((ref) async => pre),
+          relayServiceProvider.overrideWithValue(MockRelayService()),
+        ],
+      );
+      addTearDown(c.dispose);
+
+      await c.read(profilePoolStatusProvider.future);
+      final callsBefore = pre.log
+          .where((e) => e == 'profilePoolStatus')
+          .length;
+
+      await c
+          .read(profileRelaysProvider.notifier)
+          .addRelay('wss://second-profile.example.com');
+      // profileRelaysProvider's new state triggers profilePoolStatusProvider
+      // (which `ref.watch`es it) to rebuild and re-query the status.
+      await c.read(profilePoolStatusProvider.future);
+      final callsAfter = pre.log
+          .where((e) => e == 'profilePoolStatus')
+          .length;
+      expect(callsAfter, greaterThan(callsBefore));
+    });
+  });
+
+  group('publishableRelayCategories / forceEnablePublishToggles', () {
+    test('excludes RelayCategory.profile from the publish allowlist', () {
+      expect(
+        publishableRelayCategories,
+        containsAll(<RelayCategory>[
+          RelayCategory.inbox,
+          RelayCategory.keyPackage,
+        ]),
+      );
+      expect(
+        publishableRelayCategories,
+        isNot(contains(RelayCategory.profile)),
+      );
+    });
+
+    test(
+      'force-enables publish only for Inbox/KeyPackage — regression: the '
+      'service-provider init loop must never call setPublishRelayList for '
+      'profile',
+      () async {
+        final freshMock = MockRelayPreferencesService();
+        await forceEnablePublishToggles(freshMock);
+        expect(freshMock.log, contains('toggle:inbox=true'));
+        expect(freshMock.log, contains('toggle:keyPackage=true'));
+        expect(freshMock.log, isNot(contains('toggle:profile=true')));
+      },
+    );
+  });
 }

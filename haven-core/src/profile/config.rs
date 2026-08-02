@@ -1,11 +1,26 @@
-//! Compile-time configuration and relay-set selection for the public-profile
-//! module.
+//! Compile-time configuration for the public-profile module.
 //!
-//! Every tunable lives here in one place. The relay helpers deliberately reach
-//! only into `crate::relay::discovery` (the AUTH-free discovery plane) — never
-//! `crate::circle` — so the profile fetch/publish paths never ride a circle's
-//! relays or carry any group identifier.
+//! Every tunable lives here in one place: the kind-0 `REQ` shape, the
+//! scheduling budget that spreads those `REQ`s out over time, and the Blossom
+//! picture limits.
+//!
+//! # This module no longer selects relays
+//!
+//! It used to expose read / write / merge-base relay helpers. All three
+//! resolved to the AUTH-free discovery plane, which is a strict SUPERSET of the
+//! account-seed relays — i.e. exactly the relays already carrying this account's
+//! kind-445 and kind-1059 traffic. Routing kind-0 there let one operator join
+//! "who this IP shares location with" against "who this IP looks up", which is
+//! the cross-plane link the profile redesign exists to break.
+//!
+//! Relay selection now lives in two dedicated modules and nowhere else:
+//! [`crate::profile::relay_pool`] resolves the curated pool minus the
+//! contamination ledger (fail-closed on underflow), and
+//! [`crate::profile::assignment`] pins each author to one pool relay by salted
+//! rendezvous hash. The constants below only govern how the resulting
+//! single-author `REQ`s are paced.
 
+use std::ops::RangeInclusive;
 use std::time::Duration;
 
 /// Re-export of the canonical avatar MIME type (`image/jpeg`). Profile pictures
@@ -27,13 +42,65 @@ pub use crate::avatar::AVATAR_MIME;
 // `docs/PUBLIC_PROFILE_MIGRATION_PLAN.md` §1.6/D3), so freshness here comes
 // from tiered polling instead.
 
-/// Maximum authors per batched kind-0 `REQ`. The union of all known member
-/// pubkeys is chunked into requests of at most this size (defensive bound
-/// against non-pruning relays and oversized filters).
-pub const PROFILE_FETCH_MAX_AUTHORS: usize = 500;
-
 /// Bounded timeout for a one-shot profile (kind-0) relay fetch.
+///
+/// Used by the PUBLISH path (own-profile merge base / read-back), which talks
+/// to the user's own write relays rather than to an assigned pool relay. The
+/// per-author fetch path uses the tighter
+/// [`PROFILE_AUTHOR_FETCH_TIMEOUT`] instead, because it issues many more
+/// requests and must fit them inside [`PROFILE_BATCH_DEADLINE`].
 pub const PROFILE_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Kind-0 revisions requested for ONE author in ONE `REQ`.
+///
+/// A well-behaved relay prunes replaceable events and returns exactly one, but
+/// a non-pruning relay can hold every historical revision. Four is a defensive
+/// bound: enough that `parse_newest_metadata` still sees a genuine newest event
+/// if the relay happens to return them oldest-first, small enough that a
+/// misbehaving relay cannot flood the client. This is a PER-AUTHOR limit
+/// because there is exactly one author per filter — the batched
+/// `authors × 4` product of the old broadcast model is gone.
+pub const PROFILE_PER_AUTHOR_LIMIT: usize = 4;
+
+/// Bounded timeout for ONE author's kind-0 `REQ` against ONE assigned relay.
+///
+/// Deliberately much tighter than [`PROFILE_FETCH_TIMEOUT`]: requests to a
+/// single relay run SERIALLY (that serialization is what removes the burst
+/// signature a relay could otherwise use to fingerprint a roster refresh), so
+/// this value multiplies by the number of authors assigned to that relay. Four
+/// seconds is comfortably above a healthy relay's round-trip while keeping an
+/// unresponsive one from consuming the whole cycle budget.
+pub const PROFILE_AUTHOR_FETCH_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// Wall-clock budget for one complete assigned-fetch cycle.
+///
+/// Whatever has not been attempted when this elapses is reported as
+/// *unattempted* — NOT as a miss — so a slow cycle never advances an author's
+/// retry ladder onto a second relay (which would widen that author's
+/// disclosure for a reason that has nothing to do with the author). Sized to
+/// leave room for several serial [`PROFILE_AUTHOR_FETCH_TIMEOUT`] round-trips
+/// plus inter-request jitter, while still returning within a foreground
+/// refresh's patience.
+pub const PROFILE_BATCH_DEADLINE: Duration = Duration::from_secs(20);
+
+/// Maximum distinct relays queried CONCURRENTLY within one cycle.
+///
+/// Cycles fan out across relays (each holds a disjoint ~`1/N` slice of the
+/// author set) and stay serial within a relay. This bounds open sockets and
+/// concurrent DNS/TLS work; raising it does not widen disclosure (each relay
+/// still sees only its own slice), but it does make the whole cycle more
+/// conspicuous as a simultaneous burst to a network observer.
+pub const PROFILE_MAX_INFLIGHT_RELAYS: usize = 4;
+
+/// Inclusive millisecond range for the delay between two consecutive `REQ`s
+/// sent to the SAME relay.
+///
+/// Sampled per gap from the OS CSPRNG. Without it, a relay could recognise a
+/// refresh cycle by its fixed inter-arrival period and count the roster it
+/// holds by timing alone; with it, gaps carry no exploitable regularity. The
+/// floor keeps a full slice from finishing inside the batch deadline's noise
+/// floor; the ceiling keeps a 10-author slice under ~5 s of pure jitter.
+pub const PROFILE_INTER_REQ_JITTER_MS: RangeInclusive<u64> = 120..=480;
 
 /// Bounded timeout for a Blossom upload/download HTTP round-trip.
 pub const BLOSSOM_TIMEOUT: Duration = Duration::from_secs(30);
@@ -115,55 +182,12 @@ pub fn set_blossom_server_for_test(_url: String) -> std::result::Result<(), Stri
 /// is far under this.
 pub const PROFILE_PICTURE_MAX_DOWNLOAD_BYTES: u64 = 512 * 1024;
 
-/// Read-plane relays for resolving *other* users' kind-0 metadata.
-///
-/// The AUTH-free discovery plane ([`crate::relay::discovery::discovery_relays`]):
-/// read-only, one-shot, and never a publish target — so a metadata read can
-/// never be attributed to the local user (the fetch path never answers NIP-42
-/// AUTH).
-#[must_use]
-pub fn profile_read_relays() -> Vec<String> {
-    crate::relay::discovery::discovery_relays()
-}
-
-/// Write-plane relays for publishing the local user's own kind-0 / kind-24242.
-///
-/// Uses the user's NIP-65 **write** relays when configured (`user_nip65_write`,
-/// typically produced by
-/// [`crate::relay::RelayManager::extract_nip65_write_relays`]); otherwise falls
-/// back to the discovery plane. Never a circle's relays.
-///
-/// The result may be empty (e.g. the user configured no write relays and the
-/// discovery override is somehow empty in a test harness); publish callers MUST
-/// fail closed on an empty set rather than broadcast to an unintended relay.
-#[must_use]
-pub fn profile_write_relays(user_nip65_write: &[String]) -> Vec<String> {
-    if user_nip65_write.is_empty() {
-        profile_read_relays()
-    } else {
-        user_nip65_write.to_vec()
-    }
-}
-
-/// Relays to fetch the merge BASE from when editing the user's own kind-0.
-///
-/// The de-duplicated union of the read/discovery plane and the user's resolved
-/// write relays. For a NIP-65 user whose write relays are **disjoint** from the
-/// discovery plane, the freshest own kind-0 lives on the WRITE relays; fetching
-/// the base from the read plane alone would miss it, so a subsequent edit could
-/// silently drop `custom`/unknown fields written by another client (bug
-/// MEDIUM-4). For a Haven-only user with no NIP-65 relay list, `write_relays`
-/// falls back to the discovery plane, so this returns the read plane unchanged.
-#[must_use]
-pub fn self_merge_base_relays(write_relays: &[String]) -> Vec<String> {
-    let mut relays = profile_read_relays();
-    for relay in write_relays {
-        if !relays.contains(relay) {
-            relays.push(relay.clone());
-        }
-    }
-    relays
-}
+// The read / write / merge-base relay helpers that used to live here were
+// deleted with the broadcast fetch model. They all bottomed out in the
+// AUTH-free discovery plane, which is a strict superset of the account-seed
+// relays; see the module doc above. Fetch-plane relays now come from
+// `relay_pool::resolve_profile_pool` + `assignment::assigned_relay_for_attempt`,
+// and the publish plane resolves its own write relays in `publish.rs`.
 
 #[cfg(test)]
 mod tests {
@@ -180,52 +204,38 @@ mod tests {
     }
 
     #[test]
-    fn read_relays_are_non_empty_and_wss() {
-        let relays = profile_read_relays();
-        assert!(!relays.is_empty());
-        assert!(relays.iter().all(|r| r.starts_with("wss://")));
+    fn per_author_limit_is_bounded_and_non_zero() {
+        // Zero would mean "no limit" to a relay; an unbounded reply lets a
+        // misbehaving relay flood the client with historical revisions.
+        assert!(PROFILE_PER_AUTHOR_LIMIT > 0);
+        assert!(PROFILE_PER_AUTHOR_LIMIT <= 16);
     }
 
     #[test]
-    fn write_relays_prefer_user_configured() {
-        let user = vec!["wss://my.write.example".to_string()];
-        assert_eq!(profile_write_relays(&user), user);
+    fn a_single_author_req_fits_inside_the_batch_deadline() {
+        // If one REQ could outlive the whole cycle budget, the very first
+        // author on a slow relay would consume the batch and every remaining
+        // author would be reported unattempted forever.
+        assert!(PROFILE_AUTHOR_FETCH_TIMEOUT < PROFILE_BATCH_DEADLINE);
     }
 
     #[test]
-    fn write_relays_fall_back_to_discovery() {
-        // No user-configured write relays → discovery plane.
-        let fallback = profile_write_relays(&[]);
-        assert_eq!(fallback, profile_read_relays());
-        assert!(!fallback.is_empty());
-    }
-
-    #[test]
-    fn merge_base_includes_write_relays() {
-        // A NIP-65 write relay disjoint from the discovery plane must appear in
-        // the merge-base set so an own-edit reads its freshest kind-0 (MEDIUM-4).
-        let write = vec!["wss://write.only.example".to_string()];
-        let base = self_merge_base_relays(&write);
+    fn inter_req_jitter_is_a_non_degenerate_range() {
+        // A collapsed range (start == end) is a FIXED delay, which is exactly
+        // the regular inter-arrival pattern the jitter exists to destroy.
         assert!(
-            base.contains(&"wss://write.only.example".to_string()),
-            "the disjoint write relay must be in the merge-base set: {base:?}"
+            PROFILE_INTER_REQ_JITTER_MS.start() < PROFILE_INTER_REQ_JITTER_MS.end(),
+            "jitter must sample from a real range, not a constant delay",
         );
-        for read in profile_read_relays() {
-            assert!(base.contains(&read), "the read plane must be retained too");
-        }
+        assert!(
+            *PROFILE_INTER_REQ_JITTER_MS.start() > 0,
+            "a zero floor lets a whole slice arrive as one burst",
+        );
     }
 
     #[test]
-    fn merge_base_dedups_and_is_read_plane_without_nip65() {
-        // No NIP-65 relays → the base is exactly the read plane (Haven-only user;
-        // behavior unchanged). And a write relay already in the read plane is not
-        // duplicated.
-        assert_eq!(self_merge_base_relays(&[]), profile_read_relays());
-        let dup = profile_read_relays();
-        let base = self_merge_base_relays(&dup);
-        assert_eq!(
-            base, dup,
-            "a write set equal to the read plane must not duplicate entries"
-        );
+    fn inflight_relay_bound_is_positive() {
+        // Zero would deadlock the fan-out (no relay ever scheduled).
+        assert!(PROFILE_MAX_INFLIGHT_RELAYS > 0);
     }
 }

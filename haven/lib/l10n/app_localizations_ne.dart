@@ -273,7 +273,25 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get relaySettingsKeyPackageSubtitle =>
-      'जहाँ निमन्त्रणा दिनेहरूले तपाईंका कुञ्जी फेला पार्छन् र तपाईंको सार्वजनिक प्रोफाइल प्रकाशित हुन्छ (kind 10002)';
+      'जहाँ अरूले तपाईंलाई निमन्त्रणा गर्न चाहिने कुञ्जी फेला पार्छन् (kind 10002)';
+
+  @override
+  String get relaySettingsProfileTitle => 'मेरा प्रोफाइल रिलेहरू';
+
+  @override
+  String get relaySettingsProfileSubtitle =>
+      'जहाँ तपाईंको सार्वजनिक प्रोफाइल खोजिन्छ र प्रकाशित हुन्छ। यी रिलेहरू तपाईंका अन्य रिलेबाट छुट्टै राखिन्छन्, र तपाईंका प्रोफाइल रिलेहरूको सूची कहिल्यै प्रकाशित हुँदैन (kind 0)';
+
+  @override
+  String get relaySettingsProfileUnderflowTitle => 'प्रोफाइल खोजी रोकिएको छ';
+
+  @override
+  String get relaySettingsProfileUnderflowMessage =>
+      'प्रोफाइल रिलेहरू धेरै थोरै बाँकी छन्, त्यसैले सदस्यहरूका नाम र फोटो अपडेट हुन छाड्नेछन्।';
+
+  @override
+  String get relaySettingsProfileUnderflowRestoreButton =>
+      'पूर्वनिर्धारित प्रोफाइल रिले फर्काउनुहोस्';
 
   @override
   String get relaySettingsLoadRelaysError => 'रिलेहरू लोड गर्न सकिएन।';
@@ -283,7 +301,7 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get relaySettingsRestoreDefaults =>
-      'पूर्वनिर्धारित पुनर्स्थापना गर्नुहोस्';
+      'पूर्वनिर्धारित रिलेहरू पुनर्स्थापना गर्नुहोस्';
 
   @override
   String get relaySettingsAddRelayError => 'रिले थप्न सकिएन।';
@@ -350,6 +368,15 @@ class AppLocalizationsNe extends AppLocalizations {
   @override
   String get relaySettingsEmptyMessage =>
       'अरूले तपाईंकहाँ पुग्न सकून् भनेर तपाईंलाई कम्तीमा एउटा रिले चाहिन्छ। Haven को पूर्वनिर्धारित पुनर्स्थापना गर्न तल ट्याप गर्नुहोस्।';
+
+  @override
+  String get relaySettingsProfileContaminationTooltip =>
+      'Haven को अन्य ट्राफिक पनि यसैबाट जान्छ';
+
+  @override
+  String relaySettingsProfileContaminationSemantics(String url) {
+    return 'चेतावनी: $url बाट तपाईंको अन्य Haven ट्राफिक पनि जान्छ, जसले गर्दा यो रिलेले तपाईंको प्रोफाइललाई त्यो ट्राफिकसँग जोड्न सक्छ';
+  }
 
   @override
   String get locationSettingsTitle => 'स्थान';
@@ -639,8 +666,8 @@ class AppLocalizationsNe extends AppLocalizations {
       'Haven ले धेरै रिले प्रयोग गर्छ, त्यसैले कुनै एउटैले तपाईंलाई काट्न सक्दैन। एउटा अफलाइन भए पनि बाँकीले काम गरिरहन्छन्। निमन्त्रणा तपाईंकहाँ पुग्ने रिले तपाईं आफै छान्नुहुन्छ; सर्कलले प्रयोग गर्ने रिले भने त्यो सर्कल बन्दा नै तय हुन्छन्।';
 
   @override
-  String get privacyRelaysTwoLists =>
-      'Haven ले तपाईंका लागि दुई सूची राख्छ। तपाईंका इनबक्स रिलेहरू भनेका निमन्त्रणा तपाईंकहाँ पुग्ने ठाउँ हुन्। तपाईंका KeyPackage रिलेहरू भनेका तपाईंलाई निमन्त्रणा गर्न चाहिने कुञ्जी अरूले लिने ठाउँ हुन्। प्रत्येक सर्कलले पनि आफ्नै सूची बोक्छ, र सर्कलका इन्क्रिप्टेड अपडेटहरू त्यहीँबाट जान्छन्।';
+  String get privacyRelaysYourLists =>
+      'Haven ले तपाईंका लागि तीन सूची राख्छ। तपाईंका इनबक्स रिलेहरू भनेका निमन्त्रणा तपाईंकहाँ पुग्ने ठाउँ हुन्, र तपाईंका KeyPackage रिलेहरू भनेका तपाईंलाई निमन्त्रणा गर्न चाहिने कुञ्जी अरूले लिने ठाउँ हुन् — यी दुवै सूची भने अरूले भेट्टाउन सकून् भनेर Haven ले प्रकाशित गर्छ। तपाईंका प्रोफाइल रिलेहरू चाहिँ फरक छन्: त्यहीँ तपाईंको नाम र फोटो खोजिन्छ र प्रकाशित हुन्छ, तर त्यो सूची आफै तपाईंकै फोनमा रहन्छ र कहिल्यै प्रकाशित हुँदैन। त्यसैले तपाईंको स्थानका अपडेट वा निमन्त्रणा मात्र बोक्ने रिलेसँग, तपाईंले प्रोफाइलका लागि कुन-कुन रिले प्रयोग गर्नुहुन्छ भन्ने देखाउने कुनै सार्वजनिक सूची हुँदैन। प्रत्येक सर्कलले पनि आफ्नै सूची बोक्छ, र सर्कलका इन्क्रिप्टेड अपडेटहरू त्यहीँबाट जान्छन्।';
 
   @override
   String get privacyRelaysMeansForYou =>
@@ -2024,6 +2051,9 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get addRelaySheetTitleKeyPackage => 'KeyPackage रिले थप्नुहोस्';
+
+  @override
+  String get addRelaySheetTitleProfile => 'प्रोफाइल रिले थप्नुहोस्';
 
   @override
   String get addRelaySheetHint => 'wss://relay.example.com';

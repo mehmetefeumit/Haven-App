@@ -272,7 +272,26 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get relaySettingsKeyPackageSubtitle =>
-      'حيث يجد المدعوون مفاتيحك ويُنشَر ملفك الشخصي العام (kind 10002)';
+      'حيث يجد الآخرون المفاتيح التي يحتاجونها لدعوتك (kind 10002)';
+
+  @override
+  String get relaySettingsProfileTitle => 'مُرحِّلات ملفي الشخصي';
+
+  @override
+  String get relaySettingsProfileSubtitle =>
+      'حيث يُبحَث عن ملفك الشخصي العام ويُنشَر. تبقى هذه المُرحِّلات منفصلة عن بقية مُرحِّلاتك، ولا تُنشَر قائمة هذه المُرحِّلات أبدًا (kind 0)';
+
+  @override
+  String get relaySettingsProfileUnderflowTitle =>
+      'البحث عن الملفات الشخصية متوقّف مؤقتًا';
+
+  @override
+  String get relaySettingsProfileUnderflowMessage =>
+      'لم يتبقَّ عدد كافٍ من مُرحِّلات الملف الشخصي، لذا ستتوقّف أسماء الأعضاء وصورهم عن التحديث.';
+
+  @override
+  String get relaySettingsProfileUnderflowRestoreButton =>
+      'استعادة مُرحِّلات الملف الشخصي الافتراضية';
 
   @override
   String get relaySettingsLoadRelaysError => 'تعذّر تحميل المُرحِّلات.';
@@ -355,6 +374,15 @@ class AppLocalizationsAr extends AppLocalizations {
   @override
   String get relaySettingsEmptyMessage =>
       'تحتاج إلى مُرحِّل واحد على الأقل ليتمكّن الآخرون من الوصول إليك. اضغط أدناه لاستعادة إعدادات Haven الافتراضية.';
+
+  @override
+  String get relaySettingsProfileContaminationTooltip =>
+      'يحمل أيضًا حركة بيانات Haven الأخرى';
+
+  @override
+  String relaySettingsProfileContaminationSemantics(String url) {
+    return 'تحذير: $url يحمل أيضًا حركة بيانات Haven الأخرى الخاصة بك، لذا قد يتمكّن هذا المُرحِّل من ربط ملفك الشخصي بتلك الحركة';
+  }
 
   @override
   String get locationSettingsTitle => 'الموقع';
@@ -636,8 +664,8 @@ class AppLocalizationsAr extends AppLocalizations {
       'يستخدم Haven عدة مُرحِّلات، فلا يستطيع أيٌّ منها وحده أن يعزلك. وإن توقّف أحدها، واصلت البقية العمل. وأنت تختار المُرحِّلات التي تصلك عليها الدعوات، أما مُرحِّلات الدائرة فتُحدَّد عند إنشائها.';
 
   @override
-  String get privacyRelaysTwoLists =>
-      'يحفظ Haven لك قائمتين. مُرحِّلات صندوق الوارد هي حيث تصلك الدعوات. ومُرحِّلات KeyPackage هي حيث يجلب الآخرون المفاتيح التي يحتاجونها لدعوتك. وتحمل كل دائرة أيضًا قائمتها الخاصة، وعبرها تنتقل تحديثات الدائرة المشفّرة.';
+  String get privacyRelaysYourLists =>
+      'يحفظ Haven لك ثلاث قوائم. مُرحِّلات صندوق الوارد هي حيث تصلك الدعوات، ومُرحِّلات KeyPackage هي حيث يجلب الآخرون المفاتيح التي يحتاجونها لدعوتك — وينشر Haven هاتين القائمتين ليتمكّن الآخرون من العثور عليهما. أما مُرحِّلات ملفك الشخصي فمختلفة: هي حيث يُبحَث عن اسمك وصورتك ويُنشَران، لكن القائمة نفسها تبقى على جهازك ولا تُنشَر أبدًا. لذلك فإن المُرحِّل الذي لا يحمل سوى بيانات موقعك أو دعواتك لا تدلّه أي قائمة علنية على المُرحِّلات التي تستخدمها لملفك الشخصي. وتحمل كل دائرة أيضًا قائمتها الخاصة، وعبرها تنتقل تحديثات الدائرة المشفّرة.';
 
   @override
   String get privacyRelaysMeansForYou =>
@@ -2061,6 +2089,9 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get addRelaySheetTitleKeyPackage => 'إضافة مُرحِّل KeyPackage';
+
+  @override
+  String get addRelaySheetTitleProfile => 'إضافة مُرحِّل ملف شخصي';
 
   @override
   String get addRelaySheetHint => 'wss://relay.example.com';

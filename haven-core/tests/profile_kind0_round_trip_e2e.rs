@@ -2,20 +2,30 @@
 //! real in-process Nostr relay (`nostr-relay-builder`).
 //!
 //! Proves the full kind-0 round trip: `build_metadata_event` →
-//! `publish_metadata` over a real socket → `fetch_profiles` reads it back →
-//! `parse_newest_metadata` resolves the winner. Also pins newest-wins
+//! `publish_metadata` over a real socket → `fetch_profiles_assigned` reads it
+//! back → `parse_newest_metadata` resolves the winner. Also pins newest-wins
 //! convergence, the fetch→merge→publish edit preserving another client's
 //! field, and that an event failing signature/id verification never surfaces
 //! as a cached profile.
+//!
+//! # Reading the outcome buckets
+//!
+//! `fetch_profiles_assigned` partitions every requested author into exactly one
+//! of `resolved` / `missed` / `unattempted`. The tests below assert on the
+//! partition, not just on `resolved`, because that is what makes them
+//! non-vacuous: a run whose `REQ` never left the process would leave the author
+//! `unattempted`, so `resolved.is_empty()` alone would "pass" a dead socket.
+//! `unattempted.is_empty()` is the standing proof that the request really was
+//! issued and answered.
 
 use std::time::Duration;
 
 use haven_core::profile::{
-    build_metadata_event, fetch_profiles, merge_edits, publish_metadata, ProfileEdits,
-    ProfileMetadata, ProfileState,
+    build_metadata_event, fetch_profiles_assigned, merge_edits, publish_metadata, AssignedFetch,
+    ProfileEdits, ProfileMetadata, ProfileRelaySalt, ProfileState,
 };
 use haven_core::relay::{allow_ws_loopback_for_test, RelayManager};
-use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, Metadata, Timestamp};
+use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, Metadata, PublicKey, Timestamp};
 use nostr_relay_builder::MockRelay;
 use nostr_sdk::Client;
 
@@ -25,6 +35,14 @@ fn metadata(json: &str) -> ProfileMetadata {
     ProfileMetadata::from_metadata(Metadata::from_json(json).expect("valid json"))
 }
 
+/// A FIXED assignment salt — never [`ProfileRelaySalt::generate`].
+///
+/// Assignment is a salted rendezvous hash, so a random salt would make which
+/// relay an author is asked of a per-run draw and a failure irreproducible.
+fn salt() -> ProfileRelaySalt {
+    ProfileRelaySalt::from_bytes([0xAA; 32])
+}
+
 /// Builds + publishes a kind-0 for `keys` to `url` via the production
 /// `publish_metadata` path.
 async fn publish_profile(relay: &RelayManager, keys: &Keys, meta: &ProfileMetadata, url: &str) {
@@ -32,6 +50,18 @@ async fn publish_profile(relay: &RelayManager, keys: &Keys, meta: &ProfileMetada
     publish_metadata(relay, &event, &[url.to_string()])
         .await
         .expect("publish kind-0");
+}
+
+/// Requests every author in `authors` at attempt 0 from a one-relay pool.
+///
+/// A single-relay pool pins the rendezvous ranking: every author's assigned
+/// relay is `url`, so these round-trip tests read exactly as they did under the
+/// old broadcast fetch while still driving the production assignment code.
+async fn fetch_from(relay: &RelayManager, authors: &[PublicKey], url: &str) -> AssignedFetch {
+    let requests: Vec<(PublicKey, u8)> = authors.iter().map(|author| (*author, 0)).collect();
+    fetch_profiles_assigned(relay, &requests, &salt(), &[url.to_string()], NOW)
+        .await
+        .expect("fetch")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -51,16 +81,19 @@ async fn publish_fetch_parse_round_trip() {
     .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let profiles = fetch_profiles(
-        &manager,
-        &[keys.public_key()],
-        std::slice::from_ref(&url),
-        NOW,
-    )
-    .await
-    .expect("fetch");
-    assert_eq!(profiles.len(), 1, "the published profile is resolved");
-    let profile = &profiles[0];
+    let fetched = fetch_from(&manager, &[keys.public_key()], &url).await;
+    assert!(
+        fetched.unattempted.is_empty(),
+        "the author must have been queried — an unattempted author would make the \
+         assertions below vacuous",
+    );
+    assert!(fetched.missed.is_empty(), "the relay holds the kind-0");
+    assert_eq!(
+        fetched.resolved.len(),
+        1,
+        "the published profile is resolved"
+    );
+    let profile = &fetched.resolved[0];
     assert_eq!(profile.pubkey_hex, keys.public_key().to_hex());
     assert_eq!(profile.state, ProfileState::Known);
     assert_eq!(profile.fetched_at, NOW);
@@ -94,17 +127,11 @@ async fn two_publishes_newest_wins() {
     .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let profiles = fetch_profiles(
-        &manager,
-        &[keys.public_key()],
-        std::slice::from_ref(&url),
-        NOW,
-    )
-    .await
-    .expect("fetch");
-    assert_eq!(profiles.len(), 1);
+    let fetched = fetch_from(&manager, &[keys.public_key()], &url).await;
+    assert!(fetched.unattempted.is_empty(), "the author was queried");
+    assert_eq!(fetched.resolved.len(), 1);
     assert_eq!(
-        profiles[0].metadata.display_name(),
+        fetched.resolved[0].metadata.display_name(),
         Some("New"),
         "the newest kind-0 wins"
     );
@@ -133,17 +160,11 @@ async fn edit_preserves_field_written_by_another_client() {
 
     // Haven (client A) fetches the freshest, merges a display-name edit, and
     // republishes the WHOLE object.
-    let fetched = fetch_profiles(
-        &manager,
-        &[client_a.public_key()],
-        std::slice::from_ref(&url),
-        NOW,
-    )
-    .await
-    .expect("fetch");
-    assert_eq!(fetched.len(), 1);
+    let fetched = fetch_from(&manager, &[client_a.public_key()], &url).await;
+    assert!(fetched.unattempted.is_empty(), "the author was queried");
+    assert_eq!(fetched.resolved.len(), 1);
     let merged = merge_edits(
-        &fetched[0].metadata,
+        &fetched.resolved[0].metadata,
         &ProfileEdits {
             display_name: Some("Alice B".to_string()),
             ..ProfileEdits::default()
@@ -154,16 +175,10 @@ async fn edit_preserves_field_written_by_another_client() {
     publish_profile(&manager, &client_a, &merged, &url).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let after = fetch_profiles(
-        &manager,
-        &[client_a.public_key()],
-        std::slice::from_ref(&url),
-        NOW,
-    )
-    .await
-    .expect("fetch");
-    assert_eq!(after.len(), 1);
-    let md = after[0].metadata.as_metadata();
+    let after = fetch_from(&manager, &[client_a.public_key()], &url).await;
+    assert!(after.unattempted.is_empty(), "the author was queried");
+    assert_eq!(after.resolved.len(), 1);
+    let md = after.resolved[0].metadata.as_metadata();
     assert_eq!(md.display_name.as_deref(), Some("Alice B"), "edit applied");
     assert_eq!(
         md.lud16.as_deref(),
@@ -218,25 +233,32 @@ async fn forged_signature_kind0_rejected() {
     let _ = publisher.send_event(&forged).await;
     tokio::time::sleep(Duration::from_millis(400)).await;
 
-    let profiles = fetch_profiles(
-        &manager,
-        &[alice.public_key(), mallory.public_key()],
-        std::slice::from_ref(&url),
-        NOW,
-    )
-    .await
-    .expect("fetch");
+    let fetched = fetch_from(&manager, &[alice.public_key(), mallory.public_key()], &url).await;
 
     assert!(
-        profiles
+        fetched.unattempted.is_empty(),
+        "both authors must have been queried, or the rejection below proves nothing",
+    );
+    assert!(
+        fetched
+            .resolved
             .iter()
             .any(|p| p.pubkey_hex == alice.public_key().to_hex()),
         "the valid profile resolves"
     );
     assert!(
-        !profiles
+        !fetched
+            .resolved
             .iter()
             .any(|p| p.pubkey_hex == mallory.public_key().to_hex()),
         "the forged-signature profile must never resolve"
+    );
+    // Mallory was asked for and answered with nothing usable — a MISS, not a
+    // skipped author. That distinction is the whole non-vacuity argument: the
+    // forged event was rejected on its merits, not by an unsent request.
+    assert_eq!(
+        fetched.missed,
+        vec![mallory.public_key()],
+        "the forged author is a miss (asked, nothing valid came back)",
     );
 }

@@ -269,7 +269,7 @@ List<PrivacyBlock> privacyBlocksFor(
   PrivacyTopic.relays => [
     PrivacyPara(l10n.privacyRelaysWhatIsARelay),
     PrivacyPara(l10n.privacyRelaysWhyMany),
-    PrivacyPara(l10n.privacyRelaysTwoLists),
+    PrivacyPara(l10n.privacyRelaysYourLists),
     PrivacyMeansForYou(l10n.privacyRelaysMeansForYou),
     PrivacyMoreDetail([
       l10n.privacyRelaysDetailIndexers,

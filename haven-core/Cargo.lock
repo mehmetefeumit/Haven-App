@@ -1043,6 +1043,7 @@ dependencies = [
  "geohash",
  "haven-core",
  "hex",
+ "hmac",
  "image",
  "kamadak-exif",
  "keyring-core",

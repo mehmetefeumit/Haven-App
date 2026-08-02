@@ -274,7 +274,26 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get relaySettingsKeyPackageSubtitle =>
-      'Là où les personnes invitées trouvent vos clés et où votre profil public est publié (kind 10002)';
+      'Là où les autres trouvent les clés dont ils ont besoin pour vous inviter (kind 10002)';
+
+  @override
+  String get relaySettingsProfileTitle => 'Mes relais de profil';
+
+  @override
+  String get relaySettingsProfileSubtitle =>
+      'Là où votre profil public est consulté et publié. Ces relais restent séparés de vos autres relais, et la liste de vos relais de profil n\'est jamais publiée (kind 0)';
+
+  @override
+  String get relaySettingsProfileUnderflowTitle =>
+      'Consultation des profils suspendue';
+
+  @override
+  String get relaySettingsProfileUnderflowMessage =>
+      'Il reste trop peu de relais de profil : les noms et les photos des membres ne seront plus mis à jour.';
+
+  @override
+  String get relaySettingsProfileUnderflowRestoreButton =>
+      'Rétablir les relais de profil par défaut';
 
   @override
   String get relaySettingsLoadRelaysError => 'Échec du chargement des relais.';
@@ -352,6 +371,15 @@ class AppLocalizationsFr extends AppLocalizations {
   @override
   String get relaySettingsEmptyMessage =>
       'Vous avez besoin d\'au moins un relais pour que les autres puissent vous joindre. Appuyez ci-dessous pour rétablir les valeurs par défaut de Haven.';
+
+  @override
+  String get relaySettingsProfileContaminationTooltip =>
+      'Transporte aussi votre autre trafic Haven';
+
+  @override
+  String relaySettingsProfileContaminationSemantics(String url) {
+    return 'Avertissement : $url transporte aussi votre autre trafic Haven ; ce relais pourrait donc associer votre profil à ce trafic';
+  }
 
   @override
   String get locationSettingsTitle => 'Position';
@@ -648,8 +676,8 @@ class AppLocalizationsFr extends AppLocalizations {
       'Haven utilise plusieurs relais, si bien qu\'aucun ne peut vous couper du réseau à lui seul. Si l\'un se déconnecte, les autres continuent de fonctionner. Vous choisissez les relais par lesquels les invitations vous parviennent ; ceux qu\'utilise un cercle sont fixés à sa création.';
 
   @override
-  String get privacyRelaysTwoLists =>
-      'Haven tient deux listes pour vous. Vos relais de réception sont là où les invitations vous parviennent. Vos relais KeyPackage sont là où l\'on récupère les clés nécessaires pour vous inviter. Chaque cercle porte aussi sa propre liste, et c\'est par elle que circulent ses mises à jour chiffrées.';
+  String get privacyRelaysYourLists =>
+      'Haven tient trois listes pour vous. Vos relais de réception sont là où les invitations vous parviennent, et vos relais KeyPackage sont là où l\'on récupère les clés nécessaires pour vous inviter : Haven publie ces deux listes afin que les autres puissent les trouver. Vos relais de profil, eux, sont différents : c\'est là que votre nom et votre photo sont consultés et publiés, mais la liste elle-même reste sur votre appareil et n\'est jamais publiée. Un relais qui ne transporte que vos mises à jour de position ou vos invitations ne dispose donc d\'aucune liste publique lui indiquant quels relais vous utilisez pour votre profil. Chaque cercle porte aussi sa propre liste, et c\'est par elle que circulent ses mises à jour chiffrées.';
 
   @override
   String get privacyRelaysMeansForYou =>
@@ -2056,6 +2084,9 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get addRelaySheetTitleKeyPackage => 'Ajouter un relais KeyPackage';
+
+  @override
+  String get addRelaySheetTitleProfile => 'Ajouter un relais de profil';
 
   @override
   String get addRelaySheetHint => 'wss://relay.example.com';

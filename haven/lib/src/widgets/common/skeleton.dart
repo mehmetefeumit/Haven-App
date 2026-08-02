@@ -146,6 +146,14 @@ class HavenSkeletonList extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ListView.builder(
+      // `shrinkWrap` lets this size itself to its (non-scrolling) children
+      // instead of demanding a bounded height from its ancestor. Without it,
+      // embedding this loading placeholder inside another unbounded-height
+      // scroll container (e.g. a `Column` child of an outer `ListView`, as
+      // on the relay settings page) throws "Vertical viewport was given
+      // unbounded height" — latent until a caller's async data happens to
+      // still be loading on the very first painted frame.
+      shrinkWrap: true,
       physics: const NeverScrollableScrollPhysics(),
       padding: const EdgeInsets.symmetric(vertical: HavenSpacing.sm),
       itemCount: itemCount,

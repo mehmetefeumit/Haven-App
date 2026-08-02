@@ -22,6 +22,27 @@ import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/profile_service.dart';
 
+/// Selects the members from [ffiList] whose picture bytes are not yet
+/// cached (`!hasPicture`) — the set worth handing to
+/// [CircleManagerFfi.downloadMemberPictures] in [NostrProfileService
+/// .refreshMemberProfiles].
+///
+/// `has_picture` on [ProfileMetadataFfi] means "picture BYTES are already
+/// cached" (Rust doc), NOT "a picture URL is set", so this is the useful
+/// gate — members that already have bytes cached are left out, exactly as
+/// the pre-batch per-member loop did.
+///
+/// Extracted and `@visibleForTesting` so the selection is unit-testable
+/// without the Rust FFI bridge (mirrors `sheetExpansionForSize` in
+/// `circles_bottom_sheet.dart`).
+@visibleForTesting
+List<String> membersNeedingPictureDownload(List<ProfileMetadataFfi> ffiList) {
+  return [
+    for (final ffi in ffiList)
+      if (!ffi.hasPicture) ffi.pubkeyHex,
+  ];
+}
+
 /// Production implementation of [ProfileService].
 ///
 /// Uses the Rust core (via the shared [CircleManagerFfi] handle) for all
@@ -215,31 +236,41 @@ class NostrProfileService implements ProfileService {
         pubkeysHex: pubkeyHexes,
         maxAgeSecs: maxAge.inSeconds,
       );
+      // ONE batched call, not a per-member loop: looping
+      // `download_member_picture` from Dart fired the whole roster
+      // back-to-back at whatever Blossom host each member chose — commonly
+      // the same operator as a default circle relay — which is directly
+      // readable as "these are the N people in this user's circles" in one
+      // burst. `download_member_pictures` shuffles the order (OS CSPRNG) and
+      // downloads strictly one at a time with a randomized delay between
+      // requests, bounded by an overall deadline, so there is no burst to
+      // fingerprint. The trade is latency: this call takes noticeably longer
+      // than the old tight loop before `ref.invalidate` fires downstream, so
+      // member photos now populate later. That is accepted — do not
+      // "fix" it by re-parallelizing or trying to stream partial results.
+      final toDownload = membersNeedingPictureDownload(ffiList);
+      if (toDownload.isNotEmpty) {
+        try {
+          await manager.downloadMemberPictures(pubkeysHex: toDownload);
+        } on Object catch (e) {
+          // Best-effort per plan §7.2 — a batch failure must not drop the
+          // whole refresh; individual per-member download failures inside
+          // the batch are already absorbed on the Rust side.
+          debugPrint(
+            '[Profile] refreshMemberProfiles picture batch download '
+            'failed: ${e.runtimeType}',
+          );
+        }
+      }
       final result = <String, Profile>{};
       for (final ffi in ffiList) {
         // Absent from the result, not an error — mirrors the interface doc
         // ("a pubkey that was never found on any relay ... is simply absent
         // from the result").
         if (!ffi.isKnown) continue;
-        // `has_picture` on `ProfileMetadataFfi` means "picture BYTES are
-        // already cached" (Rust doc), NOT "a picture URL is set" — so the
-        // useful moment to download is when bytes are NOT yet cached.
-        // `download_member_picture` is itself a no-op when the cached
-        // kind-0 has no `picture` URL, so this is safe to call speculatively.
-        if (!ffi.hasPicture) {
-          try {
-            await manager.downloadMemberPicture(pubkeyHex: ffi.pubkeyHex);
-          } on Object catch (e) {
-            // Best-effort per plan §7.2 — one member's picture failure must
-            // not drop the whole batch.
-            debugPrint(
-              '[Profile] refreshMemberProfiles picture download failed: '
-              '${e.runtimeType}',
-            );
-          }
-        }
         // Force the picture lookup regardless of the (possibly now-stale)
-        // `hasPicture` flag above — a download may have just populated it.
+        // `hasPicture` flag above — the batch download above may have just
+        // populated it.
         result[ffi.pubkeyHex] = await _toProfile(
           manager,
           ffi,

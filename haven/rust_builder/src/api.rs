@@ -2281,6 +2281,7 @@ impl std::fmt::Debug for LeavePlanFfi {
 /// - [`RelayTypeFfi::Nip65`] → kind 10002 (NIP-65; KeyPackage discovery under
 ///   Dark Matter). Persisted under the same slot the retired kind-10051
 ///   `KeyPackage` list used, so no relay-preference data migrates.
+/// - [`RelayTypeFfi::Profile`] → **no wire kind at all** (local-only policy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelayTypeFfi {
     /// Inbox relays (kind 10050, NIP-17).
@@ -2289,6 +2290,20 @@ pub enum RelayTypeFfi {
     /// discoverable under Dark Matter (W2, replacing the retired kind-10051
     /// list). Stored under the `RelayType::KeyPackage` slot.
     Nip65,
+    /// Profile-plane relays (kind-0 lookups + own-profile publish).
+    ///
+    /// **Local-only policy — structurally unpublishable.** Unlike the other two
+    /// categories this one has NO relay-list kind, and every relay-list code
+    /// path below carries an explicit fail-closed arm that returns an error for
+    /// it (never a default, never a fallthrough). Advertising this list would
+    /// hand any observer — including a circle relay operator who already sees
+    /// this account's gift wraps and KeyPackages — a signed, public pointer
+    /// joining the identity to its profile plane, reconstructing the exact
+    /// cross-plane join the profile/location separation exists to break.
+    ///
+    /// Mapping this onto [`RelayTypeFfi::Nip65`] "so it compiles" would publish
+    /// the profile plane as a kind-10002 and defeat the entire feature. Do not.
+    Profile,
 }
 
 impl From<RelayTypeFfi> for haven_core::circle::RelayType {
@@ -2297,6 +2312,7 @@ impl From<RelayTypeFfi> for haven_core::circle::RelayType {
             RelayTypeFfi::Inbox => Self::Inbox,
             // `Nip65` shares the persisted `KeyPackage` slot (see banner).
             RelayTypeFfi::Nip65 => Self::KeyPackage,
+            RelayTypeFfi::Profile => Self::Profile,
         }
     }
 }
@@ -2306,17 +2322,36 @@ impl From<haven_core::circle::RelayType> for RelayTypeFfi {
         match t {
             haven_core::circle::RelayType::Inbox => Self::Inbox,
             haven_core::circle::RelayType::KeyPackage => Self::Nip65,
+            haven_core::circle::RelayType::Profile => Self::Profile,
         }
     }
 }
 
+/// The error every relay-list (publish-plane) path returns when handed
+/// [`RelayTypeFfi::Profile`].
+///
+/// Static text: it names no relay, no URL and no count, so it is safe to
+/// surface verbatim across the FFI (Security Rule 8).
+const PROFILE_RELAY_LIST_UNPUBLISHABLE: &str =
+    "Profile relays are local-only and are never advertised in a relay list";
+
 /// The on-wire replaceable-list kind published for a relay-preference category
 /// under Dark Matter: 10050 for Inbox, **10002 (NIP-65)** for the KeyPackage-
 /// discovery list (W2; the kind-10051 list is retired).
-fn relay_list_wire_kind(relay_type: RelayTypeFfi) -> nostr::Kind {
+///
+/// # Errors
+///
+/// Fails closed for [`RelayTypeFfi::Profile`], which has no wire kind by
+/// construction (the core [`haven_core::circle::RelayType::to_kind`] returns
+/// `None` for it). This is the single choke point every publish/unpublish/
+/// maintenance path funnels through, so the profile category can never acquire
+/// a wire form by accident.
+fn relay_list_wire_kind(relay_type: RelayTypeFfi) -> Result<nostr::Kind, String> {
     match relay_type {
-        RelayTypeFfi::Inbox => nostr::Kind::InboxRelays,
-        RelayTypeFfi::Nip65 => nostr::Kind::RelayList,
+        RelayTypeFfi::Inbox => Ok(nostr::Kind::InboxRelays),
+        RelayTypeFfi::Nip65 => Ok(nostr::Kind::RelayList),
+        // FAIL-CLOSED — never a `_ =>` default and never mapped onto `Nip65`.
+        RelayTypeFfi::Profile => Err(PROFILE_RELAY_LIST_UNPUBLISHABLE.to_string()),
     }
 }
 
@@ -2339,6 +2374,11 @@ fn build_relay_list_event_for(
         RelayTypeFfi::Nip65 => {
             haven_core::relay::build_nip65_relay_list_event(keys, urls, created_at)
         }
+        // FAIL-CLOSED: there is no event to build for the profile plane. An
+        // arm that borrowed `Nip65`'s builder would emit a signed kind-10002
+        // naming the profile relays — the one event that re-creates the
+        // cross-plane join this category exists to break.
+        RelayTypeFfi::Profile => return Err(PROFILE_RELAY_LIST_UNPUBLISHABLE.to_string()),
     }
     .map_err(|e| format!("Failed to build relay list event: {e}"))
 }
@@ -2364,6 +2404,12 @@ fn build_relay_list_unpublish_for(
             &[],
             Some(haven_core::relay::superseding_created_at(last_published_at)),
         ),
+        // FAIL-CLOSED: nothing was ever published for the profile plane, so
+        // there is nothing to replace. Emitting an "empty" kind-10002 here
+        // would still be a signed, public event tying this identity to the
+        // profile-relay category — the disclosure, not the URL list, is the
+        // problem.
+        RelayTypeFfi::Profile => return Err(PROFILE_RELAY_LIST_UNPUBLISHABLE.to_string()),
     }
     .map_err(|e| format!("Failed to build replacement: {e}"))
 }
@@ -2526,11 +2572,22 @@ fn nip65_relay_list_urls(event: &nostr::Event) -> Vec<String> {
 
 /// The on-relay URL extractor for a relay-list category's wire form: `relay`
 /// tags for Inbox (10050), `r` tags for the NIP-65 KeyPackage list (10002).
+///
+/// # Errors
+///
+/// Fails closed for [`RelayTypeFfi::Profile`]: that category has no wire form,
+/// so there is nothing on any relay to extract. Returning an empty `Vec` here
+/// instead would read as "the list was dropped from this relay" and could drive
+/// the maintenance healer into publishing one.
 #[inline]
-fn relay_list_urls_for(relay_type: RelayTypeFfi, event: &nostr::Event) -> Vec<String> {
+fn relay_list_urls_for(
+    relay_type: RelayTypeFfi,
+    event: &nostr::Event,
+) -> Result<Vec<String>, String> {
     match relay_type {
-        RelayTypeFfi::Inbox => relay_list_urls(event),
-        RelayTypeFfi::Nip65 => nip65_relay_list_urls(event),
+        RelayTypeFfi::Inbox => Ok(relay_list_urls(event)),
+        RelayTypeFfi::Nip65 => Ok(nip65_relay_list_urls(event)),
+        RelayTypeFfi::Profile => Err(PROFILE_RELAY_LIST_UNPUBLISHABLE.to_string()),
     }
 }
 
@@ -3972,6 +4029,13 @@ impl CircleManagerFfi {
 
     /// Returns whether this user wants to publish their relay list for the
     /// given category. Defaults to `true` when never set.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for [`RelayTypeFfi::Profile`]: that category has no
+    /// publish toggle because it has no publishable form. A toggle would imply
+    /// the plane *could* be advertised and invite a future "just default it to
+    /// on" change.
     pub async fn get_publish_relay_list(&self, relay_type: RelayTypeFfi) -> Result<bool, String> {
         let inner = self.inner.clone();
         run_blocking(move || {
@@ -3979,6 +4043,7 @@ impl CircleManagerFfi {
                 RelayTypeFfi::Inbox => inner.get_publish_inbox_relay_list(),
                 // `Nip65` shares the persisted `KeyPackage` toggle (W2).
                 RelayTypeFfi::Nip65 => inner.get_publish_kp_relay_list(),
+                RelayTypeFfi::Profile => return Err(PROFILE_RELAY_LIST_UNPUBLISHABLE.to_string()),
             }
             .map_err(|e| e.to_string())
         })
@@ -3987,6 +4052,11 @@ impl CircleManagerFfi {
 
     /// Sets whether this user wants to publish their relay list for the
     /// given category.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for [`RelayTypeFfi::Profile`] — see
+    /// [`Self::get_publish_relay_list`].
     pub async fn set_publish_relay_list(
         &self,
         relay_type: RelayTypeFfi,
@@ -3997,6 +4067,7 @@ impl CircleManagerFfi {
             match relay_type {
                 RelayTypeFfi::Inbox => inner.set_publish_inbox_relay_list(value),
                 RelayTypeFfi::Nip65 => inner.set_publish_kp_relay_list(value),
+                RelayTypeFfi::Profile => return Err(PROFILE_RELAY_LIST_UNPUBLISHABLE.to_string()),
             }
             .map_err(|e| e.to_string())
         })
@@ -4011,11 +4082,26 @@ impl CircleManagerFfi {
     /// Exposed for the relay-status UI. The publish flow uses the same
     /// computation internally; do NOT use this method to compute publish
     /// targets in Dart — call [`Self::build_relay_list_publish`] instead.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for [`RelayTypeFfi::Profile`], like every other method on
+    /// this publish-plane surface. The profile category is local-only: there
+    /// are no "publish targets" for it, and a Dart caller that received a list
+    /// here would hold exactly the input a `publish_event` loop wants. The
+    /// sentence above ("do NOT use this to compute publish targets") is a
+    /// convention; this arm is the guarantee, and it also keeps the whole
+    /// `RelayTypeFfi` surface uniformly fail-closed so no future reader has to
+    /// wonder which member is the exception.
     pub async fn relay_publish_targets(
         &self,
         relay_type: RelayTypeFfi,
     ) -> Result<Vec<String>, String> {
-        let core_type = haven_core::circle::RelayType::from(relay_type);
+        let core_type = match relay_type {
+            RelayTypeFfi::Inbox => haven_core::circle::RelayType::Inbox,
+            RelayTypeFfi::Nip65 => haven_core::circle::RelayType::KeyPackage,
+            RelayTypeFfi::Profile => return Err(PROFILE_RELAY_LIST_UNPUBLISHABLE.to_string()),
+        };
         let inner = self.inner.clone();
         run_blocking(move || {
             let user = inner
@@ -4055,8 +4141,9 @@ impl CircleManagerFfi {
         let core_type = haven_core::circle::RelayType::from(relay_type);
         // Dark Matter W2: the recorded / on-wire kind is 10002 for Nip65, 10050
         // for Inbox (NOT the persisted-slot `to_kind()`, which is 10051 for the
-        // KeyPackage slot).
-        let wire_kind_u16 = relay_list_wire_kind(relay_type).as_u16();
+        // KeyPackage slot). Fails closed for `Profile` BEFORE any relay is read
+        // or any event is signed.
+        let wire_kind_u16 = relay_list_wire_kind(relay_type)?.as_u16();
         let inner = self.inner.clone();
         let own_pk = keys.public_key();
 
@@ -4066,6 +4153,12 @@ impl CircleManagerFfi {
             let publish = match core_type {
                 haven_core::circle::RelayType::Inbox => inner.get_publish_inbox_relay_list(),
                 haven_core::circle::RelayType::KeyPackage => inner.get_publish_kp_relay_list(),
+                // Unreachable (the wire-kind resolution above already bailed),
+                // but kept as a second explicit fail-closed arm: a future
+                // reorder must not turn this into a silent publish.
+                haven_core::circle::RelayType::Profile => {
+                    return Err(PROFILE_RELAY_LIST_UNPUBLISHABLE.to_string())
+                }
             }
             .map_err(|e| e.to_string())?;
             if !publish {
@@ -4186,8 +4279,9 @@ impl CircleManagerFfi {
 
         let core_type = haven_core::circle::RelayType::from(relay_type);
         let inner = self.inner.clone();
-        // W2: the on-wire kind is 10002 for Nip65, 10050 for Inbox.
-        let wire_kind = relay_list_wire_kind(relay_type);
+        // W2: the on-wire kind is 10002 for Nip65, 10050 for Inbox. Fails
+        // closed for `Profile` before anything is looked up or signed.
+        let wire_kind = relay_list_wire_kind(relay_type)?;
         let kind_u16 = wire_kind.as_u16();
 
         // Look up prior publication and resolve targets atomically.
@@ -4286,7 +4380,9 @@ impl CircleManagerFfi {
         }
 
         // W2: probe/scrub the on-wire kind (10002 for Nip65, 10050 for Inbox).
-        let wire_kind = relay_list_wire_kind(relay_type);
+        // Fails closed for `Profile`: nothing was ever published for that
+        // category, so there is no stale copy to scrub.
+        let wire_kind = relay_list_wire_kind(relay_type)?;
         let kind_u16 = wire_kind.as_u16();
         let inner = self.inner.clone();
 
@@ -4361,16 +4457,32 @@ impl CircleManagerFfi {
 // picture URL ever crosses the FFI (plan D2) and no circle/group identifier is
 // ever touched (plan §4.4).
 //
+// NO SIGNER, EVER. Every network call here constructs `RelayManager::new()`,
+// which builds a signer-less client. A relay's NIP-42 AUTH challenge therefore
+// cannot be answered on any profile path, so profile traffic is structurally
+// unattributable to the local user's Nostr identity. Do not swap in a
+// signer-carrying manager (or add an AUTH knob) for convenience: that single
+// change would let a pool relay bind every kind-0 lookup it serves to the
+// identity making it, which is most of what the plane separation buys.
+//
+// PLANE SEPARATION. Relay selection here comes ONLY from
+// `CircleManager::usable_profile_relays()` (curated pool minus the append-only
+// contamination ledger). Never the discovery plane, never the account seed,
+// never a circle's routing relays: any of those already carry this account's
+// kind-445/kind-1059 traffic, and sending kind-0 there re-creates the
+// cross-plane join. Underflow is TERMINAL — fetches skip, publishes error;
+// there is deliberately no fallback.
+//
 // The whole surface — types AND methods — is one contiguous, banner-scoped
 // region (its own top-level `impl CircleManagerFfi`) so the privacy CI guard
 // (scripts/ci/check_profile_privacy_boundaries.sh) can scope its scan exactly.
 
 use haven_core::profile::{
     blossom_server, build_blank_metadata_event, build_metadata_event, build_nip09_deletion,
-    download_profile_picture, fetch_profiles, merge_edits, picture_sync_action,
-    profile_read_relays, publish_metadata, resolve_write_relays, self_merge_base_relays,
-    upload_profile_picture, CachedProfile, PictureSyncAction, ProfileEdits, ProfileMetadata,
-    ProfileState,
+    download_profile_picture, fetch_profiles_assigned, merge_edits, picture_sync_action,
+    publish_metadata, upload_profile_picture, AssignedFetch, CachedProfile, PictureSyncAction,
+    ProfileEdits, ProfileError, ProfileMetadata, ProfileRelaySalt, ProfileState,
+    PROFILE_INTER_REQ_JITTER_MS,
 };
 
 /// Redacts hex sequences (>= 16 chars) from an error before it crosses the FFI.
@@ -4385,6 +4497,173 @@ fn redact_profile_err(e: impl std::fmt::Display) -> String {
 /// Returns the current Unix time in whole seconds, saturating (never negative).
 fn profile_now_secs() -> i64 {
     i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(i64::MAX)
+}
+
+/// Wall-clock budget for reading the local user's OWN kind-0 back from the
+/// whole relay pool.
+///
+/// Unlike a member fetch (one author, one assigned relay) this walks every pool
+/// entry serially, so an unresponsive relay must not be able to hold the
+/// Identity page hostage. Whatever has not answered when this elapses is simply
+/// not merged — the newest of the answers received still wins.
+const PROFILE_OWN_FETCH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(25);
+
+/// Wall-clock budget for one paced batch of member profile-picture downloads.
+///
+/// Sized for the serial-with-jitter schedule (see
+/// [`CircleManagerFfi::download_member_pictures`]): a handful of pictures plus
+/// their gaps, and no more. Pictures not reached inside the budget are left for
+/// the next refresh; nothing is marked as failed or missing on their behalf.
+const PROFILE_PICTURE_BATCH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// Samples the pause between two consecutive profile-picture downloads.
+///
+/// `OsRng` only — a thin `getrandom` wrapper with no seeded expansion, matching
+/// the profile module's CSPRNG-only rule (`rand::thread_rng` is banned; a
+/// predictable schedule is exactly what makes a burst legible as a roster).
+/// Reuses [`PROFILE_INTER_REQ_JITTER_MS`] so the picture plane is paced like the
+/// kind-0 plane rather than inventing a second, divergent tuning.
+fn profile_picture_delay() -> std::time::Duration {
+    use rand::Rng as _;
+    let mut rng = rand::rngs::OsRng;
+    std::time::Duration::from_millis(rng.gen_range(PROFILE_INTER_REQ_JITTER_MS))
+}
+
+/// Health of the profile-plane relay pool, as **counts only**.
+///
+/// Deliberately carries no URLs. Dart needs exactly one thing — whether the
+/// plane can still operate — and a URL list crossing the FFI would give the UI
+/// (and any crash/analytics sink it feeds) a copy of which relays this install
+/// resolves profiles from. That set is the profile plane; naming it in Dart
+/// re-creates in the app layer the very pointer Haven refuses to publish.
+#[derive(Debug, Clone, Copy)]
+pub struct ProfilePoolStatusFfi {
+    /// Distinct relays configured for the profile category (curated pool
+    /// unioned with the user's own additions).
+    pub configured: u32,
+    /// How many of those are excluded because they also carry this account's
+    /// location-plane traffic (the append-only contamination ledger).
+    pub excluded: u32,
+    /// Relays that survive exclusion and may serve kind-0 lookups.
+    pub usable: u32,
+    /// `true` when too few survive to operate the plane. Profile lookups are
+    /// then skipped entirely (fail-closed: the plane NEVER falls back onto a
+    /// location relay), so the roster shows cached names only until the user
+    /// adds an uncontaminated profile relay.
+    pub is_underflow: bool,
+}
+
+/// The two stamp lists an assigned-fetch cycle produces, in canonical hex.
+///
+/// Deliberately only TWO: an [`AssignedFetch`] has three buckets, and the third
+/// one is never stamped.
+// Internal decision helper, never an FFI type: `#[frb(ignore)]` keeps codegen
+// from emitting bindings for it (which would fail to compile, since it is
+// private — same reason `InMemoryStorage` above carries the attribute).
+#[frb(ignore)]
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ProfileStampLists {
+    /// Authors whose assigned relay returned a usable kind-0.
+    hits: Vec<String>,
+    /// Authors whose assigned relay completed the `REQ` and had nothing.
+    misses: Vec<String>,
+}
+
+/// Decides which authors of a finished cycle may be stamped, and how.
+///
+/// `unattempted` is returned in NEITHER list — that omission is the whole point
+/// of this function, and the bug fix that replaced the old blanket
+/// `touch_profiles_fetched_at(&attempted, ..)` (since deleted from the core):
+///
+/// * stamping an unattempted author as a HIT would fake freshness for a profile
+///   that was never requested, and suppress the retry that would have resolved
+///   it for a full staleness tier;
+/// * stamping it as a MISS would advance its retry ladder onto a SECOND relay —
+///   widening that author's disclosure for a reason (a batch deadline, an
+///   unreachable relay) that has nothing to do with the author — and, on a
+///   first-ever fetch, pin them `Unknown` behind a backoff.
+///
+/// Doing nothing is correct: the author is simply due again on the next tick.
+fn profile_stamp_lists(outcome: &AssignedFetch) -> ProfileStampLists {
+    ProfileStampLists {
+        hits: outcome
+            .resolved
+            .iter()
+            .map(|cp| cp.pubkey_hex.clone())
+            .collect(),
+        misses: outcome
+            .missed
+            .iter()
+            .map(nostr::PublicKey::to_hex)
+            .collect(),
+    }
+}
+
+/// Reads the local user's OWN newest kind-0 back from EVERY relay in `pool`.
+///
+/// # Why the whole pool, not the salted assignment
+///
+/// The per-author assignment exists to stop any single relay from learning a
+/// slice of the user's social graph. Neither half of that applies to our own
+/// profile: it is PUBLISHED to every pool relay (a peer's assignment salt is
+/// private to their install, so we cannot know which one they will read us
+/// from), and every one of those relays therefore already holds it. Reading it
+/// back from one assigned relay would only risk merging onto a stale copy and
+/// silently dropping fields another client wrote.
+///
+/// Each relay is queried through the ordinary assigned-fetch entry point with a
+/// ONE-relay pool, which pins the target while keeping that path's guarantees:
+/// one author per `REQ`, a defensive per-author limit, and no signer (so a
+/// NIP-42 AUTH challenge can never be answered). Serial, bounded by
+/// [`PROFILE_OWN_FETCH_DEADLINE`]; the newest `created_at` wins.
+///
+/// Returns the newest answer and whether any relay actually completed a `REQ`.
+/// The second value is load-bearing: a caller may only stamp a miss when
+/// something was really asked (same rule that keeps deadline-dropped authors
+/// unstamped).
+async fn fetch_own_profile_across_pool(
+    relay: &haven_core::relay::RelayManager,
+    own_pk: nostr::PublicKey,
+    salt: &ProfileRelaySalt,
+    pool: &[String],
+    now: i64,
+) -> (Option<CachedProfile>, bool) {
+    let requests = [(own_pk, 0u8)];
+    let deadline = tokio::time::Instant::now() + PROFILE_OWN_FETCH_DEADLINE;
+    let mut newest: Option<CachedProfile> = None;
+    let mut settled = false;
+
+    for url in pool {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            log::debug!("[profile] own-profile read hit its deadline; using what arrived");
+            break;
+        }
+        let one = [url.clone()];
+        let attempt = tokio::time::timeout(
+            remaining,
+            fetch_profiles_assigned(relay, &requests, salt, &one, now),
+        )
+        .await;
+        match attempt {
+            Ok(Ok(outcome)) => {
+                settled |= !outcome.resolved.is_empty() || !outcome.missed.is_empty();
+                if let Some(candidate) = outcome.resolved.into_iter().next() {
+                    let newer = match &newest {
+                        Some(current) => candidate.event_created_at > current.event_created_at,
+                        None => true,
+                    };
+                    if newer {
+                        newest = Some(candidate);
+                    }
+                }
+            }
+            // One unusable relay must not deny the rest of the pool.
+            Ok(Err(_)) => {}
+            Err(_) => break,
+        }
+    }
+    (newest, settled)
 }
 
 /// A member's public Nostr profile (kind-0 metadata), FFI-friendly.
@@ -4541,10 +4820,25 @@ impl CircleManagerFfi {
     /// (`PROFILE_INTERACTIVE_MAX_AGE_SECS` / `PROFILE_PERIODIC_MAX_AGE_SECS` /
     /// forced), so one constant no longer has to serve every call site.
     ///
-    /// Fetched kind-0s are upserted newest-wins; queried authors that return
-    /// nothing are recorded as `Unknown` (which suppresses refetch churn without
-    /// downgrading an existing `Known` row). `has_picture` reflects whether
-    /// CURRENT picture bytes are cached.
+    /// # One relay per author
+    ///
+    /// Due authors are NOT broadcast to a read set. Each is pinned by a salted
+    /// rendezvous hash to exactly ONE relay of the profile pool and asked for
+    /// alone, so no relay ever observes a co-membership set. The pool is the
+    /// curated profile plane minus every relay in the contamination ledger, and
+    /// it fails closed: on pool underflow the network fetch is SKIPPED (cached
+    /// rows are still returned) rather than falling back onto a relay that
+    /// already carries this account's location traffic. Dart surfaces that state
+    /// via [`Self::profile_pool_status`].
+    ///
+    /// # Stamping
+    ///
+    /// Fetched kind-0s are upserted newest-wins and stamped as HITS; authors
+    /// their assigned relay answered nothing for are stamped as MISSES (which
+    /// advances the bounded retry ladder without resetting the staleness clock).
+    /// Authors the cycle never reached — dropped at the batch deadline, or on a
+    /// relay that turned out to be unusable — are stamped **not at all**.
+    /// `has_picture` reflects whether CURRENT picture bytes are cached.
     ///
     /// # Errors
     ///
@@ -4577,57 +4871,67 @@ impl CircleManagerFfi {
             return Ok(Vec::new());
         }
 
-        // Decide which need a network fetch: uncached, or staler than the
-        // caller's tolerance. `max_age_secs == 0` ⇒ every pubkey refetches.
+        // Which authors are due, and at which rung of the per-author retry
+        // ladder. The negative cache lives in the storage layer (`miss_count` /
+        // `next_retry_at`), so the decision is a single query rather than a
+        // staleness filter reconstructed here — and, crucially, an author that
+        // MISSED is retried on its schedule instead of waiting out a full
+        // staleness tier as if it had been answered.
         let max_age_secs = max_age_secs.max(0);
-        let cached = self
+        let due = self
             .inner
-            .get_profiles(&all_hex)
+            .profiles_due(&all_hex, now, max_age_secs)
             .map_err(redact_profile_err)?;
-        let to_fetch: Vec<nostr::PublicKey> = parsed
-            .iter()
-            .filter(|(hex, _)| {
-                // A forced refresh must never be skipped, even if a backwards
-                // clock jump left `fetched_at` in the future (which would make
-                // the age comparison below negative).
-                if max_age_secs == 0 {
-                    return true;
-                }
-                match cached.iter().find(|c| &c.pubkey_hex == hex) {
-                    // Fresh within tolerance ⇒ serve from cache (skip). Else refetch.
-                    Some(c) => now.saturating_sub(c.fetched_at) >= max_age_secs,
-                    None => true,
-                }
-            })
-            .map(|(_, pk)| *pk)
-            .collect();
 
-        if !to_fetch.is_empty() {
-            let relay = haven_core::relay::RelayManager::new();
-            let fetched = fetch_profiles(&relay, &to_fetch, &profile_read_relays(), now)
-                .await
-                .map_err(redact_profile_err)?;
-            for cp in &fetched {
-                // Newer-wins: a lagging relay must not downgrade a newer cached
-                // row, and a forced refetch must not revert a just-published
-                // optimistic edit (bug MEDIUM-3).
+        if !due.is_empty() {
+            if let Some(pool) = self.usable_profile_pool()? {
+                let salt = self
+                    .inner
+                    .profile_relay_salt()
+                    .map_err(redact_profile_err)?;
+                let requests: Vec<(nostr::PublicKey, u8)> = due
+                    .iter()
+                    .filter_map(|(hex, attempt)| {
+                        parsed
+                            .iter()
+                            .find(|(h, _)| h == hex)
+                            .map(|(_, pk)| (*pk, *attempt))
+                    })
+                    .collect();
+
+                // A fresh manager with NO signer (`RelayManager::new` builds a
+                // signer-less client), so a relay's NIP-42 AUTH challenge
+                // structurally cannot be answered and this fetch can never be
+                // attributed to the local user's identity.
+                let relay = haven_core::relay::RelayManager::new();
+                let outcome = fetch_profiles_assigned(&relay, &requests, &salt, &pool, now)
+                    .await
+                    .map_err(redact_profile_err)?;
+
+                // Newest-wins upsert for every resolved author (a lagging relay
+                // must not downgrade a newer cached row, nor revert a
+                // just-published optimistic edit).
+                for cp in &outcome.resolved {
+                    self.inner
+                        .upsert_profile_if_newer(cp)
+                        .map_err(redact_profile_err)?;
+                }
+
+                let ProfileStampLists { hits, misses } = profile_stamp_lists(&outcome);
+                // HITS advance the staleness clock and clear the miss state.
+                // Required even when the upsert above wrote nothing: kind-0 is
+                // replaceable, so an unchanged profile returns the same
+                // `created_at` and `fetched_at` would otherwise stay pinned to
+                // the first-ever fetch, killing every staleness tier.
                 self.inner
-                    .upsert_profile_if_newer(cp)
+                    .touch_profiles_hit(&hits, now)
+                    .map_err(redact_profile_err)?;
+                // MISSES bump `miss_count` / schedule the retry WITHOUT touching
+                // `fetched_at` or downgrading a `Known` row.
+                self.inner
+                    .record_profile_misses(&misses, now)
                     .map_err(redact_profile_err)?;
             }
-            // Record the ATTEMPT for every queried author, not only the ones
-            // that returned nothing. kind-0 is replaceable: an unchanged profile
-            // comes back with the same `created_at`, so `upsert_profile_if_newer`
-            // above correctly writes nothing — and without this touch,
-            // `fetched_at` would stay pinned to the first-ever fetch and every
-            // staleness tier would be dead, turning each trigger into a real
-            // relay REQ. The same statement inserts an `Unknown` row for an
-            // author that has never resolved (suppressing refetch churn) without
-            // downgrading an existing `Known` row.
-            let attempted: Vec<String> = to_fetch.iter().map(|pk| pk.to_hex()).collect();
-            self.inner
-                .touch_profiles_fetched_at(&attempted, now)
-                .map_err(redact_profile_err)?;
         }
 
         // Re-read the merged set (fresh + previously-cached + newly-unknown).
@@ -4648,6 +4952,125 @@ impl CircleManagerFfi {
             out.push(ProfileMetadataFfi::from_cached(cp, has_picture, hash));
         }
         Ok(out)
+    }
+
+    /// The profile-plane relays usable right now, or `None` when the pool has
+    /// underflowed.
+    ///
+    /// Underflow is TERMINAL for the network path and is reported as `None`
+    /// rather than as an error, because it must never look like a transient
+    /// failure that a fallback could paper over: there is no fallback. The
+    /// caller skips the fetch and serves whatever is cached;
+    /// [`Self::profile_pool_status`] is what tells the user why. Any other
+    /// failure (a local database error) still propagates.
+    fn usable_profile_pool(&self) -> Result<Option<Vec<String>>, String> {
+        match self.inner.usable_profile_relays() {
+            Ok(pool) => Ok(Some(pool)),
+            Err(ProfileError::PoolUnderflow { .. }) => {
+                // Counts are deliberately NOT logged: on a small pool they are
+                // close to an enumeration of which relays this install treats as
+                // contaminated.
+                log::debug!("[profile] relay pool underflow — skipping fetch (fail-closed)");
+                Ok(None)
+            }
+            Err(e) => Err(redact_profile_err(e)),
+        }
+    }
+
+    /// Health of the profile-plane relay pool, as counts only.
+    ///
+    /// Lets Flutter show "profile lookups are paused" instead of a silently
+    /// empty roster when contamination has eaten the pool. **No relay URL ever
+    /// crosses this boundary** — see [`ProfilePoolStatusFfi`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error string on database failure.
+    pub async fn profile_pool_status(&self) -> Result<ProfilePoolStatusFfi, String> {
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            // Configured = the user's own profile-category rows unioned with the
+            // curated pool, normalized and de-duplicated exactly the way the
+            // exclusion filter compares them (a count computed on raw strings
+            // would drift from the count the resolver actually sees).
+            let mut configured: Vec<String> = Vec::new();
+            let rows = inner
+                .list_user_relays(haven_core::circle::RelayType::Profile)
+                .map_err(redact_profile_err)?;
+            for raw in &rows {
+                if let Some(url) = haven_core::relay::normalize_relay_url(raw) {
+                    if !configured.contains(&url) {
+                        configured.push(url);
+                    }
+                }
+            }
+            // MUST be `profile_relay_pool_default()` — the EFFECTIVE accessor —
+            // because that is what `usable_profile_relays()` unions in below.
+            // Counting `production_profile_relays()` (the raw constant) instead
+            // makes `configured` disagree with `usable` whenever a hermetic
+            // override is installed: `configured` would count the 8 curated
+            // public relays that the resolver never sees, so `excluded`
+            // (= configured - usable) reports relays that were never candidates.
+            // Identical in release, wrong in debug — and a status counter that
+            // lies only under test is worse than one that lies always.
+            for url in haven_core::profile::profile_relay_pool_default() {
+                if !configured.contains(&url) {
+                    configured.push(url);
+                }
+            }
+
+            let usable = match inner.usable_profile_relays() {
+                Ok(pool) => pool.len(),
+                Err(ProfileError::PoolUnderflow { usable, .. }) => usable,
+                Err(e) => return Err(redact_profile_err(e)),
+            };
+
+            let configured_n = configured.len();
+            Ok(ProfilePoolStatusFfi {
+                configured: u32::try_from(configured_n).unwrap_or(u32::MAX),
+                excluded: u32::try_from(configured_n.saturating_sub(usable)).unwrap_or(u32::MAX),
+                usable: u32::try_from(usable).unwrap_or(u32::MAX),
+                is_underflow: usable < haven_core::profile::PROFILE_POOL_MIN,
+            })
+        })
+        .await
+    }
+
+    // NOTE: the profile plane deliberately has NO dedicated list/add/remove
+    // FFI methods. It is an ordinary relay category in storage, so Dart drives
+    // its CRUD through the generic [`Self::list_user_relays`] /
+    // [`Self::add_user_relay`] / [`Self::remove_user_relay`] with
+    // `RelayTypeFfi::Profile` — the same code path, the same validation, the
+    // same storage slot. Dedicated wrappers existed and no Dart caller ever
+    // used them; keeping two ways to do one thing on a privacy-critical
+    // surface only invites the two to drift. What is genuinely
+    // profile-specific keeps its own method: `restore_default_profile_relays`
+    // (restores the CURATED pool, not the account seed) and
+    // `profile_pool_status` (counts after contamination exclusion).
+    //
+    // Two properties of the generic path that a reader might expect a wrapper
+    // to add, and which hold without one: adding a profile relay does NOT
+    // append it to the contamination ledger (the profile category *is* the
+    // clean plane — `ContaminationSource::for_relay_type` maps it to `None`),
+    // and a relay already on the ledger stays excluded from lookups even after
+    // being added here, because contamination is historical.
+
+    /// Restores the curated profile pool non-destructively (adds back any
+    /// missing curated entry; keeps the user's own additions).
+    ///
+    /// The recovery action for a pool that has underflowed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error string on database failure.
+    pub async fn restore_default_profile_relays(&self) -> Result<(), String> {
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .restore_relay_defaults_for(haven_core::circle::RelayType::Profile)
+                .map_err(redact_profile_err)
+        })
+        .await
     }
 
     /// Hex SHA-256 of a member's CURRENT cached picture bytes, or `None`.
@@ -4739,6 +5162,90 @@ impl CircleManagerFfi {
         }
     }
 
+    /// Reconciles a BATCH of members' profile pictures on a shuffled, paced
+    /// schedule, and returns the pubkeys that were reconciled.
+    ///
+    /// # Why this exists
+    ///
+    /// [`Self::download_member_picture`] is correct per member but wrong per
+    /// roster: looping it from Dart fires the whole set back-to-back at one
+    /// Blossom host — frequently run by the same operator as a default circle
+    /// relay — so the burst is directly readable as "these N people are in this
+    /// user's circles", in roster order, at a moment that correlates with the
+    /// app coming to the foreground. The single-author kind-0 fetch would have
+    /// been pointless if the avatar fetch handed the same set over anyway.
+    ///
+    /// So this call:
+    /// * **shuffles** the order every cycle from the OS CSPRNG (`rand::OsRng`;
+    ///   `thread_rng` is banned), so arrival order carries no roster ordering
+    ///   and a newly added member does not appear at a stable position;
+    /// * runs the downloads **one at a time**, never concurrently, so there is
+    ///   no burst to fingerprint;
+    /// * sleeps a **CSPRNG-sampled** [`profile_picture_delay`] between requests,
+    ///   so the remaining inter-arrival pattern carries no exploitable
+    ///   regularity;
+    /// * bounds the whole batch by [`PROFILE_PICTURE_BATCH_DEADLINE`], and each
+    ///   individual download by whatever is left of it.
+    ///
+    /// Per-member failures (timeout, dead host, oversized blob) are absorbed:
+    /// one member's picture must not deny every other member theirs. Members
+    /// not reached inside the deadline are simply omitted from the result and
+    /// retried on the next refresh — nothing is recorded against them.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error string only on a failure that affects the whole
+    /// batch; individual download failures are absorbed.
+    pub async fn download_member_pictures(
+        &self,
+        pubkeys_hex: Vec<String>,
+    ) -> Result<Vec<String>, String> {
+        use rand::seq::SliceRandom as _;
+
+        // Normalize + de-duplicate first: a pubkey listed twice (a member of two
+        // circles) would otherwise cost a second identical request.
+        let mut order: Vec<String> = Vec::with_capacity(pubkeys_hex.len());
+        for hex in pubkeys_hex {
+            let hex = normalize_pubkey_hex(&hex);
+            if nostr::PublicKey::from_hex(&hex).is_ok() && !order.contains(&hex) {
+                order.push(hex);
+            }
+        }
+        if order.is_empty() {
+            return Ok(Vec::new());
+        }
+        order.shuffle(&mut rand::rngs::OsRng);
+
+        let deadline = tokio::time::Instant::now() + PROFILE_PICTURE_BATCH_DEADLINE;
+        let mut reconciled: Vec<String> = Vec::with_capacity(order.len());
+        for (index, pubkey_hex) in order.iter().enumerate() {
+            if index > 0 {
+                // Sleeping BEFORE the deadline check keeps the gap honest: a
+                // request must never be issued early just because the budget is
+                // about to expire.
+                tokio::time::sleep(profile_picture_delay()).await;
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                log::debug!("[profile] picture batch hit its deadline; remainder deferred");
+                break;
+            }
+            match tokio::time::timeout(remaining, self.download_member_picture(pubkey_hex.clone()))
+                .await
+            {
+                Ok(Ok(())) => reconciled.push(pubkey_hex.clone()),
+                // Already redacted by `download_member_picture`; logged, never
+                // surfaced, and never fatal to the rest of the batch.
+                Ok(Err(e)) => log::debug!("[profile] picture download failed: {e}"),
+                Err(_) => {
+                    log::debug!("[profile] picture download timed out; remainder deferred");
+                    break;
+                }
+            }
+        }
+        Ok(reconciled)
+    }
+
     /// Returns the locally cached profile for a pubkey, or `None`.
     ///
     /// Pure cache read (no network) — the synchronous hot path for member
@@ -4812,6 +5319,9 @@ impl CircleManagerFfi {
     /// profile; no secret crosses the FFI. A missing kind-0 yields an `Unknown`
     /// result rather than an error (offline-tolerant, plan D7).
     ///
+    /// Reads from the WHOLE profile pool rather than one salted-assignment
+    /// relay — see [`fetch_own_profile_across_pool`].
+    ///
     /// # Errors
     ///
     /// Returns a redacted error string on relay or database failure.
@@ -4822,16 +5332,33 @@ impl CircleManagerFfi {
         // newer-wins gate and the winning-row re-read line up.
         let own_hex = own_pk.to_hex();
         let now = profile_now_secs();
-        let relay = haven_core::relay::RelayManager::new();
-        let fetched = fetch_profiles(&relay, &[own_pk], &profile_read_relays(), now)
-            .await
-            .map_err(redact_profile_err)?;
-        if let Some(cp) = fetched.into_iter().next() {
+
+        let (fetched, settled) = match self.usable_profile_pool()? {
+            Some(pool) => {
+                let salt = self
+                    .inner
+                    .profile_relay_salt()
+                    .map_err(redact_profile_err)?;
+                let relay = haven_core::relay::RelayManager::new();
+                fetch_own_profile_across_pool(&relay, own_pk, &salt, &pool, now).await
+            }
+            // Pool underflow: nothing was asked, so nothing may be stamped.
+            None => (None, false),
+        };
+
+        if let Some(cp) = fetched {
             // Newer-wins: never let a lagging relay revert a newer cached row /
             // just-published optimistic edit (bug MEDIUM-3). Return the WINNING
             // row, which may be the kept cached one rather than this fetch.
             self.inner
                 .upsert_profile_if_newer(&cp)
+                .map_err(redact_profile_err)?;
+            // Stamp the HIT even when the upsert declined to write: kind-0 is
+            // replaceable, so an unchanged profile returns the same
+            // `created_at`, and without this the staleness clock would stay
+            // pinned to the first-ever fetch.
+            self.inner
+                .touch_profiles_hit(std::slice::from_ref(&own_hex), now)
                 .map_err(redact_profile_err)?;
             let winner = self
                 .inner
@@ -4845,9 +5372,15 @@ impl CircleManagerFfi {
             let hash = self.current_picture_hash(&own_hex, has_picture)?;
             Ok(ProfileMetadataFfi::from_cached(&winner, has_picture, hash))
         } else {
-            self.inner
-                .touch_profiles_fetched_at(std::slice::from_ref(&own_hex), now)
-                .map_err(redact_profile_err)?;
+            // Record a MISS only when a relay actually answered "nothing". If
+            // the pool underflowed, or every attempt fell to the deadline, this
+            // is an UNATTEMPTED author and stamping it would schedule a backoff
+            // for something we never asked.
+            if settled {
+                self.inner
+                    .record_profile_misses(std::slice::from_ref(&own_hex), now)
+                    .map_err(redact_profile_err)?;
+            }
             Ok(self
                 .inner
                 .get_profile(&own_hex)
@@ -4892,24 +5425,26 @@ impl CircleManagerFfi {
         let now = profile_now_secs();
 
         let relay = haven_core::relay::RelayManager::new();
-        // Resolve write relays first so the merge base is fetched from read ∪
-        // write: for a NIP-65 user whose write relays are disjoint from the
-        // discovery plane, the freshest own kind-0 lives on the WRITE relays, and
-        // reading the base from discovery alone would drop other clients' fields
-        // (bug MEDIUM-4). Haven-only users fall back to discovery (unchanged).
-        let write_relays = resolve_write_relays(&relay, &own_pk).await;
+        // Publish to the WHOLE usable pool, and use that same whole pool as the
+        // merge base. A peer's relay-assignment salt is private to their
+        // install, so we cannot know WHICH pool relay they will read us from:
+        // publishing to a subset would silently make us invisible to every peer
+        // assigned elsewhere, and merging onto a subset would drop fields
+        // another client wrote to a relay we skipped. Underflow propagates as an
+        // error — the user asked to publish, so failing to is never silent.
+        let write_relays = self
+            .inner
+            .usable_profile_relays()
+            .map_err(redact_profile_err)?;
+        let salt = self
+            .inner
+            .profile_relay_salt()
+            .map_err(redact_profile_err)?;
         // Fetch-latest so we merge onto the freshest object (never clobber fields
         // set by another client).
-        let base_cp = fetch_profiles(
-            &relay,
-            &[own_pk],
-            &self_merge_base_relays(&write_relays),
-            now,
-        )
-        .await
-        .map_err(redact_profile_err)?
-        .into_iter()
-        .next();
+        let base_cp = fetch_own_profile_across_pool(&relay, own_pk, &salt, &write_relays, now)
+            .await
+            .0;
         // Floor the republished kind-0's `created_at` above the freshest one we
         // merged onto, so a same-second edit still deterministically supersedes
         // it under NIP-01 replaceable-event semantics (otherwise a peer's forced
@@ -4996,22 +5531,23 @@ impl CircleManagerFfi {
             .await
             .map_err(redact_profile_err)?;
 
-        // Merge the resulting URL into the freshest kind-0 and publish.
-        // Resolve write relays first so the base is fetched from read ∪ write —
-        // otherwise a NIP-65 user's freshest kind-0 (on the write relays) is
-        // missed and the merge could drop other clients' fields (bug MEDIUM-4).
+        // Merge the resulting URL into the freshest kind-0 and publish, both
+        // against the WHOLE usable pool: a peer's assignment salt is private to
+        // their install, so any subset we picked could be exactly the one they
+        // do not read us from (and could omit the relay holding the freshest
+        // copy another client wrote).
         let relay = haven_core::relay::RelayManager::new();
-        let write_relays = resolve_write_relays(&relay, &own_pk).await;
-        let base_cp = fetch_profiles(
-            &relay,
-            &[own_pk],
-            &self_merge_base_relays(&write_relays),
-            now,
-        )
-        .await
-        .map_err(redact_profile_err)?
-        .into_iter()
-        .next();
+        let write_relays = self
+            .inner
+            .usable_profile_relays()
+            .map_err(redact_profile_err)?;
+        let salt = self
+            .inner
+            .profile_relay_salt()
+            .map_err(redact_profile_err)?;
+        let base_cp = fetch_own_profile_across_pool(&relay, own_pk, &salt, &write_relays, now)
+            .await
+            .0;
         // Floor the republished kind-0's `created_at` above the freshest one we
         // merged onto, so a same-second edit still deterministically supersedes
         // it under NIP-01 replaceable-event semantics (otherwise a peer's forced
@@ -5108,21 +5644,23 @@ impl CircleManagerFfi {
                 ));
         }
 
-        // Clear the `picture` field on the freshest kind-0 and republish.
-        // Resolve write relays first so the base is fetched from read ∪ write and
-        // a NIP-65 user's freshest kind-0 isn't missed (bug MEDIUM-4).
+        // Clear the `picture` field on the freshest kind-0 and republish, both
+        // against the WHOLE usable pool. A retraction that reached only a subset
+        // would leave the removed avatar live on every other pool relay — and
+        // those are precisely the relays some peers are assigned to read us
+        // from, so the "removed" picture would keep rendering for them.
         let relay = haven_core::relay::RelayManager::new();
-        let write_relays = resolve_write_relays(&relay, &own_pk).await;
-        let base_cp = fetch_profiles(
-            &relay,
-            &[own_pk],
-            &self_merge_base_relays(&write_relays),
-            now,
-        )
-        .await
-        .map_err(redact_profile_err)?
-        .into_iter()
-        .next();
+        let write_relays = self
+            .inner
+            .usable_profile_relays()
+            .map_err(redact_profile_err)?;
+        let salt = self
+            .inner
+            .profile_relay_salt()
+            .map_err(redact_profile_err)?;
+        let base_cp = fetch_own_profile_across_pool(&relay, own_pk, &salt, &write_relays, now)
+            .await
+            .0;
         // Floor the republished kind-0's `created_at` above the freshest one we
         // merged onto, so a same-second edit still deterministically supersedes
         // it under NIP-01 replaceable-event semantics (otherwise a peer's forced
@@ -5204,7 +5742,17 @@ impl CircleManagerFfi {
         }
 
         let relay = haven_core::relay::RelayManager::new();
-        let write_relays = resolve_write_relays(&relay, &own_pk).await;
+        // The WHOLE usable pool, for the same reason the publishers use it: we
+        // published to all of it, and a deletion that reached only a subset
+        // would leave the profile live on the relays some peers read us from.
+        let write_relays = self
+            .inner
+            .usable_profile_relays()
+            .map_err(redact_profile_err)?;
+        let salt = self
+            .inner
+            .profile_relay_salt()
+            .map_err(redact_profile_err)?;
 
         // 1. Blank kind-0 republish (supersedes any prior profile). Floor its
         // `created_at` above the freshest kind-0 we know about — the newer of
@@ -5213,16 +5761,10 @@ impl CircleManagerFfi {
         // edit and even when the delete lands in the same second as the last
         // edit (replaceable-event determinism — otherwise the blank could tie and
         // the relay keep the old profile, so peers never see the deletion).
-        let fetched_prev = fetch_profiles(
-            &relay,
-            &[own_pk],
-            &self_merge_base_relays(&write_relays),
-            now,
-        )
-        .await
-        .ok()
-        .and_then(|v| v.into_iter().next())
-        .and_then(|cp| u64::try_from(cp.event_created_at).ok());
+        let fetched_prev = fetch_own_profile_across_pool(&relay, own_pk, &salt, &write_relays, now)
+            .await
+            .0
+            .and_then(|cp| u64::try_from(cp.event_created_at).ok());
         let local_prev = self
             .inner
             .get_profile(&own_pk.to_hex())
@@ -5385,6 +5927,64 @@ pub fn set_discovery_relays_for_test(relays: Vec<String>) -> Result<(), String> 
 #[frb(sync)]
 pub fn set_discovery_relays_for_test(_relays: Vec<String>) -> Result<(), String> {
     Err("set_discovery_relays_for_test is disabled in release builds".to_string())
+}
+
+/// Overrides the profile-plane relay pool for E2E tests.
+///
+/// Forwards to [`haven_core::profile::set_profile_relays_for_test`] (debug
+/// builds) or returns an error in release builds. Intended to be called from a
+/// Patrol scenario's `setUpAll` (alongside [`set_default_relays_for_test`]) so
+/// kind-0 traffic resolves to hermetic local relays instead of the curated
+/// public pool.
+///
+/// This is the ONLY hook that retargets the profile plane.
+/// [`set_discovery_relays_for_test`] does not: the profile module is forbidden
+/// from reading the discovery plane at all (CI-enforced by
+/// `check_profile_privacy_boundaries.sh` check 3), because those relays already
+/// carry this account's kind-445 / kind-1059 traffic and routing kind-0 there is
+/// the cross-plane join the pool exists to break.
+///
+/// Two properties the caller must not expect to be relaxed, both inherited from
+/// the haven-core function this forwards to:
+///
+/// * The installed list is NOT exempt from contamination exclusion. An exempt
+///   override would make the E2E lane pass even if exclusion were broken.
+/// * Install at least [`haven_core::profile::PROFILE_POOL_MIN`] entries that
+///   survive normalization AND deduplication (the same local relay spelled three
+///   ways collapses to one). A shorter usable pool is accepted here and fails
+///   closed later with `PoolUnderflow`, which stops the plane resolving entirely.
+///
+/// There is deliberately no sibling READ accessor on this boundary: no
+/// profile-plane relay URL ever crosses the FFI (see [`ProfilePoolStatusFfi`],
+/// which reports counts only). A harness verifies propagation by this call
+/// returning `Ok` — the underlying `OnceLock` is install-once, so `Ok` means
+/// this list, and nothing else, is now the pool.
+///
+/// # Errors
+///
+/// * Returns an error if the override has already been installed (the
+///   underlying `OnceLock` is install-once per process).
+/// * Returns an error if `relays` is empty.
+/// * In release builds this function is unreachable; the sibling stub always
+///   returns an error.
+#[cfg(debug_assertions)]
+#[frb(sync)]
+pub fn set_profile_relays_for_test(relays: Vec<String>) -> Result<(), String> {
+    haven_core::profile::set_profile_relays_for_test(relays)
+}
+
+/// Release-build stub for [`set_profile_relays_for_test`]. Gated at the FFI
+/// wrapper itself (in addition to the haven-core function it forwards to) so a
+/// release binary contains no path that can retarget the kind-0 plane away from
+/// the curated pool. Mirrors [`set_discovery_relays_for_test`]'s release stub.
+///
+/// # Errors
+///
+/// Always returns an error.
+#[cfg(not(debug_assertions))]
+#[frb(sync)]
+pub fn set_profile_relays_for_test(_relays: Vec<String>) -> Result<(), String> {
+    Err("set_profile_relays_for_test is disabled in release builds".to_string())
 }
 
 /// Opt in to plaintext `ws://` URLs targeting loopback / emulator-host
@@ -6887,6 +7487,14 @@ impl RelayManagerFfi {
                 let enabled = match relay_type {
                     haven_core::circle::RelayType::Inbox => mgr.get_publish_inbox_relay_list(),
                     haven_core::circle::RelayType::KeyPackage => mgr.get_publish_kp_relay_list(),
+                    // FAIL-CLOSED: the profile category has no relay list to
+                    // maintain. The `Err` is absorbed below into
+                    // `RelayListAction::Suppressed`, so a caller that wires
+                    // `Profile` in by mistake publishes NOTHING (it does not
+                    // fall through to a healing republish).
+                    haven_core::circle::RelayType::Profile => {
+                        return Err(PROFILE_RELAY_LIST_UNPUBLISHABLE.to_string())
+                    }
                 }
                 .map_err(|e| e.to_string())?;
                 let user = mgr
@@ -6915,8 +7523,12 @@ impl RelayManagerFfi {
 
         // Dark Matter W2: the KeyPackage-discovery list is published as NIP-65
         // kind-10002 (`r` tags), the inbox list as kind-10050 (`relay` tags).
+        // A category with no wire kind (Profile) is suppressed here rather than
+        // probed — belt-and-braces behind the fail-closed arm in `prep` above.
         let ffi_type = RelayTypeFfi::from(relay_type);
-        let kind = relay_list_wire_kind(ffi_type);
+        let Ok(kind) = relay_list_wire_kind(ffi_type) else {
+            return RelayListCategoryOutcome::no_publish(RelayListAction::Suppressed);
+        };
 
         // PER-RELAY network probe of the user's OWN relays for a current list
         // (the wire kind authored by self). Unlike a merged fetch, this detects
@@ -6948,7 +7560,7 @@ impl RelayManagerFfi {
                 .events
                 .iter()
                 .max_by_key(|e| e.created_at.as_secs())
-                .map(|e| relay_list_urls_for(ffi_type, e))
+                .and_then(|e| relay_list_urls_for(ffi_type, e).ok())
                 .unwrap_or_default();
             let healthy = list_relay_healthy(&on_relay_urls, &configured);
             responders.push(RelayListPerRelay {
@@ -7931,11 +8543,11 @@ mod tests {
         // Wire kind per category.
         assert_eq!(
             relay_list_wire_kind(RelayTypeFfi::Inbox),
-            nostr::Kind::InboxRelays
+            Ok(nostr::Kind::InboxRelays)
         );
         assert_eq!(
             relay_list_wire_kind(RelayTypeFfi::Nip65),
-            nostr::Kind::RelayList
+            Ok(nostr::Kind::RelayList)
         );
         assert_eq!(
             nostr::Kind::RelayList.as_u16(),
@@ -7972,6 +8584,170 @@ mod tests {
             nostr::Kind::RelayList,
             "Nip65 relay-list event must be kind 10002"
         );
+    }
+
+    /// The profile relay category is STRUCTURALLY unpublishable: every
+    /// relay-list code path that takes a [`RelayTypeFfi`] must fail closed for
+    /// `Profile` — never fall through to a default, and above all never borrow
+    /// `Nip65`'s builder.
+    ///
+    /// Why this test and not a compiler check: these functions match on the FFI
+    /// enum, not on the core `RelayType`, so adding the variant did NOT make
+    /// them non-exhaustive. A `_ =>` arm (or an arm mapping `Profile` onto
+    /// `Nip65` "to make it compile") would publish a signed kind-10002 naming
+    /// this account's profile relays, handing any observer the exact
+    /// identity→profile-plane pointer the separation exists to break. Only a
+    /// test can catch that.
+    #[test]
+    fn profile_relay_category_is_structurally_unpublishable() {
+        let keys = nostr::Keys::generate();
+        let urls = vec!["wss://relay.example".to_string()];
+
+        // 1. The wire-kind choke point every publish path funnels through.
+        assert!(
+            relay_list_wire_kind(RelayTypeFfi::Profile).is_err(),
+            "the profile category must have NO on-wire relay-list kind",
+        );
+
+        // 2. The signed-event builder.
+        assert!(
+            build_relay_list_event_for(RelayTypeFfi::Profile, &keys, &urls, None).is_err(),
+            "no relay-list event may ever be built for the profile plane",
+        );
+
+        // 3. The empty-replacement (unpublish) builder. An "empty" list is
+        //    still a signed public event tying the identity to the category.
+        assert!(
+            build_relay_list_unpublish_for(RelayTypeFfi::Profile, &keys, None).is_err(),
+            "no empty-replacement may ever be built for the profile plane",
+        );
+
+        // 4. The on-relay URL extractor used by the maintenance healer. An
+        //    empty Vec here would read as "the list was dropped from this
+        //    relay" and could drive the healer into publishing one.
+        let probe = nostr::EventBuilder::new(nostr::Kind::RelayList, "")
+            .sign_with_keys(&keys)
+            .expect("sign probe event");
+        assert!(
+            relay_list_urls_for(RelayTypeFfi::Profile, &probe).is_err(),
+            "there is no wire form to extract for the profile plane",
+        );
+
+        // 5. The core type carries the same property, so the two layers cannot
+        //    drift: the storage slot round-trips, and the core has no kind.
+        assert_eq!(
+            haven_core::circle::RelayType::from(RelayTypeFfi::Profile),
+            haven_core::circle::RelayType::Profile,
+        );
+        assert_eq!(
+            RelayTypeFfi::from(haven_core::circle::RelayType::Profile),
+            RelayTypeFfi::Profile,
+        );
+        assert!(
+            haven_core::circle::RelayType::Profile.to_kind().is_none(),
+            "RelayType::Profile must have no publishable kind",
+        );
+
+        // 6. And it is NOT silently aliased onto a publishable category.
+        assert_ne!(RelayTypeFfi::Profile, RelayTypeFfi::Nip65);
+        assert_ne!(RelayTypeFfi::Profile, RelayTypeFfi::Inbox);
+        assert_ne!(
+            haven_core::circle::RelayType::from(RelayTypeFfi::Profile),
+            haven_core::circle::RelayType::KeyPackage,
+            "mapping Profile onto the KeyPackage slot would publish the profile plane as kind 10002",
+        );
+
+        // 7. The shared error text leaks nothing (no URL, no count).
+        let err = relay_list_wire_kind(RelayTypeFfi::Profile).unwrap_err();
+        assert!(!err.contains("wss://") && !err.contains("://"));
+        assert!(!err.chars().any(|c| c.is_ascii_digit()));
+    }
+
+    /// Builds an `AssignedFetch` with one author in each bucket.
+    fn three_bucket_outcome() -> (AssignedFetch, String, String, String) {
+        let resolved_pk = nostr::Keys::generate().public_key();
+        let missed_pk = nostr::Keys::generate().public_key();
+        let unattempted_pk = nostr::Keys::generate().public_key();
+        let outcome = AssignedFetch {
+            resolved: vec![known_cached(&resolved_pk.to_hex())],
+            missed: vec![missed_pk],
+            unattempted: vec![unattempted_pk],
+        };
+        (
+            outcome,
+            resolved_pk.to_hex(),
+            missed_pk.to_hex(),
+            unattempted_pk.to_hex(),
+        )
+    }
+
+    /// An author the cycle never reached must be stamped **in no way at all**.
+    ///
+    /// This is the bug the assigned-fetch rewrite fixed: the previous code
+    /// stamped every *intended* author with the old blanket
+    /// `touch_profiles_fetched_at` (since deleted from the core), so an
+    /// author dropped at the batch deadline looked freshly fetched (or, under
+    /// the miss-aware cache, would look like a genuine relay "no") and stayed
+    /// `Unknown` for a whole staleness tier / backed off onto a second relay.
+    #[test]
+    fn unattempted_authors_are_stamped_neither_hit_nor_miss() {
+        let (outcome, resolved_hex, missed_hex, unattempted_hex) = three_bucket_outcome();
+        let lists = profile_stamp_lists(&outcome);
+
+        assert_eq!(lists.hits, vec![resolved_hex], "only resolved authors hit");
+        assert_eq!(lists.misses, vec![missed_hex], "only answered authors miss");
+        assert!(
+            !lists.hits.contains(&unattempted_hex),
+            "an unattempted author must never be stamped as a hit (fake freshness)",
+        );
+        assert!(
+            !lists.misses.contains(&unattempted_hex),
+            "an unattempted author must never be stamped as a miss (it would advance the retry \
+             ladder onto a second relay and widen that author's disclosure)",
+        );
+    }
+
+    /// The degenerate cases: nothing attempted ⇒ nothing stamped.
+    #[test]
+    fn an_all_unattempted_cycle_stamps_nothing() {
+        let outcome = AssignedFetch {
+            resolved: Vec::new(),
+            missed: Vec::new(),
+            unattempted: (0..4)
+                .map(|_| nostr::Keys::generate().public_key())
+                .collect(),
+        };
+        let lists = profile_stamp_lists(&outcome);
+        assert_eq!(lists, ProfileStampLists::default());
+    }
+
+    /// The pool-status view is COUNTS ONLY: no relay URL may cross the FFI.
+    ///
+    /// The struct is what Dart renders a "profile lookups paused" banner from.
+    /// A URL field would hand the UI layer — and every crash/analytics sink it
+    /// feeds — an enumeration of which relays this install resolves profiles
+    /// from, i.e. the profile plane itself, re-creating in the app the pointer
+    /// Haven refuses to publish on the wire.
+    #[test]
+    fn profile_pool_status_carries_counts_only_never_urls() {
+        let status = ProfilePoolStatusFfi {
+            configured: 8,
+            excluded: 6,
+            usable: 2,
+            is_underflow: true,
+        };
+        let rendered = format!("{status:?}");
+        assert!(
+            !rendered.contains("://") && !rendered.to_lowercase().contains("wss"),
+            "no relay URL may appear in the pool status: {rendered}",
+        );
+        // Field-level proof (a future String field would show up here as a
+        // quoted value, which counts never produce).
+        assert!(
+            !rendered.contains('"'),
+            "the pool status must carry no string fields at all: {rendered}",
+        );
+        assert_eq!(status.configured - status.excluded, status.usable);
     }
 
     /// The seconds→milliseconds cursor conversion (M2) must scale by 1000 and
@@ -8974,5 +9750,250 @@ mod maintenance_real_ffi_tests {
             .maintain_key_package(circle, secret)
             .await
             .expect("maintain_key_package must not error")
+    }
+
+    // ------------------------------------------------------------------------
+    // Profile plane: every publish-side FFI entry point must FAIL CLOSED for
+    // `RelayTypeFfi::Profile`, against a REAL manager (real circles.db).
+    //
+    // These methods match on the FFI enum rather than the core `RelayType`, so
+    // adding the `Profile` variant left them compiling — a `_ =>` default or an
+    // arm reusing the `Nip65` toggle/builder would have shipped silently and
+    // published a signed kind-10002 naming this account's profile relays. No
+    // relay is contacted: every assertion is reached before any network call.
+    //
+    // `relay_publish_targets` belongs here even though it signs and publishes
+    // nothing: it returns the exact URL list a publish loop consumes, and it
+    // was for a while the ONE member of this surface without a `Profile` arm —
+    // its local-only guarantee resting on a doc-comment convention rather than
+    // on the type. An asymmetry like that is what a later refactor generalizes
+    // in the wrong direction.
+    // ------------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn profile_relay_category_fails_closed_on_every_publish_entry_point() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+
+        let keys = Keys::generate();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("profile_failclosed");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+
+        // The publish TOGGLE has no meaning for a category that cannot be
+        // published; offering one would invite a "just default it on" change.
+        assert!(
+            circle
+                .get_publish_relay_list(RelayTypeFfi::Profile)
+                .await
+                .is_err(),
+            "the profile category must expose no publish toggle to read",
+        );
+        assert!(
+            circle
+                .set_publish_relay_list(RelayTypeFfi::Profile, true)
+                .await
+                .is_err(),
+            "the profile category must expose no publish toggle to set",
+        );
+
+        // The three signed-event entry points Dart can reach.
+        assert!(
+            circle
+                .build_relay_list_publish(secret.clone(), RelayTypeFfi::Profile)
+                .await
+                .is_err(),
+            "no relay-list publish may ever be built for the profile plane",
+        );
+        assert!(
+            circle
+                .build_unpublish_relay_list(secret.clone(), RelayTypeFfi::Profile)
+                .await
+                .is_err(),
+            "no unpublish may ever be built for the profile plane",
+        );
+        assert!(
+            circle
+                .build_relay_removal_scrub(
+                    secret.clone(),
+                    RelayTypeFfi::Profile,
+                    vec!["wss://dropped.example".to_string()],
+                )
+                .await
+                .is_err(),
+            "no removal scrub may ever be built for the profile plane (nothing was published)",
+        );
+
+        // The target RESOLVER too: it builds no event, but it returns the URL
+        // list a publish loop feeds on, so handing one back for `Profile` would
+        // make the local-only property a Dart-side convention.
+        assert!(
+            circle
+                .relay_publish_targets(RelayTypeFfi::Profile)
+                .await
+                .is_err(),
+            "no publish targets may ever be resolved for the profile plane",
+        );
+
+        // Control: the two publishable categories still work, so the assertions
+        // above are proving fail-CLOSED and not merely a broken manager.
+        assert!(
+            circle
+                .get_publish_relay_list(RelayTypeFfi::Inbox)
+                .await
+                .is_ok(),
+            "the inbox category must remain publishable",
+        );
+        assert!(
+            circle
+                .get_publish_relay_list(RelayTypeFfi::Nip65)
+                .await
+                .is_ok(),
+            "the NIP-65 category must remain publishable",
+        );
+        assert!(
+            circle
+                .relay_publish_targets(RelayTypeFfi::Inbox)
+                .await
+                .is_ok(),
+            "the inbox category must still resolve publish targets",
+        );
+        assert!(
+            circle
+                .relay_publish_targets(RelayTypeFfi::Nip65)
+                .await
+                .is_ok(),
+            "the NIP-65 category must still resolve publish targets",
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // Profile plane: the local-only CRUD surface + the counts-only pool status,
+    // against a REAL manager. No network: every call is pure local storage.
+    //
+    // The CRUD is exercised through the GENERIC relay methods with
+    // `RelayTypeFfi::Profile` — the path Dart actually uses (there are no
+    // dedicated profile CRUD wrappers; see the note next to
+    // `restore_default_profile_relays`). Testing the generic path is the point:
+    // it is what would break if `RelayType::Profile` ever stopped round-tripping
+    // through the shared storage slot.
+    // ------------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn profile_relay_crud_is_local_and_pool_status_reports_counts() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+
+        let keys = Keys::generate();
+        let dir = DataDir::new("profile_crud");
+        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+
+        // A fresh manager seeds no relay defaults; first launch does it.
+        assert!(
+            circle
+                .seed_relay_defaults_if_unseeded()
+                .await
+                .expect("seed_relay_defaults_if_unseeded"),
+            "the first seed on a fresh install must write rows",
+        );
+
+        let seeded = circle
+            .list_user_relays(RelayTypeFfi::Profile)
+            .await
+            .expect("list profile relays");
+        assert!(
+            !seeded.is_empty(),
+            "the profile category must seed from the curated pool",
+        );
+
+        let added = "wss://profile-extra.example".to_string();
+        circle
+            .add_user_relay(added.clone(), RelayTypeFfi::Profile)
+            .await
+            .expect("add profile relay");
+        let after_add = circle
+            .list_user_relays(RelayTypeFfi::Profile)
+            .await
+            .expect("list after add");
+        assert_eq!(after_add.len(), seeded.len() + 1, "the add must persist");
+        assert!(after_add.contains(&added));
+
+        assert!(
+            circle
+                .remove_user_relay(added.clone(), RelayTypeFfi::Profile)
+                .await
+                .expect("remove profile relay"),
+            "removing a present relay must report a removal",
+        );
+        assert_eq!(
+            circle
+                .list_user_relays(RelayTypeFfi::Profile)
+                .await
+                .expect("list after remove")
+                .len(),
+            seeded.len(),
+        );
+
+        // Local-only: the CRUD above changed rows the profile plane reads, and
+        // NONE of it made the category publishable. `relay_publish_targets` is
+        // the one relay-list reader that hands Dart a bare URL list, so it must
+        // refuse `Profile` like every publish-side entry point does — otherwise
+        // "local-only" rests on Dart's discipline rather than on the FFI.
+        assert!(
+            circle
+                .relay_publish_targets(RelayTypeFfi::Profile)
+                .await
+                .is_err(),
+            "the profile category must expose no publish targets",
+        );
+
+        // Non-destructive restore: idempotent on an already-complete pool.
+        circle
+            .restore_default_profile_relays()
+            .await
+            .expect("restore_default_profile_relays");
+        assert_eq!(
+            circle
+                .list_user_relays(RelayTypeFfi::Profile)
+                .await
+                .expect("list after restore")
+                .len(),
+            seeded.len(),
+        );
+
+        // Pool status: counts only, internally consistent, and healthy on a
+        // fresh install (nothing has been contaminated yet).
+        let status = circle
+            .profile_pool_status()
+            .await
+            .expect("profile_pool_status");
+        assert!(status.configured > 0);
+        assert_eq!(
+            status.configured - status.excluded,
+            status.usable,
+            "configured - excluded must equal usable",
+        );
+        assert!(
+            !status.is_underflow,
+            "a fresh install has a clean, usable profile pool",
+        );
+
+        // Adding a LOCATION-plane relay contaminates it. If it is also a profile
+        // relay it must drop out of `usable` — that subtraction is the whole
+        // plane-separation mechanism, and a status that never moved would mean
+        // the ledger is not being consulted.
+        let shared = seeded.first().expect("at least one pool relay").clone();
+        circle
+            .add_user_relay(shared, RelayTypeFfi::Inbox)
+            .await
+            .expect("add inbox relay");
+        let after = circle
+            .profile_pool_status()
+            .await
+            .expect("profile_pool_status after contamination");
+        assert!(
+            after.excluded > status.excluded && after.usable < status.usable,
+            "a relay added to the location plane must be excluded from the profile pool",
+        );
     }
 }

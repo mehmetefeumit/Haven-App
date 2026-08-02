@@ -83,6 +83,12 @@ void main() {
       expect(l10n.addRelaySheetTitleKeyPackage, 'Add KeyPackage relay');
     });
 
+    testWidgets('shows the Profile title', (tester) async {
+      final l10n = await _openSheet(tester, RelayCategory.profile);
+      expect(find.text(l10n.addRelaySheetTitleProfile), findsOneWidget);
+      expect(l10n.addRelaySheetTitleProfile, 'Add Profile relay');
+    });
+
     testWidgets('shows the technical hint, paste tooltip, and actions', (
       tester,
     ) async {

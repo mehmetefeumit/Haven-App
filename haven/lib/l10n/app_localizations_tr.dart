@@ -272,7 +272,26 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get relaySettingsKeyPackageSubtitle =>
-      'kind 10002, davet edenlerin anahtarlarınızı bulduğu ve herkese açık profilinizin yayımlandığı yer';
+      'kind 10002, sizi davet etmek için gereken anahtarları başkalarının bulduğu yer';
+
+  @override
+  String get relaySettingsProfileTitle => 'Profil Aktarıcılarım';
+
+  @override
+  String get relaySettingsProfileSubtitle =>
+      'kind 0, herkese açık profilinizin sorgulandığı ve yayımlandığı yer — bu aktarıcılar diğer aktarıcılarınızdan ayrı tutulur ve profil aktarıcılarınızın listesi hiçbir zaman yayımlanmaz';
+
+  @override
+  String get relaySettingsProfileUnderflowTitle =>
+      'Profil sorguları duraklatıldı';
+
+  @override
+  String get relaySettingsProfileUnderflowMessage =>
+      'Geriye çok az Profil aktarıcısı kaldı; bu nedenle üyelerin adları ve fotoğrafları artık güncellenmeyecek.';
+
+  @override
+  String get relaySettingsProfileUnderflowRestoreButton =>
+      'Varsayılan profil aktarıcılarını geri yükle';
 
   @override
   String get relaySettingsLoadRelaysError => 'Aktarıcılar yüklenemedi.';
@@ -347,6 +366,15 @@ class AppLocalizationsTr extends AppLocalizations {
   @override
   String get relaySettingsEmptyMessage =>
       'Başkalarının size ulaşabilmesi için en az bir aktarıcıya ihtiyacınız var. Haven varsayılanlarını geri yüklemek için aşağıya dokunun.';
+
+  @override
+  String get relaySettingsProfileContaminationTooltip =>
+      'Diğer Haven trafiğinizi de taşıyor';
+
+  @override
+  String relaySettingsProfileContaminationSemantics(String url) {
+    return 'Uyarı: $url diğer Haven trafiğinizi de taşıyor; bu nedenle bu aktarıcı profilinizi o trafikle ilişkilendirebilir';
+  }
 
   @override
   String get locationSettingsTitle => 'Konum';
@@ -640,8 +668,8 @@ class AppLocalizationsTr extends AppLocalizations {
       'Haven birden fazla aktarıcı kullanır; böylece hiçbiri tek başına bağlantınızı kesemez. Biri çevrimdışı olursa diğerleri çalışmaya devam eder. Davetlerin size ulaştığı aktarıcıları siz seçersiniz; bir çevrenin kullandığı aktarıcılar ise o çevre oluşturulurken belirlenir.';
 
   @override
-  String get privacyRelaysTwoLists =>
-      'Haven sizin için iki liste tutar. Davetler, gelen kutusu aktarıcılarınıza ulaşır. Sizi davet etmek için gereken anahtarları başkaları KeyPackage aktarıcılarınızdan alır. Her çevrenin de kendi listesi vardır ve o çevrenin şifreli güncellemeleri bu listedeki aktarıcılardan geçer.';
+  String get privacyRelaysYourLists =>
+      'Haven sizin için üç liste tutar. Davetler, gelen kutusu aktarıcılarınıza ulaşır; sizi davet etmek için gereken anahtarlar ise KeyPackage aktarıcılarınızdan alınır — Haven, başkaları bulabilsin diye bu iki listeyi yayımlar. Profil aktarıcılarınız ise farklıdır: adınız ve fotoğrafınız buralarda sorgulanır ve yayımlanır, ama listenin kendisi cihazınızda kalır ve hiçbir zaman yayımlanmaz. Bu nedenle, yalnızca konum trafiğinizi ya da davetlerinizi taşıyan bir aktarıcının, profiliniz için hangi aktarıcıları kullandığınızı öğrenebileceği herkese açık bir liste yoktur. Her çevrenin de kendi listesi vardır ve o çevrenin şifreli güncellemeleri bu listedeki aktarıcılardan geçer.';
 
   @override
   String get privacyRelaysMeansForYou =>
@@ -2020,6 +2048,9 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get addRelaySheetTitleKeyPackage => 'KeyPackage aktarıcısı ekle';
+
+  @override
+  String get addRelaySheetTitleProfile => 'Profil aktarıcısı ekle';
 
   @override
   String get addRelaySheetHint => 'wss://relay.example.com';

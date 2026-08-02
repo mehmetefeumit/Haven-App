@@ -270,7 +270,26 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get relaySettingsKeyPackageSubtitle =>
-      'جہاں مدعو کیے جانے والے آپ کی کلیدیں پاتے ہیں اور آپ کا عوامی پروفائل شائع ہوتا ہے (kind 10002)';
+      'جہاں دوسرے وہ کلیدیں پاتے ہیں جو آپ کو مدعو کرنے کے لیے درکار ہوتی ہیں (kind 10002)';
+
+  @override
+  String get relaySettingsProfileTitle => 'میرے پروفائل ریلے';
+
+  @override
+  String get relaySettingsProfileSubtitle =>
+      'جہاں آپ کا عوامی پروفائل تلاش اور شائع کیا جاتا ہے۔ یہ ریلے آپ کے باقی ریلے سے الگ رکھے جاتے ہیں، اور پروفائل ریلے کی فہرست کبھی شائع نہیں کی جاتی (kind 0)';
+
+  @override
+  String get relaySettingsProfileUnderflowTitle =>
+      'پروفائل کی تلاش رُکی ہوئی ہے';
+
+  @override
+  String get relaySettingsProfileUnderflowMessage =>
+      'پروفائل ریلے بہت کم رہ گئے ہیں، اس لیے ارکان کے نام اور تصاویر اب اپ ڈیٹ نہیں ہوں گے۔';
+
+  @override
+  String get relaySettingsProfileUnderflowRestoreButton =>
+      'طے شدہ پروفائل ریلے بحال کریں';
 
   @override
   String get relaySettingsLoadRelaysError => 'ریلے لوڈ نہ ہو سکے۔';
@@ -344,6 +363,15 @@ class AppLocalizationsUr extends AppLocalizations {
   @override
   String get relaySettingsEmptyMessage =>
       'آپ کو کم از کم ایک ریلے درکار ہے تاکہ دوسرے آپ تک پہنچ سکیں۔ Haven کے طے شدہ ریلے بحال کرنے کے لیے نیچے تھپتھپائیں۔';
+
+  @override
+  String get relaySettingsProfileContaminationTooltip =>
+      'Haven کا دوسرا ٹریفک بھی لے جاتا ہے';
+
+  @override
+  String relaySettingsProfileContaminationSemantics(String url) {
+    return 'تنبیہ: $url آپ کا دوسرا Haven ٹریفک بھی لے جاتا ہے، اس لیے یہ ریلے آپ کے پروفائل کو اُس ٹریفک سے جوڑ سکتا ہے';
+  }
 
   @override
   String get locationSettingsTitle => 'مقام';
@@ -632,8 +660,8 @@ class AppLocalizationsUr extends AppLocalizations {
       'Haven کئی ریلے استعمال کرتا ہے، چنانچہ کوئی ایک بھی آپ کو کاٹ نہیں سکتا۔ ایک آف لائن ہو جائے تو باقی کام کرتے رہتے ہیں۔ آپ وہ ریلے چنتے ہیں جہاں دعوت نامے آپ تک پہنچتے ہیں؛ کوئی حلقہ جو ریلے استعمال کرتا ہے، وہ اس حلقے کے بننے کے وقت طے ہو جاتے ہیں۔';
 
   @override
-  String get privacyRelaysTwoLists =>
-      'Haven آپ کے لیے دو فہرستیں رکھتا ہے۔ اِن باکس ریلے وہ ہیں جہاں دعوت نامے آپ تک پہنچتے ہیں۔ KeyPackage ریلے وہ ہیں جہاں سے لوگ وہ کلیدیں لیتے ہیں جو آپ کو مدعو کرنے کے لیے درکار ہوتی ہیں۔ ہر حلقہ اپنی الگ فہرست بھی رکھتا ہے، اور حلقے کی خفیہ کردہ اپ ڈیٹس اسی فہرست سے سفر کرتی ہیں۔';
+  String get privacyRelaysYourLists =>
+      'Haven آپ کے لیے تین فہرستیں رکھتا ہے۔ اِن باکس ریلے وہ ہیں جہاں دعوت نامے آپ تک پہنچتے ہیں، اور KeyPackage ریلے وہ ہیں جہاں سے لوگ وہ کلیدیں لیتے ہیں جو آپ کو مدعو کرنے کے لیے درکار ہوتی ہیں — Haven یہ دونوں فہرستیں شائع کرتا ہے تاکہ دوسرے انہیں ڈھونڈ سکیں۔ آپ کے پروفائل ریلے اِن سے مختلف ہیں: وہیں آپ کا نام اور تصویر تلاش اور شائع کیے جاتے ہیں، لیکن فہرست خود آپ کے آلے پر ہی رہتی ہے اور کبھی شائع نہیں کی جاتی۔ چنانچہ جو ریلے صرف آپ کے مقام کا ٹریفک یا دعوت نامے لے جاتا ہے، اس کے پاس کوئی عوامی فہرست نہیں جو اسے بتائے کہ آپ اپنے پروفائل کے لیے کون سے ریلے استعمال کرتے ہیں۔ ہر حلقہ اپنی الگ فہرست بھی رکھتا ہے، اور حلقے کی خفیہ کردہ اپ ڈیٹس اسی فہرست سے سفر کرتی ہیں۔';
 
   @override
   String get privacyRelaysMeansForYou =>
@@ -2013,6 +2041,9 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get addRelaySheetTitleKeyPackage => 'KeyPackage ریلے شامل کریں';
+
+  @override
+  String get addRelaySheetTitleProfile => 'پروفائل ریلے شامل کریں';
 
   @override
   String get addRelaySheetHint => 'wss://relay.example.com';

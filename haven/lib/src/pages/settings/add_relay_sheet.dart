@@ -137,6 +137,7 @@ class _AddRelaySheetState extends State<_AddRelaySheet> {
     final title = switch (widget.category) {
       RelayCategory.inbox => l10n.addRelaySheetTitleInbox,
       RelayCategory.keyPackage => l10n.addRelaySheetTitleKeyPackage,
+      RelayCategory.profile => l10n.addRelaySheetTitleProfile,
     };
 
     return Padding(

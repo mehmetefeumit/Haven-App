@@ -28,9 +28,8 @@
 //! No group identifiers ever appear here: kind-0 events carry no `h` tag and
 //! no group id (test-pinned).
 
-use nostr::{Event, EventBuilder, Filter, Keys, Kind, Metadata, PublicKey, Timestamp};
+use nostr::{Event, EventBuilder, Keys, Metadata, Timestamp};
 
-use super::config::{profile_read_relays, profile_write_relays, PROFILE_FETCH_TIMEOUT};
 use super::error::{ProfileError, Result};
 use super::merge::enforce_name_rule;
 use super::types::ProfileMetadata;
@@ -162,32 +161,13 @@ pub async fn publish_metadata(
     }
 }
 
-/// Resolves the user's own kind-0 write relays (NIP-65 kind 10002).
-///
-/// Fetches the user's replaceable relay list from the AUTH-free discovery
-/// plane, extracts the **write**-capable relays
-/// ([`RelayManager::extract_nip65_write_relays`]), and applies the
-/// [`profile_write_relays`] fallback (discovery plane when the user configured
-/// none). Never a circle's relays. A transient fetch failure degrades to the
-/// discovery-plane fallback rather than erroring — profile publishing should
-/// not hard-fail because a relay-list lookup blipped.
-pub async fn resolve_write_relays(relay: &RelayManager, author: &PublicKey) -> Vec<String> {
-    let filter = Filter::new().kind(Kind::RelayList).author(*author).limit(1);
-    let events = relay
-        .fetch_events(filter, &profile_read_relays(), Some(PROFILE_FETCH_TIMEOUT))
-        .await
-        .unwrap_or_default();
-    let configured = events
-        .first()
-        .map(|event| RelayManager::extract_nip65_write_relays(&event.tags))
-        .unwrap_or_default();
-    profile_write_relays(&configured)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::JsonUtil;
+    // `Kind` is used only by the assertions below — importing it at file scope
+    // would make it dead code in a release build now that the relay-resolution
+    // helpers have moved out of this module.
+    use nostr::{JsonUtil, Kind};
 
     fn md_from(json: &str) -> ProfileMetadata {
         ProfileMetadata::from_metadata(Metadata::from_json(json).expect("valid json"))

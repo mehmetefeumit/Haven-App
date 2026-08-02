@@ -1,10 +1,13 @@
 //! Integration tests pinning the profile fetch/publish path's group-isolation
 //! and no-AUTH privacy invariants over real in-process relays.
 //!
-//! * `profile_fetch_never_dials_the_circle_relay`: given ONLY a "discovery"
-//!   relay, `fetch_profiles` resolves an author whose kind-0 lives there but
-//!   NEVER resolves an author whose kind-0 lives only on a separate "circle"
-//!   relay — proving the fetch never rode the circle relay set.
+//! * `profile_fetch_never_dials_the_circle_relay`: given a pool holding ONLY a
+//!   "discovery" relay, `fetch_profiles_assigned` resolves an author whose
+//!   kind-0 lives there but NEVER resolves an author whose kind-0 lives only on
+//!   a separate "circle" relay — proving the fetch never rode the circle relay
+//!   set. (A two-relay proof that COUNTS the circle relay's `REQ`s, rather than
+//!   inferring from what failed to resolve, lives in
+//!   `profile_plane_separation.rs::profile_plane_never_touches_circle_relays_e2e`.)
 //! * `published_kind0_carries_no_group_identifier`: a built+published kind-0
 //!   carries no `h` tag / group id.
 //! * `fetch_never_answers_nip42_auth`: against an AUTH-required (NIP-42 Read)
@@ -13,9 +16,11 @@
 
 use std::time::Duration;
 
-use haven_core::profile::{build_metadata_event, fetch_profiles, ProfileMetadata};
+use haven_core::profile::{
+    build_metadata_event, fetch_profiles_assigned, AssignedFetch, ProfileMetadata, ProfileRelaySalt,
+};
 use haven_core::relay::{allow_ws_loopback_for_test, RelayManager};
-use nostr::{JsonUtil, Keys, Metadata};
+use nostr::{JsonUtil, Keys, Metadata, PublicKey};
 use nostr_relay_builder::builder::{RelayBuilder, RelayBuilderNip42, RelayBuilderNip42Mode};
 use nostr_relay_builder::{LocalRelay, MockRelay};
 use nostr_sdk::Client;
@@ -26,6 +31,12 @@ fn metadata(json: &str) -> ProfileMetadata {
     ProfileMetadata::from_metadata(Metadata::from_json(json).expect("valid json"))
 }
 
+/// A FIXED assignment salt — never [`ProfileRelaySalt::generate`], so which
+/// relay an author is asked of is reproducible across runs.
+fn salt() -> ProfileRelaySalt {
+    ProfileRelaySalt::from_bytes([0xAA; 32])
+}
+
 /// Publishes a kind-0 for `keys` to exactly `url` via a raw client.
 async fn publish_to(url: &str, keys: &Keys, meta: &ProfileMetadata) {
     let event = build_metadata_event(keys, meta, None).expect("build kind-0");
@@ -33,6 +44,17 @@ async fn publish_to(url: &str, keys: &Keys, meta: &ProfileMetadata) {
     client.add_relay(url).await.unwrap();
     client.connect().await;
     client.send_event(&event).await.expect("publish");
+}
+
+/// Requests every author in `authors` at attempt 0 from a one-relay pool.
+///
+/// A one-relay pool pins the rendezvous ranking: every author is assigned to
+/// `url` and to nothing else, which is exactly the condition these tests need.
+async fn fetch_from(relay: &RelayManager, authors: &[PublicKey], url: &str) -> AssignedFetch {
+    let requests: Vec<(PublicKey, u8)> = authors.iter().map(|author| (*author, 0)).collect();
+    fetch_profiles_assigned(relay, &requests, &salt(), &[url.to_string()], NOW)
+        .await
+        .expect("fetch")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -62,28 +84,42 @@ async fn profile_fetch_never_dials_the_circle_relay() {
     .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // Fetch BOTH authors but target ONLY the discovery relay.
+    // Fetch BOTH authors from a pool containing ONLY the discovery relay, so
+    // both are assigned to it and the circle relay is never a target.
     let manager = RelayManager::new();
-    let profiles = fetch_profiles(
+    let fetched = fetch_from(
         &manager,
         &[on_discovery.public_key(), on_circle.public_key()],
-        std::slice::from_ref(&url_discovery),
-        NOW,
+        &url_discovery,
     )
-    .await
-    .expect("fetch");
+    .await;
 
     assert!(
-        profiles
+        fetched
+            .resolved
             .iter()
             .any(|p| p.pubkey_hex == on_discovery.public_key().to_hex()),
         "the discovery-relay author resolves"
     );
     assert!(
-        !profiles
+        !fetched
+            .resolved
             .iter()
             .any(|p| p.pubkey_hex == on_circle.public_key().to_hex()),
         "the circle-only author must NOT resolve — the fetch never dialed the circle relay"
+    );
+    // The circle-only author is a MISS, not an unattempted author: it WAS
+    // requested, from the discovery relay, which does not hold its kind-0.
+    // Asserting the bucket (rather than mere absence from `resolved`) is what
+    // rules out the vacuous pass where no request was issued at all.
+    assert_eq!(
+        fetched.missed,
+        vec![on_circle.public_key()],
+        "the circle-only author was asked for — from the discovery relay — and missed",
+    );
+    assert!(
+        fetched.unattempted.is_empty(),
+        "both authors were queried; an unattempted author would void the assertions above",
     );
 }
 
@@ -122,16 +158,19 @@ async fn fetch_never_answers_nip42_auth() {
     // challenge. The read therefore yields nothing (the relay refuses to serve
     // an unauthenticated REQ) — the fetch is never attributable to a signer.
     let manager = RelayManager::new();
-    let profiles = fetch_profiles(
-        &manager,
-        &[author.public_key()],
-        std::slice::from_ref(&url),
-        NOW,
-    )
-    .await
-    .expect("fetch returns (empty), never authenticates");
+    let fetched = fetch_from(&manager, &[author.public_key()], &url).await;
     assert!(
-        profiles.is_empty(),
+        fetched.resolved.is_empty(),
         "an AUTH-required read must resolve nothing — the fetch path never answers NIP-42 AUTH"
     );
+    // The `REQ` was issued and the relay answered it (with an auth-required
+    // refusal the SDK absorbs into an empty result), so the author is a MISS.
+    // Without this the test would pass just as happily on a dead socket and
+    // would prove nothing about AUTH.
+    assert_eq!(
+        fetched.missed,
+        vec![author.public_key()],
+        "the refusal must land as a miss — proof the REQ reached the relay",
+    );
+    assert!(fetched.unattempted.is_empty());
 }

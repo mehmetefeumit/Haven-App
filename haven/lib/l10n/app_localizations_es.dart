@@ -275,7 +275,26 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get relaySettingsKeyPackageSubtitle =>
-      'Donde los invitados encuentran tus claves y se publica tu perfil público (kind 10002)';
+      'Donde los demás encuentran las claves que necesitan para invitarte (kind 10002)';
+
+  @override
+  String get relaySettingsProfileTitle => 'Mis relés de perfil';
+
+  @override
+  String get relaySettingsProfileSubtitle =>
+      'Donde se consulta y se publica tu perfil público. Estos relés se mantienen aparte de tus demás relés, y la lista de relés de perfil nunca se publica (kind 0)';
+
+  @override
+  String get relaySettingsProfileUnderflowTitle =>
+      'Consultas de perfil en pausa';
+
+  @override
+  String get relaySettingsProfileUnderflowMessage =>
+      'No quedan suficientes relés de perfil, así que los nombres y las fotos de los miembros dejarán de actualizarse.';
+
+  @override
+  String get relaySettingsProfileUnderflowRestoreButton =>
+      'Restaurar relés de perfil predeterminados';
 
   @override
   String get relaySettingsLoadRelaysError => 'No se pudieron cargar los relés.';
@@ -353,6 +372,15 @@ class AppLocalizationsEs extends AppLocalizations {
   @override
   String get relaySettingsEmptyMessage =>
       'Necesitas al menos un relé para que otros puedan localizarte. Toca abajo para restaurar los predeterminados de Haven.';
+
+  @override
+  String get relaySettingsProfileContaminationTooltip =>
+      'También lleva otro tráfico de Haven';
+
+  @override
+  String relaySettingsProfileContaminationSemantics(String url) {
+    return 'Advertencia: $url también lleva tu otro tráfico de Haven, así que este relé podría vincular tu perfil con ese tráfico';
+  }
 
   @override
   String get locationSettingsTitle => 'Ubicación';
@@ -650,8 +678,8 @@ class AppLocalizationsEs extends AppLocalizations {
       'Haven usa varios relés, así que ninguno puede dejarte aislado por su cuenta. Si uno se desconecta, los demás siguen funcionando. Tú eliges los relés por los que te llegan las invitaciones; los relés que usa un círculo quedan fijados al crearlo.';
 
   @override
-  String get privacyRelaysTwoLists =>
-      'Haven mantiene dos listas para ti. Tus relés de bandeja de entrada son por donde te llegan las invitaciones. Tus relés de KeyPackage son donde los demás recogen las claves que necesitan para invitarte. Cada círculo lleva además su propia lista, y por ella viajan las actualizaciones cifradas del círculo.';
+  String get privacyRelaysYourLists =>
+      'Haven mantiene tres listas para ti. Tus relés de bandeja de entrada son por donde te llegan las invitaciones, y tus relés de KeyPackage son donde los demás recogen las claves que necesitan para invitarte: Haven publica ambas listas para que otras personas puedan encontrarlas. Tus relés de perfil son distintos: ahí es donde se consultan y se publican tu nombre y tu foto, pero la lista en sí se queda en tu dispositivo y nunca se publica. Por eso, un relé que solo lleva tu tráfico de ubicación o tus invitaciones no tiene ninguna lista pública que le diga qué relés usas para tu perfil. Cada círculo lleva además su propia lista, y por ella viajan las actualizaciones cifradas del círculo.';
 
   @override
   String get privacyRelaysMeansForYou =>
@@ -2057,6 +2085,9 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get addRelaySheetTitleKeyPackage => 'Añadir relé de KeyPackage';
+
+  @override
+  String get addRelaySheetTitleProfile => 'Añadir relé de perfil';
 
   @override
   String get addRelaySheetHint => 'wss://relay.example.com';

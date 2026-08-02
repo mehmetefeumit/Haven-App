@@ -18,6 +18,12 @@
 ///   — provable by making the manager factory (or the identity service)
 ///   throw an exception whose message embeds a fake hex secret, and
 ///   asserting the surfaced exception message is the FIXED generic string.
+/// - [membersNeedingPictureDownload], the pure selection helper that
+///   [NostrProfileService.refreshMemberProfiles] hands to the batched,
+///   burst-avoiding [CircleManagerFfi.downloadMemberPictures] call — this is
+///   the only part of that method genuinely testable without the bridge,
+///   since [ProfileMetadataFfi] is a plain (non-opaque) data class that can
+///   be constructed directly.
 ///
 /// Full read/write behavior against a real manager is covered by
 /// `integration_test/`, same as `NostrCircleService` today. Behavior
@@ -30,6 +36,7 @@ library;
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/nostr_profile_service.dart';
 import 'package:haven/src/services/profile_service.dart';
@@ -101,6 +108,22 @@ class _FakeIdentityService implements IdentityService {
 
   @override
   Future<void> clearCache() async {}
+}
+
+/// Builds a minimal [ProfileMetadataFfi] for [membersNeedingPictureDownload]
+/// tests. Only [pubkeyHex] and [hasPicture] matter to that helper; the rest
+/// are filled with cheap fixed values.
+ProfileMetadataFfi _profileMetadata({
+  required String pubkeyHex,
+  required bool hasPicture,
+}) {
+  return ProfileMetadataFfi(
+    pubkeyHex: pubkeyHex,
+    npub: 'npub1test',
+    hasPicture: hasPicture,
+    isKnown: true,
+    fetchedAt: 0,
+  );
 }
 
 void main() {
@@ -276,6 +299,48 @@ void main() {
               ),
         ),
       );
+    });
+  });
+
+  group('membersNeedingPictureDownload', () {
+    test('is empty for an empty member list', () {
+      expect(membersNeedingPictureDownload(const []), isEmpty);
+    });
+
+    test(
+      'is empty when every member already has cached picture bytes',
+      () {
+        final ffiList = [
+          _profileMetadata(pubkeyHex: 'aa', hasPicture: true),
+          _profileMetadata(pubkeyHex: 'bb', hasPicture: true),
+        ];
+
+        expect(membersNeedingPictureDownload(ffiList), isEmpty);
+      },
+    );
+
+    test(
+      'selects exactly the members lacking cached picture bytes, '
+      'preserving their relative order',
+      () {
+        final ffiList = [
+          _profileMetadata(pubkeyHex: 'aa', hasPicture: true),
+          _profileMetadata(pubkeyHex: 'bb', hasPicture: false),
+          _profileMetadata(pubkeyHex: 'cc', hasPicture: false),
+          _profileMetadata(pubkeyHex: 'dd', hasPicture: true),
+        ];
+
+        expect(membersNeedingPictureDownload(ffiList), ['bb', 'cc']);
+      },
+    );
+
+    test('selects every member when none have cached picture bytes', () {
+      final ffiList = [
+        _profileMetadata(pubkeyHex: 'aa', hasPicture: false),
+        _profileMetadata(pubkeyHex: 'bb', hasPicture: false),
+      ];
+
+      expect(membersNeedingPictureDownload(ffiList), ['aa', 'bb']);
     });
   });
 }

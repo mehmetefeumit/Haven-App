@@ -270,7 +270,26 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get relaySettingsKeyPackageSubtitle =>
-      'جایی که دعوت‌شدگان کلیدهایت را پیدا می‌کنند و نمایهٔ عمومی‌ات منتشر می‌شود (kind 10002)';
+      'جایی که دیگران کلیدهای لازم برای دعوت کردنت را پیدا می‌کنند (kind 10002)';
+
+  @override
+  String get relaySettingsProfileTitle => 'رله‌های نمایهٔ من';
+
+  @override
+  String get relaySettingsProfileSubtitle =>
+      'جایی که نمایهٔ عمومی‌ات جست‌وجو و منتشر می‌شود. این رله‌ها جدا از رله‌های دیگرت نگه داشته می‌شوند و فهرست رله‌های نمایه‌ات هرگز منتشر نمی‌شود (kind 0)';
+
+  @override
+  String get relaySettingsProfileUnderflowTitle =>
+      'جست‌وجوی نمایه‌ها موقتاً متوقف شد';
+
+  @override
+  String get relaySettingsProfileUnderflowMessage =>
+      'تعداد رله‌های نمایه بسیار کم شده است، بنابراین نام و عکس اعضا دیگر به‌روز نمی‌شوند.';
+
+  @override
+  String get relaySettingsProfileUnderflowRestoreButton =>
+      'بازگرداندن رله‌های پیش‌فرض نمایه';
 
   @override
   String get relaySettingsLoadRelaysError => 'بارگذاری رله‌ها ناموفق بود.';
@@ -344,6 +363,15 @@ class AppLocalizationsFa extends AppLocalizations {
   @override
   String get relaySettingsEmptyMessage =>
       'برای اینکه دیگران بتوانند به تو دسترسی داشته باشند، به دست‌کم یک رله نیاز داری. برای بازگرداندن پیش‌فرض‌های Haven، روی دکمهٔ پایین بزن.';
+
+  @override
+  String get relaySettingsProfileContaminationTooltip =>
+      'بقیهٔ ترافیک تو در Haven را هم حمل می‌کند';
+
+  @override
+  String relaySettingsProfileContaminationSemantics(String url) {
+    return 'هشدار: $url بقیهٔ ترافیک تو در Haven را هم حمل می‌کند؛ پس این رله می‌تواند نمایه‌ات را به همان ترافیک گره بزند';
+  }
 
   @override
   String get locationSettingsTitle => 'موقعیت مکانی';
@@ -636,8 +664,8 @@ class AppLocalizationsFa extends AppLocalizations {
       'Haven از چند رله استفاده می‌کند، پس هیچ‌کدام به‌تنهایی نمی‌تواند تو را قطع کند. اگر یکی از کار بیفتد، بقیه به کار خود ادامه می‌دهند. تو رله‌هایی را انتخاب می‌کنی که دعوت‌ها از آن‌ها به تو می‌رسند؛ رله‌هایی که یک حلقه به کار می‌برد، هنگام ساخته شدن آن حلقه تعیین می‌شوند.';
 
   @override
-  String get privacyRelaysTwoLists =>
-      'Haven دو فهرست برایت نگه می‌دارد. رله‌های صندوق ورودی جایی‌اند که دعوت‌ها به تو می‌رسند. رله‌های KeyPackage جایی‌اند که دیگران کلیدهای لازم برای دعوت کردن تو را از آن‌ها می‌گیرند. هر حلقه هم فهرست خودش را دارد، و به‌روزرسانی‌های رمزگذاری‌شدهٔ آن حلقه از همان فهرست می‌گذرند.';
+  String get privacyRelaysYourLists =>
+      'Haven سه فهرست برایت نگه می‌دارد. رله‌های صندوق ورودی‌ات جایی‌اند که دعوت‌ها به تو می‌رسند، و رله‌های KeyPackage جایی‌اند که دیگران کلیدهای لازم برای دعوت کردن تو را از آن‌ها می‌گیرند — Haven هر دوی این فهرست‌ها را منتشر می‌کند تا دیگران بتوانند آن‌ها را پیدا کنند. رله‌های نمایه‌ات فرق دارند: نام و عکست از آن‌ها خوانده و روی آن‌ها منتشر می‌شود، اما خودِ فهرست روی دستگاهت می‌ماند و هرگز منتشر نمی‌شود. بنابراین رله‌ای که فقط ترافیک موقعیت مکانی یا دعوت‌های تو را حمل می‌کند، هیچ فهرست عمومی ندارد که به آن بگوید برای نمایه‌ات از کدام رله‌ها استفاده می‌کنی. هر حلقه هم فهرست خودش را دارد، و به‌روزرسانی‌های رمزگذاری‌شدهٔ آن حلقه از همان فهرست می‌گذرند.';
 
   @override
   String get privacyRelaysMeansForYou =>
@@ -2008,6 +2036,9 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get addRelaySheetTitleKeyPackage => 'افزودن رلهٔ KeyPackage';
+
+  @override
+  String get addRelaySheetTitleProfile => 'افزودن رلهٔ نمایه';
 
   @override
   String get addRelaySheetHint => 'wss://relay.example.com';

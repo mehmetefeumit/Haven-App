@@ -36,6 +36,13 @@
 #                    when UNSET (every other lane), no such define is added, so
 #                    those lanes' compiled builds stay byte-identical
 #                    (backward-compatible).
+#   HAVEN_E2E_PROFILE_RELAY   ws:// URL of the FIRST profile-plane relay, and
+#   HAVEN_E2E_PROFILE_RELAYS  the comma-separated URL list of the whole
+#                    profile-plane pool (tooling/e2e/ci/start-profile-relays.sh).
+#                    Also public-profile-lane-only: kind-0 traffic must ride
+#                    relays DISJOINT from the circle relay in HAVEN_E2E_RELAY.
+#                    Same opt-in shape as HAVEN_E2E_BLOSSOM_URL — forwarded only
+#                    when set, so no other lane's build changes.
 #
 # Side effects:
 #   - Writes /tmp/flutter-ios-test.log (uploaded as a CI failure artifact).
@@ -89,6 +96,21 @@ EXTRA_DART_DEFINES=()
 if [[ -n "${HAVEN_E2E_BLOSSOM_URL:-}" ]]; then
   EXTRA_DART_DEFINES+=(--dart-define=HAVEN_E2E_BLOSSOM_URL="${HAVEN_E2E_BLOSSOM_URL}")
   echo "iOS E2E — blossom=${HAVEN_E2E_BLOSSOM_URL}"
+fi
+
+# Optional profile-plane relay passthrough (public-profile lane only), same
+# opt-in shape as the Blossom URL above. These point kind-0 publish/fetch at the
+# hermetic pool started by start-profile-relays.sh, which is DISJOINT from the
+# circle relay in ${RELAY_URL} — a contaminated relay is subtracted from the
+# pool by haven-core's contamination ledger, so reusing the circle relay for
+# kind-0 would fail closed with PoolUnderflow.
+if [[ -n "${HAVEN_E2E_PROFILE_RELAY:-}" ]]; then
+  EXTRA_DART_DEFINES+=(--dart-define=HAVEN_E2E_PROFILE_RELAY="${HAVEN_E2E_PROFILE_RELAY}")
+  echo "iOS E2E — profile relay=${HAVEN_E2E_PROFILE_RELAY}"
+fi
+if [[ -n "${HAVEN_E2E_PROFILE_RELAYS:-}" ]]; then
+  EXTRA_DART_DEFINES+=(--dart-define=HAVEN_E2E_PROFILE_RELAYS="${HAVEN_E2E_PROFILE_RELAYS}")
+  echo "iOS E2E — profile pool=${HAVEN_E2E_PROFILE_RELAYS}"
 fi
 
 # Clean slate — mirror the Android lane's force-stop + `adb uninstall`

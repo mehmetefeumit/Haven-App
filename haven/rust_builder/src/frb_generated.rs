@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 527590828;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1214173796;
 
 // Section: executor
 
@@ -1398,6 +1398,66 @@ fn wire__crate__api__CircleManagerFfi_download_member_picture_impl(
         },
     )
 }
+fn wire__crate__api__CircleManagerFfi_download_member_pictures_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "CircleManagerFfi_download_member_pictures",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>,
+            >>::sse_decode(&mut deserializer);
+            let api_pubkeys_hex = <Vec<String>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_that, 0, false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_that_guard = api_that_guard.unwrap();
+                        let output_ok = crate::api::CircleManagerFfi::download_member_pictures(
+                            &*api_that_guard,
+                            api_pubkeys_hex,
+                        )
+                        .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__CircleManagerFfi_encrypt_location_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -2565,6 +2625,63 @@ fn wire__crate__api__CircleManagerFfi_process_gift_wrapped_invitation_impl(
         },
     )
 }
+fn wire__crate__api__CircleManagerFfi_profile_pool_status_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "CircleManagerFfi_profile_pool_status",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_that, 0, false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_that_guard = api_that_guard.unwrap();
+                        let output_ok =
+                            crate::api::CircleManagerFfi::profile_pool_status(&*api_that_guard)
+                                .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__CircleManagerFfi_propose_admin_handoff_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -3472,6 +3589,65 @@ fn wire__crate__api__CircleManagerFfi_reset_all_sync_cursors_impl(
                         let output_ok =
                             crate::api::CircleManagerFfi::reset_all_sync_cursors(&*api_that_guard)
                                 .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__CircleManagerFfi_restore_default_profile_relays_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "CircleManagerFfi_restore_default_profile_relays",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, String>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_that, 0, false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_that_guard = api_that_guard.unwrap();
+                        let output_ok =
+                            crate::api::CircleManagerFfi::restore_default_profile_relays(
+                                &*api_that_guard,
+                            )
+                            .await?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -7772,6 +7948,36 @@ fn wire__crate__api__set_discovery_relays_for_test_impl(
         },
     )
 }
+fn wire__crate__api__set_profile_relays_for_test_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_profile_relays_for_test",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_relays = <Vec<String>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, String>((move || {
+                let output_ok = crate::api::set_profile_relays_for_test(api_relays)?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__tile_cache_evict_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -9229,6 +9435,22 @@ impl SseDecode for crate::api::ProfilePictureRefFfi {
     }
 }
 
+impl SseDecode for crate::api::ProfilePoolStatusFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_configured = <u32>::sse_decode(deserializer);
+        let mut var_excluded = <u32>::sse_decode(deserializer);
+        let mut var_usable = <u32>::sse_decode(deserializer);
+        let mut var_isUnderflow = <bool>::sse_decode(deserializer);
+        return crate::api::ProfilePoolStatusFfi {
+            configured: var_configured,
+            excluded: var_excluded,
+            usable: var_usable,
+            is_underflow: var_isUnderflow,
+        };
+    }
+}
+
 impl SseDecode for crate::api::PublicIdentity {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -9366,6 +9588,7 @@ impl SseDecode for crate::api::RelayTypeFfi {
         return match inner {
             0 => crate::api::RelayTypeFfi::Inbox,
             1 => crate::api::RelayTypeFfi::Nip65,
+            2 => crate::api::RelayTypeFfi::Profile,
             _ => unreachable!("Invalid variant for RelayTypeFfi: {}", inner),
         };
     }
@@ -9624,433 +9847,451 @@ fn pde_ffi_dispatcher_primary_impl(
             rust_vec_len,
             data_len,
         ),
-        23 => wire__crate__api__CircleManagerFfi_encrypt_location_impl(
+        23 => wire__crate__api__CircleManagerFfi_download_member_pictures_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        24 => wire__crate__api__CircleManagerFfi_fetch_member_profiles_impl(
+        24 => wire__crate__api__CircleManagerFfi_encrypt_location_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        25 => wire__crate__api__CircleManagerFfi_fetch_my_profile_impl(
+        25 => wire__crate__api__CircleManagerFfi_fetch_member_profiles_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        26 => wire__crate__api__CircleManagerFfi_finalize_relay_update_impl(
+        26 => wire__crate__api__CircleManagerFfi_fetch_my_profile_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        27 => wire__crate__api__CircleManagerFfi_get_all_contacts_impl(
+        27 => wire__crate__api__CircleManagerFfi_finalize_relay_update_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        29 => wire__crate__api__CircleManagerFfi_get_circle_impl(port, ptr, rust_vec_len, data_len),
-        30 => {
+        28 => wire__crate__api__CircleManagerFfi_get_all_contacts_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        30 => wire__crate__api__CircleManagerFfi_get_circle_impl(port, ptr, rust_vec_len, data_len),
+        31 => {
             wire__crate__api__CircleManagerFfi_get_circles_impl(port, ptr, rust_vec_len, data_len)
         }
-        31 => {
+        32 => {
             wire__crate__api__CircleManagerFfi_get_contact_impl(port, ptr, rust_vec_len, data_len)
         }
-        32 => {
+        33 => {
             wire__crate__api__CircleManagerFfi_get_members_impl(port, ptr, rust_vec_len, data_len)
         }
-        33 => wire__crate__api__CircleManagerFfi_get_pending_invitations_impl(
+        34 => wire__crate__api__CircleManagerFfi_get_pending_invitations_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        34 => wire__crate__api__CircleManagerFfi_get_profile_picture_impl(
+        35 => wire__crate__api__CircleManagerFfi_get_profile_picture_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        35 => wire__crate__api__CircleManagerFfi_get_profile_thumbnail_impl(
+        36 => wire__crate__api__CircleManagerFfi_get_profile_thumbnail_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        36 => wire__crate__api__CircleManagerFfi_get_publish_relay_list_impl(
+        37 => wire__crate__api__CircleManagerFfi_get_publish_relay_list_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        37 => wire__crate__api__CircleManagerFfi_get_visible_circles_impl(
+        38 => wire__crate__api__CircleManagerFfi_get_visible_circles_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        38 => {
+        39 => {
             wire__crate__api__CircleManagerFfi_group_epoch_impl(port, ptr, rust_vec_len, data_len)
         }
-        39 => wire__crate__api__CircleManagerFfi_list_user_relays_impl(
+        40 => wire__crate__api__CircleManagerFfi_list_user_relays_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        40 => wire__crate__api__CircleManagerFfi_new_impl(port, ptr, rust_vec_len, data_len),
-        41 => wire__crate__api__CircleManagerFfi_plan_leave_impl(port, ptr, rust_vec_len, data_len),
-        42 => wire__crate__api__CircleManagerFfi_process_gift_wrapped_invitation_impl(
+        41 => wire__crate__api__CircleManagerFfi_new_impl(port, ptr, rust_vec_len, data_len),
+        42 => wire__crate__api__CircleManagerFfi_plan_leave_impl(port, ptr, rust_vec_len, data_len),
+        43 => wire__crate__api__CircleManagerFfi_process_gift_wrapped_invitation_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        43 => wire__crate__api__CircleManagerFfi_propose_admin_handoff_impl(
+        44 => wire__crate__api__CircleManagerFfi_profile_pool_status_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        44 => {
+        45 => wire__crate__api__CircleManagerFfi_propose_admin_handoff_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        46 => {
             wire__crate__api__CircleManagerFfi_propose_leave_impl(port, ptr, rust_vec_len, data_len)
         }
-        45 => wire__crate__api__CircleManagerFfi_propose_self_demote_impl(
+        47 => wire__crate__api__CircleManagerFfi_propose_self_demote_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        46 => wire__crate__api__CircleManagerFfi_prune_expired_last_known_impl(
+        48 => wire__crate__api__CircleManagerFfi_prune_expired_last_known_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        47 => wire__crate__api__CircleManagerFfi_prune_processed_gift_wraps_impl(
+        49 => wire__crate__api__CircleManagerFfi_prune_processed_gift_wraps_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        48 => wire__crate__api__CircleManagerFfi_publish_failed_impl(
+        50 => wire__crate__api__CircleManagerFfi_publish_failed_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        49 => wire__crate__api__CircleManagerFfi_publish_my_profile_impl(
+        51 => wire__crate__api__CircleManagerFfi_publish_my_profile_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        50 => wire__crate__api__CircleManagerFfi_record_published_relay_list_impl(
+        52 => wire__crate__api__CircleManagerFfi_record_published_relay_list_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        51 => wire__crate__api__CircleManagerFfi_relay_publish_targets_impl(
+        53 => wire__crate__api__CircleManagerFfi_relay_publish_targets_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        52 => wire__crate__api__CircleManagerFfi_remove_last_known_circle_impl(
+        54 => wire__crate__api__CircleManagerFfi_remove_last_known_circle_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        53 => wire__crate__api__CircleManagerFfi_remove_last_known_member_impl(
+        55 => wire__crate__api__CircleManagerFfi_remove_last_known_member_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        54 => wire__crate__api__CircleManagerFfi_remove_members_impl(
+        56 => wire__crate__api__CircleManagerFfi_remove_members_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        55 => wire__crate__api__CircleManagerFfi_remove_my_profile_picture_impl(
+        57 => wire__crate__api__CircleManagerFfi_remove_my_profile_picture_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        56 => wire__crate__api__CircleManagerFfi_remove_user_relay_impl(
+        58 => wire__crate__api__CircleManagerFfi_remove_user_relay_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        57 => wire__crate__api__CircleManagerFfi_reset_all_sync_cursors_impl(
+        59 => wire__crate__api__CircleManagerFfi_reset_all_sync_cursors_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        58 => wire__crate__api__CircleManagerFfi_restore_defaults_for_impl(
+        60 => wire__crate__api__CircleManagerFfi_restore_default_profile_relays_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        59 => wire__crate__api__CircleManagerFfi_seed_relay_defaults_if_unseeded_impl(
+        61 => wire__crate__api__CircleManagerFfi_restore_defaults_for_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        60 => {
+        62 => wire__crate__api__CircleManagerFfi_seed_relay_defaults_if_unseeded_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        63 => {
             wire__crate__api__CircleManagerFfi_set_contact_impl(port, ptr, rust_vec_len, data_len)
         }
-        62 => wire__crate__api__CircleManagerFfi_set_publish_relay_list_impl(
+        65 => wire__crate__api__CircleManagerFfi_set_publish_relay_list_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        64 => wire__crate__api__CircleManagerFfi_snapshot_last_known_for_circle_impl(
+        67 => wire__crate__api__CircleManagerFfi_snapshot_last_known_for_circle_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        65 => wire__crate__api__CircleManagerFfi_still_a_member_impl(
+        68 => wire__crate__api__CircleManagerFfi_still_a_member_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        66 => wire__crate__api__CircleManagerFfi_update_circle_relays_impl(
+        69 => wire__crate__api__CircleManagerFfi_update_circle_relays_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        67 => wire__crate__api__CircleManagerFfi_upload_my_profile_picture_impl(
+        70 => wire__crate__api__CircleManagerFfi_upload_my_profile_picture_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        68 => wire__crate__api__CircleManagerFfi_upsert_last_known_location_impl(
+        71 => wire__crate__api__CircleManagerFfi_upsert_last_known_location_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        69 => wire__crate__api__CircleManagerFfi_wipe_all_last_known_locations_impl(
+        72 => wire__crate__api__CircleManagerFfi_wipe_all_last_known_locations_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        70 => wire__crate__api__CircleManagerFfi_wipe_and_reset_defaults_for_impl(
+        73 => wire__crate__api__CircleManagerFfi_wipe_and_reset_defaults_for_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        71 => wire__crate__api__HavenCore_default_impl(port, ptr, rust_vec_len, data_len),
-        73 => wire__crate__api__HavenCore_initialize_impl(port, ptr, rust_vec_len, data_len),
-        75 => wire__crate__api__HavenCore_new_impl(port, ptr, rust_vec_len, data_len),
-        79 => wire__crate__api__LiveSyncFfi_live_events_impl(port, ptr, rust_vec_len, data_len),
-        80 => wire__crate__api__LiveSyncFfi_new_instance_impl(port, ptr, rust_vec_len, data_len),
-        81 => wire__crate__api__LiveSyncFfi_resume_after_background_impl(
+        74 => wire__crate__api__HavenCore_default_impl(port, ptr, rust_vec_len, data_len),
+        76 => wire__crate__api__HavenCore_initialize_impl(port, ptr, rust_vec_len, data_len),
+        78 => wire__crate__api__HavenCore_new_impl(port, ptr, rust_vec_len, data_len),
+        82 => wire__crate__api__LiveSyncFfi_live_events_impl(port, ptr, rust_vec_len, data_len),
+        83 => wire__crate__api__LiveSyncFfi_new_instance_impl(port, ptr, rust_vec_len, data_len),
+        84 => wire__crate__api__LiveSyncFfi_resume_after_background_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        82 => wire__crate__api__LiveSyncFfi_start_session_impl(port, ptr, rust_vec_len, data_len),
-        83 => wire__crate__api__LiveSyncFfi_stop_session_impl(port, ptr, rust_vec_len, data_len),
-        84 => {
+        85 => wire__crate__api__LiveSyncFfi_start_session_impl(port, ptr, rust_vec_len, data_len),
+        86 => wire__crate__api__LiveSyncFfi_stop_session_impl(port, ptr, rust_vec_len, data_len),
+        87 => {
             wire__crate__api__LiveSyncFfi_subscribe_circle_impl(port, ptr, rust_vec_len, data_len)
         }
-        85 => {
+        88 => {
             wire__crate__api__LiveSyncFfi_unsubscribe_circle_impl(port, ptr, rust_vec_len, data_len)
         }
-        87 => {
+        90 => {
             wire__crate__api__LocationEventService_default_impl(port, ptr, rust_vec_len, data_len)
         }
-        97 => wire__crate__api__LocationSettings_new_impl(port, ptr, rust_vec_len, data_len),
-        99 => wire__crate__api__NostrIdentityManager_clear_cache_impl(
+        100 => wire__crate__api__LocationSettings_new_impl(port, ptr, rust_vec_len, data_len),
+        102 => wire__crate__api__NostrIdentityManager_clear_cache_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        100 => wire__crate__api__NostrIdentityManager_create_identity_impl(
+        103 => wire__crate__api__NostrIdentityManager_create_identity_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        101 => {
+        104 => {
             wire__crate__api__NostrIdentityManager_default_impl(port, ptr, rust_vec_len, data_len)
         }
-        102 => wire__crate__api__NostrIdentityManager_delete_identity_impl(
+        105 => wire__crate__api__NostrIdentityManager_delete_identity_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        103 => wire__crate__api__NostrIdentityManager_export_nsec_impl(
+        106 => wire__crate__api__NostrIdentityManager_export_nsec_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        105 => wire__crate__api__NostrIdentityManager_get_secret_bytes_impl(
+        108 => wire__crate__api__NostrIdentityManager_get_secret_bytes_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        107 => wire__crate__api__NostrIdentityManager_import_from_nsec_impl(
+        110 => wire__crate__api__NostrIdentityManager_import_from_nsec_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        108 => wire__crate__api__NostrIdentityManager_load_from_bytes_impl(
+        111 => wire__crate__api__NostrIdentityManager_load_from_bytes_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        109 => wire__crate__api__NostrIdentityManager_new_impl(port, ptr, rust_vec_len, data_len),
-        111 => wire__crate__api__NostrIdentityManager_sign_impl(port, ptr, rust_vec_len, data_len),
-        112 => wire__crate__api__RelayManagerFfi_check_event_on_relay_impl(
+        112 => wire__crate__api__NostrIdentityManager_new_impl(port, ptr, rust_vec_len, data_len),
+        114 => wire__crate__api__NostrIdentityManager_sign_impl(port, ptr, rust_vec_len, data_len),
+        115 => wire__crate__api__RelayManagerFfi_check_event_on_relay_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        113 => wire__crate__api__RelayManagerFfi_disconnect_relay_impl(
+        116 => wire__crate__api__RelayManagerFfi_disconnect_relay_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        114 => wire__crate__api__RelayManagerFfi_fetch_gift_wraps_impl(
+        117 => wire__crate__api__RelayManagerFfi_fetch_gift_wraps_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        115 => wire__crate__api__RelayManagerFfi_fetch_gift_wraps_per_relay_impl(
+        118 => wire__crate__api__RelayManagerFfi_fetch_gift_wraps_per_relay_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        116 => wire__crate__api__RelayManagerFfi_fetch_group_messages_impl(
+        119 => wire__crate__api__RelayManagerFfi_fetch_group_messages_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        117 => wire__crate__api__RelayManagerFfi_fetch_keypackage_impl(
+        120 => wire__crate__api__RelayManagerFfi_fetch_keypackage_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        118 => wire__crate__api__RelayManagerFfi_fetch_keypackage_relays_impl(
+        121 => wire__crate__api__RelayManagerFfi_fetch_keypackage_relays_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        119 => wire__crate__api__RelayManagerFfi_fetch_member_keypackage_impl(
+        122 => wire__crate__api__RelayManagerFfi_fetch_member_keypackage_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        120 => wire__crate__api__RelayManagerFfi_fetch_nip65_relays_impl(
+        123 => wire__crate__api__RelayManagerFfi_fetch_nip65_relays_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        121 => wire__crate__api__RelayManagerFfi_get_relay_status_impl(
+        124 => wire__crate__api__RelayManagerFfi_get_relay_status_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        122 => wire__crate__api__RelayManagerFfi_maintain_key_package_impl(
+        125 => wire__crate__api__RelayManagerFfi_maintain_key_package_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        123 => wire__crate__api__RelayManagerFfi_maintain_relay_list_impl(
+        126 => wire__crate__api__RelayManagerFfi_maintain_relay_list_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        124 => {
+        127 => {
             wire__crate__api__RelayManagerFfi_new_instance_impl(port, ptr, rust_vec_len, data_len)
         }
-        125 => {
+        128 => {
             wire__crate__api__RelayManagerFfi_publish_event_impl(port, ptr, rust_vec_len, data_len)
         }
-        126 => wire__crate__api__RelayManagerFfi_publish_event_fire_and_forget_impl(
+        129 => wire__crate__api__RelayManagerFfi_publish_event_fire_and_forget_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        127 => wire__crate__api__RelayManagerFfi_retract_legacy_key_material_impl(
+        130 => wire__crate__api__RelayManagerFfi_retract_legacy_key_material_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        128 => wire__crate__api__RelayManagerFfi_run_catchup_all_circles_impl(
+        131 => wire__crate__api__RelayManagerFfi_run_catchup_all_circles_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        129 => wire__crate__api__RelayManagerFfi_shutdown_impl(port, ptr, rust_vec_len, data_len),
-        133 => wire__crate__api__destroy_legacy_mls_state_impl(port, ptr, rust_vec_len, data_len),
-        135 => wire__crate__api__init_app_impl(port, ptr, rust_vec_len, data_len),
-        136 => wire__crate__api__init_keyring_store_impl(port, ptr, rust_vec_len, data_len),
-        137 => wire__crate__api__legacy_retraction_outcome_ffi_default_impl(
+        132 => wire__crate__api__RelayManagerFfi_shutdown_impl(port, ptr, rust_vec_len, data_len),
+        136 => wire__crate__api__destroy_legacy_mls_state_impl(port, ptr, rust_vec_len, data_len),
+        138 => wire__crate__api__init_app_impl(port, ptr, rust_vec_len, data_len),
+        139 => wire__crate__api__init_keyring_store_impl(port, ptr, rust_vec_len, data_len),
+        140 => wire__crate__api__legacy_retraction_outcome_ffi_default_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        138 => {
+        141 => {
             wire__crate__api__maintain_subscription_health_impl(port, ptr, rust_vec_len, data_len)
         }
-        139 => wire__crate__api__parse_engine_location_impl(port, ptr, rust_vec_len, data_len),
-        143 => wire__crate__api__tile_cache_evict_impl(port, ptr, rust_vec_len, data_len),
-        144 => wire__crate__api__tile_cache_get_impl(port, ptr, rust_vec_len, data_len),
-        145 => wire__crate__api__tile_cache_init_impl(port, ptr, rust_vec_len, data_len),
-        146 => wire__crate__api__tile_cache_put_impl(port, ptr, rust_vec_len, data_len),
-        147 => wire__crate__api__tile_cache_put_metadata_impl(port, ptr, rust_vec_len, data_len),
-        148 => wire__crate__api__tile_cache_wipe_impl(port, ptr, rust_vec_len, data_len),
-        149 => {
+        142 => wire__crate__api__parse_engine_location_impl(port, ptr, rust_vec_len, data_len),
+        147 => wire__crate__api__tile_cache_evict_impl(port, ptr, rust_vec_len, data_len),
+        148 => wire__crate__api__tile_cache_get_impl(port, ptr, rust_vec_len, data_len),
+        149 => wire__crate__api__tile_cache_init_impl(port, ptr, rust_vec_len, data_len),
+        150 => wire__crate__api__tile_cache_put_impl(port, ptr, rust_vec_len, data_len),
+        151 => wire__crate__api__tile_cache_put_metadata_impl(port, ptr, rust_vec_len, data_len),
+        152 => wire__crate__api__tile_cache_wipe_impl(port, ptr, rust_vec_len, data_len),
+        153 => {
             wire__crate__api__use_in_memory_keyring_for_test_impl(port, ptr, rust_vec_len, data_len)
         }
-        150 => wire__crate__api__wipe_all_mls_state_impl(port, ptr, rust_vec_len, data_len),
+        154 => wire__crate__api__wipe_all_mls_state_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -10063,61 +10304,62 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        28 => {
+        29 => {
             wire__crate__api__CircleManagerFfi_get_cached_profile_impl(ptr, rust_vec_len, data_len)
         }
-        61 => {
+        64 => {
             wire__crate__api__CircleManagerFfi_set_local_nickname_impl(ptr, rust_vec_len, data_len)
         }
-        63 => {
+        66 => {
             wire__crate__api__CircleManagerFfi_sign_deletion_event_impl(ptr, rust_vec_len, data_len)
         }
-        72 => wire__crate__api__HavenCore_get_location_settings_impl(ptr, rust_vec_len, data_len),
-        74 => wire__crate__api__HavenCore_is_initialized_impl(ptr, rust_vec_len, data_len),
-        76 => wire__crate__api__HavenCore_set_location_settings_impl(ptr, rust_vec_len, data_len),
-        77 => wire__crate__api__HavenCore_update_location_impl(ptr, rust_vec_len, data_len),
-        78 => wire__crate__api__LiveSyncFfi_is_running_impl(ptr, rust_vec_len, data_len),
-        86 => wire__crate__api__LocationEventService_create_unsigned_event_impl(
+        75 => wire__crate__api__HavenCore_get_location_settings_impl(ptr, rust_vec_len, data_len),
+        77 => wire__crate__api__HavenCore_is_initialized_impl(ptr, rust_vec_len, data_len),
+        79 => wire__crate__api__HavenCore_set_location_settings_impl(ptr, rust_vec_len, data_len),
+        80 => wire__crate__api__HavenCore_update_location_impl(ptr, rust_vec_len, data_len),
+        81 => wire__crate__api__LiveSyncFfi_is_running_impl(ptr, rust_vec_len, data_len),
+        89 => wire__crate__api__LocationEventService_create_unsigned_event_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        88 => wire__crate__api__LocationEventService_jittered_publish_interval_secs_impl(
+        91 => wire__crate__api__LocationEventService_jittered_publish_interval_secs_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        89 => wire__crate__api__LocationEventService_new_impl(ptr, rust_vec_len, data_len),
-        90 => wire__crate__api__LocationEventService_verify_signature_impl(
+        92 => wire__crate__api__LocationEventService_new_impl(ptr, rust_vec_len, data_len),
+        93 => wire__crate__api__LocationEventService_verify_signature_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        91 => wire__crate__api__LocationMessage_expires_at_impl(ptr, rust_vec_len, data_len),
-        92 => wire__crate__api__LocationMessage_geohash_impl(ptr, rust_vec_len, data_len),
-        93 => wire__crate__api__LocationMessage_is_expired_impl(ptr, rust_vec_len, data_len),
-        94 => wire__crate__api__LocationMessage_latitude_impl(ptr, rust_vec_len, data_len),
-        95 => wire__crate__api__LocationMessage_longitude_impl(ptr, rust_vec_len, data_len),
-        96 => wire__crate__api__LocationMessage_timestamp_impl(ptr, rust_vec_len, data_len),
-        98 => wire__crate__api__LocationSettings_update_interval_minutes_impl(
+        94 => wire__crate__api__LocationMessage_expires_at_impl(ptr, rust_vec_len, data_len),
+        95 => wire__crate__api__LocationMessage_geohash_impl(ptr, rust_vec_len, data_len),
+        96 => wire__crate__api__LocationMessage_is_expired_impl(ptr, rust_vec_len, data_len),
+        97 => wire__crate__api__LocationMessage_latitude_impl(ptr, rust_vec_len, data_len),
+        98 => wire__crate__api__LocationMessage_longitude_impl(ptr, rust_vec_len, data_len),
+        99 => wire__crate__api__LocationMessage_timestamp_impl(ptr, rust_vec_len, data_len),
+        101 => wire__crate__api__LocationSettings_update_interval_minutes_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        104 => {
+        107 => {
             wire__crate__api__NostrIdentityManager_get_identity_impl(ptr, rust_vec_len, data_len)
         }
-        106 => {
+        109 => {
             wire__crate__api__NostrIdentityManager_has_identity_impl(ptr, rust_vec_len, data_len)
         }
-        110 => wire__crate__api__NostrIdentityManager_pubkey_hex_impl(ptr, rust_vec_len, data_len),
-        130 => wire__crate__api__allow_private_blossom_for_test_impl(ptr, rust_vec_len, data_len),
-        131 => wire__crate__api__allow_ws_loopback_for_test_impl(ptr, rust_vec_len, data_len),
-        132 => wire__crate__api__default_relays_impl(ptr, rust_vec_len, data_len),
-        134 => wire__crate__api__discovery_relays_impl(ptr, rust_vec_len, data_len),
-        140 => wire__crate__api__set_blossom_server_for_test_impl(ptr, rust_vec_len, data_len),
-        141 => wire__crate__api__set_default_relays_for_test_impl(ptr, rust_vec_len, data_len),
-        142 => wire__crate__api__set_discovery_relays_for_test_impl(ptr, rust_vec_len, data_len),
+        113 => wire__crate__api__NostrIdentityManager_pubkey_hex_impl(ptr, rust_vec_len, data_len),
+        133 => wire__crate__api__allow_private_blossom_for_test_impl(ptr, rust_vec_len, data_len),
+        134 => wire__crate__api__allow_ws_loopback_for_test_impl(ptr, rust_vec_len, data_len),
+        135 => wire__crate__api__default_relays_impl(ptr, rust_vec_len, data_len),
+        137 => wire__crate__api__discovery_relays_impl(ptr, rust_vec_len, data_len),
+        143 => wire__crate__api__set_blossom_server_for_test_impl(ptr, rust_vec_len, data_len),
+        144 => wire__crate__api__set_default_relays_for_test_impl(ptr, rust_vec_len, data_len),
+        145 => wire__crate__api__set_discovery_relays_for_test_impl(ptr, rust_vec_len, data_len),
+        146 => wire__crate__api__set_profile_relays_for_test_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -10934,6 +11176,29 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::ProfilePictureRefFfi>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::ProfilePoolStatusFfi {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.configured.into_into_dart().into_dart(),
+            self.excluded.into_into_dart().into_dart(),
+            self.usable.into_into_dart().into_dart(),
+            self.is_underflow.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::ProfilePoolStatusFfi
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::ProfilePoolStatusFfi>
+    for crate::api::ProfilePoolStatusFfi
+{
+    fn into_into_dart(self) -> crate::api::ProfilePoolStatusFfi {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::PublicIdentity {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -11128,6 +11393,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::RelayTypeFfi {
         match self {
             Self::Inbox => 0.into_dart(),
             Self::Nip65 => 1.into_dart(),
+            Self::Profile => 2.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -12136,6 +12402,16 @@ impl SseEncode for crate::api::ProfilePictureRefFfi {
     }
 }
 
+impl SseEncode for crate::api::ProfilePoolStatusFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <u32>::sse_encode(self.configured, serializer);
+        <u32>::sse_encode(self.excluded, serializer);
+        <u32>::sse_encode(self.usable, serializer);
+        <bool>::sse_encode(self.is_underflow, serializer);
+    }
+}
+
 impl SseEncode for crate::api::PublicIdentity {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -12234,6 +12510,7 @@ impl SseEncode for crate::api::RelayTypeFfi {
             match self {
                 crate::api::RelayTypeFfi::Inbox => 0,
                 crate::api::RelayTypeFfi::Nip65 => 1,
+                crate::api::RelayTypeFfi::Profile => 2,
                 _ => {
                     unimplemented!("");
                 }

@@ -19,9 +19,15 @@
 //!   the opt-in is unreachable and every `ws://` is rejected unconditionally.
 //! * URLs containing `user:pass@` are rejected to prevent credential leakage
 //!   into logs, error messages, or relay-side observability.
-//! * The seeding sentinel ([`SEEDED_KEY`]) is checked by *presence*, not by
-//!   the row count of `user_relays` — a user who legitimately removes a
-//!   default relay must not have it re-added by the next defensive seed.
+//! * The seeding sentinels ([`SEEDED_KEY`], [`PROFILE_SEEDED_KEY`]) are
+//!   checked by *presence*, not by the row count of `user_relays` — a user who
+//!   legitimately removes a default relay must not have it re-added by the
+//!   next defensive seed.
+//! * Each category seeds from its OWN default pool
+//!   ([`default_relays_for`]). The profile category must never be seeded from
+//!   the account seed: those relays already carry the user's encrypted
+//!   location traffic, and pointing profile lookups at them would collapse the
+//!   two planes into one observer's view.
 
 // Single-shot SQLite ops naturally hold the lock to completion; the parent
 // module already disables this lint at the file level for storage.rs.
@@ -34,14 +40,41 @@ use rusqlite::{params, OptionalExtension};
 use super::error::{CircleError, Result};
 use super::relay_prefs::RelayType;
 use super::storage::CircleStorage;
+use super::storage_contamination::record_relay_category_on;
 use super::types::default_relays;
 
-/// Sentinel key in `user_settings` that records whether seeding has run.
+/// Sentinel key in `user_settings` that records whether seeding of the
+/// **account-seed categories** ([`RelayType::Inbox`], [`RelayType::KeyPackage`])
+/// has run.
 ///
 /// The `_v1` suffix leaves room for a future "rotate the default set" pass
 /// (`_v2` would be set after a one-shot upgrade-time re-seed if we ever
 /// change the relay defaults returned by [`default_relays`]).
 pub const SEEDED_KEY: &str = "relay_prefs_seeded_v1";
+
+/// Sentinel key in `user_settings` that records whether the
+/// [`RelayType::Profile`] category has been seeded.
+///
+/// # Why a second sentinel instead of bumping [`SEEDED_KEY`] to `_v2`
+///
+/// [`SEEDED_KEY`] is checked by presence, so every install that predates the
+/// profile category already has it set — a single sentinel would skip profile
+/// seeding forever for exactly the users who have never had profile relays.
+///
+/// The alternative, bumping to `_v2` with a one-shot upgrade, is strictly more
+/// dangerous. The `_v2` path re-enters the seeding routine for an install whose
+/// account-seed rows are already *user-edited*, so its correctness depends
+/// entirely on the routine remembering to insert profile rows ONLY. Any later
+/// maintainer who "simplifies" it back into one loop over every category
+/// silently re-adds a default the user deliberately removed, and the
+/// `seed_does_not_reapply_after_user_remove_and_restart` invariant dies quietly
+/// — no compile error, no failing assertion on a fresh install.
+///
+/// Two independent, monotonic, presence-checked sentinels make each category
+/// group's seed self-contained: a group is seeded at most once, ever, and an
+/// upgrade cannot touch rows belonging to a group whose sentinel is already
+/// set. That property holds structurally rather than by careful coding.
+pub const PROFILE_SEEDED_KEY: &str = "relay_prefs_profile_seeded_v1";
 
 /// `user_settings` key that toggles publishing of kind 10051.
 pub const PUBLISH_KP_RELAY_LIST_KEY: &str = "publish_keypackage_relay_list";
@@ -143,73 +176,71 @@ pub fn normalize_url(input: &str) -> Result<String> {
     let canonical = RelayUrl::parse(trimmed)
         .map_err(|_| CircleError::InvalidData("Invalid relay URL".to_string()))?
         .to_string();
-    let lower = lowercase_scheme_and_host(&canonical);
-    // Strip a sole trailing slash on the root (no path/query/fragment).
-    // "wss://x.example.com/" and "wss://x.example.com" must collide.
-    // We do NOT strip the trailing slash of a path like
-    // "wss://x.example.com/foo/" because that path *is* the path.
-    let stripped = strip_root_trailing_slash(&lower);
-    Ok(stripped)
+    // Delegate the final form to the SINGLE shared implementation. Relay URLs
+    // are compared as set members both here (the `UNIQUE (url, relay_type)`
+    // index) and in the profile plane's contamination exclusion; a second
+    // normalizer that drifted from this one would let a contaminated relay
+    // survive exclusion and start receiving profile traffic.
+    Ok(crate::relay::url_norm::canonicalize(&canonical))
 }
 
-/// Lowercases the scheme and host portion of a URL while preserving the
-/// path/query/fragment case. Used by [`normalize_url`] so equivalent URLs
-/// collide on the storage `UNIQUE` constraint regardless of input case.
+/// Returns the default relay pool for one category.
 ///
-/// Operates on parsed canonical form from `RelayUrl::parse`, so there is
-/// always a `://` separator and a host segment.
-fn lowercase_scheme_and_host(canonical: &str) -> String {
-    canonical.find("://").map_or_else(
-        || canonical.to_ascii_lowercase(),
-        |scheme_end| {
-            let scheme = &canonical[..scheme_end];
-            let after = &canonical[scheme_end + 3..];
-            // Host runs until the first '/', '?', or '#'.
-            let host_end = after.find(['/', '?', '#']).unwrap_or(after.len());
-            let host = &after[..host_end];
-            let rest = &after[host_end..];
-            format!(
-                "{}://{}{}",
-                scheme.to_ascii_lowercase(),
-                host.to_ascii_lowercase(),
-                rest
-            )
-        },
-    )
-}
-
-/// Strips a single trailing slash after the host when the URL has no
-/// real path (i.e., the canonical form is `<scheme>://<host>[:port]/`).
-/// Leaves paths like `/foo/` alone.
-fn strip_root_trailing_slash(canonical: &str) -> String {
-    if let Some(scheme_end) = canonical.find("://") {
-        let after = &canonical[scheme_end + 3..];
-        // Find the start of the path (first '/' after authority).
-        if let Some(path_start) = after.find('/') {
-            let path = &after[path_start..];
-            if path == "/" {
-                return canonical[..scheme_end + 3 + path_start].to_string();
-            }
-        }
+/// This dispatch is load-bearing for the profile/location plane separation, so
+/// it is a single named function rather than an inline `default_relays()` call
+/// repeated at each seed/restore/reset site:
+///
+/// * [`RelayType::Inbox`] and [`RelayType::KeyPackage`] — the account seed
+///   ([`default_relays`]). These relays carry the user's gift-wrapped welcomes
+///   and, through the circles built on them, their encrypted kind-445 location
+///   traffic.
+/// * [`RelayType::Profile`] — the curated profile pool
+///   ([`crate::profile::profile_relay_pool_default`] — the EFFECTIVE set, so a
+///   hermetic test override is honoured), which is
+///   disjoint from the account seed AND the discovery plane by construction
+///   (pinned by `tests/profile_plane_separation.rs`).
+///
+/// Seeding the profile category from [`default_relays`] would be the quiet
+/// failure mode of this whole feature: the UI would show an editable "Profile
+/// relays" list, the plane-separation code would run, and every profile query
+/// would still go to the same three relays that see the user's location
+/// traffic. The `match` is exhaustive so a new category cannot default into the
+/// wrong pool by omission — it fails to compile instead.
+#[must_use]
+pub fn default_relays_for(relay_type: RelayType) -> Vec<String> {
+    match relay_type {
+        RelayType::Inbox | RelayType::KeyPackage => default_relays(),
+        RelayType::Profile => crate::profile::profile_relay_pool_default(),
     }
-    canonical.to_string()
 }
 
 impl CircleStorage {
-    /// Seeds default relays on first launch.
+    /// Seeds default relays on first launch, per category group.
     ///
-    /// Idempotent: subsequent calls observe the [`SEEDED_KEY`] sentinel in
-    /// `user_settings` and short-circuit. Crucially, the sentinel is the
-    /// signal — never row presence in `user_relays`. A user who removes a
-    /// default relay must not have it re-added by the next defensive seed.
+    /// Two independent sentinel keys gate two independent groups:
     ///
-    /// All inserts and the sentinel write happen in a single transaction so
+    /// * [`SEEDED_KEY`] gates [`RelayType::Inbox`] + [`RelayType::KeyPackage`],
+    ///   seeded from the account seed.
+    /// * [`PROFILE_SEEDED_KEY`] gates [`RelayType::Profile`], seeded from the
+    ///   curated profile pool.
+    ///
+    /// Splitting them is what lets an install that predates the profile
+    /// category still receive profile relays on upgrade: its [`SEEDED_KEY`] is
+    /// already set, but [`PROFILE_SEEDED_KEY`] is not. See that constant's docs
+    /// for why this is preferred over a `_v2` sentinel bump.
+    ///
+    /// Idempotent per group: subsequent calls observe the sentinels and
+    /// short-circuit. Crucially, the sentinels are the signal — never row
+    /// presence in `user_relays`. A user who removes a default relay must not
+    /// have it re-added by the next defensive seed, in ANY category.
+    ///
+    /// All inserts and both sentinel writes happen in a single transaction so
     /// a partial failure cannot leave the user "half seeded."
     ///
     /// # Returns
     ///
-    /// `true` if seeding actually wrote rows on this call; `false` if the
-    /// sentinel was already set.
+    /// `true` if seeding wrote rows for at least one group on this call;
+    /// `false` if both sentinels were already set.
     ///
     /// # Errors
     ///
@@ -221,35 +252,78 @@ impl CircleStorage {
             .lock()
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
 
-        let already: Option<String> = conn
+        let account_seeded = conn
             .query_row(
                 "SELECT value FROM user_settings WHERE key = ?1",
                 params![SEEDED_KEY],
                 |r| r.get::<_, String>(0),
             )
-            .optional()?;
-        if already.is_some() {
+            .optional()?
+            .is_some();
+        let profile_seeded = conn
+            .query_row(
+                "SELECT value FROM user_settings WHERE key = ?1",
+                params![PROFILE_SEEDED_KEY],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+            .is_some();
+        if account_seeded && profile_seeded {
             return Ok(false);
         }
 
         let now = Utc::now().timestamp();
         let tx = conn.transaction()?;
-        for relay in default_relays() {
-            // Use INSERT OR IGNORE so a partially-completed prior attempt
-            // (where the sentinel never made it but rows did) doesn't error.
+        // Use INSERT OR IGNORE throughout so a partially-completed prior
+        // attempt (where a sentinel never made it but rows did) doesn't error.
+        if !account_seeded {
+            let inbox = default_relays_for(RelayType::Inbox);
+            for relay in &inbox {
+                tx.execute(
+                    "INSERT OR IGNORE INTO user_relays (url, relay_type, created_at) VALUES (?1, ?2, ?3)",
+                    params![relay, RelayType::Inbox.as_str(), now],
+                )?;
+            }
+            let key_package = default_relays_for(RelayType::KeyPackage);
+            for relay in &key_package {
+                tx.execute(
+                    "INSERT OR IGNORE INTO user_relays (url, relay_type, created_at) VALUES (?1, ?2, ?3)",
+                    params![relay, RelayType::KeyPackage.as_str(), now],
+                )?;
+            }
+            // Contamination ledger (append-only): seeding an account-seed
+            // category IS the moment those relays are committed to carrying this
+            // account's gift wraps and KeyPackages, so they are permanently
+            // excluded from the profile pool from here on. Recorded inside the
+            // SAME transaction as the rows themselves, so the ledger can never
+            // lag the configuration it describes.
+            record_relay_category_on(&tx, &inbox, RelayType::Inbox, now)?;
+            record_relay_category_on(&tx, &key_package, RelayType::KeyPackage, now)?;
             tx.execute(
-                "INSERT OR IGNORE INTO user_relays (url, relay_type, created_at) VALUES (?1, ?2, ?3)",
-                params![relay, RelayType::Inbox.as_str(), now],
-            )?;
-            tx.execute(
-                "INSERT OR IGNORE INTO user_relays (url, relay_type, created_at) VALUES (?1, ?2, ?3)",
-                params![relay, RelayType::KeyPackage.as_str(), now],
+                "INSERT OR IGNORE INTO user_settings (key, value) VALUES (?1, '1')",
+                params![SEEDED_KEY],
             )?;
         }
-        tx.execute(
-            "INSERT INTO user_settings (key, value) VALUES (?1, '1')",
-            params![SEEDED_KEY],
-        )?;
+        if !profile_seeded {
+            // Profile rows ONLY. This branch runs on upgrade for installs whose
+            // account-seed rows are already user-edited; touching them here
+            // would resurrect relays the user deliberately removed.
+            //
+            // And deliberately NO contamination record: this category IS the
+            // profile pool. `ContaminationSource::for_relay_type` gives a caller
+            // no source value for it, so the omission is structural rather than
+            // a rule someone has to remember here.
+            for relay in default_relays_for(RelayType::Profile) {
+                tx.execute(
+                    "INSERT OR IGNORE INTO user_relays (url, relay_type, created_at) VALUES (?1, ?2, ?3)",
+                    params![relay, RelayType::Profile.as_str(), now],
+                )?;
+            }
+            tx.execute(
+                "INSERT OR IGNORE INTO user_settings (key, value) VALUES (?1, '1')",
+                params![PROFILE_SEEDED_KEY],
+            )?;
+        }
         tx.commit()?;
         Ok(true)
     }
@@ -279,21 +353,35 @@ impl CircleStorage {
     /// so a duplicate add is a silent no-op. URLs that fail normalization
     /// surface as [`CircleError::InvalidData`].
     ///
+    /// # Contamination
+    ///
+    /// Adding an [`RelayType::Inbox`] or [`RelayType::KeyPackage`] relay hands
+    /// it this account's location-plane traffic, so the same transaction appends
+    /// it to the contamination ledger and it is excluded from the profile pool
+    /// forever after. [`RelayType::Profile`] adds are NOT recorded — that
+    /// category is the pool itself.
+    ///
     /// # Errors
     ///
     /// Returns [`CircleError::InvalidData`] for invalid URLs and database
     /// errors otherwise.
     pub fn add_user_relay(&self, url: &str, relay_type: RelayType) -> Result<()> {
         let normalized = normalize_url(url)?;
-        let conn = self
+        let mut conn = self
             .conn()
             .lock()
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
         let now = Utc::now().timestamp();
-        conn.execute(
+        // One transaction: the relay row and its ledger entry land together, so
+        // no crash window can leave a configured location-plane relay that the
+        // profile pool still considers clean.
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT OR IGNORE INTO user_relays (url, relay_type, created_at) VALUES (?1, ?2, ?3)",
             params![normalized, relay_type.as_str(), now],
         )?;
+        record_relay_category_on(&tx, std::slice::from_ref(&normalized), relay_type, now)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -341,10 +429,10 @@ impl CircleStorage {
 
     /// Restores defaults for a category **non-destructively**.
     ///
-    /// Adds any missing default relays via `INSERT OR IGNORE`. Existing
-    /// user-added custom relays are preserved. Use
-    /// [`Self::wipe_and_reset_defaults_for`] for the destructive variant
-    /// (always behind a UI confirmation dialog).
+    /// Adds any missing default relays — from THIS category's pool, per
+    /// [`default_relays_for`] — via `INSERT OR IGNORE`. Existing user-added
+    /// custom relays are preserved. Use [`Self::wipe_and_reset_defaults_for`]
+    /// for the destructive variant (always behind a UI confirmation dialog).
     ///
     /// # Errors
     ///
@@ -356,22 +444,27 @@ impl CircleStorage {
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
         let now = Utc::now().timestamp();
         let tx = conn.transaction()?;
-        for relay in default_relays() {
+        let defaults = default_relays_for(relay_type);
+        for relay in &defaults {
             tx.execute(
                 "INSERT OR IGNORE INTO user_relays (url, relay_type, created_at) VALUES (?1, ?2, ?3)",
                 params![relay, relay_type.as_str(), now],
             )?;
         }
+        // Same transaction, same reasoning as `add_user_relay`; a structural
+        // no-op for `RelayType::Profile`.
+        record_relay_category_on(&tx, &defaults, relay_type, now)?;
         tx.commit()?;
         Ok(())
     }
 
-    /// Destructively resets a category to exactly the current default relay
-    /// list returned by [`default_relays`].
+    /// Destructively resets a category to exactly its own default relay list,
+    /// as returned by [`default_relays_for`].
     ///
-    /// Wipes all rows for the category and re-inserts defaults in one
-    /// transaction. The caller MUST gate this behind a confirmation dialog;
-    /// the function name is deliberately verbose to prevent accidental use.
+    /// Wipes all rows for the category and re-inserts that category's defaults
+    /// in one transaction. The caller MUST gate this behind a confirmation
+    /// dialog; the function name is deliberately verbose to prevent accidental
+    /// use.
     ///
     /// # Errors
     ///
@@ -387,12 +480,21 @@ impl CircleStorage {
             "DELETE FROM user_relays WHERE relay_type = ?1",
             params![relay_type.as_str()],
         )?;
-        for relay in default_relays() {
+        // `OR IGNORE` (rather than a bare INSERT) so a pool that ever contains
+        // two spellings collapsing to one canonical URL cannot abort the reset
+        // and leave the category empty — the DELETE has already run.
+        let defaults = default_relays_for(relay_type);
+        for relay in &defaults {
             tx.execute(
-                "INSERT INTO user_relays (url, relay_type, created_at) VALUES (?1, ?2, ?3)",
+                "INSERT OR IGNORE INTO user_relays (url, relay_type, created_at) VALUES (?1, ?2, ?3)",
                 params![relay, relay_type.as_str(), now],
             )?;
         }
+        // The DELETE above removes CONFIGURATION, never contamination: the
+        // relays it drops have already carried this account's traffic, and the
+        // ledger keeps their rows (append-only). The re-inserted defaults are
+        // recorded here for the same reason as every other write site.
+        record_relay_category_on(&tx, &defaults, relay_type, now)?;
         tx.commit()?;
         Ok(())
     }
@@ -571,6 +673,46 @@ mod tests {
         CircleStorage::in_memory().expect("in-memory storage must initialize")
     }
 
+    /// The curated profile pool, as the seeder would insert it.
+    ///
+    /// Deliberately the shipped CONSTANT, even though the seeder itself calls
+    /// the effective accessor ([`crate::profile::profile_relay_pool_default`]).
+    /// The two agree unconditionally in this binary because NO lib unit test
+    /// installs the debug pool override — that install lives only in the
+    /// `tests/profile_relay_override_*.rs` integration binaries, each of which
+    /// gets its own process (see the NOTE in `profile::relay_pool`'s test
+    /// module; CI-enforced by `check_profile_privacy_boundaries.sh` Check 12).
+    ///
+    /// Do NOT "fix" a failure here by switching to the effective accessor: that
+    /// would make `profile_category_seeds_from_the_profile_pool_not_the_account_seed`
+    /// compare the seeded rows against whatever was seeded from, i.e. assert
+    /// nothing at all — while still passing, and while the profile plane could
+    /// be seeding from the account-seed relays. A red assertion here means
+    /// something installed an override in the lib binary; remove that instead.
+    fn profile_pool() -> Vec<String> {
+        crate::profile::relay_pool::production_profile_relays()
+    }
+
+    /// Asserts no entry of `rows` is an account-seed relay.
+    ///
+    /// Checks both the runtime seed ([`default_relays`], which a debug E2E
+    /// override can redirect) and the compiled-in production list, so the
+    /// assertion is meaningful whichever one a given process is using.
+    fn assert_no_account_seed_relay(rows: &[String]) {
+        for seed in default_relays() {
+            assert!(
+                !rows.contains(&seed),
+                "account-seed relay {seed} leaked into the profile plane: {rows:?}"
+            );
+        }
+        for seed in crate::circle::PRODUCTION_DEFAULT_RELAYS {
+            assert!(
+                !rows.iter().any(|u| u == seed),
+                "production account-seed relay {seed} leaked into the profile plane: {rows:?}"
+            );
+        }
+    }
+
     #[test]
     fn normalize_strips_trailing_slash_on_root() {
         let out = normalize_url("wss://relay.example.com/").expect("must parse");
@@ -676,13 +818,235 @@ mod tests {
     fn seed_defaults_runs_once() {
         let storage = make_storage();
         assert!(storage.seed_defaults_if_unseeded().unwrap());
-        // Second call — sentinel set, no-op.
+        // Second call — sentinels set, no-op.
         assert!(!storage.seed_defaults_if_unseeded().unwrap());
-        // Both categories populated with the production defaults.
+        // Both account categories populated with the production defaults.
         let inbox = storage.list_user_relays(RelayType::Inbox).unwrap();
         let kp = storage.list_user_relays(RelayType::KeyPackage).unwrap();
         assert_eq!(inbox.len(), crate::circle::PRODUCTION_DEFAULT_RELAYS.len());
         assert_eq!(kp.len(), crate::circle::PRODUCTION_DEFAULT_RELAYS.len());
+        // ...and the profile category from its own, separate pool.
+        let profile = storage.list_user_relays(RelayType::Profile).unwrap();
+        assert_eq!(profile, profile_pool());
+    }
+
+    #[test]
+    fn default_relays_for_dispatches_per_category() {
+        // The dispatch itself, independent of storage: the account categories
+        // share the account seed, the profile category does not draw from it
+        // at all. `default_relays_for(Profile)` resolves through the EFFECTIVE
+        // accessor, so comparing it to the shipped constant is sound only
+        // because no lib test installs the pool override — see `profile_pool`.
+        assert_eq!(default_relays_for(RelayType::Inbox), default_relays());
+        assert_eq!(default_relays_for(RelayType::KeyPackage), default_relays());
+
+        let profile = default_relays_for(RelayType::Profile);
+        assert_eq!(profile, profile_pool());
+        assert!(!profile.is_empty(), "profile pool must not be empty");
+        assert_no_account_seed_relay(&profile);
+    }
+
+    #[test]
+    fn profile_category_seeds_from_the_profile_pool_not_the_account_seed() {
+        // THE trap this feature can ship with: seeding the profile category
+        // from `default_relays()` produces an editable "Profile relays" list
+        // pre-filled with the exact relays already carrying this user's
+        // encrypted kind-445 traffic. Everything would look correct and the
+        // plane separation would be worth nothing.
+        let storage = make_storage();
+        assert!(storage.seed_defaults_if_unseeded().unwrap());
+
+        let profile = storage.list_user_relays(RelayType::Profile).unwrap();
+        assert_eq!(
+            profile,
+            profile_pool(),
+            "profile category must seed from the curated profile pool"
+        );
+        assert_no_account_seed_relay(&profile);
+
+        // Symmetrically: no profile-pool relay may end up on the location
+        // plane through seeding.
+        for account_category in [RelayType::Inbox, RelayType::KeyPackage] {
+            let rows = storage.list_user_relays(account_category).unwrap();
+            for pool_relay in profile_pool() {
+                assert!(
+                    !rows.contains(&pool_relay),
+                    "profile-pool relay {pool_relay} was seeded onto {}",
+                    account_category.as_str()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn restore_defaults_for_profile_uses_the_profile_pool() {
+        let storage = make_storage();
+        storage.seed_defaults_if_unseeded().unwrap();
+        // Remove one pool entry, then restore.
+        let removed = profile_pool()[0].clone();
+        assert!(storage
+            .remove_user_relay(&removed, RelayType::Profile)
+            .unwrap());
+        assert!(!storage
+            .list_user_relays(RelayType::Profile)
+            .unwrap()
+            .contains(&removed));
+
+        storage.restore_defaults_for(RelayType::Profile).unwrap();
+        let profile = storage.list_user_relays(RelayType::Profile).unwrap();
+        for entry in profile_pool() {
+            assert!(
+                profile.contains(&entry),
+                "restore must re-add missing profile default {entry}"
+            );
+        }
+        // `restore_defaults_for` ignored its parameter before this change and
+        // always used the account seed — that would show up right here.
+        assert_no_account_seed_relay(&profile);
+    }
+
+    #[test]
+    fn wipe_and_reset_defaults_for_profile_uses_the_profile_pool() {
+        let storage = make_storage();
+        storage
+            .add_user_relay("wss://custom-profile.example.com", RelayType::Profile)
+            .unwrap();
+        storage
+            .wipe_and_reset_defaults_for(RelayType::Profile)
+            .unwrap();
+        let profile = storage.list_user_relays(RelayType::Profile).unwrap();
+        assert_eq!(profile, profile_pool());
+        assert_no_account_seed_relay(&profile);
+    }
+
+    #[test]
+    fn existing_install_still_seeds_profile_relays_on_upgrade() {
+        // An install predating the profile category already has SEEDED_KEY set
+        // by presence. With a single sentinel it would never receive profile
+        // relays — the category would ship empty for every existing user.
+        let storage = make_storage();
+        storage.set_bool_setting(SEEDED_KEY, true).unwrap();
+        // Simulate the account rows that install already has, including a
+        // user-added custom relay and WITHOUT one default the user removed.
+        storage
+            .add_user_relay(
+                crate::circle::PRODUCTION_DEFAULT_RELAYS[1],
+                RelayType::Inbox,
+            )
+            .unwrap();
+        storage
+            .add_user_relay("wss://user-added.example.com", RelayType::Inbox)
+            .unwrap();
+        assert!(storage
+            .list_user_relays(RelayType::Profile)
+            .unwrap()
+            .is_empty());
+
+        // Upgrade-time seed: profile rows appear...
+        assert!(
+            storage.seed_defaults_if_unseeded().unwrap(),
+            "upgrade must report that it wrote rows"
+        );
+        let profile = storage.list_user_relays(RelayType::Profile).unwrap();
+        assert_eq!(profile, profile_pool());
+
+        // ...and the already-seeded account category is left exactly as the
+        // user left it. Re-adding PRODUCTION_DEFAULT_RELAYS[0] here would be
+        // the `_v2`-bump failure mode.
+        let inbox = storage.list_user_relays(RelayType::Inbox).unwrap();
+        assert_eq!(
+            inbox,
+            vec![
+                crate::circle::PRODUCTION_DEFAULT_RELAYS[1].to_string(),
+                "wss://user-added.example.com".to_string(),
+            ],
+            "upgrade seeding must not touch the account categories"
+        );
+
+        // And the upgrade is itself once-only.
+        assert!(!storage.seed_defaults_if_unseeded().unwrap());
+    }
+
+    #[test]
+    fn seeding_is_idempotent_across_all_three_categories() {
+        let storage = make_storage();
+        assert!(storage.seed_defaults_if_unseeded().unwrap());
+        let snapshot: Vec<Vec<String>> =
+            [RelayType::Inbox, RelayType::KeyPackage, RelayType::Profile]
+                .iter()
+                .map(|t| storage.list_user_relays(*t).unwrap())
+                .collect();
+
+        for _ in 0..3 {
+            assert!(
+                !storage.seed_defaults_if_unseeded().unwrap(),
+                "repeat seeding must be a no-op once both sentinels are set"
+            );
+        }
+
+        let after: Vec<Vec<String>> = [RelayType::Inbox, RelayType::KeyPackage, RelayType::Profile]
+            .iter()
+            .map(|t| storage.list_user_relays(*t).unwrap())
+            .collect();
+        assert_eq!(snapshot, after, "repeat seeding changed stored rows");
+        // Each category is non-empty and holds no duplicates.
+        for rows in &after {
+            assert!(!rows.is_empty());
+            let unique: std::collections::HashSet<&String> = rows.iter().collect();
+            assert_eq!(unique.len(), rows.len(), "duplicate row after re-seeding");
+        }
+    }
+
+    #[test]
+    fn seed_does_not_reapply_after_user_removes_a_profile_default() {
+        // The sentinel invariant, extended to the new category: a profile relay
+        // the user deliberately removed must stay removed. This matters more
+        // here than for the account categories — a resurrected profile relay is
+        // one the user may have dropped precisely because they learned it also
+        // sees their location traffic.
+        let storage = make_storage();
+        storage.seed_defaults_if_unseeded().unwrap();
+        let removed = profile_pool()[0].clone();
+        assert!(storage
+            .remove_user_relay(&removed, RelayType::Profile)
+            .unwrap());
+
+        // Assert the ROWS before the return value: the stored state is the
+        // invariant that matters, and asserting the bool first would let a
+        // resurrection regression be reported only as a wrong return code.
+        let reseeded = storage.seed_defaults_if_unseeded().unwrap();
+        let profile = storage.list_user_relays(RelayType::Profile).unwrap();
+        assert!(
+            !profile.contains(&removed),
+            "defensive seed resurrected a user-removed profile relay"
+        );
+        assert_eq!(profile.len(), profile_pool().len() - 1);
+        assert!(!reseeded, "a fully-seeded install must report no work done");
+    }
+
+    #[test]
+    fn profile_rows_are_stored_under_their_own_slug() {
+        // Categories share one table; a slug collision would merge the profile
+        // plane into an account category.
+        let storage = make_storage();
+        storage
+            .add_user_relay("wss://profile-only.example.com", RelayType::Profile)
+            .unwrap();
+        for other in [RelayType::Inbox, RelayType::KeyPackage] {
+            assert!(
+                !storage
+                    .list_user_relays(other)
+                    .unwrap()
+                    .iter()
+                    .any(|u| u.contains("profile-only.example.com")),
+                "profile row surfaced under {}",
+                other.as_str()
+            );
+        }
+        assert_eq!(
+            storage.list_user_relays(RelayType::Profile).unwrap(),
+            vec!["wss://profile-only.example.com".to_string()]
+        );
     }
 
     #[test]

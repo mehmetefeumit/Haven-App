@@ -30,6 +30,7 @@ use std::sync::{Arc, Mutex};
 
 use nostr::{Event, EventId, Keys, PublicKey};
 
+use super::contamination::ContaminationSource;
 use super::error::{CircleError, Result};
 use super::leave::{plan_leave, LeavePlan};
 use super::storage::CircleStorage;
@@ -115,6 +116,7 @@ impl CircleManager {
 
         let db_path = data_dir.join("circles.db");
         let storage = CircleStorage::new(&db_path, circle_db_hex_key)?;
+        Self::backfill_contamination_ledger(&storage);
 
         Ok(Self {
             session: Arc::new(session),
@@ -122,6 +124,34 @@ impl CircleManager {
             create_pending: Mutex::new(HashMap::new()),
             storage,
         })
+    }
+
+    /// Runs the startup contamination fold, best-effort.
+    ///
+    /// Backfills installs that predate the per-event write sites: their circles,
+    /// inbox relays and `KeyPackage` relays already carry location-plane traffic
+    /// but have no ledger rows, so without this their profile pool would happily
+    /// include a relay that has been routing their kind-445 for months. On a
+    /// current install every URL is already present and the fold is a no-op.
+    ///
+    /// It is also the ONLY write site for the discovery plane, which has no
+    /// per-query recorder because the discovery set is a process constant — see
+    /// [`CircleStorage::refresh_contamination_ledger`].
+    ///
+    /// Failure is logged rather than propagated: a manager that refuses to open
+    /// because a diagnostic backfill failed would take location sharing down
+    /// with it. The fold is idempotent, so the next launch retries. The
+    /// per-event write sites remain fail-closed (they propagate), so this is a
+    /// net for HISTORY, never the primary guarantee.
+    fn backfill_contamination_ledger(storage: &CircleStorage) {
+        match storage.refresh_contamination_ledger(chrono::Utc::now().timestamp()) {
+            Ok(0) => {}
+            Ok(n) => log::info!("contamination ledger: backfilled {n} relay(s) at startup"),
+            Err(e) => log::warn!(
+                "contamination ledger backfill failed (retries next launch): {}",
+                redact_hex_sequences(&e.to_string())
+            ),
+        }
     }
 
     /// Creates a new circle manager with a fixed-key (test) MLS session.
@@ -144,6 +174,7 @@ impl CircleManager {
 
         let db_path = data_dir.join("circles.db");
         let storage = CircleStorage::new(&db_path, None)?;
+        Self::backfill_contamination_ledger(&storage);
 
         Ok(Self {
             session: Arc::new(session),
@@ -337,6 +368,12 @@ impl CircleManager {
             updated_at: now,
         };
         self.storage.save_circle(&circle)?;
+        // Contamination ledger: this set is about to carry the circle's kind-445
+        // traffic and its commits, so it is permanently excluded from the
+        // profile pool. Recorded BEFORE the welcomes go out — over-recording (a
+        // create that is later rolled back) is the safe direction; the ledger is
+        // append-only precisely because under-recording fails OPEN.
+        self.record_contaminated(&circle.relays, ContaminationSource::CircleRouting)?;
 
         let membership = CircleMembership {
             mls_group_id: group_id.clone(),
@@ -394,6 +431,21 @@ impl CircleManager {
             .remove(&pending)
     }
 
+    /// Appends `relays` to the append-only contamination ledger.
+    ///
+    /// Called at every point a relay is handed location-plane traffic, so the
+    /// profile pool can subtract it forever after (see
+    /// [`super::contamination`]). The error is PROPAGATED rather than logged: a
+    /// silently-dropped ledger write leaves a relay looking clean while it
+    /// carries the user's encrypted traffic, which is exactly the fail-open the
+    /// plane separation exists to prevent. The ledger shares circles.db with the
+    /// row being written alongside it, so a failure here means that write was
+    /// not durable either.
+    fn record_contaminated(&self, relays: &[String], source: ContaminationSource) -> Result<()> {
+        self.storage
+            .record_contaminated_relays(relays, source, chrono::Utc::now().timestamp())
+    }
+
     /// Routes engine-produced gift-wrapped Welcomes to their recipients' relays.
     ///
     /// The Dark Matter peeler owns the NIP-59 1059 crypto, so Haven no longer
@@ -406,6 +458,24 @@ impl CircleManager {
     /// Returns [`CircleError::Mls`] on a count/recipient mismatch, or
     /// [`CircleError::MissingWelcomeRelays`] if a member has no advertised relay
     /// and there is no sender fallback.
+    ///
+    /// # Contamination
+    ///
+    /// Each resolved `recipient_relays` set is appended to the contamination
+    /// ledger under [`ContaminationSource::Welcome`] before the welcomes are
+    /// handed back for dispatch. This is the one location-plane relay set Haven
+    /// persists NOWHERE else: the cascade resolves an invitee's relays from the
+    /// key-package event at send time, and the result is not written to
+    /// `circles` or `user_relays`. Without this write site those relays would be
+    /// invisible to the profile-pool exclusion — and unlike circle and user
+    /// relays they cannot be recovered later by
+    /// [`CircleStorage::refresh_contamination_ledger`], because there is nothing
+    /// on device to fold in.
+    ///
+    /// Recording happens on the success path only, and covers exactly the
+    /// welcomes returned to the caller for publication. An error aborts before
+    /// any welcome is dispatched, so nothing is recorded for a fan-out that
+    /// never happened.
     // `async` is part of the welcome fan-out contract DM-4 wires to real relay
     // publishing; the body has no `await` yet (the gift wraps are assembled
     // synchronously), so the lint is suppressed rather than flip the signature.
@@ -469,6 +539,17 @@ impl CircleManager {
                 event,
             });
         }
+
+        // The gap this write site closes: a Welcome delivery relay is recorded
+        // NOWHERE else on device, so this is its only chance to enter the
+        // ledger. Flattened to a bare URL set — which relay served WHICH
+        // invitee is co-membership metadata the ledger deliberately does not
+        // hold (the table has no circle/group column).
+        let welcome_relays: Vec<String> = welcome_events
+            .iter()
+            .flat_map(|w| w.recipient_relays.iter().cloned())
+            .collect();
+        self.record_contaminated(&welcome_relays, ContaminationSource::Welcome)?;
 
         Ok(welcome_events)
     }
@@ -633,6 +714,13 @@ impl CircleManager {
             )));
         }
 
+        // Contamination is recorded for the NEW set even though the circle row
+        // is not updated until `finalize_relay_update`: the caller publishes
+        // this commit to the UNION of the circle's current and new relays, so
+        // every incoming relay sees group traffic regardless of whether the
+        // update is later confirmed or rolled back.
+        self.record_contaminated(&canonical, ContaminationSource::CircleRouting)?;
+
         let effects = self
             .session
             .update_relays(mls_group_id, canonical)
@@ -668,6 +756,11 @@ impl CircleManager {
         if engine_relays.is_empty() {
             return Ok(());
         }
+
+        // The receiving end of an admin's relay update: a non-admin member
+        // learns the new routing set from the engine's component rather than
+        // from `update_circle_relays`, so this is that member's write site.
+        self.record_contaminated(&engine_relays, ContaminationSource::CircleRouting)?;
 
         let mut current = circle.relays.clone();
         current.sort();
@@ -1224,6 +1317,11 @@ impl CircleManager {
         // held welcome (terminal).
         self.storage
             .record_processed_invitation(gift_wrap_id, &circle, &membership, now)?;
+        // A joined circle carries the INVITER's routing relays, which is the
+        // most common way a relay this user never chose starts seeing their
+        // kind-445 — and the most likely way a profile-pool relay would get
+        // contaminated. Record before the circle is usable.
+        self.record_contaminated(&circle.relays, ContaminationSource::CircleRouting)?;
         self.pending_welcomes.remove(gift_wrap_id);
 
         self.get_circle(&group_id)
@@ -1862,18 +1960,44 @@ impl CircleManager {
         self.storage.get_profiles(pubkeys_hex)
     }
 
-    /// See [`CircleStorage::touch_profiles_fetched_at`].
+    /// See [`CircleStorage::profiles_due`].
     ///
     /// # Errors
     ///
     /// Propagates database errors.
-    pub fn touch_profiles_fetched_at(
+    pub fn profiles_due(
         &self,
         pubkeys_hex: &[String],
         now_unix_secs: i64,
-    ) -> Result<()> {
+        max_age_secs: i64,
+    ) -> Result<Vec<(String, u8)>> {
         self.storage
-            .touch_profiles_fetched_at(pubkeys_hex, now_unix_secs)
+            .profiles_due(pubkeys_hex, now_unix_secs, max_age_secs)
+    }
+
+    /// See [`CircleStorage::touch_profiles_hit`].
+    ///
+    /// Pairs with [`Self::record_profile_misses`]: under one-relay-per-member
+    /// assignment the hit/miss split is load-bearing, so callers must never
+    /// collapse the two back into a single "stamp every attempted author" call
+    /// (the deleted `touch_profiles_fetched_at`) — that is what pinned a member
+    /// `Unknown` for a whole staleness tier after one relay's miss.
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn touch_profiles_hit(&self, pubkeys_hex: &[String], now_unix_secs: i64) -> Result<()> {
+        self.storage.touch_profiles_hit(pubkeys_hex, now_unix_secs)
+    }
+
+    /// See [`CircleStorage::record_profile_misses`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn record_profile_misses(&self, pubkeys_hex: &[String], now_unix_secs: i64) -> Result<()> {
+        self.storage
+            .record_profile_misses(pubkeys_hex, now_unix_secs)
     }
 
     /// See [`CircleStorage::upsert_profile_picture`].
@@ -1971,6 +2095,78 @@ impl CircleManager {
     pub fn wipe_all_profiles(&self) -> Result<()> {
         self.storage.wipe_all_profiles()
     }
+
+    // ==================== Profile plane (relays + salt) ====================
+    //
+    // This block is the ONLY bridge between the circle layer and the profile
+    // plane, and it is deliberately narrow: bare relay URLs and an opaque salt,
+    // in and out. Nothing here names a circle, a group, or an MLS identifier.
+    //
+    // That is a hard requirement, not a style preference. The FFI wrappers for
+    // these two methods live inside the profile block of
+    // `haven/rust_builder/src/api.rs`, which `scripts/ci/check_profile_privacy_
+    // boundaries.sh` (Check 2) scans for the tokens `nostr_group_id`,
+    // `MlsGroupId`, `mls_group_id`, `GroupId`, `circle_id`, `circleId` and
+    // `CircleId`. A signature that took or returned any circle type would force
+    // the FFI caller to spell one and break that gate — which is the gate doing
+    // its job, because the profile plane must stay unlinkable to circles at the
+    // source level.
+
+    /// The profile-plane relays that are safe to use right now.
+    ///
+    /// The curated pool unioned with the user's stored profile relays, minus
+    /// every relay in the append-only contamination ledger. Returns bare URLs;
+    /// see [`CircleStorage::usable_profile_relays`] for the union rationale.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::profile::ProfileError::PoolUnderflow`] when fewer than
+    /// [`crate::profile::PROFILE_POOL_MIN`] relays survive exclusion.
+    ///
+    /// Underflow is TERMINAL. A caller MUST surface the failure, never
+    /// substitute the discovery plane, the account seed, or an excluded relay:
+    /// that fallback would route profile lookups to a relay already holding this
+    /// account's encrypted location traffic, handing one observer both halves of
+    /// the join the plane separation exists to break.
+    pub fn usable_profile_relays(&self) -> crate::profile::Result<Vec<String>> {
+        self.storage.usable_profile_relays()
+    }
+
+    /// See [`CircleStorage::get_or_create_profile_relay_salt`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn profile_relay_salt(&self) -> Result<crate::profile::ProfileRelaySalt> {
+        self.storage.get_or_create_profile_relay_salt()
+    }
+
+    /// See [`CircleStorage::refresh_contamination_ledger`].
+    ///
+    /// Already run once per process by [`Self::new`] / [`Self::new_unencrypted`];
+    /// exposed so a caller can re-fold after a bulk configuration change.
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn refresh_contamination_ledger(&self, now: i64) -> Result<usize> {
+        self.storage.refresh_contamination_ledger(now)
+    }
+
+    /// See [`CircleStorage::list_contaminated_relays`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn list_contaminated_relays(&self) -> Result<Vec<String>> {
+        self.storage.list_contaminated_relays()
+    }
+
+    // NOTE: there is deliberately no `clear_contaminated_relays`. The ledger is
+    // append-only in the strongest sense available — no API can remove a row.
+    // The one legitimate "forget" (logout, where the identity those relays
+    // observed is itself destroyed) happens by deleting the `circles.db` file,
+    // so it needs no method here. See `circle::contamination`'s module docs.
 }
 
 /// Parses invitee `KeyPackage` events (kind 30443) into engine [`KeyPackage`]s.
@@ -2676,6 +2872,72 @@ mod tests {
         assert_eq!(
             pending[0].member_count, 1,
             "the pending list must preserve the known-inviter count"
+        );
+    }
+
+    /// A Welcome-delivery relay must enter the contamination ledger, because
+    /// the cascade is the ONLY place it is ever observed on device.
+    ///
+    /// The cascade resolves an invitee's delivery relays from their KeyPackage
+    /// at send time; the result is written to neither `circles.relays` nor
+    /// `user_relays`. So unlike every other contamination source, this one
+    /// cannot be reconstructed later by `refresh_contamination_ledger` — if the
+    /// write site regresses, the relay is invisible to the profile-pool
+    /// exclusion forever, and Haven will happily route kind-0 traffic to a
+    /// relay that already received this user's gift-wrapped Welcome.
+    ///
+    /// The invitee's inbox relay is deliberately DISJOINT from the circle's
+    /// routing relays, so a passing assertion cannot be explained by the
+    /// `CircleRouting` write site — the URL can only have reached the ledger
+    /// through the Welcome cascade.
+    #[tokio::test]
+    async fn welcome_cascade_relays_are_recorded_as_contaminated() {
+        const CIRCLE_RELAY: &str = "wss://circle-routing.test";
+        const BOB_INBOX_RELAY: &str = "wss://bob-only-inbox.test";
+
+        let circle_relays = vec![CIRCLE_RELAY.to_string()];
+        let alice_dir = TempDir::new().unwrap();
+        let alice_keys = Keys::generate();
+        let alice = CircleManager::new_unencrypted(alice_dir.path(), &alice_keys).unwrap();
+
+        // Bob is reachable ONLY at his own inbox relay, which Alice's circle
+        // never routes through.
+        let bob_member = make_member_with_relays(vec![BOB_INBOX_RELAY.to_string()], vec![]).await;
+
+        let config = CircleConfig::new("Cascade Circle").with_relays(circle_relays.clone());
+        let creation = alice
+            .create_circle(&alice_keys, vec![bob_member], &config, &circle_relays)
+            .await
+            .expect("create circle");
+
+        // Non-vacuity: the cascade really did select Bob's inbox relay, so the
+        // ledger assertion below is about a relay that was actually used.
+        let welcome = creation.welcome_events.first().expect("one welcome");
+        assert!(
+            welcome
+                .recipient_relays
+                .iter()
+                .any(|r| r.contains("bob-only-inbox")),
+            "precondition: the cascade must have routed to Bob's inbox relay, \
+             got {:?}",
+            welcome.recipient_relays,
+        );
+
+        let ledger: Vec<String> = alice.storage.list_contaminated_relays().unwrap();
+        assert!(
+            ledger.iter().any(|r| r.contains("bob-only-inbox")),
+            "the Welcome delivery relay is missing from the contamination \
+             ledger — it is recorded nowhere else on device, so the profile \
+             pool would keep treating it as clean and route kind-0 to a relay \
+             that already holds this user's gift-wrapped Welcome. ledger={ledger:?}",
+        );
+
+        // The circle's own routing relay is contaminated too, by a different
+        // write site. Asserting both keeps the test honest about which URL
+        // proves which path.
+        assert!(
+            ledger.iter().any(|r| r.contains("circle-routing")),
+            "the circle routing relay should also be contaminated: {ledger:?}",
         );
     }
 

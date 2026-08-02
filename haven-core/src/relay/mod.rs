@@ -33,6 +33,7 @@ pub mod maintenance;
 mod manager;
 pub mod publishers;
 mod types;
+pub mod url_norm;
 
 pub use auto_commit::{
     resolve_receive_publish_work, rollback_receive_publish_work, AutoCommitPublisher,
@@ -54,3 +55,4 @@ pub use publishers::{
 pub use types::{
     PublishResult, RelayConnectionStatus, RelayEventCheck, RelayFetchOutcome, RelayStatus,
 };
+pub use url_norm::{canonicalize, normalize_relay_url};

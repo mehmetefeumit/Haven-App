@@ -269,7 +269,25 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get relaySettingsKeyPackageSubtitle =>
-      'Where invitees find your keys and your public profile is published (kind 10002)';
+      'Where others find the keys they need to invite you (kind 10002)';
+
+  @override
+  String get relaySettingsProfileTitle => 'My Profile Relays';
+
+  @override
+  String get relaySettingsProfileSubtitle =>
+      'Where your public profile is looked up and published. These relays are kept separate from your other relays, and the profile relay list itself is never published (kind 0)';
+
+  @override
+  String get relaySettingsProfileUnderflowTitle => 'Profile lookups paused';
+
+  @override
+  String get relaySettingsProfileUnderflowMessage =>
+      'Too few Profile relays remain, so members\' names and photos will stop updating.';
+
+  @override
+  String get relaySettingsProfileUnderflowRestoreButton =>
+      'Restore default profile relays';
 
   @override
   String get relaySettingsLoadRelaysError => 'Failed to load relays.';
@@ -343,6 +361,15 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String get relaySettingsEmptyMessage =>
       'You need at least one relay so others can reach you. Tap below to restore Haven defaults.';
+
+  @override
+  String get relaySettingsProfileContaminationTooltip =>
+      'Also carries other Haven traffic';
+
+  @override
+  String relaySettingsProfileContaminationSemantics(String url) {
+    return 'Warning: $url also carries your other Haven traffic, so this relay could link your profile to that traffic';
+  }
 
   @override
   String get locationSettingsTitle => 'Location';
@@ -633,8 +660,8 @@ class AppLocalizationsEn extends AppLocalizations {
       'Haven uses several relays, so no single one can cut you off. If one goes offline, the rest keep working. You choose the relays where invitations reach you; the relays a circle uses are fixed when it is created.';
 
   @override
-  String get privacyRelaysTwoLists =>
-      'Haven keeps two lists for you. Your inbox relays are where invitations reach you. Your KeyPackage relays are where people fetch the keys they need in order to invite you. Each circle also carries its own list, and that is where the circle\'s encrypted updates travel.';
+  String get privacyRelaysYourLists =>
+      'Haven keeps three lists for you. Your inbox relays are where invitations reach you, and your KeyPackage relays are where people fetch the keys they need in order to invite you — Haven publishes both of these lists so others can find them. Your profile relays are different: that is where your name and photo are looked up and published, but the list itself stays on your device and is never published. A relay that only carries your location traffic or invitations therefore has no public list telling it which relays you use for your profile. Each circle also carries its own list, and that is where the circle\'s encrypted updates travel.';
 
   @override
   String get privacyRelaysMeansForYou =>
@@ -2003,6 +2030,9 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get addRelaySheetTitleKeyPackage => 'Add KeyPackage relay';
+
+  @override
+  String get addRelaySheetTitleProfile => 'Add Profile relay';
 
   @override
   String get addRelaySheetHint => 'wss://relay.example.com';

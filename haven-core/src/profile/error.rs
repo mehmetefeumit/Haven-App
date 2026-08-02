@@ -87,6 +87,26 @@ pub enum ProfileError {
     /// `Debug` time.
     #[error("profile cache error: {0}")]
     Sqlite(String),
+
+    /// Structurally invalid non-URL input (currently: a malformed persisted
+    /// relay-assignment salt). Data-free: the rejected value is never echoed.
+    #[error("invalid profile data: {0}")]
+    InvalidData(String),
+
+    /// Too few profile-plane relays survived contamination exclusion.
+    ///
+    /// Fail-closed and TERMINAL: the profile plane must never fall back to the
+    /// discovery plane or to a relay carrying the user's location traffic,
+    /// because that fallback would silently re-create the exact cross-plane
+    /// join the pool exists to prevent. Carries counts only — never URLs — so
+    /// it stays safe to surface across the FFI.
+    #[error("profile relay pool exhausted")]
+    PoolUnderflow {
+        /// Relays left after excluding every contaminated entry.
+        usable: usize,
+        /// Minimum required to operate the profile plane.
+        required: usize,
+    },
 }
 
 impl ProfileError {

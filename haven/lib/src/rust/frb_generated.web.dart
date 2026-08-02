@@ -505,6 +505,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ProfilePictureRefFfi dco_decode_profile_picture_ref_ffi(dynamic raw);
 
   @protected
+  ProfilePoolStatusFfi dco_decode_profile_pool_status_ffi(dynamic raw);
+
+  @protected
   PublicIdentity dco_decode_public_identity(dynamic raw);
 
   @protected
@@ -1094,6 +1097,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ProfilePictureRefFfi sse_decode_profile_picture_ref_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ProfilePoolStatusFfi sse_decode_profile_pool_status_ffi(
     SseDeserializer deserializer,
   );
 
@@ -1818,6 +1826,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_profile_picture_ref_ffi(
     ProfilePictureRefFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_profile_pool_status_ffi(
+    ProfilePoolStatusFfi self,
     SseSerializer serializer,
   );
 

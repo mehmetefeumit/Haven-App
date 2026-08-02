@@ -18,6 +18,13 @@
 #     The raw OpenStreetMap endpoint must never become the released default
 #     tile source (OSMF tile usage policy).
 #
+#   Tile cache keeps no secrets       scripts/ci/check_no_tile_cache_secrets.sh
+#     The encrypted tile cache must not persist or log the Stadia API key: no
+#     api_key/url column in the Rust tile layer, no value-interpolating log::
+#     call on a tile URL, and Dart tile logs stay presence-only (runtimeType).
+#     NOTE: this guard existed, passed, and was wired to NOTHING until
+#     2026-07-31 — it is the tile half of Security Rule 6/10.
+#
 #   Public-profile privacy boundaries scripts/ci/check_profile_privacy_boundaries.sh
 #     The public Nostr profile module (kind-0 + Blossom) must stay inside its
 #     privacy boundary: global Image.network ban, no circle/group tokens in
@@ -102,6 +109,10 @@ jobs:
       - name: Map tile provider policy
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_tile_provider.sh
+
+      - name: Tile cache keeps no secrets
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_no_tile_cache_secrets.sh
 
       - name: Public-profile privacy boundaries
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

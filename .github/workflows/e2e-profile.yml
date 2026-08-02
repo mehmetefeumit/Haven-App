@@ -1,14 +1,36 @@
 # Reusable workflow: public-profile (kind-0 + Blossom) E2E lane.
 #
-# Drives the public-profile picture-sharing scenario against BOTH a hermetic
-# Nostr relay AND a hermetic Blossom media server, on two platforms:
+# Drives the public-profile picture-sharing scenario against a hermetic CIRCLE
+# relay, a hermetic DISJOINT profile-plane relay pool, AND a hermetic Blossom
+# media server, on two platforms:
 #
-#   Android job — Docker: strfry container + blossom container. The emulator
-#                 reaches them at ws://10.0.2.2:7777 / http://10.0.2.2:3000.
+#   Android job — Docker: strfry container (circle) + three strfry containers
+#                 (profile pool) + blossom container. The emulator reaches them
+#                 at ws://10.0.2.2:7777, ws://10.0.2.2:{7778,7779,7780} and
+#                 http://10.0.2.2:3000.
 #   iOS job     — native binaries (macOS runners have no Linux Docker):
-#                 tooling/e2e/local-relay + tooling/e2e/local-blossom. The
-#                 simulator reaches them at ws://localhost:7777 /
+#                 tooling/e2e/local-relay (one process per relay, four in total)
+#                 + tooling/e2e/local-blossom. The simulator reaches them at
+#                 ws://localhost:7777, ws://localhost:{7778,7779,7780} and
 #                 http://localhost:3000.
+#
+# # Why the profile plane needs its OWN relays
+#
+# Haven routes kind-0 traffic to a pool that is DISJOINT from every relay
+# carrying the account's kind-445 / kind-1059 traffic (haven-core/src/profile/
+# relay_pool.rs + the contamination ledger in haven-core/src/circle/). A relay
+# that has seen circle traffic is subtracted from the pool, and
+# `resolve_profile_pool` then fails CLOSED with `PoolUnderflow` rather than
+# degrading onto it. The lane's original single strfry is simultaneously the
+# circle relay, so under that design it can never serve kind-0: every profile
+# fetch would fail closed. Hence a second (in fact third and fourth) relay.
+#
+# Three profile relays, not one: `PROFILE_POOL_MIN = 3` — a pool below that is a
+# terminal `PoolUnderflow`, so a one-relay hermetic pool would fail exactly like
+# the contaminated single-relay setup it replaces. They are started/stopped by
+# tooling/e2e/ci/{start,stop}-profile-relays.sh, which keeps each member's
+# container name / port / data dir (or PID file / process marker) distinct so
+# starting one cannot kill another.
 #
 # The scenario (PUBLIC_PROFILE_MIGRATION_PLAN.md §7.3): consent default-off
 # asserted → A opts in, sets name + photo → kind-0 on the relay + blob on
@@ -18,10 +40,41 @@
 #
 # The scenario driver is haven/integration_test/e2e/e2e_profile_sharing.dart;
 # ci.yml wires this lane alongside the other E2E lanes (`needs: [rust]`). On
-# iOS, the shared run-ios-sim-scenario.sh forwards the HAVEN_E2E_BLOSSOM_URL
-# dart-define when (and only when) the env var is set — this is the only lane
-# that sets it. On Android the APK is built in-workflow, so the dart-define is
-# baked directly below.
+# iOS, the shared run-ios-sim-scenario.sh forwards the HAVEN_E2E_BLOSSOM_URL /
+# HAVEN_E2E_PROFILE_RELAY / HAVEN_E2E_PROFILE_RELAYS dart-defines when (and only
+# when) those env vars are set — this is the only lane that sets them, so every
+# other iOS lane's compiled build stays byte-identical. On Android the APK is
+# built in-workflow, so the same dart-defines are baked directly below.
+#
+# # How the profile plane is retargeted (this lane DOES prove plane separation)
+#
+# haven/integration_test/e2e/e2e_profile_sharing.dart installs the hermetic
+# kind-0 pool in `setUpAll` via `setProfileRelaysForTest`, fed from the
+# HAVEN_E2E_PROFILE_RELAYS dart-define below (comma-separated;
+# HAVEN_E2E_PROFILE_RELAY is the first member alone). That is the ONLY hook that
+# retargets kind-0: `haven-core/src/profile/` is structurally forbidden from
+# naming the discovery plane (check 3 in check_profile_privacy_boundaries.sh),
+# so every profile read AND write resolves through
+# `CircleManager::usable_profile_relays()` = the curated pool (here, the
+# override) minus the append-only contamination ledger. The override is NOT
+# exempt from that subtraction, so this lane exercises the real exclusion
+# filter rather than a bypass.
+#
+# The neighbouring `setDiscoveryRelaysForTest(defaultStrfryUrl)` call was
+# deliberately KEPT, not left over from the pre-redesign wiring: the discovery
+# plane still serves the CIRCLE plane — `fetchMemberKeypackage` resolves Bob's
+# kind-10002 / 10050 relay lists through `discovery_relays()` (haven-core
+# relay/manager.rs) — so scenario step 0 cannot find his KeyPackage without it.
+# Do NOT "clean it up" on the grounds that it is inert for kind-0; it is inert
+# for kind-0 and load-bearing for kind-30443.
+#
+# Pointing discovery at the circle relay is also what keeps the ledger quiet
+# here: `refresh_contamination_ledger` records the discovery set
+# (`ContaminationSource::Discovery`), and in this lane that set is the circle
+# relay, which is contaminated anyway and disjoint from the three profile
+# relays. The hermetic pool sits exactly on `PROFILE_POOL_MIN`, so it has zero
+# headroom — any overlap between the discovery/circle URL and a profile URL
+# would fail the lane closed with `PoolUnderflow`.
 
 name: E2E Profile
 
@@ -41,6 +94,18 @@ jobs:
     timeout-minutes: 60
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
+      # Profile plane. DISJOINT from HAVEN_E2E_RELAY above by construction —
+      # separate strfry containers with separate stores, so the circle relay
+      # (which the contamination ledger excludes) is never asked to serve
+      # kind-0. `_RELAY` is the first pool member alone; `_RELAYS` is the whole
+      # pool, which is what the profile-plane override needs (PROFILE_POOL_MIN
+      # = 3 → a shorter list is a terminal PoolUnderflow).
+      #
+      # These ports MUST match the ports passed to start-profile-relays.sh /
+      # stop-profile-relays.sh below: the URLs are baked into the APK at build
+      # time and are not re-derived at drive time.
+      HAVEN_E2E_PROFILE_RELAY: ws://10.0.2.2:7778
+      HAVEN_E2E_PROFILE_RELAYS: ws://10.0.2.2:7778,ws://10.0.2.2:7779,ws://10.0.2.2:7780
       # Blossom is published on the host at :3000; the emulator reaches it via
       # the host-loopback alias 10.0.2.2. Baked into the APK below.
       HAVEN_E2E_BLOSSOM_URL: http://10.0.2.2:3000
@@ -89,10 +154,16 @@ jobs:
       # containers; see docs/E2E_TROUBLESHOOTING.md). Staged at /tmp/scenario.apk;
       # run-single-avd-scenario.sh detects it and skips its own build.
       #
-      # BOTH dart-defines are baked here and MUST match the URLs the drive step
-      # uses (the values are compiled into the APK; the drive does not re-pass
-      # them). `--target-platform android-x64`: the AVD is x86_64, so x64 is the
-      # only ABI it runs — matches every other Android e2e lane.
+      # ALL FOUR dart-defines are baked here and MUST match the URLs the drive
+      # step uses (the values are compiled into the APK; the drive does not
+      # re-pass them). `--target-platform android-x64`: the AVD is x86_64, so
+      # x64 is the only ABI it runs — matches every other Android e2e lane.
+      #
+      # HAVEN_E2E_PROFILE_RELAY{,S} carry the DISJOINT profile-plane pool; the
+      # scenario consumes them once `setProfileRelaysForTest` exists (see the
+      # TODO in the header and at the call site in e2e_profile_sharing.dart).
+      # Baking them now is inert for a scenario that ignores them, so the build
+      # and the wiring can land independently.
       - name: Build E2E test APK
         working-directory: haven
         timeout-minutes: 25
@@ -102,6 +173,8 @@ jobs:
             --target-platform android-x64 \
             --target=integration_test/e2e/e2e_profile_sharing.dart \
             --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
+            --dart-define=HAVEN_E2E_PROFILE_RELAY="${HAVEN_E2E_PROFILE_RELAY}" \
+            --dart-define=HAVEN_E2E_PROFILE_RELAYS="${HAVEN_E2E_PROFILE_RELAYS}" \
             --dart-define=HAVEN_E2E_BLOSSOM_URL="${HAVEN_E2E_BLOSSOM_URL}" \
             --dart-define=HAVEN_E2E_NO_BACKGROUND=true
           cp build/app/outputs/flutter-apk/app-debug.apk /tmp/scenario.apk
@@ -140,14 +213,25 @@ jobs:
           disable-animations: false
           script: echo "Generated AVD snapshot for caching."
 
-      # Start BOTH the relay and the blossom server BEFORE the emulator boots,
-      # so an image-pull/startup failure surfaces as a clean step failure early.
-      - name: Start strfry relay
+      # Start EVERY hermetic host (circle relay, profile-plane pool, blossom)
+      # BEFORE the emulator boots, so an image-pull/startup failure surfaces as
+      # a clean step failure early.
+      - name: Start strfry relay (circle plane)
         env:
           # Same immutable digest pin as the other Android e2e lanes; the
           # STRFRY_IMAGE repo variable wins when set.
           STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
         run: bash tooling/e2e/ci/start-strfry.sh
+
+      # The profile-plane pool: three more strfry containers on 7778/7779/7780,
+      # each with its own container name and data dir (start-profile-relays.sh),
+      # so none of them can `docker rm -f` / `rm -rf` another — or the circle
+      # relay above. STRFRY_IMAGE is forwarded so the pool pulls the same pinned
+      # digest. The ports here MUST match HAVEN_E2E_PROFILE_RELAY{,S} in `env:`.
+      - name: Start strfry relays (profile plane)
+        env:
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+        run: bash tooling/e2e/ci/start-profile-relays.sh docker 7778 7779 7780
 
       - name: Start blossom server
         env:
@@ -198,13 +282,18 @@ jobs:
           sudo iptables -X HAVEN_E2E_GUARD 2>/dev/null || true
           echo "Egress guard removed (if it was present)."
 
-      # Collect BOTH container logs so triage can confirm the kind-0 landed on
-      # the relay AND the blob landed on blossom (the whole point of the lane).
+      # Collect EVERY container's logs so triage can confirm the kind-0 landed
+      # on a PROFILE-plane relay (never on the circle relay) AND the blob landed
+      # on blossom — the whole point of the lane. The pool members are
+      # enumerated by name prefix so this step needs no port list.
       - name: Collect container logs
         if: always()
         run: |
           docker logs strfry > /tmp/strfry.log 2>&1 || true
           docker logs blossom > /tmp/blossom.log 2>&1 || true
+          for c in $(docker ps -a --filter 'name=^strfry-profile-' --format '{{.Names}}'); do
+            docker logs "${c}" > "/tmp/${c}.log" 2>&1 || true
+          done
 
       - name: Capture host + emulator diagnostics
         if: failure()
@@ -235,26 +324,39 @@ jobs:
             /tmp/adb-logcat.log
             /tmp/flutter-drive.log
             /tmp/strfry.log
+            /tmp/strfry-profile-*.log
             /tmp/blossom.log
             /tmp/diag.txt
             /tmp/scenario.apk
           retention-days: 14
           if-no-files-found: ignore
 
-      # Teardown runs LAST and if: always() so both containers + their host
-      # data dirs are removed on every outcome, after the log-collection step
-      # read them. Both teardown scripts are best-effort (always exit 0).
-      - name: Tear down strfry relay
+      # Teardown runs LAST and if: always() so every container + its host data
+      # dir is removed on every outcome, after the log-collection step read
+      # them. All three teardown scripts are best-effort (always exit 0), so
+      # teardown can't turn a green run red, and each runs as its OWN step so a
+      # surprise in one still leaves the others to run.
+      - name: Tear down strfry relay (circle plane)
         if: always()
         run: bash tooling/e2e/ci/stop-strfry.sh
+
+      - name: Tear down strfry relays (profile plane)
+        if: always()
+        run: bash tooling/e2e/ci/stop-profile-relays.sh docker 7778 7779 7780
 
       - name: Tear down blossom server
         if: always()
         run: bash tooling/e2e/ci/stop-blossom.sh
 
   # ==========================================================================
-  # e2e_profile_ios — booted iOS simulator; native relay + native blossom
-  # (no Docker on macOS runners).
+  # e2e_profile_ios — booted iOS simulator; native circle relay + native
+  # profile-plane relay pool + native blossom (no Docker on macOS runners).
+  #
+  # The macOS runner CAN host the extra relays: tooling/e2e/local-relay binds
+  # ONE port per process and takes it from HAVEN_RELAY_PORT, so the pool is just
+  # three more processes of the same (already-built) binary on 7778/7779/7780.
+  # start-local-relay.sh keys its PID file, log file and teardown pkill on an
+  # instance name, so the four relays coexist and are torn down independently.
   # ==========================================================================
   e2e_profile_ios:
     name: e2e_profile_ios
@@ -264,10 +366,20 @@ jobs:
     timeout-minutes: 90
     env:
       HAVEN_E2E_RELAY: ws://localhost:7777
+      # Profile plane — separate host-native relay processes with separate
+      # in-memory stores, so the circle relay above (which the contamination
+      # ledger excludes from the pool) is never asked to serve kind-0.
+      # `_RELAY` is the first pool member alone; `_RELAYS` is the whole pool
+      # (PROFILE_POOL_MIN = 3 → a shorter list is a terminal PoolUnderflow).
+      # These ports MUST match the ports passed to start-profile-relays.sh /
+      # stop-profile-relays.sh below.
+      HAVEN_E2E_PROFILE_RELAY: ws://localhost:7778
+      HAVEN_E2E_PROFILE_RELAYS: ws://localhost:7778,ws://localhost:7779,ws://localhost:7780
       # The simulator shares the host network namespace, so it reaches the
-      # host-native blossom at localhost:3000 (no 10.0.2.2 alias). See the
-      # header note: the shared run-ios-sim-scenario.sh must be extended by the
-      # scenario wave to forward this dart-define into its flutter-test build.
+      # host-native blossom at localhost:3000 (no 10.0.2.2 alias). The shared
+      # run-ios-sim-scenario.sh forwards this — and the two profile-relay vars
+      # above — into its flutter-test build as dart-defines, but ONLY when they
+      # are set, so no other iOS lane's build changes.
       HAVEN_E2E_BLOSSOM_URL: http://localhost:3000
       HAVEN_E2E_NO_BACKGROUND: "true"
       FLUTTER_SUPPRESS_ANALYTICS: "true"
@@ -305,11 +417,17 @@ jobs:
         working-directory: haven
         run: flutter pub get
 
-      # Build + start BOTH host-native servers BEFORE booting the simulator, so
+      # Build + start ALL host-native servers BEFORE booting the simulator, so
       # their build peaks never coincide with a resident simulator (the same
       # build-before-boot discipline the Android lane uses for the AVD).
-      - name: Build and start host-native relay
+      - name: Build and start host-native relay (circle plane)
         run: bash tooling/e2e/ci/start-local-relay.sh 7777
+
+      # Three more instances of the SAME binary (already built by the step
+      # above, so this is a cargo cache hit), each with its own port, PID file,
+      # log file and pkill marker. The ports MUST match HAVEN_E2E_PROFILE_RELAY{,S}.
+      - name: Build and start host-native relays (profile plane)
+        run: bash tooling/e2e/ci/start-profile-relays.sh native 7778 7779 7780
 
       - name: Build and start host-native blossom server
         run: bash tooling/e2e/ci/start-local-blossom.sh 3000
@@ -319,13 +437,11 @@ jobs:
         run: bash tooling/e2e/ci/boot-ios-sim.sh "iPhone 15"
 
       # `nick-fields/retry` absorbs the ~10% iOS-simulator launch/attach flake
-      # (which presents as a HANG). Each attempt restarts BOTH servers first so
-      # a retried attempt runs against a CLEAN store — no leftover kind-0 events
-      # or blobs from a failed prior attempt.
-      #
-      # NOTE (see header): run-ios-sim-scenario.sh does not yet forward
-      # HAVEN_E2E_BLOSSOM_URL; the env is set at the job level so the scenario
-      # wave's one-line passthrough picks it up.
+      # (which presents as a HANG). Each attempt restarts EVERY server first so
+      # a retried attempt runs against CLEAN stores — no leftover kind-0 events
+      # or blobs from a failed prior attempt. The restarts are instance-scoped:
+      # restarting the circle relay leaves the profile pool alone and vice
+      # versa, so the `&&` chain below cannot kill what it just started.
       - name: Run e2e_profile_sharing on the simulator
         timeout-minutes: 65
         uses: nick-fields/retry@v3
@@ -334,16 +450,25 @@ jobs:
           max_attempts: 2
           command: >-
             bash tooling/e2e/ci/start-local-relay.sh 7777 &&
+            bash tooling/e2e/ci/start-profile-relays.sh native 7778 7779 7780 &&
             bash tooling/e2e/ci/start-local-blossom.sh 3000 &&
             bash tooling/e2e/ci/run-ios-sim-scenario.sh
             integration_test/e2e/e2e_profile_sharing.dart
             ${{ steps.sim.outputs.udid }}
 
+      # The profile-plane instances write /tmp/haven-local-relay-profile-<port>.log
+      # (start-local-relay.sh keys the log file on the instance name), collected
+      # here alongside the circle relay's so triage can tell WHICH plane a
+      # kind-0 landed on.
       - name: Collect simulator diagnostics
         if: always()
         run: |
           xcrun simctl spawn booted log collect --output /tmp/sim.logarchive 2>/dev/null || true
           cp /tmp/haven-local-relay.log /tmp/relay.log 2>/dev/null || true
+          for f in /tmp/haven-local-relay-profile-*.log; do
+            [ -f "${f}" ] || continue
+            cp "${f}" "/tmp/relay-$(basename "${f}" .log | sed 's/^haven-local-relay-//').log" || true
+          done
           cp /tmp/haven-local-blossom.log /tmp/blossom.log 2>/dev/null || true
 
       - name: Upload failure artifacts
@@ -354,16 +479,22 @@ jobs:
           path: |
             /tmp/flutter-ios-test.log
             /tmp/relay.log
+            /tmp/relay-profile-*.log
             /tmp/blossom.log
             /tmp/sim.logarchive
           retention-days: 14
           if-no-files-found: ignore
 
-      # Teardown runs LAST and if: always() so both server processes are killed
-      # on every outcome. Both scripts always exit 0.
-      - name: Tear down host-native relay
+      # Teardown runs LAST and if: always() so every server process is killed on
+      # every outcome. All three scripts always exit 0, and each teardown is its
+      # own step so a surprise in one still leaves the others to run.
+      - name: Tear down host-native relay (circle plane)
         if: always()
         run: bash tooling/e2e/ci/stop-local-relay.sh
+
+      - name: Tear down host-native relays (profile plane)
+        if: always()
+        run: bash tooling/e2e/ci/stop-profile-relays.sh native 7778 7779 7780
 
       - name: Tear down host-native blossom server
         if: always()

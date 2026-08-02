@@ -139,6 +139,11 @@ subtle = "2.5"
 # Cryptography
 rand = "0.8"
 sha2 = "0.10"
+# Keyed PRF for the profile-plane relay assignment (HMAC-SHA256 rendezvous
+# weights, `profile::assignment`). Already present transitively at 0.12.1 via
+# openmls_rust_crypto / hkdf / pbkdf2, so naming it here unifies rather than
+# widening the dependency graph (check_mdk_supply_chain.sh).
+hmac = "0.12"
 
 # NOTE: the direct `chacha20poly1305` dependency was removed in DM-2. Its only
 # Haven consumer was the legacy REV-1 non-destructive content-type peek

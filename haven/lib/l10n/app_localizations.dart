@@ -564,11 +564,41 @@ abstract class AppLocalizations {
   /// **'My KeyPackage Relays'**
   String get relaySettingsKeyPackageTitle;
 
-  /// Subtitle of the KeyPackage relays section. 'kind 10002' is a Nostr event-kind identifier, intentionally English (not translated).
+  /// Subtitle of the KeyPackage relays section. 'kind 10002' is a Nostr event-kind identifier, intentionally English (not translated). This list no longer carries the public profile — kind-0 profile lookups/publish moved to the separate, local-only Profile relays section below (relaySettingsProfileSubtitle) so the two planes stay on disjoint relays. Do not reintroduce a 'your public profile is published' clause here.
   ///
   /// In en, this message translates to:
-  /// **'Where invitees find your keys and your public profile is published (kind 10002)'**
+  /// **'Where others find the keys they need to invite you (kind 10002)'**
   String get relaySettingsKeyPackageSubtitle;
+
+  /// Heading of the Profile relays section on the relay settings page. This is a local-only category (kind-0 profile lookups/publish), kept separate from the Inbox and KeyPackage categories.
+  ///
+  /// In en, this message translates to:
+  /// **'My Profile Relays'**
+  String get relaySettingsProfileTitle;
+
+  /// Subtitle of the Profile relays section. 'kind 0' is a Nostr event-kind identifier, intentionally English (not translated). Explains that this list is local-only policy, unlike the other two sections' published lists.
+  ///
+  /// In en, this message translates to:
+  /// **'Where your public profile is looked up and published. These relays are kept separate from your other relays, and the profile relay list itself is never published (kind 0)'**
+  String get relaySettingsProfileSubtitle;
+
+  /// Title of the warning banner shown at the top of the Profile relays section when the profile-plane relay pool has underflowed (too few relays remain to safely look up profiles — see ProfilePoolStatusFfi.isUnderflow). Only shown while true; the banner disappears on its own once enough relays are restored.
+  ///
+  /// In en, this message translates to:
+  /// **'Profile lookups paused'**
+  String get relaySettingsProfileUnderflowTitle;
+
+  /// Body of the profile-pool-underflow warning banner, paired with relaySettingsProfileUnderflowTitle. States the practical consequence in plain language (stale roster names/photos) rather than the technical cause (contamination-ledger exclusion), matching this page's register elsewhere. The fix is offered by the banner's own button (relaySettingsProfileUnderflowRestoreButton), not restated here.
+  ///
+  /// In en, this message translates to:
+  /// **'Too few Profile relays remain, so members\' names and photos will stop updating.'**
+  String get relaySettingsProfileUnderflowMessage;
+
+  /// Button in the profile-pool-underflow warning banner; calls CircleManagerFfi.restoreDefaultProfileRelays() (non-destructive: adds back missing curated profile relays, keeps the user's own additions). Deliberately worded more specifically than relaySettingsRestoreDefaults (the label already used three times on this same page for each section's destructive wipe-and-reset-to-exactly-defaults action, behind a confirmation dialog): reusing the identical short label here would give a screen-reader user, or anyone scanning the page while this banner is visible, two differently-behaving controls with the same name. Keep this button's wording distinguishable from relaySettingsRestoreDefaults in every locale.
+  ///
+  /// In en, this message translates to:
+  /// **'Restore default profile relays'**
+  String get relaySettingsProfileUnderflowRestoreButton;
 
   /// Empty-state message shown when a relay category's list could not be loaded.
   ///
@@ -677,6 +707,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'You need at least one relay so others can reach you. Tap below to restore Haven defaults.'**
   String get relaySettingsEmptyMessage;
+
+  /// Short tooltip on the warning icon shown next to a Profile-relay row whose URL is also one of the user's circle relays or inbox relays. Advisory only — never blocks adding or keeping the relay.
+  ///
+  /// In en, this message translates to:
+  /// **'Also carries other Haven traffic'**
+  String get relaySettingsProfileContaminationTooltip;
+
+  /// Full screen-reader label for the Profile-relay contamination warning icon, naming the relay so the warning reads sensibly out of visual context. {url} is the relay host (a technical address, intentionally English).
+  ///
+  /// In en, this message translates to:
+  /// **'Warning: {url} also carries your other Haven traffic, so this relay could link your profile to that traffic'**
+  String relaySettingsProfileContaminationSemantics(String url);
 
   /// Title of the location settings page (AppBar).
   ///
@@ -1158,11 +1200,11 @@ abstract class AppLocalizations {
   /// **'Haven uses several relays, so no single one can cut you off. If one goes offline, the rest keep working. You choose the relays where invitations reach you; the relays a circle uses are fixed when it is created.'**
   String get privacyRelaysWhyMany;
 
-  /// Body paragraph, Privacy → Relays, explaining the two user-editable relay lists plus the per-circle list. 'KeyPackage' is intentionally English and is deliberately NOT simplified to plain language here: the reader has to find this list on the Relay settings page, which is labelled with that exact term (relaySettingsKeyPackageTitle), so findability outranks register. The sentence itself carries the plain-language gloss. Keep 'inbox relays' matching relaySettingsInboxTitle in this locale.
+  /// Body paragraph, Privacy → Relays, explaining the three user-editable relay lists (inbox, KeyPackage, and the local-only profile list) plus the per-circle list. 'KeyPackage' is intentionally English and is deliberately NOT simplified to plain language here: the reader has to find this list on the Relay settings page, which is labelled with that exact term (relaySettingsKeyPackageTitle), so findability outranks register. The sentence itself carries the plain-language gloss. Keep 'inbox relays' matching relaySettingsInboxTitle, and 'profile relays' matching relaySettingsProfileTitle, in this locale. IMPORTANT — do not overstate the guarantee: do not imply that no relay can ever learn a device uses it for the profile plane (a relay that actually serves the profile pool obviously sees that traffic directly, and profile-relay assignment can collide across contacts). What is true, and all this sentence claims, is that Haven never publishes a list naming the profile relays, so a relay outside that pool (e.g. one that only sees your location or invitation traffic) has no public pointer to it. See haven-core/SECURITY.md, 'Profile-plane relay separation — accepted deviations', point P3, for the precise wording to match.
   ///
   /// In en, this message translates to:
-  /// **'Haven keeps two lists for you. Your inbox relays are where invitations reach you. Your KeyPackage relays are where people fetch the keys they need in order to invite you. Each circle also carries its own list, and that is where the circle\'s encrypted updates travel.'**
-  String get privacyRelaysTwoLists;
+  /// **'Haven keeps three lists for you. Your inbox relays are where invitations reach you, and your KeyPackage relays are where people fetch the keys they need in order to invite you — Haven publishes both of these lists so others can find them. Your profile relays are different: that is where your name and photo are looked up and published, but the list itself stays on your device and is never published. A relay that only carries your location traffic or invitations therefore has no public list telling it which relays you use for your profile. Each circle also carries its own list, and that is where the circle\'s encrypted updates travel.'**
+  String get privacyRelaysYourLists;
 
   /// The practical takeaway for Privacy → Relays. Reassuring rather than actionable, deliberately — there is no setting the reader must change.
   ///
@@ -3143,6 +3185,12 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Add KeyPackage relay'**
   String get addRelaySheetTitleKeyPackage;
+
+  /// Title of the bottom sheet for adding a new Profile relay address (the local-only kind-0 lookup/publish category).
+  ///
+  /// In en, this message translates to:
+  /// **'Add Profile relay'**
+  String get addRelaySheetTitleProfile;
 
   /// Text-field hint in the add-relay sheet showing the expected relay URL format. A technical URL example, intentionally English (not translated).
   ///

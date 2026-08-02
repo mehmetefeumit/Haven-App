@@ -324,9 +324,56 @@ impl CircleStorage {
 
     /// Test-only: re-runs schema initialization (and thus the migration) on the
     /// same connection.
+    ///
+    /// `pub(crate)` so sibling modules' tests (e.g.
+    /// [`super::storage_profile`]) can exercise their own migrations.
     #[cfg(test)]
-    fn reinitialize_for_test(&self) -> Result<()> {
+    pub(crate) fn reinitialize_for_test(&self) -> Result<()> {
         self.initialize_schema()
+    }
+
+    /// Test-only: rebuilds `profiles` in its PRE-miss-cache shape (no
+    /// `miss_count` / `next_retry_at`), preserving every existing row, and
+    /// clears the migration sentinel.
+    ///
+    /// This is how a test manufactures a genuine "database created by an older
+    /// build" so that [`Self::reinitialize_for_test`] exercises
+    /// [`Self::migrate_add_profile_miss_columns`] for real — rather than
+    /// asserting against a fresh database that never needed the ALTER.
+    #[cfg(test)]
+    pub(crate) fn downgrade_profiles_to_pre_miss_columns_for_test(&self) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        // Copy-rename rather than DROP: the point of the fixture is that the
+        // pre-existing ROWS are still there when the migration runs.
+        conn.execute_batch(
+            r"
+            BEGIN;
+            CREATE TABLE profiles_pre_miss (
+                pubkey            TEXT PRIMARY KEY,
+                metadata_json     TEXT NOT NULL DEFAULT '{}',
+                state             INTEGER NOT NULL DEFAULT 0,
+                event_created_at  INTEGER NOT NULL DEFAULT 0,
+                fetched_at        INTEGER NOT NULL
+            );
+            INSERT INTO profiles_pre_miss
+                (pubkey, metadata_json, state, event_created_at, fetched_at)
+                SELECT pubkey, metadata_json, state, event_created_at, fetched_at
+                FROM profiles;
+            DROP TABLE profiles;
+            ALTER TABLE profiles_pre_miss RENAME TO profiles;
+            CREATE INDEX IF NOT EXISTS idx_profiles_fetched
+                ON profiles(fetched_at);
+            COMMIT;
+            ",
+        )?;
+        conn.execute(
+            "DELETE FROM user_settings WHERE key = ?1",
+            params![Self::PROFILE_MISS_COLUMNS_KEY],
+        )?;
+        Ok(())
     }
 
     /// Initializes the database schema.
@@ -559,12 +606,20 @@ impl CircleStorage {
             -- kind-0's created_at (the newer-wins gate); `fetched_at` is the TTL
             -- base. This cache replaced the legacy MLS in-group avatar tables at
             -- the public-profile cutover (D11).
+            --
+            -- `miss_count` / `next_retry_at` back the miss-aware negative cache
+            -- (see storage_profile::record_profile_misses). They are listed here
+            -- for a FRESH database; a pre-existing database gets them from the
+            -- one-shot `migrate_add_profile_miss_columns` ALTER below. Defaults
+            -- 0/0 make a pre-migration row behave exactly as it did before.
             CREATE TABLE IF NOT EXISTS profiles (
                 pubkey            TEXT PRIMARY KEY,
                 metadata_json     TEXT NOT NULL DEFAULT '{}',
                 state             INTEGER NOT NULL DEFAULT 0,
                 event_created_at  INTEGER NOT NULL DEFAULT 0,
-                fetched_at        INTEGER NOT NULL
+                fetched_at        INTEGER NOT NULL,
+                miss_count        INTEGER NOT NULL DEFAULT 0,
+                next_retry_at     INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_profiles_fetched
                 ON profiles(fetched_at);
@@ -582,6 +637,37 @@ impl CircleStorage {
                 thumbnail  BLOB NOT NULL,
                 updated_at INTEGER NOT NULL
             );
+
+            -- Append-only ledger of relays that have observed this install's
+            -- LOCATION-plane traffic, and are therefore permanently excluded
+            -- from the profile-plane pool (see crate::profile::relay_pool).
+            --
+            -- Deliberately a FLAT URL SET: there is NO circle / group column
+            -- (structurally asserted by a PRAGMA table_info test in
+            -- storage_profile.rs). A per-circle ledger would record which
+            -- relays carry WHICH group, i.e. co-membership routing metadata
+            -- that not even a local table should hold. Knowing only that a URL
+            -- is contaminated is enough to exclude it, so the group linkage is
+            -- never stored in the first place.
+            --
+            -- Append-only by design: contamination is HISTORICAL. A relay that
+            -- routed a circle's kind-445 last month saw those events, and
+            -- leaving the circle does not un-see them — rows are therefore never
+            -- deleted on circle teardown (no `delete_circle` cascade), only on a
+            -- full account wipe.
+            --
+            -- `url` is stored NORMALIZED (storage_relay_prefs::normalize_url) so
+            -- a trailing-slash / case variant cannot re-admit a contaminated
+            -- relay. `source` records how the relay entered the ledger —
+            -- 'circle_routing' | 'inbox' | 'welcome' | 'key_package' — for
+            -- diagnostics only; exclusion never branches on it. `first_seen` is
+            -- the unix second the relay was first recorded (kept for audit, not
+            -- for expiry: contamination never expires).
+            CREATE TABLE IF NOT EXISTS contaminated_relays (
+                url        TEXT PRIMARY KEY,
+                source     TEXT NOT NULL,
+                first_seen INTEGER NOT NULL
+            );
             ",
         )?;
 
@@ -597,6 +683,77 @@ impl CircleStorage {
         // schema (hash_ref/kind columns) so the fresh DM schema takes over.
         Self::migrate_reset_published_key_packages(&conn)?;
 
+        // Profile-plane miss cache: additive ALTER of the EXISTING `profiles`
+        // table (never a drop — that would blank every cached display name).
+        Self::migrate_add_profile_miss_columns(&conn)?;
+
+        Ok(())
+    }
+
+    /// Sentinel for whether the `profiles` miss-cache columns have been added.
+    const PROFILE_MISS_COLUMNS_KEY: &'static str = "profile_miss_columns_v1";
+
+    /// One-shot, sentinel-guarded addition of the `profiles.miss_count` and
+    /// `profiles.next_retry_at` columns backing the miss-aware negative cache
+    /// (see [`CircleStorage::record_profile_misses`]).
+    ///
+    /// `CREATE TABLE IF NOT EXISTS` does **not** alter an existing table, so a
+    /// database created before these columns existed would otherwise keep the
+    /// old five-column shape forever and every miss-cache statement would fail
+    /// with `no such column`. This runs the two `ALTER TABLE … ADD COLUMN`
+    /// statements instead.
+    ///
+    /// # Why `ALTER`, never drop-and-recreate
+    ///
+    /// Unlike `published_key_packages` (whose contents are ephemeral and
+    /// regenerated on the next maintenance tick), `profiles` is a *cache of
+    /// other people's display names and avatars*. Dropping it would blank every
+    /// member name on upgrade and make the first launch refetch the entire
+    /// contact set at once — a visible regression AND a burst of relay traffic
+    /// that undoes the per-author request spreading this whole feature exists
+    /// to provide. `ALTER … ADD COLUMN … NOT NULL DEFAULT 0` keeps every row
+    /// and gives it `miss_count = 0` / `next_retry_at = 0`, which makes a
+    /// pre-existing row behave exactly as it did before the columns existed
+    /// (no recorded miss, no pending backoff).
+    ///
+    /// Idempotent twice over: the [`Self::PROFILE_MISS_COLUMNS_KEY`] sentinel
+    /// makes it once-per-database, and each `ALTER` is additionally guarded by
+    /// [`Self::table_has_column`] so a fresh database (whose `CREATE TABLE`
+    /// above already declares both columns) is a clean no-op rather than a
+    /// `duplicate column name` error.
+    fn migrate_add_profile_miss_columns(conn: &Connection) -> Result<()> {
+        let already: Option<String> = conn
+            .query_row(
+                "SELECT value FROM user_settings WHERE key = ?1",
+                params![Self::PROFILE_MISS_COLUMNS_KEY],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        if already.is_some() {
+            return Ok(());
+        }
+
+        let mut added = 0usize;
+        if !Self::table_has_column(conn, "profiles", "miss_count")? {
+            conn.execute_batch(
+                "ALTER TABLE profiles ADD COLUMN miss_count INTEGER NOT NULL DEFAULT 0;",
+            )?;
+            added += 1;
+        }
+        if !Self::table_has_column(conn, "profiles", "next_retry_at")? {
+            conn.execute_batch(
+                "ALTER TABLE profiles ADD COLUMN next_retry_at INTEGER NOT NULL DEFAULT 0;",
+            )?;
+            added += 1;
+        }
+
+        conn.execute(
+            "INSERT OR REPLACE INTO user_settings (key, value) VALUES (?1, '1')",
+            params![Self::PROFILE_MISS_COLUMNS_KEY],
+        )?;
+        if added > 0 {
+            log::info!("profile migration: added {added} miss-cache column(s) to `profiles`");
+        }
         Ok(())
     }
 

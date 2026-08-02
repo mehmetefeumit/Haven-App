@@ -311,6 +311,22 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     // mid-teardown find the underlying handles still valid.
     _locationSharingService = null;
     _circleService = null;
+
+    // Hand the MLS DB's Rule-14 single-session slot back BEFORE dropping the
+    // reference. Rust statics — including the `LIVE_SESSIONS` registry backing
+    // that rule — are shared by EVERY Dart isolate in the one loaded `.so`, and
+    // the guard is released only when Rust drops the manager. Nulling alone
+    // defers that to a GC in an isolate that is about to be torn down, so the
+    // slot can stay registered after this task is gone and lock the FOREGROUND
+    // out of its own database ("an MLS session is already open on this
+    // database") until the process dies. `dispose()` is idempotent and this is
+    // the last use of the handle — same discipline as the WorkManager worker's
+    // teardown in `background_catchup_worker.dart`.
+    try {
+      _circleManager?.dispose();
+    } on Object catch (_) {
+      // Best-effort, like the relay shutdown above.
+    }
     _circleManager = null;
     _identityManager = null;
     _relayService = null;

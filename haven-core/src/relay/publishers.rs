@@ -143,7 +143,18 @@ pub fn build_relay_list_event(
         })
         .collect::<PublisherResult<Vec<Tag>>>()?;
 
-    let kind = relay_type.to_kind();
+    // Fail closed for a category with no wire kind. `RelayType::Profile` is
+    // local-only policy: publishing a relay list that names the profile-plane
+    // relays would hand any observer a signed pointer joining this identity to
+    // its profile plane, re-creating the cross-plane link the pool exists to
+    // break. `to_kind()` returns `Option` precisely so this is a compile-time
+    // obligation rather than a convention.
+    let kind = relay_type.to_kind().ok_or_else(|| {
+        PublisherError::Build(format!(
+            "{} relays are local-only and must never be published as a relay list",
+            relay_type.as_str()
+        ))
+    })?;
     let mut builder = EventBuilder::new(kind, "").tags(tags);
     if let Some(ts) = created_at {
         let ts = u64::try_from(ts).unwrap_or(0);
@@ -215,7 +226,15 @@ pub fn build_unpublish_event(
 ) -> PublisherResult<nostr::Event> {
     let created_at_secs = superseding_created_at(last_published_at);
     let created_at_u = u64::try_from(created_at_secs).unwrap_or(0);
-    EventBuilder::new(relay_type.to_kind(), "")
+    // Fail closed — see the rationale in `build_relay_list_event`. An unpublish
+    // for a category that was never publishable is equally a bug.
+    let kind = relay_type.to_kind().ok_or_else(|| {
+        PublisherError::Build(format!(
+            "{} relays are local-only and have no relay list to unpublish",
+            relay_type.as_str()
+        ))
+    })?;
+    EventBuilder::new(kind, "")
         .custom_created_at(Timestamp::from_secs(created_at_u))
         .sign_with_keys(keys)
         .map_err(|e| PublisherError::Build(format!("sign: {e}")))

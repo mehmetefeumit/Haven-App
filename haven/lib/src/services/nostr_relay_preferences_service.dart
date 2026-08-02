@@ -222,6 +222,34 @@ class NostrRelayPreferencesService implements RelayPreferencesService {
     }
   }
 
+  @override
+  Future<ProfilePoolStatus> profilePoolStatus() async {
+    try {
+      final ffi = await _manager.profilePoolStatus();
+      return ProfilePoolStatus(
+        configured: ffi.configured,
+        excluded: ffi.excluded,
+        usable: ffi.usable,
+        isUnderflow: ffi.isUnderflow,
+      );
+    } on Object catch (e) {
+      debugPrint('profilePoolStatus failed: ${e.runtimeType}');
+      throw const RelayPreferencesException(
+        'Failed to read profile relay status.',
+      );
+    }
+  }
+
+  @override
+  Future<void> restoreDefaultProfileRelays() async {
+    try {
+      await _manager.restoreDefaultProfileRelays();
+    } on Object catch (e) {
+      debugPrint('restoreDefaultProfileRelays failed: ${e.runtimeType}');
+      throw const RelayPreferencesException('Failed to restore defaults.');
+    }
+  }
+
   /// Maps an FFI error into the appropriate Dart exception type.
   ///
   /// FFI errors arrive as `String`; we inspect a small set of known
@@ -262,8 +290,21 @@ class NostrRelayPreferencesService implements RelayPreferencesService {
   /// W2): the wire kind changed 10051→10002, but it is persisted under the
   /// SAME `RelayType::KeyPackage` storage slot, so no relay-preference data
   /// migrates and the Dart-side category name is unchanged.
+  ///
+  /// `RelayCategory.profile` maps to `RelayTypeFfi.profile` — the CRUD
+  /// methods above (`listRelays`/`addRelay`/`removeRelay`/`restoreDefaults`/
+  /// `wipeAndResetDefaults`) work fine for it: the profile plane is an
+  /// ordinary relay category in storage, and this generic path is the ONLY
+  /// one (Rust has no dedicated profile CRUD wrappers — duplicates existed,
+  /// went unused, and were removed so the two could not drift). The
+  /// publish-oriented methods (`getPublishRelayList`, `setPublishRelayList`,
+  /// `publishTargets`, `buildRelayListPublish`, `buildUnpublishRelayList`,
+  /// `buildRelayRemovalScrub`) throw for it on the Rust side — callers MUST
+  /// NOT invoke those with `RelayCategory.profile` (see
+  /// `ProfileRelaysNotifier`, which never does).
   RelayTypeFfi _toFfi(RelayCategory c) => switch (c) {
     RelayCategory.inbox => RelayTypeFfi.inbox,
     RelayCategory.keyPackage => RelayTypeFfi.nip65,
+    RelayCategory.profile => RelayTypeFfi.profile,
   };
 }
