@@ -234,3 +234,55 @@ Future<void> pumpUntilCondition(
     '${timeout.inSeconds}s ($pumps pumps at ${pumpInterval.inMilliseconds}ms).',
   );
 }
+
+/// Polls an ASYNC [condition] every [pollInterval] until it returns `true`,
+/// or [timeout] elapses — WITHOUT driving Flutter's frame pump.
+///
+/// Use this (instead of [pumpUntilCondition]) when the thing being waited on
+/// is a platform-channel read — e.g. `BackgroundLocationManager.isRunning`,
+/// which round-trips to the Android `FlutterForegroundTask` plugin — or any
+/// other pure Dart `Future`/`Timer` completion that the engine's own event
+/// loop resolves regardless of Flutter's frame pipeline.
+///
+/// ## What this does NOT guarantee
+///
+/// Under `IntegrationTestWidgetsFlutterBinding`
+/// (`LiveTestWidgetsFlutterBinding` underneath), `handleBeginFrame` only
+/// actually paints while a pump is "in flight" or the view is marked dirty
+/// (`flutter_test/lib/src/binding.dart`,
+/// `LiveTestWidgetsFlutterBinding.handleBeginFrame`) — so a widget that
+/// `markNeedsBuild()` has scheduled a rebuild for does NOT reliably re-run
+/// its `build()` method just because time passes; it needs an actual
+/// `tester.pump()` to do so. Timers and platform-channel replies DO keep
+/// firing on their own (the OS/engine event loop is real and unrelated to
+/// Flutter's frame pipeline — this is a genuine, real running process, not
+/// `flutter test`'s fake-clock `AutomatedTestWidgetsFlutterBinding`), but a
+/// WIDGET REBUILD is not guaranteed by this helper alone. If the condition
+/// you are polling could depend on a widget having rebuilt (e.g. a
+/// `Provider`'s side effect that is only read from inside another widget's
+/// `build()`), either interleave your own `tester.pump()` calls between
+/// polls, or use [pumpUntilCondition] instead — see
+/// `b1_fgs_live_foreground_test.dart`'s checkpoint A3/A4 for a worked
+/// example of exactly this trade-off.
+///
+/// Throws a [StateError] naming [description] on timeout, matching
+/// [pumpUntilCondition]'s diagnostic shape.
+Future<void> waitUntilAsync(
+  Future<bool> Function() condition, {
+  required String description,
+  Duration timeout = const Duration(seconds: 30),
+  Duration pollInterval = const Duration(seconds: 2),
+}) async {
+  final deadline = DateTime.now().add(timeout);
+  var polls = 0;
+  while (DateTime.now().isBefore(deadline)) {
+    if (await condition()) return;
+    polls += 1;
+    await Future<void>.delayed(pollInterval);
+  }
+  throw StateError(
+    'waitUntilAsync: "$description" was not satisfied within '
+    '${timeout.inSeconds}s ($polls polls at ${pollInterval.inSeconds}s '
+    'interval).',
+  );
+}

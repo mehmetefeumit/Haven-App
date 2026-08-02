@@ -43,13 +43,40 @@ readonly -a PATTERNS=(
   'password:[[:space:]]*Some\(\['
   'nsec1[ac-hj-np-z02-9]{20,}'
   '(secret|seed|exporter_secret|private[_-]?key)[^]]{0,30}\[[0-9]{1,3}(,[[:space:]]*[0-9]{1,3}){15,}\]'
+  '(PRAGMA[[:space:]]+key|pragma_key|sqlcipher[_-]?key|db[_-]?key|passphrase)[^0-9a-fA-F]{0,24}[0-9a-fA-F]{64}'
+  '(secret|seed|identity|private[_-]?key)[^A-Za-z0-9+/]{0,24}[A-Za-z0-9+/]{42,43}='
+  '(flutter|RustStdoutStderr|keyring|haven|Haven).{0,200}\[[0-9]{1,3}(,[[:space:]]*[0-9]{1,3}){31}\]'
 )
 readonly -a LABELS=(
   'keyring secret byte-dump'
   'keyring password byte-dump'
   'bech32 nsec (private key)'
   'labeled key byte-array'
+  'SQLCipher passphrase (hex-32)'
+  'base64-encoded 32-byte secret'
+  'unlabeled 32-byte array (key material or MLS group id)'
 )
+
+# On patterns 5-7 — added because the `e2e-fgs-publish` lane is the first to
+# open the MLS SQLCipher database TWICE in one process while capturing a
+# full-device debug log, which puts two previously-unmatched encodings in play:
+# the SQLCipher passphrase (a 64-char hex string, `haven-core/src/nostr/mls/
+# storage.rs`) and the identity secret at rest (base64, written by
+# `TestUser.preSeedIdentityAndSkipOnboarding` and read back by the FGS isolate).
+#
+# Both are deliberately KEYWORD-ANCHORED rather than bare shape matches. A bare
+# `[0-9a-f]{64}` would match every Nostr pubkey and event id in the logs — both
+# public, both routinely printed by the harness — and would redden every lane on
+# non-secrets. A guard that cries wolf is a guard that gets deleted.
+#
+# Pattern 7 needs no SECRET keyword — a 32-element decimal array on a Haven log
+# line is never benign, being either raw key material or a 32-byte
+# `nostr_group_id` (a Security Rule 4 violation in its own right). Pattern 4
+# already catches the labeled case; this catches the rest. It is anchored to
+# Haven's own log TAGS instead, because these scanners run over a DEVICE-WIDE
+# logcat shared with every other lane: an unanchored array match would be free
+# to fire on unrelated vendor/system output and redden lanes that leaked
+# nothing. Tag-anchored keeps the blast radius inside code this repo owns.
 
 usage() {
   echo "Usage: $0 <log-file-or-dir> [more...]  |  $0 --self-test" >&2
@@ -88,13 +115,22 @@ self_test() {
     'D/RustStdoutStderr: decrypt ok sender=deadbeef (3 new, 0 failed)' \
     'I/ActivityManager: Start proc 12345:com.oblivioustech.haven/u0a99' \
     'D/sensors: latest reading [1, 2, 3]' \
-    'I/flutter: REJECTED by relay: FormatException' > "${clean}"
+    'I/flutter: REJECTED by relay: FormatException' \
+    'I/flutter: [b1] fetchMemberKeypackage for 3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d' \
+    'I/flutter: [coordination] waiting for event 5c83da77af1dec6d7289834998ad7aafbd9e2191396d75ec3cc27f5a77226f36' \
+    'D/nostr: REQ ["kinds",[445]] authors=[npub1w0rthlessplaceholderpubkeynotasecret]' \
+    'D/BackgroundTask: Published to 1/1 due circle(s) (1 eligible), fetched 1/1 circle(s).' \
+    > "${clean}"
 
   # DIRTY log: the exact keyring_core leak shape (also a labeled byte
   # array) plus a bech32 nsec — every line MUST be caught.
   printf '%s\n' \
     'D/keyring_core: created entry Cred { specifiers: ("x","circles.db.key"), secret: Some([17, 80, 157, 233, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]) }' \
-    'I/restore: recovery nsec1acdefghjklmnpqrstuvwxyz023456789acdefghjkl' > "${dirty}"
+    'I/restore: recovery nsec1acdefghjklmnpqrstuvwxyz023456789acdefghjkl' \
+    "E/RustStdoutStderr: sqlite: file is not a database (PRAGMA key = 'a3f19c4e7b2d8051a3f19c4e7b2d8051a3f19c4e7b2d8051a3f19c4e7b2d8051')" \
+    'D/flutter: [identity] restored secret AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE= from secure storage' \
+    'D/flutter: raw bytes [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]' \
+    > "${dirty}"
 
   # The clean log must pass (scan_file returns 0).
   if ! scan_file "${clean}"; then
@@ -107,6 +143,41 @@ self_test() {
     echo "SELF-TEST FAIL: planted secret was NOT detected" >&2
     fail=1
   fi
+
+  # PER-LINE proof. The combined check above is satisfied as soon as ANY one
+  # pattern fires, so it would stay green with a newly-added pattern that
+  # matches nothing — the repo's documented recurring failure mode (code that
+  # looks complete and executes nowhere). Scanning each planted line on its own
+  # proves every pattern is individually reachable.
+  local line n=0 solo
+  while IFS= read -r line; do
+    n=$(( n + 1 ))
+    solo="${tmp}/solo.${n}.log"
+    printf '%s\n' "${line}" > "${solo}"
+    if scan_file "${solo}" 2>/dev/null; then
+      echo "SELF-TEST FAIL: dirty line ${n} was NOT detected by any pattern" >&2
+      echo "  (a planted secret shape has no live pattern — see PATTERNS)" >&2
+      fail=1
+    fi
+  done < "${dirty}"
+  if (( n < 5 )); then
+    echo "SELF-TEST FAIL: expected >=5 planted lines, found ${n}" >&2
+    fail=1
+  fi
+
+  # Every CLEAN line must also clear on its own, so one forgiving line cannot
+  # mask a pattern that false-positives on another. False positives are how a
+  # guard earns its way into being deleted.
+  n=0
+  while IFS= read -r line; do
+    n=$(( n + 1 ))
+    solo="${tmp}/cleansolo.${n}.log"
+    printf '%s\n' "${line}" > "${solo}"
+    if ! scan_file "${solo}"; then
+      echo "SELF-TEST FAIL: clean line ${n} was flagged as leaking" >&2
+      fail=1
+    fi
+  done < "${clean}"
 
   if (( fail )); then
     echo "scan-logs-for-secrets: SELF-TEST FAILED" >&2

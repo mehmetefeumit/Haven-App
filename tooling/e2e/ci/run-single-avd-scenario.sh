@@ -320,10 +320,24 @@ echo "Phase 2/4 — Installed."
 # permissions need (and accept) `pm grant`; install-time permissions
 # from the manifest (FOREGROUND_SERVICE_*) are already active.
 #
-# ACCESS_BACKGROUND_LOCATION cannot be granted via `pm grant` on
-# API 30+ — it requires the user to navigate through a Settings
-# flow. Haven only requests it via the background-share opt-in,
-# which the consolidated scenario does not exercise.
+# ACCESS_BACKGROUND_LOCATION is deliberately NOT granted here — this
+# scenario never exercises the background-share opt-in that requests
+# it. It is omitted for scope, NOT because it cannot be granted.
+#
+# (This comment previously asserted that `pm grant` cannot grant it on
+# API 30+. That is false, and the error is worth recording because it
+# blocked a CI scenario for months. The permission IS `hardRestricted`
+# in AOSP, but `adb install` sets
+# INSTALL_ALL_WHITELIST_RESTRICTED_PERMISSIONS by default — only an
+# explicit `--restrict-permissions` clears it — so the package is
+# installer-exempt and the grant gate passes. The Android 11 rule that
+# background location cannot be REQUESTED alongside foreground location
+# governs `requestPermissions()` / GrantPermissionsActivity; `pm grant`
+# never enters that path. Beware: the hard-restricted gate is a bare
+# `return` after a `Log.e`, so a REJECTED grant still exits 0 — always
+# verify with `dumpsys package`, never with `$?`. The
+# `e2e-fgs-publish` lane carries a probe that records the empirical
+# read-back on every run.)
 # -----------------------------------------------------------------
 echo "Phase 3/4 — Granting runtime permissions on ${DEVICE}..."
 for perm in \

@@ -218,6 +218,110 @@ void main() {
       },
     );
   });
+
+  // Plain `test`, NOT `testWidgets`: waitUntilAsync deliberately does not pump
+  // frames, and it waits on a REAL clock. Under testWidgets the fake-async
+  // binding would never advance its `Future.delayed` without an interleaved
+  // `tester.pump(duration)`, so the helper would hang — the very coupling to
+  // the frame pump it exists to avoid. It touches no widget tree, so a plain
+  // async test is both correct and fast.
+  group('waitUntilAsync', () {
+    test('returns as soon as the condition holds, without waiting a poll',
+        () async {
+      var calls = 0;
+      final stopwatch = Stopwatch()..start();
+
+      await waitUntilAsync(
+        () async {
+          calls += 1;
+          return true;
+        },
+        description: 'an immediately-true condition',
+        timeout: const Duration(seconds: 10),
+        // Deliberately far longer than the assertion below tolerates: if the
+        // helper ever slept BEFORE its first evaluation, this test would take
+        // 5s and fail the sub-second bound rather than passing by luck.
+        pollInterval: const Duration(seconds: 5),
+      );
+      stopwatch.stop();
+
+      expect(calls, 1, reason: 'the condition must be evaluated before any '
+          'sleep — a helper that always paid one pollInterval would add '
+          'pollInterval to every caller for nothing.');
+      expect(stopwatch.elapsed, lessThan(const Duration(seconds: 1)));
+    });
+
+    test('returns once a condition that starts false flips true', () async {
+      var calls = 0;
+
+      await waitUntilAsync(
+        () async {
+          calls += 1;
+          return calls >= 3;
+        },
+        description: 'a condition true on the third poll',
+        timeout: const Duration(seconds: 5),
+        pollInterval: const Duration(milliseconds: 20),
+      );
+
+      expect(calls, 3);
+    });
+
+    test('throws a StateError naming the description on timeout', () async {
+      Object? caught;
+      final stopwatch = Stopwatch()..start();
+
+      try {
+        await waitUntilAsync(
+          () async => false,
+          description: 'a condition that never holds',
+          timeout: const Duration(milliseconds: 200),
+          pollInterval: const Duration(milliseconds: 20),
+        );
+      } on Object catch (e) {
+        caught = e;
+      }
+      stopwatch.stop();
+
+      expect(caught, isStateError);
+      expect(
+        '$caught',
+        contains('a condition that never holds'),
+        reason: 'the description is the only diagnostic a CI log carries when '
+            'this fires — an anonymous timeout would be unattributable.',
+      );
+      // Bounds the deadline in BOTH directions: an early return would mean the
+      // helper gave up before its timeout (masking a slow-but-healthy wait),
+      // and an overrun would mean the deadline is not enforced at all.
+      expect(stopwatch.elapsed, greaterThanOrEqualTo(
+        const Duration(milliseconds: 150),
+      ));
+      expect(stopwatch.elapsed, lessThan(const Duration(seconds: 3)));
+    });
+
+    test('propagates a throwing condition rather than swallowing it', () async {
+      Object? caught;
+
+      try {
+        await waitUntilAsync(
+          () async => throw const FormatException('platform channel failed'),
+          description: 'a condition that throws',
+          timeout: const Duration(milliseconds: 200),
+          pollInterval: const Duration(milliseconds: 20),
+        );
+      } on Object catch (e) {
+        caught = e;
+      }
+
+      expect(
+        caught,
+        isFormatException,
+        reason: 'a helper that swallowed the error and timed out instead would '
+            'report "condition not satisfied" for what is actually a broken '
+            'platform channel — the wrong bug, every time.',
+      );
+    });
+  });
 }
 
 /// Wraps [child] in an [AbsorbPointer] that absorbs for [delay], then lifts —

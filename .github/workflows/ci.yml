@@ -156,6 +156,17 @@ jobs:
     needs: [rust]
     uses: ./.github/workflows/e2e-background-catchup.yml
 
+  # Runtime proof that the Android foreground service actually PUBLISHES while
+  # the UI is hidden and the foreground MLS session is still live (backlog B1).
+  # Distinct from the catch-up lane above, which is receive-only, runs in a
+  # separate process, and kills the app before waking it — so it cannot reach
+  # the Rule-14 contention that P0-1 is about. This lane asserts DELIVERY (a
+  # parsed publish count plus relay-side corroboration), not just liveness.
+  e2e-fgs-publish:
+    name: E2E FGS Publish (Android)
+    needs: [rust]
+    uses: ./.github/workflows/e2e-fgs-publish.yml
+
   # The public-profile flow (kind-0 + Blossom photo) on BOTH platforms:
   # publish, resolve, merge-preserving edit, and delete→npub-fallback against
   # a real hermetic relay + Blossom server.

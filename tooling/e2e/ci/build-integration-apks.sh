@@ -40,6 +40,30 @@
 set -euo pipefail
 
 readonly RELAY_URL="${HAVEN_E2E_RELAY:-ws://10.0.2.2:7777}"
+
+# Optional explicit live-sync define.
+#
+# `liveSyncEnabled` is `bool.fromEnvironment('HAVEN_LIVE_SYNC', defaultValue:
+# true)`, so a lane that omits the define silently INHERITS true rather than
+# declaring which receive path it means to exercise (CI_HARDENING_BACKLOG.md
+# A7). Setting HAVEN_LIVE_SYNC in a caller's env makes that choice explicit and
+# reviewable. Unset — every pre-existing caller — expands to nothing, so those
+# lanes build byte-identically to before this passthrough existed.
+# The value is VALIDATED before it is used, because the expansion below is
+# deliberately unquoted (it must expand to zero OR one word). Without this
+# check a value containing whitespace would word-split into extra
+# `flutter build apk` arguments.
+if [[ -n "${HAVEN_LIVE_SYNC:-}" ]]; then
+  if [[ ! "${HAVEN_LIVE_SYNC}" =~ ^(true|false)$ ]]; then
+    echo "ERROR: HAVEN_LIVE_SYNC must be exactly 'true' or 'false'." >&2
+    exit 2
+  fi
+  LIVE_SYNC_DEFINE="--dart-define=HAVEN_LIVE_SYNC=${HAVEN_LIVE_SYNC}"
+else
+  LIVE_SYNC_DEFINE=""
+fi
+readonly LIVE_SYNC_DEFINE
+
 readonly OUT_DIR="/tmp/integration-apks"
 readonly BUILD_APK="build/app/outputs/flutter-apk/app-debug.apk"
 
@@ -63,10 +87,12 @@ build_apk_with_retry() {
     # only ABI these APKs ever run on. Without it cargokit compiles the large
     # debug haven-core Rust lib for four ABIs (arm/arm64 + the debug-forced
     # x86/x64), which — with the NDK strip pass — has exhausted the runner disk.
+    # shellcheck disable=SC2086  # LIVE_SYNC_DEFINE is a deliberate 0-or-1 word.
     flutter build apk \
       --debug \
       --target-platform android-x64 \
       --target="${target}" \
+      ${LIVE_SYNC_DEFINE} \
       --dart-define=HAVEN_E2E_RELAY="${RELAY_URL}" || rc=$?
     if (( rc == 0 )); then
       return 0

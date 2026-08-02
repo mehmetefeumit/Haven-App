@@ -157,3 +157,11 @@ jobs:
       - name: Build-retry predicate self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/build_apk_with_retry.sh --self-test
+
+      # Guards the B1 lane's publish-count PARSER. Its critical fixture is the
+      # `Published to 0/1` line — P0-1's own signature, which a substring grep
+      # would accept. If this parser ever rots into one that returns >=1 there,
+      # the FGS lane goes green while background publishing is dead.
+      - name: E2E harness self-test (FGS publish-count parser)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-b1-fgs-publish.sh --self-test
