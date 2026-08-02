@@ -820,6 +820,13 @@ class AppLocalizationsEs extends AppLocalizations {
       'Todos los servidores con los que habla Haven ven la dirección desde la que se conecta tu teléfono, su dirección IP: tus relés, el proveedor del mapa y quien aloje la foto de perfil de un miembro. Tu proveedor de internet ve a cuáles de esos servidores accediste y cuándo. Haven, por sí solo, no hace nada por ocultar ni lo uno ni lo otro.';
 
   @override
+  String get privacyInferenceMapTilesHeading => 'El mapa en sí';
+
+  @override
+  String get privacyInferenceMapTiles =>
+      'Para dibujar el mapa, Haven le pide al proveedor del mapa los cuadros de imagen que hay en pantalla, así que este deduce más o menos qué lugares miras. Haven también descarga por adelantado una pequeña zona alrededor de cada miembro que puedes ver, para que el mapa ya esté listo cuando te desplaces hasta allí: eso significa que el proveedor puede deducir más o menos dónde está tu círculo, y no solo hacia dónde miras tú. Esos cuadros se guardan en una caché cifrada de tu teléfono durante siete días como máximo, y se borran si eliminas tu identidad.';
+
+  @override
   String get privacyInferenceVpnHeading => '¿Conviene usar una VPN?';
 
   @override
@@ -1965,24 +1972,6 @@ class AppLocalizationsEs extends AppLocalizations {
   }
 
   @override
-  String memberMarkerHoursShort(int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    return '${countString}h';
-  }
-
-  @override
-  String memberMarkerDaysShort(int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    return '${countString}d';
-  }
-
-  @override
   String memberMarkerMinutesAgoSemantics(int count) {
     final intl.NumberFormat countNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
@@ -1994,38 +1983,6 @@ class AppLocalizationsEs extends AppLocalizations {
       other: 'hace $countString minutos',
       many: 'hace $countString minutos',
       one: 'hace $countString minuto',
-    );
-    return '$_temp0';
-  }
-
-  @override
-  String memberMarkerHoursAgoSemantics(int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    String _temp0 = intl.Intl.pluralLogic(
-      count,
-      locale: localeName,
-      other: 'hace $countString horas',
-      many: 'hace $countString horas',
-      one: 'hace $countString hora',
-    );
-    return '$_temp0';
-  }
-
-  @override
-  String memberMarkerDaysAgoSemantics(int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    String _temp0 = intl.Intl.pluralLogic(
-      count,
-      locale: localeName,
-      other: 'hace $countString días',
-      many: 'hace $countString días',
-      one: 'hace $countString día',
     );
     return '$_temp0';
   }

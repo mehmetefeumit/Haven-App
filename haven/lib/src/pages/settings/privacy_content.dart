@@ -328,6 +328,8 @@ List<PrivacyBlock> privacyBlocksFor(
     PrivacyPara(l10n.privacyInferencePresence),
     PrivacyHeading(l10n.privacyInferenceIpHeading),
     PrivacyPara(l10n.privacyInferenceIpAddress),
+    PrivacyHeading(l10n.privacyInferenceMapTilesHeading),
+    PrivacyPara(l10n.privacyInferenceMapTiles),
     PrivacyHeading(l10n.privacyInferenceVpnHeading),
     PrivacyPara(l10n.privacyInferenceVpnHelps),
     // The label is the bare hostname so the destination is legible before the

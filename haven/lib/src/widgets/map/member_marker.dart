@@ -54,25 +54,25 @@ String _compassDirectionLabel(AppLocalizations l10n, CompassDirection d) {
 /// Returns `null` for ages under one minute — fresh data reads as "no pill"
 /// rather than "just now", which would be visual noise on the common case.
 /// [l10n] is threaded in because this top-level helper has no [BuildContext].
+/// Minutes are the ONLY unit: a marker is evicted once it passes
+/// `expiresAt + cacheEvictionGrace` (~45 minutes), so an hours- or days-old
+/// marker cannot reach the screen. The former `<24h` and `>=24h` branches were
+/// dead code, and their four l10n keys were dead strings in 13 locales.
+/// Reporting minutes without an upper bound also degrades gracefully: if the
+/// eviction window is ever widened, a stale marker reads "90m" rather than
+/// silently losing its age pill.
 String? _formatAge(AppLocalizations l10n, Duration age) {
   if (age.inMinutes < 1) return null;
-  if (age.inMinutes < 60) return l10n.memberMarkerMinutesShort(age.inMinutes);
-  if (age.inHours < 24) return l10n.memberMarkerHoursShort(age.inHours);
-  return l10n.memberMarkerDaysShort(age.inDays);
+  return l10n.memberMarkerMinutesShort(age.inMinutes);
 }
 
 /// Formats a [Duration] into an expanded age string for screen readers, so
 /// VoiceOver/TalkBack read "5 minutes ago" rather than "five em".
 /// [l10n] is threaded in because this top-level helper has no [BuildContext].
+/// Minutes-only for the same reason as [_formatAge] — see the note there.
 String? _formatAgeForSemantics(AppLocalizations l10n, Duration age) {
   if (age.inMinutes < 1) return null;
-  if (age.inMinutes < 60) {
-    return l10n.memberMarkerMinutesAgoSemantics(age.inMinutes);
-  }
-  if (age.inHours < 24) {
-    return l10n.memberMarkerHoursAgoSemantics(age.inHours);
-  }
-  return l10n.memberMarkerDaysAgoSemantics(age.inDays);
+  return l10n.memberMarkerMinutesAgoSemantics(age.inMinutes);
 }
 
 /// A circle member's marker — the unified teardrop (see the library doc).

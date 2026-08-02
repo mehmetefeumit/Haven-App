@@ -925,6 +925,14 @@
   "@privacyInferenceIpAddress": {
     "description": "Body paragraph, Privacy → What can still be worked out. Names all three classes of server that observe the user's address, including the photo host — an earlier version of this disclosure named only relays and the map provider, which was incomplete."
   },
+  "privacyInferenceMapTilesHeading": "The map itself",
+  "@privacyInferenceMapTilesHeading": {
+    "description": "Heading in Privacy > What can be inferred, introducing what the map provider learns."
+  },
+  "privacyInferenceMapTiles": "Drawing the map asks the map provider for the squares of imagery on screen, so it learns roughly which places you look at. Haven also fetches a small area around each member you can see before you scroll there, so the map is ready \u2014 which means the provider can learn roughly where your circle is, not only where you are looking. Those squares are kept in an encrypted cache on your phone for up to seven days, and are cleared if you delete your identity.",
+  "@privacyInferenceMapTiles": {
+    "description": "Privacy > What can be inferred: discloses that map tiles are fetched from the map provider around BOTH the user's and other members' positions, that tiles are prefetched ahead of viewing, and the on-device cache retention. Must not overstate: the provider sees tile coordinates, not identities, and Haven never sends it a member list. The final clause must name IDENTITY DELETION, not logout \u2014 Haven has no login/logout; the tile wipe runs inside NostrIdentityService.deleteIdentity()."
+  },
   "privacyInferenceVpnHeading": "Whether to use a VPN",
   "@privacyInferenceVpnHeading": {
     "description": "Section heading within the Privacy topic, introducing the VPN recommendation. Rendered as a navigable screen-reader heading. 'VPN' is intentionally English (widely-understood initialism)."
@@ -2181,37 +2189,9 @@
       "count": { "type": "int", "format": "decimalPattern" }
     }
   },
-  "memberMarkerHoursShort": "{count}h",
-  "@memberMarkerHoursShort": {
-    "description": "Compact age pill on a member marker for hours, e.g. '3h'. The 'h' suffix is intentionally English (a compact time abbreviation).",
-    "placeholders": {
-      "count": { "type": "int", "format": "decimalPattern" }
-    }
-  },
-  "memberMarkerDaysShort": "{count}d",
-  "@memberMarkerDaysShort": {
-    "description": "Compact age pill on a member marker for days, e.g. '2d'. The 'd' suffix is intentionally English (a compact time abbreviation).",
-    "placeholders": {
-      "count": { "type": "int", "format": "decimalPattern" }
-    }
-  },
   "memberMarkerMinutesAgoSemantics": "{count, plural, =1{1 minute ago} other{{count} minutes ago}}",
   "@memberMarkerMinutesAgoSemantics": {
     "description": "Expanded last-seen age, in minutes, read by screen readers for a member marker.",
-    "placeholders": {
-      "count": { "type": "int", "format": "decimalPattern" }
-    }
-  },
-  "memberMarkerHoursAgoSemantics": "{count, plural, =1{1 hour ago} other{{count} hours ago}}",
-  "@memberMarkerHoursAgoSemantics": {
-    "description": "Expanded last-seen age, in hours, read by screen readers for a member marker.",
-    "placeholders": {
-      "count": { "type": "int", "format": "decimalPattern" }
-    }
-  },
-  "memberMarkerDaysAgoSemantics": "{count, plural, =1{1 day ago} other{{count} days ago}}",
-  "@memberMarkerDaysAgoSemantics": {
-    "description": "Expanded last-seen age, in days, read by screen readers for a member marker.",
     "placeholders": {
       "count": { "type": "int", "format": "decimalPattern" }
     }

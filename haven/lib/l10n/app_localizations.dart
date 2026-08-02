@@ -1422,6 +1422,18 @@ abstract class AppLocalizations {
   /// **'Every server Haven talks to sees the address your phone connects from, its IP address: your relays, the map provider, and whoever hosts a member\'s profile photo. Your internet provider sees which of those servers you reached, and when. Haven does nothing to hide either of those on its own.'**
   String get privacyInferenceIpAddress;
 
+  /// Heading in Privacy > What can be inferred, introducing what the map provider learns.
+  ///
+  /// In en, this message translates to:
+  /// **'The map itself'**
+  String get privacyInferenceMapTilesHeading;
+
+  /// Privacy > What can be inferred: discloses that map tiles are fetched from the map provider around BOTH the user's and other members' positions, that tiles are prefetched ahead of viewing, and the on-device cache retention. Must not overstate: the provider sees tile coordinates, not identities, and Haven never sends it a member list. The final clause must name IDENTITY DELETION, not logout — Haven has no login/logout; the tile wipe runs inside NostrIdentityService.deleteIdentity().
+  ///
+  /// In en, this message translates to:
+  /// **'Drawing the map asks the map provider for the squares of imagery on screen, so it learns roughly which places you look at. Haven also fetches a small area around each member you can see before you scroll there, so the map is ready — which means the provider can learn roughly where your circle is, not only where you are looking. Those squares are kept in an encrypted cache on your phone for up to seven days, and are cleared if you delete your identity.'**
+  String get privacyInferenceMapTiles;
+
   /// Section heading within the Privacy topic, introducing the VPN recommendation. Rendered as a navigable screen-reader heading. 'VPN' is intentionally English (widely-understood initialism).
   ///
   /// In en, this message translates to:
@@ -3060,35 +3072,11 @@ abstract class AppLocalizations {
   /// **'{count}m'**
   String memberMarkerMinutesShort(int count);
 
-  /// Compact age pill on a member marker for hours, e.g. '3h'. The 'h' suffix is intentionally English (a compact time abbreviation).
-  ///
-  /// In en, this message translates to:
-  /// **'{count}h'**
-  String memberMarkerHoursShort(int count);
-
-  /// Compact age pill on a member marker for days, e.g. '2d'. The 'd' suffix is intentionally English (a compact time abbreviation).
-  ///
-  /// In en, this message translates to:
-  /// **'{count}d'**
-  String memberMarkerDaysShort(int count);
-
   /// Expanded last-seen age, in minutes, read by screen readers for a member marker.
   ///
   /// In en, this message translates to:
   /// **'{count, plural, =1{1 minute ago} other{{count} minutes ago}}'**
   String memberMarkerMinutesAgoSemantics(int count);
-
-  /// Expanded last-seen age, in hours, read by screen readers for a member marker.
-  ///
-  /// In en, this message translates to:
-  /// **'{count, plural, =1{1 hour ago} other{{count} hours ago}}'**
-  String memberMarkerHoursAgoSemantics(int count);
-
-  /// Expanded last-seen age, in days, read by screen readers for a member marker.
-  ///
-  /// In en, this message translates to:
-  /// **'{count, plural, =1{1 day ago} other{{count} days ago}}'**
-  String memberMarkerDaysAgoSemantics(int count);
 
   /// Accessibility label for an on-screen member marker that has a display name. {name} is the member's display name.
   ///

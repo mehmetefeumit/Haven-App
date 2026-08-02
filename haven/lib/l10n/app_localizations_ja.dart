@@ -770,6 +770,13 @@ class AppLocalizationsJa extends AppLocalizations {
       'Haven が通信するすべてのサーバーには、あなたの端末が接続してくるアドレス、つまり IP アドレスが見えます: あなたのリレー、地図プロバイダー、そしてメンバーのプロフィール写真を預かっているサーバーです。インターネットプロバイダーには、そのうちどのサーバーにいつ接続したかが見えます。Haven だけでは、そのどちらも隠せません。';
 
   @override
+  String get privacyInferenceMapTilesHeading => '地図そのもの';
+
+  @override
+  String get privacyInferenceMapTiles =>
+      '地図を描くには、画面に映っている四角い画像を地図プロバイダーに求める必要があります。そのため、プロバイダーにはあなたがどのあたりを見ているかがおおまかに分かります。Haven はさらに、あなたが見ることのできるメンバーそれぞれの周囲についても、あなたがそこへ地図を動かす前に、狭い範囲をあらかじめ取得しています。地図をすぐ表示するためですが、その結果プロバイダーには、あなたが見ている場所だけでなく、サークルのメンバーがいるおおよその場所まで分かることになります。これらの画像は、あなたの端末上の暗号化されたキャッシュに最長7日間保存され、識別情報を削除した場合はまとめて消去されます。';
+
+  @override
   String get privacyInferenceVpnHeading => 'VPN を使うかどうか';
 
   @override
@@ -1852,24 +1859,6 @@ class AppLocalizationsJa extends AppLocalizations {
   }
 
   @override
-  String memberMarkerHoursShort(int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    return '${countString}h';
-  }
-
-  @override
-  String memberMarkerDaysShort(int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    return '${countString}d';
-  }
-
-  @override
   String memberMarkerMinutesAgoSemantics(int count) {
     final intl.NumberFormat countNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
@@ -1879,34 +1868,6 @@ class AppLocalizationsJa extends AppLocalizations {
       count,
       locale: localeName,
       other: '$countString分前',
-    );
-    return '$_temp0';
-  }
-
-  @override
-  String memberMarkerHoursAgoSemantics(int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    String _temp0 = intl.Intl.pluralLogic(
-      count,
-      locale: localeName,
-      other: '$countString時間前',
-    );
-    return '$_temp0';
-  }
-
-  @override
-  String memberMarkerDaysAgoSemantics(int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    String _temp0 = intl.Intl.pluralLogic(
-      count,
-      locale: localeName,
-      other: '$countString日前',
     );
     return '$_temp0';
   }
