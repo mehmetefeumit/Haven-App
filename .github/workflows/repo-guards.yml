@@ -166,6 +166,15 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/build_apk_with_retry.sh --self-test
 
+      # Guards the P0-1 probe's verdict classifier. Its critical fixture is a
+      # log where the CONTROL line (Activity alive) precedes the real one — if
+      # the classifier ever takes the first match instead of the last, the
+      # experiment answers the wrong question and the architecture decision is
+      # made on a misread. Remove with the probe once P0-1 §2 is settled.
+      - name: E2E harness self-test (P0-1 probe verdict classifier)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-p0-1-session-probe.sh --self-test
+
       # Guards the predicate that catches `flutter drive` exiting 0 on a FAILED
       # test. Its critical fixture is the verbatim run-30753193231 log in which
       # a setUpAll failure was reported to the driver as "All tests passed." —

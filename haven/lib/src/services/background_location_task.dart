@@ -301,12 +301,109 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     // the async write window (a few ms) would let _waitForBackgroundIdle
     // return immediately on a foreground resume, causing both isolates to
     // call encryptLocation concurrently.
+    // Runs BEFORE `_publishCycle`, which returns immediately while
+    // `_circleManager == null` — the P0-1 steady state, and precisely the state
+    // whose recoverability the probe exists to measure. Compiled out unless the
+    // probe dart-define is set.
+    await _probeSessionAvailability();
+
     await _setIdle(false);
     try {
       await _publishCycle(timestamp);
     } finally {
       _inFlightPublish = null;
       await _setIdle(true);
+    }
+  }
+
+  /// Whether the P0-1 session-availability probe is compiled in.
+  ///
+  /// Build-time only, defaults OFF, and additionally `#[cfg]`-equivalent gated
+  /// on debug via [kDebugMode] at the call site — a release binary can never
+  /// run it. Set with
+  /// `--dart-define=HAVEN_P0_1_PROBE=true` for the experiment described in
+  /// `docs/P0_1_FGS_SESSION_PLAN.md` §2, and delete both this flag and
+  /// [_probeSessionAvailability] once that question is answered.
+  static const bool _p0_1ProbeEnabled = bool.fromEnvironment(
+    'HAVEN_P0_1_PROBE',
+  );
+
+  /// Verbatim prefix the probe's runner greps for. Keep in sync with
+  /// `tooling/e2e/ci/run-p0-1-session-probe.sh`.
+  static const String _probeMarker = '[P0-1-PROBE]';
+
+  /// Answers ONE question: can this isolate open the MLS database right now?
+  ///
+  /// The P0-1 fix plan proposes that the foreground service stop opening its
+  /// own session and instead route work to the main isolate, falling back to
+  /// opening one itself when no main isolate exists (a cold service start).
+  /// Two independent reviews argued that fallback can never succeed, because
+  /// the Rule-14 guard is held by an `Arc` inside a Rust process-global
+  /// (`static SESSION`, the live-sync engine) that OUTLIVES the main isolate:
+  /// when the Activity is destroyed the routing target dies while the guard
+  /// stays held, so there is nobody to route to AND no way to acquire.
+  ///
+  /// If that is right, the routing design is unbuildable as specified and the
+  /// architecture must change. This probe settles it empirically instead of by
+  /// argument, and it is deliberately the smallest possible instrument.
+  ///
+  /// ## Why it disposes immediately
+  ///
+  /// On success this would OWN the guard, and holding it would (a) change the
+  /// very state being measured, and (b) lock the foreground out on the user's
+  /// next launch with no recovery path — the mirror image of P0-1. Acquire,
+  /// record, release. The probe must never leave the process in a state it
+  /// did not find it in.
+  ///
+  /// ## Why it does not log the raw error
+  ///
+  /// Only the Rule-14 rejection is a fixed, content-free literal. The other
+  /// failure modes at this call site (identity decode, keyring, SQLCipher)
+  /// carry upstream text that is not ours and is not known-safe (Rule 8), so
+  /// the outcome is CLASSIFIED into a closed set and only the classification
+  /// is printed.
+  Future<void> _probeSessionAvailability() async {
+    if (!_p0_1ProbeEnabled || !kDebugMode) return;
+    final identity = _identityManager;
+    if (identity == null) {
+      debugPrint('$_probeMarker SKIPPED — no identity loaded in this isolate.');
+      return;
+    }
+
+    CircleManagerFfi? probe;
+    try {
+      final dataDir = await const PathProviderDataDirectory()
+          .getDataDirectory();
+      // Re-fetched per use rather than held (Security Rule 9) and zeroed below.
+      final secretBytes = await identity.getSecretBytes();
+      try {
+        probe = await CircleManagerFfi.newInstance(
+          dataDir: dataDir,
+          identitySecretBytes: secretBytes,
+        );
+      } finally {
+        secretBytes.fillRange(0, secretBytes.length, 0);
+      }
+      debugPrint(
+        '$_probeMarker ACQUIRED — the MLS guard was FREE from this isolate. '
+        'A cold-start fallback CAN open a session here.',
+      );
+    } on Object catch (e) {
+      // The Rule-14 message is a fixed literal in
+      // `haven-core/src/nostr/mls/storage.rs` and carries no path or secret;
+      // matching it is what lets the probe distinguish "someone holds the
+      // guard" from "the open failed for an unrelated reason".
+      final blockedByRule14 = e.toString().contains(
+        'already open on this database',
+      );
+      debugPrint(
+        '$_probeMarker REFUSED rule14=$blockedByRule14 '
+        'type=${e.runtimeType} — the MLS guard is HELD by another live '
+        'session in this process.',
+      );
+    } finally {
+      // Never hold what we only came to measure.
+      probe?.dispose();
     }
   }
 

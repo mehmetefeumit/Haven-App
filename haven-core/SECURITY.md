@@ -19,6 +19,32 @@ individually in `haven-core/.cargo/audit.toml`, not here.
 
 ### Resolved
 
+- **RUSTSEC-2026-0225 / -0226 / -0227 / -0228 / -0229 / -0230** (`nostr`
+  0.44.6) and **RUSTSEC-2026-0231 / -0232** (`nostr-relay-pool` 0.44.2) — a
+  coordinated batch published 2026-08-01. Fixed by resolving `nostr` to 0.44.7
+  and `nostr-relay-pool` to 0.44.3 in **both** lockfiles (2026-08-02); the
+  declared constraints are caret `0.44`, so no manifest change was needed.
+
+  Three are directly reachable from Haven's own inputs and are the reason this
+  is not a routine bump:
+
+  - **-0232, "Processing of unverified relay events"** (7.5) — Haven ingests
+    relay events continuously (kind 445 group messages, 1059 gift wraps, 0/10002
+    profile-plane reads). Anything a relay can hand back reaches this path.
+  - **-0227, "NIP-44 v2 decryption permits resource exhaustion"** (7.5) — NIP-44
+    v2 is the inner layer of the NIP-59 gift wraps carrying kind-444 Welcomes,
+    so a hostile or malformed 1059 is a remote input. Same reachability argument
+    as RUSTSEC-2026-0216 below, which is a recurrence of the same class.
+  - **-0231, "Relay authentication challenges can exhaust memory"** (7.5) — any
+    relay Haven connects to can send an AUTH challenge.
+
+  The remaining three are not reachable here but were fixed by the same bump:
+  -0226 (wallet event parsers) and -0225 (Debug output exposing NIP-46/NIP-60
+  credentials) cover NIPs Haven does not implement — no remote signer, no
+  wallet; -0229 (NIP-98 HTTP auth) is unused, Haven's Blossom authorization is
+  kind 24242; -0230 (empty NIP-50 search filters) is unused, Haven issues no
+  search filters; -0228 (NIP-04) is unused, Haven is NIP-44 only.
+
 - **RUSTSEC-2026-0216** — `nostr` 0.44.2, remote DoS via a malformed NIP-44 v2
   payload (CVSS 7.5; the version was also yanked). Directly relevant: NIP-44 v2
   is the inner layer of the NIP-59 gift wraps Haven ingests from relays for
