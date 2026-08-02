@@ -586,63 +586,116 @@ void main() {
       // `_onPaused()` runs exactly as it would from a real
       // `Activity.onStop()`: cancels the foreground heartbeat, stops
       // `locationPublishSchedulerProvider`, and writes
-      // `markForegroundActive(active: false)`. This drive never delivers
-      // `resumed` afterward — doing so would re-arm the foreground and
-      // defeat the hold below.
+      // `markForegroundActive(active: false)`. `resumed` is delivered only in
+      // the `finally` below — never before the hold completes, or the
+      // foreground re-arms and the FGS is gated out again.
+      //
+      // try/finally, not a trailing call: the restore re-enables frame
+      // production and `flutter_test`'s own post-test cleanup pumps a frame on
+      // the SUCCESS path (see the restore's comment for the full chain). An
+      // exception between here and there — `waitUntilAsync` below is
+      // explicitly designed to throw — currently avoids that pump only because
+      // a thrown test skips the cleanup block entirely. That is a coincidence
+      // of `flutter_test` internals, not an invariant this file should rest
+      // on, and it would silently stop holding if that cleanup ever ran
+      // unconditionally.
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
       debugPrint('$kPauseDeliveredMarker pid=$pid');
+      try {
+        // Confirm `_onPaused()` actually ran to completion — not just that it
+        // was dispatched — by polling REAL on-disk SharedPreferences for the
+        // exact flag `_publishCycle`'s gate 3 reads. Bounded: a stuck
+        // `_onPaused()` (a hung platform-channel write, a disposed `ref`
+        // throwing before the write lands) must fail this drive red with a
+        // clear, attributable reason here, rather than silently falling
+        // through to a 200 s hold that could never succeed.
+        await waitUntilAsync(
+          () async {
+            await prefs.reload();
+            return prefs.getInt(kForegroundActiveAtMsKey) == 0;
+          },
+          description: 'kForegroundActiveAtMsKey observed 0 in real '
+              'SharedPreferences — proof that the production _onPaused() ran '
+              'to completion, not merely that the pause was dispatched',
+          pollInterval: const Duration(seconds: 1),
+        );
+        debugPrint(kHandoffConfirmedMarker);
 
-      // Confirm `_onPaused()` actually ran to completion — not just that it
-      // was dispatched — by polling REAL on-disk SharedPreferences for the
-      // exact flag `_publishCycle`'s gate 3 reads. Bounded: a stuck
-      // `_onPaused()` (a hung platform-channel write, a disposed `ref`
-      // throwing before the write lands) must fail this drive red with a
-      // clear, attributable reason here, rather than silently falling
-      // through to a 200 s hold that could never succeed.
-      await waitUntilAsync(
-        () async {
-          await prefs.reload();
-          return prefs.getInt(kForegroundActiveAtMsKey) == 0;
-        },
-        description: 'kForegroundActiveAtMsKey observed 0 in real '
-            'SharedPreferences — proof that the production _onPaused() ran '
-            'to completion, not merely that the pause was dispatched',
-        pollInterval: const Duration(seconds: 1),
-      );
-      debugPrint(kHandoffConfirmedMarker);
-
-      // --- Hold the body open. The tree stays mounted, the
-      // ProviderContainer stays alive, and `aliceManager` stays open for
-      // this entire window — the Rule-14 contention this lane exists to
-      // observe is real and CONTINUOUS throughout, not merely at the
-      // instant "ARMED" printed. Poll (never a single blind sleep) so a
-      // genuinely wedged run still produces periodic evidence in the CI log
-      // instead of silence; pump a frame on every iteration too —
-      // belt-and-suspenders in case anything downstream of this point turns
-      // out to depend on a widget rebuild (see pump_helpers.dart's
-      // `waitUntilAsync` doc for why that is not guaranteed without one).
-      final holdDeadline = DateTime.now().add(_postPauseHoldDuration);
-      var elapsedHeartbeats = 0;
-      while (DateTime.now().isBefore(holdDeadline)) {
-        await tester.pump(const Duration(seconds: 1));
-        await Future<void>.delayed(const Duration(seconds: 9));
-        elapsedHeartbeats += 1;
-        if (elapsedHeartbeats.isEven) {
-          final lastPublish =
-              await BackgroundLocationManager.readLastPublishTime();
-          debugPrint(
-            '[b1] holding (~${elapsedHeartbeats * 10}s of '
-            '${_postPauseHoldDuration.inSeconds}s) — lastBackgroundPublish='
-            '${lastPublish?.toIso8601String() ?? "none yet"}',
-          );
+        // --- Hold the body open. The tree stays mounted, the
+        // ProviderContainer stays alive, and `aliceManager` stays open for
+        // this entire window — the Rule-14 contention this lane exists to
+        // observe is real and CONTINUOUS throughout, not merely at the
+        // instant "ARMED" printed. Poll (never a single blind sleep) so a
+        // genuinely wedged run still produces periodic evidence in the CI log
+        // instead of silence.
+        //
+        // NEVER pump a frame in this loop. `tester.pump()` here DEADLOCKS, and
+        // it did: CI run 30753193231 hung from the handoff until the 10-minute
+        // test timeout, emitting not one heartbeat, and tore down on
+        // `'!_expectingFrame': is not true` — the assertion that fires when a
+        // pump is still outstanding. The cause is the pause we just delivered:
+        // `SchedulerBinding.handleAppLifecycleStateChanged`
+        // (flutter/lib/src/scheduler/binding.dart:414-427) calls
+        // `_setFramesEnabledState(false)` for `paused`, `hidden` and
+        // `detached`, so `scheduleFrame()` stops producing frames and a
+        // `pump()` awaits one that can never arrive. A plain `Future.delayed`
+        // loop is both sufficient and correct: nothing this loop waits on is in
+        // the widget tree — the FGS is a different isolate — and real timers,
+        // platform-channel replies and Rust callbacks all keep running
+        // regardless of frame production.
+        final holdDeadline = DateTime.now().add(_postPauseHoldDuration);
+        var elapsedHeartbeats = 0;
+        while (DateTime.now().isBefore(holdDeadline)) {
+          await Future<void>.delayed(const Duration(seconds: 10));
+          elapsedHeartbeats += 1;
+          if (elapsedHeartbeats.isEven) {
+            final lastPublish =
+                await BackgroundLocationManager.readLastPublishTime();
+            debugPrint(
+              '[b1] holding (~${elapsedHeartbeats * 10}s of '
+              '${_postPauseHoldDuration.inSeconds}s) — lastBackgroundPublish='
+              '${lastPublish?.toIso8601String() ?? "none yet"}',
+            );
+          }
         }
+      } finally {
+        // Restore the lifecycle state before returning. This is NOT cosmetic.
+        //
+        // The pause we delivered set `framesEnabled = false`
+        // (`SchedulerBinding.handleAppLifecycleStateChanged` →
+        // `_setFramesEnabledState(false)`), and `scheduleFrame()` early-returns
+        // while that is false (scheduler/binding.dart:947). `flutter_test`'s
+        // own post-test cleanup then runs `runApp(Container(...)); await
+        // pump();` (flutter_test/lib/src/binding.dart:1684-1691) on every test
+        // that did not throw — and `LiveTestWidgetsFlutterBinding.pump` awaits
+        // a frame that `scheduleFrame()` will not request. `runApp`'s warm-up
+        // frame happens to bypass the gate, so teardown MIGHT be rescued by it,
+        // but only if the warm-up callbacks land after `pump()` has set
+        // `_expectingFrame` — an ordering race this lane should not depend on.
+        // Restoring `resumed` re-enables frames and makes teardown behave
+        // exactly as it does in every other integration test.
+        //
+        // It is also the honest state: the activity was never backgrounded at
+        // the OS level — we dispatched the lifecycle event in-process — so
+        // leaving the binding in `paused` would be a fiction the rest of
+        // teardown has to cope with.
+        //
+        // Safe for the oracle: this runs AFTER the hold, so every FGS marker
+        // the shell asserts on is already in logcat. `_onResumed()` re-marks
+        // the foreground active and restarts the foreground publisher, but a
+        // foreground publish never emits `[BackgroundTask] Published to`, so it
+        // cannot be miscounted as an FGS publish.
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.resumed,
+        );
+
+        debugPrint(
+          '[b1] hold complete (lifecycle restored to resumed) — returning now '
+          "hands control to flutter_test's own post-test teardown (see class "
+          'doc). The shell scopes its logcat window to start at '
+          '$kHandoffConfirmedMarker.',
+        );
       }
-      debugPrint(
-        '[b1] hold complete — returning now hands control to '
-        "flutter_test's own post-test teardown (see class doc). The "
-        'shell should scope its logcat/network window to start at '
-        '$kPauseDeliveredMarker, not to any later HOME press.',
-      );
     },
     timeout: const Timeout(Duration(minutes: 10)),
   );

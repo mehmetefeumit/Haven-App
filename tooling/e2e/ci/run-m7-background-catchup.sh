@@ -78,6 +78,11 @@
 
 set -Eeuo pipefail
 
+# Shared app-side failure predicate — `flutter drive` can exit 0 on a failed
+# test (see drive-log-lib.sh).
+# shellcheck source=tooling/e2e/ci/drive-log-lib.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/drive-log-lib.sh"
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -544,6 +549,18 @@ drive_target() {
   cat "${drivelog}" || true
   if (( drc != 0 )); then
     fail "drive of ${target} failed (rc=${drc}) — cannot arm the worker state."
+  fi
+  # A zero exit code is necessary, not sufficient: `flutter drive` reports
+  # success whenever the failure happened outside a `testWidgets` body, because
+  # integrationDriver only sees results the integration_test binding recorded
+  # for those bodies (drive-log-lib.sh). This lane's whole purpose is to leave
+  # ARMED state behind, and every arming step lives in a setUpAll-shaped
+  # position — exactly the blind spot.
+  if drive_log_reports_test_failure "${drivelog}"; then
+    echo "---- app-side failure evidence ----" >&2
+    drive_log_failure_evidence "${drivelog}" >&2
+    fail "drive of ${target} exited 0 but the ON-DEVICE suite reported failures \
+— the worker state is NOT armed and every later phase would mis-diagnose."
   fi
 }
 

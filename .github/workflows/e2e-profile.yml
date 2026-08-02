@@ -49,8 +49,12 @@
 # # How the profile plane is retargeted (this lane DOES prove plane separation)
 #
 # haven/integration_test/e2e/e2e_profile_sharing.dart installs the hermetic
-# kind-0 pool in `setUpAll` via `setProfileRelaysForTest`, fed from the
-# HAVEN_E2E_PROFILE_RELAYS dart-define below (comma-separated;
+# kind-0 pool in `setUpAll` by passing it to
+# `ScenarioHarness.bootstrap(profileRelays: ...)` — which reaches the tree's
+# ONLY `setProfileRelaysForTest` call site, in TestUser.bootstrapProcess
+# (enforced by scripts/ci/check_profile_override_single_site.sh; two install
+# sites race on an install-once OnceLock, which broke this lane in CI run
+# 30753193231). It is fed from the
 # HAVEN_E2E_PROFILE_RELAY is the first member alone). That is the ONLY hook that
 # retargets kind-0: `haven-core/src/profile/` is structurally forbidden from
 # naming the discovery plane (check 3 in check_profile_privacy_boundaries.sh),
@@ -159,11 +163,10 @@ jobs:
       # re-pass them). `--target-platform android-x64`: the AVD is x86_64, so
       # x64 is the only ABI it runs — matches every other Android e2e lane.
       #
-      # HAVEN_E2E_PROFILE_RELAY{,S} carry the DISJOINT profile-plane pool; the
-      # scenario consumes them once `setProfileRelaysForTest` exists (see the
-      # TODO in the header and at the call site in e2e_profile_sharing.dart).
-      # Baking them now is inert for a scenario that ignores them, so the build
-      # and the wiring can land independently.
+      # HAVEN_E2E_PROFILE_RELAY{,S} carry the DISJOINT profile-plane pool. The
+      # scenario parses and validates them into `_profileRelayUrls` and hands
+      # that to `ScenarioHarness.bootstrap(profileRelays: ...)`; they MUST be
+      # baked here because `flutter drive` does not re-pass dart-defines.
       - name: Build E2E test APK
         working-directory: haven
         timeout-minutes: 25

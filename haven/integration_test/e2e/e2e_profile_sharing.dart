@@ -42,9 +42,12 @@
 ///     superset of the relays already carrying this account's kind-445/1059.
 ///     Every profile read AND write resolves through
 ///     `CircleManager::usable_profile_relays()` = the curated pool minus the
-///     append-only contamination ledger, so this scenario installs
-///     `setProfileRelaysForTest` with the hermetic pool from
-///     `HAVEN_E2E_PROFILE_RELAYS`. THREE relays, not one: `PROFILE_POOL_MIN` is
+///     append-only contamination ledger, so this scenario installs the hermetic
+///     pool from `HAVEN_E2E_PROFILE_RELAYS` by passing it as
+///     `ScenarioHarness.bootstrap(profileRelays: ...)` — the harness owns the
+///     single `setProfileRelaysForTest` call site, because the Rust override is
+///     install-once and a second site throws (CI run 30753193231).
+///     THREE relays, not one: `PROFILE_POOL_MIN` is
 ///     3 and `resolve_profile_pool` dedupes after normalization, so a shorter
 ///     *distinct* pool is a terminal `PoolUnderflow` and the plane stops
 ///     resolving entirely (fail-closed by design — there is no fallback).
@@ -118,11 +121,11 @@ import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart'
     show
         MemberKeyPackageFfi,
+        ProfilePoolStatusFfi,
         RelayManagerFfi,
         allowPrivateBlossomForTest,
         setBlossomServerForTest,
-        setDiscoveryRelaysForTest,
-        setProfileRelaysForTest;
+        setDiscoveryRelaysForTest;
 import 'package:haven/src/services/nostr_circle_service.dart'
     show NostrCircleService;
 import 'package:integration_test/integration_test.dart';
@@ -308,7 +311,8 @@ final List<String> _profileRelayUrls =
     _parseProfileRelayPool(_profileRelaysRaw);
 
 /// Splits, trims and validates [_profileRelaysRaw] into the pool this scenario
-/// installs via `setProfileRelaysForTest`.
+/// hands to `ScenarioHarness.bootstrap(profileRelays: ...)`, which owns the one
+/// `setProfileRelaysForTest` call site in the tree.
 ///
 /// Four checks, each guarding a distinct failure mode that would otherwise
 /// surface far from its cause (or, in the first case, not surface at all):
@@ -471,6 +475,10 @@ void main() {
   late ScenarioContext ctx;
   late SyntheticUser bob;
   late String aliceHex;
+  /// Profile-pool counts sampled in `setUpAll` immediately after the FIRST
+  /// `CircleManagerFfi` is constructed, and asserted in the first test below.
+  /// See the sampling site for why the verdict cannot live in `setUpAll`.
+  late ProfilePoolStatusFfi poolStatusAtFirstManager;
   final profilePool = <TestRelay>[];
   var didInitCtx = false;
   var didInitPreSeed = false;
@@ -480,33 +488,42 @@ void main() {
     SharedPreferences.setMockInitialValues(<String, Object>{});
 
     // Rust bridge + in-memory keyring + loopback ws:// opt-in + DEFAULT-relay
-    // override (→ strfry) + a TestRelay probe socket.
-    ctx = await ScenarioHarness.bootstrap();
-    didInitCtx = true;
-
-    // Point the PROFILE plane at its own three hermetic relays. This is the
-    // only hook that retargets kind-0: `profile/` may not name the discovery
-    // plane at all, so `setDiscoveryRelaysForTest` (below) has no effect on it.
+    // override (→ strfry) + a TestRelay probe socket — AND the PROFILE plane
+    // pointed at its own three hermetic relays.
     //
-    // Must happen BEFORE the first `CircleManagerFfi` is constructed — Alice's
-    // via `HavenApp`, Bob's via `SyntheticUser.bob` — because a fresh DB seeds
-    // its `RelayType::Profile` rows from `profile_relay_pool_default()`, and
-    // `usable_profile_relays()` UNIONS those rows back in. Seeding first would
-    // leave the eight curated PUBLIC relays permanently in both users' pools,
-    // where the assignment hash would send real kind-0 REQs to them.
+    // `profileRelays:` is the only hook that retargets kind-0: `profile/` may
+    // not name the discovery plane at all, so `setDiscoveryRelaysForTest`
+    // (below) has no effect on it.
+    //
+    // It is passed INTO the harness rather than installed after it, because the
+    // Rust override is an install-once `OnceLock` and the harness installs the
+    // fail-closed default (the circle relay) for every other lane. Two install
+    // sites therefore race, and the loser throws
+    // "set_profile_relays_for_test already installed" — which is precisely how
+    // this scenario broke on both platforms in CI run 30753193231. One call
+    // site makes that structurally impossible.
+    //
+    // Installing here also keeps the ordering guarantee this scenario needs:
+    // the pool must be live BEFORE the first `CircleManagerFfi` is constructed
+    // — Alice's via `HavenApp`, Bob's via `SyntheticUser.bob` — because a fresh
+    // DB seeds its `RelayType::Profile` rows from
+    // `profile_relay_pool_default()`
+    // and `usable_profile_relays()` UNIONS those rows back in. Seeding first
+    // would leave the eight curated PUBLIC relays permanently in both users'
+    // pools, where the assignment hash would send real kind-0 REQs to them.
     //
     // `_profileRelayUrls` validates loopback-only, >= PROFILE_POOL_MIN distinct
     // entries, and disjointness from the circle relay before we get here. The
-    // call itself is the propagation check: the override is an install-once
-    // `OnceLock`, so returning without throwing means this list — and nothing
-    // else — is now the pool. (There is deliberately no read-back accessor: no
-    // profile-plane relay URL crosses the FFI.)
+    // call itself is the propagation check: returning without throwing means
+    // this list — and nothing else — is now the pool. (There is deliberately no
+    // read-back accessor: no profile-plane relay URL crosses the FFI.)
     //
     // The pool sits exactly ON the PROFILE_POOL_MIN floor, so it has zero
     // contamination headroom: if any of these three ever also carried circle
     // traffic the ledger would subtract it and the plane would fail closed. The
     // disjointness check above is what keeps that from happening silently.
-    setProfileRelaysForTest(relays: _profileRelayUrls);
+    ctx = await ScenarioHarness.bootstrap(profileRelays: _profileRelayUrls);
+    didInitCtx = true;
 
     // The discovery plane still serves the CIRCLE plane:
     // `fetchMemberKeypackage` resolves Bob's kind-10002 / 10050 / 10051 relay
@@ -540,6 +557,35 @@ void main() {
     bob = await SyntheticUser.bob(ctx.relay);
     didInitBob = true;
 
+    // Positive proof that the hermetic pool was live BEFORE the first
+    // `CircleManagerFfi` existed — Bob's, one line above, is that first one.
+    //
+    // Until now this scenario relied on an ORDERING ARGUMENT (install the
+    // override before any DB is created, or the fresh DB seeds its
+    // `RelayType::Profile` rows from `profile_relay_pool_default()` and
+    // `usable_profile_relays()` unions the eight curated PUBLIC relays back in
+    // permanently). Nothing tested it: a broken ordering surfaced only
+    // indirectly, as three 90-second kind-0 timeouts pointing nowhere near the
+    // cause — and in the worst case as REAL kind-0 REQs for test pubkeys sent
+    // to public relays.
+    //
+    // `profilePoolStatus` returns COUNTS ONLY (no profile relay URL crosses the
+    // FFI — that is a deliberate boundary), which is exactly enough: a
+    // `configured` of 8 or 11 instead of 3 is the unmistakable signature of the
+    // curated production pool having been seeded into the DB.
+    //
+    // MEASURED here, ASSERTED in the first test below. A bare read is
+    // non-assert work and is legal in `setUpAll`; an `expect()` here is not,
+    // because a `setUpAll` failure never reaches the results map
+    // `integrationDriver()` inspects and would be swallowed —
+    // `test/lints/integration_test_propagation_test.dart` enforces exactly
+    // that, and it is the same blind spot the drive-log guard in
+    // `tooling/e2e/ci/drive-log-lib.sh` exists to cover from the shell side.
+    // Capturing the value at THIS point keeps the measurement where it proves
+    // ordering (immediately after the first `CircleManagerFfi`) while moving
+    // the verdict somewhere it can actually fail the build.
+    poolStatusAtFirstManager = await bob.user.circleManager.profilePoolStatus();
+
     debugPrint(
       '[e2e_profile:setUpAll] alice=${_redactPk(aliceHex)} '
       'bob=${_redactPk(bob.pubkeyHex)} blossom=$_blossomUrl '
@@ -567,6 +613,42 @@ void main() {
     if (didInitCtx) {
       await _boundedTeardown('ctx.relay.dispose', ctx.relay.dispose);
     }
+  });
+
+  // Runs FIRST: if the profile plane resolved onto the curated PUBLIC pool,
+  // every later step is meaningless (and leaking), so say so before spending
+  // twelve minutes discovering it as a kind-0 timeout.
+  //
+  // The counts were sampled in `setUpAll` right after the first
+  // `CircleManagerFfi` was built — a fresh DB seeds its `RelayType::Profile`
+  // rows from `profile_relay_pool_default()` and `usable_profile_relays()`
+  // unions them back in permanently, so `configured` is a durable record of
+  // which pool was live at DB-creation time. Asserting it here rather than at
+  // the sampling site is what makes a failure actually fail the build.
+  testWidgets('the kind-0 plane resolved onto the hermetic pool, not the '
+      'curated public one', (tester) async {
+    expect(
+      poolStatusAtFirstManager.configured,
+      _profileRelayUrls.length,
+      reason: 'the profile pool should hold exactly the '
+          '${_profileRelayUrls.length} hermetic relays this scenario '
+          'installed. A larger count means the curated PUBLIC pool was seeded '
+          'into the fresh DB before the override took effect — kind-0 REQs '
+          'for test pubkeys would reach real relays.',
+    );
+    expect(
+      poolStatusAtFirstManager.excluded,
+      0,
+      reason: 'the hermetic profile pool is disjoint from the circle relay, so '
+          'the contamination ledger must exclude none of it. A non-zero count '
+          'means a profile relay also carried location traffic.',
+    );
+    expect(
+      poolStatusAtFirstManager.isUnderflow,
+      isFalse,
+      reason: 'an underflowing pool is TERMINAL by design (no fallback), so '
+          'every kind-0 read and write in this scenario would fail closed.',
+    );
   });
 
   testWidgets(

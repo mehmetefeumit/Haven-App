@@ -58,6 +58,26 @@
 
 set -euo pipefail
 
+# Shared app-side failure predicate. Sourced BEFORE the --self-test dispatch
+# below so `run-single-avd-scenario.sh --self-test` exercises a runner that is
+# wired exactly like the real one.
+# shellcheck source=tooling/e2e/ci/drive-log-lib.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/drive-log-lib.sh"
+
+# attempt_slice_after <accumulated-log> <byte-offset> — emit only the bytes
+# appended after <byte-offset>, i.e. the LAST drive attempt's slice.
+#
+# The accumulated drive log keeps every retried attempt's output on purpose
+# (evidence), which makes it the wrong input for a pass/fail decision about the
+# attempt that actually succeeded. Split out so the slicing is unit-testable
+# without a device — the wiring, not the predicate, is where the false-positive
+# lived.
+attempt_slice_after() {
+  local log="$1" offset="$2"
+  [[ -f "${log}" ]] || return 0
+  tail -c "+$(( offset + 1 ))" "${log}" 2>/dev/null || true
+}
+
 # -----------------------------------------------------------------
 # is_connect_flake <drive-log> — exit 0 (retryable) iff the drive died in
 # the flutter_driver CONNECT phase with NO on-device test having run; exit 1
@@ -184,11 +204,60 @@ run_self_test() {
     fail=1
   fi
 
+  # ---------------------------------------------------------------------
+  # (5) THE WIRING, not just the predicate.
+  #
+  # The app-side failure check must read ONLY the final attempt's slice of the
+  # accumulated drive log. A retried attempt's reporter output stays in that
+  # file forever, so reading the whole thing fails a genuinely green run on an
+  # earlier attempt's ghost evidence. The library's own --self-test cannot
+  # catch this: the predicate is correct in isolation and the bug lives in
+  # WHICH bytes it is handed.
+  # ---------------------------------------------------------------------
+  local accumulated="${tmp}/accumulated.log" offset slice
+  {
+    echo "===== flutter drive attempt 1/3 (rc=1, preconnect_stall=1) ====="
+    echo 'I/flutter ( 111): 00:01 +0: (setUpAll) [E]'
+    echo 'I/flutter ( 111): 00:01 +1 -1: Some tests failed.'
+  } > "${accumulated}"
+  offset="$(wc -c < "${accumulated}")"
+  {
+    echo "===== flutter drive attempt 2/3 (rc=0, preconnect_stall=0) ====="
+    echo 'I/flutter ( 222): 00:31 +12: All tests passed!'
+  } >> "${accumulated}"
+
+  # (5a) The naive read — the whole accumulated log — MUST look like a failure.
+  #      If this stops holding, fixture (5b) proves nothing.
+  if ! drive_log_reports_test_failure "${accumulated}"; then
+    echo "SELF-TEST FAIL (5a): the accumulated log should carry attempt 1's failure" >&2
+    fail=1
+  fi
+
+  # (5b) The scoped read — the final attempt only — MUST be clean.
+  slice="${tmp}/slice.log"
+  attempt_slice_after "${accumulated}" "${offset}" > "${slice}"
+  if drive_log_reports_test_failure "${slice}"; then
+    echo "SELF-TEST FAIL (5b): a retried attempt's ghost evidence leaked into" \
+         "the final-attempt slice — a green run would be failed" >&2
+    fail=1
+  fi
+  if ! grep -q 'All tests passed!' "${slice}"; then
+    echo "SELF-TEST FAIL (5b): the slice lost the final attempt's own output" >&2
+    fail=1
+  fi
+
+  # (5c) Offset 0 (single attempt, never retried) must return the whole log.
+  attempt_slice_after "${accumulated}" 0 > "${slice}"
+  if ! drive_log_reports_test_failure "${slice}"; then
+    echo "SELF-TEST FAIL (5c): offset 0 must yield the whole log" >&2
+    fail=1
+  fi
+
   if (( fail )); then
     echo "run-single-avd-scenario: SELF-TEST FAILED" >&2
     return 1
   fi
-  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried)."
+  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried; app-failure check scoped to the final attempt)."
   return 0
 }
 
@@ -571,6 +640,17 @@ while (( attempt <= DRIVE_MAX_ATTEMPTS )); do
   # Accumulate every attempt's output (with a header) into the canonical
   # drive log that the secret scan + failure-artifact upload consume, so a
   # retry never discards the earlier attempt's evidence.
+  #
+  # Record where THIS attempt's slice begins first. The app-side failure check
+  # after the loop must read only the FINAL attempt, for the same reason
+  # `is_connect_flake` classifies per-attempt: a retried attempt's reporter
+  # output stays in this file forever, so checking the accumulated log would
+  # fail a genuinely green run on an earlier attempt's ghost evidence. The
+  # window is real — a pre-connect stall is retried WITHOUT consulting
+  # `is_connect_flake`, and reporter output precedes `CONNECT_MARKER` in a real
+  # drive log, so attempt 1 can legitimately contain `Some tests failed.` and
+  # still be retried.
+  final_attempt_start="$(wc -c < /tmp/flutter-drive.log 2>/dev/null || echo 0)"
   {
     echo "===== flutter drive attempt ${attempt}/${DRIVE_MAX_ATTEMPTS}" \
          "(rc=${drive_rc}, preconnect_stall=${preconnect_stall}) ====="
@@ -640,6 +720,33 @@ scan_rc=0
 bash "${SECRET_SCAN}" /tmp/adb-logcat.log /tmp/flutter-drive.log || scan_rc=$?
 if (( scan_rc != 0 )); then
   echo "ERROR: secret-leak guard tripped — see LEAK line(s) above." >&2
+  exit 1
+fi
+
+# -----------------------------------------------------------------
+# Trust the APP, not the exit code.
+#
+# `flutter drive` exits 0 on a failed test whenever the failure happened
+# outside a `testWidgets` body: `package:integration_test` only records
+# per-test results from those bodies, so a `setUpAll` / `tearDownAll`
+# failure never reaches the map `integrationDriver()` checks, and the
+# driver cheerfully reports "All tests passed." In CI run 30753193231
+# that made `e2e_profile_android` GREEN while its setUpAll threw — the
+# same scenario failed correctly on iOS, which runs under `flutter test`.
+#
+# So a zero exit code is necessary, not sufficient. See drive-log-lib.sh.
+# -----------------------------------------------------------------
+# Scoped to the FINAL attempt only (see final_attempt_start, above).
+readonly FINAL_ATTEMPT_LOG=/tmp/flutter-drive.final-attempt.log
+attempt_slice_after /tmp/flutter-drive.log "${final_attempt_start:-0}" \
+  > "${FINAL_ATTEMPT_LOG}"
+if (( drive_rc == 0 )) && drive_log_reports_test_failure "${FINAL_ATTEMPT_LOG}"; then
+  echo "ERROR: flutter drive for ${SCENARIO_FILE} exited 0, but the ON-DEVICE" \
+       "suite reported failures. This is the integration_test/integrationDriver" \
+       "blind spot (a failure outside a testWidgets body — typically setUpAll —" \
+       "is never reported to the driver), NOT a harness quirk to be ignored." >&2
+  echo "---- app-side failure evidence (final attempt) ----" >&2
+  drive_log_failure_evidence "${FINAL_ATTEMPT_LOG}" >&2
   exit 1
 fi
 

@@ -146,6 +146,14 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_e2e_publish_before_apply.sh
 
+      # The kind-0 plane's test override is install-once, so a second call site
+      # throws and the winner depends on call order. That broke e2e_profile on
+      # both platforms in CI run 30753193231 — under a comment asserting the
+      # invariant this now enforces.
+      - name: Profile-relay override has a single install site
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_profile_override_single_site.sh
+
       - name: E2E harness self-test (connect-flake predicate)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/run-single-avd-scenario.sh --self-test
@@ -157,6 +165,15 @@ jobs:
       - name: Build-retry predicate self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/build_apk_with_retry.sh --self-test
+
+      # Guards the predicate that catches `flutter drive` exiting 0 on a FAILED
+      # test. Its critical fixture is the verbatim run-30753193231 log in which
+      # a setUpAll failure was reported to the driver as "All tests passed." —
+      # if that stops being detected, every drive-based lane can go green on a
+      # red suite again.
+      - name: E2E harness self-test (drive-log failure predicate)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/drive-log-lib.sh --self-test
 
       # Guards the B1 lane's publish-count PARSER. Its critical fixture is the
       # `Published to 0/1` line — P0-1's own signature, which a substring grep

@@ -90,8 +90,16 @@ class TestUser {
   /// the relay override, and prepares for [TestUser] construction.
   ///
   /// Call once per test process, before any `TestUser.bootstrap(...)` calls.
-  /// The keyring install is idempotent; the relay override is install-once
-  /// per process (a second call throws — guard with `try` if needed).
+  /// The keyring install is idempotent; the relay overrides are install-once
+  /// per process, so a second `bootstrapProcess` throws on
+  /// `setDefaultRelaysForTest` — that is deliberate and must not be guarded
+  /// away.
+  ///
+  /// This is also the ONLY place the kind-0 (profile-plane) override may be
+  /// installed — enforced by `scripts/ci/check_profile_override_single_site.sh`.
+  /// A scenario that needs its own profile pool passes it as [profileRelays]
+  /// rather than calling `setProfileRelaysForTest` itself; two install sites
+  /// race on the same `OnceLock` and the loser throws (CI run 30753193231).
   ///
   /// ## Privacy guard
   ///
@@ -104,9 +112,20 @@ class TestUser {
   static Future<void> bootstrapProcess({
     required List<String> relays,
     bool allowPublicRelay = false,
+    List<String>? profileRelays,
   }) async {
     if (!allowPublicRelay) {
-      for (final url in relays) {
+      // Both planes, not just the circle plane. `profileRelays` is installed
+      // verbatim below, so leaving it out of this guard would make the single
+      // choke point the ONE place that does not check — and the profile plane
+      // is the plane that PUBLISHES (kind-0 carrying a display name and a
+      // Blossom picture URL). A non-loopback entry here is a permanent public
+      // artifact keyed to a sentinel test seed, and kind-0 is replaceable but
+      // not retractable. Callers may validate further (e2e_profile_sharing's
+      // `_parseProfileRelayPool` also enforces >= PROFILE_POOL_MIN distinct
+      // entries and disjointness from the circle relay); this is the floor
+      // every caller gets for free.
+      for (final url in <String>[...relays, ...?profileRelays]) {
         if (!_isLoopback(url)) {
           throw StateError(
             'E2E tests must use a loopback relay URL; got "$url". '
@@ -170,24 +189,51 @@ class TestUser {
     // its full timeout budget, and the added latency destabilised the live-sync
     // lane into Rule-14 contention (CI run 30732662493).
     //
-    // Installing the hermetic relays as the profile pool makes the plane fail
-    // CLOSED for the whole process: they are also this test's CIRCLE relays, so
-    // the contamination ledger excludes them, `usable_profile_relays()`
-    // underflows, and kind-0 fetches skip the network entirely instead of
-    // reaching the internet. That is the correct outcome for these lanes —
-    // none of them exercises the profile plane. The lane that DOES
-    // (`e2e_profile_sharing`) never calls this method; it installs its own
-    // three-relay hermetic pool so the pool resolves rather than underflowing.
+    // Installing the hermetic CIRCLE relays as the profile pool makes the plane
+    // fail CLOSED for the whole process: they are also this test's circle
+    // relays, so the contamination ledger excludes them,
+    // `usable_profile_relays()` underflows, and kind-0 fetches skip the network
+    // entirely instead of reaching the internet. That is the correct outcome
+    // for every lane that does not exercise the profile plane.
     //
-    // Install-once, like the overrides above: tolerate an already-installed
-    // pool (a prior test file may share this process) and surface anything
-    // else.
+    // A lane that DOES exercise it (`e2e_profile_sharing`) passes its own
+    // hermetic pool via [profileRelays], so the pool RESOLVES rather than
+    // underflowing. It must come through here rather than being installed by
+    // the caller afterwards: the Rust override is an install-once `OnceLock`,
+    // so two install sites race and the loser throws
+    // "set_profile_relays_for_test already installed". That is exactly what
+    // broke e2e_profile_sharing on both platforms (CI run 30753193231) — the
+    // original version of this comment asserted that lane "never calls this
+    // method", but it reaches it through `ScenarioHarness.bootstrap`. Routing
+    // BOTH cases through this single call site makes that collision
+    // structurally impossible instead of ordering-dependent.
+    final effectiveProfileRelays = profileRelays ?? relays;
     try {
-      setProfileRelaysForTest(relays: relays);
+      setProfileRelaysForTest(relays: effectiveProfileRelays);
     } on Object catch (e) {
-      if (!e.toString().toLowerCase().contains('already installed')) {
+      final alreadyInstalled = e.toString().toLowerCase().contains(
+        'already installed',
+      );
+      // When the caller passed an explicit pool it depends on THAT pool being
+      // live — silently keeping someone else's would leave the lane asserting
+      // against relays it never installed, so fail loudly.
+      if (!alreadyInstalled || profileRelays != null) {
         rethrow;
       }
+      // Reaching here is not the "a prior test file shared this process" case
+      // an earlier version of this comment claimed: `setDefaultRelaysForTest`
+      // above is the same kind of install-once override and is NOT guarded, so
+      // a re-bootstrapped process throws there first. What survives is the
+      // narrower case where something installed the PROFILE override through a
+      // path this method does not own — i.e. exactly when the live pool's
+      // provenance is unknown. There is deliberately no read-back accessor (no
+      // profile relay URL crosses the FFI), so the only thing we can do is
+      // refuse to be silent about it.
+      debugPrint(
+        '[TestUser] WARNING: the profile-relay override was ALREADY installed '
+        'by another call site; this process is running on a pool this '
+        'bootstrap did not install and cannot read back.',
+      );
     }
     // Defense in depth: confirm the override actually propagated. A silent
     // failure here would leave the suite hitting production relays.

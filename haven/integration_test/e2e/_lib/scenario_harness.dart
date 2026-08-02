@@ -68,11 +68,24 @@ abstract final class ScenarioHarness {
   ///
   /// Returns a [ScenarioContext] the scenario should keep until the end
   /// of the test (calling [ScenarioContext.relay].dispose() in `tearDownAll`).
+  /// [profileRelays] — the kind-0 (profile-plane) pool for scenarios that
+  /// actually exercise it. Omit it and the profile plane is pointed at the
+  /// circle relay, which makes it fail CLOSED (the contamination ledger
+  /// excludes it, so the pool underflows and kind-0 never reaches the network)
+  /// — the right default for every scenario that does not test profiles.
+  ///
+  /// Pass it here rather than calling `setProfileRelaysForTest` after
+  /// bootstrapping: the Rust override is install-once, so a second install site
+  /// throws "already installed" (CI run 30753193231).
   static Future<ScenarioContext> bootstrap({
     String relayUrl = defaultStrfryUrl,
+    List<String>? profileRelays,
   }) async {
     IntegrationTestWidgetsFlutterBinding.ensureInitialized();
-    await TestUser.bootstrapProcess(relays: <String>[relayUrl]);
+    await TestUser.bootstrapProcess(
+      relays: <String>[relayUrl],
+      profileRelays: profileRelays,
+    );
     final relay = await TestRelay.connect(url: relayUrl);
     final role = ScenarioRole.fromEnvironment();
     debugPrint('[ScenarioHarness] bootstrapped role=$role relay=$relayUrl');

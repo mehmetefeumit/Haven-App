@@ -70,6 +70,12 @@
 #
 set -Eeuo pipefail
 
+# Shared app-side failure predicate — `flutter drive` can exit 0 on a failed
+# test (see drive-log-lib.sh). Sourced before the --self-test dispatch so the
+# hermetic self-test runs against a fully-wired script.
+# shellcheck source=tooling/e2e/ci/drive-log-lib.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/drive-log-lib.sh"
+
 # ---------------------------------------------------------------------------
 # VERBATIM markers (haven/lib/src/services/background_location_task.dart).
 # Kept as fixed literals matched with `grep -aF`: logcat is binary-tainted and
@@ -363,6 +369,18 @@ trap cleanup EXIT
 
 fail() {
   echo "B1-LANE-FAIL: $*" >&2
+  # A deferred drive failure changes how EVERY later message should be read.
+  # Without this note, a drive that died before arming makes the oracle's step-1
+  # message ("the foreground never handed off … this lane proved nothing") read
+  # as a product defect, which is exactly the kind of claim this lane exists to
+  # make credibly. Attribute it here rather than letting the terminal
+  # drive-failure `fail()` carry it — that one is unreachable once any earlier
+  # oracle step fails.
+  if (( ${drive_failed:-0} == 1 )); then
+    echo "NOTE: the drive ALSO did not complete cleanly (${drive_reason:-unknown})." \
+         "The finding above may be a CONSEQUENCE of that rather than a product" \
+         "defect — rule the drive failure out first." >&2
+  fi
   echo "---- [BackgroundTask] lines seen ----" >&2
   grep -aF '[BackgroundTask]' "${LOGCAT_FILE}" 2>/dev/null | tail -40 >&2 || \
     echo "(none — the FGS isolate logged nothing at all)" >&2
@@ -461,17 +479,17 @@ echo "  read-back (dumpsys package — authoritative grant state):"
 adb -s "${DEVICE}" shell dumpsys package "${PKG}" 2>/dev/null \
   | grep -a "ACCESS_BACKGROUND_LOCATION" | sed 's/^/    /' \
   || echo "    (permission not listed)"
-echo "  read-back (appops — polled, expect 'allow' not 'foreground'):"
-probe_deadline=$(( SECONDS + 30 ))
-while (( SECONDS < probe_deadline )); do
-  probe_ops="$(adb -s "${DEVICE}" shell cmd appops get "${PKG}" 2>/dev/null \
-    | grep -aiE 'COARSE_LOCATION|FINE_LOCATION' || true)"
-  if [[ "${probe_ops}" == *allow* ]]; then
-    break
-  fi
-  sleep 3
-done
-echo "${probe_ops:-    (no location app-ops reported)}" | sed 's/^/    /'
+# Single read, not a poll. An earlier revision polled this for 30s expecting
+# `allow` vs `foreground`; run 30753193231 showed it reports NOTHING for the
+# location ops on a fresh install, because `cmd appops get` lists only ops the
+# package has actually exercised — there is no entry to read before the first
+# location access. Polling for a line that cannot exist just burned the full
+# deadline. Kept as one informational read; `dumpsys package` above is the
+# authoritative grant state and is what the assertions would ever key on.
+echo "  read-back (appops — informational; empty is normal pre-first-use):"
+adb -s "${DEVICE}" shell cmd appops get "${PKG}" 2>/dev/null \
+  | grep -aiE 'COARSE_LOCATION|FINE_LOCATION' | sed 's/^/    /' \
+  || echo "    (no location app-ops reported yet)"
 echo "  authoritative failure signal (expect NO match):"
 adb -s "${DEVICE}" logcat -d 2>/dev/null \
   | grep -a "Cannot grant hard restricted non-exempt permission" | sed 's/^/    /' \
@@ -524,13 +542,49 @@ drc=0
 # GitHub Actions step logs have no retention control and cannot be redacted
 # after the fact, so an unscanned `cat` of the drive log is a wider, more
 # permanent sink than the artifact upload the trap does guard.
+drive_log_clean=1
 if bash "${SECRET_SCAN}" "${DRIVE_LOG}"; then
   cat "${DRIVE_LOG}" || true
 else
+  drive_log_clean=0
   echo "drive log withheld from the step log — secret-leak guard tripped." >&2
 fi
+
+# Record the drive's verdict WITHOUT exiting on it yet.
+#
+# The oracle below reads logcat, and its findings are the point of this lane —
+# in CI run 30753193231 the drive hung to its own 10-minute timeout while the
+# FGS had ALREADY logged `onStart FAILED`, i.e. P0-1 reproduced. Exiting here
+# would have thrown that away and reported the misleading "the app was never
+# armed" instead. Phase 5 step 1 independently proves the arming reached the
+# handoff, so a broken drive cannot make the oracle read as a pass; the
+# deferred failure is re-raised at the end so a bad drive still fails the lane.
+#
+# `drc == 0` alone is not trustworthy: `flutter drive` exits 0 when the failure
+# happened outside a `testWidgets` body (drive-log-lib.sh).
+drive_failed=0
+drive_reason=""
 if (( drc != 0 )); then
-  fail "drive of ${TARGET} failed (rc=${drc}) — the app was never armed."
+  drive_failed=1
+  drive_reason="flutter drive exited ${drc}"
+elif drive_log_reports_test_failure "${DRIVE_LOG}"; then
+  drive_failed=1
+  drive_reason="flutter drive exited 0 but the on-device suite reported failures"
+fi
+if (( drive_failed == 1 )); then
+  echo "WARN: ${drive_reason} for ${TARGET}. Continuing to the oracle anyway —" \
+       "its logcat findings are this lane's deliverable and are valid as long" \
+       "as step 1 confirms the handoff. This is re-raised as a failure at the" \
+       "end regardless of the oracle's verdict." >&2
+  # Gated on the SAME containment decision made above: this prints raw drive-log
+  # lines, and echoing them after the secret-leak guard tripped would defeat the
+  # withholding by the back door — into the step log, which has no retention
+  # control and cannot be redacted after the fact.
+  if (( drive_log_clean == 1 )); then
+    drive_log_failure_evidence "${DRIVE_LOG}" >&2
+  else
+    echo "  (evidence withheld — secret-leak guard tripped on this log)" >&2
+  fi
 fi
 
 # NOTE: no `input keyevent HOME` here, and that is deliberate.
@@ -656,6 +710,13 @@ echo "  [4/4] Publish came from PID ${publish_pid}, the same process as the fore
 # haven-core/src/relay/manager.rs:119-133 — Security Rule 13's ack/sent
 # distinction, honoured). A gate that cannot fail is the repo's documented
 # recurring failure mode, so it was removed rather than left as decoration.
+
+if (( drive_failed == 1 )); then
+  fail "the oracle passed, but ${drive_reason}. The FGS behaviour above is real \
+and was proven, yet the drive itself did not complete cleanly — treat the lane as \
+RED until that is fixed, because a drive that dies early can truncate the very \
+window the oracle measures."
+fi
 
 echo "B1 PASS — the FGS published ${published} location(s) from PID ${publish_pid} with \
 the foreground MLS session held by that same process."
