@@ -174,8 +174,13 @@ void main() {
       'setEnabled(false) clears kBackgroundIdleKey + kForegroundActiveAtMsKey',
       () async {
         // Seed sharing as enabled so setEnabled(false) is a real state change.
+        // The background disclosure must be seeded too: `_load()` reconciles
+        // "enabled without an accepted background disclosure" back to false
+        // (a pre-2026-06-07 persisted state), which would make the baseline
+        // assertion below fail for the wrong reason.
         final initial = await SharedPreferences.getInstance();
         await initial.setBool(kBackgroundSharingKey, true);
+        await initial.setBool(kLocationDisclosureBackgroundAcceptedKey, true);
 
         final notifier = BackgroundSharingNotifier(
           // stubThatThrows proves the permission fn is NOT called when

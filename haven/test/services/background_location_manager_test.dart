@@ -252,7 +252,8 @@ void main() {
     });
 
     test('returns true when kBackgroundSharingKey is set to true', () async {
-      SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true});
+      SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true,
+        kLocationDisclosureBackgroundAcceptedKey: true});
 
       final result =
           await BackgroundLocationManager.isBackgroundSharingEnabled();

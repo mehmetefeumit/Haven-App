@@ -59,16 +59,49 @@ fn live_sessions() -> &'static Mutex<HashSet<PathBuf>> {
 /// directory* (which the caller creates before opening) is canonicalized and
 /// the file name re-attached. This makes two spellings of the same file
 /// (relative vs absolute, `.`/`..` segments, a symlinked parent) collide on one
-/// key. If canonicalization fails (parent gone), the raw path is used verbatim —
-/// a fail-safe that can only ever be *stricter* (it never merges two distinct
-/// files).
-fn canonical_session_key(db_path: &Path) -> PathBuf {
-    match (db_path.parent(), db_path.file_name()) {
-        (Some(parent), Some(name)) => parent
-            .canonicalize()
-            .map_or_else(|_| db_path.to_path_buf(), |canon| canon.join(name)),
-        _ => db_path.to_path_buf(),
-    }
+/// key.
+///
+/// # Why this fails closed
+///
+/// An earlier version fell back to the raw path when canonicalization failed,
+/// documented as "a fail-safe that can only ever be *stricter*". That is true
+/// only for the MERGE direction (it never unifies two distinct files). In the
+/// other direction it is a fail-**open** on a confidentiality control: if one
+/// caller canonicalizes successfully and another hits a transient failure, the
+/// two compute DIFFERENT keys for the SAME file, both acquire, and two live
+/// [`AccountDeviceSession`]s hydrate from one database — which is exactly the
+/// epoch/generation reuse Rule 14 exists to prevent (see the type doc below).
+///
+/// On Android this is not hypothetical: `/data/user/0/<pkg>` is a symlink to
+/// `/data/data/<pkg>`, so the canonical and raw spellings genuinely differ, and
+/// the fallback would produce two keys rather than a stricter one.
+///
+/// Callers create the parent directory before opening (`CoreCircleManager::new`
+/// runs `create_dir_all` before `SessionManager::new`), so a failure here means
+/// something is genuinely wrong with the data directory — refusing to open is
+/// both correct and safe.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if `db_path` has no parent or no file
+/// name, or if the parent directory cannot be canonicalized.
+fn canonical_session_key(db_path: &Path) -> Result<PathBuf> {
+    let (Some(parent), Some(name)) = (db_path.parent(), db_path.file_name()) else {
+        return Err(NostrError::StorageError(
+            "session database path has no parent directory or no file name \
+             (Rule 14: refusing to open without a canonical registry key)"
+                .to_string(),
+        ));
+    };
+    let canonical_parent = parent.canonicalize().map_err(|_| {
+        NostrError::StorageError(
+            "could not canonicalize the session database's parent directory \
+             (Rule 14: refusing to open rather than risk two registry keys for \
+              one database)"
+                .to_string(),
+        )
+    })?;
+    Ok(canonical_parent.join(name))
 }
 
 /// RAII registration of a live MLS session's database path (Security Rule 14).
@@ -110,9 +143,11 @@ impl LiveSessionGuard {
     /// # Errors
     ///
     /// Returns [`NostrError::StorageError`] if a live session already holds this
-    /// database file.
+    /// database file, or if `db_path` cannot be reduced to a canonical registry
+    /// key (see [`canonical_session_key`] — that case fails closed rather than
+    /// risking two keys for one database).
     pub fn acquire(db_path: &Path) -> Result<Self> {
-        let key = canonical_session_key(db_path);
+        let key = canonical_session_key(db_path)?;
         // A poisoned lock is benign here — the set only gains/loses PathBufs, so
         // recover the guarded set rather than propagate the panic. The guard is a
         // temporary scoped to this statement so it drops before `Self` is built.
@@ -395,6 +430,121 @@ mod tests {
     fn unique_key_id(tag: &str) -> String {
         let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
         format!("mls.test.{tag}.{}.{id}", std::process::id())
+    }
+
+    // -----------------------------------------------------------------------
+    // LiveSessionGuard / canonical_session_key (Security Rule 14).
+    //
+    // This module previously had NO direct coverage of the guard — the only
+    // Rule-14 test lived one level up in `mls::manager` and exercised it through
+    // a full `SessionManager::new_unencrypted`. These pin the registry itself,
+    // and in particular the fail-CLOSED behaviour of the key derivation, whose
+    // fail-open predecessor could hand two keys to one database.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn guard_rejects_a_second_acquire_and_frees_the_path_on_drop() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("session.sqlite");
+
+        let first = LiveSessionGuard::acquire(&db).expect("first acquire");
+        assert!(
+            LiveSessionGuard::acquire(&db).is_err(),
+            "Rule 14: a second live session on the same DB must fail closed"
+        );
+
+        drop(first);
+        // Re-acquirable after the guard drops, or a legitimately-closed session
+        // would lock the database out for the rest of the process.
+        drop(LiveSessionGuard::acquire(&db).expect("re-acquire after drop"));
+    }
+
+    #[test]
+    fn guard_allows_distinct_databases_concurrently() {
+        let a = tempfile::tempdir().expect("tempdir a");
+        let b = tempfile::tempdir().expect("tempdir b");
+
+        let _ga = LiveSessionGuard::acquire(&a.path().join("session.sqlite")).expect("acquire a");
+        let _gb = LiveSessionGuard::acquire(&b.path().join("session.sqlite")).expect("acquire b");
+    }
+
+    #[test]
+    fn two_spellings_of_one_database_collide_on_a_single_key() {
+        // THE property the registry exists for. If these ever resolve to
+        // different keys, both acquires succeed and two `AccountDeviceSession`s
+        // hydrate from one file — the epoch/generation reuse Rule 14 prevents.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let nested = dir.path().join("nested");
+        std::fs::create_dir(&nested).expect("create nested");
+
+        let direct = nested.join("session.sqlite");
+        let indirect = dir
+            .path()
+            .join("nested")
+            .join("..")
+            .join("nested")
+            .join("session.sqlite");
+
+        // Assert the KEY EQUALITY directly. Going only through `acquire` would
+        // be satisfied by any `Err` — including one from a broken
+        // `canonical_session_key` — so a regression that stopped deriving keys
+        // at all would leave this green while proving nothing about collision.
+        assert_eq!(
+            canonical_session_key(&direct).expect("direct key"),
+            canonical_session_key(&indirect).expect("indirect key"),
+            "two spellings of one file must reduce to ONE registry key"
+        );
+
+        // Then the integration half: the registry actually rejects the second.
+        let _held = LiveSessionGuard::acquire(&direct).expect("acquire direct");
+        assert!(
+            LiveSessionGuard::acquire(&indirect).is_err(),
+            "a `..` round-trip through the same directory must resolve to the \
+             SAME registry key, not a second one"
+        );
+    }
+
+    #[test]
+    fn canonical_key_fails_closed_when_the_parent_cannot_be_canonicalized() {
+        // The regression test for the fail-open this replaced. A missing parent
+        // used to fall back to the raw path, so a caller that COULD canonicalize
+        // and one that could not would register two different keys for one file.
+        // Refusing to produce a key is the only safe answer.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("does-not-exist").join("session.sqlite");
+
+        assert!(
+            canonical_session_key(&missing).is_err(),
+            "a non-canonicalizable parent must fail, never fall back to the raw path"
+        );
+        assert!(
+            LiveSessionGuard::acquire(&missing).is_err(),
+            "acquire must propagate the failure rather than register a raw-path key"
+        );
+    }
+
+    #[test]
+    fn canonical_key_fails_closed_on_a_path_with_no_file_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(
+            canonical_session_key(dir.path().join("..").as_path()).is_err(),
+            "a path whose final component is `..` has no file name and must fail"
+        );
+    }
+
+    #[test]
+    fn canonical_key_error_carries_no_path() {
+        // Rule 8 / Rule 6: the message is a fixed literal. A path in an error
+        // that crosses the FFI would leak the data directory layout.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("does-not-exist").join("session.sqlite");
+        let err = canonical_session_key(&missing).expect_err("must fail");
+        let rendered = err.to_string();
+
+        assert!(
+            !rendered.contains(dir.path().to_str().expect("utf8")),
+            "the error must not embed the database path: {rendered}"
+        );
     }
 
     #[test]

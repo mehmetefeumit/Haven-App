@@ -95,7 +95,40 @@ class BackgroundSharingNotifier extends StateNotifier<bool> {
   Future<void> _load() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      state = prefs.getBool(kBackgroundSharingKey) ?? false;
+      final enabled = prefs.getBool(kBackgroundSharingKey) ?? false;
+
+      // Fail-closed reconcile: background sharing ON without the accepted
+      // BACKGROUND disclosure is an impossible state to reach on this build —
+      // both enable paths call `ensureDisclosed(includeBackground: true)`
+      // first — but it is reachable by HISTORY. The toggle key shipped
+      // 2026-04-18 and the background disclosure flag only on 2026-06-07, so
+      // anyone who enabled sharing in that window persisted `true` with no
+      // background flag.
+      //
+      // The background publisher now refuses to publish without both
+      // disclosures (`backgroundPublishDisclosureAccepted`). Left alone, those
+      // users would keep a running foreground service and a notification
+      // reading "Haven is sending and receiving location information" while
+      // nothing was ever sent — with no UI signal and no way to recover short
+      // of guessing to toggle off and on again.
+      //
+      // Dropping the toggle to false makes the state visible and fixable: the
+      // switch reflects reality, and re-enabling re-shows the disclosure and
+      // re-writes both flags. It also keeps the runtime gate in `_publishCycle`
+      // what its comment claims — a backstop, not the primary enforcement.
+      if (enabled &&
+          !(prefs.getBool(kLocationDisclosureBackgroundAcceptedKey) ?? false)) {
+        debugPrint(
+          '[BackgroundSharing] disabling: background sharing was persisted '
+          'without an accepted background disclosure (pre-2026-06-07 state). '
+          'Re-enable to see the disclosure.',
+        );
+        await prefs.setBool(kBackgroundSharingKey, false);
+        state = false;
+        return;
+      }
+
+      state = enabled;
     } on Object catch (e) {
       debugPrint('[BackgroundSharing] load failed: ${e.runtimeType}');
     }

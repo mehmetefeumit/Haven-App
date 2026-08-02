@@ -48,8 +48,45 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// compiler does not tree-shake it. Registered in `main.dart`.
 @pragma('vm:entry-point')
 void backgroundCallback() {
+  // A7: silence debugPrint in release builds. This isolate has its OWN
+  // `FlutterEngine` and never runs `main()`, so `main.dart`'s silencer does not
+  // reach it — `background_catchup_worker.dart`'s `callbackDispatcher` already
+  // replicates it for exactly this reason. Without it, every `[BackgroundTask]`
+  // line reaches release logcat, and those lines are not innocuous: the
+  // publish summary carries the user's circle COUNT and a per-cycle timing
+  // oracle, which together reconstruct a Haven activity timeline for anyone
+  // with `adb logcat`, a bug-report capture, or an OEM/MDM log collector.
+  //
+  // Safe for CI: the E2E oracles grep these markers, but every lane drives a
+  // debug APK — the same combination `e2e-background-catchup` relies on today.
+  if (kReleaseMode) {
+    debugPrint = (String? message, {int? wrapWidth}) {};
+  }
   FlutterForegroundTask.setTaskHandler(BackgroundLocationTaskHandler());
 }
+
+/// Whether the background isolate may publish location this cycle, given the
+/// two raw disclosure flags as `SharedPreferences` returns them.
+///
+/// Both must be explicitly `true`. Google Play's "disclosure before collection"
+/// rule requires an affirmative in-app disclosure before location is collected,
+/// and the background variant is the one carrying the "even when the app is
+/// closed or not in use" sentence — precisely what this isolate does.
+///
+/// **A missing flag is a refusal, not a default.** `getBool` returns `null` for
+/// a key that was never written (a fresh install, a wiped profile, a key
+/// renamed by a future migration). Treating `null` as permission would let
+/// exactly those cases publish location with no disclosure ever shown, so the
+/// null-coalescing here is the security property, not a formality — which is
+/// why it is a named, tested predicate rather than an inline `??` pair.
+///
+/// Extracted as a free function so the truth table is unit-testable without the
+/// Rust bridge, `SharedPreferences`, or a device.
+@visibleForTesting
+bool backgroundPublishDisclosureAccepted({
+  required bool? foregroundAccepted,
+  required bool? backgroundAccepted,
+}) => (foregroundAccepted ?? false) && (backgroundAccepted ?? false);
 
 /// Handles periodic location publishing in the background.
 ///
@@ -392,6 +429,46 @@ class BackgroundLocationTaskHandler extends TaskHandler {
         // that the moment the foreground goes inactive, every circle is seeded
         // "due now" (bounding the handoff gap to one background cycle).
         _dueTracker.pruneToKeys(<String>{});
+        return;
+      }
+
+      // 6b. Play "disclosure before collection" — NEVER publish location from
+      //     the background without both accepted disclosures.
+      //
+      //     The foreground publisher has always enforced the foreground flag
+      //     (`location_publish_scheduler_provider.dart:214`); this path
+      //     enforced NOTHING, so background publishing was strictly weaker than
+      //     foreground publishing on the one consent gate Play requires. That
+      //     asymmetry was invisible only because this isolate could not publish
+      //     at all (CI_HARDENING_BACKLOG.md P0-1) — it would have become live
+      //     the moment P0-1 was fixed, which is why the gate lands first.
+      //
+      //     BOTH flags are required, and the background one is the stricter,
+      //     load-bearing half: it is the disclosure carrying the "even when the
+      //     app is closed or not in use" sentence, which is exactly what this
+      //     isolate does. Both paths that can enable background sharing already
+      //     call `ensureDisclosed(includeBackground: true)` first
+      //     (`location_settings_page.dart:64-68`,
+      //     `create_identity_screen.dart:274-277`), so requiring them here is a
+      //     no-op for every legitimately-enabled user and a fail-closed runtime
+      //     enforcement of what is otherwise only a documented precondition on
+      //     `BackgroundSharingNotifier.setEnabled`.
+      //
+      //     Reads the same `prefs` snapshot reloaded above (step 3), so it sees
+      //     a revocation written by the UI isolate on the very next cycle.
+      final foregroundDisclosed = prefs.getBool(kLocationDisclosureAcceptedKey);
+      final backgroundDisclosed = prefs.getBool(
+        kLocationDisclosureBackgroundAcceptedKey,
+      );
+      if (!backgroundPublishDisclosureAccepted(
+        foregroundAccepted: foregroundDisclosed,
+        backgroundAccepted: backgroundDisclosed,
+      )) {
+        debugPrint(
+          '[BackgroundTask] Publish BLOCKED — location disclosure not '
+          'accepted (foreground=$foregroundDisclosed, '
+          'background=$backgroundDisclosed).',
+        );
         return;
       }
 

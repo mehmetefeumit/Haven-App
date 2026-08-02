@@ -86,7 +86,8 @@ void main() {
     test('runCatchup(isBackgroundWake:true) returns empty after sharing is '
         'disabled even if the timer fires before it is cancelled', () async {
       // Step 1: Sharing starts enabled.
-      SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true});
+      SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true,
+        kLocationDisclosureBackgroundAcceptedKey: true});
 
       final relay = _CountingRelayService();
       final service = CatchupService(
@@ -197,7 +198,8 @@ void main() {
     test(
       'state transitions from true → false when setEnabled(false) is called',
       () async {
-        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true});
+        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true,
+        kLocationDisclosureBackgroundAcceptedKey: true});
 
         final notifier = BackgroundSharingNotifier(
           ensurePermissions: () async {

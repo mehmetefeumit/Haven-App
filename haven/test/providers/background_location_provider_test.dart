@@ -245,7 +245,8 @@ void main() {
     test(
       'disable → state false, prefs false, no permission check called',
       () async {
-        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true});
+        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true,
+        kLocationDisclosureBackgroundAcceptedKey: true});
 
         // stubThatThrows proves the permission check is NOT called when
         // disabling (production code only checks when enabled && _isAndroid).
@@ -309,7 +310,8 @@ void main() {
       () async {
         // Pre-seed prefs so BackgroundSharingNotifier._load() sets state=true
         // without a race against setEnabled().
-        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true});
+        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true,
+        kLocationDisclosureBackgroundAcceptedKey: true});
 
         final tracker = _ServiceCallTracker();
 
@@ -409,7 +411,8 @@ void main() {
       () async {
         final tracker = _ServiceCallTracker();
 
-        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true});
+        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true,
+        kLocationDisclosureBackgroundAcceptedKey: true});
 
         final container = ProviderContainer(
           overrides: [
@@ -452,7 +455,8 @@ void main() {
         'neither start nor stop is called (early-return)', () async {
       final tracker = _ServiceCallTracker();
 
-      SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true});
+      SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true,
+        kLocationDisclosureBackgroundAcceptedKey: true});
 
       final container = ProviderContainer(
         overrides: [
@@ -527,7 +531,8 @@ void main() {
     test(
       'loads true from prefs on construction when key is preset to true',
       () async {
-        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true});
+        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true,
+        kLocationDisclosureBackgroundAcceptedKey: true});
 
         final notifier = BackgroundSharingNotifier(
           ensurePermissions: stubThatThrows(),
@@ -592,7 +597,8 @@ void main() {
     test(
       'persists false to prefs on setEnabled(false) when initial state is true',
       () async {
-        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true});
+        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true,
+        kLocationDisclosureBackgroundAcceptedKey: true});
 
         final notifier = BackgroundSharingNotifier(
           ensurePermissions: stubThatThrows(),
@@ -621,7 +627,15 @@ void main() {
     test(
       'survives prefs reload: new notifier reads value written by previous',
       () async {
-        SharedPreferences.setMockInitialValues({});
+        // The background disclosure is seeded (but NOT the sharing key) so
+        // this mirrors the real flow: the UI runs
+        // `ensureDisclosed(includeBackground: true)` — which writes this flag —
+        // and only then calls `setEnabled`. Without it, `_load()` reconciles
+        // the persisted `true` back to false and the reload assertion below
+        // would fail for an unrelated reason.
+        SharedPreferences.setMockInitialValues({
+          kLocationDisclosureBackgroundAcceptedKey: true,
+        });
 
         // First notifier: starts at false, then enables (non-Android path).
         final firstNotifier = BackgroundSharingNotifier(
@@ -650,6 +664,67 @@ void main() {
           reason:
               'second notifier must read the true value written by the first',
         );
+      },
+    );
+
+    // -----------------------------------------------------------------------
+    // Case 6: fail-closed reconcile of a pre-disclosure persisted state.
+    //
+    // `kBackgroundSharingKey` shipped 2026-04-18; the BACKGROUND disclosure
+    // flag only on 2026-06-07. A user who enabled sharing in that window has
+    // `true` persisted with no background disclosure. The background publisher
+    // now refuses to publish without it, so leaving the toggle on would run a
+    // foreground service showing "Haven is sending and receiving location
+    // information" while nothing is ever sent, with no way to recover.
+    // -----------------------------------------------------------------------
+    test(
+      'reconciles enabled-without-background-disclosure to false and persists '
+      'it',
+      () async {
+        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true});
+
+        final notifier = BackgroundSharingNotifier(
+          ensurePermissions: stubThatThrows(),
+        );
+        await Future<void>.delayed(Duration.zero);
+
+        expect(
+          notifier.state,
+          isFalse,
+          reason: 'background sharing persisted without an accepted background '
+              'disclosure must fail closed, not silently keep a service that '
+              'cannot publish',
+        );
+
+        final prefs = await SharedPreferences.getInstance();
+        expect(
+          prefs.getBool(kBackgroundSharingKey),
+          isFalse,
+          reason: 'the reconciled value must be PERSISTED so the toggle '
+              're-shows the disclosure on the next enable, rather than '
+              'reverting to the broken state on the next launch',
+        );
+      },
+    );
+
+    test(
+      'leaves enabled state alone when the background disclosure IS accepted',
+      () async {
+        // The negative control for the reconcile: it must not disable a user
+        // who genuinely consented.
+        SharedPreferences.setMockInitialValues({
+          kBackgroundSharingKey: true,
+          kLocationDisclosureBackgroundAcceptedKey: true,
+        });
+
+        final notifier = BackgroundSharingNotifier(
+          ensurePermissions: stubThatThrows(),
+        );
+        await Future<void>.delayed(Duration.zero);
+
+        expect(notifier.state, isTrue);
+        final prefs = await SharedPreferences.getInstance();
+        expect(prefs.getBool(kBackgroundSharingKey), isTrue);
       },
     );
   });
@@ -798,7 +873,8 @@ void main() {
       // -----------------------------------------------------------------------
       test('Android (seam) + disable → ensurePermissions not called, '
           'state false, prefs false', () async {
-        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true});
+        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true,
+        kLocationDisclosureBackgroundAcceptedKey: true});
 
         final notifier = BackgroundSharingNotifier(
           // stubThatThrows verifies the permission fn is never invoked.

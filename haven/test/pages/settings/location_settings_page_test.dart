@@ -194,7 +194,8 @@ void main() {
       '2. renders toggle ON when kBackgroundSharingKey is pre-seeded to true '
       '(no E2EE reassurance row — it was removed)',
       (tester) async {
-        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true});
+        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true,
+        kLocationDisclosureBackgroundAcceptedKey: true});
 
         final fakeDisclosure = _FakeDisclosureController(false);
 
@@ -381,7 +382,8 @@ void main() {
     testWidgets('7. disable from ON: provider becomes false, SnackBar '
         '"Background sharing disabled" (no disclosure gate)', (tester) async {
       // Pre-seed to ON.
-      SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true});
+      SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true,
+        kLocationDisclosureBackgroundAcceptedKey: true});
 
       // When disabling, the disclosure and permissions gates must NOT fire.
       final fakeDisclosure = _FakeDisclosureController(false);
@@ -462,7 +464,8 @@ void main() {
       '9. iOS while-in-use authorization + sharing ON shows the "Always" '
       'note with an Open settings action',
       (tester) async {
-        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true});
+        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true,
+        kLocationDisclosureBackgroundAcceptedKey: true});
 
         await tester.pumpWidget(
           _buildApp(
@@ -488,7 +491,8 @@ void main() {
     testWidgets('10. iOS Always authorization hides the limited note', (
       tester,
     ) async {
-      SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true});
+      SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true,
+        kLocationDisclosureBackgroundAcceptedKey: true});
 
       await tester.pumpWidget(
         // iosAuthStatus defaults to IosAuthStatus.always (not limited).

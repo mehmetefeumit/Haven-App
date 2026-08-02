@@ -393,10 +393,19 @@ class TestUser {
     await prefs.setBool(kOnboardingIntroSeenKey, true);
     await prefs.setBool(kOnboardingDisplayNameSetKey, true);
     await prefs.setBool(kOnboardingCompletedKey, true);
-    // Also pre-accept the location prominent-disclosure so the production
-    // publisher (which self-skips until this flag is set) runs in E2E without
+    // Also pre-accept the location prominent-disclosures so the production
+    // publishers (which self-skip until these flags are set) run in E2E without
     // a real disclosure dialog. The fake location service never prompts.
+    //
+    // BOTH are required. The foreground publisher gates on the foreground flag
+    // alone, but the Android foreground-service publisher gates on both (see
+    // `backgroundPublishDisclosureAccepted`), because it is the path that
+    // publishes "even when the app is closed or not in use". Seeding only the
+    // foreground flag would silently block every background-publish scenario —
+    // including `e2e-fgs-publish`, whose entire job is to reproduce P0-1, which
+    // it could no longer reach.
     await prefs.setBool(kLocationDisclosureAcceptedKey, true);
+    await prefs.setBool(kLocationDisclosureBackgroundAcceptedKey, true);
   }
 
   /// Removes the seeded identity + clears onboarding flags. Call from
@@ -413,6 +422,7 @@ class TestUser {
     await prefs.remove(kOnboardingDisplayNameSetKey);
     await prefs.remove(kOnboardingCompletedKey);
     await prefs.remove(kLocationDisclosureAcceptedKey);
+    await prefs.remove(kLocationDisclosureBackgroundAcceptedKey);
   }
 
   /// Short identifier used in logs and temp-dir names ("alice", "bob").

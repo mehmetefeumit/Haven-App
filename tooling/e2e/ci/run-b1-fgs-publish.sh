@@ -662,10 +662,12 @@ if [[ -z "${published}" ]]; then
   if grep -aqF -- "${MARK_CYCLE_FAILED}" "${WINDOW}" 2>/dev/null; then
     fail "the publish cycle threw ('${MARK_CYCLE_FAILED}') and never reported a count."
   fi
-  fail "no publish cycle reported after the handoff. The cycle returns early and \
-SILENTLY when no circle is eligible, nothing is due, or the foreground is still marked \
-active (background_location_task.dart:360-430), so this covers several distinct causes \
-— read the [BackgroundTask] dump below to tell them apart."
+  fail "no publish cycle reported after the handoff. The cycle returns early when no \
+circle is eligible, nothing is due, or the foreground is still marked active — all \
+SILENTLY — and also when the location disclosure has not been accepted, which DOES log \
+'Publish BLOCKED'. Check the [BackgroundTask] dump below for that line first; its \
+absence narrows the cause to the silent ones (\`_publishCycle\` in \
+background_location_task.dart)."
 fi
 if (( published < 1 )); then
   fail "the FGS ran a publish cycle after the handoff but published to ZERO circles \
