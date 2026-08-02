@@ -153,3 +153,7 @@ jobs:
       - name: E2E harness self-test (secret-leak scanner)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/scan-logs-for-secrets.sh --self-test
+
+      - name: Build-retry predicate self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/build_apk_with_retry.sh --self-test

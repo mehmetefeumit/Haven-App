@@ -82,8 +82,14 @@ jobs:
       - name: Get dependencies
         run: flutter pub get
 
+      # Classified retry: Gradle dependency resolution intermittently fails when
+      # Maven Central / plugins.gradle.org rate-limit shared runner IPs (CI run
+      # 30732662493 lost the `arm` leg this way while arm64/x64 built the same
+      # commit). The script retries ONLY on a network/dependency-resolution
+      # signature and fails immediately on disk/OOM, so a capacity problem can
+      # never be retried into a green build.
       - name: Build APK (${{ matrix.arch }})
-        run: flutter build apk --debug --target-platform ${{ matrix.flutter-platform }}
+        run: ../scripts/ci/build_apk_with_retry.sh ${{ matrix.flutter-platform }}
 
       - name: Upload APK
         uses: actions/upload-artifact@v6

@@ -161,6 +161,34 @@ class TestUser {
     allowWsLoopbackForTest();
     // Redirect every relay-resolution call site to the hermetic strfry.
     setDefaultRelaysForTest(relays: relays);
+    // Redirect the PROFILE plane too, or it is not hermetic.
+    //
+    // The profile pool (`PRODUCTION_PROFILE_RELAYS`) is disjoint from the
+    // account seed by construction, so `setDefaultRelaysForTest` above does NOT
+    // cover it: without this call every automatic roster refresh dials the
+    // eight real public relays. The egress guard refuses them, each fetch burns
+    // its full timeout budget, and the added latency destabilised the live-sync
+    // lane into Rule-14 contention (CI run 30732662493).
+    //
+    // Installing the hermetic relays as the profile pool makes the plane fail
+    // CLOSED for the whole process: they are also this test's CIRCLE relays, so
+    // the contamination ledger excludes them, `usable_profile_relays()`
+    // underflows, and kind-0 fetches skip the network entirely instead of
+    // reaching the internet. That is the correct outcome for these lanes —
+    // none of them exercises the profile plane. The lane that DOES
+    // (`e2e_profile_sharing`) never calls this method; it installs its own
+    // three-relay hermetic pool so the pool resolves rather than underflowing.
+    //
+    // Install-once, like the overrides above: tolerate an already-installed
+    // pool (a prior test file may share this process) and surface anything
+    // else.
+    try {
+      setProfileRelaysForTest(relays: relays);
+    } on Object catch (e) {
+      if (!e.toString().toLowerCase().contains('already installed')) {
+        rethrow;
+      }
+    }
     // Defense in depth: confirm the override actually propagated. A silent
     // failure here would leave the suite hitting production relays.
     final effective = defaultRelays();
