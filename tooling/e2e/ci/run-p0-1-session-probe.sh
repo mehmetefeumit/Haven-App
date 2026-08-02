@@ -225,10 +225,45 @@ echo "Phase 2/4 — armed."
 
 echo "Phase 3/4 — destroying the Activity while the service survives..."
 # "Don't keep activities": the Activity is finished the moment it stops, so
-# HOME destroys it — and the main FlutterEngine with it — deterministically.
+# HOME destroys it — and the main FlutterEngine with it.
 adb -s "${DEVICE}" shell settings put global always_finish_activities 1
+
+# READ IT BACK. `settings put` is silent on failure, and a probe that never
+# destroyed the Activity still reports "REFUSED" — the PREDICTED answer — which
+# is the most dangerous possible false positive. Run 30770222629 did exactly
+# that: the verdict looked like a confirmation while logcat showed no Haven
+# activity transition at all.
+setting="$(adb -s "${DEVICE}" shell settings get global always_finish_activities | tr -d '\r')"
+if [[ "${setting}" != "1" ]]; then
+  fail "could not enable always_finish_activities (read back '${setting}'). \
+Without it the Activity is only stopped, never destroyed, and the probe cannot \
+reach the state it exists to measure."
+fi
+
 adb -s "${DEVICE}" shell input keyevent HOME
-sleep 5
+
+# HARD PRECONDITION: the Activity must actually be GONE. Bounded poll — the
+# finish is asynchronous.
+activity_gone=0
+deadline=$(( SECONDS + 30 ))
+while (( SECONDS < deadline )); do
+  if ! adb -s "${DEVICE}" shell dumpsys activity activities 2>/dev/null \
+       | grep -q "${PKG}/.MainActivity"; then
+    activity_gone=1
+    break
+  fi
+  sleep 2
+done
+if (( activity_gone == 0 )); then
+  echo "---- surviving activity records ----" >&2
+  adb -s "${DEVICE}" shell dumpsys activity activities 2>/dev/null \
+    | grep -a "${PKG}" | head -10 >&2 || true
+  fail "the Activity was NOT destroyed within 30s, so the main isolate is \
+almost certainly still alive. Any verdict from this run would be meaningless: \
+'the guard is held' is trivially true while the holder is still running. This \
+is INCONCLUSIVE, not evidence for either branch."
+fi
+sleep 3
 
 # The whole experiment is void if the service died with the Activity.
 if ! adb -s "${DEVICE}" shell dumpsys activity services "${PKG}" 2>/dev/null \
@@ -237,7 +272,8 @@ if ! adb -s "${DEVICE}" shell dumpsys activity services "${PKG}" 2>/dev/null \
 process may be gone entirely — this run cannot answer the question. (It is also \
 a finding in its own right: it would mean the FGS cannot outlive the UI here.)"
 fi
-echo "Phase 3/4 — Activity destroyed, foreground service still listed."
+echo "Phase 3/4 — Activity destroyed AND foreground service still listed: the \
+probe is in the state it exists to measure."
 
 echo "Phase 4/4 — observing up to ${OBSERVE_SECS}s for the post-destruction verdict..."
 deadline=$(( SECONDS + OBSERVE_SECS ))
