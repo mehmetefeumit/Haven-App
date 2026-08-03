@@ -2516,6 +2516,30 @@ use haven_core::validation::{normalize_pubkey_hex, parse_nostr_group_id, validat
 /// via [`run_blocking`] so it does not monopolise the async runtime's
 /// worker threads. Pure-CPU `#[frb(sync)]` methods (e.g. constant
 /// getters, relay list signing) bypass `run_blocking` and execute inline.
+///
+/// # NEVER pass this handle across Dart isolates
+///
+/// It is `Send + Sync` on the Rust side and the MOI object pool backing
+/// `#[frb(opaque)]` is process-global, so smuggling the raw object id across
+/// an isolate boundary and reconstituting it with
+/// `frbInternalSseDecode` + `rust_arc_increment_strong_count_CircleManagerFfi`
+/// would appear to work. Do not. Those are unsupported FRB internals marked
+/// "not to be used by end users", and the Android foreground-service isolate is
+/// a separate isolate GROUP with its own `FlutterEngine` — the handle carries a
+/// `NativeFinalizer`, and the increment/decrement pairing would become
+/// hand-maintained across a boundary where one side can be killed without
+/// unwinding.
+///
+/// Both mistakes are unrecoverable in the same process. A missed decrement
+/// leaves a permanent +1, so the Rule-14 `LiveSessionGuard` is held until the
+/// process dies and the app can never reopen its own database. A double
+/// decrement drops the `Arc` while the other isolate still holds a pointer —
+/// a use-after-free. That converts a liveness problem into a memory-safety
+/// one.
+///
+/// Cross-isolate work is done by MESSAGE ROUTING (plain sendable data over the
+/// plugin's isolate channel), never by sharing this handle. See
+/// `docs/P0_1_FGS_SESSION_PLAN.md` §4.
 #[frb(opaque)]
 pub struct CircleManagerFfi {
     inner: Arc<CoreCircleManager>,
@@ -3398,13 +3422,35 @@ impl CircleManagerFfi {
     ///
     /// # Concurrency
     ///
-    /// MDK's `create_message` performs a non-atomic read-modify-write on the
-    /// MLS group state. Two concurrent calls for the **same** group can race
-    /// on the epoch counter, causing one message to be rejected by all
-    /// recipients. Callers **must not** invoke this method concurrently for
-    /// the same `mls_group_id`. The Dart-side `locationPublisherProvider`
-    /// satisfies this constraint by publishing one group at a time per
-    /// publish cycle. If this ever changes, add a per-group `Mutex` here.
+    /// Concurrent calls for the same group are **safe**. Every engine write
+    /// funnels through one `tokio::sync::Mutex<AccountDeviceSession>`
+    /// (`haven-core/src/nostr/mls/manager.rs:99-101`, taken in `send` at
+    /// `:494-501`), which `encrypt_location` reaches via `send_location` →
+    /// `create_message` → `send`. Application messages advance no epoch and
+    /// carry no `PendingStateRef`, and past-epoch app messages are tolerated to
+    /// `app_message_past_epoch_limit`, so the encrypt→publish gap is covered
+    /// too.
+    ///
+    /// This paragraph previously said the opposite — that `create_message`
+    /// races on the epoch counter and callers "must not" invoke it
+    /// concurrently, naming a `locationPublisherProvider` that no longer owns
+    /// publishing. That described PRE-Dark-Matter MDK, before the session
+    /// mutex existed. It is corrected rather than deleted because acting on it
+    /// is expensive in a specific way: it invites building a cross-isolate lock
+    /// for a problem upstream already solved, while the REAL hazard sits
+    /// elsewhere.
+    ///
+    /// **The real hazard: compound sequences, not this call.** The mutex is
+    /// released between FFI calls, so a Rule-13 publish-before-apply cycle —
+    /// stage → publish → `confirm_published`/`publish_failed` — spans three
+    /// round-trips with the lock dropped in between (`manager.rs:651-658`,
+    /// `:667-674`). Two concurrent commit-producing flows CAN interleave there.
+    /// The engine refuses a second send while the group is non-`Stable`, so the
+    /// result is a wedged group rather than a fork — a liveness failure, not a
+    /// confidentiality one — but callers must still serialize the whole
+    /// TRANSACTION, which is what `LocationPublishSchedulerNotifier`'s
+    /// `_publishChain` does. Location publishing produces no commits and needs
+    /// no such fence.
     ///
     /// # Arguments
     ///

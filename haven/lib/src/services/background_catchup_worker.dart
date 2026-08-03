@@ -22,8 +22,12 @@
 ///   3. **FGS fast-path bail (battery only):** if the foreground service is
 ///      running we skip the sweep to avoid a boot-cost Rust runtime for
 ///      work the FGS already covers. This is a BATTERY optimization — it
-///      is NOT the fork-safety mechanism. The Rust `WRITER_LOCK` (M7-B) is.
-///      Fail-OPEN (error → proceed).
+///      is NOT the fork-safety mechanism. That is the Rust
+///      `LiveSessionGuard` (Rule 14), which fails CLOSED: if another isolate
+///      holds the MLS session, this worker's `CircleManagerFfi.newInstance`
+///      throws and the wake is a no-op. Fail-OPEN here is therefore safe —
+///      but for a different reason than this comment used to give (see the
+///      gate bodies).
 ///   4. **Foreground-active fast-path (battery only, D4):** FGS dead but
 ///      the UI isolate is active → the map-shell pollers already receive,
 ///      so skip the boot cost. Fail-OPEN.
@@ -274,7 +278,18 @@ Future<bool> runBackgroundCatchupTask({
   }
 
   // Gate 3: FGS alive → skip (battery fast-path, NOT the fork-safety mech).
-  // The Rust WRITER_LOCK (M7-B) is the actual exclusion mechanism.
+  //
+  // The actual exclusion mechanism is the Rust `LiveSessionGuard` (Rule 14,
+  // haven-core/src/nostr/mls/storage.rs). NOT a `WRITER_LOCK` — that symbol
+  // does not exist in haven-core or rust_builder and was superseded at Dark
+  // Matter; the comments here claimed it for months.
+  //
+  // The correction matters because the two behave OPPOSITELY. A `WRITER_LOCK`
+  // would serialize a concurrent sweep; `LiveSessionGuard` fails CLOSED, so a
+  // concurrent sweep does not queue — `newInstance` below simply throws and
+  // this wake accomplishes nothing. That is still safe (no fork, no double
+  // write), which is why fail-open on the gate reads below is acceptable, but
+  // "proceed and it will be serialized" was never true.
   try {
     final fgsRunning = await isRunningService();
     if (fgsRunning) {
@@ -282,8 +297,9 @@ Future<bool> runBackgroundCatchupTask({
       return true; // FGS covers receive; no work needed here
     }
   } on Object {
-    // Cannot read FGS state — proceed conservatively (let the sweep try;
-    // the WRITER_LOCK will serialize it safely with any concurrent FGS).
+    // Cannot read FGS state — proceed and let the sweep try. If an FGS is
+    // in fact alive and holding the session, `newInstance` fails closed on the
+    // Rule-14 guard and the wake no-ops; it is not serialized behind it.
   }
 
   // Gate 4 (D4): foreground UI active → skip. Catches FGS-dead-but-UI-active
@@ -292,7 +308,8 @@ Future<bool> runBackgroundCatchupTask({
   // Rust engine + SQLCipher boot for nothing. Battery gate ONLY — a read
   // error PROCEEDS (fail-open) so a persistent error cannot silently starve
   // the catch-up floor (correctness never depends on this gate: the sweep is
-  // cursor-idempotent and excluded by the Rust WRITER_LOCK).
+  // cursor-idempotent, and a concurrent session holder makes the open fail
+  // closed on the Rule-14 guard rather than racing).
   try {
     final foregroundActive = await isForegroundActive();
     if (foregroundActive) {

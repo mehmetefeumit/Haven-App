@@ -223,11 +223,24 @@ it, enforced by a CI guard).
 Each wake is **receive-only and consent-gated**:
 
 - A wake invokes only the receive-only sweep (`run_catchup_all_circles`), which
-  never authors MLS state; its `decrypt_receive_only` path takes the
-  process-global `WRITER_LOCK` via `try_acquire_background()`, yielding
-  (`Skipped`, no cursor advance, re-fetched next sweep) to any authoring writer
-  rather than blocking — so a background wake can never fork a group against a
-  concurrent foreground/FGS write.
+  never authors MLS state.
+
+  *Corrected 2026-08-03:* this bullet previously said the sweep takes a
+  "process-global `WRITER_LOCK` via `try_acquire_background()`", yielding to any
+  authoring writer. **No such symbol exists** in `haven-core/src` or
+  `haven/rust_builder/src` — it was superseded at Dark Matter, and the
+  description outlived it here and in
+  `haven/lib/src/services/background_catchup_worker.dart`.
+
+  The live mechanism is the Rule-14 `LiveSessionGuard`
+  (`haven-core/src/nostr/mls/storage.rs`), and it behaves **oppositely**: it
+  fails CLOSED rather than yielding. A background wake that races a live
+  foreground/FGS session does not queue behind it and does not skip politely —
+  its `CircleManagerFfi::new` throws and the wake accomplishes nothing. The
+  fork-safety conclusion still holds (a wake can never author against a
+  concurrent writer, because it cannot open the session at all), but the
+  mechanism, the failure mode, and the operational consequence are all
+  different from what was written.
 - Background wakes run only while the user's durable background-sharing consent
   is set: the intent is re-checked at every wake (the Android worker's gate
   chain / the iOS `isEnabled()` predicate) and again inside
