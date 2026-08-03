@@ -16,7 +16,18 @@ class _FakeEngine implements LiveSyncFfi {
     this.failStart = false,
     this.failSubscribe = false,
     this.failUnsubscribe = false,
+    this.failLiveEvents = false,
   });
+
+  /// When true, [liveEvents] throws — the one failure that lands AFTER the
+  /// service has taken ownership of the handle, so it distinguishes "the
+  /// failure path released an abandoned engine" from "it double-released one
+  /// `stop()` already owns".
+  final bool failLiveEvents;
+
+  /// Counts [dispose] calls, not just whether one happened: a double dispose is
+  /// a different defect from a leak and must be visible as one.
+  int disposeCalls = 0;
 
   /// When true, [startSession] throws (with a hex-like detail, to prove the
   /// service never leaks it — Security Rule 8).
@@ -60,7 +71,12 @@ class _FakeEngine implements LiveSyncFfi {
   }
 
   @override
-  Stream<FfiRelayEvent> liveEvents() => controller.stream;
+  Stream<FfiRelayEvent> liveEvents() {
+    if (failLiveEvents) {
+      throw Exception('boom for mls group deadbeefcafef00ddeadbeefcafef00d');
+    }
+    return controller.stream;
+  }
 
   @override
   bool isRunning() => _running;
@@ -73,8 +89,12 @@ class _FakeEngine implements LiveSyncFfi {
     // bus, which is what ends the `liveEvents()` stream. Without modelling that
     // coupling the fake cannot reproduce the `onDone` a deliberate stop
     // provokes, and any test claiming to pin re-entrancy is vacuous.
+    // NOT awaited: `close()` on a single-subscription controller that was
+    // never listened to only completes once a subscriber drains it, so awaiting
+    // here would hang whenever the service failed BEFORE subscribing. The real
+    // engine does not await stream delivery either.
     if (!controller.isClosed) {
-      await controller.close();
+      unawaited(controller.close());
     }
   }
 
@@ -100,7 +120,10 @@ class _FakeEngine implements LiveSyncFfi {
   }
 
   @override
-  void dispose() => disposed = true;
+  void dispose() {
+    disposeCalls++;
+    disposed = true;
+  }
 
   @override
   bool get isDisposed => disposed;
@@ -441,6 +464,105 @@ void main() {
         await service.stop();
       },
     );
+  });
+
+  group('a failed start does not strand the Rule-14 guard', () {
+    // A `LiveSyncFfi` holds an `Arc<CircleManager>`, so an undisposed handle
+    // keeps the MLS database's single-session guard registered. The native
+    // finalizer runs on GC — non-deterministic, possibly never — so the failure
+    // path has to release it explicitly.
+
+    test('the engine is disposed when startSession throws', () async {
+      final engine = _FakeEngine(failStart: true);
+      final service = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async => engine,
+      );
+
+      await expectLater(
+        service.start(groups: const [], inboxRelays: const []),
+        throwsA(isA<SubscriptionServiceException>()),
+      );
+
+      expect(
+        engine.disposed,
+        isTrue,
+        reason: 'the handle is referenced by nothing after this throw, so if '
+            'it is not disposed here the guard is held until GC — the database '
+            'stays unopenable and no retry can succeed',
+      );
+    });
+
+    test('repeated failures do not accumulate live handles', () async {
+      // The self-heal retries on a timer, so a persistent failure would
+      // otherwise add one guard holder per attempt.
+      final built = <_FakeEngine>[];
+      final service = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async {
+          final e = _FakeEngine(failStart: true);
+          built.add(e);
+          return e;
+        },
+      );
+
+      for (var i = 0; i < 3; i++) {
+        await expectLater(
+          service.start(groups: const [], inboxRelays: const []),
+          throwsA(isA<SubscriptionServiceException>()),
+        );
+      }
+
+      expect(built, hasLength(3));
+      expect(
+        built.every((e) => e.disposed),
+        isTrue,
+        reason: 'every abandoned handle must be released, or a retry loop '
+            'permanently blocks both its own next attempt and the foreground '
+            "service's reclaim",
+      );
+    });
+
+    test('a throw AFTER ownership transfers disposes exactly once', () async {
+      // `liveEvents()` runs after `_engine` is assigned, so `stop()` in the
+      // catch already owns the disposal. If the failure path also fired, the
+      // handle would be disposed twice — which is why ownership is handed over
+      // explicitly rather than left for both paths to guess at.
+      final engine = _FakeEngine(failLiveEvents: true);
+      final service = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async => engine,
+      );
+
+      await expectLater(
+        service.start(groups: const [], inboxRelays: const []),
+        throwsA(isA<SubscriptionServiceException>()),
+      );
+
+      expect(
+        engine.disposeCalls,
+        1,
+        reason: 'exactly one release: neither leaked nor double-disposed',
+      );
+      expect(service.isRunning, isFalse);
+    });
+
+    test('a SUCCESSFUL start does not dispose the live engine', () async {
+      // The failure path must not over-fire: disposing a handle that is now
+      // owned by `_engine` would tear down the session it just established.
+      final engine = _FakeEngine();
+      final service = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async => engine,
+      );
+
+      await service.start(groups: const [], inboxRelays: const []);
+
+      expect(engine.disposed, isFalse);
+      expect(service.isRunning, isTrue);
+      await service.stop();
+      expect(engine.disposed, isTrue, reason: 'stop still owns the disposal');
+    });
   });
 
   group('an unexpected engine death is survivable', () {

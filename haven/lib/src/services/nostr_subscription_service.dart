@@ -50,10 +50,21 @@ class NostrSubscriptionService implements SubscriptionService {
     required List<String> inboxRelays,
   }) async {
     if (_engine != null) return; // idempotent
+    // Held outside the try so the failure path can release it. Until this
+    // handle is disposed it keeps an `Arc<CircleManager>` alive, and with it the
+    // MLS database's Rule-14 `LiveSessionGuard` — so a leak here does not just
+    // waste memory, it makes the database unopenable. Relying on the native
+    // finalizer is not enough: it runs on GC, which is non-deterministic and may
+    // never happen.
+    LiveSyncFfi? built;
     try {
       final engine = await _engineFactory();
+      built = engine;
       await engine.startSession(groups: groups, inboxRelays: inboxRelays);
       _engine = engine;
+      // Ownership has transferred to `_engine`; `stop()` disposes it from here
+      // on, so the failure path below must NOT also dispose it.
+      built = null;
       // Subscribe only AFTER startSession resolves — `liveEvents()` throws on a
       // cold-start race (no active session yet).
       _sub = engine.liveEvents().listen(
@@ -74,6 +85,18 @@ class NostrSubscriptionService implements SubscriptionService {
         debugPrint('[Subscription] start error detail: $e');
       }
       await stop();
+      // `stop()` cannot reach this handle: `_engine` is only assigned once
+      // `startSession` has resolved, so a throw before that leaves the engine
+      // referenced by nothing but this local. Dropping it here is what keeps a
+      // failing start from stranding the guard — and the self-heal retries
+      // every couple of minutes, so a persistent failure would otherwise
+      // accumulate one guard holder per attempt and permanently block both the
+      // foreground service's reclaim and its own next retry.
+      try {
+        built?.dispose();
+      } on Object catch (e) {
+        debugPrint('[Subscription] failed-start dispose: ${e.runtimeType}');
+      }
       throw const SubscriptionServiceException('failed to start live session');
     }
   }
