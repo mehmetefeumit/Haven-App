@@ -199,10 +199,81 @@ void main() {
     });
   });
 
+  group('acquiring a session is not the same as reclaiming one', () {
+    // The bug this pins. The reclaim DECLINES when the guard is free
+    // (`guardNotHeld`) — correctly, since there is nothing to reclaim. But the
+    // normal path to owning a session is exactly that free case: the foreground
+    // hands it over at pause. With the reclaim wired as the only recovery, the
+    // service declined to open a database sitting available, and background
+    // publishing stayed dead through the very handoff meant to enable it.
+    late String ensureBody;
+
+    setUpAll(() {
+      final at = taskSource.indexOf('Future<bool> _ensureSession() async {');
+      expect(at, isNonNegative, reason: '_ensureSession must exist');
+      ensureBody = taskSource.substring(
+        at,
+        taskSource.indexOf('\n  /// Tries to recover', at),
+      );
+    });
+
+    test('the cycle goes through _ensureSession, not straight to a reclaim', () {
+      final at = cycleBody.indexOf('_ensureSession()');
+      expect(at, isNonNegative);
+      expect(
+        cycleBody.contains('!await _attemptSessionReclaim()'),
+        isFalse,
+        reason: 'the reclaim must be an escalation, never the only route',
+      );
+    });
+
+    test('a FREE guard leads to a plain open', () {
+      final query = ensureBody.indexOf('isSessionLive(');
+      final open = ensureBody.indexOf('_openCircleManager()');
+      expect(query, isNonNegative);
+      expect(
+        open,
+        isNonNegative,
+        reason: 'the post-handoff case needs an open, not a reclaim',
+      );
+      expect(
+        query,
+        lessThan(open),
+        reason: 'query first — it is cheap and decides which path applies',
+      );
+      expect(
+        ensureBody.contains('_wireSharingServices()'),
+        isTrue,
+        reason: 'an opened manager with no services still cannot publish',
+      );
+    });
+
+    test('a HELD guard escalates to the reclaim', () {
+      final at = ensureBody.indexOf('_attemptSessionReclaim()');
+      expect(at, isNonNegative);
+      expect(
+        RegExp(r'if\s*\(guardHeld\)').hasMatch(ensureBody),
+        isTrue,
+        reason: 'only a held guard may escalate',
+      );
+    });
+
+    test('an unanswerable query neither opens nor escalates', () {
+      // "Cannot tell" must not become "free" (open blind) or "held" (escalate
+      // to a destructive path on no evidence).
+      final at = ensureBody.indexOf('session query failed');
+      expect(at, isNonNegative);
+      expect(
+        ensureBody.substring(at, at + 120),
+        contains('return false'),
+      );
+    });
+  });
+
   group('the reclaim runs only where the foreground is known idle', () {
     test('it is invoked after the foreground-active gate', () {
       final gateAt = cycleBody.indexOf('if (foregroundActive) {');
-      final reclaimAt = cycleBody.indexOf('_attemptSessionReclaim()');
+      final reclaimAt = cycleBody.indexOf('_ensureSession()');
       expect(gateAt, isNonNegative);
       expect(
         reclaimAt,
@@ -237,7 +308,7 @@ void main() {
       // Asserted structurally rather than as one exact statement: the previous
       // version matched a whole line verbatim, so a reformat or an equivalent
       // rewrite would have failed CI without any safety property changing.
-      final at = cycleBody.indexOf('_attemptSessionReclaim()');
+      final at = cycleBody.indexOf('_ensureSession()');
       expect(at, isNonNegative);
       expect(
         cycleBody.substring(at, at + 60),

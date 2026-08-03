@@ -95,6 +95,18 @@ readonly MARK_ONSTART_FAILED='[BackgroundTask] onStart FAILED'
 # That makes it a POSITIVE oracle for P0-1 rather than an absence check.
 readonly MARK_INITIALIZED='[BackgroundTask] Initialized ('
 readonly MARK_LOCSHARING_OK='locationSharing=true'
+# The SECOND positive proof, and the normal one under the pause-time handoff.
+#
+# The service starts while the app is foregrounded, so at `onStart` the UI
+# isolate still legitimately holds the session and `locationSharing=false` is
+# CORRECT — Rule 14 permits exactly one live session per database per process.
+# The acquire happens later, in the publish cycle, once `_onPaused` has handed
+# the session over. This marker is emitted there and only after
+# `_locationSharingService != null`, so like the one above it is constructible
+# only when the Rule-14 acquire actually worked. Accepting either is not a
+# weakening: both prove the same thing, at the two points it can legitimately
+# happen.
+readonly MARK_SESSION_ACQUIRED='[BackgroundTask] session acquired'
 readonly MARK_PUBLISHED_PREFIX='[BackgroundTask] Published to '
 readonly MARK_CYCLE_FAILED='[BackgroundTask] Publish cycle FAILED'
 readonly MARK_ONDESTROY='[BackgroundTask] onDestroy'
@@ -644,12 +656,19 @@ session. EXPECTED CAUSE: the Rule-14 LiveSessionGuard collision — see \
 docs/CI_HARDENING_BACKLOG.md P0-1. Confirm from the runtime type dumped above before \
 concluding; an unrelated open failure reaches this same marker."
 fi
-if ! grep -aF -- "${MARK_INITIALIZED}" "${LOGCAT_FILE}" 2>/dev/null \
-     | grep -aqF -- "${MARK_LOCSHARING_OK}"; then
-  fail "the FGS isolate never reported a completed init with location sharing wired \
-('${MARK_INITIALIZED}… ${MARK_LOCSHARING_OK}'). It either never booted, or it booted \
-without a CircleManagerFfi — the P0-1 steady state, in which _publishCycle returns \
-immediately and silently forever."
+# Braced group so the negation covers BOTH alternatives: `! A || B` would parse
+# as `(!A) || B` and pass whenever B alone held, which is the opposite of the
+# intent. Both markers are read from logcat — the FGS isolate logs there, not to
+# the drive log.
+if ! { grep -aF -- "${MARK_INITIALIZED}" "${LOGCAT_FILE}" 2>/dev/null \
+         | grep -aqF -- "${MARK_LOCSHARING_OK}" \
+       || grep -aqF -- "${MARK_SESSION_ACQUIRED}" "${LOGCAT_FILE}" 2>/dev/null; }
+then
+  fail "the FGS isolate never acquired an MLS session. Neither positive proof \
+appeared: '${MARK_INITIALIZED}… ${MARK_LOCSHARING_OK}' (acquired at onStart) nor \
+'${MARK_SESSION_ACQUIRED}' (acquired after the pause-time handoff). It either never \
+booted, or it booted and never took the session — the P0-1 steady state, in which \
+_publishCycle returns immediately and silently forever."
 fi
 echo "  [2/4] FGS initialized with location sharing wired (Rule-14 acquire succeeded)."
 

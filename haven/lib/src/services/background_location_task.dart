@@ -558,6 +558,56 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     );
   }
 
+  /// Acquires a usable session, escalating only as far as the situation needs.
+  ///
+  /// # Why an open is tried before any reclaim
+  ///
+  /// The two are different problems and were conflated. A reclaim is for a
+  /// guard held by an isolate that is GONE; it declines outright when the guard
+  /// is free (`guardNotHeld`), because stopping or releasing anything would
+  /// achieve nothing. But the normal path to this isolate owning a session is
+  /// exactly that free case: the foreground hands the session over at pause, so
+  /// by the time this runs there is usually nothing to reclaim — just something
+  /// to open.
+  ///
+  /// Wiring the reclaim as the ONLY recovery therefore left the service
+  /// declining to open a database that was sitting available, and background
+  /// publishing stayed dead through the very handoff meant to enable it.
+  ///
+  /// The registry query comes first because it is cheap and side-effect-free.
+  /// It is advisory — the guard can change state immediately after — but the
+  /// acquire remains the authority and fails closed, so a lost race costs one
+  /// cycle, never correctness.
+  Future<bool> _ensureSession() async {
+    final dataDir = _dataDir;
+    if (dataDir == null) return false;
+
+    final bool guardHeld;
+    try {
+      guardHeld = await isSessionLive(dataDir: dataDir);
+    } on Object catch (e) {
+      // Cannot tell: do not open blind and do not escalate.
+      debugPrint('[BackgroundTask] session query failed: ${e.runtimeType}');
+      return false;
+    }
+
+    if (guardHeld) {
+      // Someone else holds it. Only the reclaim path knows whether that is
+      // recoverable, and it carries the gates that decide.
+      return _attemptSessionReclaim();
+    }
+
+    // Free — the post-handoff steady state. Just take it.
+    await _openCircleManager();
+    if (_circleManager == null) return false;
+    _wireSharingServices();
+    if (_locationSharingService != null) {
+      debugPrint('[BackgroundTask] session acquired');
+      return true;
+    }
+    return _repairSharingServices();
+  }
+
   /// Tries to recover from "the MLS session is held by an isolate that is
   /// gone".
   ///
@@ -777,7 +827,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       //     question. `_attemptSessionReclaim` adds the gates specific to the
       //     destructive step, including a direct liveness probe.
       if (_circleManager == null) {
-        if (!await _attemptSessionReclaim()) return;
+        if (!await _ensureSession()) return;
       } else if (_locationSharingService == null) {
         // The manager opened but the wiring did not finish (see
         // `_ensureAuxServices`). No reclaim is warranted — this isolate already
