@@ -719,16 +719,66 @@ class _MapShellState extends ConsumerState<MapShell>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // `inactive`/`hidden`/`detached` are deliberately not distinct here:
-    // iOS always sandwiches `inactive` between the two authoritative
-    // states, so gating on paused/resumed alone cannot strand the
-    // foreground-active hint.
+    // `inactive`/`hidden` are deliberately not distinct from paused/resumed:
+    // iOS always sandwiches `inactive` between the two authoritative states,
+    // so gating on paused/resumed alone cannot strand the foreground-active
+    // hint.
+    //
+    // `detached` IS distinct, and is handled below — it is the only lifecycle
+    // signal that says this isolate is going away while it can still act.
     if (state == AppLifecycleState.paused) {
       _setForegroundActive(false);
       unawaited(_onPaused());
     } else if (state == AppLifecycleState.resumed) {
       _setForegroundActive(true);
       unawaited(_onResumed());
+    } else if (state == AppLifecycleState.detached) {
+      _setForegroundActive(false);
+      unawaited(_onDetached());
+    }
+  }
+
+  /// Releases the live-sync engine when the Flutter engine is being torn down.
+  ///
+  /// # Why this is worth doing proactively
+  ///
+  /// The MLS database allows exactly one live session per process (Rule 14),
+  /// and the guard enforcing it is a Rust static that no Dart finalizer
+  /// reaches. When this isolate dies without releasing, the background service
+  /// is left contending with a session whose owner no longer exists — the
+  /// orphan the reclaim machinery exists to recover from. Reclaiming is
+  /// reactive, gated on inferring that this isolate is gone, and destructive if
+  /// that inference is ever wrong. Releasing here is none of those things: at
+  /// `detached` we still exist, so we can simply hand the session back.
+  ///
+  /// # What this does NOT free
+  ///
+  /// The guard is also held by this isolate's `CircleManagerFfi`, which is a
+  /// provider singleton used across the app and is deliberately left alone —
+  /// `detached` can be followed by `resumed` (Android activity recreation), and
+  /// disposing it would leave every circle operation broken on the way back.
+  /// So this narrows the orphan rather than eliminating it: the engine, its
+  /// supervisor tasks, and the process-global session slot are released, which
+  /// is every holder except that one.
+  ///
+  /// # Coming back
+  ///
+  /// A resume after `detached` finds a stopped engine and restarts it through
+  /// the ordinary self-heal, so this is safe to do on a signal that does not
+  /// always mean death.
+  Future<void> _onDetached() async {
+    // Stop the periodic backstop first: a tick landing mid-teardown would race
+    // the stop below with a restart, which is the one thing that could leave a
+    // fresh session orphaned instead of releasing the old one.
+    _liveSyncHealTimer?.cancel();
+    final liveSync = _liveSync;
+    if (liveSync == null) return;
+    try {
+      await liveSync.stop();
+    } on Object catch (e) {
+      // Never the raw error (Rule 8), and never rethrow: this runs on a
+      // best-effort teardown path with no one to handle a failure.
+      debugPrint('[MapShell] detached live-sync release: ${e.runtimeType}');
     }
   }
 
