@@ -57,7 +57,10 @@
 /// compiled out and the lane will report no verdict at all.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show SystemNavigator;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/rust/api.dart' show CircleManagerFfi;
@@ -77,6 +80,12 @@ import 'e2e/_lib/test_user.dart';
 /// finalizer can release the guard before the Activity is destroyed.
 // ignore: unreachable_from_main
 CircleManagerFfi? leakedForProbe;
+
+/// How long after the drive exits before the Activity finishes itself.
+///
+/// Must clear `flutter drive`'s disconnect and teardown — popping while the
+/// driver is still attached fails the drive before anything is measured.
+const Duration _selfDestructDelay = Duration(seconds: 25);
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -126,10 +135,36 @@ void main() {
             'the Activity to run the probe',
       );
 
+      // Schedule the Activity to finish ITSELF shortly after this drive exits.
+      //
+      // Run 30772868486 proved the OS lever is not reliable here:
+      // `always_finish_activities` read back as 1 and HOME was pressed, yet
+      // `dumpsys` still showed `MainActivity` in the task history
+      // (`visible=false`, still attached to pid 4041) 30s later. Paused is not
+      // destroyed, and the probe needs destroyed — otherwise the main isolate
+      // is alive and "the guard is held" is trivially true.
+      //
+      // `SystemNavigator.pop()` finishes the Activity from inside the app.
+      // `MainActivity` is a `FlutterActivity` that caches no engine, so
+      // finishing it tears down the main `FlutterEngine` and its isolate, while
+      // the `location`-typed foreground service keeps the PROCESS alive. That
+      // is exactly the swipe-from-recents state, reached deterministically and
+      // without depending on a developer setting.
+      //
+      // Delayed rather than immediate: this must happen AFTER the drive
+      // disconnects, or it kills the drive mid-teardown and the run fails
+      // before anything is measured. The timer survives because the isolate
+      // does — `flutter drive --keep-app-running` leaves the process up.
+      Timer(_selfDestructDelay, () {
+        debugPrint('[P0-1-PROBE] finishing the Activity (SystemNavigator.pop)');
+        unawaited(SystemNavigator.pop());
+      });
+
       debugPrint(
         '[P0-1-PROBE] ARMED — main isolate holds the MLS guard, foreground '
-        'service running. Destroy the Activity now; the next FGS tick reports '
-        'the verdict.',
+        'service running. The Activity will finish itself in '
+        '${_selfDestructDelay.inSeconds}s; the next FGS tick after that '
+        'reports the verdict.',
       );
 
       await ctx.relay.dispose();

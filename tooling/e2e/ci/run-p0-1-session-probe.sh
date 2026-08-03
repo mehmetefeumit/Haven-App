@@ -24,12 +24,19 @@
 #
 #   1. Drive a target that leaves the main isolate holding the MLS guard and a
 #      foreground service running.
-#   2. Turn ON "Don't keep activities" (`always_finish_activities`), then press
-#      HOME. Android destroys the Activity immediately — and with it the main
-#      `FlutterEngine`, since `MainActivity` caches none — while the
-#      `location`-typed foreground service keeps the PROCESS alive. That is the
-#      swipe-from-recents state, reachable deterministically from adb.
-#   3. Wait for the next FGS tick and read the probe's verdict.
+#   2. Press HOME, then let the app finish its OWN Activity: the drive target
+#      schedules `SystemNavigator.pop()` ~25s after the drive exits. Since
+#      `MainActivity` caches no `FlutterEngine`, finishing it tears down the
+#      main engine and its isolate, while the `location`-typed foreground
+#      service keeps the PROCESS alive — the swipe-from-recents state.
+#
+#      "Don't keep activities" (`always_finish_activities`) is set too, but only
+#      as belt-and-braces: run 30772868486 proved it does NOT destroy the
+#      Activity here. The setting read back as 1 and HOME was pressed, yet
+#      `dumpsys` still listed `MainActivity` (`visible=false`, still attached to
+#      the process) 30s later. Paused is not destroyed.
+#   3. VERIFY the Activity is actually gone before believing anything, then read
+#      the next FGS tick's verdict.
 #
 # Reading the result:
 #
@@ -228,24 +235,26 @@ echo "Phase 3/4 — destroying the Activity while the service survives..."
 # HOME destroys it — and the main FlutterEngine with it.
 adb -s "${DEVICE}" shell settings put global always_finish_activities 1
 
-# READ IT BACK. `settings put` is silent on failure, and a probe that never
-# destroyed the Activity still reports "REFUSED" — the PREDICTED answer — which
-# is the most dangerous possible false positive. Run 30770222629 did exactly
-# that: the verdict looked like a confirmation while logcat showed no Haven
-# activity transition at all.
-setting="$(adb -s "${DEVICE}" shell settings get global always_finish_activities | tr -d '\r')"
-if [[ "${setting}" != "1" ]]; then
-  fail "could not enable always_finish_activities (read back '${setting}'). \
-Without it the Activity is only stopped, never destroyed, and the probe cannot \
-reach the state it exists to measure."
-fi
-
+# Belt-and-braces only. Run 30772868486 proved this lever does NOT destroy the
+# Activity here: the setting read back as 1 and HOME was pressed, yet `dumpsys`
+# still showed `MainActivity` in the task history (`visible=false`, still
+# attached to the process) 30s later. Paused is not destroyed.
+#
+# The AUTHORITATIVE destruction now comes from inside the app: the drive target
+# schedules `SystemNavigator.pop()` ~25s after it exits, which finishes the
+# Activity and — since `MainActivity` caches no engine — tears down the main
+# `FlutterEngine` and its isolate, while the foreground service keeps the
+# process alive. HOME is still pressed because backgrounding first is closer to
+# the real scenario.
 adb -s "${DEVICE}" shell input keyevent HOME
 
 # HARD PRECONDITION: the Activity must actually be GONE. Bounded poll — the
-# finish is asynchronous.
+# self-pop is scheduled, so allow for its delay plus slack. A probe that never
+# destroyed the Activity still reports "REFUSED", the PREDICTED answer, which is
+# the most dangerous possible false positive; run 30770222629 did exactly that
+# before this check existed.
 activity_gone=0
-deadline=$(( SECONDS + 30 ))
+deadline=$(( SECONDS + 90 ))
 while (( SECONDS < deadline )); do
   if ! adb -s "${DEVICE}" shell dumpsys activity activities 2>/dev/null \
        | grep -q "${PKG}/.MainActivity"; then
@@ -258,7 +267,8 @@ if (( activity_gone == 0 )); then
   echo "---- surviving activity records ----" >&2
   adb -s "${DEVICE}" shell dumpsys activity activities 2>/dev/null \
     | grep -a "${PKG}" | head -10 >&2 || true
-  fail "the Activity was NOT destroyed within 30s, so the main isolate is \
+  fail "the Activity was NOT destroyed within 90s (the drive target schedules a \
+ SystemNavigator.pop; did it fire?), so the main isolate is \
 almost certainly still alive. Any verdict from this run would be meaningless: \
 'the guard is held' is trivially true while the holder is still running. This \
 is INCONCLUSIVE, not evidence for either branch."
