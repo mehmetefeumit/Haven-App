@@ -85,6 +85,7 @@ import 'dart:math' as math;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:haven/src/services/mls_session_handover.dart';
 import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/member_profile_refresh_provider.dart';
@@ -381,15 +382,7 @@ class MaintenanceSchedulerNotifier extends Notifier<void> {
   ///
   /// A null `lifecycleState` (before the first lifecycle event, i.e. startup,
   /// and in unit tests) counts as foregrounded.
-  static bool _appIsForegrounded() {
-    try {
-      final state = WidgetsBinding.instance.lifecycleState;
-      return state == null || state == AppLifecycleState.resumed;
-    } on Object {
-      // No binding (pure-Dart test context) — nothing to defer to.
-      return true;
-    }
-  }
+  static bool _appIsForegrounded() => appIsForegrounded();
 
   Future<void> _runProfileAntiEntropyTick(int generation) async {
     if (!_isCurrent(generation)) return;

@@ -10,10 +10,46 @@
 /// Rust bridge, or a real service.
 library;
 
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/services/mls_session_handover.dart';
 
 void main() {
+  final binding = TestWidgetsFlutterBinding.ensureInitialized();
+
+  group('appIsForegrounded (the real predicate)', () {
+    // Every other test here injects this seam, so without a direct test the
+    // shared implementation is never exercised — and it now also backs the
+    // maintenance scheduler's own foreground gate, so drift would silently
+    // disable both.
+
+    tearDown(
+      () => binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed),
+    );
+
+    testWidgets('a paused app is not foregrounded', (tester) async {
+      // Deliberately no pump: `paused` disables frame scheduling, so pumping
+      // here would deadlock. Only the predicate is under test.
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      expect(
+        appIsForegrounded(),
+        isFalse,
+        reason: 'this is what stops a background maintenance tick from '
+            'stopping the user\'s foreground service',
+      );
+    });
+
+    testWidgets('a resumed app is foregrounded', (tester) async {
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      expect(appIsForegrounded(), isTrue);
+    });
+
+    testWidgets('detached is not foregrounded', (tester) async {
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.detached);
+      expect(appIsForegrounded(), isFalse);
+    });
+  });
+
   /// Drives the handover with recorded calls and a scripted guard.
   ///
   /// [liveResponses] is consumed one entry per `isSessionLive` call; the last
@@ -30,6 +66,7 @@ void main() {
   run({
     required List<bool> liveResponses,
     bool backgroundSharingEnabled = true,
+    bool foregrounded = true,
     bool stopThrows = false,
     bool restartThrows = false,
     Object? queryThrowsAfter,
@@ -58,6 +95,7 @@ void main() {
         if (restartThrows) throw Exception('restart failed');
       },
       backgroundSharingEnabled: backgroundSharingEnabled,
+      isForegrounded: () => foregrounded,
       timeout: timeout,
       pollInterval: const Duration(milliseconds: 250),
       // Virtual clock: no real waiting, but elapsed time is still accounted for
@@ -73,6 +111,40 @@ void main() {
       slept: slept,
     );
   }
+
+  group('background maintenance must not stop the service', () {
+    // The defect this closes. `initialize()` is reached from the KeyPackage and
+    // relay-list maintenance ticks, which — unlike every MapShell timer — keep
+    // running while the app is paused. Ungated, a tick roughly 30 minutes into
+    // any backgrounded session would take the session back from the foreground
+    // service and silently end background location publishing.
+
+    test('a backgrounded open never touches the service', () async {
+      final r = await run(liveResponses: [true], foregrounded: false);
+      expect(r.outcome, HandoverOutcome.backgrounded);
+      expect(
+        r.stops,
+        0,
+        reason: 'a routine background task can wait for the next foreground; '
+            'the user\'s location sharing cannot be spent on it',
+      );
+      expect(r.restarts, 0);
+      expect(
+        r.queries,
+        0,
+        reason: 'the foreground check must come FIRST — cheapest, and it '
+            'decides whether any of this applies',
+      );
+    });
+
+    test('the same conditions DO recover in the foreground', () async {
+      // The counterpart: without this the gate could be satisfied by never
+      // recovering at all.
+      final r = await run(liveResponses: [true, false]);
+      expect(r.outcome, HandoverOutcome.released);
+      expect(r.stops, 1);
+    });
+  });
 
   group('the guard is not held', () {
     test('nothing is stopped and nothing is restarted', () async {

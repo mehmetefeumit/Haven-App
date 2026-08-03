@@ -37,6 +37,7 @@ library;
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 
 
 /// How long to wait for the service to release the guard before giving up.
@@ -50,6 +51,24 @@ const Duration handoverTimeout = Duration(seconds: 12);
 
 /// Gap between guard re-checks while waiting for the service to let go.
 const Duration handoverPollInterval = Duration(milliseconds: 250);
+
+/// Whether the app is currently foregrounded.
+///
+/// The main isolate stays alive while background location sharing runs, and
+/// `MapShell` is not disposed when the app is backgrounded, so neither widget
+/// lifetime nor "this code is running" is a foreground proxy.
+///
+/// A null `lifecycleState` — before the first lifecycle event, i.e. startup,
+/// and in unit tests — counts as foregrounded.
+bool appIsForegrounded() {
+  try {
+    final state = WidgetsBinding.instance.lifecycleState;
+    return state == null || state == AppLifecycleState.resumed;
+  } on Object {
+    // No binding (pure-Dart test context) — nothing to defer to.
+    return true;
+  }
+}
 
 /// Why a handover did or did not happen. Returned rather than a bare `bool` so
 /// callers and tests can tell "nothing to do" from "tried and failed".
@@ -67,6 +86,12 @@ enum HandoverOutcome {
 
   /// Stopping the service failed outright.
   stopFailed,
+
+  /// The app is backgrounded, so this open was not the user waiting on a blank
+  /// screen — it was routine background maintenance. Stopping the service for
+  /// it would kill background location sharing to satisfy a task that can
+  /// simply wait.
+  backgrounded,
 }
 
 /// Asks the foreground service to stop and waits for the MLS guard to clear.
@@ -89,10 +114,22 @@ Future<HandoverOutcome> requestSessionHandover({
   required Future<void> Function() stopService,
   required Future<void> Function() restartService,
   required bool backgroundSharingEnabled,
+  bool Function() isForegrounded = appIsForegrounded,
   Duration timeout = handoverTimeout,
   Duration pollInterval = handoverPollInterval,
   Future<void> Function(Duration) delay = _defaultDelay,
 }) async {
+  // Only recover for the FOREGROUND. This exists because a user opening the
+  // app finds no circles, no map and no location — a total, visible failure
+  // worth stopping the service over. But `initialize()` is ALSO reached from
+  // background maintenance (the KeyPackage and relay-list ticks keep running
+  // while paused, unlike every MapShell timer), and there the trade inverts:
+  // stopping the service would kill background location sharing to satisfy a
+  // routine task that can wait for the next foreground. Ungated, a KeyPackage
+  // tick ~30 minutes into any backgrounded session would take the session back
+  // from the service and silently end background publishing.
+  if (!isForegrounded()) return HandoverOutcome.backgrounded;
+
   // Only act on a guard that is genuinely held. A failure with a free guard is
   // something else — a locked keyring, a full disk — that stopping the service
   // cannot fix, and stopping it would cost the user background sharing for
