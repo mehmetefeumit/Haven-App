@@ -69,6 +69,13 @@ class _FakeEngine implements LiveSyncFfi {
   Future<void> stopSession() async {
     stopCalls++;
     _running = false;
+    // Faithful to the real engine: `stopSession` tears down the native event
+    // bus, which is what ends the `liveEvents()` stream. Without modelling that
+    // coupling the fake cannot reproduce the `onDone` a deliberate stop
+    // provokes, and any test claiming to pin re-entrancy is vacuous.
+    if (!controller.isClosed) {
+      await controller.close();
+    }
   }
 
   @override
@@ -434,5 +441,85 @@ void main() {
         await service.stop();
       },
     );
+  });
+
+  group('an unexpected engine death is survivable', () {
+    // The engine can stop for reasons this service does not control: a
+    // Rust-side teardown, or another isolate force-releasing the process-global
+    // session to reclaim the MLS database. The stream closing is the only
+    // signal that reaches Dart.
+
+    test('the stream closing returns the service to a restartable state',
+        () async {
+      final engine = _FakeEngine();
+      final service = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async => engine,
+      );
+      await service.start(groups: const [], inboxRelays: const []);
+
+      // The engine dies underneath us.
+      await engine.controller.close();
+      await pumpEventQueue();
+
+      expect(
+        engine.disposed,
+        isTrue,
+        reason: 'the dead handle holds an Arc<CircleManager>, so until it is '
+            'disposed the Rule-14 guard stays registered and a reclaiming '
+            'isolate cannot open the database',
+      );
+      expect(
+        service.isRunning,
+        isFalse,
+        reason: 'the service must not keep claiming to run',
+      );
+    });
+
+    test('a restart after an unexpected close builds a FRESH engine', () async {
+      final first = _FakeEngine();
+      final second = _FakeEngine();
+      var built = 0;
+      final service = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async => (built++ == 0) ? first : second,
+      );
+      await service.start(groups: const [], inboxRelays: const []);
+
+      await first.controller.close();
+      await pumpEventQueue();
+
+      // THE property: `start` early-returns while `_engine != null`, so without
+      // the teardown above this call would be a silent no-op and live receive
+      // would stay dead for the rest of the process.
+      await service.start(groups: const [], inboxRelays: const []);
+
+      expect(built, 2, reason: 'a second engine must actually be built');
+      expect(second.startCalls, 1);
+      expect(service.isRunning, isTrue);
+      await service.stop();
+    });
+
+    test('a deliberate stop is not mistaken for a death', () async {
+      // `stop()` closes the bus itself, so it necessarily triggers the same
+      // `onDone`. If that were treated as an unexpected close it would call
+      // `stop()` again from inside its own teardown.
+      final engine = _FakeEngine();
+      final service = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async => engine,
+      );
+      await service.start(groups: const [], inboxRelays: const []);
+
+      await service.stop();
+      await engine.controller.close();
+      await pumpEventQueue();
+
+      expect(
+        engine.stopCalls,
+        1,
+        reason: 'a re-entrant teardown would stop the session twice',
+      );
+    });
   });
 }

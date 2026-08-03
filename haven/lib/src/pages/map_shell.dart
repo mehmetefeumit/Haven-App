@@ -141,6 +141,13 @@ class _MapShellState extends ConsumerState<MapShell>
   // invariant.
   Timer? _foregroundHeartbeatTimer;
 
+  /// Periodically restarts the live-sync engine if it has stopped while a
+  /// session is still wanted. Armed ONLY when `liveSyncEnabled` — the receive
+  /// and evolution timers are both skipped in that mode, so without this there
+  /// is no periodic tick at all on the live-sync path and a dead engine is
+  /// never noticed.
+  Timer? _liveSyncHealTimer;
+
   /// The live-sync engine handle, captured in [_startLiveSync] so [dispose] can
   /// stop it without `ref` (forbidden in dispose). `null` until started / when
   /// `liveSyncEnabled` is off.
@@ -485,6 +492,7 @@ class _MapShellState extends ConsumerState<MapShell>
     _pruneTimer?.cancel();
     _evolutionTimer?.cancel();
     _foregroundHeartbeatTimer?.cancel();
+    _liveSyncHealTimer?.cancel();
     _stopMotionTrigger();
 
     // Foreground-active heartbeat — see `_foregroundHeartbeatTimer`
@@ -562,6 +570,15 @@ class _MapShellState extends ConsumerState<MapShell>
     // the same minute even on rapid pause/resume cycles.
     // Skipped when the live-sync engine drives receive — its GroupUpdate events
     // (the engine converges peer SelfRemoves in-Rust, M6-2) replace this poll.
+    if (liveSyncEnabled) {
+      // The engine owns receive on this path, so a stopped engine means NO
+      // receive at all — and nothing else here would observe it. Interval is
+      // deliberately unhurried: the check is a cheap `isRunning` read on a
+      // healthy engine, and a restart is only ever needed after an event that
+      // is supposed to be rare.
+      _rearmLiveSyncHealTimer();
+    }
+
     if (!liveSyncEnabled) {
       _evolutionTimer = Timer.periodic(const Duration(minutes: 1), (_) {
         if (!mounted) return;
@@ -575,6 +592,40 @@ class _MapShellState extends ConsumerState<MapShell>
             ..read(evolutionPollerProvider);
         }
       });
+    }
+  }
+
+  /// (Re-)arms the periodic self-heal backstop. Idempotent — cancels first, so
+  /// repeated calls cannot leave two timers running.
+  void _rearmLiveSyncHealTimer() {
+    if (!liveSyncEnabled) return;
+    _liveSyncHealTimer?.cancel();
+    _liveSyncHealTimer = Timer.periodic(const Duration(minutes: 2), (_) {
+      if (!mounted) return;
+      unawaited(_healLiveSyncIfStopped());
+    });
+  }
+
+  /// Restarts the live-sync engine if it stopped while a session is still
+  /// wanted.
+  ///
+  /// The engine can be stopped by things this widget does not control — a
+  /// Rust-side teardown, or the background isolate force-releasing the
+  /// process-global session to reclaim the MLS database. That reclaim is gated
+  /// to only run against an isolate believed gone, but "believed" is a
+  /// judgement, and without a recovery path a wrong call would cost live
+  /// receive until the user relaunched the app. This bounds that to one tick.
+  ///
+  /// Cheap when healthy: `ensureRunning` short-circuits on a running engine.
+  Future<void> _healLiveSyncIfStopped() async {
+    final resubscriber = _liveSyncResubscriber;
+    if (resubscriber == null) return;
+    try {
+      await resubscriber.ensureRunning();
+    } on Object catch (e) {
+      // Never surface the raw error (Rule 8) and never let a failed heal break
+      // the timer — the next tick retries.
+      debugPrint('[MapShell] live-sync heal failed: ${e.runtimeType}');
     }
   }
 
@@ -789,6 +840,7 @@ class _MapShellState extends ConsumerState<MapShell>
     _invitationTimer?.cancel();
     _pruneTimer?.cancel();
     _evolutionTimer?.cancel();
+    _liveSyncHealTimer?.cancel();
 
     // Cancel any in-flight post-circle-add burst window — its short fetch
     // cadence is meaningless once the user has backgrounded, and we must
@@ -923,9 +975,29 @@ class _MapShellState extends ConsumerState<MapShell>
     _bgSharingPausedSub?.close();
     _bgSharingPausedSub = null;
 
+    // Heal BEFORE the debounce, deliberately.
+    //
+    // `_onPaused` cancels `_liveSyncHealTimer` and only `_startTimers()` (below,
+    // after the debounce) re-arms it. So a resume inside the debounce window
+    // used to skip the heal AND skip the re-arm — leaving a foregrounded app
+    // with a dead engine and no periodic backstop at all, indefinitely, until
+    // some resume finally landed more than 30 s after the previous one. The
+    // glance pattern the debounce exists to absorb (shade pull, lock-screen
+    // check, app-switcher peek) is exactly what keeps resumes inside that
+    // window, so the debounce was gating recovery precisely when it was least
+    // likely to recover on its own.
+    //
+    // Safe to run unconditionally: `ensureRunning` short-circuits on a running
+    // engine, so the repeated-resume case costs one `isRunning` read.
+    unawaited(_healLiveSyncIfStopped());
+
     // Debounce rapid resume cycles (e.g. notification shade pull on Android).
     if (_resumeStopwatch.isRunning &&
         _resumeStopwatch.elapsed < const Duration(seconds: 30)) {
+      // Re-arm the heal backstop even on the debounced path: `_onPaused`
+      // cancelled it, and returning here skips the `_startTimers()` that would
+      // otherwise bring it back.
+      _rearmLiveSyncHealTimer();
       return;
     }
     _resumeStopwatch
@@ -1085,6 +1157,7 @@ class _MapShellState extends ConsumerState<MapShell>
     _invitationTimer?.cancel();
     _pruneTimer?.cancel();
     _evolutionTimer?.cancel();
+    _liveSyncHealTimer?.cancel();
     _foregroundHeartbeatTimer?.cancel();
     _coldStartProfileRefreshTimer?.cancel();
     _stopMotionTrigger();

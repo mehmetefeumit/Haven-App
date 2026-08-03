@@ -291,6 +291,70 @@ class LiveSyncResubscriber {
   /// [_fullRestart] instead of a doomed subscribeCircle/unsubscribeCircle
   /// round-trip; the residual TOCTOU race (stopped between this check and
   /// the loop below) still falls back via the existing `on Object catch`.
+  /// Restarts the engine if it has stopped while a session is still wanted.
+  ///
+  /// Returns whether the engine is running when this resolves.
+  ///
+  /// # Why this exists
+  ///
+  /// [_fullRestart] already recovers a stopped engine, but the ONLY thing that
+  /// reaches it is [onCirclesChanged] → [_applyDelta], which runs when the
+  /// accepted-circle set changes. With a stable set — the normal case — an
+  /// engine that dies mid-session is never noticed: the health FFI
+  /// reads an empty session and returns the inert `EngineOff`, so the health
+  /// tick that exists to catch this is disarmed by the very condition it should
+  /// heal, and live location receive stays dead until the app is relaunched.
+  ///
+  /// Engines die for reasons outside this class: a Rust-side teardown, or
+  /// another isolate force-releasing the process-global session to reclaim the
+  /// MLS database. That last one is deliberately possible, so an unbounded
+  /// consequence for it is not acceptable — this is what bounds it.
+  ///
+  /// Idempotent and cheap when healthy: it only acts on an engine that is both
+  /// wanted (a non-empty running set) and not running.
+  ///
+  /// Serialized on `_chain`, so it can never interleave with an apply.
+  Future<bool> ensureRunning() {
+    if (_disposed) return Future<bool>.value(false);
+    // Queue behind any in-flight apply or restart, exactly as
+    // [onCirclesChanged] does. Calling `_fullRestart` directly — as an earlier
+    // version did — is the bug this class's `_chain` exists to prevent:
+    //
+    //   * two restarts could run `stop()`/`start()` concurrently against the
+    //     one shared engine, where the second `start` is silently swallowed by
+    //     `NostrSubscriptionService`'s `if (_engine != null) return`, yet its
+    //     caller still ran `_adoptRunning` with its own group list; and
+    //   * whichever finished LAST won that write, so a heal holding a stale
+    //     snapshot could stamp a smaller set over the newer one a concurrent
+    //     delta had just started, leaving `_running`/`_signature` permanently
+    //     disagreeing with the live engine — which makes the next identical
+    //     snapshot look "changed" and re-issue subscribes forever.
+    //
+    // Two concurrent heals are just as reachable as a heal racing a delta: the
+    // periodic timer and the resume-triggered call share no debounce.
+    final completer = Completer<bool>();
+    _chain = _chain.then((_) async {
+      completer.complete(await _ensureRunningLocked());
+    });
+    return completer.future;
+  }
+
+  /// The body of [ensureRunning], run only from inside `_chain`.
+  Future<bool> _ensureRunningLocked() async {
+    if (_disposed) return false;
+    // Nothing was ever subscribed, so there is no session to restore and no
+    // group set to restore it with. A caller must go through
+    // [onCirclesChanged] first.
+    if (_running.isEmpty) return false;
+    // Re-read under the chain rather than trusting a pre-queue observation: an
+    // apply that ran while this was queued may already have restarted it.
+    if (_engine.isRunning) return true;
+    debugPrint('[LiveSyncResubscriber] engine stopped — self-heal restart');
+    final groups = _running.values.toList();
+    await _fullRestart(groups);
+    return !_disposed && _engine.isRunning;
+  }
+
   Future<void> _applyDelta(Delta delta) async {
     if (_disposed || delta.isEmpty) return;
     if (!_engine.isRunning) {

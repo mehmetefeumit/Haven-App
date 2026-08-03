@@ -30,6 +30,7 @@ class NostrSubscriptionService implements SubscriptionService {
   LiveSyncFfi? _engine;
   StreamSubscription<FfiRelayEvent>? _sub;
 
+
   /// Serializes the async event handlers: each [LiveEventRouter.handleEvent] is
   /// chained after the previous one completes.
   Future<void> _processing = Future<void>.value();
@@ -60,6 +61,7 @@ class NostrSubscriptionService implements SubscriptionService {
         onError: (Object e, StackTrace _) {
           debugPrint('[Subscription] stream error: ${e.runtimeType}');
         },
+        onDone: _onStreamClosed,
         cancelOnError: false,
       );
     } on Object catch (e) {
@@ -74,6 +76,38 @@ class NostrSubscriptionService implements SubscriptionService {
       await stop();
       throw const SubscriptionServiceException('failed to start live session');
     }
+  }
+
+  /// Handles the event stream ending without [stop] having asked for it.
+  ///
+  /// The stream completes when the engine's native bus closes, so this means
+  /// the session ended underneath us — a Rust-side teardown, or another isolate
+  /// force-releasing the process-global session to reclaim the MLS database.
+  ///
+  /// Two things were broken without this. The service kept a non-null `_engine`,
+  /// and [start] early-returns while that is set, so live receive stayed dead
+  /// for the rest of the process — nothing else restarts it, since the only
+  /// existing restart path fires on a change to the accepted-circle set. And the
+  /// dead handle was never disposed, so its `Arc<CircleManager>` clone kept the
+  /// Rule-14 `LiveSessionGuard` registered — which is what a reclaiming isolate
+  /// is waiting on, so the death held the database hostage as well.
+  ///
+  /// Running the normal teardown restores a clean, restartable state and drops
+  /// the handle. It does NOT restart here: this callback cannot know the group
+  /// set or whether a session is still wanted. Recovery is the owner's job (see
+  /// `LiveSyncResubscriber.ensureRunning`).
+  void _onStreamClosed() {
+    // A null `_engine` means WE are the ones closing the bus. [stop] clears the
+    // field synchronously, before the `await engine.stopSession()` that ends the
+    // stream, so its own `onDone` always observes null and this returns — no
+    // re-entrant teardown, and no separate "am I stopping" flag to keep in step.
+    //
+    // That ordering is therefore load-bearing, not incidental: moving the clear
+    // after `stopSession()` would make every deliberate stop re-enter itself.
+    // `a deliberate stop is not mistaken for a death` pins it.
+    if (_engine == null) return;
+    debugPrint('[Subscription] event stream closed unexpectedly — releasing');
+    unawaited(stop());
   }
 
   /// Chains the next event's handler after the in-flight one (serialized). The
@@ -174,6 +208,15 @@ class NostrSubscriptionService implements SubscriptionService {
     // cancel so the load-bearing stopSession()-then-cancel ordering documented
     // above is untouched, and a `start()` after this always builds a fresh
     // engine via `_engineFactory` rather than reusing a disposed handle.
-    engine?.dispose();
+    // Guarded like every other fallible step here. Disposing an FRB opaque
+    // handle right after an ABNORMAL engine death is exactly where a Rust-side
+    // drop could fail, and this method is reached from `unawaited(stop())` in
+    // `_onStreamClosed` — so an escape would surface as an unhandled async
+    // error with no caller able to catch it.
+    try {
+      engine?.dispose();
+    } on Object catch (e) {
+      debugPrint('[Subscription] engine dispose failed: ${e.runtimeType}');
+    }
   }
 }

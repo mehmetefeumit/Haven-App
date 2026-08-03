@@ -909,4 +909,168 @@ void main() {
       expect(joined, isNot(contains('abababab')));
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Self-heal: nothing else notices a stopped engine when the circle set is
+  // stable. `_applyDelta` is the only other route to a restart and it runs on
+  // circle-set changes, while the health FFI reads an empty session and returns
+  // an inert `EngineOff` — disarmed by the very condition it should heal.
+  // -------------------------------------------------------------------------
+  group('ensureRunning', () {
+    test('restarts a stopped engine with the last known group set', () async {
+      final circles = [_circle(tag: 1), _circle(tag: 2)];
+      final engine = _RecordingEngine();
+      final resub = _resub(engine, circles);
+      await engine.stop();
+      engine.startCalls.clear();
+
+      final healthy = await resub.ensureRunning();
+
+      expect(healthy, isTrue);
+      expect(
+        engine.startCalls,
+        hasLength(1),
+        reason: 'a stopped engine with a wanted session must be restarted',
+      );
+      expect(
+        engine.startCalls.single.groups.map((g) => _hexOf(g.nostrGroupId)).toSet(),
+        _runningMap(circles).keys.toSet(),
+        reason: 'it must come back with the SAME groups, or the heal silently '
+            'drops circles from receive',
+      );
+      resub.dispose();
+    });
+
+    test('a running engine is left alone', () async {
+      final engine = _RecordingEngine();
+      final resub = _resub(engine, [_circle(tag: 1)]);
+      engine.startCalls.clear();
+
+      expect(await resub.ensureRunning(), isTrue);
+      expect(
+        engine.startCalls,
+        isEmpty,
+        reason: 'this runs on a timer; restarting a healthy engine would tear '
+            'down a working session on every tick',
+      );
+      resub.dispose();
+    });
+
+    test('does nothing when no session was ever wanted', () async {
+      // An empty running set means nothing was subscribed, so there is no group
+      // set to restore and a "restart" would start an empty session.
+      final engine = _RecordingEngine();
+      final resub = _resub(engine, const []);
+      await engine.stop();
+      engine.startCalls.clear();
+
+      expect(await resub.ensureRunning(), isFalse);
+      expect(engine.startCalls, isEmpty);
+      resub.dispose();
+    });
+
+    test('does nothing after dispose', () async {
+      // No start-after-dispose: a heal racing logout must not resurrect a
+      // session past teardown. Enforced in depth — `_fullRestart` guards this
+      // too, so `ensureRunning`s own early return is consistency with the
+      // class idiom rather than the sole protection. This pins the BEHAVIOUR,
+      // which is what must not regress if either guard moves.
+      final engine = _RecordingEngine();
+      final resub = _resub(engine, [_circle(tag: 1)])..dispose();
+      await engine.stop();
+      engine.startCalls.clear();
+
+      expect(await resub.ensureRunning(), isFalse);
+      expect(engine.startCalls, isEmpty);
+    });
+
+    test('is serialized against an in-flight apply, not run alongside it',
+        () async {
+      // THE race this must not lose. `_fullRestart` overwrites `_running` and
+      // `_signature` unconditionally when it finishes, so if a heal holding a
+      // STALE snapshot ran concurrently with a delta that adds a circle, the
+      // last writer would win — and if that is the heal, the bookkeeping ends
+      // up describing a smaller set than the engine is actually running. Every
+      // later identical snapshot then looks "changed", re-issuing subscribes
+      // forever.
+      final startGate = Completer<void>();
+      final engine = _RecordingEngine(startGate: startGate.future);
+      final before = [_circle(tag: 1)];
+      final after = [_circle(tag: 1), _circle(tag: 2)];
+      final resub = _resub(engine, before, debounce: Duration.zero);
+
+      // Kill the engine, then start an apply that will restart with the LARGER
+      // set. It suspends inside `start()` on the gate.
+      await engine.stop();
+      engine.startCalls.clear();
+      resub.onCirclesChanged(after);
+      await pumpEventQueue();
+
+      // The heal fires while that apply is still suspended.
+      final healing = resub.ensureRunning();
+      await pumpEventQueue();
+
+      expect(
+        engine.startCalls,
+        hasLength(1),
+        reason: 'the heal must QUEUE behind the in-flight restart, not launch '
+            'a second concurrent stop/start against the shared engine',
+      );
+
+      startGate.complete();
+      await healing;
+      await pumpEventQueue();
+
+      // The engine is running the larger set, and the bookkeeping agrees. A
+      // stale-snapshot overwrite shows up here as the smaller set.
+      expect(
+        engine.startCalls.first.groups
+            .map((g) => _hexOf(g.nostrGroupId))
+            .toSet(),
+        _runningMap(after).keys.toSet(),
+      );
+      expect(
+        LiveSyncResubscriber.signatureForGroups(
+          engine.startCalls.first.groups,
+        ),
+        _sigOf(after),
+        reason: 'the heal must not stamp a stale group set over the newer one',
+      );
+      resub.dispose();
+    });
+
+    test('two concurrent heals restart the engine once', () async {
+      // The periodic timer and the resume-triggered heal share no debounce, so
+      // this pair is as reachable as the apply race above.
+      final engine = _RecordingEngine();
+      final resub = _resub(engine, [_circle(tag: 1)]);
+      await engine.stop();
+      engine.startCalls.clear();
+
+      final results = await Future.wait<bool>([
+        resub.ensureRunning(),
+        resub.ensureRunning(),
+      ]);
+
+      expect(results, everyElement(isTrue));
+      expect(
+        engine.startCalls,
+        hasLength(1),
+        reason: 'the second heal must observe the first one already restarted '
+            'the engine and short-circuit',
+      );
+      resub.dispose();
+    });
+
+    test('a failed restart reports unhealthy rather than throwing', () async {
+      // It is driven from a periodic timer; throwing would kill the timer and
+      // remove the only recovery path there is.
+      final engine = _RecordingEngine(throwOnStart: true);
+      final resub = _resub(engine, [_circle(tag: 1)]);
+      await engine.stop();
+
+      expect(await resub.ensureRunning(), isFalse);
+      resub.dispose();
+    });
+  });
 }
