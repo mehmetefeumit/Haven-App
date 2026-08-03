@@ -9,6 +9,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/constants/profile_refresh_tiers.dart';
+import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
@@ -16,6 +17,9 @@ import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/member_profile_refresh_provider.dart';
 import 'package:haven/src/rust/api.dart';
+import 'package:haven/src/services/mls_session_handover.dart';
+import 'package:haven/src/services/background_location_task.dart';
+import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/catchup_service.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
@@ -95,6 +99,25 @@ final circleServiceProvider = Provider<CircleService>((ref) {
     // `initialize()` call rather than held (Security Rule 9).
     identitySecretBytesProvider: () =>
         ref.read(identityNotifierProvider.notifier).getSecretBytes(),
+    // Recovery for the case where the Android foreground service already holds
+    // the MLS database's Rule-14 guard — it can win the race on a cold
+    // auto-restart, before any Activity exists, and nothing otherwise makes it
+    // let go. Wired only here, in the UI isolate: the background isolate is
+    // usually the holder.
+    sessionHandover: (dataDir) async =>
+        await requestSessionHandover(
+          dataDir: dataDir,
+          // The process-local registry, never an error string — Haven's FFI
+          // errors interpolate remote-authored text, so classifying them would
+          // let a circle admin stop the user's background service at will.
+          isSessionLive: (dir) => isSessionLive(dataDir: dir),
+          stopService: BackgroundLocationManager.stopService,
+          restartService: () => BackgroundLocationManager.startService(
+            callback: backgroundCallback,
+          ),
+          backgroundSharingEnabled: ref.read(backgroundSharingProvider),
+        ) ==
+        HandoverOutcome.released,
   );
 });
 

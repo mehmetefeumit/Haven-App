@@ -66,7 +66,9 @@ class NostrCircleService implements CircleService {
     KeyringInitializer? keyringInitializer,
     bool enableLeaverBackstop = false,
     Future<List<int>> Function()? identitySecretBytesProvider,
+    Future<bool> Function(String dataDir)? sessionHandover,
   }) : _relayService = relayService,
+       _sessionHandover = sessionHandover,
        _dataDirectoryProvider =
            dataDirectoryProvider ?? const PathProviderDataDirectory(),
        _keyringInitializer = keyringInitializer ?? initKeyringStore,
@@ -94,6 +96,10 @@ class NostrCircleService implements CircleService {
        _keyringInitializer = initKeyringStore,
        _enableLeaverBackstop = false,
        _identitySecretBytesProvider = null,
+       // The background isolate is usually the HOLDER of the guard, so a
+       // handover would be asking the service to stop itself. It also never
+       // opens a manager here — one is injected.
+       _sessionHandover = null,
        _manager = injectedManager,
        _initialized = true;
 
@@ -110,6 +116,12 @@ class NostrCircleService implements CircleService {
   /// `null` for the background-isolate / injected-manager constructor, which
   /// never calls [initialize] (the manager is already open).
   final Future<List<int>> Function()? _identitySecretBytesProvider;
+
+  /// Recovers a Rule-14 guard held by another isolate, returning whether it was
+  /// released. Null disables recovery — correct for the background isolate
+  /// (which is usually the HOLDER, so stopping the service would be asking it
+  /// to stop itself) and for tests that inject a manager directly.
+  final Future<bool> Function(String dataDir)? _sessionHandover;
 
   /// Whether this instance runs the REV-1 leaver backstop (driver 2) after a
   /// `propose_leave`.
@@ -200,12 +212,34 @@ class NostrCircleService implements CircleService {
         );
       }
       final dataDir = await _dataDirectoryProvider.getDataDirectory();
-      // Re-fetched fresh (never held) — Security Rule 9.
-      final identitySecretBytes = await secretBytesProvider();
-      final manager = await CircleManagerFfi.newInstance(
-        dataDir: dataDir,
-        identitySecretBytes: identitySecretBytes,
+      // Re-fetched fresh AND scrubbed on the way out — Security Rule 9. Dart
+      // has no `zeroize`, so `withFreshSecret`'s `finally` is what keeps the
+      // raw nsec from being left for a GC that relocates rather than erases.
+      Future<CircleManagerFfi> open() => withFreshSecret(
+        secretBytesProvider,
+        (secret) => CircleManagerFfi.newInstance(
+          dataDir: dataDir,
+          identitySecretBytes: secret,
+        ),
       );
+
+      CircleManagerFfi manager;
+      try {
+        manager = await open();
+      } on Object {
+        // The open can fail because another isolate in this process holds the
+        // Rule-14 guard — in practice the Android foreground service, which can
+        // win the race on a cold auto-restart before any Activity exists.
+        // Retrying alone never helps: every retry hits the same held guard, and
+        // nothing makes the service let go, so the user is left with no
+        // circles, no map, no publishing and no receiving until they toggle
+        // background sharing off or the process dies.
+        //
+        // ONE recovery attempt, then give up and report the original failure.
+        final handover = _sessionHandover;
+        if (handover == null || !await handover(dataDir)) rethrow;
+        manager = await open();
+      }
       // M10 (H1 in-flight race): the service may have been wiped/latched while
       // this init was suspended at the awaited open above. If so, do NOT adopt
       // the just-(re)created handle — a caller receiving it would operate on a
