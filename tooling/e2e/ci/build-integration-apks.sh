@@ -127,6 +127,10 @@ declare -a DEFAULT_TARGETS=(
   "integration_test/encryption_pipeline_test.dart"
   "integration_test/circle_service_remove_member_test.dart"
   "integration_test/circle_admin_leave_ghost_test.dart"
+  # Forced Rule-14 contention. Once the reclaim and handover keep both
+  # isolates unstuck, nothing else drives a contended acquire, so the
+  # fail-closed property they all rest on could rot unnoticed.
+  "integration_test/session_guard_contention_test.dart"
 )
 
 declare -a TARGETS

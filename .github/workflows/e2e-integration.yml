@@ -1,6 +1,6 @@
 # Reusable workflow: Android non-E2E integration-test lane (backlog CI-4).
 #
-# Drives the five Flutter integration tests under haven/integration_test/
+# Drives the Flutter integration tests under haven/integration_test/
 # that are NOT part of the consolidated functional flow
 # (`e2e_combined.dart`, owned by e2e-android.yml). Before this lane
 # existed they ran NOWHERE in CI — present in the tree, green by
@@ -15,6 +15,7 @@
 #   integration_test/encryption_pipeline_test.dart
 #   integration_test/circle_service_remove_member_test.dart
 #   integration_test/circle_admin_leave_ghost_test.dart
+#   integration_test/session_guard_contention_test.dart  (Rule-14 contention)
 #
 # # Honest skips, not failures
 #
@@ -101,7 +102,7 @@ jobs:
         working-directory: haven
         run: flutter pub get
 
-      # Build ALL SIX target APKs (smoke pre-flight + five) BEFORE the emulator boots, for the
+      # Build ALL target APKs (smoke pre-flight + the rest) BEFORE the emulator boots, for the
       # same reason e2e-android builds e2e_combined up front: the
       # Rust-NDK + Gradle peak must not coincide with a resident
       # emulator. Each target is a separate --target build (the Rust
@@ -117,8 +118,8 @@ jobs:
         working-directory: haven
         # Bounds a hung/stalled build so it fails fast rather than
         # burning toward the job timeout — symmetric with the build
-        # bound in e2e-android.yml. Six builds need more than one.
-        timeout-minutes: 40
+        # bound in e2e-android.yml. Several builds need more than one.
+        timeout-minutes: 45
         run: bash ../tooling/e2e/ci/build-integration-apks.sh
 
       - name: Enable KVM group perms
@@ -197,7 +198,7 @@ jobs:
           # multi-line script: in its own sh -c, which would drop the
           # loop's shell state. All real logic is in the checked-in
           # script.
-          script: bash tooling/e2e/ci/run-integration-tests.sh integration_test/e2e/smoke_test.dart=/tmp/integration-apks/smoke_test.apk integration_test/app_test.dart=/tmp/integration-apks/app_test.apk integration_test/keyring_test.dart=/tmp/integration-apks/keyring_test.apk integration_test/encryption_pipeline_test.dart=/tmp/integration-apks/encryption_pipeline_test.apk integration_test/circle_service_remove_member_test.dart=/tmp/integration-apks/circle_service_remove_member_test.apk integration_test/circle_admin_leave_ghost_test.dart=/tmp/integration-apks/circle_admin_leave_ghost_test.apk
+          script: bash tooling/e2e/ci/run-integration-tests.sh integration_test/e2e/smoke_test.dart=/tmp/integration-apks/smoke_test.apk integration_test/app_test.dart=/tmp/integration-apks/app_test.apk integration_test/keyring_test.dart=/tmp/integration-apks/keyring_test.apk integration_test/encryption_pipeline_test.dart=/tmp/integration-apks/encryption_pipeline_test.apk integration_test/circle_service_remove_member_test.dart=/tmp/integration-apks/circle_service_remove_member_test.apk integration_test/circle_admin_leave_ghost_test.dart=/tmp/integration-apks/circle_admin_leave_ghost_test.apk integration_test/session_guard_contention_test.dart=/tmp/integration-apks/session_guard_contention_test.apk
 
       - name: Collect strfry logs
         if: always()
