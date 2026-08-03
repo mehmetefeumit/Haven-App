@@ -190,14 +190,14 @@ mod tests {
             let base = ProfileMetadata::from_metadata(base_md);
 
             let edits = ProfileEdits {
-                display_name: edit_display.clone(),
-                about: edit_about.clone(),
+                display_name: edit_display,
+                about: edit_about,
                 picture: None,
             };
             let merged = merge_edits(&base, &edits);
 
             // Serialize→parse to prove wire round-trip stability.
-            let reparsed = Metadata::from_json(&merged.as_metadata().as_json())
+            let reparsed = Metadata::from_json(merged.as_metadata().as_json())
                 .expect("merged metadata must round-trip");
 
             // Non-edited modeled fields are value-equal.

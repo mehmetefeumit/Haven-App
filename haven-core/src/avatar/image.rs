@@ -342,6 +342,10 @@ mod tests {
 
     /// Builds a synthetic in-memory PNG of the given size filled with a
     /// gradient so it has some entropy (and therefore some encoded size).
+    // `x % 256` and `(x + y) % 256` are in `0..=255` by construction, so the
+    // `u8` cast cannot truncate. A `try_from` here would add a fallible path
+    // that no input can reach, inside a pixel loop.
+    #[allow(clippy::cast_possible_truncation)]
     fn synthetic_png(w: u32, h: u32) -> Vec<u8> {
         let mut img = RgbImage::new(w, h);
         for (x, y, px) in img.enumerate_pixels_mut() {
@@ -395,6 +399,8 @@ mod tests {
     }
 
     /// Encodes a plain JPEG (no metadata) of the given size.
+    // See `synthetic_png`: `x % 256` is in `0..=255`, so the cast is exact.
+    #[allow(clippy::cast_possible_truncation)]
     fn plain_jpeg(w: u32, h: u32) -> Vec<u8> {
         let mut img = RgbImage::new(w, h);
         for (x, y, px) in img.enumerate_pixels_mut() {
@@ -409,7 +415,7 @@ mod tests {
 
     /// Builds a little-endian TIFF/Exif payload (the bytes that follow the
     /// "Exif\0\0" identifier in an APP1 segment) containing a GPS IFD with one
-    /// real GPS tag (GPSLatitudeRef = "N"). Hand-rolled so we control exactly
+    /// real GPS tag (`GPSLatitudeRef` = "N"). Hand-rolled so we control exactly
     /// what EXIF the *input* carries.
     fn exif_payload_with_gps() -> Vec<u8> {
         let mut p: Vec<u8> = Vec::new();
@@ -548,11 +554,12 @@ mod tests {
 
     #[test]
     fn canonical_output_is_opaque_jpeg_not_input_png() {
+        const PNG_MAGIC: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
         let png = synthetic_png(256, 256);
         let processed = process_own_avatar(&png).expect("pipeline");
         // Output must be JPEG, not the input PNG container.
         assert!(is_jpeg(&processed.canonical));
-        const PNG_MAGIC: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         assert!(processed.canonical.len() < 8 || processed.canonical[..8] != PNG_MAGIC);
     }
 
@@ -622,6 +629,8 @@ mod tests {
     }
 
     #[test]
+    // See `synthetic_png`: `x % 256` is in `0..=255`, so the cast is exact.
+    #[allow(clippy::cast_possible_truncation)]
     fn webp_input_is_accepted_and_recoded_to_jpeg() {
         // Encode a small WebP (lossless) and confirm the pipeline accepts it
         // and emits a JPEG canonical.
@@ -698,8 +707,11 @@ mod tests {
         // observable (a square base would hide the 90/270 width/height swap).
         let base = plain_jpeg(40, 24);
 
-        for v in 1u16..=8 {
-            let jpeg = inject_exif_app1(&base, &exif_payload_with_orientation(v));
+        // `u8`, not `u16`: `Orientation::from_exif` takes a `u8`, and the EXIF
+        // payload builder widens. Iterating as `u8` removes a narrowing cast the
+        // range already made unreachable.
+        for v in 1u8..=8 {
+            let jpeg = inject_exif_app1(&base, &exif_payload_with_orientation(u16::from(v)));
 
             // Our pipeline's decode: orientation read from EXIF and baked in.
             let got = decode_under_limits(&jpeg, DecodeLimits::own())
@@ -710,7 +722,7 @@ mod tests {
             // sides decode the identical base JPEG and apply the identical
             // transform — there is no second lossy re-encode on either side.
             let mut expected = image::load_from_memory(&base).expect("load base");
-            expected.apply_orientation(Orientation::from_exif(v as u8).expect("valid exif"));
+            expected.apply_orientation(Orientation::from_exif(v).expect("valid exif"));
 
             assert_eq!(
                 got.dimensions(),
@@ -767,13 +779,17 @@ mod tests {
             .unwrap()
             .to_rgb8();
         assert_eq!(a.dimensions(), b.dimensions());
+        // Exact `u32`→`f64` widening rather than `len() as f64`: a canonical
+        // avatar is at most a few million subpixels, so the conversion is
+        // lossless and the fallible step is a real (if unreachable) check.
+        let subpixels = u32::try_from(a.as_raw().len()).expect("canonical avatar fits in u32");
         let mean: f64 = a
             .as_raw()
             .iter()
             .zip(b.as_raw())
             .map(|(&x, &y)| f64::from((i32::from(x) - i32::from(y)).unsigned_abs()))
             .sum::<f64>()
-            / a.as_raw().len() as f64;
+            / f64::from(subpixels);
         assert!(
             mean < 6.0,
             "mean per-channel abs diff {mean} too high — orientation not applied?"
@@ -864,12 +880,12 @@ mod tests {
 
     #[test]
     fn inbound_strips_trailing_polyglot_bytes_via_reencode() {
+        const TRAILER: &[u8] = b"TRAILING-POLYGLOT-PAYLOAD-home-address-1-secret-st";
+
         // A malicious member could append a trailing payload after a valid
         // image (polyglot). The inbound re-encode must produce a clean canonical
         // JPEG that does NOT carry the trailing garbage.
-        let base = plain_jpeg(640, 480);
-        const TRAILER: &[u8] = b"TRAILING-POLYGLOT-PAYLOAD-home-address-1-secret-st";
-        let mut polyglot = base.clone();
+        let mut polyglot = plain_jpeg(640, 480);
         polyglot.extend_from_slice(TRAILER);
         // The crafted input genuinely carries the trailing payload.
         assert!(

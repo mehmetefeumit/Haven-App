@@ -61,14 +61,20 @@ jobs:
   e2e_relay_customization:
     name: e2e_relay_customization
     runs-on: ubuntu-latest
-    # Three targets, each: reset BOTH relays + install + grant + drive.
+    # Four targets, each: reset BOTH relays + install + grant + drive.
     # Each target is far cheaper than the full e2e_combined flow, but
-    # three of them plus per-target double-relay resets add up. An
-    # all-green run is observed at ~23 min end-to-end (APK builds +
-    # emulator boot + three drives), so 45 minutes stays a comfortable
-    # envelope. The per-target drive is bounded by the emulator step's
-    # own timeout-minutes below.
-    timeout-minutes: 45
+    # four of them plus per-target double-relay resets add up.
+    #
+    # Was 45, and that was the thinnest job envelope in the repo: across 26
+    # successful runs (ci.yml, 2026-07/08) this job ran p95 21 min but MAX 40
+    # min — 89% of its own cap on a run that went GREEN. (The 40-minute run is
+    # explained: one target's cold-attach wedged until it hit the per-drive
+    # timeout, and run-relay-customization.sh retried it, as designed.) A cap
+    # 12% above the observed green worst case is a false-red waiting to
+    # happen, so this is 60 — 1.5x the observed max. Raising it costs nothing
+    # on a green run (jobs bill actual time) and the drive step's own 25m
+    # deadline below is what now bounds a hang, at less than half this number.
+    timeout-minutes: 60
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
       HAVEN_E2E_RELAY_2: ws://10.0.2.2:7778
@@ -216,6 +222,15 @@ jobs:
 
       - name: Create AVD snapshot
         if: steps.avd-cache.outputs.cache-hit != 'true'
+        # This step's entire job is booting an emulator, and until 2026-08-03 it
+        # had no bound of any kind — a wedged boot here ran to the JOB cap,
+        # which SIGKILLs the runner before any if: failure() step, so the lane
+        # died slow and with no artifacts. Measured across 23 successful runs
+        # (ci.yml, 2026-07/08) the snapshot takes 91-130 s; 15 min is ~7x the
+        # observed max, so it can only ever fire on a genuine wedge. The
+        # emulator-boot-timeout below is the action's own inner bound (7 min,
+        # matching the drive steps) and fires first with the action's message.
+        timeout-minutes: 15
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -227,6 +242,9 @@ jobs:
             -no-snapshot-save -no-window -gpu swiftshader_indirect
             -noaudio -no-boot-anim -camera-back none
           disable-animations: false
+          # Bound the boot itself (the only thing this step does) so a wedged
+          # emulator fails inside the step rather than at the step cap above.
+          emulator-boot-timeout: 420
           script: echo "Generated AVD snapshot for caching."
 
       # Start BOTH relays BEFORE the emulator boots. Starting them here
@@ -260,9 +278,22 @@ jobs:
       # run-relay-customization.sh pull the same pinned image (for both
       # R1 and R2).
       #
-      # timeout-minutes: 35 bounds a hung drive across all three targets so
-      # GitHub kills THIS step (not the runner), letting the
-      # if: always() / if: failure() diagnostic + artifact steps run.
+      # BOUNDS. Three of them, innermost first:
+      #   10m  per-target `flutter drive` (HAVEN_DRIVE_TIMEOUT, set in
+      #        run-relay-customization.sh) — names the target that hung.
+      #   25m  this step's inner deadline (run-with-deadline.sh below) — the
+      #        AGGREGATE bound across all four targets, and the one that
+      #        actually reaps.
+      #   35m  this step's timeout-minutes = 25 + 1 (kill grace) + 7
+      #        (emulator-boot-timeout), a belt over the deadline.
+      # Sizing evidence: 34 successful runs (ci.yml, 2026-07/08) put the whole
+      # step at p50 5.8 / p95 6.5 min. The MAX was 25.8 min — a green run in
+      # which one target wedged on cold attach, burned the then-20m per-drive
+      # default, and passed on the designed retry. That single number is why
+      # the per-drive bound moved to 10m in run-relay-customization.sh: at 20m
+      # the lane's own retry could not complete inside any deadline that also
+      # sits under the step cap. With 10m the same shape costs ~16 min, which
+      # fits under 25 comfortably.
       - name: Run relay-customization tests on the emulator
         timeout-minutes: 35
         uses: reactivecircus/android-emulator-runner@v2
@@ -278,11 +309,14 @@ jobs:
             -no-snapshot-save -no-window -gpu swiftshader_indirect
             -noaudio -no-boot-anim -camera-back none
           disable-animations: true
+          # Bound the boot (which happens BEFORE `script:` runs, and is
+          # therefore outside the deadline below).
+          emulator-boot-timeout: 420
           # Single bash invocation — the action runs each line of a
           # multi-line script: in its own sh -c, which would drop the
           # loop's shell state. All real logic is in the checked-in
           # script.
-          script: bash tooling/e2e/ci/run-relay-customization.sh integration_test/relay_customization_publish_test.dart=/tmp/relay-custom-apks/relay_customization_publish_test.apk integration_test/relay_customization_trigger_test.dart=/tmp/relay-custom-apks/relay_customization_trigger_test.apk integration_test/relay_resync_convergence_test.dart=/tmp/relay-custom-apks/relay_resync_convergence_test.apk integration_test/relay_two_plane_privacy_test.dart=/tmp/relay-custom-apks/relay_two_plane_privacy_test.apk
+          script: bash tooling/e2e/ci/run-with-deadline.sh 25m "e2e-relay-customization drive (4 targets)" -- bash tooling/e2e/ci/run-relay-customization.sh integration_test/relay_customization_publish_test.dart=/tmp/relay-custom-apks/relay_customization_publish_test.apk integration_test/relay_customization_trigger_test.dart=/tmp/relay-custom-apks/relay_customization_trigger_test.apk integration_test/relay_resync_convergence_test.dart=/tmp/relay-custom-apks/relay_resync_convergence_test.apk integration_test/relay_two_plane_privacy_test.dart=/tmp/relay-custom-apks/relay_two_plane_privacy_test.apk
 
       # Collect logs from BOTH relays so triage can confirm which relay
       # an event did (or didn't) land on — the whole point of the lane.

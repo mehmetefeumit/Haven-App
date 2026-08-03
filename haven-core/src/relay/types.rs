@@ -196,7 +196,7 @@ mod tests {
             status: RelayStatus::Connected,
             last_seen: Some(1_234_567_890),
         };
-        let debug_str = format!("{:?}", status);
+        let debug_str = format!("{status:?}");
         assert!(debug_str.contains("RelayConnectionStatus"));
         assert!(debug_str.contains("wss://relay.example.com"));
     }

@@ -38,8 +38,18 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
+      # `--all-targets`, matching the rust_builder job below. Bare `cargo clippy`
+      # selects --lib/--bins only, so this crate's `#[cfg(test)]` modules and its
+      # 20 `tests/*.rs` integration targets were never linted — 123 findings had
+      # accumulated there, including 24 discarded `#[must_use]` `StopOutcome`s
+      # (a discarded `TimedOut` reports a drain that did not happen).
+      #
+      # `--all-targets` also pulls in dev-dependencies, which turns on the
+      # `test-utils` feature — so it lints the `#[cfg(feature = "test-utils")]`
+      # lib surface (e.g. `SessionManager::new_unencrypted`) that bare clippy
+      # never compiles either.
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       # `set -o pipefail` so `tee` cannot mask a failing cargo exit code —
       # GitHub's default shell is `bash -e {0}`, which does NOT set it.

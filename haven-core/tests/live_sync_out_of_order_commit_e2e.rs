@@ -37,7 +37,7 @@ use tempfile::TempDir;
 
 /// A genuine MLS circle: `admin` (creator) + `members`, each with its own on-disk
 /// (unencrypted) MLS store. The `TempDir`s are retained so a receiving member's
-/// SQLite files survive a manager teardown/reopen (TEST 1's restart proof).
+/// `SQLite` files survive a manager teardown/reopen (TEST 1's restart proof).
 struct BuiltCircle {
     admin: CircleManager,
     admin_keys: Keys,
@@ -226,7 +226,9 @@ async fn future_epoch_app_message_buffers_then_releases_across_a_restart() {
     );
     // The buffered location is delivered — either folded into this batch, or on a
     // follow-up ingest of the same (idempotent) message after convergence.
-    let delivered = first_location(&released).or_else(|| None);
+    // (Was `.or_else(|| None)` — an exact no-op on any `Option`, so it read as a
+    // fallback that never existed. Dropped; the real fallback is the `else` arm.)
+    let delivered = first_location(&released);
     let (glat, glon) = if let Some(p) = delivered {
         p
     } else {

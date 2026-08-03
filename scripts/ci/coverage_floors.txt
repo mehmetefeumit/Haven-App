@@ -1,0 +1,196 @@
+# Per-path coverage floors — the minimum each security- or privacy-critical
+# path may fall to, and the level past which it must be re-pinned.
+#
+# Enforced by scripts/ci/check_coverage_floors.sh (see that file's header for
+# the mechanism, the ratchet, and why a stale entry is a hard failure).
+#
+# Format, one entry per line:
+#
+#     <stack>|<path>|<floor-percent>[|<ratchet-margin>]
+#
+#   stack     rust (haven-core) | flutter (haven) — reconciled independently,
+#             so a rust row is never reported stale while checking flutter.
+#   path      Relative to the STACK ROOT. A trailing `/` means "directory" and
+#             AGGREGATES every file beneath it; anything else is a glob over the
+#             file path. Directory and file rows deliberately overlap: the
+#             directory catches slow layer-wide drift, the file row catches one
+#             critical file being hollowed out while its neighbours compensate.
+#   floor     Whole percent. Line coverage — the same metric the 80%/50%
+#             aggregate gates use, read from the same lcov report.
+#   margin    Optional. Points above the floor at which the run fails asking for
+#             a re-pin. Defaults to 5; raise it only for a path so small that
+#             one line is worth several points.
+#
+# Regenerate every row against a fresh report with:
+#   scripts/ci/check_coverage_floors.sh --list rust    haven-core/coverage.lcov
+#   scripts/ci/check_coverage_floors.sh --list flutter haven/coverage/lcov.info
+#
+# ===========================================================================
+# LOWERING A FLOOR IS NOT A FIX.
+#
+# These numbers exist because the 80%/50% gates are AGGREGATES, and an
+# aggregate is a budget the whole crate shares. When this file was pinned,
+# haven-core had ~2290 lines of slack over its 80% gate and haven had ~1588
+# over its 50% — enough for any single file here to fall to zero with the gate
+# still green. A row that goes red is telling you a specific proof stopped
+# running; editing the number down converts a measured regression into a
+# permitted one and leaves nothing behind to notice it again.
+#
+# The legitimate reasons to EDIT a number are: the ratchet asked you to raise
+# it (do so, using the value in the failure message), or the path genuinely
+# moved (update the pattern — do not delete the row, an entry matching nothing
+# fails on purpose).
+# ===========================================================================
+#
+# All values below were measured on 2026-08-03 from
+#   cargo llvm-cov --all-features --lcov --ignore-filename-regex 'frb_generated'
+#   flutter test --coverage
+# and pinned at floor(measured) - 2, or exactly 100 where the path is fully
+# covered (see the guard header: the margin rule cannot ratchet a 100% path).
+
+
+# ===========================================================================
+# haven-core (Rust) — aggregate at pinning time: 90.74% (19419/21400)
+# ===========================================================================
+
+# --- MLS: the protocol core -------------------------------------------------
+# Every Marmot group operation. Security Rules 1-5 and 13 live here: key
+# separation, per-message ephemeral keys, unsigned kind-444 welcomes, group-ID
+# privacy, exporter-secret lifecycle, publish-before-apply. welcome.rs is pinned
+# at 100 because Rule 3 (kind 444 MUST remain unsigned) has no partial form.
+rust|src/nostr/mls/|89                       # measured 91.90% (1418/1543)
+rust|src/nostr/mls/manager.rs|90             # measured 92.32% (697/755)
+rust|src/nostr/mls/storage.rs|83             # measured 85.34% (297/348)
+rust|src/nostr/mls/signer.rs|94              # measured 96.47% (82/85)
+rust|src/nostr/mls/welcome.rs|100            # measured 100.00% (124/124)
+
+# --- Nostr crypto and event construction ------------------------------------
+# encryption/ is NIP-44; keys.rs and identity/ hold the identity keypair and its
+# storage (Security Rules 1, 6, 7); giftwrap.rs is the three-layer NIP-59
+# wrapper that carries welcomes. tags.rs is pinned at 100 because it encodes the
+# kind-445 tag allowlist — `h` only for commits, `h` + NIP-40 expiration for
+# application messages, nothing else — and a tag leaking past it is a metadata
+# disclosure no aggregate would flinch at.
+rust|src/nostr/encryption/|96                # measured 98.41% (124/126)
+rust|src/nostr/identity/|92                  # measured 94.43% (661/700)
+rust|src/nostr/keys.rs|95                    # measured 97.84% (136/139)
+rust|src/nostr/giftwrap.rs|87                # measured 89.90% (187/208)
+rust|src/nostr/event.rs|89                   # measured 91.72% (454/495)
+rust|src/nostr/tags.rs|100                   # measured 100.00% (102/102)
+
+# --- Key and database custody ----------------------------------------------
+# Chooses the platform keyring backend and gates SQLCipher key handling.
+rust|src/keyring_policy.rs|84                # measured 86.00% (172/200)
+
+# --- Circles: group state and its encrypted store ---------------------------
+rust|src/circle/|89                          # measured 91.03% (7710/8470)
+rust|src/circle/storage.rs|91                # measured 93.74% (2335/2491)
+rust|src/circle/leave.rs|93                  # measured 95.33% (102/107)
+
+# --- Location: the payload the whole app exists to protect ------------------
+# ttl.rs derives the NIP-40 expiration from group component 0x8005; nostr.rs
+# encodes the location event. nostr.rs is the weakest link in this group and is
+# pinned low deliberately — the number is the evidence, not an endorsement.
+rust|src/location/|89                        # measured 91.65% (450/491)
+rust|src/location/ttl.rs|92                  # measured 94.70% (125/132)
+rust|src/location/nostr.rs|50                # measured 52.54% (31/59)
+
+# --- Public profile plane (kind 0 + Blossom) --------------------------------
+# The Rule-10 exception. Its privacy boundary — HTTPS-only Blossom, anti-SSRF
+# download filter, no group IDs in paths, identity-key-only signing — is
+# statically guarded by check_profile_privacy_boundaries.sh; these floors keep
+# the RUNTIME proofs of that boundary executing. avatar/image.rs is the EXIF/GPS
+# strip performed before upload.
+rust|src/profile/|90                         # measured 92.49% (2095/2265)
+rust|src/profile/blossom.rs|88               # measured 90.43% (718/794)
+rust|src/profile/fetch.rs|93                 # measured 95.79% (410/428)
+rust|src/avatar/image.rs|91                  # measured 93.50% (475/508)
+
+# --- Relay plane -----------------------------------------------------------
+# publishers.rs carries the OK-ack accounting Security Rule 13 depends on
+# ("acked" must never mean "sent"). catchup.rs and auto_commit.rs are the two
+# genuinely thin files in haven-core; catchup.rs at 28.50% is also where the
+# open `limit(512)` saturation defect lives, so its floor is the audit trail for
+# how little of it is exercised.
+rust|src/relay/live_sync/|91                 # measured 93.94% (2479/2639)
+rust|src/relay/live_sync/session.rs|90       # measured 92.95% (1476/1588)
+rust|src/relay/publishers.rs|87              # measured 89.38% (261/292)
+rust|src/relay/maintenance/|96               # measured 98.01% (640/653)
+rust|src/relay/manager.rs|69                 # measured 71.59% (718/1003)
+rust|src/relay/auto_commit.rs|48             # measured 50.85% (30/59)
+rust|src/relay/catchup.rs|26                 # measured 28.50% (59/207)
+
+# --- Encrypted tile cache ---------------------------------------------------
+# Must never persist the Stadia key (Security Rule 6/10); the static half is
+# check_no_tile_cache_secrets.sh.
+rust|src/tiles/|92                           # measured 94.67% (640/676)
+
+
+# ===========================================================================
+# haven (Flutter) — aggregate at pinning time: 64.82% (6944/10712)
+# ===========================================================================
+
+# --- The service layer as a whole -------------------------------------------
+# 48.96% — BELOW the 50% package gate, inside a package that gates green,
+# because the widget and provider suites pay for it out of the shared budget.
+# This single row is the clearest statement of why A5 exists.
+flutter|lib/src/services/|46                 # measured 48.96% (1317/2690)
+
+# --- Secret handling and MLS session custody --------------------------------
+# fresh_secret.dart implements Security Rule 9 (Dart has no zeroize, so secrets
+# are re-fetched per use instead of held) and is pinned at 100.
+# mls_session_handover.dart and foreground_liveness_probe.dart are the Rule-14
+# single-session machinery: the latched pause-time handoff and the liveness
+# responder that decides whether the foreground service may reclaim a session.
+# Both are P0-1's fix surface, and 60.98% is how much of the probe runs today.
+flutter|lib/src/services/fresh_secret.dart|100              # measured 100.00% (8/8)
+flutter|lib/src/services/mls_session_handover.dart|91       # measured 93.75% (15/16)
+flutter|lib/src/services/foreground_liveness_probe.dart|58  # measured 60.98% (25/41)
+
+# --- Location send/receive pipeline -----------------------------------------
+flutter|lib/src/services/location_sharing_service.dart|84   # measured 86.04% (339/394)
+flutter|lib/src/services/geolocator_location_service.dart|81 # measured 83.67% (82/98)
+flutter|lib/src/services/live_sync_resubscriber.dart|100    # measured 100.00% (117/117)
+flutter|lib/src/services/subscription_service.dart|86       # measured 88.33% (53/60)
+
+# --- Background publishing and catch-up -------------------------------------
+# background_location_task.dart is the foreground-service isolate — the file
+# P0-1 lives in — at 1.69%. Its floor is 0 by arithmetic, and that is the point:
+# the row makes a near-zero VISIBLE in a reviewed file instead of leaving it
+# hidden inside a green aggregate, and the ratchet fires the moment anyone
+# covers 5% of it, forcing the number to be written down.
+flutter|lib/src/services/background_location_task.dart|0    # measured  1.69% (4/236)
+flutter|lib/src/services/background_location_manager.dart|49 # measured 51.61% (48/93)
+flutter|lib/src/services/background_catchup_worker.dart|26  # measured 28.40% (23/81)
+
+# --- MLS / relay / identity / profile FFI seams -----------------------------
+# The Dart side of every Rust call. Same reading as above: these numbers are
+# evidence of how thin the coverage is, pinned so it cannot get thinner.
+# nostr_relay_preferences_service.dart is at literal 0.00% — 88 instrumented
+# lines, not one of them executed by any test, entirely invisible to the 50%
+# gate.
+flutter|lib/src/services/nostr_circle_service.dart|9        # measured 11.63% (60/516)
+flutter|lib/src/services/nostr_identity_service.dart|29     # measured 31.07% (32/103)
+flutter|lib/src/services/nostr_profile_service.dart|21      # measured 23.33% (21/90)
+flutter|lib/src/services/nostr_relay_service.dart|0         # measured  0.63% (1/158)
+flutter|lib/src/services/nostr_relay_preferences_service.dart|0 # measured 0.00% (0/88)
+
+# --- Leave / wipe paths -----------------------------------------------------
+# The proofs that leaving a circle and logging out actually destroy state.
+flutter|lib/src/services/pending_leave_service.dart|86      # measured 88.89% (32/36)
+flutter|lib/src/services/pending_mls_wipe_service.dart|75   # measured 77.78% (14/18)
+
+# --- Tile privacy -----------------------------------------------------------
+# tile_key.dart strips the Stadia API key before a URL is ever used as a cache
+# key; pinned_tile_client.dart is the CA-pinned HTTP client. 13 instrumented
+# lines makes one line worth 7.7 points there, so its margin is widened.
+flutter|lib/src/services/tile_key.dart|91                   # measured 93.55% (29/31)
+flutter|lib/src/network/pinned_tile_client.dart|59|10       # measured 61.54% (8/13)
+
+# --- Riverpod state and validators ------------------------------------------
+# The providers layer is where service results become UI state; the validators
+# are the input filters on relay URLs and npubs.
+flutter|lib/src/providers/|80                # measured 82.34% (1138/1382)
+flutter|lib/src/utils/|87                    # measured 89.15% (189/212)
+flutter|lib/src/utils/relay_url_validator.dart|93           # measured 95.83% (23/24)
+flutter|lib/src/utils/npub_validator.dart|60                # measured 62.50% (20/32)

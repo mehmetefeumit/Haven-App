@@ -246,7 +246,7 @@ mod tests {
         let expiration = wrapped
             .tags
             .iter()
-            .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("expiration"))
+            .find(|t| t.as_slice().first().map(std::string::String::as_str) == Some("expiration"))
             .expect("Gift wrap should have an expiration tag");
 
         let exp_timestamp: u64 = expiration.as_slice()[1]

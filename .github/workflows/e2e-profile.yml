@@ -215,6 +215,15 @@ jobs:
 
       - name: Create AVD snapshot
         if: steps.avd-cache.outputs.cache-hit != 'true'
+        # This step's entire job is booting an emulator, and until 2026-08-03 it
+        # had no bound of any kind — a wedged boot here ran to the JOB cap,
+        # which SIGKILLs the runner before any if: failure() step, so the lane
+        # died slow and with no artifacts. Measured across 23 successful runs
+        # (ci.yml, 2026-07/08) the snapshot takes 91-130 s; 15 min is ~7x the
+        # observed max, so it can only ever fire on a genuine wedge. The
+        # emulator-boot-timeout below is the action's own inner bound (7 min,
+        # matching the drive steps) and fires first with the action's message.
+        timeout-minutes: 15
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -226,6 +235,9 @@ jobs:
             -no-snapshot-save -no-window -gpu swiftshader_indirect
             -noaudio -no-boot-anim -camera-back none
           disable-animations: false
+          # Bound the boot itself (the only thing this step does) so a wedged
+          # emulator fails inside the step rather than at the step cap above.
+          emulator-boot-timeout: 420
           script: echo "Generated AVD snapshot for caching."
 
       # Start EVERY hermetic host (circle relay, profile-plane pool, blossom)
@@ -268,11 +280,26 @@ jobs:
       # exactly the property this lane wants: uploads must go ONLY to the
       # hermetic blossom, never to a public host.
       #
-      # The whole script is wrapped in an explicit coreutils `timeout` because
-      # the action's own `timeout-minutes` does not reliably reap a hung
+      # The whole script is wrapped in an explicit coreutils `timeout` (via
+      # run-with-deadline.sh, which adds a banner naming this lane) because the
+      # action's own `timeout-minutes` does not reliably reap a hung
       # emulator/adb/drive subtree (see e2e-android.yml).
+      # BOUNDS. Three of them, innermost first:
+      #   12m  the `flutter drive` (HAVEN_DRIVE_TIMEOUT, declared below).
+      #        Previously unset, so it inherited run-single-avd-scenario.sh's
+      #        20m default — which sat ABOVE the 16m outer wrapper and could
+      #        therefore never fire, making the harness's own "flutter drive
+      #        exceeded" message unreachable (CI_HARDENING_BACKLOG.md A8).
+      #   26m  this step's inner deadline. Sized to fit the harness's own
+      #        documented retry budget, (DRIVE_MAX_ATTEMPTS-1) x
+      #        CONNECT_WATCHDOG + DRIVE_TIMEOUT + overhead = 2x5 + 12 + 3 = 25.
+      #   35m  this step's timeout-minutes = 26 + 1 (kill grace) + 7
+      #        (emulator-boot-timeout); 60m job cap.
+      # Sizing evidence: 27 successful runs (ci.yml, 2026-07/08) put the whole
+      # step at p50 2.3 / p95 2.7 / max 2.7 min — this is the cheapest Android
+      # lane, and 12m is ~4.4x its observed whole-step max.
       - name: Run e2e_profile_sharing on the emulator
-        timeout-minutes: 30
+        timeout-minutes: 35
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -285,7 +312,7 @@ jobs:
             -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           emulator-boot-timeout: 420
-          script: timeout --kill-after=60s 16m bash -c 'bash tooling/e2e/ci/setup-network-guard.sh && bash tooling/e2e/ci/run-single-avd-scenario.sh integration_test/e2e/e2e_profile_sharing.dart'
+          script: bash tooling/e2e/ci/run-with-deadline.sh 26m "e2e-profile android drive" -- bash -c 'bash tooling/e2e/ci/setup-network-guard.sh && HAVEN_DRIVE_TIMEOUT=12m bash tooling/e2e/ci/run-single-avd-scenario.sh integration_test/e2e/e2e_profile_sharing.dart'
 
       # Tear the egress guard down BEFORE anything that needs outbound HTTPS
       # (artifact upload + cache save both POST over :443).
@@ -457,6 +484,12 @@ jobs:
 
       - name: Boot iOS simulator
         id: sim
+        # The macos-* runners have no GNU coreutils `timeout`, so this step's
+        # only available bound is GitHub's — and it had none, meaning a sim
+        # that never reaches Booted ran to the JOB cap and skipped every
+        # if: always() diagnostic. Measured across 32 successful runs (ci.yml,
+        # 2026-07/08) the boot takes 136-215 s; 15 min is ~4x the observed max.
+        timeout-minutes: 15
         run: bash tooling/e2e/ci/boot-ios-sim.sh "iPhone 15"
 
       # `nick-fields/retry` absorbs the iOS-simulator launch/attach flake (which

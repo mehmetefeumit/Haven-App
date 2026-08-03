@@ -3,8 +3,12 @@
 # Local coverage gate — mirrors .github/workflows/coverage.yml.
 #
 # Runs the unit tests WITH coverage for haven-core (Rust) and haven (Flutter)
-# and fails if line coverage drops below the SAME thresholds CI enforces. Because
-# it runs the suites, it also catches a failing test before it reaches CI: a
+# and fails if line coverage drops below the SAME thresholds CI enforces —
+# both the global aggregates AND the per-path floors in
+# scripts/ci/coverage_floors.txt (check_coverage_floors.sh), because an
+# aggregate is a shared budget that cannot see one critical file emptying out.
+#
+# Because it runs the suites, it also catches a failing test before it reaches CI: a
 # single test panic fails the CI "Rust Coverage" job, since cargo-llvm-cov runs
 # the whole suite. Wired as a pre-push hook (.githooks/pre-push); also runnable
 # by hand:  scripts/ci/check_coverage.sh
@@ -73,6 +77,23 @@ if [ "$CHECK_RUST" = "1" ]; then
     err "Rust (haven-core) line coverage ${rust_cov}% is BELOW ${RUST_MIN}%"
     rust_status="fail"
   fi
+
+  # Per-path floors (coverage.yml runs the same guard on its own lcov). The
+  # aggregate above is a budget the whole crate shares — ~2290 lines of slack
+  # over the 80% line — so it cannot see a single critical file emptying out.
+  # `llvm-cov report` re-renders the run above from its existing profdata
+  # instead of executing the suite a second time, so this costs seconds and is
+  # guaranteed to describe the SAME run the percentage came from.
+  if cargo llvm-cov report --lcov --output-path "$TMP/rust.lcov" \
+       --ignore-filename-regex 'frb_generated' \
+       --manifest-path "$ROOT/haven-core/Cargo.toml" >/dev/null 2>&1; then
+    if ! "$SCRIPT_DIR/check_coverage_floors.sh" rust "$TMP/rust.lcov"; then
+      rust_status="fail"
+    fi
+  else
+    err "Could not render an lcov report for the per-path floors (skipped)."
+    rust_status="fail"
+  fi
 fi
 
 # -------------------------------- Flutter (haven) ---------------------------
@@ -107,6 +128,15 @@ if [ "$CHECK_FLUTTER" = "1" ]; then
     flutter_status="pass"
   else
     err "Flutter (haven) line coverage ${flutter_cov}% is BELOW ${FLUTTER_MIN}%"
+    flutter_status="fail"
+  fi
+
+  # Per-path floors, as in coverage.yml. The raw report is used rather than the
+  # workflow's `lcov --remove` output: no pinned path is in the removal set
+  # (test/, src/rust/, *.g.dart, *.freezed.dart, generated l10n), so the two
+  # produce identical verdicts and this needs no `lcov` binary — same reason
+  # the aggregate above is computed by parsing lcov.info directly.
+  if ! "$SCRIPT_DIR/check_coverage_floors.sh" flutter "$lcov_file"; then
     flutter_status="fail"
   fi
 fi

@@ -244,6 +244,12 @@ mod tests {
     use super::*;
 
     #[test]
+    // `float_cmp` is inverted here: EXACT equality is the assertion. These
+    // coordinates must survive verbatim (a sanitizer that nudged a value would
+    // silently move a user on the map), and the rejection tests must land on the
+    // literal `0.0` sentinel — an epsilon compare would accept `1e-300` as
+    // "rejected" and hide a validator that stopped clamping.
+    #[allow(clippy::float_cmp)]
     fn location_message_new_preserves_exact_coordinates() {
         let location = LocationMessage::new(37.774_929_5, -122.419_415_5);
 
@@ -334,6 +340,9 @@ mod tests {
     }
 
     #[test]
+    // Exact equality is the assertion — see the note on the first
+    // `#[allow(clippy::float_cmp)]` in this module.
+    #[allow(clippy::float_cmp)]
     fn location_message_roundtrip_json() {
         let original = LocationMessage::new(37.7749, -122.4194);
         let json = original.to_string().unwrap();
@@ -353,24 +362,36 @@ mod tests {
     // SECURITY TESTS - Input Validation
 
     #[test]
+    // Exact equality is the assertion — see the note on the first
+    // `#[allow(clippy::float_cmp)]` in this module.
+    #[allow(clippy::float_cmp)]
     fn location_message_rejects_nan_latitude() {
         let location = LocationMessage::new(f64::NAN, -122.4194);
         assert_eq!(location.latitude, 0.0);
     }
 
     #[test]
+    // Exact equality is the assertion — see the note on the first
+    // `#[allow(clippy::float_cmp)]` in this module.
+    #[allow(clippy::float_cmp)]
     fn location_message_rejects_nan_longitude() {
         let location = LocationMessage::new(37.7749, f64::NAN);
         assert_eq!(location.longitude, 0.0);
     }
 
     #[test]
+    // Exact equality is the assertion — see the note on the first
+    // `#[allow(clippy::float_cmp)]` in this module.
+    #[allow(clippy::float_cmp)]
     fn location_message_rejects_infinity_latitude() {
         let location = LocationMessage::new(f64::INFINITY, -122.4194);
         assert_eq!(location.latitude, 0.0);
     }
 
     #[test]
+    // Exact equality is the assertion — see the note on the first
+    // `#[allow(clippy::float_cmp)]` in this module.
+    #[allow(clippy::float_cmp)]
     fn location_message_rejects_out_of_range_latitude() {
         let location = LocationMessage::new(91.0, -122.4194);
         assert_eq!(location.latitude, 0.0);
@@ -380,6 +401,9 @@ mod tests {
     }
 
     #[test]
+    // Exact equality is the assertion — see the note on the first
+    // `#[allow(clippy::float_cmp)]` in this module.
+    #[allow(clippy::float_cmp)]
     fn location_message_rejects_out_of_range_longitude() {
         let location = LocationMessage::new(37.7749, 181.0);
         assert_eq!(location.longitude, 0.0);
@@ -389,6 +413,9 @@ mod tests {
     }
 
     #[test]
+    // Exact equality is the assertion — see the note on the first
+    // `#[allow(clippy::float_cmp)]` in this module.
+    #[allow(clippy::float_cmp)]
     fn location_message_accepts_valid_boundaries() {
         let north_pole = LocationMessage::new(90.0, 0.0);
         assert_eq!(north_pole.latitude, 90.0);
@@ -444,6 +471,9 @@ mod tests {
     }
 
     #[test]
+    // Exact equality is the assertion — see the note on the first
+    // `#[allow(clippy::float_cmp)]` in this module.
+    #[allow(clippy::float_cmp)]
     fn unknown_legacy_fields_are_ignored() {
         // Older Haven builds emitted a `precision` field; deserialization must
         // tolerate it (and any other unknown field) for forward compatibility.
@@ -468,8 +498,8 @@ mod tests {
             .expect("a location carrying a legacy display_name must deserialize, not hard-error");
 
         // (a) Coordinate / freshness data reads correctly.
-        assert!((location.latitude - 37.7749295).abs() < f64::EPSILON);
-        assert!((location.longitude + 122.4194155).abs() < f64::EPSILON);
+        assert!((location.latitude - 37.774_929_5).abs() < f64::EPSILON);
+        assert!((location.longitude + 122.419_415_5).abs() < f64::EPSILON);
         assert_eq!(location.geohash, "9q8yyk8y");
         assert_eq!(location.timestamp.timestamp(), 1_735_689_600);
         assert_eq!(location.expires_at.timestamp(), 1_735_690_500);

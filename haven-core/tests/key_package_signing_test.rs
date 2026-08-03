@@ -6,7 +6,7 @@
 //!
 //! # Dark Matter port (DM-5a)
 //!
-//! The KeyPackage kind is now **30443** (addressable, W1), not the legacy 443,
+//! The `KeyPackage` kind is now **30443** (addressable, W1), not the legacy 443,
 //! and `create_key_package_event` is async over `SessionManager`. The kind-10051
 //! relay-list builder is retained (its retirement + retraction is the DM-4 FFI
 //! flip), so those tests are unchanged.
@@ -138,7 +138,7 @@ async fn sign_key_package_has_expected_tags() {
 /// tag (`["-"]`).
 ///
 /// The DM-2b builder never emits a `Tag::protected()`, so the invariant that a
-/// published KeyPackage carries no NIP-70 protected tag (which most production
+/// published `KeyPackage` carries no NIP-70 protected tag (which most production
 /// relays reject) holds by construction. This test proves it end-to-end.
 #[tokio::test]
 async fn sign_key_package_event_has_no_nip70_protected_tag() {

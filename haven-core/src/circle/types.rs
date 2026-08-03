@@ -640,7 +640,7 @@ mod tests {
             is_admin: true,
         };
 
-        let debug_str = format!("{:?}", member);
+        let debug_str = format!("{member:?}");
         assert!(debug_str.contains("CircleMember"));
         assert!(debug_str.contains("abc123def4567890..."));
         assert!(
@@ -740,6 +740,17 @@ mod tests {
         assert_eq!(cloned.display_name, "Clone Test");
         assert_eq!(cloned.circle_type, CircleType::DirectShare);
         assert_eq!(cloned.nostr_group_id, [0x99; 32]);
+        // The ORIGINAL must survive the clone. Without this, `let cloned =
+        // circle` (a move) satisfies every assertion above, so the test would
+        // still pass with the `Clone` impl removed — i.e. it would prove nothing
+        // about the trait it is named for.
+        assert_eq!(circle.display_name, cloned.display_name);
+        assert_eq!(circle.circle_type, cloned.circle_type);
+        assert_eq!(circle.nostr_group_id, cloned.nostr_group_id);
+        assert_eq!(circle.mls_group_id, cloned.mls_group_id);
+        assert_eq!(circle.relays, cloned.relays);
+        assert_eq!(circle.created_at, cloned.created_at);
+        assert_eq!(circle.updated_at, cloned.updated_at);
     }
 
     #[test]
@@ -756,6 +767,13 @@ mod tests {
         assert_eq!(cloned.status, MembershipStatus::Accepted);
         assert_eq!(cloned.inviter_pubkey, Some("abc".to_string()));
         assert_eq!(cloned.responded_at, Some(200));
+        // See `circle_clone`: reading the original AFTER the clone is what makes
+        // this a `Clone` test rather than a move that any type would satisfy.
+        assert_eq!(membership.status, cloned.status);
+        assert_eq!(membership.inviter_pubkey, cloned.inviter_pubkey);
+        assert_eq!(membership.responded_at, cloned.responded_at);
+        assert_eq!(membership.mls_group_id, cloned.mls_group_id);
+        assert_eq!(membership.invited_at, cloned.invited_at);
     }
 
     #[test]

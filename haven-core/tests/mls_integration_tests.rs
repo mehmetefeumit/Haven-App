@@ -349,9 +349,7 @@ mod location_message_result_tests {
                 "Invalidated",
             ),
             (
-                LocationMessageResult::Unrecoverable {
-                    group_id: g.clone(),
-                },
+                LocationMessageResult::Unrecoverable { group_id: g },
                 "Unrecoverable",
             ),
         ] {

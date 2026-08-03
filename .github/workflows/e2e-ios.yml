@@ -112,6 +112,12 @@ jobs:
 
       - name: Boot iOS simulator
         id: sim
+        # The macos-* runners have no GNU coreutils `timeout`, so this step's
+        # only available bound is GitHub's — and it had none, meaning a sim
+        # that never reaches Booted ran to the JOB cap and skipped every
+        # if: always() diagnostic. Measured across 32 successful runs (ci.yml,
+        # 2026-07/08) the boot takes 136-215 s; 15 min is ~4x the observed max.
+        timeout-minutes: 15
         run: bash tooling/e2e/ci/boot-ios-sim.sh "iPhone 15"
 
       # `nick-fields/retry` absorbs the well-documented iOS-simulator

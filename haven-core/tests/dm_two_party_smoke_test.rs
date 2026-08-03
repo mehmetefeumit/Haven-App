@@ -2,7 +2,7 @@
 //!
 //! Validates the migrated `helpers::setup_two_party_group` harness end-to-end
 //! over the new `SessionManager` stack: Alice creates a group with Bob's
-//! kind-30443 KeyPackage, Bob joins via the engine-produced 1059 welcome, a
+//! kind-30443 `KeyPackage`, Bob joins via the engine-produced 1059 welcome, a
 //! location round-trips (Alice → Bob), and an admin `update_relays` commit
 //! advances the epoch. This is the integration-level counterpart to the inline
 //! `CircleManager` two-party idiom proven in `src/circle/manager.rs`.

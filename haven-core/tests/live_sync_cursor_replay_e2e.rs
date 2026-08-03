@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use haven_core::circle::CircleManager;
-use haven_core::relay::live_sync::{group_cursor_stream, CircleSpec, LiveSyncCore};
+use haven_core::relay::live_sync::{group_cursor_stream, CircleSpec, LiveSyncCore, StopOutcome};
 use nostr::{Alphabet, EventBuilder, Keys, Kind, SingleLetterTag, Tag, TagKind, Timestamp};
 use nostr_relay_builder::MockRelay;
 use nostr_sdk::Client;
@@ -112,7 +112,17 @@ async fn delivered_445_advances_cursor_and_persists_across_restart() {
         "a delivered 445 must advance the per-circle cursor past its seed"
     );
 
-    engine1.stop().await;
+    // Rule 14 (single live session per MLS DB): session 2 below re-opens on the
+    // SAME `Arc<CircleManager>`, so this stop must have JOINED session 1's
+    // supervisor tasks first. A discarded `TimedOut` here would silently mean two
+    // live sessions over one store — the exact divergence the guard exists to
+    // prevent — and the restart assertions below would be reading a cursor two
+    // engines were writing.
+    assert_ne!(
+        engine1.stop().await,
+        StopOutcome::TimedOut,
+        "session 1 must be fully drained before session 2 opens the same store"
+    );
 
     // --- Session 2 (fresh engine + pool, SAME persisted cursor): the cursor
     // survived the restart at its advanced value (durable persistence). ---
@@ -132,7 +142,10 @@ async fn delivered_445_advances_cursor_and_persists_across_restart() {
         circle.read_sync_cursor(&cursor_key).unwrap() >= advanced,
         "a restart must never regress the persisted cursor"
     );
-    engine2.stop().await;
+    // Teardown only: every assertion above has already run, and the drain itself
+    // is pinned by the mid-test `assert_ne!` above and by `join_tasks_*` in
+    // `session.rs`.
+    let _ = engine2.stop().await;
 }
 
 /// R4 (per-circle cursor multiplex gap): two circles on ONE relay share a single
@@ -184,7 +197,12 @@ async fn busy_circle_high_cursor_does_not_bury_a_quiet_co_multiplexed_circle() {
     // Circle B is QUIET: a single 445 an hour ago (well above B's seed, below A's
     // cursor). The multiplexed REQ, anchored at MIN = B's low seed, must fetch it
     // and advance B — proving A did not bury it.
-    engine1.stop().await;
+    // Same Rule-14 drain requirement as R3: engine2 re-opens the same store.
+    assert_ne!(
+        engine1.stop().await,
+        StopOutcome::TimedOut,
+        "session 1 must be fully drained before session 2 opens the same store"
+    );
     let engine2 = LiveSyncCore::new_local(Arc::clone(&circle), Keys::generate().public_key());
     engine2.start(&specs, &[]).await.expect("start session 2");
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -203,5 +221,6 @@ async fn busy_circle_high_cursor_does_not_bury_a_quiet_co_multiplexed_circle() {
         "the busy circle's own cursor is not disturbed by the MIN-anchored bucket"
     );
 
-    engine2.stop().await;
+    // Teardown only — see the note on R3's teardown.
+    let _ = engine2.stop().await;
 }

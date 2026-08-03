@@ -102,6 +102,17 @@
 #     The guard also pins that the shared build wrappers keep FORWARDING the
 #     define, since a workflow can declare a value the funnel silently drops.
 #
+#   E2E timeout ordering              scripts/ci/check_e2e_step_timeout_ordering.sh
+#     Every emulator/simulator lane must stay bounded from the inside out:
+#     inner deadline < step `timeout-minutes` < job `timeout-minutes`. The
+#     order is what decides whether a hang produces a usable red. Our own
+#     inner deadline names the lane and lets the step's if: failure()
+#     diagnostics run; GitHub's step cap does NOT reliably reap the emulator
+#     action's backgrounded subtree; and the job cap SIGKILLs the runner
+#     before any diagnostic step, so a job-cap death is slow AND evidence-free.
+#     The guard also fails an inoperative bound — a step cap equal to its job
+#     cap, or a per-drive timeout set above the wrapper that would preempt it.
+#
 #   Skip-manifest self-test           scripts/ci/check_no_undeclared_skips.sh
 #     The guard that fails a run when a test SKIPS without being declared in
 #     scripts/ci/expected_test_skips.txt. The gate itself must parse real test
@@ -110,6 +121,20 @@
 #     belongs in this toolchain-free job. That self-test is what stops the
 #     parser rotting into a vacuous pass: an extractor matching nothing would
 #     otherwise report "0 skips, all declared" forever.
+#
+#   Coverage-floors self-test         scripts/ci/check_coverage_floors.sh
+#     The guard that enforces a MINIMUM COVERAGE PER PATH, plus a ratchet that
+#     fails when a path has outgrown its declared floor. It has to read a real
+#     lcov report, so it runs where coverage is produced — coverage.yml, once
+#     per stack — and only its hermetic --self-test belongs in this
+#     toolchain-free job. That self-test is what stops the guard decaying into
+#     a rubber stamp: its fixtures pin that a path below its floor fails, that
+#     a floor set to the exact measured value still passes, that a path which
+#     climbed past floor+margin fails ASKING FOR A RAISE, that a 100% path
+#     pinned below 100 ratchets (the margin rule can never fire there — there
+#     is no 103%), and that an entry matching no file fails. That last one is
+#     the skip manifest's lesson applied to coverage: a stale floor measures
+#     nothing, so it can never be below itself, and would sit green forever.
 #
 #   E2E harness self-tests            tooling/e2e/ci/*.sh --self-test
 #     The bash guards embedded in the E2E tooling must not silently rot: the
@@ -248,6 +273,47 @@ jobs:
       - name: Skip-manifest guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_no_undeclared_skips.sh --self-test
+
+      # Fixture-driven, no toolchain and no lcov: a path below its floor must
+      # fail, a floor equal to the measured value must pass, a path that
+      # outgrew its floor must fail naming the number to write down, a 100%
+      # path pinned below 100 must ratchet, and an entry matching no file must
+      # fail. The last two fixtures parse the CHECKED-IN manifest for both real
+      # stacks, so a typo in scripts/ci/coverage_floors.txt is caught in this
+      # seconds-long job instead of an hour into the coverage workflow.
+      - name: Coverage-floors guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_coverage_floors.sh --self-test
+
+      # An emulator lane with no inner deadline routes every hang to the JOB
+      # cap, which SIGKILLs the runner before the if: failure() diagnostics,
+      # the secret scan and the artifact upload — slow, and with no evidence.
+      # Four lanes were in that state (CI_HARDENING_BACKLOG.md A8), and two
+      # more carried bounds that could never fire: a per-drive timeout ABOVE
+      # its own wrapper, and a step cap EQUAL to its job cap.
+      - name: E2E timeout ordering (inner < step < job)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_e2e_step_timeout_ordering.sh
+
+      # The guard above reads YAML with a purpose-built parser, so it is
+      # exactly as trustworthy as that parser. The fixtures pin each check
+      # against a lane shape that really occurred here, and pin the two ways
+      # it could rot into a rubber stamp: a step comment that MENTIONS a
+      # timeout must not count as declaring one, and a hermetic `--self-test`
+      # step must not be mistaken for a simulator lane. The guard additionally
+      # refuses to pass if it finds fewer lanes than the repo has, so an
+      # extractor that stops matching fails loudly instead of vacuously.
+      - name: E2E timeout-ordering guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_e2e_step_timeout_ordering.sh --self-test
+
+      # The inner deadline itself. Its critical fixture is exit-code
+      # PASS-THROUGH: if a genuine test failure were ever reported as 124,
+      # run-relay-customization.sh's timeout-only retry would start retrying
+      # real reds and a failing lane could flake green.
+      - name: E2E harness self-test (inner deadline wrapper)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-with-deadline.sh --self-test
 
       - name: E2E harness self-test (connect-flake predicate)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

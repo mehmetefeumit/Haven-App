@@ -1267,7 +1267,9 @@ mod tests {
         );
 
         // Recording the HIT is what keeps the tier gate alive.
-        storage.touch_profiles_hit(&[hex.clone()], 1000).unwrap();
+        storage
+            .touch_profiles_hit(std::slice::from_ref(&hex), 1000)
+            .unwrap();
         let row = storage.get_profile(&hex).unwrap().unwrap();
         assert_eq!(row.fetched_at, 1000, "the answered fetch must be recorded");
         assert_eq!(row.state, ProfileState::Known, "state must not downgrade");
@@ -1287,7 +1289,9 @@ mod tests {
         // empty metadata blob rather than a fabricated "known-but-blank" row.
         let storage = CircleStorage::in_memory().unwrap();
         let hex = "cd".repeat(32);
-        storage.touch_profiles_hit(&[hex.clone()], 700).unwrap();
+        storage
+            .touch_profiles_hit(std::slice::from_ref(&hex), 700)
+            .unwrap();
         let row = storage.get_profile(&hex).unwrap().unwrap();
         assert_eq!(row.state, ProfileState::Unknown);
         assert_eq!(row.fetched_at, 700);
@@ -1729,6 +1733,13 @@ mod tests {
     }
 
     #[test]
+    // `needless_collect` is WRONG here, and following it would hang the suite:
+    // collecting the `JoinHandle`s is what starts all 8 threads before the first
+    // `join`. Fusing the spawn into the join iterator makes the spawns lazy —
+    // thread N+1 would not exist until thread N had been joined — so the
+    // `Barrier::new(8)` every thread waits on could never be released. The
+    // collect IS the concurrency this test is named for.
+    #[allow(clippy::needless_collect)]
     fn concurrent_first_use_mints_exactly_one_salt() {
         // The read-then-conditional-insert happens under ONE acquisition of the
         // connection lock (and the insert is OR IGNORE + re-read), so racing

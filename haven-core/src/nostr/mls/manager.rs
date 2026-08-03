@@ -138,7 +138,7 @@ impl SessionManager {
     /// Opens a session over a fixed-key encrypted temp database, bypassing the
     /// keyring. Test/development only.
     ///
-    /// The Dark Matter `storage-sqlite` backend always encrypts (SQLCipher); the
+    /// The Dark Matter `storage-sqlite` backend always encrypts (`SQLCipher`); the
     /// "unencrypted" name is retained for continuity with the old test API. It
     /// uses a constant test passphrase so no platform keyring is required.
     ///
@@ -1350,7 +1350,7 @@ mod tests {
         // sibling drives the refresh), and a quarantine (not a live group) stays None.
         assert!(
             SessionManager::location_result_from_event(&GroupEvent::CommitRolledBack {
-                group_id: gid.clone(),
+                group_id: gid,
                 invalidated_commit_id: MessageId::new(vec![1; 32]),
             })
             .is_none()

@@ -1518,9 +1518,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stop_on_a_fresh_engine_returns_promptly() {
         let (core, _dir) = build_core();
-        tokio::time::timeout(Duration::from_secs(2), core.stop())
+        let outcome = tokio::time::timeout(Duration::from_secs(2), core.stop())
             .await
             .expect("stop on a never-started engine must return promptly");
+        assert_eq!(
+            outcome,
+            StopOutcome::NotStarted,
+            "a core that never spawned a supervisor task must report NotStarted, \
+             not a Drained/TimedOut join it never performed"
+        );
     }
 
     // DELETED-WITH-SUBJECT: `stop_drains_an_in_flight_converge_task` and
@@ -1615,10 +1621,15 @@ mod tests {
 
         // Release the lock → `stop` proceeds through `stop_inner` and completes.
         drop(held);
-        tokio::time::timeout(Duration::from_secs(10), stopping)
+        let outcome = tokio::time::timeout(Duration::from_secs(10), stopping)
             .await
             .expect("stop must complete once the lifecycle lock is released")
             .expect("stop task must not panic");
+        assert_eq!(
+            outcome,
+            StopOutcome::NotStarted,
+            "this core was never started, so the released stop has no task to join"
+        );
         assert!(!core.is_running(), "stop completed with the flag raised");
     }
 
@@ -1672,7 +1683,10 @@ mod tests {
             .unwrap();
         rt.block_on(async {
             let (core, _dir) = build_core();
-            core.stop().await; // sets the shutdown flag
+            // Never started, so the arrange-stop must report NotStarted. Pinning
+            // it keeps this a stopped-session test: if the stop silently became
+            // a TimedOut (tasks still live) the "stopped" premise would be false.
+            assert_eq!(core.stop().await, StopOutcome::NotStarted);
             assert!(!core.is_running());
             let result = core.resume_after_background().await;
             assert!(
@@ -1725,7 +1739,7 @@ mod tests {
             .unwrap();
         rt.block_on(async {
             let (core, _dir) = build_core();
-            core.stop().await;
+            assert_eq!(core.stop().await, StopOutcome::NotStarted);
             assert!(!core.is_running());
             let outcome = core.maintain_subscription_health().await.unwrap();
             assert_eq!(
@@ -1823,7 +1837,9 @@ mod tests {
         // added — proving the guard, not the gate, is what stops it.
         let _ = crate::relay::allow_ws_loopback_for_test();
         let (core, _dir) = build_core();
-        core.stop().await; // shutdown flag set + client shut down (pool cleared)
+        // Never started ⇒ NotStarted; the flag + client shutdown are what the
+        // rest of the test exercises.
+        assert_eq!(core.stop().await, StopOutcome::NotStarted);
         let result = core
             .start(
                 &[CircleSpec {
@@ -1864,16 +1880,21 @@ mod tests {
             let start_core = Arc::clone(&core);
             let start = tokio::spawn(async move { start_core.start(&circles, &[]).await });
             // Request a stop on the same core concurrently with the in-flight start.
-            core.stop().await;
+            // The outcome is racy BY DESIGN here — whether there is a supervisor
+            // task to join depends on which side won the lifecycle lock, which is
+            // the very race under test — so it is the one place it must not be
+            // asserted. The drain itself is pinned by `join_tasks_*` above.
+            let _ = core.stop().await;
             let started = tokio::time::timeout(Duration::from_secs(10), start)
                 .await
                 .expect("start must not hang")
                 .expect("start task must not panic");
             match started {
-                // Start won the lock and completed against the live relay.
-                Ok(()) => {}
-                // Stop won the lock first — fail closed, never the emptied-pool error.
-                Err(LiveSyncError::NoSession) => {}
+                // Either start won the lock and completed against the live
+                // relay, or stop won it first and start failed closed. Any
+                // OTHER error — notably the pool's opaque "no relays" — is the
+                // regression.
+                Ok(()) | Err(LiveSyncError::NoSession) => {}
                 Err(other) => panic!(
                     "concurrent stop must never surface as a pool 'no relays' error: {other:?}"
                 ),
@@ -1922,7 +1943,7 @@ mod tests {
 
     // ===================== Incremental subscribe/unsubscribe =====================
 
-    /// Starts a live session over `hexes` (each on the SAME shared MockRelay), so
+    /// Starts a live session over `hexes` (each on the SAME shared `MockRelay`), so
     /// the delta-op tests run against a real connected relay. Returns the started
     /// core (Arc, for the concurrent-stop test), the relay + tempdir (kept alive),
     /// and the relay url (to add more circles).
@@ -2145,7 +2166,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn subscribe_circle_on_a_stopped_core_fails_closed_no_session() {
         let (core, _dir) = build_core();
-        core.stop().await; // shutdown flag set
+        assert_eq!(core.stop().await, StopOutcome::NotStarted); // shutdown flag set
         let result = core
             .subscribe_circle(&CircleSpec {
                 group_id_hex: "aa".repeat(32),
@@ -2177,7 +2198,7 @@ mod tests {
         // A stopped / no-active session has nothing to unsubscribe ⇒ Ok no-op
         // (correction #5), never an error and never a full-restart trigger.
         let (core, _dir) = build_core();
-        core.stop().await;
+        assert_eq!(core.stop().await, StopOutcome::NotStarted);
         core.unsubscribe_circle(&"aa".repeat(32))
             .await
             .expect("unsubscribe on a stopped core is an Ok no-op");
@@ -2220,14 +2241,17 @@ mod tests {
                     })
                     .await
             });
-            core.stop().await;
+            // Racy by design, exactly as in
+            // `concurrent_stop_during_start_never_yields_no_relays`.
+            let _ = core.stop().await;
             let res = tokio::time::timeout(Duration::from_secs(10), sub)
                 .await
                 .expect("subscribe must not hang")
                 .expect("subscribe task must not panic");
             match res {
-                Ok(()) => {}
-                Err(LiveSyncError::NoSession) => {}
+                // Subscribe won the lock, or stop won it and subscribe failed
+                // closed. Anything else — notably "no relays" — is the bug.
+                Ok(()) | Err(LiveSyncError::NoSession) => {}
                 Err(other) => panic!(
                     "concurrent stop must never surface as a pool 'no relays' error: {other:?}"
                 ),

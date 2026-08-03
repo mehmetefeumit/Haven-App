@@ -179,6 +179,15 @@ jobs:
 
       - name: Create AVD snapshot
         if: steps.avd-cache.outputs.cache-hit != 'true'
+        # This step's entire job is booting an emulator, and until 2026-08-03 it
+        # had no bound of any kind — a wedged boot here ran to the JOB cap,
+        # which SIGKILLs the runner before any if: failure() step, so the lane
+        # died slow and with no artifacts. Measured across 23 successful runs
+        # (ci.yml, 2026-07/08) the snapshot takes 91-130 s; 15 min is ~7x the
+        # observed max, so it can only ever fire on a genuine wedge. The
+        # emulator-boot-timeout below is the action's own inner bound (7 min,
+        # matching the drive steps) and fires first with the action's message.
+        timeout-minutes: 15
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -190,6 +199,9 @@ jobs:
             -no-snapshot-save -no-window -gpu swiftshader_indirect
             -noaudio -no-boot-anim -camera-back none
           disable-animations: false
+          # Bound the boot itself (the only thing this step does) so a wedged
+          # emulator fails inside the step rather than at the step cap above.
+          emulator-boot-timeout: 420
           script: echo "Generated AVD snapshot for caching."
 
       - name: Start strfry relay
@@ -202,9 +214,21 @@ jobs:
       # forwarded so the per-iteration relay resets inside
       # run-flake-stress.sh pull the same pinned image.
       #
-      # timeout-minutes bounds the whole loop so a hang kills THIS step
-      # (not the runner), letting the if: always() artifact step run.
-      # Sized to match the job envelope above.
+      # BOUNDS. Three of them, innermost first:
+      #   20m  per-iteration `flutter drive` (run-single-avd-scenario.sh's
+      #        default HAVEN_DRIVE_TIMEOUT; this lane is poll-path, so the
+      #        default applies).
+      #  310m  this step's inner deadline (run-with-deadline.sh below) — the
+      #        AGGREGATE bound over the whole iteration loop, and the only one
+      #        that reliably reaps (CI_HARDENING_BACKLOG.md A8).
+      #  320m  this step's timeout-minutes = 310 + 1 (kill grace) + 7
+      #        (emulator-boot-timeout) + margin; 330m job cap above.
+      # Sizing evidence: 8 successful nightly runs put the DEFAULT 10-iteration
+      # loop at p50 43.7 / max 59.4 min (~6 min/iteration). 310m is ~5x that.
+      # NOTE the iteration count is a workflow input (default 10, script cap
+      # 1000): at ~6 min/iteration this deadline covers ~50 iterations, the
+      # same exposure the 320m step cap already had. A deliberately long
+      # stress run needs all three numbers raised together.
       - name: Stress-run e2e_combined on the emulator
         timeout-minutes: 320
         uses: reactivecircus/android-emulator-runner@v2
@@ -226,6 +250,9 @@ jobs:
             -no-snapshot-save -no-window -gpu swiftshader_indirect
             -noaudio -no-boot-anim -camera-back none
           disable-animations: true
+          # Bound the boot (which happens BEFORE `script:` runs, and is
+          # therefore outside the deadline below).
+          emulator-boot-timeout: 420
           # Single bash invocation — the action runs each line of a
           # multi-line script: in its own sh -c, dropping loop state.
           #
@@ -236,7 +263,7 @@ jobs:
           # action runs it — this does not rely on the action's subshell
           # inheriting the job-level env var. run-flake-stress.sh still
           # validates the value is a positive integer and caps it.
-          script: bash tooling/e2e/ci/run-flake-stress.sh "${{ env.FLAKE_ITERATIONS }}" integration_test/e2e/e2e_combined.dart
+          script: bash tooling/e2e/ci/run-with-deadline.sh 310m "e2e-flakiness-stress loop" -- bash tooling/e2e/ci/run-flake-stress.sh "${{ env.FLAKE_ITERATIONS }}" integration_test/e2e/e2e_combined.dart
 
       - name: Collect strfry logs
         if: always()

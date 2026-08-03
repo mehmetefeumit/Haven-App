@@ -164,6 +164,15 @@ jobs:
 
       - name: Create AVD snapshot
         if: steps.avd-cache.outputs.cache-hit != 'true'
+        # This step's entire job is booting an emulator, and until 2026-08-03 it
+        # had no bound of any kind — a wedged boot here ran to the JOB cap,
+        # which SIGKILLs the runner before any if: failure() step, so the lane
+        # died slow and with no artifacts. Measured across 23 successful runs
+        # (ci.yml, 2026-07/08) the snapshot takes 91-130 s; 15 min is ~7x the
+        # observed max, so it can only ever fire on a genuine wedge. The
+        # emulator-boot-timeout below is the action's own inner bound (7 min,
+        # matching the drive steps) and fires first with the action's message.
+        timeout-minutes: 15
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -175,6 +184,9 @@ jobs:
             -no-snapshot-save -no-window -gpu swiftshader_indirect
             -noaudio -no-boot-anim -camera-back none
           disable-animations: false
+          # Bound the boot itself (the only thing this step does) so a wedged
+          # emulator fails inside the step rather than at the step cap above.
+          emulator-boot-timeout: 420
           script: echo "Generated AVD snapshot for caching."
 
       - name: Start strfry relay
@@ -207,14 +219,18 @@ jobs:
       # minutes` is only a loose belt that MUST sit above the explicit
       # inner bound PLUS this step's own emulator boot: the step also boots
       # the AVD (`emulator-boot-timeout: 420` = 7 min) before the script
-      # runs, and the script's `timeout --kill-after=60s` adds ~1 min grace,
+      # runs, and run-with-deadline.sh's `--kill-after=60s` adds ~1 min grace,
       # so the flag-on step's true worst case is 45m (script) + 7m (boot) +
       # 1m ≈ 53m. The belt is therefore 55 (not 45/50), preserving a margin
       # over that so GitHub's own step reaper can never fire before the
-      # explicit `timeout` lets the `if: failure()` diagnostics + secret
-      # scan run. Poll-path keeps its 30-min belt over the 16-min bound.
+      # explicit deadline lets the `if: failure()` diagnostics + secret
+      # scan run. The poll path's belt is 35 over its 26m bound by the same
+      # arithmetic (26 + 1 + 7 = 34); it was 30 over a 16m bound until A8
+      # widened the bound to fit the harness's retry budget (see the script
+      # comment below). scripts/ci/check_e2e_step_timeout_ordering.sh enforces
+      # this arithmetic on every lane so the two numbers cannot drift apart.
       - name: Run e2e_combined on the emulator
-        timeout-minutes: ${{ inputs.live_sync && 55 || 30 }}
+        timeout-minutes: ${{ inputs.live_sync && 55 || 35 }}
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -255,11 +271,31 @@ jobs:
           # outbound HTTPS — otherwise its own :443 reject rule would RST
           # the artifact-upload + cache-save POST steps and silently lose
           # the diagnostics.
-          # Outer bound. The poll-path build finishes in ~11 min (the live-sync
-          # scenarios self-skip), so 16 min never cuts a passing poll run.
+          # Outer bound, via run-with-deadline.sh (same coreutils `timeout`,
+          # plus a banner naming this lane when it fires — an anonymous rc=124
+          # is what made these hangs expensive to triage).
+          #
+          # POLL PATH, corrected 2026-08-03 (CI_HARDENING_BACKLOG.md A8). The
+          # old pair was inner DRIVE_TIMEOUT 20m under a 16m outer wrapper: the
+          # inner bound could NEVER fire, so run-single-avd-scenario.sh's
+          # attributable "flutter drive for X exceeded 20m" was unreachable and
+          # every poll hang surfaced as a bare 124. Worse, the harness's own
+          # documented retry budget —
+          #   (DRIVE_MAX_ATTEMPTS-1) x CONNECT_WATCHDOG + DRIVE_TIMEOUT + ~3
+          #   = 2x5 + 20 + 3 = 33 min
+          # — did not fit under 16 min either, so a run that hit the connect
+          # watchdog twice and then recovered was SIGKILLed mid-recovery.
+          # Re-derived from measurement: 21 successful poll runs (ci.yml,
+          # 2026-07/08) put the whole step at p50 4.8 / p95 5.1 / max 5.1 min,
+          # so the drive itself is comfortably under 5 min. DRIVE_TIMEOUT 12m
+          # is ~2.4x that whole-step max, and the budget becomes 2x5 + 12 + 3 =
+          # 25 min, which fits the 26m wrapper. Step cap 35 = 26 + 1 (kill
+          # grace) + 7 (emulator-boot-timeout 420), job cap 60.
+          # Net effect on a plain hang: it now dies at ~13 min NAMED (the inner
+          # DRIVE_TIMEOUT) instead of at 16 min anonymous.
           # Flag-on (live_sync=true) runs the 10 real live-sync scenarios on top. Their
           # measured organic runtime is ~20 min (live-sync group ~16 min + main + FE +
-          # teardown), which left ZERO slack under the old 20 min inner
+          # teardown), which left ZERO slack under the then-default 20 min inner
           # DRIVE_TIMEOUT (default in run-single-avd-scenario.sh): the drive was
           # SIGKILLed mid-suite (rc=124) BEFORE any per-test `timeout:` could
           # report cleanly. So the flag-on lane widens the inner DRIVE_TIMEOUT to
@@ -270,7 +306,7 @@ jobs:
           # < the 45 min wrapper. The per-test `timeout:` overrides inside
           # e2e_combined.dart now have real headroom to convert any single stuck
           # scenario into a clean, named failure instead of a blind SIGKILL.
-          script: timeout --kill-after=60s ${{ inputs.live_sync && '45m' || '16m' }} bash -c 'bash tooling/e2e/ci/setup-network-guard.sh && HAVEN_DRIVE_TIMEOUT=${{ inputs.live_sync && '28m' || '20m' }} bash tooling/e2e/ci/run-single-avd-scenario.sh integration_test/e2e/e2e_combined.dart'
+          script: bash tooling/e2e/ci/run-with-deadline.sh ${{ inputs.live_sync && '45m' || '26m' }} "e2e-android drive (${{ inputs.live_sync && 'live-sync' || 'poll' }})" -- bash -c 'bash tooling/e2e/ci/setup-network-guard.sh && HAVEN_DRIVE_TIMEOUT=${{ inputs.live_sync && '28m' || '12m' }} bash tooling/e2e/ci/run-single-avd-scenario.sh integration_test/e2e/e2e_combined.dart'
 
       # Tear the egress guard down BEFORE anything that needs outbound
       # HTTPS. The guard's `REJECT ... --reject-with tcp-reset` on TCP 443

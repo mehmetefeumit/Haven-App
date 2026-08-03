@@ -2463,9 +2463,9 @@ mod tests {
         (manager, keys, temp_dir)
     }
 
-    /// Mints a signed kind-30443 KeyPackage event via the DM-2b maintenance
+    /// Mints a signed kind-30443 `KeyPackage` event via the DM-2b maintenance
     /// builder (the real publish path), so `create_group`/`add_members` consume a
-    /// KeyPackage the receiver actually produced, exactly as in production.
+    /// `KeyPackage` the receiver actually produced, exactly as in production.
     async fn make_kp_event(manager: &CircleManager, keys: &Keys, relays: &[String]) -> Event {
         build_kp_maintenance_events(manager.session(), keys, relays, None)
             .await
@@ -2505,7 +2505,7 @@ mod tests {
         relays: Vec<String>,
     }
 
-    /// Establishes a two-party circle: Alice creates with Bob's KeyPackage,
+    /// Establishes a two-party circle: Alice creates with Bob's `KeyPackage`,
     /// confirms the pending create (publish-before-apply), then Bob holds and
     /// accepts the engine-produced gift-wrapped (1059) welcome.
     async fn setup_two_party_circle() -> TwoPartyCircle {
@@ -2795,7 +2795,7 @@ mod tests {
         use crate::nostr::mls::types::EpochId;
         let gid = GroupId::new(vec![7, 7, 7]);
         let folded = fold_group_events(&[GroupEvent::PendingCommitRecovered {
-            group_id: gid.clone(),
+            group_id: gid,
             recovered_epoch: EpochId(2),
         }]);
         assert!(
@@ -2878,7 +2878,7 @@ mod tests {
     /// A Welcome-delivery relay must enter the contamination ledger, because
     /// the cascade is the ONLY place it is ever observed on device.
     ///
-    /// The cascade resolves an invitee's delivery relays from their KeyPackage
+    /// The cascade resolves an invitee's delivery relays from their `KeyPackage`
     /// at send time; the result is written to neither `circles.relays` nor
     /// `user_relays`. So unlike every other contamination source, this one
     /// cannot be reconstructed later by `refresh_contamination_ledger` — if the
@@ -3549,7 +3549,7 @@ mod tests {
         let bob_hex = tp.bob_keys.public_key().to_hex();
         let commit = tp
             .alice
-            .remove_members(&tp.mls_group_id, &[bob_hex.clone()])
+            .remove_members(&tp.mls_group_id, std::slice::from_ref(&bob_hex))
             .await
             .expect("admin removes bob");
         assert_eq!(commit.commit_event.kind.as_u16(), 445);

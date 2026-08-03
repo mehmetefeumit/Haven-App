@@ -134,6 +134,15 @@ jobs:
 
       - name: Create AVD snapshot
         if: steps.avd-cache.outputs.cache-hit != 'true'
+        # This step's entire job is booting an emulator, and until 2026-08-03 it
+        # had no bound of any kind — a wedged boot here ran to the JOB cap,
+        # which SIGKILLs the runner before any if: failure() step, so the lane
+        # died slow and with no artifacts. Measured across 23 successful runs
+        # (ci.yml, 2026-07/08) the snapshot takes 91-130 s; 15 min is ~7x the
+        # observed max, so it can only ever fire on a genuine wedge. The
+        # emulator-boot-timeout below is the action's own inner bound (7 min,
+        # matching the drive steps) and fires first with the action's message.
+        timeout-minutes: 15
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -145,6 +154,9 @@ jobs:
             -no-snapshot-save -no-window -gpu swiftshader_indirect
             -noaudio -no-boot-anim -camera-back none
           disable-animations: false
+          # Bound the boot itself (the only thing this step does) so a wedged
+          # emulator fails inside the step rather than at the step cap above.
+          emulator-boot-timeout: 420
           script: echo "Generated AVD snapshot for caching."
 
       - name: Start strfry relay
@@ -162,6 +174,21 @@ jobs:
       # state). The reboot in Phase B is a GUEST reboot the action's emulator
       # survives; the script waits for sys.boot_completed. STRFRY_IMAGE is
       # forwarded so the per-phase relay resets pull the same pinned image.
+      # BOUNDS. Three of them, innermost first:
+      #   10m  per-drive `flutter drive` (run-m7-background-catchup.sh's
+      #        HAVEN_DRIVE_TIMEOUT), applied to each phase's drive.
+      #   30m  this step's inner deadline (run-with-deadline.sh below) — the
+      #        AGGREGATE bound over all four phases INCLUDING the parts no
+      #        per-drive timeout covers: the Phase-B guest reboot, the
+      #        per-phase strfry resets, and the WorkManager settle waits. That
+      #        gap is why this lane needed an aggregate deadline and not just
+      #        the per-drive one (CI_HARDENING_BACKLOG.md A8).
+      #   40m  this step's timeout-minutes = 30 + 1 (kill grace) + 7
+      #        (emulator-boot-timeout) + margin, a belt over the deadline.
+      # Sizing evidence: 33 successful runs (ci.yml, 2026-07/08) put the whole
+      # step at p50 5.5 / p95 6.8 / max 7.2 min. 30m is ~4x the observed max,
+      # which leaves room for the guest reboot to run long without cutting a
+      # healthy run.
       - name: Run background catch-up phases on the emulator
         timeout-minutes: 40
         uses: reactivecircus/android-emulator-runner@v2
@@ -185,7 +212,10 @@ jobs:
             -no-snapshot-save -no-window -gpu swiftshader_indirect
             -noaudio -no-boot-anim -camera-back none -memory 6144
           disable-animations: true
-          script: bash tooling/e2e/ci/run-m7-background-catchup.sh /tmp/integration-apks/m7_worker_setup_test.apk /tmp/integration-apks/m7_worker_pending_wipe_test.apk /tmp/integration-apks/m7_worker_disable_test.apk
+          # Bound the boot (which happens BEFORE `script:` runs, and is
+          # therefore outside the deadline below).
+          emulator-boot-timeout: 420
+          script: bash tooling/e2e/ci/run-with-deadline.sh 30m "e2e-background-catchup phases" -- bash tooling/e2e/ci/run-m7-background-catchup.sh /tmp/integration-apks/m7_worker_setup_test.apk /tmp/integration-apks/m7_worker_pending_wipe_test.apk /tmp/integration-apks/m7_worker_disable_test.apk
 
       - name: Capture host + emulator diagnostics
         if: failure()

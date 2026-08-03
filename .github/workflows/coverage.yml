@@ -41,11 +41,30 @@ jobs:
 
       - name: Check coverage threshold
         run: |
+          # `pipefail` so a broken llvm-cov (or a missing TOTAL line) fails the
+          # pipeline instead of quietly yielding an empty COVERAGE.
+          set -euo pipefail
+
           # Extract coverage percentage from lcov file
           COVERAGE=$(cargo llvm-cov --all-features \
             --ignore-filename-regex 'frb_generated' \
             --summary-only | grep 'TOTAL' | awk '{print $10}' | sed 's/%//')
           echo "Coverage: ${COVERAGE}%"
+
+          # A PARSE FAILURE USED TO PASS THIS GATE. With COVERAGE empty (or any
+          # non-numeric text), `echo " < 80" | bc -l` writes a syntax error to
+          # stderr and NOTHING to stdout; `(( ))` on an empty string evaluates
+          # to 0, i.e. false, so control fell through to the else branch and the
+          # job printed "✅ Coverage % meets threshold 80%" and exited 0. Every
+          # way of losing the number — an llvm-cov output change, a renamed
+          # TOTAL row, a build that produced no summary — therefore reported
+          # SUCCESS. Validate the shape before comparing.
+          case "${COVERAGE}" in
+            ''|*[!0-9.]*)
+              echo "::error::Could not parse a coverage percentage from llvm-cov (got: '${COVERAGE}')"
+              exit 1
+              ;;
+          esac
 
           # Check if coverage meets threshold
           THRESHOLD=80
@@ -55,6 +74,18 @@ jobs:
           else
             echo "✅ Coverage ${COVERAGE}% meets threshold ${THRESHOLD}%"
           fi
+
+      # The gate above is a single AGGREGATE, and an aggregate is a budget the
+      # whole crate shares: haven-core sits ~10 points over its 80% threshold,
+      # which is ~2290 lines of slack — more than any one file in the crate.
+      # src/nostr/mls/manager.rs, src/nostr/giftwrap.rs and all of
+      # src/nostr/encryption/ could go to zero coverage together and the step
+      # above would still print a green check. The floors below are the
+      # per-path minimum that cannot express, enforced against the SAME lcov.
+      # `!cancelled()` so a failing aggregate still reports the floors too.
+      - name: Per-path coverage floors (haven-core)
+        if: ${{ !cancelled() }}
+        run: bash ../scripts/ci/check_coverage_floors.sh rust coverage.lcov
 
       - name: Generate HTML report
         run: |
@@ -161,6 +192,19 @@ jobs:
         with:
           path: haven/coverage/lcov_filtered.info
           min_coverage: 50
+
+      # The 50% above is an aggregate over the whole package, and the package
+      # clears it (64.82% when these floors were pinned) only because the widget
+      # and provider suites pay for the service layer — which measures 48.96%,
+      # i.e. BELOW the very threshold the package passes. Three services sit at
+      # or near zero (nostr_relay_preferences_service.dart 0.00%,
+      # nostr_relay_service.dart 0.63%, background_location_task.dart 1.69% —
+      # the file P0-1 lives in) and the aggregate cannot see any of it. Runs on
+      # the same filtered report the gate above reads, and with `!cancelled()`
+      # so one red run reports both the aggregate and the per-path verdicts.
+      - name: Per-path coverage floors (haven)
+        if: ${{ !cancelled() }}
+        run: bash ../scripts/ci/check_coverage_floors.sh flutter coverage/lcov_filtered.info
 
       - name: Generate HTML report
         run: genhtml coverage/lcov_filtered.info -o coverage/html

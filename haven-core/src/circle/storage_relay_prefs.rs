@@ -1107,11 +1107,11 @@ mod tests {
             .add_user_relay("wss://custom.example.com", RelayType::Inbox)
             .unwrap();
         let list = storage.list_user_relays(RelayType::Inbox).unwrap();
-        let matches: Vec<_> = list
+        let matches = list
             .iter()
             .filter(|u| u.contains("custom.example.com"))
-            .collect();
-        assert_eq!(matches.len(), 1, "case-only differing URLs must collide");
+            .count();
+        assert_eq!(matches, 1, "case-only differing URLs must collide");
     }
 
     #[test]

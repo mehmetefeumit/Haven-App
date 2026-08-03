@@ -137,7 +137,7 @@ mod tests {
 
     /// The Marmot mandatory ciphersuite id (`0x0001`) and its Ed25519 signature
     /// scheme (`0x0807`). Named as raw `u16`s here so the test does not need a
-    /// direct OpenMLS dependency — [`AccountIdentityProofRequest`] exposes both
+    /// direct `OpenMLS` dependency — [`AccountIdentityProofRequest`] exposes both
     /// as public `u16` fields, and signing only signs the canonical event id, so
     /// the concrete values need only be internally consistent.
     const CIPHERSUITE: u16 = 0x0001;

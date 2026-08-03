@@ -111,7 +111,12 @@ async fn engine_receives_routes_and_processes_a_kind445_over_a_real_relay() {
         "the relayed kind:445 must traverse the whole engine path and advance the per-circle cursor"
     );
 
-    engine.stop().await;
+    // Teardown only: every assertion has already run. The outcome is not
+    // asserted here because the drain contract itself is pinned by
+    // `join_tasks_*` and the `stop_*` unit tests in
+    // `src/relay/live_sync/session.rs`, and by the same-store restart
+    // assertions in `live_sync_cursor_replay_e2e`.
+    let _ = engine.stop().await;
 }
 
 /// Two circles sharing one relay set are served by a SINGLE multiplexed `#h`
@@ -179,7 +184,12 @@ async fn engine_multiplexes_two_circles_and_drops_unsubscribed_h() {
         "the unsubscribed #h must never reach the engine (no cursor is created)"
     );
 
-    engine.stop().await;
+    // Teardown only: every assertion has already run. The outcome is not
+    // asserted here because the drain contract itself is pinned by
+    // `join_tasks_*` and the `stop_*` unit tests in
+    // `src/relay/live_sync/session.rs`, and by the same-store restart
+    // assertions in `live_sync_cursor_replay_e2e`.
+    let _ = engine.stop().await;
 }
 
 /// `resume_after_background` re-anchors the subscriptions: it emits
@@ -245,7 +255,12 @@ async fn engine_resume_after_background_re_anchors_and_still_delivers() {
         "an event published after resume must still be received and processed"
     );
 
-    engine.stop().await;
+    // Teardown only: every assertion has already run. The outcome is not
+    // asserted here because the drain contract itself is pinned by
+    // `join_tasks_*` and the `stop_*` unit tests in
+    // `src/relay/live_sync/session.rs`, and by the same-store restart
+    // assertions in `live_sync_cursor_replay_e2e`.
+    let _ = engine.stop().await;
 }
 
 /// M8-4: over a live relay, a health tick reports `Healthy` (relays present,
@@ -289,7 +304,12 @@ async fn subscription_health_reports_healthy_over_a_connected_relay() {
     assert_eq!(outcome.relays_total, 1);
     assert_eq!(outcome.relays_disconnected, 0);
 
-    engine.stop().await;
+    // Teardown only: every assertion has already run. The outcome is not
+    // asserted here because the drain contract itself is pinned by
+    // `join_tasks_*` and the `stop_*` unit tests in
+    // `src/relay/live_sync/session.rs`, and by the same-store restart
+    // assertions in `live_sync_cursor_replay_e2e`.
+    let _ = engine.stop().await;
 }
 
 /// M8-4: the actual healing branch — with a dropped relay in the pool, a health
@@ -342,5 +362,10 @@ async fn subscription_health_resubscribes_when_a_relay_is_down() {
     assert!(outcome.relays_total >= 2);
     assert!(outcome.relays_disconnected >= 1);
 
-    engine.stop().await;
+    // Teardown only: every assertion has already run. The outcome is not
+    // asserted here because the drain contract itself is pinned by
+    // `join_tasks_*` and the `stop_*` unit tests in
+    // `src/relay/live_sync/session.rs`, and by the same-store restart
+    // assertions in `live_sync_cursor_replay_e2e`.
+    let _ = engine.stop().await;
 }

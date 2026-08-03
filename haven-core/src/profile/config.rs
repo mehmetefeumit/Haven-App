@@ -204,6 +204,12 @@ mod tests {
     }
 
     #[test]
+    // `assertions_on_constants` is true but not a defect: the assertion holds
+    // for the constant AS IT IS TODAY, and that is precisely the regression
+    // this test exists to catch — editing the const to 0 (or above the cap)
+    // turns it red. Making it a `const { assert!(..) }` would move the failure
+    // to compile time but delete a counted test.
+    #[allow(clippy::assertions_on_constants)]
     fn per_author_limit_is_bounded_and_non_zero() {
         // Zero would mean "no limit" to a relay; an unbounded reply lets a
         // misbehaving relay flood the client with historical revisions.
@@ -234,6 +240,9 @@ mod tests {
     }
 
     #[test]
+    // See `per_author_limit_is_bounded_and_non_zero`: the constant value is the
+    // subject, so "the assertion is constant" is the point, not a defect.
+    #[allow(clippy::assertions_on_constants)]
     fn inflight_relay_bound_is_positive() {
         // Zero would deadlock the fan-out (no relay ever scheduled).
         assert!(PROFILE_MAX_INFLIGHT_RELAYS > 0);

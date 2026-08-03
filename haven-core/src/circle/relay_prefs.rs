@@ -257,10 +257,15 @@ mod tests {
 
     #[test]
     fn copy_semantics() {
-        // RelayType is Copy — pass by value freely.
+        // RelayType is Copy — pass by value freely. The two by-value bindings
+        // below are the proof: the second would not compile if `Copy` were
+        // removed (the first would have moved `t`). They are READ afterwards so
+        // the proof is a real comparison and not a discarded binding.
         let t = RelayType::Inbox;
-        let _a = t;
-        let _b = t; // would not compile if Copy was removed
+        let a = t;
+        let b = t;
+        assert_eq!(a, RelayType::Inbox);
+        assert_eq!(b, RelayType::Inbox);
         assert_eq!(t, RelayType::Inbox);
     }
 }

@@ -123,6 +123,15 @@ jobs:
 
       - name: Create AVD snapshot
         if: steps.avd-cache.outputs.cache-hit != 'true'
+        # This step's entire job is booting an emulator, and until 2026-08-03 it
+        # had no bound of any kind — a wedged boot here ran to the JOB cap,
+        # which SIGKILLs the runner before any if: failure() step, so the lane
+        # died slow and with no artifacts. Measured across 23 successful runs
+        # (ci.yml, 2026-07/08) the snapshot takes 91-130 s; 15 min is ~7x the
+        # observed max, so it can only ever fire on a genuine wedge. The
+        # emulator-boot-timeout below is the action's own inner bound (7 min,
+        # matching the drive steps) and fires first with the action's message.
+        timeout-minutes: 15
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -134,6 +143,9 @@ jobs:
             -no-snapshot-save -no-window -gpu swiftshader_indirect
             -noaudio -no-boot-anim -camera-back none
           disable-animations: false
+          # Bound the boot itself (the only thing this step does) so a wedged
+          # emulator fails inside the step rather than at the step cap above.
+          emulator-boot-timeout: 420
           script: echo "Generated AVD snapshot for caching."
 
       - name: Start strfry relay
@@ -150,9 +162,19 @@ jobs:
       # pressure) ALONGSIDE the resident app and its live foreground MLS session.
       # Both sessions are held simultaneously here by design, so the peak is at
       # least as high as that lane's.
+      # BOUNDS. Three of them, innermost first:
+      #   18m  the `flutter drive` (run-b1-fgs-publish.sh's B1_DRIVE_TIMEOUT).
+      #   25m  this step's inner deadline (run-with-deadline.sh below) — covers
+      #        the drive PLUS install/grants/GPS-seed/assertions, none of which
+      #        the per-drive timeout bounds, and is the bound that actually
+      #        reaps (CI_HARDENING_BACKLOG.md A8).
+      #   35m  this step's timeout-minutes = 25 + 1 (kill grace) + 7
+      #        (emulator-boot-timeout) + margin, a belt over the deadline.
+      # Sizing evidence: this lane is new (2026-08-02) and has no green run
+      # yet, so the number comes from the FAILED runs, where the step ran 5.2-
+      # 12.1 min (14 runs). 25m is ~2x the observed max and 1.4x the inner
+      # drive bound; revise it against p95 once this lane has green history.
       - name: Run the FGS publish proof on the emulator
-        # 18m drive + install/grants/GPS-seed/assertions, with headroom for a
-        # cold AVD boot on a contended runner.
         timeout-minutes: 35
         uses: reactivecircus/android-emulator-runner@v2
         env:
@@ -167,7 +189,10 @@ jobs:
             -no-snapshot-save -no-window -gpu swiftshader_indirect
             -noaudio -no-boot-anim -camera-back none -memory 6144
           disable-animations: true
-          script: bash tooling/e2e/ci/run-b1-fgs-publish.sh /tmp/integration-apks/b1_fgs_live_foreground_test.apk integration_test/b1_fgs_live_foreground_test.dart
+          # Bound the boot (which happens BEFORE `script:` runs, and is
+          # therefore outside the deadline below).
+          emulator-boot-timeout: 420
+          script: bash tooling/e2e/ci/run-with-deadline.sh 25m "e2e-fgs-publish drive" -- bash tooling/e2e/ci/run-b1-fgs-publish.sh /tmp/integration-apks/b1_fgs_live_foreground_test.apk integration_test/b1_fgs_live_foreground_test.dart
 
       - name: Capture host + emulator diagnostics
         if: failure()

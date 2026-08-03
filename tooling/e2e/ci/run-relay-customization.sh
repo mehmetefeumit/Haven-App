@@ -113,6 +113,23 @@
 
 set -euo pipefail
 
+# Per-target `flutter drive` timeout, exported so run-single-avd-scenario.sh
+# (invoked by run_one for each target) bounds every drive. Same reasoning as
+# run-integration-tests.sh: these targets are small — the measured per-target
+# drive here is ~90 s — so 10m is a generous ceiling.
+#
+# This lane used to inherit run-single-avd-scenario.sh's 20m default, which was
+# sized for the long single-target e2e_combined flow, not for a four-target
+# loop. The cost was measurable: across 34 successful runs (ci.yml, 2026-07/08)
+# the emulator step ran p95 6.5 min but MAX 25.8 min, on a GREEN run where one
+# target wedged on cold attach, burned the full 20m, and then passed on the
+# retry below. At 20m that shape could not fit under any step deadline that
+# also fits under the job cap; at 10m the same shape costs ~16 min, so the
+# retry — which exists precisely for that attach flake — can actually complete
+# inside the lane's bounds instead of being SIGKILLed mid-recovery.
+# CI_HARDENING_BACKLOG.md A8.
+export HAVEN_DRIVE_TIMEOUT="${HAVEN_DRIVE_TIMEOUT:-10m}"
+
 if [[ $# -lt 1 ]]; then
   echo "Usage: $0 <target.dart>[=<prebuilt.apk>] [<target.dart>[=<prebuilt.apk>] ...]" >&2
   exit 2

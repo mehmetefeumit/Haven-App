@@ -237,6 +237,11 @@ async fn two_engines_converge_over_one_relay_via_the_engine_loop() {
         "Alice must decrypt a fresh location Bob sends at the converged epoch (bilateral)"
     );
 
-    alice_engine.stop().await;
-    bob_engine.stop().await;
+    // Teardown only: every assertion has already run. The outcome is not
+    // asserted here because the drain contract itself is pinned by
+    // `join_tasks_*` and the `stop_*` unit tests in
+    // `src/relay/live_sync/session.rs`, and by the same-store restart
+    // assertions in `live_sync_cursor_replay_e2e`.
+    let _ = alice_engine.stop().await;
+    let _ = bob_engine.stop().await;
 }

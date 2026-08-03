@@ -33,7 +33,7 @@ fn metadata(json: &str) -> ProfileMetadata {
 
 /// A FIXED assignment salt — never [`ProfileRelaySalt::generate`], so which
 /// relay an author is asked of is reproducible across runs.
-fn salt() -> ProfileRelaySalt {
+const fn salt() -> ProfileRelaySalt {
     ProfileRelaySalt::from_bytes([0xAA; 32])
 }
 

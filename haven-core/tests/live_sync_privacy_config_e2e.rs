@@ -153,7 +153,12 @@ async fn engine_never_authenticates_to_an_auth_required_relay() {
         "an authenticating control client reads the stored event — the relay + event are live behind AUTH"
     );
 
-    engine.stop().await;
+    // Teardown only: every assertion has already run. The outcome is not
+    // asserted here because the drain contract itself is pinned by
+    // `join_tasks_*` and the `stop_*` unit tests in
+    // `src/relay/live_sync/session.rs`, and by the same-store restart
+    // assertions in `live_sync_cursor_replay_e2e`.
+    let _ = engine.stop().await;
 }
 
 /// R9 (privacy, no gossip): the engine connects to EXACTLY the configured circle
@@ -246,5 +251,10 @@ async fn engine_connects_only_to_configured_relays_never_gossip_discovered() {
     // `total == 3` invariant above holds by construction, not by chance
     // non-discovery. The NIP-65 event IS live on g1 (the control-authored publish
     // succeeded), so "never adopted" is a genuine refusal, not an unfetched list.
-    engine.stop().await;
+    // Teardown only: every assertion has already run. The outcome is not
+    // asserted here because the drain contract itself is pinned by
+    // `join_tasks_*` and the `stop_*` unit tests in
+    // `src/relay/live_sync/session.rs`, and by the same-store restart
+    // assertions in `live_sync_cursor_replay_e2e`.
+    let _ = engine.stop().await;
 }

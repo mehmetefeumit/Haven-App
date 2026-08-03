@@ -164,6 +164,12 @@ mod tests {
     }
 
     #[test]
+    // `float_cmp` is inverted here: EXACT equality is the assertion. These
+    // coordinates must survive verbatim (a sanitizer that nudged a value would
+    // silently move a user on the map), and the rejection tests must land on the
+    // literal `0.0` sentinel — an epsilon compare would accept `1e-300` as
+    // "rejected" and hide a validator that stopped clamping.
+    #[allow(clippy::float_cmp)]
     fn update_location_preserves_exact_coordinates() {
         let core = HavenCore::new();
         let location = core.update_location(37.774_929_5, -122.419_415_5);

@@ -9,7 +9,7 @@
 //! persistence across reopen).
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use haven_core::circle::{CircleStorage, RelayType, PRODUCTION_DEFAULT_RELAYS};
@@ -32,13 +32,13 @@ fn unique_db_path(prefix: &str) -> PathBuf {
     dir.join("circles.db")
 }
 
-fn cleanup(path: &PathBuf) {
+fn cleanup(path: &Path) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::remove_dir_all(parent);
     }
 }
 
-/// 64-char hex key for SQLCipher tests.
+/// 64-char hex key for `SQLCipher` tests.
 fn test_hex_key() -> String {
     "deadbeefcafebabe1234567890abcdef".repeat(2)
 }
@@ -403,7 +403,7 @@ proptest! {
 /// # Scope (corrected post-Dark-Matter)
 ///
 /// Haven DOES publish kind 10002 — it is the NIP-65 relay list used for
-/// KeyPackage discovery, and it retired kind 10051 for that purpose (see the
+/// `KeyPackage` discovery, and it retired kind 10051 for that purpose (see the
 /// protocol table in `CLAUDE.md`). That publish goes through the FFI's
 /// `RelayTypeFfi::Nip65` route, which calls
 /// [`haven_core::relay::build_nip65_relay_list_event`] directly and never
@@ -412,7 +412,7 @@ proptest! {
 /// So what this test guards is narrower and still worth guarding: the CORE
 /// enum's mapping must not silently acquire 10002. The mapping feeds exactly
 /// two live builders — `build_relay_list_event` and `build_unpublish_event`
-/// — and the only surviving production caller for the KeyPackage arm is the
+/// — and the only surviving production caller for the `KeyPackage` arm is the
 /// legacy-retraction path (`relay/maintenance/key_package.rs`), which
 /// publishes an EMPTY kind-10051 to scrub a pre-Dark-Matter list. That is why
 /// `RelayType::KeyPackage → 10051` below is correct and must stay: 10051 is

@@ -215,6 +215,11 @@ impl CircleStorage {
     }
 
     /// Test-only: returns the number of rows in `published_key_packages`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database lock is poisoned or the count query
+    /// fails.
     #[cfg(test)]
     pub fn count_published_key_packages(&self) -> Result<i64> {
         let conn = self

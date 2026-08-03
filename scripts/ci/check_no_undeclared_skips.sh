@@ -126,10 +126,30 @@ misconfig() {
 # stable identity. Doctests carry no reason — ```ignore has no message — so
 # their manifest reason field is empty, and the WHY lives in the manifest's
 # comments.
+#
+# ## Colour
+#
+# `dtolnay/rust-toolchain` exports `CARGO_TERM_COLOR=always` (its "enable colors
+# in Cargo output" step), so in CI those three header lines arrive wrapped in
+# SGR escapes — `ESC[1mESC[92m     RunningESC[0m unittests src/lib.rs (…)`. The
+# line then starts with ESC rather than whitespace and every header pattern
+# below misses it. `CARGO_TERM_COLOR` governs CARGO's own output only; libtest
+# writes its `test … ignored` verdicts uncoloured to a non-TTY pipe. So the
+# verdict lines still parsed, the count self-check still balanced, and every
+# skip was simply mis-keyed to an EMPTY target — which the reconciler then
+# reported as an undeclared skip AND a stale declaration for the same test
+# (CI run 30826511298). Escapes are therefore stripped per line, and an
+# unattributed skip is treated as parser rot rather than as a policy violation.
 # ---------------------------------------------------------------------------
 extract_cargo_skips() {
   local logfile="$1"
   awk '
+    # Dynamic regex rather than a `\033` literal: escape handling inside a
+    # bracket-anchored regex literal differs between gawk and mawk (the runner
+    # default), and this must not depend on which one is installed.
+    BEGIN { ansi = sprintf("%c", 27) "\\[[0-9;]*[a-zA-Z]" }
+    { gsub(ansi, ""); sub(/\r$/, "") }
+
     # Order matters: the "unittests" form is a prefix of the generic one.
     /^[[:space:]]+Running unittests / {
       ctx = $0
@@ -155,6 +175,7 @@ extract_cargo_skips() {
       rest = substr(line, i + length(" ... ignored"))
       reason = (substr(rest, 1, 2) == ", ") ? substr(rest, 3) : ""
       if (ctx == "doc") sub(/ \(line [0-9]+\)$/, "", name)
+      if (ctx == "") unattributed++
       printf "%s::%s\t%s\n", ctx, name, reason
       parsed++
       next
@@ -173,6 +194,15 @@ extract_cargo_skips() {
       }
       if (parsed != declared) {
         printf "PARSE-ERROR parsed %d `... ignored` lines but the summaries declare %d — the extractor has rotted\n", parsed, declared > "/dev/stderr"
+        exit 3
+      }
+      # The count check above balances even when every id is mis-keyed, because
+      # it only ever compares verdict lines against summary fields. Names are
+      # unique only WITHIN a binary, so an unresolved target makes the id a
+      # different thing from what the manifest declares — reported as rot, not
+      # as "a test was skipped", because no manifest edit can fix it.
+      if (unattributed > 0) {
+        printf "PARSE-ERROR %d skipped test(s) could not be attributed to a cargo target: no `Running …` / `Doc-tests …` header was recognised before them, so their ids would be keyed to an empty target. Colourised cargo output or a cargo format change?\n", unattributed > "/dev/stderr"
         exit 3
       }
     }
@@ -492,6 +522,43 @@ EOF
   _case "empty log is a misconfiguration" 2 "${tmp}/manifest.ok" cargo "${tmp}/cargo.empty.log"
   _case "missing log is a misconfiguration" 2 "${tmp}/manifest.ok" cargo "${tmp}/nope.log"
 
+  # (13) THE CI SHAPE, byte-faithful (ESC included). `dtolnay/rust-toolchain`
+  #      exports CARGO_TERM_COLOR=always, so cargo's OWN header lines arrive
+  #      wrapped in SGR escapes while libtest's verdicts — written to a non-TTY
+  #      pipe — do not. In CI run 30826511298 every header therefore missed,
+  #      every id keyed to an EMPTY target, and the guard reported the same five
+  #      tests as BOTH undeclared and stale. Fixture (5)'s count check could not
+  #      see it: it compares verdict lines to summary fields, and both were
+  #      intact.
+  local esc=$'\033'
+  {
+    printf '%s\n' "${esc}[1m${esc}[92m   Compiling${esc}[0m haven-core v0.1.0"
+    printf '%s\n' "${esc}[1m${esc}[92m     Running${esc}[0m unittests src/lib.rs (target/debug/deps/haven_core-89aa4c3db7f5a07d)"
+    printf '\nrunning 3 tests\n'
+    printf '%s\n' 'test location::types::tests::unknown_legacy_fields_are_ignored ... ok'
+    printf '%s\n' 'test profile::blossom::tests::live_round_trip_against_local_blossom ... ignored, needs a running Blossom server'
+    printf '%s\n' 'test relay::manager::tests::relay_tag_malformed_single_element_ignored ... ok'
+    printf '\ntest result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.00s\n\n'
+    printf '%s\n' "${esc}[1m${esc}[92m     Running${esc}[0m tests/mls_integration_tests.rs (target/debug/deps/mls_integration_tests-93bdff999faf3424)"
+    printf '\nrunning 1 test\n'
+    printf '%s\n' 'test production_storage_tests::storage_encrypted_opens_successfully ... ignored, requires system keyring - run with --ignored flag'
+    printf '\ntest result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\n'
+    printf '%s\n' "${esc}[1m${esc}[92m   Doc-tests${esc}[0m haven_core"
+    printf '\nrunning 1 test\n'
+    printf '%s\n' 'test src/nostr/mod.rs - nostr (line 25) ... ignored'
+    printf '\ntest result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.10s\n'
+  } > "${tmp}/cargo.color.log"
+  _case "colourised cargo log reconciles identically" 0 "${tmp}/manifest.ok" cargo "${tmp}/cargo.color.log"
+
+  # (14) The DIAGNOSIS that was missing. With the target headers gone the count
+  #      self-check still balances, so the only thing left to notice is that the
+  #      ids have no target on them. Names are unique only WITHIN a binary, so
+  #      an unattributed skip is rot — no manifest edit can fix it, and blaming
+  #      the manifest (as this did) sends the reader to the wrong file.
+  grep -vE '^[[:space:]]+(Running|Doc-tests) ' "${tmp}/cargo.ok.log" \
+    > "${tmp}/cargo.noctx.log"
+  _case "unattributed skips are parser rot, not a policy failure" 2 "${tmp}/manifest.ok" cargo "${tmp}/cargo.noctx.log"
+
   log "self-test: dart surface"
 
   # A minimal but structurally faithful NDJSON report: two suites, one skipped
@@ -543,7 +610,7 @@ EOF
   if [[ "${fails}" -ne 0 ]]; then
     fail "self-test failed — this guard cannot be trusted until it is fixed"
   fi
-  log "OK: self-test passed (12 fixtures)."
+  log "OK: self-test passed (14 fixtures)."
 }
 
 main() {

@@ -270,7 +270,7 @@ async fn encrypted_event_has_h_tag_with_nostr_group_id_only() {
 /// key cannot be byte-extracted from an integration test. Key separation is now
 /// formalized ON-WIRE as the mandatory `account-identity-proof.v2` leaf extension
 /// (W7): the engine REJECTS any leaf whose proof does not verify. The observable
-/// re-expression: (1) a genuine Haven KeyPackage — created with the identity key —
+/// re-expression: (1) a genuine Haven `KeyPackage` — created with the identity key —
 /// is ACCEPTED by `create_group` (the two-party setup succeeds), so its
 /// identity-proof is present + verifies; and (2) the Nostr identity key is NEVER
 /// used to sign a kind-445 group message (an ephemeral key is), so the identity

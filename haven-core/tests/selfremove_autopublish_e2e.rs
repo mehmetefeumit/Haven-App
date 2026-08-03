@@ -40,7 +40,7 @@ struct FakePublisher {
 }
 
 impl FakePublisher {
-    fn new(ack: bool) -> Self {
+    const fn new(ack: bool) -> Self {
         Self {
             ack,
             published: Mutex::new(Vec::new()),
@@ -227,13 +227,13 @@ async fn auto_commit_is_published_then_confirmed_and_a_third_member_converges() 
     let publisher = FakePublisher::new(true);
     resolve_receive_publish_work(&fx.alice, &publisher, &work).await;
 
-    let published = publisher.published();
+    let sent = publisher.published();
     assert_eq!(
-        published.len(),
+        sent.len(),
         1,
         "exactly one eviction commit must be published to the relay before confirming"
     );
-    let commit_event = published.into_iter().next().unwrap();
+    let commit_event = sent.into_iter().next().unwrap();
 
     assert!(
         !roster(&fx.alice, &fx.mls_group_id).await.contains(&bob_hex),
@@ -343,7 +343,7 @@ async fn engine_processor_publishes_the_auto_commit_before_confirming() {
         .process_group_event(&proposal, &fx.nostr_group_id)
         .await;
     let carol_pk = fx.carol_keys.public_key();
-    let mut published = false;
+    let mut saw_publish = false;
     for i in 0..40 {
         tokio::time::sleep(Duration::from_millis(25)).await;
         let (loc_event, _, _) = fx
@@ -351,7 +351,7 @@ async fn engine_processor_publishes_the_auto_commit_before_confirming() {
             .encrypt_location(
                 &fx.mls_group_id,
                 &carol_pk,
-                &LocationMessage::new(1.0 + f64::from(i) * 0.01, 2.0),
+                &LocationMessage::new(f64::from(i).mul_add(0.01, 1.0), 2.0),
                 300,
             )
             .await
@@ -360,13 +360,13 @@ async fn engine_processor_publishes_the_auto_commit_before_confirming() {
             .process_group_event(&loc_event, &fx.nostr_group_id)
             .await;
         if !fake.published().is_empty() {
-            published = true;
+            saw_publish = true;
             break;
         }
     }
 
     assert!(
-        published,
+        saw_publish,
         "the processor must PUBLISH the auto-commit over its relay plane, not \
          optimistically confirm it"
     );
@@ -455,6 +455,11 @@ async fn two_live_sync_engines_publish_and_converge_on_the_eviction() {
         "no split-brain: Alice and Carol land on the same post-eviction epoch"
     );
 
-    alice_engine.stop().await;
-    carol_engine.stop().await;
+    // Teardown only: every assertion has already run. The outcome is not
+    // asserted here because the drain contract itself is pinned by
+    // `join_tasks_*` and the `stop_*` unit tests in
+    // `src/relay/live_sync/session.rs`, and by the same-store restart
+    // assertions in `live_sync_cursor_replay_e2e`.
+    let _ = alice_engine.stop().await;
+    let _ = carol_engine.stop().await;
 }

@@ -1841,11 +1841,9 @@ mod tests {
         let canonical_old = make_kp_event(&keys, Kind::Custom(30443), 1_000);
         let legacy_new = make_kp_event(&keys, Kind::MlsKeyPackage, 9_000);
 
-        let picked = RelayManager::pick_keypackage_from_events(vec![
-            legacy_new.clone(),
-            canonical_old.clone(),
-        ])
-        .expect("should pick a key package");
+        let picked =
+            RelayManager::pick_keypackage_from_events(vec![legacy_new, canonical_old.clone()])
+                .expect("should pick a key package");
 
         assert_eq!(
             picked.kind,
@@ -1861,11 +1859,9 @@ mod tests {
         let old_canonical = make_kp_event(&keys, Kind::Custom(30443), 1_000);
         let new_canonical = make_kp_event(&keys, Kind::Custom(30443), 5_000);
 
-        let picked = RelayManager::pick_keypackage_from_events(vec![
-            old_canonical.clone(),
-            new_canonical.clone(),
-        ])
-        .expect("should pick a key package");
+        let picked =
+            RelayManager::pick_keypackage_from_events(vec![old_canonical, new_canonical.clone()])
+                .expect("should pick a key package");
 
         assert_eq!(picked.id, new_canonical.id);
     }

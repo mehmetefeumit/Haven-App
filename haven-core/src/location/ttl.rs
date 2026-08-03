@@ -302,7 +302,7 @@ mod tests {
             })
             .sum();
         let mean = sum / 10_000;
-        let diff = if mean > 300 { mean - 300 } else { 300 - mean };
+        let diff = mean.abs_diff(300);
         assert!(
             diff < 5,
             "empirical mean {mean} drifts too far from nominal 300"

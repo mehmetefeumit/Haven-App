@@ -1119,13 +1119,13 @@ mod mls_dependent_tests {
     //! Dark Matter (DM-5a) re-expression of the MLS-dependent circle tests.
     //!
     //! Ported to the async `CircleManager`/`SessionManager` idiom (manager
-    //! identity == sender keys; KeyPackages via the DM-2b maintenance builder).
+    //! identity == sender keys; `KeyPackages` via the DM-2b maintenance builder).
     //! Subject-gone tests are DELETED with a note: the `self_update_*` /
     //! `groups_needing_self_update_*` families (engine owns convergence, no
     //! `self_update`); the basic
     //! create/add/remove/get-member/invitation/finalize/clear tests (covered by
     //! the `src/circle/manager.rs` inline suite). The UNIQUE, high-value coverage
-    //! kept + re-expressed here is the welcome-delivery cascade, the create_circle
+    //! kept + re-expressed here is the welcome-delivery cascade, the `create_circle`
     //! relay defaulting, and the two crown-jewel cross-party gates: forward
     //! secrecy on removal (RC-1) and add/remove convergence (RC-3/RC-4).
 
@@ -1145,7 +1145,7 @@ mod mls_dependent_tests {
         (manager, keys, dir)
     }
 
-    /// Mints a signed kind-30443 KeyPackage event for `manager` (whose identity
+    /// Mints a signed kind-30443 `KeyPackage` event for `manager` (whose identity
     /// MUST be `keys`), via the real DM-2b publish path.
     async fn kp_event(manager: &CircleManager, keys: &Keys, relays: &[String]) -> nostr::Event {
         build_kp_maintenance_events(manager.session(), keys, relays, None)
@@ -1154,7 +1154,7 @@ mod mls_dependent_tests {
             .event
     }
 
-    fn member(kp: nostr::Event, inbox: Vec<String>, nip65: Vec<String>) -> MemberKeyPackage {
+    const fn member(kp: nostr::Event, inbox: Vec<String>, nip65: Vec<String>) -> MemberKeyPackage {
         MemberKeyPackage {
             key_package_event: kp,
             inbox_relays: inbox,
@@ -1571,6 +1571,13 @@ mod mls_dependent_tests {
     /// (an admin-policy commit peers cannot apply, or an admin bit nobody holds,
     /// would leave a circle that can never add, remove, or re-key again).
     #[tokio::test]
+    // One indivisible three-party MLS scenario: handoff commit → peer apply →
+    // post-handoff add/remove → location round-trip, all at successive epochs of
+    // the SAME group. Splitting it to satisfy the 100-line cap would either
+    // duplicate the (slow) three-party setup per fragment or thread live MLS
+    // state between helpers, and the value of the test is precisely that the
+    // sequence holds unbroken.
+    #[allow(clippy::too_many_lines)]
     async fn admin_handoff_transfers_admin_and_group_stays_usable() {
         let c = setup_three_party_active_circle("admin_handoff").await;
         let alice_pk = c.alice_keys.public_key();

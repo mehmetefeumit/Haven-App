@@ -118,11 +118,10 @@ pub mod tests {
 
     impl SecureKeyStorage for MockStorage {
         fn store(&self, key: &str, value: &[u8]) -> Result<(), IdentityError> {
-            let mut data = self
-                .data
+            self.data
                 .write()
-                .map_err(|e| IdentityError::Storage(e.to_string()))?;
-            data.insert(key.to_string(), value.to_vec());
+                .map_err(|e| IdentityError::Storage(e.to_string()))?
+                .insert(key.to_string(), value.to_vec());
             Ok(())
         }
 
@@ -135,11 +134,10 @@ pub mod tests {
         }
 
         fn delete(&self, key: &str) -> Result<(), IdentityError> {
-            let mut data = self
-                .data
+            self.data
                 .write()
-                .map_err(|e| IdentityError::Storage(e.to_string()))?;
-            data.remove(key);
+                .map_err(|e| IdentityError::Storage(e.to_string()))?
+                .remove(key);
             Ok(())
         }
 

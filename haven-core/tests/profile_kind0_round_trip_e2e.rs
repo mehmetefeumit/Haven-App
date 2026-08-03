@@ -39,7 +39,7 @@ fn metadata(json: &str) -> ProfileMetadata {
 ///
 /// Assignment is a salted rendezvous hash, so a random salt would make which
 /// relay an author is asked of a per-run draw and a failure irreproducible.
-fn salt() -> ProfileRelaySalt {
+const fn salt() -> ProfileRelaySalt {
     ProfileRelaySalt::from_bytes([0xAA; 32])
 }
 

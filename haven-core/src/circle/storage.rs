@@ -2264,7 +2264,7 @@ mod tests {
         CircleMembership {
             mls_group_id: GroupId::from_slice(&[id; 32]),
             status: MembershipStatus::Pending,
-            inviter_pubkey: Some(format!("{:064x}", id)),
+            inviter_pubkey: Some(format!("{id:064x}")),
             invited_at: 1_000_000,
             responded_at: None,
         }
@@ -2272,7 +2272,7 @@ mod tests {
 
     fn create_test_contact(id: u8) -> Contact {
         Contact {
-            pubkey: format!("{:064x}", id),
+            pubkey: format!("{id:064x}"),
             display_name: Some(format!("Contact {id}")),
             notes: Some(format!("Notes for contact {id}")),
             created_at: 1_000_000,
@@ -2345,12 +2345,12 @@ mod tests {
         storage.save_circle(&circle2).unwrap();
         storage.save_circle(&circle3).unwrap();
 
-        let circles = storage.get_all_circles().unwrap();
-        assert_eq!(circles.len(), 3);
+        let ordered = storage.get_all_circles().unwrap();
+        assert_eq!(ordered.len(), 3);
         // Should be ordered by updated_at DESC
-        assert_eq!(circles[0].updated_at, 3_000_000);
-        assert_eq!(circles[1].updated_at, 2_000_000);
-        assert_eq!(circles[2].updated_at, 1_000_000);
+        assert_eq!(ordered[0].updated_at, 3_000_000);
+        assert_eq!(ordered[1].updated_at, 2_000_000);
+        assert_eq!(ordered[2].updated_at, 1_000_000);
     }
 
     #[test]
@@ -2552,12 +2552,12 @@ mod tests {
         storage.save_contact(&contact2).unwrap();
         storage.save_contact(&contact3).unwrap();
 
-        let contacts = storage.get_all_contacts().unwrap();
-        assert_eq!(contacts.len(), 3);
+        let ordered = storage.get_all_contacts().unwrap();
+        assert_eq!(ordered.len(), 3);
         // Should be ordered by display_name (NULLS LAST), then pubkey
-        assert_eq!(contacts[0].display_name, Some("Alice".to_string()));
-        assert_eq!(contacts[1].display_name, Some("Zoe".to_string()));
-        assert!(contacts[2].display_name.is_none());
+        assert_eq!(ordered[0].display_name, Some("Alice".to_string()));
+        assert_eq!(ordered[1].display_name, Some("Zoe".to_string()));
+        assert!(ordered[2].display_name.is_none());
     }
 
     #[test]

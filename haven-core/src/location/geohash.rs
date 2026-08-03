@@ -96,6 +96,12 @@ mod tests {
     }
 
     #[test]
+    // `float_cmp` is inverted here: EXACT equality is the assertion. These
+    // coordinates must survive verbatim (a sanitizer that nudged a value would
+    // silently move a user on the map), and the rejection tests must land on the
+    // literal `0.0` sentinel — an epsilon compare would accept `1e-300` as
+    // "rejected" and hide a validator that stopped clamping.
+    #[allow(clippy::float_cmp)]
     fn empty_geohash_returns_zero() {
         let (lat, lon) = geohash_to_location("");
         assert_eq!(lat, 0.0);
@@ -103,6 +109,9 @@ mod tests {
     }
 
     #[test]
+    // Exact equality is the assertion — see the note on the first
+    // `#[allow(clippy::float_cmp)]` in this module.
+    #[allow(clippy::float_cmp)]
     fn invalid_geohash_returns_zero() {
         let (lat, lon) = geohash_to_location("not-a-geohash");
         assert_eq!(lat, 0.0);
