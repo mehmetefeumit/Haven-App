@@ -33,6 +33,7 @@
 library;
 
 import 'dart:async';
+import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
@@ -60,6 +61,45 @@ const Duration kLivenessProbeTimeout = Duration(seconds: 5);
 /// separates them enough to be independent samples without stretching the whole
 /// decision past a publish cycle.
 const Duration kLivenessProbeGap = Duration(seconds: 3);
+
+/// The name `flutter_foreground_task` registers its cross-isolate port under.
+///
+/// Duplicated from the plugin, where it is private (`_kPortName` in
+/// `flutter_foreground_task.dart`). It is needed because
+/// `FlutterForegroundTask.sendDataToMain` is `sendPort?.send(data)` — a SILENT
+/// no-op when nothing is registered — so without looking the port up first,
+/// "the channel was never set up" is indistinguishable from "the isolate is
+/// dead", and the caller acts on the latter. A drift test pins this against the
+/// plugin source.
+const String kForegroundTaskPortName =
+    'flutter_foreground_task/isolateComPort';
+
+/// Whether the cross-isolate channel is actually available.
+///
+/// If no port is registered, a ping cannot be delivered at all and silence
+/// carries no information about the other isolate.
+bool foregroundTaskChannelReady() =>
+    IsolateNameServer.lookupPortByName(kForegroundTaskPortName) != null;
+
+/// Installs the foreground-task comms this isolate needs, idempotently.
+///
+/// Call from EVERY entrypoint that brings up the UI, not just `main()`. The
+/// responder used to be installed only there, so an entrypoint that builds the
+/// app itself — an integration-test target, for instance — left the channel
+/// unregistered. Every liveness ping then vanished into
+/// `sendDataToMain`'s null-safe send, both probes timed out, and the foreground
+/// service concluded a perfectly healthy UI isolate was dead and released its
+/// session. That is the exact harm the probe exists to prevent, produced by the
+/// probe's own setup being missed.
+///
+/// Safe to call repeatedly from the SAME isolate: `initCommunicationPort`
+/// re-registers this isolate's own port, and the responder install is latched.
+/// It must never be called from a second isolate — see
+/// `scripts/ci/check_liveness_port_single_owner.sh`.
+void ensureForegroundTaskComms() {
+  FlutterForegroundTask.initCommunicationPort();
+  registerForegroundLivenessResponder();
+}
 
 /// Registers the main-isolate side of the probe: reply to any ping with the
 /// same nonce.
@@ -153,7 +193,15 @@ class ForegroundLivenessProbe {
   /// caller uses this to authorise tearing down a session it may not own.
   Future<bool> mainIsolateIsAlive({
     Duration timeout = kLivenessProbeTimeout,
+    bool Function() channelReady = foregroundTaskChannelReady,
   }) async {
+    // Silence only means "dead" if a ping could have been delivered. With no
+    // port registered the send is a no-op, so treat it as "cannot tell" —
+    // the fail-closed direction.
+    if (!channelReady()) {
+      debugPrint('[Liveness] comms channel not registered; assuming alive');
+      return true;
+    }
     if (_pending != null) {
       // A concurrent probe would overwrite `_nonce`, so the earlier call's
       // correctly-timed reply would then look stale and be ignored — making it

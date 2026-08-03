@@ -10,7 +10,6 @@ import 'dart:io' show Directory;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -98,14 +97,10 @@ Future<void> main() async {
   // either — only the UI/protocol e2e_combined lane, which does not exercise the
   // foreground service, opts out.
   if (!const bool.fromEnvironment('HAVEN_E2E_NO_BACKGROUND')) {
-    FlutterForegroundTask.initCommunicationPort();
-    // Answer the service isolate's liveness pings. Registered HERE rather than
-    // in a widget because it must stay installed for as long as this isolate
-    // could hold the MLS session — which outlives any route or widget mount.
-    // Without it every ping times out, the service concludes this isolate is
-    // gone, and a reclaim could tear down a live session (see
-    // `foreground_liveness_probe.dart`).
-    registerForegroundLivenessResponder();
+    // Port + liveness responder together. `MapShell.initState` calls this too,
+    // so an entrypoint that builds the app without running this `main()` — an
+    // integration-test target, say — still registers the channel. Idempotent.
+    ensureForegroundTaskComms();
     // Configure the foreground-service notification channel up-front so
     // the channel exists before any `startService` request is issued.
     // Android does not allow modifying a channel's importance after

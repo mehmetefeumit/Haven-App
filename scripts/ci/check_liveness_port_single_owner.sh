@@ -31,28 +31,47 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 status=0
-OWNER='haven/lib/main.dart'
+OWNER='haven/lib/src/services/foreground_liveness_probe.dart'
 
+# `initCommunicationPort()` must be reachable ONLY through the helper, so the
+# port and the responder are always installed together. Calling it directly
+# elsewhere is how an entrypoint ends up with a port and no responder — or, from
+# a second isolate, steals the port outright.
 port_sites=$(grep -rln --include='*.dart' 'initCommunicationPort()' haven/lib || true)
 if [ "$port_sites" != "$OWNER" ]; then
-  echo "ERROR: initCommunicationPort() must be called from exactly $OWNER."
-  echo "Found in:"
+  echo "ERROR: initCommunicationPort() must be called only from $OWNER,"
+  echo "inside ensureForegroundTaskComms(). Found in:"
   echo "${port_sites:-  (nowhere)}"
   echo
-  echo "A second call takes the port name over. Probes would then reach an"
-  echo "isolate with no liveness responder, and the foreground service would"
-  echo "read the silence as a dead UI isolate and reclaim its MLS session."
+  echo "Calling it directly risks a port with no responder; from a second"
+  echo "isolate it takes the port name over entirely. Either way the foreground"
+  echo "service reads the resulting silence as a dead UI isolate and releases"
+  echo "its MLS session."
   status=1
 fi
 
+# The helper must install both halves, or the port exists with nothing to
+# answer on it.
 if ! grep -q 'registerForegroundLivenessResponder()' "$OWNER"; then
-  echo "ERROR: $OWNER owns the communication port but does not install the"
-  echo "liveness responder. The port owner MUST be able to answer probes, or"
-  echo "every probe times out and the reclaim fires against a healthy isolate."
+  echo "ERROR: ensureForegroundTaskComms() must install the liveness responder"
+  echo "alongside the port, or every probe times out against a healthy isolate."
   status=1
 fi
+
+# Every UI entrypoint must call the helper. `main()` alone is not enough: an
+# entrypoint that builds the app itself (an integration-test target) never runs
+# it, and CI run 30786149786 showed the foreground service then reclaim a live
+# session on exactly that path.
+for entry in haven/lib/main.dart haven/lib/src/pages/map_shell.dart; do
+  if ! grep -q 'ensureForegroundTaskComms()' "$entry"; then
+    echo "ERROR: $entry does not call ensureForegroundTaskComms()."
+    echo "An entrypoint without it leaves the channel unregistered, and"
+    echo "sendDataToMain is a silent no-op when nothing is registered."
+    status=1
+  fi
+done
 
 if [ "$status" -eq 0 ]; then
-  echo "OK: one isolate owns the communication port, and it answers probes."
+  echo "OK: the port is installed only with its responder, from every UI entrypoint."
 fi
 exit "$status"

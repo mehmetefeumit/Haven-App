@@ -36,6 +36,7 @@ import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/self_update_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart';
+import 'package:haven/src/services/foreground_liveness_probe.dart';
 import 'package:haven/src/services/background_idle_waiter.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/circle_service.dart';
@@ -210,6 +211,12 @@ class _MapShellState extends ConsumerState<MapShell>
     // running) defers to the foreground publisher (MLS single-writer
     // invariant). Best-effort: missed flag updates only relax the
     // overlap guard, not the underlying MLS safety.
+    // Register the foreground-task channel from the widget layer as well as
+    // `main()`. An entrypoint that builds the app itself never runs `main()`,
+    // and without the channel every liveness ping vanishes into a null-safe
+    // send — so the foreground service reads the silence as a dead UI isolate
+    // and releases a session this isolate is actively using. Idempotent.
+    ensureForegroundTaskComms();
     unawaited(BackgroundLocationManager.markForegroundActive(active: true));
     // Pre-warm relay service, then fire startup tasks.
     WidgetsBinding.instance.addPostFrameCallback((_) async {
