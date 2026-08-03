@@ -138,6 +138,40 @@ void main() {
       expect(write, lessThan(releaseAt));
     });
 
+    test('a late reply aborts the reclaim even after both probes elapse', () {
+      // Both probes timing out is not the same as nothing ever answering.
+      final at = reclaimBody.indexOf('sawRecentReply');
+      expect(
+        at,
+        isNonNegative,
+        reason: 'a reply that lands after its own probe gave up is still proof '
+            'the isolate is alive, and must abort the destructive step',
+      );
+      expect(at, lessThan(releaseAt));
+    });
+
+    test('the confirmation probe is spaced, not issued back-to-back', () {
+      // Back-to-back probes observe one contiguous window, so a single
+      // sustained stall satisfies both and the confirmation proves nothing.
+      final firstProbe = reclaimBody.indexOf('mainIsolateIsAlive(');
+      final gap = reclaimBody.indexOf('kLivenessProbeGap');
+      final secondProbe = reclaimBody.indexOf(
+        'mainIsolateIsAlive(',
+        firstProbe + 1,
+      );
+      expect(gap, isNonNegative, reason: 'the probes must be separated');
+      expect(firstProbe, lessThan(gap));
+      expect(gap, lessThan(secondProbe));
+    });
+
+    test('each decision starts from a clean evidence round', () {
+      // Without this, one old reply would suppress every later reclaim.
+      final reset = reclaimBody.indexOf('resetRound()');
+      final firstProbe = reclaimBody.indexOf('mainIsolateIsAlive(');
+      expect(reset, isNonNegative);
+      expect(reset, lessThan(firstProbe));
+    });
+
     test('a dead verdict is confirmed by a second probe', () {
       // One silent window can be a garbage collection in a healthy isolate.
       expect(

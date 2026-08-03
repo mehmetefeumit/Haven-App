@@ -84,6 +84,7 @@ import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/rust/frb_generated.dart';
+import 'package:haven/src/services/fresh_secret.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/catchup_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
@@ -519,11 +520,16 @@ Future<void> _runCatchupViaWorkerBootstrap() async {
   //    Dark Matter hard-requires the identity secret at construction time
   //    (account identity + NIP-59 welcome signer + account-identity-proof
   //    signer); re-fetched fresh here rather than reusing `bytes` above
-  //    (already zeroized) — Security Rule 9.
-  final identitySecretBytes = await identityManager.getSecretBytes();
-  final circleManager = await CircleManagerFfi.newInstance(
-    dataDir: dataDir,
-    identitySecretBytes: identitySecretBytes,
+  //    (already zeroized), and scrubbed again on the way out via
+  //    `withFreshSecret`'s `finally` — Security Rule 9. Fetching into a bare
+  //    local leaves the raw 32-byte nsec in this isolate's Dart heap for the GC
+  //    to relocate rather than erase.
+  final circleManager = await withFreshSecret(
+    identityManager.getSecretBytes,
+    (secret) => CircleManagerFfi.newInstance(
+      dataDir: dataDir,
+      identitySecretBytes: secret,
+    ),
   );
 
   // 6. Relay service. Its initialize() is INSIDE the try so a throw there

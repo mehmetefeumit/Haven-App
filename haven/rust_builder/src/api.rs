@@ -9382,7 +9382,7 @@ fn reinstall_after_timed_out_stop(core: Arc<LiveSyncCore>) {
 /// registry key — surfaced rather than answered `false`, which would be
 /// fail-open.
 pub fn is_session_live(data_dir: String) -> Result<bool, String> {
-    let db = std::path::Path::new(&data_dir).join("session.sqlite");
+    let db = haven_core::nostr::mls::storage::session_db_path(std::path::Path::new(&data_dir));
     haven_core::nostr::mls::storage::is_session_live(&db).map_err(|e| e.to_string())
 }
 

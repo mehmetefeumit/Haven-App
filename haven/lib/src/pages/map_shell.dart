@@ -595,14 +595,43 @@ class _MapShellState extends ConsumerState<MapShell>
     }
   }
 
+  // Self-heal cadence. Jittered for the same reason the invitation poll is:
+  // when the engine is healthy this costs a local `isRunning` read, but when a
+  // restart keeps FAILING every tick issues a full connect + REQ sweep across
+  // every group and inbox relay. A fixed period would give that a metronomic,
+  // Haven-specific signature to a passive relay observer.
+  static const _healMinSecs = 90;
+  static const _healMaxSecs = 150;
+
+  /// Consecutive failed restarts, used to back off. Reset on success so a
+  /// transient failure does not permanently slow recovery.
+  int _consecutiveHealFailures = 0;
+
+  /// Cap on the backoff multiplier — 8 × the base cadence is roughly 15
+  /// minutes, past which retrying faster buys nothing against a relay set that
+  /// is simply unreachable.
+  static const _healBackoffMaxMultiplier = 8;
+
+  final math.Random _healRng = math.Random.secure();
+
   /// (Re-)arms the periodic self-heal backstop. Idempotent — cancels first, so
   /// repeated calls cannot leave two timers running.
+  ///
+  /// One-shot and re-armed from its own callback rather than `Timer.periodic`,
+  /// so each interval draws fresh jitter and can widen under backoff.
   void _rearmLiveSyncHealTimer() {
     if (!liveSyncEnabled) return;
     _liveSyncHealTimer?.cancel();
-    _liveSyncHealTimer = Timer.periodic(const Duration(minutes: 2), (_) {
+    final multiplier = math.min(
+      1 << _consecutiveHealFailures,
+      _healBackoffMaxMultiplier,
+    );
+    final delaySecs =
+        (_healMinSecs + _healRng.nextInt(_healMaxSecs - _healMinSecs + 1)) *
+        multiplier;
+    _liveSyncHealTimer = Timer(Duration(seconds: delaySecs), () {
       if (!mounted) return;
-      unawaited(_healLiveSyncIfStopped());
+      unawaited(_healLiveSyncIfStopped().whenComplete(_rearmLiveSyncHealTimer));
     });
   }
 
@@ -621,11 +650,19 @@ class _MapShellState extends ConsumerState<MapShell>
     final resubscriber = _liveSyncResubscriber;
     if (resubscriber == null) return;
     try {
-      await resubscriber.ensureRunning();
+      if (await resubscriber.ensureRunning()) {
+        _consecutiveHealFailures = 0;
+        return;
+      }
     } on Object catch (e) {
       // Never surface the raw error (Rule 8) and never let a failed heal break
       // the timer — the next tick retries.
       debugPrint('[MapShell] live-sync heal failed: ${e.runtimeType}');
+    }
+    // Counted, not just logged: a relay set that is unreachable would otherwise
+    // be swept on every tick indefinitely.
+    if (_consecutiveHealFailures < _healBackoffMaxMultiplier) {
+      _consecutiveHealFailures++;
     }
   }
 

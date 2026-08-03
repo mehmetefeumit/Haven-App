@@ -53,6 +53,14 @@ const String kLivenessPongKey = 'haven.liveness.pong';
 /// a second, independent timeout before acting.
 const Duration kLivenessProbeTimeout = Duration(seconds: 5);
 
+/// Gap between a probe and its confirmation.
+///
+/// Two probes issued back-to-back observe one contiguous window, so a single
+/// sustained stall satisfies both and the confirmation proves nothing. This
+/// separates them enough to be independent samples without stretching the whole
+/// decision past a publish cycle.
+const Duration kLivenessProbeGap = Duration(seconds: 3);
+
 /// Registers the main-isolate side of the probe: reply to any ping with the
 /// same nonce.
 ///
@@ -91,8 +99,33 @@ void _respondToPing(Object data) {
 /// [mainIsolateIsAlive] before authorising a session reclaim.
 class ForegroundLivenessProbe {
   Completer<void>? _pending;
-  int? _nonce;
   int _nextNonce = 1;
+
+  /// Nonces issued recently, not just the one in flight.
+  ///
+  /// A reply that arrives after its own probe gave up is still direct proof
+  /// that the main isolate is alive and answering — discarding it (as matching
+  /// a single `_nonce` did) meant a sustained stall spanning both probes read
+  /// as death, which is the verdict that authorises tearing down a session.
+  /// The realistic cause is not jank but the main isolate blocked on a sync FFI
+  /// call while this isolate holds the same SQLCipher locks — i.e. exactly the
+  /// situation this runs in.
+  final Set<int> _recentNonces = <int>{};
+
+  /// Set when a reply lands for any recently-issued nonce. [sawRecentReply]
+  /// lets the caller abandon a reclaim it has already started deciding on.
+  bool _sawReply = false;
+
+  /// Whether the main isolate answered ANY recent probe, including one whose
+  /// own wait had already elapsed.
+  bool get sawRecentReply => _sawReply;
+
+  /// Forgets prior probes. Call before a fresh decision so a reply from an
+  /// earlier, unrelated round cannot vouch for the isolate now.
+  void resetRound() {
+    _recentNonces.clear();
+    _sawReply = false;
+  }
 
   /// Feeds a payload received by the task handler to this probe.
   ///
@@ -102,9 +135,10 @@ class ForegroundLivenessProbe {
     if (data is! Map) return false;
     final Object? nonce = data[kLivenessPongKey];
     if (nonce == null) return false;
-    // Ignore a reply to a PREVIOUS, already-abandoned ping: it says nothing
-    // about whether the isolate is alive now.
-    if (nonce != _nonce) return true;
+    // Only nonces from THIS round count — a reply from an earlier, unrelated
+    // decision says nothing about the isolate now.
+    if (!_recentNonces.contains(nonce)) return true;
+    _sawReply = true;
     final pending = _pending;
     _pending = null;
     if (pending != null && !pending.isCompleted) {
@@ -130,7 +164,7 @@ class ForegroundLivenessProbe {
       return true;
     }
     final nonce = _nextNonce++;
-    _nonce = nonce;
+    _recentNonces.add(nonce);
     final pending = Completer<void>();
     _pending = pending;
     try {

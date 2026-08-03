@@ -58,24 +58,57 @@ void main() {
       expect(probe.onData(<String, Object>{kLivenessPongKey: 1}), isTrue);
     });
 
-    test('a second probe is not completed by the first reply', () async {
-      final probe = ForegroundLivenessProbe();
-      final first = probe.mainIsolateIsAlive(
-        timeout: const Duration(milliseconds: 50),
+    test('a late reply within the round still counts as proof of life',
+        () async {
+      // Deliberately changed from "a reply to an abandoned ping is ignored".
+      // Discarding it was the defect: a reply arriving after its own probe gave
+      // up is direct evidence the isolate is alive and answering, and the
+      // realistic cause of the delay is the main isolate blocked on a sync FFI
+      // call while the service holds the same SQLCipher locks — exactly the
+      // situation this runs in. Throwing that proof away let one sustained
+      // stall read as death and authorise tearing down a live session.
+      final probe = ForegroundLivenessProbe()..resetRound();
+      expect(
+        await probe.mainIsolateIsAlive(
+          timeout: const Duration(milliseconds: 50),
+        ),
+        isFalse,
       );
-      expect(await first, isFalse);
 
-      // Nonce 1's reply arrives late, after probe 2 is in flight. It must not
-      // satisfy probe 2 — otherwise a single stale reply could vouch for an
-      // isolate that has since died.
-      final second = probe.mainIsolateIsAlive(
-        timeout: const Duration(milliseconds: 80),
+      // Nonce 1's reply lands after probe 1 gave up.
+      probe.onData(<String, Object>{kLivenessPongKey: 1});
+      expect(
+        probe.sawRecentReply,
+        isTrue,
+        reason: 'the caller must be able to abandon a reclaim on this',
+      );
+    });
+
+    test('a reply from a PREVIOUS round does not count', () async {
+      // The boundary that still matters. Evidence from an earlier decision says
+      // nothing about the isolate now, so `resetRound` must actually forget it
+      // — otherwise one old reply would suppress every future reclaim.
+      final probe = ForegroundLivenessProbe()..resetRound();
+      expect(
+        await probe.mainIsolateIsAlive(
+          timeout: const Duration(milliseconds: 50),
+        ),
+        isFalse,
+      );
+      probe.onData(<String, Object>{kLivenessPongKey: 1});
+      expect(probe.sawRecentReply, isTrue);
+
+      probe.resetRound();
+      expect(
+        probe.sawRecentReply,
+        isFalse,
+        reason: 'a new decision starts with no evidence',
       );
       probe.onData(<String, Object>{kLivenessPongKey: 1});
       expect(
-        await second,
+        probe.sawRecentReply,
         isFalse,
-        reason: 'a reply to an abandoned ping must not answer the current one',
+        reason: 'a stale nonce from the previous round must be rejected',
       );
     });
 

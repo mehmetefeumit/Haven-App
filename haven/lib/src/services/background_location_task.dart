@@ -36,6 +36,7 @@ import 'package:haven/src/rust/frb_generated.dart';
 import 'package:haven/src/services/background_identity_service.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/foreground_liveness_probe.dart';
+import 'package:haven/src/services/fresh_secret.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
@@ -150,9 +151,16 @@ SessionReclaimDecision evaluateSessionReclaimGates({
   if (!hasIdentity) return SessionReclaimDecision.noIdentity;
   if (wipePending) return SessionReclaimDecision.wipePending;
   if (!guardHeld) return SessionReclaimDecision.guardNotHeld;
-  if (lastAttemptMs != null &&
-      nowMs - lastAttemptMs < backoff.inMilliseconds) {
-    return SessionReclaimDecision.backoffActive;
+  if (lastAttemptMs != null) {
+    final elapsed = nowMs - lastAttemptMs;
+    // A NEGATIVE elapsed means the wall clock moved backwards (a manual change
+    // or a large NTP correction). Treating that as "no time has passed" would
+    // latch the limit until the clock caught up — potentially forever, which
+    // would disable recovery entirely. A stamp in the future is not evidence of
+    // a recent attempt, so let it through; the caller rewrites the stamp.
+    if (elapsed >= 0 && elapsed < backoff.inMilliseconds) {
+      return SessionReclaimDecision.backoffActive;
+    }
   }
   return SessionReclaimDecision.proceed;
 }
@@ -462,11 +470,20 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     if (dataDir == null || !(_identityManager?.hasIdentity() ?? false)) return;
     try {
       // Re-fetched fresh rather than reusing the onStart copy (already
-      // zeroized) — Security Rule 9.
-      final identitySecretBytes = await _identityManager!.getSecretBytes();
-      _circleManager = await CircleManagerFfi.newInstance(
-        dataDir: dataDir,
-        identitySecretBytes: identitySecretBytes,
+      // zeroized), and scrubbed again on the way out — Security Rule 9.
+      //
+      // `withFreshSecret` owns the `finally` that wipes it. Fetching into a
+      // bare local, as this did, leaves the raw 32-byte nsec in the isolate's
+      // Dart heap for the GC to relocate rather than erase. That mattered more
+      // after this method gained a second caller: the reclaim path can run
+      // every backoff window, so each attempt used to mint another copy that
+      // was never wiped.
+      _circleManager = await withFreshSecret(
+        _identityManager!.getSecretBytes,
+        (secret) => CircleManagerFfi.newInstance(
+          dataDir: dataDir,
+          identitySecretBytes: secret,
+        ),
       );
     } on Object catch (e) {
       // Generic in the UI sense (Rule 8): the type alone, never the message,
@@ -632,13 +649,27 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     // acting on that destroys its live receive. Two consecutive silences,
     // separated by a fresh round trip, are far harder to produce by transient
     // jank. Both fail closed to "alive".
+    _livenessProbe.resetRound();
     if (await _livenessProbe.mainIsolateIsAlive()) {
       debugPrint('[BackgroundTask] reclaim: declined, main isolate alive');
       return false;
     }
+    // Space the confirmation. Issued back-to-back the two probes observe one
+    // contiguous window, so a single sustained stall — the main isolate blocked
+    // on a sync FFI call while this isolate holds the same SQLCipher locks —
+    // satisfies both, which is precisely what a confirmation is supposed to
+    // rule out. A gap makes them independent samples.
+    await Future<void>.delayed(kLivenessProbeGap);
     if (await _livenessProbe.mainIsolateIsAlive()) {
       debugPrint('[BackgroundTask] reclaim: declined, main isolate answered '
           'on retry');
+      return false;
+    }
+    // A reply for EITHER probe, including one that landed after its own wait
+    // elapsed, is proof of life. Both probes timing out is not the same as
+    // nothing ever answering.
+    if (_livenessProbe.sawRecentReply) {
+      debugPrint('[BackgroundTask] reclaim: declined, late reply observed');
       return false;
     }
 

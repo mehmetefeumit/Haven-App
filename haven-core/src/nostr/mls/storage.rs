@@ -72,6 +72,18 @@ fn live_sessions() -> &'static Mutex<HashSet<PathBuf>> {
 /// a `contains` that drives a decision, that is a bug.
 pub const SESSION_BUSY_MARKER: &str = "HAVEN_E_SESSION_BUSY";
 
+/// The `session.sqlite` path inside `data_dir`.
+///
+/// Exported so callers never re-spell the filename. A second literal elsewhere
+/// silently decouples on any rename: [`is_session_live`] would keep succeeding
+/// and answering `false` for a key nothing ever registers, so a reclaiming
+/// caller would conclude the guard is free and never recover an orphan. The
+/// direction is fail-safe but permanent and silent.
+#[must_use]
+pub fn session_db_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(MLS_DB_FILENAME)
+}
+
 /// Reports whether a live session is currently registered for `db_path`.
 ///
 /// This asks the registry directly instead of pattern-matching an error

@@ -118,14 +118,17 @@ void main() {
       expect(decide(lastAttemptMs: null), SessionReclaimDecision.proceed);
     });
 
-    test('a clock that jumped BACKWARD stays restrictive', () {
-      // `nowMs - lastAttemptMs` goes negative, which is still `< backoff`, so
-      // the limit holds. The failure direction here matters: becoming
-      // permissive on a clock change would let a device with bad time reclaim
-      // on every tick.
+    test('a clock that jumped BACKWARD does not latch the limit', () {
+      // Changed deliberately. Treating a negative elapsed as "no time passed"
+      // held the limit until the wall clock caught up — after a large backward
+      // correction that is effectively forever, which disables recovery
+      // altogether. A stamp in the future is not evidence of a recent attempt.
+      // The exposure is bounded: the caller rewrites the stamp before acting,
+      // so this costs at most one extra evaluation, and the liveness probe
+      // still independently gates the destructive step.
       expect(
         decide(nowMs: 500, lastAttemptMs: 1000000),
-        SessionReclaimDecision.backoffActive,
+        SessionReclaimDecision.proceed,
       );
     });
   });

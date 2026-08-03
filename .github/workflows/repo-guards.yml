@@ -72,6 +72,11 @@
 #     substring test over them is a remote control channel. Callers ask the
 #     registry (`is_session_live` / `isSessionLive`) instead.
 #
+#   Liveness port single owner        scripts/ci/check_liveness_port_single_owner.sh
+#     Only the UI isolate may call initCommunicationPort(), and it must also
+#     install the liveness responder — a second caller silently steals the port
+#     and makes the foreground service reclaim a healthy session.
+#
 #   E2E publish-before-apply          scripts/ci/check_e2e_publish_before_apply.sh
 #     An integration test that calls createCircle() must also resolve the
 #     staged create (confirmPublished / publishFailed, Security Rule 13).
@@ -157,6 +162,15 @@ jobs:
       - name: Session-busy marker stays log-only
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_session_busy_marker_not_routed.sh
+
+      # `initCommunicationPort()` TAKES OVER the isolate port name rather than
+      # joining it. A second caller (the natural copy-paste when adding
+      # worker->UI messaging) would route every liveness probe to an isolate
+      # with no responder, so the foreground service would read the silence as a
+      # dead UI isolate and force-release its live-sync session on a schedule.
+      - name: Liveness port has a single owner
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_liveness_port_single_owner.sh
 
       - name: E2E publish-before-apply (staged creates resolved)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
