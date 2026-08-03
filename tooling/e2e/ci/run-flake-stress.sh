@@ -88,8 +88,11 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SINGLE_AVD="${script_dir}/run-single-avd-scenario.sh"
 readonly START_STRFRY="${script_dir}/start-strfry.sh"
 readonly STOP_STRFRY="${script_dir}/stop-strfry.sh"
+# Secret-leak guard (Security Rule #6) — run over the preserved-evidence dir;
+# see the call site for why it is scoped to the failing-iteration path.
+readonly SECRET_SCAN="${script_dir}/scan-logs-for-secrets.sh"
 
-for dep in "${SINGLE_AVD}" "${START_STRFRY}" "${STOP_STRFRY}"; do
+for dep in "${SINGLE_AVD}" "${START_STRFRY}" "${STOP_STRFRY}" "${SECRET_SCAN}"; do
   if [[ ! -f "${dep}" ]]; then
     echo "ERROR: required helper not found: ${dep}" >&2
     exit 1
@@ -155,6 +158,34 @@ echo "============================================================"
 if (( ${#FAILED_ITERS[@]} > 0 )); then
   echo "  failed iterations: ${FAILED_ITERS[*]}"
   echo "  per-iteration logs saved under ${LOG_DIR}/iter-<n>.{logcat,drive}.log"
+  echo
+  # -------------------------------------------------------------------------
+  # Secret-leak guard (Security Rule #6) over the preserved evidence.
+  #
+  # Scoped to the FAILING path on purpose, unlike the other orchestrators.
+  # This lane copies logs into ${LOG_DIR} only inside the failed-iteration
+  # branch above, so on an all-green run the directory is empty — and since
+  # A4 an empty evidence directory is itself a failure verdict (rc=3), an
+  # unconditional scan here would redden every clean stress run. That is not a
+  # coverage hole: a green iteration is one where run-single-avd-scenario.sh
+  # reached and passed its own scan of /tmp/adb-logcat.log and
+  # /tmp/flutter-drive.log, because a leak there exits non-zero and would have
+  # marked the iteration FAILED. The only logs this lane can publish unscanned
+  # are the ones preserved from failing iterations, whose inner runner may have
+  # died before its own scan — which is exactly what this call covers.
+  #
+  # No exit-code handling needed: this block already ends in `exit 1`, so the
+  # scan can only add diagnosis, never rescue a run. Kept `|| scan_rc=$?` so
+  # `set -e` cannot abort before the fail-rate summary is printed.
+  # -------------------------------------------------------------------------
+  echo "== Secret-leak scan over ${LOG_DIR} (Security Rule 6) =="
+  scan_rc=0
+  bash "${SECRET_SCAN}" "${LOG_DIR}" || scan_rc=$?
+  if (( scan_rc != 0 )); then
+    echo "ERROR: secret-leak guard tripped on ${LOG_DIR} (rc=${scan_rc}) — see the" \
+         "LEAK / UNUSABLE line(s) above. rc=1 means key material reached the" \
+         "preserved logs; rc=3 means a failing iteration left no readable log." >&2
+  fi
   echo
   # A flake test fails on ANY failure — even 1/N is a flake worth
   # surfacing. Report the observed fail rate for the run summary.

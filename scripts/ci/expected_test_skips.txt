@@ -1,0 +1,151 @@
+# Expected-skip manifest — every test allowed to NOT run, and why.
+#
+# Enforced by scripts/ci/check_no_undeclared_skips.sh (see that file's header
+# for the mechanism and for the surfaces it deliberately does not cover).
+#
+# Format, one entry per line:
+#
+#     <surface>|<test-id>|<skip-reason>|<expected-count>
+#
+#   surface         haven-core | rust_builder | flutter — reconciled
+#                   independently, so a haven-core row is never reported stale
+#                   while checking rust_builder.
+#   test-id         Rust:  <cargo target>::<libtest name>, where the target is
+#                          `src/lib.rs`, `tests/<file>.rs`, or `doc` for
+#                          doctests (whose churning `(line N)` suffix is
+#                          stripped — the item path is the stable identity).
+#                   Dart:  <package-relative suite path>::<full test name>.
+#                   A trailing `*` makes it a prefix glob.
+#   skip-reason     The reason VERBATIM: `#[ignore = "..."]` for Rust (empty for
+#                   a doctest, which has no message), `skip:`/`skipReason` for
+#                   Dart. Matched exactly — the reason is the gate, so a gate
+#                   that silently changes cause must not pass.
+#   expected-count  Optional; defaults to 1. REQUIRED on a glob, so a group
+#                   entry pins how many tests it covers instead of quietly
+#                   absorbing the disappearance of all but one of them.
+#
+# Regenerate the raw rows with:
+#   scripts/ci/check_no_undeclared_skips.sh --list cargo <cargo-test.log>
+#   scripts/ci/check_no_undeclared_skips.sh --list dart  <test-report.json>
+#
+# ===========================================================================
+# ADDING AN ENTRY IS A DECISION, NOT A FORMALITY.
+#
+# Every skip below is gated on an ENVIRONMENT fact — a D-Bus Secret Service, a
+# Blossom server, a generated ARB, `Platform.isAndroid` — not on anything in a
+# diff. That is what makes them safe to declare and dangerous to leave
+# undeclared: the set can change from underneath a PR that never touched a
+# test. Before adding a row, establish that the proof is not simply LOST:
+# either the same invariant is proven by a sibling test that does run (say so,
+# and name it), or the skip is a genuine capability gap that belongs on the
+# manual pre-release checklist.
+#
+# Removing a row is equally load-bearing: it means the test runs again. Deleting
+# a row for a test that still skips fails the build, which is the point.
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# haven-core — 21 skips
+# ---------------------------------------------------------------------------
+
+# Blossom round-trips against a REAL server (BUD-01/02 upload + download +
+# revalidation). They speak HTTP to `HAVEN_E2E_BLOSSOM` and are meaningless
+# without it; no hosted runner starts one. The privacy boundary these back —
+# HTTPS-only, no group tokens in paths, EXIF strip, anti-SSRF download filter —
+# is separately enforced statically by check_profile_privacy_boundaries.sh and
+# by the non-ignored unit tests alongside them in src/profile/blossom.rs, so
+# what is lost here is transport-level round-trip fidelity, not the invariant.
+haven-core|src/lib.rs::profile::blossom::tests::live_round_trip_against_local_blossom|needs a running Blossom server; set HAVEN_E2E_BLOSSOM=http://127.0.0.1:<port>
+haven-core|tests/profile_blossom_integration_test.rs::download_of_absent_hash_errors_not_panics|requires a live Blossom server (HAVEN_E2E_BLOSSOM)
+haven-core|tests/profile_blossom_integration_test.rs::duplicate_upload_succeeds|requires a live Blossom server (HAVEN_E2E_BLOSSOM)
+haven-core|tests/profile_blossom_integration_test.rs::upload_then_download_byte_identical_after_revalidation|requires a live Blossom server (HAVEN_E2E_BLOSSOM)
+
+# SQLCipher-at-rest openers driven through the PRODUCTION keyring path. Hosted
+# ubuntu runners have no D-Bus Secret Service provider (CLAUDE.md, "Platform
+# Keyring Crates"), so `open_encrypted_storage` cannot mint a key.
+# NOT a lost proof: `storage_encrypted_opens_or_reports_keyring_unavailable`
+# in the same module is NOT ignored and asserts the keyring-absent branch fails
+# descriptively rather than silently degrading to plaintext. The Android/iOS
+# keyring backends are exercised for real by the E2E lanes.
+haven-core|tests/mls_integration_tests.rs::production_storage_tests::circle_manager_encrypted_creates_successfully|requires system keyring - run with --ignored flag
+haven-core|tests/mls_integration_tests.rs::production_storage_tests::session_manager_encrypted_creates_successfully|requires system keyring - run with --ignored flag
+haven-core|tests/mls_integration_tests.rs::production_storage_tests::storage_encrypted_opens_successfully|requires system keyring - run with --ignored flag
+
+# Doctests written as ```ignore — rustdoc neither compiles nor runs them, so
+# they are prose that merely LOOKS executable. They are listed individually (not
+# globbed) because that is the whole value of declaring them: 14 API examples
+# for the identity/keypair/storage/relay surface are currently unverified, and
+# the manifest is where that shows up instead of as a digit in a summary line.
+# Reasons are empty because ```ignore carries no message.
+#
+# These are legitimate only in the weak sense that they were marked deliberately
+# — most need a live keyring or relay to run. The cheap improvement is
+# ```no_run (compiled, not executed), which would catch API drift; that is a
+# separate change and deliberately not made here.
+haven-core|doc::src/nostr/identity/mod.rs - nostr::identity|
+haven-core|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager|
+haven-core|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::create_identity|
+haven-core|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::delete_identity|
+haven-core|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::export_nsec|
+haven-core|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::get_identity|
+haven-core|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::has_identity|
+haven-core|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::import_from_nsec|
+haven-core|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::new|
+haven-core|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::pubkey_hex|
+haven-core|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::sign|
+haven-core|doc::src/nostr/identity/storage.rs - nostr::identity::storage::SecureKeyStorage|
+haven-core|doc::src/nostr/mod.rs - nostr|
+haven-core|doc::src/relay/manager.rs - relay::manager::RelayManager|
+
+
+# ---------------------------------------------------------------------------
+# haven/rust_builder — 5 skips
+# ---------------------------------------------------------------------------
+
+# The REAL-OS-keyring twins of FFI tests that already run against the in-memory
+# store (`useInMemoryKeyringForTest`). api.rs:7793 documents the pairing, and
+# api.rs:8240/8357 name the in-memory counterparts explicitly: each ignored test
+# asserts the same end-to-end behaviour, differing only in which keyring backend
+# is installed. What CI therefore does not prove here is the platform keyring
+# BINDING itself — covered at runtime by the Android/iOS E2E lanes, which run
+# on devices that have one.
+rust_builder|src/lib.rs::api::tests::init_keyring_store_is_idempotent|requires a running keyring backend (D-Bus Secret Service on Linux)
+rust_builder|src/lib.rs::api::tests::init_keyring_store_succeeds|requires a running keyring backend (D-Bus Secret Service on Linux)
+rust_builder|src/lib.rs::api::tests::keyring_init_guard_caches_success|requires a running keyring backend (D-Bus Secret Service on Linux)
+rust_builder|src/lib.rs::api::tests::m10_wipe_deletes_real_manager_state_os_keyring|requires a running keyring backend (D-Bus Secret Service on Linux)
+rust_builder|src/lib.rs::api::tests::remove_db_keys_are_idempotent|requires a running keyring backend (D-Bus Secret Service on Linux)
+
+
+# ---------------------------------------------------------------------------
+# haven (flutter test) — 22 skips
+# ---------------------------------------------------------------------------
+
+# `BackgroundSharingNotifier.setEnabled` Android branches. The production code
+# reads `Platform.isAndroid`, which is false on every host `flutter test`
+# runner, so these three can only ever skip there.
+# NOT a lost proof: T9–T11 in the same file
+# ("BackgroundSharingNotifier — Android-seam permission cases") assert the same
+# three outcomes through the `isAndroid` seam and DO run everywhere. The file's
+# own header says these remain "as documentation". Each carries its own reason
+# string naming its seam twin, so they are declared individually — a glob would
+# let two of the three vanish while the third kept the entry alive.
+flutter|test/providers/background_location_provider_test.dart::BackgroundSharingNotifier.setEnabled — permission gating Android: enable + Granted → state true, prefs true, returns Granted|Platform.isAndroid == false on runner — see T9 for seam version
+flutter|test/providers/background_location_provider_test.dart::BackgroundSharingNotifier.setEnabled — permission gating Android: enable + NotificationDenied → state false, prefs false, returns NotificationDenied|Platform.isAndroid == false on runner — see T10 for seam version
+flutter|test/providers/background_location_provider_test.dart::BackgroundSharingNotifier.setEnabled — permission gating Android: enable + BatteryOptDenied → state true, prefs true, returns BatteryOptDenied (soft warning)|Platform.isAndroid == false on runner — see T11 for seam version
+
+# The pseudo-locale sweep: overflow + un-extracted-string checks for the Privacy
+# and About surfaces at 200% text scale in the accented `en_XA` pseudo locale.
+# `lib/l10n/app_en_XA.arb` is generated on demand and intentionally NOT
+# committed (the file's header documents the generate/run/delete cycle), so the
+# whole group is gated on one `hasPseudo` condition and is inert in CI by
+# design. This is the one genuinely LOCAL-ONLY proof in the manifest — CI has no
+# substitute for it, though `test/l10n/locale_smoke_test.dart` covers overflow
+# for the 13 real locales at 1.5x and DOES run.
+#
+# Globbed because the names are generated from `PrivacyTopic.values`, but the
+# count is pinned: adding or removing a privacy topic changes 19, fails this
+# gate, and forces the number to be re-stated deliberately. Combined with the
+# exact-reason match, a NEW skip in this file gated on anything other than the
+# missing ARB is still rejected.
+flutter|test/l10n/pseudo_locale_sweep_test.dart::pseudo-locale sweep *|app_en_XA.arb absent|19

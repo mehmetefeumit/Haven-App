@@ -28,9 +28,10 @@
 #      AND that the handoff completed (`[b1] HANDOFF_CONFIRMED`).
 #   2. ASSERT `[BackgroundTask] Initialized (… locationSharing=true)` PRESENT
 #      and `onStart FAILED` ABSENT.
-#   3. ASSERT `Published to N/M due circle(s)` with N >= 1, WINDOWED to after
-#      the pause and PARSED, never grepped.
-#   4. ASSERT the publishing PID equals the PID that handed off.
+#   3. ASSERT `Published to N/M due circle(s)` with N >= 1, WINDOWED to the
+#      handoff→hold-complete span and PARSED, never grepped.
+#   4. ASSERT the publishing PID equals the PID that handed off, and that the
+#      service was not destroyed inside that same span.
 #
 # Each step exists to close a specific false-green route found in adversarial
 # review:
@@ -43,11 +44,15 @@
 #   locationSharing=true)` is emitted only once the manager exists, so it proves
 #   the Rule-14 acquire succeeded rather than merely failing to observe it.
 #
-# * Step 3 is windowed because a publish emitted while the UI was still
-#   foregrounded is not the thing under test — it is a Rule-14 single-writer
-#   violation, and counting it as success would invert the lane's meaning. N is
-#   parsed because `Published to 0/1` is P0-1's own signature and contains the
-#   marker substring.
+# * Step 3 is windowed at BOTH ends. It opens at the handoff because a publish
+#   emitted while the UI was still foregrounded is not the thing under test — it
+#   is a Rule-14 single-writer violation, and counting it as success would
+#   invert the lane's meaning. It closes at the hold because everything after
+#   that is teardown, where the service is stopped deliberately (twice: the
+#   resume takes the MLS session back by stopping it, then the post-test unmount
+#   stops it again) — an EOF-bounded window reads those as the service dying
+#   mid-proof. N is parsed because `Published to 0/1` is P0-1's own signature
+#   and contains the marker substring.
 #
 # * Step 4 is the anti-vacuity check and the most important line in the file.
 #   The FGS's foreground-active gate goes stale after 144s, so if the app
@@ -123,6 +128,16 @@ readonly MARK_PAUSE='[b1] PAUSE_DELIVERED'
 # windowing from the dispatch instead would open the window before the FGS was
 # permitted to publish at all. Mirrors `kHandoffConfirmedMarker`.
 readonly MARK_HANDOFF_OK='[b1] HANDOFF_CONFIRMED'
+# Closes the proof window. Printed by the drive the instant its hold ends and
+# BEFORE it restores `resumed`, so everything after it is teardown. That
+# distinction is load-bearing rather than tidy: resuming runs the production
+# `_onResumed()`, which takes the MLS session back — and on Android taking it
+# back means STOPPING the foreground service (mls_session_handover.dart), which
+# emits `onDestroy`. flutter_test's post-test unmount then stops it again. An
+# EOF-bounded window sees those two legitimate stops as "the service died inside
+# the window it was supposed to publish in" and fails a passing lane. MUST match
+# `kHoldCompleteMarker` in the drive target VERBATIM.
+readonly MARK_HOLD_DONE='[b1] HOLD_COMPLETE'
 
 # Extract the publish COUNT (N of "Published to N/M due circle(s)") from the
 # highest-N line in a log. Emits nothing when no line matches; callers treat
@@ -138,16 +153,33 @@ max_published_count() {
       | grep -aoE '[0-9]+/' | tr -d '/' | sort -n | tail -1; } || true
 }
 
-# Print every line from the FIRST occurrence of <marker> to EOF.
+# Print every line from the FIRST occurrence of <start> up to, but NOT
+# including, the first <end> at or after it. Falls back to EOF when <end> never
+# appears.
 #
-# The publish oracle MUST be windowed to after the foreground handoff. Grepping
-# the whole capture would accept a publish emitted while the UI was still
-# foregrounded — which is not the thing under test, and is in fact a Rule-14
-# single-writer violation being counted as success. `index()` rather than a
-# regex: the markers contain `[`, `(` and other metacharacters.
-window_after_marker() {
-  local logfile="$1" marker="$2"
-  awk -v m="${marker}" 'index($0, m) { f = 1 } f' "${logfile}" 2>/dev/null || true
+# The OPEN is what keeps a publish emitted while the UI was still foregrounded
+# out of the count — that is not the thing under test, it is a Rule-14
+# single-writer violation being read as success.
+#
+# The CLOSE is what keeps the drive's teardown out, where the FGS is destroyed
+# twice over, legitimately (see MARK_HOLD_DONE). Without it, "did the service
+# survive its publish window" degrades into "was the service ever stopped,
+# including on the way out".
+#
+# The EOF fallback is the conservative direction: a drive that died before
+# printing the close leaves the widest window, so a truncated run fails rather
+# than passing on a window that silently shrank to nothing. Such a run also
+# trips `drive_failed`.
+#
+# `index()` rather than a regex: the markers contain `[`, `(` and other
+# metacharacters.
+window_between_markers() {
+  local logfile="$1" start="$2" end="$3"
+  awk -v s="${start}" -v e="${end}" '
+    !f { if (index($0, s)) f = 1; else next }
+    f && index($0, e) { exit }
+    f
+  ' "${logfile}" 2>/dev/null || true
 }
 
 # Print the PID column of the first line containing <marker>.
@@ -235,9 +267,9 @@ run_self_test() {
     fail=1
   fi
 
-  # --- window_after_marker + pid_of_marker ---------------------------------
-  # These two carry the lane's anti-vacuity checks (post-handoff windowing and
-  # same-process proof), so they get fixtures of their own rather than being
+  # --- window_between_markers + pid_of_marker ------------------------------
+  # These two carry the lane's anti-vacuity checks (windowing to the proof span
+  # and same-process proof), so they get fixtures of their own rather than being
   # trusted because they look obvious.
   printf '%s\n' \
     '08-02 04:40:00.000  1111  1120 I flutter : [BackgroundTask] Published to 9/9 due circle(s) (9 eligible), fetched 9/9 circle(s).' \
@@ -248,16 +280,17 @@ run_self_test() {
   # (6) A publish from BEFORE the handoff must not count. Without the window
   #     the parser would return 9 and the lane would pass on a foreground
   #     publish — which is a Rule-14 single-writer violation, not a success.
-  got="$(window_after_marker "${tmp}/window.log" '[b1] HANDOFF_CONFIRMED' \
-    | { max_published_count /dev/stdin; })"
+  got="$(window_between_markers "${tmp}/window.log" '[b1] HANDOFF_CONFIRMED' \
+    '[b1] HOLD_COMPLETE' | { max_published_count /dev/stdin; })"
   if [[ "${got}" != "1" ]]; then
     echo "SELF-TEST FAIL (6): windowed count should be 1 (post-handoff), got '${got}'" >&2
     fail=1
   fi
 
-  # (7) No marker at all ⇒ empty window, so a missing handoff can never be
+  # (7) No open marker at all ⇒ empty window, so a missing handoff can never be
   #     silently treated as "the whole log counts".
-  got="$(window_after_marker "${tmp}/window.log" '[b1] NEVER_HAPPENED' | wc -l | tr -d ' ')"
+  got="$(window_between_markers "${tmp}/window.log" '[b1] NEVER_HAPPENED' \
+    '[b1] HOLD_COMPLETE' | wc -l | tr -d ' ')"
   if [[ "${got}" != "0" ]]; then
     echo "SELF-TEST FAIL (7): a missing marker must yield an empty window, got ${got} line(s)" >&2
     fail=1
@@ -282,11 +315,70 @@ run_self_test() {
     fail=1
   fi
 
+  # --- window_between_markers ----------------------------------------------
+  # The CLOSE of the window. Teardown legitimately destroys the FGS twice (the
+  # resume takes the MLS session back by stopping it, then the post-test unmount
+  # stops it again), so an EOF-bounded window fails a lane that passed.
+  printf '%s\n' \
+    '08-02 04:41:00.000  1111  1130 I flutter : [b1] HANDOFF_CONFIRMED' \
+    '08-02 04:42:14.552  1111  1140 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 1/1 circle(s).' \
+    '08-02 04:45:00.000  1111  1130 I flutter : [b1] HOLD_COMPLETE' \
+    '08-02 04:45:02.000  1111  1140 I flutter : [BackgroundTask] onDestroy (isTimeout=false)' \
+    > "${tmp}/closed.log"
+
+  # (10) A teardown destroy must fall OUTSIDE the window.
+  if window_between_markers "${tmp}/closed.log" '[b1] HANDOFF_CONFIRMED' \
+       '[b1] HOLD_COMPLETE' | grep -aqF -- '[BackgroundTask] onDestroy'; then
+    echo "SELF-TEST FAIL (10): a post-hold onDestroy leaked into the window" >&2
+    fail=1
+  fi
+
+  # (11) …while the publish inside it still counts. A close that swallowed the
+  #      window's contents would turn every assertion vacuous.
+  got="$(window_between_markers "${tmp}/closed.log" '[b1] HANDOFF_CONFIRMED' \
+    '[b1] HOLD_COMPLETE' | { max_published_count /dev/stdin; })"
+  if [[ "${got}" != "1" ]]; then
+    echo "SELF-TEST FAIL (11): expected 1 publish inside the window, got '${got}'" >&2
+    fail=1
+  fi
+
+  # (12) A destroy BEFORE the close is the real failure this check exists for —
+  #      the service dying mid-window — and must still be caught.
+  printf '%s\n' \
+    '08-02 04:41:00.000  1111  1130 I flutter : [b1] HANDOFF_CONFIRMED' \
+    '08-02 04:42:00.000  1111  1140 I flutter : [BackgroundTask] onDestroy (isTimeout=true)' \
+    '08-02 04:45:00.000  1111  1130 I flutter : [b1] HOLD_COMPLETE' \
+    > "${tmp}/died.log"
+  if ! window_between_markers "${tmp}/died.log" '[b1] HANDOFF_CONFIRMED' \
+       '[b1] HOLD_COMPLETE' | grep -aqF -- '[BackgroundTask] onDestroy'; then
+    echo "SELF-TEST FAIL (12): a mid-window onDestroy was not caught" >&2
+    fail=1
+  fi
+
+  # (13) No close marker (a drive killed mid-hold) must fall back to EOF, never
+  #      to an empty window — an empty one would make every assertion pass
+  #      vacuously on exactly the runs that are least trustworthy.
+  got="$(window_between_markers "${tmp}/closed.log" '[b1] HANDOFF_CONFIRMED' \
+    '[b1] NEVER_PRINTED' | wc -l | tr -d ' ')"
+  if [[ "${got}" != "4" ]]; then
+    echo "SELF-TEST FAIL (13): expected a 4-line EOF fallback, got ${got}" >&2
+    fail=1
+  fi
+
+  # (14) An end marker BEFORE the start must not open the window backwards —
+  #      the close is only ever the first one at or after the open.
+  got="$(window_between_markers "${tmp}/closed.log" '[BackgroundTask] Published to ' \
+    '[b1] HANDOFF_CONFIRMED' | wc -l | tr -d ' ')"
+  if [[ "${got}" != "3" ]]; then
+    echo "SELF-TEST FAIL (14): a close preceding the open must be ignored, got ${got} line(s)" >&2
+    fail=1
+  fi
+
   if (( fail != 0 )); then
     echo "run-b1-fgs-publish.sh --self-test: FAILED" >&2
     return 1
   fi
-  echo "run-b1-fgs-publish.sh --self-test: all 9 fixtures passed"
+  echo "run-b1-fgs-publish.sh --self-test: all 14 fixtures passed"
   return 0
 }
 
@@ -350,6 +442,7 @@ readonly DRIVE_LOG="${LOG_DIR}/flutter-drive.log"
 # ---------------------------------------------------------------------------
 cleanup() {
   local rc=$?
+  local scan_rc=0
   trap - EXIT
   if [[ -n "${GEO_PID}" ]] && kill -0 "${GEO_PID}" 2>/dev/null; then
     kill "${GEO_PID}" 2>/dev/null || true
@@ -359,7 +452,8 @@ cleanup() {
   fi
   docker logs strfry > "${LOG_DIR}/strfry.final.log" 2>&1 || true
   echo "== Secret-leak scan over ${LOG_DIR} (Security Rule 6) =="
-  if ! bash "${SECRET_SCAN}" "${LOG_DIR}"; then
+  bash "${SECRET_SCAN}" "${LOG_DIR}" || scan_rc=$?
+  if (( scan_rc == 1 )); then
     # CONTAINMENT, not just detection. The workflow uploads ${LOG_DIR} with
     # `if: always()` and a 14-day retention, so merely going red here would
     # publish the leaking log for a fortnight — the guard would tell us about
@@ -372,6 +466,17 @@ cleanup() {
       echo "See the LEAK line(s) in the step log for file/label/line numbers."
     } > "${LOG_DIR}/LEAK_DETECTED.txt"
     echo "ERROR: secret-leak guard tripped on B1 logs — logs deleted, not uploaded." >&2
+    rc=1
+  elif (( scan_rc != 0 )); then
+    # rc 3 = a log was absent / unreadable / EMPTY, i.e. this lane died before
+    # it finished writing its evidence. Go red — a run that scanned nothing has
+    # proved nothing — but deliberately do NOT take the containment branch.
+    # Deletion exists to stop a LEAK from being published; there is no leak
+    # here, only the truncated crash artefacts that triage needs most, and
+    # destroying them would erase the evidence of the very failure that tripped
+    # the guard.
+    echo "ERROR: secret-leak guard could not scan the B1 logs (rc=${scan_rc}) —" \
+         "see the UNUSABLE line(s) above. Logs kept for triage." >&2
     rc=1
   fi
   bash "${STOP_STRFRY}" >/dev/null 2>&1 || true
@@ -672,10 +777,23 @@ _publishCycle returns immediately and silently forever."
 fi
 echo "  [2/4] FGS initialized with location sharing wired (Rule-14 acquire succeeded)."
 
-# (3) Delivery, windowed to AFTER the handoff and PARSED (never grepped —
-#     `Published to 0/1` is P0-1's own signature and contains the marker).
+# (3) Delivery, windowed to the handoff→hold-complete span and PARSED (never
+#     grepped — `Published to 0/1` is P0-1's own signature and contains the
+#     marker). The window OPENS at the handoff because a publish emitted while
+#     the UI was still foregrounded is a Rule-14 single-writer violation, not a
+#     success; it CLOSES at the hold because everything after is teardown, where
+#     the service is stopped on purpose.
 WINDOW="${LOG_DIR}/post-pause.window.log"
-window_after_marker "${LOGCAT_FILE}" "${MARK_HANDOFF_OK}" > "${WINDOW}"
+window_between_markers "${LOGCAT_FILE}" "${MARK_HANDOFF_OK}" "${MARK_HOLD_DONE}" \
+  > "${WINDOW}"
+# Recorded, not asserted: a drive killed mid-hold never prints the close, and
+# the window then runs to EOF. That is the safe direction, but it changes what
+# the assertions below are reading, so say so when one of them fails.
+window_note=""
+if ! grep -aqF -- "${MARK_HOLD_DONE}" "${LOGCAT_FILE}" 2>/dev/null; then
+  window_note=" NOTE: the drive never printed '${MARK_HOLD_DONE}', so this \
+window ran to the end of the capture and includes teardown."
+fi
 published="$(max_published_count "${WINDOW}")"
 if [[ -z "${published}" ]]; then
   if grep -aqF -- "${MARK_CYCLE_FAILED}" "${WINDOW}" 2>/dev/null; then
@@ -717,8 +835,8 @@ died, which means there was no live foreground MLS session to contend with and t
 proves NOTHING about P0-1."
 fi
 if grep -aqF -- "${MARK_ONDESTROY}" "${WINDOW}" 2>/dev/null; then
-  fail "the FGS was destroyed after the handoff ('${MARK_ONDESTROY}') — the service did \
-not survive the window it was supposed to publish in."
+  fail "the FGS was destroyed during the publish window ('${MARK_ONDESTROY}') — the \
+service did not survive the window it was supposed to publish in.${window_note}"
 fi
 echo "  [4/4] Publish came from PID ${publish_pid}, the same process as the foreground."
 

@@ -90,8 +90,26 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      # `--file-reporter` writes a machine-readable JSON stream ALONGSIDE the
+      # normal console reporter (unlike `--reporter`, which would replace it),
+      # so the skip gate below gets per-test `skipped` verdicts without costing
+      # a second full test run. This is the repo's only `flutter test` over the
+      # whole suite — flutter-check.yml runs `flutter analyze` only — so it is
+      # where the Dart half of the skip gate has to live.
       - name: Run tests with coverage
-        run: flutter test --coverage
+        run: >-
+          flutter test --coverage
+          --file-reporter=json:"${RUNNER_TEMP}/flutter-test-report.json"
+
+      # `flutter test` prints "~22" and exits 0; nothing asserted it. Those 22
+      # are the pseudo-locale overflow sweep (gated on a deliberately
+      # uncommitted ARB) and three Android-only permission cases — all
+      # legitimate, all previously invisible. The gate makes them declared, so a
+      # NEW skip, or the disappearance of a declared one, fails the build.
+      # Deliberately NOT applied to the flag-off step below: that runs two named
+      # files, and a filtered run cannot prove the whole suite's skip set.
+      - name: No undeclared test skips
+        run: bash ../scripts/ci/check_no_undeclared_skips.sh dart flutter "${RUNNER_TEMP}/flutter-test-report.json"
 
       # M11 Phase B: production now defaults `liveSyncEnabled` ON, so the
       # coverage run above (no --dart-define) builds the LIVE branches — the

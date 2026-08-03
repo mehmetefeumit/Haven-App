@@ -41,8 +41,22 @@ jobs:
       - name: Clippy
         run: cargo clippy -- -D warnings
 
+      # `set -o pipefail` so `tee` cannot mask a failing cargo exit code —
+      # GitHub's default shell is `bash -e {0}`, which does NOT set it.
       - name: Run tests
-        run: cargo test
+        run: |
+          set -o pipefail
+          cargo test 2>&1 | tee "${RUNNER_TEMP}/haven-core-cargo-test.log"
+
+      # `cargo test` prints "21 ignored" and exits 0. Nothing asserted that
+      # number, and the reporter never names the tests, so a keyring- or
+      # Blossom-gated proof could stop running with no trace but a digit. The
+      # gate reconciles the run's real skip list against
+      # scripts/ci/expected_test_skips.txt: an undeclared skip fails, and so
+      # does a declaration whose test is gone (a stale allowance is its own
+      # false green).
+      - name: No undeclared test skips
+        run: bash ../scripts/ci/check_no_undeclared_skips.sh cargo haven-core "${RUNNER_TEMP}/haven-core-cargo-test.log"
 
       # Release builds disable `debug_assertions`, so a production path that
       # accidentally calls a `#[cfg(any(test, debug_assertions))]`-gated method
@@ -94,4 +108,13 @@ jobs:
       # decorative. coverage.yml's rust job is `working-directory: haven-core`
       # and does NOT reach this crate.
       - name: Run tests
-        run: cargo test
+        run: |
+          set -o pipefail
+          cargo test 2>&1 | tee "${RUNNER_TEMP}/rust-builder-cargo-test.log"
+
+      # All five of this crate's `#[ignore]`d tests are the real-OS-keyring
+      # twins of FFI tests that run in-memory. If one of the in-memory ones ever
+      # acquires an `#[ignore]` too, the pair collapses to nothing — and the
+      # only signal would be "5 ignored" becoming "6 ignored".
+      - name: No undeclared test skips
+        run: bash ../../scripts/ci/check_no_undeclared_skips.sh cargo rust_builder "${RUNNER_TEMP}/rust-builder-cargo-test.log"

@@ -229,6 +229,13 @@
 ///     that the pause was dispatched). Strictly later and tighter than
 ///     [kPauseDeliveredMarker] if the shell wants the narrowest possible
 ///     window.
+///   * [kHoldCompleteMarker] (`[b1] HOLD_COMPLETE`) — printed the instant the
+///     hold ends and BEFORE the lifecycle is restored to `resumed`, so it
+///     closes the window the two markers above open. Everything after it is
+///     teardown, where the FGS is EXPECTED to be destroyed: resuming takes the
+///     MLS session back (which stops the service), and `flutter_test`'s own
+///     post-test unmount disposes the `ProviderScope` and stops it again. An
+///     oracle windowed to EOF reads those as the service dying mid-proof.
 library;
 
 import 'dart:io' show Platform, pid;
@@ -290,6 +297,19 @@ const String kPauseDeliveredMarker = '[b1] PAUSE_DELIVERED';
 /// completion: `kForegroundActiveAtMsKey` reads back `0`, the exact value
 /// `_publishCycle`'s gate 3 checks before it will publish.
 const String kHandoffConfirmedMarker = '[b1] HANDOFF_CONFIRMED';
+
+/// Verbatim marker closing the proof window: printed the instant the hold ends,
+/// BEFORE the lifecycle is restored to `resumed`.
+///
+/// Everything the shell asserts about the FGS — that it published, and that it
+/// stayed alive to do so — belongs to `[kHandoffConfirmedMarker,
+/// kHoldCompleteMarker)`. After it, teardown legitimately destroys the service
+/// twice over: `_onResumed()` takes the MLS session back (stopping the service
+/// to get it), and `flutter_test`'s post-test unmount disposes the
+/// `ProviderScope`, whose `onDispose` stops it again. Both emit
+/// `[BackgroundTask] onDestroy`, which an EOF-bounded window reads as the
+/// service dying inside the window it was supposed to publish in.
+const String kHoldCompleteMarker = '[b1] HOLD_COMPLETE';
 
 /// How long this drive keeps `MapShell` mounted (and `aliceManager` open)
 /// AFTER the confirmed handoff, so the FGS gets at least two full
@@ -659,6 +679,18 @@ void main() {
           }
         }
       } finally {
+        // Close the proof window FIRST — before the resume below, not after.
+        //
+        // Restoring `resumed` runs the production `_onResumed()`, which takes
+        // the MLS session back from the foreground service; on Android that
+        // means STOPPING the service (`mls_session_handover.dart`), which emits
+        // `[BackgroundTask] onDestroy`. The framework's post-test unmount then
+        // stops it a second time. Both are correct, and both would read as "the
+        // service did not survive its publish window" to an oracle bounded by
+        // EOF instead of by this marker. Printed in the `finally` so a failed
+        // hold still closes the window rather than leaving it open to EOF.
+        debugPrint(kHoldCompleteMarker);
+
         // Restore the lifecycle state before returning. This is NOT cosmetic.
         //
         // The pause we delivered set `framesEnabled = false`
@@ -692,8 +724,9 @@ void main() {
         debugPrint(
           '[b1] hold complete (lifecycle restored to resumed) — returning now '
           "hands control to flutter_test's own post-test teardown (see class "
-          'doc). The shell scopes its logcat window to start at '
-          '$kHandoffConfirmedMarker.',
+          'doc). The shell scopes its logcat window to '
+          '[$kHandoffConfirmedMarker, $kHoldCompleteMarker), so everything '
+          'from here on is outside it.',
         );
       }
     },

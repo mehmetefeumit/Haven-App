@@ -72,6 +72,12 @@
 #     substring test over them is a remote control channel. Callers ask the
 #     registry (`is_session_live` / `isSessionLive`) instead.
 #
+#   MLS session single owner          scripts/ci/check_mls_session_single_owner.sh
+#     `CircleManagerFfi.newInstance` may appear in exactly three files — one per
+#     isolate that legitimately owns a session — and the UI isolate's one must
+#     latch the pause-time handoff, or the foreground service can never take
+#     the session it was handed.
+#
 #   Liveness port single owner        scripts/ci/check_liveness_port_single_owner.sh
 #     Only the UI isolate may call initCommunicationPort(), and it must also
 #     install the liveness responder — a second caller silently steals the port
@@ -83,6 +89,15 @@
 #     Skipping it pins the group in MDK's PendingPublish, where every inbound
 #     kind-445 buffers forever and the scenario fails on the receive path with
 #     nothing pointing back at the create.
+#
+#   Skip-manifest self-test           scripts/ci/check_no_undeclared_skips.sh
+#     The guard that fails a run when a test SKIPS without being declared in
+#     scripts/ci/expected_test_skips.txt. The gate itself must parse real test
+#     output, so it runs where the tests do — rust-check.yml for both cargo
+#     crates, coverage.yml for `flutter test`; only its hermetic --self-test
+#     belongs in this toolchain-free job. That self-test is what stops the
+#     parser rotting into a vacuous pass: an extractor matching nothing would
+#     otherwise report "0 skips, all declared" forever.
 #
 #   E2E harness self-tests            tooling/e2e/ci/*.sh --self-test
 #     The bash guards embedded in the E2E tooling must not silently rot: the
@@ -172,6 +187,16 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_liveness_port_single_owner.sh
 
+      # Rule 14 is enforced per PROCESS, and Android runs the UI and the
+      # location foreground service as two isolates inside one. The pause-time
+      # handoff is what lets the service publish, and it only holds because
+      # every reopen in the UI isolate funnels through one latched chokepoint —
+      # a direct `CircleManagerFfi.newInstance` anywhere else takes the session
+      # straight back, which is exactly how background publishing died (P0-1).
+      - name: MLS session has a single owner per isolate
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_mls_session_single_owner.sh
+
       - name: E2E publish-before-apply (staged creates resolved)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_e2e_publish_before_apply.sh
@@ -183,6 +208,14 @@ jobs:
       - name: Profile-relay override has a single install site
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_profile_override_single_site.sh
+
+      # Fixture-driven, no toolchain: an undeclared skip must fail, a log
+      # matching the manifest must pass, a stale manifest entry must fail, and
+      # a parsed-vs-summary count disagreement must be reported as a broken
+      # guard rather than as a clean run.
+      - name: Skip-manifest guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_no_undeclared_skips.sh --self-test
 
       - name: E2E harness self-test (connect-flake predicate)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

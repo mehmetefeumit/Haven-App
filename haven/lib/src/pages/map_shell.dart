@@ -668,6 +668,37 @@ class _MapShellState extends ConsumerState<MapShell>
     }
   }
 
+  /// Takes the MLS session back on resume — the mirror of
+  /// [_handOffMlsSession].
+  ///
+  /// Ending the handoff is all this has to do: the open itself happens lazily,
+  /// under whichever provider needs the manager first, and if the foreground
+  /// service still holds the guard that open recovers it through the ordinary
+  /// `sessionHandover` path (`service_providers.dart`).
+  ///
+  /// The re-subscriber is replayed because a circle-set change that arrived
+  /// while the handoff held could NOT be applied — restarting the engine needs
+  /// the manager, and the manager was (correctly) refused. That failure leaves
+  /// the re-subscriber's running-set signature un-advanced on purpose, so
+  /// feeding it today's snapshot re-decides the same change and applies it now.
+  /// An unchanged set is a no-op there, and this runs only when a handoff was
+  /// genuinely in effect.
+  void _endMlsSessionHandoff() {
+    final service = ref.read(circleServiceProvider);
+    if (service is! NostrCircleService) return;
+    bool ended;
+    try {
+      ended = service.endSessionHandoff();
+    } on Object catch (e) {
+      debugPrint('[MapShell] handoff end failed: ${e.runtimeType}');
+      return;
+    }
+    if (!ended) return;
+    debugPrint('[MapShell] handoff: session taken back by the foreground');
+    final circles = ref.read(circlesProvider).valueOrNull;
+    if (circles != null) _onLiveSyncCirclesChanged(circles);
+  }
+
   /// Restarts the live-sync engine if it stopped while a session is still
   /// wanted.
   ///
@@ -1108,6 +1139,14 @@ class _MapShellState extends ConsumerState<MapShell>
     // mid-pause cancel from the notifier's transient-false rebuild.
     _bgSharingPausedSub?.close();
     _bgSharingPausedSub = null;
+
+    // End the pause-time MLS handoff FIRST, before the debounce and before the
+    // heal below. Everything that follows — the heal's engine restart, the
+    // publisher invalidations, the resume catch-up — needs the circle manager,
+    // and while the handoff holds every one of those opens fails closed by
+    // design. Running them ahead of this would spend the whole resume failing
+    // and leave the engine down until the next circle-set change.
+    _endMlsSessionHandoff();
 
     // Heal BEFORE the debounce, deliberately.
     //

@@ -122,8 +122,12 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SINGLE_AVD="${script_dir}/run-single-avd-scenario.sh"
 readonly START_STRFRY="${script_dir}/start-strfry.sh"
 readonly STOP_STRFRY="${script_dir}/stop-strfry.sh"
+# Secret-leak guard (Security Rule #6) — run over the aggregated evidence dir
+# after every target; see the call site for why the inner runner's own scan is
+# not sufficient here.
+readonly SECRET_SCAN="${script_dir}/scan-logs-for-secrets.sh"
 
-for dep in "${SINGLE_AVD}" "${START_STRFRY}" "${STOP_STRFRY}"; do
+for dep in "${SINGLE_AVD}" "${START_STRFRY}" "${STOP_STRFRY}" "${SECRET_SCAN}"; do
   if [[ ! -f "${dep}" ]]; then
     echo "ERROR: required helper not found: ${dep}" >&2
     exit 1
@@ -243,6 +247,28 @@ for spec in "$@"; do
   run_one "${spec}" || true
 done
 
+# ---------------------------------------------------------------------------
+# Secret-leak guard (Security Rule #6) over the AGGREGATED evidence directory.
+#
+# run-single-avd-scenario.sh already scans /tmp/adb-logcat.log and
+# /tmp/flutter-drive.log after each drive — but only when it REACHES that scan.
+# It runs under `set -e` from the moment it starts logcat, and has two earlier
+# `exit 2` argument guards, so an install / build / config failure leaves the
+# lane through a path that never scans. run_one's `cp` then copies those
+# never-scanned logs into ${LOG_DIR}, which the workflow uploads with 14-day
+# retention — i.e. the failure mode publishes precisely the material the inner
+# guard exists to catch. Re-scanning the aggregate closes that window.
+#
+# Deliberately placed BEFORE the summary's `exit 1` so it also runs on red
+# runs: those are exactly the runs where the inner scan was likely skipped.
+# The verdict is applied after the FAIL list is printed, so a leak never robs
+# triage of the failing-target names (both outcomes are exit 1 regardless).
+# ---------------------------------------------------------------------------
+echo
+echo "== Secret-leak scan over ${LOG_DIR} (Security Rule 6) =="
+scan_rc=0
+bash "${SECRET_SCAN}" "${LOG_DIR}" || scan_rc=$?
+
 echo
 echo "============================================================"
 echo "Integration test summary"
@@ -259,6 +285,14 @@ if (( ${#FAILED[@]} > 0 )); then
   printf '  FAIL  %s\n' "${FAILED[@]}"
   echo
   echo "ERROR: ${#FAILED[@]} integration target(s) failed." >&2
+  exit 1
+fi
+
+if (( scan_rc != 0 )); then
+  echo "ERROR: secret-leak guard tripped on ${LOG_DIR} (rc=${scan_rc}) — see the" \
+       "LEAK / UNUSABLE line(s) above. rc=1 means key material reached the logs;" \
+       "rc=3 means a target's log was absent, unreadable or empty, so this run" \
+       "carries no evidence either way." >&2
   exit 1
 fi
 

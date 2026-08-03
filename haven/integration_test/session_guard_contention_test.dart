@@ -29,9 +29,24 @@ library;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/rust/frb_generated.dart';
+import 'package:haven/src/services/circle_service.dart'
+    show CircleServiceException;
 import 'package:haven/src/services/mls_session_handover.dart';
+import 'package:haven/src/services/nostr_circle_service.dart';
+import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:path_provider/path_provider.dart';
+
+/// Pins the service to this lane's dedicated directory instead of the app's
+/// real one, so nothing here can contend with a session another target holds.
+class _FixedDataDirectory implements DataDirectoryProvider {
+  const _FixedDataDirectory(this.path);
+
+  final String path;
+
+  @override
+  Future<String> getDataDirectory() async => path;
+}
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -139,6 +154,67 @@ void main() {
       // The point of the whole exercise: the database is now openable.
       final recovered = await open();
       recovered.dispose();
+    });
+
+    testWidgets('a handed-off session is not taken back while backgrounded', (
+      tester,
+    ) async {
+      // The other direction of the same guard, and the one that had no
+      // coverage: handing the session DOWN to the foreground service.
+      //
+      // Releasing frees the guard for an instant. Keeping it free is a separate
+      // property, and it is the one that was missing — a paused main isolate is
+      // not a dead one, so its suspended publish chains, its live-sync
+      // re-subscriber and its maintenance ticks all call back into the service
+      // and simply re-open. The service's next 72-second tick then finds the
+      // guard held by a provably-alive owner, its reclaim correctly declines,
+      // and background publishing stays dead through the very handoff meant to
+      // enable it (`e2e-fgs-publish`, run 30792258968).
+      //
+      // Real FFI and real registry: `LIVE_SESSIONS` is a Rust static that host
+      // tests cannot reach, and "the guard is genuinely free AND this isolate
+      // still refuses to take it" is only observable against the real one.
+      final identity = await NostrIdentityManager.newInstance();
+      await identity.createIdentity();
+      final service = NostrCircleService(
+        relayService: NostrRelayService(),
+        dataDirectoryProvider: _FixedDataDirectory(dataDir),
+        identitySecretBytesProvider: identity.getSecretBytes,
+        // The app is backgrounded — the state a pause-time handoff lives in.
+        isForegrounded: () => false,
+      );
+
+      await service.initialize();
+      expect(
+        await isSessionLive(dataDir: dataDir),
+        isTrue,
+        reason: 'the service must hold the guard before it can hand it over',
+      );
+
+      expect(service.releaseForHandoff(), isTrue);
+      expect(
+        await isSessionLive(dataDir: dataDir),
+        isFalse,
+        reason: 'the handoff is worthless if the guard is not actually free',
+      );
+
+      // THE assertion. The guard is free and this open would succeed on Rule 14
+      // alone — it must be refused anyway, because the free guard belongs to
+      // the foreground service now.
+      await expectLater(
+        service.getCircleManagerFfi(),
+        throwsA(isA<CircleServiceException>()),
+      );
+      expect(
+        await isSessionLive(dataDir: dataDir),
+        isFalse,
+        reason: 'a refused open must not have opened anything',
+      );
+
+      // So the service isolate can take it — the outcome the whole handoff
+      // exists for.
+      final fgs = await open();
+      fgs.dispose();
     });
 
     testWidgets('the handover declines when the guard is free', (tester) async {

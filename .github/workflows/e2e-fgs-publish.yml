@@ -196,9 +196,22 @@ jobs:
           } > /tmp/b1-logs/diag.log 2>&1 || true
           # Scan what this step just wrote (Security Rule 6). Withhold rather
           # than upload on a hit, matching the orchestrator's containment.
-          if ! bash tooling/e2e/ci/scan-logs-for-secrets.sh /tmp/b1-logs/diag.log; then
+          # rc 1 (a real leak) and rc 3 (absent/unreadable/empty log) are kept
+          # apart deliberately: both fail the step, but only a leak justifies
+          # destroying the diag. If the redirection above produced nothing —
+          # a full disk is the realistic cause on this lane — the honest
+          # marker is "never written", not "withheld because it leaked".
+          diag_scan_rc=0
+          bash tooling/e2e/ci/scan-logs-for-secrets.sh /tmp/b1-logs/diag.log \
+            || diag_scan_rc=$?
+          if [ "${diag_scan_rc}" -eq 1 ]; then
             rm -f /tmp/b1-logs/diag.log
             echo "diag withheld: secret-leak guard tripped" > /tmp/b1-logs/DIAG_LEAK.txt
+            exit 1
+          elif [ "${diag_scan_rc}" -ne 0 ]; then
+            echo "diag unscannable (rc=${diag_scan_rc}): absent, unreadable or empty" \
+              > /tmp/b1-logs/DIAG_UNSCANNABLE.txt
+            echo "ERROR: diag log could not be scanned (rc=${diag_scan_rc})." >&2
             exit 1
           fi
 

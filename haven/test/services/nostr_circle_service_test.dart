@@ -1166,4 +1166,175 @@ void _handoffTests() {
       );
     });
   });
+
+  group('handoff durability', () {
+    // Releasing frees the Rule-14 guard for an INSTANT. Keeping it free is a
+    // separate property, and it is the one the `e2e-fgs-publish` lane caught
+    // missing: the paused main isolate is not a dead one, so a suspended
+    // publish chain, the live-sync re-subscriber or a maintenance tick simply
+    // re-opened the database milliseconds later. The foreground service's next
+    // tick then found the guard held by a provably-alive owner — which its
+    // reclaim correctly refuses to take — and background publishing stayed
+    // dead through the very handoff meant to enable it.
+
+    /// A service whose initialisation cannot reach the Rust bridge, with a
+    /// controllable foreground answer. [keyringCalls] counts how far an
+    /// `initialize()` got: a refusal that happens BEFORE the keyring proves the
+    /// gate fires ahead of any I/O, not merely somewhere along the way.
+    ({NostrCircleService service, List<int> keyringCalls}) build({
+      required bool Function() isForegrounded,
+      Future<void> Function()? keyring,
+    }) {
+      final calls = <int>[];
+      final service = NostrCircleService(
+        relayService: _StubRelayService(),
+        dataDirectoryProvider: _ThrowingDataDirectoryProvider(),
+        keyringInitializer: () async {
+          calls.add(calls.length);
+          if (keyring != null) await keyring();
+        },
+        isForegrounded: isForegrounded,
+      );
+      return (service: service, keyringCalls: calls);
+    }
+
+    Matcher throwsHandoffRefusal() => throwsA(
+      isA<CircleServiceException>().having(
+        (e) => e.message,
+        'message',
+        contains('handed off'),
+      ),
+    );
+
+    test('a released session is not re-opened while backgrounded', () async {
+      final h = build(isForegrounded: () => false);
+      h.service.releaseForHandoff();
+
+      await expectLater(h.service.initialize(), throwsHandoffRefusal());
+      expect(
+        h.keyringCalls,
+        isEmpty,
+        reason: 'the refusal must precede every step of the open — reaching '
+            'the keyring means the gate is downstream of work that can '
+            'succeed, and a successful open is exactly what re-takes the guard',
+      );
+    });
+
+    test('latches even when there was no handle to release', () async {
+      // The return value reports whether THIS call gave a live handle away;
+      // the latch is about whether the isolate may take one back, and it must
+      // hold in both cases. A service that had not opened yet at pause (or was
+      // suspended mid-init) is precisely the case that would otherwise open
+      // fresh, seconds later, into a guard the service was told it could have.
+      final h = build(isForegrounded: () => false);
+      expect(h.service.releaseForHandoff(), isFalse);
+      await expectLater(h.service.initialize(), throwsHandoffRefusal());
+    });
+
+    test('a release during an in-flight init still latches', () async {
+      // `releaseForHandoff` cannot cancel an open already suspended, so it
+      // reports `false` — but the latch it sets is what stops the NEXT open,
+      // and (see `_runInitialization`) what makes the suspended one dispose
+      // its handle rather than adopt it.
+      final gate = Completer<void>();
+      final h = build(isForegrounded: () => false, keyring: () => gate.future);
+
+      final first = h.service.initialize();
+      // The init is now suspended inside the keyring initializer.
+      expect(h.keyringCalls, hasLength(1));
+      expect(h.service.releaseForHandoff(), isFalse);
+      gate.complete();
+      await expectLater(first, throwsA(isA<CircleServiceException>()));
+
+      await expectLater(h.service.initialize(), throwsHandoffRefusal());
+    });
+
+    test('endSessionHandoff lets the next open through', () async {
+      final h = build(isForegrounded: () => false);
+      h.service.releaseForHandoff();
+      expect(h.service.endSessionHandoff(), isTrue);
+      expect(
+        h.service.endSessionHandoff(),
+        isFalse,
+        reason: 'a second end has no handoff to end',
+      );
+
+      // No longer the handoff refusal — the open now runs and fails on this
+      // harness's own missing identity instead.
+      await expectLater(
+        h.service.initialize(),
+        throwsA(
+          isA<CircleServiceException>().having(
+            (e) => e.message,
+            'message',
+            isNot(contains('handed off')),
+          ),
+        ),
+      );
+      expect(h.keyringCalls, hasLength(1));
+    });
+
+    test('the refusal lapses on its own once foregrounded', () async {
+      // The safety property. `endSessionHandoff` is called from the resume
+      // path, and if that call were ever missed — an early return, a MapShell
+      // disposed while paused — a latch alone would leave the user with a
+      // database the app refuses to open for the rest of the process: no
+      // circles, no map, no publishing. Pairing it with "still backgrounded"
+      // bounds the refusal to the window it is for.
+      var foregrounded = false;
+      final h = build(isForegrounded: () => foregrounded);
+      h.service.releaseForHandoff();
+      await expectLater(h.service.initialize(), throwsHandoffRefusal());
+
+      foregrounded = true;
+      await expectLater(
+        h.service.initialize(),
+        throwsA(
+          isA<CircleServiceException>().having(
+            (e) => e.message,
+            'message',
+            isNot(contains('handed off')),
+          ),
+        ),
+      );
+
+      // And the lapse is durable: going backgrounded again with no NEW handoff
+      // must not resurrect the refusal, or every background maintenance tick
+      // after one resume would fail closed for no reason.
+      foregrounded = false;
+      await expectLater(
+        h.service.initialize(),
+        throwsA(
+          isA<CircleServiceException>().having(
+            (e) => e.message,
+            'message',
+            isNot(contains('handed off')),
+          ),
+        ),
+      );
+    });
+
+    test('an in-flight open is not adopted once a handoff latched', () {
+      // The adoption itself needs a real `CircleManagerFfi.newInstance`, so it
+      // is asserted on the source: the guard must cover the handoff as well as
+      // the wipe, and must dispose rather than orphan — the handle holds the
+      // Rule-14 guard, and orphaning it locks out the service AND the next
+      // legitimate open.
+      final src = File(
+        'lib/src/services/nostr_circle_service.dart',
+      ).readAsStringSync();
+      final at = src.indexOf('if (_wiped || _handoffHolds) {');
+      expect(
+        at,
+        isNonNegative,
+        reason: 'the post-open adoption must fail closed on BOTH latches',
+      );
+      final branch = src.substring(at, src.indexOf('return;', at));
+      expect(
+        branch.indexOf('manager.dispose()'),
+        isNonNegative,
+        reason: 'a refused adoption must release the guard it just took',
+      );
+    });
+  });
 }

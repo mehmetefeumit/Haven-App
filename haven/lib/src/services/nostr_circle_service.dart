@@ -40,6 +40,8 @@ import 'package:haven/src/rust/api.dart' as frb_api;
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/fresh_secret.dart';
 import 'package:haven/src/services/leaver_backstop.dart';
+import 'package:haven/src/services/mls_session_handover.dart'
+    show appIsForegrounded;
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/pending_leave_service.dart';
 import 'package:haven/src/services/relay_service.dart';
@@ -67,8 +69,10 @@ class NostrCircleService implements CircleService {
     bool enableLeaverBackstop = false,
     Future<List<int>> Function()? identitySecretBytesProvider,
     Future<bool> Function(String dataDir)? sessionHandover,
+    bool Function()? isForegrounded,
   }) : _relayService = relayService,
        _sessionHandover = sessionHandover,
+       _isForegrounded = isForegrounded ?? appIsForegrounded,
        _dataDirectoryProvider =
            dataDirectoryProvider ?? const PathProviderDataDirectory(),
        _keyringInitializer = keyringInitializer ?? initKeyringStore,
@@ -100,6 +104,10 @@ class NostrCircleService implements CircleService {
        // handover would be asking the service to stop itself. It also never
        // opens a manager here — one is injected.
        _sessionHandover = null,
+       // Never consulted: the pause-time handoff is a UI-isolate concern and
+       // this constructor's service never calls `initialize()` (the manager is
+       // already open, and `releaseForHandoff` is never called on it).
+       _isForegrounded = appIsForegrounded,
        _manager = injectedManager,
        _initialized = true;
 
@@ -122,6 +130,11 @@ class NostrCircleService implements CircleService {
   /// (which is usually the HOLDER, so stopping the service would be asking it
   /// to stop itself) and for tests that inject a manager directly.
   final Future<bool> Function(String dataDir)? _sessionHandover;
+
+  /// Whether the app is currently foregrounded. Consulted only while
+  /// [_handedOff] holds — see [releaseForHandoff] for why the handoff must
+  /// expire on the way back up rather than latching until logout.
+  final bool Function() _isForegrounded;
 
   /// Whether this instance runs the REV-1 leaver backstop (driver 2) after a
   /// `propose_leave`.
@@ -164,6 +177,46 @@ class NostrCircleService implements CircleService {
   /// [markCircleBlocked] / [isCircleBlocked].
   final Set<String> _blockedCircleIds = {};
 
+  /// Set by [releaseForHandoff], cleared by [endSessionHandoff] (or by the
+  /// first foregrounded open — see [_handoffHolds]). While it holds, every
+  /// [initialize] fails closed so nothing in THIS isolate re-takes the Rule-14
+  /// guard it just handed to the foreground service.
+  ///
+  /// Unlike [_wiped] this is not one-way: the session is expected back on
+  /// resume.
+  bool _handedOff = false;
+
+  /// Whether a handed-off session must stay handed off right now.
+  ///
+  /// The `_handedOff` flag alone is deliberately NOT enough. It is set on the
+  /// way down and cleared on the way back up, and if the clear were ever
+  /// missed — a resume path that returned early, a `MapShell` disposed while
+  /// paused — the app would come back to a database it refuses to open, with
+  /// no circles, no map and no publishing, for the rest of the process. Pairing
+  /// it with "and we are still backgrounded" bounds that to the window it is
+  /// meant for: the moment the app is foregrounded again the refusal lapses on
+  /// its own, and the ordinary [_sessionHandover] recovery takes the session
+  /// back from the service.
+  bool get _handoffHolds => _handedOff && !_isForegrounded();
+
+  /// Message for the refusal above. Deliberately says nothing about the
+  /// database, the path, or any group (Rule 8) — a caller only needs to know
+  /// this isolate is not the session's owner right now.
+  static const String _handoffRefusalMessage =
+      'MLS session handed off to the background service';
+
+  /// Ends the pause-time handoff so the next [initialize] may re-open.
+  ///
+  /// Returns whether a handoff was actually in effect. Called on resume, when
+  /// this isolate becomes the natural owner of the session again; the open it
+  /// re-enables may still have to take the guard back from the service, which
+  /// is what [_sessionHandover] is for.
+  bool endSessionHandoff() {
+    if (!_handedOff) return false;
+    _handedOff = false;
+    return true;
+  }
+
   /// Releases the MLS session so another isolate can take it, WITHOUT the
   /// permanent latch [closeAndInvalidate] applies.
   ///
@@ -184,17 +237,38 @@ class NostrCircleService implements CircleService {
   /// service work, and unlike the service's reclaim it needs no inference
   /// about who is alive: this isolate is deciding about itself.
   ///
+  /// # Why releasing alone is not handing over
+  ///
+  /// Releasing frees the guard for an instant; it does not keep it free. This
+  /// isolate is NOT dead at pause — it is paused, with work still resolving.
+  /// A publish chain suspended mid-`await`, the live-sync re-subscriber
+  /// reacting to a circle-set change, a maintenance tick that outlives every
+  /// `MapShell` timer: each of those calls [initialize] and, on a free guard,
+  /// simply re-opens the database. The service's next 72-second tick then finds
+  /// the guard held by a main isolate that is provably alive, its reclaim
+  /// correctly declines (a reclaim is for a dead owner), and background
+  /// publishing stays dead through the very handoff meant to enable it — which
+  /// is exactly what the `e2e-fgs-publish` lane observed.
+  ///
+  /// So this latches [_handedOff] as well as releasing, and the latch is what
+  /// makes the handoff hold. It expires on the way back up ([_handoffHolds]).
+  ///
   /// # In-flight initialisation
   ///
-  /// An `initialize()` suspended on its awaited open would otherwise adopt its
-  /// handle AFTER this returns, silently re-taking the guard we just gave away
-  /// — and the service would already have failed. Releasing is therefore
-  /// refused while an init is in flight; the caller retries or accepts that the
-  /// handoff did not happen, which costs a publish cycle rather than
-  /// correctness.
+  /// An `initialize()` suspended on its awaited open adopts its handle AFTER
+  /// this returns, and cannot be cancelled from here. The latch is therefore
+  /// set BEFORE the early return below, so that adoption fails closed and
+  /// disposes the handle rather than silently re-taking the guard (see
+  /// `_runInitialization`). The return value still reports only whether THIS
+  /// call released a live handle.
   bool releaseForHandoff() {
+    // Latch first, unconditionally: whether there was a handle to give away and
+    // whether this isolate may take one back are different questions, and the
+    // answer to the second is "not until we are foregrounded again" in every
+    // case below.
+    _handedOff = true;
     if (_initCompleter != null) {
-      debugPrint('[CircleService] handoff refused: init in flight');
+      debugPrint('[CircleService] handoff: init in flight, adopt will refuse');
       return false;
     }
     final manager = _manager;
@@ -220,6 +294,20 @@ class NostrCircleService implements CircleService {
       return Future.error(
         const CircleServiceException('circle service was wiped'),
       );
+    }
+    // The session belongs to the foreground service until we are foregrounded
+    // again — see [releaseForHandoff]. Fail closed rather than re-opening: one
+    // straggler open here is all it takes to strand background publishing for
+    // the whole backgrounded session.
+    if (_handedOff) {
+      if (_handoffHolds) {
+        return Future.error(
+          const CircleServiceException(_handoffRefusalMessage),
+        );
+      }
+      // Foregrounded again — the handoff is over even if no resume path got
+      // around to saying so.
+      _handedOff = false;
     }
     if (_initialized) return Future.value();
 
@@ -292,7 +380,13 @@ class NostrCircleService implements CircleService {
       // that newInstance() created are deleted by the wipeAllMlsState() that
       // deleteIdentity() runs AFTER closeAndInvalidate() drains this future.
       // Fail closed so no live manager escapes over a doomed DB.
-      if (_wiped) {
+      //
+      // The same applies to a handoff latched while this init was suspended
+      // (`releaseForHandoff` cannot cancel an open already in flight): adopting
+      // here would re-take the guard microseconds after giving it away, and the
+      // foreground service — which by then may already have failed its own
+      // open — would stay locked out for the rest of the backgrounded session.
+      if (_wiped || _handoffHolds) {
         // Release the handle we just opened rather than orphaning it: it holds
         // this DB's Rule-14 `LiveSessionGuard`, so dropping it on GC alone
         // would keep the process-global single-session slot occupied and make
@@ -302,10 +396,16 @@ class NostrCircleService implements CircleService {
         _initialized = false;
         _initCompleter = null;
         completer.completeError(
-          const CircleServiceException('circle service was wiped'),
+          CircleServiceException(
+            _wiped ? 'circle service was wiped' : _handoffRefusalMessage,
+          ),
         );
         return;
       }
+      // Adopting IS taking ownership back, so the handoff is over — clear it
+      // rather than leaving a stale flag that a later pause would revive
+      // against a manager this instance is already holding.
+      _handedOff = false;
       _manager = manager;
       _initialized = true;
       _initCompleter = null;

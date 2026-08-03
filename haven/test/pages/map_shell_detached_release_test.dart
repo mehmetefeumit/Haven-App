@@ -149,7 +149,12 @@ void main() {
       final src = File('lib/src/pages/map_shell.dart').readAsStringSync();
       final at = src.indexOf('Future<void> _handOffMlsSession() async {');
       expect(at, isNonNegative, reason: 'the handoff must exist');
-      final body = src.substring(at, src.indexOf('\n  /// Restarts', at));
+      // Bounded by the NEXT member's doc, so the ordering below is read from
+      // the handoff alone and cannot be satisfied by its mirror underneath it.
+      final body = src.substring(
+        at,
+        src.indexOf('\n  /// Takes the MLS session back', at),
+      );
 
       final stop = body.indexOf('_liveSync?.stop()');
       final release = body.indexOf('releaseForHandoff()');
@@ -180,6 +185,84 @@ void main() {
         before.lastIndexOf('} else if'),
         lessThan(branch),
         reason: 'the call must not have drifted into another branch',
+      );
+    });
+  });
+
+  group('taking the session back on resume', () {
+    // The handoff latches the circle service closed for the whole backgrounded
+    // window (see `nostr_circle_service_test.dart`, "handoff durability"), so
+    // the resume path has a hard ordering obligation: end the handoff before
+    // anything that needs the manager, or spend the resume failing every open.
+    late String resumeBody;
+
+    setUpAll(() {
+      final start = source.indexOf('Future<void> _onResumed() async {');
+      expect(start, isNonNegative, reason: '_onResumed must exist');
+      // Bounded by the next member, so an ordering assertion about the resume
+      // can never be satisfied by code elsewhere in a 1300-line file.
+      final end = source.indexOf('static const double _kMinSheetSize', start);
+      expect(end, greaterThan(start));
+      resumeBody = source.substring(start, end);
+    });
+
+    test('the handoff ends before the heal and before the debounce', () {
+      final end = resumeBody.indexOf('_endMlsSessionHandoff()');
+      final heal = resumeBody.indexOf('_healLiveSyncIfStopped()');
+      final debounce = resumeBody.indexOf('_resumeStopwatch.elapsed');
+      expect(
+        end,
+        isNonNegative,
+        reason: 'without this the session stays handed off after resume and '
+            'the app comes back to a database it refuses to open',
+      );
+      expect(heal, isNonNegative);
+      expect(debounce, isNonNegative);
+      expect(
+        end,
+        lessThan(heal),
+        reason: 'the heal restarts the engine, which needs the manager — '
+            'running it first burns the resume on a guaranteed failure',
+      );
+      expect(
+        end,
+        lessThan(debounce),
+        reason: 'a resume inside the debounce window must still take the '
+            'session back, or a glance-and-return leaves it handed off',
+      );
+    });
+
+    test('ending the handoff replays the re-subscriber', () {
+      // A circle-set change that arrived while the handoff held could not be
+      // applied — the engine restart needs the manager. That failure leaves the
+      // re-subscriber's signature un-advanced on purpose, so replaying today's
+      // snapshot re-decides it. Without the replay, live receive for that
+      // circle stays dead until the set changes AGAIN.
+      final at = source.indexOf('void _endMlsSessionHandoff() {');
+      expect(at, isNonNegative);
+      final body = source.substring(at, source.indexOf('\n  /// ', at));
+      expect(
+        body.contains('_onLiveSyncCirclesChanged('),
+        isTrue,
+        reason: 'the deferred re-subscribe must be replayed on the way back',
+      );
+      expect(
+        body.indexOf('if (!ended) return;'),
+        lessThan(body.indexOf('_onLiveSyncCirclesChanged(')),
+        reason: 'the replay is scoped to a handoff that was really in effect; '
+            'firing it on every resume would cancel an unrelated pending '
+            'debounce for no reason',
+      );
+    });
+
+    test('it never throws out of the lifecycle callback', () {
+      final at = source.indexOf('void _endMlsSessionHandoff() {');
+      final body = source.substring(at, source.indexOf('\n  /// ', at));
+      expect(body.contains('on Object catch'), isTrue);
+      expect(
+        RegExp(r'\$e[^a-zA-Z]').hasMatch(body),
+        isFalse,
+        reason: 'Security Rule 8: log the type, never the message',
       );
     });
   });
