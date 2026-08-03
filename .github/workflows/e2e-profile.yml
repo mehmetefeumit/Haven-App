@@ -113,6 +113,17 @@ jobs:
       # Blossom is published on the host at :3000; the emulator reaches it via
       # the host-loopback alias 10.0.2.2. Baked into the APK below.
       HAVEN_E2E_BLOSSOM_URL: http://10.0.2.2:3000
+      # Receive path, DECLARED — not inherited. `liveSyncEnabled` is
+      # `bool.fromEnvironment('HAVEN_LIVE_SYNC', defaultValue: true)`, so this
+      # job was compiling the engine ON without ever saying so, while its iOS
+      # twin below reached the shared run-ios-sim-scenario.sh default and
+      # compiled it OFF — ONE lane, one scenario file, two receive paths, and
+      # nothing on either side declaring it (CI_HARDENING_BACKLOG.md A7). Each
+      # half now states the value it has been running, so the split is visible
+      # and reviewable instead of emergent. Resolving the split is a separate,
+      # behaviour-changing decision: flipping the iOS half to "true" is the
+      # production-parity option and is the one that risks turning red.
+      HAVEN_LIVE_SYNC: "true"
       FLUTTER_SUPPRESS_ANALYTICS: "true"
 
     steps:
@@ -179,6 +190,7 @@ jobs:
             --dart-define=HAVEN_E2E_PROFILE_RELAY="${HAVEN_E2E_PROFILE_RELAY}" \
             --dart-define=HAVEN_E2E_PROFILE_RELAYS="${HAVEN_E2E_PROFILE_RELAYS}" \
             --dart-define=HAVEN_E2E_BLOSSOM_URL="${HAVEN_E2E_BLOSSOM_URL}" \
+            --dart-define=HAVEN_LIVE_SYNC="${HAVEN_LIVE_SYNC}" \
             --dart-define=HAVEN_E2E_NO_BACKGROUND=true
           cp build/app/outputs/flutter-apk/app-debug.apk /tmp/scenario.apk
           ls -lh /tmp/scenario.apk
@@ -385,6 +397,14 @@ jobs:
       # are set, so no other iOS lane's build changes.
       HAVEN_E2E_BLOSSOM_URL: http://localhost:3000
       HAVEN_E2E_NO_BACKGROUND: "true"
+      # Receive path, DECLARED — see the Android job's note above. This half was
+      # taking run-ios-sim-scenario.sh's built-in default ("false") while the
+      # Android half of the SAME lane inherited Dart's default ("true"); neither
+      # was a decision. "false" is written here because it is the value this job
+      # has actually been running green — NOT because poll is the right mode for
+      # a profile lane. The script now REQUIRES this env, so the built-in
+      # default can no longer answer the question by accident.
+      HAVEN_LIVE_SYNC: "false"
       FLUTTER_SUPPRESS_ANALYTICS: "true"
 
     steps:
@@ -439,12 +459,21 @@ jobs:
         id: sim
         run: bash tooling/e2e/ci/boot-ios-sim.sh "iPhone 15"
 
-      # `nick-fields/retry` absorbs the ~10% iOS-simulator launch/attach flake
-      # (which presents as a HANG). Each attempt restarts EVERY server first so
-      # a retried attempt runs against CLEAN stores — no leftover kind-0 events
-      # or blobs from a failed prior attempt. The restarts are instance-scoped:
+      # `nick-fields/retry` absorbs the iOS-simulator launch/attach flake (which
+      # presents as a HANG). Each attempt restarts EVERY server first so a
+      # retried attempt runs against CLEAN stores — no leftover kind-0 events or
+      # blobs from a failed prior attempt. The restarts are instance-scoped:
       # restarting the circle relay leaves the profile pool alone and vice
       # versa, so the `&&` chain below cannot kill what it just started.
+      #
+      # The action retries on ANY non-zero exit (it has no `retry_on`
+      # predicate), so the narrowing lives in run-ios-sim-scenario.sh: it
+      # classifies each failed attempt and attempt 2 refuses unless the verdict
+      # is the one admitted infrastructure signature, failing closed otherwise.
+      # This lane is where that mattered most — job 91511139791 (run
+      # 30753193231) burned a second 30-minute attempt on a deterministic
+      # `set_profile_relays_for_test already installed` setUpAll throw. See
+      # tooling/e2e/ci/ios-flake-lib.sh.
       - name: Run e2e_profile_sharing on the simulator
         timeout-minutes: 65
         uses: nick-fields/retry@v3

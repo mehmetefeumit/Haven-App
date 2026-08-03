@@ -585,11 +585,28 @@ resolve_apk() {
     return 0
   fi
   echo "[build] no prebuilt APK for ${target}; building on demand (LOCAL)..." >&2
+  # Compiling means declaring the receive path: `liveSyncEnabled` is
+  # `bool.fromEnvironment('HAVEN_LIVE_SYNC', defaultValue: true)`, so an omitted
+  # define silently produces a live-sync build — here that would mean a local
+  # repro compiled differently from the CI lane it reproduces
+  # (CI_HARDENING_BACKLOG.md A7). CI never reaches this branch (the workflow
+  # stages prebuilt APKs), so the requirement costs the lane nothing.
+  if [[ -z "${HAVEN_LIVE_SYNC:-}" ]]; then
+    echo "ERROR: HAVEN_LIVE_SYNC is not set and this local fallback is about to" >&2
+    echo "       COMPILE the app. Export HAVEN_LIVE_SYNC=true|false (the lane" >&2
+    echo "       sets 'true')." >&2
+    exit 2
+  fi
+  if [[ ! "${HAVEN_LIVE_SYNC}" =~ ^(true|false)$ ]]; then
+    echo "ERROR: HAVEN_LIVE_SYNC must be exactly 'true' or 'false' (got '${HAVEN_LIVE_SYNC}')." >&2
+    exit 2
+  fi
   ( cd "${HAVEN_DIR}" && flutter build apk \
       --debug \
       --target-platform android-x64 \
       --target="${target}" \
-      --dart-define=HAVEN_E2E_RELAY="${RELAY_URL}" >&2 )
+      --dart-define=HAVEN_E2E_RELAY="${RELAY_URL}" \
+      --dart-define=HAVEN_LIVE_SYNC="${HAVEN_LIVE_SYNC}" >&2 )
   cp "${HAVEN_DIR}/build/app/outputs/flutter-apk/app-debug.apk" "${staged}"
   printf '%s' "${staged}"
 }

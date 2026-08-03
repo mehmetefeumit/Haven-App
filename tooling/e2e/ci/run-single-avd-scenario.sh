@@ -341,6 +341,26 @@ if [[ -f "${APK}" ]]; then
   echo "Phase 1/4 — Using pre-built APK at ${APK} (skipping build)."
 else
   echo "Phase 1/4 — No pre-built APK; building for ${SCENARIO_FILE}..."
+  # This fallback compiles the app, so it must state the receive path.
+  # `liveSyncEnabled` is `bool.fromEnvironment('HAVEN_LIVE_SYNC', defaultValue:
+  # true)`: omitting the define here would hand a LOCAL run a different receive
+  # path from the CI lane it is meant to reproduce, which is the worst possible
+  # place for a silent difference (CI_HARDENING_BACKLOG.md A7). Required rather
+  # than defaulted for the same reason CI requires it — a default is an answer
+  # nobody gave. CI never reaches this branch: every lane stages a pre-built APK
+  # at ${APK}, and the check lives HERE, not at the top of the script, so the
+  # drive-only path (which cannot influence a compiled-in define) is unaffected.
+  if [[ -z "${HAVEN_LIVE_SYNC:-}" ]]; then
+    echo "ERROR: HAVEN_LIVE_SYNC is not set, and this local fallback is about" >&2
+    echo "       to COMPILE the app. Unset means the Dart default (live-sync" >&2
+    echo "       ON), not 'unspecified'. Export HAVEN_LIVE_SYNC=true|false to" >&2
+    echo "       match the lane you are reproducing." >&2
+    exit 2
+  fi
+  if [[ ! "${HAVEN_LIVE_SYNC}" =~ ^(true|false)$ ]]; then
+    echo "ERROR: HAVEN_LIVE_SYNC must be exactly 'true' or 'false' (got '${HAVEN_LIVE_SYNC}')." >&2
+    exit 2
+  fi
   # `--target-platform android-x64`: the AVD is x86_64, so x64 is the only
   # ABI this APK runs on. It keeps cargokit from compiling the large debug
   # Rust lib for every ABI (a multi-ABI build + NDK strip has run the CI
@@ -349,7 +369,8 @@ else
     --debug \
     --target-platform android-x64 \
     --target="${SCENARIO_FILE}" \
-    --dart-define=HAVEN_E2E_RELAY="${RELAY_URL}"
+    --dart-define=HAVEN_E2E_RELAY="${RELAY_URL}" \
+    --dart-define=HAVEN_LIVE_SYNC="${HAVEN_LIVE_SYNC}"
   cp "${BUILD_APK}" "${APK}"
   echo "Phase 1/4 — APK ready at ${APK}"
 fi

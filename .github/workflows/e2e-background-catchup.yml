@@ -50,6 +50,15 @@ jobs:
     timeout-minutes: 60
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
+      # Receive path, DECLARED — not inherited. `liveSyncEnabled` defaults to
+      # true when the define is absent, so an omitted flag compiles the engine
+      # ON while reading as "nobody decided" (CI_HARDENING_BACKLOG.md A7). The
+      # M7 wake gates this lane proves are flag-INDEPENDENT (gate 0 is
+      # `backgroundCatchupEnabled`, a separate const), so the value that
+      # matters here is the production one — engine ON, which is what this lane
+      # has been running since the Phase-B flip. build-integration-apks.sh
+      # REQUIRES this env, so a future omission fails loudly.
+      HAVEN_LIVE_SYNC: "true"
       FLUTTER_SUPPRESS_ANALYTICS: "true"
 
     steps:

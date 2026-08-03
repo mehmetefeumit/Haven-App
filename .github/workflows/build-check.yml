@@ -8,6 +8,28 @@
 #     own runner because a combined multi-ABI build has exhausted a default
 #     runner's disk.
 #   - iOS: debug build, no codesign.
+#
+# # Why these jobs pass no HAVEN_LIVE_SYNC
+#
+# `liveSyncEnabled` is `bool.fromEnvironment('HAVEN_LIVE_SYNC', defaultValue:
+# true)`, and scripts/ci/check_live_sync_define_declared.sh requires every
+# workflow job that builds the app to DECLARE which receive path it compiles —
+# an omission elsewhere means "nobody decided" (CI_HARDENING_BACKLOG.md A7).
+# These jobs are the exception the guard names explicitly: their entire purpose
+# is to prove that the artifact SHIPPED to users builds, and the shipped
+# artifact passes no define, so its receive path is whatever
+# live_sync_provider.dart's `defaultValue` says it is. Pinning a literal here
+# would decouple the verified build from the one-line rollback lever that
+# defaultValue IS (docs/M11_ROLLOUT.md §8, pinned by check 14b of
+# check_m7_native_wake_guards.sh): a rollback would flip production while these
+# jobs kept compiling — and kept proving — the abandoned path. So the choice is
+# still declared, just declared as "the default, deliberately":
+#
+#   HAVEN_LIVE_SYNC-INTENT: production-default
+#
+# The guard allows that token in this file and in release-build.yml only; any
+# other workflow reaching for it has to edit the guard's allowlist, which is a
+# reviewable act rather than a silent omission.
 
 name: Build Check
 
@@ -17,6 +39,8 @@ on:
 jobs:
   android:
     name: Android (${{ matrix.arch }})
+    # HAVEN_LIVE_SYNC-INTENT: production-default — see the header. This job
+    # builds what ships, and what ships passes no define.
     runs-on: ubuntu-latest
     strategy:
       # One architecture failing must not cancel the other two — each arch is
@@ -100,6 +124,8 @@ jobs:
 
   ios:
     name: iOS
+    # HAVEN_LIVE_SYNC-INTENT: production-default — see the header. This job
+    # builds what ships, and what ships passes no define.
     runs-on: macos-latest
     defaults:
       run:

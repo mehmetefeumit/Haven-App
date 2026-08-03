@@ -90,6 +90,18 @@
 #     kind-445 buffers forever and the scenario fails on the receive path with
 #     nothing pointing back at the create.
 #
+#   Live-sync define is declared      scripts/ci/check_live_sync_define_declared.sh
+#     Every workflow job that BUILDS the app must say which receive path it
+#     compiles. `liveSyncEnabled` is `bool.fromEnvironment('HAVEN_LIVE_SYNC',
+#     defaultValue: true)` and the value is baked in at build time, so a lane
+#     that omits the define does not build something neutral — it builds the
+#     live-sync engine, chosen by nobody, under whatever name the lane carries.
+#     build-check.yml and release-build.yml are the two allowlisted exceptions
+#     (they build the SHIPPED artifact, whose path must come from defaultValue,
+#     the M11 §8 rollback lever) and declare that intent with a token instead.
+#     The guard also pins that the shared build wrappers keep FORWARDING the
+#     define, since a workflow can declare a value the funnel silently drops.
+#
 #   Skip-manifest self-test           scripts/ci/check_no_undeclared_skips.sh
 #     The guard that fails a run when a test SKIPS without being declared in
 #     scripts/ci/expected_test_skips.txt. The gate itself must parse real test
@@ -102,7 +114,10 @@
 #   E2E harness self-tests            tooling/e2e/ci/*.sh --self-test
 #     The bash guards embedded in the E2E tooling must not silently rot: the
 #     connect-flake retry predicate must never retry a genuine test failure,
-#     and the secret-leak log scanner must catch planted key material.
+#     the secret-leak log scanner must catch planted key material, and the iOS
+#     retry classifier + first-test watchdog must admit exactly one
+#     infrastructure signature and refuse everything else — including an empty
+#     or absent log, where "no evidence" must not read as "flake".
 
 name: Repo Guards
 
@@ -209,6 +224,23 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_profile_override_single_site.sh
 
+      # A poll lane that inherits live-sync is a lane whose name is wrong about
+      # what it runs. e2e-flakiness-stress spent months running the M11 live
+      # suite inside a poll-sized budget, red most nights, while its header said
+      # it mirrored the poll lane; e2e-profile ran its two platform jobs on
+      # OPPOSITE receive paths. Both were omissions, not decisions.
+      - name: Live-sync define is declared, never inherited
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_live_sync_define_declared.sh
+
+      # The guard above is a grep over YAML, so it is exactly as trustworthy as
+      # its patterns. The fixtures pin the two directions it can rot in: a build
+      # with no declaration must fail, and a job that merely MENTIONS the flag
+      # (in prose, or in a comment) must not count as having declared it.
+      - name: Live-sync define guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_live_sync_define_declared.sh --self-test
+
       # Fixture-driven, no toolchain: an undeclared skip must fail, a log
       # matching the manifest must pass, a stale manifest entry must fail, and
       # a parsed-vs-summary count disagreement must be reported as a broken
@@ -245,3 +277,25 @@ jobs:
       - name: E2E harness self-test (FGS publish-count parser)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/run-b1-fgs-publish.sh --self-test
+
+      # The iOS twin of the connect-flake predicate. Both iOS lanes hand their
+      # scenario to `nick-fields/retry` with no filter, so before this the second
+      # attempt was a free re-roll of ANY red — measured, 19 genuine test
+      # failures were retried and only one signature (a post-build, pre-test
+      # simulator launch/attach stall) ever justified it. The critical fixtures
+      # are the verbatim `::error::9 tests passed, 1 failed.` log (must NOT
+      # retry) and an empty/absent log (must NOT retry — the A4 lesson: no
+      # evidence is not evidence of a flake).
+      - name: E2E harness self-test (iOS flake classifier + retry gate)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/ios-flake-lib.sh --self-test
+
+      # …and the WIRING, which fixtures alone cannot reach: the watchdog that
+      # turns a silent 30-minute hang into a classified, attributed failure has
+      # to actually fire on a stall and actually leave a running suite alone.
+      # Drives the real watchdog against a stubbed process, then hands its output
+      # to the real classifier — so the marker the one writes and the marker the
+      # other requires cannot drift apart unnoticed.
+      - name: E2E harness self-test (iOS first-test watchdog)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-ios-sim-scenario.sh --self-test

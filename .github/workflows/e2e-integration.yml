@@ -60,6 +60,16 @@ jobs:
     timeout-minutes: 45
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
+      # Receive path, DECLARED — not inherited. `liveSyncEnabled` is
+      # `bool.fromEnvironment('HAVEN_LIVE_SYNC', defaultValue: true)`, so a lane
+      # that omits the define compiles the live-sync engine anyway and its name
+      # stops describing what it runs (CI_HARDENING_BACKLOG.md A7). This lane
+      # exercises the orphan integration targets under the PRODUCTION
+      # configuration, which since M11 Phase B is the engine ON — the value it
+      # has been running all along, now stated. build-integration-apks.sh reads
+      # this env and REQUIRES it, so an omission fails the build rather than
+      # silently reverting to an inherited default.
+      HAVEN_LIVE_SYNC: "true"
       FLUTTER_SUPPRESS_ANALYTICS: "true"
 
     steps:

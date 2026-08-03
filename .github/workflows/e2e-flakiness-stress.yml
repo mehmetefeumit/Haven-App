@@ -61,6 +61,33 @@ jobs:
     timeout-minutes: 330
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
+      # Receive path, DECLARED — and this lane is the one where the inherited
+      # value was actively wrong (CI_HARDENING_BACKLOG.md A7).
+      #
+      # `liveSyncEnabled` is `bool.fromEnvironment('HAVEN_LIVE_SYNC',
+      # defaultValue: true)`. This lane never passed the define, so since the
+      # M11 Phase-B flip it silently compiled the LIVE build and ran the ten
+      # M11 live-sync scenarios on top of the main + FE-2 flow — while every
+      # number in this file is derived from the POLL path: the job envelope
+      # cites "the ~12-minute e2e_combined ceiling", and each iteration is
+      # bounded by run-single-avd-scenario.sh's default DRIVE_TIMEOUT of 20m.
+      # e2e-android.yml's flag-on lane needs HAVEN_DRIVE_TIMEOUT=28m and a 45m
+      # outer wrapper for exactly that suite, so the budget here was ~8 minutes
+      # short of the work being asked for, ten times a night. Nightly evidence
+      # (run 30733446211): iterations report "+15 -1"/"+14 -2" — the LIVE test
+      # count — failing on `[MapShell] live-sync start error: ... an MLS
+      # session is already open on this database (Rule 14)`, and the schedule
+      # has been red on roughly 8 of the last 12 nights.
+      #
+      # "false" is what this lane's stated design asks for: it exists to stress
+      # the SAME flow the PR gate runs (its header: "Architecture mirrors
+      # e2e-android.yml"), and e2e-android's default — the variant ci.yml and
+      # e2e-nightly.yml call with no `with:` — is live_sync=false. No coverage
+      # is lost: the live suite is a required PR gate in its own right
+      # (ci.yml's "E2E Core Flow (Android, live-sync)"), sized for it. Stressing
+      # the live path is a separate lane, not a silent default: at 28m per
+      # iteration × 10 it does not fit this job's 330-minute envelope.
+      HAVEN_LIVE_SYNC: "false"
       FLUTTER_SUPPRESS_ANALYTICS: "true"
       # workflow_dispatch supplies inputs.iterations; schedule does not,
       # so fall back to 10. run-flake-stress.sh validates this is a
@@ -127,7 +154,8 @@ jobs:
             --debug \
             --target-platform android-x64 \
             --target=integration_test/e2e/e2e_combined.dart \
-            --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}"
+            --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
+            --dart-define=HAVEN_LIVE_SYNC="${HAVEN_LIVE_SYNC}"
           cp build/app/outputs/flutter-apk/app-debug.apk /tmp/scenario.apk
           ls -lh /tmp/scenario.apk
 

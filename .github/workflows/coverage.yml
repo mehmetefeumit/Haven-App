@@ -111,6 +111,15 @@ jobs:
       - name: No undeclared test skips
         run: bash ../scripts/ci/check_no_undeclared_skips.sh dart flutter "${RUNNER_TEMP}/flutter-test-report.json"
 
+      # The coverage run above passing NO --dart-define is load-bearing, not an
+      # A7 omission: it is a HOST test run, not an app build, and it is the only
+      # place `live_sync_provider_test`'s "defaults ON" assertion can observe the
+      # compiled default. Forcing an explicit define there would turn that test
+      # into a tautology and delete the proof that production ships the engine
+      # ON. scripts/ci/check_live_sync_define_declared.sh therefore scopes itself
+      # to app BUILD sites (`flutter build`, `flutter test integration_test/…`)
+      # and never to the host suite.
+      #
       # M11 Phase B: production now defaults `liveSyncEnabled` ON, so the
       # coverage run above (no --dart-define) builds the LIVE branches — the
       # engine-teardown-on-logout ordering (subscriptionService.stop() BEFORE

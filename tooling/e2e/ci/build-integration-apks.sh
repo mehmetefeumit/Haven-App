@@ -33,6 +33,8 @@
 #                    --dart-define. MUST match the URL the drive step
 #                    uses (the value is baked in; drive does not
 #                    re-pass it). Defaults to ws://10.0.2.2:7777.
+#   HAVEN_LIVE_SYNC  'true' or 'false'. MANDATORY — there is deliberately no
+#                    default; see below.
 #
 # Output:
 #   /tmp/integration-apks/<basename>.apk for each target.
@@ -41,28 +43,37 @@ set -euo pipefail
 
 readonly RELAY_URL="${HAVEN_E2E_RELAY:-ws://10.0.2.2:7777}"
 
-# Optional explicit live-sync define.
+# Mandatory live-sync define — no default, on purpose.
 #
 # `liveSyncEnabled` is `bool.fromEnvironment('HAVEN_LIVE_SYNC', defaultValue:
-# true)`, so a lane that omits the define silently INHERITS true rather than
-# declaring which receive path it means to exercise (CI_HARDENING_BACKLOG.md
-# A7). Setting HAVEN_LIVE_SYNC in a caller's env makes that choice explicit and
-# reviewable. Unset — every pre-existing caller — expands to nothing, so those
-# lanes build byte-identically to before this passthrough existed.
-# The value is VALIDATED before it is used, because the expansion below is
-# deliberately unquoted (it must expand to zero OR one word). Without this
-# check a value containing whitespace would word-split into extra
-# `flutter build apk` arguments.
-if [[ -n "${HAVEN_LIVE_SYNC:-}" ]]; then
-  if [[ ! "${HAVEN_LIVE_SYNC}" =~ ^(true|false)$ ]]; then
-    echo "ERROR: HAVEN_LIVE_SYNC must be exactly 'true' or 'false'." >&2
-    exit 2
-  fi
-  LIVE_SYNC_DEFINE="--dart-define=HAVEN_LIVE_SYNC=${HAVEN_LIVE_SYNC}"
-else
-  LIVE_SYNC_DEFINE=""
+# true)`, so omitting the define does not produce an "unset" build: it produces
+# a LIVE build that no lane asked for and no lane name describes
+# (CI_HARDENING_BACKLOG.md A7). Every caller of this script therefore has to
+# state which receive path its APKs compile.
+#
+# A default here would defeat the point. This script is the single funnel for
+# three lanes (e2e-integration, e2e-background-catchup, e2e-fgs-publish), so any
+# default it carried would become those lanes' de-facto answer without any of
+# them saying anything — the exact shape of the defect, moved one file down.
+# Failing closed costs a caller one env line and makes the mode greppable from
+# the workflow.
+#
+# The value is VALIDATED because the expansion at the build site is deliberately
+# unquoted (it must expand to exactly one word); an unvalidated value containing
+# whitespace would word-split into extra `flutter build apk` arguments.
+if [[ -z "${HAVEN_LIVE_SYNC:-}" ]]; then
+  echo "ERROR: HAVEN_LIVE_SYNC is not set." >&2
+  echo "       This script bakes the receive path into every APK it builds, and" >&2
+  echo "       'unset' compiles the live-sync engine ON via the Dart default —" >&2
+  echo "       silently, whatever the lane is called. Set it to 'true' or" >&2
+  echo "       'false' in the calling job's env (CI_HARDENING_BACKLOG.md A7)." >&2
+  exit 2
 fi
-readonly LIVE_SYNC_DEFINE
+if [[ ! "${HAVEN_LIVE_SYNC}" =~ ^(true|false)$ ]]; then
+  echo "ERROR: HAVEN_LIVE_SYNC must be exactly 'true' or 'false' (got '${HAVEN_LIVE_SYNC}')." >&2
+  exit 2
+fi
+readonly LIVE_SYNC_DEFINE="--dart-define=HAVEN_LIVE_SYNC=${HAVEN_LIVE_SYNC}"
 
 readonly OUT_DIR="/tmp/integration-apks"
 readonly BUILD_APK="build/app/outputs/flutter-apk/app-debug.apk"
@@ -87,7 +98,7 @@ build_apk_with_retry() {
     # only ABI these APKs ever run on. Without it cargokit compiles the large
     # debug haven-core Rust lib for four ABIs (arm/arm64 + the debug-forced
     # x86/x64), which — with the NDK strip pass — has exhausted the runner disk.
-    # shellcheck disable=SC2086  # LIVE_SYNC_DEFINE is a deliberate 0-or-1 word.
+    # shellcheck disable=SC2086  # LIVE_SYNC_DEFINE is one validated word.
     flutter build apk \
       --debug \
       --target-platform android-x64 \

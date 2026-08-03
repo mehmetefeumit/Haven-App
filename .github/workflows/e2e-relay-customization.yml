@@ -72,6 +72,15 @@ jobs:
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
       HAVEN_E2E_RELAY_2: ws://10.0.2.2:7778
+      # Receive path, DECLARED — not inherited. `liveSyncEnabled` is
+      # `bool.fromEnvironment('HAVEN_LIVE_SYNC', defaultValue: true)`, so an
+      # omitted define compiles the engine ON regardless of what the lane name
+      # implies (CI_HARDENING_BACKLOG.md A7). The relay-customization proofs are
+      # about WHICH relay an event lands on, not which receive path reads it, so
+      # this lane runs the production configuration — engine ON, the value it
+      # has been running since the Phase-B flip. Baked into every target APK by
+      # the build step below (`flutter drive` never re-passes dart-defines).
+      HAVEN_LIVE_SYNC: "true"
       FLUTTER_SUPPRESS_ANALYTICS: "true"
 
     steps:
@@ -125,9 +134,12 @@ jobs:
       # /tmp/relay-custom-apks/<basename>.apk; run-relay-customization.sh
       # copies each into place before driving.
       #
-      # BOTH --dart-define values are baked here and MUST match the
+      # Both relay --dart-define values are baked here and MUST match the
       # relay URLs the emulator step uses (the values are compiled into
-      # the APK; the drive step does not re-pass them). Unlike the
+      # the APK; the drive step does not re-pass them). HAVEN_LIVE_SYNC rides
+      # the same build for the same reason — it too is compile-time only, so
+      # omitting it here is not "unset", it is "whatever the Dart default
+      # happens to be" (A7). Unlike the
       # single-relay lanes, this lane bakes HAVEN_E2E_RELAY_2 too, so it
       # builds inline rather than via build-integration-apks.sh (which
       # only knows about the single default relay).
@@ -163,7 +175,8 @@ jobs:
               --target-platform android-x64 \
               --target="${target}" \
               --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
-              --dart-define=HAVEN_E2E_RELAY_2="${HAVEN_E2E_RELAY_2}"
+              --dart-define=HAVEN_E2E_RELAY_2="${HAVEN_E2E_RELAY_2}" \
+              --dart-define=HAVEN_LIVE_SYNC="${HAVEN_LIVE_SYNC}"
             cp build/app/outputs/flutter-apk/app-debug.apk \
               "/tmp/relay-custom-apks/${base}.apk"
             ls -lh "/tmp/relay-custom-apks/${base}.apk"

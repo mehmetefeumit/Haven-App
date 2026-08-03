@@ -18,9 +18,18 @@
 #                    host-loopback alias).
 #   HAVEN_E2E_DEVICE Device id to pass to flutter test --device-id (default:
 #                    unset; uses Flutter's default device picker).
+#   HAVEN_LIVE_SYNC  'true' or 'false' — MANDATORY. Baked into the build as a
+#                    --dart-define. `liveSyncEnabled` is
+#                    `bool.fromEnvironment('HAVEN_LIVE_SYNC', defaultValue:
+#                    true)`, so leaving it out does not mean "unspecified", it
+#                    means live-sync ON. Requiring it keeps a local repro on the
+#                    same receive path as the CI lane being reproduced
+#                    (CI_HARDENING_BACKLOG.md A7); the CI lanes state it in
+#                    their job env, so state it here too.
 #
 # Failure modes:
 #   - Exits 2 if Docker is not installed.
+#   - Exits 4 if HAVEN_LIVE_SYNC is unset or not exactly 'true'/'false'.
 #   - Exits 3 if strfry healthcheck never reports ready.
 #   - Exits with flutter test's own exit code on scenario failure.
 
@@ -34,6 +43,20 @@ COMPOSE_FILE="${E2E_DIR}/docker-compose.yml"
 # Default relay URL: Android emulator loopback alias. iOS simulator users
 # should export HAVEN_E2E_RELAY=ws://localhost:7777 before invoking this.
 RELAY_URL="${HAVEN_E2E_RELAY:-ws://10.0.2.2:7777}"
+
+# Receive path — required, never defaulted (see the header).
+if [[ -z "${HAVEN_LIVE_SYNC:-}" ]]; then
+  echo "ERROR: HAVEN_LIVE_SYNC is not set. It is compiled into the build, and" >&2
+  echo "       'unset' resolves to the Dart default (live-sync ON) rather than" >&2
+  echo "       to 'unspecified'. Export HAVEN_LIVE_SYNC=true or =false to match" >&2
+  echo "       the CI lane you are reproducing." >&2
+  exit 4
+fi
+if [[ ! "${HAVEN_LIVE_SYNC}" =~ ^(true|false)$ ]]; then
+  echo "ERROR: HAVEN_LIVE_SYNC must be exactly 'true' or 'false' (got '${HAVEN_LIVE_SYNC}')." >&2
+  exit 4
+fi
+readonly LIVE_SYNC="${HAVEN_LIVE_SYNC}"
 
 # Optional device override.
 DEVICE_ARGS=()
@@ -105,6 +128,7 @@ run_flutter_test() {
   cd "${HAVEN_DIR}"
   flutter test \
     --dart-define=HAVEN_E2E_RELAY="${RELAY_URL}" \
+    --dart-define=HAVEN_LIVE_SYNC="${LIVE_SYNC}" \
     "${DEVICE_ARGS[@]}" \
     "${target}"
 }

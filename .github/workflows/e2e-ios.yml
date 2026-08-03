@@ -114,9 +114,28 @@ jobs:
         id: sim
         run: bash tooling/e2e/ci/boot-ios-sim.sh "iPhone 15"
 
-      # `nick-fields/retry` absorbs the well-documented ~10% iOS-simulator
-      # launch/attach flake (which presents as a HANG, not a fast fail). The
-      # per-attempt timeout covers a COLD iOS build (Xcode + pod install +
+      # `nick-fields/retry` absorbs the well-documented iOS-simulator
+      # launch/attach flake (which presents as a HANG, not a fast fail).
+      #
+      # The action itself retries on ANY non-zero exit — it has no `retry_on`
+      # predicate — so the NARROWING lives in the command it re-runs.
+      # run-ios-sim-scenario.sh classifies each failed attempt and leaves a
+      # verdict; attempt 2 refuses to run unless that verdict is the one
+      # admitted infrastructure signature (post-build, pre-first-test stall),
+      # and fails immediately with the original exit code otherwise. It fails
+      # CLOSED: an attempt that dies without classifying is not retried. That is
+      # what stops a real, reproducible red from going green on the second roll
+      # — measured over 156 attempts, 19 genuine test failures were retried here
+      # and every one of them could have. See tooling/e2e/ci/ios-flake-lib.sh
+      # (hermetic --self-test wired into repo-guards.yml).
+      #
+      # The same script also runs a first-test watchdog, so a stall is killed
+      # and attributed ~5 min after the build instead of consuming the whole
+      # per-attempt budget as an anonymous "Timeout of 1800000ms hit". The
+      # timeouts below are unchanged and remain the backstop — they still have
+      # to cover the HEALTHY worst case, which the watchdog does not shorten.
+      #
+      # The per-attempt timeout covers a COLD iOS build (Xcode + pod install +
       # aarch64 Rust, ~15 min) PLUS the inner test. On the POLL path the inner
       # test self-bounds at ~12 min, so 30 min/attempt is ample. FLAG-ON
       # (live_sync=true) runs the 10 live-sync scenarios instead — a ~25 min
@@ -138,8 +157,11 @@ jobs:
         timeout-minutes: ${{ inputs.live_sync && 95 || 65 }}
         # S1: live-sync scoped to THIS step via the env the shared
         # run-ios-sim-scenario.sh reads — so it NEVER reaches the ios_bg_mirror
-        # step below (which must not start the engine). That step sets no env, so
-        # the script's HAVEN_LIVE_SYNC default (false) keeps it poll-path safe.
+        # step below (which must not start the engine). That step now sets
+        # HAVEN_LIVE_SYNC: "false" on itself rather than leaning on a built-in
+        # script default: the script REQUIRES the env, so "poll-path safe" is a
+        # stated per-step choice instead of a property of a default that a
+        # future edit could change without either step noticing (A7).
         env:
           HAVEN_LIVE_SYNC: ${{ inputs.live_sync }}
           # Single-engine for the driver (see main.dart): e2e_combined does not
@@ -164,9 +186,19 @@ jobs:
       # teardown channels are registered + retained (no MissingPluginException).
       # Pods/Rust are cached from the e2e_combined build, so this incremental
       # build is bounded — 20 min/attempt is ample. Wrapped in nick-fields/retry
-      # for the same ~10% sim launch/attach flake the first step absorbs.
+      # for the same sim launch/attach flake the first step absorbs, and under
+      # the same narrowing: the retry gate in run-ios-sim-scenario.sh keys on a
+      # verdict file named after the SCENARIO, so this step's decisions are
+      # independent of e2e_combined's and neither can retry on the other's.
       - name: Run iOS background-mirror scenario on the simulator
         timeout-minutes: 45
+        # S1's other half, now explicit: this step must NOT start the live-sync
+        # engine (a second engine alongside the M7 mirror check is pure flake
+        # surface), and it says so rather than inheriting it. Deliberately NOT
+        # `${{ inputs.live_sync }}` — this step is poll-path in BOTH lane
+        # variants, which is precisely what S1 exists to guarantee.
+        env:
+          HAVEN_LIVE_SYNC: "false"
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 20

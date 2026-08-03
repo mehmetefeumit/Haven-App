@@ -7,6 +7,22 @@
 # --obfuscate --split-debug-info, runs the no-committed-secrets guard, and sets
 # HAVEN_RELEASE_WRAPPER=1 so the Gradle release gate passes.
 #
+# # Why neither job passes HAVEN_LIVE_SYNC
+#
+# scripts/ci/check_live_sync_define_declared.sh makes every workflow job that
+# builds the app declare which receive path it compiles, because
+# `liveSyncEnabled` is `bool.fromEnvironment('HAVEN_LIVE_SYNC', defaultValue:
+# true)` and an omitted define is indistinguishable from an unmade decision
+# (CI_HARDENING_BACKLOG.md A7). These jobs build the RELEASE artifact, and the
+# release artifact's receive path must come from live_sync_provider.dart's
+# `defaultValue` — that const is the documented one-line rollback lever
+# (docs/M11_ROLLOUT.md §8, pinned by check 14b of
+# check_m7_native_wake_guards.sh). A literal define here would quietly outrank
+# it: flipping the default back to false would change nothing about what
+# actually ships. The decision is therefore declared as "take the default":
+#
+#   HAVEN_LIVE_SYNC-INTENT: production-default
+#
 # Required repository secret:
 #   STADIA_API_KEY              Stadia Maps tile API key
 # Optional (Android signing — falls back to debug signing if unset):
@@ -76,6 +92,9 @@ jobs:
 
   android:
     name: Android release (per-ABI APKs)
+    # HAVEN_LIVE_SYNC-INTENT: production-default — see the header. The shipped
+    # APK's receive path is live_sync_provider.dart's defaultValue, not a
+    # value this workflow chooses.
     needs: [rust-check, cross-check, coverage, guards]
     runs-on: ubuntu-latest
     # contents: write lets the built-in GITHUB_TOKEN create the GitHub Release and
@@ -219,6 +238,9 @@ jobs:
 
   ios:
     name: iOS release (TestFlight)
+    # HAVEN_LIVE_SYNC-INTENT: production-default — see the header. The shipped
+    # IPA's receive path is live_sync_provider.dart's defaultValue, not a
+    # value this workflow chooses.
     needs: [rust-check, cross-check, coverage, guards]
     # Pin macos-15 (GA) rather than macos-latest: macos-latest is mid-migration
     # to macos-26 (started 2026-06-15), so the SDK it provides is ambiguous.
