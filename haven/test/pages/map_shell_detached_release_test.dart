@@ -139,4 +139,48 @@ void main() {
           'detached-then-quickly-resumed app comes back with no engine',
     );
   });
+
+  group('the pause-time MLS handoff', () {
+    test('live-sync is stopped BEFORE the manager is released', () {
+      // The engine holds its own Arc on the circle manager, so releasing the
+      // manager first leaves the guard held by the engine and hands over
+      // nothing — the foreground service still cannot open, and background
+      // publishing stays dead for the whole session.
+      final src = File('lib/src/pages/map_shell.dart').readAsStringSync();
+      final at = src.indexOf('Future<void> _handOffMlsSession() async {');
+      expect(at, isNonNegative, reason: 'the handoff must exist');
+      final body = src.substring(at, src.indexOf('\n  /// Restarts', at));
+
+      final stop = body.indexOf('_liveSync?.stop()');
+      final release = body.indexOf('releaseForHandoff()');
+      expect(stop, isNonNegative);
+      expect(release, isNonNegative);
+      expect(
+        stop,
+        lessThan(release),
+        reason: 'releasing before the engine stops frees nothing',
+      );
+    });
+
+    test('the handoff is confined to the Android background-sharing path', () {
+      // It is the one configuration where another isolate needs the session
+      // while this one is merely paused. On iOS this isolate keeps publishing.
+      final src = File('lib/src/pages/map_shell.dart').readAsStringSync();
+      // The CALL, not the definition — which appears earlier in the file.
+      final call = src.indexOf('await _handOffMlsSession();');
+      expect(call, isNonNegative);
+      final before = src.substring(0, call);
+      final branch = before.lastIndexOf('if (bgEnabled && Platform.isAndroid)');
+      expect(
+        branch,
+        isNonNegative,
+        reason: 'the nearest enclosing branch must be the Android handoff',
+      );
+      expect(
+        before.lastIndexOf('} else if'),
+        lessThan(branch),
+        reason: 'the call must not have drifted into another branch',
+      );
+    });
+  });
 }

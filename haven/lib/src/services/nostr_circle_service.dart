@@ -164,6 +164,51 @@ class NostrCircleService implements CircleService {
   /// [markCircleBlocked] / [isCircleBlocked].
   final Set<String> _blockedCircleIds = {};
 
+  /// Releases the MLS session so another isolate can take it, WITHOUT the
+  /// permanent latch [closeAndInvalidate] applies.
+  ///
+  /// Returns whether a manager was actually released.
+  ///
+  /// # Why this is separate from closeAndInvalidate
+  ///
+  /// That one is logout: it sets `_wiped`, which makes every future
+  /// [initialize] fail closed forever, because the database is about to be
+  /// deleted. A pause-time handoff is the opposite — the session is expected
+  /// back on resume — so it must leave the service re-openable.
+  ///
+  /// # Why release at all
+  ///
+  /// Rule 14 allows exactly one live session per database per process. While
+  /// this isolate holds it, the Android foreground service cannot open one, so
+  /// it cannot publish. Handing the session over at pause is what lets the
+  /// service work, and unlike the service's reclaim it needs no inference
+  /// about who is alive: this isolate is deciding about itself.
+  ///
+  /// # In-flight initialisation
+  ///
+  /// An `initialize()` suspended on its awaited open would otherwise adopt its
+  /// handle AFTER this returns, silently re-taking the guard we just gave away
+  /// — and the service would already have failed. Releasing is therefore
+  /// refused while an init is in flight; the caller retries or accepts that the
+  /// handoff did not happen, which costs a publish cycle rather than
+  /// correctness.
+  bool releaseForHandoff() {
+    if (_initCompleter != null) {
+      debugPrint('[CircleService] handoff refused: init in flight');
+      return false;
+    }
+    final manager = _manager;
+    if (manager == null) return false;
+    _manager = null;
+    _initialized = false;
+    // Dispose rather than dropping: the handle holds this database's Rule-14
+    // guard in Rust, and nulling alone defers the release to a GC that may
+    // never run — the service would keep failing to open for the whole
+    // background session.
+    manager.dispose();
+    return true;
+  }
+
   /// Initializes the circle manager with persistent storage.
   ///
   /// Must be called before any other methods.

@@ -17,6 +17,8 @@ library;
 
 import 'dart:async';
 
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
@@ -172,6 +174,7 @@ class _OrderTrackingDataDirectoryProvider implements DataDirectoryProvider {
 }
 
 void main() {
+  _handoffTests();
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('CircleService - Data Structures', () {
@@ -1076,6 +1079,90 @@ void main() {
         throwsA(anything),
         reason:
             'pruneProcessedGiftWraps must throw when initialization fails',
+      );
+    });
+  });
+}
+
+void _handoffTests() {
+  group('releaseForHandoff', () {
+    // Rule 14 allows exactly one live session per database per process, so
+    // while this isolate holds it the foreground service cannot open one and
+    // therefore cannot publish. Handing it over at pause is what makes
+    // background sharing work — and unlike the service's reclaim it needs no
+    // inference about who is alive, since this isolate decides about itself.
+
+    test('disposes the handle rather than dropping it', () {
+      // The handle owns the Rust-side guard, released on Drop — which for a
+      // RustOpaque means a GC that may never come. Nulling alone would leave
+      // the service unable to open for the whole background session.
+      final manager = _FakeManager();
+      final service = NostrCircleService.withInjectedManager(
+        relayService: _StubRelayService(),
+        injectedManager: manager,
+      );
+
+      expect(service.releaseForHandoff(), isTrue);
+      expect(
+        manager.disposed,
+        isTrue,
+        reason: 'the guard is only freed when Rust drops the manager',
+      );
+    });
+
+    test('does not latch the wipe flag, unlike a logout close', () {
+      // THE difference from closeAndInvalidate, which sets `_wiped` so every
+      // later initialize fails closed forever — correct for logout, where the
+      // database is about to be deleted, and fatal here, where the session is
+      // expected back on resume. Latching it would brick the app on return.
+      //
+      // Asserted on the source because the alternative — driving `initialize()`
+      // in this harness — reaches the real keyring and produces an unhandled
+      // completer error that says nothing about the property under test.
+      final src = File(
+        'lib/src/services/nostr_circle_service.dart',
+      ).readAsStringSync();
+      final at = src.indexOf('bool releaseForHandoff() {');
+      expect(at, isNonNegative);
+      final body = src.substring(at, src.indexOf('\n  /// Initializes', at));
+      expect(
+        body.contains('_wiped'),
+        isFalse,
+        reason: 'a handoff must leave the service re-openable on resume',
+      );
+      expect(body.contains('dispose()'), isTrue);
+    });
+
+    test('refuses while an initialisation is in flight', () {
+      // An `initialize()` suspended on its awaited open would adopt its handle
+      // AFTER the release returned, silently re-taking the guard we just gave
+      // away — and the foreground service would already have failed to open.
+      // Source-asserted: the in-flight state needs a suspended real open, which
+      // this harness cannot produce without the Rust bridge.
+      final src = File(
+        'lib/src/services/nostr_circle_service.dart',
+      ).readAsStringSync();
+      final at = src.indexOf('bool releaseForHandoff() {');
+      final body = src.substring(at, src.indexOf('\n  /// Initializes', at));
+      final check = body.indexOf('_initCompleter != null');
+      expect(check, isNonNegative, reason: 'the in-flight case must be gated');
+      expect(
+        check,
+        lessThan(body.indexOf('dispose()')),
+        reason: 'the refusal must precede the release, not follow it',
+      );
+    });
+
+    test('is a no-op when nothing is held', () {
+      final service = NostrCircleService.withInjectedManager(
+        relayService: _StubRelayService(),
+        injectedManager: _FakeManager(),
+      );
+      expect(service.releaseForHandoff(), isTrue);
+      expect(
+        service.releaseForHandoff(),
+        isFalse,
+        reason: 'a second handoff has nothing to give away',
       );
     });
   });

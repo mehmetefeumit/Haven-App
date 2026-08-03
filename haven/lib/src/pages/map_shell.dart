@@ -36,6 +36,7 @@ import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/self_update_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart';
+import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/foreground_liveness_probe.dart';
 import 'package:haven/src/services/background_idle_waiter.dart';
 import 'package:haven/src/services/background_location_manager.dart';
@@ -642,6 +643,31 @@ class _MapShellState extends ConsumerState<MapShell>
     });
   }
 
+  /// Releases this isolate's MLS session so the foreground service can take it.
+  ///
+  /// Android + background-sharing only: it is the one configuration where
+  /// another isolate needs the session while this one is merely paused.
+  Future<void> _handOffMlsSession() async {
+    // The engine holds its own Arc on the circle manager, so it must go first
+    // or the release frees nothing.
+    try {
+      await _liveSync?.stop();
+    } on Object catch (e) {
+      debugPrint('[MapShell] handoff: live-sync stop failed: ${e.runtimeType}');
+    }
+
+    final service = ref.read(circleServiceProvider);
+    if (service is! NostrCircleService) return;
+    try {
+      final released = service.releaseForHandoff();
+      debugPrint('[MapShell] handoff: released=$released');
+    } on Object catch (e) {
+      // Never throw out of the pause path: the framework dispatches it without
+      // awaiting, and the service's own reclaim is the fallback.
+      debugPrint('[MapShell] handoff failed: ${e.runtimeType}');
+    }
+  }
+
   /// Restarts the live-sync engine if it stopped while a session is still
   /// wanted.
   ///
@@ -877,6 +903,20 @@ class _MapShellState extends ConsumerState<MapShell>
       // notification text so the user can distinguish "foreground
       // running" from "actively sharing in background".
       await BackgroundLocationManager.markForegroundActive(active: false);
+
+      // Hand the MLS session to the service. Rule 14 allows exactly one live
+      // session per database per process, so while this isolate holds it the
+      // service cannot open one and therefore cannot publish — the whole
+      // reason background sharing was dead.
+      //
+      // Ordering matters: stop live-sync BEFORE releasing the manager. The
+      // engine holds its own `Arc` on that manager, so releasing first would
+      // leave the guard held by the engine and hand over nothing.
+      //
+      // This isolate stays alive and takes the session back on resume through
+      // the ordinary handover, so nothing here is destructive. If it fails, the
+      // service falls back to its own reclaim — slower, but it still recovers.
+      await _handOffMlsSession();
       unawaited(
         BackgroundLocationManager.updateNotification(
           text: 'Haven is sending and receiving location information',
