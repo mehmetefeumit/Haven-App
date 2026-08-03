@@ -26,7 +26,7 @@ use std::sync::Arc;
 use nostr::{Event, RelayUrl, SubscriptionId};
 use nostr_sdk::RelayPoolNotification;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc, watch, RwLock};
 
 use super::event::SyncStatusReason;
 use super::planes::PlaneKind;
@@ -96,18 +96,47 @@ pub fn canonical_group_hex(nostr_group_id: &[u8]) -> String {
 }
 
 /// The RAW notifications receiver: forwards first-seen events onto `tx`, never
-/// blocking on decrypt, surviving `Lagged`, stopping only on `Closed`/`Shutdown`
-/// or the explicit `shutdown` flag.
+/// blocking on decrypt, surviving `Lagged`, stopping only on `Closed`/`Shutdown`,
+/// the explicit `shutdown` flag, or `cancel`.
+///
+/// # Why `cancel` exists (and why `shutdown` is not enough)
+///
+/// `shutdown` is polled at the TOP of the loop, so a task parked in
+/// `notifications.recv().await` never observes it. Before this parameter the
+/// only other wake path was the pool's `Shutdown` notification — and that is
+/// **not guaranteed to arrive**. `RelayPool::shutdown` latches an atomic
+/// *before* awaiting `force_remove_all_relays()` and only then sends the
+/// notification, so a caller that bounds the shutdown with a timeout (as
+/// `LiveSyncCore::stop_inner` does) can drop the future in between: the
+/// notification is never sent, and because the latch is already set, no retry
+/// will ever send it.
+///
+/// That leaves this task parked forever holding its `mpsc::Sender`, which keeps
+/// `run_worker` alive, which holds `Arc<EngineProcessor>` → `Arc<CircleManager>`
+/// → the Rule-14 `LiveSessionGuard`. The result is an unowned MLS writer and a
+/// database no isolate can ever reopen. `cancel` is the independent wake that
+/// breaks that cycle.
 pub async fn run_receiver(
     mut notifications: broadcast::Receiver<RelayPoolNotification>,
     tx: mpsc::Sender<RawEvent>,
     shutdown: Arc<AtomicBool>,
+    mut cancel: watch::Receiver<bool>,
 ) {
     loop {
         if shutdown.load(Ordering::Acquire) {
             break;
         }
-        match notifications.recv().await {
+        let notification = tokio::select! {
+            biased;
+            // `wait_for` evaluates the CURRENT value, so a cancel raised before
+            // this receiver was created is still observed. `changed()` would
+            // mark the value seen at subscribe time and miss exactly that case
+            // — which is the case that matters, because `stop` raises cancel
+            // before it touches anything else.
+            _ = cancel.wait_for(|cancelled| *cancelled) => break,
+            received = notifications.recv() => received,
+        };
+        match notification {
             Ok(n) => match notification_disposition(&n) {
                 NotifDisposition::Forward => {
                     if let RelayPoolNotification::Event {
@@ -409,7 +438,8 @@ mod supervisor_isolation_tests {
             let (_, n) = notif(&format!("junk{i}"));
             btx.send(n).unwrap();
         }
-        let handle = tokio::spawn(run_receiver(brx, mtx, Arc::clone(&shutdown)));
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let handle = tokio::spawn(run_receiver(brx, mtx, Arc::clone(&shutdown), cancel_rx));
 
         // A distinctive event AFTER the lag.
         let (marker_id, marker) = notif("MARKER");
@@ -434,5 +464,86 @@ mod supervisor_isolation_tests {
             .await
             .expect("run_receiver must exit promptly on Closed")
             .expect("the receiver task must join cleanly");
+    }
+
+    /// The regression test for a permanent, unrecoverable wedge.
+    ///
+    /// `run_receiver` used to have exactly two exits: the `shutdown` flag —
+    /// which it only polls at the TOP of the loop, so a task parked in
+    /// `recv().await` never sees it — and the pool's `Shutdown`/`Closed`
+    /// notification. That second exit is NOT guaranteed:
+    /// `RelayPool::shutdown` latches an atomic BEFORE awaiting relay removal
+    /// and only then sends the notification, so a bounded caller
+    /// (`LiveSyncCore::stop_inner` wraps it in a 10s timeout) can drop the
+    /// future in between. The notification is then never sent, and the latch
+    /// makes every retry a no-op.
+    ///
+    /// A receiver stuck there holds its `mpsc::Sender`, which keeps
+    /// `run_worker` alive, which holds `Arc<EngineProcessor>` →
+    /// `Arc<CircleManager>` → the Rule-14 `LiveSessionGuard`. The result is an
+    /// unowned MLS writer and a database no isolate can reopen for the life of
+    /// the process.
+    ///
+    /// So: hold the broadcast sender (never `Closed`), never send `Shutdown`,
+    /// and require the task to exit on `cancel` alone.
+    #[tokio::test]
+    async fn run_receiver_exits_on_cancel_without_any_pool_notification() {
+        let (btx, brx) = broadcast::channel::<RelayPoolNotification>(4);
+        let (mtx, _mrx) = mpsc::channel::<RawEvent>(4);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+
+        let handle = tokio::spawn(run_receiver(brx, mtx, Arc::clone(&shutdown), cancel_rx));
+
+        // The task is now parked in `recv().await`: nothing has been sent, and
+        // `btx` is deliberately kept alive so the channel never closes.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !handle.is_finished(),
+            "precondition: the receiver must be parked"
+        );
+
+        cancel_tx.send(true).expect("cancel send");
+
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("run_receiver must exit on cancel with no pool notification")
+            .expect("the receiver task must join cleanly");
+        drop(btx);
+    }
+
+    /// Pins `wait_for` over `changed()`.
+    ///
+    /// `stop` raises cancel BEFORE anything else, so a receiver can be created
+    /// after the flag is already true. `changed()` marks the value seen at
+    /// subscribe time and would miss exactly that case — the task would park
+    /// forever on a session that was already told to stop.
+    #[tokio::test]
+    async fn run_receiver_observes_a_cancel_raised_before_it_subscribed() {
+        let (btx, brx) = broadcast::channel::<RelayPoolNotification>(4);
+        let (mtx, _mrx) = mpsc::channel::<RawEvent>(4);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        // Mirror `LiveSyncCore`'s construction EXACTLY, because the details are
+        // the whole test. An earlier version reused the receiver from
+        // `channel(false)` and called `send`; that receiver has not observed the
+        // send either, so `changed()` also fires and the test passed against the
+        // very implementation it claimed to rule out (verified by mutation).
+        //
+        // Production drops the initial receiver (`watch::channel(false).0`) and
+        // subscribes later, which pins two things at once:
+        //   * `send` would return `Err` and DISCARD the value with no receivers
+        //     alive — hence `send_replace`;
+        //   * `Sender::subscribe` marks all prior sends as seen, so `changed()`
+        //     would park forever — hence `wait_for`.
+        let cancel_tx = tokio::sync::watch::channel(false).0;
+        cancel_tx.send_replace(true);
+        let cancel_rx = cancel_tx.subscribe();
+
+        let handle = tokio::spawn(run_receiver(brx, mtx, Arc::clone(&shutdown), cancel_rx));
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("a pre-existing cancel must still be observed")
+            .expect("the receiver task must join cleanly");
+        drop(btx);
     }
 }

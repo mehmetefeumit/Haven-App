@@ -1068,6 +1068,12 @@ pub async fn destroy_legacy_mls_state(data_dir: String) -> Result<(), String> {
 /// lock across both test modules keeps their create→assert→wipe sequences from
 /// interleaving.
 ///
+/// It ALSO serializes every test that mutates the process-global `SESSION`
+/// slot (the live-sync engine). That global is independent of the keyring, but
+/// reusing one lock keeps the ordering total: two suites interleaving a
+/// `start_session` with a `force_release_live_session` would look exactly like
+/// a Rule-14 failure, which is the worst possible false positive in this file.
+///
 /// It is a `tokio::sync::Mutex` (not `std::sync`) so the async `tc*` tests can
 /// hold the guard across `.await` points without making their futures non-Send;
 /// the synchronous M10 tests take it via `blocking_lock` (they run under no
@@ -8823,7 +8829,7 @@ mod tests {
 // events are pushed to Dart over a single `StreamSink<FfiRelayEvent>`.
 
 use haven_core::relay::live_sync::{
-    CircleSpec as CoreCircleSpec, LiveSyncCore, LiveSyncEvent as CoreLiveSyncEvent,
+    CircleSpec as CoreCircleSpec, LiveSyncCore, LiveSyncEvent as CoreLiveSyncEvent, StopOutcome,
     SyncStatusReason as CoreSyncStatusReason,
 };
 
@@ -9084,7 +9090,17 @@ impl LiveSyncFfi {
                 .take()
         };
         if let Some(previous) = previous {
-            previous.stop().await;
+            // Fail CLOSED on a timed-out stop. Installing a new core over the
+            // same `Arc<CircleManager>` while the previous core's worker is
+            // still ingesting into it would put two supervisors on one MLS
+            // writer — the divergence Rule 14 exists to prevent, reached from
+            // inside a single session rather than across isolates.
+            if previous.stop().await == StopOutcome::TimedOut {
+                reinstall_after_timed_out_stop(previous);
+                return Err(
+                    "previous live session did not stop; refusing to start a second".to_string(),
+                );
+            }
         }
         {
             let mut guard = SESSION
@@ -9130,7 +9146,13 @@ impl LiveSyncFfi {
             .map_err(|_| "session lock poisoned".to_string())?
             .take();
         if let Some(core) = core {
-            core.stop().await;
+            // Do NOT report a clean teardown that did not happen: on a timeout
+            // the worker still holds the manager `Arc`, so keep the core
+            // reachable (a retry needs a handle) and tell the caller.
+            if core.stop().await == StopOutcome::TimedOut {
+                reinstall_after_timed_out_stop(core);
+                return Err("live session did not stop cleanly".to_string());
+            }
         }
         Ok(())
     }
@@ -9280,6 +9302,169 @@ pub async fn maintain_subscription_health() -> Result<SubscriptionHealthOutcomeF
         .await
         .map_err(|e| e.to_string())?;
     Ok(outcome.into())
+}
+
+/// Outcome of [`force_release_live_session`].
+///
+/// Closed enum — no raw error string crosses the FFI (Security Rule 8), and it
+/// carries no path, relay URL, or group id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForceReleaseOutcomeFfi {
+    /// No live session was installed; nothing to release.
+    NoSession,
+    /// The session was stopped and every supervisor task joined, so every
+    /// `Arc<CircleManager>` the ENGINE held has been dropped.
+    ///
+    /// This does NOT mean the guard is free. Other holders — most importantly a
+    /// `CircleManagerFfi` handle in another isolate — are untouched by this call,
+    /// and `LiveSessionGuard::acquire` remains the only authority on whether an
+    /// open will succeed. A caller that reads this as "the retry will work" can
+    /// loop forever, stopping the engine on every pass.
+    Drained,
+    /// The session was stopped but a supervisor task was still running when the
+    /// join budget elapsed. The caller MUST NOT infer that the guard is free.
+    StopTimedOut,
+}
+
+/// Reinstalls `core` into [`SESSION`] iff the slot is still empty, after a
+/// `stop` that reported [`StopOutcome::TimedOut`].
+///
+/// A timed-out stop leaves supervisor tasks running that still hold
+/// `Arc<CircleManager>` → the Rule-14 `LiveSessionGuard`. If the caller simply
+/// dropped its `Arc<LiveSyncCore>` at that point, NOTHING in the process would
+/// hold a handle on which `stop` could be retried: the tasks hold the processor
+/// and the router, never the core. The session would be unreachable-but-alive,
+/// and the next reclaim would answer `NoSession` — "nothing to release" —
+/// while the guard was in fact still held. That collapses the two states the
+/// outcome enum exists to separate onto the reassuring one.
+///
+/// The CAS matters: a concurrent `start_session` may already have installed a
+/// fresh core. Overwriting it would strand THAT core the same way. Losing the
+/// race means the wedged tasks stay unreachable, which is no worse than not
+/// trying, so the compare is the safe side.
+fn reinstall_after_timed_out_stop(core: Arc<LiveSyncCore>) {
+    let Ok(mut guard) = SESSION.write() else {
+        // A poisoned lock means some other path panicked mid-update; there is
+        // nothing safe to write, and the alternative is losing the handle.
+        log::warn!("[api] session lock poisoned; wedged live-sync core is unreachable");
+        return;
+    };
+    if guard.is_none() {
+        *guard = Some(core);
+    }
+}
+
+/// Reports whether a live MLS session is currently registered for `data_dir`
+/// (Security Rule 14) — i.e. whether an open would be refused right now.
+///
+/// This is the supported way to answer "is the guard held?". It reads the
+/// process-global registry directly; it does NOT inspect any error message.
+///
+/// # Why not classify the error string
+///
+/// Haven's FFI errors are flattened prose, and several interpolate
+/// remote-authored text: a circle admin controls the group's routing relay list,
+/// and the live-sync relay gate formats the offending URL into its error. A
+/// relay of `ws://host/HAVEN_E_SESSION_BUSY` would make a substring test read an
+/// unrelated failure as session-busy, handing a remote party a one-bit control
+/// channel over a local recovery decision. `redact_hex_sequences` does not help
+/// — it only collapses long hex runs. The registry has no untrusted input.
+///
+/// # Advisory only
+///
+/// The answer is a snapshot and may be stale the instant it returns. Use it to
+/// decide whether a recovery step is worth ATTEMPTING; never to decide that
+/// opening is safe. Only `LiveSessionGuard::acquire` is atomic with the open.
+///
+/// # Errors
+///
+/// Returns an error string if `data_dir` cannot be reduced to a canonical
+/// registry key — surfaced rather than answered `false`, which would be
+/// fail-open.
+pub fn is_session_live(data_dir: String) -> Result<bool, String> {
+    let db = std::path::Path::new(&data_dir).join("session.sqlite");
+    haven_core::nostr::mls::storage::is_session_live(&db).map_err(|e| e.to_string())
+}
+
+/// Force-stops and clears the process-global live-sync session so its
+/// `Arc<CoreCircleManager>` clones drop, letting another isolate acquire the
+/// Rule-14 [`LiveSessionGuard`] on the same `session.sqlite`.
+///
+/// Exists for exactly one caller: the Android foreground-service isolate, after
+/// its own `CircleManagerFfi::new` has failed because the guard is held by a
+/// session whose owning isolate is gone. When the main `FlutterEngine` is
+/// destroyed, Dart-held handles are finalized and their `Arc`s drop — but this
+/// global is a Rust static that no Dart finalizer can reach, so without this
+/// function the database is unopenable for the life of the process.
+///
+/// # Rule 14 is preserved, but this is NOT harmless
+///
+/// It never grants exclusion; it only *releases* references. If any other holder
+/// remains — a live `CircleManagerFfi` or `LiveSyncFfi` in ANY isolate — the
+/// guard stays registered and the caller's subsequent `acquire` still fails
+/// closed. Exclusion is arbitrated solely by `LiveSessionGuard::acquire`, so no
+/// fencing token or liveness epoch is needed for CORRECTNESS.
+///
+/// An earlier version of this doc drew the wrong conclusion from that — that a
+/// live foreground "cannot be raced" because the call "releases nothing". The
+/// second half is false. `SESSION` holds an `Arc::clone` of the *same*
+/// `CoreCircleManager` the foreground's Dart handle owns, so against a LIVE
+/// foreground this call stops that foreground's own live-sync engine: the
+/// `live_events` stream completes, and because `NostrSubscriptionService`
+/// registers no `onDone` and `start()` early-returns while `_engine != null`, it
+/// never restarts. `maintain_subscription_health` then reads an empty `SESSION`
+/// and returns the inert `EngineOff`, disarming the self-healer. The guard is
+/// still held by the foreground's handle, so the caller ALSO still cannot open —
+/// pure loss: live receive is dead until the process restarts, and the caller
+/// gained nothing.
+///
+/// # The caller therefore owes a liveness gate
+///
+/// Call this ONLY once the foreground has been established as gone (Haven uses
+/// the `kForegroundActiveAtMsKey` heartbeat and its staleness window, read
+/// fail-CLOSED — "unknown" must mean "do not reclaim"). Rule 14 does not depend
+/// on that gate; the app's receive path does.
+///
+/// # Why it is not merely a slot clear
+///
+/// Dropping the `Arc<LiveSyncCore>` alone releases nothing. The detached
+/// `run_worker` holds an `Arc<EngineProcessor>` whose `Client` clone keeps the
+/// relay pool's notification channel open, so `run_receiver` never observes
+/// `Closed` and neither task ever exits — an unowned MLS writer, still mutating
+/// state, with no handle anywhere in the process. Only `LiveSyncCore::stop`
+/// breaks that cycle, which is why this awaits a real stop and reports whether
+/// the supervisor actually drained.
+///
+/// # Errors
+///
+/// Returns an error string only if the `SESSION` lock is poisoned.
+pub async fn force_release_live_session() -> Result<ForceReleaseOutcomeFfi, String> {
+    // Take the slot and DROP the write guard BEFORE any await — a
+    // `std::sync::RwLock` guard must never span `.await` (mirrors
+    // `stop_session`).
+    let core = SESSION
+        .write()
+        .map_err(|_| "session lock poisoned".to_string())?
+        .take();
+    let Some(core) = core else {
+        return Ok(ForceReleaseOutcomeFfi::NoSession);
+    };
+    let outcome = core.stop().await;
+    if outcome == StopOutcome::TimedOut {
+        reinstall_after_timed_out_stop(core);
+    }
+    Ok(match outcome {
+        // `NotStarted` means nothing was ever spawned, so there is nothing left
+        // holding an `Arc` — indistinguishable from a clean drain for the
+        // caller's purposes.
+        StopOutcome::Drained | StopOutcome::NotStarted => ForceReleaseOutcomeFfi::Drained,
+        StopOutcome::TimedOut => ForceReleaseOutcomeFfi::StopTimedOut,
+        // `StopOutcome` is `#[non_exhaustive]`. Any future variant must fail
+        // CLOSED here: reporting `Drained` for an outcome we do not understand
+        // would tell the caller the guard is free when it may not be, and the
+        // caller acts on that. `StopTimedOut` costs only a retry next tick.
+        _ => ForceReleaseOutcomeFfi::StopTimedOut,
+    })
 }
 
 #[cfg(test)]
@@ -9568,6 +9753,144 @@ mod maintenance_real_ffi_tests {
     // now-live, tracked KeyPackage as AlreadyHealthy and NOT force-rotate it. A
     // regression (misreading the primary KP as dead) would republish every tick.
     // ------------------------------------------------------------------------
+
+    // ------------------------------------------------------------------------
+    // force_release_live_session — Rule-14 session reclaim.
+    //
+    // These pin BOTH halves of the safety argument. The reclaim must free the
+    // guard when the only remaining holder is the process-global engine (an
+    // isolate died and its Dart handles were finalized), and must NOT free it
+    // while any handle is alive — because exclusion comes from
+    // `LiveSessionGuard::acquire`, never from this function.
+    // ------------------------------------------------------------------------
+
+    /// The safety half, and the central claim of the design: a reclaim issued
+    /// while a `CircleManagerFfi` is alive releases NOTHING.
+    ///
+    /// This installs a REAL `SESSION` first. An earlier version did not, so
+    /// `force_release_live_session` returned at its `NoSession` early-exit and
+    /// the entire body under test — `stop`, `join_tasks`, the outcome mapping —
+    /// never executed; replacing the body with `Ok(NoSession)` still passed it.
+    /// What it actually asserted was `LiveSessionGuard`'s own semantics, which
+    /// `haven-core` already covers.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn force_release_does_not_release_while_a_manager_handle_is_alive() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let keys = Keys::generate();
+        let dir = DataDir::new("force_release_live");
+        let manager = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+
+        // Install a live core so the reclaim runs its real body.
+        let core = std::sync::Arc::new(super::LiveSyncCore::new_local(
+            std::sync::Arc::clone(&manager.inner),
+            keys.public_key(),
+        ));
+        *super::SESSION.write().expect("session lock") = Some(std::sync::Arc::clone(&core));
+
+        let outcome = super::force_release_live_session()
+            .await
+            .expect("force release");
+        assert_eq!(
+            outcome,
+            super::ForceReleaseOutcomeFfi::Drained,
+            "an installed, never-started core must stop cleanly"
+        );
+        assert!(
+            super::SESSION.read().expect("session lock").is_none(),
+            "a cleanly-stopped core must not be left installed"
+        );
+
+        // THE claim: the manager is still alive, so the guard is still held and
+        // the reclaim has granted the caller nothing.
+        let db = std::path::Path::new(&dir.as_str()).join("session.sqlite");
+        assert!(
+            haven_core::nostr::mls::storage::LiveSessionGuard::acquire(&db).is_err(),
+            "the reclaim must never release a guard held by a LIVE handle — \
+             exclusion is the CAS's job, not this function's"
+        );
+        assert!(
+            super::is_session_live(dir.as_str()).expect("liveness query"),
+            "and the caller's own liveness query must agree"
+        );
+
+        // Self-validation: without this the assertion above could pass simply
+        // because `acquire` never succeeds for this path. Dropping the last
+        // holder must make it succeed, which proves the oracle discriminates.
+        drop(core);
+        drop(manager);
+        drop(
+            haven_core::nostr::mls::storage::LiveSessionGuard::acquire(&db)
+                .expect("the guard must be acquirable once the last handle drops"),
+        );
+    }
+
+    /// The FFI liveness query over the real production path.
+    ///
+    /// `haven-core` covers the registry semantics; what only this level can
+    /// catch is the wrapper's own `data_dir` → `session.sqlite` join. Get that
+    /// wrong and the query answers `false` forever — the foreground service
+    /// would conclude the guard is free, skip recovery, and never publish.
+    ///
+    /// This replaced a version that classified the FAILURE STRING for a marker.
+    /// An adversarial review showed that substring test was remotely
+    /// influenceable: a circle admin controls the group's routing relays, the
+    /// live-sync relay gate interpolates a rejected URL into its error, and
+    /// redaction preserves a planted marker verbatim.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_live_manager_is_visible_to_the_session_liveness_query() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let keys = Keys::generate();
+        let dir = DataDir::new("session_live_query");
+
+        assert!(
+            !super::is_session_live(dir.as_str()).expect("query before open"),
+            "nothing is open yet"
+        );
+
+        let first = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys)).expect("first open");
+        assert!(
+            super::is_session_live(dir.as_str()).expect("query while open"),
+            "the foreground service routes on this to tell a held guard from an \
+             unrelated failure"
+        );
+        // ...and the guard is really enforcing, not merely being reported.
+        assert!(
+            CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys)).is_err(),
+            "Rule 14: a second manager on one data dir must fail closed"
+        );
+
+        drop(first);
+        assert!(
+            !super::is_session_live(dir.as_str()).expect("query after drop"),
+            "a closed session must not leave the database looking permanently \
+             busy — recovery would be unreachable for the life of the process"
+        );
+    }
+
+    /// No session installed yields `NoSession`, and a second call is still
+    /// `NoSession` rather than an error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn force_release_with_no_session_is_an_idempotent_noop() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+
+        assert_eq!(
+            super::force_release_live_session()
+                .await
+                .expect("first release"),
+            super::ForceReleaseOutcomeFfi::NoSession
+        );
+        assert_eq!(
+            super::force_release_live_session()
+                .await
+                .expect("second release"),
+            super::ForceReleaseOutcomeFfi::NoSession
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn tc1_live_tracked_kp_is_already_healthy_via_real_ffi() {
         // Serialize with the M10 wipe tests + sibling tc* tests: they share the

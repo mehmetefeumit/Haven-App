@@ -32,6 +32,7 @@ import 'package:haven/src/rust/api.dart' show tileCacheEvict, tileCacheInit;
 import 'package:haven/src/rust/frb_generated.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/data_directory_provider.dart';
+import 'package:haven/src/services/foreground_liveness_probe.dart';
 import 'package:haven/src/services/image_cache_guard.dart';
 import 'package:haven/src/services/ios_background_catchup.dart';
 import 'package:haven/src/services/legacy_cutover_service.dart';
@@ -98,6 +99,13 @@ Future<void> main() async {
   // foreground service, opts out.
   if (!const bool.fromEnvironment('HAVEN_E2E_NO_BACKGROUND')) {
     FlutterForegroundTask.initCommunicationPort();
+    // Answer the service isolate's liveness pings. Registered HERE rather than
+    // in a widget because it must stay installed for as long as this isolate
+    // could hold the MLS session — which outlives any route or widget mount.
+    // Without it every ping times out, the service concludes this isolate is
+    // gone, and a reclaim could tear down a live session (see
+    // `foreground_liveness_probe.dart`).
+    registerForegroundLivenessResponder();
     // Configure the foreground-service notification channel up-front so
     // the channel exists before any `startService` request is issued.
     // Android does not allow modifying a channel's importance after

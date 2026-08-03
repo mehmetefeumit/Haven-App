@@ -13,13 +13,14 @@
 use std::collections::HashSet;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex as StdMutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use nostr::{Filter, PublicKey, SubscriptionId};
 use nostr_sdk::pool::monitor::Monitor;
 use nostr_sdk::{Client, ClientOptions, RelayPoolNotification, RelayPoolOptions, RelayStatus};
-use tokio::sync::{broadcast, mpsc, Mutex as TokioMutex, RwLock};
+use tokio::sync::{broadcast, mpsc, watch, Mutex as TokioMutex, RwLock};
+use tokio::task::JoinHandle;
 use zeroize::Zeroizing;
 
 use crate::circle::CircleManager;
@@ -123,7 +124,31 @@ fn to_group_subscription(sub: &LiveGroupSub) -> GroupSubscription {
     }
 }
 
-/// The persistent live-sync engine.
+/// Whether [`LiveSyncCore::stop`] observed every supervisor task exit.
+///
+/// The distinction matters to exactly one caller: something reclaiming an
+/// orphaned MLS session needs to know whether the engine's
+/// `Arc<CircleManager>` clones — and with them the Rule-14
+/// `LiveSessionGuard` — are actually gone by the time `stop` returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+#[must_use = "a TimedOut stop left the manager Arc — and the Rule-14 guard — \
+              possibly still held; discarding this reports a clean teardown \
+              that did not happen"]
+pub enum StopOutcome {
+    /// No supervisor task is outstanding: either the session was never
+    /// started, or a previous `stop` already joined every task. Both mean
+    /// nothing this core spawned still holds an `Arc<CircleManager>`.
+    NotStarted,
+    /// Every supervisor task joined. Every `Arc<CircleManager>` this core and
+    /// its tasks held has been dropped by the time `stop` returned.
+    Drained,
+    /// The join budget elapsed with a task still running. A caller relying on
+    /// the `Arc` drop MUST treat this as "not released" and re-check rather
+    /// than assume.
+    TimedOut,
+}
+
 pub struct LiveSyncCore {
     client: Client,
     circle: Arc<CircleManager>,
@@ -133,6 +158,30 @@ pub struct LiveSyncCore {
     own_pubkey: PublicKey,
     salt: Zeroizing<[u8; 16]>,
     shutdown: Arc<AtomicBool>,
+    /// Supervisor task handles from [`Self::start`], joined by [`Self::stop`].
+    ///
+    /// Retained so `stop` is a real happens-before edge for the `Arc`
+    /// drops: a caller that needs the Rule-14 `LiveSessionGuard` released
+    /// (the Android foreground service reclaiming an orphaned session) can
+    /// only trust `stop`'s return if the tasks holding
+    /// `Arc<EngineProcessor>` — and through it `Arc<CircleManager>` — are
+    /// known to be gone.
+    ///
+    /// `std::sync::Mutex`, not the tokio one: it is only ever `take()`n
+    /// synchronously and the guard is never held across an `.await` (which
+    /// would also make the future non-`Send`).
+    tasks: StdMutex<Vec<JoinHandle<()>>>,
+    /// Sticky cancellation for the supervisor tasks.
+    ///
+    /// A `watch` rather than a `Notify` so a receiver created AFTER the send
+    /// still observes it — see [`run_receiver`]'s use of `wait_for`.
+    ///
+    /// This exists because `shutdown` alone CANNOT wake the receiver: it is
+    /// polled at the top of the loop, so a task parked in
+    /// `notifications.recv().await` never sees it. The only other wake path
+    /// was the relay pool's `Shutdown` notification, and that is not
+    /// guaranteed to arrive (see [`Self::stop_inner`]).
+    cancel_tx: watch::Sender<bool>,
     /// The live subscription model of the active session, retained so
     /// [`Self::resume_after_background`] and the delta ops
     /// ([`Self::subscribe_circle`] / [`Self::unsubscribe_circle`]) re-anchor /
@@ -263,6 +312,8 @@ impl LiveSyncCore {
             own_pubkey,
             salt: generate_session_salt(),
             shutdown: Arc::new(AtomicBool::new(false)),
+            tasks: StdMutex::new(Vec::new()),
+            cancel_tx: watch::channel(false).0,
             active: RwLock::new(None),
             lifecycle: TokioMutex::new(()),
         }
@@ -417,12 +468,23 @@ impl LiveSyncCore {
         // The worker just drains events and feeds them to the engine (which owns
         // convergence + publish-before-apply internally); no per-circle gate /
         // settle buffer / converge task is needed anymore (plan §5.4).
-        tokio::spawn(run_receiver(notifications, tx, Arc::clone(&self.shutdown)));
-        tokio::spawn(run_worker(
+        let receiver_task = tokio::spawn(run_receiver(
+            notifications,
+            tx,
+            Arc::clone(&self.shutdown),
+            self.cancel_tx.subscribe(),
+        ));
+        let worker_task = tokio::spawn(run_worker(
             rx,
             Arc::clone(&self.router),
             Arc::clone(&self.processor),
         ));
+        // Retained so `stop` can join them; see the `tasks` field doc.
+        {
+            let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
+            tasks.push(receiver_task);
+            tasks.push(worker_task);
+        }
 
         // Register the router + issue every REQ. A failure mid-way must leave a
         // CLEANLY-STOPPED engine, not a half-started one (orphaned tasks, stale
@@ -605,8 +667,22 @@ impl LiveSyncCore {
     /// fails closed ([`LiveSyncError::NoSession`]), never subscribing onto an
     /// emptied pool. Raising the flag early only lets a holder fail closed SOONER;
     /// it never lets the pool clear while a subscribe is in flight.
-    pub async fn stop(&self) {
+    pub async fn stop(&self) -> StopOutcome {
         self.shutdown.store(true, Ordering::Release);
+        // Raise cancel with the flag, not later: the receiver may be parked in
+        // `recv().await` where it can never observe `shutdown`, and the pool's
+        // `Shutdown` notification is not a guaranteed wake (see `run_receiver`).
+        //
+        // `send_replace`, NOT `send`. `watch::Sender::send` returns `Err` and
+        // DISCARDS THE VALUE when no receiver exists — and no receiver exists
+        // for exactly the window this cancel is designed to cover: the channel
+        // is built in `new_local` with its initial receiver dropped, so the
+        // count is zero until `start` calls `subscribe`. A `stop` racing an
+        // in-flight `start` would therefore have its cancel silently thrown
+        // away, the receiver would subscribe to a `false`, and the whole
+        // mechanism would fall back to the pool notification it exists to stop
+        // trusting. `send_replace` always stores and cannot fail.
+        self.cancel_tx.send_replace(true);
         // Diagnostic (teardown-hang triage): these bracket the two awaits `stop`
         // can park on — the lifecycle-lock acquire and `stop_inner` — so a drive
         // log pinpoints WHERE a teardown stalls (or, if none of these appear at
@@ -616,7 +692,89 @@ impl LiveSyncCore {
         let _lifecycle = self.lifecycle.lock().await;
         log::debug!("[live_sync] stop: lifecycle lock acquired");
         self.stop_inner().await;
+        self.join_tasks(Self::STOP_JOIN_BUDGET).await
     }
+
+    /// Awaits the supervisor tasks spawned by [`Self::start`], bounded.
+    ///
+    /// This is what turns `stop` into a happens-before edge for the `Arc`
+    /// drops. Without it `stop` returns while `run_worker` may still hold
+    /// `Arc<EngineProcessor>` → `Arc<CircleManager>` → the Rule-14
+    /// `LiveSessionGuard`, so a caller reclaiming an orphaned session could not
+    /// tell a released guard from one about to be released.
+    ///
+    /// On timeout the tasks are deliberately NOT aborted. Aborting
+    /// `run_worker` only stops it awaiting its inner panic-isolation spawn;
+    /// that inner task holds its own `Arc<EngineProcessor>` and runs to
+    /// completion regardless, so an abort buys no earlier drop and loses the
+    /// task's own signalling. Reporting [`StopOutcome::TimedOut`] and letting
+    /// the caller's `acquire` remain the authority is both simpler and honest.
+    async fn join_tasks(&self, budget: Duration) -> StopOutcome {
+        // Take the handles OUT under the lock, then drop the guard before the
+        // first await — a `std::sync::MutexGuard` held across `.await` would
+        // make this future non-`Send`.
+        let handles: Vec<JoinHandle<()>> = {
+            let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
+            std::mem::take(&mut *tasks)
+        };
+        if handles.is_empty() {
+            return StopOutcome::NotStarted;
+        }
+
+        // Join under one shared deadline, keeping every handle we did NOT get
+        // to. `timeout` takes `&mut handle` (a `JoinHandle` is `Unpin`) so a
+        // handle SURVIVES its own elapsed timeout instead of being consumed.
+        //
+        // Restoring the survivors is load-bearing, not tidiness. An earlier
+        // version moved every handle into one timed future, so a timeout
+        // dropped them all — detaching the tasks, since tokio never aborts on
+        // drop — and left `self.tasks` empty forever. The next `stop` then took
+        // an empty vec and answered `NotStarted`, which the FFI maps to
+        // "drained": a fail-OPEN on the one invariant this type exists to
+        // report, hit precisely by the caller the docs tell to re-check after a
+        // `TimedOut`.
+        let deadline = Instant::now() + budget;
+        let mut pending: Vec<JoinHandle<()>> = Vec::new();
+        for mut handle in handles {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            // Once the budget is gone, keep the rest without awaiting them.
+            if pending.is_empty() && !remaining.is_zero() {
+                // A panicked task is still a DROPPED task, which is all this
+                // join asserts; `JoinError` is therefore not a failure here.
+                if bounded(remaining, &mut handle).await.is_ok() {
+                    continue;
+                }
+            }
+            pending.push(handle);
+        }
+
+        if pending.is_empty() {
+            return StopOutcome::Drained;
+        }
+        let outstanding = pending.len();
+        {
+            let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
+            // A concurrent `start` may have spawned fresh tasks while we were
+            // joining; append rather than overwrite so neither set is lost.
+            tasks.extend(pending);
+        }
+        log::warn!(
+            "[live_sync] stop: supervisor join timed out with {outstanding} task(s) \
+             outstanding; the manager Arc may still be held"
+        );
+        StopOutcome::TimedOut
+    }
+
+    /// Bound on the post-teardown supervisor join.
+    ///
+    /// Sized to let a healthy task that has already been signalled finish its
+    /// current event, without waiting on one that is wedged.
+    ///
+    /// Note this is the SMALLEST term in `stop`, so shortening it is not what
+    /// bounds a caller. `stop` first awaits the lifecycle lock (unbounded), then
+    /// `stop_inner` spends up to three `RELAY_LIFECYCLE_OP_TIMEOUT`s. A caller
+    /// that needs a hard bound must impose it at its own call site.
+    const STOP_JOIN_BUDGET: Duration = Duration::from_secs(5);
 
     /// The teardown body of [`Self::stop`], WITHOUT acquiring the lifecycle lock.
     ///
@@ -1099,6 +1257,59 @@ mod tests {
         let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
         let pk = keys.public_key();
         (LiveSyncCore::new_local(circle, pk), dir)
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_join_keeps_its_handles_so_a_retry_stays_truthful() {
+        // The regression test for a fail-OPEN. An earlier `join_tasks` moved
+        // every handle into one timed future, so a timeout dropped them all
+        // (tokio does not abort on drop — the tasks kept running) and left
+        // `self.tasks` empty. The next `stop` then saw an empty vec and
+        // answered `NotStarted`, which the FFI maps to "drained" — telling the
+        // caller the manager `Arc`, and with it the Rule-14 guard, had been
+        // released while a live task still held it. That is exactly the
+        // re-check the `TimedOut` contract instructs the caller to perform.
+        let (core, _dir) = build_core();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        core.tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(tokio::spawn(async move {
+                let _ = release_rx.await;
+            }));
+
+        assert_eq!(
+            core.join_tasks(Duration::from_millis(50)).await,
+            StopOutcome::TimedOut,
+            "a task that will not finish must time out"
+        );
+        assert_eq!(
+            core.join_tasks(Duration::from_millis(50)).await,
+            StopOutcome::TimedOut,
+            "the RE-CHECK must still say TimedOut; answering NotStarted here is \
+             the fail-open this test exists to catch"
+        );
+
+        // ...and the handle really was retained, not merely reported: once the
+        // task finishes, the same core can finally observe a genuine drain.
+        let _ = release_tx.send(());
+        assert_eq!(
+            core.join_tasks(Duration::from_secs(5)).await,
+            StopOutcome::Drained,
+            "a retained handle must still be joinable once its task completes"
+        );
+    }
+
+    #[tokio::test]
+    async fn joining_a_core_that_never_spawned_reports_nothing_outstanding() {
+        // The other half: `NotStarted` must stay reachable for a core with no
+        // tasks, or the FFI would report a permanent TimedOut for an idle
+        // session and the caller would retry forever.
+        let (core, _dir) = build_core();
+        assert_eq!(
+            core.join_tasks(Duration::from_millis(50)).await,
+            StopOutcome::NotStarted
+        );
     }
 
     #[tokio::test]

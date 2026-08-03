@@ -53,6 +53,69 @@ fn live_sessions() -> &'static Mutex<HashSet<PathBuf>> {
     LIVE_SESSIONS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// Machine-readable marker embedded in — and ONLY in — the error
+/// [`LiveSessionGuard::acquire`] returns when the database is already claimed by
+/// a live session (Rule 14).
+///
+/// # This marker is for HUMANS, not for control flow
+///
+/// Every failure crossing the FFI boundary is flattened to a prose `String`, and
+/// "an MLS session is already open" is otherwise indistinguishable in a log from
+/// a locked keyring or a full disk. The marker makes that one condition
+/// greppable in a bug report or an E2E log.
+///
+/// It is deliberately NOT the way code answers "is the guard held?". Haven's
+/// error strings interpolate remote-authored text (see [`is_session_live`] for
+/// the concrete chain), so a substring test over them is remotely influenceable.
+/// Code must call [`is_session_live`], which reads the registry directly and has
+/// no untrusted input. Treat this constant as a log token: if it ever appears in
+/// a `contains` that drives a decision, that is a bug.
+pub const SESSION_BUSY_MARKER: &str = "HAVEN_E_SESSION_BUSY";
+
+/// Reports whether a live session is currently registered for `db_path`.
+///
+/// This asks the registry directly instead of pattern-matching an error
+/// message, and it is the ONLY supported way for a caller to answer "is the
+/// Rule-14 guard held on this database?".
+///
+/// # Why not classify the error string
+///
+/// The obvious alternative — test a flattened FFI error for
+/// [`SESSION_BUSY_MARKER`] — is unsafe, and not for a subtle reason. Haven's
+/// error strings interpolate remote-authored text: a circle admin controls the
+/// group's routing relay list, and the live-sync relay gate formats the
+/// offending URL into its error (`relay/live_sync/session.rs`). A relay URL of
+/// `ws://host/HAVEN_E_SESSION_BUSY` therefore produces an unrelated error that a
+/// substring test would classify as session-busy — handing a remote party a
+/// one-bit control channel over a local recovery decision. Redaction does not
+/// help: `redact_hex_sequences` only collapses long hex runs, so it preserves a
+/// planted marker as faithfully as a genuine one.
+///
+/// A registry lookup has no such input. It answers from process-local state
+/// that no remote party can write.
+///
+/// # This is advisory, not exclusion
+///
+/// The answer is a snapshot: a session may be opened or closed the instant
+/// after it returns. That is fine for its purpose (deciding whether a recovery
+/// step is worth attempting), and it must NEVER be used to decide whether
+/// opening is safe — [`LiveSessionGuard::acquire`] is the only authority on
+/// that, because only a CAS can be atomic with respect to the open.
+///
+/// # Errors
+///
+/// Returns [`NostrError::StorageError`] if `db_path` cannot be reduced to a
+/// canonical registry key — the same fail-closed condition
+/// [`LiveSessionGuard::acquire`] hits, surfaced rather than reported as "not
+/// live", which would be a fail-open answer.
+pub fn is_session_live(db_path: &Path) -> Result<bool> {
+    let key = canonical_session_key(db_path)?;
+    Ok(live_sessions()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&key))
+}
+
 /// Normalizes a `session.sqlite` path to a stable registry key.
 ///
 /// The DB file itself may not exist yet on a first open, so the *parent
@@ -158,11 +221,14 @@ impl LiveSessionGuard {
         if inserted {
             Ok(Self { key })
         } else {
-            Err(NostrError::StorageError(
-                "an MLS session is already open on this database \
-                 (Rule 14: exactly one live session per DB file)"
-                    .to_string(),
-            ))
+            // The marker leads the message so it survives any outer wrapping
+            // (`thiserror` prefixes "Storage error: ") and stays greppable. It
+            // is a LOG token only — code asks `is_session_live` instead of
+            // matching this prose.
+            Err(NostrError::StorageError(format!(
+                "{SESSION_BUSY_MARKER}: an MLS session is already open on this \
+                 database (Rule 14: exactly one live session per DB file)"
+            )))
         }
     }
 }
@@ -457,6 +523,111 @@ mod tests {
         // Re-acquirable after the guard drops, or a legitimately-closed session
         // would lock the database out for the rest of the process.
         drop(LiveSessionGuard::acquire(&db).expect("re-acquire after drop"));
+    }
+
+    #[test]
+    fn busy_error_stays_greppable_after_the_string_flattening_ffi_does() {
+        // The marker's only job is diagnosability, so pin the shape a human
+        // actually greps: the FFI-flattened string, not the `NostrError`
+        // variant. `thiserror` prefixes "Storage error: ", so anything anchored
+        // at the start of the message would not survive.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("session.sqlite");
+        let _held = LiveSessionGuard::acquire(&db).expect("first acquire");
+
+        let flattened = LiveSessionGuard::acquire(&db)
+            .expect_err("second acquire must fail")
+            .to_string();
+
+        assert!(
+            flattened.contains(SESSION_BUSY_MARKER),
+            "the already-live failure must stay identifiable in a log: {flattened}"
+        );
+    }
+
+    #[test]
+    fn is_session_live_tracks_the_guard_and_is_not_a_constant() {
+        // Both directions in one test, because either alone is satisfiable by a
+        // function that ignores its argument.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("session.sqlite");
+
+        assert!(
+            !is_session_live(&db).expect("query before acquire"),
+            "no session has been opened yet"
+        );
+        let held = LiveSessionGuard::acquire(&db).expect("acquire");
+        assert!(
+            is_session_live(&db).expect("query while held"),
+            "the registry must report the live session the FGS is contending with"
+        );
+        drop(held);
+        assert!(
+            !is_session_live(&db).expect("query after drop"),
+            "a released guard must not leave the database looking permanently \
+             busy — that would make recovery unreachable forever"
+        );
+    }
+
+    #[test]
+    fn is_session_live_answers_per_database_not_globally() {
+        // A global "any session live" answer would tell the caller to reclaim
+        // over an unrelated database.
+        let a = tempfile::tempdir().expect("tempdir a");
+        let b = tempfile::tempdir().expect("tempdir b");
+        let db_a = a.path().join("session.sqlite");
+        let db_b = b.path().join("session.sqlite");
+
+        let _held_a = LiveSessionGuard::acquire(&db_a).expect("acquire a");
+        assert!(is_session_live(&db_a).expect("a is live"));
+        assert!(
+            !is_session_live(&db_b).expect("b is not live"),
+            "holding one database must not report a different one as busy"
+        );
+    }
+
+    #[test]
+    fn is_session_live_fails_closed_rather_than_reporting_not_live() {
+        // Mirrors `acquire`: an underivable key must surface as an error. `false`
+        // would be a fail-OPEN answer ("nothing is live, go ahead"), which is the
+        // wrong default for a question asked in order to decide about recovery.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("does-not-exist").join("session.sqlite");
+
+        assert!(
+            is_session_live(&missing).is_err(),
+            "a non-canonicalizable path must error, never answer `false`"
+        );
+    }
+
+    #[test]
+    fn remote_authored_text_cannot_forge_a_live_session() {
+        // The reason this is a registry lookup and not a substring test over an
+        // error string. A circle admin controls the group's routing relays, and
+        // the live-sync relay gate formats the offending URL into its error —
+        // so a relay of `ws://host/HAVEN_E_SESSION_BUSY` yields an unrelated
+        // error carrying the marker verbatim. Redaction does not strip it:
+        // `redact_hex_sequences` only collapses long hex runs.
+        //
+        // Assert on the actual redactor rather than a hand-written string, so
+        // this keeps testing the real sanitizer if it changes.
+        let hostile = crate::util::redact_hex_sequences(
+            "plaintext ws:// not allowed for the live-sync engine: \
+             ws://evil.example/HAVEN_E_SESSION_BUSY",
+        );
+        assert!(
+            hostile.contains(SESSION_BUSY_MARKER),
+            "precondition: the marker survives redaction, which is exactly why \
+             classifying error prose would be remotely influenceable"
+        );
+
+        // The supported query is unaffected: it never reads a message at all.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("session.sqlite");
+        assert!(
+            !is_session_live(&db).expect("query"),
+            "no error string can make the registry claim a session is live"
+        );
     }
 
     #[test]

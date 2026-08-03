@@ -35,10 +35,12 @@ import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/rust/frb_generated.dart';
 import 'package:haven/src/services/background_identity_service.dart';
 import 'package:haven/src/services/background_location_manager.dart';
+import 'package:haven/src/services/foreground_liveness_probe.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
+import 'package:haven/src/services/pending_mls_wipe_service.dart';
 import 'package:haven/src/services/per_circle_due_tracker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -94,6 +96,67 @@ bool backgroundPublishDisclosureAccepted({
 /// 1. [onStart] — initializes Rust FFI, services, and identity
 /// 2. [onRepeatEvent] — fires every ~72 s; skips if jitter target not reached
 /// 3. [onDestroy] — tears down relay connections
+/// Why a session reclaim was or was not authorised.
+///
+/// Split out of [BackgroundLocationTaskHandler] so the gate logic is reachable
+/// from a unit test. It used to live inline, where the only thing testing it was
+/// a source-text scan — that could prove a gate's *token* appeared before the
+/// destructive call, but not that its branch actually declined, and it could not
+/// see the comparison operator in the rate limit at all.
+enum SessionReclaimDecision {
+  /// Every precondition holds; the caller may run the liveness probe and, if
+  /// that reports the main isolate gone, reclaim.
+  proceed,
+
+  /// No data directory resolved — nothing to open.
+  noDataDir,
+
+  /// No identity loaded, so there is no session to open even if the guard were
+  /// free.
+  noIdentity,
+
+  /// An MLS wipe is owed. Re-opening the database would recreate state that is
+  /// supposed to be destroyed, so this outranks every other consideration.
+  wipePending,
+
+  /// The Rule-14 guard is not held, so the open failed for some other reason (a
+  /// locked keyring, a full disk) that a reclaim cannot fix.
+  guardNotHeld,
+
+  /// A reclaim was attempted too recently.
+  backoffActive,
+}
+
+/// Evaluates the gates that do not require I/O.
+///
+/// Pure by construction: every input is a value the caller has already
+/// gathered, so the decision can be exercised exhaustively without a Rust
+/// bridge, a foreground service, or a second isolate.
+///
+/// The liveness probe is deliberately NOT folded in — it is the one gate that
+/// must run last and costs a cross-isolate round trip, so the caller applies it
+/// only after this returns [SessionReclaimDecision.proceed].
+@visibleForTesting
+SessionReclaimDecision evaluateSessionReclaimGates({
+  required bool hasDataDir,
+  required bool hasIdentity,
+  required bool wipePending,
+  required bool guardHeld,
+  required int? lastAttemptMs,
+  required int nowMs,
+  required Duration backoff,
+}) {
+  if (!hasDataDir) return SessionReclaimDecision.noDataDir;
+  if (!hasIdentity) return SessionReclaimDecision.noIdentity;
+  if (wipePending) return SessionReclaimDecision.wipePending;
+  if (!guardHeld) return SessionReclaimDecision.guardNotHeld;
+  if (lastAttemptMs != null &&
+      nowMs - lastAttemptMs < backoff.inMilliseconds) {
+    return SessionReclaimDecision.backoffActive;
+  }
+  return SessionReclaimDecision.proceed;
+}
+
 class BackgroundLocationTaskHandler extends TaskHandler {
   CircleManagerFfi? _circleManager;
   NostrIdentityManager? _identityManager;
@@ -103,6 +166,13 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   NostrCircleService? _circleService;
   LocationSharingService? _locationSharingService;
   String? _pubkeyHex;
+
+  /// Data directory resolved in [onStart], retained so a session reclaim can
+  /// re-open the manager without re-resolving it.
+  String? _dataDir;
+
+  /// Liveness probe against the main isolate. Consulted before any reclaim.
+  final ForegroundLivenessProbe _livenessProbe = ForegroundLivenessProbe();
 
   /// In-flight publish future, tracked so `onDestroy` can await it
   /// rather than nulling services mid-cycle.
@@ -225,26 +295,20 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       //    only one CircleManagerFfi may exist per isolate or MLS state
       //    will diverge across two in-memory engine sessions. With no
       //    identity, `_circleManager` stays null — every downstream call
-      //    site already gates on `_pubkeyHex == null || _circleManager ==
-      //    null` and no-ops, matching the pre-migration no-identity
-      //    behaviour.
-      if (overrideCircleManager != null) {
-        _circleManager = overrideCircleManager;
-      } else if (_identityManager!.hasIdentity()) {
-        // Re-fetched fresh rather than reusing `bytes` above (already
-        // zeroized) — Security Rule 9.
-        final identitySecretBytes = await _identityManager!.getSecretBytes();
-        _circleManager = await CircleManagerFfi.newInstance(
-          dataDir: dataDir,
-          identitySecretBytes: identitySecretBytes,
-        );
-      }
+      //    site already gates on it and no-ops, matching the pre-migration
+      //    no-identity behaviour.
+      //
+      //    The failure is caught INSIDE `_openCircleManager` on purpose. This
+      //    open is the one step that fails routinely for a recoverable reason
+      //    (the Rule-14 guard held by a session whose isolate is gone), and
+      //    letting it throw here would skip steps 6 and 7 as well — leaving the
+      //    isolate with no relay service and no location-sharing service, so a
+      //    later recovery that rebuilt only the manager could not publish.
+      _dataDir = dataDir;
+      await _openCircleManager();
 
       // 6. Create relay, location, and jitter services.
-      _relayService = overrideRelayService ?? NostrRelayService();
-      await _relayService!.initialize();
-      _locationService = overrideLocationService ?? GeolocatorLocationService();
-      _locationEventService = LocationEventService();
+      await _ensureAuxServices();
 
       // 7. Construct circle + location-sharing services so the background
       //    isolate can fetch peer locations alongside publishing. The
@@ -252,19 +316,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       //    spawning a second MLS state cache over the same DB. The
       //    identity adapter only exposes pubkey hex — secret material
       //    stays inside the underlying NostrIdentityManager.
-      if (overrideLocationSharingService != null) {
-        _locationSharingService = overrideLocationSharingService;
-      } else if (_identityManager != null && _circleManager != null) {
-        _circleService = NostrCircleService.withInjectedManager(
-          relayService: _relayService!,
-          injectedManager: _circleManager!,
-        );
-        _locationSharingService = LocationSharingService(
-          circleService: _circleService!,
-          relayService: _relayService!,
-          identityService: BackgroundIdentityService(_identityManager!),
-        );
-      }
+      _wireSharingServices();
 
       // 8. Per-circle publish scheduling (privacy: decorrelation) is seeded
       //    lazily in `_publishCycle` — each circle is registered "due now" the
@@ -379,6 +431,16 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   }
 
   @override
+  void onReceiveData(Object data) {
+    // `onReceiveData` is the ONE dispatch point for everything sent to this
+    // task, so anything added later must branch here rather than assume it is
+    // reached. The probe reports whether it consumed the payload; today it is
+    // the only sender, so an unconsumed payload has no other handler to reach.
+    if (_livenessProbe.onData(data)) return;
+    debugPrint('[BackgroundTask] unrouted task data: ${data.runtimeType}');
+  }
+
+  @override
   void onNotificationPressed() {
     FlutterForegroundTask.launchApp();
   }
@@ -387,14 +449,256 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   // Publish cycle
   // ---------------------------------------------------------------------------
 
+  /// Opens the circle manager, leaving `_circleManager` null on failure.
+  ///
+  /// Never throws: see the call site in [onStart] for why a failure here must
+  /// not abort the rest of initialisation.
+  Future<void> _openCircleManager() async {
+    if (overrideCircleManager != null) {
+      _circleManager = overrideCircleManager;
+      return;
+    }
+    final dataDir = _dataDir;
+    if (dataDir == null || !(_identityManager?.hasIdentity() ?? false)) return;
+    try {
+      // Re-fetched fresh rather than reusing the onStart copy (already
+      // zeroized) — Security Rule 9.
+      final identitySecretBytes = await _identityManager!.getSecretBytes();
+      _circleManager = await CircleManagerFfi.newInstance(
+        dataDir: dataDir,
+        identitySecretBytes: identitySecretBytes,
+      );
+    } on Object catch (e) {
+      // Generic in the UI sense (Rule 8): the type alone, never the message,
+      // which can carry MLS group ids or relay URLs.
+      debugPrint(
+        '[BackgroundTask] circle manager open failed: ${e.runtimeType}',
+      );
+    }
+  }
+
+  /// Creates the relay / location / event services if they are absent.
+  ///
+  /// Separated from [onStart] so it can be re-run. `NostrRelayService.initialize`
+  /// rethrows, and in `onStart` that exception is caught only by the outer
+  /// handler — which aborts the remaining steps. Because the manager is opened
+  /// BEFORE this, a throw here used to leave the isolate holding the Rule-14
+  /// guard with no circle service and no sharing service, and nothing could
+  /// repair it: the recovery path keys off `_circleManager == null`, which is
+  /// false in that state. The isolate then held the guard hostage — unusable
+  /// itself and blocking the main isolate from opening — until the OS restarted
+  /// the service.
+  Future<void> _ensureAuxServices() async {
+    if (_relayService == null) {
+      final relay = overrideRelayService ?? NostrRelayService();
+      // Assign only after a successful initialize, so a failed attempt leaves
+      // the field null and the next cycle retries rather than reusing a
+      // half-initialised service.
+      await relay.initialize();
+      _relayService = relay;
+    }
+    _locationService ??= overrideLocationService ?? GeolocatorLocationService();
+    _locationEventService ??= LocationEventService();
+  }
+
+  /// Repairs an isolate that holds a manager but never finished wiring.
+  ///
+  /// Non-destructive: it touches no other isolate's session, so unlike a
+  /// reclaim it needs no liveness gate.
+  Future<bool> _repairSharingServices() async {
+    try {
+      await _ensureAuxServices();
+    } on Object catch (e) {
+      debugPrint('[BackgroundTask] service repair failed: ${e.runtimeType}');
+      return false;
+    }
+    _wireSharingServices();
+    return _locationSharingService != null;
+  }
+
+  /// Builds the circle + location-sharing services over the current manager.
+  ///
+  /// No-op when the manager is absent, so it is safe to call both from
+  /// [onStart] and after a recovery.
+  void _wireSharingServices() {
+    if (overrideLocationSharingService != null) {
+      _locationSharingService = overrideLocationSharingService;
+      return;
+    }
+    if (_identityManager == null ||
+        _circleManager == null ||
+        _relayService == null) {
+      return;
+    }
+    _circleService = NostrCircleService.withInjectedManager(
+      relayService: _relayService!,
+      injectedManager: _circleManager!,
+    );
+    _locationSharingService = LocationSharingService(
+      circleService: _circleService!,
+      relayService: _relayService!,
+      identityService: BackgroundIdentityService(_identityManager!),
+    );
+  }
+
+  /// Tries to recover from "the MLS session is held by an isolate that is
+  /// gone".
+  ///
+  /// Returns `true` only if a usable `_circleManager` exists afterwards.
+  ///
+  /// # Why this is gated so heavily
+  ///
+  /// `forceReleaseLiveSession` stops the process-global live-sync engine. If
+  /// the main isolate is actually ALIVE, that engine is ITS engine: the stream
+  /// ends, nothing restarts it (`NostrSubscriptionService` registers no
+  /// `onDone`), and the guard is still held by the main isolate's own handle —
+  /// so the reclaim
+  /// destroys live receive and gains nothing. Every gate below exists to make
+  /// sure that case is excluded before the destructive call, and every one of
+  /// them fails CLOSED (declining to reclaim) when it cannot get an answer.
+  Future<bool> _attemptSessionReclaim() async {
+    final dataDir = _dataDir;
+
+    final SharedPreferences prefs;
+    try {
+      prefs = await SharedPreferences.getInstance();
+      await prefs.reload();
+    } on Object catch (e) {
+      debugPrint(
+        '[BackgroundTask] reclaim: prefs unavailable (${e.runtimeType})',
+      );
+      return false;
+    }
+
+    // Is the guard actually held? Asked of the registry, never by classifying
+    // an error string: Haven's FFI errors interpolate remote-authored text (a
+    // circle admin controls the group's routing relays, and the relay gate
+    // formats a rejected URL into its message), so a substring test would let a
+    // remote party trigger this path at will.
+    bool guardHeld = false;
+    if (dataDir != null) {
+      try {
+        guardHeld = await isSessionLive(dataDir: dataDir);
+      } on Object catch (e) {
+        debugPrint(
+          '[BackgroundTask] reclaim: liveness query failed (${e.runtimeType})',
+        );
+        return false;
+      }
+    }
+
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final decision = evaluateSessionReclaimGates(
+      hasDataDir: dataDir != null,
+      hasIdentity: _identityManager?.hasIdentity() ?? false,
+      wipePending: prefs.getBool(kPendingMlsWipeKey) ?? false,
+      guardHeld: guardHeld,
+      lastAttemptMs: prefs.getInt(kBackgroundSessionReclaimAtMsKey),
+      nowMs: nowMs,
+      backoff: kBackgroundSessionReclaimBackoff,
+    );
+    if (decision != SessionReclaimDecision.proceed) {
+      debugPrint('[BackgroundTask] reclaim: declined (${decision.name})');
+      return false;
+    }
+
+    // Consume the backoff HERE — before the probe, not after it.
+    //
+    // Recording it only on the reclaim path (as an earlier version did) meant a
+    // "main isolate alive" verdict never advanced the limit. That is the normal
+    // steady state whenever a user backgrounds the app with sharing on: the
+    // main isolate keeps its handle, so the open keeps failing and this runs on
+    // EVERY 72-second tick, firing a full cross-isolate probe each time. Each
+    // probe is an independent chance for a GC pause or a jank frame to look
+    // like death, so hundreds of rolls per afternoon turn a rare misread into a
+    // likely one. Consuming the limit unconditionally bounds the attempts —
+    // and it keeps the original crash-safety property, since a crash between
+    // here and the release still leaves the limit spent.
+    try {
+      await prefs.setInt(kBackgroundSessionReclaimAtMsKey, nowMs);
+    } on Object catch (e) {
+      debugPrint(
+        '[BackgroundTask] reclaim: backoff write failed (${e.runtimeType})',
+      );
+      return false;
+    }
+
+    // The decisive gate: only a DEAD main isolate may be reclaimed from. The
+    // foreground-active heartbeat cannot answer this (the Android pause path
+    // writes 0 while keeping the session), so ask the isolate itself.
+    //
+    // Confirmed with a SECOND probe. One silent window can be a garbage
+    // collection or a slow frame in an isolate that is perfectly alive, and
+    // acting on that destroys its live receive. Two consecutive silences,
+    // separated by a fresh round trip, are far harder to produce by transient
+    // jank. Both fail closed to "alive".
+    if (await _livenessProbe.mainIsolateIsAlive()) {
+      debugPrint('[BackgroundTask] reclaim: declined, main isolate alive');
+      return false;
+    }
+    if (await _livenessProbe.mainIsolateIsAlive()) {
+      debugPrint('[BackgroundTask] reclaim: declined, main isolate answered '
+          'on retry');
+      return false;
+    }
+
+    // Re-check the guard after the probes. The window between the first query
+    // and here is seconds wide, and if the holder released in the meantime
+    // there is nothing to reclaim — just open.
+    if (dataDir != null) {
+      try {
+        if (!await isSessionLive(dataDir: dataDir)) {
+          debugPrint('[BackgroundTask] reclaim: guard freed while probing');
+          await _openCircleManager();
+          if (_circleManager == null) return false;
+          _wireSharingServices();
+          return _locationSharingService != null;
+        }
+      } on Object catch (e) {
+        debugPrint(
+          '[BackgroundTask] reclaim: re-check failed (${e.runtimeType})',
+        );
+        return false;
+      }
+    }
+
+    final ForceReleaseOutcomeFfi outcome;
+    try {
+      outcome = await forceReleaseLiveSession();
+    } on Object catch (e) {
+      debugPrint(
+        '[BackgroundTask] reclaim: release failed (${e.runtimeType})',
+      );
+      return false;
+    }
+    debugPrint('[BackgroundTask] reclaim: release outcome=${outcome.name}');
+    // `StopTimedOut` means a supervisor task is still running and may still
+    // hold the manager — the open would fail anyway, and retrying it would only
+    // add noise. `NoSession` means the holder was never the engine (a leaked
+    // handle this cannot reach), so the open will likely fail too; attempt it
+    // once regardless, since the registry said the guard was held and this is
+    // the cheapest way to learn whether it has since been released.
+    if (outcome == ForceReleaseOutcomeFfi.stopTimedOut) return false;
+
+    await _openCircleManager();
+    if (_circleManager == null) return false;
+    _wireSharingServices();
+    if (_locationSharingService == null) return false;
+    debugPrint('[BackgroundTask] reclaim: session recovered');
+    return true;
+  }
+
   Future<void> _publishCycle(DateTime timestamp) async {
     try {
       // Per-circle jitter now lives in `_dueTracker` (step 7 below), so there
       // is no single cycle-wide jitter gate here — the master `onRepeatEvent`
       // cadence (`kBackgroundRepeatInterval`) is just the polling granularity.
 
-      // 2. Abort if no identity is loaded.
-      if (_pubkeyHex == null || _circleManager == null) return;
+      // 2. Abort if no identity is loaded. A MISSING MANAGER is no longer fatal
+      //    here — it may be the recoverable "Rule-14 guard held by an isolate
+      //    that is gone" case, which is retried below once the foreground gate
+      //    has confirmed this isolate owns publishing.
+      if (_pubkeyHex == null) return;
 
       // 3. Defer to the foreground UI isolate while it is active.
       //    BackgroundLocationManager.isForegroundActive() uses a
@@ -430,6 +734,25 @@ class BackgroundLocationTaskHandler extends TaskHandler {
         // "due now" (bounding the handoff gap to one background cycle).
         _dueTracker.pruneToKeys(<String>{});
         return;
+      }
+
+      // 3b. No manager? Try to recover the MLS session, but only from HERE —
+      //     after the gate above has established the foreground is not
+      //     publishing. Recovery stops the process-global live-sync engine, so
+      //     running it from `onStart` (which executes regardless of foreground
+      //     state) could tear down a session the visible UI is actively using.
+      //     Placing it here inherits that decision from code that already owns
+      //     it, rather than adding a second, parallel judgement of the same
+      //     question. `_attemptSessionReclaim` adds the gates specific to the
+      //     destructive step, including a direct liveness probe.
+      if (_circleManager == null) {
+        if (!await _attemptSessionReclaim()) return;
+      } else if (_locationSharingService == null) {
+        // The manager opened but the wiring did not finish (see
+        // `_ensureAuxServices`). No reclaim is warranted — this isolate already
+        // owns the session — but without this the isolate would hold the
+        // Rule-14 guard forever while publishing nothing.
+        if (!await _repairSharingServices()) return;
       }
 
       // 6b. Play "disclosure before collection" — NEVER publish location from

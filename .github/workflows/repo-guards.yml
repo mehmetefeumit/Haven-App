@@ -66,6 +66,12 @@
 #     no forbidden uniffi/app/account/QUIC/agent crates, no legacy mdk-*
 #     crates, and a single libsqlite3-sys version.
 #
+#   Session-busy marker is log-only   scripts/ci/check_session_busy_marker_not_routed.sh
+#     The Rule-14 "an MLS session is already open" marker must never drive a
+#     decision — Haven's FFI errors interpolate remote-authored text, so a
+#     substring test over them is a remote control channel. Callers ask the
+#     registry (`is_session_live` / `isSessionLive`) instead.
+#
 #   E2E publish-before-apply          scripts/ci/check_e2e_publish_before_apply.sh
 #     An integration test that calls createCircle() must also resolve the
 #     staged create (confirmPublished / publishFailed, Security Rule 13).
@@ -141,6 +147,16 @@ jobs:
       - name: MDK supply-chain shape
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_mdk_supply_chain.sh
+
+      # The Rule-14 busy marker is a LOG token. Routing on it would be
+      # remotely influenceable: a circle admin controls the group's routing
+      # relays, the live-sync relay gate interpolates a rejected URL into its
+      # error, and redaction preserves a planted marker verbatim — so
+      # `ws://host/HAVEN_E_SESSION_BUSY` could make the foreground service tear
+      # down a healthy live-sync engine. Liveness comes from the registry.
+      - name: Session-busy marker stays log-only
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_session_busy_marker_not_routed.sh
 
       - name: E2E publish-before-apply (staged creates resolved)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

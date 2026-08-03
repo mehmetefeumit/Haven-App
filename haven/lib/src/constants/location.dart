@@ -163,3 +163,22 @@ const String kLocationDisclosureAcceptedKey =
 /// disclosure first, even if the foreground disclosure was already accepted.
 const String kLocationDisclosureBackgroundAcceptedKey =
     'haven.location.disclosure_background_accepted';
+
+/// SharedPreferences key storing the millisecond timestamp of the last MLS
+/// session-reclaim attempt by the background isolate.
+///
+/// Backs the rate limit in `BackgroundLocationTaskHandler`: a reclaim stops the
+/// live-sync engine, so a tight retry loop against a condition it cannot fix
+/// (for example a leaked manager handle, which the reclaim does not own) would
+/// keep restarting that teardown every cycle. Persisted rather than held in
+/// memory so a service restart cannot reset the limit.
+const String kBackgroundSessionReclaimAtMsKey =
+    'haven.background_session_reclaim_at_ms';
+
+/// Minimum interval between MLS session-reclaim attempts.
+///
+/// Long relative to the publish cadence: a genuine orphaned session is
+/// permanent until reclaimed, so recovering on the next tick instead of this
+/// one costs little, while retrying every tick against an unfixable condition
+/// costs a live-sync teardown each time.
+const Duration kBackgroundSessionReclaimBackoff = Duration(minutes: 15);

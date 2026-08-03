@@ -6,9 +6,9 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_commit_to_publish`, `convert_location_result`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_legacy_mls_db_files`, `delete_mls_session_db_files`, `delete_tile_db_files`, `event_secs_to_cursor_ms`, `fetch_own_profile_across_pool`, `from_cached`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `kp_event_d_tag`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `nip65_relay_list_urls`, `now_ms`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `redact_profile_err`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `republish_key_package`, `run_blocking`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`, `usable_profile_pool`
+// These functions are ignored because they are not marked as `pub`: `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_commit_to_publish`, `convert_location_result`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_legacy_mls_db_files`, `delete_mls_session_db_files`, `delete_tile_db_files`, `event_secs_to_cursor_ms`, `fetch_own_profile_across_pool`, `from_cached`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `kp_event_d_tag`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `nip65_relay_list_urls`, `now_ms`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `redact_profile_err`, `reinstall_after_timed_out_stop`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `republish_key_package`, `run_blocking`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`, `usable_profile_pool`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`, `ProfileStampLists`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`, `default`
 
 /// Initializes the platform-specific keyring credential store.
@@ -473,6 +473,91 @@ void setBlossomServerForTest({required String url}) =>
 Future<SubscriptionHealthOutcomeFfi> maintainSubscriptionHealth() =>
     RustLib.instance.api.crateApiMaintainSubscriptionHealth();
 
+/// Reports whether a live MLS session is currently registered for `data_dir`
+/// (Security Rule 14) — i.e. whether an open would be refused right now.
+///
+/// This is the supported way to answer "is the guard held?". It reads the
+/// process-global registry directly; it does NOT inspect any error message.
+///
+/// # Why not classify the error string
+///
+/// Haven's FFI errors are flattened prose, and several interpolate
+/// remote-authored text: a circle admin controls the group's routing relay list,
+/// and the live-sync relay gate formats the offending URL into its error. A
+/// relay of `ws://host/HAVEN_E_SESSION_BUSY` would make a substring test read an
+/// unrelated failure as session-busy, handing a remote party a one-bit control
+/// channel over a local recovery decision. `redact_hex_sequences` does not help
+/// — it only collapses long hex runs. The registry has no untrusted input.
+///
+/// # Advisory only
+///
+/// The answer is a snapshot and may be stale the instant it returns. Use it to
+/// decide whether a recovery step is worth ATTEMPTING; never to decide that
+/// opening is safe. Only `LiveSessionGuard::acquire` is atomic with the open.
+///
+/// # Errors
+///
+/// Returns an error string if `data_dir` cannot be reduced to a canonical
+/// registry key — surfaced rather than answered `false`, which would be
+/// fail-open.
+Future<bool> isSessionLive({required String dataDir}) =>
+    RustLib.instance.api.crateApiIsSessionLive(dataDir: dataDir);
+
+/// Force-stops and clears the process-global live-sync session so its
+/// `Arc<CoreCircleManager>` clones drop, letting another isolate acquire the
+/// Rule-14 [`LiveSessionGuard`] on the same `session.sqlite`.
+///
+/// Exists for exactly one caller: the Android foreground-service isolate, after
+/// its own `CircleManagerFfi::new` has failed because the guard is held by a
+/// session whose owning isolate is gone. When the main `FlutterEngine` is
+/// destroyed, Dart-held handles are finalized and their `Arc`s drop — but this
+/// global is a Rust static that no Dart finalizer can reach, so without this
+/// function the database is unopenable for the life of the process.
+///
+/// # Rule 14 is preserved, but this is NOT harmless
+///
+/// It never grants exclusion; it only *releases* references. If any other holder
+/// remains — a live `CircleManagerFfi` or `LiveSyncFfi` in ANY isolate — the
+/// guard stays registered and the caller's subsequent `acquire` still fails
+/// closed. Exclusion is arbitrated solely by `LiveSessionGuard::acquire`, so no
+/// fencing token or liveness epoch is needed for CORRECTNESS.
+///
+/// An earlier version of this doc drew the wrong conclusion from that — that a
+/// live foreground "cannot be raced" because the call "releases nothing". The
+/// second half is false. `SESSION` holds an `Arc::clone` of the *same*
+/// `CoreCircleManager` the foreground's Dart handle owns, so against a LIVE
+/// foreground this call stops that foreground's own live-sync engine: the
+/// `live_events` stream completes, and because `NostrSubscriptionService`
+/// registers no `onDone` and `start()` early-returns while `_engine != null`, it
+/// never restarts. `maintain_subscription_health` then reads an empty `SESSION`
+/// and returns the inert `EngineOff`, disarming the self-healer. The guard is
+/// still held by the foreground's handle, so the caller ALSO still cannot open —
+/// pure loss: live receive is dead until the process restarts, and the caller
+/// gained nothing.
+///
+/// # The caller therefore owes a liveness gate
+///
+/// Call this ONLY once the foreground has been established as gone (Haven uses
+/// the `kForegroundActiveAtMsKey` heartbeat and its staleness window, read
+/// fail-CLOSED — "unknown" must mean "do not reclaim"). Rule 14 does not depend
+/// on that gate; the app's receive path does.
+///
+/// # Why it is not merely a slot clear
+///
+/// Dropping the `Arc<LiveSyncCore>` alone releases nothing. The detached
+/// `run_worker` holds an `Arc<EngineProcessor>` whose `Client` clone keeps the
+/// relay pool's notification channel open, so `run_receiver` never observes
+/// `Closed` and neither task ever exits — an unowned MLS writer, still mutating
+/// state, with no handle anywhere in the process. Only `LiveSyncCore::stop`
+/// breaks that cycle, which is why this awaits a real stop and reports whether
+/// the supervisor actually drained.
+///
+/// # Errors
+///
+/// Returns an error string only if the `SESSION` lock is poisoned.
+Future<ForceReleaseOutcomeFfi> forceReleaseLiveSession() =>
+    RustLib.instance.api.crateApiForceReleaseLiveSession();
+
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>>
 abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Wipes local state for the `Abandon` plan — sole-member cleanup with
@@ -893,13 +978,35 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   ///
   /// # Concurrency
   ///
-  /// MDK's `create_message` performs a non-atomic read-modify-write on the
-  /// MLS group state. Two concurrent calls for the **same** group can race
-  /// on the epoch counter, causing one message to be rejected by all
-  /// recipients. Callers **must not** invoke this method concurrently for
-  /// the same `mls_group_id`. The Dart-side `locationPublisherProvider`
-  /// satisfies this constraint by publishing one group at a time per
-  /// publish cycle. If this ever changes, add a per-group `Mutex` here.
+  /// Concurrent calls for the same group are **safe**. Every engine write
+  /// funnels through one `tokio::sync::Mutex<AccountDeviceSession>`
+  /// (`haven-core/src/nostr/mls/manager.rs:99-101`, taken in `send` at
+  /// `:494-501`), which `encrypt_location` reaches via `send_location` →
+  /// `create_message` → `send`. Application messages advance no epoch and
+  /// carry no `PendingStateRef`, and past-epoch app messages are tolerated to
+  /// `app_message_past_epoch_limit`, so the encrypt→publish gap is covered
+  /// too.
+  ///
+  /// This paragraph previously said the opposite — that `create_message`
+  /// races on the epoch counter and callers "must not" invoke it
+  /// concurrently, naming a `locationPublisherProvider` that no longer owns
+  /// publishing. That described PRE-Dark-Matter MDK, before the session
+  /// mutex existed. It is corrected rather than deleted because acting on it
+  /// is expensive in a specific way: it invites building a cross-isolate lock
+  /// for a problem upstream already solved, while the REAL hazard sits
+  /// elsewhere.
+  ///
+  /// **The real hazard: compound sequences, not this call.** The mutex is
+  /// released between FFI calls, so a Rule-13 publish-before-apply cycle —
+  /// stage → publish → `confirm_published`/`publish_failed` — spans three
+  /// round-trips with the lock dropped in between (`manager.rs:651-658`,
+  /// `:667-674`). Two concurrent commit-producing flows CAN interleave there.
+  /// The engine refuses a second send while the group is non-`Stable`, so the
+  /// result is a wedged group rather than a fork — a liveness failure, not a
+  /// confidentiality one — but callers must still serialize the whole
+  /// TRANSACTION, which is what `LocationPublishSchedulerNotifier`'s
+  /// `_publishChain` does. Location publishing produces no commits and needs
+  /// no such fence.
   ///
   /// # Arguments
   ///
@@ -2741,6 +2848,29 @@ enum FfiSyncStatusReason {
 
   /// The session resumed from background.
   backgroundResumed,
+}
+
+/// Outcome of [`force_release_live_session`].
+///
+/// Closed enum — no raw error string crosses the FFI (Security Rule 8), and it
+/// carries no path, relay URL, or group id.
+enum ForceReleaseOutcomeFfi {
+  /// No live session was installed; nothing to release.
+  noSession,
+
+  /// The session was stopped and every supervisor task joined, so every
+  /// `Arc<CircleManager>` the ENGINE held has been dropped.
+  ///
+  /// This does NOT mean the guard is free. Other holders — most importantly a
+  /// `CircleManagerFfi` handle in another isolate — are untouched by this call,
+  /// and `LiveSessionGuard::acquire` remains the only authority on whether an
+  /// open will succeed. A caller that reads this as "the retry will work" can
+  /// loop forever, stopping the engine on every pass.
+  drained,
+
+  /// The session was stopped but a supervisor task was still running when the
+  /// join budget elapsed. The caller MUST NOT infer that the guard is free.
+  stopTimedOut,
 }
 
 /// A gift-wrapped Welcome ready for publishing (FFI-friendly).

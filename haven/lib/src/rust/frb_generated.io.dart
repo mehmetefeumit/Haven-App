@@ -331,6 +331,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   FfiSyncStatusReason dco_decode_ffi_sync_status_reason(dynamic raw);
 
   @protected
+  ForceReleaseOutcomeFfi dco_decode_force_release_outcome_ffi(dynamic raw);
+
+  @protected
   GiftWrappedWelcomeFfi dco_decode_gift_wrapped_welcome_ffi(dynamic raw);
 
   @protected
@@ -885,6 +888,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   FfiSyncStatusReason sse_decode_ffi_sync_status_reason(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ForceReleaseOutcomeFfi sse_decode_force_release_outcome_ffi(
     SseDeserializer deserializer,
   );
 
@@ -1563,6 +1571,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_ffi_sync_status_reason(
     FfiSyncStatusReason self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_force_release_outcome_ffi(
+    ForceReleaseOutcomeFfi self,
     SseSerializer serializer,
   );
 

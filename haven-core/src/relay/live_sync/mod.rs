@@ -56,4 +56,4 @@ pub use planes::{
 };
 pub use processor::{group_cursor_stream, EngineProcessor, GroupProcessOutcome};
 pub use router::{Router, SubCtx};
-pub use session::LiveSyncCore;
+pub use session::{LiveSyncCore, StopOutcome};
