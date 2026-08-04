@@ -2429,4 +2429,96 @@ mod tests {
         );
         assert_ne!(since, now, "must never regress to a fresh now");
     }
+
+    #[tokio::test]
+    async fn subscribe_circle_is_a_no_op_for_a_circle_with_no_usable_relays() {
+        // Mirrors the skip `build_relay_set_subscriptions` performs at start:
+        // a circle whose relay set normalizes to nothing has nowhere to send a
+        // REQ. It must be a benign no-op, NOT an error the caller would escalate
+        // into a full engine restart, and — the part that matters — it must
+        // register NO router state, or every later `kind:445` would be routed to
+        // a subscription that was never issued.
+        let (core, _dir) = build_core();
+
+        let res = core
+            .subscribe_circle(&CircleSpec {
+                group_id_hex: "ab".repeat(32),
+                // Blank entries are exactly what `canonical_relay_set` drops,
+                // so the normalized set is empty — the state a circle stored
+                // with no routing relays presents.
+                relays: vec![String::new(), "   ".to_string()],
+            })
+            .await;
+
+        assert!(
+            res.is_ok(),
+            "an unusable relay set is a no-op, not a failure: {res:?}"
+        );
+        assert!(
+            core.live_group_subs_for_test().await.is_empty(),
+            "nothing may be recorded as live — a subscription the engine never \
+             issued would silently swallow that circle's events"
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_circle_fails_closed_once_the_session_is_shut_down() {
+        // Rule 14 adjacent: after `stop` the engine no longer owns its handles.
+        // Accepting a subscribe here would register router state and issue a REQ
+        // against a client that is being torn down, leaving an entry nothing
+        // ever clears. The caller is expected to rebuild a fresh core, so this
+        // must be an error rather than a silent success.
+        let (core, _dir) = build_core();
+        core.shutdown_for_test().store(true, Ordering::Release);
+
+        let res = core
+            .subscribe_circle(&CircleSpec {
+                group_id_hex: "cd".repeat(32),
+                relays: vec!["wss://relay.example.com".to_string()],
+            })
+            .await;
+
+        assert!(
+            matches!(res, Err(LiveSyncError::NoSession)),
+            "a shut-down session must refuse a delta subscribe: {res:?}"
+        );
+        assert!(
+            core.live_group_subs_for_test().await.is_empty(),
+            "and must leave no live-subscription bookkeeping behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_after_background_fails_closed_once_shut_down() {
+        // The resume path re-issues every REQ under the FROZEN sub-ids. Doing
+        // that against a stopped engine would re-open sockets the stop just
+        // closed; the caller must see `NoSession` and start a fresh core.
+        let (core, _dir) = build_core();
+        core.shutdown_for_test().store(true, Ordering::Release);
+
+        let res = core.resume_after_background().await;
+
+        assert!(
+            matches!(res, Err(LiveSyncError::NoSession)),
+            "a shut-down session must refuse to re-anchor: {res:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn circle_accessor_hands_back_the_one_shared_manager() {
+        // Rule 14: the engine processor must mutate the SAME `CircleManager`
+        // the rest of the process holds — a second manager over one database is
+        // two hydrated epoch states. The accessor is how that sharing is
+        // observable, so pin that it hands back the very Arc it was built with
+        // rather than a clone of the underlying manager.
+        let dir = TempDir::new().unwrap();
+        let keys = Keys::generate();
+        let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
+        let core = LiveSyncCore::new_local(Arc::clone(&circle), keys.public_key());
+
+        assert!(
+            Arc::ptr_eq(core.circle(), &circle),
+            "the engine must share the caller's manager, not its own"
+        );
+    }
 }

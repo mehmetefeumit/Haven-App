@@ -954,4 +954,99 @@ mod tests {
             "alt tag must not contain 'family': got '{alt_value}'"
         );
     }
+
+    // ---- Security Rules 4/6/8: the redacting `Debug` impls -----------------
+    //
+    // Both event types carry material that must never reach a log: the inner
+    // event's `content` is the plaintext location JSON, and the outer event's
+    // `id` / `pubkey` / `sig` identify the ephemeral sender key minted per
+    // message (Rule 2). Neither type derives `Debug` — each hand-writes one
+    // that substitutes `<redacted>`. A `#[derive(Debug)]` would compile, pass
+    // every other test, and silently start printing coordinates into logcat,
+    // a bug report, or an OEM log collector.
+    //
+    // These assert on the RENDERED string, which is what actually reaches a
+    // log, rather than on the impl's existence.
+
+    #[test]
+    fn unsigned_event_debug_redacts_the_location_content() {
+        let event = UnsignedLocationEvent {
+            kind: 9,
+            // Distinctive values so a leak cannot hide behind a coincidence.
+            content: r#"{"latitude":52.370216,"longitude":4.895168}"#.to_string(),
+            tags: vec![vec!["t".to_string(), "location".to_string()]],
+            created_at: 1_700_000_000,
+        };
+
+        let rendered = format!("{event:?}");
+
+        assert!(
+            !rendered.contains("52.370216") && !rendered.contains("4.895168"),
+            "the inner event's plaintext coordinates must never render: {rendered}"
+        );
+        assert!(
+            !rendered.contains("latitude"),
+            "not even the content's shape may render — it is the payload the \
+             whole app exists to protect: {rendered}"
+        );
+        assert!(
+            rendered.contains("<redacted>"),
+            "the content field must be present but redacted, so a reader can \
+             see it was withheld rather than absent: {rendered}"
+        );
+        // The non-sensitive fields stay, or the type is useless for debugging.
+        assert!(rendered.contains("kind: 9"), "kind is safe: {rendered}");
+        assert!(
+            rendered.contains("tag_count: 1"),
+            "tags render as a COUNT — a tag value can carry a group id: {rendered}"
+        );
+        assert!(
+            rendered.contains("1700000000"),
+            "created_at is safe: {rendered}"
+        );
+    }
+
+    #[test]
+    fn signed_event_debug_redacts_every_identifying_field() {
+        let event = SignedLocationEvent {
+            id: "aaaaaaaabbbbbbbbccccccccdddddddd".to_string(),
+            pubkey: "deadbeefdeadbeefdeadbeefdeadbeef".to_string(),
+            created_at: 1_700_000_000,
+            kind: KIND_GROUP_MESSAGE,
+            tags: vec![
+                vec!["h".to_string(), "0123456789abcdef".to_string()],
+                vec!["expiration".to_string(), "1700000228".to_string()],
+            ],
+            content: "BASE64CIPHERTEXTPAYLOAD".to_string(),
+            sig: "ffffffffffffffffffffffffffffffff".to_string(),
+        };
+
+        let rendered = format!("{event:?}");
+
+        for secret in [
+            "aaaaaaaabbbbbbbb",        // id
+            "deadbeefdeadbeef",        // ephemeral pubkey (Rule 2)
+            "BASE64CIPHERTEXTPAYLOAD", // ciphertext
+            "ffffffffffffffff",        // signature
+        ] {
+            assert!(
+                !rendered.contains(secret),
+                "`{secret}` leaked into the rendered Debug: {rendered}"
+            );
+        }
+        assert!(
+            !rendered.contains("0123456789abcdef"),
+            "the `h` tag IS the nostr_group_id — rendering it links a device to \
+             a circle across every log line it appears in (Rule 4): {rendered}"
+        );
+        assert!(
+            rendered.contains("tag_count: 2"),
+            "tags must reduce to a count: {rendered}"
+        );
+        assert!(
+            rendered.contains("kind: 445"),
+            "the kind is safe and is the field that makes a log line \
+             identifiable at all: {rendered}"
+        );
+    }
 }

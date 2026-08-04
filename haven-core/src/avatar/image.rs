@@ -964,4 +964,51 @@ mod tests {
         }
         crc ^ 0xFFFF_FFFF
     }
+
+    /// Security Rule 6/8: `ProcessedAvatar` holds the encoded image bytes and
+    /// their content hash, and the type deliberately does NOT derive `Debug`.
+    ///
+    /// The bytes are the user's face; the content hash is a stable, linkable
+    /// identifier for that exact image — it is the Blossom path component, so
+    /// leaking it into a log correlates a device with a blob any relay operator
+    /// can fetch. A `#[derive(Debug)]` here compiles and breaks nothing else.
+    #[test]
+    fn processed_avatar_debug_redacts_bytes_and_content_hash() {
+        let processed = ProcessedAvatar {
+            canonical: Zeroizing::new(vec![0xAB, 0xCD, 0xEF, 0x01]),
+            thumbnail: Zeroizing::new(vec![0x12, 0x34]),
+            content_hash: [0x5A; 32],
+            width: AVATAR_TIER_EDGE_PX,
+            height: AVATAR_TIER_EDGE_PX,
+        };
+
+        let rendered = format!("{processed:?}");
+
+        // Byte buffers must not render in ANY of the shapes `Debug` produces
+        // for a `Vec<u8>` / `[u8; 32]`.
+        assert!(
+            !rendered.contains("171") && !rendered.contains("205"),
+            "canonical bytes rendered as decimal: {rendered}"
+        );
+        assert!(
+            !rendered.contains("18") && !rendered.contains("52"),
+            "thumbnail bytes rendered as decimal: {rendered}"
+        );
+        assert!(
+            !rendered.contains("90"),
+            "the content hash rendered as decimal — it is the Blossom path \
+             component, so this is a linkable identifier: {rendered}"
+        );
+        assert_eq!(
+            rendered.matches("<redacted>").count(),
+            3,
+            "all three sensitive fields must be present-but-withheld, so a \
+             reader sees they were redacted rather than absent: {rendered}"
+        );
+        // Dimensions are safe and are what makes the type debuggable at all.
+        assert!(
+            rendered.contains(&AVATAR_TIER_EDGE_PX.to_string()),
+            "dimensions must still render: {rendered}"
+        );
+    }
 }

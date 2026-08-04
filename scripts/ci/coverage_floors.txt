@@ -74,6 +74,21 @@
 # pin is floor(measured) - 2 rather than the tighter value the ratchet's
 # failure message suggests — `--list` implements the former, and it is the
 # supported way to re-pin.
+#
+# THE PRE-PUSH HOOK RUNS THIS FILE TOO, and it runs on whatever `cargo` is
+# default. On a toolchain older than CI's, some rows are not merely tighter —
+# they are UNSATISFIABLE. Measured on rustc 1.92 against these 1.97.1 pins:
+#
+#   src/profile/fetch.rs   floor 97, ceiling 96.26%  (2 uncovered production
+#                          lines; 410+2 = 412/428)
+#   src/keyring_policy.rs  floor 89, ceiling 88.00%  (4 uncovered production
+#                          lines; 172+4 = 176/200)
+#
+# "Ceiling" is with EVERY remaining production line covered. The rest of each
+# file's uncovered lines are assertion-failure messages inside passing tests,
+# which execute only when the assertion fails — no test can cover them. So on
+# 1.92 those two rows cannot be satisfied by writing tests, only by matching
+# CI's toolchain (`rustup update`, or run the hook with `cargo +<ci-ver>`).
 # ===========================================================================
 
 
@@ -90,7 +105,7 @@
 # at 100 because Rule 3 (kind 444 MUST remain unsigned) has no partial form.
 rust|src/nostr/mls/|91                       # measured 93.29% (1419/1521)
 rust|src/nostr/mls/manager.rs|90             # measured 92.56% (697/753)
-rust|src/nostr/mls/storage.rs|88             # measured 90.55% (297/328)
+rust|src/nostr/mls/storage.rs|91             # measured 93.12% (325/349)
 rust|src/nostr/mls/signer.rs|94              # measured 96.47% (82/85)
 rust|src/nostr/mls/welcome.rs|100            # measured 100.00% (124/124)
 
@@ -105,7 +120,7 @@ rust|src/nostr/encryption/|97                # measured 99.20% (124/125)
 rust|src/nostr/identity/|93                  # measured 95.51% (659/690)
 rust|src/nostr/keys.rs|97                    # measured 99.27% (136/137)
 rust|src/nostr/giftwrap.rs|89                # measured 91.63% (186/203)
-rust|src/nostr/event.rs|92                   # measured 94.19% (454/482)
+rust|src/nostr/event.rs|96                   # measured 98.31% (523/532)
 rust|src/nostr/tags.rs|100                   # measured 100.00% (102/102)
 
 # --- Key and database custody ----------------------------------------------
@@ -134,7 +149,7 @@ rust|src/location/nostr.rs|50                # measured 52.54% (31/59)
 rust|src/profile/|92                         # measured 94.84% (2095/2209)
 rust|src/profile/blossom.rs|89               # measured 91.48% (719/786)
 rust|src/profile/fetch.rs|97                 # measured 99.51% (410/412)
-rust|src/avatar/image.rs|94                  # measured 96.74% (475/491)
+rust|src/avatar/image.rs|96                  # measured 98.63% (504/511)
 
 # --- Relay plane -----------------------------------------------------------
 # publishers.rs carries the OK-ack accounting Security Rule 13 depends on

@@ -840,4 +840,57 @@ mod tests {
         assert_eq!(MLS_DB_FILENAME, "session.sqlite");
         assert_eq!(LEGACY_MLS_DB_FILENAME, "haven_mdk.db");
     }
+
+    #[test]
+    fn session_db_path_is_the_registry_key_callers_must_reuse() {
+        // Rule 14's registry is keyed on this exact path. The helper exists so
+        // no caller re-spells the filename: a second literal decouples silently
+        // on any rename — `is_session_live` would keep answering `false` for a
+        // key nothing registers, and a reclaiming caller would conclude the
+        // guard is free and never recover an orphaned session.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = session_db_path(dir.path());
+
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some(MLS_DB_FILENAME),
+            "the helper must produce the MLS db filename, not a second spelling"
+        );
+        assert_eq!(
+            path,
+            StorageConfig::new(dir.path()).database_path(),
+            "the free helper and the config method must agree — they key the \
+             SAME registry entry, and a divergence is invisible until a \
+             reclaim silently fails"
+        );
+        assert_eq!(path.parent(), Some(dir.path()));
+    }
+
+    #[test]
+    fn open_encrypted_storage_fails_closed_when_the_data_dir_cannot_exist() {
+        // A device whose storage is unavailable (locked, full, or — as here —
+        // a path that cannot be a directory) must surface an error rather than
+        // fall back to an unencrypted or in-memory store. Silently degrading
+        // would put MLS state, and the exporter secrets in it, outside
+        // SQLCipher.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let blocker = dir.path().join("not-a-dir");
+        std::fs::write(&blocker, b"regular file").expect("write blocker");
+
+        // `data_dir` NESTED under a regular file, so `create_dir_all` cannot
+        // succeed on any platform.
+        // `SqliteAccountStorage` is not `Debug`, so match rather than
+        // `expect_err`.
+        let config = StorageConfig::new(blocker.join("mls"));
+        match config.open_encrypted_storage() {
+            Err(NostrError::StorageError(_)) => {}
+            Err(other) => {
+                panic!("the failure must be a StorageError the caller can act on: {other:?}")
+            }
+            Ok(_) => panic!(
+                "an unusable data directory must fail closed — opening anyway \
+                 would put MLS state outside SQLCipher"
+            ),
+        }
+    }
 }
