@@ -300,7 +300,7 @@ mod tests {
         );
         // The dropped spellings are equally unusable as pool entries.
         for bad in &input[..4] {
-            assert!(
+            assert_eq!(
                 crate::profile::resolve_profile_pool(
                     &[
                         bad.clone(),
@@ -311,8 +311,8 @@ mod tests {
                     &[],
                 )
                 .expect("3 valid survive")
-                .len()
-                    == 3
+                .len(),
+                3
             );
         }
     }

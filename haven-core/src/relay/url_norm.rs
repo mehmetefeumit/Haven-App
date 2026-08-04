@@ -134,7 +134,7 @@ mod tests {
     #[test]
     fn rejects_empty_credentials_and_plaintext_ws() {
         for bad in ["", "   ", "wss://user:pass@relay.example", "not-a-url"] {
-            assert!(normalize_relay_url(bad).is_none(), "accepted {bad:?}",);
+            assert!(normalize_relay_url(bad).is_none(), "accepted {bad:?}");
         }
         // ws:// is rejected in release; in debug it needs the loopback opt-in,
         // which this test never arms.

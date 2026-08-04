@@ -1,0 +1,282 @@
+# Reusable workflow: Android PERMISSION-REVOCATION lane
+# (docs/CI_HARDENING_BACKLOG.md Workstream B, item B5).
+#
+# Revokes the app's location permission (`pm revoke`) underneath a live
+# sharing session and asserts what Haven does about it:
+#
+#   1. permission GRANTED -> the app publishes         (count PARSED, and
+#                                                       corroborated off the
+#                                                       relay)
+#   2. `pm revoke` mid-session                         (VERIFIED via
+#                                                       `dumpsys package` —
+#                                                       `pm revoke` exits 0
+#                                                       even when it refuses)
+#   3. permission REVOKED -> the real denied /
+#      deniedForever branch refuses every location read
+#   4. permission REVOKED -> ZERO location events reach the relay for a
+#      bounded window, across the relaunch the revocation forces
+#
+# # What was actually missing (the premise, checked against the tree)
+#
+# `GeolocatorLocationService`'s denied / deniedForever branches
+# (geolocator_location_service.dart:267-277 and :316-326) are reached in
+# `haven/test/services/geolocator_location_service_test.dart` ONLY through a
+# mocked `GeolocatorWrapper`, and every E2E scenario injects
+# `FakeLocationService`, whose `checkPermission()` is a hardcoded
+# `LocationPermissionStatus.always`
+# (haven/integration_test/e2e/_lib/fake_location_service.dart:57). The real
+# platform refusal executed nowhere in CI.
+#
+# # Why TWO drives, unlike the sibling B6 lane
+#
+# `pm revoke` KILLS the app process: AOSP's
+# `PermissionManagerServiceImpl.revokeRuntimePermissionInternal` calls back
+# into `PackageManagerService.onPermissionRevoked`, which posts
+# `killUid(... KILL_APP_REASON_PERMISSIONS_REVOKED)`. So on Android the
+# mid-session half is enforced by the OS, and Haven's own denied branches run
+# only on the NEXT launch. A single-drive lane could prove only that a dead
+# process publishes nothing — true of every app. ACT 2 (a second drive of the
+# same target against the same install, permission still revoked) is what
+# executes the branches this item is about. See the orchestrator header.
+#
+# `e2e-location-provider-toggle.yml` (B6) is the sibling, not a substitute:
+# it switches the DEVICE-WIDE provider off, which lands on
+# `isLocationServiceEnabled()` (:258) and leaves the process alive. Different
+# gate, different object, neither reachable from the other.
+#
+# # Architecture mirrors e2e-location-provider-toggle.yml / e2e-real-gps.yml
+#
+# Same single-AVD, build-before-boot design: the multi-GB Rust-NDK + Gradle
+# peak must never coincide with a resident emulator
+# (docs/E2E_TROUBLESHOOTING.md).
+
+name: E2E Permission Revocation
+
+on:
+  workflow_call:
+
+jobs:
+  e2e_permission_revocation:
+    name: e2e_permission_revocation
+    runs-on: ubuntu-latest
+    # One APK build (<=30m) + boot + a step that runs TWO drives back to back
+    # (<=34m of step deadline). The step-level timeout-minutes below bound a
+    # hung phase so GitHub kills the STEP rather than the runner, letting the
+    # if: always() artifact upload still run; this job-level cap is the outer
+    # envelope over both.
+    timeout-minutes: 85
+    env:
+      HAVEN_E2E_RELAY: ws://10.0.2.2:7777
+
+      # Declared EXPLICITLY rather than inherited. `liveSyncEnabled` defaults
+      # to true when the define is absent, so an omitted flag reads as "we
+      # didn't think about it" (CI_HARDENING_BACKLOG.md A7).
+      #
+      # `false` is a deliberate choice, not a copy. This lane's subject is the
+      # SEND half (platform permission -> location service -> publisher) and
+      # what stops when the permission goes away; the app's own receive path
+      # is not on the path being proven, and running it would only widen the
+      # failure surface — and add relay traffic — inside a window whose whole
+      # point is that it stays empty. The live receive path is proven by the
+      # e2e-android live_sync variants.
+      HAVEN_LIVE_SYNC: "false"
+
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Free disk space
+        run: bash tooling/e2e/ci/free-disk-space.sh
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: haven-core
+          # Distinct cache key from the other E2E jobs so they don't race on
+          # one entry; all build the same x86_64-linux-android target.
+          key: e2e-permission-revocation-x64
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: flutter pub get
+
+      # Build the target APK BEFORE the emulator boots (build-before-boot
+      # discipline). Staged at /tmp/integration-apks/<basename>.apk; the
+      # --dart-defines baked here (relay URL + receive path) MUST match what
+      # the drive step assumes, because `flutter drive` does not re-pass them.
+      # ONE APK serves both acts — the target picks its act from the live
+      # permission state, not from a define.
+      - name: Build permission-revocation test APK
+        working-directory: haven
+        timeout-minutes: 30
+        run: bash ../tooling/e2e/ci/build-integration-apks.sh
+          integration_test/b5_permission_revocation_test.dart
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: AVD cache
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          # Shared with the other Android E2E lanes: the AVD snapshot is
+          # byte-identical (same api/arch/target/profile), so this restores
+          # the snapshot they created instead of rebuilding it.
+          key: avd-api34-x86_64-google_apis-single-v1
+
+      - name: Create AVD snapshot
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        # Bounded for the same reason the sibling lanes are: a wedged boot
+        # with no step cap dies at the JOB cap, which SIGKILLs the runner
+        # before any if: failure() step, so the lane fails slow and with no
+        # artifacts. 15 min is ~7x the observed snapshot time.
+        timeout-minutes: 15
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          emulator-boot-timeout: 420
+          script: echo "Generated AVD snapshot for caching."
+
+      - name: Start strfry relay
+        env:
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+        run: bash tooling/e2e/ci/start-strfry.sh
+
+      # All real logic lives in the checked-in orchestrator (single bash
+      # invocation — the action runs each line of a multi-line `script:` in
+      # its own sh -c, which would drop shell state). It backgrounds ACT 1's
+      # `flutter drive` so the revoke lands mid-session, then runs ACT 2 as a
+      # second drive while polling the relay for the absence proof.
+      #
+      # BOUNDS. Three of them, innermost first:
+      #   14m  EACH `flutter drive` (the orchestrator's own B5_DRIVE1_TIMEOUT
+      #        / B5_DRIVE2_TIMEOUT defaults; kept in the script rather than
+      #        declared here so the two cannot drift).
+      #   34m  this step's inner deadline (run-with-deadline.sh below) —
+      #        covers BOTH drives plus install/verified-grants/GPS-seed/
+      #        revoke/`pm clear`/relay polling/oracle, none of which the
+      #        per-drive timeouts bound, and is the bound that actually reaps
+      #        (CI_HARDENING_BACKLOG.md A8).
+      #   43m  this step's timeout-minutes = 34 + 1 (kill grace) + 7
+      #        (emulator-boot-timeout) + margin, a belt over the deadline.
+      # Sizing evidence: each act self-bounds at a 13-minute in-test Timeout
+      # (ACT 1: arming + a 150s baseline wait + a 120s revoke-observation wait
+      # + the 258s mid-session window; ACT 2: arming + a 75s probe + the 258s
+      # absence window), and the two run back to back. Revise against p95 once
+      # this lane has green history.
+      #
+      # -memory 6144 matches the sibling Android lanes: RustLib + SQLCipher
+      # floods `mlock() -1 ENOMEM` under pressure.
+      - name: Run the permission-revocation proof on the emulator
+        timeout-minutes: 43
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none -memory 6144
+          disable-animations: true
+          emulator-boot-timeout: 420
+          script: bash tooling/e2e/ci/run-with-deadline.sh 34m "e2e-permission-revocation drive" -- bash tooling/e2e/ci/run-b5-permission-revocation.sh /tmp/integration-apks/b5_permission_revocation_test.apk integration_test/b5_permission_revocation_test.dart
+
+      - name: Capture host + emulator diagnostics
+        if: failure()
+        run: |
+          mkdir -p /tmp/b5-logs
+          adb reconnect offline || true
+          timeout 60 adb wait-for-device || true
+          {
+            echo "=== df -h ==="
+            df -h || true
+            echo
+            echo "=== free -h ==="
+            free -h || true
+            echo
+            echo "=== adb devices -l (after reconnect attempt) ==="
+            adb devices -l || true
+            echo
+            echo "=== location permission state ==="
+            adb shell dumpsys package com.oblivioustech.haven \
+              | grep -E 'ACCESS_(FINE|COARSE|BACKGROUND)_LOCATION' || true
+            echo
+            echo "=== appops location slice ==="
+            adb shell cmd appops get com.oblivioustech.haven || true
+          # `.log`, not `.txt`: this file is written AFTER the orchestrator's
+          # EXIT trap has already scanned, and the scanner's directory walk
+          # only picks up `*.log`. A `.txt` here would be uploaded unscanned.
+          } > /tmp/b5-logs/diag.log 2>&1 || true
+          # Scan what this step just wrote (Security Rule 6). Withhold rather
+          # than upload on a hit, matching the orchestrator's containment.
+          # rc 1 (a real leak) and rc 3 (absent/unreadable/empty log) are kept
+          # apart deliberately: both fail the step, but only a leak justifies
+          # destroying the diag.
+          diag_scan_rc=0
+          bash tooling/e2e/ci/scan-logs-for-secrets.sh /tmp/b5-logs/diag.log \
+            || diag_scan_rc=$?
+          if [ "${diag_scan_rc}" -eq 1 ]; then
+            rm -f /tmp/b5-logs/diag.log
+            echo "diag withheld: secret-leak guard tripped" > /tmp/b5-logs/DIAG_LEAK.txt
+            exit 1
+          elif [ "${diag_scan_rc}" -ne 0 ]; then
+            echo "diag unscannable (rc=${diag_scan_rc}): absent, unreadable or empty" \
+              > /tmp/b5-logs/DIAG_UNSCANNABLE.txt
+            echo "ERROR: diag log could not be scanned (rc=${diag_scan_rc})." >&2
+            exit 1
+          fi
+
+      # if: always() so a green run still surfaces the permission read-backs,
+      # the relay baseline, and any measured mid-session stale-cache tail as
+      # recorded evidence.
+      - name: Upload permission-revocation artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-permission-revocation-${{ github.run_id }}
+          path: |
+            /tmp/b5-logs/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Tear down strfry relay
+        if: always()
+        run: bash tooling/e2e/ci/stop-strfry.sh

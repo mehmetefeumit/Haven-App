@@ -90,6 +90,17 @@
 #     kind-445 buffers forever and the scenario fails on the receive path with
 #     nothing pointing back at the create.
 #
+#   Background delivery is asserted   scripts/ci/check_m7_background_delivery_assertion.sh
+#     The e2e-background-catchup lane must prove a background wake RECEIVED a
+#     peer location, not merely that it booted. Its `M7_REQUIRE_DECRYPT`
+#     switch defaulted to 0 and was set in no workflow, so for its whole life
+#     the lane proved bootstrap under a name that said delivery. The guard
+#     pins the workflow setting it, the runner still hard-failing, the CI-only
+#     dispatcher arming the ws:// opt-in in the cold process AND delegating to
+#     the production wake body, every m7_worker_* target registering it, and —
+#     the privacy half — that no ws:// opt-in or HAVEN_E2E define ever appears
+#     in the shipped worker library.
+#
 #   Live-sync define is declared      scripts/ci/check_live_sync_define_declared.sh
 #     Every workflow job that BUILDS the app must say which receive path it
 #     compiles. `liveSyncEnabled` is `bool.fromEnvironment('HAVEN_LIVE_SYNC',
@@ -241,6 +252,23 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_e2e_publish_before_apply.sh
 
+      # A switch that exists, reads plausibly, and is set nowhere is the
+      # quietest way for a lane to stop proving what it is named for:
+      # M7_REQUIRE_DECRYPT defaulted to 0 for its entire life, so the
+      # background catch-up lane asserted bootstrap and never delivery.
+      - name: Background catch-up lane asserts delivery
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_m7_background_delivery_assertion.sh
+
+      # The guard above is a grep over four file kinds, so its fixtures pin
+      # each one in both directions — including the exact regression it exists
+      # for (a workflow that sets nothing), a doc comment that must not count
+      # as a call, and a dispatcher that re-implements the wake instead of
+      # delegating to it, which would make the lane prove the copy.
+      - name: Background-delivery guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_m7_background_delivery_assertion.sh --self-test
+
       # The kind-0 plane's test override is install-once, so a second call site
       # throws and the winner depends on call order. That broke e2e_profile on
       # both platforms in CI run 30753193231 — under a comment asserting the
@@ -344,6 +372,73 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/run-b1-fgs-publish.sh --self-test
 
+      # Guards the B3 real-GPS lane's oracle predicates. Two critical fixtures:
+      # `[b3] PUBLISHED n=0` (the publisher reporting it published to NOTHING —
+      # a presence grep would call that a pass) and a `dumpsys package` dump
+      # where a NEIGHBOURING permission is granted while ours is not (a bare
+      # `granted=true` grep would report the location permission as held). If
+      # either rots, the lane goes green on a chain that never carried a real
+      # GPS fix.
+      - name: E2E harness self-test (real-GPS oracle predicates)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-b3-real-gps.sh --self-test
+
+      # Guards the B6 provider-toggle lane's oracle, which is exercised END TO
+      # END here rather than only per-predicate: one fixture is TODAY'S real
+      # behaviour (publishes, stops, recovers, tells the user NOTHING) and must
+      # be REPORTED, and its twin is the fully-fixed app and must PASS. Without
+      # the second, an oracle hard-coded to red would look correct; without the
+      # first, the lane would bless the silent-failure defect it exists to find.
+      # Two more pin the vacuity routes: a zero baseline (it never published, so
+      # "it stopped" is meaningless) and an error surface that was already up
+      # before the toggle.
+      - name: E2E harness self-test (provider-toggle oracle)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-b6-location-provider-toggle.sh --self-test
+
+      # Guards the B5 permission-revocation oracle. Two halves need pinning.
+      # The RELAY half is a diff over location-event ids, and its fixtures are
+      # the ones that can silently rot: a commit-only capture must yield NO
+      # ids (kind 445 also carries MLS evolution traffic, which ACT 2's own
+      # circle creation produces), the 64-hex `pubkey` on the same line must
+      # never be harvested as an event id, and a baseline id that EXPIRED off
+      # the relay must not resurface as "new". The PERMISSION half is read
+      # from `dumpsys package`, where a granted neighbouring permission one
+      # line up would answer for ours under a bare `granted=true` grep — and
+      # `pm grant`/`pm revoke` exit 0 even when they refuse, so that read is
+      # the only place a refusal is visible at all.
+      - name: E2E harness self-test (permission-revocation oracle)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-b5-permission-revocation.sh --self-test
+
+      # Guards the B8 clock-skew lane's ANTI-VACUITY parsers. The critical
+      # fixture is a servo record whose read-back drift equals the full
+      # requested magnitude — i.e. `date` exited 0 and the clock never moved.
+      # If `jump_ok_seqs` ever rots into one that accepts it, every phase of
+      # that lane runs at true time, every in-drive oracle passes, and the lane
+      # reports GREEN having applied no skew at all. Two more pin the routes
+      # either side of it: a missing/empty servo log must yield NO applied
+      # jumps (a grep that matches nothing is how a guard becomes a no-op), and
+      # a truncated capture must stay distinguishable from a clean one so "the
+      # body died at phase 2" cannot read as "phases 3-4 found nothing".
+      - name: E2E harness self-test (clock-skew parsers)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-b8-clock-skew.sh --self-test
+
+      # Guards the B9 network-reconnect oracle. Its critical fixtures are the
+      # NEGATIVE TWINS: every verdict in that lane is a positive/negative pair
+      # printed by the drive, and a substring match that let
+      # `OUTAGE_NOT_OBSERVED` satisfy a search for `OUTAGE_OBSERVED` would
+      # report a lane that never disconnected as one that did — a green run
+      # proving nothing at all. The rest pin the four vacuity routes (no
+      # baseline receive, engine never running, no outage, nothing published
+      # after it), the REAL FINDING case (recovery never happened, which must
+      # be reported), and the healthy app (which must PASS, or an oracle
+      # hard-coded to red would look correct on the finding fixture).
+      - name: E2E harness self-test (network-reconnect oracle)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-b9-network-reconnect.sh --self-test
+
       # The iOS twin of the connect-flake predicate. Both iOS lanes hand their
       # scenario to `nick-fields/retry` with no filter, so before this the second
       # attempt was a free re-roll of ANY red — measured, 19 genuine test
@@ -365,3 +460,32 @@ jobs:
       - name: E2E harness self-test (iOS first-test watchdog)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/run-ios-sim-scenario.sh --self-test
+
+      # The B7 auth-tier lane's own predicates. Its failure modes are all
+      # silent-green ones that no on-device run could report: an Xcode whose
+      # `simctl privacy` has no `location-always` service (the lane would grant
+      # `location` twice and "pass"); two runs that observed the SAME tier
+      # (every per-tier branch in the drive target still passes, having
+      # discriminated nothing); and a drive that exits 0 without running either
+      # test body — the tier marker is printed BEFORE the first assertion, so
+      # the discrimination gate reads it and passes while `[b7] COPY_OK` and
+      # `[b7] BACKGROUND_PUBLISH_OK` never appear. The fixtures pin all three,
+      # plus the tier-marker parser that feeds the first two.
+      - name: E2E harness self-test (iOS auth-tier discrimination gate)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-b7-ios-auth-tier.sh --self-test
+
+      # The B4 iOS real-GPS lane's preflight and oracle. The fixtures that earn
+      # their keep are the silent-green ones: a `simctl location` usage listing
+      # WITHOUT a `set` action (the lane must refuse rather than improvise a
+      # fake fix) versus an Xcode with no `location` subcommand at all (a
+      # different failure, and conflating them blames Xcode for a broken probe);
+      # `(0, 0)` refused as a seed, because the null island is exactly what a
+      # simulator with no simulated location reports, so seeding it would make
+      # the lane unable to tell a delivered fix from no fix; and a log that says
+      # `1 test passed` without the `[b4] PEER_DECRYPT_MATCH` marker, which is
+      # the only check that can see a drive exiting 0 without reaching its proof
+      # (A3b).
+      - name: E2E harness self-test (iOS real-GPS preflight + proof oracle)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-b4-ios-real-gps.sh --self-test

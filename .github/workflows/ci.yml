@@ -167,6 +167,95 @@ jobs:
     needs: [rust]
     uses: ./.github/workflows/e2e-fgs-publish.yml
 
+  # Runtime proof of the REAL location stack (backlog B3): no
+  # `locationServiceProvider` override, a VERIFIED `pm grant`, coordinates
+  # injected with `adb emu geo fix`, and — the part no other lane does — the
+  # coordinates a PEER decrypts asserted numerically against what was
+  # injected. B1 above proves a background publish HAPPENED; this proves WHAT
+  # was published, which is the difference between a live GPS path and a
+  # constant.
+  e2e-real-gps:
+    name: E2E Real GPS (Android)
+    needs: [rust]
+    uses: ./.github/workflows/e2e-real-gps.yml
+
+  # Runtime proof that a +/-6h device wall-clock jump does not silently kill
+  # location sharing (backlog B8). Three subsystems ride the device clock with
+  # no external reference: the kind-445 `created_at`, the 228 s NIP-40 TTL
+  # derived from it, and the `since` cursor catch-up re-derives from a peer's
+  # `created_at`. The hermetic relay is the one clock in the lane that does not
+  # move, which is what makes the asymmetry — and therefore the assertion —
+  # real rather than self-consistent.
+  e2e-clock-skew:
+    name: E2E Clock Skew (Android)
+    needs: [rust]
+    uses: ./.github/workflows/e2e-clock-skew.yml
+
+  # The iOS twin of the lane above (backlog B4): `simctl privacy grant location`
+  # + `simctl location set`, no `locationServiceProvider` override, and the same
+  # numeric assertion on the coordinates a PEER decrypts. Kept as its own lane
+  # rather than a job of e2e-ios.yml because the grant must land between the
+  # install and the first launch — an ordering the shared iOS runner's hermetic
+  # uninstall would otherwise erase.
+  e2e-ios-real-gps:
+    name: E2E Real GPS (iOS)
+    needs: [rust]
+    uses: ./.github/workflows/e2e-ios-real-gps.yml
+
+  # OS-level location services switched OFF mid-session and back on (backlog
+  # B6): `cmd location set-location-enabled false`. Distinct from B5, which
+  # revokes the APP's permission and lands in `checkPermission()`'s denied
+  # branches; this reaches `isLocationServiceEnabled()`, a gate that
+  # `FakeLocationService` hardcodes to `true` and that therefore executed
+  # nowhere in CI. The lane asserts that publishing STOPS (measuring the
+  # documented 168s stale-fix tail), that the user is TOLD, and that
+  # re-enabling recovers. EXPECTED RED on the "user is told" step — see the
+  # workflow header.
+  e2e-location-provider-toggle:
+    name: E2E Location Provider Toggle (Android)
+    needs: [rust]
+    uses: ./.github/workflows/e2e-location-provider-toggle.yml
+
+  # Runtime proof that revoking the APP's location permission mid-session
+  # stops it publishing, and that it stays stopped (backlog B5): `pm revoke`
+  # under a live sharing session, then a SECOND drive of the same target
+  # against the same install. Two drives because `pm revoke` kills the app
+  # process (AOSP posts `killUid(... KILL_APP_REASON_PERMISSIONS_REVOKED)`),
+  # so Haven's own denied/deniedForever branches — mocked in unit tests,
+  # hardcoded to `always` by `FakeLocationService` in every other scenario —
+  # run only on the relaunch. The absence half is asserted off the RELAY
+  # (a diff over location-event ids, polled across a bounded window), which
+  # also covers the per-circle scheduler the app-side checks cannot see.
+  e2e-permission-revocation:
+    name: E2E Permission Revocation (Android)
+    needs: [rust]
+    uses: ./.github/workflows/e2e-permission-revocation.yml
+
+  # iOS CoreLocation authorization tiers (backlog B7): the same drive target run
+  # twice on one simulator, once per `xcrun simctl privacy grant` tier, with a
+  # gate that fails unless the two runs OBSERVED different tiers. It asserts the
+  # honest per-tier UI copy and that background publishing continues under BOTH
+  # — When-In-Use is genuinely sufficient for a foreground-started background
+  # session on iOS; "Always" only adds the SLC relaunch after termination. No
+  # other lane grants a real CoreLocation authorization at all.
+  e2e-ios-auth-tier:
+    name: E2E iOS Auth Tier (When In Use vs Always)
+    needs: [rust]
+    uses: ./.github/workflows/e2e-ios-auth-tier.yml
+
+  # Network loss and reconnect (backlog B9): device-wide airplane mode dropped
+  # under a live session, then restored, asserting that a PEER location
+  # published after the reconnect is DECRYPTED — not merely that a socket
+  # reopened. Nothing in CI had ever disconnected a running Haven, so all
+  # three of the live-sync engine's recovery mechanisms were unexercised: the
+  # relay pool's own reconnect + filter replay, the M8 subscription-health
+  # re-anchor, and MapShell's 90-150s self-heal, which is the only thing that
+  # restarts an engine torn down by `_onStreamClosed`.
+  e2e-network-reconnect:
+    name: E2E Network Reconnect (Android)
+    needs: [rust]
+    uses: ./.github/workflows/e2e-network-reconnect.yml
+
   # The public-profile flow (kind-0 + Blossom photo) on BOTH platforms:
   # publish, resolve, merge-preserving edit, and delete→npub-fallback against
   # a real hermetic relay + Blossom server.

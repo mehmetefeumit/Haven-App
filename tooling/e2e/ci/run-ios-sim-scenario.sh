@@ -441,6 +441,28 @@ if [[ -n "${HAVEN_E2E_PROFILE_RELAYS:-}" ]]; then
   echo "iOS E2E — profile pool=${HAVEN_E2E_PROFILE_RELAYS}"
 fi
 
+# Optional real-GPS expectation passthrough (B4 lane only — set by
+# tooling/e2e/ci/run-b4-ios-real-gps.sh), same opt-in shape as the two above, so
+# every other iOS lane's compiled dart-defines stay byte-identical.
+#
+# These name the coordinates that lane seeded with `xcrun simctl location set`.
+# They MUST reach the compiler: b4_ios_real_gps_test.dart has no default for
+# them and fails closed when they are absent, precisely so it can never end up
+# comparing a decrypt against a constant it chose itself. The values are not
+# echoed — a seeded position is the payload that lane exists to prove is
+# encrypted, and this log is uploaded as a CI artifact.
+if [[ -n "${HAVEN_B4_GEO_LAT:-}" ]]; then
+  EXTRA_DART_DEFINES+=(--dart-define=HAVEN_B4_GEO_LAT="${HAVEN_B4_GEO_LAT}")
+fi
+if [[ -n "${HAVEN_B4_GEO_LON:-}" ]]; then
+  EXTRA_DART_DEFINES+=(--dart-define=HAVEN_B4_GEO_LON="${HAVEN_B4_GEO_LON}")
+fi
+if [[ -n "${HAVEN_B4_GEO_TOLERANCE_DEG:-}" ]]; then
+  EXTRA_DART_DEFINES+=(
+    --dart-define=HAVEN_B4_GEO_TOLERANCE_DEG="${HAVEN_B4_GEO_TOLERANCE_DEG}"
+  )
+fi
+
 # Clean slate — mirror the Android lane's force-stop + `adb uninstall`
 # (run-single-avd-scenario.sh). This simulator is booted ONCE and reused across
 # steps and both retry attempts, and `flutter test` does NOT guarantee a data
@@ -452,7 +474,21 @@ fi
 # deterministically fails live-sync engine start for EVERY scenario. Removing
 # the app deletes that container so the first open mints a fresh key+DB pair.
 # `|| true`: a not-yet-installed app is fine.
-xcrun simctl uninstall "${SIM_UDID}" com.oblivioustech.haven >/dev/null 2>&1 || true
+#
+# OPT-OUT (HAVEN_E2E_IOS_SKIP_UNINSTALL=1): a caller that has ALREADY prepared
+# the simulator — its own uninstall, install, and per-run `xcrun simctl privacy`
+# grants — must be able to stop this line from erasing that preparation. A
+# privacy grant is keyed by bundle id and does not survive an uninstall, so an
+# unconditional wipe here would silently revert the B7 auth-tier lane
+# (tooling/e2e/ci/run-b7-ios-auth-tier.sh) to "no authorization granted", which
+# reads on the wire exactly like a passing run of a lane that proved nothing.
+# Unset in every other lane, so their behaviour is unchanged.
+if [[ "${HAVEN_E2E_IOS_SKIP_UNINSTALL:-}" == "1" ]]; then
+  echo "iOS E2E — skipping the pre-run uninstall (HAVEN_E2E_IOS_SKIP_UNINSTALL=1):" \
+       "the caller owns this simulator's install + privacy state."
+else
+  xcrun simctl uninstall "${SIM_UDID}" com.oblivioustech.haven >/dev/null 2>&1 || true
+fi
 
 # ---------------------------------------------------------------------------
 # Drive the integration test on the booted simulator.

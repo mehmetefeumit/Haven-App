@@ -42,19 +42,23 @@
 /// worker process to read. Real-keyring viability on the AVD is proven by the
 /// green `integration_test/keyring_test.dart`.
 ///
-/// ## Cross-process relay caveat (Phase A hard-asserts bootstrap, not decrypt)
+/// ## Cross-process relay opt-in (why Phase A can assert DELIVERY)
 ///
 /// The debug-only `ws://` loopback opt-in (`allowWsLoopbackForTest`, the
 /// `ALLOW_WS_LOOPBACK_FOR_TEST` OnceLock) is ALSO process-global — but, unlike
-/// the keyring, it has NO on-disk / persistent form. A cold worker process
-/// therefore rejects the plaintext `ws://` CI relay stored in the circle
-/// (`validate_single_relay_url`), so its sweep returns `locations=0`,
-/// `relayErrors>=1`. Seeding Bob's location is still correct (it is the update
-/// a worker that COULD reach the relay would decrypt, and it makes the circle a
-/// realistic multi-member group with genuine authoring history), but the lane's
-/// deterministic Phase-A assertion is `bootstrap ok` + `sweep complete:` +
-/// `circles>=1`; the decryption counters are captured as EVIDENCE only. See the
-/// lane script and the M7-E Wave-2 report for the full rationale.
+/// the keyring, it has NO on-disk / persistent form, so it cannot be inherited
+/// from this drive process. Until 2026-08-03 the cold worker therefore rejected
+/// the plaintext `ws://` CI relay stored in the circle
+/// (`validate_single_relay_url`) and its sweep returned `locations=0`,
+/// `relayErrors=1` — the lane could only assert bootstrap
+/// (`docs/CI_HARDENING_BACKLOG.md` B2).
+///
+/// [registerM7CiOneOffCatchup] now also registers `m7CiCallbackDispatcher`,
+/// which installs the opt-in IN the cold worker process and then runs the
+/// production wake body unmodified. Bob's seeded location below is
+/// consequently not just realistic history — it is the peer update Phase A
+/// hard-asserts the background wake decrypted (`locations>=1` +
+/// `relayErrors=0`, with `M7_REQUIRE_DECRYPT` now ON in CI).
 ///
 /// This target intentionally NEVER mounts `MapShell`, so no foreground poller
 /// consumes the synthetic location before the worker runs (plan D6).

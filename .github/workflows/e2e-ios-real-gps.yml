@@ -1,0 +1,178 @@
+# Reusable workflow: iOS REAL-GPS end-to-end lane
+# (docs/CI_HARDENING_BACKLOG.md Workstream B, item B4).
+#
+# The iOS twin of e2e-real-gps.yml (B3, Android). It proves the whole location
+# chain with nothing faked and asserts the VALUE rather than the event:
+#
+#   `xcrun simctl location <udid> set <lat>,<lon>` -> CoreLocation ->
+#   geolocator plugin -> GeolocatorLocationService ->
+#   locationPublisherProvider -> MLS encrypt -> kind-445 on a hermetic relay
+#   -> a PEER's own CircleManagerFfi decrypt -> coordinates compared
+#   numerically against what was seeded.
+#
+# # What was actually missing (the premise, checked against the tree)
+#
+# Every iOS scenario overrides `locationServiceProvider` with
+# `FakeLocationService` — `e2e_combined.dart:475` and `:5171`,
+# `e2e_profile_sharing.dart:706` — and run-ios-sim-scenario.sh's own header
+# states it: "No native location-permission grant: the scenario overrides
+# `locationServiceProvider` with `FakeLocationService` ... so CLLocationManager
+# is never touched." So on iOS the "GPS fix" was a Dart constant, and the
+# CoreLocation authorization path, the `AppleSettings` selection and the
+# simulator's location stack executed nowhere in CI. The drive target this lane
+# runs installs NO location override at all.
+#
+# # Why a SEPARATE workflow (not another job in e2e-ios.yml)
+#
+# The lane needs three things the shared iOS lane does not do and should not
+# learn: a build-then-install-then-GRANT ordering (a `simctl privacy` grant
+# resolves the bundle id against INSTALLED apps and does not survive
+# `simctl uninstall`, which the shared runner performs on entry), a device-level
+# `simctl location set` between the install and the launch, and a build with the
+# seeded coordinates baked in as `--dart-define`s so the drive target can assert
+# against them. All of that lives in tooling/e2e/ci/run-b4-ios-real-gps.sh,
+# which then DELEGATES the drive to run-ios-sim-scenario.sh so the first-test
+# watchdog, the narrowed retry gate (A6) and the secret-leak scan are inherited
+# rather than reimplemented.
+#
+# # Architecture mirrors e2e-ios-auth-tier.yml
+#
+# Same build-before-boot discipline (the multi-GB Rust + Xcode peak must never
+# coincide with a resident simulator) and the same host-native relay: macOS
+# runners have no Linux Docker daemon, so the Android lane's strfry container
+# cannot run here.
+
+name: E2E iOS Real GPS
+
+on:
+  workflow_call:
+
+jobs:
+  e2e_ios_real_gps:
+    name: e2e_ios_real_gps
+    runs-on: macos-latest # Apple Silicon; arm64 simulator (no Linux Docker).
+    # Envelope sized for a COLD first run: setup (~10-15m) + the boot step's
+    # 15m ceiling + the drive step's 75m ceiling. The drive step is the real
+    # bound; this is the outer backstop that must never fire first, because a
+    # job-cap SIGKILL skips every `if: always()` diagnostic — the worst red
+    # there is (scripts/ci/check_e2e_step_timeout_ordering.sh).
+    timeout-minutes: 105
+    env:
+      HAVEN_E2E_RELAY: ws://localhost:7777
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+      # Poll path, stated per JOB rather than inherited (S1 /
+      # CI_HARDENING_BACKLOG.md A7). This lane's subject is the ACQUIRE +
+      # PUBLISH side; its receive assertion runs through a synthetic peer's own
+      # FFI, not through the app's receive engine, so the live-sync path is an
+      # unrelated axis that would only add flake surface here.
+      HAVEN_LIVE_SYNC: "false"
+      # The coordinates seeded into the simulator AND asserted against, declared
+      # once here so the workflow, the seed and the assertion cannot disagree.
+      # South Pacific, both negative: far from anything, and the opposite
+      # hemisphere from every other sentinel in this repo (FakeLocationService's
+      # are all positive), so a sign-dropping regression in the encode path
+      # cannot hide behind them.
+      HAVEN_B4_GEO_LAT: "-41.234567"
+      HAVEN_B4_GEO_LON: "-134.567890"
+      # ~1.1 m, matching B3. Not a rounding risk: `simctl location set` hands
+      # CoreLocation the exact double it was given (the simulator runs no GNSS
+      # solver and adds no noise), so the only way to miss this window is a
+      # genuine coordinate-carrying defect.
+      HAVEN_B4_GEO_TOLERANCE_DEG: "1e-5"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Simulator triple for Apple-Silicon runners (mirrors e2e-ios.yml).
+          targets: aarch64-apple-ios-sim
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            haven-core
+            tooling/e2e/local-relay
+          key: e2e-ios-real-gps
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: flutter pub get
+
+      # Build + start the relay BEFORE booting the simulator, so the two
+      # multi-GB build peaks never coincide with a resident simulator.
+      - name: Build and start host-native relay
+        run: bash tooling/e2e/ci/start-local-relay.sh 7777
+
+      - name: Boot iOS simulator
+        id: sim
+        # macos-* runners have no GNU `timeout`, so GitHub's step cap is the
+        # only available bound on a boot that never reaches Booted. Measured
+        # boots are 136-215 s; 15 min is ~4x the observed max.
+        timeout-minutes: 15
+        run: bash tooling/e2e/ci/boot-ios-sim.sh "iPhone 15"
+
+      # `nick-fields/retry` is the inner bound on macOS (no coreutils
+      # `timeout`), and it retries on ANY non-zero exit — it has no `retry_on`
+      # predicate. The NARROWING lives inside the command: the drive is
+      # delegated to run-ios-sim-scenario.sh, whose retry gate refuses a second
+      # attempt unless the previous one was classified as the single admitted
+      # infrastructure signature (a post-build, pre-first-test launch/attach
+      # stall). A genuine assertion failure, a refused `simctl` grant, or a
+      # drive that exited 0 without printing its proof marker all stop on
+      # attempt 1 with their own exit code.
+      #
+      # 35 min/attempt covers a COLD run: one full Xcode+pods+aarch64-Rust build
+      # (~15 min, done ONCE by the harness), one incremental rebuild inside the
+      # delegated `flutter test`, and a single ~5 min drive. The step cap (75)
+      # must exceed max_attempts x timeout_minutes (2 x 35 = 70) plus slack, or
+      # the step reaper fires mid-second-attempt and the retry buys nothing.
+      #
+      # The relay is restarted first so a retried attempt runs against a CLEAN
+      # in-memory store (start-local-relay.sh stops any prior instance); the
+      # binary is already compiled by the build-before-boot step above.
+      - name: Run the iOS real-GPS lane
+        timeout-minutes: 75
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 35
+          max_attempts: 2
+          command: >-
+            bash tooling/e2e/ci/start-local-relay.sh 7777 &&
+            bash tooling/e2e/ci/run-b4-ios-real-gps.sh
+            ${{ steps.sim.outputs.udid }}
+
+      - name: Collect simulator diagnostics
+        if: always()
+        run: |
+          xcrun simctl spawn booted log collect --output /tmp/sim.logarchive 2>/dev/null || true
+          cp /tmp/haven-local-relay.log /tmp/relay.log 2>/dev/null || true
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-ios-real-gps-${{ github.run_id }}
+          path: |
+            /tmp/b4-ios-real-gps.log
+            /tmp/flutter-ios-test.log
+            /tmp/relay.log
+            /tmp/sim.logarchive
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # Relay teardown. Runs LAST and `if: always()` so the relay process is
+      # killed on every outcome. The script always exits 0, so teardown can
+      # never turn a green run red.
+      - name: Tear down host-native relay
+        if: always()
+        run: bash tooling/e2e/ci/stop-local-relay.sh

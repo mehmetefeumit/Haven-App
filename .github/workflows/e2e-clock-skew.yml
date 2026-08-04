@@ -1,0 +1,275 @@
+# Reusable workflow: Android device-clock-skew lane
+# (docs/CI_HARDENING_BACKLOG.md Workstream B, item B8 — "Clock jump +/-6h").
+#
+# Proves that a +/-6 h device wall-clock jump does not silently break location
+# sharing. Three things ride the device clock with no external reference
+# anywhere in the tree, and this lane exercises all three in one run:
+#
+#   1. `created_at` — the MDK peeler stamps the inner app event with
+#      `now_unix_seconds()` and BINDS the outer kind-445 `created_at` to it,
+#      so a skewed device signs skewed events;
+#   2. the 228 s TTL — the engine derives the NIP-40 `expiration` as
+#      `inner_created_at + message-retention.v1`, i.e. from the SAME skewed
+#      clock, so a backdated event is born already expired;
+#   3. the `since` cursor — catch-up advances the cursor to the SENDER's
+#      `created_at` and re-derives the next REQ floor 60 s below it, so an
+#      event minted further back is outside every subsequent window.
+#
+# # Why the hermetic relay is load-bearing here
+#
+# The publisher and the receiver share one device clock, so jumping it moves
+# BOTH and every comparison stays self-consistent — a naive version of this
+# scenario is vacuous. The strfry container is the one clock in the lane that
+# does not move: it runs on the CI host, and its
+# `rejectEventsNewerThanSeconds` (tooling/e2e/strfry.conf) judges a
+# fast-clocked publish exactly as a correctly-clocked peer would. The
+# slow-clock half instead gets its asymmetry from TIME: the event is minted
+# skewed and read back after the clock is restored.
+#
+# # Why a SEPARATE workflow
+#
+# The lane needs `adb root` plus a pinned `auto_time`, and it drives the
+# device clock from the shell on cue from the app. No shared runner should
+# learn any of that: run-single-avd-scenario.sh and run-integration-tests.sh
+# force-stop and uninstall between targets, and a mid-run clock jump inside a
+# shared runner would corrupt every OTHER target's timing assumptions.
+#
+# # Architecture mirrors e2e-fgs-publish.yml / e2e-real-gps.yml
+#
+# Same single-AVD, build-before-boot design (the multi-GB Rust-NDK + Gradle
+# peak must never coincide with a resident emulator; docs/E2E_TROUBLESHOOTING.md).
+
+name: E2E Clock Skew
+
+on:
+  workflow_call:
+
+jobs:
+  e2e_clock_skew:
+    name: e2e_clock_skew
+    runs-on: ubuntu-latest
+    # One APK build (<=30m) + boot + a bounded drive (<=25m of step deadline).
+    # The step-level timeout-minutes below bound a hung phase so GitHub kills
+    # the STEP rather than the runner, letting the if: always() artifact upload
+    # still run; this job-level cap is the outer envelope over both.
+    timeout-minutes: 70
+    env:
+      HAVEN_E2E_RELAY: ws://10.0.2.2:7777
+
+      # Declared EXPLICITLY rather than inherited. `liveSyncEnabled` defaults
+      # to true when the define is absent, so an omitted flag reads as "we
+      # didn't think about it" (CI_HARDENING_BACKLOG.md A7).
+      #
+      # `false` is a deliberate choice here, not a copy. This lane's receive
+      # oracle is the CURSOR-ANCHORED catch-up sweep
+      # (`run_catchup_all_circles`), and the whole point of the backward-skew
+      # phase is which events its `since` floor does and does not reach. A
+      # standing live subscription would deliver those same events out of
+      # band, on a different code path, and mask exactly the behaviour under
+      # test. The live receive path is covered by the e2e-android live_sync
+      # variants, which exist for that.
+      HAVEN_LIVE_SYNC: "false"
+
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Free disk space
+        run: bash tooling/e2e/ci/free-disk-space.sh
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: haven-core
+          # Distinct cache key from the other E2E jobs so they don't race on
+          # one entry; all build the same x86_64-linux-android target.
+          key: e2e-clock-skew-x64
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: flutter pub get
+
+      # Build the target APK BEFORE the emulator boots (build-before-boot
+      # discipline). Staged at /tmp/integration-apks/<basename>.apk; the
+      # --dart-defines baked here are un-re-passable at drive time (`flutter
+      # drive` does not forward them). This target reads no lane-specific
+      # defines, so the SHARED builder is the right funnel — unlike B3, which
+      # needs its coordinates baked in and therefore has its own.
+      - name: Build clock-skew test APK
+        working-directory: haven
+        timeout-minutes: 30
+        run: bash ../tooling/e2e/ci/build-integration-apks.sh
+          integration_test/b8_clock_skew_test.dart
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: AVD cache
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          # Shared with the other Android E2E lanes: the AVD snapshot is
+          # byte-identical (same api/arch/target/profile), so this restores
+          # the snapshot they created instead of rebuilding it.
+          #
+          # `target: google_apis` is not incidental for THIS lane: it is a
+          # userdebug image, so `adb root` succeeds and the wall clock is
+          # writable. On `google_apis_playstore` (a user build) the orchestrator
+          # fails closed in Phase 0 rather than running every phase at true
+          # time and reporting a vacuous green.
+          key: avd-api34-x86_64-google_apis-single-v1
+
+      - name: Create AVD snapshot
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        # Bounded for the same reason the sibling lanes are: a wedged boot with
+        # no step cap dies at the JOB cap, which SIGKILLs the runner before any
+        # if: failure() step, so the lane fails slow and with no artifacts.
+        # 15 min is ~7x the observed snapshot time.
+        timeout-minutes: 15
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          emulator-boot-timeout: 420
+          script: echo "Generated AVD snapshot for caching."
+
+      - name: Start strfry relay
+        env:
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+        run: bash tooling/e2e/ci/start-strfry.sh
+
+      # All real logic lives in the checked-in orchestrator (single bash
+      # invocation — the action runs each line of a multi-line `script:` in its
+      # own sh -c, which would drop shell state).
+      #
+      # BOUNDS. Three of them, innermost first:
+      #   18m  the `flutter drive` (the orchestrator's B8_DRIVE_TIMEOUT default;
+      #        kept in the script rather than declared here so the two cannot
+      #        drift).
+      #   25m  this step's inner deadline (run-with-deadline.sh below) — covers
+      #        the drive PLUS install, `adb root`, the auto_time pin, the four
+      #        clock jumps and the oracle, none of which the per-drive timeout
+      #        bounds, and is the bound that actually reaps
+      #        (CI_HARDENING_BACKLOG.md A8).
+      #   35m  this step's timeout-minutes = 25 + 1 (kill grace) + 7
+      #        (emulator-boot-timeout) + margin, a belt over the deadline.
+      # Sizing evidence: the drive's own worst case is circle setup + four
+      # publishes + four catch-up sweeps (30s each) + four clock rendezvous
+      # (150s each, bounded in-Dart) under a 15-minute in-test Timeout. This
+      # lane is new and has no green history; revise against p95 once it does.
+      #
+      # -memory 6144 matches the sibling Android lanes: RustLib + SQLCipher
+      # floods `mlock() -1 ENOMEM` under pressure, and this lane holds two MLS
+      # sessions (the publisher's and the synthetic peer's) at once.
+      - name: Run the clock-skew proof on the emulator
+        timeout-minutes: 35
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none -memory 6144
+          disable-animations: true
+          emulator-boot-timeout: 420
+          script: bash tooling/e2e/ci/run-with-deadline.sh 25m "e2e-clock-skew drive" -- bash tooling/e2e/ci/run-b8-clock-skew.sh /tmp/integration-apks/b8_clock_skew_test.apk integration_test/b8_clock_skew_test.dart
+
+      - name: Capture host + emulator diagnostics
+        if: failure()
+        run: |
+          mkdir -p /tmp/b8-logs
+          adb reconnect offline || true
+          timeout 60 adb wait-for-device || true
+          {
+            echo "=== df -h ==="
+            df -h || true
+            echo
+            echo "=== free -h ==="
+            free -h || true
+            echo
+            echo "=== adb devices -l (after reconnect attempt) ==="
+            adb devices -l || true
+            echo
+            echo "=== host vs device clock (the lane's own subject) ==="
+            echo "host   $(date -u +%s)"
+            echo "device $(adb shell date -u +%s 2>/dev/null | tr -dc '0-9')"
+            echo
+            echo "=== automatic-time settings (must both read 0) ==="
+            echo "auto_time      $(adb shell settings get global auto_time 2>/dev/null | tr -d '\r')"
+            echo "auto_time_zone $(adb shell settings get global auto_time_zone 2>/dev/null | tr -d '\r')"
+          # `.log`, not `.txt`: this file is written AFTER the orchestrator's
+          # EXIT trap has already scanned, and the scanner's directory walk
+          # only picks up `*.log`. A `.txt` here would be uploaded unscanned.
+          } > /tmp/b8-logs/diag.log 2>&1 || true
+          # Scan what this step just wrote (Security Rule 6). Withhold rather
+          # than upload on a hit, matching the orchestrator's containment.
+          # rc 1 (a real leak) and rc 3 (absent/unreadable/empty log) are kept
+          # apart deliberately: both fail the step, but only a leak justifies
+          # destroying the diag.
+          diag_scan_rc=0
+          bash tooling/e2e/ci/scan-logs-for-secrets.sh /tmp/b8-logs/diag.log \
+            || diag_scan_rc=$?
+          if [ "${diag_scan_rc}" -eq 1 ]; then
+            rm -f /tmp/b8-logs/diag.log
+            echo "diag withheld: secret-leak guard tripped" > /tmp/b8-logs/DIAG_LEAK.txt
+            exit 1
+          elif [ "${diag_scan_rc}" -ne 0 ]; then
+            echo "diag unscannable (rc=${diag_scan_rc}): absent, unreadable or empty" \
+              > /tmp/b8-logs/DIAG_UNSCANNABLE.txt
+            echo "ERROR: diag log could not be scanned (rc=${diag_scan_rc})." >&2
+            exit 1
+          fi
+
+      # if: always() so a green run still publishes the clock-servo records as
+      # recorded evidence that the jumps really landed.
+      - name: Upload clock-skew artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-clock-skew-${{ github.run_id }}
+          path: |
+            /tmp/b8-logs/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Tear down strfry relay
+        if: always()
+        run: bash tooling/e2e/ci/stop-strfry.sh

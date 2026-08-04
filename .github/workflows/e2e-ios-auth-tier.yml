@@ -1,0 +1,153 @@
+# Reusable workflow: iOS CoreLocation authorization-tier lane (backlog B7).
+#
+# Runs ONE drive target (haven/integration_test/b7_ios_auth_tier_test.dart)
+# TWICE on the same booted simulator — once after
+# `xcrun simctl privacy <udid> grant location-always`, once after
+# `... grant location` — and requires the two runs to have OBSERVED different
+# CoreLocation tiers. See tooling/e2e/ci/run-b7-ios-auth-tier.sh for the full
+# rationale; the short version:
+#
+#   * On iOS, background location publishing does NOT require "Always". A
+#     foreground-started CLLocationManager session with
+#     `allowsBackgroundLocationUpdates = true` keeps delivering under
+#     "When In Use", with the blue status-bar indicator. Haven's
+#     `MapShell._onPaused()` relies on exactly that and never consults the
+#     tier. "Always" buys only the receive-only SLC relaunch after iOS
+#     terminates the app (`HavenSLCHandler` refuses to arm without it).
+#   * So the tier changes what the UI may CLAIM, not whether publishing
+#     continues. This lane asserts the honest per-tier copy AND continued
+#     background publishing in BOTH tiers.
+#   * The lane refuses to pass unless the two grants demonstrably landed on
+#     DIFFERENT tiers — otherwise every per-tier branch would still pass while
+#     the lane discriminated nothing.
+#
+# The `location-always` simctl service is PROBED at runtime, never assumed: the
+# harness reads `xcrun simctl help privacy` and stops with an attributable
+# misconfiguration (exit 2) if this runner's Xcode does not offer it.
+#
+# What this lane does NOT prove: real background delivery on hardware. The
+# simulator does not suspend a backgrounded app and does not run CoreLocation
+# for real, and it can fire neither SLC nor BGTaskScheduler. Those stay on the
+# physical-device pre-release checklist.
+
+name: E2E iOS Auth Tier
+
+on:
+  workflow_call:
+
+jobs:
+  e2e_ios_auth_tier:
+    name: e2e_ios_auth_tier
+    runs-on: macos-latest # Apple Silicon; arm64 simulator (no Linux Docker).
+    # Envelope sized for a COLD first run: setup (~10-15m) + the drive step's
+    # 95m ceiling (2 x 45m retry + slack). The drive step itself is the real
+    # bound; this is the outer backstop that must never fire first (a job-cap
+    # SIGKILL skips every `if: always()` diagnostic, which is the worst red
+    # there is — see scripts/ci/check_e2e_step_timeout_ordering.sh).
+    timeout-minutes: 115
+    env:
+      HAVEN_E2E_RELAY: ws://localhost:7777
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+      # Poll path, stated per JOB rather than inherited (S1 /
+      # CI_HARDENING_BACKLOG.md A7). This lane's subject is the PUBLISH side
+      # under two authorization tiers; the live-sync receive engine is an
+      # unrelated axis, and running it here would only add flake surface.
+      HAVEN_LIVE_SYNC: "false"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Simulator triple for Apple-Silicon runners (mirrors e2e-ios.yml).
+          targets: aarch64-apple-ios-sim
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            haven-core
+            tooling/e2e/local-relay
+          key: e2e-ios-auth-tier
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: flutter pub get
+
+      # Build + start the relay BEFORE booting the simulator, so the two
+      # multi-GB build peaks never coincide with a resident simulator (the same
+      # build-before-boot discipline e2e-ios.yml and e2e-android.yml use).
+      - name: Build and start host-native relay
+        run: bash tooling/e2e/ci/start-local-relay.sh 7777
+
+      - name: Boot iOS simulator
+        id: sim
+        # macos-* runners have no GNU `timeout`, so GitHub's step cap is the
+        # only available bound on a boot that never reaches Booted. Measured
+        # boots are 136-215 s; 15 min is ~4x the observed max.
+        timeout-minutes: 15
+        run: bash tooling/e2e/ci/boot-ios-sim.sh "iPhone 15"
+
+      # `nick-fields/retry` is the inner bound on macOS (no coreutils
+      # `timeout`), and it retries on ANY non-zero exit — it has no `retry_on`
+      # predicate. The NARROWING therefore lives inside the command: each of the
+      # two per-tier runs is delegated to run-ios-sim-scenario.sh, whose retry
+      # gate refuses a second attempt unless the previous one was classified as
+      # the single admitted infrastructure signature (a post-build,
+      # pre-first-test launch/attach stall). A genuine assertion failure — or a
+      # failed discrimination gate — stops on attempt 1 with its own exit code.
+      #
+      # 45 min/attempt covers a COLD run: one full Xcode+pods+aarch64-Rust build
+      # (~15 min, done ONCE by the harness) plus two incremental builds and two
+      # ~8 min drives. The step cap (95) must exceed max_attempts x
+      # timeout_minutes (2 x 45 = 90) plus slack, or the step reaper fires
+      # mid-second-attempt and the retry buys nothing.
+      #
+      # The relay is restarted first so a retried attempt runs against a CLEAN
+      # in-memory store (start-local-relay.sh stops any prior instance); the
+      # binary is already compiled by the build-before-boot step above.
+      - name: Run the iOS auth-tier lane (Always, then When In Use)
+        timeout-minutes: 95
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 45
+          max_attempts: 2
+          command: >-
+            bash tooling/e2e/ci/start-local-relay.sh 7777 &&
+            bash tooling/e2e/ci/run-b7-ios-auth-tier.sh
+            ${{ steps.sim.outputs.udid }}
+
+      - name: Collect simulator diagnostics
+        if: always()
+        run: |
+          xcrun simctl spawn booted log collect --output /tmp/sim.logarchive 2>/dev/null || true
+          cp /tmp/haven-local-relay.log /tmp/relay.log 2>/dev/null || true
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-ios-auth-tier-${{ github.run_id }}
+          path: |
+            /tmp/b7-ios-always.log
+            /tmp/b7-ios-wheninuse.log
+            /tmp/flutter-ios-test.log
+            /tmp/relay.log
+            /tmp/sim.logarchive
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # Relay teardown. Runs LAST and `if: always()` so the relay process is
+      # killed on every outcome. The script always exits 0, so teardown can
+      # never turn a green run red.
+      - name: Tear down host-native relay
+        if: always()
+        run: bash tooling/e2e/ci/stop-local-relay.sh

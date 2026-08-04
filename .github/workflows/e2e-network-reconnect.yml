@@ -1,0 +1,305 @@
+# Reusable workflow: Android NETWORK LOSS / RECONNECT lane
+# (docs/CI_HARDENING_BACKLOG.md Workstream B, item B9).
+#
+# Drops the device's network mid-session, restores it, and asserts that live
+# location receive comes back — measured as a PEER EVENT DECRYPTED after the
+# reconnect, never as a socket that reopened:
+#
+#   1. live receive works                       (peer location decrypted)
+#   2. the live-sync engine is running           (anti-vacuity)
+#   3. the network really goes away              (proved from inside the app)
+#   4. the network comes back
+#   5. a peer publishes                          (something to receive)
+#   6. that peer's NEW coordinates surface       (THE HEADLINE)
+#
+# # The backlog item's mechanism does not exist
+#
+# `adb emu network disable/enable` is not a thing. The emulator console's
+# `network` command takes `status`, `speed`, `delay` and `capture` — verified
+# against the help strings compiled into the shipped `qemu-system-x86_64` —
+# and its only connectivity kill switch is `gsm data <state>`, which reaches
+# the CELLULAR path while an API-34 `google_apis` AVD routes over emulated
+# Wi-Fi. The orchestrator uses `cmd connectivity airplane-mode enable` with a
+# `settings get global airplane_mode_on` read-back (device-wide loss, the
+# thing the item means), plus a host-side iptables REJECT of the relay port
+# so the socket dies immediately instead of waiting out a 55 s WebSocket
+# ping. Neither is trusted: the drive target proves the outage with its own
+# WebSocket probe from inside the app process.
+#
+# # What was actually missing (the premise, checked against the tree)
+#
+# Nothing in CI had ever disconnected a running Haven. The live-sync engine
+# has THREE recovery mechanisms and none had a runtime proof:
+# the relay pool's own reconnect + `resubscribe()` filter replay
+# (nostr-relay-pool, 10 s retry adapting to 60 s); Haven's M8
+# subscription-health re-anchor at the persisted cursor
+# (`maintainSubscriptionHealth`, +90 s then every 15 min); and
+# `MapShell._healLiveSyncIfStopped` -> `LiveSyncResubscriber.ensureRunning()`,
+# the ONLY thing that restarts an engine that
+# `NostrSubscriptionService._onStreamClosed` tore down, on a jittered
+# 90-150 s timer that doubles per consecutive failure. That self-heal landed
+# because nothing restarted a dead engine; a network drop is its realistic
+# trigger, so this lane is its runtime proof. The drive's recovery budget is
+# sized to that heal cadence (330 s), not to the fast path.
+#
+# # Why HAVEN_LIVE_SYNC=true here (unlike the B6 lane next door)
+#
+# The subject IS the persistent relay-subscription engine. Under the 30 s
+# poll path there is no standing socket to drop, so the lane would prove
+# something else entirely while keeping its name.
+#
+# # Why a SEPARATE workflow
+#
+# GitHub runs every job on its own runner, so co-locating buys no setup
+# reuse; it would duplicate the setup steps under one file while forcing
+# lanes with different bounds, different APKs and different failure modes to
+# share an envelope. This lane also manipulates HOST networking (an iptables
+# chain), which no other lane does and which must not leak into a
+# co-tenant's steps.
+#
+# # Architecture mirrors e2e-location-provider-toggle.yml
+#
+# Same single-AVD, build-before-boot design: the multi-GB Rust-NDK + Gradle
+# peak must never coincide with a resident emulator
+# (docs/E2E_TROUBLESHOOTING.md).
+
+name: E2E Network Reconnect
+
+on:
+  workflow_call:
+
+jobs:
+  e2e_network_reconnect:
+    name: e2e_network_reconnect
+    runs-on: ubuntu-latest
+    # One APK build (<=30m) + boot + a drive that internally holds a 75 s
+    # blackout and up to a 330 s recovery window (<=27m of step deadline).
+    # The step-level timeout-minutes below bound a hung phase so GitHub kills
+    # the STEP rather than the runner, letting the if: always() artifact
+    # upload still run; this job-level cap is the outer envelope over both.
+    timeout-minutes: 70
+    env:
+      HAVEN_E2E_RELAY: ws://10.0.2.2:7777
+
+      # Declared EXPLICITLY rather than inherited. `liveSyncEnabled` defaults
+      # to true when the define is absent, so an omitted flag reads as "we
+      # didn't think about it" (CI_HARDENING_BACKLOG.md A7).
+      #
+      # `true` is load-bearing here, not a copy: this lane's entire subject is
+      # the persistent relay-subscription engine's reconnect. Under the poll
+      # path there is no standing subscription for a network drop to break,
+      # and the lane would silently measure a different mechanism.
+      HAVEN_LIVE_SYNC: "true"
+
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Free disk space
+        run: bash tooling/e2e/ci/free-disk-space.sh
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: haven-core
+          # Distinct cache key from the other E2E jobs so they don't race on
+          # one entry; all build the same x86_64-linux-android target.
+          key: e2e-network-reconnect-x64
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: flutter pub get
+
+      # Build the target APK BEFORE the emulator boots (build-before-boot
+      # discipline). Staged at /tmp/integration-apks/<basename>.apk; the
+      # --dart-defines baked here (relay URL + receive path) MUST match what
+      # the drive step assumes, because `flutter drive` does not re-pass them.
+      - name: Build network-reconnect test APK
+        working-directory: haven
+        timeout-minutes: 30
+        run: bash ../tooling/e2e/ci/build-integration-apks.sh
+          integration_test/b9_network_reconnect_test.dart
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: AVD cache
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          # Shared with the other Android E2E lanes: the AVD snapshot is
+          # byte-identical (same api/arch/target/profile), so this restores
+          # the snapshot they created instead of rebuilding it.
+          key: avd-api34-x86_64-google_apis-single-v1
+
+      - name: Create AVD snapshot
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        # Bounded for the same reason the sibling lanes are: a wedged boot
+        # with no step cap dies at the JOB cap, which SIGKILLs the runner
+        # before any if: failure() step, so the lane fails slow and with no
+        # artifacts. 15 min is ~7x the observed snapshot time.
+        timeout-minutes: 15
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          emulator-boot-timeout: 420
+          script: echo "Generated AVD snapshot for caching."
+
+      - name: Start strfry relay
+        env:
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+        run: bash tooling/e2e/ci/start-strfry.sh
+
+      # All real logic lives in the checked-in orchestrator (single bash
+      # invocation — the action runs each line of a multi-line `script:` in
+      # its own sh -c, which would drop shell state). The orchestrator
+      # backgrounds `flutter drive` and cuts the network underneath it,
+      # because the whole subject is ONE continuous session that loses its
+      # relay connection and has to get it back.
+      #
+      # BOUNDS. Three of them, innermost first:
+      #   20m  the `flutter drive` (the orchestrator's own B9_DRIVE_TIMEOUT
+      #        default; kept in the script rather than declared here so the
+      #        two cannot drift).
+      #   27m  this step's inner deadline (run-with-deadline.sh below) —
+      #        covers the drive PLUS install/grants/both network toggles/the
+      #        oracle, none of which the per-drive timeout bounds, and is the
+      #        bound that actually reaps (CI_HARDENING_BACKLOG.md A8).
+      #   36m  this step's timeout-minutes = 27 + 1 (kill grace) + 7
+      #        (emulator-boot-timeout) + margin, a belt over the deadline.
+      # Sizing evidence: the drive target's own worst case is ~13 min (arming
+      # + a 75s baseline receive + a 120s wait for the drop + the 75s outage
+      # hold + a 120s wait for the restore + a 330s recovery budget sized to
+      # MapShell's 90-150s self-heal with one doubled retry) under a
+      # 16-minute in-test Timeout; revise against p95 once this lane has
+      # green history.
+      #
+      # -memory 6144 matches the sibling Android lanes: RustLib + SQLCipher
+      # floods `mlock() -1 ENOMEM` under pressure.
+      - name: Run the network-reconnect proof on the emulator
+        timeout-minutes: 36
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none -memory 6144
+          disable-animations: true
+          emulator-boot-timeout: 420
+          script: bash tooling/e2e/ci/run-with-deadline.sh 27m "e2e-network-reconnect drive" -- bash tooling/e2e/ci/run-b9-network-reconnect.sh /tmp/integration-apks/b9_network_reconnect_test.apk integration_test/b9_network_reconnect_test.dart
+
+      # Belt for the case the orchestrator's own EXIT trap never ran (a step
+      # cap SIGKILL). Leaving the guest in airplane mode or the host chain
+      # installed would silently break every later step in this job — and,
+      # worse, would look like a product failure on the next lane to run.
+      - name: Restore connectivity (belt)
+        if: always()
+        run: |
+          adb shell cmd connectivity airplane-mode disable || true
+          sudo iptables -D OUTPUT -j HAVEN_B9_OUTAGE 2>/dev/null || true
+          sudo iptables -F HAVEN_B9_OUTAGE 2>/dev/null || true
+          sudo iptables -X HAVEN_B9_OUTAGE 2>/dev/null || true
+
+      - name: Capture host + emulator diagnostics
+        if: failure()
+        run: |
+          mkdir -p /tmp/b9-logs
+          adb reconnect offline || true
+          timeout 60 adb wait-for-device || true
+          {
+            echo "=== df -h ==="
+            df -h || true
+            echo
+            echo "=== free -h ==="
+            free -h || true
+            echo
+            echo "=== adb devices -l (after reconnect attempt) ==="
+            adb devices -l || true
+            echo
+            echo "=== airplane mode ==="
+            adb shell settings get global airplane_mode_on || true
+            echo
+            echo "=== active default network ==="
+            adb shell dumpsys connectivity 2>/dev/null | head -30 || true
+            echo
+            echo "=== host iptables OUTPUT ==="
+            sudo iptables -L OUTPUT -n -v --line-numbers || true
+          # `.log`, not `.txt`: this file is written AFTER the orchestrator's
+          # EXIT trap has already scanned, and the scanner's directory walk
+          # only picks up `*.log`. A `.txt` here would be uploaded unscanned.
+          } > /tmp/b9-logs/diag.log 2>&1 || true
+          # Scan what this step just wrote (Security Rule 6). Withhold rather
+          # than upload on a hit, matching the orchestrator's containment.
+          # rc 1 (a real leak) and rc 3 (absent/unreadable/empty log) are kept
+          # apart deliberately: both fail the step, but only a leak justifies
+          # destroying the diag.
+          diag_scan_rc=0
+          bash tooling/e2e/ci/scan-logs-for-secrets.sh /tmp/b9-logs/diag.log \
+            || diag_scan_rc=$?
+          if [ "${diag_scan_rc}" -eq 1 ]; then
+            rm -f /tmp/b9-logs/diag.log
+            echo "diag withheld: secret-leak guard tripped" > /tmp/b9-logs/DIAG_LEAK.txt
+            exit 1
+          elif [ "${diag_scan_rc}" -ne 0 ]; then
+            echo "diag unscannable (rc=${diag_scan_rc}): absent, unreadable or empty" \
+              > /tmp/b9-logs/DIAG_UNSCANNABLE.txt
+            echo "ERROR: diag log could not be scanned (rc=${diag_scan_rc})." >&2
+            exit 1
+          fi
+
+      # if: always() so a green run still surfaces the measured recovery
+      # latency, the re-publish count and the toggle read-backs as recorded
+      # evidence — the numbers that say WHICH recovery path ran.
+      - name: Upload network-reconnect artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-network-reconnect-${{ github.run_id }}
+          path: |
+            /tmp/b9-logs/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Tear down strfry relay
+        if: always()
+        run: bash tooling/e2e/ci/stop-strfry.sh

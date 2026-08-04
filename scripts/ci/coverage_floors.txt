@@ -47,10 +47,40 @@
 #   flutter test --coverage
 # and pinned at floor(measured) - 2, or exactly 100 where the path is fully
 # covered (see the guard header: the margin rule cannot ratchet a 100% path).
+#
+# ===========================================================================
+# MEASURE WITH THE TOOLCHAIN CI USES, OR THE NUMBERS ARE NOT COMPARABLE.
+#
+# The denominator here is INSTRUMENTED LINES, and how many lines LLVM
+# instruments is a property of the LLVM version, not of the tests. The rust
+# rows were first pinned against rustc 1.92 and CI runs `dtolnay/rust-
+# toolchain@stable` — 1.97.1 at the time of writing, LLVM 22.1.6 — which
+# instruments 1-4% FEWER lines per path. Same tests, same hits, smaller
+# denominator, so every percentage read higher in CI than in the pin: seven
+# paths tripped the ratchet on the first run (30833142781) with nothing about
+# the code having changed. They are re-pinned below against 1.97.1.
+#
+# The dangerous direction is the other one. Re-running `--list` on an OLDER
+# toolchain reads every path 1-4 points LOW and emits a row for each — which,
+# pasted in, silently LOWERS all thirty floors while looking like routine
+# maintenance. So: re-pin from a CI report, or from a local run on the
+# toolchain CI resolves (`rustup toolchain install <ver>` and
+# `cargo +<ver> llvm-cov …`). If the numbers you measure sit uniformly below
+# the comments below, that is the toolchain, not a regression.
+#
+# Hit counts also wobble a few lines run to run on the concurrency-sensitive
+# paths (src/relay/live_sync/ moved 4 lines between two runs of the same
+# commit). That is what the two points of headroom absorb, and it is why the
+# pin is floor(measured) - 2 rather than the tighter value the ratchet's
+# failure message suggests — `--list` implements the former, and it is the
+# supported way to re-pin.
+# ===========================================================================
 
 
 # ===========================================================================
-# haven-core (Rust) — aggregate at pinning time: 90.74% (19419/21400)
+# haven-core (Rust) — aggregate at pinning time: 93.43% (19618/20997) on
+# rustc 1.97.1. The first pin read 90.74% (19419/21400) on 1.92: ~400 fewer
+# lines instrumented, near-identical hits. See the toolchain note above.
 # ===========================================================================
 
 # --- MLS: the protocol core -------------------------------------------------
@@ -58,9 +88,9 @@
 # separation, per-message ephemeral keys, unsigned kind-444 welcomes, group-ID
 # privacy, exporter-secret lifecycle, publish-before-apply. welcome.rs is pinned
 # at 100 because Rule 3 (kind 444 MUST remain unsigned) has no partial form.
-rust|src/nostr/mls/|89                       # measured 91.90% (1418/1543)
-rust|src/nostr/mls/manager.rs|90             # measured 92.32% (697/755)
-rust|src/nostr/mls/storage.rs|83             # measured 85.34% (297/348)
+rust|src/nostr/mls/|91                       # measured 93.29% (1419/1521)
+rust|src/nostr/mls/manager.rs|90             # measured 92.56% (697/753)
+rust|src/nostr/mls/storage.rs|88             # measured 90.55% (297/328)
 rust|src/nostr/mls/signer.rs|94              # measured 96.47% (82/85)
 rust|src/nostr/mls/welcome.rs|100            # measured 100.00% (124/124)
 
@@ -71,28 +101,28 @@ rust|src/nostr/mls/welcome.rs|100            # measured 100.00% (124/124)
 # kind-445 tag allowlist — `h` only for commits, `h` + NIP-40 expiration for
 # application messages, nothing else — and a tag leaking past it is a metadata
 # disclosure no aggregate would flinch at.
-rust|src/nostr/encryption/|96                # measured 98.41% (124/126)
-rust|src/nostr/identity/|92                  # measured 94.43% (661/700)
-rust|src/nostr/keys.rs|95                    # measured 97.84% (136/139)
-rust|src/nostr/giftwrap.rs|87                # measured 89.90% (187/208)
-rust|src/nostr/event.rs|89                   # measured 91.72% (454/495)
+rust|src/nostr/encryption/|97                # measured 99.20% (124/125)
+rust|src/nostr/identity/|93                  # measured 95.51% (659/690)
+rust|src/nostr/keys.rs|97                    # measured 99.27% (136/137)
+rust|src/nostr/giftwrap.rs|89                # measured 91.63% (186/203)
+rust|src/nostr/event.rs|92                   # measured 94.19% (454/482)
 rust|src/nostr/tags.rs|100                   # measured 100.00% (102/102)
 
 # --- Key and database custody ----------------------------------------------
 # Chooses the platform keyring backend and gates SQLCipher key handling.
-rust|src/keyring_policy.rs|84                # measured 86.00% (172/200)
+rust|src/keyring_policy.rs|89                # measured 91.49% (172/188)
 
 # --- Circles: group state and its encrypted store ---------------------------
-rust|src/circle/|89                          # measured 91.03% (7710/8470)
-rust|src/circle/storage.rs|91                # measured 93.74% (2335/2491)
-rust|src/circle/leave.rs|93                  # measured 95.33% (102/107)
+rust|src/circle/|90                          # measured 92.94% (7727/8314)
+rust|src/circle/storage.rs|93                # measured 95.07% (2333/2454)
+rust|src/circle/leave.rs|94                  # measured 96.23% (102/106)
 
 # --- Location: the payload the whole app exists to protect ------------------
 # ttl.rs derives the NIP-40 expiration from group component 0x8005; nostr.rs
 # encodes the location event. nostr.rs is the weakest link in this group and is
 # pinned low deliberately — the number is the evidence, not an endorsement.
-rust|src/location/|89                        # measured 91.65% (450/491)
-rust|src/location/ttl.rs|92                  # measured 94.70% (125/132)
+rust|src/location/|91                        # measured 93.36% (450/482)
+rust|src/location/ttl.rs|94                  # measured 96.90% (125/129)
 rust|src/location/nostr.rs|50                # measured 52.54% (31/59)
 
 # --- Public profile plane (kind 0 + Blossom) --------------------------------
@@ -101,29 +131,49 @@ rust|src/location/nostr.rs|50                # measured 52.54% (31/59)
 # statically guarded by check_profile_privacy_boundaries.sh; these floors keep
 # the RUNTIME proofs of that boundary executing. avatar/image.rs is the EXIF/GPS
 # strip performed before upload.
-rust|src/profile/|90                         # measured 92.49% (2095/2265)
-rust|src/profile/blossom.rs|88               # measured 90.43% (718/794)
-rust|src/profile/fetch.rs|93                 # measured 95.79% (410/428)
-rust|src/avatar/image.rs|91                  # measured 93.50% (475/508)
+rust|src/profile/|92                         # measured 94.84% (2095/2209)
+rust|src/profile/blossom.rs|89               # measured 91.48% (719/786)
+rust|src/profile/fetch.rs|97                 # measured 99.51% (410/412)
+rust|src/avatar/image.rs|94                  # measured 96.74% (475/491)
 
 # --- Relay plane -----------------------------------------------------------
 # publishers.rs carries the OK-ack accounting Security Rule 13 depends on
-# ("acked" must never mean "sent"). catchup.rs and auto_commit.rs are the two
-# genuinely thin files in haven-core; catchup.rs at 28.50% is also where the
-# open `limit(512)` saturation defect lives, so its floor is the audit trail for
-# how little of it is exercised.
-rust|src/relay/live_sync/|91                 # measured 93.94% (2479/2639)
-rust|src/relay/live_sync/session.rs|90       # measured 92.95% (1476/1588)
-rust|src/relay/publishers.rs|87              # measured 89.38% (261/292)
-rust|src/relay/maintenance/|96               # measured 98.01% (640/653)
-rust|src/relay/manager.rs|69                 # measured 71.59% (718/1003)
-rust|src/relay/auto_commit.rs|48             # measured 50.85% (30/59)
-rust|src/relay/catchup.rs|26                 # measured 28.50% (59/207)
+# ("acked" must never mean "sent").
+#
+# catchup.rs is the background-wake receive path: fetch since the cursor,
+# ingest, persist, re-broadcast auto-commits, advance the cursor. Until
+# tests/catchup_sweep_e2e.rs only its cursor ARITHMETIC was exercised — the
+# sweep itself ran nowhere, which is how a path that decides what a
+# backgrounded device keeps and what it silently skips sat at 28.92%. The
+# remaining ~5% is deliberate: the saturation counter needs a 512-event
+# window, the `Buffered` arm needs an out-of-order epoch, and the rest are
+# defensive arms (storage down, whole-batch fetch error, a circle stored with
+# no relays) that the public API cannot reach — forcing them would mean
+# fabricating states production cannot produce. The open `limit(512)` paging
+# defect (P0-4) is NOT covered by these tests and must not be read as settled.
+#
+# auto_commit.rs is pinned at 100, not because a round number is tidy but
+# because it is the whole of Rule 13's RECEIVE side: every branch there ends in
+# either `confirm_published` or `publish_failed`, and the ones that were
+# uncovered were exactly the fail-closed ones (no relay plane wired, an
+# unconvertible commit, send-side work on a receive batch). A regression turning
+# any of them into an optimistic confirm applies a commit no relay ever saw and
+# forks the group — silently. At 100 the floor trips on the first uncovered
+# line; anything lower licenses one of those branches to stop being exercised.
+# Pinned exactly (the margin rule cannot ratchet a 100% path — see the guard
+# header). Proofs: tests/selfremove_autopublish_e2e.rs.
+rust|src/relay/live_sync/|94                 # measured 96.52% (2495/2585)
+rust|src/relay/live_sync/session.rs|94       # measured 96.19% (1491/1550)
+rust|src/relay/publishers.rs|88              # measured 90.28% (260/288)
+rust|src/relay/maintenance/|96               # measured 98.46% (640/650)
+rust|src/relay/manager.rs|71                 # measured 73.54% (720/979)
+rust|src/relay/auto_commit.rs|100            # measured 100.00% (59/59)
+rust|src/relay/catchup.rs|92                 # measured 94.61% (193/204)
 
 # --- Encrypted tile cache ---------------------------------------------------
 # Must never persist the Stadia key (Security Rule 6/10); the static half is
 # check_no_tile_cache_secrets.sh.
-rust|src/tiles/|92                           # measured 94.67% (640/676)
+rust|src/tiles/|94                           # measured 96.11% (642/668)
 
 
 # ===========================================================================

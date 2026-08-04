@@ -25,8 +25,10 @@ use std::time::Duration;
 
 use haven_core::circle::{CircleConfig, CircleManager, MemberKeyPackage};
 use haven_core::location::LocationMessage;
-use haven_core::nostr::mls::types::{GroupId, PublishWork};
-use haven_core::relay::auto_commit::{resolve_receive_publish_work, AutoCommitPublisher};
+use haven_core::nostr::mls::types::{GroupId, PendingStateRef, PublishWork, TransportMessage};
+use haven_core::relay::auto_commit::{
+    resolve_receive_publish_work, rollback_receive_publish_work, AutoCommitPublisher,
+};
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use nostr::{Event, Keys};
 use tempfile::TempDir;
@@ -177,6 +179,59 @@ async fn surface_auto_commit(circle: &CircleManager, group_id: &GroupId) -> Vec<
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     panic!("SelfRemove auto-commit never surfaced within the jitter window");
+}
+
+/// A circle with Bob's eviction commit genuinely STAGED on Alice's side but not
+/// yet resolved: the fixture, the wrapped commit, its engine pending ref, and
+/// the epoch the group sits at once it is rolled back.
+///
+/// # What `epoch_before` means, and why it is captured here
+///
+/// A staged commit is already reflected in what the session reports: between
+/// surfacing and resolution, `member_pubkeys` ALREADY omits the leaver and
+/// `epoch` ALREADY reads one higher. Only the resolution decides whether that
+/// view becomes real (`confirm_published`) or is reverted (`publish_failed`).
+/// So the baseline a fail-closed test must compare against is the PRE-proposal
+/// epoch, captured before any of this — comparing against the armed state would
+/// invert every assertion below.
+///
+/// The tests also need a genuinely staged ref rather than a fabricated one:
+/// they assert that group state does NOT move, and against an invented ref
+/// nothing would have been staged to move in the first place.
+struct ArmedAutoCommit {
+    fx: ThreeMemberCircle,
+    msg: TransportMessage,
+    pending: PendingStateRef,
+    epoch_before: u64,
+}
+
+async fn arm_staged_auto_commit() -> ArmedAutoCommit {
+    let fx = build_three_member_circle(vec!["wss://group.example.com".to_string()]).await;
+    let epoch_before = epoch(&fx.alice, &fx.mls_group_id).await;
+    let proposal = fx
+        .bob
+        .propose_leave(&fx.mls_group_id)
+        .await
+        .expect("bob proposes leave");
+    fx.alice
+        .session()
+        .process_event(&proposal)
+        .await
+        .expect("alice ingests proposal");
+    let work = surface_auto_commit(&fx.alice, &fx.mls_group_id).await;
+    let (msg, pending) = work
+        .iter()
+        .find_map(|w| match w {
+            PublishWork::AutoPublish { msg, pending } => Some((msg.clone(), *pending)),
+            _ => None,
+        })
+        .expect("the surfaced batch carries the auto-commit");
+    ArmedAutoCommit {
+        fx,
+        msg,
+        pending,
+        epoch_before,
+    }
 }
 
 async fn roster(circle: &CircleManager, group_id: &GroupId) -> Vec<String> {
@@ -462,4 +517,299 @@ async fn two_live_sync_engines_publish_and_converge_on_the_eviction() {
     // assertions in `live_sync_cursor_replay_e2e`.
     let _ = alice_engine.stop().await;
     let _ = carol_engine.stop().await;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Fail-closed paths.
+//
+// Everything above pins the happy path and the no-ack rollback. The branches
+// below are the ones that decide what happens when the publish CANNOT be
+// attempted at all — no relay plane wired, an unconvertible commit, or a work
+// item that has no business being on the receive side. Each of them ends in
+// `publish_failed`, and each was previously reachable only by reading the code:
+// a regression that turned any one of them into an optimistic `confirm_published`
+// would have applied a commit no relay ever saw (Rule 13) and forked the group,
+// with every existing test still green.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The catch-up sweep's relay plane. `RelayManager::publish_auto_commit` must
+/// report `true` ONLY on a real relay OK-ack, and resolve every failure — a
+/// transport error, an unusable relay set — to `false` so the caller rolls back.
+///
+/// Runs against an in-process relay rather than a fake: this impl exists purely
+/// to translate `RelayManager`'s own result type into the ack verdict, so a fake
+/// would be asserting the translation against itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn relay_manager_publisher_acks_only_on_a_real_relay_ok() {
+    use haven_core::relay::{allow_ws_loopback_for_test, RelayManager};
+    use nostr_relay_builder::MockRelay;
+
+    let _ = allow_ws_loopback_for_test();
+    let relay = MockRelay::run().await.expect("mock relay");
+    let url = relay.url().await.to_string();
+
+    // A genuine signed kind:445 — Bob's own SelfRemove proposal — rather than an
+    // arbitrary event, so the relay sees the event shape this path really carries.
+    let fx = build_three_member_circle(vec![url.clone()]).await;
+    let commit = fx
+        .bob
+        .propose_leave(&fx.mls_group_id)
+        .await
+        .expect("bob proposes leave");
+
+    let manager = RelayManager::new();
+    let publisher: &dyn AutoCommitPublisher = &manager;
+
+    assert!(
+        publisher
+            .publish_auto_commit(&commit, std::slice::from_ref(&url))
+            .await,
+        "a relay that OK-acks the commit must resolve to an ack"
+    );
+
+    // Rule 13's other half: anything short of an OK-ack is `false`, never an
+    // optimistic `true`. A non-wss relay is rejected before any socket is opened,
+    // so this asserts the error branch without waiting on a network timeout.
+    assert!(
+        !publisher
+            .publish_auto_commit(&commit, &["http://not-a-relay.example".to_string()])
+            .await,
+        "an unusable relay set must resolve to NO ack, so the caller rolls back"
+    );
+}
+
+/// A receive path with no relay plane wired rolls the staged commit back rather
+/// than applying it: the leaver stays in the roster at the prior epoch, and the
+/// eviction re-derives when a relay-backed path next sees the proposal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rollback_receive_publish_work_never_applies_a_staged_commit() {
+    let ArmedAutoCommit {
+        fx,
+        msg,
+        pending,
+        epoch_before,
+    } = arm_staged_auto_commit().await;
+    let bob_hex = fx.bob_keys.public_key().to_hex();
+
+    // The real staged ref rides on the AutoPublish item; the send-side variants
+    // carry a ref the engine never issued. Both arms must be walked, and a ref
+    // that resolves to nothing must not stop the loop before the one that does —
+    // so the ordering here (unknown refs AFTER the real one) is not the
+    // interesting case; the un-ordered coverage of every arm is.
+    let unknown = PendingStateRef::new(u64::MAX);
+    rollback_receive_publish_work(
+        &fx.alice,
+        &[
+            PublishWork::AutoPublish {
+                msg: msg.clone(),
+                pending,
+            },
+            PublishWork::GroupEvolution {
+                msg: msg.clone(),
+                welcomes: vec![],
+                pending: unknown,
+            },
+            PublishWork::GroupCreated {
+                welcomes: vec![],
+                pending: unknown,
+            },
+            // Carries no pending ref: nothing to roll back, and it must not make
+            // the loop stumble over the ones that do.
+            PublishWork::ApplicationMessage { msg },
+        ],
+    )
+    .await;
+
+    assert!(
+        roster(&fx.alice, &fx.mls_group_id).await.contains(&bob_hex),
+        "a rolled-back eviction must leave the leaver in the roster — applying it \
+         with no relay plane to publish through would fork the group"
+    );
+    assert_eq!(
+        epoch(&fx.alice, &fx.mls_group_id).await,
+        epoch_before,
+        "a rolled-back auto-commit leaves the epoch unchanged"
+    );
+}
+
+/// Send-side work must never be optimistically confirmed if it ever appears in a
+/// receive batch. `GroupCreated` / `GroupEvolution` originate from `send`, so the
+/// receive resolver treats them as a contract violation and rolls them back —
+/// publishing nothing, applying nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn send_side_work_on_the_receive_path_is_rolled_back_never_confirmed() {
+    let ArmedAutoCommit {
+        fx,
+        msg,
+        pending,
+        epoch_before,
+    } = arm_staged_auto_commit().await;
+    let bob_hex = fx.bob_keys.public_key().to_hex();
+
+    // The resolver decides on the VARIANT alone, so wrapping the genuinely staged
+    // commit in each send-side shape is what puts the branch under test — and the
+    // ref really is staged, so "nothing moved" is a real observation.
+    let publisher = FakePublisher::new(true);
+    resolve_receive_publish_work(
+        &fx.alice,
+        &publisher,
+        &[
+            PublishWork::GroupEvolution {
+                msg: msg.clone(),
+                welcomes: vec![],
+                pending,
+            },
+            PublishWork::GroupCreated {
+                welcomes: vec![],
+                pending,
+            },
+        ],
+    )
+    .await;
+
+    assert!(
+        publisher.published().is_empty(),
+        "receive-side send work must not be published — it is a contract \
+         violation, not a commit to broadcast"
+    );
+    assert!(
+        roster(&fx.alice, &fx.mls_group_id).await.contains(&bob_hex),
+        "and it must be rolled back, not confirmed, even with a relay acking"
+    );
+    assert_eq!(
+        epoch(&fx.alice, &fx.mls_group_id).await,
+        epoch_before,
+        "no epoch may advance on a commit this path never published"
+    );
+}
+
+/// `ApplicationMessage` / `Proposal` carry no pending ref: the resolver skips
+/// them entirely, publishing nothing AND — the part worth pinning — leaving a
+/// co-batched staged commit still live, neither confirmed nor rolled back.
+///
+/// "Still live" needs an observation, not an absence. A staged commit already
+/// reads as applied (see [`ArmedAutoCommit`]), so it is indistinguishable from a
+/// confirmed one; what only a LIVE ref can still do is roll back. The skip is
+/// therefore followed by a rollback, and the state reverting is the proof.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn work_without_a_pending_ref_is_skipped_and_disturbs_nothing() {
+    let ArmedAutoCommit {
+        fx,
+        msg,
+        pending,
+        epoch_before,
+    } = arm_staged_auto_commit().await;
+    let bob_hex = fx.bob_keys.public_key().to_hex();
+
+    let publisher = FakePublisher::new(true);
+    resolve_receive_publish_work(
+        &fx.alice,
+        &publisher,
+        &[
+            PublishWork::ApplicationMessage { msg: msg.clone() },
+            PublishWork::Proposal { msg: msg.clone() },
+        ],
+    )
+    .await;
+
+    assert!(
+        publisher.published().is_empty(),
+        "neither variant is publishable work on this path"
+    );
+    assert_eq!(
+        epoch(&fx.alice, &fx.mls_group_id).await,
+        epoch_before + 1,
+        "the skip must leave the staged view exactly as it found it"
+    );
+
+    // Only a ref the engine still holds can be rolled back, so the revert below
+    // is what proves the skip consumed nothing.
+    rollback_receive_publish_work(&fx.alice, &[PublishWork::AutoPublish { msg, pending }]).await;
+    assert!(
+        roster(&fx.alice, &fx.mls_group_id).await.contains(&bob_hex),
+        "the staged commit must still have been rollable — proof the skip left \
+         the pending ref alone rather than silently resolving it"
+    );
+    assert_eq!(
+        epoch(&fx.alice, &fx.mls_group_id).await,
+        epoch_before,
+        "and the revert lands back on the pre-proposal epoch"
+    );
+}
+
+/// A commit that cannot be converted to a signed `kind:445` cannot be published,
+/// so it fails closed: no publish attempt, and the staged commit rolled back.
+///
+/// The conversion reads `msg.payload` as the transport DTO, so corrupting the
+/// payload of a REAL staged auto-commit reproduces the branch without inventing
+/// an engine state — the pending ref is genuine, which is what makes "the epoch
+/// did not move" evidence rather than a tautology.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unconvertible_auto_commit_rolls_back_without_publishing() {
+    let ArmedAutoCommit {
+        fx,
+        msg,
+        pending,
+        epoch_before,
+    } = arm_staged_auto_commit().await;
+    let bob_hex = fx.bob_keys.public_key().to_hex();
+
+    let mut corrupted = msg;
+    corrupted.payload = b"not a transport-wrapped nostr event".to_vec();
+
+    let publisher = FakePublisher::new(true);
+    resolve_receive_publish_work(
+        &fx.alice,
+        &publisher,
+        &[PublishWork::AutoPublish {
+            msg: corrupted,
+            pending,
+        }],
+    )
+    .await;
+
+    assert!(
+        publisher.published().is_empty(),
+        "an unconvertible commit must never reach the relay plane"
+    );
+    assert!(
+        roster(&fx.alice, &fx.mls_group_id).await.contains(&bob_hex),
+        "and must roll back rather than confirm — a relay acking a DIFFERENT \
+         event would otherwise apply a commit nobody received"
+    );
+    assert_eq!(
+        epoch(&fx.alice, &fx.mls_group_id).await,
+        epoch_before,
+        "no epoch advance on a commit that was never published"
+    );
+}
+
+/// The live-sync engine's own relay plane (`nostr_sdk::Client`) must resolve a
+/// transport error to NO ack, so the caller rolls the staged commit back.
+///
+/// The error branch is the one that matters here and is the harder of the two to
+/// reach: the success branch is exercised end-to-end by
+/// `two_live_sync_engines_publish_and_converge_on_the_eviction`, but nothing
+/// drives a send that fails outright. A client with an EMPTY relay pool asked to
+/// send to a relay it does not hold errors before any socket work, so this needs
+/// no network and cannot flake on a timeout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_sync_publisher_resolves_a_transport_error_to_no_ack() {
+    use nostr::{EventBuilder, Kind};
+    use nostr_sdk::Client;
+
+    let event = EventBuilder::new(Kind::Custom(445), "opaque-ciphertext")
+        .sign_with_keys(&Keys::generate())
+        .expect("sign");
+
+    let client = Client::builder().build();
+    let publisher: &dyn AutoCommitPublisher = &client;
+
+    assert!(
+        !publisher
+            .publish_auto_commit(&event, &["wss://not-in-the-pool.example".to_string()])
+            .await,
+        "a send that errors must resolve to NO ack — an optimistic `true` here \
+         would confirm a commit no relay ever received (Rule 13)"
+    );
 }

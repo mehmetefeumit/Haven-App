@@ -1,0 +1,285 @@
+# Reusable workflow: Android LOCATION-PROVIDER TOGGLE lane
+# (docs/CI_HARDENING_BACKLOG.md Workstream B, item B6).
+#
+# Switches the DEVICE-WIDE location provider off underneath a live sharing
+# session (`cmd location set-location-enabled false`) and back on, and asserts
+# what Haven does about it:
+#
+#   1. provider ON  -> the app publishes                  (count PARSED)
+#   2. provider OFF -> the app DETECTS it                 (positive oracle)
+#   3. provider OFF -> the app STOPS publishing           (sustained, and the
+#                                                          stale-cache tail is
+#                                                          MEASURED)
+#   4. provider OFF -> the user is TOLD                   (expected RED, below)
+#   5. provider ON  -> publishing RESUMES
+#
+# # What was actually missing (the premise, checked against the tree)
+#
+# `FakeLocationService.isLocationServiceEnabled()` is a hardcoded `true`
+# (haven/integration_test/e2e/_lib/fake_location_service.dart:52), and every
+# multi-party scenario injects that fake through a `locationServiceProvider`
+# override. So `GeolocatorLocationService`'s service-enabled gate
+# (geolocator_location_service.dart:258 and :307) and the plugin's mid-stream
+# `LocationServiceDisabledException` executed NOWHERE in CI.
+#
+# This is NOT the permission-revocation scenario (B5): `pm revoke` reaches
+# `checkPermission()`'s denied branches, which is a different gate on a
+# different object. And it is not covered by the real-GPS lane (B3), which
+# only ever runs with the provider ON — it proves the chain works, not what
+# happens when the user switches location off.
+#
+# # EXPECT THIS LANE TO FAIL ON ITS FIRST RUN, on step 4
+#
+# That failure is the deliverable, and it was predicted from source before the
+# lane existed. Both listeners of `locationStreamProvider`
+# (`map_page.dart:441`, `map_shell.dart:738`) handle it with
+# `next.whenData(...)`, which DISCARDS the error, and the map's only error
+# overlay is gated on `_obfuscatedLocation == null` (`map_page.dart:568`) —
+# false in every mid-session case. Haven stops sharing location and tells the
+# user nothing at all. Do not "fix" the lane by relaxing the assertion
+# (CLAUDE.md, Testing Requirements #5); fix it by rendering the app's OWN
+# existing copy (`mapLocationOffTitle` / `mapLocationOffMessage`, already
+# translated in 13 locales) when the service is disabled.
+#
+# # Why a SEPARATE workflow (not another job in e2e-real-gps.yml)
+#
+# GitHub runs every job on its own runner, so co-locating buys no setup reuse
+# — it would duplicate all eleven setup steps under one file while forcing two
+# lanes with different bounds, different APKs and different failure modes to
+# share an envelope. The lanes also differ in kind: B3 bakes coordinates into
+# its APK through a dedicated builder because it ASSERTS the value; B6 asserts
+# behaviour around a toggle and only needs a fix to exist, so it rides the
+# shared `build-integration-apks.sh` funnel unchanged.
+#
+# # Architecture mirrors e2e-real-gps.yml / e2e-fgs-publish.yml
+#
+# Same single-AVD, build-before-boot design: the multi-GB Rust-NDK + Gradle
+# peak must never coincide with a resident emulator
+# (docs/E2E_TROUBLESHOOTING.md).
+
+name: E2E Location Provider Toggle
+
+on:
+  workflow_call:
+
+jobs:
+  e2e_location_provider_toggle:
+    name: e2e_location_provider_toggle
+    runs-on: ubuntu-latest
+    # One APK build (<=30m) + boot + a drive that internally holds the
+    # 168-second stale-fix window plus both toggles (<=24m of step deadline).
+    # The step-level timeout-minutes below bound a hung phase so GitHub kills
+    # the STEP rather than the runner, letting the if: always() artifact
+    # upload still run; this job-level cap is the outer envelope over both.
+    timeout-minutes: 70
+    env:
+      HAVEN_E2E_RELAY: ws://10.0.2.2:7777
+
+      # Declared EXPLICITLY rather than inherited. `liveSyncEnabled` defaults
+      # to true when the define is absent, so an omitted flag reads as "we
+      # didn't think about it" (CI_HARDENING_BACKLOG.md A7).
+      #
+      # `false` is a deliberate choice, not a copy. This lane's subject is the
+      # SEND half (OS provider -> location service -> publisher) and the UI
+      # that should react to it; the app's own receive path is not on the path
+      # being proven, and running it would only widen the failure surface with
+      # a subsystem whose startup has reddened lanes before. The live receive
+      # path is proven by the e2e-android live_sync variants.
+      HAVEN_LIVE_SYNC: "false"
+
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Free disk space
+        run: bash tooling/e2e/ci/free-disk-space.sh
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: haven-core
+          # Distinct cache key from the other E2E jobs so they don't race on
+          # one entry; all build the same x86_64-linux-android target.
+          key: e2e-location-provider-toggle-x64
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: flutter pub get
+
+      # Build the target APK BEFORE the emulator boots (build-before-boot
+      # discipline). Staged at /tmp/integration-apks/<basename>.apk; the
+      # --dart-defines baked here (relay URL + receive path) MUST match what
+      # the drive step assumes, because `flutter drive` does not re-pass them.
+      - name: Build provider-toggle test APK
+        working-directory: haven
+        timeout-minutes: 30
+        run: bash ../tooling/e2e/ci/build-integration-apks.sh
+          integration_test/b6_location_provider_toggle_test.dart
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: AVD cache
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          # Shared with the other Android E2E lanes: the AVD snapshot is
+          # byte-identical (same api/arch/target/profile), so this restores
+          # the snapshot they created instead of rebuilding it.
+          key: avd-api34-x86_64-google_apis-single-v1
+
+      - name: Create AVD snapshot
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        # Bounded for the same reason the sibling lanes are: a wedged boot
+        # with no step cap dies at the JOB cap, which SIGKILLs the runner
+        # before any if: failure() step, so the lane fails slow and with no
+        # artifacts. 15 min is ~7x the observed snapshot time.
+        timeout-minutes: 15
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          emulator-boot-timeout: 420
+          script: echo "Generated AVD snapshot for caching."
+
+      - name: Start strfry relay
+        env:
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+        run: bash tooling/e2e/ci/start-strfry.sh
+
+      # All real logic lives in the checked-in orchestrator (single bash
+      # invocation — the action runs each line of a multi-line `script:` in
+      # its own sh -c, which would drop shell state). The orchestrator
+      # backgrounds `flutter drive` and toggles the provider underneath it,
+      # because the whole subject is ONE continuous session whose provider
+      # disappears mid-flight.
+      #
+      # BOUNDS. Three of them, innermost first:
+      #   16m  the `flutter drive` (the orchestrator's own
+      #        B6_DRIVE_TIMEOUT default; kept in the script rather than
+      #        declared here so the two cannot drift).
+      #   24m  this step's inner deadline (run-with-deadline.sh below) —
+      #        covers the drive PLUS install/verified-grants/GPS-seed/both
+      #        toggles/oracle, none of which the per-drive timeout bounds,
+      #        and is the bound that actually reaps
+      #        (CI_HARDENING_BACKLOG.md A8).
+      #   34m  this step's timeout-minutes = 24 + 1 (kill grace) + 7
+      #        (emulator-boot-timeout) + margin, a belt over the deadline.
+      # Sizing evidence: the drive target's own worst case is ~13 min (arming
+      # + a 150s baseline wait + a 90s disable wait + the 168s stale-fix
+      # window with sustained checks + a 90s re-enable wait + a 150s recovery
+      # wait) under a 12-minute in-test Timeout; revise against p95 once this
+      # lane has green history.
+      #
+      # -memory 6144 matches the sibling Android lanes: RustLib + SQLCipher
+      # floods `mlock() -1 ENOMEM` under pressure.
+      - name: Run the provider-toggle proof on the emulator
+        timeout-minutes: 34
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none -memory 6144
+          disable-animations: true
+          emulator-boot-timeout: 420
+          script: bash tooling/e2e/ci/run-with-deadline.sh 24m "e2e-location-provider-toggle drive" -- bash tooling/e2e/ci/run-b6-location-provider-toggle.sh /tmp/integration-apks/b6_location_provider_toggle_test.apk integration_test/b6_location_provider_toggle_test.dart
+
+      - name: Capture host + emulator diagnostics
+        if: failure()
+        run: |
+          mkdir -p /tmp/b6-logs
+          adb reconnect offline || true
+          timeout 60 adb wait-for-device || true
+          {
+            echo "=== df -h ==="
+            df -h || true
+            echo
+            echo "=== free -h ==="
+            free -h || true
+            echo
+            echo "=== adb devices -l (after reconnect attempt) ==="
+            adb devices -l || true
+            echo
+            echo "=== location provider state ==="
+            adb shell cmd location is-location-enabled || true
+            echo
+            echo "=== appops location slice ==="
+            adb shell cmd appops get com.oblivioustech.haven || true
+          # `.log`, not `.txt`: this file is written AFTER the orchestrator's
+          # EXIT trap has already scanned, and the scanner's directory walk
+          # only picks up `*.log`. A `.txt` here would be uploaded unscanned.
+          } > /tmp/b6-logs/diag.log 2>&1 || true
+          # Scan what this step just wrote (Security Rule 6). Withhold rather
+          # than upload on a hit, matching the orchestrator's containment.
+          # rc 1 (a real leak) and rc 3 (absent/unreadable/empty log) are kept
+          # apart deliberately: both fail the step, but only a leak justifies
+          # destroying the diag.
+          diag_scan_rc=0
+          bash tooling/e2e/ci/scan-logs-for-secrets.sh /tmp/b6-logs/diag.log \
+            || diag_scan_rc=$?
+          if [ "${diag_scan_rc}" -eq 1 ]; then
+            rm -f /tmp/b6-logs/diag.log
+            echo "diag withheld: secret-leak guard tripped" > /tmp/b6-logs/DIAG_LEAK.txt
+            exit 1
+          elif [ "${diag_scan_rc}" -ne 0 ]; then
+            echo "diag unscannable (rc=${diag_scan_rc}): absent, unreadable or empty" \
+              > /tmp/b6-logs/DIAG_UNSCANNABLE.txt
+            echo "ERROR: diag log could not be scanned (rc=${diag_scan_rc})." >&2
+            exit 1
+          fi
+
+      # if: always() so a green run still surfaces the measured stale-cache
+      # tail and the toggle read-backs as recorded evidence.
+      - name: Upload provider-toggle artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-location-provider-toggle-${{ github.run_id }}
+          path: |
+            /tmp/b6-logs/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Tear down strfry relay
+        if: always()
+        run: bash tooling/e2e/ci/stop-strfry.sh

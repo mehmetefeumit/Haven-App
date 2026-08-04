@@ -105,7 +105,7 @@ misconfig() { printf '\033[1;31m[%s] ERROR:\033[0m %s\n' "${SCRIPT_NAME}" "$*" >
 # The wrapper names are listed literally rather than matched loosely so that a
 # renamed or newly added wrapper shows up as an unrecognised build site in
 # check 2's inventory instead of silently escaping check 1.
-readonly BUILD_RE='flutter build (apk|ios|ipa|appbundle)|flutter test [^|&]*integration_test/|build-integration-apks\.sh|run-ios-sim-scenario\.sh|build_apk_with_retry\.sh|build_release\.sh'
+readonly BUILD_RE='flutter build (apk|ios|ipa|appbundle)|flutter test [^|&]*integration_test/|build-integration-apks\.sh|build-b3-real-gps-apk\.sh|run-ios-sim-scenario\.sh|run-b4-ios-real-gps\.sh|run-b7-ios-auth-tier\.sh|build_apk_with_retry\.sh|build_release\.sh'
 
 # A DECLARATION of the value: `--dart-define=HAVEN_LIVE_SYNC=x`, a YAML
 # `HAVEN_LIVE_SYNC: x` env entry, or a shell `HAVEN_LIVE_SYNC=x`.

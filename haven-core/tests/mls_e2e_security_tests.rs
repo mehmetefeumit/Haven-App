@@ -52,12 +52,21 @@ async fn send_445(sender: &SessionManager, gid: &GroupId, content: &str) -> Even
 /// The inner location content a receiver recovers from a 445, or `None`.
 async fn decrypt_445_content(receiver: &SessionManager, event: &Event) -> Option<String> {
     let ingest = receiver.process_event(event).await.ok()?;
-    let mut results: Vec<LocationMessageResult> = ingest
-        .effects
-        .events
-        .iter()
-        .filter_map(SessionManager::location_result_from_event)
-        .collect();
+    // Accumulated with `extend` rather than seeded by `collect()`: the vector is
+    // appended to across the awaited loop below, so it is not the
+    // collect-then-consume shape `clippy::needless_collect` reads it as (its own
+    // suggested rewrite drops the `extend` and does not compile). Draining every
+    // pending group BEFORE searching is deliberate — `advance_convergence`
+    // mutates receiver state, and short-circuiting on the first match would
+    // leave the remaining groups un-advanced.
+    let mut results: Vec<LocationMessageResult> = Vec::new();
+    results.extend(
+        ingest
+            .effects
+            .events
+            .iter()
+            .filter_map(SessionManager::location_result_from_event),
+    );
     for gid in &ingest.effects.pending_convergence {
         if let Ok(more) = receiver.advance_convergence(gid).await {
             results.extend(

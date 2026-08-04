@@ -387,32 +387,61 @@ void callbackDispatcher() {
   DartPluginRegistrant.ensureInitialized();
 
   // (3+4) Execute the task body.
-  Workmanager().executeTask((taskName, inputData) async {
-    return runBackgroundCatchupTask(
-      isBackgroundSharingEnabled: () async {
-        final prefs = await SharedPreferences.getInstance();
-        // L1: reload so a cross-isolate opt-out written after this isolate's
-        // first getInstance() is seen (cheap; this gate runs once per wake).
-        await prefs.reload();
-        return prefs.getBool(kBackgroundSharingKey) ?? false;
-      },
-      // Direct pref read (D2) — deliberately NOT PendingMlsWipeService,
-      // whose construction requires the very CircleService path this gate
-      // exists to keep closed. Reuses the instance gate 1 just loaded
-      // (fresh in this brand-new isolate; the bootstrap re-check below
-      // reload()s again before any DB open).
-      isPendingMlsWipe: () async {
-        final prefs = await SharedPreferences.getInstance();
-        return prefs.getBool(kPendingMlsWipeKey) ?? false;
-      },
-      isRunningService: () => FlutterForegroundTask.isRunningService,
-      // D4: staleness-checked foreground flag (auto-expires after
-      // 2 × kBackgroundRepeatInterval, so a stale value cannot permanently
-      // starve the floor). Its own read error already returns false.
-      isForegroundActive: BackgroundLocationManager.isForegroundActive,
-      runCatchup: _runCatchupViaWorkerBootstrap,
-    );
-  });
+  Workmanager().executeTask(
+    (taskName, inputData) => runBackgroundCatchupWake(),
+  );
+}
+
+/// The production wake body: the gate chain of [runBackgroundCatchupTask]
+/// wired to its **production** readers (SharedPreferences, the foreground-task
+/// plugin, the D4 foreground flag) and terminating in the receive-only Rust
+/// sweep.
+///
+/// [callbackDispatcher] is nothing more than "prepare the isolate, then run
+/// this". The two are split so a caller that must prepare the isolate
+/// DIFFERENTLY can still run the identical wake instead of a hand-copied
+/// lookalike — the `e2e-background-catchup` lane's CI-only dispatcher
+/// (`haven/integration_test/e2e/_lib/m7_worker_ci_oneoff.dart`) installs the
+/// debug `ws://` loopback opt-in in the cold worker process, which has no
+/// persistent form and therefore cannot be inherited from the drive process,
+/// and then delegates here.
+///
+/// That split is deliberate about which side owns what: **no test-only
+/// behaviour lives in this file.** This function reads exactly the production
+/// prefs, calls exactly the production sweep, and is byte-identical for a
+/// production wake and a CI wake. Everything the lane needs that production
+/// does not is confined to the harness dispatcher, and
+/// `scripts/ci/check_m7_background_delivery_assertion.sh` fails the build if a
+/// test hook ever migrates into this library.
+///
+/// Returns `true` when the wake completed (including every clean gate no-op),
+/// `false` when the sweep threw — the value WorkManager reads to decide
+/// whether to apply its back-off policy.
+Future<bool> runBackgroundCatchupWake() {
+  return runBackgroundCatchupTask(
+    isBackgroundSharingEnabled: () async {
+      final prefs = await SharedPreferences.getInstance();
+      // L1: reload so a cross-isolate opt-out written after this isolate's
+      // first getInstance() is seen (cheap; this gate runs once per wake).
+      await prefs.reload();
+      return prefs.getBool(kBackgroundSharingKey) ?? false;
+    },
+    // Direct pref read (D2) — deliberately NOT PendingMlsWipeService,
+    // whose construction requires the very CircleService path this gate
+    // exists to keep closed. Reuses the instance gate 1 just loaded
+    // (fresh in this brand-new isolate; the bootstrap re-check below
+    // reload()s again before any DB open).
+    isPendingMlsWipe: () async {
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getBool(kPendingMlsWipeKey) ?? false;
+    },
+    isRunningService: () => FlutterForegroundTask.isRunningService,
+    // D4: staleness-checked foreground flag (auto-expires after
+    // 2 × kBackgroundRepeatInterval, so a stale value cannot permanently
+    // starve the floor). Its own read error already returns false.
+    isForegroundActive: BackgroundLocationManager.isForegroundActive,
+    runCatchup: _runCatchupViaWorkerBootstrap,
+  );
 }
 
 /// Boots the minimal service set in the WorkManager isolate and runs one

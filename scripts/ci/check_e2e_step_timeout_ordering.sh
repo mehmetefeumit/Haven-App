@@ -269,7 +269,9 @@ is_emulator_step() { [[ "$1" == *"reactivecircus/android-emulator-runner"* ]]; }
 # a guard is how guards get disabled.
 is_simulator_body() {
   [[ "$1" == *"--self-test"* ]] && return 1
-  [[ "$1" == *"run-ios-sim-scenario.sh"* || "$1" == *"boot-ios-sim.sh"* ]]
+  [[ "$1" == *"run-ios-sim-scenario.sh"* || "$1" == *"boot-ios-sim.sh"* \
+     || "$1" == *"run-b7-ios-auth-tier.sh"* \
+     || "$1" == *"run-b4-ios-real-gps.sh"* ]]
 }
 # A DRIVE step actually runs a lane's harness. An AVD-snapshot step uses the
 # same action but only echoes, so it needs a cap (C5) and no deadline (C1).

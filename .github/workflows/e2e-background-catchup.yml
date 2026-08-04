@@ -59,6 +59,15 @@ jobs:
       # has been running since the Phase-B flip. build-integration-apks.sh
       # REQUIRES this env, so a future omission fails loudly.
       HAVEN_LIVE_SYNC: "true"
+      # Phase A hard-asserts BACKGROUND DELIVERY: the cold worker must fetch,
+      # decrypt and apply the peer kind-445 the setup drive seeded
+      # (locations>=1 && relayErrors==0), not merely boot and sweep. Declared
+      # here rather than left to the script default so the lane's promise is
+      # visible where the lane is configured — it defaulted to 0 and was set in
+      # no workflow until 2026-08-03, so the lane proved less than its name
+      # implied (docs/CI_HARDENING_BACKLOG.md B2). Pinned by
+      # scripts/ci/check_m7_background_delivery_assertion.sh.
+      M7_REQUIRE_DECRYPT: "1"
       FLUTTER_SUPPRESS_ANALYTICS: "true"
 
     steps:
@@ -194,6 +203,10 @@ jobs:
         uses: reactivecircus/android-emulator-runner@v2
         env:
           STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+          # Re-declared at STEP level, like STRFRY_IMAGE above: the action spawns
+          # the script itself, so the value the orchestrator reads is pinned
+          # where it is used rather than inherited from two scopes away.
+          M7_REQUIRE_DECRYPT: ${{ env.M7_REQUIRE_DECRYPT }}
         with:
           api-level: 34
           arch: x86_64

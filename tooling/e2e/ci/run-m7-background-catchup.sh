@@ -7,12 +7,13 @@
 # separate lane from run-integration-tests.sh — that lane force-stops +
 # uninstalls between targets, both of which strip JobScheduler jobs).
 #
-#   Phase A  isolate-bootstrap proof: install the setup APK, drive it to the
-#            armed state (real keyring + identity + circle + seeded peer +
-#            consent + registered task), go COLD, force-run the job, and assert
-#            the worker booted (bootstrap ok) and swept (sweep complete:) with
-#            circles>=1. Decryption counters are captured as EVIDENCE only — see
-#            the "cold-process relay caveat" below.
+#   Phase A  isolate-bootstrap AND DELIVERY proof: install the setup APK, drive
+#            it to the armed state (real keyring + identity + circle + seeded
+#            peer + consent + registered task), go COLD, force-run the job, and
+#            assert the worker booted (bootstrap ok), swept (sweep complete:)
+#            with circles>=1, AND decrypted the seeded peer location
+#            (locations>=1 && relayErrors==0) — see "cold-process relay
+#            reachability" below.
 #   Phase B  reboot re-arm: reboot the guest, wait for boot, BOUNDED-poll that
 #            WorkManager re-scheduled the job (A6), assert the RebootReceiver is
 #            runtime-resolvable for BOOT_COMPLETED, then force-run again.
@@ -21,20 +22,44 @@
 #   Phase C2 leaked-wake no-op: install the disable APK, drive, go cold,
 #            force-run, assert the gate-1 marker AND strfry silence.
 #
-# # Cold-process relay caveat (why Phase A/B assert bootstrap, not decrypt)
+# # Cold-process relay reachability (why Phase A CAN assert decrypt)
 #
 # The worker runs in a fresh process (produced with `am kill`, NOT force-stop —
 # force-stop strips scheduled jobs). The debug-only ws:// loopback opt-in
 # (`allow_ws_loopback_for_test`, an in-memory OnceLock with NO on-disk form,
 # unlike the keyring which persists in the Android Keystore) is therefore NOT
-# installed in that process, so the cold worker rejects the plaintext
-# `ws://10.0.2.2:7777` CI relay and its sweep returns locations=0,relayErrors>=1.
-# The DETERMINISTIC Phase-A/B assertion is thus `bootstrap ok` + `sweep complete:`
-# + circles>=1 (cold RustLib.init + real keyring + SQLCipher open + identity +
-# circle visible + sweep runs). The decryption counters are printed as evidence;
-# set M7_REQUIRE_DECRYPT=1 to ALSO hard-assert locations>=1 && relayErrors==0 —
-# do that ONLY once relay reachability from the cold worker is solved (see the
-# M7-E Wave-2 report / §5 local runbook), otherwise it will fail by construction.
+# inherited by that process.
+#
+# Until 2026-08-03 that ended the story: the cold worker rejected the plaintext
+# `ws://10.0.2.2:7777` CI relay in `validate_single_relay_url` before opening a
+# socket, its sweep returned locations=0,relayErrors=1 (CI run 30792258968), and
+# the lane could only assert bootstrap. `M7_REQUIRE_DECRYPT` existed to assert
+# delivery but defaulted to 0 and was set in NO workflow, because at 1 it failed
+# by construction — the lane proved less than its name implied
+# (docs/CI_HARDENING_BACKLOG.md B2).
+#
+# The three m7_worker_* targets now register a CI-only WorkManager dispatcher
+# (`m7CiCallbackDispatcher`, haven/integration_test/e2e/_lib/m7_worker_ci_oneoff.dart)
+# which installs the opt-in IN the cold process and then runs the PRODUCTION
+# wake body (`runBackgroundCatchupWake`) unmodified. So Phase A now hard-asserts
+# DELIVERY — the peer kind-445 the setup drive seeded was fetched, decrypted and
+# applied by a background wake — and M7_REQUIRE_DECRYPT DEFAULTS TO 1.
+#
+# Two corollaries worth keeping in mind before weakening any of this:
+#   * The C1/C2 negative phases' "strfry silence" now proves the GATE. Before
+#     the opt-in reached the cold process, a leaked wake could not have reached
+#     the relay even with every gate open, so the silence was over-determined.
+#   * The seeded kind-445 carries a NIP-40 expiration of 228 s
+#     (LOCATION_MESSAGE_RETENTION_SECS) and the engine treats an event past
+#     expiry + RECEIVER_EXPIRATION_GRACE_SECS (60 s) as terminally `Stale`,
+#     which counts as APPLIED with nothing decrypted. `M7_DECRYPT_FRESHNESS_S`
+#     bounds seed→sweep so that short-circuit cannot masquerade as delivery
+#     (observed seed→sweep across six 2026-08 runs: 11-63 s).
+#
+# Set M7_REQUIRE_DECRYPT=0 only for a local run against a relay the cold worker
+# genuinely cannot reach; CI pins it to 1 and
+# scripts/ci/check_m7_background_delivery_assertion.sh fails the build if the
+# workflow stops doing so.
 #
 # # Marker strings
 #
@@ -64,7 +89,14 @@
 #   HAVEN_E2E_RELAY   ws:// URL of the strfry relay (default ws://10.0.2.2:7777).
 #
 # Optional env:
-#   M7_REQUIRE_DECRYPT      1 => also hard-assert Phase-A locations>=1 (see caveat).
+#   M7_REQUIRE_DECRYPT      1 (DEFAULT) => hard-assert Phase-A delivery
+#                           (locations>=1 && relayErrors==0). 0 downgrades it to
+#                           evidence-only; CI pins 1 (see the section above).
+#   M7_DECRYPT_FRESHNESS_S  Max seconds between the setup drive finishing (peer
+#                           kind-445 seeded) and the sweep, above which the
+#                           seeded event may have aged past its NIP-40 window
+#                           and a `Stale` short-circuit could pass as delivery
+#                           (default 240; the engine's hard limit is 228+60).
 #   HAVEN_DRIVE_TIMEOUT     per-drive `timeout` (default 10m).
 #   M7_BOOT_TIMEOUT         reboot boot-completed bound in s (default 300).
 #   M7_JOB_REARM_TIMEOUT    post-boot job re-schedule bound in s (default 60, A6).
@@ -126,7 +158,17 @@ readonly MARKER_TIMEOUT="${M7_MARKER_TIMEOUT:-240}"
 # slow cold bootstrap. Defaulted readonly so it can never be empty (an empty
 # value would collapse the poll to zero and hammer force_run_all with no gap).
 readonly FORCE_RUN_ROUND_POLL="${M7_FORCE_RUN_ROUND_POLL:-4}"
-readonly REQUIRE_DECRYPT="${M7_REQUIRE_DECRYPT:-0}"
+# Phase-A DELIVERY assertion. Defaults ON: the CI-only dispatcher installs the
+# ws:// loopback opt-in in the cold worker process, so a background wake CAN
+# reach the hermetic relay and decrypt the seeded peer location. `0` downgrades
+# the assertion to evidence-only for a local run against an unreachable relay.
+readonly REQUIRE_DECRYPT="${M7_REQUIRE_DECRYPT:-1}"
+# Upper bound on seed→sweep wall clock for the Phase-A delivery assertion. The
+# seeded kind-445 expires 228 s after `created_at` and the engine short-circuits
+# an event past expiry+60 s to `Stale`, which the sweep counts as APPLIED with
+# nothing decrypted. Bounding the window keeps `locations>=1` an honest decrypt
+# oracle rather than one a slow run could satisfy vacuously.
+readonly DECRYPT_FRESHNESS_S="${M7_DECRYPT_FRESHNESS_S:-240}"
 # If adb marks the emulator 'offline' (a transport drop under this lane's memory
 # pressure, or right after the Phase-B guest reboot), how long to try recovering
 # it before declaring an infrastructure failure. Bounded so a genuinely-wedged
@@ -145,6 +187,13 @@ readonly MARK_CONSENT_DISABLED='[CatchupWorker] wake: consent disabled — no-op
 # so a slow in-progress bootstrap is never restarted. Specific to Haven (no other
 # app on the image uses flutter_workmanager), so an app-wide grep is safe.
 readonly MARK_WORKER_STARTED='WM-WorkerWrapper: Starting work for dev.fluttercommunity.workmanager.BackgroundWorker'
+# VERBATIM literals of kM7CiLoopbackArmedMarker / kM7CiLoopbackFailedMarker in
+# haven/integration_test/e2e/_lib/m7_worker_ci_oneoff.dart. The ARMED marker is
+# what separates "the worker reached the relay and found nothing" from "the
+# worker was never able to reach the relay" — both produce locations=0, and
+# only one of them is a delivery regression.
+readonly MARK_CI_LOOPBACK_ARMED='[M7CI] ws:// loopback opt-in armed'
+readonly MARK_CI_LOOPBACK_FAILED='[M7CI] ws:// loopback opt-in FAILED'
 
 # Three targets, in fixed order. Args override each APK; a missing arg/file
 # triggers a LOCAL build of that target.
@@ -617,7 +666,7 @@ resolve_apk() {
 
 phase_a() {
   echo "============================================================"
-  echo "Phase A — isolate-bootstrap proof (positive)"
+  echo "Phase A — isolate-bootstrap + peer-delivery proof (positive)"
   echo "============================================================"
   reset_strfry "phase A"
 
@@ -633,6 +682,11 @@ phase_a() {
   start_logcat "${LOG_DIR}/logcat.a.log"
 
   drive_target "${APK_SETUP}" "${TARGET_SETUP}" "${LOG_DIR}/drive.a.log"
+  # Freshness anchor for the delivery assertion. The setup drive publishes Bob's
+  # kind-445 near its end, so the drive's exit is a safe (slightly pessimistic)
+  # stand-in for `created_at`. Everything between here and the sweep counts
+  # against DECRYPT_FRESHNESS_S.
+  local seed_at="${SECONDS}"
 
   # Discover the WorkManager JobScheduler id(s) to force-run. WorkManager on API
   # 34 schedules into the `androidx.work.systemjobscheduler` NAMESPACE, which the
@@ -685,22 +739,54 @@ phase_a() {
   if [[ -z "${circles}" ]] || (( circles < 1 )); then
     fail "sweep reported circles=${circles:-<none>} (<1) — worker did not open the app's circle DB."
   fi
-  echo "[phase-a] PASS (deterministic): cold isolate booted Rust+keyring+SQLCipher, opened the DB, swept circles>=1."
+  echo "[phase-a] bootstrap sub-proof: cold isolate booted Rust+keyring+SQLCipher, opened the DB, swept circles>=1."
 
-  # Decryption evidence — see the cold-process relay caveat in the header.
-  if [[ -n "${locations}" ]] && (( locations >= 1 )) \
-     && [[ -n "${relay_errors}" ]] && (( relay_errors == 0 )); then
-    echo "[phase-a] DECRYPTION OBSERVED: locations=${locations} relayErrors=0 (worker reached the relay)."
-  else
-    echo "[phase-a] NOTE: decryption NOT observed in the cold worker" \
-         "(locations=${locations:-?} relayErrors=${relay_errors:-?})." \
-         "Expected: the ws:// loopback opt-in is process-global with no persistent" \
-         "form, so a cold worker cannot reach the plaintext CI relay. See the M7-E" \
-         "Wave-2 report / §5 runbook. Bootstrap proof above stands."
-    if [[ "${REQUIRE_DECRYPT}" == "1" ]]; then
-      fail "M7_REQUIRE_DECRYPT=1 but decryption was not observed (see NOTE above)."
+  # --- Delivery assertion (B2) ---------------------------------------------
+  # `locations` is the sweep's eventsApplied counter. Phase A's relay holds
+  # exactly ONE h-tagged event — the kind-445 the setup drive had Bob publish —
+  # so locations>=1 with relayErrors==0 means that peer event was fetched from
+  # the relay and applied by the engine, i.e. decrypted by a background wake.
+  local elapsed=$(( SECONDS - seed_at ))
+  if [[ "${REQUIRE_DECRYPT}" != "1" ]]; then
+    if [[ -n "${locations}" ]] && (( locations >= 1 )) \
+       && [[ -n "${relay_errors}" ]] && (( relay_errors == 0 )); then
+      echo "[phase-a] DECRYPTION OBSERVED (evidence-only, M7_REQUIRE_DECRYPT=${REQUIRE_DECRYPT}):" \
+           "locations=${locations} relayErrors=0."
+    else
+      echo "[phase-a] NOTE: decryption NOT observed and M7_REQUIRE_DECRYPT=${REQUIRE_DECRYPT}" \
+           "(locations=${locations:-?} relayErrors=${relay_errors:-?}) — evidence only." >&2
     fi
+    echo "[phase-a] PASS (bootstrap only — delivery assertion disabled)."
+    return 0
   fi
+
+  # Reachability first, so a locations=0 caused by the harness never reads as a
+  # delivery regression. The CI dispatcher installs the process-global ws://
+  # loopback opt-in that the cold process cannot inherit.
+  if grep -aqF -- "${MARK_CI_LOOPBACK_FAILED}" "${LOG_DIR}/logcat.a.log" 2>/dev/null; then
+    tail -60 "${LOG_DIR}/logcat.a.log" >&2 || true
+    fail "the CI dispatcher could not arm the ws:// loopback opt-in in the cold worker (HARNESS failure, not a delivery regression): ${MARK_CI_LOOPBACK_FAILED}"
+  fi
+  if ! grep -aqF -- "${MARK_CI_LOOPBACK_ARMED}" "${LOG_DIR}/logcat.a.log" 2>/dev/null; then
+    tail -60 "${LOG_DIR}/logcat.a.log" >&2 || true
+    fail "the cold worker never logged '${MARK_CI_LOOPBACK_ARMED}' — it ran the PRODUCTION dispatcher, so it could not reach ws://; registerM7CiOneOffCatchup must re-point the WorkManager callback handle at m7CiCallbackDispatcher AFTER registerBackgroundCatchup()."
+  fi
+  echo "[phase-a] cold worker armed the ws:// loopback opt-in (relay reachable)."
+
+  # Freshness: past 228s (NIP-40 expiration) + 60s receiver grace the engine
+  # short-circuits the seeded event to `Stale`, which the sweep counts as
+  # APPLIED with nothing decrypted. Refuse to call that delivery.
+  if (( elapsed > DECRYPT_FRESHNESS_S )); then
+    fail "seed→sweep took ${elapsed}s (> ${DECRYPT_FRESHNESS_S}s): the seeded kind-445 may have aged past its NIP-40 window, where a terminal 'Stale' outcome counts as APPLIED without decrypting anything. This is a LANE-TIMING failure, not proof of a delivery regression — re-run, and if it persists shorten the force-run path rather than raising M7_DECRYPT_FRESHNESS_S past 228+60."
+  fi
+
+  if [[ -z "${locations}" ]] || (( locations < 1 )) \
+     || [[ -z "${relay_errors}" ]] || (( relay_errors != 0 )); then
+    tail -60 "${LOG_DIR}/logcat.a.log" >&2 || true
+    fail "BACKGROUND DELIVERY FAILED: the cold worker reached the relay (opt-in armed) but did not apply the seeded peer location — locations=${locations:-<none>} (want >=1) relayErrors=${relay_errors:-<none>} (want 0), seed→sweep ${elapsed}s. A peer kind-445 published before the wake was not received in the background."
+  fi
+  echo "[phase-a] PASS (deterministic): cold isolate booted, reached the relay, and DECRYPTED the seeded peer location" \
+       "(locations=${locations} relayErrors=0, seed→sweep ${elapsed}s)."
 }
 
 phase_b() {
@@ -820,6 +906,18 @@ run_negative_phase() {
   fi
   echo "[phase-${tag}] no-op marker observed: ${marker}"
 
+  # The silence below only means something if the wake COULD have reached the
+  # relay. The CI dispatcher arms the ws:// loopback opt-in before the gate
+  # chain runs, so require that marker here: without it the cold worker would
+  # have been rejected at URL validation and strfry would be silent no matter
+  # what the gate decided — an over-determined proof, which is what this phase
+  # asserted until 2026-08-03 (docs/CI_HARDENING_BACKLOG.md B2).
+  if ! grep -aqF -- "${MARK_CI_LOOPBACK_ARMED}" "${LOG_DIR}/logcat.${tag}.log" 2>/dev/null; then
+    tail -60 "${LOG_DIR}/logcat.${tag}.log" >&2 || true
+    fail "phase ${name}: cold worker never logged '${MARK_CI_LOOPBACK_ARMED}' — the relay was unreachable by construction, so the strfry-silence proof below would be vacuous."
+  fi
+  echo "[phase-${tag}] relay was reachable (loopback opt-in armed) — silence below proves the GATE."
+
   # Settle, then prove ZERO network + no bootstrap/sweep.
   sleep 5
   local conn1 lines1
@@ -864,7 +962,11 @@ main() {
 
   mkdir -p "${LOG_DIR}"
 
-  echo "M7 background-catch-up runtime lane — relay=${RELAY_URL} require_decrypt=${REQUIRE_DECRYPT}"
+  echo "M7 background-catch-up runtime lane — relay=${RELAY_URL} require_decrypt=${REQUIRE_DECRYPT} decrypt_freshness=${DECRYPT_FRESHNESS_S}s"
+  if [[ "${REQUIRE_DECRYPT}" != "1" ]]; then
+    echo "WARNING: M7_REQUIRE_DECRYPT=${REQUIRE_DECRYPT} — Phase A will NOT assert background delivery," \
+         "only bootstrap. CI pins this to 1 (docs/CI_HARDENING_BACKLOG.md B2)." >&2
+  fi
 
   # Resolve all three APKs up front (build any missing ones BEFORE the phases so
   # a LOCAL build never interleaves with a force-run).
@@ -882,10 +984,14 @@ main() {
   echo
   echo "============================================================"
   echo "M7 background-catch-up lane: ALL PHASES PASSED"
-  echo "  A  cold isolate bootstrap + DB open + sweep (circles>=1)"
+  if [[ "${REQUIRE_DECRYPT}" == "1" ]]; then
+    echo "  A  cold isolate bootstrap + DB open + sweep (circles>=1) + PEER LOCATION DECRYPTED"
+  else
+    echo "  A  cold isolate bootstrap + DB open + sweep (circles>=1) — delivery NOT asserted"
+  fi
   echo "  B  job survives reboot + RebootReceiver resolvable + post-boot wake"
-  echo "  C1 pending-wipe gate declines + strfry silence"
-  echo "  C2 consent gate declines a leaked wake + strfry silence"
+  echo "  C1 pending-wipe gate declines + strfry silence (relay was reachable)"
+  echo "  C2 consent gate declines a leaked wake + strfry silence (relay was reachable)"
   echo "============================================================"
   # The secret scan runs in the EXIT trap (Security Rule 6), even here.
 }
