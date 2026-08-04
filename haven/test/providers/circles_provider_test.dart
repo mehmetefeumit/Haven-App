@@ -396,12 +396,6 @@ class _ThrowingCircleService implements CircleService {
   Future<void> failPendingCommit(PendingCommitToken pending) async {}
 
   @override
-  Future<void> advanceGroupCursorToEventSecs(int eventCreatedAtSecs) async {}
-
-  @override
-  Future<void> advanceInboxCursorToWrapSecs(int wrapCreatedAtSecs) async {}
-
-  @override
   Future<String> signDeletionEvent({
     required List<int> identitySecretBytes,
     required List<String> eventIds,
@@ -571,12 +565,6 @@ class _ThrowingErrorCircleService implements CircleService {
 
   @override
   Future<void> failPendingCommit(PendingCommitToken pending) async {}
-
-  @override
-  Future<void> advanceGroupCursorToEventSecs(int eventCreatedAtSecs) async {}
-
-  @override
-  Future<void> advanceInboxCursorToWrapSecs(int wrapCreatedAtSecs) async {}
 
   @override
   Future<String> signDeletionEvent({

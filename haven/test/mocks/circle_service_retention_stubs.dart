@@ -66,10 +66,6 @@ mixin CircleServiceRetentionStubs {
   bool isCircleBlocked(List<int> mlsGroupId) =>
       _blockedCircleIdsStub.contains(mlsGroupId.join(','));
 
-  Future<void> advanceGroupCursorToEventSecs(int eventCreatedAtSecs) async {}
-
-  Future<void> advanceInboxCursorToWrapSecs(int wrapCreatedAtSecs) async {}
-
   Future<void> updateCircleRelays({
     required List<int> mlsGroupId,
     required List<String> newRelays,

@@ -36,6 +36,17 @@
 //! ingest at all — during a publish-before-apply transition. The EOSE anchor
 //! covers both because it does not depend on per-event outcomes.
 //!
+//! # The inbox plane is the same rule, against a cheaper forgery
+//!
+//! A `kind:1059` gift wrap is routed by a `#p` tag holding the recipient's
+//! PUBLIC key and is authored by a throwaway ephemeral key by construction, and
+//! peeling one consults NIP-59 alone — no MLS state, and nothing binding the
+//! outer `created_at` to the payload. So minting a wrap that a victim's client
+//! peels cleanly, at any `created_at`, costs one NIP-44 encryption to a
+//! published npub. The inbox cursor therefore advances on its own REQ's `EOSE`
+//! (see [`super::anchor::InboxAnchor`]) and the wrapper timestamp is not even
+//! forwarded to the consumer.
+//!
 //! # Per-circle cursor
 //!
 //! Each circle gets its own group cursor via `group_445:{hex(nostr_group_id)}`,
@@ -56,7 +67,7 @@ use crate::relay::auto_commit::{
     CONVERGENCE_RETICK_DELAY, MAX_CONVERGENCE_RETICKS,
 };
 
-use super::anchor::CursorAnchors;
+use super::anchor::{CursorAnchors, InboxAnchor};
 use super::event::{LiveSyncEvent, SyncStatusReason};
 use super::event_bus::EventBus;
 
@@ -90,14 +101,22 @@ pub enum GroupProcessOutcome {
     /// also persists it durably, so nothing is lost across a restart.
     Buffered,
     /// Haven's local receiver-side screen rejected the event BEFORE any MLS
-    /// authentication (see [`crate::nostr::mls::types::ScreenedIngest`]). Nothing
-    /// was routed and nothing was persisted. It holds nothing back either: there
-    /// is no un-applied message to come back for, and letting it hold would sell
-    /// an attacker a stall for the price of one forged event.
+    /// authentication (see [`crate::nostr::mls::types::ScreenedIngest`]) — an
+    /// expired NIP-40 replay, or an envelope the pure pre-engine transport parse
+    /// could not read at all. Nothing was routed and nothing was persisted. It
+    /// holds nothing back either: there is no un-applied message to come back
+    /// for, and letting it hold would sell an attacker a stall for the price of
+    /// one forged event.
     RejectedBeforeAuth,
-    /// The message could not be ingested at all (hard failure). Treated like
+    /// The ENGINE could not ingest the message (hard failure). Treated like
     /// [`Self::Buffered`] for the cursor: something at this position is
     /// unresolved, so it holds the generation back.
+    ///
+    /// Reaching this means the envelope parsed and the engine took the message —
+    /// it is the authenticated path failing, not a screen. An envelope that does
+    /// not parse is [`Self::RejectedBeforeAuth`] instead, so an attacker cannot
+    /// mint a hold-back here without producing ciphertext the engine will
+    /// actually work on.
     Unprocessable,
 }
 
@@ -114,9 +133,13 @@ pub struct EngineProcessor {
     /// (never an optimistic apply). The live-sync session installs the engine
     /// `Client` here via [`Self::with_publisher`].
     publisher: Option<Arc<dyn AutoCommitPublisher>>,
-    /// Per-circle cursor anchors: the ONLY thing in this module that may move a
-    /// sync cursor forward, and it moves it to a local clock reading.
+    /// Per-circle cursor anchors: one of the only two things in this module that
+    /// may move a sync cursor forward, and it moves it to a local clock reading.
     anchors: CursorAnchors,
+    /// The inbox (`kind:1059`) cursor anchor — the other one, and likewise a
+    /// local clock reading. A gift wrap's own `created_at` reaches it in no
+    /// direction; see [`InboxAnchor`].
+    inbox_anchor: InboxAnchor,
 }
 
 impl EngineProcessor {
@@ -132,6 +155,7 @@ impl EngineProcessor {
             bus,
             publisher: None,
             anchors: CursorAnchors::default(),
+            inbox_anchor: InboxAnchor::default(),
         }
     }
 
@@ -149,6 +173,7 @@ impl EngineProcessor {
             bus,
             publisher: Some(publisher),
             anchors: CursorAnchors::default(),
+            inbox_anchor: InboxAnchor::default(),
         }
     }
 
@@ -198,6 +223,49 @@ impl EngineProcessor {
         self.anchors.forget(group_id_hex);
     }
 
+    /// Opens a fresh INBOX cursor-anchor generation at `opened_at_secs` — a
+    /// LOCAL wall-clock reading taken when the `kind:1059` REQ was (re-)issued.
+    ///
+    /// The session MUST call this for every inbox REQ it issues, before or as it
+    /// issues it, reusing the same `now` it derived that REQ's `since` from.
+    /// With no open generation the inbox cursor never advances.
+    pub fn note_inbox_subscription_opened(&self, opened_at_secs: i64) {
+        self.inbox_anchor.open(opened_at_secs);
+    }
+
+    /// Records the relay's end-of-stored-events for the INBOX subscription and
+    /// advances the persisted `inbox_1059` cursor to what the generation
+    /// justifies.
+    ///
+    /// Returns whether an advance was issued (`false` when no generation is open
+    /// or this generation already advanced). Best-effort: a storage failure is
+    /// swallowed, because the cursor is an optimization and dropping the EOSE
+    /// signal must never cost a delivered invitation.
+    ///
+    /// # Why not the gift wrap's own timestamp
+    ///
+    /// A `kind:1059`'s `#p` routing tag is the recipient's PUBLIC key and its
+    /// author is a throwaway ephemeral key by construction, so anyone who knows
+    /// a user's npub can mint a wrap that peels cleanly at any `created_at` —
+    /// see [`InboxAnchor`] for the full argument and for why the FUTURE
+    /// direction is the one that kills invitation delivery outright.
+    pub fn note_inbox_end_of_stored_events(&self) -> bool {
+        let now_secs = chrono::Utc::now().timestamp();
+        let Some(ms) = self.inbox_anchor.consume_eose(now_secs) else {
+            return false;
+        };
+        let _ = self
+            .circle
+            .advance_sync_cursor(crate::relay::cursor::STREAM_INBOX_1059, ms);
+        true
+    }
+
+    /// Drops the inbox anchor after its subscription is closed, so a later stray
+    /// EOSE cannot advance a cursor for a REQ we no longer own.
+    pub fn forget_inbox_subscription(&self) {
+        self.inbox_anchor.forget();
+    }
+
     /// Processes one incoming `kind:445` for `nostr_group_id` (its routed `#h`).
     ///
     /// Ingests via the engine, routes the drained events, advances stored
@@ -233,13 +301,18 @@ impl EngineProcessor {
         let group_hex = hex::encode(nostr_group_id);
         let created_at_secs = i64::try_from(event.created_at.as_secs()).unwrap_or(i64::MAX);
 
+        // An `Err` here is an ENGINE-side ingest failure: the envelope parsed, so
+        // the engine took the message and failed on it. Something at this
+        // position is unresolved, so hold the generation at it. Attacker-writable
+        // in principle, but only downwards (and the cursor write is
+        // monotonic-max), so the worst it buys is a wider refetch — and minting
+        // one now costs producing ciphertext the engine will actually work on,
+        // because an unreadable envelope no longer lands here (it is a
+        // `RejectedBeforeAuth` below).
         let Ok(screened) = self.circle.session().process_event(event).await else {
             self.bus.send(LiveSyncEvent::Status {
                 reason: SyncStatusReason::Unprocessable,
             });
-            // Something at this position is unresolved, so hold the generation
-            // at it. Attacker-writable, but only downwards (and the cursor write
-            // is monotonic-max), so the worst it buys is a wider refetch.
             self.anchors.note_unapplied(&group_hex, created_at_secs);
             return GroupProcessOutcome::Unprocessable;
         };
@@ -381,12 +454,16 @@ impl EngineProcessor {
     }
 
     /// Emits a raw gift-wrapped invitation (`kind:1059`) onto the bus. The
-    /// engine never unwraps it; the foreground consumer does. The inbox cursor
-    /// advances only via the foreground after a successful hold, never here.
+    /// engine never unwraps it; the foreground consumer does.
+    ///
+    /// **Cursor-inert, in both directions.** The wrapper's `created_at` is not
+    /// forwarded to the consumer at all, because the only thing it was ever used
+    /// for was a cursor advance — and it is an unauthenticated field on an event
+    /// anyone who knows this user's npub can mint (see [`InboxAnchor`]). The
+    /// inbox cursor moves on [`Self::note_inbox_end_of_stored_events`] alone.
     pub fn process_inbox_event(&self, event: &Event) {
         self.bus.send(LiveSyncEvent::Welcome {
             gift_wrap_json: event.as_json(),
-            wrap_created_at_secs: i64::try_from(event.created_at.as_secs()).unwrap_or(i64::MAX),
         });
     }
 

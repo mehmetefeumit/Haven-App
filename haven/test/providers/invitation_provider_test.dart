@@ -164,7 +164,7 @@ void main() {
     );
 
     test(
-      'advances inbox cursor to the newest handled gift wrap (M2)',
+      'advances NO sync cursor: the poll path is cursor-free end to end',
       () async {
         final mockIdentityService = _MockIdentityService(identityExists: true);
         final mockCircleService = MockCircleService();
@@ -188,8 +188,34 @@ void main() {
 
         await container.read(invitationPollerProvider.future);
 
-        // Newest handled wrapper `created_at`, regardless of fetch order.
-        expect(mockCircleService.advanceInboxCursorLastSecs, 1700000300);
+        // Anti-vacuity FIRST: all three wraps really were handled, so the
+        // assertion below is about the cursor and not about an inert poll.
+        expect(
+          mockCircleService.methodCalls
+              .where((c) => c == 'processGiftWrappedInvitation')
+              .length,
+          3,
+        );
+        // The defect: this poll used to raise the persisted `inbox_1059`
+        // cursor to the newest handled wrapper's outer `created_at`
+        // (1700000300 here). That field is chosen by whoever built the wrap,
+        // and a kind:1059 that peels cleanly costs one NIP-44 encryption to a
+        // published npub — so a future-dated wrap parked the cursor above the
+        // wall clock, and since the derived REQ floor is capped at `now`,
+        // every later inbox floor was pinned at `now`. NIP-59 backdates every
+        // gift wrap by up to 48h, so a floor at `now` filters out even a wrap
+        // published this second: invitations stopped arriving, permanently and
+        // across restarts. Dart has no cursor write path at all now.
+        expect(
+          mockCircleService.methodCalls.where(
+            (c) => c.toLowerCase().contains('cursor'),
+          ),
+          isEmpty,
+          reason:
+              'the invitation poll must not write any sync cursor: the '
+              'inbox cursor is anchored in Rust on the inbox REQ own local '
+              'open time, never on a gift wrap timestamp',
+        );
       },
     );
 

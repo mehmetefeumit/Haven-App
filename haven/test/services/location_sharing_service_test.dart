@@ -321,7 +321,24 @@ void main() {
       });
 
       // ------------------------------------------------------------------
-      // Group sync cursor (M2): advance only past fully-processed events.
+      // Group sync cursor: this poller writes NONE.
+      //
+      // It used to advance the persisted `group_445` cursor to the
+      // high-water-mark `created_at` of the events it processed. That value is
+      // chosen by whoever signed the outer kind:445 envelope and is
+      // authenticated by nothing on the receive path, and a circle's `#h` is its
+      // PUBLIC routing id — so any relay observer could mint an event dated
+      // "now", push the persisted REQ floor to it, and strand every legitimate
+      // event below it, permanently and across restarts.
+      //
+      // The whole path — the `CircleService` group-cursor advance and the FFI
+      // wrapper beneath it — is deleted (the symbols are named nowhere so the
+      // guard can ban the tokens flat); group cursors are advanced in Rust only,
+      // from the local instant an observation window opened.
+      // `scripts/ci/check_no_event_timestamp_cursor_advance.sh` keeps it
+      // deleted. The tests below pin what this poller DOES own —
+      // in-memory seen-marking — which is what the deleted cursor tests were
+      // really exercising through the accumulator.
       // ------------------------------------------------------------------
       List<LocationEventResult> locationResult(String sender) => fakeDecrypt(
         location: DecryptedLocation(
@@ -334,14 +351,13 @@ void main() {
         ),
       );
 
-      test('advances group cursor to the newest fully-processed event', () async {
+      test('the location poll never asks for a cursor advance', () async {
         final mockRelay = MockRelayService(
           groupMessages: [
             '{"id":"evtA","kind":445,"created_at":1700000100,"content":"loc"}',
             '{"id":"evtB","kind":445,"created_at":1700000200,"content":"commit"}',
           ],
         );
-        // Processed in ascending created_at order: evtA(100) then evtB(200).
         final mockCircle = MockCircleService()
           ..decryptLocationResults = [
             locationResult('sender1'),
@@ -354,27 +370,51 @@ void main() {
 
         await svc.fetchMemberLocations(circle: testCircle);
 
-        expect(mockCircle.advanceGroupCursorLastSecs, 1700000200);
+        expect(
+          mockCircle.methodCalls.where((c) => c.contains('Cursor')),
+          isEmpty,
+          reason:
+              'a fully-processed batch must move no sync cursor from this '
+              'poller — the group cursor is anchored in Rust on a local clock '
+              'reading, never on an inbound event timestamp',
+        );
       });
 
       test(
-        'does not advance group cursor when every event is unprocessable',
+        'an unprocessable event stays eligible for retry on the next poll',
         () async {
+          // The property the deleted "never advances past an unprocessable
+          // event" cursor test was really protecting: a failed decrypt must not
+          // be marked seen, so the next poll re-attempts it while the
+          // successful one is skipped.
           final mockRelay = MockRelayService(
             groupMessages: [
-              '{"id":"evtA","kind":445,"created_at":1700000100,"content":"x"}',
+              '{"id":"evtA","kind":445,"created_at":1700000100,"content":"loc"}',
+              '{"id":"evtB","kind":445,"created_at":1700000200,"content":"unp"}',
             ],
           );
-          // Default MockCircleService returns null (unprocessable) for decrypts.
-          final mockCircle = MockCircleService();
+          final mockCircle = MockCircleService()
+            ..decryptLocationResults = [
+              locationResult('sender1'), // evtA succeeds
+              noDecryptResult, // evtB unprocessable
+              noDecryptResult, // evtB, retried on the second poll
+            ];
           final svc = LocationSharingService(
             circleService: mockCircle,
             relayService: mockRelay,
           );
 
           await svc.fetchMemberLocations(circle: testCircle);
+          expect(mockCircle.decryptCallEventJsons, hasLength(2));
 
-          expect(mockCircle.advanceGroupCursorLastSecs, isNull);
+          await svc.fetchMemberLocations(circle: testCircle);
+          expect(
+            mockCircle.decryptCallEventJsons, hasLength(3),
+            reason:
+                'exactly ONE more decrypt: evtA was seen and is skipped, evtB '
+                'failed and must be retried',
+          );
+          expect(mockCircle.decryptCallEventJsons.last, contains('evtB'));
         },
       );
 
@@ -386,7 +426,7 @@ void main() {
       // decrypt failure. `CircleService.decryptLocation` surfaces this
       // shape as a non-null `DecryptResult` with `location: null` and
       // `groupUpdated: false` (mirrors the Rust FFI contract: the MLS
-      // layer decrypted successfully — cursor-advancing — but the content
+      // layer decrypted successfully — fully processed — but the content
       // isn't a `LocationMessage`).
       // ------------------------------------------------------------------
       test(
@@ -412,17 +452,6 @@ void main() {
 
           expect(result.locations, isEmpty);
           expect(result.groupUpdated, isFalse);
-          // Seen + cursor-advancing: a parse failure is never a decrypt
-          // failure, so the event's created_at becomes the new high-water
-          // mark instead of being left eligible for retry.
-          expect(
-            mockCircle.advanceGroupCursorLastSecs,
-            1700000300,
-            reason:
-                'a successfully-decrypted, non-location event must still '
-                'advance the group sync cursor — it was fully processed, '
-                'not left un-seen for retry',
-          );
 
           // A second fetch (same relay contents) must NOT re-decrypt the
           // same event — proving it was recorded as seen rather than left
@@ -439,77 +468,35 @@ void main() {
         },
       );
 
-      test('advances only to the newest SUCCESSFUL event, never past an '
-          'unprocessable one', () async {
+      // The evolution poller (_runEvolutionPoll) had its OWN copy of the
+      // deleted cursor accumulator; it must stay cursor-free too.
+      test('the evolution poll never asks for a cursor advance', () async {
         final mockRelay = MockRelayService(
           groupMessages: [
             '{"id":"evtA","kind":445,"created_at":1700000100,"content":"loc"}',
-            '{"id":"evtB","kind":445,"created_at":1700000200,"content":"unp"}',
+            '{"id":"evtB","kind":445,"created_at":1700000200,"content":"commit"}',
           ],
         );
         final mockCircle = MockCircleService()
           ..decryptLocationResults = [
-            locationResult('sender1'), // evtA(100) succeeds
-            noDecryptResult, // evtB(200) unprocessable
+            locationResult('sender1'),
+            fakeDecrypt(groupUpdated: true),
           ];
         final svc = LocationSharingService(
           circleService: mockCircle,
           relayService: mockRelay,
         );
 
-        await svc.fetchMemberLocations(circle: testCircle);
+        await svc.pollEvolutionEvents(circles: [testCircle]);
 
-        // Must stop at the newest SUCCESS (100), not the newest event (200,
-        // which stays eligible for retry).
-        expect(mockCircle.advanceGroupCursorLastSecs, 1700000100);
+        expect(
+          mockCircle.methodCalls.where((c) => c.contains('Cursor')),
+          isEmpty,
+          reason:
+              'the evolution poll must move no sync cursor either — same '
+              'unauthenticated-timestamp argument as the location poll',
+        );
       });
-
-      // The evolution poller (_runEvolutionPoll) has its OWN cursor-advance
-      // accumulator; the same contract must hold there.
-      test(
-        'evolution poller advances group cursor to newest processed event',
-        () async {
-          final mockRelay = MockRelayService(
-            groupMessages: [
-              '{"id":"evtA","kind":445,"created_at":1700000100,"content":"loc"}',
-              '{"id":"evtB","kind":445,"created_at":1700000200,"content":"commit"}',
-            ],
-          );
-          final mockCircle = MockCircleService()
-            ..decryptLocationResults = [
-              locationResult('sender1'),
-              fakeDecrypt(groupUpdated: true),
-            ];
-          final svc = LocationSharingService(
-            circleService: mockCircle,
-            relayService: mockRelay,
-          );
-
-          await svc.pollEvolutionEvents(circles: [testCircle]);
-
-          expect(mockCircle.advanceGroupCursorLastSecs, 1700000200);
-        },
-      );
-
-      test(
-        'evolution poller does not advance cursor when all unprocessable',
-        () async {
-          final mockRelay = MockRelayService(
-            groupMessages: [
-              '{"id":"evtA","kind":445,"created_at":1700000100,"content":"x"}',
-            ],
-          );
-          final mockCircle = MockCircleService(); // null decrypts
-          final svc = LocationSharingService(
-            circleService: mockCircle,
-            relayService: mockRelay,
-          );
-
-          await svc.pollEvolutionEvents(circles: [testCircle]);
-
-          expect(mockCircle.advanceGroupCursorLastSecs, isNull);
-        },
-      );
 
       // ------------------------------------------------------------------
       // Receiver-side auto-commit (Fix #1) — REMOVED (Dark Matter DM-4b),

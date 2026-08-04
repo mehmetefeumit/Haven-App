@@ -79,6 +79,39 @@ attempt_slice_after() {
 }
 
 # -----------------------------------------------------------------
+# guest_has_default_route <text> — exit 0 iff <text> (the guest's
+# /proc/net/route) carries a usable default route.
+#
+# `sys.boot_completed=1` is the ONLY readiness signal the emulator action waits
+# for, and it is not the one that matters here. It fires while the guest's
+# network is still coming up: on a COLD boot the virtio-wifi interface has to
+# associate and take a DHCP lease afterwards, and until it does the guest has
+# no default route at all. A `connect()` to the host-loopback alias then fails
+# instantly with ENETUNREACH (errno 101) rather than blocking, so nothing in the
+# app retries it — in CI run 30925179141 the e2e_android live-sync lane's
+# `setUpAll` died on exactly that, two seconds into the drive, while its
+# sibling poll lane won the same race on the same cold boot.
+#
+# It has to be `/proc/net/route`: it exists on every Android image, needs no
+# toybox applet, and reports the kernel's own routing state rather than a
+# framework's opinion of it. Format is one route per line, tab-separated:
+#
+#   Iface  Destination  Gateway   Flags  RefCnt  Use  Metric  Mask  ...
+#   wlan0  00000000     0202000A  0003   0       0    0       00000000
+#
+# A default route is `Destination == 00000000`. Loopback is excluded (it is up
+# from the first instant and would make this vacuous), and a null Gateway is
+# excluded because an on-link default with no next hop cannot reach the host
+# alias. Pure text inspection: takes no device and is unit-tested below.
+guest_has_default_route() {
+  awk '
+    NR == 1 { next }                                   # header
+    $1 == "lo" { next }                                # up from boot: vacuous
+    $2 == "00000000" && $3 != "00000000" { found = 1 }
+    END { exit(found ? 0 : 1) }
+  ' <<<"$1"
+}
+
 # is_connect_flake <drive-log> — exit 0 (retryable) iff the drive died in
 # the flutter_driver CONNECT phase with NO on-device test having run; exit 1
 # otherwise. Pure text inspection: takes no device and is safe to unit-test.
@@ -253,11 +286,66 @@ run_self_test() {
     fail=1
   fi
 
+  # ---------------------------------------------------------------
+  # (6) guest_has_default_route — the cold-boot network gate.
+  # ---------------------------------------------------------------
+  local hdr='Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask		MTU	Window	IRTT'
+
+  # (6a) THE READY SHAPE: wlan0 default route via a real gateway.
+  if ! guest_has_default_route "${hdr}
+wlan0	00000000	0202000A	0003	0	0	0	00000000	0	0	0
+wlan0	0002000A	00000000	0001	0	0	0	00FFFFFF	0	0	0"; then
+    echo "SELF-TEST FAIL (6a): a wlan0 default route must read as ready" >&2
+    fail=1
+  fi
+
+  # (6b) THE FAILING SHAPE, and the one that actually cost a CI run: the
+  # interface is up with an on-link route but has NOT taken its lease yet, so
+  # there is no default route and every connect() is ENETUNREACH.
+  if guest_has_default_route "${hdr}
+wlan0	0002000A	00000000	0001	0	0	0	00FFFFFF	0	0	0"; then
+    echo "SELF-TEST FAIL (6b): an on-link route with no default must read as" \
+         "NOT ready — this is the state the lane drove into" >&2
+    fail=1
+  fi
+
+  # (6c) THE VACUITY CASE. Loopback is up from the first instant of boot and
+  # carries no default route, but a predicate that merely looked for
+  # "00000000 somewhere" would pass on it and gate nothing at all.
+  if guest_has_default_route "${hdr}
+lo	00000000	00000000	0001	0	0	0	00000000	0	0	0"; then
+    echo "SELF-TEST FAIL (6c): loopback must never satisfy the gate" >&2
+    fail=1
+  fi
+
+  # (6d) A default route with a NULL gateway cannot reach the host alias, so it
+  # is not readiness either.
+  if guest_has_default_route "${hdr}
+wlan0	00000000	00000000	0001	0	0	0	00000000	0	0	0"; then
+    echo "SELF-TEST FAIL (6d): a default route with no next hop is not ready" >&2
+    fail=1
+  fi
+
+  # (6e) Empty / header-only / error output (adb raced the shell, the device
+  # went offline) must read as NOT ready — fail closed, then keep waiting.
+  if guest_has_default_route ""; then
+    echo "SELF-TEST FAIL (6e): empty route output must read as NOT ready" >&2
+    fail=1
+  fi
+  if guest_has_default_route "${hdr}"; then
+    echo "SELF-TEST FAIL (6e2): a header-only table must read as NOT ready" >&2
+    fail=1
+  fi
+  if guest_has_default_route "cat: /proc/net/route: No such file or directory"; then
+    echo "SELF-TEST FAIL (6e3): an error string must read as NOT ready" >&2
+    fail=1
+  fi
+
   if (( fail )); then
     echo "run-single-avd-scenario: SELF-TEST FAILED" >&2
     return 1
   fi
-  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried; app-failure check scoped to the final attempt)."
+  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried; app-failure check scoped to the final attempt; the cold-boot network gate reads a lease-less guest as NOT ready and is not satisfied by loopback)."
   return 0
 }
 
@@ -442,6 +530,50 @@ do
   fi
 done
 echo "Phase 3/4 — Permissions ready."
+
+# -----------------------------------------------------------------
+# The guest network. Boot-completed is not network-ready (see
+# guest_has_default_route): on a cold boot the app can reach
+# `flutter drive` over adb and still have no route to the relay,
+# which surfaces as an instant ENETUNREACH inside setUpAll rather
+# than as anything the harness would recognise as an infrastructure
+# fault. Gate here, where the message can say so, instead of paying
+# for a whole drive to learn it.
+#
+# Waited for, not slept through: the wait ends the moment the route
+# appears, so a warm boot pays nothing.
+# -----------------------------------------------------------------
+readonly GUEST_NET_TIMEOUT_SECS="${GUEST_NET_TIMEOUT_SECS:-120}"
+echo "Waiting for the guest network on ${DEVICE} (up to ${GUEST_NET_TIMEOUT_SECS}s)..."
+net_waited=0
+net_ready=0
+while (( net_waited < GUEST_NET_TIMEOUT_SECS )); do
+  # `|| true`d because adb itself fails while the device is still settling
+  # ("device offline"); an unreadable table is simply not-ready, which the
+  # predicate already reports, and the loop retries.
+  route_table="$(adb -s "${DEVICE}" shell cat /proc/net/route 2>&1 | tr -d '\r' || true)"
+  if guest_has_default_route "${route_table}"; then
+    net_ready=1
+    break
+  fi
+  sleep 2
+  net_waited=$(( net_waited + 2 ))
+done
+
+if (( net_ready == 1 )); then
+  echo "Guest network ready after ${net_waited}s:"
+  printf '%s\n' "${route_table}" | sed 's/^/  /'
+else
+  # Fail closed. Driving anyway is what produced the failure this gate exists
+  # for, and it costs a full drive to reach a message that blames the app.
+  echo "ERROR: the guest never obtained a default route within" \
+       "${GUEST_NET_TIMEOUT_SECS}s, so it cannot reach the relay at" \
+       "${RELAY_URL}. Driving now would fail inside the scenario's setUpAll" \
+       "with 'Network is unreachable' and read as a product failure." >&2
+  echo "---- guest routing table (last read) ----" >&2
+  printf '%s\n' "${route_table}" >&2
+  exit 1
+fi
 
 # -----------------------------------------------------------------
 # Phase 4 — Drive the integration test via `flutter drive`, which

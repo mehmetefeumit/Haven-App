@@ -462,16 +462,47 @@ Usage: simctl privacy <device> <action> <service> [<bundle identifier>]
   got="$(b7_missing_proofs "${always_log}")"
   _check "C6 the trailing ' tier=<name>' does not defeat the match" "" "${got}"
 
+  # --- (H1) STRUCTURAL: `run_tier` must reset BOTH halves of the per-tier
+  #     state. Every gate above reads a LOG, so none of them can see this: a
+  #     lane whose second tier run reuses the first run's relay state fails
+  #     inside the drive, where the symptom (`seededD`) names an identity, not
+  #     the missing reset. Asserted over the function's own source because
+  #     there is no runtime signal to key on.
+  #
+  #     Comment lines are stripped first. Without that, the prose above
+  #     explaining WHY the restart exists would satisfy a grep for the restart
+  #     itself, and the fixture would pass over a `run_tier` that only talks
+  #     about resetting the relay.
+  local body
+  body="$(sed -n '/^run_tier() {/,/^}/p' "${BASH_SOURCE[0]}" \
+            | grep -v '^[[:space:]]*#')"
+
+  rc=0
+  grep -qF 'simctl uninstall' <<<"${body}" || rc=1
+  _check "H1 run_tier wipes the device container" 0 "${rc}"
+
+  rc=0
+  grep -qF 'bash "${RELAY_STARTER}" "${RELAY_PORT}"' <<<"${body}" || rc=1
+  _check "H1b run_tier restarts the relay (a clean store per tier)" 0 "${rc}"
+
+  # A best-effort restart is the vacuity case: the relay keeps serving the
+  # previous tier's store and the lane goes back to failing on `seededD`, one
+  # layer further from its cause.
+  rc=0
+  grep -qF 'if ! bash "${RELAY_STARTER}" "${RELAY_PORT}"; then' <<<"${body}" \
+    || rc=1
+  _check "H1c the relay restart is fail-closed, not best-effort" 0 "${rc}"
+
   if (( fail != 0 )); then
     echo "run-b7-ios-auth-tier.sh --self-test: FAILED" >&2
     return 1
   fi
-  echo "run-b7-ios-auth-tier.sh --self-test: all 21 fixtures passed (simctl" \
+  echo "run-b7-ios-auth-tier.sh --self-test: all 24 fixtures passed (simctl" \
        "support is probed not assumed; the tier parser reports missing and" \
        "conflict distinctly; the discrimination gate rejects identical," \
-       "swapped and absent observations; and the completion gate refuses a" \
+       "swapped and absent observations; the completion gate refuses a" \
        "run that exited 0 without printing both terminal proofs in BOTH tier" \
-       "logs)."
+       "logs; and each tier run resets the relay as well as the device)."
   return 0
 }
 
@@ -491,6 +522,14 @@ if [[ -z "${SIM_UDID}" || $# -gt 1 ]]; then
 fi
 
 readonly RELAY_URL="${HAVEN_E2E_RELAY:-ws://localhost:7777}"
+
+# The relay's port and starter, for the per-tier restart in `run_tier`. The port
+# is parsed out of RELAY_URL so the two cannot drift, and falls back to
+# start-local-relay.sh's own default when the URL carries no explicit port.
+RELAY_PORT="${RELAY_URL##*:}"
+[[ "${RELAY_PORT}" =~ ^[0-9]+$ ]] || RELAY_PORT=7777
+readonly RELAY_PORT
+readonly RELAY_STARTER="${SCRIPT_DIR}/start-local-relay.sh"
 
 # Same mandatory, no-default contract run-ios-sim-scenario.sh enforces: the
 # receive path is compiled into the artifact, so the calling STEP has to state
@@ -514,6 +553,8 @@ readonly SIM_RUNNER="${SCRIPT_DIR}/run-ios-sim-scenario.sh"
   || { echo "ERROR: drive target not found: ${HAVEN_DIR}/${SCENARIO_FILE}" >&2; exit 2; }
 [[ -f "${SIM_RUNNER}" ]] \
   || { echo "ERROR: shared runner not found: ${SIM_RUNNER}" >&2; exit 2; }
+[[ -f "${RELAY_STARTER}" ]] \
+  || { echo "ERROR: relay starter not found: ${RELAY_STARTER}" >&2; exit 2; }
 
 echo "B7 iOS auth-tier lane — udid=${SIM_UDID} relay=${RELAY_URL} live_sync=${LIVE_SYNC}"
 
@@ -583,14 +624,40 @@ echo "B7 — built ${APP_PATH}"
 
 # run_tier <tier-name> <simctl-service> <log-path>
 #
-# uninstall (clears any prior grant + data container) -> install -> grant ->
-# drive. The shared runner is told to skip its own uninstall, which would
-# otherwise erase the grant between this function and the app's first launch.
+# relay restart (clears the relay's store) -> uninstall (clears any prior grant
+# + data container) -> install -> grant -> drive. The shared runner is told to
+# skip its own uninstall, which would otherwise erase the grant between this
+# function and the app's first launch.
+#
+# BOTH resets, together, are the contract: the two tier runs are independent
+# scenarios, so neither the device nor the relay may carry state across them.
+# For a long time only the device half was reset, and the asymmetry is what
+# made this lane red on its first run. Both runs pre-seed the same `aliceSeed`
+# and bootstrap the same `bobSeed`, so both publish a kind-30443 into the same
+# addressable `d` slot. On the SECOND run the relay still held the first run's
+# KeyPackage for that slot, so `maintain_key_package` adopted it instead of
+# publishing (action=`seededD`, relaysHealed=0) and `SyntheticUser.bootstrap`
+# failed closed. Failing closed was the good outcome: the surviving KeyPackage's
+# private half died with the previous run's data container, so a Welcome sealed
+# to it would have been undecryptable — a silent, misattributed failure instead
+# of a loud one.
 run_tier() {
   local tier="$1" service="$2" log="$3" rc=0
 
   echo ""
   echo "=== B7 tier '${tier}' (simctl privacy grant ${service}) ==============="
+
+  # start-local-relay.sh stops any prior instance before starting, so every
+  # invocation yields a fresh in-memory store — the same discipline the
+  # workflow already applies between retry attempts, for the same reason. The
+  # binary is compiled by the build-before-boot step, so this costs a cache-hit
+  # cargo build and a TCP wait, not a rebuild.
+  if ! bash "${RELAY_STARTER}" "${RELAY_PORT}"; then
+    echo "ERROR: could not restart the hermetic relay on port ${RELAY_PORT}" >&2
+    echo "       before the '${tier}' tier run. Continuing would drive this" >&2
+    echo "       tier against the previous tier's leftover events." >&2
+    return 2
+  fi
 
   xcrun simctl uninstall "${SIM_UDID}" "${BUNDLE_ID}" >/dev/null 2>&1 || true
 

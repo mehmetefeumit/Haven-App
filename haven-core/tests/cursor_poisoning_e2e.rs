@@ -47,6 +47,20 @@
 //!   the anchor refusing to take a remote number and not this change having
 //!   quietly broken cursor advance altogether.
 //!
+//! # The hold-back side, and where the classification boundary sits
+//!
+//! Hold-backs are the one place a remote `created_at` still enters, so they get
+//! the same treatment from the other direction. An envelope the PURE PRE-ENGINE
+//! parse cannot read (a second `#h` tag is enough, and a NIP-01 `#h` filter
+//! matches such an event on either value) is a pre-authentication rejection: it
+//! neither advances the cursor nor holds it, because it can be minted for free,
+//! in bulk, by anyone who has seen the circle's public routing id. An
+//! ENGINE-side failure — envelope parsed, engine took the message, engine choked
+//! — still holds, because something on the authenticated path is genuinely
+//! unresolved there. Both sides are gated below, in both planes; the accepted
+//! cost of skipping the first class is recorded at the classification point in
+//! `SessionManager::process_event`.
+//!
 //! # Why the catch-up plane's expired case is NOT end-to-end here
 //!
 //! `MockRelay` is backed by `nostr-database`, whose `DatabaseHelper` rejects an
@@ -66,6 +80,7 @@ use std::time::Duration;
 use haven_core::circle::{CircleConfig, CircleManager, MemberKeyPackage};
 use haven_core::location::LocationMessage;
 use haven_core::nostr::mls::types::GroupId;
+use haven_core::nostr::mls::SessionManager;
 use haven_core::relay::catchup::run_catchup_all_circles;
 use haven_core::relay::live_sync::{
     group_cursor_stream, EngineProcessor, EventBus, GroupProcessOutcome,
@@ -236,6 +251,38 @@ fn rewrap(observed: &Event, created_at_secs: u64, expired: bool) -> Event {
         .custom_created_at(Timestamp::from(created_at_secs))
         .sign_with_keys(&Keys::generate())
         .expect("re-sign the observed ciphertext")
+}
+
+/// A `kind:445` routed at the circle's public `#h` that carries a SECOND `h`
+/// tag, dated `created_at_secs`.
+///
+/// The cheapest reachable unparseable envelope, and a real wire shape rather
+/// than a synthetic one: a NIP-01 `#h` filter matches an event on ANY of its
+/// `h` values, so a conformant relay delivers this to a victim subscribed on
+/// the first one — while the pure pre-engine transport parse refuses it
+/// ("exactly one h tag") before the engine, the signature, or any key material
+/// is involved. Minting it needs nothing but the circle's public routing id.
+fn malformed_445(h: &str, created_at_secs: u64) -> Event {
+    EventBuilder::new(nostr::Kind::Custom(445), "b3BhcXVl")
+        .tags(vec![
+            Tag::parse(["h", h]).unwrap(),
+            Tag::parse(["h", &hex::encode([0x11u8; 32])]).unwrap(),
+        ])
+        .custom_created_at(Timestamp::from(created_at_secs))
+        .sign_with_keys(&Keys::generate())
+        .expect("sign a malformed 445")
+}
+
+/// A `kind:445` whose ENVELOPE is well formed but whose `content` is not
+/// base64 — so the pre-engine parse succeeds and the ENGINE is the thing that
+/// fails. The other side of the classification boundary from
+/// [`malformed_445`].
+fn engine_unprocessable_445(h: &str, created_at_secs: u64) -> Event {
+    EventBuilder::new(nostr::Kind::Custom(445), "!!!!not-base64!!!!")
+        .tags(vec![Tag::parse(["h", h]).unwrap()])
+        .custom_created_at(Timestamp::from(created_at_secs))
+        .sign_with_keys(&Keys::generate())
+        .expect("sign an engine-unprocessable 445")
 }
 
 fn now_secs() -> i64 {
@@ -487,18 +534,25 @@ async fn livesync_a_buffered_message_holds_the_cursor_below_itself() {
     );
 }
 
-/// A hard ingest failure holds its generation back too.
+/// THE CLASSIFICATION BOUNDARY, live plane: a hard ENGINE-side ingest failure
+/// still holds its generation back, and must never be reclassified as a
+/// pre-authentication rejection.
 ///
-/// The engine never saw this event — the transport parse failed — so unlike a
-/// `Stale` verdict there is no engine-side retention behind it and nothing has
-/// decided anything about it. The conservative reading is the only safe one: the
-/// event is re-requested, at the cost of a wider window.
+/// This event's envelope is well formed — a single, correctly-sized `#h`, a
+/// valid signature — so the pure pre-engine parse accepts it and hands it to the
+/// engine, which chokes on the non-base64 content. Something at this position
+/// has therefore been *looked at by the authenticated path* and left unresolved,
+/// so the conservative reading is the only safe one: hold, and re-request at the
+/// cost of a wider window.
 ///
-/// (This is also the one hold-back an unauthenticated party can mint at will, so
-/// it is where the design's cost lands: a stall, never a skip, and floored by the
-/// monotonic cursor write — see this file's header.)
+/// Widening the `Malformed` screen to swallow this class is what the whole
+/// design forbids: it would turn every engine-side failure into a SKIP, which is
+/// the primitive the cursor contract exists to deny. (It is also where the
+/// design's residual cost lands — an unauthenticated party who can produce
+/// engine-bound ciphertext buys a stall here, never a skip, floored by the
+/// monotonic cursor write. See this file's header.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn livesync_an_unprocessable_event_holds_the_cursor_below_itself() {
+async fn livesync_an_engine_side_failure_holds_the_cursor_below_itself() {
     let fx = build_two_member_circle(vec!["wss://group.example.com".to_string()]).await;
     let processor = EngineProcessor::new(Arc::clone(&fx.alice), EventBus::new());
 
@@ -507,22 +561,23 @@ async fn livesync_an_unprocessable_event_holds_the_cursor_below_itself() {
     let opened_at = now_secs();
     processor.note_subscription_opened(&fx.group_hex(), opened_at);
 
-    // `!` is outside every base64 alphabet, so the transport conversion fails
-    // before the engine is reached. Dated an hour below the anchor so the
-    // hold-back is unmistakable.
-    let unparseable_secs = now_secs() - 3600;
-    let junk = EventBuilder::new(nostr::Kind::Custom(445), "!!!!not-base64!!!!")
-        .tags(vec![Tag::parse(["h", &fx.group_hex()]).unwrap()])
-        .custom_created_at(Timestamp::from(u64::try_from(unparseable_secs).unwrap()))
-        .sign_with_keys(&Keys::generate())
-        .expect("sign junk");
+    // Dated an hour below the anchor so the hold-back is unmistakable.
+    let unprocessable_secs = now_secs() - 3600;
+    let junk =
+        engine_unprocessable_445(&fx.group_hex(), u64::try_from(unprocessable_secs).unwrap());
+    assert!(
+        SessionManager::event_to_transport_message(&junk).is_ok(),
+        "precondition: the ENVELOPE parses — only the content is junk — so what \
+         follows is the engine failing, not a pre-auth screen firing"
+    );
 
     assert_eq!(
         processor
             .process_group_event(&junk, &fx.nostr_group_id)
             .await,
         GroupProcessOutcome::Unprocessable,
-        "precondition: this must be a hard ingest failure, not an engine verdict"
+        "an engine-side ingest failure must stay `Unprocessable`, never be \
+         reclassified as a pre-authentication rejection"
     );
     assert_eq!(
         fx.alice_cursor(),
@@ -533,9 +588,117 @@ async fn livesync_an_unprocessable_event_holds_the_cursor_below_itself() {
     assert!(processor.note_end_of_stored_events(&fx.group_hex()));
     assert_eq!(
         fx.alice_cursor(),
-        Some(unparseable_secs * 1000),
+        Some(unprocessable_secs * 1000),
         "and it caps the generation's anchor at itself rather than letting it \
          redeem its full {opened_at} s",
+    );
+}
+
+/// THE RESIDUAL STALL LEVER, closed: an envelope the pre-engine parse cannot
+/// read moves the cursor NOWHERE — and, unlike an engine-side failure, holds it
+/// nowhere either.
+///
+/// Minting one costs an attacker nothing but the circle's public `#h`, and it
+/// needs no observed ciphertext at all (contrast [`rewrap`]) — so if this held,
+/// one event dated far in the past would pin the circle's cursor for the whole
+/// subscription generation, and a trickle of them would pin it indefinitely.
+/// That is the same denial the advance-side fix removed, bought from the other
+/// end for even less.
+///
+/// The accepted cost of skipping is stated at the classification point in
+/// `SessionManager::process_event`: a genuine peer emitting an unparseable
+/// commit is now stepped over rather than stalled on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn livesync_a_malformed_445_neither_advances_the_cursor_nor_holds_it() {
+    let fx = build_two_member_circle(vec!["wss://group.example.com".to_string()]).await;
+    let processor = EngineProcessor::new(Arc::clone(&fx.alice), EventBus::new());
+
+    let floor = (now_secs() - 7200) * 1000;
+    fx.seed_alice_cursor(floor);
+    let opened_at = now_secs();
+    processor.note_subscription_opened(&fx.group_hex(), opened_at);
+
+    // Dated an hour BELOW the anchor, so a hold-back would be plainly visible in
+    // the post-EOSE cursor.
+    let minted_secs = now_secs() - 3600;
+    let malformed = malformed_445(&fx.group_hex(), u64::try_from(minted_secs).unwrap());
+    assert!(
+        SessionManager::event_to_transport_message(&malformed).is_err(),
+        "precondition: this envelope must really fail the PRE-ENGINE parse — \
+         otherwise this test is just re-asserting the engine boundary"
+    );
+
+    assert_eq!(
+        processor
+            .process_group_event(&malformed, &fx.nostr_group_id)
+            .await,
+        GroupProcessOutcome::RejectedBeforeAuth,
+        "an unparseable envelope is a pre-authentication rejection: it was \
+         SIGNED that way, and nothing here has been authenticated"
+    );
+    assert_eq!(
+        fx.alice_cursor(),
+        Some(floor),
+        "it must not move the cursor one millisecond"
+    );
+
+    assert!(processor.note_end_of_stored_events(&fx.group_hex()));
+    assert_eq!(
+        fx.alice_cursor(),
+        Some(opened_at * 1000),
+        "and it must not hold the generation back either — the anchor still \
+         redeems its full open time",
+    );
+}
+
+/// Legitimate progress is untouched by the screen above: an inbound event that
+/// really is un-applied still holds, in the SAME generation that also saw a
+/// malformed one.
+///
+/// Without this pairing, `livesync_a_malformed_445_neither_advances_the_cursor_nor_holds_it`
+/// would pass just as well if hold-backs had been disabled outright.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn livesync_a_malformed_445_does_not_disarm_a_real_hold_back() {
+    let fx = build_two_member_circle(vec!["wss://group.example.com".to_string()]).await;
+    let processor = EngineProcessor::new(Arc::clone(&fx.alice), EventBus::new());
+
+    let floor = (now_secs() - 7200) * 1000;
+    fx.seed_alice_cursor(floor);
+    let opened_at = now_secs();
+    processor.note_subscription_opened(&fx.group_hex(), opened_at);
+
+    // The malformed one is the OLDER of the two, so if it could hold, it would
+    // win the `min` and be visible in the final cursor.
+    let malformed_secs = now_secs() - 5400;
+    let engine_fail_secs = now_secs() - 3600;
+    assert_eq!(
+        processor
+            .process_group_event(
+                &malformed_445(&fx.group_hex(), u64::try_from(malformed_secs).unwrap()),
+                &fx.nostr_group_id,
+            )
+            .await,
+        GroupProcessOutcome::RejectedBeforeAuth,
+    );
+    assert_eq!(
+        processor
+            .process_group_event(
+                &engine_unprocessable_445(
+                    &fx.group_hex(),
+                    u64::try_from(engine_fail_secs).unwrap()
+                ),
+                &fx.nostr_group_id,
+            )
+            .await,
+        GroupProcessOutcome::Unprocessable,
+    );
+
+    assert!(processor.note_end_of_stored_events(&fx.group_hex()));
+    assert_eq!(
+        fx.alice_cursor(),
+        Some(engine_fail_secs * 1000),
+        "the genuine hold-back must still cap the generation — and at ITS \
+         timestamp, not at the older malformed event's",
     );
 }
 
@@ -562,7 +725,6 @@ async fn livesync_a_future_dated_event_cannot_push_the_cursor_past_now() {
     let future = Timestamp::now().as_secs() + 900;
     let event = rewrap(&observed, future, false);
 
-    let before = now_secs();
     let outcome = processor
         .process_group_event(&event, &fx.nostr_group_id)
         .await;
@@ -582,9 +744,30 @@ async fn livesync_a_future_dated_event_cannot_push_the_cursor_past_now() {
         "the cursor must be clamped to the local clock; got {cursor} ms for an \
          event dated {future} s"
     );
+    // The exact value, not a band. The live plane's anchor is the REQ open time
+    // captured at `note_subscription_opened`, so that — and only that — is what
+    // this generation's EOSE may redeem, however long the MLS work above took
+    // and whatever timestamp the event carried. A lower bound read off the clock
+    // any later than `opened_at` would be asserting an advance PAST the window's
+    // own open time, which is precisely the unsound claim this module refuses:
+    // events published in the interval were never requested, so nothing has
+    // earned the right to declare them delivered.
+    assert_eq!(
+        cursor,
+        opened_at * 1000,
+        "the advance must land ON the window's open time — not reset to zero, and \
+         not redeem the event's future timestamp",
+    );
     assert!(
-        cursor >= before * 1000,
-        "the clamp must land ON now, not reset the cursor to zero; got {cursor} ms"
+        cursor < i64::try_from(future).unwrap() * 1000,
+        "anti-vacuity: the cursor must sit strictly BELOW the forged future \
+         timestamp ({future} s), which is the parked-in-the-future state that \
+         pins every subsequent REQ floor at now; got {cursor} ms",
+    );
+    assert!(
+        cursor > floor,
+        "anti-vacuity: the generation really did advance off the seeded floor, so \
+         the equality above is a live advance and not a no-op",
     );
 }
 
@@ -810,6 +993,95 @@ async fn catchup_a_window_of_only_undecryptable_events_still_advances() {
     assert!(
         cursor >= before * 1000,
         "an all-undecryptable window must not wedge the cursor; got {cursor} ms",
+    );
+}
+
+/// THE RESIDUAL STALL LEVER, catch-up plane: a fetched envelope the pre-engine
+/// parse cannot read neither advances the sweep's cursor nor holds it.
+///
+/// Driven end to end through the real sweep, because the property lives in the
+/// classification the sweep performs and not in the arithmetic: a relay really
+/// serves this event (its `#h` genuinely matches the filter — that is why the
+/// shape is reachable at all), the sweep really fetches and screens it, and the
+/// window still redeems its full open time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catchup_a_malformed_445_neither_advances_the_cursor_nor_holds_it() {
+    let (_relay, url, relay_mgr) = relay_under_test().await;
+    let fx = build_two_member_circle(vec![url.clone()]).await;
+
+    let floor = (now_secs() - 7200) * 1000;
+    fx.seed_alice_cursor(floor);
+
+    // An hour below the window's open time: were it able to hold, the advance
+    // would visibly stop there instead of reaching "now".
+    let minted_secs = now_secs() - 3600;
+    let malformed = malformed_445(&fx.group_hex(), u64::try_from(minted_secs).unwrap());
+    relay_mgr
+        .publish_event(&malformed, std::slice::from_ref(&url))
+        .await
+        .expect("the malformed event reaches the relay");
+
+    let before = now_secs();
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 20).await;
+
+    assert_eq!(
+        out.events_rejected_pre_auth, 1,
+        "precondition: the sweep really fetched it and really screened it before \
+         authentication — otherwise the cursor assertion below proves nothing"
+    );
+    assert_eq!(
+        out.events_deferred, 0,
+        "a pre-auth rejection is not a deferral: there is no un-applied message \
+         to come back for"
+    );
+    let cursor = fx.alice_cursor().expect("the cursor advanced");
+    assert!(
+        cursor >= before * 1000,
+        "the window must still redeem its own open time; a cursor pinned at \
+         {minted_secs} s would be the stall this screen removes (got {cursor} ms)",
+    );
+}
+
+/// THE CLASSIFICATION BOUNDARY, catch-up plane: an ENGINE-side ingest failure
+/// still holds the sweep's cursor at itself.
+///
+/// The counterpart of the gate above, over an event whose envelope parses and
+/// whose content the engine then rejects. If the `Malformed` screen ever widened
+/// to cover engine failures, this cursor would jump to the window's open time
+/// and the un-applied event would be stranded below every future REQ floor —
+/// the original defect, re-created from the inside.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catchup_an_engine_side_failure_holds_the_cursor_at_itself() {
+    let (_relay, url, relay_mgr) = relay_under_test().await;
+    let fx = build_two_member_circle(vec![url.clone()]).await;
+
+    let floor = (now_secs() - 7200) * 1000;
+    fx.seed_alice_cursor(floor);
+
+    let unprocessable_secs = now_secs() - 3600;
+    let junk =
+        engine_unprocessable_445(&fx.group_hex(), u64::try_from(unprocessable_secs).unwrap());
+    assert!(
+        SessionManager::event_to_transport_message(&junk).is_ok(),
+        "precondition: the envelope parses, so the failure below is the engine's"
+    );
+    relay_mgr
+        .publish_event(&junk, std::slice::from_ref(&url))
+        .await
+        .expect("the junk reaches the relay");
+
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 20).await;
+
+    assert_eq!(
+        out.events_deferred, 1,
+        "an engine-side hard failure is a deferral, never a pre-auth rejection"
+    );
+    assert_eq!(out.events_rejected_pre_auth, 0);
+    assert_eq!(
+        fx.alice_cursor(),
+        Some(unprocessable_secs * 1000),
+        "the sweep must stop at the un-applied event so the next sweep's `since` \
+         comes back for it",
     );
 }
 

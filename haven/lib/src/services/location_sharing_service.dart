@@ -708,27 +708,18 @@ class LocationSharingService {
     var decryptNull = 0;
     var decryptFailed = 0;
     var groupUpdated = false;
-    // High-water-mark `created_at` (Unix seconds) of events FULLY processed
-    // this batch (decrypted + any receiver-side commit re-published — i.e.
-    // marked seen). Drives the persisted `group_445` cursor below: it advances
-    // only past fully-processed events, never past an Unprocessable /
-    // publish-failed one (those stay un-seen for retry).
+    // NOTE: this loop deliberately keeps NO cursor high-water mark. It used to
+    // accumulate the newest fully-processed event's `created_at` and push it
+    // into the persisted group sync cursor — i.e. it derived a cursor advance
+    // from a value chosen by whoever signed the outer envelope, which nothing on
+    // the receive path authenticates. Any observer of the circle's public `#h`
+    // could mint an event dated "now" and bury every legitimate event below the
+    // resulting REQ floor, permanently and across restarts.
     //
-    // The cursor CAN advance past an older *application message* that failed
-    // while a newer event succeeded; that residual is handled by the
-    // background catch-up (a forward cursor cannot guard against it alone) and
-    // is provably SAFE — it never skips an epoch-required commit. MLS commits
-    // are strictly sequential per lineage: an Unprocessable commit advancing
-    // epoch N→N+1 makes every later same-lineage event (commit or app-message
-    // under N+1) Unprocessable too, so those stay un-seen and never advance the
-    // cursor. The only events that can succeed "past" a skipped item are
-    // current-epoch-N application messages (stale peer location pings, which
-    // re-broadcast on a ~minute cadence). Do NOT "fix" this by capping the
-    // advance below the oldest Unprocessable event: a permanently-undecryptable
-    // (expired / malformed) event at a low timestamp would then pin the cursor
-    // forever and re-open a near-full-history window — the poison-stall this
-    // cursor exists to prevent.
-    var maxSeenCreatedAtSecs = 0;
+    // The group cursor is now written in Rust only, anchored on the local
+    // instant an observation window opened (`haven_core::relay::cursor`), by the
+    // catch-up sweep and the live-sync EOSE anchor. `_seenEventIds` below is a
+    // separate, in-memory dedup marker and is NOT a cursor.
     for (final idx in orderedIndices) {
       final eventJson = eventJsons[idx];
       // Fence against pause landing mid-loop between per-event awaits.
@@ -794,10 +785,6 @@ class LocationSharingService {
         if (eventId != null) {
           _seenEventIds.add(eventId);
           _enforceSeenEventIdsCap();
-          final ts = timestamps[idx];
-          if (ts > maxSeenCreatedAtSecs) {
-            maxSeenCreatedAtSecs = ts;
-          }
         }
 
         for (final result in results) {
@@ -865,23 +852,6 @@ class LocationSharingService {
 
     // Track fetch time for next incremental query
     _lastFetchTime[circleKey] = fetchTime;
-
-    // Advance the persisted group sync cursor to the newest fully-processed
-    // event. Best-effort: a cursor write failure must never fail the fetch (a
-    // lagging cursor self-heals on the next advance / cold-start refetch). Not
-    // yet read by this poller — it becomes the resubscribe `since` anchor in a
-    // later milestone; populating it here de-risks that switch.
-    if (maxSeenCreatedAtSecs > 0) {
-      try {
-        await _circleService.advanceGroupCursorToEventSecs(
-          maxSeenCreatedAtSecs,
-        );
-      } on Object catch (e) {
-        debugPrint(
-          '[LocationService] group cursor advance failed: ${e.runtimeType}',
-        );
-      }
-    }
 
     // A roster-changing result (joined / groupUpdate / invalidated) means the
     // engine already applied the change internally by the time decrypt
@@ -1380,12 +1350,9 @@ class LocationSharingService {
       var skipped = 0;
       // Per-circle group-updated flag for the onGroupUpdated callback.
       var circleGroupUpdated = false;
-      // High-water-mark `created_at` (seconds) of fully-processed events this
-      // batch; advances the persisted `group_445` cursor after the loop (same
-      // contract + safety argument as `fetchMemberLocations`: the cursor never
-      // advances past an epoch-required commit, only past a stale app message,
-      // so deferring the residual to the background catch-up is safe).
-      var maxSeenCreatedAtSecs = 0;
+      // No cursor high-water mark here either — same reason as
+      // `fetchMemberLocations`: a group-cursor advance may never be derived from
+      // an inbound event's unauthenticated `created_at`.
       for (final idx in orderedIndices) {
         if (_pauseGeneration != startGen) {
           debugPrint('[EvolutionPoller] aborted — paused mid-event-loop');
@@ -1497,10 +1464,6 @@ class LocationSharingService {
         if (eventId != null) {
           _seenEventIds.add(eventId);
           _enforceSeenEventIdsCap();
-          final ts = timestamps[idx];
-          if (ts > maxSeenCreatedAtSecs) {
-            maxSeenCreatedAtSecs = ts;
-          }
         }
 
         processed++;
@@ -1529,23 +1492,10 @@ class LocationSharingService {
         }
       }
 
-      // Advance the per-circle evolution cursor.
+      // Advance the per-circle evolution cursor. In-memory only: this bounds
+      // the NEXT fetch's `since` for this process, and is not the persisted sync
+      // cursor (which Rust owns).
       _lastEvolutionFetchTime[circleKey] = fetchTime;
-
-      // Advance the persisted group sync cursor to the newest fully-processed
-      // evolution event (best-effort; monotonic-max merges with the location
-      // poll's advance).
-      if (maxSeenCreatedAtSecs > 0) {
-        try {
-          await _circleService.advanceGroupCursorToEventSecs(
-            maxSeenCreatedAtSecs,
-          );
-        } on Object catch (e) {
-          debugPrint(
-            '[EvolutionPoller] group cursor advance failed: ${e.runtimeType}',
-          );
-        }
-      }
 
       // Notify the caller that this circle had a group state change
       // (membership/epoch advance), for any per-circle follow-up it needs.

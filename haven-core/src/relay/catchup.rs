@@ -5,7 +5,8 @@
 //! background / on foreground resume. The engine owns convergence,
 //! out-of-order sequencing, and publish-before-apply internally, so this sweep
 //! no longer needs the Haven-owned staged-commit marker or a per-circle write
-//! gate — it just ingests and advances the cursor over the applied prefix.
+//! gate — it just ingests, then advances the cursor to the window's own open
+//! time, held back at anything it could not apply (see "Cursor safety" below).
 //!
 //! # Rule 14 (single session)
 //!
@@ -77,13 +78,20 @@ pub enum ReceiveOnlyOutcome {
     /// whatever the engine authenticated, so the advance is taken from the
     /// window's open time instead.
     Applied,
-    /// The engine buffered the message for a future epoch, the ingest failed
-    /// hard, or the sweep's deadline stopped us reaching it. Something at this
-    /// position is still outstanding, so the cursor is held at or below this
+    /// The engine buffered the message for a future epoch, the ENGINE's ingest
+    /// failed hard, or the sweep's deadline stopped us reaching it. Something at
+    /// this position is still outstanding, so the cursor is held at or below this
     /// event's `created_at` and the event is re-fetched next sweep.
+    ///
+    /// A hard failure lands here only once the envelope has parsed and the
+    /// engine has taken the message; an envelope the pre-engine parse could not
+    /// read is [`Self::NoEvidence`], so this hold-back cannot be minted from
+    /// outside without ciphertext the engine will actually work on.
     Deferred,
     /// Haven's local receiver-side screen rejected the event BEFORE any MLS
-    /// authentication ran (see [`crate::nostr::mls::types::ScreenedIngest`]).
+    /// authentication ran (see [`crate::nostr::mls::types::ScreenedIngest`]) —
+    /// an expired NIP-40 replay, or an envelope the pure pre-engine transport
+    /// parse could not read at all.
     ///
     /// Contributes nothing in EITHER direction. It is not evidence the sweep
     /// caught up to its `created_at` (nothing authenticated that timestamp), and
@@ -106,10 +114,12 @@ pub struct CatchupOutcome {
     /// Events the engine buffered for a future epoch (cursor stopped).
     pub events_deferred: usize,
     /// Events Haven's own receiver-side screen rejected before any MLS
-    /// authentication ran (expired NIP-40 replays, forged or genuine). Neither
+    /// authentication ran: expired NIP-40 replays, and envelopes the pure
+    /// pre-engine transport parse could not read (forged or genuine). Neither
     /// applied nor deferred: they contribute no cursor evidence at all. A
     /// persistently non-zero count on a healthy circle means some relay is
-    /// serving events past their advertised TTL.
+    /// serving events past their advertised TTL, or something on the wire is
+    /// emitting `kind:445`s Haven cannot parse.
     pub events_rejected_pre_auth: usize,
     /// Per-circle group cursors advanced.
     pub cursors_advanced: usize,
@@ -265,15 +275,20 @@ async fn ingest_one(
     ngid: &[u8; 32],
     own_hex: &str,
 ) -> ReceiveOnlyOutcome {
+    // An `Err` is an ENGINE-side ingest failure (the envelope parsed and the
+    // engine took the message), so something at this position is genuinely
+    // outstanding and the cursor must stop at it. An envelope that would not
+    // parse never reaches here — it comes back as a pre-auth rejection below.
     let Ok(screened) = circle_mgr.session().process_event(ev).await else {
         return ReceiveOnlyOutcome::Deferred;
     };
 
     let ingest = match screened {
-        // Rejected by Haven's local screen BEFORE any MLS authentication.
-        // Nothing here is verified, so persist nothing, publish nothing, drain
-        // nothing — and report `NoEvidence` so the event's unauthenticated
-        // `created_at` cannot become this circle's cursor.
+        // Rejected by Haven's local screen BEFORE any MLS authentication (an
+        // expired replay, or an envelope that would not parse). Nothing here is
+        // verified, so persist nothing, publish nothing, drain nothing — and
+        // report `NoEvidence` so the event's unauthenticated `created_at` can
+        // neither become this circle's cursor nor hold it back.
         ScreenedIngest::RejectedBeforeAuth(_) => return ReceiveOnlyOutcome::NoEvidence,
         ScreenedIngest::Ingested(effects) => effects,
     };
@@ -883,6 +898,44 @@ mod tests {
             "an event screened before authentication must contribute NO cursor \
              evidence — reporting `Applied` here is the defect, and reporting \
              `Deferred` would let one forged event stall the sweep forever"
+        );
+    }
+
+    /// A `kind:445` carrying TWO `#h` tags, the first being the circle's. A
+    /// conformant relay serves it to a `#h` subscription (or fetch) for either
+    /// value, and the pure pre-engine transport parse then refuses it —
+    /// "exactly one h tag" — without touching key material.
+    fn malformed_445(h: &str) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(445), "b3BhcXVl")
+            .tags(vec![
+                Tag::parse(["h", h]).unwrap(),
+                Tag::parse(["h", &hex::encode([0x11u8; 32])]).unwrap(),
+            ])
+            .sign_with_keys(&Keys::generate())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn ingest_one_reports_no_evidence_for_a_malformed_envelope() {
+        let dir = TempDir::new().unwrap();
+        let keys = Keys::generate();
+        let mgr = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
+        let relay_mgr = RelayManager::new();
+        let ngid = [0x8Au8; 32];
+        let h = hex::encode(ngid);
+        let own = keys.public_key().to_hex();
+
+        let malformed = malformed_445(&h);
+        assert!(
+            crate::nostr::mls::SessionManager::event_to_transport_message(&malformed).is_err(),
+            "precondition: this envelope must really fail the PRE-ENGINE parse"
+        );
+        assert_eq!(
+            ingest_one(&mgr, &relay_mgr, &malformed, &ngid, &own).await,
+            ReceiveOnlyOutcome::NoEvidence,
+            "an unparseable envelope was screened before authentication, so it \
+             must contribute no cursor evidence — reporting `Deferred` would sell \
+             an attacker a permanent stall for one minted event"
         );
     }
 

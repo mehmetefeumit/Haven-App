@@ -128,24 +128,37 @@ void main() {
       expect(spy.groupUpdated.single.nostrGroupId, const [1, 2, 3]);
     });
 
-    test('Welcome processes the invitation + advances the cursor', () async {
+    test('Welcome processes the invitation and touches NO cursor', () async {
       await buildRouter().handleEvent(
         const FfiRelayEvent(
           kind: FfiRelayEventKind.welcome,
           giftWrapJson: '{"kind":1059}',
-          wrapCreatedAtSecs: 4242,
         ),
       );
       expect(spy.secretFetches, 1);
       expect(
         circleService.methodCalls,
-        containsAllInOrder(<String>[
-          'processGiftWrappedInvitation',
-          'advanceInboxCursorToWrapSecs:4242',
-        ]),
+        contains('processGiftWrappedInvitation'),
       );
       // The mock returns a non-null invitation ⇒ a refresh fires.
       expect(spy.invitationReceived, 1);
+      // The defect: this handler used to raise the persisted `inbox_1059`
+      // cursor to the wrapper's own `created_at`. A kind:1059 is routed by a
+      // `#p` tag holding the recipient's PUBLIC key and authored by a throwaway
+      // ephemeral key, and peeling it consults NIP-59 alone — so anyone who
+      // knows this user's npub could mint one that peels cleanly at any
+      // timestamp. Future-dated, it pinned every later inbox REQ floor at
+      // `now`, which NIP-59's mandatory backdating then makes fatal: even a
+      // wrap published this second falls below the floor. The inbox cursor is
+      // anchored in Rust on the inbox REQ's own EOSE now, and the wrapper
+      // timestamp no longer crosses the FFI boundary at all.
+      expect(
+        circleService.methodCalls.where(
+          (c) => c.toLowerCase().contains('cursor'),
+        ),
+        isEmpty,
+        reason: 'the live welcome path must be cursor-inert',
+      );
     });
 
     test('Welcome zeroizes the identity secret after use (Rule 9)', () async {
@@ -153,7 +166,6 @@ void main() {
         const FfiRelayEvent(
           kind: FfiRelayEventKind.welcome,
           giftWrapJson: '{"kind":1059}',
-          wrapCreatedAtSecs: 4242,
         ),
       );
       // The router copies the (non-zero, 32×7) secret into a Uint8List, passes

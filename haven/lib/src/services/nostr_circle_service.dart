@@ -1546,32 +1546,10 @@ class NostrCircleService implements CircleService {
     return _blockedCircleIds.contains(_hexGroupId(mlsGroupId));
   }
 
-  @override
-  Future<void> advanceGroupCursorToEventSecs(int eventCreatedAtSecs) async {
-    final manager = await _ensureInitialized();
-    try {
-      await manager.cursorAdvanceGroupToEvent(
-        eventCreatedAtSecs: eventCreatedAtSecs,
-      );
-    } on Object catch (_) {
-      // Surface as the class's own exception type (callers treat cursor
-      // advance as best-effort; this protects any future
-      // `on CircleServiceException` caller).
-      throw const CircleServiceException('Failed to advance group sync cursor');
-    }
-  }
-
-  @override
-  Future<void> advanceInboxCursorToWrapSecs(int wrapCreatedAtSecs) async {
-    final manager = await _ensureInitialized();
-    try {
-      await manager.cursorAdvanceInboxToWrap(
-        wrapCreatedAtSecs: wrapCreatedAtSecs,
-      );
-    } on Object catch (_) {
-      throw const CircleServiceException('Failed to advance inbox sync cursor');
-    }
-  }
+  // REMOVED: both of Dart's sync-cursor advances (group and inbox) — see
+  // `CircleService`. Both cursors are written in Rust only, anchored on a local
+  // clock reading taken when an observation window opened, never on an inbound
+  // event's or gift wrap's timestamp.
 
   // NOTE: `KeyPackage` signing/publishing/recording no longer live on this
   // service — see the `CircleService` doc comment. Use

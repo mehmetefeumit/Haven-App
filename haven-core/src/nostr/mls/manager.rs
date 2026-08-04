@@ -557,9 +557,14 @@ impl SessionManager {
     ///
     /// Returns [`IngestEffects`] carrying the [`super::types::IngestOutcome`]
     /// classification and any drained events / publish work. The engine
-    /// sequences out-of-order input internally; the caller advances its cursor
-    /// on `Processed` / `Stale` and relies on the engine's buffering for
-    /// `Buffered`.
+    /// sequences out-of-order input internally.
+    ///
+    /// No outcome here is a cursor ADVANCE — that is derived from the receive
+    /// plane's own window-open time, never from an ingested event's
+    /// `created_at` (see [`crate::relay::cursor::cursor_ms_for_window`]). What
+    /// the outcome decides is the HOLD-BACK: `Buffered` (and a hard `Err`) keeps
+    /// the window's advance at or below that event so it is re-requested, while
+    /// `Processed` / `Stale` leave it alone.
     ///
     /// # Errors
     ///
@@ -584,6 +589,14 @@ impl SessionManager {
     /// the type level — see that type for why the distinction cannot be folded
     /// into [`super::types::IngestOutcome`].
     ///
+    /// # The two local screens
+    ///
+    /// Both run before the engine, and both report
+    /// [`ScreenedIngest::RejectedBeforeAuth`]: the NIP-40 expiration screen
+    /// below, and the pure transport parse further down (see the comment at
+    /// that call for why an unparseable envelope is a *pre-authentication*
+    /// judgement and what skipping it costs).
+    ///
     /// # Receiver-side NIP-40 expiration screen
     ///
     /// Restored post-Dark-Matter (pre-migration this lived in
@@ -606,15 +619,17 @@ impl SessionManager {
     ///
     /// A caller therefore MUST treat [`ScreenedIngest::RejectedBeforeAuth`] as
     /// "learned nothing about this event": no routing, no persistence, no
-    /// convergence drain, and above all **no sync-cursor advance**. (Before
-    /// DM-6 this path reported a synthetic `Stale`, which both cursor gates read
-    /// as "advance past it" — one forged event could push a circle's persisted
-    /// REQ floor to any timestamp it liked and strand every legitimate event
-    /// below it, permanently and across restarts.)
+    /// convergence drain, and above all **no sync-cursor advance** — and no
+    /// hold-back either. (Before DM-6 this path reported a synthetic `Stale`,
+    /// which both cursor gates read as "advance past it" — one forged event
+    /// could push a circle's persisted REQ floor to any timestamp it liked and
+    /// strand every legitimate event below it, permanently and across restarts.)
     ///
     /// # Errors
     ///
-    /// Returns an error if conversion or ingest fails hard.
+    /// Returns an error only for a hard INGEST failure — i.e. one the engine
+    /// raised. A failure of the pre-engine transport parse is not an error here;
+    /// it comes back as [`PreAuthRejection::Malformed`].
     pub async fn process_event(&self, event: &Event) -> Result<ScreenedIngest> {
         if let Some(expires_at) = event.tags.iter().find_map(|t| match t.as_standardized() {
             Some(nostr::TagStandard::Expiration(ts)) => Some(*ts),
@@ -631,7 +646,56 @@ impl SessionManager {
                 ));
             }
         }
-        let msg = Self::event_to_transport_message(event)?;
+        // ── The pure pre-engine parse, and why its failure is a pre-auth
+        //    rejection rather than an un-applied message.
+        //
+        // `event_to_transport_message` reads ONLY already-materialized envelope
+        // fields: the kind, the `h`/`p` routing tag, and the self-reported id
+        // against the event's own hash. It touches no key material, never looks
+        // at the base64 `content`, reaches no storage, reads no clock and never
+        // calls the engine. Every failure it can return therefore says how the
+        // event was SIGNED — a missing, duplicated, valueless or wrong-width
+        // routing tag, or an unsupported kind — decided before anything
+        // authenticated anything. That is the same class of judgement as the
+        // expiration screen above, so it is classified the same way:
+        // `Malformed`, i.e. terminal, no routing, no persistence, no
+        // convergence drain, no cursor advance — and NO HOLD-BACK.
+        //
+        // # The trade-off this makes, deliberately
+        //
+        // The previous behaviour returned `Err`, which both receive planes read
+        // as "un-applied", holding that window's cursor advance at this event's
+        // `created_at`. A circle's `#h` is its PUBLIC `nostr_group_id`, and a
+        // conformant relay delivers an event carrying TWO `h` tags to a `#h`
+        // subscription for either of them — so any relay observer can mint an
+        // unparseable event at a timestamp of its choosing and pin the victim's
+        // cursor there, for free, indefinitely, in unlimited supply. Bounded
+        // (the cursor write is monotonic-max, so it is a stall and never a
+        // skip), but a stall is still the availability loss this whole design
+        // exists to remove.
+        //
+        // What is LOST: if a genuine peer ever emits an unparseable commit, this
+        // now steps over it instead of stalling until someone notices. That cost
+        // is accepted because holding never recovered such an event either — the
+        // parse is deterministic over the delivered bytes, so re-requesting it
+        // forever fails identically forever, while the window it re-opens only
+        // widens until saturation freezes the cursor for good (Rule 12). Under
+        // BOTH rules the engine never sees the event; only the collateral
+        // differs.
+        //
+        // # The boundary, which must not move
+        //
+        // Scoped deliberately to THIS call's `Err`. `self.ingest` below still
+        // propagates its own errors, so an engine-side or decryption-side
+        // failure — anything that has already touched key material — keeps
+        // holding the cursor. Widening this arm to cover those would hand an
+        // attacker a SKIP primitive over authenticated-path failures, which is
+        // the exact defect this module's cursor contract exists to prevent.
+        let Ok(msg) = Self::event_to_transport_message(event) else {
+            return Ok(ScreenedIngest::RejectedBeforeAuth(
+                PreAuthRejection::Malformed,
+            ));
+        };
         self.ingest(msg).await.map(ScreenedIngest::Ingested)
     }
 
@@ -1373,5 +1437,142 @@ mod tests {
     fn inner_app_content_is_empty_for_garbage() {
         assert_eq!(inner_app_content(b"not json"), "");
         assert_eq!(inner_app_content(br#"{"no_content":1}"#), "");
+    }
+
+    // ── The pre-engine parse screen (`PreAuthRejection::Malformed`) ──────────
+    //
+    // These pin the CLASSIFICATION boundary at its source: exactly which inputs
+    // `process_event` may screen out before the engine, and — just as
+    // importantly — which it may not. The cursor consequences of each side are
+    // asserted in the two planes (`relay::catchup`, `relay::live_sync`) and end
+    // to end in `tests/cursor_poisoning_e2e.rs`.
+
+    /// A signed `kind:445` routed at `h`, minted by a throwaway key that belongs
+    /// to no member — what any observer of a circle's public `#h` can produce.
+    fn signed_445(tags: Vec<Tag>, content: &str) -> Event {
+        nostr::EventBuilder::new(Kind::Custom(445), content)
+            .tags(tags)
+            .sign_with_keys(&Keys::generate())
+            .expect("sign 445")
+    }
+
+    fn h_tag(hex_value: &str) -> Tag {
+        Tag::parse(["h", hex_value]).expect("h tag")
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_routing_tag_is_screened_as_malformed() {
+        // The cheapest reachable shape, and the reason this classification
+        // exists: `#h` matches an event carrying MORE than one `h` tag, so a
+        // conformant relay delivers this to a victim subscribed on the first
+        // one. The peeler DTO then refuses it ("exactly one h tag"), before the
+        // engine and before any key material is touched.
+        let (manager, dir) = open_manager();
+        let ev = signed_445(
+            vec![
+                h_tag(&hex::encode([0xAAu8; 32])),
+                h_tag(&hex::encode([0x11u8; 32])),
+            ],
+            "b3BhcXVl",
+        );
+        assert!(
+            matches!(
+                manager.process_event(&ev).await,
+                Ok(ScreenedIngest::RejectedBeforeAuth(
+                    PreAuthRejection::Malformed
+                ))
+            ),
+            "an envelope the pure pre-engine parse cannot read is a \
+             PRE-AUTHENTICATION rejection, not an un-applied message"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn every_pre_engine_parse_failure_is_screened_as_malformed() {
+        // The full set the parse can reject, so a future peeler bump that adds
+        // one is not silently split across the two classifications. Each of
+        // these is an envelope-shape judgement: no ciphertext, no key material.
+        let (manager, dir) = open_manager();
+        let good_h = hex::encode([0xAAu8; 32]);
+        let cases: Vec<(&str, Event)> = vec![
+            ("no h tag at all", signed_445(vec![], "b3BhcXVl")),
+            (
+                "two h tags",
+                signed_445(
+                    vec![h_tag(&good_h), h_tag(&hex::encode([1u8; 32]))],
+                    "b3BhcXVl",
+                ),
+            ),
+            (
+                "valueless h tag",
+                signed_445(vec![Tag::parse(["h"]).expect("bare h")], "b3BhcXVl"),
+            ),
+            (
+                "h tag of the wrong width",
+                signed_445(vec![h_tag("abcd")], "b3BhcXVl"),
+            ),
+            (
+                "h tag that is not hex",
+                signed_445(vec![h_tag(&"z".repeat(64))], "b3BhcXVl"),
+            ),
+            (
+                "a kind the transport does not carry",
+                nostr::EventBuilder::new(Kind::Custom(9), "hi")
+                    .tags(vec![h_tag(&good_h)])
+                    .sign_with_keys(&Keys::generate())
+                    .expect("sign kind 9"),
+            ),
+        ];
+        for (label, ev) in cases {
+            assert!(
+                SessionManager::event_to_transport_message(&ev).is_err(),
+                "precondition: `{label}` must really fail the pre-engine parse, \
+                 or the assertion below proves nothing",
+            );
+            assert!(
+                matches!(
+                    manager.process_event(&ev).await,
+                    Ok(ScreenedIngest::RejectedBeforeAuth(
+                        PreAuthRejection::Malformed
+                    ))
+                ),
+                "`{label}` must be screened as Malformed",
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_parseable_envelope_reaches_the_engine_and_is_never_screened() {
+        // THE BOUNDARY, at its source: the screen is a function of the ENVELOPE
+        // alone. This event's `content` is not base64 — garbage to the engine —
+        // but the pre-engine parse never looks at `content`, so nothing here may
+        // be screened. Whatever the engine then makes of it is an engine
+        // disposition, and the cursor planes must keep holding on it.
+        //
+        // This session holds no groups, so the engine answers "not mine" rather
+        // than erroring; the ERROR half of the boundary needs a real group and
+        // is pinned end to end, at the cursor, by
+        // `tests/cursor_poisoning_e2e.rs::{livesync,catchup}_an_engine_side_failure_*`.
+        let (manager, dir) = open_manager();
+        let ev = signed_445(
+            vec![h_tag(&hex::encode([0xAAu8; 32]))],
+            "!!!!not-base64!!!!",
+        );
+        assert!(
+            SessionManager::event_to_transport_message(&ev).is_ok(),
+            "precondition: the ENVELOPE is well-formed — only its content is \
+             junk — so any failure this event produces is the engine's"
+        );
+        assert!(
+            matches!(
+                manager.process_event(&ev).await,
+                Ok(ScreenedIngest::Ingested(_))
+            ),
+            "a parseable envelope must reach the engine: only the pre-engine \
+             parse and the expiration screen may reject before authentication"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

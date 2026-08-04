@@ -130,7 +130,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get onboardingValueProp1Summary =>
-      'Chiffrée sur ton appareil : seuls les cercles que tu choisis peuvent la lire.';
+      'Chiffrée sur votre appareil : seuls les cercles que vous choisissez peuvent la lire.';
 
   @override
   String get onboardingValueProp2Summary =>
@@ -138,7 +138,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get onboardingValueProp3Summary =>
-      'Ni e-mail, ni téléphone, ni inscription. Ta clé secrète ne quitte jamais ton téléphone.';
+      'Ni e-mail, ni téléphone, ni inscription. Votre clé secrète ne quitte jamais votre téléphone.';
 
   @override
   String get onboardingCreateIdentityTitle => 'Créez votre identité';

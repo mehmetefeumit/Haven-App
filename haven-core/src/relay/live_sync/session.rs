@@ -346,6 +346,49 @@ impl LiveSyncCore {
         !self.shutdown.load(Ordering::Acquire)
     }
 
+    /// Clamps any cursor parked in the FUTURE back to `now_secs`, on every
+    /// stream this session is about to REQ. Best-effort.
+    ///
+    /// # Why a future cursor cannot be waited out
+    ///
+    /// [`since_for_stream`] caps the derived REQ floor at `now`, so a cursor
+    /// above the wall clock does not produce a future-dated filter — it pins
+    /// EVERY floor at `now` for the duration of the skew. And the advance path
+    /// is monotonic-max, so nothing in it can ever bring such a value back
+    /// down: it has to be clamped explicitly, or it lasts exactly as long as
+    /// the timestamp that produced it — forever, if that timestamp was chosen.
+    ///
+    /// The inbox stream is where this actually bit. A pre-fix build advanced
+    /// `inbox_1059` from a `kind:1059` gift wrap's outer `created_at`, which
+    /// anyone who knows this user's published npub can set to any value (see
+    /// [`super::anchor::InboxAnchor`]). Deleting that write path stops new
+    /// poisoning but does nothing for a device that already took one, and a
+    /// pinned inbox floor is fatal rather than merely wasteful: NIP-59 mandates
+    /// backdating, so a floor at `now` filters out even a wrap published this
+    /// second.
+    ///
+    /// Applied to the group streams too, where it is a standing guard against a
+    /// local clock that jumped forward and back rather than a migration. In
+    /// both cases LOWERING a cursor is the safe direction — it only widens the
+    /// next REQ — and the clamp is conditional, so a healthy cursor below the
+    /// clock is left exactly where it is.
+    fn repair_future_cursors(&self, circles: &[CircleSpec], has_inbox: bool, now_secs: i64) {
+        let now_ms = now_secs.saturating_mul(1000).max(0);
+        for c in circles {
+            let _ = self
+                .circle
+                .clamp_sync_cursor_down_to(&group_cursor_stream(&c.group_id_hex), now_ms);
+        }
+        if has_inbox
+            && self
+                .circle
+                .clamp_sync_cursor_down_to(STREAM_INBOX_1059, now_ms)
+                .unwrap_or(false)
+        {
+            log::warn!("[live_sync] inbox cursor was ahead of the local clock; clamped to now");
+        }
+    }
+
     /// Computes the bucket REQ `since` (seconds) as the minimum over the
     /// bucket's circles' per-circle cursors, so a multiplexed `#h` REQ never
     /// raises the `since` floor past any one circle's un-applied events.
@@ -412,6 +455,7 @@ impl LiveSyncCore {
                 .circle
                 .seed_sync_cursor_if_unset(STREAM_INBOX_1059, seed_ms);
         }
+        self.repair_future_cursors(circles, !inbox_relays.is_empty(), now);
 
         let own_pk_bytes = self.own_pubkey.to_bytes();
         let (group_subs, inbox_sub) =
@@ -587,6 +631,14 @@ impl LiveSyncCore {
                 );
             }
         }
+        // Open the inbox cursor-anchor generation BEFORE the REQ goes out, on
+        // the SAME `now` the `since` below is derived from — so the anchor is
+        // the local instant we asked, never later than the request it vouches
+        // for. This is the ONLY input to the inbox advance, and no remote party
+        // can write it: a gift wrap's own `created_at` is chosen by whoever
+        // wrapped it, and a `#p`-routed wrap costs one NIP-44 encryption to a
+        // published npub (see `live_sync::anchor::InboxAnchor`).
+        self.processor.note_inbox_subscription_opened(now);
         let inbox_cursor = self
             .circle
             .read_sync_cursor(STREAM_INBOX_1059)
@@ -836,6 +888,12 @@ impl LiveSyncCore {
         {
             log::warn!("[live_sync] stop: router clear timed out; proceeding");
         }
+        // Every REQ is closed: drop the inbox anchor so a stray EOSE arriving
+        // after teardown cannot redeem a generation for a subscription this
+        // session no longer owns. (The per-circle group anchors are dropped by
+        // `unsubscribe_circle`; a stopped session's router is cleared above, so
+        // this is belt-and-braces on the one anchor that outlives no REQ.)
+        self.processor.forget_inbox_subscription();
         log::debug!("[live_sync] stop_inner: router cleared; emitting SessionStopped");
         self.bus.send(LiveSyncEvent::Status {
             reason: SyncStatusReason::SessionStopped,

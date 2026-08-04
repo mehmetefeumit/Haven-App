@@ -18,9 +18,19 @@ pub const BUS_CAP: usize = 8192;
 ///
 /// Sized to absorb a burst while a slow `SQLCipher` decrypt runs; on overflow the
 /// receiver's `try_send` drops the event (never blocking the pool), and the
-/// dropped event is re-fetched via the cursor on the next subscribe — lossless,
-/// since the cursor advances only on applied events. Kept independent of
-/// [`BUS_CAP`] so the decouple buffer can be tuned separately (M11).
+/// dropped event is re-fetched by the next subscribe's lookback window.
+///
+/// Note what carries that recovery, since it is NOT the cursor: a cursor
+/// advance is anchored on the subscription's own REQ open time, and a dropped
+/// event never reaches the worker, so it records no hold-back and the
+/// generation's `EOSE` advances over it. What re-requests it is the
+/// [`GROUP_RESUBSCRIBE_BUFFER_SECS`] lookback subtracted from the cursor on the
+/// next REQ, plus the catch-up sweep. So this capacity must stay far above any
+/// realistic burst: it is sized so the drop does not happen, rather than relied
+/// on to be free when it does. Kept independent of [`BUS_CAP`] so the decouple
+/// buffer can be tuned separately (M11).
+///
+/// [`GROUP_RESUBSCRIBE_BUFFER_SECS`]: crate::relay::cursor::GROUP_RESUBSCRIBE_BUFFER_SECS
 pub const WORKER_QUEUE_CAP: usize = 8192;
 
 /// Capacity of the nostr pool's notification broadcast channel.

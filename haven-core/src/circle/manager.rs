@@ -1695,6 +1695,21 @@ impl CircleManager {
         self.storage.update_sync_cursor_max(stream, ms)
     }
 
+    /// Lowers `stream`'s cursor to `ms` if it is currently ABOVE it (monotonic
+    /// min). Returns whether a row changed.
+    ///
+    /// The only sanctioned backward move, and only for repairing a cursor
+    /// parked in the future — see
+    /// [`CircleStorage::clamp_sync_cursor_down_to`] for why the normal advance
+    /// path can never undo one.
+    ///
+    /// # Errors
+    ///
+    /// Propagates storage errors.
+    pub fn clamp_sync_cursor_down_to(&self, stream: &str, ms: i64) -> Result<bool> {
+        self.storage.clamp_sync_cursor_down_to(stream, ms)
+    }
+
     /// Resets `stream`'s cursor to the unseeded state.
     ///
     /// # Errors

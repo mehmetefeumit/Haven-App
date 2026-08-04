@@ -1,9 +1,25 @@
 # Reusable workflow: Android device-clock-skew lane
 # (docs/CI_HARDENING_BACKLOG.md Workstream B, item B8 — "Clock jump +/-6h").
 #
-# Proves that a +/-6 h device wall-clock jump does not silently break location
-# sharing. Three things ride the device clock with no external reference
-# anywhere in the tree, and this lane exercises all three in one run:
+# Proves that a +/-6 h device wall-clock jump is DETECTED and SURFACED rather
+# than failing silently, and MEASURES the delivery it still costs.
+#
+# # What this lane gates
+#
+#   * a fast clock's relay refusal reaches Dart as a typed device-clock fault
+#     (`RelayError::DeviceClockRejected`) rather than collapsed into a generic
+#     publish failure, and reaches a consumer that raises a verdict;
+#   * a slow clock is inferred from peers' own timestamps read from INSIDE the
+#     MLS ciphertext, keyed by authenticated member id — TWO distinct members
+#     must agree, and ONE outlying peer must NOT raise the verdict;
+#   * both faults reach the user, and the two say DIFFERENT things (one means
+#     nothing is being shared at all, the other means the send succeeded and
+#     the data was then discarded).
+#
+# # What this lane records but does not gate
+#
+# Three things ride the device clock with no external reference anywhere in
+# the tree, and a jump still costs a skewed device real delivery:
 #
 #   1. `created_at` — the MDK peeler stamps the inner app event with
 #      `now_unix_seconds()` and BINDS the outer kind-445 `created_at` to it,
@@ -15,16 +31,26 @@
 #      `created_at` and re-derives the next REQ floor 60 s below it, so an
 #      event minted further back is outside every subsequent window.
 #
+# The drive measures all three and prints them as `[b8] EVIDENCE`. They are
+# recorded rather than asserted because each bottoms out in signing a
+# `created_at` the device clock does not hold — clock correction — which moves
+# the TTL, the cursor floor and the peeler's inner/outer binding with it and
+# needs its own security analysis; the receiver-side one would additionally
+# mean widening a replay defence. Same evidence-vs-finding split B1, B5, B6
+# and B9 use.
+#
 # # Why the hermetic relay is load-bearing here
 #
 # The publisher and the receiver share one device clock, so jumping it moves
 # BOTH and every comparison stays self-consistent — a naive version of this
 # scenario is vacuous. The strfry container is the one clock in the lane that
 # does not move: it runs on the CI host, and its
-# `rejectEventsNewerThanSeconds` (tooling/e2e/strfry.conf) judges a
-# fast-clocked publish exactly as a correctly-clocked peer would. The
-# slow-clock half instead gets its asymmetry from TIME: the event is minted
-# skewed and read back after the clock is restored.
+# `rejectEventsNewerThanSeconds = 900` (tooling/e2e/strfry.conf) judges a
+# fast-clocked publish exactly as a correctly-clocked peer would, which is
+# what every fast-clock oracle bottoms out in. The slow-clock half gets its
+# asymmetry from TIME instead: the peer samples are sealed inside the MLS
+# ciphertext at true time and only READ after the clock moves, so the sender's
+# reading cannot follow the reader's clock.
 #
 # # Why a SEPARATE workflow
 #
@@ -176,9 +202,11 @@ jobs:
       # own sh -c, which would drop shell state).
       #
       # BOUNDS. Three of them, innermost first:
-      #   18m  the `flutter drive` (the orchestrator's B8_DRIVE_TIMEOUT default;
+      #   20m  the `flutter drive` (the orchestrator's B8_DRIVE_TIMEOUT default;
       #        kept in the script rather than declared here so the two cannot
-      #        drift).
+      #        drift). Above the drive target's own 17-minute in-test Timeout,
+      #        so an overrun fails as a NAMED test rather than an anonymous
+      #        kill.
       #   25m  this step's inner deadline (run-with-deadline.sh below) — covers
       #        the drive PLUS install, `adb root`, the auto_time pin, the four
       #        clock jumps and the oracle, none of which the per-drive timeout
@@ -186,14 +214,15 @@ jobs:
       #        (CI_HARDENING_BACKLOG.md A8).
       #   35m  this step's timeout-minutes = 25 + 1 (kill grace) + 7
       #        (emulator-boot-timeout) + margin, a belt over the deadline.
-      # Sizing evidence: the drive's own worst case is circle setup + four
-      # publishes + four catch-up sweeps (30s each) + four clock rendezvous
-      # (150s each, bounded in-Dart) under a 15-minute in-test Timeout. This
-      # lane is new and has no green history; revise against p95 once it does.
+      # Sizing evidence: the drive's own worst case is a 3-member circle setup
+      # + seven publishes + four catch-up sweeps (30s each) + two banner pumps
+      # + four clock rendezvous (150s each, bounded in-Dart) under a 17-minute
+      # in-test Timeout. This lane has no green history yet; revise against p95
+      # once it does.
       #
       # -memory 6144 matches the sibling Android lanes: RustLib + SQLCipher
-      # floods `mlock() -1 ENOMEM` under pressure, and this lane holds two MLS
-      # sessions (the publisher's and the synthetic peer's) at once.
+      # floods `mlock() -1 ENOMEM` under pressure, and this lane holds three
+      # MLS sessions at once (the publisher's and both synthetic peers').
       - name: Run the clock-skew proof on the emulator
         timeout-minutes: 35
         uses: reactivecircus/android-emulator-runner@v2

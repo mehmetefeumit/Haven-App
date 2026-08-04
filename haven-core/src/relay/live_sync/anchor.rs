@@ -1,4 +1,5 @@
-//! Per-circle cursor anchors for the live plane.
+//! Cursor anchors for the live plane: per-circle ([`CursorAnchors`]) and one
+//! for the inbox ([`InboxAnchor`]).
 //!
 //! The live receive path never advances a sync cursor because an event arrived.
 //! An inbound `kind:445`'s outer `created_at` is signed by a throwaway ephemeral
@@ -6,6 +7,12 @@
 //! *public* `nostr_group_id` — so any relay observer can mint, or re-wrap an
 //! observed ciphertext into, an event carrying whatever timestamp it likes. A
 //! per-event advance therefore hands a remote party the persisted REQ floor.
+//!
+//! The same is true of the inbox plane, for a *cheaper* forgery: a `kind:1059`
+//! gift wrap is routed by a `#p` tag holding the recipient's PUBLIC key, is
+//! authored by a throwaway ephemeral key by construction, and is peeled with
+//! NIP-59 alone — no MLS state is consulted, and nothing binds the outer
+//! `created_at` to anything. See [`InboxAnchor`].
 //!
 //! What the live plane CAN vouch for is the relay's end-of-stored-events signal:
 //! after `EOSE` on a REQ, everything the relay held matching that filter has
@@ -154,6 +161,230 @@ impl CursorAnchors {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(group_id_hex);
+    }
+}
+
+/// The live plane's anchor for the ONE inbox (`kind:1059`) stream.
+///
+/// Same generation model as [`CursorAnchors`], collapsed to a single unkeyed
+/// generation because there is exactly one inbox subscription per session.
+///
+/// # Why the inbox needs this at all — the forgery is cheaper here
+///
+/// A gift wrap is routed by a `#p` tag carrying the recipient's public key.
+/// That key is published in the user's own `kind:0` profile, their `kind:10002`
+/// / `kind:10050` relay lists and every `kind:30443` `KeyPackage`, so the
+/// routing address of any Haven user is public by design. The wrapper is
+/// authored by a throwaway ephemeral key *by construction* (NIP-59), and
+/// peeling it consults NIP-59 alone — a valid seal over a `kind:444` rumor with
+/// a well-formed `e` tag, a well-formed `relays` tag and non-empty base64
+/// content is accepted; **no MLS state is touched and nothing binds the outer
+/// `created_at` to the payload**. So anyone who knows a user's npub can mint a
+/// wrap that peels cleanly, at any `created_at`, for the cost of one NIP-44
+/// encryption. Deriving a cursor advance from that field would hand the inbox
+/// REQ floor to the entire network.
+///
+/// # Why parking the cursor in the FUTURE is the damaging direction
+///
+/// [`super::super::cursor::since_for_stream`] caps the derived floor at `now`,
+/// so a cursor above the wall clock pins EVERY subsequent inbox floor at `now`
+/// for the whole duration of the skew. And NIP-59 deliberately backdates every
+/// gift wrap by up to 48h, so with the floor at `now` even a wrap published
+/// *this second* fails the `since` filter: invitation delivery stops entirely,
+/// permanently, and across restarts. The 7-day inbox lookback bounds the
+/// backward direction but does nothing here — it is subtracted from a cursor
+/// that is already ahead of the clock.
+///
+/// # What this anchors on instead
+///
+/// The local clock reading taken when the inbox REQ was issued, redeemed on
+/// that REQ's `EOSE`. No remote party can write it. Nothing is passed in from
+/// the consumer, so there is no remotely-written input to defend at all: the
+/// hold-back arm of [`cursor_ms_for_window`] is deliberately unused here.
+///
+/// # Why no hold-back
+///
+/// A wrap the foreground could not hold is either (a) unpeelable — nothing
+/// about it authenticated, which is the inbox's exact analogue of the group
+/// plane's `RejectedBeforeAuth`, and letting it hold would sell anyone who
+/// knows the victim's npub a permanent cursor stall for one free event — or (b)
+/// a local storage failure, which no remote party caused. Case (b) is covered
+/// instead by the stream's 7-day lookback ([`INBOX_GIFTWRAP_LOOKBACK_SECS`]):
+/// the next REQ's floor is a full week below this advance, so a wrap that was
+/// delivered in this window is re-requested for the next seven days.
+///
+/// [`INBOX_GIFTWRAP_LOOKBACK_SECS`]: super::super::cursor::INBOX_GIFTWRAP_LOOKBACK_SECS
+#[derive(Default)]
+pub struct InboxAnchor {
+    inner: Mutex<Option<InboxGeneration>>,
+}
+
+/// One inbox subscription generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InboxGeneration {
+    /// LOCAL wall-clock reading taken when this generation's REQ was issued.
+    opened_at_secs: i64,
+    /// Whether this generation has already consumed its one EOSE advance.
+    eose_consumed: bool,
+}
+
+impl InboxGeneration {
+    /// The cursor value (ms) this generation's EOSE justifies, or `None` if the
+    /// generation has already consumed its advance.
+    const fn consume_eose(&mut self, now_secs: i64) -> Option<i64> {
+        if self.eose_consumed {
+            return None;
+        }
+        self.eose_consumed = true;
+        // `None` hold-back: see "Why no hold-back" on `InboxAnchor`. The clamp
+        // to `now_secs` and the floor at 0 both live in `cursor_ms_for_window`.
+        Some(cursor_ms_for_window(self.opened_at_secs, None, now_secs))
+    }
+}
+
+impl std::fmt::Debug for InboxAnchor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let open = self
+            .inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some();
+        f.debug_struct("InboxAnchor")
+            .field("generation_open", &open)
+            .finish()
+    }
+}
+
+impl InboxAnchor {
+    /// Opens a fresh generation anchored at `opened_at_secs` — a LOCAL clock
+    /// reading taken when the inbox REQ was (re-)issued.
+    ///
+    /// Callers MUST pass the same `now` they derived the REQ's `since` from.
+    /// Passing an EARLIER time is safe (it claims less); a later one is not.
+    pub fn open(&self, opened_at_secs: i64) {
+        *self.inner.lock().unwrap_or_else(PoisonError::into_inner) = Some(InboxGeneration {
+            opened_at_secs,
+            eose_consumed: false,
+        });
+    }
+
+    /// Consumes this generation's EOSE and returns the cursor value (ms) it
+    /// justifies, or `None` when no generation is open or it already advanced.
+    ///
+    /// A relay that flaps re-EOSEs on the same REQ; the open time has not
+    /// moved, so the second EOSE carries no new completeness claim and must not
+    /// re-advance.
+    pub fn consume_eose(&self, now_secs: i64) -> Option<i64> {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_mut()
+            .and_then(|generation| generation.consume_eose(now_secs))
+    }
+
+    /// Drops the generation (the inbox REQ was closed / the session stopped),
+    /// so a later stray EOSE cannot redeem an anchor for a REQ we no longer own.
+    pub fn forget(&self) {
+        *self.inner.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+}
+
+#[cfg(test)]
+mod inbox_tests {
+    use super::InboxAnchor;
+
+    /// A `now` far past every timestamp here, so the clamp is inert and each
+    /// test isolates the rule it is about.
+    const NOW: i64 = 2_000_000_000;
+    const OPENED: i64 = 1_000_000;
+
+    #[test]
+    fn eose_advances_to_the_req_open_time() {
+        let anchor = InboxAnchor::default();
+        anchor.open(OPENED);
+        assert_eq!(anchor.consume_eose(NOW), Some(OPENED * 1000));
+    }
+
+    #[test]
+    fn nothing_a_gift_wrap_carries_appears_in_the_advance() {
+        // THE HEADLINE, stated as a type property: `consume_eose` takes only a
+        // local clock reading. There is no parameter a wrap's `created_at`
+        // could be threaded through, at any magnitude, in either direction —
+        // which is the whole point of the shape. Anyone who knows the victim's
+        // npub can mint a wrap that peels cleanly at an arbitrary `created_at`,
+        // so the advance must not have an input for it.
+        let anchor = InboxAnchor::default();
+        anchor.open(OPENED);
+        assert_eq!(anchor.consume_eose(NOW), Some(OPENED * 1000));
+    }
+
+    #[test]
+    fn no_open_generation_never_advances() {
+        // No REQ ⇒ no window ⇒ nothing to claim. This is what stops unsolicited
+        // inbox traffic (or a stray EOSE for a closed REQ) from conjuring an
+        // anchor.
+        let anchor = InboxAnchor::default();
+        assert_eq!(anchor.consume_eose(NOW), None);
+    }
+
+    #[test]
+    fn a_generation_advances_at_most_once() {
+        // A flapping relay re-EOSEs the same REQ. The open time has not moved,
+        // so the second EOSE claims nothing new — otherwise a relay could pump
+        // the inbox cursor forward by reconnecting in a loop.
+        let anchor = InboxAnchor::default();
+        anchor.open(OPENED);
+        assert_eq!(anchor.consume_eose(NOW), Some(OPENED * 1000));
+        assert_eq!(anchor.consume_eose(NOW), None);
+        assert_eq!(anchor.consume_eose(NOW), None);
+    }
+
+    #[test]
+    fn a_fresh_generation_re_arms_the_advance() {
+        let anchor = InboxAnchor::default();
+        anchor.open(OPENED);
+        assert_eq!(anchor.consume_eose(NOW), Some(OPENED * 1000));
+        anchor.open(OPENED + 500);
+        assert_eq!(anchor.consume_eose(NOW), Some((OPENED + 500) * 1000));
+    }
+
+    #[test]
+    fn a_future_open_time_clamps_to_now() {
+        // A device clock stepped backwards mid-session must still not park the
+        // cursor above the wall clock: `since_for_stream` caps the derived floor
+        // at `now`, so a future cursor pins EVERY inbox floor at `now` — and
+        // since NIP-59 backdates every gift wrap by up to 48h, a floor at `now`
+        // rejects even wraps published this second. That is the failure mode
+        // this clamp exists to make unreachable.
+        let now = 1_000_i64;
+        let anchor = InboxAnchor::default();
+        anchor.open(now + 10_000);
+        assert_eq!(anchor.consume_eose(now), Some(now * 1000));
+    }
+
+    #[test]
+    fn a_negative_open_time_floors_at_zero() {
+        // `since_for_stream` div_euclid's the stored value, so a negative cursor
+        // must never be persisted.
+        let anchor = InboxAnchor::default();
+        anchor.open(-5);
+        assert_eq!(anchor.consume_eose(NOW), Some(0));
+    }
+
+    #[test]
+    fn forget_drops_the_generation() {
+        let anchor = InboxAnchor::default();
+        anchor.open(OPENED);
+        anchor.forget();
+        assert_eq!(anchor.consume_eose(NOW), None);
+    }
+
+    #[test]
+    fn the_debug_impl_is_presence_only() {
+        let anchor = InboxAnchor::default();
+        assert!(format!("{anchor:?}").contains("generation_open: false"));
+        anchor.open(OPENED);
+        assert!(format!("{anchor:?}").contains("generation_open: true"));
     }
 }
 

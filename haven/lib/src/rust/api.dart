@@ -6,7 +6,7 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_commit_to_publish`, `convert_location_result`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_legacy_mls_db_files`, `delete_mls_session_db_files`, `delete_tile_db_files`, `event_secs_to_cursor_ms`, `fetch_own_profile_across_pool`, `from_cached`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `kp_event_d_tag`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `nip65_relay_list_urls`, `now_ms`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `redact_profile_err`, `reinstall_after_timed_out_stop`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `republish_key_package`, `run_blocking`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`, `usable_profile_pool`
+// These functions are ignored because they are not marked as `pub`: `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_commit_to_publish`, `convert_location_result`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_legacy_mls_db_files`, `delete_mls_session_db_files`, `delete_tile_db_files`, `fetch_own_profile_across_pool`, `from_cached`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `kp_event_d_tag`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `nip65_relay_list_urls`, `now_ms`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `redact_profile_err`, `reinstall_after_timed_out_stop`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `republish_key_package`, `run_blocking`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`, `usable_profile_pool`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`, `ProfileStampLists`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`, `default`
@@ -730,56 +730,6 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required List<String> creatorFallbackRelays,
   });
 
-  /// Advances `stream`'s cursor to `ms` (monotonic max; never backward).
-  ///
-  /// `ms` is a millisecond timestamp. Prefer the seconds-taking semantic
-  /// wrappers [`Self::cursor_advance_group_to_event`] /
-  /// [`Self::cursor_advance_inbox_to_wrap`], which own the stream key and the
-  /// seconds→milliseconds conversion; reach for this generic form only when
-  /// the caller already holds a millisecond value. There is intentionally no
-  /// unconditional setter: the cursor only moves forward, and only for a
-  /// successfully-processed event.
-  ///
-  /// # Errors
-  ///
-  /// Returns a redacted error string if the storage write fails.
-  Future<void> cursorAdvance({
-    required String stream,
-    required PlatformInt64 ms,
-  });
-
-  /// Advances the `group_445` cursor to a fully-processed `kind:445` event's
-  /// `created_at` (Unix **seconds**).
-  ///
-  /// Convenience over [`Self::cursor_advance`] that owns BOTH the stream key
-  /// ([`haven_core::relay::STREAM_GROUP_445`]) and the seconds→milliseconds
-  /// conversion in one place, so the Dart caller passes a plain event
-  /// timestamp and cannot drift the key or the unit. Monotonic-max: only ever
-  /// moves the cursor forward.
-  ///
-  /// # Errors
-  ///
-  /// Returns a redacted error string if the storage write fails.
-  Future<void> cursorAdvanceGroupToEvent({
-    required PlatformInt64 eventCreatedAtSecs,
-  });
-
-  /// Advances the `inbox_1059` cursor to a processed gift-wrap's `created_at`
-  /// (Unix **seconds**).
-  ///
-  /// As [`Self::cursor_advance_group_to_event`], but for the gift-wrap inbox
-  /// stream ([`haven_core::relay::STREAM_INBOX_1059`]). The 7-day inbox
-  /// lookback applied at REQ time (see [`haven_core::relay::cursor`]) absorbs
-  /// NIP-59's wrapper backdating, so advancing on the outer wrapper timestamp
-  /// is safe.
-  ///
-  /// # Errors
-  ///
-  /// Returns a redacted error string if the storage write fails.
-  Future<void> cursorAdvanceInboxToWrap({
-    required PlatformInt64 wrapCreatedAtSecs,
-  });
-
   /// Reads the persisted relay sync cursor (raw ms) for `stream`.
   ///
   /// Returns `None` when the stream has never been seeded — callers MUST
@@ -802,18 +752,6 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   ///
   /// Returns a redacted error string if the storage write fails.
   Future<void> cursorReset({required String stream});
-
-  /// Seeds `stream`'s cursor to `ms` only if it is currently unseeded.
-  ///
-  /// Idempotent: an already-seeded cursor is never moved.
-  ///
-  /// # Errors
-  ///
-  /// Returns a redacted error string if the storage write fails.
-  Future<void> cursorSeedIfUnset({
-    required String stream,
-    required PlatformInt64 ms,
-  });
 
   /// Declines an invitation, keyed by the gift-wrap event id.
   ///
@@ -2751,10 +2689,15 @@ class FfiRelayEvent {
   final String? evolutionEventJson;
 
   /// Raw `kind:1059` gift-wrap JSON (Welcome).
+  ///
+  /// The wrapper's `created_at` is deliberately NOT surfaced alongside it. Its
+  /// only consumer was a sync-cursor advance, and a `#p`-routed gift wrap is
+  /// authored by a throwaway ephemeral key that anyone who knows this user's
+  /// published npub can mint — so that field was a remotely-chosen number
+  /// wired straight into the persisted inbox REQ floor. The inbox cursor is
+  /// advanced in haven-core now, from the inbox REQ's own local open time
+  /// (`haven_core::relay::live_sync::anchor::InboxAnchor`).
   final String? giftWrapJson;
-
-  /// Gift-wrap `created_at` seconds (Welcome).
-  final PlatformInt64? wrapCreatedAtSecs;
 
   /// Closed status reason (Status).
   final FfiSyncStatusReason? statusReason;
@@ -2767,7 +2710,6 @@ class FfiRelayEvent {
     this.eventCreatedAtSecs,
     this.evolutionEventJson,
     this.giftWrapJson,
-    this.wrapCreatedAtSecs,
     this.statusReason,
   });
 
@@ -2780,7 +2722,6 @@ class FfiRelayEvent {
       eventCreatedAtSecs.hashCode ^
       evolutionEventJson.hashCode ^
       giftWrapJson.hashCode ^
-      wrapCreatedAtSecs.hashCode ^
       statusReason.hashCode;
 
   @override
@@ -2795,7 +2736,6 @@ class FfiRelayEvent {
           eventCreatedAtSecs == other.eventCreatedAtSecs &&
           evolutionEventJson == other.evolutionEventJson &&
           giftWrapJson == other.giftWrapJson &&
-          wrapCreatedAtSecs == other.wrapCreatedAtSecs &&
           statusReason == other.statusReason;
 }
 

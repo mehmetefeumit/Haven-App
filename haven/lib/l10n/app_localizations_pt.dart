@@ -130,7 +130,7 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get onboardingValueProp1Summary =>
-      'Encriptado no teu dispositivo, por isso só os círculos que escolheres o podem ler.';
+      'Criptografada no seu dispositivo, então só os círculos que você escolher podem lê-la.';
 
   @override
   String get onboardingValueProp2Summary =>
@@ -138,7 +138,7 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get onboardingValueProp3Summary =>
-      'Sem email, telefone ou registo. A tua chave secreta nunca sai do teu telefone.';
+      'Sem e-mail, telefone ou cadastro. Sua chave secreta nunca sai do seu celular.';
 
   @override
   String get onboardingCreateIdentityTitle => 'Crie sua identidade';

@@ -1,6 +1,6 @@
-/// B8 drive target — publishes and receives across a +/-6 h device clock
-/// jump (`docs/CI_HARDENING_BACKLOG.md`, Workstream B, item B8:
-/// "Clock jump +/-6h ... exercises `created_at`, the 228 s TTL,
+/// B8 drive target — device-clock skew: what Haven now DETECTS, and what a
+/// +/-6 h jump still costs (`docs/CI_HARDENING_BACKLOG.md`, Workstream B,
+/// item B8: "Clock jump +/-6h ... exercises `created_at`, the 228 s TTL,
 /// `since`-cursor catch-up").
 ///
 /// ## What is actually clock-dependent (verified from source, not assumed)
@@ -11,9 +11,7 @@
 ///   * **`created_at`** — the MDK peeler stamps the inner app event with
 ///     `now_unix_seconds()` (`transport-nostr-peeler/src/event.rs:180,217`)
 ///     and BINDS the outer kind-445 `created_at` to it
-///     (`peeler.rs:169`, Package E). No monotonic source, no relay-time
-///     correction, and nothing anywhere in `haven-core` or `haven/lib`
-///     compares the device clock against any external reference.
+///     (`peeler.rs:169`, Package E).
 ///   * **The 228 s TTL** — Haven stamps every circle with the Dark Matter
 ///     `message-retention.v1` component
 ///     (`LOCATION_MESSAGE_RETENTION_SECS = 228`,
@@ -24,29 +22,51 @@
 ///   * **The receiver gate** — `SessionManager::process_event`
 ///     (`haven-core/src/nostr/mls/manager.rs:594-624`) drops any event whose
 ///     expiration is more than `RECEIVER_EXPIRATION_GRACE_SECS = 60` s in the
-///     receiver's past, BEFORE any decryption, and reports it as `Stale`.
+///     receiver's past, BEFORE any decryption.
 ///   * **The `since` cursor** — `run_catchup_all_circles`
 ///     (`haven-core/src/relay/catchup.rs:288-349`) advances the persisted
 ///     cursor to the SENDER's `created_at`, and `since_for_stream`
 ///     (`haven-core/src/relay/cursor.rs:114-130`) re-derives the next REQ
-///     floor as `cursor - GROUP_RESUBSCRIBE_BUFFER_SECS` (60 s), capped to
-///     the receiver's `now`.
+///     floor as `cursor - GROUP_RESUBSCRIBE_BUFFER_SECS` (60 s).
 ///
-/// ## What this target proves, and why one device is enough
+/// ## What this lane GATES, and what it merely RECORDS
 ///
-/// The publisher and the receiver share this device's wall clock, so a
-/// naive "jump the clock and have a peer decrypt" scenario is VACUOUS: both
-/// sides move together and every comparison stays self-consistent. The
-/// asymmetry this target uses instead is asymmetry in TIME, plus the one
-/// genuinely independent clock in the lane — the hermetic strfry relay,
-/// which runs on the CI host and never moves:
+/// Haven does not rewrite `created_at`, deliberately: the TTL, the `since`
+/// cursor floor and the peeler's inner/outer timestamp binding all ride that
+/// value, so correcting it needs its own security analysis and is out of
+/// scope here. Everything above therefore still costs a skewed device real
+/// delivery, and this target MEASURES that cost and reports it as EVIDENCE —
+/// a standing record of a live residual defect, not a gate (the same
+/// evidence-vs-finding split B1, B5, B6 and B9 use).
 ///
-///   * a publish issued while the device runs FAST is judged by the relay's
-///     own `rejectEventsNewerThanSeconds` (`tooling/e2e/strfry.conf:16`),
-///     i.e. by a correctly-clocked observer;
-///   * a publish issued while the device runs SLOW is READ BACK after the
-///     clock is restored, so the receiver-side gate and the `since` floor
-///     are evaluated at TRUE time against an event minted at skewed time.
+/// What IS gated is the behaviour that landed instead: **the failure is no
+/// longer silent.** A fast clock's relay refusal is classified into a typed
+/// `RelayError::DeviceClockRejected` rather than collapsed into a generic
+/// failure, and a slow clock is inferred from peers' own timestamps read from
+/// INSIDE the MLS ciphertext, keyed by authenticated member id and requiring
+/// two distinct members to agree. Both raise a user-visible banner, and the
+/// two faults say different things. Those five properties are this lane's
+/// gate; each one goes red if the corresponding piece of the fix is reverted.
+///
+/// ## Why one device is enough, and what breaks the clock symmetry
+///
+/// The publisher and the receiver share this device's wall clock, so a naive
+/// "jump the clock and have a peer decrypt" scenario is VACUOUS: both sides
+/// move together and every comparison stays self-consistent. Every oracle
+/// below therefore names the thing that does NOT move with the device:
+///
+///   * **The hermetic strfry relay.** It runs on the CI host, its clock never
+///     moves, and its `rejectEventsNewerThanSeconds = 900`
+///     (`tooling/e2e/strfry.conf`) judges a `created_at` 21 600 s in its
+///     future exactly as a correctly-clocked peer would. Every fast-clock
+///     oracle bottoms out in its refusal, which the device cannot produce by
+///     moving both of its own roles together.
+///   * **A timestamp frozen at a DIFFERENT offset.** The peer samples are
+///     minted at true time, sealed inside the MLS ciphertext, and only then
+///     is the clock moved and the sample READ. The sender's reading cannot
+///     follow the reader's clock — it is ciphertext by then — so the observed
+///     offset is a genuine discontinuity. Had the jump silently no-opped, the
+///     offsets would be ~0 s and the corroboration oracle would go red.
 ///
 /// The clock itself is moved by the shell
 /// (`tooling/e2e/ci/run-b8-clock-skew.sh`) on cue: this body prints
@@ -57,21 +77,23 @@
 ///
 /// ## Findings are accumulated, not thrown
 ///
-/// Every oracle records into `findings` and the body runs to completion, so
-/// ONE run reports every defect rather than stopping at the first. Genuine
-/// harness failures (the clock never moved, the baseline never worked, the
-/// premise no longer holds) still throw immediately — a run whose machinery
-/// is broken must not be readable as a product verdict.
-///
-/// EXPECT THIS LANE TO FAIL until the skew defects it names are fixed. That
-/// is the deliverable, exactly as for B1. Do not relax an assertion to make
-/// it green (CLAUDE.md, Testing Requirements #5).
+/// Every gating oracle records into `findings` and the body runs to
+/// completion, so ONE run reports every defect rather than stopping at the
+/// first. Genuine harness failures (the clock never moved, the baseline never
+/// worked, the premise no longer holds) still throw immediately — a run whose
+/// machinery is broken must not be readable as a product verdict.
 library;
 
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/constants/location.dart'
+    show kClockSkewAlertThreshold;
+import 'package:haven/src/providers/service_providers.dart'
+    show clockSkewDetectorProvider;
 import 'package:haven/src/rust/api.dart'
     show
         CircleCreationResultFfi,
@@ -79,9 +101,16 @@ import 'package:haven/src/rust/api.dart'
         LocationMessageResultKindFfi,
         MemberKeyPackageFfi,
         RelayManagerFfi;
+import 'package:haven/src/services/clock_skew_detector.dart'
+    show ClockSkewDetector;
+import 'package:haven/src/services/nostr_relay_service.dart'
+    show NostrRelayService;
+import 'package:haven/src/widgets/location/clock_skew_banner.dart'
+    show ClockSkewBanner;
 import 'package:integration_test/integration_test.dart';
 
 import 'e2e/_lib/circle_creation.dart' show createCircleConfirmed;
+import 'e2e/_lib/clock_skew_oracles.dart';
 import 'e2e/_lib/coordination.dart' show waitForKeyPackage;
 import 'e2e/_lib/scenario_harness.dart';
 import 'e2e/_lib/synthetic_user.dart' show SyntheticUser;
@@ -104,12 +133,43 @@ const String kClockObservedMarker = '[b8] CLOCK_OBSERVED';
 /// Emitted when a requested jump never arrived. A harness failure.
 const String kClockTimeoutMarker = '[b8] CLOCK_TIMEOUT';
 
-/// One recorded defect. The shell fails the lane if any appears.
+/// One recorded defect in the behaviour this lane GATES. The shell fails the
+/// lane if any appears.
 const String kFindingMarker = '[b8] FINDING';
+
+/// One recorded MEASUREMENT of the delivery cost a skewed clock still
+/// imposes. Printed by the shell, never gating — closing it needs clock
+/// correction, which is deliberately out of scope (see the library doc).
+const String kEvidenceMarker = '[b8] EVIDENCE';
 
 /// Terminal marker. Its ABSENCE means the body died early, which invalidates
 /// every negative result above it.
 const String kAllPhasesMarker = '[b8] ALL_PHASES_COMPLETE';
+
+// --- Gating oracles. The shell requires EVERY one of these to be present. ---
+
+/// A fast clock's relay refusal reached Dart CLASSIFIED as a device-clock
+/// fault instead of collapsed into a generic publish failure.
+const String kOkRejectionClassified = '[b8] OK rejection-classified';
+
+/// …and reached a consumer that can act on it, raising its verdict.
+const String kOkRejectionVerdict = '[b8] OK rejection-verdict';
+
+/// ONE member reporting a future time does NOT accuse this device's clock.
+const String kOkPeerSingleSourceSilent = '[b8] OK peer-single-source-silent';
+
+/// TWO distinct MLS-authenticated members agreeing DOES raise the verdict.
+const String kOkPeerCorroborated = '[b8] OK peer-corroborated';
+
+/// The fast-clock fault reaches the user, in its own words.
+const String kOkSurfaceRejected = '[b8] OK surface-rejected';
+
+/// The slow-clock fault reaches the user, in its own words.
+const String kOkSurfaceBehind = '[b8] OK surface-behind';
+
+/// …and those words differ: one fault means nothing is shared, the other
+/// means the send succeeded and the data was then discarded.
+const String kOkSurfaceDistinct = '[b8] OK surface-distinct';
 
 // ---------------------------------------------------------------------------
 // Timings
@@ -146,6 +206,9 @@ const int _expectedRetentionSecs = 228;
 // ---------------------------------------------------------------------------
 const ({double lat, double lon}) _coordsBaseline = (lat: 52.3702, lon: 4.8952);
 const ({double lat, double lon}) _coordsFast = (lat: 48.8584, lon: 2.2945);
+const ({double lat, double lon}) _coordsFastProd = (lat: 55.6761, lon: 12.5683);
+const ({double lat, double lon}) _coordsPeerA = (lat: 40.4319, lon: 116.5704);
+const ({double lat, double lon}) _coordsPeerC = (lat: 37.8199, lon: -122.4783);
 const ({double lat, double lon}) _coordsSlow = (lat: 41.9028, lon: 12.4964);
 const ({double lat, double lon}) _coordsRestored = (lat: 59.9139, lon: 10.7522);
 
@@ -154,39 +217,83 @@ void main() {
 
   // testWidgets, not bare `test`: only a testWidgets body's failure is
   // recorded by the integration binding and can turn `flutter drive` red
-  // (drive-log-lib.sh). This body pumps no widget tree — it drives the FFI
-  // and the relay directly, like m7_worker_setup_test.dart — so `tester` is
-  // intentionally unused.
+  // (drive-log-lib.sh). The body drives the FFI and the relay directly, and
+  // additionally pumps the clock-skew banner — the one part of the fix that
+  // only exists as a widget.
   testWidgets(
-    'B8: location survives a +/-6h device clock jump',
+    'B8: a +/-6h device clock jump is detected, surfaced, and measured',
     (tester) async {
       final findings = <String>[];
+      final evidence = <String>[];
       final clock = _ClockServo();
 
+      /// Records a defect in the behaviour this lane GATES.
       void record(String phase, String detail) {
         final line = '$kFindingMarker $phase: $detail';
         debugPrint(line);
         findings.add('$phase: $detail');
       }
 
+      /// Records a MEASUREMENT of the delivery cost a skewed clock still
+      /// imposes. Never gating.
+      void note(String phase, String detail) {
+        final line = '$kEvidenceMarker $phase: $detail';
+        debugPrint(line);
+        evidence.add('$phase: $detail');
+      }
+
+      /// Emits [okMarker] when an oracle held, or records why it did not.
+      void gate(String okMarker, String phase, String? failure) {
+        if (failure == null) {
+          debugPrint(okMarker);
+          return;
+        }
+        record(phase, failure);
+      }
+
       final ctx = await ScenarioHarness.bootstrap();
       final relay = ctx.relay;
       final relayManager = await RelayManagerFfi.newInstance();
 
-      // Alice publishes; Bob receives. Two CircleManagerFfi instances over
-      // two temp data dirs (the standard SyntheticUser arrangement), so
-      // Bob's cursor store and MLS state are genuinely his own.
+      // The PRODUCTION relay service, used for the fast-clock oracle. The
+      // rest of the lane publishes through `TestRelay.publishAndAwaitOk`,
+      // which is the right probe for a measurement (it returns the relay's
+      // verdict instead of throwing) but bypasses `RelayManager::publish_event`
+      // entirely — so it exercises none of the classification under test.
+      final relayService = NostrRelayService();
+      await relayService.initialize();
+
+      final l10n = await AppLocalizations.delegate.load(const Locale('en'));
+
+      // Two detectors, never one: `_evaluate` lets the relay signal outrank
+      // the peer signal, so a single detector carrying phase 2's relay
+      // complaint could report `relayRejectedTimestamp` in phase 3 and mask a
+      // peer signal that never fired.
+      final relayDetector = ClockSkewDetector();
+      final peerDetector = ClockSkewDetector();
+
+      // Alice publishes; Bob receives; Carol is the SECOND independent
+      // publisher the corroboration rule requires. Three CircleManagerFfi
+      // instances over three temp data dirs (the standard SyntheticUser
+      // arrangement), so Bob's cursor store and MLS state are genuinely his
+      // own and Carol's member id is genuinely distinct from Alice's.
       final alice = await TestUser.alice();
       final bob = await SyntheticUser.bob(relay);
+      final carol = await SyntheticUser.carol(relay);
       await waitForKeyPackage(relay: relay, authorPubkeyHex: bob.pubkeyHex);
+      await waitForKeyPackage(relay: relay, authorPubkeyHex: carol.pubkeyHex);
 
       final bobKp = await relayManager.fetchMemberKeypackage(
         pubkey: bob.pubkeyHex,
       );
-      if (bobKp == null) {
+      final carolKp = await relayManager.fetchMemberKeypackage(
+        pubkey: carol.pubkeyHex,
+      );
+      if (bobKp == null || carolKp == null) {
         throw StateError(
-          '[b8] fetchMemberKeypackage returned null for Bob — his KeyPackage '
-          'never reached the hermetic relay. Harness failure, not a finding.',
+          '[b8] fetchMemberKeypackage returned null for '
+          '${bobKp == null ? 'Bob' : 'Carol'} — their KeyPackage never '
+          'reached the hermetic relay. Harness failure, not a finding.',
         );
       }
 
@@ -197,7 +304,7 @@ void main() {
           manager: alice.circleManager,
           relay: relay,
           identitySecretBytes: aliceSecret,
-          members: <MemberKeyPackageFfi>[bobKp],
+          members: <MemberKeyPackageFfi>[bobKp, carolKp],
           name: 'B8 Clock Skew Circle',
           circleType: 'location_sharing',
           relays: <String>[defaultStrfryUrl],
@@ -210,18 +317,22 @@ void main() {
           aliceSecret[i] = 0;
         }
       }
-      if (creation.welcomeEvents.isEmpty) {
-        throw StateError('[b8] createCircle produced no Welcome for Bob.');
+      if (creation.welcomeEvents.length < 2) {
+        throw StateError(
+          '[b8] createCircle produced ${creation.welcomeEvents.length} '
+          'Welcome(s) for two invitees.',
+        );
       }
 
       final bobCircle = await bob.acceptInvitationViaRelay(relay: relay);
+      final carolCircle = await carol.acceptInvitationViaRelay(relay: relay);
       final ngidHex = bytesToHex(bobCircle.circle.nostrGroupId);
       // Mirrors haven_core::relay::live_sync::group_cursor_stream: the
       // per-circle group stream key is "<STREAM_GROUP_445>:<ngid hex>".
       final groupStream = 'group_445:$ngidHex';
       final aliceCircle = creation.circle;
 
-      debugPrint('[b8] phase 0/4 complete — 2-member circle at a shared epoch');
+      debugPrint('[b8] phase 0/5 complete — 3-member circle at a shared epoch');
 
       // ---------------------------------------------------------------------
       // Phase 1 — baseline at TRUE time. Positive control AND premise pin.
@@ -286,16 +397,27 @@ void main() {
           'harness failure, not a clock-skew finding.',
         );
       }
-      debugPrint('[b8] phase 1/4 complete — baseline delivered at true time');
+      debugPrint('[b8] phase 1/5 complete — baseline delivered at true time');
 
       // ---------------------------------------------------------------------
       // Phase 2 — device clock runs FAST (+6 h).
       //
-      // Oracle: a location published by a fast-clocked device must still be
-      // deliverable. The relay is the correctly-clocked observer here: it
-      // judges `created_at` against its own (host) clock.
+      // Clock symmetry is broken by the RELAY: strfry runs on the CI host and
+      // never moves, so its `rejectEventsNewerThanSeconds = 900` verdict on a
+      // `created_at` 21 600 s in its future is the verdict a correctly-clocked
+      // peer would give. Nothing the device does to both of its own roles can
+      // manufacture that refusal.
+      //
+      //   * EVIDENCE — the delivery cost: the publish is refused outright.
+      //     Clearing this needs the device to stop signing a future
+      //     `created_at`, i.e. clock correction (out of scope, see above).
+      //   * GATE — the refusal is CLASSIFIED, reaches a consumer, and reaches
+      //     the user.
       // ---------------------------------------------------------------------
       await clock.request(1, _skew.inSeconds);
+
+      // (a) The measurement, through the raw probe so a refusal is a value
+      //     rather than a throw.
       final fast = await _publishLocation(
         alice: alice,
         circle: aliceCircle,
@@ -303,24 +425,73 @@ void main() {
         coords: _coordsFast,
       );
       if (!fast.accepted) {
-        record(
+        note(
           'forward-skew-publish',
-          'a device whose clock is +${_skew.inHours}h could not publish at '
-          'all: the correctly-clocked relay refused the kind-445 '
+          'a device whose clock is +${_skew.inHours}h cannot publish at all: '
+          'the correctly-clocked relay refuses the kind-445 '
           '("${fast.rejection}"). Every event this device signs carries a '
-          'future `created_at` (peeler event.rs:180), and a spec-conformant '
-          'relay bounds that (strfry rejectEventsNewerThanSeconds). Nothing '
-          'in haven-core or haven/lib checks the device clock against any '
-          'external reference, and publishLocation only debugPrints the '
-          'rejection — so location sharing is dead for the session with no '
-          'user-visible signal.',
+          'future `created_at` (peeler event.rs:180) and a spec-conformant '
+          'relay bounds that. NOT GATED: the only local lever that clears it '
+          'is signing a `created_at` the device clock does not hold, and that '
+          'rewrite moves the TTL, the `since` cursor floor and the '
+          "peeler's inner/outer binding with it, so it is deferred to its "
+          'own security analysis. What IS gated is that the refusal is no '
+          'longer silent — '
+          'see $kOkRejectionClassified below.',
         );
       }
+
+      // (b) The gate, through the PRODUCTION publish path
+      //     (NostrRelayService -> RelayManagerFfi ->
+      //     RelayManager::publish_event -> publish_with_retry ->
+      //     clock_skew::classify_publish_outcome). A fresh
+      //     encrypt, so this is a new event id and cannot come back as a
+      //     `duplicate:` from probe (a).
+      final prod = await _publishViaProductionPath(
+        alice: alice,
+        circle: aliceCircle,
+        relayService: relayService,
+        coords: _coordsFastProd,
+      );
+      gate(
+        kOkRejectionClassified,
+        'clock-fault-classification',
+        checkFastClockRejectionClassified(prod.error),
+      );
+
+      final prodError = prod.error;
+      if (prodError != null) {
+        // Exactly what `LocationSharingService` does at its publish call site.
+        final token = ClockSkewDetector.complaintFromError(prodError)?.name;
+        if (token != null) {
+          relayDetector.recordPublishClockRejection(token);
+        } else {
+          relayDetector.recordPublishError(prodError);
+        }
+      }
+      gate(
+        kOkRejectionVerdict,
+        'clock-fault-verdict',
+        checkRelayVerdictRaised(relayDetector.status),
+      );
+
+      final rejectedTexts = await _renderBanner(tester, relayDetector);
+      gate(
+        kOkSurfaceRejected,
+        'clock-fault-surface-rejected',
+        checkFaultSurfaced(
+          fault: 'fast-clock (relay refused the timestamp)',
+          renderedTexts: rejectedTexts,
+          expectedBody: l10n.clockSkewBodyRejected,
+        ),
+      );
 
       await clock.request(2, 0);
 
       if (fast.accepted) {
-        // The relay took it, so delivery is now purely a receiver question.
+        // The relay took it, so delivery is now purely a receiver question —
+        // and a receiver that drops it IS a gated defect, because nothing
+        // about clock correction is needed to fix it.
         await _sweep(relayManager, bob, _sweepSecs);
         final gotFast = await _snapshotHas(
           bob,
@@ -336,19 +507,125 @@ void main() {
           );
         }
       }
-      debugPrint('[b8] phase 2/4 complete');
+      debugPrint('[b8] phase 2/5 complete');
 
       // ---------------------------------------------------------------------
       // Phase 3 — device clock runs SLOW (-6 h).
       //
-      // Three oracles, deliberately ordered so each is independently
-      // meaningful (see the per-probe notes):
-      //   3a  the relay must still hold the event once we are back at true
-      //       time (a born-expired event is a NIP-40 delete candidate);
-      //   3b  the natural cursor's catch-up must not skip it;
-      //   3c  the receiver must still decrypt it.
+      // Two independent halves:
+      //
+      //   GATE — the slow-clock DETECTION. Alice and Carol each publish while
+      //   the clock is still true; their readings are sealed inside the MLS
+      //   ciphertext at that moment. Only THEN does the clock move, and only
+      //   then are the samples read. That is what breaks the symmetry: the
+      //   reader's `DateTime.now()` moved by -6 h, the senders' sealed
+      //   readings could not follow, so the observed offset is a real
+      //   discontinuity. Had the jump silently no-opped, both offsets would be
+      //   ~0 s and `peer-corroborated` would go red.
+      //
+      //   EVIDENCE — the delivery cost of a backdated publish. Measured after
+      //   the clock is restored, so every gate is evaluated at TRUE time
+      //   against an event minted at skewed time, which is what a real peer
+      //   would do.
       // ---------------------------------------------------------------------
+
+      // 3-pre, at TRUE time: two independent members mint a reading each.
+      final peerA = await _publishLocation(
+        alice: alice,
+        circle: aliceCircle,
+        relay: relay,
+        coords: _coordsPeerA,
+      );
+      if (!peerA.accepted) {
+        throw StateError(
+          "[b8] the relay refused Alice's peer-sample publish at TRUE time "
+          '("${peerA.rejection}"). Harness failure.',
+        );
+      }
+      final peerCId = await carol.publishLocation(
+        circle: carolCircle,
+        latitude: _coordsPeerC.lat,
+        longitude: _coordsPeerC.lon,
+        relay: relay,
+      );
+      // Fetch both BEFORE the jump: the relay still holds them at true time,
+      // and reading them now keeps the sample acquisition independent of
+      // whatever the skewed clock does to a later REQ.
+      final peerAOnWire = await _fetchById(relay, ngidHex, peerA.eventId);
+      final peerCOnWire = await _fetchById(relay, ngidHex, peerCId);
+      if (peerAOnWire == null || peerCOnWire == null) {
+        throw StateError(
+          '[b8] a peer-sample kind-445 never appeared on the relay '
+          '(alice=${peerAOnWire != null} carol=${peerCOnWire != null}). '
+          'Harness failure.',
+        );
+      }
+
       await clock.request(3, -_skew.inSeconds);
+
+      // The samples are read HERE, at -6 h, against readings sealed at true
+      // time. Both events' NIP-40 expiration is ~6 h in this device's future,
+      // so `SessionManager::process_event` passes them through untouched —
+      // the receiver gate only bounds the past.
+      final sampleA = await _decryptPeerSample(bob, peerAOnWire);
+      final sampleC = await _decryptPeerSample(bob, peerCOnWire);
+      if (sampleA == null || sampleC == null) {
+        throw StateError(
+          '[b8] a peer sample failed to decrypt under a -${_skew.inHours}h '
+          'clock (alice=${sampleA != null} carol=${sampleC != null}). The '
+          'corroboration oracle is unevaluable without both — HARNESS '
+          'failure, not a product finding.',
+        );
+      }
+      if (sampleA.sender.toLowerCase() == sampleC.sender.toLowerCase()) {
+        throw StateError(
+          '[b8] both peer samples carry the SAME MLS-authenticated member id, '
+          'so the corroboration oracle would be testing one member twice. '
+          'Harness failure.',
+        );
+      }
+
+      peerDetector.recordPeerTimestamp(
+        senderPubkey: sampleA.sender,
+        peerTimestamp: sampleA.timestamp,
+      );
+      gate(
+        kOkPeerSingleSourceSilent,
+        'slow-clock-single-source',
+        checkSingleSourceStaysSilent(
+          peerDetector.status,
+          sourcesFed: peerDetector.trackedSourceCountForTest,
+        ),
+      );
+
+      peerDetector.recordPeerTimestamp(
+        senderPubkey: sampleC.sender,
+        peerTimestamp: sampleC.timestamp,
+      );
+      gate(
+        kOkPeerCorroborated,
+        'slow-clock-corroborated',
+        checkPeerSkewCorroborated(
+          peerDetector.status,
+          thresholdSecs: kClockSkewAlertThreshold.inSeconds,
+        ),
+      );
+
+      // Rendered while the fault is LIVE. The peer verdict is computed at
+      // record time and cached, but rendering it after the clock is restored
+      // would be a weaker claim about a state the user never actually saw.
+      final behindTexts = await _renderBanner(tester, peerDetector);
+      gate(
+        kOkSurfaceBehind,
+        'clock-fault-surface-behind',
+        checkFaultSurfaced(
+          fault: 'slow-clock (peers ahead of this device)',
+          renderedTexts: behindTexts,
+          expectedBody: l10n.clockSkewBodyBehind,
+        ),
+      );
+
+      // --- the delivery-cost half ------------------------------------------
       final slow = await _publishLocation(
         alice: alice,
         circle: aliceCircle,
@@ -356,6 +633,9 @@ void main() {
         coords: _coordsSlow,
       );
       if (!slow.accepted) {
+        // GATED, not evidence: strfry's `rejectEventsOlderThanSeconds` is
+        // 94 608 000 s, so a -6 h `created_at` is well inside what the relay
+        // accepts. A refusal here would be a real, fixable regression.
         record(
           'backward-skew-publish',
           'the relay refused a kind-445 from a device whose clock is '
@@ -369,36 +649,25 @@ void main() {
 
       if (slow.accepted) {
         // --- 3a: is it still on the relay at all? --------------------------
-        // Its NIP-40 expiration is `created_at + 228`, i.e. ~6 h in the past
-        // the moment it was written. A relay that honours NIP-40 (strfry
-        // does) is entitled to drop it. Distinguishing "the relay GC'd it"
-        // from "the client skipped it" is the difference between two
-        // completely different fixes, so it is measured, not assumed.
         final slowOnWire = await _fetchById(relay, ngidHex, slow.eventId);
         if (slowOnWire == null) {
-          record(
+          note(
             'backward-skew-retention',
             'a location published by a -${_skew.inHours}h device is already '
             'expired the instant it is written (NIP-40 expiration = '
             'created_at + ${_expectedRetentionSecs}s, both from the skewed '
             'clock) and the relay no longer serves it. The publisher saw a '
-            'successful OK-ack and reported success, so the loss is total '
-            'and silent.',
+            'successful OK-ack and reported success. NOT GATED: expiration '
+            'is derived from `created_at` inside the engine, so the only '
+            'local lever is clock correction, which is deferred.',
           );
         } else {
           // --- 3b: does the cursor-anchored catch-up still fetch it? -------
           //
-          // Bob's cursor now sits at the BASELINE event's `created_at`
-          // (~true now), and `since_for_stream` subtracts only
-          // GROUP_RESUBSCRIBE_BUFFER_SECS = 60 s. The slow event's
-          // `created_at` is 6 h below that floor.
-          //
-          // Measured WITHOUT reimplementing the `since` formula: run the
-          // real sweep on the real cursor, then run it again on a
-          // deliberately widened window (cursor reset -> the unseeded
-          // default of now-24h) and compare how many events the engine saw.
-          // A wider window that sees MORE events is proof that the natural
-          // floor excluded backlog the relay was still holding.
+          // Measured WITHOUT reimplementing the `since` formula: run the real
+          // sweep on the real cursor, then run it again on a deliberately
+          // widened window (cursor reset -> the unseeded default of now-24h)
+          // and compare how many events the engine saw.
           final natural = await _sweep(relayManager, bob, _sweepSecs);
 
           // --- 3c: does the receiver decrypt it? ---------------------------
@@ -409,13 +678,15 @@ void main() {
           // later sweep still classifies it identically.
           final decrypted = await _decryptOne(bob, slowOnWire);
           if (!decrypted) {
-            record(
+            note(
               'backward-skew-receive',
               'a correctly-clocked peer discards the location entirely: the '
               'outer NIP-40 expiration is ~${_skew.inHours}h in the past, so '
               'SessionManager::process_event drops it before decryption '
-              '(RECEIVER_EXPIRATION_GRACE_SECS = 60 s) and reports it as '
-              'Stale, which also lets the cursor advance past it.',
+              '(RECEIVER_EXPIRATION_GRACE_SECS = 60 s). NOT GATED: making the '
+              'receiver keep it means widening that grace window, which is a '
+              'replay defence — the fix is clock correction on the sender, '
+              'which is deferred.',
             );
           }
 
@@ -431,29 +702,28 @@ void main() {
             );
           }
           if (widened.eventsApplied > natural.eventsApplied) {
-            record(
+            note(
               'backward-skew-catchup',
-              'catch-up silently skipped backlog the relay still holds: the '
-              'natural cursor window reached ${natural.eventsApplied} '
-              'event(s), a widened window reached ${widened.eventsApplied}. '
-              "The cursor advances to the SENDER's created_at "
+              'catch-up skipped backlog the relay still holds: the natural '
+              'cursor window reached ${natural.eventsApplied} event(s), a '
+              'widened window reached ${widened.eventsApplied}. The cursor '
+              "advances to the SENDER's created_at "
               '(catchup.rs::cursor_advance_ms) and the next REQ floor is only '
               'GROUP_RESUBSCRIBE_BUFFER_SECS = 60 s below it (cursor.rs), so '
-              'anything minted further back — clock skew here, but equally a '
-              'peer whose clock is behind — is outside every subsequent '
-              'window, permanently. The saturation guard does not cover this: '
-              'the window was never full, it simply never contained the '
-              'event. A dropped COMMIT on this path strands the epoch chain.',
+              'anything minted further back is outside every subsequent '
+              'window. NOT GATED: this is a property of where the cursor '
+              'window sits relative to a skewed `created_at`, which no '
+              'detection change moves.',
             );
           }
         }
       }
-      debugPrint('[b8] phase 3/4 complete');
+      debugPrint('[b8] phase 3/5 complete');
 
       // ---------------------------------------------------------------------
       // Phase 4 — restored clock. The closing positive control.
       //
-      // Without this, every finding above is indistinguishable from "the
+      // Without this, every measurement above is indistinguishable from "the
       // harness broke somewhere in the middle". A failure here is therefore
       // a harness failure and throws.
       // ---------------------------------------------------------------------
@@ -480,17 +750,48 @@ void main() {
       if (!gotRestored) {
         throw StateError(
           '[b8] the post-restore location never reached Bob. The lane cannot '
-          'attribute its earlier negatives to clock skew — harness failure.',
+          'attribute its earlier measurements to clock skew — harness '
+          'failure.',
         );
       }
-      debugPrint('[b8] phase 4/4 complete — delivery restored with the clock');
+      debugPrint('[b8] phase 4/5 complete — delivery restored with the clock');
+
+      // ---------------------------------------------------------------------
+      // Phase 5 — the two faults must not say the same thing.
+      //
+      // Compared from the copy the two banners ACTUALLY painted in phases 2
+      // and 3, not from the l10n bundle: a `resolveClockSkewCopy` that mapped
+      // both signals to one string would satisfy a bundle-level check and
+      // still show the user one sentence for two different situations.
+      // ---------------------------------------------------------------------
+      gate(
+        kOkSurfaceDistinct,
+        'clock-fault-copy',
+        checkFaultCopyDistinct(
+          rejectedBody: _longest(rejectedTexts),
+          behindBody: _longest(behindTexts),
+        ),
+      );
+      debugPrint('[b8] phase 5/5 complete');
 
       // Terminal marker FIRST: the shell needs to know the body ran to the
       // end even (especially) on a red run.
-      debugPrint('$kAllPhasesMarker findings=${findings.length}');
+      debugPrint(
+        '$kAllPhasesMarker findings=${findings.length} '
+        'evidence=${evidence.length}',
+      );
 
       try {
+        // Unmount the banner BEFORE closing the detectors' change streams:
+        // `clockSkewStatusProvider` is listening to one of them, and tearing
+        // the tree down first keeps that ordering out of the teardown's
+        // best-effort catch.
+        await tester.pumpWidget(const SizedBox.shrink());
+        await relayDetector.dispose();
+        await peerDetector.dispose();
+        await relayService.shutdown();
         await relayManager.shutdown();
+        await carol.dispose();
         await bob.dispose();
         await alice.dispose();
         await relay.dispose();
@@ -502,14 +803,20 @@ void main() {
         findings,
         isEmpty,
         reason:
-            'B8 requires that a +/-${_skew.inHours}h device clock jump leave '
-            'location delivery intact: events stay publishable and '
-            'decryptable by a correctly-clocked peer, and catch-up does not '
-            'skip backlog the relay still holds. Findings:\n'
+            'B8 gates that a +/-${_skew.inHours}h device clock jump is '
+            "DETECTED and SURFACED: a fast clock's refusal is classified "
+            'rather than collapsed, a corroborated slow clock raises a '
+            'verdict a single peer cannot, and each fault reaches the user in '
+            'its own words. (The delivery cost of the jump is recorded as '
+            'EVIDENCE, not gated — closing it needs clock correction, which '
+            'is deferred.) Findings:\n'
             '${findings.map((f) => '  - $f').join('\n')}',
       );
     },
-    timeout: const Timeout(Duration(minutes: 15)),
+    // Stays BELOW the orchestrator's per-drive B8_DRIVE_TIMEOUT (20m) so a
+    // genuine overrun fails HERE, with a named test and a readable reason,
+    // rather than as an anonymous `flutter drive` kill.
+    timeout: const Timeout(Duration(minutes: 17)),
   );
 }
 
@@ -596,15 +903,52 @@ Future<_PublishOutcome> _publishLocation({
     updateIntervalSecs: BigInt.from(198),
   );
   final (accepted, msg) = await relay.publishAndAwaitOk(encrypted.eventJson);
-  final decoded = jsonDecode(encrypted.eventJson);
-  final id = decoded is Map<String, dynamic>
-      ? (decoded['id'] as String? ?? '')
-      : '';
+  final id = _eventIdOf(encrypted.eventJson);
   debugPrint(
     '[b8] publish accepted=$accepted evt=${_short(id)} '
     '${accepted ? '' : 'relay="$msg"'}',
   );
   return (accepted: accepted, rejection: msg, eventId: id);
+}
+
+/// Encrypts a location and offers it through the PRODUCTION publish path —
+/// `NostrRelayService` -> `RelayManagerFfi` -> `RelayManager::publish_event`
+/// -> `publish_with_retry` -> `clock_skew::classify_publish_outcome`.
+///
+/// Returns whatever that path threw (or `null` on success), because the
+/// CLASSIFICATION of the failure is the thing under test. Every other publish
+/// in this lane goes through `TestRelay.publishAndAwaitOk`, which speaks to
+/// the relay over its own WebSocket and therefore exercises none of it.
+Future<({Object? error, String eventId})> _publishViaProductionPath({
+  required TestUser alice,
+  required CircleFfi circle,
+  required NostrRelayService relayService,
+  required ({double lat, double lon}) coords,
+}) async {
+  final encrypted = await alice.circleManager.encryptLocation(
+    mlsGroupId: circle.mlsGroupId,
+    senderPubkeyHex: alice.pubkeyHex,
+    latitude: coords.lat,
+    longitude: coords.lon,
+    updateIntervalSecs: BigInt.from(198),
+  );
+  final id = _eventIdOf(encrypted.eventJson);
+  Object? error;
+  try {
+    await relayService.publishEvent(
+      eventJson: encrypted.eventJson,
+      relays: <String>[defaultStrfryUrl],
+    );
+  } on Object catch (e) {
+    error = e;
+  }
+  // Security Rule 8: the type, never the message — a publish error can carry
+  // relay-controlled prose.
+  debugPrint(
+    '[b8] production publish evt=${_short(id)} '
+    'threw=${error?.runtimeType ?? '-'}',
+  );
+  return (error: error, eventId: id);
 }
 
 /// Fetches one kind-445 by id, with NO `since` bound, so the answer is
@@ -716,22 +1060,113 @@ Future<bool> _snapshotHas(
 ///
 /// Uses `decryptLocationCollectingCommits` — never `decryptLocation`, which
 /// rolls back any receive-side auto-commit the engine staged.
-Future<bool> _decryptOne(SyntheticUser bob, TestRelayEvent event) async {
+Future<bool> _decryptOne(SyntheticUser bob, TestRelayEvent event) async =>
+    await _decryptPeerSample(bob, event) != null;
+
+/// One MLS-authenticated member's sealed clock reading.
+typedef _PeerSample = ({String sender, DateTime timestamp});
+
+/// Decrypts [event] on [bob]'s manager and returns the sender's own reading
+/// from INSIDE the MLS ciphertext, attributed to the MLS-authenticated member
+/// id that came back with it.
+///
+/// Never the outer kind-445 `created_at`: that field is unauthenticated and
+/// attacker-writable (anyone who has observed one of the circle's events can
+/// mint a kind-445 with an `h` tag and a `created_at` of their choosing), so
+/// using it would hand a skew verdict to any observer.
+Future<_PeerSample?> _decryptPeerSample(
+  SyntheticUser bob,
+  TestRelayEvent event,
+) async {
   try {
     final outcome = await bob.user.circleManager
         .decryptLocationCollectingCommits(eventJson: jsonEncode(event.raw));
     for (final r in outcome.results) {
-      if (r.kind == LocationMessageResultKindFfi.location &&
-          r.location != null) {
-        return true;
+      final loc = r.location;
+      if (r.kind == LocationMessageResultKindFfi.location && loc != null) {
+        return (
+          sender: loc.senderPubkey,
+          timestamp: DateTime.fromMillisecondsSinceEpoch(
+            loc.timestamp * 1000,
+            isUtc: true,
+          ),
+        );
       }
     }
-    return false;
+    return null;
   } on Object catch (e) {
     // Security Rule 8: runtimeType only — a raw error can carry MLS state.
     debugPrint('[b8] direct decrypt threw: ${e.runtimeType}');
-    return false;
+    return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// The user-visible surface
+// ---------------------------------------------------------------------------
+
+/// Pumps [ClockSkewBanner] over [detector] and returns every string it
+/// painted.
+///
+/// The detector is the REAL one, already carrying a verdict derived from this
+/// run's real evidence — so a green result here means the banner responds to
+/// the fault, not to a hand-built status object.
+Future<List<String>> _renderBanner(
+  WidgetTester tester,
+  ClockSkewDetector detector,
+) async {
+  await tester.pumpWidget(
+    ProviderScope(
+      overrides: <Override>[
+        clockSkewDetectorProvider.overrideWithValue(detector),
+      ],
+      child: const MaterialApp(
+        locale: Locale('en'),
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(body: ClockSkewBanner()),
+      ),
+    ),
+  );
+  await tester.pumpAndSettle();
+  final texts = tester
+      .widgetList<Text>(
+        find.descendant(
+          of: find.byType(ClockSkewBanner),
+          matching: find.byType(Text),
+        ),
+      )
+      .map((t) => t.data ?? '')
+      .where((s) => s.isNotEmpty)
+      .toList();
+  // The copy itself is never logged — this log line is uploaded as a CI
+  // artifact and there is no reason to widen what it carries.
+  debugPrint('[b8] banner painted ${texts.length} text(s)');
+  return texts;
+}
+
+/// The longest painted string, i.e. the body rather than the headline.
+///
+/// The banner paints a title and a body; the title is shared by both faults
+/// by design, so comparing titles would report "distinct" as "identical".
+String _longest(List<String> texts) {
+  var longest = '';
+  for (final t in texts) {
+    if (t.length > longest.length) longest = t;
+  }
+  return longest;
+}
+
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
+
+/// The `id` field of a signed event JSON, or `''` when it cannot be read.
+String _eventIdOf(String eventJson) {
+  final decoded = jsonDecode(eventJson);
+  return decoded is Map<String, dynamic>
+      ? (decoded['id'] as String? ?? '')
+      : '';
 }
 
 /// First 8 hex chars of an event id — enough to correlate a publish with a

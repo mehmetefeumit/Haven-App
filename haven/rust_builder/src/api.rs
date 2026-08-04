@@ -2203,16 +2203,6 @@ pub struct DecryptLocationOutcomeFfi {
     pub auto_commits: Vec<CommitToPublishFfi>,
 }
 
-/// Converts a Nostr event `created_at` (Unix seconds) to the millisecond unit
-/// the sync cursor stores.
-///
-/// Saturating, so a pathological future timestamp cannot overflow `i64`.
-/// Centralizing the seconds→milliseconds conversion here (rather than in Dart)
-/// removes the ms/s drift footgun at the FFI boundary.
-const fn event_secs_to_cursor_ms(secs: i64) -> i64 {
-    secs.saturating_mul(1000)
-}
-
 /// Discriminator for [`LeavePlanFfi`].
 ///
 /// Drives the Flutter-side leave state machine. See the core
@@ -3672,9 +3662,11 @@ impl CircleManagerFfi {
 
     /// Reads the persisted relay sync cursor (raw ms) for `stream`.
     ///
-    /// Returns `None` when the stream has never been seeded — callers MUST
-    /// seed a floor before opening a subscription. See
-    /// [`haven_core::relay::cursor`] for stream keys and semantics.
+    /// Returns `None` when the stream has never been seeded. Seeding — like
+    /// every other operation that can RAISE a cursor — happens in haven-core,
+    /// on the receive plane that is about to issue the REQ; this boundary is
+    /// read-only on that axis. See [`haven_core::relay::cursor`] for stream
+    /// keys and semantics.
     ///
     /// # Errors
     ///
@@ -3694,45 +3686,22 @@ impl CircleManagerFfi {
         .await
     }
 
-    /// Seeds `stream`'s cursor to `ms` only if it is currently unseeded.
-    ///
-    /// Idempotent: an already-seeded cursor is never moved.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redacted error string if the storage write fails.
-    pub async fn cursor_seed_if_unset(&self, stream: String, ms: i64) -> Result<(), String> {
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            inner
-                .seed_sync_cursor_if_unset(&stream, ms)
-                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
-        })
-        .await
-    }
-
-    /// Advances `stream`'s cursor to `ms` (monotonic max; never backward).
-    ///
-    /// `ms` is a millisecond timestamp. Prefer the seconds-taking semantic
-    /// wrappers [`Self::cursor_advance_group_to_event`] /
-    /// [`Self::cursor_advance_inbox_to_wrap`], which own the stream key and the
-    /// seconds→milliseconds conversion; reach for this generic form only when
-    /// the caller already holds a millisecond value. There is intentionally no
-    /// unconditional setter: the cursor only moves forward, and only for a
-    /// successfully-processed event.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redacted error string if the storage write fails.
-    pub async fn cursor_advance(&self, stream: String, ms: i64) -> Result<(), String> {
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            inner
-                .advance_sync_cursor(&stream, ms)
-                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
-        })
-        .await
-    }
+    // REMOVED: the generic millisecond cursor advance, and the unseeded-only
+    // cursor seed (both deleted 2026-08; neither name is spelled out here, see
+    // the guard referenced below).
+    //
+    // Neither had a single Dart caller, and between them they let the foreground
+    // raise ANY stream's persisted REQ floor to ANY value. A sync cursor is a
+    // claim about what this device has already seen, so it may only ever be
+    // raised from a LOCAL, trusted fact — the instant an observation window
+    // opened. Both receive planes derive every advance that way now
+    // (`haven_core::relay::cursor`, "the governing asymmetry"), and no FFI entry
+    // point may raise a cursor at all: reading one and RESETTING one (which can
+    // only lower it, to unseeded) are the only cursor operations left here.
+    //
+    // Guarded by `scripts/ci/check_no_event_timestamp_cursor_advance.sh`, which
+    // additionally bans the underlying core writers by name in this crate, so a
+    // renamed re-implementation does not evade it.
 
     /// Resets `stream`'s cursor to the unseeded state (wipe-on-logout).
     ///
@@ -3749,57 +3718,53 @@ impl CircleManagerFfi {
         .await
     }
 
-    /// Advances the `group_445` cursor to a fully-processed `kind:445` event's
-    /// `created_at` (Unix **seconds**).
-    ///
-    /// Convenience over [`Self::cursor_advance`] that owns BOTH the stream key
-    /// ([`haven_core::relay::STREAM_GROUP_445`]) and the seconds→milliseconds
-    /// conversion in one place, so the Dart caller passes a plain event
-    /// timestamp and cannot drift the key or the unit. Monotonic-max: only ever
-    /// moves the cursor forward.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redacted error string if the storage write fails.
-    pub async fn cursor_advance_group_to_event(
-        &self,
-        event_created_at_secs: i64,
-    ) -> Result<(), String> {
-        let ms = event_secs_to_cursor_ms(event_created_at_secs);
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            inner
-                .advance_sync_cursor(haven_core::relay::STREAM_GROUP_445, ms)
-                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
-        })
-        .await
-    }
+    // REMOVED: the group-cursor-to-event advance (a seconds-taking wrapper over
+    // the generic advance, deleted 2026-08 — the name is spelled out nowhere
+    // on purpose, see the guard below).
+    //
+    // It advanced the BARE `group_445` stream straight from an inbound event's
+    // `created_at` — a value chosen by whoever signed the outer envelope and
+    // authenticated by nothing on the receive path. Both Rust receive planes
+    // stopped deriving advances from event timestamps for exactly that reason
+    // (see `haven_core::relay::cursor`'s "governing asymmetry": advance from a
+    // local clock reading taken when the observation window opened; let remote
+    // timestamps only hold the advance BACK).
+    //
+    // It was also write-only: every REQ floor is derived from the PER-CIRCLE key
+    // `group_445:{hex(nostr_group_id)}` (`live_sync::session::bucket_since`,
+    // `relay::catchup::sweep_one_circle`) or from `inbox_1059`, and
+    // `sync_cursors` is only ever read by exact `stream =` match — so nothing
+    // ever read the row this wrote. Deleting it rather than anchoring it is the
+    // safer outcome: an unsafe primitive that no longer exists cannot be wired
+    // up later by someone who does not know it is unsafe. Guarded by
+    // `scripts/ci/check_no_event_timestamp_cursor_advance.sh`.
 
-    /// Advances the `inbox_1059` cursor to a processed gift-wrap's `created_at`
-    /// (Unix **seconds**).
-    ///
-    /// As [`Self::cursor_advance_group_to_event`], but for the gift-wrap inbox
-    /// stream ([`haven_core::relay::STREAM_INBOX_1059`]). The 7-day inbox
-    /// lookback applied at REQ time (see [`haven_core::relay::cursor`]) absorbs
-    /// NIP-59's wrapper backdating, so advancing on the outer wrapper timestamp
-    /// is safe.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redacted error string if the storage write fails.
-    pub async fn cursor_advance_inbox_to_wrap(
-        &self,
-        wrap_created_at_secs: i64,
-    ) -> Result<(), String> {
-        let ms = event_secs_to_cursor_ms(wrap_created_at_secs);
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            inner
-                .advance_sync_cursor(haven_core::relay::STREAM_INBOX_1059, ms)
-                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
-        })
-        .await
-    }
+    // REMOVED: the inbox-cursor-to-gift-wrap advance (a seconds-taking wrapper
+    // that owned the inbox stream key, deleted 2026-08 — the name is spelled out
+    // nowhere on purpose, see the guard below).
+    //
+    // It raised the `inbox_1059` cursor straight from a `kind:1059` wrapper's
+    // outer `created_at`, saturating but otherwise unclamped. That field is
+    // chosen by whoever built the wrap, and building one that a victim's client
+    // peels cleanly needs only their npub — which is public by design (it is in
+    // their `kind:0` profile, their relay lists and every `KeyPackage`) — plus
+    // one NIP-44 encryption. No MLS state is consulted on the peel path and
+    // nothing binds the wrapper timestamp to its payload.
+    //
+    // The FUTURE direction is the damaging one: the derived REQ floor is capped
+    // at `now`, so a cursor above the wall clock pins every later inbox floor at
+    // `now` for the duration of the skew — and NIP-59 backdates every gift wrap
+    // by up to 48h, so a floor at `now` filters out even a wrap published this
+    // second. Invitation delivery stops entirely, permanently, and across
+    // restarts. The 7-day inbox lookback bounds the backward direction only; it
+    // is subtracted from a cursor already ahead of the clock.
+    //
+    // The inbox cursor is advanced in haven-core now, on the inbox REQ's own
+    // `EOSE`, to the LOCAL clock reading taken when that REQ was issued
+    // (`haven_core::relay::live_sync::anchor::InboxAnchor`) — so no gift-wrap
+    // timestamp reaches it in any direction, and the wrapper timestamp is no
+    // longer surfaced across this boundary at all. Guarded by
+    // `scripts/ci/check_no_event_timestamp_cursor_advance.sh`.
 
     // ==================== Last-Known Location Cache ====================
 
@@ -8802,22 +8767,10 @@ mod tests {
         assert_eq!(status.configured - status.excluded, status.usable);
     }
 
-    /// The seconds→milliseconds cursor conversion (M2) must scale by 1000 and
-    /// saturate rather than overflow on a pathological future timestamp.
-    #[test]
-    fn event_secs_to_cursor_ms_converts_and_saturates() {
-        assert_eq!(event_secs_to_cursor_ms(0), 0);
-        assert_eq!(event_secs_to_cursor_ms(1_700_000_000), 1_700_000_000_000);
-        assert_eq!(
-            event_secs_to_cursor_ms(i64::MAX),
-            i64::MAX,
-            "saturates, no panic"
-        );
-        // A negative input stays negative (Dart `> 0` guards block it upstream;
-        // pin the behavior so the conversion never silently wraps).
-        assert_eq!(event_secs_to_cursor_ms(-5), -5000);
-        assert_eq!(event_secs_to_cursor_ms(i64::MIN), i64::MIN, "saturates low");
-    }
+    // REMOVED with the cursor advances it fed: the seconds→milliseconds
+    // conversion for a cursor value crossing this boundary. There is no such
+    // value any more — a cursor advance is earned by a completed observation
+    // window, which only haven-core's receive planes observe.
 }
 
 // ========================= M3c: Live-Sync Engine FFI =========================
@@ -8927,9 +8880,15 @@ pub struct FfiRelayEvent {
     /// only for an auto-committed peer `SelfRemove`).
     pub evolution_event_json: Option<String>,
     /// Raw `kind:1059` gift-wrap JSON (Welcome).
+    ///
+    /// The wrapper's `created_at` is deliberately NOT surfaced alongside it. Its
+    /// only consumer was a sync-cursor advance, and a `#p`-routed gift wrap is
+    /// authored by a throwaway ephemeral key that anyone who knows this user's
+    /// published npub can mint — so that field was a remotely-chosen number
+    /// wired straight into the persisted inbox REQ floor. The inbox cursor is
+    /// advanced in haven-core now, from the inbox REQ's own local open time
+    /// (`haven_core::relay::live_sync::anchor::InboxAnchor`).
     pub gift_wrap_json: Option<String>,
-    /// Gift-wrap `created_at` seconds (Welcome).
-    pub wrap_created_at_secs: Option<i64>,
     /// Closed status reason (Status).
     pub status_reason: Option<FfiSyncStatusReason>,
 }
@@ -8946,7 +8905,6 @@ impl std::fmt::Debug for FfiRelayEvent {
             .field("event_created_at_secs", &self.event_created_at_secs)
             .field("has_evolution_event", &self.evolution_event_json.is_some())
             .field("has_gift_wrap", &self.gift_wrap_json.is_some())
-            .field("wrap_created_at_secs", &self.wrap_created_at_secs)
             .field("status_reason", &self.status_reason)
             .finish()
     }
@@ -8961,7 +8919,6 @@ fn live_event_to_ffi(event: CoreLiveSyncEvent) -> FfiRelayEvent {
         event_created_at_secs: None,
         evolution_event_json: None,
         gift_wrap_json: None,
-        wrap_created_at_secs: None,
         status_reason: None,
     };
     match event {
@@ -8985,13 +8942,9 @@ fn live_event_to_ffi(event: CoreLiveSyncEvent) -> FfiRelayEvent {
             out.nostr_group_id = Some(nostr_group_id);
             out.evolution_event_json = evolution_event_json;
         }
-        CoreLiveSyncEvent::Welcome {
-            gift_wrap_json,
-            wrap_created_at_secs,
-        } => {
+        CoreLiveSyncEvent::Welcome { gift_wrap_json } => {
             out.kind = FfiRelayEventKind::Welcome;
             out.gift_wrap_json = Some(gift_wrap_json);
-            out.wrap_created_at_secs = Some(wrap_created_at_secs);
         }
         CoreLiveSyncEvent::Status { reason } => {
             out.kind = FfiRelayEventKind::Status;
@@ -9502,11 +9455,9 @@ mod live_sync_ffi_tests {
 
         let w = live_event_to_ffi(Ev::Welcome {
             gift_wrap_json: "wrap".to_string(),
-            wrap_created_at_secs: 7,
         });
         assert_eq!(w.kind, FfiRelayEventKind::Welcome);
         assert_eq!(w.gift_wrap_json.as_deref(), Some("wrap"));
-        assert_eq!(w.wrap_created_at_secs, Some(7));
 
         let s = live_event_to_ffi(Ev::Status {
             reason: R::BackgroundResumed,
@@ -9555,7 +9506,6 @@ mod live_sync_ffi_tests {
         // Welcome: the raw gift-wrap JSON MUST be redacted, presence flagged.
         let w = live_event_to_ffi(Ev::Welcome {
             gift_wrap_json: "SECRET_WRAP".to_string(),
-            wrap_created_at_secs: 7,
         });
         let dbg = format!("{w:?}");
         assert!(!dbg.contains("SECRET_WRAP"), "leaked gift-wrap json: {dbg}");

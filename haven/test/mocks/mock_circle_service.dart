@@ -517,26 +517,6 @@ class MockCircleService implements CircleService {
     failPendingCommitCalls.add(pending);
   }
 
-  /// Records the last seconds value passed to [advanceGroupCursorToEventSecs],
-  /// or `null` if it was never called.
-  int? advanceGroupCursorLastSecs;
-
-  /// Records the last seconds value passed to [advanceInboxCursorToWrapSecs],
-  /// or `null` if it was never called.
-  int? advanceInboxCursorLastSecs;
-
-  @override
-  Future<void> advanceGroupCursorToEventSecs(int eventCreatedAtSecs) async {
-    methodCalls.add('advanceGroupCursorToEventSecs:$eventCreatedAtSecs');
-    advanceGroupCursorLastSecs = eventCreatedAtSecs;
-  }
-
-  @override
-  Future<void> advanceInboxCursorToWrapSecs(int wrapCreatedAtSecs) async {
-    methodCalls.add('advanceInboxCursorToWrapSecs:$wrapCreatedAtSecs');
-    advanceInboxCursorLastSecs = wrapCreatedAtSecs;
-  }
-
   // NOTE: `signKeyPackageEvent` / `recordPublishedKeyPackages` were removed
   // from `CircleService` — `KeyPackage` publish now lives entirely behind
   // `RelayService.maintainKeyPackage` (see `key_package_provider.dart`).

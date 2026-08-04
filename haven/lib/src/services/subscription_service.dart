@@ -77,7 +77,7 @@ class LiveEventRouter {
     required this.onStatus,
   });
 
-  /// Circle service (for invitation processing + cursor advance) — mockable.
+  /// Circle service (for invitation processing) — mockable.
   final CircleService circleService;
 
   /// Snapshot of the user's joined circles (to resolve a `nostr_group_id`).
@@ -229,10 +229,18 @@ class LiveEventRouter {
     }
   }
 
+  /// Unwraps one streamed gift wrap.
+  ///
+  /// Deliberately CURSOR-INERT. This used to advance the persisted
+  /// `inbox_1059` cursor to the wrapper's own `created_at` — a number chosen
+  /// by whoever built the wrap, and buildable by anyone who knows this user's
+  /// published npub. The inbox cursor is advanced in haven-core now, on the
+  /// inbox REQ's EOSE, to the local instant that REQ was issued; the wrapper
+  /// timestamp is not even carried across the FFI boundary any more. See
+  /// `CircleService`.
   Future<void> _handleWelcome(FfiRelayEvent event) async {
     final giftWrapJson = event.giftWrapJson;
     if (giftWrapJson == null) return;
-    final wrapSecs = event.wrapCreatedAtSecs;
 
     Uint8List? secret;
     try {
@@ -241,9 +249,6 @@ class LiveEventRouter {
         identitySecretBytes: secret,
         giftWrapEventJson: giftWrapJson,
       );
-      if (wrapSecs != null) {
-        await circleService.advanceInboxCursorToWrapSecs(wrapSecs);
-      }
       // A non-null invitation is genuinely new; null = already-processed.
       if (invitation != null) {
         onInvitationReceived();

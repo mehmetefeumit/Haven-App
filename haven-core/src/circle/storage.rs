@@ -1909,6 +1909,42 @@ impl CircleStorage {
         Ok(())
     }
 
+    /// Lowers a stream's cursor to `ms`, but ONLY when the stored value is
+    /// strictly greater (monotonic min). Returns whether a row was changed.
+    ///
+    /// The one sanctioned way to move a cursor BACKWARD, and the direction is
+    /// why it is safe: a lower cursor widens the next REQ, so the worst it costs
+    /// is a re-fetch of events already held. It exists for exactly one caller —
+    /// repairing a cursor parked in the FUTURE.
+    ///
+    /// # Why a future cursor has to be repaired rather than waited out
+    ///
+    /// [`crate::relay::cursor::since_for_stream`] caps the derived REQ floor at
+    /// `now`, so a cursor above the wall clock does not produce a future-dated
+    /// filter — it silently pins EVERY floor at `now` until the clock catches
+    /// up. And [`Self::update_sync_cursor_max`] only ever raises, so nothing in
+    /// the normal advance path can ever bring such a value back down: without
+    /// this, an install that took one future-dated timestamp (from an attacker,
+    /// or from a peer with a fast clock) stays pinned for as long as the skew
+    /// lasts, which for a deliberately-chosen timestamp is forever.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn clamp_sync_cursor_down_to(&self, stream: &str, ms: i64) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        let changed = conn.execute(
+            "UPDATE sync_cursors SET last_synced_ms = ?2 \
+             WHERE stream = ?1 AND last_synced_ms > ?2",
+            params![stream, ms],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// Removes a stream's cursor row, resetting it to the unseeded state.
     ///
     /// Idempotent: resetting an absent cursor is a no-op. Wired into the
@@ -3729,6 +3765,79 @@ mod tests {
         // An equal value is also a no-op (strictly-greater guard).
         storage.update_sync_cursor_max("group_445", 250).unwrap();
         assert_eq!(storage.read_sync_cursor("group_445").unwrap(), Some(250));
+    }
+
+    #[test]
+    fn sync_cursor_clamp_lowers_only_a_cursor_above_the_bound() {
+        let storage = CircleStorage::in_memory().unwrap();
+        storage.update_sync_cursor_max("inbox_1059", 5_000).unwrap();
+
+        // Above the bound ⇒ lowered, and reported as changed.
+        assert!(storage
+            .clamp_sync_cursor_down_to("inbox_1059", 1_000)
+            .unwrap());
+        assert_eq!(storage.read_sync_cursor("inbox_1059").unwrap(), Some(1_000));
+
+        // At or below the bound ⇒ untouched. The clamp is a repair for a cursor
+        // parked in the future, NOT a general setter: it must never drag a
+        // healthy cursor down to `now` and re-open a window already closed.
+        assert!(!storage
+            .clamp_sync_cursor_down_to("inbox_1059", 4_000)
+            .unwrap());
+        assert_eq!(storage.read_sync_cursor("inbox_1059").unwrap(), Some(1_000));
+        assert!(!storage
+            .clamp_sync_cursor_down_to("inbox_1059", 1_000)
+            .unwrap());
+        assert_eq!(storage.read_sync_cursor("inbox_1059").unwrap(), Some(1_000));
+    }
+
+    #[test]
+    fn sync_cursor_clamp_never_seeds_an_unseeded_stream() {
+        // An UPDATE, not an upsert: repairing a stream that has no row must not
+        // conjure one, or a clamp would install a floor no observation window
+        // ever earned.
+        let storage = CircleStorage::in_memory().unwrap();
+        assert!(!storage
+            .clamp_sync_cursor_down_to("inbox_1059", 1_000)
+            .unwrap());
+        assert_eq!(storage.read_sync_cursor("inbox_1059").unwrap(), None);
+    }
+
+    #[test]
+    fn sync_cursor_clamp_is_the_only_thing_that_can_undo_a_future_cursor() {
+        // The migration property. `update_sync_cursor_max` only ever RAISES, so
+        // once a pre-fix build took a gift wrap's future-dated `created_at` the
+        // cursor could never come back down on its own — and a cursor above the
+        // wall clock pins every derived REQ floor at `now` (`since_for_stream`
+        // caps there), which on the inbox stream hides even a wrap published
+        // this second, because NIP-59 backdates every one of them.
+        let storage = CircleStorage::in_memory().unwrap();
+        let now_ms = 1_700_000_000_000_i64;
+        let poisoned = now_ms + 30 * 86_400 * 1000; // dated a month ahead
+        storage
+            .update_sync_cursor_max("inbox_1059", poisoned)
+            .unwrap();
+
+        // Every forward-only operation leaves the poison in place.
+        storage
+            .update_sync_cursor_max("inbox_1059", now_ms)
+            .unwrap();
+        storage
+            .seed_sync_cursor_if_unset("inbox_1059", now_ms)
+            .unwrap();
+        assert_eq!(
+            storage.read_sync_cursor("inbox_1059").unwrap(),
+            Some(poisoned),
+            "precondition: nothing in the normal advance path can lower it"
+        );
+
+        assert!(storage
+            .clamp_sync_cursor_down_to("inbox_1059", now_ms)
+            .unwrap());
+        assert_eq!(
+            storage.read_sync_cursor("inbox_1059").unwrap(),
+            Some(now_ms)
+        );
     }
 
     #[test]

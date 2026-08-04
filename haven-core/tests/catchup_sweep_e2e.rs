@@ -3,7 +3,8 @@
 //! `run_catchup_all_circles` is what a background wake and a foreground resume
 //! run: fetch whatever a circle's relays hold since the persisted cursor, feed it
 //! to the engine, persist any decrypted peer location, re-broadcast any auto-
-//! commit, and advance the cursor over the applied prefix. Until this file the
+//! commit, and advance the cursor to the fetch window's own open time (held back
+//! at anything the window could not apply). Until this file the
 //! only thing under test was the pure cursor arithmetic
 //! (`cursor_advance_ms` / `hold_backs`); the sweep itself — the
 //! fetch, the ingest, the persistence, and the cursor WRITE — ran nowhere.
@@ -19,6 +20,28 @@
 //! So the tests below read the cursor back with `read_sync_cursor` and assert
 //! its VALUE. The counters are asserted only where they are the thing being
 //! described (a relay that did not respond, a deadline that was hit).
+//!
+//! # What a cursor VALUE may be asserted against, and what it may never be
+//!
+//! Never an event's `created_at`, nor anything derived from one. The outer
+//! `kind:445` envelope is signed by a throwaway ephemeral key and its
+//! `created_at` is bound to nothing the engine authenticates, so an advance read
+//! off it is remotely writable in the one direction that strands legitimate
+//! history permanently. The sweep therefore anchors every advance on a LOCAL
+//! clock reading taken before the fetch window's REQ went out, and lets event
+//! timestamps only HOLD IT BACK — see
+//! [`haven_core::relay::cursor::cursor_ms_for_window`], which carries the full
+//! argument.
+//!
+//! So an "it advanced" assertion here brackets the sweep with two readings of
+//! the SAME clock the sweep uses (`chrono::Utc::now().timestamp()`, whole
+//! seconds) and asserts the cursor lands in that closed interval. That pins the
+//! value's PROVENANCE rather than its arithmetic, and it is strictly stronger
+//! than an equality against the applied event: an implementation that read the
+//! event's timestamp could not satisfy it, because [`wait_until_after`] puts a
+//! whole second between the publish and the sweep. A "it held" assertion bounds
+//! the cursor from ABOVE by the held event instead, which is the only direction
+//! a remote timestamp is allowed to appear in.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -123,6 +146,28 @@ async fn build_two_member_circle(group_relays: Vec<String>) -> TwoMemberCircle {
     }
 }
 
+/// Blocks until the local wall clock has ticked strictly PAST `secs`, read from
+/// the same clock and at the same whole-second precision the sweep's anchor uses
+/// (`chrono::Utc::now().timestamp()`).
+///
+/// The sweep's advance is the fetch window's open time; the pre-fix rule used
+/// the applied event's `created_at` instead. Those two values are only
+/// DISTINGUISHABLE once a whole second separates them, so a test that means to
+/// pin the advance's provenance has to put one there. Without it the test passes
+/// under either rule whenever the publish and the sweep fall in the same second
+/// — which is most of the time, making the assertion silently vacuous and, if
+/// stated as an equality against the event, flaky at every second boundary.
+///
+/// Waiting for the tick rather than sleeping a fixed 1.5 s makes the separation
+/// a guarantee instead of a probability, and costs half a second on average.
+/// It is also the real shape of a catch-up: the backlog is always older than the
+/// sweep that fetches it.
+async fn wait_until_after(secs: i64) {
+    while chrono::Utc::now().timestamp() <= secs {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// A running in-process relay plus a `RelayManager` pointed at it — the same
 /// pair the background wake hands to the sweep.
 async fn relay_under_test() -> (MockRelay, String, RelayManager) {
@@ -133,7 +178,8 @@ async fn relay_under_test() -> (MockRelay, String, RelayManager) {
 }
 
 /// The sweep's whole job on the receive side: fetch a peer's `kind:445`, apply
-/// it, persist the decrypted location, and advance the cursor to that event.
+/// it, persist the decrypted location, and advance the cursor to the FETCH
+/// WINDOW's own open time — never to the event's remotely-chosen `created_at`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_peer_location_is_applied_persisted_and_moves_the_cursor() {
     let (_relay, url, relay_mgr) = relay_under_test().await;
@@ -161,7 +207,27 @@ async fn a_peer_location_is_applied_persisted_and_moves_the_cursor() {
         .await
         .expect("bob's location reaches the relay");
 
+    // Put a whole second between the event and the window that fetches it, so
+    // the event's `created_at` and the window's open time are distinguishable
+    // values rather than the same one (see `wait_until_after`).
+    let created_secs = i64::try_from(loc_event.created_at.as_secs()).expect("created_at fits i64");
+    wait_until_after(created_secs).await;
+
+    // The bracket. Both readings come from the SAME clock and the SAME
+    // precision as the sweep's own anchor and clamp
+    // (`chrono::Utc::now().timestamp()`), so the interval below is exact and
+    // carries no rounding slack in either direction.
+    let swept_from = chrono::Utc::now().timestamp();
     let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 20).await;
+    let swept_to = chrono::Utc::now().timestamp();
+
+    assert!(
+        swept_from > created_secs,
+        "precondition: the window must open strictly AFTER the event was \
+         published ({created_secs} s), or an advance read off the event would \
+         land inside the interval asserted below and the whole gate would be \
+         vacuous"
+    );
 
     assert_eq!(out.circles_swept, 1);
     assert_eq!(
@@ -190,12 +256,50 @@ async fn a_peer_location_is_applied_persisted_and_moves_the_cursor() {
     );
 
     // The cursor VALUE, not the counter (see this file's header).
-    let created_ms = i64::try_from(loc_event.created_at.as_secs()).unwrap() * 1000;
-    assert_eq!(
-        fx.alice_cursor(),
-        Some(created_ms),
-        "the cursor must land exactly on the applied event, so the next sweep \
-         resumes from it rather than re-ingesting or skipping ahead"
+    //
+    // PROVENANCE, not equality: the advance is the fetch window's own open time,
+    // a local clock reading no remote party can write, so it must fall inside
+    // the bracket taken around the call. This is a strictly stronger statement
+    // than "the cursor equals the applied event's created_at" was — that
+    // equality pinned an arithmetic coincidence, this pins where the value comes
+    // from, and the precondition above makes it unsatisfiable by any
+    // implementation that reads the event's timestamp.
+    let cursor = fx.alice_cursor().expect("the sweep wrote a cursor");
+    assert!(
+        cursor >= swept_from * 1000 && cursor <= swept_to * 1000,
+        "the cursor must land on the fetch window's own open time (between \
+         {swept_from} s and {swept_to} s), so the next sweep resumes from where \
+         this one asked rather than re-ingesting or skipping ahead; got {cursor} ms"
+    );
+    assert!(
+        cursor > created_secs * 1000,
+        "and strictly ABOVE the applied event's created_at ({created_secs} s) — \
+         which is what proves the advance is not being read off the event, whose \
+         outer envelope is signed by a throwaway key and bound to nothing the \
+         engine authenticates; got {cursor} ms"
+    );
+
+    // Monotonic-max and the clamp, at this call site rather than only in the
+    // storage layer's unit tests. A second sweep over the same relay contents
+    // re-fetches the same event (the next `since` keeps a lookback buffer below
+    // the cursor) and must never hand the write a smaller number — a regression
+    // here would re-open a window the device had already closed. Nor may
+    // repeated sweeps ever park the cursor above the local wall clock, where
+    // `since_for_stream` pins every subsequent REQ floor at `now`.
+    let again_from = chrono::Utc::now().timestamp();
+    let _ = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 20).await;
+    let again_to = chrono::Utc::now().timestamp();
+    let cursor_again = fx.alice_cursor().expect("the cursor is still readable");
+    assert!(
+        cursor_again >= cursor,
+        "monotonic-max: a re-sweep must never LOWER the persisted cursor \
+         ({cursor} ms → {cursor_again} ms)"
+    );
+    assert!(
+        cursor_again <= again_to * 1000,
+        "and the clamp holds across sweeps: no advance may park the cursor above \
+         the local clock ({again_to} s); got {cursor_again} ms, for a window \
+         opened at or after {again_from} s"
     );
 }
 

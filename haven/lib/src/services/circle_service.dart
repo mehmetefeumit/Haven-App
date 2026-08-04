@@ -726,25 +726,34 @@ abstract class CircleService {
   /// The UI MUST block send/mutate for a blocked circle (Rule 8).
   bool isCircleBlocked(List<int> mlsGroupId);
 
-  /// Advances the persisted `group_445` sync cursor to a fully-processed
-  /// kind:445 event's `created_at` (Unix **seconds**).
-  ///
-  /// Monotonic — never moves the cursor backward. Call this only after an
-  /// event was fully processed (decrypted, and any receiver-side commit
-  /// re-published), with the high-water-mark `created_at` of such events in a
-  /// fetch batch, so a later cold start / resubscribe re-anchors here instead
-  /// of replaying full history or skipping an unprocessed commit. Best-effort:
-  /// callers should swallow failures (a lagging cursor self-heals on the next
-  /// advance or the cold-start refetch).
-  Future<void> advanceGroupCursorToEventSecs(int eventCreatedAtSecs);
-
-  /// Advances the persisted `inbox_1059` sync cursor to a handled gift-wrap's
-  /// outer `created_at` (Unix **seconds**).
-  ///
-  /// As [advanceGroupCursorToEventSecs], for the kind:1059 gift-wrap inbox.
-  /// The 7-day inbox lookback applied at REQ time absorbs NIP-59 wrapper
-  /// backdating, so advancing on the outer wrapper timestamp is safe.
-  Future<void> advanceInboxCursorToWrapSecs(int wrapCreatedAtSecs);
+  // REMOVED: BOTH of Dart's sync-cursor advances — the group one that took an
+  // inbound kind:445's `created_at`, and the inbox one that took a kind:1059
+  // gift wrap's (deleted 2026-08; neither name is spelled out here on purpose,
+  // so the CI guard can ban the tokens outright rather than parse comments).
+  //
+  // Both raised a persisted REQ floor from a remotely-chosen `created_at` that
+  // nothing on the receive path authenticates, which is a lever for pushing a
+  // victim's floor past legitimate events — permanently, and across restarts.
+  //
+  // The gift-wrap one was the cheaper of the two to exploit: a kind:1059 is
+  // routed by a `#p` tag carrying the recipient's PUBLIC key (published in
+  // their kind:0 profile, their relay lists and every KeyPackage), is authored
+  // by a throwaway ephemeral key by construction, and is peeled with NIP-59
+  // alone — no MLS state, nothing binding the wrapper timestamp to its payload.
+  // So anyone who knows a user's npub could mint a wrap that peels cleanly at
+  // any `created_at`. Dated in the FUTURE it parked the cursor above the wall
+  // clock, and since the derived floor is capped at `now`, every later inbox
+  // REQ floor was pinned at `now` — where NIP-59's mandatory backdating (up to
+  // 48h) makes even a wrap published this second invisible. Invitations simply
+  // stopped arriving.
+  //
+  // Dart now has NO sync-cursor write path of any kind. Both cursors are
+  // advanced in haven-core, from a LOCAL clock reading taken when an
+  // observation window opened — the catch-up fetch's open time, and each REQ's
+  // own open time redeemed on that REQ's EOSE (`haven_core::relay::cursor`,
+  // "the governing asymmetry"). Do not reintroduce one: a "high-water mark of
+  // processed events" is exactly the shape that was removed, in both planes.
+  // Kept deleted by `scripts/ci/check_no_event_timestamp_cursor_advance.sh`.
 
   // NOTE: `KeyPackage` signing/publishing no longer lives on `CircleService`.
   // The Dark Matter `maintain_key_package` FFI method (via

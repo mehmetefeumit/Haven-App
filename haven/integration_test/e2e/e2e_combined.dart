@@ -2382,8 +2382,9 @@ void main() {
           );
 
           // Force the SAME gift-wrap to redeliver (resubscribe; the inbox
-          // cursor advanced to THIS wrap's timestamp via
-          // advanceInboxCursorToWrapSecs, which is inclusive on re-REQ).
+          // cursor is anchored on the REQ's own local open time and the REQ
+          // floor sits a further 7 days below it, so this wrap is inside the
+          // re-REQ window).
           await _m11ForceResubscribe(container);
           await _m11Settle(tester, generation);
           container.invalidate(pendingInvitationsProvider);

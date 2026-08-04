@@ -183,8 +183,16 @@ const String kAct2GpsLeakedMarker = '[b5] ACT2_GPS_LEAKED';
 /// ACT 2, per-cycle: `i=<index> n=<published>`.
 const String kAct2CycleMarker = '[b5] ACT2_CYCLE';
 
-/// ACT 2, with `cycles=<count> max=<highest-n>`: the window closed. `max`
-/// is PARSED and must be 0.
+/// A publish cycle that never returned, with `i=<index> after=<seconds>s`.
+///
+/// Distinct from `ACT2_CYCLE i=<i> n=0`, and the distinction is the point: a
+/// cycle that published to zero circles is this lane PASSING, and a cycle that
+/// wedged is a publish path that answered nothing at all. Collapsing the two
+/// would let a hung publisher read as proof that the app stopped publishing.
+const String kAct2WedgedMarker = '[b5] ACT2_WEDGED';
+
+/// ACT 2, with `cycles=<count> max=<highest-n> wedged=<count>`: the window
+/// closed. `max` is PARSED and must be 0; so is `wedged`.
 const String kAct2DoneMarker = '[b5] ACT2_DONE';
 
 /// Closes the capture in BOTH acts. Printed unconditionally, before the
@@ -241,6 +249,28 @@ const Duration _act2CycleSpacing = Duration(seconds: 30);
 /// user-fixed` precisely to avoid that; this bound is what turns a failure
 /// of that step into a named finding instead of a hang.
 const Duration _gpsProbeTimeout = Duration(seconds: 75);
+
+/// Bound on ONE publish cycle.
+///
+/// The same hazard [_gpsProbeTimeout] guards, one step further along the same
+/// path — and for a long time the only one of the two that was guarded.
+/// `publishNow` awaits the real publish provider, which reaches the platform
+/// location plugin, so it is exactly as able to never return as the one-shot
+/// probe is. Neither of its callers supplies a bound: [waitUntilAsync] re-reads
+/// its own deadline only BETWEEN polls, so a poll that never returns outlives
+/// it, and ACT 2's absence loop awaited it bare.
+///
+/// That cost the whole lane in CI run 30925179141. ACT 2's one-shot probe
+/// reported its own `TimeoutException` correctly, the absence loop then called
+/// the same path unbounded on its FIRST cycle, and the drive died at the
+/// 13-minute per-test timeout having printed no [kAct2DoneMarker] — so the
+/// app-side half of the proof was simply absent and the shell could report
+/// only its absence, not what happened.
+///
+/// Sized so a whole window still fits: 45 s + [_act2CycleSpacing] is 75 s
+/// worst case per cycle, and [_act2AbsenceWindow] is 258 s, so even an
+/// all-wedged window closes and prints its marker.
+const Duration _publishCycleTimeout = Duration(seconds: 45);
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -360,12 +390,37 @@ void main() {
         ),
       );
 
+      /// Cycles that exceeded [_publishCycleTimeout]. Read by ACT 2.
+      var wedgedCycles = 0;
+
       /// Runs one production publish cycle and returns the number of circles
-      /// it published to. `locationPublisherProvider` swallows every failure
-      /// into `0`, which is exactly the signal both acts need.
-      Future<int> publishNow() async {
+      /// it published to, or `null` if the cycle never answered.
+      ///
+      /// `locationPublisherProvider` swallows every publish FAILURE into `0`,
+      /// which is exactly the signal both acts need — but it cannot swallow a
+      /// call that does not return, so the bound has to live here (see
+      /// [_publishCycleTimeout]).
+      ///
+      /// `null` rather than `0`: a wedged cycle is not evidence the app
+      /// published nothing, and returning `0` would let a hung publisher read
+      /// as this lane's PASSING condition. The timeout is deliberately not
+      /// rethrown — every caller has to stay able to finish its window and
+      /// print its terminal marker, because the shell's oracle reads markers,
+      /// not exceptions.
+      Future<int?> publishNow() async {
         container.invalidate(locationPublisherProvider);
-        return container.read(locationPublisherProvider.future);
+        try {
+          return await container
+              .read(locationPublisherProvider.future)
+              .timeout(_publishCycleTimeout);
+        } on TimeoutException {
+          wedgedCycles += 1;
+          debugPrint(
+            '$kAct2WedgedMarker i=$wedgedCycles '
+            'after=${_publishCycleTimeout.inSeconds}s',
+          );
+          return null;
+        }
       }
 
       /// How many circles a still-working publisher would publish to.
@@ -395,7 +450,7 @@ void main() {
         try {
           await waitUntilAsync(
             () async {
-              baseline = await publishNow();
+              baseline = await publishNow() ?? 0;
               return baseline >= 1;
             },
             description: 'a publish cycle reached >= 1 circle with '
@@ -559,21 +614,41 @@ void main() {
         final deadline = DateTime.now().add(_act2AbsenceWindow);
         var cycles = 0;
         var maxPublished = 0;
+        final wedgedBefore = wedgedCycles;
         while (DateTime.now().isBefore(deadline)) {
           final n = await publishNow();
           cycles += 1;
-          if (n > maxPublished) {
+          if (n != null && n > maxPublished) {
             maxPublished = n;
           }
-          debugPrint('$kAct2CycleMarker i=$cycles n=$n');
+          // `n=-1` for a wedged cycle: the marker's field stays numeric for
+          // the shell's parser, and -1 cannot collide with a real count.
+          debugPrint('$kAct2CycleMarker i=$cycles n=${n ?? -1}');
           await Future<void>.delayed(_act2CycleSpacing);
         }
-        debugPrint('$kAct2DoneMarker cycles=$cycles max=$maxPublished');
+        final wedgedHere = wedgedCycles - wedgedBefore;
+        debugPrint(
+          '$kAct2DoneMarker cycles=$cycles max=$maxPublished '
+          'wedged=$wedgedHere',
+        );
 
         if (cycles < 1) {
           failures.add(
             'the ACT 2 absence window ran zero publish cycles — it proved '
             'nothing about what the app does with a revoked permission',
+          );
+        }
+        if (wedgedHere > 0) {
+          failures.add(
+            '$wedgedHere of $cycles ACT 2 publish cycle(s) never returned '
+            'within ${_publishCycleTimeout.inSeconds}s. A publish path that '
+            'hangs with the permission revoked is NOT the same as one that '
+            'declines to publish, and this lane may not report the second '
+            'when it observed the first. Two known causes, in order of '
+            'likelihood: the system permission dialog was raised because the '
+            "grant is not USER_FIXED (check the shell's Phase 6 read-back), "
+            'or ACT 2 is running against ACT 1 state because `pm clear` did '
+            'not take',
           );
         }
         if (maxPublished > 0) {

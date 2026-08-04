@@ -3,11 +3,35 @@
 # B8 runtime-proof orchestrator for the `e2e-clock-skew` CI lane
 # (docs/CI_HARDENING_BACKLOG.md Workstream B, item B8 — "Clock jump +/-6h").
 #
-# ## What this lane exists to catch
+# ## What this lane GATES
 #
-# Every wall-clock dependency on Haven's send and receive paths bottoms out in
-# an unguarded `SystemTime::now()` / `Timestamp::now()`, with no monotonic
-# source and no relay-time correction anywhere in the tree:
+# That a wrong device clock is DETECTED and SURFACED rather than failing
+# silently. Seven properties, each emitted by the drive as a `[b8] OK <name>`
+# line and each required by this script:
+#
+#   rejection-classified        a fast clock's relay refusal reaches Dart as a
+#                               typed device-clock fault, not as a generic
+#                               publish failure;
+#   rejection-verdict           …and reaches a consumer that raises a verdict;
+#   peer-single-source-silent   ONE member reporting a future time does NOT
+#                               accuse this device's clock;
+#   peer-corroborated           TWO distinct MLS-authenticated members
+#                               agreeing DOES;
+#   surface-rejected            the fast-clock fault reaches the user;
+#   surface-behind              the slow-clock fault reaches the user;
+#   surface-distinct            …and the two say different things (one means
+#                               nothing is shared, the other means the send
+#                               succeeded and the data was then discarded).
+#
+# ## What this lane RECORDS but does not gate
+#
+# A +/-6 h jump still costs a device real delivery, and the drive measures
+# that cost and prints it as `[b8] EVIDENCE`. It is recorded rather than
+# asserted because every one of those measurements bottoms out in the device
+# signing a `created_at` its own clock does not hold — clock correction —
+# which moves the 228 s TTL, the `since` cursor floor and the MDK peeler's
+# inner/outer timestamp binding with it, and is deferred to its own security
+# analysis:
 #
 #   * the MDK peeler stamps the inner app event with `now_unix_seconds()`
 #     (transport-nostr-peeler/src/event.rs:180,217) and BINDS the outer
@@ -20,15 +44,17 @@
 #   * `SessionManager::process_event` (haven-core/src/nostr/mls/manager.rs:594)
 #     drops any event whose expiration is more than
 #     `RECEIVER_EXPIRATION_GRACE_SECS = 60` s in the receiver's past, before
-#     decryption, and reports it `Stale` — which also lets the cursor advance;
+#     decryption. Making it keep such an event means widening a REPLAY
+#     defence, which is not a trade this lane may make;
 #   * `run_catchup_all_circles` advances the persisted cursor to the SENDER's
 #     `created_at` (haven-core/src/relay/catchup.rs:336-348) and
 #     `since_for_stream` re-derives the next REQ floor as
 #     `cursor - GROUP_RESUBSCRIBE_BUFFER_SECS` (60 s)
-#     (haven-core/src/relay/cursor.rs:114-130).
+#     (haven-core/src/relay/cursor.rs:114-130) — a window property no
+#     detection change moves.
 #
-# Nothing in `haven-core` or `haven/lib` compares the device clock against any
-# external reference, so a device with a wrong clock has no way to find out.
+# Same evidence-vs-finding split B1, B5, B6 and B9 use. EVIDENCE is printed on
+# every run, green or red; it is a standing record of a live residual defect.
 #
 # ## Why the clock is moved from HERE and not from Dart
 #
@@ -51,9 +77,12 @@
 #   3. ASSERT every requested jump was OBSERVED by the app process
 #      (`CLOCK_OBSERVED`), so the skew demonstrably reached the code under
 #      test and not merely the shell.
-#   4. ASSERT no `[b8] FINDING` line. Each one is a place where a +/-6h clock
-#      broke location delivery; they are printed in full on failure.
-#   5. ASSERT the drive itself passed (`flutter drive` exits 0 on a FAILED
+#   4. ASSERT every `[b8] OK <name>` above is PRESENT. A positive check, not
+#      an absence check: an oracle that never ran leaves no FINDING either,
+#      so check 5 alone would bless a drive whose gating half was deleted.
+#   5. ASSERT no `[b8] FINDING` line. Each one names a detection or surfacing
+#      property that regressed; they are printed in full on failure.
+#   6. ASSERT the drive itself passed (`flutter drive` exits 0 on a FAILED
 #      test — see drive-log-lib.sh).
 #
 # Checks 2 and 3 are deliberately separate. A servo that set the clock while
@@ -61,9 +90,9 @@
 # servo never made, are different failures with different fixes, and folding
 # them into one check would report either as the other.
 #
-# EXPECT THIS LANE TO FAIL until the skew defects it names are fixed. That is
-# the deliverable, exactly as for B1. Do not "fix" it by relaxing an assertion
-# — see CLAUDE.md, Testing Requirements #5.
+# This lane is expected GREEN on a healthy tree. Do not "fix" a red by
+# relaxing an assertion, and do not convert a FINDING into EVIDENCE to quiet
+# it — see CLAUDE.md, Testing Requirements #5.
 #
 # Usage:
 #   run-b8-clock-skew.sh <apk> <target.dart>   run the lane (needs emulator-5554)
@@ -86,7 +115,26 @@ readonly MARK_REQ_CLOCK='[b8] REQ_CLOCK'
 readonly MARK_CLOCK_OBSERVED='[b8] CLOCK_OBSERVED'
 readonly MARK_CLOCK_TIMEOUT='[b8] CLOCK_TIMEOUT'
 readonly MARK_FINDING='[b8] FINDING'
+readonly MARK_EVIDENCE='[b8] EVIDENCE'
 readonly MARK_ALL_PHASES='[b8] ALL_PHASES_COMPLETE'
+
+# The gating oracles, by name. Every one must appear as `[b8] OK <name>`.
+#
+# A LIST rather than a chain of inline greps so --self-test can assert two
+# things a chain cannot express: that a reverted fix is reported by NAME, and
+# that every name here is really declared by the drive target (fixture group
+# 14). Adding an oracle to the Dart target without adding it here would leave
+# it ungated; adding it here without the target would fail every run.
+required_ok_markers() {
+  printf '%s\n' \
+    'rejection-classified' \
+    'rejection-verdict' \
+    'peer-single-source-silent' \
+    'peer-corroborated' \
+    'surface-rejected' \
+    'surface-behind' \
+    'surface-distinct'
+}
 
 # Largest |device - expected| the read-back may show and still count as a
 # fulfilled jump. `date` sets whole seconds and adb round-trips add a beat, so
@@ -131,6 +179,45 @@ finding_lines() {
   local logfile="$1"
   { sed -n 's/.*\(\[b8\] FINDING \)/\1/p' "${logfile}" 2>/dev/null \
       | awk '!seen[$0]++'; } || true
+}
+
+# Print every EVIDENCE line, prefix-stripped and deduplicated.
+#
+# Same shape as finding_lines() and deliberately a SEPARATE parser: the two
+# must never be able to leak into each other. An EVIDENCE line read as a
+# finding would fail the lane for a defect that is out of scope; a FINDING
+# read as evidence would silently un-gate the fix. Fixture group 15 pins both
+# directions.
+evidence_lines() {
+  local logfile="$1"
+  { sed -n 's/.*\(\[b8\] EVIDENCE \)/\1/p' "${logfile}" 2>/dev/null \
+      | awk '!seen[$0]++'; } || true
+}
+
+# Whether the drive emitted `[b8] OK <name>`.
+#
+# Matched as a fixed string with a trailing boundary so `surface-behind`
+# cannot be satisfied by a hypothetical `surface-behind-partial`, and so a
+# FINDING that happens to quote a marker name in its prose cannot satisfy it
+# either (a FINDING line's prefix is `[b8] FINDING `, never `[b8] OK `).
+has_ok_marker() {
+  local logfile="$1" name="$2"
+  grep -aqE "\\[b8\\] OK ${name}([^A-Za-z0-9_-]|\$)" "${logfile}" 2>/dev/null
+}
+
+# Print the name of every required OK marker the log does NOT carry.
+#
+# Fail-closed by construction: a missing, empty or unreadable log makes
+# has_ok_marker false for every name, so the whole list comes back as missing
+# rather than an empty "nothing wrong here".
+missing_ok_markers() {
+  local logfile="$1" name
+  while IFS= read -r name; do
+    [[ -n "${name}" ]] || continue
+    if ! has_ok_marker "${logfile}" "${name}"; then
+      printf '%s\n' "${name}"
+    fi
+  done < <(required_ok_markers)
 }
 
 # Print the seq numbers the servo recorded as successfully applied.
@@ -186,17 +273,29 @@ run_self_test() {
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
 
+  # THE HEALTHY RUN: every jump landed, every gating oracle held, and the two
+  # residual delivery costs were recorded as EVIDENCE. This is what the lane
+  # must read as green.
   printf '%s\n' \
-    '08-03 04:41:02.001  1234  1300 I flutter : [b8] phase 0/4 complete' \
+    '08-03 04:41:02.001  1234  1300 I flutter : [b8] phase 0/5 complete' \
     '08-03 04:41:03.001  1234  1300 I flutter : [b8] REQ_CLOCK 1 21600' \
     '08-03 04:41:33.001  1234  1300 I flutter : [b8] CLOCK_OBSERVED 1 21601' \
+    '08-03 04:41:40.001  1234  1300 I flutter : [b8] EVIDENCE forward-skew-publish: the relay refuses a +6h kind-445' \
+    '08-03 04:41:41.001  1234  1300 I flutter : [b8] OK rejection-classified' \
+    '08-03 04:41:42.001  1234  1300 I flutter : [b8] OK rejection-verdict' \
+    '08-03 04:41:43.001  1234  1300 I flutter : [b8] OK surface-rejected' \
     '08-03 04:42:03.001  1234  1300 I flutter : [b8] REQ_CLOCK 2 0' \
     '08-03 04:42:33.001  1234  1300 I flutter : [b8] CLOCK_OBSERVED 2 -21599' \
     '08-03 04:43:03.001  1234  1300 I flutter : [b8] REQ_CLOCK 3 -21600' \
     '08-03 04:43:33.001  1234  1300 I flutter : [b8] CLOCK_OBSERVED 3 -21600' \
+    '08-03 04:43:34.001  1234  1300 I flutter : [b8] OK peer-single-source-silent' \
+    '08-03 04:43:35.001  1234  1300 I flutter : [b8] OK peer-corroborated' \
+    '08-03 04:43:36.001  1234  1300 I flutter : [b8] OK surface-behind' \
+    '08-03 04:43:50.001  1234  1300 I flutter : [b8] EVIDENCE backward-skew-receive: a correctly-clocked peer discards it' \
     '08-03 04:44:03.001  1234  1300 I flutter : [b8] REQ_CLOCK 4 0' \
     '08-03 04:44:33.001  1234  1300 I flutter : [b8] CLOCK_OBSERVED 4 21600' \
-    '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=0' \
+    '08-03 04:44:50.001  1234  1300 I flutter : [b8] OK surface-distinct' \
+    '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=0 evidence=2' \
     > "${tmp}/green.log"
 
   # (1) All four requests are seen, in order, exactly once.
@@ -222,10 +321,29 @@ run_self_test() {
     fail=1
   fi
 
-  # (4) A clean run yields no findings.
+  # (4) A clean run yields no findings — and the EVIDENCE lines on the SAME
+  #     log must not be mistaken for any. This is the whole risk of the
+  #     evidence convention: an evidence line read as a finding would fail the
+  #     lane for a defect that is deliberately out of scope.
   got="$(finding_lines "${tmp}/green.log" | wc -l | tr -d ' ')"
   if [[ "${got}" != "0" ]]; then
     echo "SELF-TEST FAIL (4): a clean log must yield 0 findings, got ${got}" >&2
+    fail=1
+  fi
+  got="$(evidence_lines "${tmp}/green.log" | wc -l | tr -d ' ')"
+  if [[ "${got}" != "2" ]]; then
+    echo "SELF-TEST FAIL (4b): expected 2 evidence lines on the healthy log," \
+         "got ${got} — the delivery cost this lane RECORDS is not being read" >&2
+    fail=1
+  fi
+
+  # (4c) …and the healthy log satisfies every gating oracle. Without this the
+  #      "reverted fix" fixtures below could pass against a list that nothing
+  #      can ever satisfy, i.e. a lane that is red on a healthy tree.
+  got="$(missing_ok_markers "${tmp}/green.log" | tr '\n' ',')"
+  if [[ -n "${got}" ]]; then
+    echo "SELF-TEST FAIL (4c): the HEALTHY fixture is missing OK marker(s)" \
+         "'${got}' — the lane would be red on a healthy tree" >&2
     fail=1
   fi
 
@@ -388,11 +506,198 @@ run_self_test() {
     fail=1
   fi
 
+  # --- (14) Every gated NAME is really declared by the drive target. -------
+  #
+  # The two files carry the marker literals independently (logcat is the only
+  # channel between them), so a rename on one side silently disarms the
+  # oracle: the drive stops emitting a line nobody requires, or this script
+  # requires a line nobody emits. Scanned from the CONST DECLARATION shape,
+  # never from prose — a comment quoting a marker name must not be able to
+  # satisfy this check (this repo has shipped a guard that matched its own
+  # documentation before).
+  local target repo dart_missing=""
+  repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+  target="${repo}/haven/integration_test/b8_clock_skew_test.dart"
+  if [[ ! -f "${target}" ]]; then
+    echo "SELF-TEST FAIL (14): drive target not found at ${target}, so the" \
+         "marker-parity check scanned nothing" >&2
+    fail=1
+  else
+    while IFS= read -r key; do
+      [[ -n "${key}" ]] || continue
+      if ! grep -qE "^const String k[A-Za-z0-9]+ = '\\[b8\\] OK ${key}';\$" \
+             "${target}"; then
+        dart_missing+="${key} "
+      fi
+    done < <(required_ok_markers)
+    if [[ -n "${dart_missing}" ]]; then
+      echo "SELF-TEST FAIL (14): this script requires OK marker(s)" \
+           "'${dart_missing% }' that b8_clock_skew_test.dart does not declare." \
+           "The lane would be red on a healthy tree." >&2
+      fail=1
+    fi
+
+    # (14b) …and the SIX line markers this script parses are declared too.
+    #       MARK_EVIDENCE is the one that most needs saying: a literal the
+    #       drive spells differently would make the recorded evidence vanish
+    #       from every artifact without failing anything.
+    local mark esc
+    for mark in "${MARK_REQ_CLOCK}" "${MARK_CLOCK_OBSERVED}" \
+                "${MARK_CLOCK_TIMEOUT}" "${MARK_FINDING}" \
+                "${MARK_EVIDENCE}" "${MARK_ALL_PHASES}"; do
+      esc="$(sed 's/[][\\.*^$/]/\\&/g' <<<"${mark}")"
+      if ! grep -qE "^const String k[A-Za-z0-9]+ = '${esc}';\$" "${target}"; then
+        echo "SELF-TEST FAIL (14b): this script parses '${mark}' but" \
+             "b8_clock_skew_test.dart declares no such marker constant —" \
+             "the two files have drifted and that channel is dead" >&2
+        fail=1
+      fi
+    done
+  fi
+
+  # --- (15) EVIDENCE and FINDING must not leak into each other. ------------
+  #
+  # Both directions, because both are silent. An EVIDENCE line read as a
+  # finding fails the lane for a defect that is out of scope; a FINDING read
+  # as evidence un-gates the fix and the lane goes permanently green.
+  printf '%s\n' \
+    '08-03 04:41:40.001  1234  1300 I flutter : [b8] EVIDENCE backward-skew-catchup: the window skipped backlog' \
+    '08-03 04:41:41.001  1234  1300 I flutter : [b8] EVIDENCE backward-skew-retention: the relay dropped it' \
+    > "${tmp}/evidence-only.log"
+  if [[ -n "$(finding_lines "${tmp}/evidence-only.log")" ]]; then
+    echo "SELF-TEST FAIL (15): an EVIDENCE line was read as a FINDING — the" \
+         "lane would fail on the delivery cost it only means to record" >&2
+    fail=1
+  fi
+  if [[ "$(evidence_lines "${tmp}/evidence-only.log" | wc -l | tr -d ' ')" != "2" ]]; then
+    echo "SELF-TEST FAIL (15b): the EVIDENCE parser did not read both lines" >&2
+    fail=1
+  fi
+  if [[ -n "$(evidence_lines "${tmp}/red.log")" ]]; then
+    echo "SELF-TEST FAIL (15c): a FINDING line was read as EVIDENCE — the" \
+         "lane would report a regression as a recorded measurement" >&2
+    fail=1
+  fi
+
+  # --- (16) THE REVERTED-FIX FIXTURES. --------------------------------------
+  #
+  # One per load-bearing piece of the clock-skew fix. Each is a log the drive
+  # would emit if that piece were reverted, and each must be reported BY NAME.
+  # These are what make "the lane fails if the fix is reverted" a tested claim
+  # rather than an assertion in a comment.
+
+  # (16a) `publish_with_retry` collapses a fully-unacknowledged publish back
+  #       into `RelayError::AllRelaysFailed` (the pre-fix behaviour). The
+  #       refusal reaches Dart untyped, so the classification, the verdict and
+  #       the surface all fall over together.
+  printf '%s\n' \
+    '08-03 04:41:03.001  1234  1300 I flutter : [b8] REQ_CLOCK 1 21600' \
+    '08-03 04:41:33.001  1234  1300 I flutter : [b8] CLOCK_OBSERVED 1 21600' \
+    '08-03 04:41:41.001  1234  1300 I flutter : [b8] FINDING clock-fault-classification: the refusal reached Dart as RelayServiceException with NO device-clock classification' \
+    '08-03 04:41:42.001  1234  1300 I flutter : [b8] FINDING clock-fault-verdict: the detector verdict is still none' \
+    '08-03 04:41:43.001  1234  1300 I flutter : [b8] FINDING clock-fault-surface-rejected: the banner painted NOTHING' \
+    '08-03 04:43:34.001  1234  1300 I flutter : [b8] OK peer-single-source-silent' \
+    '08-03 04:43:35.001  1234  1300 I flutter : [b8] OK peer-corroborated' \
+    '08-03 04:43:36.001  1234  1300 I flutter : [b8] OK surface-behind' \
+    '08-03 04:44:50.001  1234  1300 I flutter : [b8] OK surface-distinct' \
+    '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=3 evidence=1' \
+    > "${tmp}/reverted-classification.log"
+  got="$(missing_ok_markers "${tmp}/reverted-classification.log" | tr '\n' ',')"
+  if [[ "${got}" != "rejection-classified,rejection-verdict,surface-rejected," ]]; then
+    echo "SELF-TEST FAIL (16a): a reverted publish_with_retry must be reported" \
+         "as missing 'rejection-classified,rejection-verdict,surface-rejected,'," \
+         "got '${got}'" >&2
+    fail=1
+  fi
+  if [[ "$(finding_lines "${tmp}/reverted-classification.log" | wc -l | tr -d ' ')" != "3" ]]; then
+    echo "SELF-TEST FAIL (16b): the reverted-classification run must also" \
+         "report its three FINDINGs" >&2
+    fail=1
+  fi
+
+  # (16c) `minCorroboratingSources` reverted to 1. Everything else still
+  #       works, so exactly ONE name goes missing — the near-miss a
+  #       coarse "any OK line present" check would bless.
+  printf '%s\n' \
+    '08-03 04:41:41.001  1234  1300 I flutter : [b8] OK rejection-classified' \
+    '08-03 04:41:42.001  1234  1300 I flutter : [b8] OK rejection-verdict' \
+    '08-03 04:41:43.001  1234  1300 I flutter : [b8] OK surface-rejected' \
+    '08-03 04:43:34.001  1234  1300 I flutter : [b8] FINDING slow-clock-single-source: ONE member reporting a future time already raised peersAheadOfDevice' \
+    '08-03 04:43:35.001  1234  1300 I flutter : [b8] OK peer-corroborated' \
+    '08-03 04:43:36.001  1234  1300 I flutter : [b8] OK surface-behind' \
+    '08-03 04:44:50.001  1234  1300 I flutter : [b8] OK surface-distinct' \
+    '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=1 evidence=2' \
+    > "${tmp}/reverted-corroboration.log"
+  got="$(missing_ok_markers "${tmp}/reverted-corroboration.log" | tr '\n' ',')"
+  if [[ "${got}" != "peer-single-source-silent," ]]; then
+    echo "SELF-TEST FAIL (16c): a corroboration rule reverted to one source" \
+         "must be reported as missing exactly 'peer-single-source-silent,'," \
+         "got '${got}'" >&2
+    fail=1
+  fi
+
+  # (16d) The two faults collapsed into one sentence. Only the distinctness
+  #       oracle falls, and it must not be rescued by the two per-fault
+  #       surface markers that are still there.
+  printf '%s\n' \
+    '08-03 04:41:41.001  1234  1300 I flutter : [b8] OK rejection-classified' \
+    '08-03 04:41:42.001  1234  1300 I flutter : [b8] OK rejection-verdict' \
+    '08-03 04:41:43.001  1234  1300 I flutter : [b8] OK surface-rejected' \
+    '08-03 04:43:34.001  1234  1300 I flutter : [b8] OK peer-single-source-silent' \
+    '08-03 04:43:35.001  1234  1300 I flutter : [b8] OK peer-corroborated' \
+    '08-03 04:43:36.001  1234  1300 I flutter : [b8] OK surface-behind' \
+    '08-03 04:44:50.001  1234  1300 I flutter : [b8] FINDING clock-fault-copy: both faults render the SAME body' \
+    '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=1 evidence=2' \
+    > "${tmp}/reverted-copy.log"
+  got="$(missing_ok_markers "${tmp}/reverted-copy.log" | tr '\n' ',')"
+  if [[ "${got}" != "surface-distinct," ]]; then
+    echo "SELF-TEST FAIL (16d): collapsing the two fault bodies must be" \
+         "reported as missing exactly 'surface-distinct,', got '${got}'" >&2
+    fail=1
+  fi
+
+  # (16e) A prefix must not satisfy a longer name, and a FINDING that quotes a
+  #       marker name in its prose must not satisfy it either. Both are ways a
+  #       naive substring grep turns a red run green.
+  printf '%s\n' \
+    '08-03 04:43:36.001  1234  1300 I flutter : [b8] OK surface-behind-partial' \
+    '08-03 04:43:37.001  1234  1300 I flutter : [b8] FINDING clock-fault-copy: surface-distinct did not hold' \
+    > "${tmp}/lookalike.log"
+  if has_ok_marker "${tmp}/lookalike.log" 'surface-distinct'; then
+    echo "SELF-TEST FAIL (16e): a FINDING quoting a marker name satisfied it" >&2
+    fail=1
+  fi
+  if ! has_ok_marker "${tmp}/lookalike.log" 'surface-behind-partial'; then
+    echo "SELF-TEST FAIL (16f): the boundary match rejects a legitimate" \
+         "end-of-line marker, so fixture 16e proved nothing" >&2
+    fail=1
+  fi
+
+  # --- (17) FAIL CLOSED on a log that says nothing. -------------------------
+  #
+  # A drive that never started, a logcat capture that never attached, or a
+  # marker rename all produce a log with no OK lines at all. That must read as
+  # "every oracle missing", never as "nothing wrong here".
+  local expected_all
+  expected_all="$(required_ok_markers | tr '\n' ',')"
+  got="$(missing_ok_markers "${tmp}/empty.log" | tr '\n' ',')"
+  if [[ "${got}" != "${expected_all}" ]]; then
+    echo "SELF-TEST FAIL (17): an EMPTY log must report every oracle missing" \
+         "('${expected_all}'), got '${got}'" >&2
+    fail=1
+  fi
+  got="$(missing_ok_markers "${tmp}/does-not-exist.log" | tr '\n' ',')"
+  if [[ "${got}" != "${expected_all}" ]]; then
+    echo "SELF-TEST FAIL (17b): a MISSING log must report every oracle" \
+         "missing, got '${got}'" >&2
+    fail=1
+  fi
+
   if (( fail != 0 )); then
     echo "run-b8-clock-skew.sh --self-test: FAILED" >&2
     return 1
   fi
-  echo "run-b8-clock-skew.sh --self-test: all 13 fixture groups passed"
+  echo "run-b8-clock-skew.sh --self-test: all 17 fixture groups passed"
   return 0
 }
 
@@ -411,12 +716,15 @@ readonly LOG_DIR="/tmp/b8-logs"
 readonly APK="${1:-/tmp/integration-apks/b8_clock_skew_test.apk}"
 readonly TARGET="${2:-integration_test/b8_clock_skew_test.dart}"
 
-# The drive owns the whole timeline: circle setup, four publishes, four
-# catch-up sweeps, and four clock rendezvous (each bounded at 150 s inside the
-# drive). Its own in-test Timeout is 15 min; this is the outer per-drive bound
-# and stays BELOW the workflow's step deadline so the attributable message
-# ("flutter drive ... exceeded") is reachable (backlog A8 / guard C4).
-readonly DRIVE_TIMEOUT="${B8_DRIVE_TIMEOUT:-18m}"
+# The drive owns the whole timeline: a 3-member circle setup, seven publishes
+# (four measured, one through the production publish path, two peer samples),
+# four catch-up sweeps, two banner pumps, and four clock rendezvous (each
+# bounded at 150 s inside the drive). Its own in-test Timeout is 17 min; this
+# is the outer per-drive bound and stays ABOVE it and BELOW the workflow's step
+# deadline, so the attributable message ("flutter drive ... exceeded") is
+# reachable (backlog A8 / guard C4) and an in-test overrun fails with a named
+# test rather than an anonymous kill.
+readonly DRIVE_TIMEOUT="${B8_DRIVE_TIMEOUT:-20m}"
 
 # How often the servo re-reads logcat for a new request.
 readonly SERVO_POLL_SECS="${B8_SERVO_POLL_SECS:-1}"
@@ -769,7 +1077,7 @@ if ! grep -aqF -- "${MARK_ALL_PHASES}" "${LOGCAT_FILE}" 2>/dev/null; then
 four phases. Nothing below can be read as a product verdict — the absent phases simply \
 did not run. Check the drive log above for the throw."
 fi
-echo "  [1/5] Drive ran all four phases to completion."
+echo "  [1/6] Drive ran all five phases to completion."
 
 # (2) THE ANTI-VACUITY CHECK. Every requested jump must have LANDED on the
 #     device, proven by an adb read-back, not by an exit code.
@@ -800,7 +1108,7 @@ at TRUE time while the drive believed it was skewed. HARNESS failure, not a prod
 finding — do not read the drive's verdicts below it. Unfulfilled:
 ${missing}"
 fi
-echo "  [2/5] All $(printf '%s\n' ${requested} | wc -l | tr -d ' ') requested jump(s) \
+echo "  [2/6] All $(printf '%s\n' ${requested} | wc -l | tr -d ' ') requested jump(s) \
 landed on the device (adb read-back within ${JUMP_DRIFT_TOLERANCE_SECS}s)."
 
 # (3) …and the APP PROCESS saw them. Separate from (2) on purpose: a jump the
@@ -820,26 +1128,58 @@ for seq in ${requested}; do
 $(jump_record "${JUMP_LOG}" "${seq}")). The skew did not reach the process under test."
   fi
 done
-echo "  [3/5] Every jump was observed inside the app process."
+echo "  [3/6] Every jump was observed inside the app process."
 
-# (4) The product verdict.
+# The RECORDED EVIDENCE. Printed before the verdict, on every run, green or
+# red: it is this lane's standing measurement of what a +/-6h jump still costs
+# a device, and it is deliberately not a gate (see the header).
+evidence="$(evidence_lines "${LOGCAT_FILE}")"
+if [[ -n "${evidence}" ]]; then
+  echo "---- recorded evidence (measured, NOT gating) ----"
+  printf '%s\n' "${evidence}"
+  echo "---- end evidence ----"
+else
+  echo "  (no evidence lines recorded this run)"
+fi
+
+# (4) EVERY gating oracle ran and held. A positive check on purpose: an
+#     oracle that was deleted, renamed, or never reached leaves no FINDING
+#     either, so check 5 alone would read a gutted drive as a clean one.
+missing_ok="$(missing_ok_markers "${LOGCAT_FILE}")"
+if [[ -n "${missing_ok}" ]]; then
+  echo "---- gating oracles with no OK line ----" >&2
+  printf '  %s\n' ${missing_ok} >&2
+  fail "the drive did not report every gating oracle as held. Each name above is a \
+device-clock DETECTION property that either regressed or was never evaluated: a fast \
+clock's refusal must reach Dart classified rather than collapsed, a corroborated slow \
+clock must raise a verdict a single peer cannot, and each fault must reach the user in \
+its own words. If a name is missing with no matching FINDING, the oracle never ran at \
+all — check the drive log for a throw, and check that the marker literals still agree \
+between b8_clock_skew_test.dart and this script."
+fi
+echo "  [4/6] All $(required_ok_markers | wc -l | tr -d ' ') gating oracles reported \
+held."
+
+# (5) …and nothing was recorded as broken.
 findings="$(finding_lines "${LOGCAT_FILE}")"
 if [[ -n "${findings}" ]]; then
   echo "---- clock-skew findings ----" >&2
   printf '%s\n' "${findings}" >&2
-  fail "a +/-6h device clock jump broke location delivery. Each FINDING above names one \
-place where an event became undeliverable, undecryptable, or unreachable by catch-up. \
-See docs/CI_HARDENING_BACKLOG.md item B8 for the source-level derivation of each."
+  fail "a device-clock fault stopped being detected or surfaced. Each FINDING above \
+names one property of the clock-skew detection that regressed. NOTE these are not the \
+lane's delivery measurements — those are printed above as EVIDENCE and are not gated, \
+because closing them needs clock correction, which is deferred."
 fi
-echo "  [4/5] No clock-skew findings recorded."
+echo "  [5/6] No detection findings recorded."
 
-# (5) The drive's own verdict, re-raised last so the oracle's attribution is
+# (6) The drive's own verdict, re-raised last so the oracle's attribution is
 #     printed first.
 if (( drive_failed == 1 )); then
   fail "the oracle passed, but ${drive_reason}. Treat the lane as RED until that is \
 fixed: a drive that dies early can truncate the very window the oracle measures."
 fi
-echo "  [5/5] Drive completed cleanly."
+echo "  [6/6] Drive completed cleanly."
 
-echo "B8 PASS — location stayed publishable, decryptable and reachable by catch-up \
-across $(printf '%s\n' ${requested} | wc -l | tr -d ' ') device clock jump(s) of +/-6h."
+echo "B8 PASS — across $(printf '%s\n' ${requested} | wc -l | tr -d ' ') device clock \
+jump(s) of +/-6h, both fault directions were detected, corroborated where corroboration \
+is required, and surfaced to the user in their own distinct words."

@@ -161,6 +161,9 @@ readonly MARK_ACT2_ARMED='[b5] ACT2_ARMED'
 readonly MARK_ACT2_REFUSED='[b5] ACT2_GPS_REFUSED'
 readonly MARK_ACT2_LEAKED='[b5] ACT2_GPS_LEAKED'
 readonly MARK_ACT2_DONE='[b5] ACT2_DONE'
+# A publish cycle that never answered. Its own marker, never folded into
+# ACT2_CYCLE: see the gate on `wedged=` in b5_assert_act2.
+readonly MARK_ACT2_WEDGED='[b5] ACT2_WEDGED'
 readonly MARK_COMPLETE='[b5] SEQUENCE_COMPLETE'
 
 # The AOSP kill reason posted by `revokeRuntimePermissionInternal`. Recorded
@@ -434,9 +437,27 @@ permission."
       b5_finding "ACT 2's own publish path reached ${act2_max} circle(s) \
 with ACCESS_FINE_LOCATION revoked — the app published location it had no \
 permission to collect."
-    else
-      b5_note "ACT 2: ${act2_cycles} production publish cycles, all reaching \
-0 circles, with the permission revoked."
+    fi
+
+    # A WEDGED cycle is not a zero cycle. `max=0` is this lane's passing
+    # condition, and a publish call that never answered contributes a 0 to it
+    # without having observed anything — so without this gate a wholly hung
+    # publish path reads as the strongest possible pass. Absent (an older
+    # drive target that predates the field) is treated as 0 rather than as a
+    # finding, so the gate cannot fail a run for a missing field alone.
+    local act2_wedged
+    act2_wedged="$(b5_marker_number "${log}" "${MARK_ACT2_DONE}" 'wedged')"
+    act2_wedged="${act2_wedged:-0}"
+    if (( act2_wedged > 0 )); then
+      b5_finding "${act2_wedged} of ${act2_cycles} ACT 2 publish cycle(s) \
+never returned ('${MARK_ACT2_WEDGED}'). A hung publish path is not evidence \
+that the app declined to publish, so the max=${act2_max} reading above proves \
+nothing. Check this phase's USER_FIXED read-back and the \`pm clear\` result \
+first — both put ACT 2 in a state where the publish path stalls for reasons \
+unrelated to the revocation."
+    elif (( act2_max == 0 )); then
+      b5_note "ACT 2: ${act2_cycles} production publish cycles, all returning \
+and all reaching 0 circles, with the permission revoked."
     fi
   fi
 
@@ -517,7 +538,7 @@ run_self_test() {
       "I/flutter ( 91): ${MARK_ACT2_ARMED} eligible=1" \
       "${probe}" \
       "I/flutter ( 91): [b5] ACT2_CYCLE i=1 n=0" \
-      "I/flutter ( 91): ${MARK_ACT2_DONE} cycles=9 max=0" \
+      "I/flutter ( 91): ${MARK_ACT2_DONE} cycles=9 max=0 wedged=0" \
       "I/flutter ( 91): ${MARK_COMPLETE}" \
       > "${out}"
   }
@@ -563,13 +584,17 @@ run_self_test() {
   _eq_case "largest of 9 and 12 is 12" "12" \
     "$(b5_marker_number "${tmp}/wide.log" "${MARK_BASELINE}" 'n')"
 
-  # (7) Two keys on ONE line must not bleed into each other.
-  printf '%s\n' "I/flutter ( 91): ${MARK_ACT2_DONE} cycles=9 max=0" \
+  # (7) Several keys on ONE line must not bleed into each other. `wedged=` was
+  #     appended after `max=`, so the trailing key is the one most likely to be
+  #     picked up by a lazy pattern anchored on the marker alone.
+  printf '%s\n' "I/flutter ( 91): ${MARK_ACT2_DONE} cycles=9 max=0 wedged=3" \
     > "${tmp}/two.log"
   _eq_case "cycles= reads 9 on a line that also has max=0" "9" \
     "$(b5_marker_number "${tmp}/two.log" "${MARK_ACT2_DONE}" 'cycles')"
   _eq_case "max= reads 0 on a line that also has cycles=9" "0" \
     "$(b5_marker_number "${tmp}/two.log" "${MARK_ACT2_DONE}" 'max')"
+  _eq_case "wedged= reads 3 past both earlier keys" "3" \
+    "$(b5_marker_number "${tmp}/two.log" "${MARK_ACT2_DONE}" 'wedged')"
 
   # --- b5_phase_pid -------------------------------------------------------
   _fixture_full "${tmp}/full.log"
@@ -767,6 +792,33 @@ run_self_test() {
   b5_run_oracle "${tmp}/full.log" "${tmp}/oracle-baseline.ids" \
     "${tmp}/absent-new.ids" 1 >/dev/null || rc=$?
   _case "a missing relay diff fails the oracle" 1 "${rc}"
+
+  # (31) THE WEDGED-CYCLE FIXTURE, and the reason the gate exists at all: a
+  #      window whose publish cycles never ANSWERED still reports max=0, which
+  #      is this lane's passing value. Every other field here is the passing
+  #      capture, so this fixture isolates `wedged=` alone — a gate that read
+  #      only `max` would call this the strongest possible pass.
+  sed "s/ACT2_DONE cycles=9 max=0 wedged=0/ACT2_DONE cycles=9 max=0 wedged=2/" \
+    "${tmp}/full.log" > "${tmp}/wedged.log"
+  if ! grep -qF 'wedged=2' "${tmp}/wedged.log"; then
+    echo "  SELF-TEST SETUP FAIL (31): the wedged mutation did not apply —" \
+         "the passing fixture's ACT2_DONE line was reworded" >&2
+    fails=1
+  fi
+  rc=0
+  b5_run_oracle "${tmp}/wedged.log" "${tmp}/oracle-baseline.ids" \
+    "${tmp}/oracle-new.ids" 1 >/dev/null || rc=$?
+  _case "publish cycles that never returned fail the oracle" 1 "${rc}"
+
+  # (32) BACKWARD COMPATIBILITY, and the other direction of the same risk: a
+  #      drive target that predates the field must not fail merely for
+  #      omitting it. Absent reads as 0.
+  sed "s/ ACT2_DONE cycles=9 max=0 wedged=0/ ACT2_DONE cycles=9 max=0/" \
+    "${tmp}/full.log" > "${tmp}/nowedgefield.log"
+  rc=0
+  b5_run_oracle "${tmp}/nowedgefield.log" "${tmp}/oracle-baseline.ids" \
+    "${tmp}/oracle-new.ids" 1 >/dev/null || rc=$?
+  _case "an ACT2_DONE without the wedged field still passes" 0 "${rc}"
 
   if (( fails != 0 )); then
     echo "run-b5-permission-revocation.sh --self-test: FAILED" >&2
@@ -1285,7 +1337,23 @@ echo "  relay baseline: ${baseline_ids_count:-0} ACT 1 location event(s)"
 # with the permission in whatever state `pm clear` chose.
 # ---------------------------------------------------------------------------
 echo "Phase 6/7 — clearing app state and re-asserting the revocation..."
-adb -s "${DEVICE}" shell pm clear "${PKG}" 2>&1 | sed 's/^/    /' || true
+# `pm clear` REPORTS in its output, not in its exit status: it prints "Failed"
+# and still exits 0, so `|| true` on the exit code checked nothing. Run
+# 30925179141 printed exactly that "Failed" and the lane carried on into ACT 2
+# regardless — which, by this phase's own comment above, means ACT 2 ran
+# against ACT 1's data directory with a fresh in-memory keyring, i.e. in the
+# one state this phase exists to prevent.
+CLEAR_OUT="$(adb -s "${DEVICE}" shell pm clear "${PKG}" 2>&1 | tr -d '\r' || true)"
+printf '%s\n' "${CLEAR_OUT}" | sed 's/^/    /'
+if ! grep -qF 'Success' <<<"${CLEAR_OUT}"; then
+  fail "\`pm clear ${PKG}\` did not report Success (it exits 0 either way, so" \
+       "its OUTPUT is the only signal). ACT 2 would then start on ACT 1's data" \
+       "directory while its in-memory keyring mints a NEW SQLCipher" \
+       "passphrase, so the MLS database cannot be opened and every publish" \
+       "path it exercises fails or hangs for a reason that has nothing to do" \
+       "with the revoked permission."
+fi
+
 for perm in \
   android.permission.ACCESS_FINE_LOCATION \
   android.permission.ACCESS_COARSE_LOCATION
@@ -1309,6 +1377,20 @@ do
     fail "${perm} is granted again after \`pm clear\` + re-revoke. ACT 2" \
          "would run WITH the permission and prove the opposite of what this" \
          "lane claims."
+  fi
+  # The SAME read-back Phase 4 performs, in the phase that actually governs
+  # ACT 2. `pm clear` resets runtime permission FLAGS along with the grants,
+  # so USER_FIXED has to be re-established here and re-read here; without this
+  # the only place the lane ever confirmed it was a phase whose state ACT 2
+  # does not inherit, and an ACT 2 that then stalls on the system dialog is
+  # unattributable — which is precisely how it presented.
+  if b5_permission_user_fixed "${PERM_REVOKED_DUMP}" "${perm}"; then
+    echo "    USER_FIXED set for ACT 2 (no system dialog will be raised)"
+  else
+    echo "    NOTE: USER_FIXED absent for ACT 2 — \`pm set-permission-flags\`" \
+         "did not take. ACT 2's probe and its publish cycles may hit the" \
+         "system permission dialog and report TimeoutException /" \
+         "'${MARK_ACT2_WEDGED}'; read those as this, not as a product defect."
   fi
 done
 echo "  both location permissions verified revoked for ACT 2."

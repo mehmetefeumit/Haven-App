@@ -18,7 +18,7 @@ class AppLocalizationsFa extends AppLocalizations {
   String get appearanceThemeSystem => 'پیش‌فرض سیستم';
 
   @override
-  String get appearanceThemeSystemSubtitle => 'هماهنگ با تنظیمات دستگاه شما';
+  String get appearanceThemeSystemSubtitle => 'هماهنگ با تنظیمات دستگاهت';
 
   @override
   String get appearanceThemeLight => 'روشن';
@@ -100,7 +100,7 @@ class AppLocalizationsFa extends AppLocalizations {
   String get onboardingWelcomeHeadlineEmphasis => 'فقط';
 
   @override
-  String get onboardingWelcomeCta => 'شروع کنید';
+  String get onboardingWelcomeCta => 'شروع کن';
 
   @override
   String get onboardingValuePropsTitle => 'چه چیزی Haven را متفاوت می‌کند';
@@ -129,7 +129,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get onboardingValueProp1Summary =>
-      'روی دستگاه شما رمزنگاری می‌شود؛ فقط حلقه‌هایی که انتخاب می‌کنید می‌توانند آن را ببینند.';
+      'روی دستگاهت رمزگذاری می‌شود؛ فقط حلقه‌هایی که انتخاب می‌کنی می‌توانند آن را ببینند.';
 
   @override
   String get onboardingValueProp2Summary =>
@@ -140,7 +140,7 @@ class AppLocalizationsFa extends AppLocalizations {
       'بدون ایمیل، تلفن یا ثبت‌نام. کلید خصوصی‌ات هرگز از گوشی‌ات بیرون نمی‌رود.';
 
   @override
-  String get onboardingCreateIdentityTitle => 'هویت خود را بسازید';
+  String get onboardingCreateIdentityTitle => 'هویتت را بساز';
 
   @override
   String get onboardingCreateIdentityBody =>
@@ -164,10 +164,10 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get onboardingCreateIdentityError =>
-      'هنگام ساختن هویت مشکلی پیش آمد. لطفاً دوباره تلاش کنید.';
+      'هنگام ساختن هویت مشکلی پیش آمد. لطفاً دوباره تلاش کن.';
 
   @override
-  String get onboardingImportTitle => 'کلید موجود خود را وارد کنید';
+  String get onboardingImportTitle => 'کلید موجودت را وارد کن';
 
   @override
   String get onboardingImportBody =>
@@ -184,18 +184,18 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get onboardingImportInvalid =>
-      'این به یک کلید پشتیبان معتبر شبیه نیست. لطفاً بررسی کنید و دوباره تلاش کنید.';
+      'این به یک کلید پشتیبان معتبر شبیه نیست. لطفاً بررسی کن و دوباره تلاش کن.';
 
   @override
   String get onboardingImportError =>
-      'نتوانستیم آن کلید را وارد کنیم. لطفاً بررسی کنید و دوباره تلاش کنید.';
+      'نتوانستیم آن کلید را وارد کنیم. لطفاً بررسی کن و دوباره تلاش کن.';
 
   @override
   String get onboardingDisplayNameHint => 'مثلاً علی';
 
   @override
   String get onboardingDisplayNameError =>
-      'نتوانستیم آن نام را ذخیره کنیم. لطفاً دوباره تلاش کنید.';
+      'نتوانستیم آن نام را ذخیره کنیم. لطفاً دوباره تلاش کن.';
 
   @override
   String get onboardingAddPhotoOptional => 'افزودن عکس (اختیاری)';
@@ -253,7 +253,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get relaySettingsNoIdentityMessage =>
-      'برای مدیریت رله‌ها، ابتدا یک هویت بسازید.';
+      'برای مدیریت رله‌ها، ابتدا یک هویت بساز.';
 
   @override
   String get relaySettingsLoadIdentityError => 'بارگذاری هویت ناموفق بود.';
@@ -959,7 +959,7 @@ class AppLocalizationsFa extends AppLocalizations {
   String get nameCircleNameHint => 'مثلاً خانواده، دوستان نزدیک';
 
   @override
-  String get nameCircleNameEmptyError => 'لطفاً یک نام برای حلقه وارد کنید';
+  String get nameCircleNameEmptyError => 'لطفاً یک نام برای حلقه وارد کن';
 
   @override
   String get nameCircleNameTooLongError => 'نام باید ۵۰ نویسه یا کمتر باشد';
@@ -1011,11 +1011,11 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get nameCircleIdentityError =>
-      'خطای هویت. لطفاً تنظیمات هویت خود را بررسی کنید.';
+      'خطای هویت. لطفاً تنظیمات هویتت را بررسی کن.';
 
   @override
   String get nameCircleCreateError =>
-      'ساختن حلقه ناموفق بود. لطفاً دوباره تلاش کنید.';
+      'ساختن حلقه ناموفق بود. لطفاً دوباره تلاش کن.';
 
   @override
   String addMemberTitle(String circleName) {
@@ -1076,7 +1076,7 @@ class AppLocalizationsFa extends AppLocalizations {
   }
 
   @override
-  String get addMemberError => 'افزودن عضو ناموفق بود. لطفاً دوباره تلاش کنید.';
+  String get addMemberError => 'افزودن عضو ناموفق بود. لطفاً دوباره تلاش کن.';
 
   @override
   String get qrScannerTitle => 'اسکن کد QR';
@@ -1266,11 +1266,11 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get invitationAcceptError =>
-      'پذیرفتن دعوت ناموفق بود. لطفاً دوباره تلاش کنید.';
+      'پذیرفتن دعوت ناموفق بود. لطفاً دوباره تلاش کن.';
 
   @override
   String get invitationDeclineError =>
-      'رد کردن دعوت ناموفق بود. لطفاً دوباره تلاش کنید.';
+      'رد کردن دعوت ناموفق بود. لطفاً دوباره تلاش کن.';
 
   @override
   String get circleSelectorLabel => 'انتخابگر حلقه';
@@ -1444,7 +1444,7 @@ class AppLocalizationsFa extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       total,
       locale: localeName,
-      other: 'همه‌ی $totalString رله پاسخ دادند',
+      other: 'همهٔ $totalString رله پاسخ دادند',
       one: 'رله پاسخ داد',
     );
     return '$_temp0';
@@ -1470,7 +1470,7 @@ class AppLocalizationsFa extends AppLocalizations {
   String get refreshRingAnnouncementChecking => 'در حال بررسی رله‌ها';
 
   @override
-  String get refreshRingAnnouncementAllOk => 'همه‌ی رله‌ها پاسخ دادند';
+  String get refreshRingAnnouncementAllOk => 'همهٔ رله‌ها پاسخ دادند';
 
   @override
   String refreshRingAnnouncementPartial(int ok, int total) {
@@ -1501,14 +1501,14 @@ class AppLocalizationsFa extends AppLocalizations {
     String _temp0 = intl.Intl.pluralLogic(
       total,
       locale: localeName,
-      other: 'همه‌ی $totalString رله داده‌های شما را دارند',
-      one: 'رله داده‌های شما را دارد',
+      other: 'همهٔ $totalString رله داده‌هایت را دارند',
+      one: 'رله داده‌هایت را دارد',
     );
     return '$_temp0';
   }
 
   @override
-  String get refreshRingSemanticNoneFound => 'هیچ رله‌ای داده‌های شما را ندارد';
+  String get refreshRingSemanticNoneFound => 'هیچ رله‌ای داده‌هایت را ندارد';
 
   @override
   String refreshRingSemanticPartialFound(int ok, int total) {
@@ -1520,12 +1520,12 @@ class AppLocalizationsFa extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$okString از $totalString رله داده‌های شما را دارند';
+    return '$okString از $totalString رله داده‌هایت را دارند';
   }
 
   @override
   String get refreshRingAnnouncementAllFound =>
-      'همه‌ی رله‌ها داده‌های شما را دارند';
+      'همهٔ رله‌ها داده‌هایت را دارند';
 
   @override
   String refreshRingAnnouncementPartialFound(int ok, int total) {
@@ -1537,19 +1537,19 @@ class AppLocalizationsFa extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$okString از $totalString رله داده‌های شما را دارند';
+    return '$okString از $totalString رله داده‌هایت را دارند';
   }
 
   @override
   String get refreshRingAnnouncementNoneFound =>
-      'هیچ رله‌ای داده‌های شما را ندارد';
+      'هیچ رله‌ای داده‌هایت را ندارد';
 
   @override
   String get identityTitle => 'هویت';
 
   @override
   String get identityLoadError =>
-      'هنگام بارگذاری هویت تو مشکلی پیش آمد. لطفاً دوباره تلاش کنید.';
+      'هنگام بارگذاری هویت تو مشکلی پیش آمد. لطفاً دوباره تلاش کن.';
 
   @override
   String get identityMissingTitle => 'بدون هویت';
@@ -1586,7 +1586,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get identityAdvancedExportError =>
-      'استخراج کلید خصوصی ناموفق بود. لطفاً دوباره تلاش کنید.';
+      'استخراج کلید خصوصی ناموفق بود. لطفاً دوباره تلاش کن.';
 
   @override
   String get identityAdvancedDeleteTitle => 'هویت حذف شود؟';
@@ -1603,7 +1603,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get identityAdvancedDeleteError =>
-      'حذف هویت ناموفق بود. لطفاً دوباره تلاش کنید.';
+      'حذف هویت ناموفق بود. لطفاً دوباره تلاش کن.';
 
   @override
   String identityAdvancedCopiedToClipboard(String label) {
@@ -1653,7 +1653,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get qrCodeLoadError =>
-      'هنگام بارگذاری کلید عمومی تو مشکلی پیش آمد. لطفاً دوباره تلاش کنید.';
+      'هنگام بارگذاری کلید عمومی تو مشکلی پیش آمد. لطفاً دوباره تلاش کن.';
 
   @override
   String get qrCodeYourPublicKeyLabel => 'کلید عمومی تو';
@@ -1749,7 +1749,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get memberProfileRefreshErrorGeneric =>
-      'نتوانستیم نمایه‌ها را تازه‌سازی کنیم. لطفاً دوباره تلاش کنید.';
+      'نتوانستیم نمایه‌ها را تازه‌سازی کنیم. لطفاً دوباره تلاش کن.';
 
   @override
   String get memberDetailSheetTitle => 'جزئیات عضو';
@@ -1809,11 +1809,11 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get avatarPickerRemoveError =>
-      'نتوانستیم عکس تو را حذف کنیم. لطفاً دوباره تلاش کنید.';
+      'نتوانستیم عکس تو را حذف کنیم. لطفاً دوباره تلاش کن.';
 
   @override
   String get avatarPickerUpdateError =>
-      'نتوانستیم عکس تو را به‌روزرسانی کنیم. لطفاً دوباره تلاش کنید.';
+      'نتوانستیم عکس تو را به‌روزرسانی کنیم. لطفاً دوباره تلاش کن.';
 
   @override
   String get avatarPickerCropTitle => 'برش عکس';
@@ -1845,7 +1845,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get mapInitFailedRetry =>
-      'راه‌اندازی ناموفق بود. لطفاً دوباره تلاش کنید.';
+      'راه‌اندازی ناموفق بود. لطفاً دوباره تلاش کن.';
 
   @override
   String get mapLocationOffMessage =>

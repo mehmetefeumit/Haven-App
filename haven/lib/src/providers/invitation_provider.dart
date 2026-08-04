@@ -4,8 +4,6 @@
 /// for discovering new gift-wrapped welcome events from relays.
 library;
 
-import 'dart:convert';
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -38,27 +36,11 @@ final pendingInvitationsProvider = FutureProvider<List<Invitation>>((
 
 /// NIP-59 gift wraps have `created_at` randomized up to 2 days in the past.
 /// We must look back at least that far, plus a buffer for clock skew.
-const _giftWrapLookback = Duration(days: 2, hours: 1);
-
-/// Extracts a kind:1059 gift-wrap's outer `created_at` (Unix seconds), or
-/// `null` if the JSON is unparseable or missing the field.
 ///
-/// Used to advance the persisted `inbox_1059` sync cursor after a wrap is
-/// handled. The wrapper timestamp is safe to anchor on because the 7-day inbox
-/// lookback applied at REQ time absorbs NIP-59 backdating.
-int? _giftWrapCreatedAtSecs(String eventJson) {
-  try {
-    final decoded = jsonDecode(eventJson);
-    if (decoded is Map<String, dynamic>) {
-      final createdAt = decoded['created_at'];
-      if (createdAt is int) return createdAt;
-      if (createdAt is num) return createdAt.toInt();
-    }
-  } on FormatException {
-    // Unparseable wrapper — just skip advancing the cursor for it.
-  }
-  return null;
-}
+/// This poll's own REQ floor, and it is derived from the wall clock alone —
+/// never from the persisted `inbox_1059` cursor, and never from anything a
+/// fetched wrap carries. See [invitationPollerProvider].
+const _giftWrapLookback = Duration(days: 2, hours: 1);
 
 /// Polls relays for new gift-wrapped invitations and processes them.
 ///
@@ -72,6 +54,17 @@ int? _giftWrapCreatedAtSecs(String eventJson) {
 ///
 /// Designed to be called periodically (every 2 minutes), on app resume,
 /// and manually (refresh button).
+///
+/// # No sync-cursor write
+///
+/// This poller advances NO persisted cursor. It used to raise `inbox_1059` to
+/// the newest handled gift wrap's outer `created_at` — a field chosen by
+/// whoever built the wrap, on an event that anyone who knows this user's
+/// published npub can mint (see `CircleService`). Its own REQ floor is the
+/// fixed [_giftWrapLookback] below, which never reads that cursor either, so
+/// this path is cursor-free end to end. The one consumer of `inbox_1059` is the
+/// live-sync engine's inbox REQ, which anchors it in Rust on that REQ's own
+/// local open time.
 final invitationPollerProvider = FutureProvider<int>((ref) async {
   // Coupling to the relay-preferences invalidator: when the user changes
   // their inbox relay list, the next poll picks up the new relays.
@@ -120,11 +113,11 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
     // an independent MLS group, so parallel processing is safe.
     final secretBytes = await identityNotifier.getSecretBytes();
 
-    // Process all gift wraps in parallel. Each result records whether the
-    // wrap was newly accepted (for the count) and the wrapper `created_at`
-    // (seconds) when it was HANDLED WITHOUT ERROR (new or dedup) — eligible to
-    // advance the inbox cursor. A wrap that threw yields `wrapSecs == null` so
-    // the cursor never advances past an un-handled wrap (it retries next poll).
+    // Process all gift wraps in parallel. Each result records only whether the
+    // wrap was newly accepted (for the count). Nothing a wrap carries is read
+    // beyond its own payload — in particular its outer `created_at` is not
+    // extracted at all, because the only thing it was ever used for was a
+    // cursor advance this path no longer performs.
     final results = await Future.wait(
       giftWraps.map((eventJson) async {
         try {
@@ -134,16 +127,13 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
           );
           // `null` → already-processed gift wrap (handled by Rust dedup).
           // Silent no-op for the count, but still a handled wrap.
-          return (
-            isNew: invitation != null,
-            wrapSecs: _giftWrapCreatedAtSecs(eventJson),
-          );
+          return invitation != null;
         } on CircleServiceException catch (e) {
           // Real failure from the service layer (malformed event, MDK
           // error, storage failure). The underlying Rust error has already
           // been logged with sanitized detail by `nostr_circle_service.dart`.
           debugPrint('[InvitationPoller] skipped gift-wrap: ${e.runtimeType}');
-          return (isNew: false, wrapSecs: null);
+          return false;
         } on Object catch (e) {
           // FFI Error path. Log only the runtime type — error messages from
           // non-Mls CircleError variants (NotFound, ContactNotFound, etc.)
@@ -152,27 +142,11 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
             '[InvitationPoller] skipped gift-wrap (processing error): '
             '${e.runtimeType}',
           );
-          return (isNew: false, wrapSecs: null);
+          return false;
         }
       }),
     );
-    final newCount = results.where((r) => r.isNew).length;
-
-    // Advance the persisted inbox cursor to the newest wrapper we handled
-    // without error. Best-effort: a write failure must never fail the poll.
-    final maxWrapSecs = results
-        .map((r) => r.wrapSecs)
-        .whereType<int>()
-        .fold<int>(0, (max, v) => v > max ? v : max);
-    if (maxWrapSecs > 0) {
-      try {
-        await circleService.advanceInboxCursorToWrapSecs(maxWrapSecs);
-      } on Object catch (e) {
-        debugPrint(
-          '[InvitationPoller] inbox cursor advance failed: ${e.runtimeType}',
-        );
-      }
-    }
+    final newCount = results.where((isNew) => isNew).length;
 
     if (newCount > 0) {
       ref

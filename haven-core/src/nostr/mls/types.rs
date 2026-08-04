@@ -41,6 +41,25 @@ pub enum PreAuthRejection {
     /// [`crate::location::ttl::RECEIVER_EXPIRATION_GRACE_SECS`] of clock-skew
     /// grace, is in the past.
     Expired,
+    /// The event could not be converted into a transport message by the PURE,
+    /// pre-engine parse
+    /// ([`SessionManager::event_to_transport_message`](crate::nostr::mls::SessionManager::event_to_transport_message)):
+    /// a missing, duplicated, valueless or wrong-width `h`/`p` routing tag, an
+    /// unsupported kind, or a self-reported id that does not match the event's
+    /// own hash.
+    ///
+    /// That parse reads only already-materialized envelope fields. It never
+    /// touches key material, never looks at the base64 `content`, and never
+    /// reaches the engine — so a failure here says how the event was *signed*,
+    /// decided before anything authenticated anything. Substantively the same
+    /// class of judgement as [`Self::Expired`], and classified the same way.
+    ///
+    /// **Only that one parse may produce this.** An engine-side or
+    /// decryption-side failure MUST stay an `Err`: reclassifying it here would
+    /// convert a hold into a skip for input that has already touched secrets,
+    /// which is precisely the primitive the cursor design exists to deny (see
+    /// [`ScreenedIngest::RejectedBeforeAuth`]).
+    Malformed,
 }
 
 /// The disposition of one inbound Nostr event handed to
@@ -72,10 +91,14 @@ pub enum ScreenedIngest {
     /// authentication ran.
     ///
     /// Terminal — do not retry, do not surface, do not drain convergence — but
-    /// **not evidence about the event**. Callers MUST NOT advance a sync cursor
-    /// to (or past) this event's `created_at`: one forged event would otherwise
-    /// push the persisted REQ floor forward and strand every legitimate event
-    /// below it, permanently and across restarts.
+    /// **not evidence about the event**, in EITHER direction. Callers MUST NOT
+    /// advance a sync cursor to (or past) this event's `created_at`: one forged
+    /// event would otherwise push the persisted REQ floor forward and strand
+    /// every legitimate event below it, permanently and across restarts. Nor may
+    /// they hold a cursor back at it: there is no un-applied message to come
+    /// back for, and a hold-back is the same denial bought from the other end —
+    /// one forged event, minted for free by any observer of the circle's public
+    /// `#h`, pinning the window open indefinitely.
     RejectedBeforeAuth(PreAuthRejection),
 }
 
@@ -309,6 +332,24 @@ impl std::fmt::Debug for LocationMessageResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_pre_auth_rejection_carries_no_engine_effects() {
+        // The fail-safe accessor, over EVERY reason. A future variant added
+        // without an `ingested()` arm would not compile; this pins that no
+        // existing one can hand back a synthetic engine result, which is what a
+        // defaulting accessor would do and what the cursor planes would then
+        // read as "advance past this".
+        for reason in [PreAuthRejection::Expired, PreAuthRejection::Malformed] {
+            let screened = ScreenedIngest::RejectedBeforeAuth(reason);
+            let rendered = format!("{screened:?}");
+            assert!(
+                screened.ingested().is_none(),
+                "{reason:?} must carry no engine effects"
+            );
+            assert!(rendered.contains("RejectedBeforeAuth"));
+        }
+    }
 
     #[test]
     fn group_id_ext_from_slice_matches_new() {

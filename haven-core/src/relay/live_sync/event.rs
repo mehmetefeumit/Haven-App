@@ -73,11 +73,17 @@ pub enum LiveSyncEvent {
     },
     /// A raw gift-wrapped invitation (kind 1059). The engine never unwraps it;
     /// the consumer unwraps via `process_gift_wrapped_invitation`.
+    ///
+    /// # No wrapper timestamp
+    ///
+    /// The wrapper's `created_at` is deliberately NOT carried. Its only consumer
+    /// was a sync-cursor advance, and it is an unauthenticated field on an event
+    /// anyone who knows the recipient's (public) npub can mint — see
+    /// [`super::anchor::InboxAnchor`]. The inbox cursor is advanced in-Rust from
+    /// the inbox REQ's own local open time, redeemed on that REQ's `EOSE`.
     Welcome {
         /// The raw kind:1059 event JSON.
         gift_wrap_json: String,
-        /// The wrapper's relay-public `created_at` (seconds).
-        wrap_created_at_secs: i64,
     },
     /// A non-content status / lifecycle signal.
     Status {
@@ -107,13 +113,9 @@ impl std::fmt::Debug for LiveSyncEvent {
                 .field("nostr_group_id", &"<redacted>")
                 .field("has_evolution_event", &evolution_event_json.is_some())
                 .finish(),
-            Self::Welcome {
-                wrap_created_at_secs,
-                ..
-            } => f
+            Self::Welcome { .. } => f
                 .debug_struct("Welcome")
                 .field("gift_wrap_json", &"<redacted>")
-                .field("wrap_created_at_secs", wrap_created_at_secs)
                 .finish(),
             Self::Status { reason } => f.debug_struct("Status").field("reason", reason).finish(),
         }
@@ -146,7 +148,6 @@ mod tests {
         };
         let welcome = LiveSyncEvent::Welcome {
             gift_wrap_json: GIFTWRAP_JSON.to_string(),
-            wrap_created_at_secs: 5678,
         };
         let status = LiveSyncEvent::Status {
             reason: SyncStatusReason::Connected,
@@ -167,7 +168,6 @@ mod tests {
 
         // Relay-public timestamps + the closed status enum may render.
         assert!(format!("{location:?}").contains("1234"));
-        assert!(format!("{welcome:?}").contains("5678"));
         assert!(format!("{group_update:?}").contains("has_evolution_event: true"));
         assert!(format!("{status:?}").contains("Connected"));
     }

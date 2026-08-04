@@ -256,20 +256,32 @@ pub async fn run_worker(
         let raw = match signal {
             RawSignal::Event(raw) => *raw,
             RawSignal::EndOfStoredEvents { .. } => {
-                // The live plane's ONLY cursor-advance signal. It is handled
-                // HERE, after the worker has already drained every stored event
-                // the relay sent ahead of it on this same channel, so the
-                // advance can never claim an event this worker has not ingested.
-                //
-                // Only the group plane anchors on it: the inbox cursor is
-                // advanced by the foreground after a successful hold, never here.
-                if ctx.plane == PlaneKind::Group {
-                    for group_hex in &ctx.group_ids_hex {
-                        if processor.note_end_of_stored_events(group_hex) {
-                            log::debug!(
-                                "[live_sync::worker] EOSE anchored cursor group={}…",
-                                group_hex.get(..8).unwrap_or(group_hex.as_str()),
-                            );
+                // The live plane's ONLY cursor-advance signal, on BOTH planes.
+                // It is handled HERE, after the worker has already drained every
+                // stored event the relay sent ahead of it on this same channel,
+                // so the advance can never claim an event this worker has not
+                // ingested.
+                match ctx.plane {
+                    PlaneKind::Group => {
+                        for group_hex in &ctx.group_ids_hex {
+                            if processor.note_end_of_stored_events(group_hex) {
+                                log::debug!(
+                                    "[live_sync::worker] EOSE anchored cursor group={}…",
+                                    group_hex.get(..8).unwrap_or(group_hex.as_str()),
+                                );
+                            }
+                        }
+                    }
+                    // The inbox cursor used to be advanced by the FOREGROUND,
+                    // from the gift wrap's own `created_at` — a field anyone who
+                    // knows this user's (published) npub can choose freely, and
+                    // one whose FUTURE direction pins every later inbox REQ
+                    // floor at `now`, where NIP-59's mandatory backdating makes
+                    // every genuine wrap invisible. It anchors here now, on the
+                    // inbox REQ's local open time, exactly like a group bucket.
+                    PlaneKind::Inbox => {
+                        if processor.note_inbox_end_of_stored_events() {
+                            log::debug!("[live_sync::worker] EOSE anchored inbox cursor");
                         }
                     }
                 }

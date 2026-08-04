@@ -183,7 +183,8 @@ rust|src/relay/publishers.rs|88              # measured 90.28% (260/288)
 rust|src/relay/maintenance/|96               # measured 98.46% (640/650)
 rust|src/relay/manager.rs|71                 # measured 73.54% (720/979)
 rust|src/relay/auto_commit.rs|100            # measured 100.00% (59/59)
-rust|src/relay/catchup.rs|92                 # measured 94.61% (193/204)
+rust|src/relay/catchup.rs|97                 # measured 97.14%; was 92 (94.61%) before the
+                                             # fetch-window cursor anchor brought its own tests
 
 # --- Encrypted tile cache ---------------------------------------------------
 # Must never persist the Stadia key (Security Rule 6/10); the static half is
@@ -199,7 +200,9 @@ rust|src/tiles/|94                           # measured 96.11% (642/668)
 # 48.96% — BELOW the 50% package gate, inside a package that gates green,
 # because the widget and provider suites pay for it out of the shared budget.
 # This single row is the clearest statement of why A5 exists.
-flutter|lib/src/services/|46                 # measured 48.96% (1317/2690)
+flutter|lib/src/services/|51                 # measured 51.06%; was 46 (48.96%) before the
+                                             # location-access gate, clock-skew detector and
+                                             # session/cursor work brought their own tests
 
 # --- Secret handling and MLS session custody --------------------------------
 # fresh_secret.dart implements Security Rule 9 (Dart has no zeroize, so secrets

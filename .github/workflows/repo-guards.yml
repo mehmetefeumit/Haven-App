@@ -75,6 +75,12 @@
 #     lever that can downgrade the kind-445 exporter derivation away from
 #     "marmot/group-event"; Haven's Rust source must never name it.
 #
+#   No event-timestamp cursor advance scripts/ci/check_no_event_timestamp_cursor_advance.sh
+#     A sync cursor may never be advanced from an inbound event's `created_at`
+#     (unauthenticated, remotely chosen, and poisoning it strands every event
+#     below the new REQ floor). The deleted Dart/FFI group-cursor advance stays
+#     deleted, and no FFI entry point may name the bare `group_445` stream.
+#
 #   Clock-skew policy parity          scripts/ci/check_clock_skew_policy_parity.sh
 #     The device-clock skew policy lives authoritatively in Rust and is
 #     mirrored in Dart across an FFI with no shared source of truth. If the
@@ -254,6 +260,10 @@ jobs:
       - name: No exporter-label override
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_no_exporter_label_override.sh
+
+      - name: No cursor advance from an event timestamp
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_no_event_timestamp_cursor_advance.sh
 
       - name: Clock-skew policy parity
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
