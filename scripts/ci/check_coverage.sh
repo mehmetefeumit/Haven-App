@@ -49,17 +49,50 @@ ge() { awk -v a="$1" -v b="$2" 'BEGIN { exit (a + 0 >= b + 0) ? 0 : 1 }'; }
 rust_status="skipped"
 flutter_status="skipped"
 
+# The toolchain the per-path floors in coverage_floors.txt were MEASURED with.
+#
+# This is not a style preference — it is what makes the comparison meaningful.
+# The floors' denominator is INSTRUMENTED LINES, which is a property of the
+# LLVM version, not of the tests. Measuring here on an older toolchain reads
+# every path 1-4 points lower than the pin, and for some rows the floor then
+# becomes UNSATISFIABLE: on rustc 1.92 against the current pins,
+# `src/profile/fetch.rs` tops out at 96.26% under a floor of 97 and
+# `src/keyring_policy.rs` at 88.00% under a floor of 89 — with EVERY remaining
+# production line covered, because the rest are assertion-failure messages that
+# only execute when a test fails. A developer hitting that would be told to
+# "add tests for the uncovered lines" for a gap no test can close.
+#
+# So the gate pins the measuring toolchain to the one the floors came from, and
+# says so loudly if it is missing rather than silently measuring something
+# incomparable. Re-pinning the floors and bumping this belong in ONE commit.
+COVERAGE_TOOLCHAIN="${HAVEN_COVERAGE_TOOLCHAIN:-1.97.1}"
+
 # ------------------------------- Rust (haven-core) --------------------------
 if [ "$CHECK_RUST" = "1" ]; then
   command -v cargo >/dev/null 2>&1 || die "cargo not found on PATH."
-  cargo llvm-cov --version >/dev/null 2>&1 \
-    || die "cargo-llvm-cov not installed. Install with: cargo install cargo-llvm-cov"
+
+  # Resolve the pinned toolchain, or explain exactly how to get it. `+none`
+  # opts out (measure with whatever is default) for a deliberate experiment.
+  cargo_bin=(cargo)
+  if [ "$COVERAGE_TOOLCHAIN" != "none" ]; then
+    if cargo "+$COVERAGE_TOOLCHAIN" --version >/dev/null 2>&1; then
+      cargo_bin=(cargo "+$COVERAGE_TOOLCHAIN")
+    else
+      die "the coverage floors were measured on rustc ${COVERAGE_TOOLCHAIN}, which is not installed.
+   Measuring on a different toolchain compares against floors it may be unable to satisfy.
+   Install it:   rustup toolchain install ${COVERAGE_TOOLCHAIN}
+   Or override:  HAVEN_COVERAGE_TOOLCHAIN=none scripts/ci/check_coverage.sh"
+    fi
+  fi
+
+  "${cargo_bin[@]}" llvm-cov --version >/dev/null 2>&1 \
+    || die "cargo-llvm-cov not installed for ${COVERAGE_TOOLCHAIN}. Install with: cargo install cargo-llvm-cov"
 
   info "${BOLD}▶ Rust coverage (haven-core) — threshold ${RUST_MIN}%${RESET} ${DIM}(runs the test suite)${RESET}"
   # Exact flags from coverage.yml. This RUNS the tests: a test failure exits
   # non-zero here and fails the gate (so a broken/flaky test is caught too).
   if ! ( cd "$ROOT/haven-core" \
-         && cargo llvm-cov --all-features \
+         && "${cargo_bin[@]}" llvm-cov --all-features \
               --ignore-filename-regex 'frb_generated' --summary-only ) \
          >"$TMP/rust.out" 2>"$TMP/rust.err"; then
     err "Rust tests/coverage run failed (test failure or build error):"
@@ -84,7 +117,7 @@ if [ "$CHECK_RUST" = "1" ]; then
   # `llvm-cov report` re-renders the run above from its existing profdata
   # instead of executing the suite a second time, so this costs seconds and is
   # guaranteed to describe the SAME run the percentage came from.
-  if cargo llvm-cov report --lcov --output-path "$TMP/rust.lcov" \
+  if "${cargo_bin[@]}" llvm-cov report --lcov --output-path "$TMP/rust.lcov" \
        --ignore-filename-regex 'frb_generated' \
        --manifest-path "$ROOT/haven-core/Cargo.toml" >/dev/null 2>&1; then
     if ! "$SCRIPT_DIR/check_coverage_floors.sh" rust "$TMP/rust.lcov"; then
