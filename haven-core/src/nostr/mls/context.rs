@@ -10,9 +10,9 @@ use std::sync::Arc;
 use nostr::prelude::{Event, UnsignedEvent};
 
 use super::manager::SessionManager;
-use super::types::GroupId;
+use super::types::{GroupId, ScreenedIngest};
 use crate::nostr::error::{NostrError, Result};
-use cgka_session::{IngestEffects, SessionEffects};
+use cgka_session::SessionEffects;
 
 /// Context for an MLS group used for location sharing.
 ///
@@ -106,14 +106,19 @@ impl MlsGroupContext {
 
     /// Decrypts / ingests a received event for this group.
     ///
-    /// Delegates to [`SessionManager::process_event`]. The returned
-    /// [`IngestEffects`] carries the ingest outcome and any drained events for
-    /// the caller to fold via [`SessionManager::location_result_from_event`].
+    /// Delegates to [`SessionManager::process_event`], propagating its
+    /// [`ScreenedIngest`] verbatim: on
+    /// [`ScreenedIngest::Ingested`] the carried `IngestEffects` holds the ingest
+    /// outcome and any drained events for the caller to fold via
+    /// [`SessionManager::location_result_from_event`], while
+    /// [`ScreenedIngest::RejectedBeforeAuth`] means Haven's local screen dropped
+    /// the event before any MLS authentication — the caller must not treat it as
+    /// an engine verdict (in particular, must not advance a sync cursor for it).
     ///
     /// # Errors
     ///
     /// Returns an error only for hard ingest failures.
-    pub async fn decrypt_event(&self, event: &Event) -> Result<IngestEffects> {
+    pub async fn decrypt_event(&self, event: &Event) -> Result<ScreenedIngest> {
         self.manager.process_event(event).await
     }
 }

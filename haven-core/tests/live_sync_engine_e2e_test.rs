@@ -4,70 +4,173 @@
 //! Proves the full networking glue wires up: the engine `Client` CONNECTS to a
 //! real relay, the supervisor RECEIVES a live `kind:445`, the worker ROUTES it
 //! by its `#h` tag to the right circle context, the processor PROCESSES it, and
-//! the per-circle cursor ADVANCES.
+//! the decrypted location REACHES the fan-out bus.
 //!
-//! # Dark Matter port (DM-5a)
+//! # Why the oracle is a decrypted location on the bus
+//!
+//! Two earlier ports of this file used weaker proxies, and each was invalidated
+//! by the layer underneath it.
 //!
 //! The pre-migration tests observed the traversal via a `Status(Unprocessable)`
-//! bus emit for an undecryptable 445. The DM engine classifies an undecryptable
-//! / unknown-group 445 as `Ok(Stale)` (not an error), so no Unprocessable fires;
-//! instead the per-circle cursor ADVANCES. The whole connect → subscribe →
-//! receive → route → process path is therefore proven via the observable cursor
-//! advance (the arithmetic side effect of a Processed/Stale ingest).
+//! bus emit for an undecryptable 445; the Dark Matter engine classifies an
+//! undecryptable / unknown-group 445 as `Ok(Stale)` (not an error), so that
+//! emit stopped firing. The DM-5a port therefore switched to "the per-circle
+//! cursor advanced".
+//!
+//! That proxy is gone too, and for a reason worth stating: a delivered event no
+//! longer advances any cursor, because its outer `created_at` is chosen by
+//! whoever signed the envelope and is bound to nothing the engine authenticates
+//! (see `live_sync::anchor`). In this plane the cursor moves when a relay sends
+//! `EOSE`, which happens whether or not a single event was routed — so a
+//! cursor-based delivery assertion would now pass VACUOUSLY.
+//!
+//! So these tests use real circles and real locations: a
+//! `LiveSyncEvent::Location` carrying the expected `nostr_group_id` and sender
+//! can only appear if the event traversed connect → subscribe → receive → route
+//! → decrypt → emit. That is what the file claims to prove, and unlike both
+//! proxies it cannot be satisfied by anything else.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use haven_core::circle::CircleManager;
-use haven_core::relay::live_sync::{group_cursor_stream, CircleSpec, HealthAction, LiveSyncCore};
-use nostr::{Alphabet, EventBuilder, Keys, Kind, SingleLetterTag, Tag, TagKind};
+use haven_core::circle::{CircleConfig, CircleManager, MemberKeyPackage};
+use haven_core::location::LocationMessage;
+use haven_core::nostr::mls::types::GroupId;
+use haven_core::relay::live_sync::{
+    group_cursor_stream, CircleSpec, HealthAction, LiveSyncCore, LiveSyncEvent,
+};
+use haven_core::relay::maintenance::build_kp_maintenance_events;
+use nostr::{Event, Keys};
 use nostr_relay_builder::MockRelay;
 use nostr_sdk::Client;
 use tempfile::TempDir;
 
-/// Publishes a `kind:445` carrying `#h = h_value` via a fresh publisher.
-async fn publish_kind445(url: &str, h_value: &str) {
+/// A real MLS circle the engine's `CircleManager` administers, plus the peer
+/// whose locations it will receive.
+struct RealCircle {
+    peer: Arc<CircleManager>,
+    peer_keys: Keys,
+    mls_group_id: GroupId,
+    nostr_group_id: [u8; 32],
+    _peer_dir: TempDir,
+}
+
+impl RealCircle {
+    fn hex(&self) -> String {
+        hex::encode(self.nostr_group_id)
+    }
+
+    fn spec(&self, url: &str) -> CircleSpec {
+        CircleSpec {
+            group_id_hex: self.hex(),
+            relays: vec![url.to_string()],
+        }
+    }
+
+    /// A genuine, MLS-encrypted `kind:445` location from the peer.
+    async fn peer_location(&self, lat: f64, lon: f64) -> Event {
+        self.peer
+            .encrypt_location(
+                &self.mls_group_id,
+                &self.peer_keys.public_key(),
+                &LocationMessage::new(lat, lon),
+                600,
+            )
+            .await
+            .expect("peer encrypts a location")
+            .0
+    }
+}
+
+/// Creates a circle administered by `admin` with one fresh peer member.
+async fn real_circle(
+    admin: &Arc<CircleManager>,
+    admin_keys: &Keys,
+    relays: &[String],
+) -> RealCircle {
+    let peer_dir = TempDir::new().unwrap();
+    let peer_keys = Keys::generate();
+    let peer = Arc::new(CircleManager::new_unencrypted(peer_dir.path(), &peer_keys).unwrap());
+    let kp_event = build_kp_maintenance_events(
+        peer.session(),
+        &peer_keys,
+        &["wss://kp.example.com".to_string()],
+        None,
+    )
+    .await
+    .expect("peer key package")
+    .event;
+    let member = MemberKeyPackage {
+        key_package_event: kp_event,
+        inbox_relays: vec!["wss://inbox.example.com".to_string()],
+        nip65_relays: vec![],
+    };
+
+    let config = CircleConfig::new("Engine E2E Circle").with_relays(relays.to_vec());
+    let result = admin
+        .create_circle(admin_keys, vec![member], &config, relays)
+        .await
+        .expect("create circle");
+    let mls_group_id = result.circle.mls_group_id.clone();
+    let nostr_group_id = result.circle.nostr_group_id;
+    admin
+        .confirm_published(result.pending)
+        .await
+        .expect("confirm creation");
+
+    let welcome = result
+        .welcome_events
+        .iter()
+        .find(|w| w.recipient_pubkey == peer_keys.public_key().to_hex())
+        .expect("welcome for the peer");
+    peer.process_gift_wrapped_invitation(&peer_keys, &welcome.event)
+        .await
+        .expect("peer processes the welcome");
+    peer.accept_invitation(&welcome.event.id)
+        .await
+        .expect("peer joins");
+
+    RealCircle {
+        peer,
+        peer_keys,
+        mls_group_id,
+        nostr_group_id,
+        _peer_dir: peer_dir,
+    }
+}
+
+/// Publishes `event` to `url` from a publisher independent of the engine.
+async fn publish(url: &str, event: &Event) {
     let publisher = Client::builder().build();
     publisher.add_relay(url).await.unwrap();
     publisher.connect().await;
-    let event = EventBuilder::new(Kind::Custom(445), "opaque-ciphertext")
-        .tags([Tag::custom(
-            TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
-            [h_value.to_string()],
-        )])
-        .sign_with_keys(&Keys::generate())
-        .unwrap();
-    publisher
-        .send_event(&event)
-        .await
-        .expect("publish kind:445");
+    publisher.send_event(event).await.expect("publish");
 }
 
-/// Polls `circle`'s per-circle cursor for `group_hex` until it exceeds `floor`
-/// (or the budget elapses). Returns whether it advanced.
-async fn wait_cursor_advanced(
-    circle: &CircleManager,
-    group_hex: &str,
-    floor: Option<i64>,
+/// Waits (bounded) for a decrypted location from `circle`'s peer on the bus.
+///
+/// Consumes unrelated events so a `Status` or another circle's `Location`
+/// cannot mask the one being waited for.
+async fn wait_for_location(
+    bus: &mut tokio::sync::broadcast::Receiver<LiveSyncEvent>,
+    circle: &RealCircle,
     budget: Duration,
 ) -> bool {
-    let key = group_cursor_stream(group_hex);
+    let want_gid = circle.nostr_group_id.to_vec();
+    let want_sender = circle.peer_keys.public_key().to_hex();
     let deadline = tokio::time::Instant::now() + budget;
-    loop {
-        let cur = circle.read_sync_cursor(&key).ok().flatten();
-        let advanced = match (cur, floor) {
-            (Some(c), Some(f)) => c > f,
-            (Some(_), None) => true,
-            _ => false,
-        };
-        if advanced {
-            return true;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), bus.recv()).await {
+            Ok(Ok(LiveSyncEvent::Location {
+                nostr_group_id,
+                sender_pubkey,
+                ..
+            })) if nostr_group_id == want_gid && sender_pubkey == want_sender => return true,
+            Ok(Ok(_)) | Err(_) => {}
+            Ok(Err(_)) => return false,
         }
-        if tokio::time::Instant::now() >= deadline {
-            return false;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    false
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -80,35 +183,27 @@ async fn engine_receives_routes_and_processes_a_kind445_over_a_real_relay() {
     let url = relay.url().await.to_string();
 
     let dir = TempDir::new().unwrap();
-    let circle =
-        Arc::new(CircleManager::new_unencrypted(dir.path(), &nostr::Keys::generate()).unwrap());
-    let engine = LiveSyncCore::new_local(Arc::clone(&circle), Keys::generate().public_key());
+    let admin_keys = Keys::generate();
+    let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &admin_keys).unwrap());
+    let fx = real_circle(&circle, &admin_keys, std::slice::from_ref(&url)).await;
 
-    let group_hex = hex::encode([0xABu8; 32]); // stand-in nostr_group_id
+    let engine = LiveSyncCore::new_local(Arc::clone(&circle), admin_keys.public_key());
+    let mut bus = engine.bus().subscribe();
     engine
-        .start(
-            &[CircleSpec {
-                group_id_hex: group_hex.clone(),
-                relays: vec![url.clone()],
-            }],
-            &[],
-        )
+        .start(&[fx.spec(&url)], &[])
         .await
         .expect("engine starts and subscribes");
     tokio::time::sleep(Duration::from_millis(500)).await; // REQ registers
 
-    let seed = circle
-        .read_sync_cursor(&group_cursor_stream(&group_hex))
-        .unwrap();
+    // A separate publisher sends the peer's real kind:445 for our circle.
+    publish(&url, &fx.peer_location(52.370_216, 4.895_168).await).await;
 
-    // A separate publisher sends a kind:445 carrying our circle's #h.
-    publish_kind445(&url, &group_hex).await;
-
-    // The event must traverse connect → subscribe → receive → route → process →
-    // cursor-advance (the Stale ingest's observable side effect).
+    // The event must traverse connect → subscribe → receive → route → decrypt →
+    // emit. Nothing but a genuine delivery produces this.
     assert!(
-        wait_cursor_advanced(&circle, &group_hex, seed, Duration::from_secs(8)).await,
-        "the relayed kind:445 must traverse the whole engine path and advance the per-circle cursor"
+        wait_for_location(&mut bus, &fx, Duration::from_secs(15)).await,
+        "the relayed kind:445 must traverse the whole engine path and surface as \
+         a decrypted location"
     );
 
     // Teardown only: every assertion has already run. The outcome is not
@@ -120,9 +215,9 @@ async fn engine_receives_routes_and_processes_a_kind445_over_a_real_relay() {
 }
 
 /// Two circles sharing one relay set are served by a SINGLE multiplexed `#h`
-/// REQ on ONE socket: both deliver (both cursors advance), and an `#h` the engine
-/// did not subscribe to is excluded by the relay-side filter (its cursor is never
-/// created — the event never reaches the engine).
+/// REQ on ONE socket: both deliver, and an `#h` the engine did not subscribe to
+/// is excluded by the relay-side filter (its cursor is never created — the event
+/// never reaches the engine).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn engine_multiplexes_two_circles_and_drops_unsubscribed_h() {
     let _ = haven_core::relay::allow_ws_loopback_for_test();
@@ -130,48 +225,38 @@ async fn engine_multiplexes_two_circles_and_drops_unsubscribed_h() {
     let url = relay.url().await.to_string();
 
     let dir = TempDir::new().unwrap();
-    let circle =
-        Arc::new(CircleManager::new_unencrypted(dir.path(), &nostr::Keys::generate()).unwrap());
-    let engine = LiveSyncCore::new_local(Arc::clone(&circle), Keys::generate().public_key());
-
-    let hex_a = hex::encode([0xA1u8; 32]);
-    let hex_b = hex::encode([0xB2u8; 32]);
+    let admin_keys = Keys::generate();
+    let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &admin_keys).unwrap());
+    let fx_a = real_circle(&circle, &admin_keys, std::slice::from_ref(&url)).await;
+    let fx_b = real_circle(&circle, &admin_keys, std::slice::from_ref(&url)).await;
     let hex_unsubscribed = hex::encode([0xCCu8; 32]);
+
+    let engine = LiveSyncCore::new_local(Arc::clone(&circle), admin_keys.public_key());
+    let mut bus = engine.bus().subscribe();
     engine
-        .start(
-            &[
-                CircleSpec {
-                    group_id_hex: hex_a.clone(),
-                    relays: vec![url.clone()],
-                },
-                CircleSpec {
-                    group_id_hex: hex_b.clone(),
-                    relays: vec![url.clone()],
-                },
-            ],
-            &[],
-        )
+        .start(&[fx_a.spec(&url), fx_b.spec(&url)], &[])
         .await
         .expect("start");
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let seed_a = circle
-        .read_sync_cursor(&group_cursor_stream(&hex_a))
-        .unwrap();
-    let seed_b = circle
-        .read_sync_cursor(&group_cursor_stream(&hex_b))
-        .unwrap();
-
-    publish_kind445(&url, &hex_a).await;
-    publish_kind445(&url, &hex_b).await;
-    publish_kind445(&url, &hex_unsubscribed).await; // must be filtered out
+    publish(&url, &fx_a.peer_location(1.0, 2.0).await).await;
+    publish(&url, &fx_b.peer_location(3.0, 4.0).await).await;
+    // A 445 for a circle the engine never subscribed to; must be filtered out.
+    publish(
+        &url,
+        &nostr::EventBuilder::new(nostr::Kind::Custom(445), "opaque-ciphertext")
+            .tags([nostr::Tag::parse(["h", &hex_unsubscribed]).unwrap()])
+            .sign_with_keys(&Keys::generate())
+            .unwrap(),
+    )
+    .await;
 
     assert!(
-        wait_cursor_advanced(&circle, &hex_a, seed_a, Duration::from_secs(8)).await,
+        wait_for_location(&mut bus, &fx_a, Duration::from_secs(15)).await,
         "circle A delivers on the multiplexed socket"
     );
     assert!(
-        wait_cursor_advanced(&circle, &hex_b, seed_b, Duration::from_secs(8)).await,
+        wait_for_location(&mut bus, &fx_b, Duration::from_secs(15)).await,
         "circle B delivers on the SAME multiplexed socket"
     );
     // The unsubscribed #h never reaches the engine (relay-side filter): it was
@@ -194,37 +279,26 @@ async fn engine_multiplexes_two_circles_and_drops_unsubscribed_h() {
 
 /// `resume_after_background` re-anchors the subscriptions: it emits
 /// `BackgroundResumed` (proving the resume path executed, not a silent no-op)
-/// AND a `kind:445` published after resume is still delivered (cursor advances).
+/// AND a `kind:445` published after resume is still delivered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn engine_resume_after_background_re_anchors_and_still_delivers() {
-    use haven_core::relay::live_sync::{LiveSyncEvent, SyncStatusReason};
+    use haven_core::relay::live_sync::SyncStatusReason;
 
     let _ = haven_core::relay::allow_ws_loopback_for_test();
     let relay = MockRelay::run().await.expect("mock relay");
     let url = relay.url().await.to_string();
 
     let dir = TempDir::new().unwrap();
-    let circle =
-        Arc::new(CircleManager::new_unencrypted(dir.path(), &nostr::Keys::generate()).unwrap());
-    let engine = LiveSyncCore::new_local(Arc::clone(&circle), Keys::generate().public_key());
-    let group_hex = hex::encode([0x7Eu8; 32]);
-    engine
-        .start(
-            &[CircleSpec {
-                group_id_hex: group_hex.clone(),
-                relays: vec![url.clone()],
-            }],
-            &[],
-        )
-        .await
-        .expect("start");
+    let admin_keys = Keys::generate();
+    let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &admin_keys).unwrap());
+    let fx = real_circle(&circle, &admin_keys, std::slice::from_ref(&url)).await;
+
+    let engine = LiveSyncCore::new_local(Arc::clone(&circle), admin_keys.public_key());
+    engine.start(&[fx.spec(&url)], &[]).await.expect("start");
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Subscribe BEFORE resume so we observe the BackgroundResumed status.
     let mut rx = engine.bus().subscribe();
-    let seed = circle
-        .read_sync_cursor(&group_cursor_stream(&group_hex))
-        .unwrap();
     engine
         .resume_after_background()
         .await
@@ -248,10 +322,10 @@ async fn engine_resume_after_background_re_anchors_and_still_delivers() {
         "resume must emit BackgroundResumed (proves the resume path executed)"
     );
 
-    // Post-resume delivery: an event published after resume advances the cursor.
-    publish_kind445(&url, &group_hex).await;
+    // Post-resume delivery: an event published after resume still arrives.
+    publish(&url, &fx.peer_location(9.0, 9.0).await).await;
     assert!(
-        wait_cursor_advanced(&circle, &group_hex, seed, Duration::from_secs(8)).await,
+        wait_for_location(&mut rx, &fx, Duration::from_secs(15)).await,
         "an event published after resume must still be received and processed"
     );
 

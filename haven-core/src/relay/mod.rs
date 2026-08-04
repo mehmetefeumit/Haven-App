@@ -25,6 +25,7 @@
 
 pub mod auto_commit;
 pub mod catchup;
+pub mod clock_skew;
 pub mod cursor;
 pub mod discovery;
 mod error;
@@ -39,10 +40,15 @@ pub use auto_commit::{
     resolve_receive_publish_work, rollback_receive_publish_work, AutoCommitPublisher,
 };
 pub use catchup::{CatchupOutcome, ReceiveOnlyOutcome};
+pub use clock_skew::{
+    classify_publish_outcome, classify_relay_rejection, publish_retry_is_hopeless,
+    DeviceClockComplaint, CLOCK_SKEW_ALERT_THRESHOLD_SECS, DEVICE_CLOCK_REJECTED_TOKEN,
+    TOTAL_LOSS_SKEW_SECS,
+};
 pub use cursor::{
-    cap_timestamp_to_now, since_for_stream, SubscribePhase, GROUP_INITIAL_BUFFER_SECS,
-    GROUP_RESUBSCRIBE_BUFFER_SECS, INBOX_GIFTWRAP_LOOKBACK_SECS, STREAM_GROUP_445,
-    STREAM_INBOX_1059,
+    cap_timestamp_to_now, cursor_ms_for_event, since_for_stream, SubscribePhase,
+    GROUP_INITIAL_BUFFER_SECS, GROUP_RESUBSCRIBE_BUFFER_SECS, INBOX_GIFTWRAP_LOOKBACK_SECS,
+    STREAM_GROUP_445, STREAM_INBOX_1059,
 };
 pub use discovery::{discovery_relays, set_discovery_relays_for_test, PRODUCTION_DISCOVERY_RELAYS};
 pub use error::{RelayError, RelayResult};

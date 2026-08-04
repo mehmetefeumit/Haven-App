@@ -1882,6 +1882,49 @@ class AppLocalizationsNe extends AppLocalizations {
   String get mapLocationUnavailable => 'स्थान अस्थायी रूपमा उपलब्ध छैन';
 
   @override
+  String get mapLocationNoPermissionTitle =>
+      'Haven ले तपाईंको स्थान प्रयोग गर्न सक्दैन';
+
+  @override
+  String get mapLocationSharingStoppedServiceOff =>
+      'यो यन्त्रमा स्थान निष्क्रिय भएकाले Haven ले तपाईंको स्थान तपाईंका सर्कलसँग साझा गर्न छाडेको छ। फेरि सुरु गर्न स्थान सक्रिय गर्नुहोस्।';
+
+  @override
+  String get mapLocationSharingStoppedPermission =>
+      'Haven लाई अब तपाईंको स्थान प्रयोग गर्ने अनुमति छैन, त्यसैले साझेदारी रोकिएको छ। फेरि सुरु गर्न Haven का लागि स्थानलाई अनुमति दिनुहोस्।';
+
+  @override
+  String get mapLocationSharingStoppedPermissionSettings =>
+      'सिस्टम सेटिङमा Haven का लागि स्थानको पहुँच बन्द गरिएको छ, त्यसैले साझेदारी रोकिएको छ। फेरि सुरु गर्न त्यहीँ गएर अनुमति दिनुहोस्।';
+
+  @override
+  String get mapLocationSharingStoppedBoth =>
+      'Haven ले तपाईंको स्थान साझा गर्न छाडेको छ। यो यन्त्रमा स्थान सक्रिय गर्नुहोस् र Haven लाई स्थान प्रयोग गर्ने अनुमति दिनुहोस्।';
+
+  @override
+  String get mapLocationSharingStoppedUnknown =>
+      'Haven ले तपाईंको स्थान पाउन छाडेको छ, त्यसैले साझेदारी रोकिएको छ। स्थान सक्रिय छ र Haven लाई त्यो प्रयोग गर्ने अनुमति छ कि छैन जाँच्नुहोस्।';
+
+  @override
+  String get mapLocationAccessRestoredAnnouncement =>
+      'Haven ले अब तपाईंको स्थान प्रयोग गर्न सक्छ। साझेदारी फेरि सुरु भएको छ।';
+
+  @override
+  String get clockSkewTitle => 'यो फोनको घडी मिलेको छैन';
+
+  @override
+  String get clockSkewBodyRejected =>
+      'यो फोनले तपाईंको स्थानमा राख्ने समय रिलेहरूले अस्वीकार गर्छन्, त्यसैले तपाईंका सर्कलहरूले त्यो पाइरहेका छैनन्। यो मिलाउन सिस्टम सेटिङमा मिति र समय स्वतः सेट गर्ने सुविधा सक्रिय गर्नुहोस्।';
+
+  @override
+  String get clockSkewBodyBehind =>
+      'यो फोनको समय तपाईंका सर्कलका अरू सदस्यहरूको भन्दा पछाडि छ। यसले तपाईंको स्थान पठाउँछ त, तर कसैले देख्नुअघि नै त्यसको समयसीमा सकिन्छ। यो मिलाउन सिस्टम सेटिङमा मिति र समय स्वतः सेट गर्ने सुविधा सक्रिय गर्नुहोस्।';
+
+  @override
+  String get clockSkewResolvedAnnouncement =>
+      'घडीको समस्या हटेको छ। Haven ले फेरि तपाईंको स्थान साझा गर्दै छ।';
+
+  @override
   String get mapThisLocation => 'यो स्थान';
 
   @override

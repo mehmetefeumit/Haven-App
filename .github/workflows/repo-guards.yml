@@ -52,6 +52,20 @@
 #     (never hardcoded), the C4 disable-while-paused watcher installed
 #     outside the liveSync-gated path, presence-only location logging.
 #
+#   Location access gate ordering     scripts/ci/check_location_access_gate.sh
+#     No stored coordinate may outlive the user's location access. The
+#     geolocator service caches the stream's latest fix (168 s of servable
+#     exposure), and only STATEMENT ORDER stops that cache — and the
+#     iOS-backgrounded last-known shortcut — from being served ahead of the
+#     permission/provider gate, which is where they used to sit. Also pins:
+#     every denial CLEARS the cache instead of merely refusing the call; the
+#     gate never raises a permission prompt while backgrounded (iOS defers it
+#     and geolocator never resolves the future); the gate reads the granted
+#     ACCURACY, the only signal for a Precise-Location/FINE downgrade that
+#     checkPermission still calls whileInUse; and the per-circle publish
+#     chain bounds each link, since a hung future raises no error for
+#     catchError to catch.
+#
 #   Locale stays device-local         scripts/ci/check_locale_privacy.sh
 #     The app language must remain a local preference and never be referenced
 #     from the service layer (nothing locale-shaped may reach a relay).
@@ -60,6 +74,12 @@
 #     The transport-nostr-peeler's with_exporter_label hook is the only local
 #     lever that can downgrade the kind-445 exporter derivation away from
 #     "marmot/group-event"; Haven's Rust source must never name it.
+#
+#   Clock-skew policy parity          scripts/ci/check_clock_skew_policy_parity.sh
+#     The device-clock skew policy lives authoritatively in Rust and is
+#     mirrored in Dart across an FFI with no shared source of truth. If the
+#     wire token drifts, Dart silently stops recognising a fast-clock
+#     rejection and the failure goes invisible again with nothing else red.
 #
 #   MDK supply-chain shape            scripts/ci/check_mdk_supply_chain.sh
 #     haven-core/Cargo.lock must hold exactly the five Dark Matter crates —
@@ -207,6 +227,26 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_ios_background_publish.sh
 
+      # The gate that stops a cached GPS fix outliving the consent for it is
+      # enforced by nothing but statement ORDER — the permission/provider
+      # checks used to sit BELOW the warm-cache and last-known shortcuts, so
+      # both published coordinates the user had already revoked. Putting them
+      # back is a one-line reorder that compiles, reads naturally in a diff
+      # hunk, and can be made to pass the unit tests by softening one stub.
+      - name: Location access gate precedes every coordinate
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_location_access_gate.sh
+
+      # The guard above is an ordering analysis over a comment-stripped view,
+      # so its fixtures pin both directions and the two ways it could rot: a
+      # correctly ordered service must PASS (or a guard hard-coded to fail
+      # would look right on every negative fixture), a DELETED gate must fail
+      # loudly rather than pass for want of an anchor, and a doc comment that
+      # merely mentions the gate must not count as calling it.
+      - name: Location access gate guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_location_access_gate.sh --self-test
+
       - name: Locale stays device-local
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_locale_privacy.sh
@@ -214,6 +254,10 @@ jobs:
       - name: No exporter-label override
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_no_exporter_label_override.sh
+
+      - name: Clock-skew policy parity
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_clock_skew_policy_parity.sh
 
       - name: MDK supply-chain shape
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

@@ -1908,6 +1908,48 @@ class AppLocalizationsAr extends AppLocalizations {
   String get mapLocationUnavailable => 'الموقع غير متاح مؤقتًا';
 
   @override
+  String get mapLocationNoPermissionTitle => 'لا يستطيع Haven استخدام موقعك';
+
+  @override
+  String get mapLocationSharingStoppedServiceOff =>
+      'الموقع مُعطّل على هذا الجهاز، لذا توقّف Haven عن مشاركة موقعك مع دوائرك. فعّل الموقع لتُستأنف المشاركة.';
+
+  @override
+  String get mapLocationSharingStoppedPermission =>
+      'لم يعد لدى Haven إذن باستخدام موقعك، فتوقّفت مشاركته. اسمح بالوصول إلى الموقع لتُستأنف المشاركة.';
+
+  @override
+  String get mapLocationSharingStoppedPermissionSettings =>
+      'وصول تطبيق Haven إلى موقعك مُعطّل في إعدادات النظام، لذا توقّفت المشاركة. اسمح به من هناك لتُستأنف المشاركة.';
+
+  @override
+  String get mapLocationSharingStoppedBoth =>
+      'توقّف Haven عن مشاركة موقعك. فعّل الموقع على هذا الجهاز، واسمح لتطبيق Haven باستخدامه.';
+
+  @override
+  String get mapLocationSharingStoppedUnknown =>
+      'لم يعد Haven يتلقّى موقعك، لذا توقّفت المشاركة. تحقّق من أنّ الموقع مُفعّل وأنّ تطبيق Haven مسموح له باستخدامه.';
+
+  @override
+  String get mapLocationAccessRestoredAnnouncement =>
+      'عاد الوصول إلى الموقع. يشارك Haven موقعك من جديد.';
+
+  @override
+  String get clockSkewTitle => 'ساعة هذا الهاتف غير مضبوطة';
+
+  @override
+  String get clockSkewBodyRejected =>
+      'لا يصل موقعك إلى دوائرك، لأنّ المُرحِّلات ترفض وقت الإرسال الذي يسجّله هذا الهاتف. فعّل ضبط التاريخ والوقت تلقائيًا في إعدادات النظام لحلّ المشكلة.';
+
+  @override
+  String get clockSkewBodyBehind =>
+      'هذا الهاتف متأخّر في التوقيت عن بقية أعضاء دوائرك، فهو يرسل تحديثات موقعك، لكن تنتهي صلاحيتها قبل أن يراها أحد. فعّل ضبط التاريخ والوقت تلقائيًا في إعدادات النظام لحلّ المشكلة.';
+
+  @override
+  String get clockSkewResolvedAnnouncement =>
+      'انتهت مشكلة الساعة. يشارك Haven موقعك من جديد.';
+
+  @override
   String get mapThisLocation => 'هذا الموقع';
 
   @override

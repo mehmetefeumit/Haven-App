@@ -23,7 +23,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use nostr::{Event, RelayUrl, SubscriptionId};
+use nostr::{Event, RelayMessage, RelayUrl, SubscriptionId};
 use nostr_sdk::RelayPoolNotification;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, watch, RwLock};
@@ -44,24 +44,61 @@ pub struct RawEvent {
     pub event: Event,
 }
 
+/// What the receiver hands the worker: a delivered event, or a relay's
+/// end-of-stored-events for one subscription.
+///
+/// The two are carried on the SAME channel deliberately. EOSE is the live
+/// plane's only cursor-advance signal (see [`super::anchor`]), and it must be
+/// observed AFTER every stored event the relay sent before it — a separate
+/// channel would race the backlog and let the cursor claim events the worker
+/// has not ingested yet.
+///
+/// `RawEvent` is boxed so the channel's slot size is set by the small EOSE
+/// variant rather than by a whole `nostr::Event`: the queue is bounded at
+/// [`super::config`]'s worker cap and a `try_send` that finds it full DROPS the
+/// signal, so keeping the per-slot cost low is what keeps that cap meaningful.
+#[derive(Debug, Clone)]
+pub enum RawSignal {
+    /// A first-seen event on a live subscription.
+    Event(Box<RawEvent>),
+    /// A relay finished replaying its stored events for one subscription.
+    EndOfStoredEvents {
+        /// Relay that sent the EOSE.
+        relay_url: RelayUrl,
+        /// Subscription it terminates the stored phase of.
+        subscription_id: SubscriptionId,
+    },
+}
+
 /// What the receiver loop should do with one pool notification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotifDisposition {
     /// A first-seen `Event`: extract + forward to the worker.
     Forward,
+    /// A relay's `EOSE`: forward to the worker as a cursor-anchor signal.
+    ForwardEose,
     /// The pool shut down: stop the loop cleanly.
     Stop,
-    /// A `Message`/auth/other notification we don't act on.
+    /// A relay message / auth / other notification we don't act on.
     Ignore,
 }
 
 /// Classifies one pool notification (pure; testable without a runtime).
+///
+/// `EndOfStoredEvents` is singled out of the `Message` arm because it is the
+/// only relay message the live plane trusts for anything: it is the relay
+/// stating that it has handed over everything it stored for a REQ, which is what
+/// lets the cursor advance to that REQ's LOCAL open time instead of to an event's
+/// remotely-chosen `created_at`.
 #[must_use]
 pub const fn notification_disposition(n: &RelayPoolNotification) -> NotifDisposition {
     match n {
         RelayPoolNotification::Event { .. } => NotifDisposition::Forward,
         RelayPoolNotification::Shutdown => NotifDisposition::Stop,
-        RelayPoolNotification::Message { .. } => NotifDisposition::Ignore,
+        RelayPoolNotification::Message { message, .. } => match message {
+            RelayMessage::EndOfStoredEvents(_) => NotifDisposition::ForwardEose,
+            _ => NotifDisposition::Ignore,
+        },
     }
 }
 
@@ -118,7 +155,7 @@ pub fn canonical_group_hex(nostr_group_id: &[u8]) -> String {
 /// breaks that cycle.
 pub async fn run_receiver(
     mut notifications: broadcast::Receiver<RelayPoolNotification>,
-    tx: mpsc::Sender<RawEvent>,
+    tx: mpsc::Sender<RawSignal>,
     shutdown: Arc<AtomicBool>,
     mut cancel: watch::Receiver<bool>,
 ) {
@@ -148,10 +185,26 @@ pub async fn run_receiver(
                         // try_send (never await) so the notification consumer
                         // cannot lag the pool; a full channel drops to cursor
                         // replay, never to a wedged receiver.
-                        let _ = tx.try_send(RawEvent {
+                        let _ = tx.try_send(RawSignal::Event(Box::new(RawEvent {
                             relay_url,
                             subscription_id,
                             event: *event,
+                        })));
+                    }
+                }
+                NotifDisposition::ForwardEose => {
+                    if let RelayPoolNotification::Message {
+                        relay_url,
+                        message: RelayMessage::EndOfStoredEvents(subscription_id),
+                    } = n
+                    {
+                        // Dropped on a full channel like any other signal — and
+                        // dropping it is the SAFE direction: a missed EOSE only
+                        // means the cursor does not advance this generation, so
+                        // the next REQ re-requests a wider window.
+                        let _ = tx.try_send(RawSignal::EndOfStoredEvents {
+                            relay_url,
+                            subscription_id: subscription_id.into_owned(),
                         });
                     }
                 }
@@ -176,21 +229,53 @@ pub async fn run_receiver(
 /// catch-up replay anything skipped), so one adversarial event can never blind
 /// the whole receive path.
 pub async fn run_worker(
-    mut rx: mpsc::Receiver<RawEvent>,
+    mut rx: mpsc::Receiver<RawSignal>,
     router: Arc<RwLock<Router>>,
     processor: Arc<EngineProcessor>,
 ) {
-    while let Some(raw) = rx.recv().await {
+    while let Some(signal) = rx.recv().await {
+        let (relay_url, subscription_id) = match &signal {
+            RawSignal::Event(raw) => (raw.relay_url.clone(), raw.subscription_id.clone()),
+            RawSignal::EndOfStoredEvents {
+                relay_url,
+                subscription_id,
+            } => (relay_url.clone(), subscription_id.clone()),
+        };
+
         // Resolve the subscription context (cloned so the router lock is not held
         // across the ingest).
         let ctx = {
             router
                 .read()
                 .await
-                .lookup(raw.relay_url.as_str(), &raw.subscription_id)
+                .lookup(relay_url.as_str(), &subscription_id)
                 .cloned()
         };
         let Some(ctx) = ctx else { continue };
+
+        let raw = match signal {
+            RawSignal::Event(raw) => *raw,
+            RawSignal::EndOfStoredEvents { .. } => {
+                // The live plane's ONLY cursor-advance signal. It is handled
+                // HERE, after the worker has already drained every stored event
+                // the relay sent ahead of it on this same channel, so the
+                // advance can never claim an event this worker has not ingested.
+                //
+                // Only the group plane anchors on it: the inbox cursor is
+                // advanced by the foreground after a successful hold, never here.
+                if ctx.plane == PlaneKind::Group {
+                    for group_hex in &ctx.group_ids_hex {
+                        if processor.note_end_of_stored_events(group_hex) {
+                            log::debug!(
+                                "[live_sync::worker] EOSE anchored cursor group={}…",
+                                group_hex.get(..8).unwrap_or(group_hex.as_str()),
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
+        };
 
         match ctx.plane {
             PlaneKind::Inbox => processor.process_inbox_event(&raw.event),
@@ -304,6 +389,42 @@ mod tests {
             NotifDisposition::Stop
         );
     }
+
+    #[test]
+    fn eose_is_forwarded_and_every_other_relay_message_is_ignored() {
+        // EOSE is the live plane's ONLY cursor-advance signal, so dropping it
+        // into the `Message` catch-all would silently freeze every per-circle
+        // cursor. The complement matters just as much: no other relay message
+        // may be mistaken for a completeness claim.
+        let relay_url = RelayUrl::parse("wss://relay.example").unwrap();
+        let eose = RelayPoolNotification::Message {
+            relay_url: relay_url.clone(),
+            message: RelayMessage::EndOfStoredEvents(std::borrow::Cow::Owned(SubscriptionId::new(
+                "sub",
+            ))),
+        };
+        assert_eq!(
+            notification_disposition(&eose),
+            NotifDisposition::ForwardEose
+        );
+
+        for other in [
+            RelayMessage::Closed {
+                subscription_id: std::borrow::Cow::Owned(SubscriptionId::new("sub")),
+                message: std::borrow::Cow::Borrowed("closed"),
+            },
+            RelayMessage::Notice(std::borrow::Cow::Borrowed("hello")),
+        ] {
+            assert_eq!(
+                notification_disposition(&RelayPoolNotification::Message {
+                    relay_url: relay_url.clone(),
+                    message: other,
+                }),
+                NotifDisposition::Ignore,
+                "only EOSE may be read as end-of-stored-events",
+            );
+        }
+    }
 }
 
 /// Panic-isolation (R6 / GAP-A) and Lagged/Closed-survival (R7 / GAP-B+F) tests
@@ -323,7 +444,7 @@ mod supervisor_isolation_tests {
     use tempfile::TempDir;
     use tokio::sync::{broadcast, mpsc, RwLock};
 
-    use super::{run_receiver, run_worker, RawEvent};
+    use super::{run_receiver, run_worker, RawEvent, RawSignal};
     use crate::circle::CircleManager;
     use crate::relay::live_sync::{
         EngineProcessor, EventBus, LiveSyncEvent, Router, SyncStatusReason,
@@ -367,13 +488,15 @@ mod supervisor_isolation_tests {
             &HashSet::from([group_hex.clone()]),
         );
 
-        let (tx, worker_rx) = mpsc::channel::<RawEvent>(16);
+        let (tx, worker_rx) = mpsc::channel::<RawSignal>(16);
         tokio::spawn(run_worker(worker_rx, Arc::clone(&router), processor));
 
-        let raw = |content: &str| RawEvent {
-            relay_url: RelayUrl::parse(&relay).unwrap(),
-            subscription_id: sub.clone(),
-            event: event_445(&group_hex, content),
+        let raw = |content: &str| {
+            RawSignal::Event(Box::new(RawEvent {
+                relay_url: RelayUrl::parse(&relay).unwrap(),
+                subscription_id: sub.clone(),
+                event: event_445(&group_hex, content),
+            }))
         };
         // TWO panic events (each trips the `#[cfg(test)]` seam inside
         // `process_group_event`): the worker isolates each panic (the ingest runs
@@ -417,7 +540,7 @@ mod supervisor_isolation_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_receiver_survives_lagged_then_stops_on_closed() {
         let (btx, brx) = broadcast::channel::<RelayPoolNotification>(4);
-        let (mtx, mut mrx) = mpsc::channel::<RawEvent>(64);
+        let (mtx, mut mrx) = mpsc::channel::<RawSignal>(64);
         let shutdown = Arc::new(AtomicBool::new(false));
 
         let notif = |content: &str| {
@@ -447,8 +570,9 @@ mod supervisor_isolation_tests {
 
         // The receiver must swallow Lagged and still forward the post-lag marker.
         let mut forwarded = false;
-        while let Ok(Some(raw)) = tokio::time::timeout(Duration::from_secs(2), mrx.recv()).await {
-            if raw.event.id == marker_id {
+        while let Ok(Some(signal)) = tokio::time::timeout(Duration::from_secs(2), mrx.recv()).await
+        {
+            if matches!(signal, RawSignal::Event(raw) if raw.event.id == marker_id) {
                 forwarded = true;
                 break;
             }
@@ -489,7 +613,7 @@ mod supervisor_isolation_tests {
     #[tokio::test]
     async fn run_receiver_exits_on_cancel_without_any_pool_notification() {
         let (btx, brx) = broadcast::channel::<RelayPoolNotification>(4);
-        let (mtx, _mrx) = mpsc::channel::<RawEvent>(4);
+        let (mtx, _mrx) = mpsc::channel::<RawSignal>(4);
         let shutdown = Arc::new(AtomicBool::new(false));
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
@@ -521,7 +645,7 @@ mod supervisor_isolation_tests {
     #[tokio::test]
     async fn run_receiver_observes_a_cancel_raised_before_it_subscribed() {
         let (btx, brx) = broadcast::channel::<RelayPoolNotification>(4);
-        let (mtx, _mrx) = mpsc::channel::<RawEvent>(4);
+        let (mtx, _mrx) = mpsc::channel::<RawSignal>(4);
         let shutdown = Arc::new(AtomicBool::new(false));
         // Mirror `LiveSyncCore`'s construction EXACTLY, because the details are
         // the whole test. An earlier version reused the receiver from

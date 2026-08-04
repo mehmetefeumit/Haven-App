@@ -1912,6 +1912,49 @@ class AppLocalizationsFr extends AppLocalizations {
   String get mapLocationUnavailable => 'Position temporairement indisponible';
 
   @override
+  String get mapLocationNoPermissionTitle =>
+      'Haven n\'a pas accès à votre position';
+
+  @override
+  String get mapLocationSharingStoppedServiceOff =>
+      'La localisation est désactivée sur cet appareil : Haven a donc cessé de partager votre position avec vos cercles. Réactivez la localisation pour reprendre le partage.';
+
+  @override
+  String get mapLocationSharingStoppedPermission =>
+      'Haven n\'a plus l\'autorisation d\'utiliser votre position : le partage s\'est donc arrêté. Accordez de nouveau cette autorisation pour reprendre le partage.';
+
+  @override
+  String get mapLocationSharingStoppedPermissionSettings =>
+      'L\'accès à votre position est désactivé pour Haven : le partage s\'est donc arrêté. Réactivez cet accès dans les réglages du système pour reprendre le partage.';
+
+  @override
+  String get mapLocationSharingStoppedBoth =>
+      'Haven a cessé de partager votre position. Réactivez la localisation sur cet appareil, puis autorisez Haven à l\'utiliser.';
+
+  @override
+  String get mapLocationSharingStoppedUnknown =>
+      'Haven ne reçoit plus votre position : le partage s\'est donc arrêté. Vérifiez que la localisation est activée et que Haven est autorisé à l\'utiliser.';
+
+  @override
+  String get mapLocationAccessRestoredAnnouncement =>
+      'L\'accès à la localisation est rétabli. Haven partage à nouveau votre position.';
+
+  @override
+  String get clockSkewTitle => 'L\'horloge de ce téléphone est déréglée';
+
+  @override
+  String get clockSkewBodyRejected =>
+      'Vos cercles ne reçoivent pas votre position : les relais refusent l\'heure que ce téléphone y inscrit. Activez la date et l\'heure automatiques dans les réglages du système pour y remédier.';
+
+  @override
+  String get clockSkewBodyBehind =>
+      'Ce téléphone retarde sur le reste de vos cercles : les positions qu\'il envoie expirent donc avant que quiconque puisse les voir. Activez la date et l\'heure automatiques dans les réglages du système pour y remédier.';
+
+  @override
+  String get clockSkewResolvedAnnouncement =>
+      'Le problème d\'horloge est résolu. Haven partage à nouveau votre position.';
+
+  @override
   String get mapThisLocation => 'cet emplacement';
 
   @override

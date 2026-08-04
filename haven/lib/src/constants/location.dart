@@ -139,6 +139,12 @@ const String kForegroundActiveAtMsKey = 'haven.foreground_active_at_ms';
 /// iOS background publish path avoid the one-shot `getCurrentPosition`
 /// entirely — the plugin's one-time CLLocationManager never enables
 /// background delivery, so a backgrounded one-shot can only stall.
+///
+/// This is a FRESHNESS bound and never a consent bound. Whether the user
+/// still has location access is decided per call by
+/// `GeolocatorLocationService._ensureAccessOrThrow()`, and any observed
+/// loss clears the cache outright, so this window can never become a tail
+/// of publishing after a revoked permission or a switched-off provider.
 const Duration kStreamPositionMaxAge = kLocationPublishMaxInterval;
 
 // ---------------------------------------------------------------------------
@@ -182,3 +188,44 @@ const String kBackgroundSessionReclaimAtMsKey =
 /// one costs little, while retrying every tick against an unfixable condition
 /// costs a live-sync teardown each time.
 const Duration kBackgroundSessionReclaimBackoff = Duration(minutes: 15);
+
+// ---------------------------------------------------------------------------
+// Device-clock skew
+// ---------------------------------------------------------------------------
+
+/// Skew magnitude at which every location this device publishes is discarded
+/// by a correctly-clocked peer.
+///
+/// A receiver drops an event whose NIP-40 expiration is more than
+/// `RECEIVER_EXPIRATION_GRACE_SECS` (60 s) into its past, and the expiration is
+/// `created_at + LOCATION_MESSAGE_RETENTION_SECS` (228 s) — both computed from
+/// the *sender's* clock. A publisher lagging by this much therefore loses 100 %
+/// of its updates while still seeing a successful relay ACK.
+///
+/// Drift-check only; the authoritative value lives in Rust at
+/// `haven_core::relay::clock_skew::TOTAL_LOSS_SKEW_SECS`.
+const Duration kClockSkewTotalLossThreshold = Duration(seconds: 288);
+
+/// Skew magnitude at or above which Haven tells the user their clock is wrong.
+///
+/// Derived from the two constants that bound what actually breaks, not chosen
+/// for feel:
+///
+/// * **Lower bound — do not cry wolf.** `RECEIVER_EXPIRATION_GRACE_SECS` is
+///   60 s: the band of disagreement the protocol already absorbs by design.
+///   Alerting inside it would fire on skew that costs the user nothing.
+///   `2 × 60 = 120` sits strictly outside every tolerated band.
+/// * **Upper bound — do not hide real breakage.** At
+///   [kClockSkewTotalLossThreshold] (288 s) delivery is already 100 % lost and
+///   silent; the alarm must fire well before that.
+/// * **It is already a real defect here.** The no-gap invariant is
+///   `retention (228 s) > max publish gap (168 s)`. A publisher lagging 120 s
+///   has an effective relay residency of `228 − 120 = 108 s`, under the 168 s
+///   worst-case inter-publish gap, so peers are *guaranteed* coverage holes.
+///
+/// Moving this in either direction is a behaviour change: widening hides
+/// breakage, narrowing cries wolf. Pinned by `clock_skew_detector_test.dart`
+/// and, against the Rust original
+/// (`haven_core::relay::clock_skew::CLOCK_SKEW_ALERT_THRESHOLD_SECS`), by
+/// `scripts/ci/check_clock_skew_policy_parity.sh`.
+const Duration kClockSkewAlertThreshold = Duration(seconds: 120);

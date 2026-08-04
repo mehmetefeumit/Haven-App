@@ -111,6 +111,38 @@ class LocationPublishSchedulerNotifier extends Notifier<void> {
   /// suspenders on top of the engine's own session mutex).
   Future<void> _publishChain = Future<void>.value();
 
+  /// Ceiling on a single chained publish before the chain moves on without
+  /// it.
+  ///
+  /// A FIFO chain has one structural failure mode: a link that never
+  /// completes is not an error the `catchError` below can absorb, it is a
+  /// permanent stall. Every later tick — for EVERY circle — queues behind
+  /// it, and only [build] resets the chain, so a single hung await ends
+  /// location sharing for the rest of the process, silently. One route in
+  /// was a backgrounded iOS permission prompt that iOS defers and
+  /// geolocator never resolves; that specific route is closed at the
+  /// source in `GeolocatorLocationService`, but the fragility is the
+  /// chain's, not that call site's, so it is bounded here too.
+  ///
+  /// 3 minutes is chosen to be unreachable by a slow-but-honest publish
+  /// and still bounded: the composed internal ceilings are the 30 s
+  /// one-shot GPS `timeLimit` plus the Rust relay publisher's ~49 s worst
+  /// case (3 attempts × (`CONNECTION_TIMEOUT` + `DEFAULT_TIMEOUT`) + 2
+  /// backoffs, `haven-core/src/relay/manager.rs`), i.e. ≈79 s — so this
+  /// leaves better than 2× headroom, while still recovering within about
+  /// one publish cadence.
+  ///
+  /// Letting the abandoned link run on does not weaken Rule 14. The
+  /// single-writer guarantee is the engine's `tokio::sync::Mutex<
+  /// AccountDeviceSession>`, which every `encrypt_location` funnels
+  /// through (documented at `rust_builder/src/api.rs`'s `encryptLocation`);
+  /// this chain is the belt on top of those suspenders, and a stall long
+  /// enough to trip this cap is overwhelmingly in the GPS/permission
+  /// stage, before the engine is touched at all.
+  static const Duration _defaultPublishLinkTimeout = Duration(minutes: 3);
+
+  Duration _publishLinkTimeout = _defaultPublishLinkTimeout;
+
   bool _disposed = false;
 
   /// Whether recurring publishing is active. Set false while the app is
@@ -192,9 +224,25 @@ class LocationPublishSchedulerNotifier extends Notifier<void> {
     final circle = _circles[key];
     if (circle == null) return; // removed between arm and fire
     // Enqueue onto the single serialization chain. catchError keeps one failed
-    // publish from poisoning the chain for later circles.
+    // publish from poisoning the chain for later circles, and the timeout
+    // keeps one HUNG publish from poisoning it forever (see
+    // [_defaultPublishLinkTimeout] — an unfinished future raises no error, so
+    // catchError alone cannot see it).
+    //
+    // The timeout is constructed INSIDE the `then`, so its clock starts when
+    // the link begins rather than when it is enqueued; starting it at enqueue
+    // time would make queued links expire for the sin of waiting their turn.
     _publishChain = _publishChain
-        .then((_) => _publishCircle(circle, generation))
+        .then(
+          (_) => _publishCircle(circle, generation).timeout(
+            _publishLinkTimeout,
+            onTimeout: () => debugPrint(
+              '[LocationPublishScheduler] per-circle publish exceeded '
+              '${_publishLinkTimeout.inSeconds}s — abandoning the link so the '
+              'chain keeps moving',
+            ),
+          ),
+        )
         .catchError((Object _) {});
   }
 
@@ -256,6 +304,14 @@ class LocationPublishSchedulerNotifier extends Notifier<void> {
 
   @visibleForTesting
   bool get isActiveForTest => _active;
+
+  /// Shortens [_defaultPublishLinkTimeout] so the wedge-recovery property is
+  /// provable in milliseconds instead of minutes. Production never writes it.
+  @visibleForTesting
+  // A getter would be dead weight: nothing reads this back, and the
+  // production value is the const above.
+  // ignore: avoid_setters_without_getters
+  set publishLinkTimeoutForTest(Duration value) => _publishLinkTimeout = value;
 
   /// Enqueues a per-circle tick immediately (as a real timer would) and returns
   /// the serialization chain snapshot INCLUDING it — `await` the result to let

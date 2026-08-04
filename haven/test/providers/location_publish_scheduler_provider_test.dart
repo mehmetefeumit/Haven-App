@@ -51,6 +51,7 @@ void main() {
     List<Circle> circles, {
     bool disclosureAccepted = true,
     int sample = 120,
+    LocationService? locationService,
   }) {
     SharedPreferences.setMockInitialValues({
       if (disclosureAccepted) kLocationDisclosureAcceptedKey: true,
@@ -65,7 +66,9 @@ void main() {
         identityServiceProvider.overrideWithValue(
           _MockIdentityService(identity: identity),
         ),
-        locationServiceProvider.overrideWithValue(_FixedLocationService()),
+        locationServiceProvider.overrideWithValue(
+          locationService ?? _FixedLocationService(),
+        ),
         circleServiceProvider.overrideWithValue(mock),
         locationSharingServiceProvider.overrideWithValue(sharing),
         locationPublishJitterSamplerProvider.overrideWithValue((_) => sample),
@@ -174,6 +177,51 @@ void main() {
         env.mock.encryptedMlsGroupIds,
         [const [1], const [2]],
         reason: 'both publish, in enqueue order, once the first releases',
+      );
+    });
+
+    test('a HUNG publish does not wedge the chain for every other circle',
+        () async {
+      // The FIFO chain's structural failure mode: a link that never
+      // completes raises no error, so `catchError` cannot see it, every
+      // later tick for EVERY circle queues behind it, and only `build()`
+      // resets the chain — neither stop/startScheduling does. One hung
+      // await therefore ends location sharing for the rest of the process,
+      // silently. The route that made this reachable was a backgrounded
+      // iOS permission prompt that iOS defers and geolocator never
+      // resolves.
+      final a = TestCircleFactory.createCircle(
+        mlsGroupId: const [1],
+        nostrGroupId: const [10],
+        members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+      );
+      final b = TestCircleFactory.createCircle(
+        mlsGroupId: const [2],
+        nostrGroupId: const [20],
+        members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+      );
+      final wedging = _WedgingLocationService();
+      addTearDown(wedging.release);
+      final env = build([a, b], locationService: wedging);
+      final notifier = await ready(env.container);
+      notifier.publishLinkTimeoutForTest = const Duration(milliseconds: 50);
+
+      // A's tick hangs inside getCurrentLocation; B's queues behind it.
+      unawaited(notifier.triggerTickForTest(_hex(const [10])));
+      final second = notifier.triggerTickForTest(_hex(const [20]));
+
+      await second.timeout(
+        const Duration(seconds: 5),
+        onTimeout: () => fail(
+          'the chain never advanced past the wedged link — one hung publish '
+          'kills location sharing for the whole process lifetime',
+        ),
+      );
+
+      expect(
+        env.mock.encryptedMlsGroupIds,
+        [const [2]],
+        reason: 'B must still publish; A never got a fix, so it must not',
       );
     });
 
@@ -296,6 +344,27 @@ class _MockIdentityService implements IdentityService {
   Future<void> setDisplayName(String? name) async {}
   @override
   Future<void> clearCache() async {}
+}
+
+/// Hangs the FIRST `getCurrentLocation()` forever and serves every later one
+/// normally — the shape of a backgrounded iOS permission prompt that the OS
+/// defers and geolocator never resolves.
+class _WedgingLocationService extends _FixedLocationService {
+  final Completer<Position> _wedge = Completer<Position>();
+  bool _wedged = false;
+
+  /// Frees the abandoned link at teardown so the test isolate does not exit
+  /// with a future nobody will ever complete.
+  void release() {
+    if (!_wedge.isCompleted) _wedge.completeError(StateError('test teardown'));
+  }
+
+  @override
+  Future<Position> getCurrentLocation() {
+    if (_wedged) return super.getCurrentLocation();
+    _wedged = true;
+    return _wedge.future;
+  }
 }
 
 class _FixedLocationService implements LocationService {

@@ -104,6 +104,12 @@ void main() {
           locationSettings: anyNamed('locationSettings'),
         ),
       ).thenAnswer((_) => Stream.fromIterable([mockPosition]));
+      // The access gate reads the granted ACCURACY on its granted arm; the
+      // mock is `throwOnMissingStub`. Nothing here is about precision, so
+      // pin the undowngraded state.
+      when(
+        mockGeolocator.getLocationAccuracy(),
+      ).thenAnswer((_) async => geo.LocationAccuracyStatus.precise);
       service = GeolocatorLocationService(
         geolocator: mockGeolocator,
         isIOS: true,
@@ -175,13 +181,31 @@ void main() {
 
     test('toggle-off rebuild clears the cached stream position', () async {
       final container = containerWith(backgroundSharing: true);
+      // A live platform stream never completes, and the service treats a
+      // CLOSED stream as "no further fix will arrive" by dropping the
+      // cache — so model the pre-flip stream with an open controller.
+      // A finite stream would empty the cache for the wrong reason and
+      // make this test pass vacuously.
+      final live = StreamController<geo.Position>();
+      addTearDown(live.close);
+      when(
+        mockGeolocator.getPositionStream(
+          locationSettings: anyNamed('locationSettings'),
+        ),
+      ).thenAnswer((_) => live.stream);
       final sub = container.listen(locationStreamProvider, (_, _) {});
       addTearDown(sub.close);
-      // Drain the first emission so the service tee caches it.
+      live.add(mockPosition);
       await container.read(locationStreamProvider.future);
 
       // Sanity: cache is populated → getCurrentLocation serves it without
-      // any one-shot request.
+      // any one-shot request, once the access gate reads granted.
+      when(
+        mockGeolocator.isLocationServiceEnabled(),
+      ).thenAnswer((_) async => true);
+      when(
+        mockGeolocator.checkPermission(),
+      ).thenAnswer((_) async => geo.LocationPermission.whileInUse);
       await service.getCurrentLocation();
       verifyNever(
         mockGeolocator.getCurrentPosition(

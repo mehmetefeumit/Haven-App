@@ -10,7 +10,11 @@
 /// - Fresh position retrieval without fallback
 /// - Position streaming
 /// - Error scenarios and edge cases
+/// - The access gate: no stored coordinate may outlive the user's location
+///   access (see the `access gate` group)
 library;
+
+import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:geolocator/geolocator.dart' as geo;
@@ -33,6 +37,14 @@ void main() {
 
     setUp(() {
       mockGeolocator = MockGeolocatorWrapper();
+      // The access gate reads the granted ACCURACY on its granted arm.
+      // Default every test to the undowngraded state so only the tests
+      // that are about precision have to say anything about it; the
+      // mock is `throwOnMissingStub`, so this is a default, never a
+      // relaxation of an assertion.
+      when(
+        mockGeolocator.getLocationAccuracy(),
+      ).thenAnswer((_) async => geo.LocationAccuracyStatus.precise);
       service = GeolocatorLocationService(geolocator: mockGeolocator);
     });
 
@@ -835,13 +847,20 @@ void main() {
       GeolocatorLocationService serviceFor({required bool isIOS}) =>
           GeolocatorLocationService(geolocator: mockGeolocator, isIOS: isIOS);
 
-      void stubOneShot(geo.Position position) {
+      /// Stubs the access gate as "provider on, permission granted" and
+      /// nothing else, so a test can prove where a returned position came
+      /// from (cache vs one-shot vs last-known).
+      void stubAccessGranted() {
         when(
           mockGeolocator.isLocationServiceEnabled(),
         ).thenAnswer((_) async => true);
         when(
           mockGeolocator.checkPermission(),
         ).thenAnswer((_) async => geo.LocationPermission.whileInUse);
+      }
+
+      void stubOneShot(geo.Position position) {
+        stubAccessGranted();
         when(
           mockGeolocator.getCurrentPosition(
             locationSettings: anyNamed('locationSettings'),
@@ -850,17 +869,28 @@ void main() {
       }
 
       /// Pushes [position] through the service's unified stream so the tee
-      /// populates the cache, then completes.
+      /// populates the cache, and leaves the cache warm.
+      ///
+      /// Deliberately an OPEN [StreamController] rather than
+      /// `Stream.fromIterable`: a real geolocator position stream is
+      /// unbounded, and the service treats a CLOSED stream as "no further
+      /// fix will arrive" and drops the cache. Cancelling the subscription
+      /// (what a settings rebuild does) raises no done event, so the warm
+      /// fix survives — which is the state these tests are about.
       Future<void> seedCache(
         GeolocatorLocationService service,
         geo.Position position,
       ) async {
+        final controller = StreamController<geo.Position>();
         when(
           mockGeolocator.getPositionStream(
             locationSettings: anyNamed('locationSettings'),
           ),
-        ).thenAnswer((_) => Stream.fromIterable([position]));
-        await service.getLocationStream().drain<void>();
+        ).thenAnswer((_) => controller.stream);
+        final sub = service.getLocationStream().listen((_) {});
+        controller.add(position);
+        await Future<void>.delayed(Duration.zero);
+        await sub.cancel();
       }
 
       test(
@@ -868,6 +898,7 @@ void main() {
         () async {
           final service = serviceFor(isIOS: true);
           await seedCache(service, positionAt(DateTime.now()));
+          stubAccessGranted();
 
           final result = await service.getCurrentLocation();
 
@@ -961,6 +992,7 @@ void main() {
         'never attempts the one-shot',
         () async {
           final service = serviceFor(isIOS: true)..foregroundActive = false;
+          stubAccessGranted();
           when(
             mockGeolocator.getLastKnownPosition(),
           ).thenAnswer((_) async => positionAt(DateTime.now()));
@@ -1022,6 +1054,879 @@ void main() {
             locationSettings: anyNamed('locationSettings'),
           ),
         ).called(1);
+      });
+    });
+
+    // -----------------------------------------------------------------
+    // Access gate.
+    //
+    // The cached stream fix (and the iOS-backgrounded last-known read)
+    // used to be served BEFORE the service-enabled and permission checks,
+    // and nothing dropped the cache when access ended. Wherever the
+    // process survives losing location access — an iOS app that keeps
+    // running while backgrounded, an Android app-op flip — that published
+    // the user's last position to their circles for up to
+    // `kStreamPositionMaxAge` (168 s) after consent was gone.
+    //
+    // Two independent properties are pinned here, because either alone
+    // leaves a hole: every position-producing path is GATED on a live
+    // access check, and every observation of lost access CLEARS the cache
+    // rather than letting it age out.
+    // -----------------------------------------------------------------
+    group('access gate — no cached fix may outlive location access', () {
+      /// The coordinate that reaches the cache through the stream tee.
+      geo.Position cachedFix({DateTime? timestamp}) => geo.Position(
+        latitude: 51.5,
+        longitude: -0.12,
+        timestamp: timestamp ?? DateTime.now(),
+        accuracy: 5,
+        altitude: 0,
+        altitudeAccuracy: 1,
+        heading: 0,
+        headingAccuracy: 1,
+        speed: 0,
+        speedAccuracy: 1,
+      );
+
+      /// Distinct from [cachedFix] so an assertion can tell a one-shot
+      /// result apart from a resurrected cache entry.
+      final oneShotFix = geo.Position(
+        latitude: 10,
+        longitude: 20,
+        timestamp: DateTime.now(),
+        accuracy: 5,
+        altitude: 0,
+        altitudeAccuracy: 1,
+        heading: 0,
+        headingAccuracy: 1,
+        speed: 0,
+        speedAccuracy: 1,
+      );
+
+      /// Distinct again, for the iOS-backgrounded branch.
+      final lastKnownFix = geo.Position(
+        latitude: 30,
+        longitude: 40,
+        timestamp: DateTime.now(),
+        accuracy: 5,
+        altitude: 0,
+        altitudeAccuracy: 1,
+        heading: 0,
+        headingAccuracy: 1,
+        speed: 0,
+        speedAccuracy: 1,
+      );
+
+      GeolocatorLocationService serviceFor({bool isIOS = true}) =>
+          GeolocatorLocationService(geolocator: mockGeolocator, isIOS: isIOS);
+
+      void stubServiceEnabled({required bool enabled}) {
+        when(
+          mockGeolocator.isLocationServiceEnabled(),
+        ).thenAnswer((_) async => enabled);
+      }
+
+      void stubPermission(geo.LocationPermission permission) {
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => permission);
+      }
+
+      void stubAccessGranted() {
+        stubServiceEnabled(enabled: true);
+        stubPermission(geo.LocationPermission.whileInUse);
+      }
+
+      void stubAccuracy(geo.LocationAccuracyStatus accuracy) {
+        when(
+          mockGeolocator.getLocationAccuracy(),
+        ).thenAnswer((_) async => accuracy);
+      }
+
+      void stubOneShot(geo.Position position) {
+        when(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenAnswer((_) async => position);
+      }
+
+      /// Subscribes the unified stream, feeds [position] through the tee,
+      /// and hands back the still-open controller plus its subscription so
+      /// a test can end the stream the way the platform would (error or
+      /// close) instead of merely cancelling.
+      Future<
+        ({
+          StreamController<geo.Position> controller,
+          StreamSubscription<Position> subscription,
+        })
+      >
+      openStream(
+        GeolocatorLocationService service,
+        geo.Position position,
+      ) async {
+        final controller = StreamController<geo.Position>();
+        when(
+          mockGeolocator.getPositionStream(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenAnswer((_) => controller.stream);
+        final subscription = service.getLocationStream().listen(
+          (_) {},
+          onError: (Object _) {},
+        );
+        addTearDown(subscription.cancel);
+        controller.add(position);
+        await Future<void>.delayed(Duration.zero);
+        return (controller: controller, subscription: subscription);
+      }
+
+      /// A service whose cache holds a FRESH [cachedFix] — i.e. one the
+      /// pre-fix code would have happily served for the next 168 s.
+      ///
+      /// The stream subscription is cancelled (not closed) afterwards:
+      /// cancellation raises no done event, so this models "the stream ran
+      /// and delivered", not "the stream ended".
+      Future<GeolocatorLocationService> serviceWithWarmCache({
+        bool isIOS = true,
+      }) async {
+        final service = serviceFor(isIOS: isIOS);
+        final handle = await openStream(service, cachedFix());
+        await handle.subscription.cancel();
+        return service;
+      }
+
+      /// Proves the cache is EMPTY by re-granting access and showing the
+      /// next call has to go to the one-shot, returning [oneShotFix]
+      /// rather than the pre-revocation [cachedFix].
+      Future<void> expectCacheDoesNotResurrect(
+        GeolocatorLocationService service,
+      ) async {
+        stubAccessGranted();
+        stubOneShot(oneShotFix);
+
+        final result = await service.getCurrentLocation();
+
+        expect(
+          result.latitude,
+          10,
+          reason: 'a re-grant resurrected the pre-revocation cached fix — '
+              'the cache was bypassed, not cleared',
+        );
+        verify(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).called(1);
+      }
+
+      group('the gate runs before any position is produced', () {
+        test('a fresh cached fix is not served once permission is denied',
+            () async {
+          final service = await serviceWithWarmCache();
+          stubServiceEnabled(enabled: true);
+          stubPermission(geo.LocationPermission.denied);
+          when(
+            mockGeolocator.requestPermission(),
+          ).thenAnswer((_) async => geo.LocationPermission.denied);
+
+          await expectLater(
+            service.getCurrentLocation(),
+            throwsA(isA<LocationServiceException>()),
+          );
+
+          verifyNever(
+            mockGeolocator.getCurrentPosition(
+              locationSettings: anyNamed('locationSettings'),
+            ),
+          );
+          verifyNever(mockGeolocator.getLastKnownPosition());
+        });
+
+        test(
+          'a fresh cached fix is not served once permission reads '
+          'deniedForever (no prompt, no position)',
+          () async {
+            final service = await serviceWithWarmCache();
+            stubServiceEnabled(enabled: true);
+            stubPermission(geo.LocationPermission.deniedForever);
+
+            await expectLater(
+              service.getCurrentLocation(),
+              throwsA(
+                isA<LocationServiceException>().having(
+                  (e) => e.message,
+                  'message',
+                  contains('denied forever'),
+                ),
+              ),
+            );
+
+            // A direct deniedForever read used to fall THROUGH to the
+            // one-shot, whose failure path then returned last-known.
+            verifyNever(mockGeolocator.requestPermission());
+            verifyNever(
+              mockGeolocator.getCurrentPosition(
+                locationSettings: anyNamed('locationSettings'),
+              ),
+            );
+            verifyNever(mockGeolocator.getLastKnownPosition());
+          },
+        );
+
+        test(
+          'a fresh cached fix is not served once the service reports '
+          'disabled',
+          () async {
+            final service = await serviceWithWarmCache();
+            stubServiceEnabled(enabled: false);
+
+            await expectLater(
+              service.getCurrentLocation(),
+              throwsA(
+                isA<LocationServiceException>().having(
+                  (e) => e.message,
+                  'message',
+                  contains('Location services are disabled'),
+                ),
+              ),
+            );
+
+            verifyNever(
+              mockGeolocator.getCurrentPosition(
+                locationSettings: anyNamed('locationSettings'),
+              ),
+            );
+            verifyNever(mockGeolocator.getLastKnownPosition());
+          },
+        );
+
+        test(
+          'the iOS-backgrounded last-known branch is gated on the service '
+          'being enabled',
+          () async {
+            final service = serviceFor()..foregroundActive = false;
+            stubServiceEnabled(enabled: false);
+            when(
+              mockGeolocator.getLastKnownPosition(),
+            ).thenAnswer((_) async => lastKnownFix);
+
+            await expectLater(
+              service.getCurrentLocation(),
+              throwsA(isA<LocationServiceException>()),
+            );
+
+            verifyNever(mockGeolocator.getLastKnownPosition());
+          },
+        );
+
+        test(
+          'the iOS-backgrounded last-known branch is gated on permission',
+          () async {
+            final service = serviceFor()..foregroundActive = false;
+            stubServiceEnabled(enabled: true);
+            stubPermission(geo.LocationPermission.deniedForever);
+            when(
+              mockGeolocator.getLastKnownPosition(),
+            ).thenAnswer((_) async => lastKnownFix);
+
+            await expectLater(
+              service.getCurrentLocation(),
+              throwsA(isA<LocationServiceException>()),
+            );
+
+            verifyNever(mockGeolocator.getLastKnownPosition());
+          },
+        );
+
+        test(
+          'the gate is consulted on EVERY call — a warm cache never '
+          'memoises it away',
+          () async {
+            final service = await serviceWithWarmCache();
+            stubAccessGranted();
+
+            await service.getCurrentLocation();
+            await service.getCurrentLocation();
+
+            verify(mockGeolocator.isLocationServiceEnabled()).called(2);
+            verify(mockGeolocator.checkPermission()).called(2);
+          },
+        );
+
+        test(
+          'an `unableToDetermine` gate withholds the warm cache and falls '
+          'through to the one-shot',
+          () async {
+            // Web-only in production, but the arm is reachable in code and
+            // returning `true` from it — or dropping the `if (granted)`
+            // wrapper the cache read sits inside — would serve a stored
+            // coordinate on an authorization nobody could determine.
+            final service = await serviceWithWarmCache();
+            stubServiceEnabled(enabled: true);
+            stubPermission(geo.LocationPermission.unableToDetermine);
+            stubOneShot(oneShotFix);
+
+            final result = await service.getCurrentLocation();
+
+            expect(
+              result.latitude,
+              10,
+              reason: 'an undeterminable authorization is not consent — the '
+                  'cached fix must be withheld, not served',
+            );
+            verify(
+              mockGeolocator.getCurrentPosition(
+                locationSettings: anyNamed('locationSettings'),
+              ),
+            ).called(1);
+          },
+        );
+
+        test(
+          'an `unableToDetermine` gate also withholds the iOS-backgrounded '
+          'last-known shortcut',
+          () async {
+            // The `if (granted)` wrapper guards the last-known branch as
+            // well as the cache read. Without it a backgrounded iOS call
+            // would hand back a STORED coordinate on an undeterminable
+            // authorization, skipping the one-shot entirely.
+            final service = serviceFor()..foregroundActive = false;
+            stubServiceEnabled(enabled: true);
+            stubPermission(geo.LocationPermission.unableToDetermine);
+            stubOneShot(oneShotFix);
+            when(
+              mockGeolocator.getLastKnownPosition(),
+            ).thenAnswer((_) async => lastKnownFix);
+
+            final result = await service.getCurrentLocation();
+
+            expect(result.latitude, 10);
+            verify(
+              mockGeolocator.getCurrentPosition(
+                locationSettings: anyNamed('locationSettings'),
+              ),
+            ).called(1);
+            verifyNever(mockGeolocator.getLastKnownPosition());
+          },
+        );
+      });
+
+      group('the gate never prompts from the background', () {
+        test(
+          'backgrounded: a denied read is NOT turned into a prompt',
+          () async {
+            // On iOS `denied` covers `notDetermined`, and a prompt raised
+            // while backgrounded is deferred by the OS — geolocator's
+            // delegate early-returns on `notDetermined`, so its
+            // FlutterResult is never invoked and this await would never
+            // return, wedging the per-circle publish chain for the rest of
+            // the process.
+            final service = await serviceWithWarmCache();
+            service.foregroundActive = false;
+            stubServiceEnabled(enabled: true);
+            stubPermission(geo.LocationPermission.denied);
+            // Stubbed to SUCCEED on purpose. Leaving it unstubbed would make
+            // this test go red on a MissingStubError if the guard were ever
+            // removed — red for the right reason by accident. Stubbing a
+            // grant models the real regression instead: the prompt is
+            // reached, iOS answers it (here, instantly), and the call
+            // returns a position it should never have been able to produce.
+            when(
+              mockGeolocator.requestPermission(),
+            ).thenAnswer((_) async => geo.LocationPermission.whileInUse);
+            stubOneShot(oneShotFix);
+
+            await expectLater(
+              service.getCurrentLocation(),
+              throwsA(isA<LocationServiceException>()),
+            );
+
+            verifyNever(mockGeolocator.requestPermission());
+          },
+        );
+
+        test(
+          'the un-prompted background denial fails CLOSED: no position, and '
+          'the cache is gone',
+          () async {
+            // Skipping the prompt must not become a way to skip the denial:
+            // the un-prompted read stays `denied` and takes the throwing
+            // branch, having dropped the cached fix on the way.
+            final service = await serviceWithWarmCache();
+            service.foregroundActive = false;
+            stubServiceEnabled(enabled: true);
+            stubPermission(geo.LocationPermission.denied);
+            // See the sibling test: a grant that the prompt WOULD have
+            // returned, so removing the foreground guard produces a real
+            // coordinate here rather than a MissingStubError.
+            when(
+              mockGeolocator.requestPermission(),
+            ).thenAnswer((_) async => geo.LocationPermission.whileInUse);
+            stubOneShot(oneShotFix);
+            when(
+              mockGeolocator.getLastKnownPosition(),
+            ).thenAnswer((_) async => lastKnownFix);
+
+            await expectLater(
+              service.getCurrentLocation(),
+              throwsA(isA<LocationServiceException>()),
+            );
+
+            verifyNever(
+              mockGeolocator.getCurrentPosition(
+                locationSettings: anyNamed('locationSettings'),
+              ),
+            );
+            verifyNever(mockGeolocator.getLastKnownPosition());
+
+            service.foregroundActive = true;
+            await expectCacheDoesNotResurrect(service);
+          },
+        );
+
+        test(
+          'foregrounded: a denied read still prompts (the prompt is not '
+          'globally disabled)',
+          () async {
+            final service = serviceFor();
+            stubServiceEnabled(enabled: true);
+            stubPermission(geo.LocationPermission.denied);
+            when(
+              mockGeolocator.requestPermission(),
+            ).thenAnswer((_) async => geo.LocationPermission.whileInUse);
+            stubOneShot(oneShotFix);
+
+            final result = await service.getCurrentLocation();
+
+            expect(result.latitude, 10);
+            verify(mockGeolocator.requestPermission()).called(1);
+          },
+        );
+
+        test(
+          'a re-grant does not resurrect the fix cached before the denial',
+          () async {
+            // The clear inside the `denied` branch runs BEFORE the prompt,
+            // precisely so that saying "Allow" cannot hand back a
+            // coordinate captured while the answer was "no". Nothing else
+            // covers it: the later `case denied:` clear only fires when the
+            // prompt is also refused.
+            final service = await serviceWithWarmCache();
+            stubServiceEnabled(enabled: true);
+            stubPermission(geo.LocationPermission.denied);
+            when(
+              mockGeolocator.requestPermission(),
+            ).thenAnswer((_) async => geo.LocationPermission.whileInUse);
+            stubOneShot(oneShotFix);
+
+            final result = await service.getCurrentLocation();
+
+            expect(
+              result.latitude,
+              10,
+              reason: 're-granting permission resurrected the pre-revocation '
+                  'cached fix — it was bypassed during the denial, not '
+                  'cleared',
+            );
+            verify(
+              mockGeolocator.getCurrentPosition(
+                locationSettings: anyNamed('locationSettings'),
+              ),
+            ).called(1);
+          },
+        );
+      });
+
+      group('a precision downgrade is an access loss too', () {
+        /// Runs one gated call under [accuracy] with a COLD cache, so the
+        /// service records that authorization as the baseline. Returns a
+        /// service whose cache is then warmed from the stream.
+        Future<GeolocatorLocationService> serviceBaselinedAt(
+          geo.LocationAccuracyStatus accuracy,
+        ) async {
+          final service = serviceFor();
+          stubAccessGranted();
+          stubAccuracy(accuracy);
+          stubOneShot(oneShotFix);
+          await service.getCurrentLocation();
+
+          final handle = await openStream(service, cachedFix());
+          await handle.subscription.cancel();
+          return service;
+        }
+
+        test(
+          'precise → reduced drops the cached precise fix',
+          () async {
+            // iOS: Settings → Privacy → Location Services → Precise
+            // Location off. Android: FINE revoked while COARSE remains.
+            // `checkPermission()` keeps reporting whileInUse in both, so
+            // this transition is the only signal there is.
+            final service = await serviceBaselinedAt(
+              geo.LocationAccuracyStatus.precise,
+            );
+            stubAccessGranted();
+            stubAccuracy(geo.LocationAccuracyStatus.reduced);
+            stubOneShot(oneShotFix);
+
+            final result = await service.getCurrentLocation();
+
+            expect(
+              result.latitude,
+              10,
+              reason: 'a fix captured under a precise grant was served after '
+                  'the user downgraded to approximate location',
+            );
+          },
+        );
+
+        test(
+          'a warm cache of unknown provenance is dropped the first time the '
+          'gate sees `reduced`',
+          () async {
+            // getLocationStream fills the cache WITHOUT running the gate, so
+            // on the first gated call there is no baseline to compare
+            // against. Treating that as "it must have been captured under
+            // the current reduced grant" is the optimistic reading, and the
+            // cache would then be a precise fix from before the downgrade.
+            final service = serviceFor();
+            final handle = await openStream(service, cachedFix());
+            await handle.subscription.cancel();
+            stubAccessGranted();
+            stubAccuracy(geo.LocationAccuracyStatus.reduced);
+            stubOneShot(oneShotFix);
+
+            final result = await service.getCurrentLocation();
+
+            expect(result.latitude, 10);
+          },
+        );
+
+        test(
+          'steady `reduced` still serves the cache (no one-shot per tick)',
+          () async {
+            final service = await serviceBaselinedAt(
+              geo.LocationAccuracyStatus.reduced,
+            );
+            stubAccessGranted();
+            stubAccuracy(geo.LocationAccuracyStatus.reduced);
+
+            final result = await service.getCurrentLocation();
+
+            expect(
+              result.latitude,
+              51.5,
+              reason: 'an approximate-mode user must not be forced onto the '
+                  'one-shot on every publish tick — only the TRANSITION is '
+                  'an access loss',
+            );
+          },
+        );
+
+        test(
+          'reduced → precise is an upgrade and keeps the cache',
+          () async {
+            final service = await serviceBaselinedAt(
+              geo.LocationAccuracyStatus.reduced,
+            );
+            stubAccessGranted();
+            stubAccuracy(geo.LocationAccuracyStatus.precise);
+
+            final result = await service.getCurrentLocation();
+
+            expect(result.latitude, 51.5);
+          },
+        );
+
+        test(
+          'an intervening `unknown` does not destroy a settled `reduced` '
+          'baseline',
+          () async {
+            // `unknown` means "no information", so the baseline must survive
+            // it. Recording it cannot create a false NEGATIVE (the
+            // comparison is against `reduced`, so an `unknown` baseline
+            // still trips the next real downgrade) but it does create a
+            // false POSITIVE: the next reduced read would look like a fresh
+            // downgrade and drop a cache captured under the very same
+            // authorization. That is the direction this pins.
+            final service = await serviceBaselinedAt(
+              geo.LocationAccuracyStatus.reduced,
+            );
+            stubAccessGranted();
+            stubAccuracy(geo.LocationAccuracyStatus.unknown);
+
+            expect((await service.getCurrentLocation()).latitude, 51.5);
+
+            stubAccuracy(geo.LocationAccuracyStatus.reduced);
+            stubOneShot(oneShotFix);
+
+            expect(
+              (await service.getCurrentLocation()).latitude,
+              51.5,
+              reason: 'the `unknown` read was recorded as the baseline, so a '
+                  'steady approximate grant now reads as a downgrade and '
+                  'costs a one-shot every time the platform is unsure',
+            );
+          },
+        );
+
+        test(
+          '`unknown` still lets a later genuine downgrade through',
+          () async {
+            // The other direction: ignoring `unknown` must not make the
+            // service blind to the precise → reduced transition that
+            // follows one.
+            final service = await serviceBaselinedAt(
+              geo.LocationAccuracyStatus.precise,
+            );
+            stubAccessGranted();
+            stubAccuracy(geo.LocationAccuracyStatus.unknown);
+            expect((await service.getCurrentLocation()).latitude, 51.5);
+
+            stubAccuracy(geo.LocationAccuracyStatus.reduced);
+            stubOneShot(oneShotFix);
+
+            expect((await service.getCurrentLocation()).latitude, 10);
+          },
+        );
+
+        test(
+          'the accuracy read is confined to the granted arm',
+          () async {
+            // Android answers `getLocationAccuracy` with a permissionDenied
+            // platform error when neither FINE nor COARSE is held, which
+            // would turn a clean denial into a channel exception.
+            final service = serviceFor();
+            stubServiceEnabled(enabled: true);
+            stubPermission(geo.LocationPermission.deniedForever);
+
+            await expectLater(
+              service.getCurrentLocation(),
+              throwsA(isA<LocationServiceException>()),
+            );
+
+            verifyNever(mockGeolocator.getLocationAccuracy());
+          },
+        );
+
+        test(
+          'getCurrentLocationFresh applies the same downgrade rule',
+          () async {
+            final service = await serviceBaselinedAt(
+              geo.LocationAccuracyStatus.precise,
+            );
+            stubAccessGranted();
+            stubAccuracy(geo.LocationAccuracyStatus.reduced);
+            stubOneShot(oneShotFix);
+
+            await service.getCurrentLocationFresh();
+
+            // The fresh path never serves the cache anyway; what matters is
+            // that it dropped it, so a later getCurrentLocation cannot.
+            stubAccuracy(geo.LocationAccuracyStatus.reduced);
+            expect((await service.getCurrentLocation()).latitude, 10);
+          },
+        );
+      });
+
+      group('losing access clears the cache rather than ageing it out', () {
+        test('a denied permission read clears it', () async {
+          final service = await serviceWithWarmCache();
+          stubServiceEnabled(enabled: true);
+          stubPermission(geo.LocationPermission.denied);
+          when(
+            mockGeolocator.requestPermission(),
+          ).thenAnswer((_) async => geo.LocationPermission.denied);
+          await expectLater(
+            service.getCurrentLocation(),
+            throwsA(isA<LocationServiceException>()),
+          );
+
+          await expectCacheDoesNotResurrect(service);
+        });
+
+        test('a disabled location service clears it', () async {
+          final service = await serviceWithWarmCache();
+          stubServiceEnabled(enabled: false);
+          await expectLater(
+            service.getCurrentLocation(),
+            throwsA(isA<LocationServiceException>()),
+          );
+
+          await expectCacheDoesNotResurrect(service);
+        });
+
+        test('a denial discovered by getCurrentLocationFresh clears it',
+            () async {
+          final service = await serviceWithWarmCache();
+          stubServiceEnabled(enabled: true);
+          stubPermission(geo.LocationPermission.deniedForever);
+          await expectLater(
+            service.getCurrentLocationFresh(),
+            throwsA(isA<LocationServiceException>()),
+          );
+
+          await expectCacheDoesNotResurrect(service);
+        });
+
+        test('the public checkPermission() read clears it on a denial',
+            () async {
+          final service = await serviceWithWarmCache();
+          stubPermission(geo.LocationPermission.deniedForever);
+
+          expect(
+            await service.checkPermission(),
+            LocationPermissionStatus.deniedForever,
+          );
+
+          await expectCacheDoesNotResurrect(service);
+        });
+
+        test(
+          'the public isLocationServiceEnabled() read clears it when off',
+          () async {
+            final service = await serviceWithWarmCache();
+            stubServiceEnabled(enabled: false);
+
+            expect(await service.isLocationServiceEnabled(), isFalse);
+
+            await expectCacheDoesNotResurrect(service);
+          },
+        );
+
+        test('an ungranted requestPermission() clears it', () async {
+          final service = await serviceWithWarmCache();
+          when(
+            mockGeolocator.requestPermission(),
+          ).thenAnswer((_) async => geo.LocationPermission.denied);
+
+          expect(await service.requestPermission(), isFalse);
+
+          await expectCacheDoesNotResurrect(service);
+        });
+
+        test('a mid-stream error clears it', () async {
+          final service = serviceFor();
+          final handle = await openStream(service, cachedFix());
+
+          handle.controller.addError(Exception('provider disabled'));
+          await Future<void>.delayed(Duration.zero);
+
+          await expectCacheDoesNotResurrect(service);
+        });
+
+        test('the stream closing clears it', () async {
+          final service = serviceFor();
+          final handle = await openStream(service, cachedFix());
+
+          await handle.controller.close();
+          await Future<void>.delayed(Duration.zero);
+
+          await expectCacheDoesNotResurrect(service);
+        });
+
+        test('a stream error still reaches subscribers', () async {
+          final service = serviceFor();
+          final controller = StreamController<geo.Position>();
+          when(
+            mockGeolocator.getPositionStream(
+              locationSettings: anyNamed('locationSettings'),
+            ),
+          ).thenAnswer((_) => controller.stream);
+          final errors = <Object>[];
+          final sub = service.getLocationStream().listen(
+            (_) {},
+            onError: errors.add,
+          );
+          addTearDown(sub.cancel);
+
+          controller.addError(Exception('provider disabled'));
+          await Future<void>.delayed(Duration.zero);
+
+          expect(errors, hasLength(1));
+        });
+      });
+
+      group('granted access still works (the cache exists for a reason)', () {
+        test(
+          'backgrounded on iOS: a warm cache is still served with no '
+          'platform position request',
+          () async {
+            final service = await serviceWithWarmCache();
+            service.foregroundActive = false;
+            stubAccessGranted();
+
+            final result = await service.getCurrentLocation();
+
+            expect(result.latitude, 51.5);
+            expect(result.longitude, -0.12);
+            verifyNever(
+              mockGeolocator.getCurrentPosition(
+                locationSettings: anyNamed('locationSettings'),
+              ),
+            );
+            verifyNever(mockGeolocator.getLastKnownPosition());
+          },
+        );
+
+        test(
+          'backgrounded on iOS with a cold cache: the last-known fix is '
+          'still used instead of the doomed one-shot',
+          () async {
+            final service = serviceFor()..foregroundActive = false;
+            stubAccessGranted();
+            when(
+              mockGeolocator.getLastKnownPosition(),
+            ).thenAnswer((_) async => lastKnownFix);
+
+            final result = await service.getCurrentLocation();
+
+            expect(result.latitude, 30);
+            verifyNever(
+              mockGeolocator.getCurrentPosition(
+                locationSettings: anyNamed('locationSettings'),
+              ),
+            );
+          },
+        );
+
+        test(
+          'backgrounded on iOS with `always` permission: still served',
+          () async {
+            final service = await serviceWithWarmCache();
+            service.foregroundActive = false;
+            stubServiceEnabled(enabled: true);
+            stubPermission(geo.LocationPermission.always);
+
+            final result = await service.getCurrentLocation();
+
+            expect(result.latitude, 51.5);
+          },
+        );
+
+        test(
+          'a cache older than kStreamPositionMaxAge still falls through to '
+          'the one-shot under a granted gate',
+          () async {
+            final service = serviceFor();
+            final handle = await openStream(
+              service,
+              cachedFix(
+                timestamp: DateTime.now().subtract(
+                  kStreamPositionMaxAge + const Duration(seconds: 1),
+                ),
+              ),
+            );
+            await handle.subscription.cancel();
+            stubAccessGranted();
+            stubOneShot(oneShotFix);
+
+            final result = await service.getCurrentLocation();
+
+            expect(result.latitude, 10);
+          },
+        );
       });
     });
 

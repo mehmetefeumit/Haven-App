@@ -1428,6 +1428,15 @@ impl CircleManager {
     /// from the send paths. An auto-commit that cannot be serialized is rolled
     /// back here (never surfaced half-formed).
     ///
+    /// An event Haven's receiver-side screen rejected before any MLS
+    /// authentication (an expired NIP-40 replay) yields an EMPTY
+    /// [`DecryptedIngest`]: no results, no auto-commits, nothing persisted. This
+    /// entry point owns no sync cursor, so there is no cursor decision to make
+    /// here — the two planes that do own one
+    /// ([`crate::relay::live_sync`], [`crate::relay::catchup`]) call
+    /// [`crate::nostr::mls::SessionManager::process_event`] directly and match on
+    /// its [`ScreenedIngest`](crate::nostr::mls::types::ScreenedIngest).
+    ///
     /// # Errors
     ///
     /// Returns an error only for a hard ingest failure.
@@ -1435,11 +1444,17 @@ impl CircleManager {
         &self,
         event: &Event,
     ) -> Result<DecryptedIngest> {
-        let ingest = self
+        let screened = self
             .session
             .process_event(event)
             .await
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+        let Some(ingest) = screened.ingested() else {
+            return Ok(DecryptedIngest {
+                results: Vec::new(),
+                auto_commits: Vec::new(),
+            });
+        };
 
         let mut results = fold_group_events(&ingest.effects.events);
         let mut auto_commits = Vec::new();
@@ -3853,11 +3868,18 @@ mod tests {
             .tags(tags)
             .sign_with_keys(&Keys::generate())
             .expect("re-sign replayed event");
-        // Session-level oracle: only the receiver-side guard yields a Stale
-        // outcome with EMPTY effects for this event — without the guard the
-        // engine would either decrypt it (non-empty effects) or classify it
-        // PeelFailed, so this cannot pass vacuously.
-        let ingest = tp
+        // Session-level oracle: only the receiver-side guard yields
+        // `RejectedBeforeAuth` for this event — without the guard the engine
+        // would either decrypt it (an `Ingested` with non-empty effects) or
+        // classify it `Stale { PeelFailed }` (an `Ingested` either way), so this
+        // cannot pass vacuously.
+        //
+        // The variant matters as much as the drop: the guard used to report a
+        // synthetic `Stale`, which both cursor planes read as "advance past
+        // this". Since NOTHING about this replay is authenticated — it is
+        // re-signed here by a throwaway key precisely to model that — its
+        // `created_at` must never be able to move a sync cursor.
+        let screened = tp
             .alice
             .session()
             .process_event(&replayed)
@@ -3865,14 +3887,18 @@ mod tests {
             .expect("expired event is dropped, not an error");
         assert!(
             matches!(
-                ingest.outcome,
-                crate::nostr::mls::types::IngestOutcome::Stale {
-                    reason: crate::nostr::mls::types::StaleReason::AlreadySeen
-                }
+                screened,
+                crate::nostr::mls::types::ScreenedIngest::RejectedBeforeAuth(
+                    crate::nostr::mls::types::PreAuthRejection::Expired
+                )
             ),
-            "the expiration guard must classify the replay as Stale"
+            "the expiration guard must report a PRE-AUTHENTICATION rejection, \
+             never an engine outcome the cursor planes would advance past"
         );
-        assert!(ingest.effects.events.is_empty(), "no effects may surface");
+        assert!(
+            screened.ingested().is_none(),
+            "a pre-auth rejection carries no engine effects at all"
+        );
         // Behavior-level check through the production drain API.
         let results = tp
             .alice

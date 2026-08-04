@@ -66,6 +66,16 @@ class MockGeolocatorWrapper extends _i1.Mock implements _i3.GeolocatorWrapper {
           as _i4.Future<_i2.LocationPermission>);
 
   @override
+  _i4.Future<_i2.LocationAccuracyStatus> getLocationAccuracy() =>
+      (super.noSuchMethod(
+            Invocation.method(#getLocationAccuracy, []),
+            returnValue: _i4.Future<_i2.LocationAccuracyStatus>.value(
+              _i2.LocationAccuracyStatus.reduced,
+            ),
+          )
+          as _i4.Future<_i2.LocationAccuracyStatus>);
+
+  @override
   _i4.Future<_i2.Position> getCurrentPosition({
     required _i2.LocationSettings? locationSettings,
   }) =>

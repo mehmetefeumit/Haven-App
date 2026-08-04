@@ -1861,6 +1861,48 @@ class AppLocalizationsEn extends AppLocalizations {
   String get mapLocationUnavailable => 'Location temporarily unavailable';
 
   @override
+  String get mapLocationNoPermissionTitle => 'Haven can\'t use your location';
+
+  @override
+  String get mapLocationSharingStoppedServiceOff =>
+      'Location is off on this device, so Haven has stopped sharing your location with your circles. Turn location on to start again.';
+
+  @override
+  String get mapLocationSharingStoppedPermission =>
+      'Haven no longer has permission to use your location, so sharing has stopped. Allow location access to start again.';
+
+  @override
+  String get mapLocationSharingStoppedPermissionSettings =>
+      'Location access for Haven is turned off in system settings, so sharing has stopped. Allow it there to start again.';
+
+  @override
+  String get mapLocationSharingStoppedBoth =>
+      'Haven has stopped sharing your location. Turn location on for this device and allow Haven to use it.';
+
+  @override
+  String get mapLocationSharingStoppedUnknown =>
+      'Haven has stopped receiving your location, so sharing has stopped. Check that location is on and that Haven is allowed to use it.';
+
+  @override
+  String get mapLocationAccessRestoredAnnouncement =>
+      'Haven can use your location again. Sharing has resumed.';
+
+  @override
+  String get clockSkewTitle => 'This phone\'s clock is wrong';
+
+  @override
+  String get clockSkewBodyRejected =>
+      'Your circles are not receiving your location, because the relays reject the time this phone stamps on it. Turn on automatic date and time in system settings to fix it.';
+
+  @override
+  String get clockSkewBodyBehind =>
+      'This phone is running behind the rest of your circles, so the locations it sends expire before anyone can see them. Turn on automatic date and time in system settings to fix it.';
+
+  @override
+  String get clockSkewResolvedAnnouncement =>
+      'The clock problem is gone. Haven is sharing your location again.';
+
+  @override
   String get mapThisLocation => 'this location';
 
   @override

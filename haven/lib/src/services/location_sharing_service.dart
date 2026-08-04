@@ -10,6 +10,7 @@ import 'package:flutter/foundation.dart';
 import 'package:haven/src/constants/location.dart';
 
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/clock_skew_detector.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 
@@ -118,10 +119,15 @@ class LocationSharingService {
   /// [maxSeenEventIds] and [cacheEvictionGrace] are exposed for tests
   /// to exercise eviction behaviour at small scales. Production code
   /// should accept the defaults.
+  /// [clockSkewDetector] receives both halves of the device-clock evidence:
+  /// the verdict of every publish, and every MLS-authenticated peer timestamp
+  /// this service decrypts. Optional so existing tests that do not care about
+  /// clock skew construct unchanged; production always supplies the singleton.
   LocationSharingService({
     required CircleService circleService,
     required RelayService relayService,
     IdentityService? identityService,
+    ClockSkewDetector? clockSkewDetector,
     this.maxSeenEventIds = _defaultMaxSeenEventIds,
     this.cacheEvictionGrace = _defaultCacheEvictionGrace,
     DateTime Function() now = DateTime.now,
@@ -133,6 +139,7 @@ class LocationSharingService {
        _circleService = circleService,
        _relayService = relayService,
        _identityService = identityService,
+       _clockSkewDetector = clockSkewDetector,
        _now = now;
 
   /// Maximum number of event IDs retained in [_seenEventIds] before
@@ -157,6 +164,7 @@ class LocationSharingService {
   final CircleService _circleService;
   final RelayService _relayService;
   final IdentityService? _identityService;
+  final ClockSkewDetector? _clockSkewDetector;
   final DateTime Function() _now;
 
   /// Cached lowercase-hex own pubkey. Resolved lazily once per process and
@@ -265,11 +273,36 @@ class LocationSharingService {
       'publishing to ${encrypted.relays.length} relay(s)',
     );
 
-    // Step 2: Publish to relays
-    final publishResult = await _relayService.publishEvent(
-      eventJson: encrypted.eventJson,
-      relays: encrypted.relays,
-    );
+    // Step 2: Publish to relays.
+    //
+    // The outcome is reported to the clock-skew detector BEFORE it is returned
+    // or rethrown. That ordering is the fix, not a detail: every caller of this
+    // method drops the result on the floor (the per-circle scheduler and the
+    // publisher provider both `catch`-and-`debugPrint`), so routing the verdict
+    // through the service itself is what stops a relay's "your timestamp is out
+    // of range" from dying in a log line no user will ever read.
+    final PublishResult publishResult;
+    try {
+      publishResult = await _relayService.publishEvent(
+        eventJson: encrypted.eventJson,
+        relays: encrypted.relays,
+      );
+    } on RelayClockRejectionException catch (e) {
+      _clockSkewDetector?.recordPublishClockRejection(e.complaintToken);
+      debugPrint(
+        '[LocationService] evt=$encryptedEvtTag publish refused — the relays '
+        'judged the device clock wrong (${e.complaintToken})',
+      );
+      rethrow;
+    } on Object catch (e) {
+      _clockSkewDetector?.recordPublishError(e);
+      debugPrint(
+        '[LocationService] evt=$encryptedEvtTag publish failed: '
+        '${e.runtimeType}',
+      );
+      rethrow;
+    }
+    _clockSkewDetector?.recordPublishResult(publishResult);
     debugPrint(
       '[LocationService] evt=$encryptedEvtTag publish done — '
       'accepted=${publishResult.acceptedBy.length}, '
@@ -488,6 +521,20 @@ class LocationSharingService {
     required DecryptedLocation decrypted,
     required String? ownPubkeyHex,
   }) async {
+    // Device-clock evidence, signal 2. This is the single funnel every receive
+    // plane (poll fetch, evolution poll, live-sync stream) reaches, so one hook
+    // here covers all three.
+    //
+    // `decrypted.timestamp` is the sender's own clock reading from INSIDE the
+    // MLS ciphertext and `decrypted.senderPubkey` is the MLS-authenticated
+    // member id — never the outer kind-445 `created_at`, which is
+    // unauthenticated and attacker-writable. Self-echoes are already dropped by
+    // both call sites, so a sample can only come from another member.
+    _clockSkewDetector?.recordPeerTimestamp(
+      senderPubkey: decrypted.senderPubkey,
+      peerTimestamp: decrypted.timestamp,
+    );
+
     // Look up the existing member entry so the cache row carries the
     // sender's local petname (Contact table), if any.
     final member = circle.members

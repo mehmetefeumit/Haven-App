@@ -150,14 +150,23 @@ impl LocationEventBuilder {
     ///
     /// # Errors
     ///
-    /// Returns an error if ingest fails hard, or if the event did not yield an
-    /// application message (e.g. it was a commit/proposal, was stale, or was
-    /// buffered for a future epoch), or if deserialization fails.
+    /// Returns an error if ingest fails hard, if Haven's receiver-side screen
+    /// dropped the event before authentication (an expired NIP-40 replay), or if
+    /// the event did not yield an application message (e.g. it was a
+    /// commit/proposal, was stale, or was buffered for a future epoch), or if
+    /// deserialization fails.
     ///
     /// [`GroupEvent`]: cgka_traits::engine::GroupEvent
     pub async fn decrypt(&self, event: &Event, group: &MlsGroupContext) -> Result<LocationMessage> {
-        // Step 1: Delegate to the engine for peel + ingest.
-        let ingest = group.decrypt_event(event).await?;
+        // Step 1: Delegate to the engine for peel + ingest. A pre-authentication
+        // rejection never reached the engine, so there is nothing to fold — and,
+        // unlike an engine outcome, it says nothing about the event (Security
+        // Rule 6: the message names only the local policy, never the event).
+        let Some(ingest) = group.decrypt_event(event).await?.ingested() else {
+            return Err(NostrError::Decryption(
+                "event rejected by the receiver-side expiration screen".to_string(),
+            ));
+        };
 
         // Step 2: Fold the emitted GroupEvents; the first location application
         // message carries the inner content. Commits/proposals/state changes

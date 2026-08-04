@@ -14,6 +14,7 @@ import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/tile_cache_policy.dart';
 import 'package:haven/src/constants/tile_prefetch_policy.dart';
 import 'package:haven/src/providers/circles_provider.dart';
+import 'package:haven/src/providers/location_access_provider.dart';
 import 'package:haven/src/providers/location_disclosure_provider.dart';
 import 'package:haven/src/providers/location_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
@@ -43,6 +44,49 @@ import 'package:url_launcher/url_launcher.dart';
 class MapPage extends ConsumerStatefulWidget {
   /// Creates the map page.
   const MapPage({super.key});
+
+  /// Whether the user's OWN location marker may be drawn.
+  ///
+  /// False whenever location access is blocked, even if a fix is still in
+  /// memory. Haven never persists an own-location, and a dot left on the map
+  /// under a "location is off" banner would assert the one thing that is no
+  /// longer true — that this is where the user is NOW. Peer markers are
+  /// deliberately untouched: their freshness is governed by their own
+  /// publish/expiry, and hiding them would remove information the outage did
+  /// not take away.
+  ///
+  /// Pure and static so the decision is unit-testable: pumping [MapPage] needs
+  /// the Rust bridge (`HavenCore.newInstance()` in `initState`).
+  @visibleForTesting
+  static bool showOwnLocationMarker({
+    required bool hasFix,
+    required bool accessBlocked,
+  }) => hasFix && !accessBlocked;
+
+  /// Whether the full-viewport loading scrim should cover the map.
+  ///
+  /// Blocked access is not a loading state: without this gate, clearing the
+  /// marker on an access loss would drop the map behind an indefinite
+  /// "Loading map…" scrim that no fix will ever lift.
+  @visibleForTesting
+  static bool showLoadingScrim({
+    required bool hasFix,
+    required bool hasError,
+    required bool locationDeclined,
+    required bool accessBlocked,
+  }) => !hasFix && !hasError && !locationDeclined && !accessBlocked;
+
+  /// Whether the full-viewport error empty state should cover the map.
+  ///
+  /// Suppressed while access is blocked so the banner is the single surface
+  /// for that condition — two overlays stating the same thing, one of which
+  /// hides the circle members who are still visible, is worse than one.
+  @visibleForTesting
+  static bool showFullScreenError({
+    required bool hasFix,
+    required bool hasError,
+    required bool accessBlocked,
+  }) => hasError && !hasFix && !accessBlocked;
 
   @override
   ConsumerState<MapPage> createState() => _MapPageState();
@@ -225,6 +269,32 @@ class _MapPageState extends ConsumerState<MapPage>
     }
   }
 
+  /// Handles every position-stream state, not just the happy one.
+  ///
+  /// This was `next.whenData(_updateLocationFromPosition)`, which runs ONLY for
+  /// `AsyncData`. An `AsyncError` — the plugin's mid-stream
+  /// `LocationServiceDisabledException` when the OS location provider is
+  /// switched off, or a revoked permission — was dropped on the floor, as was
+  /// a stream that simply stopped, and the map went on drawing the last fix as
+  /// though it were current. [locationAccessProvider] owns the user-facing
+  /// verdict (it is the only thing that can ask the platform WHY, and it also
+  /// covers the silent-stop case that no listener can see); this listener must
+  /// simply stop treating a dead stream as a healthy one.
+  void _onPositionStreamEvent(
+    AsyncValue<Position>? previous,
+    AsyncValue<Position> next,
+  ) {
+    if (next is AsyncError<Position>) {
+      // Type only — never the raw error (Security Rule 8).
+      debugPrint('[MapPage] position stream error: ${next.error.runtimeType}');
+      return;
+    }
+    if (next is AsyncData<Position>) {
+      _updateLocationFromPosition(next.value);
+    }
+    // AsyncLoading: a (re)subscribe is in flight; keep the current view.
+  }
+
   /// Processes a GPS position update from the location service.
   void _updateLocationFromPosition(Position position) {
     if (_core == null || !mounted) return;
@@ -330,6 +400,11 @@ class _MapPageState extends ConsumerState<MapPage>
       }
     } on Exception {
       debugPrint('Location error occurred');
+      // Ask WHY, immediately. This is the one detection trigger that does not
+      // depend on the position stream at all, so a cold start with location
+      // already off surfaces the right cause without waiting for a stream that
+      // may never emit or error.
+      unawaited(ref.read(locationAccessProvider.notifier).refresh());
       if (mounted) {
         setState(() {
           _acquiringLocation = false;
@@ -340,6 +415,9 @@ class _MapPageState extends ConsumerState<MapPage>
   }
 
   void _recenterMap() {
+    // While access is blocked there is no own-location to recenter on (the fix
+    // was cleared), so this degrades to a re-check: the button becomes the
+    // user's manual "I fixed it, look again" affordance.
     if (_obfuscatedLocation != null) {
       // Reset to the app's launch view: recenter on the user, restore the
       // default zoom, and clear any manual rotation back to north-up. This
@@ -437,9 +515,23 @@ class _MapPageState extends ConsumerState<MapPage>
 
   @override
   Widget build(BuildContext context) {
-    // Listen to location stream for updates
-    ref.listen<AsyncValue<Position>>(locationStreamProvider, (previous, next) {
-      next.whenData(_updateLocationFromPosition);
+    // Listen to location stream for updates.
+    ref.listen<AsyncValue<Position>>(
+      locationStreamProvider,
+      _onPositionStreamEvent,
+    );
+
+    // Drop the last fix the moment access is lost. `showOwnLocationMarker`
+    // already gates the marker on the same condition, so this is belt-and-
+    // braces on the display side — its real job is to stop Haven holding an
+    // own-location it can no longer vouch for.
+    // ignore: cascade_invocations — ref.listen returns void, cascade not valid.
+    ref.listen<LocationAccessStatus>(locationAccessProvider, (previous, next) {
+      if (!next.isBlocked || _obfuscatedLocation == null || !mounted) return;
+      setState(() {
+        _obfuscatedLocation = null;
+        _acquiringLocation = false;
+      });
     });
 
     // M-D: Single listener for anticipatory tile prefetch on circle-selection.
@@ -491,6 +583,11 @@ class _MapPageState extends ConsumerState<MapPage>
 
   Widget _buildBody() {
     final l10n = AppLocalizations.of(context);
+    // Watched (not read) so the map's own overlays follow the live access
+    // state, and so this page keeps `locationAccessProvider` alive even if the
+    // shell's banner is ever moved or removed — detection must not depend on
+    // one widget staying where it is.
+    final accessBlocked = ref.watch(locationAccessProvider).isBlocked;
     if (_isInitialized == null) {
       return HavenLoadingIndicator(label: l10n.mapInitializing);
     }
@@ -513,7 +610,7 @@ class _MapPageState extends ConsumerState<MapPage>
         // north-up orientation, member-marker screen positions, off-screen
         // bearing indicators) must NEVER be mirrored under RTL — geography is
         // not reading-direction. Only the surrounding chrome mirrors.
-        _buildMap(),
+        _buildMap(accessBlocked: accessBlocked),
 
         // Map controls (positioned above the collapsed bottom sheet).
         // Intentionally pinned bottom-RIGHT in both LTR and RTL: zoom/recenter
@@ -540,9 +637,12 @@ class _MapPageState extends ConsumerState<MapPage>
         // stray taps on the map/controls behind it). `liveRegion` ensures
         // VoiceOver / TalkBack announces the state change when the overlay
         // appears (WCAG 2.1 SC 4.1.3 Status Messages).
-        if (_obfuscatedLocation == null &&
-            _errorMessage == null &&
-            !_locationDeclined)
+        if (MapPage.showLoadingScrim(
+          hasFix: _obfuscatedLocation != null,
+          hasError: _errorMessage != null,
+          locationDeclined: _locationDeclined,
+          accessBlocked: accessBlocked,
+        ))
           Positioned.fill(
             child: Semantics(
               liveRegion: true,
@@ -564,8 +664,14 @@ class _MapPageState extends ConsumerState<MapPage>
           ),
 
         // Empty state: a declined disclosure is a calm "off" choice, not an
-        // error; a real GPS/service failure is shown as an error.
-        if (_errorMessage != null && _obfuscatedLocation == null)
+        // error; a real GPS/service failure is shown as an error. Suppressed
+        // while access is blocked — the shell's banner names the cause and the
+        // remedy, and keeps the circle members on screen while it does.
+        if (MapPage.showFullScreenError(
+          hasFix: _obfuscatedLocation != null,
+          hasError: _errorMessage != null,
+          accessBlocked: accessBlocked,
+        ))
           Positioned.fill(
             child: HavenErrorDisplay(
               title: _locationDeclined
@@ -579,7 +685,7 @@ class _MapPageState extends ConsumerState<MapPage>
     );
   }
 
-  Widget _buildMap() {
+  Widget _buildMap({required bool accessBlocked}) {
     final memberLocations = ref.watch(memberLocationsProvider);
     // Resolve the active tile style against the live theme brightness, so an
     // "Auto" map-style selection swaps between the light/dark Alidade basemaps
@@ -684,8 +790,13 @@ class _MapPageState extends ConsumerState<MapPage>
               : null,
         ),
 
-        // User location marker
-        if (_obfuscatedLocation != null)
+        // User location marker. Hidden whenever location access is blocked —
+        // see [MapPage.showOwnLocationMarker] for why the marker goes rather
+        // than being restyled as stale.
+        if (MapPage.showOwnLocationMarker(
+          hasFix: _obfuscatedLocation != null,
+          accessBlocked: accessBlocked,
+        ))
           MarkerLayer(
             markers: [
               Marker(

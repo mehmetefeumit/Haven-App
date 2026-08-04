@@ -2988,6 +2988,72 @@ abstract class AppLocalizations {
   /// **'Location temporarily unavailable'**
   String get mapLocationUnavailable;
 
+  /// Title of the map's location-access banner when the blocker is Haven's own location PERMISSION rather than the device location toggle. Must read as distinct from mapLocationOffTitle ('Location is off'), because the two have different remedies and the pair is the only thing telling the user which settings screen to open. Keep it short — it sits above a two-line body in a banner that must not dominate the map. Avoid blaming the user; state the capability that is missing.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven can\'t use your location'**
+  String get mapLocationNoPermissionTitle;
+
+  /// Body of the map's location-access banner when the DEVICE-WIDE location provider was switched off mid-session (Android LocationManager.isLocationEnabled false / iOS Location Services off). Distinct from mapLocationOffMessage, which is the calm first-run empty state for a user who declined the disclosure and has never shared: this one reports a change that already happened — sharing was working and has stopped. Two facts must survive translation: (a) the blocker is the DEVICE's location setting, not a Haven permission, and (b) the user's circles are no longer receiving their location. The remedy verb should match whatever the platform's own location toggle is called in this locale. Paired with title mapLocationOffTitle and the action label commonOpenSettings.
+  ///
+  /// In en, this message translates to:
+  /// **'Location is off on this device, so Haven has stopped sharing your location with your circles. Turn location on to start again.'**
+  String get mapLocationSharingStoppedServiceOff;
+
+  /// Body of the map's location-access banner when Haven's location permission is not granted but can still be requested (geolocator LocationPermission.denied / unableToDetermine). Paired with title mapLocationNoPermissionTitle and the action label commonOpenSettings. Contrast with mapLocationSharingStoppedPermissionSettings, which covers the permanently-denied case where the app can no longer prompt. Do not say 'location is off' here — the device location service IS on in this state, and saying otherwise sends the user to the wrong screen.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven no longer has permission to use your location, so sharing has stopped. Allow location access to start again.'**
+  String get mapLocationSharingStoppedPermission;
+
+  /// Body of the map's location-access banner when Haven's location permission is permanently denied (Android 'Don't ask again' / iOS 'Never'), so the app can no longer show a permission prompt and the ONLY remedy is the system settings screen. Paired with title mapLocationNoPermissionTitle and the action label commonOpenSettings. Must not promise an in-app prompt. 'system settings' should match the OS's own naming in this locale.
+  ///
+  /// In en, this message translates to:
+  /// **'Location access for Haven is turned off in system settings, so sharing has stopped. Allow it there to start again.'**
+  String get mapLocationSharingStoppedPermissionSettings;
+
+  /// Body of the map's location-access banner when BOTH blockers are present: the device location provider is off AND Haven's permission is not granted. Deliberately names both remedies rather than picking one, because fixing only one leaves the user still blocked and with no explanation. Paired with title mapLocationOffTitle and the action label commonOpenSettings. Keep both clauses — do not collapse them into a single generic 'check your settings'.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven has stopped sharing your location. Turn location on for this device and allow Haven to use it.'**
+  String get mapLocationSharingStoppedBoth;
+
+  /// Body of the map's location-access banner when location updates stopped and the platform checks that would name the cause themselves failed, so Haven genuinely does not know why. Honest by construction: it must state the observable fact and offer both things to check, and must NEVER assert a specific cause. Paired with the existing title mapLocationErrorTitle and the action label commonTryAgain.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven has stopped receiving your location, so sharing has stopped. Check that location is on and that Haven is allowed to use it.'**
+  String get mapLocationSharingStoppedUnknown;
+
+  /// Screen-reader-only announcement (SemanticsService.sendAnnouncement) fired once when location access returns and the map's location-access banner disappears. Nothing is drawn for this string — a live region announces its own APPEARANCE but not its removal, so without this a TalkBack/VoiceOver user is told that sharing stopped and never told that it resumed. Keep it a short complete sentence pair; it is spoken, never read. Do not include an action — there is nothing left to do. MUST BE CAUSE-NEUTRAL: it fires on recovery from ANY blocked state, so it must not name which blocker cleared. Saying 'location is back on' is WRONG in the permission-only cases, where the device location toggle was never off — that is the same wrong-cause imprecision the other six strings in this group exist to prevent, and here it is spoken aloud to someone who cannot see the screen to check.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven can use your location again. Sharing has resumed.'**
+  String get mapLocationAccessRestoredAnnouncement;
+
+  /// Title of the banner shown when the device clock is preventing or silently breaking location sharing. Short headline (fits one or two lines beside an icon). Names the phone as the thing that is wrong, because that is the only thing the user can act on. Address the DEVICE, not the user — the fault is the phone's, and blaming the user reads badly in a security app.
+  ///
+  /// In en, this message translates to:
+  /// **'This phone\'s clock is wrong'**
+  String get clockSkewTitle;
+
+  /// Banner body when no relay accepted this device's location and at least one refused it on timestamp grounds (typically a clock running fast). Sharing is failing outright right now. 'Relays' are the Nostr servers Haven publishes to; keep the term if your locale's Haven UI already uses it, otherwise 'servers' is acceptable. The second sentence is the remedy and must stay actionable: on iOS this is Settings > General > Date & Time > Set Automatically, on Android Settings > System > Date & time > Set time automatically — use whatever wording your locale's OS actually shows. MUST NOT imply the send partially worked. No placeholders and no numbers: the measured magnitude is deliberately never rendered.
+  ///
+  /// In en, this message translates to:
+  /// **'Your circles are not receiving your location, because the relays reject the time this phone stamps on it. Turn on automatic date and time in system settings to fix it.'**
+  String get clockSkewBodyRejected;
+
+  /// Banner body when several independent circle members consistently report times ahead of this device (a clock running slow). Crucially this fault is INVISIBLE: the send succeeds and the data is then discarded, so the wording must convey 'sent but wasted', and MUST NEVER imply the send failed — that is the distinction from clockSkewBodyRejected, and the two bodies must not be merged. 'Expire' refers to a short time-to-live carried on each location update. Same remedy sentence as clockSkewBodyRejected; keep it identical in your locale so the fix reads the same in both faults.
+  ///
+  /// In en, this message translates to:
+  /// **'This phone is running behind the rest of your circles, so the locations it sends expire before anyone can see them. Turn on automatic date and time in system settings to fix it.'**
+  String get clockSkewBodyBehind;
+
+  /// Screen-reader announcement spoken once when the clock warning clears. A live region announces its appearance but never its removal, so this is the only signal a screen-reader user gets that sharing recovered. 'Haven' is the app name and is never translated.
+  ///
+  /// In en, this message translates to:
+  /// **'The clock problem is gone. Haven is sharing your location again.'**
+  String get clockSkewResolvedAnnouncement;
+
   /// Generic fallback name for a member marker (used in the 'Open in Apple Maps' prompt) when the member has no display name.
   ///
   /// In en, this message translates to:

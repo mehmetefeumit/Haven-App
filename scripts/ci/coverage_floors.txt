@@ -214,7 +214,7 @@ flutter|lib/src/services/foreground_liveness_probe.dart|58  # measured 60.98% (2
 
 # --- Location send/receive pipeline -----------------------------------------
 flutter|lib/src/services/location_sharing_service.dart|84   # measured 86.04% (339/394)
-flutter|lib/src/services/geolocator_location_service.dart|81 # measured 83.67% (82/98)
+flutter|lib/src/services/geolocator_location_service.dart|86 # measured 86.72% (111/128)
 flutter|lib/src/services/live_sync_resubscriber.dart|100    # measured 100.00% (117/117)
 flutter|lib/src/services/subscription_service.dart|86       # measured 88.33% (53/60)
 

@@ -143,11 +143,14 @@ pub async fn publish_metadata(
     if write_relays.is_empty() {
         return Err(ProfileError::NoRelays);
     }
-    // `publish_event` collapses a fully-unacknowledged / all-rejected publish
-    // into `Err(AllRelaysFailed)` after its bounded retries; it only returns
-    // `Ok` when at least one relay accepted. So the mapped error already
-    // covers the `OK=false` case; the explicit `is_success` guard below is
-    // defense in depth against a future change to that contract.
+    // `publish_event` reports a fully-unacknowledged / all-rejected publish as
+    // an `Err` after its bounded retries — `AllRelaysFailed`, or
+    // `DeviceClockRejected` when the relays blamed this device's timestamp —
+    // and only returns `Ok` when at least one relay accepted. Both are mapped
+    // the same way here (a kind-0 publish has no clock-specific remedy to
+    // offer), so the mapped error already covers the `OK=false` case; the
+    // explicit `is_success` guard below is defense in depth against a future
+    // change to that contract.
     let result = relay
         .publish_event(event, write_relays)
         .await

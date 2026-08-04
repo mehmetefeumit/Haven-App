@@ -1879,6 +1879,48 @@ class AppLocalizationsTr extends AppLocalizations {
   String get mapLocationUnavailable => 'Konum geçici olarak kullanılamıyor';
 
   @override
+  String get mapLocationNoPermissionTitle => 'Haven konumunuzu kullanamıyor';
+
+  @override
+  String get mapLocationSharingStoppedServiceOff =>
+      'Bu cihazda konum kapatıldı, bu yüzden Haven konumunuzu çevrelerinizle paylaşmayı durdurdu. Paylaşımı yeniden başlatmak için konumu açın.';
+
+  @override
+  String get mapLocationSharingStoppedPermission =>
+      'Haven\'ın konumunuzu kullanma izni artık yok, bu yüzden paylaşım durdu. Yeniden başlatmak için konum erişimine izin verin.';
+
+  @override
+  String get mapLocationSharingStoppedPermissionSettings =>
+      'Haven için konum erişimi sistem ayarlarında kapalı, bu yüzden paylaşım durdu. Yeniden başlatmak için izni oradan verin.';
+
+  @override
+  String get mapLocationSharingStoppedBoth =>
+      'Haven konumunuzu paylaşmayı durdurdu. Bu cihazda konumu açın ve Haven\'a konum izni verin.';
+
+  @override
+  String get mapLocationSharingStoppedUnknown =>
+      'Haven konumunuzu almayı durdurdu, bu yüzden paylaşım da durdu. Konumun açık olduğundan ve Haven\'ın konum izni olduğundan emin olun.';
+
+  @override
+  String get mapLocationAccessRestoredAnnouncement =>
+      'Konum erişimi geri geldi. Haven konumunuzu yeniden paylaşıyor.';
+
+  @override
+  String get clockSkewTitle => 'Bu telefonun saati yanlış';
+
+  @override
+  String get clockSkewBodyRejected =>
+      'Çevreleriniz konumunuzu alamıyor, çünkü aktarıcılar bu telefonun konuma eklediği zaman damgasını kabul etmiyor. Bunu düzeltmek için sistem ayarlarından tarih ve saatin otomatik ayarlanmasını açın.';
+
+  @override
+  String get clockSkewBodyBehind =>
+      'Bu telefonun saati çevrelerinizdekilere göre geri kalıyor. Konumlarınız gönderiliyor ama kimse görmeden geçerliliğini yitiriyor. Bunu düzeltmek için sistem ayarlarından tarih ve saatin otomatik ayarlanmasını açın.';
+
+  @override
+  String get clockSkewResolvedAnnouncement =>
+      'Saat sorunu giderildi. Haven konumunuzu yeniden paylaşıyor.';
+
+  @override
   String get mapThisLocation => 'bu konum';
 
   @override

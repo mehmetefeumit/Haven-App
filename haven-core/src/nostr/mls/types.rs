@@ -27,6 +27,87 @@ pub use cgka_traits::transport::TransportMessage;
 pub use cgka_traits::types::{EpochId, GroupId, MemberId, MessageId};
 pub use nostr::Event;
 
+// ── Haven-local ingest screening ─────────────────────────────────────────────
+
+/// Why Haven's own receiver-side screen rejected an inbound event BEFORE the
+/// MLS engine ever saw it.
+///
+/// Fieldless (`Copy`) — carries no timestamp, event id, group id, or ciphertext,
+/// so its derived `Debug` is leak-free by construction (Security Rules 4/6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PreAuthRejection {
+    /// The event's NIP-40 `expiration` tag, plus
+    /// [`crate::location::ttl::RECEIVER_EXPIRATION_GRACE_SECS`] of clock-skew
+    /// grace, is in the past.
+    Expired,
+}
+
+/// The disposition of one inbound Nostr event handed to
+/// [`crate::nostr::mls::SessionManager::process_event`].
+///
+/// # Why this type exists
+///
+/// [`IngestOutcome`] and [`StaleReason`] are re-exported straight from the
+/// upstream `cgka-traits` crate, so Haven cannot add a variant to either to
+/// signal "my own local policy dropped this before the engine ran". Folding a
+/// local drop into one of the engine's own outcomes is exactly the bug this type
+/// removes: `Stale` means *the engine looked at the message and terminally
+/// handled it*, which every receive plane reads as "safe to advance my sync
+/// cursor past this event". A locally screened event has been AUTHENTICATED BY
+/// NOTHING — not its signature, not its ephemeral author, not its ciphertext —
+/// so its `created_at` is entirely attacker-chosen and must never become a
+/// persisted cursor value.
+///
+/// Splitting the two dispositions into distinct variants makes the compiler,
+/// not a code reviewer, responsible for every call site: there is no field to
+/// forget to read and no default that means "advance".
+pub enum ScreenedIngest {
+    /// The event reached the engine. The carried [`IngestEffects`] holds the
+    /// engine's own [`IngestOutcome`] (`Processed` / `Stale` / `Buffered`) and
+    /// any drained events or publish work; the caller's normal cursor rules
+    /// apply.
+    Ingested(IngestEffects),
+    /// Haven's local receiver-side screen rejected the event before any MLS
+    /// authentication ran.
+    ///
+    /// Terminal — do not retry, do not surface, do not drain convergence — but
+    /// **not evidence about the event**. Callers MUST NOT advance a sync cursor
+    /// to (or past) this event's `created_at`: one forged event would otherwise
+    /// push the persisted REQ floor forward and strand every legitimate event
+    /// below it, permanently and across restarts.
+    RejectedBeforeAuth(PreAuthRejection),
+}
+
+impl ScreenedIngest {
+    /// The engine's [`IngestEffects`], or `None` when the local pre-auth screen
+    /// rejected the event.
+    ///
+    /// Deliberately an [`Option`] and not a defaulting accessor: a caller that
+    /// ignores the `None` arm loses the effects (fails safe) instead of
+    /// inheriting a synthetic "engine said stale" (fails open).
+    #[must_use]
+    pub fn ingested(self) -> Option<IngestEffects> {
+        match self {
+            Self::Ingested(effects) => Some(effects),
+            Self::RejectedBeforeAuth(_) => None,
+        }
+    }
+}
+
+// Presence-only: never prints the drained `GroupEvent`s (decrypted inner
+// locations) or the publish work (whose `h` tag carries the `nostr_group_id`).
+impl std::fmt::Debug for ScreenedIngest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ingested(_) => f.debug_tuple("Ingested").field(&"<redacted>").finish(),
+            Self::RejectedBeforeAuth(reason) => {
+                f.debug_tuple("RejectedBeforeAuth").field(reason).finish()
+            }
+        }
+    }
+}
+
 /// Extension trait restoring the old MDK `GroupId::from_slice` constructor over
 /// the Dark Matter [`GroupId`].
 ///

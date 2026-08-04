@@ -107,6 +107,19 @@ class MockRelayService implements RelayService {
   /// Defaults to `false` (every relay acks).
   bool shouldRejectPublish = false;
 
+  /// The reason each relay reports when [shouldRejectPublish] is set.
+  ///
+  /// Defaults to a generic refusal. Set it to a relay's real timestamp
+  /// wording (e.g. strfry's "invalid: event too far off from the current
+  /// time") to exercise the device-clock classification path.
+  String publishRejectionReason = 'mock rejection';
+
+  /// When set, [publishEvent] throws this instead of returning a result —
+  /// simulating the FFI raising `RelayError::DeviceClockRejected`, which is
+  /// the shape a fully-rejected publish actually takes in production (Rust
+  /// returns `Err`, so no `PublishResult` reaches Dart at all).
+  Object? publishThrows;
+
   @override
   Future<List<String>> fetchGroupMessages({
     required List<int> nostrGroupId,
@@ -126,14 +139,20 @@ class MockRelayService implements RelayService {
     methodCalls.add('publishEvent');
     publishedEvents.add(eventJson);
     publishEventRelayCalls.add(List.of(relays));
+    final thrown = publishThrows;
+    if (thrown != null) {
+      throw thrown;
+    }
     return PublishResult(
       eventId: 'mock-event-id',
       acceptedBy: shouldRejectPublish ? const [] : relays,
       rejectedBy: shouldRejectPublish
           ? relays
                 .map(
-                  (relay) =>
-                      RelayRejection(relay: relay, reason: 'mock rejection'),
+                  (relay) => RelayRejection(
+                    relay: relay,
+                    reason: publishRejectionReason,
+                  ),
                 )
                 .toList()
           : const [],

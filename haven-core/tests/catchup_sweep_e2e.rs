@@ -5,7 +5,7 @@
 //! to the engine, persist any decrypted peer location, re-broadcast any auto-
 //! commit, and advance the cursor over the applied prefix. Until this file the
 //! only thing under test was the pure cursor arithmetic
-//! (`cursor_advance_ms` / `contiguous_prefix_cursor_ms`); the sweep itself — the
+//! (`cursor_advance_ms` / `hold_backs`); the sweep itself — the
 //! fetch, the ingest, the persistence, and the cursor WRITE — ran nowhere.
 //!
 //! # What these tests assert against, and why not the counters
@@ -399,13 +399,25 @@ async fn a_peer_leave_is_committed_and_re_broadcast_by_the_sweep() {
 }
 
 /// An event the engine cannot ingest at all must be counted as DEFERRED and must
-/// HOLD the cursor — never be skipped past.
+/// HOLD the cursor at or below itself — never be skipped past.
 ///
 /// This is the Rule-12 property at the level of a single event: the sweep cannot
-/// tell an undecryptable event apart from one that will decrypt once a missing
+/// tell an un-ingestable event apart from one that will apply once a missing
 /// commit arrives, so it must assume the latter. Advancing over it would push
 /// `since` past an event that was never applied, and if the event were a commit
 /// the epoch chain would be stranded with nothing left to re-fetch it.
+///
+/// # What "held" means now, and why the test proves it directly
+///
+/// The sweep's advance is anchored on the FETCH WINDOW's open time, not on any
+/// event, so "held" is no longer the same statement as "the cursor is still
+/// unset" — a deferral caps the advance at that event rather than suppressing it
+/// entirely. That cap is exactly as strong, because `since` is an inclusive
+/// lower bound: a cursor sitting ON the deferred event still re-requests it,
+/// with no reliance on the clock-skew buffer at all.
+///
+/// So this asserts the property the old `cursor == None` was only a proxy for:
+/// a SECOND sweep must see the same event again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_uningestable_event_defers_and_holds_the_cursor() {
     let (_relay, url, relay_mgr) = relay_under_test().await;
@@ -425,6 +437,7 @@ async fn an_uningestable_event_defers_and_holds_the_cursor() {
         .publish_event(&junk, std::slice::from_ref(&url))
         .await
         .expect("the junk event reaches the relay");
+    let junk_secs = i64::try_from(junk.created_at.as_secs()).expect("created_at fits");
 
     let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 20).await;
 
@@ -434,10 +447,21 @@ async fn an_uningestable_event_defers_and_holds_the_cursor() {
         "an event the engine could not ingest is deferred, not applied"
     );
     assert_eq!(out.events_applied, 0);
+    let cursor = fx
+        .alice_cursor()
+        .expect("the window still advanced somewhere");
+    assert!(
+        cursor <= junk_secs * 1000,
+        "the cursor must not move PAST an event that was never applied; got \
+         {cursor} ms for an event dated {junk_secs} s",
+    );
+
+    // The property that actually matters: the next sweep still sees it.
+    let again =
+        run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 20).await;
     assert_eq!(
-        fx.alice_cursor(),
-        None,
-        "the cursor must NOT move past an event that was never applied — the \
-         next sweep has to see it again"
+        again.events_deferred, 1,
+        "the un-applied event must be re-fetched by the next sweep — that is \
+         what holding the cursor is FOR",
     );
 }

@@ -50,8 +50,19 @@ async fn send_445(sender: &SessionManager, gid: &GroupId, content: &str) -> Even
 }
 
 /// The inner location content a receiver recovers from a 445, or `None`.
+///
+/// Every event these gates feed here is freshly built, so its NIP-40 expiration
+/// (`created_at + 228 s`) is comfortably in the future and the receiver-side
+/// screen must let it through to the engine. Asserted rather than folded into
+/// the `None` return: a silent pre-auth rejection would make each "must not
+/// yield plaintext" gate below pass for the wrong reason.
 async fn decrypt_445_content(receiver: &SessionManager, event: &Event) -> Option<String> {
-    let ingest = receiver.process_event(event).await.ok()?;
+    let ingest = receiver
+        .process_event(event)
+        .await
+        .ok()?
+        .ingested()
+        .expect("a freshly-built 445 must reach the engine, not Haven's pre-auth screen");
     // Accumulated with `extend` rather than seeded by `collect()`: the vector is
     // appended to across the awaited loop below, so it is not the
     // collect-then-consume shape `clippy::needless_collect` reads it as (its own
@@ -109,7 +120,11 @@ async fn advance_both(g: &TwoPartyGroup, count: usize) {
             .bob
             .process_event(&commit_event)
             .await
-            .expect("bob ingests commit");
+            .expect("bob ingests commit")
+            .ingested()
+            // Commits carry no `expiration` tag at all (group history must
+            // outlive any TTL), so the receiver-side screen can never fire here.
+            .expect("a commit must reach the engine, not Haven's pre-auth screen");
         for gid in &ingest.effects.pending_convergence {
             let _ = g.bob.advance_convergence(gid).await;
         }

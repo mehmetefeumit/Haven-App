@@ -23,41 +23,57 @@
 ///
 /// ## The behaviour this target measures (verified from source first)
 ///
-/// 1. **A stale-cache tail.** `getCurrentLocation()` serves
-///    `_lastStreamPosition` whenever the cached GPS FIX TIME is within
-///    `kStreamPositionMaxAge` (= `kLocationPublishMaxInterval`, 168 s) —
-///    BEFORE it ever consults `isLocationServiceEnabled()`. So for up to
-///    168 s after the user switches location off, the publish path keeps
-///    succeeding from cache. This target MEASURES that tail rather than
-///    assuming it, and only then asserts that publishing has stopped.
-/// 2. **Detection.** Past the tail the service layer throws
-///    `LocationServiceException`, and the position stream carries the
-///    plugin's `LocationServiceDisabledException`
-///    (`geolocator_android/lib/src/geolocator_android.dart:247`, raised from
+/// 1. **A short stop, not a stale-cache tail.** This target used to be sized
+///    around a 168 s tail: `getCurrentLocation()` served `_lastStreamPosition`
+///    whenever the cached GPS FIX TIME was within `kStreamPositionMaxAge`
+///    BEFORE it ever consulted `isLocationServiceEnabled()`, so publishing
+///    legitimately continued for up to that long after the toggle. That
+///    ordering has since been inverted — `_ensureAccessOrThrow()` now runs
+///    FIRST and `_noteAccessLost` drops the cache outright the moment a loss is
+///    observed — so the cache can no longer outlive consent. The tail is still
+///    MEASURED rather than assumed (it is the one number here that is a
+///    property of the app rather than of this lane), but it is now expected to
+///    be seconds, not minutes.
+/// 2. **Detection.** The service layer throws `LocationServiceException`, and
+///    the position stream carries the plugin's
+///    `LocationServiceDisabledException` (raised from
 ///    `LocationManagerClient.onProviderDisabled`).
-/// 3. **Surfacing.** Both app-side listeners of `locationStreamProvider`
-///    (`map_page.dart:441` and `map_shell.dart:738`) handle it with
-///    `next.whenData(...)`, which DISCARDS the error, and the map's only
-///    error overlay is gated on `_obfuscatedLocation == null`
-///    (`map_page.dart:568`) — false in every mid-session case. This target
-///    asserts the user-visible half anyway: see "Expected red", below.
+/// 3. **Surfacing.** `locationAccessProvider` notices — from the stream error
+///    AND from its own silence watchdog, since a stream can stop without
+///    erroring — and `MapStatusBanners` renders `LocationAccessBanner` over the
+///    map, naming the cause and offering the device-location-settings remedy.
+///    This target asserts the user-visible half.
 /// 4. **Recovery.** Re-enabling the provider restores the one-shot
-///    `getCurrentPosition` path the publisher depends on. Whether the
-///    continuous STREAM also recovers is recorded as evidence, not asserted
-///    (the native client calls `removeUpdates` and nulls its provider on
-///    disable, and `onProviderEnabled` is an empty method, so a re-subscribe
-///    that reuses `GeolocatorAndroid._positionStream` cannot come back).
+///    `getCurrentPosition` path the publisher depends on, and the access
+///    notifier's recovery edge invalidates `locationStreamProvider`, which
+///    hands out a NEW native subscription. The continuous stream is therefore
+///    expected to come back too, but it is still recorded as EVIDENCE rather
+///    than asserted: the re-subscribe escapes `GeolocatorAndroid`'s
+///    `_positionStream` cache only through `_wrapStream`'s
+///    `asBroadcastStream(onCancel:)`, which is a property of a third-party
+///    package rather than of this app.
 ///
-/// ## Expected red — read this before "fixing" the lane
+/// ## This lane is no longer expected red
 ///
-/// The SURFACING assertion is expected to FAIL on this lane's first run, and
-/// that failure IS the deliverable: today Haven tells the user NOTHING when
-/// the OS location provider is switched off mid-session. Do not satisfy it by
-/// weakening the check (CLAUDE.md, Testing Requirements #5); satisfy it by
-/// rendering the app's OWN existing copy — `mapLocationOffTitle` /
-/// `mapLocationOffMessage`, already translated in all 13 locales — when the
-/// service is disabled. The check accepts any of the map's existing error
-/// strings precisely so it does not dictate a design.
+/// It was, once, and that was the deliverable: Haven used to tell the user
+/// NOTHING when the OS location provider was switched off mid-session, because
+/// both listeners of `locationStreamProvider` dropped the error with
+/// `next.whenData(...)` and the map's only error overlay was gated on a null
+/// own-location, which is false mid-session. That is fixed. If the surfacing
+/// check goes red now it is a REGRESSION, not a finding — do not satisfy it by
+/// weakening the check (CLAUDE.md, Testing Requirements #5). The check accepts
+/// any of the map's existing error strings precisely so it does not dictate a
+/// design.
+///
+/// ## What this lane still cannot see
+///
+/// `surfacingVisible()` uses `find.text(...).evaluate()`, which matches a
+/// widget that is in the tree but fully OCCLUDED — and the banner sits in the
+/// same `Stack` as an opaque bottom sheet whose maximum snap covers most of the
+/// screen. A regression that put the banner back underneath the sheet would
+/// pass here. That gap is closed at the widget level, where hit-testing is
+/// possible, by `test/pages/map_shell_banner_layering_test.dart`; do not read
+/// a green lane here as proof the banner was reachable.
 ///
 /// ## Why the body never throws mid-sequence
 ///
@@ -95,7 +111,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/main.dart';
 import 'package:haven/src/constants/location.dart'
-    show kStreamPositionMaxAge;
+    show kLocationDisclosureAcceptedKey, kStreamPositionMaxAge;
 import 'package:haven/src/pages/map_shell.dart';
 import 'package:haven/src/providers/identity_provider.dart'
     show identityNotifierProvider, identityProvider;
@@ -188,10 +204,19 @@ const String kPublishNotResumedMarker = '[b6] PUBLISH_NOT_RESUMED';
 
 /// Evidence only (never asserted): the continuous position stream delivered a
 /// fresh fix after the provider came back.
+///
+/// Now the EXPECTED outcome, where it once was not: `locationAccessProvider`
+/// invalidates `locationStreamProvider` on its recovery edge, which disposes
+/// the last listener and so lets `_wrapStream`'s `asBroadcastStream(onCancel:)`
+/// null `GeolocatorAndroid._positionStream` — yielding a genuinely fresh native
+/// subscription. Still recorded rather than asserted: that escape hatch is a
+/// property of `geolocator_android`, not of this app.
 const String kStreamRecoveredMarker = '[b6] STREAM_RECOVERED';
 
-/// Evidence only: it did not. See the class doc's point 4 for why this is
-/// expected on Android and why it is recorded rather than asserted.
+/// Evidence only: it did not. Was the expected reading before the access
+/// notifier existed to force a re-subscribe — the native client calls
+/// `removeUpdates` and nulls its provider on disable, and `onProviderEnabled`
+/// is an empty method, so nothing re-arms the platform side on its own.
 const String kStreamDeadMarker = '[b6] STREAM_DEAD';
 
 /// Closes the capture. Printed unconditionally, before the final assertion,
@@ -203,10 +228,18 @@ const Duration _toggleObservationTimeout = Duration(seconds: 90);
 
 /// How long to wait for publishing to stop after the provider goes away.
 ///
-/// Must exceed [kStreamPositionMaxAge] (168 s): until the cached stream fix
-/// ages past it, `getCurrentLocation()` never reaches the service-enabled
-/// check at all and publishing legitimately continues. 90 s of slack on top
-/// covers a loaded CI emulator and the poll granularity.
+/// Sized from [kStreamPositionMaxAge] (168 s) even though the stale-cache tail
+/// it was originally sized for is CLOSED: `getCurrentLocation()` now runs its
+/// access gate before it serves the cache, and an observed loss clears the
+/// cache outright, so publishing should stop within a poll or two.
+///
+/// The constant is kept as the bound anyway, deliberately. If the ordering is
+/// ever inverted again the tail comes straight back, and a timeout tightened to
+/// today's behaviour would turn that privacy regression into an ambiguous
+/// timeout instead of a measured `PUBLISH_STOPPED tail=<S>s` line naming
+/// exactly how long the app kept broadcasting. A generous bound costs a slow
+/// lane on a real failure; a tight one costs the diagnosis. 90 s of slack on
+/// top covers a loaded CI emulator and the poll granularity.
 final Duration _publishStopTimeout =
     kStreamPositionMaxAge + const Duration(seconds: 90);
 
@@ -258,6 +291,30 @@ void main() {
       final prefs = await SharedPreferences.getInstance();
       final introSeen = prefs.getBool(kOnboardingIntroSeenKey) ?? false;
       final completed = prefs.getBool(kOnboardingCompletedKey) ?? false;
+
+      // ASSERT THE DISCLOSURE FLAG DIRECTLY, before anything depends on it.
+      //
+      // `locationAccessProvider._disclosureAccepted()` gates the ENTIRE
+      // surfacing half of this lane and fails CLOSED: with the flag missing it
+      // resolves to `available` and no banner ever renders, no matter how
+      // thoroughly the provider is switched off. The flag is seeded by
+      // `TestUser.preSeedIdentityAndSkipOnboarding` — one line, in a helper
+      // shared with every other scenario, none of which needs it for this.
+      //
+      // Without this check that dependency is invisible: dropping the seed
+      // would fail the lane with the SURFACING finding below, which blames a
+      // `whenData` defect that no longer exists, and points at line numbers in
+      // `map_page.dart` where there is now nothing to find. Hours of the wrong
+      // investigation. Named as a HARNESS failure here instead, before the
+      // sequence starts.
+      expect(
+        prefs.getBool(kLocationDisclosureAcceptedKey),
+        isTrue,
+        reason: 'HARNESS, not product: the foreground location-disclosure flag '
+            'is not seeded, so `locationAccessProvider` will stay quiet by '
+            'design and the surfacing half of this lane cannot run at all. '
+            'Check `TestUser.preSeedIdentityAndSkipOnboarding`.',
+      );
       await tester.pumpWidget(
         ProviderScope(
           overrides: <Override>[
@@ -493,13 +550,17 @@ void main() {
         );
       } else if (!surfaced) {
         failures.add(
-          'the disabled provider was NOT surfaced to the user. Both '
-          'listeners of locationStreamProvider (map_page.dart:441, '
-          'map_shell.dart:738) discard the error with `next.whenData(...)`, '
-          'and the map error overlay is gated on `_obfuscatedLocation == '
-          'null` (map_page.dart:568), which is false mid-session. Location '
-          'sharing stops silently and the map keeps showing the last fix. '
-          'See docs/CI_HARDENING_BACKLOG.md B6',
+          'the disabled provider was NOT surfaced to the user — a REGRESSION, '
+          'not the original finding. This is what `locationAccessProvider` + '
+          'LocationAccessBanner exist to prevent, and both the stream-error '
+          'path and the silence watchdog should have caught it. Look first '
+          'at: the disclosure gate (asserted directly at the top of this '
+          'target, so it is not that), MapStatusBanners still being reached '
+          'from MapShell.buildLayers, and locationAccessProvider still being '
+          'watched. NOTE this check uses find.text(...).evaluate(), which '
+          'matches an OCCLUDED widget, so it can only tell you the banner is '
+          'ABSENT — never that it was reachable. See '
+          'test/pages/map_shell_banner_layering_test.dart',
         );
       }
 

@@ -25,6 +25,24 @@
 //! All derived `since` values are floored at `0` and capped to the caller's
 //! `now`, so a corrupt or future cursor can never produce a future-dated or
 //! negative filter bound.
+//!
+//! # The governing asymmetry: advance from local facts, hold back on timestamps
+//!
+//! A cursor ADVANCE is a claim about what this device has already seen. An
+//! inbound event's `created_at` is chosen by whoever signed the wrapper and is
+//! authenticated by nothing on the receive path — the engine authenticates the
+//! *inner* MLS message, and no receive-side check binds the outer envelope's
+//! timestamp to it. Deriving an advance from that field is therefore
+//! remotely writable, and writable in the one direction that destroys
+//! availability permanently (see [`cursor_ms_for_window`]).
+//!
+//! So the two receive planes derive every advance from a **local clock reading
+//! taken when the observation window opened** — the catch-up fetch's open time,
+//! the live subscription's REQ time — and use event timestamps ONLY to hold the
+//! advance back. Holding back is safe against arbitrary input: the worst an
+//! attacker buys with a hostile timestamp is a refetch of events we already
+//! have, and the cursor write is monotonic-max, so a hold-back can never even
+//! move the cursor backwards.
 
 /// Logical stream key for `kind:445` group messages (multiplexed by `#h`).
 pub const STREAM_GROUP_445: &str = "group_445";
@@ -89,6 +107,135 @@ pub const fn cap_timestamp_to_now(ts_secs: i64, now_secs: i64) -> i64 {
     }
 }
 
+/// Converts an event's `created_at` (unix **seconds**) into a millisecond cursor
+/// value, clamping it to `now_secs` first.
+///
+/// # NOT the cursor advance — use [`cursor_ms_for_window`]
+///
+/// Neither receive plane derives a cursor ADVANCE from this any more, and none
+/// may start again. An event's `created_at` is chosen by whoever signed the
+/// envelope and is bound to nothing the MLS engine authenticates, so a cursor
+/// taken from it is remotely writable in the one direction that strands
+/// legitimate history permanently. [`cursor_ms_for_window`] carries the full
+/// argument, and is the only sanctioned advance computation.
+///
+/// What survives here is the clamp below, which both planes still depend on
+/// through `cursor_ms_for_window`. Kept public because the clamp's reasoning is
+/// worth reading on its own and a caller that legitimately needs "this event's
+/// timestamp, bounded by the local clock" (a hold-back floor, a diagnostic)
+/// should not re-derive it.
+///
+/// # Why the clamp
+///
+/// A cursor is only ever read back through [`since_for_stream`], which caps the
+/// derived REQ floor at `now`. So a cursor sitting in the FUTURE does not
+/// produce a future-dated filter — it silently pins the floor at `now` for as
+/// long as the future timestamp exceeds the wall clock. Catch-up then degrades
+/// to "only what was published after this fetch started": everything a peer
+/// published while the device was offline is below the floor and is never
+/// requested again. `created_at` is chosen by whoever built the event, so this
+/// needs no attacker — one co-member whose clock runs an hour fast, or a relay
+/// that accepts loosely-bounded timestamps (a spec-conformant one still allows
+/// `now + 900s`), is enough. Clamping keeps the persisted cursor inside the
+/// window the local clock can actually vouch for.
+///
+/// # Examples
+///
+/// ```
+/// use haven_core::relay::cursor::cursor_ms_for_event;
+///
+/// // A normal, past event: cursor lands exactly on it.
+/// assert_eq!(cursor_ms_for_event(1_700_000_000, 1_700_000_050), 1_700_000_000_000);
+/// // A future-dated event: cursor stops at `now`.
+/// assert_eq!(cursor_ms_for_event(1_700_009_999, 1_700_000_050), 1_700_000_050_000);
+/// ```
+#[must_use]
+pub const fn cursor_ms_for_event(event_created_at_secs: i64, now_secs: i64) -> i64 {
+    cap_timestamp_to_now(event_created_at_secs, now_secs).saturating_mul(1000)
+}
+
+/// The millisecond cursor value one completed OBSERVATION WINDOW justifies.
+///
+/// This is the only function either receive plane may use to compute a cursor
+/// advance. Both planes route through it so the argument below lives in exactly
+/// one place.
+///
+/// # What the two arguments are, and why only one of them may raise the cursor
+///
+/// * `window_opened_at_secs` — a reading of the **local** wall clock, taken
+///   before the request that opened this window was issued. A completed window
+///   means "the relay handed over everything it held matching this filter as of
+///   the moment I asked", so this local timestamp — and nothing else — is what
+///   the device has actually earned the right to claim. It is not writable by
+///   any remote party.
+/// * `hold_back_secs` — the `created_at` of the oldest event in the window that
+///   could NOT be applied (engine-buffered, hard ingest failure, or never
+///   reached because a deadline cut the batch short). Used ONLY as an upper
+///   bound, so that un-applied event is re-requested next time.
+///
+/// # How this defeats arbitrary attacker timestamps
+///
+/// A circle's `nostr_group_id` is the public `#h` tag of every one of its
+/// `kind:445`s, so any relay observer can mint — or re-wrap an observed
+/// ciphertext into — an event carrying a `created_at` of its choosing. The
+/// engine will authenticate the inner MLS message (or not) and report
+/// `Processed` / `Stale` / `Buffered`, but **no receive-side check binds the
+/// outer `created_at` to that inner message**, for ANY of those outcomes.
+///
+/// The advance here is `min(window_opened_at_secs, hold_back_secs)`, so an
+/// attacker's timestamp can only ever appear on the `min`'s LOW side:
+///
+/// * it can never raise the result above `window_opened_at_secs`, which the
+///   attacker cannot influence at all; and
+/// * lowering the result only causes a wider re-request — and since the cursor
+///   write is monotonic-max, a value below the stored cursor is a no-op.
+///
+/// So no number of injected `kind:445`s, at any `created_at`, can push the
+/// persisted REQ floor past a legitimate event and strand it. (That was the
+/// defect: with a per-event advance, ONE forged event dated `now` buried every
+/// genuine event below it, permanently and across restarts — a stranded
+/// location merely ages out, but a stranded COMMIT breaks the epoch chain.)
+///
+/// The result is additionally clamped to `now_secs` and floored at `0`, so a
+/// window opened against a fast local clock still cannot park the cursor in the
+/// future, where [`since_for_stream`] would pin every REQ floor at `now`.
+///
+/// # Examples
+///
+/// ```
+/// use haven_core::relay::cursor::cursor_ms_for_window;
+///
+/// // A clean window: the advance is the local open time, not any event's.
+/// assert_eq!(cursor_ms_for_window(1_700_000_000, None, 1_700_000_050), 1_700_000_000_000);
+/// // One event could not be applied: hold at it so it is re-requested.
+/// assert_eq!(
+///     cursor_ms_for_window(1_700_000_000, Some(1_699_999_000), 1_700_000_050),
+///     1_699_999_000_000,
+/// );
+/// // A hold-back ABOVE the window open time cannot raise the advance.
+/// assert_eq!(
+///     cursor_ms_for_window(1_700_000_000, Some(1_700_009_999), 1_700_000_050),
+///     1_700_000_000_000,
+/// );
+/// ```
+#[must_use]
+pub const fn cursor_ms_for_window(
+    window_opened_at_secs: i64,
+    hold_back_secs: Option<i64>,
+    now_secs: i64,
+) -> i64 {
+    let target = match hold_back_secs {
+        Some(hold) if hold < window_opened_at_secs => hold,
+        _ => window_opened_at_secs,
+    };
+    let capped = cap_timestamp_to_now(target, now_secs);
+    if capped < 0 {
+        0
+    } else {
+        capped.saturating_mul(1000)
+    }
+}
+
 /// Derives the REQ `since` (unix seconds) for `stream` from its persisted
 /// cursor.
 ///
@@ -140,6 +287,109 @@ mod tests {
         assert_eq!(cap_timestamp_to_now(100, 50), 50);
         assert_eq!(cap_timestamp_to_now(50, 50), 50);
         assert_eq!(cap_timestamp_to_now(40, 50), 40);
+    }
+
+    #[test]
+    fn cursor_ms_for_event_clamps_the_future_and_scales_to_ms() {
+        // Past event: lands exactly on it (seconds → milliseconds).
+        assert_eq!(
+            cursor_ms_for_event(1_700_000_000, 1_700_000_050),
+            1_700_000_000_000
+        );
+        // Exactly `now`: the boundary is inclusive, not off by one second.
+        assert_eq!(
+            cursor_ms_for_event(1_700_000_050, 1_700_000_050),
+            1_700_000_050_000
+        );
+        // Future event: clamped to `now`, never beyond.
+        assert_eq!(
+            cursor_ms_for_event(1_700_009_999, 1_700_000_050),
+            1_700_000_050_000
+        );
+    }
+
+    // ---- `cursor_ms_for_window`: the only sanctioned advance computation.
+
+    #[test]
+    fn a_window_advance_is_the_local_open_time_not_any_event() {
+        // The headline property: nothing an event carries appears in the result.
+        assert_eq!(
+            cursor_ms_for_window(1_700_000_000, None, 1_700_000_050),
+            1_700_000_000_000
+        );
+    }
+
+    #[test]
+    fn a_hold_back_below_the_open_time_wins() {
+        assert_eq!(
+            cursor_ms_for_window(1_700_000_000, Some(1_699_999_000), 1_700_000_050),
+            1_699_999_000_000,
+            "an un-applied event must keep the cursor at (or below) itself so it \
+             is re-requested"
+        );
+    }
+
+    #[test]
+    fn a_hold_back_can_never_raise_the_advance() {
+        // The security direction, stated as arithmetic: this is the ONLY place a
+        // remotely-chosen number enters the computation, and `min` confines it to
+        // lowering the result. Both a near and an absurd attacker value.
+        for forged in [1_700_000_001, i64::MAX] {
+            assert_eq!(
+                cursor_ms_for_window(1_700_000_000, Some(forged), 1_700_000_050),
+                1_700_000_000_000,
+                "a forged created_at of {forged} must not raise the advance",
+            );
+        }
+    }
+
+    #[test]
+    fn a_window_advance_is_still_clamped_to_now() {
+        // A fast local clock (or a caller passing a stale `now`) must not park
+        // the cursor in the future, where `since_for_stream` pins every REQ floor
+        // at `now` for the duration of the skew.
+        let now = 1_000_i64;
+        assert_eq!(cursor_ms_for_window(now + 10_000, None, now), now * 1000);
+        assert_eq!(
+            cursor_ms_for_window(now + 10_000, Some(now + 5_000), now),
+            now * 1000
+        );
+    }
+
+    #[test]
+    fn a_window_advance_is_floored_at_zero() {
+        // A hold-back of 0 (or a nonsensical negative, which a malformed
+        // `created_at` could produce upstream) must never yield a negative
+        // cursor: `since_for_stream` div_euclid's the stored value.
+        assert_eq!(cursor_ms_for_window(1_000, Some(0), 2_000), 0);
+        assert_eq!(cursor_ms_for_window(1_000, Some(-5), 2_000), 0);
+        assert_eq!(cursor_ms_for_window(-5, None, 2_000), 0);
+    }
+
+    #[test]
+    fn a_cursor_parked_in_the_future_pins_every_since_at_now() {
+        // Why `cursor_ms_for_event` clamps at all: a future cursor does not
+        // produce a future-dated filter (that is already capped) — it silently
+        // pins the REQ floor at `now`, so nothing published before the fetch is
+        // ever requested again. This asserts the failure mode the clamp removes.
+        let now = 1_000_i64;
+        let unclamped_future_cursor_ms = (now + 10_000) * 1000;
+        assert_eq!(
+            since_for_stream(
+                STREAM_GROUP_445,
+                unclamped_future_cursor_ms,
+                SubscribePhase::Resubscribe,
+                now
+            ),
+            now,
+            "an unclamped future cursor collapses the lookback window entirely"
+        );
+        // With the clamp applied at write time the floor keeps its full buffer.
+        let clamped = cursor_ms_for_event(now + 10_000, now);
+        assert_eq!(
+            since_for_stream(STREAM_GROUP_445, clamped, SubscribePhase::Resubscribe, now),
+            now - GROUP_RESUBSCRIBE_BUFFER_SECS,
+        );
     }
 
     #[test]

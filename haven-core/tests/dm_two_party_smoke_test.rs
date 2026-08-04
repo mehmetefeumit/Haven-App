@@ -53,7 +53,13 @@ async fn two_party_location_round_trips_alice_to_bob() {
     let event = SessionManager::transport_message_to_event(app).unwrap();
 
     // Bob ingests it; a location application message applies immediately.
-    let ingest = g.bob.process_event(&event).await.unwrap();
+    let ingest = g
+        .bob
+        .process_event(&event)
+        .await
+        .unwrap()
+        .ingested()
+        .expect("a freshly-built 445 must reach the engine, not Haven's pre-auth screen");
     assert!(matches!(ingest.outcome, IngestOutcome::Processed));
     let senders = helpers::location_senders(&ingest.effects.events);
     assert_eq!(senders, vec![g.alice_keys.public_key().to_hex()]);

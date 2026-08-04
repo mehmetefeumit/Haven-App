@@ -38,5 +38,8 @@ pub use manager::redact_hex_sequences;
 pub use manager::{SessionManager, DEFAULT_EXPORTER_LABEL};
 pub use signer::HavenIdentityProofSigner;
 pub use storage::StorageConfig;
-pub use types::{GroupIdExt, LocationGroupConfig, LocationGroupInfo, LocationMessageResult};
+pub use types::{
+    GroupIdExt, LocationGroupConfig, LocationGroupInfo, LocationMessageResult, PreAuthRejection,
+    ScreenedIngest,
+};
 pub use welcome::{PendingWelcome, PendingWelcomeStore, WelcomePreview};

@@ -211,5 +211,82 @@ void main() {
         );
       },
     );
+
+    testWidgets(
+      'persists the acceptance BEFORE it publishes it in memory',
+      (tester) async {
+        // THE ORDERING ANOTHER READER DEPENDS ON.
+        //
+        // `LocationAccessNotifier._disclosureAccepted` gates the whole
+        // location-access banner and consults SharedPreferences and nothing
+        // else. It used to read this controller's in-memory state first, with
+        // a doc claiming that closed a race — but the race cannot happen in
+        // this direction: prefs is written and awaited before `state` is
+        // touched, and the only other write path (`_syncFromPrefs`) derives
+        // memory FROM prefs. So in-memory-true always implied prefs-true, the
+        // extra read was unreachable as load-bearing, and deleting it changed
+        // nothing. It is gone.
+        //
+        // Which makes THIS the invariant to pin. If someone later reorders
+        // `ensureDisclosed` to publish in memory first and persist afterwards,
+        // the deleted read would silently become load-bearing again and a
+        // probe landing in that window would misread a consenting user as
+        // un-disclosed — staying quiet through a real outage. Asserting the
+        // two flags at the end could not catch that; both are true by then.
+        // So the pref is sampled AT the moment the state changes.
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+
+        bool? prefAtPublish;
+        final container = ProviderContainer();
+        addTearDown(container.dispose);
+        final controller = container.read(
+          locationDisclosureControllerProvider.notifier,
+        );
+        // Fires synchronously on every `state = ...`, so it observes the
+        // ordering rather than the outcome.
+        controller.addListener((state) {
+          if (state.foregroundAccepted) {
+            prefAtPublish ??= prefs.getBool(kLocationDisclosureAcceptedKey);
+          }
+        });
+
+        final result = ValueNotifier<bool?>(null);
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: MaterialApp(
+              home: Scaffold(
+                body: Consumer(
+                  builder: (context, ref, _) => ElevatedButton(
+                    onPressed: () async {
+                      result.value = await ref
+                          .read(locationDisclosureControllerProvider.notifier)
+                          .ensureDisclosed(context, includeBackground: false);
+                    },
+                    child: const Text('Trigger'),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+
+        await tester.tap(find.text('Trigger'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+        await tester.pumpAndSettle();
+
+        expect(result.value, isTrue);
+        expect(
+          prefAtPublish,
+          isTrue,
+          reason: 'The persisted flag must already be set the instant the '
+              'in-memory state says accepted. Everything that reads consent '
+              'from prefs alone — the location-access banner\'s gate, the '
+              'publishers — depends on prefs never being behind memory.',
+        );
+      },
+    );
   });
 }

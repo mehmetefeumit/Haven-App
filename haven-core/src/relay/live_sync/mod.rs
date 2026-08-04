@@ -29,6 +29,7 @@
 //! relay-public commit JSON (Security Rule 5), and every error/event `Debug` is
 //! presence-only (Security Rule 8).
 
+pub(crate) mod anchor;
 pub mod config;
 pub mod error;
 pub mod event;

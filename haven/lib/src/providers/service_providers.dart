@@ -22,10 +22,12 @@ import 'package:haven/src/services/background_location_task.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/catchup_service.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/clock_skew_detector.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/ios_location_auth_service.dart';
 import 'package:haven/src/services/location_service.dart';
+import 'package:haven/src/services/location_settings_launcher.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/maintenance_service.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
@@ -58,6 +60,17 @@ final identityServiceProvider = Provider<IdentityService>((ref) {
 /// Uses [GeolocatorLocationService] in production.
 final locationServiceProvider = Provider<LocationService>((ref) {
   return GeolocatorLocationService();
+});
+
+/// Provides the launcher used by the map's location-access surface to send
+/// the user to the OS screen that fixes their particular blocker.
+///
+/// Separate from [locationServiceProvider] so a widget test can assert WHICH
+/// settings screen a remedy button opens without a platform channel.
+final locationSettingsLauncherProvider = Provider<LocationSettingsLauncher>((
+  ref,
+) {
+  return const GeolocatorSettingsLauncher();
 });
 
 /// Provides the iOS CoreLocation "Always" authorization bridge.
@@ -148,6 +161,18 @@ final profileServiceProvider = Provider<ProfileService>((ref) {
   );
 });
 
+/// Provides the device-clock skew detector singleton.
+///
+/// A singleton because its whole value is corroboration across sources: the
+/// peer signal needs samples from distinct MLS members, which arrive across
+/// different circles and different receive planes, and one detector per caller
+/// would never accumulate two of them.
+final clockSkewDetectorProvider = Provider<ClockSkewDetector>((ref) {
+  final detector = ClockSkewDetector();
+  ref.onDispose(detector.dispose);
+  return detector;
+});
+
 /// Provides the location sharing service singleton.
 ///
 /// Uses [LocationSharingService] for encrypt-publish-fetch-decrypt pipeline.
@@ -156,6 +181,7 @@ final locationSharingServiceProvider = Provider<LocationSharingService>((ref) {
     circleService: ref.read(circleServiceProvider),
     relayService: ref.read(relayServiceProvider),
     identityService: ref.read(identityServiceProvider),
+    clockSkewDetector: ref.read(clockSkewDetectorProvider),
   );
 });
 

@@ -1905,6 +1905,49 @@ class AppLocalizationsDe extends AppLocalizations {
   String get mapLocationUnavailable => 'Standort vorübergehend nicht verfügbar';
 
   @override
+  String get mapLocationNoPermissionTitle =>
+      'Haven darf deinen Standort nicht nutzen';
+
+  @override
+  String get mapLocationSharingStoppedServiceOff =>
+      'Der Standort ist auf diesem Gerät ausgeschaltet, deshalb teilt Haven deinen Standort nicht mehr mit deinen Kreisen. Schalte den Standort wieder ein, damit das Teilen weitergeht.';
+
+  @override
+  String get mapLocationSharingStoppedPermission =>
+      'Haven hat keine Berechtigung mehr für deinen Standort und teilt ihn deshalb nicht mehr. Erlaube den Standortzugriff, damit das Teilen weitergeht.';
+
+  @override
+  String get mapLocationSharingStoppedPermissionSettings =>
+      'Der Standortzugriff für Haven ist in den Systemeinstellungen deaktiviert, deshalb wird dein Standort nicht mehr geteilt. Erlaube den Zugriff dort wieder, damit das Teilen weitergeht.';
+
+  @override
+  String get mapLocationSharingStoppedBoth =>
+      'Haven teilt deinen Standort nicht mehr. Schalte den Standort auf diesem Gerät ein und erlaube Haven den Zugriff darauf.';
+
+  @override
+  String get mapLocationSharingStoppedUnknown =>
+      'Haven erhält deinen Standort nicht mehr, deshalb wurde das Teilen gestoppt. Prüfe, ob der Standort eingeschaltet ist und ob Haven darauf zugreifen darf.';
+
+  @override
+  String get mapLocationAccessRestoredAnnouncement =>
+      'Haven hat wieder Zugriff auf deinen Standort. Das Teilen läuft wieder.';
+
+  @override
+  String get clockSkewTitle => 'Die Uhr dieses Geräts geht falsch';
+
+  @override
+  String get clockSkewBodyRejected =>
+      'Deine Kreise erhalten deinen Standort nicht, weil die Relays den Zeitstempel ablehnen, den dieses Gerät darauf setzt. Aktiviere in den Systemeinstellungen die automatische Einstellung von Datum und Uhrzeit, um das zu beheben.';
+
+  @override
+  String get clockSkewBodyBehind =>
+      'Dieses Gerät geht gegenüber dem Rest deiner Kreise nach, deshalb werden deine Standorte zwar gesendet, laufen aber ab, bevor sie jemand sehen kann. Aktiviere in den Systemeinstellungen die automatische Einstellung von Datum und Uhrzeit, um das zu beheben.';
+
+  @override
+  String get clockSkewResolvedAnnouncement =>
+      'Das Problem mit der Uhr ist behoben. Haven teilt deinen Standort wieder.';
+
+  @override
   String get mapThisLocation => 'diesen Standort';
 
   @override

@@ -1867,6 +1867,49 @@ class AppLocalizationsFa extends AppLocalizations {
   String get mapLocationUnavailable => 'موقعیت مکانی موقتاً در دسترس نیست';
 
   @override
+  String get mapLocationNoPermissionTitle =>
+      'Haven به موقعیت مکانی‌ات دسترسی ندارد';
+
+  @override
+  String get mapLocationSharingStoppedServiceOff =>
+      'موقعیت مکانی روی این دستگاه خاموش است، پس Haven اشتراک‌گذاری آن با حلقه‌هایت را متوقف کرده است. برای شروع دوباره، موقعیت مکانی را روشن کن.';
+
+  @override
+  String get mapLocationSharingStoppedPermission =>
+      'Haven دیگر مجوز استفاده از موقعیت مکانی‌ات را ندارد، پس اشتراک‌گذاری متوقف شده است. برای شروع دوباره، دسترسی به موقعیت مکانی را مجاز کن.';
+
+  @override
+  String get mapLocationSharingStoppedPermissionSettings =>
+      'در تنظیمات سیستم، دسترسی Haven به موقعیت مکانی مجاز نیست، پس اشتراک‌گذاری متوقف شده است. برای شروع دوباره، همان‌جا آن را مجاز کن.';
+
+  @override
+  String get mapLocationSharingStoppedBoth =>
+      'Haven اشتراک‌گذاری موقعیت مکانی‌ات را متوقف کرده است. موقعیت مکانی را روی این دستگاه روشن کن و دسترسی Haven به آن را مجاز کن.';
+
+  @override
+  String get mapLocationSharingStoppedUnknown =>
+      'Haven دیگر موقعیت مکانی‌ات را دریافت نمی‌کند، پس اشتراک‌گذاری متوقف شده است. بررسی کن که موقعیت مکانی روشن باشد و Haven اجازهٔ استفاده از آن را داشته باشد.';
+
+  @override
+  String get mapLocationAccessRestoredAnnouncement =>
+      'دسترسی به موقعیت مکانی برقرار شد. Haven دوباره موقعیت مکانی‌ات را به اشتراک می‌گذارد.';
+
+  @override
+  String get clockSkewTitle => 'ساعت این گوشی درست نیست';
+
+  @override
+  String get clockSkewBodyRejected =>
+      'حلقه‌هایت موقعیت مکانی‌ات را دریافت نمی‌کنند، چون رله‌ها زمانی را که این گوشی ثبت می‌کند نمی‌پذیرند. برای رفع این مشکل، در تنظیمات سیستم تنظیم خودکار تاریخ و ساعت را روشن کن.';
+
+  @override
+  String get clockSkewBodyBehind =>
+      'ساعت این گوشی از بقیهٔ حلقه‌هایت عقب است، پس موقعیت مکانی‌ات فرستاده می‌شود، اما پیش از آنکه کسی بتواند آن را ببیند منقضی می‌شود. برای رفع این مشکل، در تنظیمات سیستم تنظیم خودکار تاریخ و ساعت را روشن کن.';
+
+  @override
+  String get clockSkewResolvedAnnouncement =>
+      'مشکل ساعت برطرف شد. Haven دوباره موقعیت مکانی‌ات را به اشتراک می‌گذارد.';
+
+  @override
   String get mapThisLocation => 'این موقعیت';
 
   @override

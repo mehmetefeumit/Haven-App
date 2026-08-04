@@ -10,8 +10,9 @@
 # location provider off underneath a live sharing session. They land in
 # different code: `pm revoke` reaches `checkPermission()`'s denied branches,
 # while the provider toggle reaches `Geolocator.isLocationServiceEnabled()`
-# (`GeolocatorLocationService.getCurrentLocation()` :258 and
-# `getCurrentLocationFresh()` :307) and the plugin's mid-stream
+# (via `GeolocatorLocationService._ensureAccessOrThrow()`, which both
+# `getCurrentLocation()` and `getCurrentLocationFresh()` now run before they
+# produce any coordinate) and the plugin's mid-stream
 # `LocationServiceDisabledException`. Neither is reachable from the other,
 # and NEITHER is reachable at all from `FakeLocationService`, whose
 # `isLocationServiceEnabled()` is a hardcoded `true`
@@ -52,30 +53,50 @@
 # armed, and "the app published nothing" is the *expected* state for most of
 # this sequence — so proving it means first proving the app was publishing.
 #
-# # EXPECT STEP 6 TO FAIL ON THIS LANE'S FIRST RUN
+# # STEP 6 WAS THE DELIVERABLE RED, AND IS NOW FIXED (2026-08-04)
 #
-# That failure is the deliverable, and it was predicted from source before
-# the lane existed: both listeners of `locationStreamProvider`
-# (`map_page.dart:441`, `map_shell.dart:738`) handle it with
-# `next.whenData(...)`, which DISCARDS the error, and the map's only error
-# overlay is gated on `_obfuscatedLocation == null` (`map_page.dart:568`) —
-# false in every mid-session case. Haven therefore stops sharing location
-# and tells the user nothing at all. Do not "fix" the lane by relaxing the
-# assertion (CLAUDE.md, Testing Requirements #5); fix it by rendering the
-# app's OWN existing copy (`mapLocationOffTitle` / `mapLocationOffMessage`,
-# already translated in 13 locales).
+# This lane was written to fail step 6, and that failure was predicted from
+# source before the lane existed: both listeners of `locationStreamProvider`
+# handled the error case with `next.whenData(...)`, which DISCARDS it, and
+# the map's only error overlay was gated on a null location — false in every
+# mid-session case. Haven stopped sharing location and told the user nothing.
+#
+# Both `whenData` sites are gone. A `locationAccessProvider` now owns
+# detection (stream error, stream close, a 30 s silence watchdog, and app
+# resume all funnel into one platform probe) and a `LocationAccessBanner`
+# renders the verdict, distinguishing the device toggle from Haven's own
+# permission because the two have different remedies. Step 6 is expected to
+# PASS. If it fails, that is a regression, not the original defect.
+#
+# Do not "fix" this lane by relaxing the assertion (CLAUDE.md, Testing
+# Requirements #5).
+#
+# Note what step 6 can and cannot prove: `find.text(...).evaluate()` matches
+# OCCLUDED widgets, so a green step 6 proves the banner is in the tree, not
+# that a user could see or tap it. Reachability at the bottom sheet's 0.85
+# snap is pinned host-side instead, by hit-testing in
+# `haven/test/pages/map_shell_banner_layering_test.dart`.
 #
 # # Traps this lane is built around
 #
-#   1. THE STALE-CACHE TAIL. `getCurrentLocation()` serves
-#      `_lastStreamPosition` whenever the cached GPS FIX TIME is within
-#      `kStreamPositionMaxAge` (168 s) — BEFORE it consults
-#      `isLocationServiceEnabled()` at all. So publishing legitimately
-#      continues for up to 168 s after the toggle. A naive lane that
-#      asserted "no publish after the toggle" would fail a correct app; one
-#      that checked once, early, would pass a broken one. The drive target
-#      requires FOUR consecutive zero-publish cycles inside a window sized
-#      from that constant, and reports the measured tail.
+#   1. THE STALE-CACHE TAIL — CLOSED 2026-08-04, and the window is kept
+#      anyway. `getCurrentLocation()` used to serve `_lastStreamPosition`
+#      whenever the cached GPS FIX TIME was within `kStreamPositionMaxAge`
+#      (168 s) BEFORE it consulted `isLocationServiceEnabled()` at all, so
+#      publishing legitimately continued for up to 168 s after the toggle.
+#      An access gate now runs before any coordinate is produced and the
+#      cache is cleared the moment access loss is observed, so the tail
+#      should measure ~0.
+#
+#      The window is deliberately NOT tightened to match. It bounds an
+#      ABSENCE assertion, so a generous bound makes the assertion stronger,
+#      and it is now the only thing that would catch the gate being reordered
+#      back below the cache read. The reported tail changes meaning
+#      accordingly: it was a measurement, it is now a REGRESSION SIGNAL.
+#      A naive lane that asserted "no publish after the toggle" would still
+#      fail a correct app on timing; one that checked once, early, would
+#      still pass a broken one. The drive target therefore still requires
+#      FOUR consecutive zero-publish cycles inside that window.
 #   2. `adb emu geo fix` is a ONE-SHOT injection into the goldfish GNSS HAL.
 #      The re-issue loop keeps running THROUGH the disabled window on
 #      purpose: a publish that survived the toggle then proves the app
@@ -285,21 +306,24 @@ not measured at all."
     local tail_secs
     tail_secs="$(b6_marker_number "${log}" "${MARK_STOPPED}" 'tail')"
     b6_note "publishing stopped ${tail_secs:-?}s after the provider was \
-disabled. Anything above ~0s is the documented kStreamPositionMaxAge (168s) \
-stale-fix cache in getCurrentLocation(): the app keeps publishing its last \
-known position for that long after the user turns location off."
+disabled. This should now be ~0s: getCurrentLocation() runs its access gate \
+before serving any coordinate, and the cached fix is cleared as soon as \
+access loss is observed. A tail approaching kStreamPositionMaxAge (168s) \
+means the gate was reordered back below the cache read."
   fi
 
-  # (7) THE HEADLINE. Expected red today — see the header.
+  # (7) THE HEADLINE. Was the deliverable red; fixed 2026-08-04 — see header.
   if ! b6_has_marker "${log}" "${MARK_SURF_PRESENT}"; then
     if b6_has_marker "${log}" "${MARK_SURF_ABSENT}"; then
       b6_finding "the disabled location provider was NOT surfaced to the \
 user ('${MARK_SURF_ABSENT}'). Location sharing stopped silently and the map \
-kept showing the last fix. Predicted from source: both listeners of \
-locationStreamProvider (map_page.dart:441, map_shell.dart:738) discard the \
-error with \`next.whenData(...)\`, and the map's only error overlay is gated \
-on \`_obfuscatedLocation == null\` (map_page.dart:568), which is false \
-mid-session. See docs/CI_HARDENING_BACKLOG.md B6."
+kept showing the last fix. This is a REGRESSION, not the original defect: \
+the surfacing landed 2026-08-04 (locationAccessProvider + \
+LocationAccessBanner). Check that the banner is still rendered from \
+MapShell.buildLayers, that the disclosure flag is set (a closed disclosure \
+gate keeps the banner silent by design), and that detection still fires — \
+stream error, stream close, the 30s silence watchdog, or app resume. See \
+docs/CI_HARDENING_BACKLOG.md B6."
     else
       b6_finding "neither '${MARK_SURF_PRESENT}' nor '${MARK_SURF_ABSENT}' \
 was recorded — the drive never reached the surfacing check."

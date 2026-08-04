@@ -33,16 +33,38 @@
 ///
 /// ## The stale-fix cache (READ THIS BEFORE CHANGING THE WINDOWS)
 ///
-/// `GeolocatorLocationService.getCurrentLocation()` serves
-/// `_lastStreamPosition` whenever the cached GPS FIX TIME is within
-/// `kStreamPositionMaxAge` (168 s) — at line 233, BEFORE it consults
-/// `isLocationServiceEnabled()` (:258) and BEFORE it consults
-/// `checkPermission()` (:266). Losing location access therefore does NOT
-/// stop publishing for up to 168 s wherever the process survives the loss;
-/// the cache is cleared only on logout and on background-sharing opt-out
-/// (`clearCachedPosition`, :163). B6 measured this for the provider toggle;
-/// ACT 1 here measures it for permission revocation, and ACT 2's window is
-/// sized so a stale-cache tail could not hide inside it.
+/// This lane was written against a defect it found and which is now FIXED;
+/// the windows below are still sized for the defect on purpose, so keep
+/// reading before tightening them.
+///
+/// The defect: `GeolocatorLocationService.getCurrentLocation()` served the
+/// cached `_lastStreamPosition` whenever the cached GPS FIX TIME was within
+/// `kStreamPositionMaxAge` (168 s) BEFORE it consulted either
+/// `isLocationServiceEnabled()` or `checkPermission()`, and nothing cleared
+/// that cache when access was withdrawn (`clearCachedPosition` ran only on
+/// logout and on background-sharing opt-out). Losing location access
+/// therefore did NOT stop publishing for up to 168 s wherever the process
+/// survived the loss.
+///
+/// The fix: both gates now run before ANY position is produced — the cache
+/// read and the iOS-backgrounded last-known branch included — and the cache
+/// is cleared eagerly the moment access loss is observed (a denial, a
+/// disabled provider, or the position stream erroring or closing).
+///
+/// What that means here. `MIDSESSION_TAIL` should now be ~0 rather than up
+/// to 168 s, so it has changed from a measurement into a REGRESSION SIGNAL:
+/// a tail approaching 168 s again means the gate was reordered back below
+/// the cache read. The windows are deliberately NOT tightened to match,
+/// because they are upper bounds on an ABSENCE assertion — a generous bound
+/// makes the absence stronger, not weaker, and tightening it would only buy
+/// flakiness on a loaded CI emulator.
+///
+/// One residual the fix does not close, so do not read a green run as
+/// proving more than it does: `checkPermission()` reads the permission grant
+/// via `ContextCompat.checkSelfPermission` and does not consult the app-op,
+/// so `cmd appops set <pkg> android:fine_location deny` still reads as
+/// granted. Under appops the platform simply stops delivering, and exposure
+/// is bounded by the 168 s freshness window rather than closed.
 ///
 /// ## What ACT 2 proves that no unit test can
 ///
@@ -131,8 +153,10 @@ const String kRevokeObservedMarker = '[b5] REVOKE_OBSERVED';
 const String kMidSessionCycleMarker = '[b5] MIDSESSION_CYCLE';
 
 /// ACT 1, with `tail=<seconds>`: how long publishing continued after the
-/// permission was observed gone. Anything above ~0 is the
-/// `kStreamPositionMaxAge` stale-fix cache described in the class doc.
+/// permission was observed gone. Now that the access gate runs before any
+/// position is produced this should be ~0; anything approaching
+/// `kStreamPositionMaxAge` means the stale-fix cache described in the class
+/// doc has been reintroduced.
 const String kMidSessionTailMarker = '[b5] MIDSESSION_TAIL';
 
 /// ACT 1: publishing NEVER stopped inside the bounded window — the app kept
@@ -175,10 +199,14 @@ const Duration _revokeObservationTimeout = Duration(seconds: 120);
 /// ACT 1's mid-session observation window, opened when the app observes the
 /// permission is gone.
 ///
-/// Must exceed [kStreamPositionMaxAge] (168 s): until the cached stream fix
-/// ages past it, `getCurrentLocation()` never reaches the permission check
-/// at all and publishing continues on the last fix. 90 s of slack covers a
-/// loaded CI emulator and the poll granularity.
+/// Must exceed [kStreamPositionMaxAge] (168 s). That bound is kept from
+/// before the access gate was fixed, when a cached fix newer than it meant
+/// `getCurrentLocation()` never reached the permission check at all and
+/// publishing continued on the last fix. Publishing should now stop
+/// promptly, but the window stays wide deliberately: it bounds an ABSENCE,
+/// so a generous bound makes the assertion stronger, and it is the only
+/// thing that would still catch a regression reinstating the stale read.
+/// 90 s of slack covers a loaded CI emulator and the poll granularity.
 final Duration _midSessionWindow =
     kStreamPositionMaxAge + const Duration(seconds: 90);
 
@@ -417,8 +445,10 @@ void main() {
           debugPrint('$kRevokeObservedMarker perm=${after.name}');
 
           // The process outlived the revoke, so the app's OWN behaviour
-          // mid-session is observable. Measure how long publishing continues
-          // — the stale-fix cache in the class doc predicts up to 168 s.
+          // mid-session is observable. Measure how long publishing continues.
+          // Before the access gate was fixed this ran to the full 168 s of
+          // the stale-fix cache; it should now be ~0, and a long tail is the
+          // signature of that regression returning.
           final revokedAt = DateTime.now();
           final deadline = revokedAt.add(_midSessionWindow);
           var consecutiveZeros = 0;

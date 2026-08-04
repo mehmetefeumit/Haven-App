@@ -27,6 +27,7 @@ import 'package:haven/src/rust/api.dart';
 // shadowing/recursion.
 import 'package:haven/src/rust/api.dart' as rust_ffi;
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/clock_skew_detector.dart';
 import 'package:haven/src/services/relay_service.dart';
 
 // Re-exported for backward compatibility: `DataDirectoryProvider` +
@@ -415,10 +416,35 @@ class NostrRelayService implements RelayService {
 
       return _convertPublishResult(ffiResult);
     } on Object catch (e) {
+      // A device-clock rejection must NOT be flattened into the generic
+      // failure: it is the one publish error the user can actually act on, and
+      // collapsing it here is what made a fast clock a silent outage. The
+      // token is Haven-authored (`RelayError::DeviceClockRejected`), so the
+      // match cannot be steered by a hostile relay, and no relay prose is
+      // logged or rethrown (Security Rule 8).
+      final complaintToken = _deviceClockComplaintToken(e);
+      if (complaintToken != null) {
+        debugPrint(
+          'Publish rejected on timestamp grounds (device clock '
+          '$complaintToken)',
+        );
+        throw RelayClockRejectionException(complaintToken);
+      }
       debugPrint('Failed to publish event: ${e.runtimeType}');
       throw const RelayServiceException('Failed to publish event');
     }
   }
+
+  /// Extracts the wire token from a `RelayError::DeviceClockRejected` that the
+  /// FFI flattened to a string, or `null` for any other error.
+  ///
+  /// Delegates to [ClockSkewDetector.complaintFromError] rather than
+  /// re-implementing the match: a second copy of the parser is a second thing
+  /// that can silently stop recognising the token, and only one of them would
+  /// have tests. `DeviceClockComplaint.name` is the wire token by construction
+  /// — pinned by `clock_skew_detector_test.dart`.
+  static String? _deviceClockComplaintToken(Object error) =>
+      ClockSkewDetector.complaintFromError(error)?.name;
 
   @override
   Future<List<String>> fetchGroupMessages({

@@ -1899,6 +1899,49 @@ class AppLocalizationsRu extends AppLocalizations {
   String get mapLocationUnavailable => 'Местоположение временно недоступно';
 
   @override
+  String get mapLocationNoPermissionTitle =>
+      'У Haven нет доступа к местоположению';
+
+  @override
+  String get mapLocationSharingStoppedServiceOff =>
+      'На этом устройстве выключено местоположение, поэтому Haven перестал делиться им с вашими кругами. Включите местоположение, чтобы возобновить обмен.';
+
+  @override
+  String get mapLocationSharingStoppedPermission =>
+      'Haven больше не может использовать ваше местоположение, поэтому перестал делиться им с вашими кругами. Разрешите доступ, чтобы возобновить обмен.';
+
+  @override
+  String get mapLocationSharingStoppedPermissionSettings =>
+      'В системных настройках у Haven отключён доступ к местоположению, поэтому обмен прекратился. Разрешите доступ там, чтобы возобновить его.';
+
+  @override
+  String get mapLocationSharingStoppedBoth =>
+      'Haven перестал делиться вашим местоположением. Включите местоположение на этом устройстве и разрешите Haven доступ к нему.';
+
+  @override
+  String get mapLocationSharingStoppedUnknown =>
+      'Haven перестал получать ваше местоположение, поэтому обмен прекратился. Проверьте, включено ли местоположение и разрешён ли Haven доступ к нему.';
+
+  @override
+  String get mapLocationAccessRestoredAnnouncement =>
+      'Доступ к местоположению восстановлен. Haven снова делится им с вашими кругами.';
+
+  @override
+  String get clockSkewTitle => 'Часы этого телефона идут неверно';
+
+  @override
+  String get clockSkewBodyRejected =>
+      'Ваши круги не получают ваше местоположение: реле отклоняют метку времени, которую ставит этот телефон. Включите в системных настройках автоматическую установку даты и времени, чтобы это исправить.';
+
+  @override
+  String get clockSkewBodyBehind =>
+      'Этот телефон отстаёт по времени от остальных участников ваших кругов: местоположение отправляется, но срок его жизни истекает раньше, чем его успевают увидеть. Включите в системных настройках автоматическую установку даты и времени, чтобы это исправить.';
+
+  @override
+  String get clockSkewResolvedAnnouncement =>
+      'Проблема с часами устранена. Haven снова делится вашим местоположением.';
+
+  @override
   String get mapThisLocation => 'это место';
 
   @override

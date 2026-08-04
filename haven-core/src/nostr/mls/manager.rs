@@ -60,7 +60,7 @@ use transport_nostr_peeler::{NostrMlsPeeler, NostrTransportEvent};
 
 use super::signer::HavenIdentityProofSigner;
 use super::storage::{LiveSessionGuard, StorageConfig};
-use super::types::{LocationGroupConfig, LocationMessageResult};
+use super::types::{LocationGroupConfig, LocationMessageResult, PreAuthRejection, ScreenedIngest};
 use super::welcome::WelcomePreview;
 use crate::nostr::error::{NostrError, Result};
 
@@ -577,21 +577,45 @@ impl SessionManager {
             .map_err(map_mls_err)
     }
 
-    /// Converts a signed Nostr event into a transport message and ingests it.
+    /// Screens a signed Nostr event against Haven's local receiver-side policy
+    /// and, if it passes, converts it to a transport message and ingests it.
     ///
-    /// Receiver-side NIP-40 expiration enforcement (restored post-Dark-Matter;
-    /// pre-migration this lived in `decrypt_location`): a well-behaved relay
-    /// drops expired events, but a malicious or buggy relay could replay stale
-    /// location ciphertext past its advertised TTL. Defense-in-depth: drop
-    /// locally too, with a small grace window for clock skew. Every receive
-    /// plane (poll drain, live-sync, background catch-up) funnels through this
-    /// method, so the guard covers all of them. Gift wraps (kind 1059) carry
-    /// no expiration tag and pass through untouched.
+    /// Returns a [`ScreenedIngest`], which keeps the two dispositions apart at
+    /// the type level — see that type for why the distinction cannot be folded
+    /// into [`super::types::IngestOutcome`].
+    ///
+    /// # Receiver-side NIP-40 expiration screen
+    ///
+    /// Restored post-Dark-Matter (pre-migration this lived in
+    /// `decrypt_location`): a well-behaved relay drops expired events, but a
+    /// malicious or buggy relay could replay stale location ciphertext past its
+    /// advertised TTL. Defense-in-depth: drop locally too, with a small grace
+    /// window for clock skew. Every receive plane (poll drain, live-sync,
+    /// background catch-up) funnels through this method, so the guard covers all
+    /// of them. Gift wraps (kind 1059) carry no expiration tag and pass through
+    /// untouched.
+    ///
+    /// # The screen runs BEFORE authentication — the cursor contract
+    ///
+    /// The `expiration` tag is read straight off the raw event, so a rejected
+    /// event has had NOTHING verified: not its signature, not its ephemeral
+    /// author, not its ciphertext, not its membership in the group it claims.
+    /// Routing is by the `h` tag, which is the *public* `nostr_group_id` — any
+    /// observer of one of a circle's kind-445s can mint a matching event with an
+    /// `expiration` in the past and a `created_at` of its choosing.
+    ///
+    /// A caller therefore MUST treat [`ScreenedIngest::RejectedBeforeAuth`] as
+    /// "learned nothing about this event": no routing, no persistence, no
+    /// convergence drain, and above all **no sync-cursor advance**. (Before
+    /// DM-6 this path reported a synthetic `Stale`, which both cursor gates read
+    /// as "advance past it" — one forged event could push a circle's persisted
+    /// REQ floor to any timestamp it liked and strand every legitimate event
+    /// below it, permanently and across restarts.)
     ///
     /// # Errors
     ///
     /// Returns an error if conversion or ingest fails hard.
-    pub async fn process_event(&self, event: &Event) -> Result<IngestEffects> {
+    pub async fn process_event(&self, event: &Event) -> Result<ScreenedIngest> {
         if let Some(expires_at) = event.tags.iter().find_map(|t| match t.as_standardized() {
             Some(nostr::TagStandard::Expiration(ts)) => Some(*ts),
             _ => None,
@@ -602,25 +626,13 @@ impl SessionManager {
                     .saturating_add(crate::location::ttl::RECEIVER_EXPIRATION_GRACE_SECS),
             );
             if Timestamp::now() > grace {
-                // Terminal for this event: report it as `Stale` with empty
-                // effects so every caller advances its cursor past it (the
-                // same contract as the engine's own dedup outcomes) and
-                // nothing is surfaced to decrypt.
-                return Ok(IngestEffects {
-                    outcome: super::types::IngestOutcome::Stale {
-                        reason: super::types::StaleReason::AlreadySeen,
-                    },
-                    effects: SessionEffects {
-                        events: Vec::new(),
-                        publish: Vec::new(),
-                        queued: Vec::new(),
-                        pending_convergence: Vec::new(),
-                    },
-                });
+                return Ok(ScreenedIngest::RejectedBeforeAuth(
+                    PreAuthRejection::Expired,
+                ));
             }
         }
         let msg = Self::event_to_transport_message(event)?;
-        self.ingest(msg).await
+        self.ingest(msg).await.map(ScreenedIngest::Ingested)
     }
 
     /// Advances stored convergence for a group, releasing queued work and

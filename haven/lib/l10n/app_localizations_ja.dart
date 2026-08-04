@@ -1800,6 +1800,48 @@ class AppLocalizationsJa extends AppLocalizations {
   String get mapLocationUnavailable => '位置情報を一時的に取得できません';
 
   @override
+  String get mapLocationNoPermissionTitle => 'Haven が位置情報を使用できません';
+
+  @override
+  String get mapLocationSharingStoppedServiceOff =>
+      'この端末で位置情報がオフになったため、サークルへの共有を停止しました。位置情報をオンにすると再開します。';
+
+  @override
+  String get mapLocationSharingStoppedPermission =>
+      'Haven に位置情報の使用が許可されていないため、共有を停止しました。使用を許可すると再開します。';
+
+  @override
+  String get mapLocationSharingStoppedPermissionSettings =>
+      '端末の設定で Haven の位置情報の使用が許可されていないため、共有を停止しました。設定で許可すると再開します。';
+
+  @override
+  String get mapLocationSharingStoppedBoth =>
+      '位置情報の共有を停止しました。この端末で位置情報をオンにし、Haven に使用を許可してください。';
+
+  @override
+  String get mapLocationSharingStoppedUnknown =>
+      '位置情報を取得できなくなったため、共有を停止しました。位置情報がオンか、Haven に使用が許可されているかをご確認ください。';
+
+  @override
+  String get mapLocationAccessRestoredAnnouncement =>
+      '位置情報が使えるようになりました。共有を再開しています';
+
+  @override
+  String get clockSkewTitle => 'この端末の時刻が正しくありません';
+
+  @override
+  String get clockSkewBodyRejected =>
+      'この端末が付ける時刻をリレーが受け付けないため、サークルに位置情報が届いていません。端末の設定で日付と時刻の自動設定をオンにしてください。';
+
+  @override
+  String get clockSkewBodyBehind =>
+      'この端末の時刻がサークルのほかのメンバーより遅れているため、送信された位置情報は誰にも見られないまま有効期限が切れています。端末の設定で日付と時刻の自動設定をオンにしてください。';
+
+  @override
+  String get clockSkewResolvedAnnouncement =>
+      '時刻の問題が解消しました。Haven が位置情報の共有を再開しました';
+
+  @override
   String get mapThisLocation => 'この場所';
 
   @override

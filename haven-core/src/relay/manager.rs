@@ -16,6 +16,7 @@ use nostr::Url;
 use nostr::{Event, Filter, Kind, PublicKey, RelayUrl};
 use nostr_sdk::{Client, RelayPoolNotification};
 
+use super::clock_skew;
 use super::discovery::discovery_relays;
 use super::error::{RelayError, RelayResult};
 use super::types::{
@@ -106,6 +107,21 @@ const PUBLISH_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 ///
 /// The send logic is injected as a closure (receiving the zero-based attempt
 /// index) so the retry policy is unit tested without a live relay.
+///
+/// # Device-clock rejections are not collapsed
+///
+/// A non-accepting `Ok` used to be flattened to a bare
+/// [`RelayError::AllRelaysFailed`], discarding the per-relay reasons entirely.
+/// That is where a fast-clock failure went silent: the relay had *said* the
+/// timestamp was out of range, and no layer above the retry loop could ever
+/// learn it. Now the reasons are classified
+/// ([`clock_skew::classify_publish_outcome`]) and, when the clock is the
+/// stated cause, surfaced as [`RelayError::DeviceClockRejected`].
+///
+/// When *every* relay that answered blamed the clock the loop also stops
+/// early: a retry re-offers the same signed event with the same `created_at`,
+/// so it is provably hopeless, and spending two more radio round trips on it
+/// only drains a device that is already failing to share location.
 async fn publish_with_retry<F, Fut>(
     max_attempts: u32,
     backoff: Duration,
@@ -120,10 +136,30 @@ where
     for i in 0..attempts {
         match attempt(i).await {
             Ok(result) if result.is_success() => return Ok(result),
-            // Relays reached but none acknowledged in time — retry on a
-            // (hopefully warm) connection. Collapse to AllRelaysFailed so a
-            // final miss matches the historical error contract.
-            Ok(_) => last_err = RelayError::AllRelaysFailed,
+            // Relays reached but none acknowledged. Classify BEFORE collapsing
+            // so the one actionable diagnosis the relays offered survives.
+            Ok(result) => {
+                let accepted = result.is_success();
+                if let Some(complaint) =
+                    clock_skew::classify_publish_outcome(accepted, &result.rejected_by)
+                {
+                    log::warn!(
+                        "[RelayManager] publish rejected on timestamp grounds \
+                         (device clock {}); not retrying={}",
+                        complaint.wire_token(),
+                        clock_skew::publish_retry_is_hopeless(accepted, &result.rejected_by)
+                    );
+                    if clock_skew::publish_retry_is_hopeless(accepted, &result.rejected_by) {
+                        return Err(RelayError::DeviceClockRejected { complaint });
+                    }
+                    last_err = RelayError::DeviceClockRejected { complaint };
+                } else {
+                    // Preserve the historical contract that a fully
+                    // unacknowledged publish with no stated cause is
+                    // `AllRelaysFailed`.
+                    last_err = RelayError::AllRelaysFailed;
+                }
+            }
             Err(e) => last_err = e,
         }
         if i + 1 < attempts {
@@ -1568,6 +1604,133 @@ mod tests {
         .await;
         assert!(matches!(result, Err(RelayError::AllRelaysFailed)));
         assert_eq!(calls.get(), 3, "must use the full attempt budget");
+    }
+
+    // ----------------------------------------------------------------------
+    // Device-clock rejections. These are the tests that prove
+    // `relay::clock_skew` is REACHED from the production publish path rather
+    // than merely existing: they drive `publish_with_retry` — the same
+    // function `RelayManager::publish_event` calls — with the wire text a
+    // spec-conformant relay actually returns.
+    // ----------------------------------------------------------------------
+
+    /// A no-acceptance result whose relays all rejected with `reason`.
+    fn rejected_publish_result(reasons: &[&str]) -> PublishResult {
+        PublishResult {
+            event_id: nostr::EventId::from_slice(&[0u8; 32]).expect("32-byte id"),
+            accepted_by: vec![],
+            rejected_by: reasons
+                .iter()
+                .enumerate()
+                .map(|(i, r)| (format!("wss://relay{i}.example.com"), (*r).to_string()))
+                .collect(),
+            failed: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_with_retry_reports_a_clock_rejection_instead_of_swallowing_it() {
+        // Before the fix this returned a bare `AllRelaysFailed` and the
+        // relay's stated reason never left this function — the fast-clock
+        // failure mode was invisible to every layer above.
+        let result = publish_with_retry(3, Duration::ZERO, |_| async {
+            Ok(rejected_publish_result(&[
+                "invalid: event too far off from the current time",
+            ]))
+        })
+        .await;
+        assert!(
+            matches!(
+                result,
+                Err(RelayError::DeviceClockRejected {
+                    complaint: clock_skew::DeviceClockComplaint::Unspecified
+                })
+            ),
+            "a timestamp rejection must survive the retry loop as a clock \
+             diagnosis, not collapse to AllRelaysFailed"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_with_retry_stops_retrying_a_hopeless_clock_rejection() {
+        let calls = std::cell::Cell::new(0u32);
+        let result = publish_with_retry(3, Duration::ZERO, |_| {
+            calls.set(calls.get() + 1);
+            async {
+                Ok(rejected_publish_result(&[
+                    "invalid: created_at is in the future",
+                ]))
+            }
+        })
+        .await;
+        assert!(matches!(
+            result,
+            Err(RelayError::DeviceClockRejected {
+                complaint: clock_skew::DeviceClockComplaint::Ahead
+            })
+        ));
+        assert_eq!(
+            calls.get(),
+            1,
+            "re-offering the same signed event with the same created_at to a \
+             relay that already judged it out of range cannot succeed"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_with_retry_keeps_retrying_a_mixed_rejection() {
+        // One relay blames the clock, another rate-limits. The second may well
+        // accept next time, so the normal retry budget must stand — and the
+        // clock diagnosis must still be the reported cause when it does not.
+        let calls = std::cell::Cell::new(0u32);
+        let result = publish_with_retry(3, Duration::ZERO, |_| {
+            calls.set(calls.get() + 1);
+            async {
+                Ok(rejected_publish_result(&[
+                    "invalid: event too far off from the current time",
+                    "rate-limited: slow down",
+                ]))
+            }
+        })
+        .await;
+        assert!(matches!(
+            result,
+            Err(RelayError::DeviceClockRejected {
+                complaint: clock_skew::DeviceClockComplaint::Unspecified
+            })
+        ));
+        assert_eq!(calls.get(), 3, "a recoverable relay must still be retried");
+    }
+
+    #[tokio::test]
+    async fn publish_with_retry_does_not_blame_the_clock_for_ordinary_rejections() {
+        // The negative control for the whole mechanism: a non-timestamp
+        // rejection must keep producing the historical error, or every
+        // ordinary outage would be misreported to the user as a broken clock.
+        let result = publish_with_retry(2, Duration::ZERO, |_| async {
+            Ok(rejected_publish_result(&["blocked: pubkey not allowed"]))
+        })
+        .await;
+        assert!(matches!(result, Err(RelayError::AllRelaysFailed)));
+    }
+
+    #[tokio::test]
+    async fn publish_with_retry_prefers_a_later_acceptance_over_a_clock_rejection() {
+        // A transient clock complaint from one attempt must not mask a
+        // subsequent success (e.g. the user fixed the clock, or a second relay
+        // came up).
+        let result = publish_with_retry(3, Duration::ZERO, |attempt| async move {
+            if attempt == 0 {
+                Ok(rejected_publish_result(&[
+                    "invalid: event too far off from the current time",
+                    "rate-limited: slow down",
+                ]))
+            } else {
+                Ok(dummy_publish_result(true))
+            }
+        })
+        .await;
+        assert!(result.expect("later acceptance wins").is_success());
     }
 
     #[tokio::test]

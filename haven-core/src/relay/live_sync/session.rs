@@ -555,6 +555,16 @@ impl LiveSyncCore {
                 .write()
                 .await
                 .register_group(&g.relays, &g.sub_id, &group_ids);
+            // Open this bucket's cursor-anchor generation BEFORE the REQ goes
+            // out, so the anchor is the local instant we asked — never later
+            // than the request it vouches for, and never a value any relay or
+            // event author can influence. `now` is the same reading the `since`
+            // below is derived from. Opening before the subscribe also means a
+            // stored event that arrives while `subscribe_bucket` is still
+            // retrying already has a generation to hold back.
+            for hex in &g.group_ids_hex {
+                self.processor.note_subscription_opened(hex, now);
+            }
             let since = self.bucket_since(&g.group_ids_hex, phase, now);
             let filter = group_filter(&g.group_ids_hex, since);
             self.subscribe_bucket(g.relays.clone(), g.sub_id.clone(), filter)
@@ -1002,6 +1012,10 @@ impl LiveSyncCore {
             .await
             .register_group(&relays, &sub_id, &group_ids);
 
+        // Open this circle's cursor-anchor generation at the same local `now`
+        // the `since` below is derived from (see `register_and_subscribe`).
+        self.processor.note_subscription_opened(&hex, now);
+
         let since = self.bucket_since(std::slice::from_ref(&hex), SubscribePhase::Initial, now);
         let filter = group_filter(std::slice::from_ref(&hex), since);
         if let Err(e) = self
@@ -1009,6 +1023,10 @@ impl LiveSyncCore {
             .await
         {
             self.router.write().await.rollback_subscription(&sub_id);
+            // No REQ is live for this circle, so nothing can vouch for the
+            // generation we just opened; drop it rather than leave an anchor a
+            // stray EOSE could redeem.
+            self.processor.forget_subscription(&hex);
             return Err(e);
         }
 
@@ -1083,6 +1101,9 @@ impl LiveSyncCore {
                 log::warn!("[live_sync] unsubscribe_circle: unsubscribe timed out; proceeding");
             }
             self.router.write().await.rollback_subscription(&sub_id);
+            // Its REQ is closed: drop the anchor so no later EOSE for a recycled
+            // sub-id can advance a cursor for a circle we no longer follow.
+            self.processor.forget_subscription(group_id_hex);
             if let Some(active) = self.active.write().await.as_mut() {
                 active.group_subs.retain(|s| s.sub_id != sub_id);
             }
@@ -1100,6 +1121,13 @@ impl LiveSyncCore {
             let mut remaining_vec: Vec<String> = remaining.iter().cloned().collect();
             remaining_vec.sort();
             let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(i64::MAX);
+            // The bucket's REQ is being replaced, so every remaining circle
+            // starts a fresh anchor generation at this local `now`; the leaving
+            // circle's anchor is dropped outright.
+            self.processor.forget_subscription(group_id_hex);
+            for hex in &remaining_vec {
+                self.processor.note_subscription_opened(hex, now);
+            }
             let since = self.remove_reissue_since(&remaining_vec, now);
             let filter = group_filter(&remaining_vec, since);
             self.subscribe_bucket(relays.clone(), sub_id.clone(), filter)
@@ -1973,6 +2001,58 @@ mod tests {
         (core, relay, dir, url)
     }
 
+    /// Waits (bounded) for the next routed-event marker on the bus.
+    ///
+    /// The marker is the `#[cfg(test)]` panic seam inside `process_group_event`,
+    /// which `run_worker` isolates and reports as `Status { Unprocessable }`.
+    /// Reaching it requires the worker to have ROUTED the event to a specific
+    /// `#h`, which makes it the one per-event delivery oracle that survives both
+    /// the engine's `Ok(Stale)` classification of undecryptable input and the
+    /// removal of the per-event cursor advance.
+    async fn await_routed(
+        bus: &mut tokio::sync::broadcast::Receiver<crate::relay::live_sync::LiveSyncEvent>,
+    ) -> bool {
+        use crate::relay::live_sync::{LiveSyncEvent, SyncStatusReason};
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_secs(1), bus.recv()).await {
+                Ok(Ok(LiveSyncEvent::Status {
+                    reason: SyncStatusReason::Unprocessable,
+                })) => return true,
+                Ok(Ok(_)) | Err(_) => {}
+                Ok(Err(_)) => return false,
+            }
+        }
+        false
+    }
+
+    /// Waits (bounded) until `hex`'s start-generation EOSE anchor has been
+    /// consumed, i.e. its cursor has moved off the cold-start seed.
+    ///
+    /// The live plane advances a cursor ONLY on a relay's end-of-stored-events
+    /// (see `live_sync::anchor`), which lands asynchronously some time after
+    /// `start` returns. Any test that snapshots a cursor has to settle that
+    /// first, or it races an advance it did not cause and blames the next
+    /// operation for it. Returns the settled value.
+    async fn settle_eose_anchor(core: &LiveSyncCore, hex: &str) -> Option<i64> {
+        let key = group_cursor_stream(hex);
+        let read = || core.circle.read_sync_cursor(&key).ok().flatten();
+        // The cold seed is `now − 24h`; the EOSE anchor is `now`, so "moved off
+        // the seed" is an unambiguous, engine-independent signal.
+        let floor = i64::try_from(nostr::Timestamp::now().as_secs())
+            .unwrap_or(i64::MAX)
+            .saturating_sub(SEED_LOOKBACK_SECS / 2)
+            .saturating_mul(1000);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let current = read();
+            if current.is_some_and(|ms| ms >= floor) || tokio::time::Instant::now() >= deadline {
+                return current;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn subscribe_circle_does_not_re_anchor_existing_bucket_since() {
         // THE regression: adding a circle must NOT fold into an existing bucket
@@ -2040,10 +2120,15 @@ mod tests {
         let a = "aa".repeat(32);
         let b = "bb".repeat(32);
         let (core, _relay, _dir, url) = started_core_with(&[&a]).await;
-        let a_cursor_before = core
-            .circle
-            .read_sync_cursor(&group_cursor_stream(&a))
-            .unwrap();
+        // Settle A's own start-generation EOSE anchor first, so the comparison
+        // below measures what subscribing B did and not an advance already in
+        // flight when the session started.
+        let a_cursor_before = settle_eose_anchor(&core, &a).await;
+        assert!(
+            a_cursor_before.is_some(),
+            "precondition: A's start generation must have anchored, else the \
+             equality below would hold vacuously"
+        );
         core.subscribe_circle(&CircleSpec {
             group_id_hex: b.clone(),
             relays: vec![url],
@@ -2264,20 +2349,32 @@ mod tests {
         // Lossless-across-an-add: after subscribing B, BOTH the existing circle A
         // and the new circle B reach the processor — proving B is live AND A was
         // not torn down (no receive gap). A publisher independent of the engine
-        // sends one undecryptable kind:445 per circle.
+        // sends one kind:445 per circle.
         //
-        // RE-EXPRESSED: the DM engine classifies an undecryptable 445 for a group
-        // it does not hold as `Ok(Stale)` — NOT an error — so `process_group_event`
-        // advances the per-circle cursor silently instead of emitting
-        // `Status { Unprocessable }` (the old MDK error path this test relied on).
-        // Delivery is therefore proven by each circle's per-circle cursor
-        // ADVANCING past its cold-start seed (the engine-independent side effect of
-        // a Processed/Stale ingest), not by an Unprocessable count.
+        // RE-EXPRESSED (twice). The pre-Dark-Matter version keyed on
+        // `Status { Unprocessable }` from an MDK error path the engine no longer
+        // takes (it reports an undecryptable 445 as `Ok(Stale)`), so it moved to
+        // "the per-circle cursor advanced". That oracle is now gone too, and for
+        // a reason worth stating: a delivered event no longer advances any
+        // cursor, because its `created_at` is remotely chosen (see
+        // `live_sync::anchor`). Cursor motion in this plane means "a relay sent
+        // EOSE", which happens whether or not either circle's event was routed —
+        // it would have made this test pass vacuously.
+        //
+        // So delivery is proven by the ONE side effect that is per-event and
+        // engine-independent: the `#[cfg(test)]` panic seam inside
+        // `process_group_event`, which the worker isolates and reports as
+        // `Status { Unprocessable }`. Reaching it requires the worker to have
+        // routed the event to that exact `#h`. The two circles are published
+        // SEQUENTIALLY, each awaited, so a missing delivery for A times out on
+        // its own await instead of being masked by B's.
+        // (Scary panic messages on stderr are expected.)
         use nostr::{Alphabet, EventBuilder, Kind, SingleLetterTag, Tag, TagKind};
 
         let a = "aa".repeat(32);
         let b = "bb".repeat(32);
         let (core, _relay, _dir, url) = started_core_with(&[&a]).await;
+        let mut bus = core.bus().subscribe();
 
         core.subscribe_circle(&CircleSpec {
             group_id_hex: b.clone(),
@@ -2286,22 +2383,12 @@ mod tests {
         .await
         .expect("subscribe B live");
 
-        // Snapshot each circle's cold-start cursor seed BEFORE publishing.
-        let seed = |hex: &str| -> Option<i64> {
-            core.circle
-                .read_sync_cursor(&group_cursor_stream(hex))
-                .ok()
-                .flatten()
-        };
-        let seed_a = seed(&a);
-        let seed_b = seed(&b);
-
         let publisher = Client::builder().build();
         let _ = publisher.add_relay(url.as_str()).await;
         publisher.connect().await;
         publisher.wait_for_connection(Duration::from_secs(5)).await;
         let event_445 = |h: &str| {
-            EventBuilder::new(Kind::Custom(445), "undecryptable")
+            EventBuilder::new(Kind::Custom(445), "__panic_for_test__")
                 .tags(vec![Tag::custom(
                     TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
                     [h.to_string()],
@@ -2309,38 +2396,24 @@ mod tests {
                 .sign_with_keys(&Keys::generate())
                 .unwrap()
         };
+
         publisher
             .send_event_to([url.as_str()], &event_445(&a))
             .await
             .expect("publish for A");
+        assert!(
+            await_routed(&mut bus).await,
+            "the existing circle A must keep delivering to the processor after \
+             B is added (no receive gap from the delta subscribe)"
+        );
+
         publisher
             .send_event_to([url.as_str()], &event_445(&b))
             .await
             .expect("publish for B");
-
-        // A cursor advance past its pre-publish seed proves the circle's event
-        // reached the processor and the engine handled it.
-        let advanced = |hex: &str, before: Option<i64>| -> bool {
-            match (seed(hex), before) {
-                (Some(now), Some(was)) => now > was,
-                (Some(_), None) => true,
-                _ => false,
-            }
-        };
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        while tokio::time::Instant::now() < deadline {
-            if advanced(&a, seed_a) && advanced(&b, seed_b) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
         assert!(
-            advanced(&a, seed_a),
-            "the existing circle A must keep delivering (cursor must advance) after B is added"
-        );
-        assert!(
-            advanced(&b, seed_b),
-            "the newly-added circle B must deliver live (cursor must advance)"
+            await_routed(&mut bus).await,
+            "the newly-added circle B must deliver live"
         );
     }
 

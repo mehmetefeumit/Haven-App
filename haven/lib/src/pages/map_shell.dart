@@ -28,6 +28,7 @@ import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/legacy_cutover_provider.dart';
 import 'package:haven/src/providers/legacy_retraction_provider.dart';
 import 'package:haven/src/providers/live_sync_provider.dart';
+import 'package:haven/src/providers/location_access_provider.dart';
 import 'package:haven/src/providers/location_provider.dart';
 import 'package:haven/src/providers/location_publish_scheduler_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
@@ -36,15 +37,15 @@ import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/self_update_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart';
-import 'package:haven/src/services/nostr_circle_service.dart';
-import 'package:haven/src/services/foreground_liveness_probe.dart';
 import 'package:haven/src/services/background_idle_waiter.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/foreground_liveness_probe.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
 import 'package:haven/src/services/identity_service.dart' show Identity;
 import 'package:haven/src/services/live_sync_resubscriber.dart';
 import 'package:haven/src/services/location_service.dart';
+import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/pending_leave_service.dart';
 import 'package:haven/src/services/subscription_service.dart';
@@ -56,6 +57,7 @@ import 'package:haven/src/widgets/common/invitations_button.dart';
 import 'package:haven/src/widgets/common/legacy_cutover_explainer_dialog.dart';
 import 'package:haven/src/widgets/common/settings_button.dart';
 import 'package:haven/src/widgets/debug/debug_log_overlay.dart';
+import 'package:haven/src/widgets/map/map_status_banners.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// The main shell containing the map, bottom sheet, and floating controls.
@@ -108,6 +110,125 @@ class MapShell extends ConsumerStatefulWidget {
     required bool backgroundSharingEnabled,
     required bool isIOS,
   }) => backgroundSharingEnabled && isIOS;
+
+  /// Vertical space the top-edge floating buttons occupy, measured from the
+  /// safe-area inset: `HavenSpacing.sm` of offset plus the 48 dp Material
+  /// minimum tap target that `IconButton` lays out to.
+  static const double _kFloatingButtonExtent = HavenSpacing.sm + 48;
+
+  /// Top offset of the status-banner slot, measured from the safe-area inset:
+  /// clear of the floating buttons, with one spacing unit of air.
+  static const double _kStatusBannerTop =
+      _kFloatingButtonExtent + HavenSpacing.sm;
+
+  /// The shell's overlay stack, bottom-most first — i.e. in both paint and
+  /// (reverse) hit-test order.
+  ///
+  /// ## Why the status banner sits ABOVE the bottom sheet
+  ///
+  /// It used to sit below it, and that made the whole surface ineffective in a
+  /// state users sit in routinely. `CirclesBottomSheet` paints an opaque
+  /// `colorScheme.surface` and its snap ladder tops out at 0.85, so on a
+  /// 390 x 844 phone (safe-area top 47) its top edge rests at y = 126.6 while
+  /// the banner spans y = 111 to 319. Fifteen of its 208 dp were visible, the
+  /// remedy button — which is at the BOTTOM of the card — was neither visible
+  /// nor hit-testable, and a user browsing their member list was told nothing
+  /// at all. Paint order was the entire cause: nothing about the geometry
+  /// changed here.
+  ///
+  /// Ordering it above the sheet is safe with respect to everything that
+  /// legitimately outranks it:
+  ///
+  ///   * `DimOverlay` is the sheet's own scrim and stays below, which is what
+  ///     keeps the banner from being dimmed along with the map;
+  ///   * `DebugLogOverlay` stays last, so a debug build's log still covers
+  ///     everything; and
+  ///   * dialogs, modal sheets and pushed routes live on the `Navigator`'s
+  ///     overlay, which is above this entire `Stack` regardless of order.
+  ///
+  /// The cost is real and accepted: while a banner is up at the 0.85 detent it
+  /// covers the sheet's grab handle and circle selector. The sheet stays
+  /// draggable and scrollable from everywhere else, and the alternative —
+  /// hiding a non-dismissible warning about the user's own sharing being dead
+  /// because they happened to open a list — is the defect wearing a different
+  /// hat.
+  ///
+  /// ## Why the banner slot is given a `bottom:`
+  ///
+  /// `top` + `start` + `end` alone leave the height unbounded, so the banners
+  /// inside cannot bound themselves either: at a 200 % text scale the card is
+  /// 652 dp on a 390 dp-wide phone and 788 dp at 320 dp, and with no bound it
+  /// simply runs off the viewport — no overflow stripe, no exception, remedy
+  /// button hundreds of dp below the fold. Adding `bottom:` bounds it; the
+  /// `Align` re-loosens those constraints so the card still shrink-wraps at
+  /// ordinary scales instead of stretching to fill the screen.
+  ///
+  /// Extracted as a pure static because `MapPage` reaches the Rust bridge in
+  /// `initState` and cannot be pumped in `flutter test` (CLAUDE.md), so this is
+  /// what lets a widget test compose the REAL banner over the REAL sheet at
+  /// the REAL offsets and hit-test the result.
+  @visibleForTesting
+  static List<Widget> buildLayers({
+    required double topPadding,
+    required double bottomPadding,
+    required Widget map,
+    required Widget dimOverlay,
+    required Widget invitationsButton,
+    required Widget settingsButton,
+    required Widget statusBanners,
+    required Widget circlesSheet,
+    Widget? debugOverlay,
+  }) {
+    return [
+      // Full-screen map (always visible)
+      map,
+
+      // Dim overlay (animated based on sheet expansion)
+      Positioned.fill(child: dimOverlay),
+
+      // Invitations button (top leading edge; mirrors to the right in RTL,
+      // respects safe area)
+      PositionedDirectional(
+        top: topPadding + HavenSpacing.sm,
+        start: HavenSpacing.base,
+        child: invitationsButton,
+      ),
+
+      // Settings button (top trailing edge; mirrors to the left in RTL,
+      // respects safe area)
+      PositionedDirectional(
+        top: topPadding + HavenSpacing.sm,
+        end: HavenSpacing.base,
+        child: settingsButton,
+      ),
+
+      // Circles bottom sheet
+      circlesSheet,
+
+      // Status banners: tell the user, WHILE it is happening, that their
+      // location sharing has stopped and what to do about it. Render nothing
+      // while everything is fine.
+      //
+      // Above the sheet, and height-bounded — see this method's doc for both.
+      // Offset below the floating controls (`_kFloatingButtonExtent`) so it
+      // never overlaps them; start/end insets mirror under RTL; the map canvas
+      // beneath is untouched, so circle members stay visible and useful
+      // throughout the outage.
+      PositionedDirectional(
+        top: topPadding + _kStatusBannerTop,
+        start: HavenSpacing.base,
+        end: HavenSpacing.base,
+        bottom: bottomPadding + HavenSpacing.base,
+        child: Align(
+          alignment: AlignmentDirectional.topStart,
+          child: statusBanners,
+        ),
+      ),
+
+      // Debug log overlay (debug builds only)
+      if (debugOverlay != null) debugOverlay,
+    ];
+  }
 
   @override
   ConsumerState<MapShell> createState() => _MapShellState();
@@ -409,10 +530,12 @@ class _MapShellState extends ConsumerState<MapShell>
     try {
       await ref.read(circleServiceProvider).pruneExpiredLastKnown();
     } on Object catch (e) {
+      // Type only. The FFI boundary hands back a Rust `Result<_, String>` whose
+      // text is sanitized by `redact_hex_sequences`, but "sanitized by someone
+      // else's regex" is not the standard the rest of this file holds itself
+      // to, and a `kDebugMode` carve-out still logs it in every debug build and
+      // every E2E capture — which is where the log scanners look.
       debugPrint('[MapShell] pruneExpiredLastKnown failed: ${e.runtimeType}');
-      if (kDebugMode) {
-        debugPrint('[MapShell] pruneExpiredLastKnown error: $e');
-      }
     }
     // The widget may have been disposed while the first FFI call was in
     // flight. `ref` throws once the ConsumerState is disposed, so guard
@@ -422,10 +545,8 @@ class _MapShellState extends ConsumerState<MapShell>
     try {
       await ref.read(circleServiceProvider).pruneProcessedGiftWraps();
     } on Object catch (e) {
+      // Type only — see the sibling prune above.
       debugPrint('[MapShell] pruneProcessedGiftWraps failed: ${e.runtimeType}');
-      if (kDebugMode) {
-        debugPrint('[MapShell] pruneProcessedGiftWraps error: $e');
-      }
     }
   }
 
@@ -470,14 +591,13 @@ class _MapShellState extends ConsumerState<MapShell>
         fireImmediately: true,
       );
     } on Object catch (e) {
+      // Type only, like every other catch in this file. The FFI error is a
+      // Rust `Result<_, String>` that `redact_hex_sequences` has been over,
+      // but that redaction is a hex-shaped denylist — it is not a guarantee
+      // that no relay URL, group id or internal state rides along in the
+      // remaining prose, and the debug/E2E builds this used to print in are
+      // exactly the ones whose logs get captured and uploaded.
       debugPrint('[MapShell] live-sync start failed: ${e.runtimeType}');
-      // The FFI error is a Rust `Result<_, String>` already sanitized by
-      // `redact_hex_sequences`; surface its (redacted) detail in debug/e2e
-      // builds so a start failure is diagnosable instead of an opaque
-      // "String" runtimeType. Release builds keep only the runtimeType.
-      if (kDebugMode) {
-        debugPrint('[MapShell] live-sync start error: $e');
-      }
     }
   }
 
@@ -736,10 +856,38 @@ class _MapShellState extends ConsumerState<MapShell>
     _motionSub?.close();
     _motionSub = ref.listenManual<AsyncValue<Position>>(
       locationStreamProvider,
-      (_, next) {
-        next.whenData(_onMotionPosition);
-      },
+      _onMotionStreamEvent,
     );
+  }
+
+  /// Handles every position-stream state, not just the happy one.
+  ///
+  /// This was `next.whenData(_onMotionPosition)`, which runs ONLY for
+  /// `AsyncData`: an `AsyncError` — the plugin's mid-stream
+  /// `LocationServiceDisabledException` when the OS location provider is
+  /// switched off, or a permission revocation — was discarded here, and so was
+  /// a stream that stopped delivering. Sharing died and nothing in the app
+  /// noticed. `locationAccessProvider` owns the user-facing verdict (it is the
+  /// only thing that can ask the platform WHY); this listener's job is to stop
+  /// treating a dead stream as a healthy one.
+  void _onMotionStreamEvent(
+    AsyncValue<Position>? previous,
+    AsyncValue<Position> next,
+  ) {
+    if (next is AsyncError<Position>) {
+      // Type only — never the raw error (Security Rule 8).
+      debugPrint('[MapShell] position stream error: ${next.error.runtimeType}');
+      // Drop the motion reference point: it was captured before the outage, so
+      // the first fix after recovery would otherwise be measured against a
+      // position that may be hours and many kilometres old and fire a bogus
+      // "you moved 100 m" publish. Re-seeding costs one stream emission.
+      _lastMotionTriggerPosition = null;
+      return;
+    }
+    if (next is AsyncData<Position>) {
+      _onMotionPosition(next.value);
+    }
+    // AsyncLoading: a (re)subscribe is in flight, nothing to publish from yet.
   }
 
   void _stopMotionTrigger() {
@@ -911,6 +1059,13 @@ class _MapShellState extends ConsumerState<MapShell>
     // backgrounded within the settle window must not fire a relay fetch with
     // no UI to render it. Resume re-triggers the refresh anyway.
     _coldStartProfileRefreshTimer?.cancel();
+    // Stop the location-access silence watchdog. It drives a banner nobody can
+    // see while backgrounded, and its recovery edge invalidates
+    // `locationStreamProvider` — which with background sharing OFF also runs
+    // that provider's `clearCachedPosition()`, throwing away the fix the
+    // publish path serves from. `_onResumed` calls `refresh()` before anything
+    // else, which re-arms it from a fresh platform read.
+    ref.read(locationAccessProvider.notifier).suspend();
 
     if (bgEnabled && Platform.isAndroid) {
       // Android: hand off publishing to the already-running foreground
@@ -1140,6 +1295,16 @@ class _MapShellState extends ConsumerState<MapShell>
     _bgSharingPausedSub?.close();
     _bgSharingPausedSub = null;
 
+    // Re-check location access BEFORE the debounce, deliberately.
+    //
+    // Leaving the app to change a system toggle and coming straight back is
+    // the single most likely way location access changes, and it lands well
+    // inside the 30 s debounce window. Gating the re-check behind the debounce
+    // would leave the banner stale in exactly the case it exists for — both
+    // directions: still showing after the user turned location back on, and
+    // still absent after they turned it off. Cheap: two local platform reads.
+    unawaited(ref.read(locationAccessProvider.notifier).refresh());
+
     // End the pause-time MLS handoff FIRST, before the debounce and before the
     // heal below. Everything that follows — the heal's engine restart, the
     // publisher invalidations, the resume catch-up — needs the circle manager,
@@ -1367,7 +1532,7 @@ class _MapShellState extends ConsumerState<MapShell>
     // visible).
     ref.watch(backgroundServiceLifecycleProvider);
 
-    final topPadding = MediaQuery.of(context).padding.top;
+    final mediaQuery = MediaQuery.of(context);
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: SystemUiOverlayStyle(
@@ -1380,53 +1545,35 @@ class _MapShellState extends ConsumerState<MapShell>
         child: Scaffold(
           extendBodyBehindAppBar: true,
           body: Stack(
-            children: [
-              // Full-screen map (always visible)
-              const MapPage(),
-
-              // Dim overlay (animated based on sheet expansion)
-              Positioned.fill(
-                child: DimOverlay(
-                  opacity: _sheetExpansion,
-                  onDismiss: _collapseSheet,
-                ),
+            children: MapShell.buildLayers(
+              topPadding: mediaQuery.padding.top,
+              bottomPadding: mediaQuery.padding.bottom,
+              map: const MapPage(),
+              dimOverlay: DimOverlay(
+                opacity: _sheetExpansion,
+                onDismiss: _collapseSheet,
               ),
-
-              // Invitations button (top leading edge; mirrors to the right in
-              // RTL, respects safe area)
-              PositionedDirectional(
-                top: topPadding + HavenSpacing.sm,
-                start: HavenSpacing.base,
-                child: const InvitationsFloatingButton(),
-              ),
-
-              // Settings button (top trailing edge; mirrors to the left in
-              // RTL, respects safe area)
-              PositionedDirectional(
-                top: topPadding + HavenSpacing.sm,
-                end: HavenSpacing.base,
-                child: const SettingsFloatingButton(),
-              ),
-
-              // Circles bottom sheet
-              CirclesBottomSheet(
+              invitationsButton: const InvitationsFloatingButton(),
+              settingsButton: const SettingsFloatingButton(),
+              statusBanners: const MapStatusBanners(),
+              circlesSheet: CirclesBottomSheet(
                 controller: _sheetController,
                 onExpansionChanged: (expansion) {
                   setState(() => _sheetExpansion = expansion);
                 },
                 onMemberFocused: () => unawaited(_partiallyCollapseSheet()),
               ),
-
-              // Debug log overlay (debug builds only)
-              if (kDebugMode)
-                Consumer(
-                  builder: (context, ref, _) {
-                    final logState = ref.watch(debugLogProvider);
-                    if (!logState.isVisible) return const SizedBox.shrink();
-                    return const DebugLogOverlay();
-                  },
-                ),
-            ],
+              // Debug builds only.
+              debugOverlay: kDebugMode
+                  ? Consumer(
+                      builder: (context, ref, _) {
+                        final logState = ref.watch(debugLogProvider);
+                        if (!logState.isVisible) return const SizedBox.shrink();
+                        return const DebugLogOverlay();
+                      },
+                    )
+                  : null,
+            ),
           ),
         ),
       ),

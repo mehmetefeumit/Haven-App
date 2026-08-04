@@ -1909,6 +1909,49 @@ class AppLocalizationsPt extends AppLocalizations {
       'Localização temporariamente indisponível';
 
   @override
+  String get mapLocationNoPermissionTitle =>
+      'O Haven não pode usar sua localização';
+
+  @override
+  String get mapLocationSharingStoppedServiceOff =>
+      'A localização está desativada neste dispositivo, então o Haven parou de compartilhar sua posição com seus círculos. Ative a localização para voltar a compartilhar.';
+
+  @override
+  String get mapLocationSharingStoppedPermission =>
+      'O Haven não tem mais permissão para usar sua localização, então o compartilhamento parou. Permita o acesso à localização para voltar a compartilhar.';
+
+  @override
+  String get mapLocationSharingStoppedPermissionSettings =>
+      'Nas configurações do sistema, o acesso do Haven à localização está desativado, então o compartilhamento parou. Permita o acesso por lá para voltar a compartilhar.';
+
+  @override
+  String get mapLocationSharingStoppedBoth =>
+      'O Haven parou de compartilhar sua posição. Ative a localização deste dispositivo e permita que o Haven a acesse.';
+
+  @override
+  String get mapLocationSharingStoppedUnknown =>
+      'O Haven parou de receber sua posição, então o compartilhamento foi interrompido. Verifique se a localização está ativada e se o Haven tem permissão para usá-la.';
+
+  @override
+  String get mapLocationAccessRestoredAnnouncement =>
+      'O acesso à localização voltou. O Haven está compartilhando sua posição de novo.';
+
+  @override
+  String get clockSkewTitle => 'O relógio deste telefone está errado';
+
+  @override
+  String get clockSkewBodyRejected =>
+      'Seus círculos não estão recebendo sua posição, porque os relays rejeitam o horário que este telefone marca nela. Ative a data e hora automáticas nas configurações do sistema para corrigir isso.';
+
+  @override
+  String get clockSkewBodyBehind =>
+      'Este telefone está atrasado em relação ao resto dos seus círculos, então as posições que ele envia expiram antes que alguém consiga vê-las. Ative a data e hora automáticas nas configurações do sistema para corrigir isso.';
+
+  @override
+  String get clockSkewResolvedAnnouncement =>
+      'O relógio deste telefone já está certo. O Haven está compartilhando sua posição de novo.';
+
+  @override
   String get mapThisLocation => 'este local';
 
   @override

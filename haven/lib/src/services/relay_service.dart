@@ -234,6 +234,36 @@ class RelayServiceException implements Exception {
   String toString() => 'RelayServiceException: $message';
 }
 
+/// Thrown when no relay accepted an event and at least one blamed this
+/// device's clock.
+///
+/// A distinct type rather than a flag on [RelayServiceException] because the
+/// two demand different handling and different words: an ordinary publish
+/// failure is transient and worth retrying, whereas this one persists until
+/// the user fixes their clock. A user told "location sharing is failing"
+/// cannot act; a user told "this phone's clock is wrong" can.
+///
+/// Carries no relay-controlled text. The direction is classified in Rust
+/// (`haven_core::relay::clock_skew`) and crosses the FFI as a closed token;
+/// the relay's own words are discarded there and never reach a log line or a
+/// UI string (Security Rule 8).
+class RelayClockRejectionException implements Exception {
+  /// Creates a clock-rejection exception.
+  ///
+  /// [complaintToken] is the wire token (`ahead` / `behind` / `unspecified`)
+  /// carried by `RelayError::DeviceClockRejected`. It is kept as a plain
+  /// string so this layer stays free of a dependency on the detector, which
+  /// owns the enum.
+  const RelayClockRejectionException(this.complaintToken);
+
+  /// The direction the relays reported, as a wire token.
+  final String complaintToken;
+
+  @override
+  String toString() =>
+      'RelayClockRejectionException(device clock $complaintToken)';
+}
+
 /// Result of publishing an event to relays.
 @immutable
 class PublishResult {

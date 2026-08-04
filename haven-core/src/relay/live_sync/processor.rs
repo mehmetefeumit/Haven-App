@@ -4,13 +4,37 @@
 //! the Dark Matter engine (`SessionManager::process_event`), which owns
 //! convergence, out-of-order sequencing (buffering future-epoch messages), and
 //! stale/duplicate rejection. The processor then drains the engine's emitted
-//! `GroupEvent`s onto the fan-out bus and advances the per-circle cursor — but
-//! **only** when the engine reports `Processed` or `Stale`, never on `Buffered`
-//! (so a future-epoch message is re-fed until it applies; the engine also
-//! persists it durably).
+//! `GroupEvent`s onto the fan-out bus.
 //!
 //! The hand-rolled settle-window / regime gate that used to live here is gone
 //! (plan §5.3/§5.4): the engine's stored convergence replaces it.
+//!
+//! # No delivered event ever advances a cursor
+//!
+//! An inbound event's outer `created_at` is chosen by whoever signed the
+//! envelope — a throwaway ephemeral key — and no receive-side check binds it to
+//! the inner MLS message the engine authenticates. That is true for EVERY
+//! ingest outcome, `Processed` and `Stale` included: the engine's re-wrap dedup
+//! is content-derived, so an observer who re-wraps a circle's ciphertext under a
+//! fresh key and a `created_at` of its choosing still gets a clean engine
+//! verdict. A per-event cursor advance would therefore hand the persisted REQ
+//! floor to any relay observer (the `#h` routing tag IS the public
+//! `nostr_group_id`).
+//!
+//! So the advance comes from [`super::anchor`] instead, anchored on the relay's
+//! `EOSE`: after end-of-stored-events on a REQ, everything the relay held has
+//! been delivered as of the LOCAL instant the REQ was issued. Delivered events
+//! contribute in one direction only — an event that could not be APPLIED
+//! (engine `Buffered`, or a hard ingest failure) holds that generation's advance
+//! at or below its own `created_at`, so it is re-requested.
+//!
+//! A "future-epoch message is `Buffered`, so the cursor stops at it" rule would
+//! not have been enough even if the timestamps were trustworthy: the engine
+//! reports a future-epoch APPLICATION message as `Stale { PeelFailed }` (it
+//! retains it as a retryable row and re-peels once the commit lands), not as
+//! `Buffered`. `Buffered` is reported when this device's own group state cannot
+//! ingest at all — during a publish-before-apply transition. The EOSE anchor
+//! covers both because it does not depend on per-event outcomes.
 //!
 //! # Per-circle cursor
 //!
@@ -23,13 +47,16 @@ use std::sync::Arc;
 use nostr::{Event, JsonUtil};
 
 use crate::circle::CircleManager;
-use crate::nostr::mls::types::{GroupId, IngestOutcome, LocationMessageResult, PublishWork};
+use crate::nostr::mls::types::{
+    GroupId, IngestOutcome, LocationMessageResult, PublishWork, ScreenedIngest,
+};
 use crate::nostr::mls::SessionManager;
 use crate::relay::auto_commit::{
     resolve_receive_publish_work, rollback_receive_publish_work, AutoCommitPublisher,
     CONVERGENCE_RETICK_DELAY, MAX_CONVERGENCE_RETICKS,
 };
 
+use super::anchor::CursorAnchors;
 use super::event::{LiveSyncEvent, SyncStatusReason};
 use super::event_bus::EventBus;
 
@@ -41,21 +68,36 @@ pub fn group_cursor_stream(group_id_hex: &str) -> String {
 }
 
 /// What the processor did with one group event (returned for observability and
-/// testing; the side effects — bus emit, cursor advance — are already applied).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// testing; the bus side effects are already applied).
+///
+/// **No variant advances a cursor.** The variants say what the ENGINE decided
+/// and, through that, whether the event holds its generation's EOSE advance
+/// back — see the module docs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupProcessOutcome {
-    /// The engine applied the message (or it was stale/terminal); the per-circle
-    /// cursor advanced.
-    Processed {
-        /// Whether the per-circle group cursor advanced.
-        advanced_cursor: bool,
-    },
-    /// The engine buffered the message for a future epoch (out-of-order). The
-    /// cursor did NOT advance — the event is re-fed until it applies. The engine
+    /// The engine APPLIED the message (`IngestOutcome::Processed`). Nothing is
+    /// outstanding at this event's position, so it holds nothing back.
+    Applied,
+    /// The engine terminally handled the message without applying anything new
+    /// (`IngestOutcome::Stale` — duplicate, stale epoch, not-for-us, or
+    /// undecryptable-and-retained). Holds nothing back: the engine owns the
+    /// retry of what it retained, and holding here would let one forged event
+    /// pin the circle's cursor for the session.
+    Stale,
+    /// The engine buffered the message (this device's own group state cannot
+    /// ingest right now — a publish-before-apply transition). Un-applied, so it
+    /// holds this generation's advance at or below its `created_at`; the engine
     /// also persists it durably, so nothing is lost across a restart.
     Buffered,
-    /// The message could not be ingested at all (hard failure); cursor
-    /// unchanged.
+    /// Haven's local receiver-side screen rejected the event BEFORE any MLS
+    /// authentication (see [`crate::nostr::mls::types::ScreenedIngest`]). Nothing
+    /// was routed and nothing was persisted. It holds nothing back either: there
+    /// is no un-applied message to come back for, and letting it hold would sell
+    /// an attacker a stall for the price of one forged event.
+    RejectedBeforeAuth,
+    /// The message could not be ingested at all (hard failure). Treated like
+    /// [`Self::Buffered`] for the cursor: something at this position is
+    /// unresolved, so it holds the generation back.
     Unprocessable,
 }
 
@@ -72,6 +114,9 @@ pub struct EngineProcessor {
     /// (never an optimistic apply). The live-sync session installs the engine
     /// `Client` here via [`Self::with_publisher`].
     publisher: Option<Arc<dyn AutoCommitPublisher>>,
+    /// Per-circle cursor anchors: the ONLY thing in this module that may move a
+    /// sync cursor forward, and it moves it to a local clock reading.
+    anchors: CursorAnchors,
 }
 
 impl EngineProcessor {
@@ -81,11 +126,12 @@ impl EngineProcessor {
     /// (fail closed, Rule 13) since it cannot be published. Use
     /// [`Self::with_publisher`] for the live-sync path.
     #[must_use]
-    pub const fn new(circle: Arc<CircleManager>, bus: EventBus) -> Self {
+    pub fn new(circle: Arc<CircleManager>, bus: EventBus) -> Self {
         Self {
             circle,
             bus,
             publisher: None,
+            anchors: CursorAnchors::default(),
         }
     }
 
@@ -102,16 +148,74 @@ impl EngineProcessor {
             circle,
             bus,
             publisher: Some(publisher),
+            anchors: CursorAnchors::default(),
         }
+    }
+
+    /// Opens a fresh cursor-anchor generation for `group_id_hex`, anchored at
+    /// `opened_at_secs` — a LOCAL wall-clock reading taken when that circle's REQ
+    /// was (re-)issued.
+    ///
+    /// The session MUST call this for every circle of every REQ it issues, before
+    /// or as it issues it. Passing an open time EARLIER than the actual REQ is
+    /// safe (it claims less); passing a later one is not, so callers reuse the
+    /// same `now` they derived the REQ's `since` from.
+    ///
+    /// A circle with no open generation never advances its cursor — which is why
+    /// a bare processor with no session wired is inert on the cursor.
+    pub fn note_subscription_opened(&self, group_id_hex: &str, opened_at_secs: i64) {
+        self.anchors.open_generation(group_id_hex, opened_at_secs);
+    }
+
+    /// Records the relay's end-of-stored-events for `group_id_hex` and advances
+    /// that circle's persisted cursor to what the generation justifies.
+    ///
+    /// Returns whether an advance was issued (`false` when no generation is open
+    /// or this generation already advanced). Best-effort: a storage failure is
+    /// swallowed, because the cursor is an optimization and dropping the EOSE
+    /// signal must never cost a delivered event.
+    ///
+    /// # Why EOSE and not the event
+    ///
+    /// EOSE is the relay saying "that was everything I had for this REQ". Paired
+    /// with the local instant the REQ was issued, it is the only completeness
+    /// claim this plane can make that no remote party can write. See the module
+    /// docs.
+    pub fn note_end_of_stored_events(&self, group_id_hex: &str) -> bool {
+        let now_secs = chrono::Utc::now().timestamp();
+        let Some(ms) = self.anchors.note_eose(group_id_hex, now_secs) else {
+            return false;
+        };
+        let _ = self
+            .circle
+            .advance_sync_cursor(&group_cursor_stream(group_id_hex), ms);
+        true
+    }
+
+    /// Drops a circle's anchor after its subscription is closed, so a later
+    /// stray EOSE cannot advance a cursor for a circle we no longer follow.
+    pub fn forget_subscription(&self, group_id_hex: &str) {
+        self.anchors.forget(group_id_hex);
     }
 
     /// Processes one incoming `kind:445` for `nostr_group_id` (its routed `#h`).
     ///
     /// Ingests via the engine, routes the drained events, advances stored
-    /// convergence for any pending group, resolves any engine publish work, and
-    /// gates the per-circle cursor on the ingest outcome (advance on
-    /// `Processed`/`Stale`, never on `Buffered`).
+    /// convergence for any pending group, and resolves any engine publish work.
+    ///
+    /// **Never advances a cursor.** An event that could not be applied records a
+    /// hold-back against its circle's current anchor generation, so the next
+    /// [`Self::note_end_of_stored_events`] stops at or below it; every other
+    /// outcome is cursor-inert. See the module docs for why no ingest outcome —
+    /// `Processed` included — vouches for the outer `created_at`.
+    ///
+    /// `#[deny(clippy::wildcard_enum_match_arm)]`: the two matches below are the
+    /// hold-back gate. A wildcard arm here is how a future variant — of
+    /// [`ScreenedIngest`] or of the upstream `IngestOutcome` — silently inherits
+    /// "nothing outstanding here", so making one a hard error (clippy runs with
+    /// `-D warnings` in CI) forces the decision to be written down.
     #[cfg_attr(test, allow(clippy::missing_panics_doc))]
+    #[deny(clippy::wildcard_enum_match_arm)]
     pub async fn process_group_event(
         &self,
         event: &Event,
@@ -129,11 +233,28 @@ impl EngineProcessor {
         let group_hex = hex::encode(nostr_group_id);
         let created_at_secs = i64::try_from(event.created_at.as_secs()).unwrap_or(i64::MAX);
 
-        let Ok(ingest) = self.circle.session().process_event(event).await else {
+        let Ok(screened) = self.circle.session().process_event(event).await else {
             self.bus.send(LiveSyncEvent::Status {
                 reason: SyncStatusReason::Unprocessable,
             });
+            // Something at this position is unresolved, so hold the generation
+            // at it. Attacker-writable, but only downwards (and the cursor write
+            // is monotonic-max), so the worst it buys is a wider refetch.
+            self.anchors.note_unapplied(&group_hex, created_at_secs);
             return GroupProcessOutcome::Unprocessable;
+        };
+
+        let ingest = match screened {
+            // Rejected by Haven's local screen BEFORE any MLS authentication:
+            // the signature, the ephemeral author and the ciphertext are all
+            // unverified. No routing, no publish work, no convergence drain —
+            // and no hold-back either: there is no un-applied message to come
+            // back for, so letting it hold would let one forged event stall the
+            // circle's cursor for the whole generation.
+            ScreenedIngest::RejectedBeforeAuth(_) => {
+                return GroupProcessOutcome::RejectedBeforeAuth;
+            }
+            ScreenedIngest::Ingested(effects) => effects,
         };
 
         // Route the drained events, then release any stored convergence + route
@@ -147,22 +268,17 @@ impl EngineProcessor {
         )
         .await;
 
-        // Cursor gate: advance on Processed/Stale (the engine handled it), never
-        // on Buffered (future-epoch; re-fed until it applies — the engine also
-        // persists it durably so nothing is lost on restart).
+        // The hold-back gate. NOT a cursor advance: no arm here writes a cursor,
+        // because no engine verdict binds this envelope's `created_at` to what it
+        // authenticated. `Buffered` is the one un-applied verdict, so it — and
+        // only it — pins this generation's EOSE advance at or below the event.
         match ingest.outcome {
-            IngestOutcome::Buffered { .. } => GroupProcessOutcome::Buffered,
-            IngestOutcome::Processed | IngestOutcome::Stale { .. } => {
-                let ms = created_at_secs.saturating_mul(1000);
-                // Best-effort: a cursor write failure must not drop the delivered
-                // event; the cursor re-advances on the next applied event.
-                let _ = self
-                    .circle
-                    .advance_sync_cursor(&group_cursor_stream(&group_hex), ms);
-                GroupProcessOutcome::Processed {
-                    advanced_cursor: true,
-                }
+            IngestOutcome::Buffered { .. } => {
+                self.anchors.note_unapplied(&group_hex, created_at_secs);
+                GroupProcessOutcome::Buffered
             }
+            IngestOutcome::Processed => GroupProcessOutcome::Applied,
+            IngestOutcome::Stale { .. } => GroupProcessOutcome::Stale,
         }
     }
 
