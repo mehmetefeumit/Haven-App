@@ -103,7 +103,7 @@ mechanism at all. `locationSettingsIosLimitedNote` repeats the over-claim.
 Fix the English, then re-translate. Batch with the other copy fixes below so the
 12 locales are touched once.
 
-### P0-3 · KeyPackage expires at 84 days → accounts silently uninvitable — OPEN
+### P0-3 · KeyPackage expires at 84 days → accounts silently uninvitable — FIXED 2026-08-04
 
 `decide_kp_maintenance`
 (`haven-core/src/relay/maintenance/key_package.rs:236-278`) has four branches,
@@ -120,10 +120,122 @@ cannot be repaired, and `MaintenanceService` swallows the failure into a state
 indistinguishable from "already healthy"
 (`haven/lib/src/services/maintenance_service.dart:44-53`).
 
-Needs a rotation-policy decision (re-mint threshold — 75% of lifetime is a
-reasonable default — plus deletion of superseded packages and whether
-already-published accounts get a forced rotation on next launch), not just a
-test. Cheapest partial mitigation: a mint fallback when the reuse-build fails.
+**FIXED 2026-08-04 — owner chose lifetime-keyed rotation.** Rotate at
+`KP_ROTATE_AT_LIFETIME_FRACTION = 0.75` of the package's OWN lifetime, read off
+the validated KeyPackage (`relay/maintenance/kp_lifetime.rs`), never off an
+event timestamp.
+
+*Why not the reference app's design.* White Noise rotates on a 30-day timer
+keyed to the Nostr event's `created_at` and never parses `not_after` at all —
+`grep` for `not_after|not_before|Lifetime` across its core returns nothing. That
+is honest for it only because every publish there mints fresh material. **Haven's
+heal path republishes cached bytes with a fresh `created_at`**, so an event-age
+timer would silently reset on every relay heal while the real `not_after` kept
+ticking: a green timer over an expired package. `heal_does_not_reset_the
+_rotation_clock` is the test that exists for exactly this.
+
+*Reading the lifetime needed a dependency.* `not_before`/`not_after` are not
+reachable through the pinned Dark Matter crates — the engine parses them but
+surfaces the numbers only inside the error for a package that already FAILED
+validation. `haven-core` now names `openmls` directly, which adds **zero
+crates** (both already resolved transitively; `Cargo.lock` grew two lines) and
+avoids putting a hand-rolled MLS wire parser in the crypto path. The reader
+validates before reading, so a corrupt row cannot dictate rotation timing.
+
+*Design points worth keeping:*
+
+* **Rotation sits ABOVE the heal branch.** Healing first would republish aging
+  cached bytes to the dropped relay and only then rotate — two publishes with a
+  window where relays serve about-to-die material. `Rotate` targets every
+  responder, not just the missing ones.
+* **Unreadable lifetime rotates**, and reports a distinct action. "Assume
+  fresh" is the defect being fixed; "assume stale" is bounded and
+  self-correcting (the replacement is minted by our own engine, so the next
+  tick reads `Known`), and a permanently-broken reader is visible rather than
+  indistinguishable from health.
+* **Migration is free by construction** — keying on `not_after` means an
+  already-published account simply reads as past threshold on the next check.
+  No special-case path, tested both directions.
+* **Monotonic `created_at`.** NIP-01 breaks a `created_at` tie by keeping the
+  LOWEST event id, so a same-second replacement can silently fail to replace.
+  Copied from the reference app, which is the one piece of its design that
+  transfers cleanly.
+
+*A spec MUST we were violating is now closed.* Last-resort init material must be
+deleted at the EARLIER of confirmed replacement publication or `not_after`.
+Haven satisfied the first bound (the delete sits inside `if published`, and
+`publish_event` returns `Ok` only on ≥1 relay ack) but **not** the second, so an
+offline or relay-less device retained dead private keys indefinitely — the same
+leak the reference app has. `purge_key_package_past_not_after` now runs before
+any relay probe, since that bound is transport-independent. The spec's stated
+risk: compromising one lets an attacker decrypt every recorded Welcome to it.
+
+*Failure surfacing, the amplifier that hid all of this.* The bigger conflation
+was NOT the swallowed exception in `MaintenanceService` — it was that
+`republish_key_package` picks its action BEFORE knowing whether the write
+landed and signals the ack only through `relays_healed`, which is 0 on
+`AllRelaysFailed`. A publish acked by **nobody** arrived in Dart labelled
+`republishedFreshD` and scored as success. Classification moved into the FFI
+mapping layer; `KeyPackageMaintenanceOutcome` is now a sealed
+healthy/published/failed hierarchy whose `.empty()` constructor — the literal
+collapse — is deleted, and the scheduler retries on a ladder instead of
+sleeping a full interval while the account is uninvitable.
+
+*`relays_targeted` separates two failures that looked identical:* nothing
+configured (await user action) from nothing reachable (retry promptly).
+
+*Testing.* 21 lifetime-reader unit tests; `tests/kp_rotation_e2e.rs` (11)
+including a security oracle proving a deleted init key actually makes Welcomes
+to that package undecryptable; 4 real-FFI tests; 21 Rust mutations and 4 Dart
+mutations, 0 survivors. Plus the wire lane below.
+
+*Wire proof — `e2e-kp-rotation`* (`tooling/e2e/ci/run-kp-rotation.sh`,
+`haven/integration_test/kp_rotation_wire_test.dart`, 36 self-test fixtures).
+Everything above observes rotation from the PUBLISHER's side; this proves the
+part a user actually hits — a separate participant fetching from the relay gets
+material that validates at Add time AND yields a working group. A Welcome that
+is accepted but produces an unusable group is what a "did the Add succeed"
+check would wave through, so the lane requires Alice to decrypt what Bob
+publishes afterwards.
+
+The threshold is reached by **backdating the device clock 70 days before the
+first mint**, then restoring true time. A short-lifetime package was rejected
+as unmintable (the 84-day span is not configurable anywhere Haven can reach,
+and a hand-built package would not be what the production minter produced); a
+forward jump is impossible because `strfry.conf`'s
+`rejectEventsNewerThanSeconds = 900` refuses to accept anything from a device
+ahead of it; a test-only threshold override was rejected on the precedent
+`check_no_exporter_label_override.sh` sets. Backdating leaves the mint, the
+stamped `Lifetime`, the reader, the arithmetic, the publish and the relay all
+real — the only fiction is *when* the first package was minted, which is the
+variable under test. It works because the relay's clock is the one that does
+NOT move.
+
+Non-vacuity: the lane requires TWO independent readings of the same claim — the
+tick's own `rotatedExpiringMaterial` verdict AND a superseding relay event with
+different `content` in the same `d` — so reporting rotation without publishing,
+or publishing without re-minting, both fail. The elapsed fraction is computed
+from WIRE timestamps and must fall strictly between 75% and 100%, which is also
+what separates "threshold fired" from "already expired" (the action name alone
+cannot: `rotatedExpiringMaterial` covers both).
+
+**Known gaps, stated rather than implied:** Bob is a separate identity, DB and
+MLS state but the SAME OS process — the repo has no multi-process E2E harness.
+Android only; `adb root` + `date` has no `simctl` equivalent. 70 days is
+simulated, not waited. And the converse heal case is unreachable on the wire by
+construction (rotate precedes heal, so a past-threshold package can never be
+healed), so the wire lane proves the reachable half and the host suite covers
+the other with a fabricated lifetime.
+
+**Adjacent spec deviation found, NOT fixed:** `mint_d()` generates 16 random
+bytes → a 32-char hex `d`, but the Nostr binding requires exactly one
+64-character lowercase hex value decoding to 32 bytes. Existing slots are
+reused, so a fix affects first publishes only. Follow-up.
+
+**Also found:** `MockRelay` does not implement NIP-01's lower-event-id
+tie-break — it takes the last write. Discovered by asserting the spec and
+watching it fail. This makes the same-second hazard WORSE, not better, since
+the same tie can resolve differently on different relays.
 
 ### P0-4 · Catch-up drops offline backlog — OPEN (partial)
 
@@ -137,7 +249,7 @@ returns the **newest** *n*, so past 512 events the oldest are never delivered.
   ordering in the MLS convergence path and wants E2E validation. Until then,
   a circle with a persistently saturated window makes no cursor progress.
 
-### P0-5 · Unauthenticated remote cursor poisoning — FIXED 2026-08-04 (one path still open)
+### P0-5 · Unauthenticated remote cursor poisoning — FIXED 2026-08-04 (all paths)
 
 Discovered while building the Workstream B clock-skew lane; it is the severe
 form of what B8's finding (3) records as a benign clock-skew shape.
@@ -1371,8 +1483,9 @@ does the first and **not** the second:
   (`location_sharing_provider.dart:246`,
   `location_publish_scheduler_provider.dart:227`). Net effect: **location
   sharing stops, the map keeps showing the last fix, and the user is told
-  nothing.** The lane asserts the surfacing anyway and is therefore **EXPECTED
-  RED on that step** — the B1 precedent: the red is the deliverable.
+  nothing.** The lane asserted the surfacing anyway and WAS expected red on that
+  step — the B1 precedent: the red is the deliverable. It is no longer red; see
+  the fix below.
 
   **FIXED 2026-08-03.** A new `locationAccessProvider` owns detection and a new
   `LocationAccessBanner` renders it from `_MapShellState.build`
@@ -1599,16 +1712,23 @@ variant. (b) The behind direction in an account with exactly one other member
 across all circles, since corroboration needs two distinct member ids —
 relaxing that would let any single peer's bad clock accuse the user's phone.
 
-**The lane stays RED, deliberately, and was NOT weakened.** `b8` asserts that a
-±6 h jump leaves *delivery* intact. That is unachievable without clock
-correction: `forward-skew-publish` can only be cleared by not signing a future
-`created_at`; `backward-skew-retention` / `-receive` follow mechanically from
-`expiration = created_at + 228` on the same skewed clock, and making a peer
-accept them would mean weakening `RECEIVER_EXPIRATION_GRACE_SECS`, a replay
-defence; `backward-skew-catchup` is a cursor-window property no detection
-change touches. The lane also publishes through its own `TestRelay`
-WebSocket rather than `RelayManager::publish_event`, so this work neither
-regresses nor improves it.
+**Why the lane WAS red, and was not simply weakened.** As first written, `b8`
+asserted that a ±6 h jump leaves *delivery* intact. That is unachievable
+without clock correction: `forward-skew-publish` can only be cleared by not
+signing a future `created_at`; `backward-skew-retention` / `-receive` follow
+mechanically from `expiration = created_at + 228` on the same skewed clock, and
+making a peer accept them would mean weakening
+`RECEIVER_EXPIRATION_GRACE_SECS`, a replay defence; `backward-skew-catchup` is
+a cursor-window property no detection change touches.
+
+A permanently-red lane is worse than no lane — it trains people to ignore it
+and cannot detect a regression — so the resolution below re-scoped it rather
+than deleting the measurements or relaxing what could still hold. One of the
+four supposedly-unachievable properties turned out to be achievable and was
+KEPT as a gate: `backward-skew-publish` passes, because
+`tooling/e2e/strfry.conf` sets `rejectEventsOlderThanSeconds = 94608000`
+(3 years), so a −6 h `created_at` is accepted and a refusal there would be a
+real, fixable regression.
 
 **OWNER DECISION — TAKEN 2026-08-04: re-scoped to the SIGNALS.** The lane now
 gates what the app is actually responsible for and RECORDS what it is not,
@@ -2062,3 +2182,94 @@ same read-back.
 
 **5. `E2E Clock Skew` — the lane doing its job.** See the B8 owner decision
 above, taken in this round.
+
+## CI run 30964250098 — `Coverage / Flutter Coverage`, and the tooling around it 2026-08-04
+
+**The failure.** One line:
+
+```
+BELOW   lib/src/services/
+        50.99% < floor 51% (1442/2828 lines, manifest line 203).
+```
+
+Seven hundredths of a point, on a row nothing in the diff had touched.
+
+**The cause was not coverage.** It was the pin. That row had been hand-written
+as `51` against a recorded `# measured 51.06%`, where the file's own documented
+rule — `floor(measured) - 2`, which `--list` implements and every other row
+followed — gives **49**. A floor 0.06 points under its measurement is not a
+floor, it is a tripwire: with 2828 instrumented lines in that directory, one
+percentage point is 28 lines, so any unrelated change that adds a few uncovered
+lines to the service layer reddens the build.
+
+Two more rows were in the same state and had simply not gone off yet:
+`src/relay/catchup.rs` at 97 against 97.14% (0.14 points; the rule gives 95) and
+`geolocator_location_service.dart` at 86 against 86.72% (0.72; rule 84). Three
+of fifty-four rows had drifted from the rule, and **nothing checked**. The only
+thing that could observe a bad pin was a full 11-minute `llvm-cov` run, or a
+5-minute `flutter test --coverage` — after the fact, in CI.
+
+*What was built.*
+
+* **`--lint`, a static check of the manifest against its own rule.** Every row
+  must carry its `# measured N%` provenance and must be pinned no tighter than
+  `floor(measured) - 2` (or exactly 100). No report, no toolchain, ~50 ms. Also
+  catches duplicate rows and rows with no recorded measurement — a floor nobody
+  can re-derive is a floor nobody can review. Wired into repo-guards.yml **and**
+  a new pre-commit hook, so the defect above is now caught in the diff that
+  writes it. `--lint --fix` rewrites the mechanical ones.
+* **`--repin`, so nobody computes a pin by hand again.** Raises floors the code
+  has outgrown and refreshes their provenance, in place, preserving every
+  comment, margin override and column. It is **one-directional**: a row whose
+  coverage FELL is left byte-for-byte alone, because re-pinning downward is
+  exactly how a measured regression gets laundered into a permitted one, and
+  because rewriting the provenance alone would leave the row failing its own
+  lint. Six floors were raised from this run's report; four rows held.
+* **A low-headroom notice.** A row above its floor but within one point of it
+  is reported (as a `::warning`, not a failure — the band exists to permit that
+  state). `src/location/nostr.rs` is at exactly 50.00% against a floor of 50
+  and had said nothing.
+
+**The second failure this run could not have caught: the instrument moves.**
+The coverage jobs ran `dtolnay/rust-toolchain@stable` and `channel: stable`.
+Coverage is a ratio whose denominator is *instrumented lines* — a property of
+the compiler, not of the tests — so a floating toolchain silently re-measures
+every path on someone else's release schedule. It already had: `stable` moving
+1.92 → 1.97.1 instrumented ~400 fewer lines in haven-core and tripped seven
+per-path ratchets in one run with no code change, and Flutter had moved 3.41 →
+3.44.8 unnoticed. `scripts/ci/coverage_toolchain.env` now pins both, read by
+coverage.yml *and* the local gate; every other workflow keeps floating, so
+new-SDK breakage still surfaces — just not as a coverage number nobody changed.
+
+**The third: the local gate was not the thing it claimed to be.**
+`check_coverage.sh` said it "mirrors CI" while running four of the workflow's
+seven gates. The undeclared-skip check and the rollback-path flag-off run lived
+only in the workflow, so a green local run was compatible with a red CI. It also
+measured Flutter from the RAW lcov where CI measured a filtered one, and
+re-implemented the filter in awk — whose `/\/test\//` cannot match a
+package-relative `test/foo.dart` record where lcov's `**/test/**` does, a
+divergence invisible only because `flutter test --coverage` happens not to emit
+test files today. It is now a **superset**: all seven gates, the filter extracted
+to one script both callers invoke (`filter_lcov.sh`), the two stacks run in
+parallel (slowest-of rather than sum-of), and the static gates run first and
+alone so the common failure costs a second.
+
+`VeryGoodOpenSource/very_good_coverage@v3` went with it. The workflow carried a
+NOTE to replace it "before GitHub forces Node 24" — a plan that works only if
+someone reads it in time — and the gate is a sum over LH/LF, four lines of awk
+now shared with the local run (`check_lcov_aggregate.sh`).
+
+**Honest about what it cannot measure.** rustc is *required* to match the pin
+(rustup makes that free), so the Rust half is predictive. There is no equivalent
+for Flutter, so a mismatched SDK downgrades the ratio-based verdicts to
+ADVISORY, keeps the SDK-independent ones (tests green, no undeclared skips, the
+flag-off run) gating, and says so in the verdict. A gate that fails on a number
+it knows it cannot measure is a gate that teaches `--no-verify`.
+
+*Verification.* 31 hermetic fixtures on the floors guard (18 existing + 13 new,
+covering the tight pin, the fix's column/margin/comment preservation, the
+one-directional repin, duplicate rows, missing provenance, and the CHECKED-IN
+manifest against the rule), 12 on the filter, 8 on the aggregate — all wired into
+repo-guards. Verified end to end against a real local run of both stacks: the
+Rust per-path table reproduces CI's numbers line for line on the paths whose
+sources are unchanged.

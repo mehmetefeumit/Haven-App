@@ -16,11 +16,24 @@ class MockRelayService implements RelayService {
     int maxDurationSecs = 20,
   }) async => const CatchupResult.empty();
 
+  /// The outcome [maintainKeyPackage] reports.
+  ///
+  /// Defaults to a *confirmed* healthy tick (one relay answered, serving one
+  /// canonical) rather than to a neutral zero value. The type this replaced had
+  /// an `.empty()` default whose zeroes read as health, so a stand-in that had
+  /// never talked to a relay and a stand-in that had verified one were the same
+  /// object; spelling the numbers out here keeps a mock from re-teaching that.
+  KeyPackageMaintenanceOutcome keyPackageOutcome =
+      const KeyPackageMaintenanceHealthy(
+        canonicalOnRelays: 1,
+        respondersProbed: 1,
+      );
+
   @override
-  Future<KeyPackageMaintenanceResult> maintainKeyPackage({
+  Future<KeyPackageMaintenanceOutcome> maintainKeyPackage({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
-  }) async => const KeyPackageMaintenanceResult.empty();
+  }) async => keyPackageOutcome;
 
   @override
   Future<RelayListMaintenanceResult> maintainRelayList({

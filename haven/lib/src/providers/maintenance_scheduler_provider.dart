@@ -90,6 +90,7 @@ import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/member_profile_refresh_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/services/relay_service.dart';
 
 // ---------------------------------------------------------------------------
 // Interval constants
@@ -97,6 +98,31 @@ import 'package:haven/src/providers/service_providers.dart';
 
 /// Nominal `KeyPackage` maintenance interval (jittered ±25 % per tick).
 const Duration keyPackageMaintenanceInterval = Duration(minutes: 10);
+
+/// First retry delay after a `KeyPackage` tick reported a *transient* failure
+/// ([KeyPackageRetryDisposition.retryPromptly]) — a relay that did not answer,
+/// or a publish no relay acknowledged.
+///
+/// Doubles per consecutive failure up to [keyPackageRetryMaxDelay]. The whole
+/// ladder sits strictly inside the nominal interval's jitter floor (see that
+/// constant), so a failing tick always comes back sooner than a healthy one —
+/// which is the entire point: between the failed publish and the next
+/// successful one, nobody can invite this account.
+const Duration keyPackageRetryPromptDelay = Duration(seconds: 60);
+
+/// Flat retry delay after a `KeyPackage` tick reported a *local* failure
+/// ([KeyPackageRetryDisposition.retryLater]) — a broken FFI call or MLS store.
+///
+/// Not laddered: repeating a broken local call faster buys nothing, and the
+/// condition does not heal on a relay's timescale.
+const Duration keyPackageRetryLaterDelay = Duration(minutes: 5);
+
+/// Cap on the `KeyPackage` retry ladder.
+///
+/// Chosen so the jittered retry (max `5 min × 1.25` = 6 min 15 s) stays below
+/// the jittered nominal floor (`10 min × 0.75` = 7 min 30 s). A retry that can
+/// land later than the ordinary cadence is not a retry.
+const Duration keyPackageRetryMaxDelay = Duration(minutes: 5);
 
 /// Nominal relay-list maintenance interval (jittered ±25 % per tick).
 const Duration relayListMaintenanceInterval = Duration(minutes: 30);
@@ -154,6 +180,11 @@ class MaintenanceSchedulerNotifier extends Notifier<void> {
   /// the login-publish causal handoff. Reset per generation in [build].
   bool _awaitedLoginPublish = false;
 
+  /// Consecutive `KeyPackage` ticks that reported a retryable failure. Drives
+  /// the retry ladder; reset to 0 by any tick that did not. Reset per
+  /// generation in [build].
+  int _keyPackageFailureStreak = 0;
+
   /// Monotonic lifecycle counter. Riverpod reuses this notifier instance across
   /// an `invalidate`+re-read, so a settling tick from a superseded lifecycle
   /// must not touch the current one — every tick captures its generation and
@@ -180,6 +211,7 @@ class MaintenanceSchedulerNotifier extends Notifier<void> {
     _healthInFlight = false;
     _profileAntiEntropyInFlight = false;
     _awaitedLoginPublish = false;
+    _keyPackageFailureStreak = 0;
     final generation = ++_generation;
 
     ref.onDispose(() {
@@ -278,6 +310,10 @@ class MaintenanceSchedulerNotifier extends Notifier<void> {
       return;
     }
     _keyPackageInFlight = true;
+    // Null only while the tick has not produced a verdict yet. Anything that
+    // leaves the try block without setting it is a failure by definition, so
+    // the reschedule below reads a null as one rather than as "fine".
+    KeyPackageMaintenanceOutcome? outcome;
     try {
       if (!_awaitedLoginPublish) {
         _awaitedLoginPublish = true;
@@ -285,18 +321,15 @@ class MaintenanceSchedulerNotifier extends Notifier<void> {
         // Logout / re-login may have superseded us during the settle wait.
         if (!_isCurrent(generation)) return;
       }
-      final result = await ref
-          .read(maintenanceServiceProvider)
-          .maintainKeyPackage();
-      debugPrint(
-        '[Maintenance] KeyPackage tick: ${result.action.name} '
-        '(canonical=${result.canonicalOnRelays}, '
-        'errors=${result.relayErrors})',
-      );
+      outcome = await ref.read(maintenanceServiceProvider).maintainKeyPackage();
+      debugPrint('[Maintenance] KeyPackage tick: $outcome');
     } on Object catch (e) {
       // Defensive: the service is already best-effort, but a throw here would
       // kill the reschedule and leave the loop dead. Never let a tick throw.
       debugPrint('[Maintenance] KeyPackage tick threw: ${e.runtimeType}');
+      outcome = const KeyPackageMaintenanceFailed(
+        KeyPackageFailureKind.tickErrored,
+      );
     } finally {
       // Reset the in-flight flag ONLY for the current generation. A stale tick
       // (superseded by a re-login rebuild) must NOT clear the flag — doing so
@@ -305,9 +338,49 @@ class MaintenanceSchedulerNotifier extends Notifier<void> {
       // is a no-op (build() already reset the flag for the new lifecycle).
       if (_isCurrent(generation)) {
         _keyPackageInFlight = false;
-        _armKeyPackage(_jittered(keyPackageMaintenanceInterval), generation);
+        _armKeyPackage(_nextKeyPackageDelay(outcome), generation);
       }
     }
+  }
+
+  /// Decides when the next `KeyPackage` tick should run, given what this one
+  /// reported — the point of making the outcome three-way in the first place.
+  ///
+  /// A failed tick means nobody can invite this account right now, so waiting
+  /// out the full nominal interval is the wrong answer; the ladder brings the
+  /// next attempt in sooner and widens as the failure persists. A tick that
+  /// confirmed health (or landed a publish) clears the streak, so one bad relay
+  /// window does not permanently accelerate the loop.
+  ///
+  /// [outcome] is null only when the tick returned before reaching a verdict,
+  /// which is treated as a local failure rather than as success.
+  Duration _nextKeyPackageDelay(KeyPackageMaintenanceOutcome? outcome) {
+    final disposition = switch (outcome) {
+      KeyPackageMaintenanceHealthy() ||
+      KeyPackageMaintenancePublished() => null,
+      KeyPackageMaintenanceFailed(:final disposition) => disposition,
+      null => KeyPackageRetryDisposition.retryLater,
+    };
+
+    if (disposition == null ||
+        disposition == KeyPackageRetryDisposition.awaitUserAction) {
+      // Nothing to escalate: either the account is reachable, or no amount of
+      // retrying substitutes for the user logging back in.
+      _keyPackageFailureStreak = 0;
+      return _jittered(keyPackageMaintenanceInterval);
+    }
+
+    _keyPackageFailureStreak++;
+    if (disposition == KeyPackageRetryDisposition.retryLater) {
+      return _jittered(keyPackageRetryLaterDelay);
+    }
+    // Doubling ladder, capped. The shift exponent is clamped so a long-lived
+    // failure streak cannot overflow it.
+    final doublings = math.min(_keyPackageFailureStreak - 1, 16);
+    final scaled = keyPackageRetryPromptDelay * (1 << doublings);
+    return _jittered(
+      scaled > keyPackageRetryMaxDelay ? keyPackageRetryMaxDelay : scaled,
+    );
   }
 
   // --- Relay-list task ------------------------------------------------------

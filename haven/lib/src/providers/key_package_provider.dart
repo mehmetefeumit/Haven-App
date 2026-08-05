@@ -24,45 +24,49 @@ import 'package:haven/src/services/relay_service.dart';
 /// Publishes the user's `KeyPackage` (kind 30443, reuse-or-mint into a
 /// stable slot) and relay lists (kind 10050 inbox + kind 10002 NIP-65).
 ///
-/// Returns `true` unless the `KeyPackage` tick could not confirm any
-/// canonical reachable on relays (a hard failure — both `MaintenanceService`
-/// branches are otherwise best-effort and never throw).
+/// Exposes the tick's [KeyPackageMaintenanceOutcome] rather than a bool.
+///
+/// It used to return `bool`, computed as "action != alreadyHealthy ||
+/// canonicalOnRelays > 0", with a comment explaining that the value carried no
+/// weight because a failure was indistinguishable from health anyway. Both
+/// halves of that were wrong in the same direction: a publish that no relay
+/// acknowledged reached this provider labelled `republishedFreshD`, so the
+/// bool it produced was `true` — a *failed* tick reporting success. Keeping the
+/// sealed outcome means the distinction survives to the provider layer, where a
+/// UI can watch it, and no caller can flatten it back by accident.
+///
+/// [KeyPackageMaintenanceFailed] with
+/// [KeyPackageFailureKind.identityUnavailable] is also what "no identity yet"
+/// resolves to, so the not-signed-in case is not a fourth silent shape.
 ///
 /// Re-runs whenever the relay-preferences provider invalidates
 /// [keyPackagePublisherInvalidatorProvider].
-final keyPackagePublisherProvider = FutureProvider<bool>((ref) async {
-  // Coupling to the relay-preferences invalidator: when the user adds /
-  // removes a KP relay or toggles the publish setting, we re-run.
-  ref.watch(keyPackagePublisherInvalidatorProvider);
+final keyPackagePublisherProvider =
+    FutureProvider<KeyPackageMaintenanceOutcome>((ref) async {
+      // Coupling to the relay-preferences invalidator: when the user adds /
+      // removes a KP relay or toggles the publish setting, we re-run.
+      ref.watch(keyPackagePublisherInvalidatorProvider);
 
-  final identity = await ref.read(identityProvider.future);
-  if (identity == null) return false;
+      final identity = await ref.read(identityProvider.future);
+      if (identity == null) {
+        return const KeyPackageMaintenanceFailed(
+          KeyPackageFailureKind.identityUnavailable,
+        );
+      }
 
-  final maintenanceService = ref.read(maintenanceServiceProvider);
+      final maintenanceService = ref.read(maintenanceServiceProvider);
 
-  final kpResult = await maintenanceService.maintainKeyPackage();
-  debugPrint(
-    '[KeyPackage] maintain tick: ${kpResult.action.name} '
-    '(canonical=${kpResult.canonicalOnRelays}, '
-    'errors=${kpResult.relayErrors})',
-  );
+      final kpOutcome = await maintenanceService.maintainKeyPackage();
+      debugPrint('[KeyPackage] maintain tick: $kpOutcome');
 
-  // Relay lists (kind 10050 inbox + the kind-10002 NIP-65 slot) are
-  // best-effort and never block the KeyPackage result.
-  final relayListResult = await maintenanceService.maintainRelayList();
-  debugPrint(
-    '[KeyPackage] relay-list tick: inbox=${relayListResult.inbox.action.name}, '
-    'nip65=${relayListResult.keyPackage.action.name}',
-  );
+      // Relay lists (kind 10050 inbox + the kind-10002 NIP-65 slot) are
+      // best-effort and never block the KeyPackage outcome.
+      final relayListResult = await maintenanceService.maintainRelayList();
+      debugPrint(
+        '[KeyPackage] relay-list tick: '
+        'inbox=${relayListResult.inbox.action.name}, '
+        'nip65=${relayListResult.keyPackage.action.name}',
+      );
 
-  // `alreadyHealthy` / `seededD` / `republishedStableD` / `republishedFreshD`
-  // are all non-failure outcomes (the FFI itself only distinguishes success
-  // shapes — a hard failure is swallowed to `KeyPackageMaintenanceResult
-  // .empty()` by `MaintenanceService`, which is indistinguishable from
-  // `alreadyHealthy` by design (presence-only, leak-free result). Callers of
-  // this provider only ever fire-and-forget it (`invalidate` + `read`), so
-  // the exact boolean carries no control-flow weight — it is kept for API
-  // continuity with the pre-migration signature.
-  return kpResult.action != KeyPackageMaintenanceAction.alreadyHealthy ||
-      kpResult.canonicalOnRelays > 0;
-});
+      return kpOutcome;
+    });

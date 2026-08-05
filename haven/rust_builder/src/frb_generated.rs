@@ -8715,6 +8715,8 @@ impl SseDecode for crate::api::KpMaintenanceActionFfi {
             1 => crate::api::KpMaintenanceActionFfi::SeededD,
             2 => crate::api::KpMaintenanceActionFfi::RepublishedStableD,
             3 => crate::api::KpMaintenanceActionFfi::RepublishedFreshD,
+            4 => crate::api::KpMaintenanceActionFfi::RotatedExpiringMaterial,
+            5 => crate::api::KpMaintenanceActionFfi::RotatedUnreadableLifetime,
             _ => unreachable!("Invalid variant for KpMaintenanceActionFfi: {}", inner),
         };
     }
@@ -8726,14 +8728,18 @@ impl SseDecode for crate::api::KpMaintenanceOutcomeFfi {
         let mut var_action = <crate::api::KpMaintenanceActionFfi>::sse_decode(deserializer);
         let mut var_canonicalOnRelays = <u32>::sse_decode(deserializer);
         let mut var_respondersProbed = <u32>::sse_decode(deserializer);
+        let mut var_relaysTargeted = <u32>::sse_decode(deserializer);
         let mut var_relaysHealed = <u32>::sse_decode(deserializer);
         let mut var_relayErrors = <u32>::sse_decode(deserializer);
+        let mut var_expiredInitKeyPurged = <bool>::sse_decode(deserializer);
         return crate::api::KpMaintenanceOutcomeFfi {
             action: var_action,
             canonical_on_relays: var_canonicalOnRelays,
             responders_probed: var_respondersProbed,
+            relays_targeted: var_relaysTargeted,
             relays_healed: var_relaysHealed,
             relay_errors: var_relayErrors,
+            expired_init_key_purged: var_expiredInitKeyPurged,
         };
     }
 }
@@ -10745,6 +10751,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::KpMaintenanceActionFfi {
             Self::SeededD => 1.into_dart(),
             Self::RepublishedStableD => 2.into_dart(),
             Self::RepublishedFreshD => 3.into_dart(),
+            Self::RotatedExpiringMaterial => 4.into_dart(),
+            Self::RotatedUnreadableLifetime => 5.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -10767,8 +10775,10 @@ impl flutter_rust_bridge::IntoDart for crate::api::KpMaintenanceOutcomeFfi {
             self.action.into_into_dart().into_dart(),
             self.canonical_on_relays.into_into_dart().into_dart(),
             self.responders_probed.into_into_dart().into_dart(),
+            self.relays_targeted.into_into_dart().into_dart(),
             self.relays_healed.into_into_dart().into_dart(),
             self.relay_errors.into_into_dart().into_dart(),
+            self.expired_init_key_purged.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -11800,6 +11810,8 @@ impl SseEncode for crate::api::KpMaintenanceActionFfi {
                 crate::api::KpMaintenanceActionFfi::SeededD => 1,
                 crate::api::KpMaintenanceActionFfi::RepublishedStableD => 2,
                 crate::api::KpMaintenanceActionFfi::RepublishedFreshD => 3,
+                crate::api::KpMaintenanceActionFfi::RotatedExpiringMaterial => 4,
+                crate::api::KpMaintenanceActionFfi::RotatedUnreadableLifetime => 5,
                 _ => {
                     unimplemented!("");
                 }
@@ -11815,8 +11827,10 @@ impl SseEncode for crate::api::KpMaintenanceOutcomeFfi {
         <crate::api::KpMaintenanceActionFfi>::sse_encode(self.action, serializer);
         <u32>::sse_encode(self.canonical_on_relays, serializer);
         <u32>::sse_encode(self.responders_probed, serializer);
+        <u32>::sse_encode(self.relays_targeted, serializer);
         <u32>::sse_encode(self.relays_healed, serializer);
         <u32>::sse_encode(self.relay_errors, serializer);
+        <bool>::sse_encode(self.expired_init_key_purged, serializer);
     }
 }
 

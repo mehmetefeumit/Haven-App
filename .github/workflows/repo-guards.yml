@@ -173,6 +173,25 @@
 #     the skip manifest's lesson applied to coverage: a stale floor measures
 #     nothing, so it can never be below itself, and would sit green forever.
 #
+#   Coverage-floor pin rule           scripts/ci/check_coverage_floors.sh --lint
+#     The manifest checked against its OWN rule — floor = floor(measured) - 2,
+#     or exactly 100 — using each row's recorded `# measured N%` provenance.
+#     Purely static, so unlike the enforcing run it belongs here. It exists
+#     because the rule was not being applied: three rows had been hand-
+#     tightened to 0.06, 0.14 and 0.72 points of headroom, turning floors into
+#     tripwires, and the first of them reddened CI when unrelated work moved an
+#     aggregate by seven hundredths of a point. Also catches duplicate rows and
+#     rows with no recorded measurement — a floor nobody can re-derive is a
+#     floor nobody can review.
+#
+#   Coverage lcov filter self-test    scripts/ci/filter_lcov.sh
+#     The single implementation of which files the Flutter 50% gate and every
+#     Flutter floor are computed from. It was two implementations (lcov globs
+#     in the workflow, awk in the local gate) that nothing compared, and they
+#     did differ. A bug here moves every Flutter coverage number at once, so
+#     its fixtures pin each exclusion and pin that an empty or fully-excluded
+#     report is reported as a broken filter rather than as 0%.
+#
 #   E2E harness self-tests            tooling/e2e/ci/*.sh --self-test
 #     The bash guards embedded in the E2E tooling must not silently rot: the
 #     connect-flake retry predicate must never retry a genuine test failure,
@@ -367,6 +386,24 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_coverage_floors.sh --self-test
 
+      # Static half of the coverage gate: every floor must equal the pin rule
+      # applied to its own recorded measurement. Three rows had been hand-
+      # tightened past it — one to 0.06 points of headroom, which is what
+      # reddened run 30964250098 when unrelated work moved an aggregate by
+      # seven hundredths of a point. That verdict needed a full 11-minute
+      # llvm-cov run to reach; here it costs milliseconds, and the same command
+      # runs in the pre-commit hook.
+      - name: Coverage-floor manifest obeys its pin rule
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_coverage_floors.sh --lint
+
+      # The filter that decides WHICH files the 50% gate and every Flutter floor
+      # are computed from. Shared by coverage.yml and the local gate, so a bug
+      # here silently moves every Flutter number at once.
+      - name: Coverage lcov filter self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/filter_lcov.sh --self-test
+
       # An emulator lane with no inner deadline routes every hang to the JOB
       # cap, which SIGKILLs the runner before the if: failure() diagnostics,
       # the secret scan and the artifact upload — slow, and with no evidence.
@@ -478,6 +515,25 @@ jobs:
       - name: E2E harness self-test (clock-skew parsers)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/run-b8-clock-skew.sh --self-test
+
+      # Guards the KPR lane's oracle END TO END, not only per-predicate. The
+      # critical fixture is THE PRE-FIX CONDITION: a capture in which the tick
+      # reported `alreadyHealthy` and the peer's re-fetch was unchanged — the
+      # state the repo actually shipped in — which must be REPORTED. Its twin
+      # is the healthy app, which must PASS, or an oracle hard-coded to red
+      # would look correct on the first. The near-misses pin the three ways a
+      # rotation can look complete and not be: rotated into a DIFFERENT `d`
+      # (the old expiring package stays addressable beside the new one),
+      # published but acked by NOBODY (the action names the branch that ran and
+      # is chosen before the write), and an Add that succeeded while the
+      # resulting group decrypts nothing. The vacuity fixtures pin the routes
+      # where the lane would prove nothing while looking green: a backdate that
+      # never landed on the device (`date` exits 0 having changed nothing),
+      # material below the 75% point, and material already EXPIRED — which
+      # re-mints through a different branch entirely.
+      - name: E2E harness self-test (KeyPackage-rotation oracle)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-kp-rotation.sh --self-test
 
       # Guards the B9 network-reconnect oracle. Its critical fixtures are the
       # NEGATIVE TWINS: every verdict in that lane is a positive/negative pair

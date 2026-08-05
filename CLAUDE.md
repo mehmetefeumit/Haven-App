@@ -47,7 +47,7 @@ scripts/              → Build and utility scripts
 
 - **Public profiles by default**: Saving a display name or photo publishes a public kind-0 profile (name/picture) + a Blossom-hosted photo immediately — publishing is **unconditional** (no consent toggle). That a saved profile is public on the Nostr network is disclosed to the user in onboarding and on the Identity settings page.
 - **Local contacts**: Petnames (local display-name overrides) are still stored only on the device
-- **Pubkey-only for users who never save a profile**: Until a user saves a name/photo, relays see only pubkeys, never usernames
+- **Anonymous pseudonym on account creation (owner-directed 2026-07-18)**: Onboarding pre-fills the display-name field with a random anonymous "Adjective Archetype" name (e.g. "Quiet Wanderer"; generator in `haven/lib/src/utils/anonymous_name_generator.dart`) and publishes it as a public kind-0 profile when the user taps "Create My Identity" — matching White Noise. There is **no "skip / stay pubkey-only" step in onboarding**; every new install publishes a *pseudonymous* profile (the anonymous name reveals no real-world identity, and the user can rename it in the same field or later on the Identity page). Relays therefore see an anonymous pseudonym, not a bare pubkey, from account creation. Do NOT reintroduce a skip/pubkey-only onboarding path treating this as a regression.
 
 **Rule-10 exception (owner-directed, recorded 2026-07-12; made public-by-default 2026-07-16)**: the public Nostr profile module (kind 0 + Blossom — `haven-core/src/profile/`, plan in `docs/PUBLIC_PROFILE_MIGRATION_PLAN.md`) deliberately reverses the no-public-profiles posture at the owner's explicit direction, matching the White Noise reference app. Do NOT treat it as a privacy regression to revert. Its remaining boundaries — anti-SSRF download filter, EXIF/GPS strip before upload, identity-key-only signing (key separation), no group IDs in profile paths, HTTPS-only Blossom, and the retraction no-op gate — are CI-enforced by `scripts/ci/check_profile_privacy_boundaries.sh`.
 
@@ -83,9 +83,25 @@ scripts/build_release.sh apk                    # Release APK (also: appbundle |
 # Then run: cargo fmt, dart format, and tests
 ./scripts/regenerate_frb.sh
 
-# Combined coverage (both Rust + Flutter)
-./scripts/coverage.sh
+# Coverage. ONE gate; the local script runs every check coverage.yml does
+# (both aggregates, the per-path floors, the undeclared-skip gate and the
+# rollback-path flag-off run), so green locally means green in CI.
+scripts/ci/check_coverage.sh --static-only   # < 1 s: manifest pin rule + guard self-tests
+scripts/ci/check_coverage.sh                 # full gate, both stacks in parallel (~6-11 min)
+./scripts/coverage.sh                        # same gate + HTML reports
+scripts/ci/install_git_hooks.sh              # once per clone: pre-commit (static) + pre-push (full)
+
+# Per-path coverage floors: NEVER hand-edit scripts/ci/coverage_floors.txt.
+# Every floor must equal floor(measured) - 2 (or exactly 100), enforced by --lint.
+scripts/ci/check_coverage_floors.sh --lint [--fix]
+scripts/ci/check_coverage_floors.sh --repin <rust|flutter> <lcov>   # raises only, never lowers
 ```
+
+**Coverage toolchains are pinned** in `scripts/ci/coverage_toolchain.env` (rustc
++ Flutter), because a coverage percentage is a ratio whose denominator is
+instrumented lines — a compiler property, not a test property. Every other
+workflow keeps floating on `stable`. Bump the pin and re-pin the floors in ONE
+commit.
 
 ## Code Quality
 
@@ -95,8 +111,8 @@ scripts/build_release.sh apk                    # Release APK (also: appbundle |
 - **Coverage thresholds**: CI enforces 80% for Rust, 50% for Flutter (FRB-generated files excluded)
 - **FFI error handling**: Use `on Object catch (e)` at FFI call sites — catches both `Exception` and `Error` from the FFI boundary while satisfying `avoid_catches_without_on_clauses` lint
 - **FFI error convention**: Rust FFI methods return `Result<T, String>` at the boundary; custom `Debug` impls on error types redact MLS group IDs and secret material
-- **MDK pinning**: `haven-core` pins MDK crates to a specific git rev for reproducible builds
-- **SQLCipher on Android**: Uses `bundled-sqlcipher-vendored-openssl` because Android NDK lacks OpenSSL headers; `libsqlite3-sys` version must match `mdk-sqlite-storage`'s `rusqlite` version
+- **MDK pinning**: `haven-core` pins the five MDK "Dark Matter" crates (`cgka-session`, `cgka-engine`, `cgka-traits`, `storage-sqlite`, `transport-nostr-peeler`) to the v0.9.4 release rev; bump only to released tags, never `master`
+- **SQLCipher on Android**: Uses `bundled-sqlcipher-vendored-openssl` because Android NDK lacks OpenSSL headers; `libsqlite3-sys` version must match `storage-sqlite`'s `rusqlite` version
 
 ## Coding Requirements
 - Always use sub-agents and make sure to get the most recent information through the references online and MCPs which are avaiable to the agents.
@@ -134,12 +150,16 @@ Non-negotiable for this cryptographic application:
 2. **Ephemeral Keys**: Generate NEW keypair for EACH group message (kind 445)
 3. **Welcome Events**: Kind 444 MUST remain unsigned
 4. **Group ID Privacy**: Only publish `nostr_group_id`, never real MLS group ID
-5. **Secret Lifecycle**: Old `exporter_secret`s age out of MDK's retention window (`DEFAULT_EPOCH_LOOKBACK` = 5 past epochs; Haven does not override it) and are pruned automatically — never retain secrets beyond what's needed to decrypt in-flight messages
+5. **Secret Lifecycle**: Old `exporter_secret`s age out of the engine's retention window (`DEFAULT_MAX_PAST_EPOCHS` = 5 past epochs; Haven does not override it) and are pruned automatically — never retain secrets beyond what's needed to decrypt in-flight messages
 6. **No Key Logging**: NEVER log, print, or expose key material
 7. **Secure Memory**: Use `Zeroizing<T>` from the `zeroize` crate for secret bytes; structs holding secrets must derive `ZeroizeOnDrop`
 8. **No Raw Errors in UI**: Never display `$e` or `e.message` to users — could leak MLS group IDs or internal state. Use `debugPrint` for details, generic messages for UI
 9. **Dart Secret Lifetime**: Dart has no `zeroize`; minimize exposure by re-fetching secret bytes per use rather than holding long-lived references
 10. **User privacy comes first**: Never make changes which reduce the user privacy and security unless the prompt explicitly tells you to.
+11. **Nonce Uniqueness / No Label Downgrade**: The kind-445 ChaCha20-Poly1305 nonce MUST be CSPRNG-random (12 bytes) and MUST NEVER repeat under a fixed epoch `group_event_key`; NEVER call the peeler's `with_exporter_label` override — it is the only local lever that can downgrade the kind-445 exporter derivation (CI-guarded by `scripts/ci/check_no_exporter_label_override.sh`)
+12. **Convergence-Buffer Backpressure**: Rate-limit convergence-buffer ingest with backpressure; NEVER silently drop legitimate offline backlog (future-epoch catch-up is legitimate). Caveat: the engine's stored buffer has no per-group cap and no eviction API (upstream #757 OPEN), so a Haven-side intake cap throttles but does not bound engine storage
+13. **Publish-Before-Apply**: NEVER call `confirm_published` before at least one relay has returned an OK-ack ("acked" means acked, never merely "sent"); call `publish_failed` on failure; treat `PendingCommitRecovered` as a mandatory resync
+14. **Single Session**: Run exactly ONE live `AccountDeviceSession` per MLS DB file across all isolates/processes — a second session diverges in-memory epoch state and risks epoch/exporter-key reuse, i.e. a confidentiality loss, not just DB corruption
 
 **Database Encryption**: MLS state is stored in SQLCipher (encrypted SQLite). Keys are stored in system keyring (Keychain/GNOME Keyring/Credential Manager). See `haven-core/SECURITY.md` for details.
 
@@ -154,11 +174,13 @@ Non-negotiable for this cryptographic application:
 | Event Kind | Purpose | Notes |
 |------------|---------|-------|
 | 0 | Public profile metadata (NIP-01/24) | Public-by-default (published on save, no consent gate); signed by identity key |
-| 443 | KeyPackage | Published to relays |
+| 30443 | KeyPackage (addressable) | `d` = stable slot; published to and fetched from the account's NIP-65 (kind 10002) relays |
 | 444 | Welcome | Gift-wrapped, UNSIGNED |
-| 445 | Group messages | Ephemeral pubkey per message |
+| 445 | Group messages | Outer ChaCha20-Poly1305 layer keyed by MLS-Exporter `"marmot/group-event"`; ephemeral pubkey per message. Tags are `h` only for commits/proposals, `h` + NIP-40 `expiration` (= `created_at` + 228s, from group component 0x8005) for application messages — **no other tag is permitted** |
+| 450 | Account identity proof | Canonical event embedded in the MLS leaf extension 0xF2F1; signed by identity key; NOT published to relays by Haven |
 | 1059 | Gift Wrap (NIP-59) | 3-layer encrypted welcome delivery |
-| 10051 | KeyPackage relay list | User's inbox relays |
+| 10002 | NIP-65 relay list | KeyPackage discovery (replaces the retired kind 10051) |
+| 10050 | NIP-17 inbox relays | Gift-wrap (1059) delivery |
 | 10063 | Blossom server list (BUD-03) | Not published in v1 |
 | 24242 | Blossom authorization (BUD-01/02) | HTTP `Authorization` header only — NEVER published to a relay |
 | 9 | Chat/location content | Inner application message |
@@ -167,7 +189,7 @@ Non-negotiable for this cryptographic application:
 
 Reusable workflows in `.github/workflows/`; **ci.yml** is the PR/push orchestrator (one job per concern, five stages):
 - **Stage 1 — code quality**: `rust-check.yml` (fmt + clippy + tests + release-mode build, both crates), `flutter-check.yml` (`flutter analyze --no-fatal-infos` — errors/warnings gate, pre-existing infos advisory), `cross-check.yml` (`cargo check --target` for macOS/iOS/Windows/Android; validates platform-gated `#[cfg]` code), `coverage.yml` (80% Rust / 50% Flutter thresholds), `audit.yml` (cargo-audit; also weekly)
-- **Stage 2 — repo guards**: `repo-guards.yml` — ALL fast grep/bash invariants in ONE job (committed secrets, tile-provider policy, public-profile privacy boundaries, INTERNET permission, background-wake invariants, locale privacy, E2E-harness self-tests). Every guard step runs even if an earlier one failed, so one red run reports all violations. Add new pure-grep guards HERE as steps, not as new workflows.
+- **Stage 2 — repo guards**: `repo-guards.yml` — ALL fast grep/bash invariants in ONE job (committed secrets, tile-provider policy, public-profile privacy boundaries, INTERNET permission, background-wake invariants, locale privacy, exporter-label override ban, MDK supply-chain shape, E2E publish-before-apply, E2E-harness self-tests). Every guard step runs even if an earlier one failed, so one red run reports all violations. Add new pure-grep guards HERE as steps, not as new workflows.
 - **Stage 3 — localization**: `l10n-check.yml` (gen-l10n regeneration + cross-locale ARB parity)
 - **Stage 4 — E2E lanes** (all parallel, each `needs: [rust]` only): core flow on Android + iOS, each in poll AND live-sync variants (`e2e-android.yml` / `e2e-ios.yml` via the `live_sync` input), `e2e-integration.yml` (component integration tests), `e2e-relay-customization.yml` (two-relay proof), `e2e-background-catchup.yml` (WorkManager runtime proof incl. guest reboot), `e2e-profile.yml` (kind-0 + Blossom, Android + iOS)
 - **Stage 5 — build verification**: `build-check.yml` — Android debug APK per ABI (separate runners avoid disk exhaustion) + iOS no-codesign build; `needs: [rust, coverage, guards]`
@@ -177,7 +199,7 @@ Reusable workflows in `.github/workflows/`; **ci.yml** is the PR/push orchestrat
 ## References
 
 - **Protocol Specs**: https://github.com/marmot-protocol/marmot (MIP-00 through MIP-04)
-- **MDK (Rust SDK)**: https://github.com/parres-hq/mdk
+- **MDK (Rust SDK)**: https://github.com/marmot-protocol/mdk
 - **whitenoise-rs**: https://github.com/parres-hq/whitenoise (reference app)
 - **Local Docs**: See `MARMOT_PROTOCOL_KNOWLEDGE.md` for consolidated protocol reference
 - **Setup Guide**: See `haven/DEVELOPMENT.md` for environment setup

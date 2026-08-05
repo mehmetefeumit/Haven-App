@@ -43,6 +43,11 @@ dependencies:
   intl: ^0.20.0
   # Preferences
   shared_preferences: ^2.5.0
+  # Dart-team annotations. Already present transitively (via flutter); declared
+  # directly so lib/ may use `@useResult` — the annotation that makes silently
+  # DISCARDING a maintenance outcome an analyzer warning rather than a way to
+  # read a failed KeyPackage publish as health. See relay_service.dart.
+  meta: ^1.16.0
   # State management
   flutter_riverpod: ^2.6.1
   qr_flutter: ^4.1.0

@@ -1053,6 +1053,8 @@ dependencies = [
  "nostr",
  "nostr-relay-builder",
  "nostr-sdk",
+ "openmls",
+ "openmls_rust_crypto",
  "proptest",
  "rand 0.8.6",
  "reqwest",

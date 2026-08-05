@@ -49,13 +49,15 @@ class _RecordingRelay extends MockRelayService {
   int kpCalls = 0;
   int relayListCalls = 0;
 
-  KeyPackageMaintenanceResult kpResult = const KeyPackageMaintenanceResult(
-    action: KeyPackageMaintenanceAction.republishedFreshD,
-    canonicalOnRelays: 2,
-  );
+  KeyPackageMaintenanceOutcome kpResult =
+      const KeyPackageMaintenancePublished(
+        relaysAcked: 2,
+        mintedFreshSlot: true,
+        respondersProbed: 2,
+      );
 
   @override
-  Future<KeyPackageMaintenanceResult> maintainKeyPackage({
+  Future<KeyPackageMaintenanceOutcome> maintainKeyPackage({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
   }) async {
@@ -130,7 +132,7 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('keyPackagePublisherProvider', () {
-    test('returns false when no identity', () async {
+    test('reports identityUnavailable when no identity', () async {
       final relay = _RecordingRelay();
       final container = ProviderContainer(
         overrides: [
@@ -150,7 +152,11 @@ void main() {
 
       final result = await container.read(keyPackagePublisherProvider.future);
 
-      expect(result, isFalse);
+      expect(result, isA<KeyPackageMaintenanceFailed>());
+      expect(
+        (result as KeyPackageMaintenanceFailed).kind,
+        KeyPackageFailureKind.identityUnavailable,
+      );
       expect(
         relay.kpCalls,
         0,
@@ -186,10 +192,11 @@ void main() {
       },
     );
 
-    test('returns true when a KeyPackage was (re)published', () async {
+    test('surfaces a published tick as published', () async {
       final relay = _RecordingRelay()
-        ..kpResult = const KeyPackageMaintenanceResult(
-          action: KeyPackageMaintenanceAction.republishedFreshD,
+        ..kpResult = const KeyPackageMaintenancePublished(
+          relaysAcked: 1,
+          mintedFreshSlot: true,
         );
       final container = ProviderContainer(
         overrides: [
@@ -209,15 +216,17 @@ void main() {
 
       final result = await container.read(keyPackagePublisherProvider.future);
 
-      expect(result, isTrue);
+      expect(result, isA<KeyPackageMaintenancePublished>());
+      expect((result as KeyPackageMaintenancePublished).relaysAcked, 1);
     });
 
     test(
-      'returns true when already healthy with a canonical reachable',
+      'surfaces a confirmed-healthy tick as healthy',
       () async {
         final relay = _RecordingRelay()
-          ..kpResult = const KeyPackageMaintenanceResult(
+          ..kpResult = const KeyPackageMaintenanceHealthy(
             canonicalOnRelays: 3,
+            respondersProbed: 2,
           );
         final container = ProviderContainer(
           overrides: [
@@ -239,19 +248,22 @@ void main() {
           keyPackagePublisherProvider.future,
         );
 
-        expect(result, isTrue);
+        expect(result, isA<KeyPackageMaintenanceHealthy>());
+        expect(
+          (result as KeyPackageMaintenanceHealthy).canonicalOnRelays,
+          3,
+        );
       },
     );
 
     test(
-      'returns false on an empty (best-effort-failed) maintenance result',
+      'a hard orchestration failure is NOT reported as healthy',
       () async {
-        // MaintenanceService swallows a hard failure (e.g. the circle
-        // manager factory throwing) into KeyPackageMaintenanceResult.empty
-        // — action alreadyHealthy, canonicalOnRelays 0 — indistinguishable
-        // by design from "genuinely nothing to do" (presence-only,
-        // leak-free result). The provider's bool is best-effort UI signal
-        // only; every caller of this provider fire-and-forgets it.
+        // The regression this whole change exists for. A circle-manager
+        // factory that throws used to collapse into
+        // `KeyPackageMaintenanceResult.empty()` — action `alreadyHealthy`,
+        // zero counters — which is exactly the value a genuinely-nothing-to-do
+        // tick produced. The provider then reported it as a non-failure.
         final relay = _RecordingRelay();
         final container = ProviderContainer(
           overrides: [
@@ -274,7 +286,16 @@ void main() {
           keyPackagePublisherProvider.future,
         );
 
-        expect(result, isFalse);
+        expect(
+          result,
+          isNot(isA<KeyPackageMaintenanceHealthy>()),
+          reason: 'a tick that never ran cannot report the account healthy',
+        );
+        expect(result, isA<KeyPackageMaintenanceFailed>());
+        expect(
+          (result as KeyPackageMaintenanceFailed).kind,
+          KeyPackageFailureKind.tickErrored,
+        );
       },
     );
 

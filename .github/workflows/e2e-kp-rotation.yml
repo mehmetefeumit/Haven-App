@@ -1,0 +1,325 @@
+# Reusable workflow: Android KeyPackage-rotation-on-the-wire lane (KPR).
+#
+# Proves the RECEIVING half of KeyPackage rotation — the half no existing test
+# reaches:
+#
+#   a KeyPackage minted 70 days ago -> the production maintenance tick reads
+#   its real MLS `Lifetime` off the real wire bytes and rotates -> a SEPARATE
+#   participant fetches the rotated package off a hermetic relay through the
+#   production discovery cascade -> that participant ADDS its owner to a circle
+#   -> the owner DECRYPTS a message in the resulting group.
+#
+# # What was actually missing (the premise, checked against the tree)
+#
+# `decide_kp_maintenance` (`haven-core/src/relay/maintenance/key_package.rs`)
+# now rotates at 0.75 of a package's own `Lifetime`, read through
+# `kp_lifetime.rs`. That is densely covered: 21 unit tests on the lifetime
+# reader, `haven-core/tests/kp_rotation_e2e.rs`, and FFI tests inside
+# `haven/rust_builder/src/api.rs`.
+#
+# Every one of those observes the rotation from the PUBLISHER's side — what the
+# decision returned, and what the publisher published. RFC 9420 puts the
+# `not_before`/`not_after` check on the INVITER, so a rotation that publishes
+# successfully while producing material an inviter rejects at Add time would
+# pass all of them and still leave the account uninvitable. That is the hole
+# this lane fills, and it is why the assertion here is that a peer's Add
+# succeeds AND the resulting group decrypts.
+#
+# # How a 63-day threshold is testable in minutes
+#
+# The device wall clock is moved BACKWARDS 70 days before the first mint, then
+# restored. Every part of the production path then runs for real: the mint, the
+# `Lifetime` OpenMLS stamps on it, the lifetime reader, the 0.75 arithmetic,
+# `now`, the publish and the relay. The only fiction is WHEN the first package
+# was minted, which is exactly the variable under test.
+#
+# The alternatives were ruled out against the tree, not by preference:
+#
+#   * A FORWARD jump cannot work — `tooling/e2e/strfry.conf` sets
+#     `rejectEventsNewerThanSeconds = 900` (the B8 lane leans on it as an
+#     oracle), so a device 70 days ahead cannot publish at all.
+#   * A short-lifetime package cannot be minted through the real path: the
+#     84-day span is `Lifetime::default()` inside OpenMLS, reached via
+#     `cgka-engine`'s `MlsKeyPackage::builder()`, which never calls
+#     `.key_package_lifetime(...)` — and the engine REJECTS a wider range on
+#     receive. Hand-building one would take the material the peer validates out
+#     of the real mint path, which is the one thing this lane must not do.
+#   * A test-only threshold override was rejected on this repo's own precedent
+#     (`scripts/ci/check_no_exporter_label_override.sh`).
+#
+# The mechanism cannot produce a green run without the production code
+# rotating: the pre-fix decision had no time awareness, so with every responder
+# serving the slot it returned `NoOp` — `alreadyHealthy`, nothing new on the
+# relay, and the peer re-fetching the byte-identical package. The lane requires
+# BOTH the `rotatedExpiringMaterial` verdict AND a superseding event with
+# different material in the same `d`, which are independent readings.
+#
+# # Why a SEPARATE workflow
+#
+# Two things no shared runner should learn: `adb root` with a pinned
+# `auto_time` and a 70-day clock write, and a SECOND hermetic relay that
+# deliberately does not serve the account's KeyPackage slot.
+# run-single-avd-scenario.sh and run-integration-tests.sh force-stop and
+# uninstall between targets, and a device clock 70 days in the past would
+# corrupt every other target's timing assumptions on the same runner.
+#
+# # Architecture mirrors e2e-clock-skew.yml / e2e-real-gps.yml
+#
+# Same single-AVD, build-before-boot design (the multi-GB Rust-NDK + Gradle
+# peak must never coincide with a resident emulator;
+# docs/E2E_TROUBLESHOOTING.md).
+
+name: E2E KeyPackage Rotation
+
+on:
+  workflow_call:
+
+jobs:
+  e2e_kp_rotation:
+    name: e2e_kp_rotation
+    runs-on: ubuntu-latest
+    # One APK build (<=30m) + boot + a bounded drive (<=30m of step deadline).
+    # The step-level timeout-minutes below bound a hung phase so GitHub kills
+    # the STEP rather than the runner, letting the if: always() artifact upload
+    # still run; this job-level cap is the outer envelope over both.
+    timeout-minutes: 75
+    env:
+      # R1 carries the whole scenario.
+      HAVEN_E2E_RELAY: ws://10.0.2.2:7777
+      # R2 exists only for the final phase: a responder that does NOT serve
+      # Alice's KeyPackage slot, which is what makes the maintenance tick take
+      # the heal branch (republish the CACHED bytes under a fresh `created_at`)
+      # rather than the rotate branch. Reading both copies back is the direct
+      # wire evidence that a heal moves the event timestamp and leaves the
+      # package's `not_before` — and therefore the rotation clock — alone.
+      HAVEN_E2E_RELAY_2: ws://10.0.2.2:7778
+
+      # Declared EXPLICITLY rather than inherited. `liveSyncEnabled` defaults
+      # to true when the define is absent, so an omitted flag reads as "we
+      # didn't think about it" (CI_HARDENING_BACKLOG.md A7).
+      #
+      # `false` is a deliberate choice here, not a copy. This lane's subject is
+      # the KeyPackage maintenance decision and a peer's Add; both participants
+      # drive the FFI and the relay directly, so the app's own standing
+      # subscription is not on the path being proven. It would also be the one
+      # subsystem asked to survive a 70-day forward wall-clock discontinuity
+      # mid-run — its cursor arithmetic is derived from event `created_at` —
+      # which is B8's subject, not this lane's. The live receive path is proven
+      # by the e2e-android live_sync variants, which exist for that.
+      HAVEN_LIVE_SYNC: "false"
+
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Free disk space
+        run: bash tooling/e2e/ci/free-disk-space.sh
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: haven-core
+          # Distinct cache key from the other E2E jobs so they don't race on
+          # one entry; all build the same x86_64-linux-android target.
+          key: e2e-kp-rotation-x64
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: flutter pub get
+
+      # Build BEFORE the emulator boots (build-before-boot discipline). The
+      # dedicated builder bakes BOTH relay URLs and the receive path; all three
+      # are un-re-passable at drive time because `flutter drive` does not
+      # forward dart-defines.
+      - name: Build KeyPackage-rotation test APK
+        working-directory: haven
+        timeout-minutes: 30
+        run: bash ../tooling/e2e/ci/build-kp-rotation-apk.sh
+          integration_test/kp_rotation_wire_test.dart
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: AVD cache
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          # Shared with the other Android E2E lanes: the AVD snapshot is
+          # byte-identical (same api/arch/target/profile), so this restores the
+          # snapshot they created instead of rebuilding it.
+          key: avd-api34-x86_64-google_apis-single-v1
+
+      - name: Create AVD snapshot
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        # Bounded for the same reason the sibling lanes are: a wedged boot with
+        # no step cap dies at the JOB cap, which SIGKILLs the runner before any
+        # if: failure() step, so the lane fails slow and with no artifacts.
+        timeout-minutes: 15
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          # `google_apis`, NOT `google_apis_playstore`: this lane needs
+          # `adb root` to write the device clock, and only the userdebug image
+          # allows it. Without a writable clock the KeyPackage under test is
+          # seconds old and the whole lane is vacuous.
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          emulator-boot-timeout: 420
+          script: echo "Generated AVD snapshot for caching."
+
+      # R1 and R2 are two SEPARATE strfry instances. start-strfry.sh manages
+      # exactly one relay keyed by STRFRY_CONTAINER / STRFRY_PORT /
+      # STRFRY_DATA_DIR and `docker rm -f`s its own container name on start, so
+      # R2 must differ in all three or starting it would destroy R1.
+      - name: Start strfry relay R1
+        env:
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+        run: bash tooling/e2e/ci/start-strfry.sh
+
+      - name: Start strfry relay R2
+        env:
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+          STRFRY_CONTAINER: strfry2
+          STRFRY_PORT: "7778"
+          STRFRY_DATA_DIR: /tmp/strfry2-data
+        run: bash tooling/e2e/ci/start-strfry.sh
+
+      # All real logic lives in the checked-in orchestrator (single bash
+      # invocation — the action runs each line of a multi-line `script:` in its
+      # own sh -c, which would drop shell state).
+      #
+      # BOUNDS. Three of them, innermost first:
+      #   24m  the `flutter drive` (the orchestrator's own default; kept in the
+      #        script rather than declared here so the two cannot drift).
+      #   30m  this step's inner deadline (run-with-deadline.sh below) —
+      #        covers the drive PLUS the install, the `adb root` + clock pin,
+      #        the backdate read-back and the oracle, none of which the
+      #        per-drive timeout bounds, and is the bound that actually reaps
+      #        (CI_HARDENING_BACKLOG.md A8).
+      #   39m  this step's timeout-minutes = 30 + 1 (kill grace) + 7
+      #        (emulator-boot-timeout) + margin, a belt over the deadline.
+      # Sizing evidence: the drive target's own worst case is ~10 min
+      # (bootstrap + first mint, a 180s clock rendezvous, two discovery-cascade
+      # fetches, circle creation and the Welcome round trip, a 120s peer-decrypt
+      # wait, and the heal phase) under a 20-minute in-test Timeout; revise
+      # against p95 once this lane has green history.
+      #
+      # -memory 6144 matches the sibling Android lanes: RustLib + SQLCipher
+      # floods `mlock() -1 ENOMEM` under pressure, and this lane holds two MLS
+      # sessions at once.
+      - name: Run the KeyPackage-rotation proof on the emulator
+        timeout-minutes: 39
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none -memory 6144
+          disable-animations: true
+          emulator-boot-timeout: 420
+          script: bash tooling/e2e/ci/run-with-deadline.sh 30m "e2e-kp-rotation drive" -- bash tooling/e2e/ci/run-kp-rotation.sh /tmp/integration-apks/kp_rotation_wire_test.apk integration_test/kp_rotation_wire_test.dart
+
+      - name: Capture host + emulator diagnostics
+        if: failure()
+        run: |
+          mkdir -p /tmp/kpr-logs
+          adb reconnect offline || true
+          timeout 60 adb wait-for-device || true
+          {
+            echo "=== df -h ==="
+            df -h || true
+            echo
+            echo "=== free -h ==="
+            free -h || true
+            echo
+            echo "=== adb devices -l (after reconnect attempt) ==="
+            adb devices -l || true
+            echo
+            echo "=== device clock / auto_time state ==="
+            adb shell date -u || true
+            adb shell settings get global auto_time || true
+            adb shell settings get global auto_time_zone || true
+            echo
+            echo "=== relay containers ==="
+            docker ps -a --filter name=strfry || true
+          # `.log`, not `.txt`: this file is written AFTER the orchestrator's
+          # EXIT trap has already scanned, and the scanner's directory walk
+          # only picks up `*.log`. A `.txt` here would be uploaded unscanned.
+          } > /tmp/kpr-logs/diag.log 2>&1 || true
+          # Scan what this step just wrote (Security Rule 6). Withhold rather
+          # than upload on a hit, matching the orchestrator's containment.
+          # rc 1 (a real leak) and rc 3 (absent/unreadable/empty log) are kept
+          # apart deliberately: both fail the step, but only a leak justifies
+          # destroying the diag.
+          diag_scan_rc=0
+          bash tooling/e2e/ci/scan-logs-for-secrets.sh /tmp/kpr-logs/diag.log \
+            || diag_scan_rc=$?
+          if [ "${diag_scan_rc}" -eq 1 ]; then
+            rm -f /tmp/kpr-logs/diag.log
+            echo "diag withheld: secret-leak guard tripped" > /tmp/kpr-logs/DIAG_LEAK.txt
+            exit 1
+          elif [ "${diag_scan_rc}" -ne 0 ]; then
+            echo "diag unscannable (rc=${diag_scan_rc}): absent, unreadable or empty" \
+              > /tmp/kpr-logs/DIAG_UNSCANNABLE.txt
+            echo "ERROR: diag log could not be scanned (rc=${diag_scan_rc})." >&2
+            exit 1
+          fi
+
+      # if: always() so a green run still surfaces the servo's clock records
+      # and the parsed checkpoints as evidence.
+      - name: Upload KeyPackage-rotation artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-kp-rotation-${{ github.run_id }}
+          path: |
+            /tmp/kpr-logs/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # Teardown is best-effort (stop-strfry.sh always exits 0), so both relays
+      # are torn down unconditionally and independently.
+      - name: Tear down strfry relays
+        if: always()
+        run: |
+          bash tooling/e2e/ci/stop-strfry.sh
+          STRFRY_CONTAINER=strfry2 STRFRY_DATA_DIR=/tmp/strfry2-data \
+            bash tooling/e2e/ci/stop-strfry.sh

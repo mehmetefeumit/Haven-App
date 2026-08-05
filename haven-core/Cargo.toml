@@ -66,13 +66,34 @@ cgka-traits = { git = "https://github.com/marmot-protocol/mdk", rev = "e391adc13
 storage-sqlite = { git = "https://github.com/marmot-protocol/mdk", rev = "e391adc133a9b60e420da7a0446f014a180ac8d2" }
 transport-nostr-peeler = { git = "https://github.com/marmot-protocol/mdk", rev = "e391adc133a9b60e420da7a0446f014a180ac8d2" }
 
-# NOTE: the old direct `openmls` / `openmls_traits` deps were dropped. They
-# existed only for the M8-2 KeyPackage live-material gate (OpenMLS
-# `StorageProvider` trait). That gate is deleted in DM-2 (last-resort KP
-# semantics dissolve its premise), and no other Haven code names OpenMLS types.
-# openmls (~0.8.1, `extensions-draft-08`) now enters the graph solely through
-# cgka-engine / storage-sqlite, unified to a single instance; `cargo tree -i
-# openmls` must show one version.
+# OpenMLS — declared directly for EXACTLY ONE reason: reading a KeyPackage's own
+# MLS `Lifetime` (`not_before` / `not_after`) so KeyPackage rotation can be timed
+# off the package's real expiry instead of a Nostr event timestamp
+# (`relay::maintenance::kp_lifetime`). The Dark Matter crates parse the lifetime
+# internally (`cgka_engine::key_package::validate_key_package_lifetime_policy`)
+# but expose it on NO public API: `KeyPackageMetadata` carries only the
+# KeyPackageRef + credential identity, and `EngineError::InvalidKeyPackageLifetime`
+# surfaces the timestamps only for a package that FAILED the range check. So
+# naming OpenMLS here is the smallest change that makes the lifetime reachable —
+# the alternative (hand-rolling TLS parsing of LeafNode → Lifetime) would put a
+# fragile, unversioned MLS wire parser in the crypto path.
+#
+# This adds ZERO crates to the graph: openmls 0.8.1 + openmls_rust_crypto 0.5.1
+# already resolve from crates.io via cgka-engine / storage-sqlite. The version
+# and the `extensions-draft-08` feature MUST keep matching the mdk workspace
+# (`~0.8.1`, same feature) so the graph unifies to ONE instance — `cargo tree -i
+# openmls` must still show a single version, or two MLS type universes coexist.
+# `openmls_rust_crypto` supplies the `OpenMlsCrypto` impl `KeyPackageIn::validate`
+# requires; it is the same provider cgka-engine uses (`RustCrypto::default()`).
+#
+# The pre-Dark-Matter direct deps were dropped because their only consumer (the
+# M8-2 `has_live_key_material` gate) was deleted. This is NOT that gate coming
+# back: nothing here touches the OpenMLS `StorageProvider`, and the engine
+# remains the sole owner of MLS state.
+openmls = { version = "~0.8.1", default-features = false, features = [
+  "extensions-draft-08",
+] }
+openmls_rust_crypto = "~0.5"
 
 # Keyring (system credential store) — declared directly so `keyring_policy` and
 # the MLS storage layer (`nostr::mls::storage`) can provision the SQLCipher

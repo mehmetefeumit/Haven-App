@@ -13,6 +13,7 @@ import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/widgets/circles/invitation_card.dart';
 
 import '../../mocks/mock_circle_service.dart';
@@ -34,7 +35,12 @@ void main() {
             // Track how many times keyPackagePublisherProvider is built
             keyPackagePublisherProvider.overrideWith((ref) {
               keyPackageReadCount++;
-              return Future.value(true);
+              return Future.value(
+                const KeyPackageMaintenanceHealthy(
+                  canonicalOnRelays: 1,
+                  respondersProbed: 1,
+                ),
+              );
             }),
             // Stub out providers that get invalidated on accept
             pendingInvitationsProvider.overrideWith(

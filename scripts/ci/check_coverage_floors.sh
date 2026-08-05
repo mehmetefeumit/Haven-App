@@ -90,9 +90,45 @@
 # path is a stale entry and fails loudly, which is the intended reading: a file
 # no test imports is exactly the case the aggregate cannot see.
 #
+# ## The pin rule, and the lint that enforces it
+#
+# Every floor is `floor(measured) - 2`, or exactly 100 for a fully covered path.
+# That rule is what makes the two-sided band work: two points of headroom below
+# (run-to-run wobble, a few new lines landing in a pinned path) and three above
+# before the ratchet asks for a re-pin.
+#
+# It only works if the rule is actually APPLIED. It was not. Three rows had been
+# hand-tightened over time — `lib/src/services/` pinned at 51 against a measured
+# 51.06%, `src/relay/catchup.rs` at 97 against 97.14%, and
+# `geolocator_location_service.dart` at 86 against 86.72% — leaving 0.06, 0.14
+# and 0.72 points of headroom on rows the rule would have pinned at 49, 95 and
+# 84. Those are not floors; they are tripwires. The first of them reddened CI
+# (run 30964250098) when unrelated work moved the services aggregate by
+# 0.07 points, and the other two were one line of new code away from the same.
+#
+# So the manifest is now checked against its own rule, statically:
+#
+#   check_coverage_floors.sh --lint          # no report, no toolchain, ~50 ms
+#
+# Every row must carry its `# measured N%` provenance, and its floor must be
+# no HIGHER than the rule produces from that number. (Lower is allowed — the
+# ratchet already governs floors that are too low.) The lint needs no coverage
+# run, so it goes in repo-guards.yml and in the pre-commit hook, and a
+# hand-edited floor fails in under a second on the machine that wrote it
+# instead of an hour into the coverage workflow.
+#
+# `--repin` is the writer that keeps the manifest rule-shaped, so nobody has to
+# compute a pin by hand again. It RAISES floors that coverage has outgrown and
+# refreshes their provenance; it never lowers one. A row whose coverage FELL is
+# left completely untouched — floor and comment — because re-pinning downward is
+# how a measured regression gets laundered into a permitted one, and because
+# rewriting the provenance alone would leave the row failing its own lint.
+#
 # ## Usage
 #
 #   check_coverage_floors.sh <stack> <lcov-file>   # enforce (stack: rust|flutter)
+#   check_coverage_floors.sh --lint [--fix]        # static: floors obey the pin rule
+#   check_coverage_floors.sh --repin <stack> <lcov> # raise earned floors in place
 #   check_coverage_floors.sh --list <stack> <lcov> # print measured rows to re-pin
 #   check_coverage_floors.sh --self-test           # hermetic fixtures, no toolchain
 #
@@ -124,6 +160,30 @@ DEFAULT_MANIFEST="${REPO_ROOT}/scripts/ci/coverage_floors.txt"
 # See the header for why 5. Overridable per entry (4th column) and per run
 # (env), so a deliberate exception is always written down somewhere reviewable.
 DEFAULT_RATCHET_MARGIN="${COVERAGE_RATCHET_MARGIN:-5}"
+
+# Points of headroom a fresh pin leaves under the measured value. Together with
+# the margin above this defines the band a row may move in without a manifest
+# edit: [measured - 2, measured + 3). Both `--list` and `--repin` write pins at
+# this rule, and `--lint` fails any row pinned tighter than it.
+PIN_HEADROOM=2
+
+# Below this much headroom a row is one small change away from reddening CI.
+# Reported as a NOTICE rather than a failure: the row is still above its floor,
+# so failing here would punish a legal state, but staying silent is how
+# `src/location/nostr.rs` reached exactly 50.00% against a floor of 50 with
+# nothing anywhere saying so.
+LOW_HEADROOM_POINTS=1
+
+# The floor a freshly measured percentage pins to. Single definition, used by
+# --list, --repin and --lint so the three can never disagree about the rule.
+# 100 is pinned exactly: the margin rule cannot ratchet a fully covered path
+# (there is no 103% to reach), so anything less would under-declare it forever.
+pin_for() { # <pct>
+  awk -v p="$1" -v hr="${PIN_HEADROOM}" 'BEGIN {
+    if (p + 0 >= 100) { print 100; exit }
+    v = int(p) - hr; if (v < 0) v = 0; printf "%d", v
+  }'
+}
 
 # Resolved per invocation, NOT once at load: --self-test points
 # HAVEN_COVERAGE_FLOORS at each fixture in turn, and binding it at load time
@@ -280,7 +340,7 @@ run_check() { # <stack> <lcov-file>
 
   read_manifest "${stack}"
 
-  local -a violations=()
+  local -a violations=() notices=()
   local i j pattern floor margin agg_h agg_f matched pct verdict
   log "${BOLD}Per-path coverage floors — stack '${stack}' (${#MAN_PATTERN[@]} pinned paths)${RESET}"
   log ""
@@ -354,11 +414,40 @@ run_check() { # <stack> <lcov-file>
         ;;
       *)
         printf '  %s%-7s%s %-9s %-56s %s\n' "${GREEN}" "${pct}" "${RESET}" "${floor}%" "${pattern}" "${agg_h}/${agg_f}"
+        # A row that is above its floor but has all but consumed the two points
+        # of headroom the pin rule gave it. Not a failure — it is legal, and
+        # failing here would redden a build for a state the band exists to
+        # permit — but it is the LAST run before the next small change turns it
+        # into a BELOW, so it must not pass in silence.
+        #
+        # Floors of 0 and 100 are excluded, and not as a convenience: both are
+        # TERMINAL pins where the rule gives no headroom by construction — a
+        # fully covered path is pinned exactly (there is no 103% for the ratchet
+        # to reach) and the pin clamps at 0 below ~2%. Warning there would fire
+        # forever on rows in their intended state, which is how a notice gets
+        # tuned out and stops being read on the rows that mean something.
+        if [ "${floor}" -gt 0 ] && [ "${floor}" -lt 100 ] \
+           && awk -v p="${pct}" -v fl="${floor}" -v lim="${LOW_HEADROOM_POINTS}" \
+                'BEGIN { exit (p + 0 - fl + 0 < lim + 0) ? 0 : 1 }'; then
+          notices+=("$(printf '%s\n          %s%% is within %s point of floor %s%% (%s/%s lines, manifest line %s).\n          The band has been spent: the next uncovered lines to land here turn\n          this into a build failure. Add tests now, while it is a notice.' \
+            "${pattern}" "${pct}" "${LOW_HEADROOM_POINTS}" "${floor}" "${agg_h}" "${agg_f}" "${MAN_LINE[$i]}")")
+        fi
         ;;
     esac
   done
 
   log ""
+  if [ "${#notices[@]}" -gt 0 ]; then
+    printf '%s%s row(s) with less than %s point of headroom:%s\n' \
+      "${YELLOW}" "${#notices[@]}" "${LOW_HEADROOM_POINTS}" "${RESET}"
+    for v in "${notices[@]}"; do
+      printf '  %s\n\n' "${v}"
+      if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+        printf '::warning file=scripts/ci/coverage_floors.txt::%s has under %s point of coverage headroom\n' \
+          "${v%%$'\n'*}" "${LOW_HEADROOM_POINTS}"
+      fi
+    done
+  fi
   if [ "${#violations[@]}" -gt 0 ]; then
     printf '%s%s violation(s):%s\n' "${RED}" "${#violations[@]}" "${RESET}" >&2
     for v in "${violations[@]}"; do printf '  %s\n\n' "${v}" >&2; done
@@ -399,11 +488,7 @@ run_list() { # <stack> <lcov-file>
       continue
     fi
     pct="$(awk -v h="${agg_h}" -v f="${agg_f}" 'BEGIN { printf "%.2f", (h / f) * 100 }')"
-    # Same rule the manifest is pinned with: two points of headroom, except at
-    # 100 where the pin is exact (see run_check's verdict for why).
-    pin="$(awk -v p="${pct}" 'BEGIN {
-      v = int(p) - 2; if (p + 0 >= 100) v = 100; if (v < 0) v = 0; printf "%d", v
-    }')"
+    pin="$(pin_for "${pct}")"
     # Carry any per-entry margin through. Re-pinning must not silently DELETE
     # an override: the rows that carry one are the small paths where a single
     # line is worth several points, and dropping it would make the next honest
@@ -413,6 +498,313 @@ run_list() { # <stack> <lcov-file>
     printf '%s|%s|%s%s   # measured %s%% (%s/%s)\n' \
       "${stack}" "${pattern}" "${pin}" "${suffix}" "${pct}" "${agg_h}" "${agg_f}"
   done
+}
+
+# ---------------------------------------------------------------------------
+# Manifest writing.
+#
+# Both `--lint --fix` and `--repin` funnel through here so there is exactly one
+# piece of code that edits the manifest, and so an edit can never disturb
+# anything but the floor field and the `measured N%` token: every comment,
+# section header, blank line, ordering choice and margin override survives
+# byte-for-byte, and the `#` column is held steady so the diff shows the number
+# that changed and nothing else. A rewriter that reformatted the file would
+# bury a floor change in whitespace noise, which is the one thing review has to
+# be able to see.
+#
+# Edits arrive as `lineno<TAB>new-floor<TAB>new-measured-text` (empty third
+# field = leave the comment alone).
+# ---------------------------------------------------------------------------
+rewrite_manifest() { # <edits-file>
+  local edits="$1" manifest tmp
+  manifest="$(manifest_path)"
+  tmp="$(mktemp)"
+  awk -v edits="${edits}" '
+    BEGIN {
+      while ((getline line < edits) > 0) {
+        n = split(line, a, "\t")
+        if (n < 2) continue
+        nf[a[1] + 0] = a[2]
+        nm[a[1] + 0] = (n >= 3 ? a[3] : "")
+      }
+      close(edits)
+    }
+    {
+      if (!(FNR in nf)) { print; next }
+
+      # Split the row into its code half and its trailing comment, at the same
+      # first whitespace-then-# the parser uses, so writer and reader agree on
+      # where the declaration ends.
+      idx = match($0, /[ \t]+#/)
+      if (idx > 0) { code = substr($0, 1, idx - 1); rest = substr($0, idx) }
+      else         { code = $0; rest = "" }
+      width = length(code)
+
+      n = split(code, f, "|")
+      f[3] = nf[FNR]
+      out = f[1] "|" f[2] "|" f[3]
+      for (i = 4; i <= n; i++) out = out "|" f[i]
+
+      # Hold the comment column: pad when the new floor is narrower, and eat
+      # the same number of leading spaces when it is wider (never the last one,
+      # so `#` keeps the whitespace the parser needs in front of it).
+      if (length(out) < width) {
+        while (length(out) < width) out = out " "
+      } else if (length(out) > width && rest != "") {
+        drop = length(out) - width
+        while (drop-- > 0 && rest ~ /^  /) rest = substr(rest, 2)
+      }
+
+      if (nm[FNR] != "") {
+        sub(/measured[ \t]+[0-9]+(\.[0-9]+)?%([ \t]*\([0-9]+\/[0-9]+\))?/,
+            "measured " nm[FNR], rest)
+      }
+      print out rest
+    }
+  ' "${manifest}" >"${tmp}" || { rm -f "${tmp}"; misconfig "could not rewrite ${manifest}"; }
+
+  # An in-place writer that truncates its own input on a bad day is worse than
+  # no writer: the manifest IS the record of what is enforced, and an empty one
+  # reads to every downstream check as "nothing to enforce". A rewrite may only
+  # change the CONTENT of lines, never how many there are, so a line-count
+  # mismatch means the transform went wrong and the original stands.
+  local before after
+  before="$(wc -l <"${manifest}")"
+  after="$(wc -l <"${tmp}")"
+  if [ "${after}" -ne "${before}" ]; then
+    rm -f "${tmp}"
+    misconfig "rewrite would change the manifest from ${before} to ${after} lines — refusing, ${manifest} is unchanged"
+  fi
+  cat "${tmp}" >"${manifest}"
+  rm -f "${tmp}"
+}
+
+# Pull the `# measured N%` provenance out of a row's trailing comment. Empty if
+# the row carries none — which is itself a lint failure, because a floor with no
+# recorded measurement cannot be checked against the pin rule, and a number
+# nobody can re-derive is a number nobody can review.
+provenance_of() { # <raw-line>
+  local comment="$1"
+  if [[ "${comment}" =~ measured[[:space:]]+([0-9]+(\.[0-9]+)?)% ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# --lint — the manifest checked against its own pin rule. No report, no
+# toolchain, milliseconds. This is the half of the guard that can run at commit
+# time, and it is the half that would have caught the three hand-tightened rows
+# (see the header) the day each one was written.
+# ---------------------------------------------------------------------------
+run_lint() { # [--fix]
+  local fix=0
+  [ "${1:-}" = "--fix" ] && fix=1
+
+  local manifest; manifest="$(manifest_path)"
+  [ -f "${manifest}" ] || misconfig "manifest not found: ${manifest}"
+
+  # Strict syntax first, via the same parser the enforcing run uses, so --lint
+  # is a superset of "the manifest parses" and one command answers the whole
+  # static question. Driven off the stacks the file actually declares rather
+  # than a hardcoded rust+flutter, because read_manifest treats an absent stack
+  # as a misconfiguration — correct when enforcing, wrong here, and it would
+  # make every hermetic fixture below unrunnable.
+  local st
+  while read -r st; do
+    [ -n "${st}" ] || continue
+    read_manifest "${st}" >/dev/null
+  done < <(awk -F'|' '!/^[[:space:]]*#/ && NF >= 3 { print $1 }' "${manifest}" | sort -u)
+
+  local -a problems=()
+  local -A seen_key=()
+  local edits; edits="$(mktemp)"
+  # shellcheck disable=SC2064
+  trap "rm -f '${edits}'" RETURN
+
+  local lineno=0 line code comment f_stack f_pattern f_floor f_margin
+  local measured want key rows=0 fixed=0
+  while IFS= read -r line || [ -n "${line}" ]; do
+    lineno=$((lineno + 1))
+    line="${line%$'\r'}"
+    [ -n "${line}" ] || continue
+    case "${line}" in \#*) continue ;; esac
+
+    # Split exactly the way read_manifest does, so lint and enforcement agree
+    # on where a declaration ends. This also drops CONTINUATION lines — the
+    # indented `#` rows that carry a row's narrative onto a second line. They
+    # are pure comment, but they do not start at column 0, so a naive
+    # leading-`#` skip reads each one as a floor declaration and reports it as
+    # a row with no provenance.
+    code="${line%%[[:space:]]#*}"
+    code="${code%"${code##*[![:space:]]}"}"
+    [ -n "${code}" ] || continue
+    comment="${line#"${code}"}"
+
+    IFS='|' read -r f_stack f_pattern f_floor f_margin _ <<<"${code}"
+    f_margin="${f_margin:-${DEFAULT_RATCHET_MARGIN}}"
+    rows=$((rows + 1))
+
+    key="${f_stack}|${f_pattern}"
+    if [ -n "${seen_key[${key}]:-}" ]; then
+      problems+=("$(printf 'DUPLICATE  %s (line %s, first declared on line %s).\n           Two floors for one path means one of them is dead: the loop takes\n           whichever it reads, and the other is a number nobody enforces.' \
+        "${key}" "${lineno}" "${seen_key[${key}]}")")
+      continue
+    fi
+    seen_key["${key}"]="${lineno}"
+
+    measured="$(provenance_of "${comment}")"
+    if [ -z "${measured}" ]; then
+      problems+=("$(printf 'NO-PROVENANCE  %s (line %s).\n               Every row must record the value it was pinned from, as\n               `# measured N%%`. Without it the floor cannot be checked\n               against the pin rule, and a reviewer cannot tell a ratchet-\n               driven raise from someone quietly relaxing a floor.\n               Re-pin with: %s --repin %s <lcov>' \
+        "${f_pattern}" "${lineno}" "${SCRIPT_NAME}.sh" "${f_stack}")")
+      continue
+    fi
+
+    want="$(pin_for "${measured}")"
+
+    # TOO TIGHT — the floor sits above what the rule allows, so the row has
+    # less than the two points of headroom every other row gets. This is the
+    # defect that reddened run 30964250098.
+    if [ "${f_floor}" -gt "${want}" ]; then
+      problems+=("$(printf 'TOO-TIGHT  %s (line %s)\n           floor %s%% against a measured %s%%: %s point(s) of headroom, where the\n           pin rule (floor(measured) - %s, or exactly 100) gives %s%%.\n           A floor this close to its measurement is a tripwire, not a floor —\n           the next unrelated change to land in this path reddens CI.\n           Fix: set the floor to %s (or run --lint --fix).' \
+        "${f_pattern}" "${lineno}" "${f_floor}" "${measured}" \
+        "$(awk -v m="${measured}" -v fl="${f_floor}" 'BEGIN { printf "%.2f", m - fl }')" \
+        "${PIN_HEADROOM}" "${want}" "${want}")")
+      printf '%s\t%s\t\n' "${lineno}" "${want}" >>"${edits}"
+      continue
+    fi
+
+    # TOO LOOSE — the recorded measurement already sits at or past floor+margin,
+    # so the row was stale the moment it was written. The live ratchet would
+    # catch this on the next coverage run; catching it here costs no test run.
+    if awk -v m="${measured}" -v fl="${f_floor}" -v mg="${f_margin}" \
+         'BEGIN { exit (m + 0 >= fl + mg + 0) ? 0 : 1 }'; then
+      problems+=("$(printf 'TOO-LOOSE  %s (line %s)\n           floor %s%% against a measured %s%% — already %s or more points below\n           its own provenance, which is where the ratchet fires. The floor was\n           stale when it was written.\n           Fix: set the floor to %s (or run --lint --fix).' \
+        "${f_pattern}" "${lineno}" "${f_floor}" "${measured}" "${f_margin}" "${want}")")
+      printf '%s\t%s\t\n' "${lineno}" "${want}" >>"${edits}"
+      continue
+    fi
+  done <"${manifest}"
+
+  log "${BOLD}Coverage-floor manifest lint — ${rows} rows in ${manifest#"${REPO_ROOT}/"}${RESET}"
+  log ""
+
+  if [ "${#problems[@]}" -eq 0 ]; then
+    printf '%sOK: every floor obeys the pin rule (floor(measured) - %s, 100 pinned exactly).%s\n' \
+      "${GREEN}" "${PIN_HEADROOM}" "${RESET}"
+    return 0
+  fi
+
+  printf '%s%s problem(s):%s\n' "${RED}" "${#problems[@]}" "${RESET}" >&2
+  local p
+  for p in "${problems[@]}"; do printf '  %s\n\n' "${p}" >&2; done
+
+  if [ "${fix}" -eq 1 ] && [ -s "${edits}" ]; then
+    fixed="$(wc -l <"${edits}" | tr -d ' ')"
+    rewrite_manifest "${edits}"
+    printf '%s--fix: rewrote %s floor(s) to the pin rule. Review the diff before committing.%s\n' \
+      "${GREEN}" "${fixed}" "${RESET}"
+    # Re-run clean so --fix cannot report success on a file it failed to mend
+    # (a row with no provenance is unfixable and must still be a failure).
+    run_lint
+    return $?
+  fi
+
+  fail "Coverage-floor manifest does not obey its own pin rule (${SCRIPT_NAME}.sh --lint --fix rewrites the mechanical ones)."
+}
+
+# ---------------------------------------------------------------------------
+# --repin — raise earned floors in place, from a fresh report.
+#
+# The direction is the whole design. Coverage climbing past a floor is the
+# routine case and used to require hand arithmetic against a `--list` dump,
+# which is how the manifest acquired hand-tightened rows in the first place.
+# Coverage FALLING is not routine, and this deliberately cannot express it: a
+# row whose measurement dropped is left byte-for-byte alone, so `--repin` can
+# never be the tool that turns a measured regression into a permitted one. When
+# a drop matters, it surfaces as BELOW on the next enforcing run, with tests as
+# the only remedy.
+# ---------------------------------------------------------------------------
+run_repin() { # <stack> <lcov-file>
+  local stack="$1" lcov="$2"
+  case "${stack}" in
+    rust|flutter|selftest) ;;
+    *) misconfig "unknown stack '${stack}' (expected: rust | flutter)" ;;
+  esac
+  [ -f "${lcov}" ] || misconfig "coverage report not found: ${lcov}"
+
+  local -a paths=() hits=() founds=()
+  local p h f
+  while IFS=$'\t' read -r p h f; do
+    [ -n "${p}" ] || continue
+    paths+=("${p}"); hits+=("${h}"); founds+=("${f}")
+  done < <(measure "${lcov}")
+  [ "${#paths[@]}" -gt 0 ] \
+    || misconfig "parsed 0 source records from ${lcov} — the report is empty or not lcov"
+
+  read_manifest "${stack}"
+
+  local edits; edits="$(mktemp)"
+  # shellcheck disable=SC2064
+  trap "rm -f '${edits}'" RETURN
+
+  local i j pattern floor agg_h agg_f matched pct target
+  local raised=0 held=0 dropped=0 stale=0
+  log "${BOLD}Re-pinning coverage floors — stack '${stack}'${RESET}"
+  log ""
+
+  for ((i = 0; i < ${#MAN_PATTERN[@]}; i++)); do
+    pattern="${MAN_PATTERN[$i]}"; floor="${MAN_FLOOR[$i]}"
+    agg_h=0; agg_f=0; matched=0
+    local glob="${pattern}"
+    case "${glob}" in */) glob="${glob}*" ;; esac
+    for ((j = 0; j < ${#paths[@]}; j++)); do
+      # shellcheck disable=SC2053
+      if [[ "${paths[$j]}" == ${glob} ]]; then
+        matched=$((matched + 1)); agg_h=$((agg_h + hits[j])); agg_f=$((agg_f + founds[j]))
+      fi
+    done
+
+    if [ "${matched}" -eq 0 ] || [ "${agg_f}" -eq 0 ]; then
+      printf '  %sSTALE  %s%s — no measurable file; left untouched (the enforcing run will fail on it)\n' \
+        "${RED}" "${pattern}" "${RESET}"
+      stale=$((stale + 1))
+      continue
+    fi
+
+    pct="$(awk -v h="${agg_h}" -v f="${agg_f}" 'BEGIN { printf "%.2f", (h / f) * 100 }')"
+    target="$(pin_for "${pct}")"
+
+    if [ "${target}" -gt "${floor}" ]; then
+      printf '  %sRAISE  %-52s %s%% -> %s%%%s   (measured %s%%)\n' \
+        "${GREEN}" "${pattern}" "${floor}" "${target}" "${RESET}" "${pct}"
+      printf '%s\t%s\t%s%% (%s/%s)\n' "${MAN_LINE[$i]}" "${target}" "${pct}" "${agg_h}" "${agg_f}" >>"${edits}"
+      raised=$((raised + 1))
+    elif [ "${target}" -lt "${floor}" ]; then
+      # The pin rule would LOWER this row. Never done, and never even recorded:
+      # rewriting the provenance while holding the floor would leave the row
+      # failing its own lint, and rewriting both would be the laundering this
+      # tool exists not to do.
+      printf '  %sHOLD   %-52s %s%% kept%s   (measured %s%% — coverage fell; add tests, do not re-pin)\n' \
+        "${YELLOW}" "${pattern}" "${floor}" "${RESET}" "${pct}"
+      dropped=$((dropped + 1))
+    else
+      held=$((held + 1))
+    fi
+  done
+
+  log ""
+  if [ -s "${edits}" ]; then
+    rewrite_manifest "${edits}"
+  fi
+  printf '%s raised, %s already at the pin, %s held (coverage fell), %s stale.\n' \
+    "${raised}" "${held}" "${dropped}" "${stale}"
+  if [ "${raised}" -gt 0 ]; then
+    printf '%sManifest updated — review the diff, then commit it with the change that earned it.%s\n' \
+      "${GREEN}" "${RESET}"
+  else
+    printf 'Manifest unchanged.\n'
+  fi
+  [ "${stale}" -eq 0 ] || fail "${stale} stale entr(ies) — fix the pattern(s) before re-pinning."
 }
 
 # ---------------------------------------------------------------------------
@@ -592,7 +984,134 @@ EOF
   printf 'selftest|src/nostr/encryption/mod.rs|100\n' >"${tmp}/manifest.full100_exact"
   _case "100% path pinned at 100 passes" 0 "${tmp}/manifest.full100_exact" "${tmp}/report.lcov"
 
-  # (15) The REAL manifest must parse for both real stacks. A syntax error in a
+  # ---- the static lint ----------------------------------------------------
+  # These fixtures cover the failure that actually happened: a floor hand-set
+  # above what the pin rule allows, leaving a row one small change from red.
+
+  _lint() { # _lint <label> <expect-rc> <manifest>
+    local label="$1" want="$2" man="$3" got=0
+    ( HAVEN_COVERAGE_FLOORS="${man}" run_lint ) >/dev/null 2>&1 || got=$?
+    if [ "${got}" -eq "${want}" ]; then
+      printf '  %sPASS%s %s (rc=%d)\n' "${GREEN}" "${RESET}" "${label}" "${got}"
+    else
+      printf '  %sFAIL%s %s (want rc=%d, got rc=%d)\n' "${RED}" "${RESET}" "${label}" "${want}" "${got}" >&2
+      fails=1
+    fi
+  }
+
+  # (15) A manifest whose every floor is exactly the pin rule applied to its own
+  #      provenance. 93.29 -> 91, 100.00 -> 100 (exact), 1.69 -> 0 (clamped, not
+  #      negative), and a widened margin carried through.
+  cat >"${tmp}/lint.ok" <<'EOF'
+selftest|src/nostr/mls/|91                    # measured 93.29% (1419/1521)
+selftest|src/nostr/mls/welcome.rs|100         # measured 100.00% (124/124)
+selftest|lib/src/services/task.dart|0         # measured 1.69% (4/236)
+selftest|src/relay/gate.rs|90|10              # measured 95.00% (19/20)
+EOF
+  _lint "manifest obeying the pin rule passes" 0 "${tmp}/lint.ok"
+
+  # (16) THE FIXTURE FOR THE DEFECT THIS LINT EXISTS FOR — the exact shape of
+  #      the row that reddened run 30964250098: floor 51 against a measured
+  #      51.06%, i.e. 0.06 points of headroom where the rule gives 49.
+  printf 'selftest|lib/src/services/|51        # measured 51.06%% (1373/2689)\n' >"${tmp}/lint.tight"
+  _lint "floor pinned tighter than the rule fails" 1 "${tmp}/lint.tight"
+
+  # …and the message must name the value to write down, or the failure is a
+  # puzzle rather than an instruction.
+  msg="$( ( HAVEN_COVERAGE_FLOORS="${tmp}/lint.tight" run_lint ) 2>&1 || true )"
+  if printf '%s' "${msg}" | grep -q 'set the floor to 49'; then
+    printf '  %sPASS%s lint names the corrected floor\n' "${GREEN}" "${RESET}"
+  else
+    printf '  %sFAIL%s lint did not name the corrected floor (49)\n' "${RED}" "${RESET}" >&2
+    fails=1
+  fi
+
+  # (17) `--fix` must actually rewrite the number, and must leave the rest of the
+  #      row — the margin override, the provenance comment, the alignment —
+  #      untouched. A fixer that reformatted the file would hide the change it
+  #      made inside a whitespace diff.
+  printf 'selftest|src/relay/gate.rs|94|10     # measured 95.00%% (19/20)\n' >"${tmp}/lint.fix"
+  ( HAVEN_COVERAGE_FLOORS="${tmp}/lint.fix" run_lint --fix ) >/dev/null 2>&1 || true
+  if grep -qF 'selftest|src/relay/gate.rs|93|10     # measured 95.00% (19/20)' "${tmp}/lint.fix"; then
+    printf '  %sPASS%s --fix rewrites only the floor, preserving margin/comment/columns\n' "${GREEN}" "${RESET}"
+  else
+    printf '  %sFAIL%s --fix mangled the row: %s\n' "${RED}" "${RESET}" "$(cat "${tmp}/lint.fix")" >&2
+    fails=1
+  fi
+
+  # (18) A floor so far below its own provenance that the ratchet would fire on
+  #      sight. Caught statically, before any suite runs.
+  printf 'selftest|src/nostr/mls/|80           # measured 93.29%% (1419/1521)\n' >"${tmp}/lint.loose"
+  _lint "floor already past the ratchet in its own provenance fails" 1 "${tmp}/lint.loose"
+
+  # (19) A row with no `# measured` provenance cannot be checked against the
+  #      rule at all, so it must fail rather than pass unchecked — and `--fix`
+  #      must not report success on it.
+  printf 'selftest|src/nostr/mls/|91\n' >"${tmp}/lint.noprov"
+  _lint "row without provenance fails" 1 "${tmp}/lint.noprov"
+  local frc=0
+  ( HAVEN_COVERAGE_FLOORS="${tmp}/lint.noprov" run_lint --fix ) >/dev/null 2>&1 || frc=$?
+  if [ "${frc}" -ne 0 ]; then
+    printf '  %sPASS%s --fix still fails on an unfixable row (rc=%d)\n' "${GREEN}" "${RESET}" "${frc}"
+  else
+    printf '  %sFAIL%s --fix reported success on a row it cannot mend\n' "${RED}" "${RESET}" >&2
+    fails=1
+  fi
+
+  # (20) Two floors for one path: the loop enforces one of them and the other is
+  #      a number nobody reads. Same false-green shape as a stale entry.
+  cat >"${tmp}/lint.dup" <<'EOF'
+selftest|src/nostr/mls/|91                    # measured 93.29% (1419/1521)
+selftest|src/nostr/mls/|60                    # measured 93.29% (1419/1521)
+EOF
+  _lint "duplicate path rows fail" 1 "${tmp}/lint.dup"
+
+  # ---- --repin ------------------------------------------------------------
+  # (21) A floor the code has outgrown must be RAISED and its provenance
+  #      refreshed. giftwrap.rs measures 87.00 in the fixture report, so a floor
+  #      of 80 becomes 85.
+  printf 'selftest|src/nostr/giftwrap.rs|80    # measured 82.00%% (164/200)\n' >"${tmp}/repin.up"
+  ( HAVEN_COVERAGE_FLOORS="${tmp}/repin.up" run_repin selftest "${tmp}/report.lcov" ) >/dev/null 2>&1 || true
+  if grep -qF 'selftest|src/nostr/giftwrap.rs|85    # measured 87.00% (174/200)' "${tmp}/repin.up"; then
+    printf '  %sPASS%s --repin raises an outgrown floor and refreshes its provenance\n' "${GREEN}" "${RESET}"
+  else
+    printf '  %sFAIL%s --repin did not raise correctly: %s\n' "${RED}" "${RESET}" "$(cat "${tmp}/repin.up")" >&2
+    fails=1
+  fi
+
+  # (22) THE CRITICAL --repin FIXTURE — coverage FELL. The tool must leave the
+  #      row byte-for-byte alone: neither the floor nor the provenance may move
+  #      down, or `--repin` becomes the one-command way to launder a measured
+  #      regression into a permitted one.
+  local before after
+  printf 'selftest|src/nostr/giftwrap.rs|89    # measured 91.50%% (183/200)\n' >"${tmp}/repin.down"
+  before="$(cat "${tmp}/repin.down")"
+  ( HAVEN_COVERAGE_FLOORS="${tmp}/repin.down" run_repin selftest "${tmp}/report.lcov" ) >/dev/null 2>&1 || true
+  after="$(cat "${tmp}/repin.down")"
+  if [ "${before}" = "${after}" ]; then
+    printf '  %sPASS%s --repin never lowers a floor when coverage fell\n' "${GREEN}" "${RESET}"
+  else
+    printf '  %sFAIL%s --repin rewrote a row whose coverage dropped: %s\n' "${RED}" "${RESET}" "${after}" >&2
+    fails=1
+  fi
+
+  # (23) …and whatever --repin writes must satisfy the lint, or the two writers
+  #      of this manifest disagree about its rule.
+  _lint "a --repin'd manifest passes the lint" 0 "${tmp}/repin.up"
+
+  # (24) The CHECKED-IN manifest must obey the pin rule. This is the fixture
+  #      that turns the whole lint into a standing invariant rather than a
+  #      facility nobody points at the real file.
+  local lrc=0
+  ( run_lint ) >/dev/null 2>&1 || lrc=$?
+  if [ "${lrc}" -eq 0 ]; then
+    printf '  %sPASS%s checked-in manifest obeys the pin rule\n' "${GREEN}" "${RESET}"
+  else
+    printf '  %sFAIL%s checked-in manifest violates the pin rule (rc=%d) — run --lint\n' "${RED}" "${RESET}" "${lrc}" >&2
+    fails=1
+  fi
+
+  # (25) The REAL manifest must parse for both real stacks. A syntax error in a
   #      checked-in row would otherwise only surface in the coverage workflow,
   #      an hour of test runtime later.
   local rc=0
@@ -616,13 +1135,23 @@ EOF
   if [ "${fails}" -ne 0 ]; then
     fail "self-test failed — this guard cannot be trusted until it is fixed"
   fi
-  printf '%sOK: self-test passed (18 fixtures).%s\n' "${GREEN}" "${RESET}"
+  printf '%sOK: self-test passed (31 fixtures).%s\n' "${GREEN}" "${RESET}"
 }
 
 main() {
   case "${1:---help}" in
     --self-test)
       self_test
+      ;;
+    --lint)
+      [ "$#" -le 2 ] || misconfig "usage: ${SCRIPT_NAME}.sh --lint [--fix]"
+      [ "$#" -eq 1 ] || [ "${2}" = "--fix" ] \
+        || misconfig "unknown option '${2}' (usage: ${SCRIPT_NAME}.sh --lint [--fix])"
+      run_lint "${2:-}"
+      ;;
+    --repin)
+      [ "$#" -eq 3 ] || misconfig "usage: ${SCRIPT_NAME}.sh --repin <rust|flutter> <lcov-file>"
+      run_repin "$2" "$3"
       ;;
     --list)
       [ "$#" -eq 3 ] || misconfig "usage: ${SCRIPT_NAME}.sh --list <rust|flutter> <lcov-file>"
@@ -632,7 +1161,7 @@ main() {
       sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//; $d'
       ;;
     *)
-      [ "$#" -eq 2 ] || misconfig "usage: ${SCRIPT_NAME}.sh <rust|flutter> <lcov-file> | --list <stack> <lcov> | --self-test"
+      [ "$#" -eq 2 ] || misconfig "usage: ${SCRIPT_NAME}.sh <rust|flutter> <lcov-file> | --lint [--fix] | --repin <stack> <lcov> | --list <stack> <lcov> | --self-test"
       run_check "$1" "$2"
       ;;
   esac

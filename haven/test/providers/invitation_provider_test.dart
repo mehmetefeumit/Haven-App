@@ -879,10 +879,13 @@ class _MockRelayService implements RelayService {
   }) async => const CatchupResult.empty();
 
   @override
-  Future<KeyPackageMaintenanceResult> maintainKeyPackage({
+  Future<KeyPackageMaintenanceOutcome> maintainKeyPackage({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
-  }) async => const KeyPackageMaintenanceResult.empty();
+  }) async => const KeyPackageMaintenanceHealthy(
+    canonicalOnRelays: 1,
+    respondersProbed: 1,
+  );
 
   @override
   Future<RelayListMaintenanceResult> maintainRelayList({

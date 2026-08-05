@@ -61,6 +61,7 @@ async fn build_two_member_circle() -> TwoMemberCircle {
         &bob_keys,
         &["wss://kp.example.com".to_string()],
         None,
+        None,
     )
     .await
     .expect("bob key package")

@@ -6319,6 +6319,21 @@ pub enum KpMaintenanceActionFfi {
     RepublishedStableD,
     /// A `KeyPackage` was published into a freshly-minted `d` (first-ever slot).
     RepublishedFreshD,
+    /// FRESH material was minted into the existing stable `d` because the
+    /// tracked package passed the rotation point of its own MLS `Lifetime`
+    /// (~day 63 of 84). The healthy steady state.
+    RotatedExpiringMaterial,
+    /// FRESH material was minted into the existing stable `d` because the
+    /// tracked package's MLS `Lifetime` could not be read.
+    ///
+    /// Rotating on an unreadable lifetime is deliberate (the alternative —
+    /// assume-fresh — is the silent, unbounded failure this whole path exists
+    /// to prevent), and it is safe because it self-corrects: the replacement is
+    /// minted by our own engine. Seeing this REPEATEDLY means the reader itself
+    /// is broken and every tick is burning init-key material — which is exactly
+    /// why it is a distinct value rather than folded into
+    /// [`Self::RotatedExpiringMaterial`].
+    RotatedUnreadableLifetime,
 }
 
 impl From<haven_core::relay::maintenance::KpMaintenanceAction> for KpMaintenanceActionFfi {
@@ -6329,6 +6344,8 @@ impl From<haven_core::relay::maintenance::KpMaintenanceAction> for KpMaintenance
             A::SeededD => Self::SeededD,
             A::RepublishedStableD => Self::RepublishedStableD,
             A::RepublishedFreshD => Self::RepublishedFreshD,
+            A::RotatedExpiringMaterial => Self::RotatedExpiringMaterial,
+            A::RotatedUnreadableLifetime => Self::RotatedUnreadableLifetime,
         }
     }
 }
@@ -6348,10 +6365,35 @@ pub struct KpMaintenanceOutcomeFfi {
     /// Responding own relays the probe reached this tick (non-responders
     /// excluded).
     pub responders_probed: u32,
-    /// Responding + non-live relays this tick republished to.
+    /// Own `KeyPackage` relays this tick TARGETED — the account's configured
+    /// NIP-65 set after dedup, counted before any is contacted.
+    ///
+    /// Separates two situations every other field reports identically, and whose
+    /// remedies are opposite:
+    ///
+    /// * `0` — the account has **no `KeyPackage` relays configured**. Nothing to
+    ///   retry; this is await-user-action.
+    /// * `> 0` with `responders_probed == 0` — every configured relay was
+    ///   **unreachable this tick**. Transient; retry promptly.
+    pub relays_targeted: u32,
+    /// Responding relays that ACKED this tick's publish.
+    ///
+    /// The only evidence in this struct that anything landed. The `action` names
+    /// the branch that RAN and is chosen before the write is attempted, so a
+    /// `Republished*` / `Rotated*` action with `relays_healed == 0` is a publish
+    /// nobody accepted — not a completed rotation.
     pub relays_healed: u32,
     /// Relay probes/publishes that errored (tallied, never fatal).
     pub relay_errors: u32,
+    /// Whether this tick deleted the tracked `KeyPackage`'s private `init_key`
+    /// because it reached `Lifetime.not_after`.
+    ///
+    /// `foundation/key-packages.md` makes that deletion a MUST at the earlier of
+    /// a confirmed replacement publication or `not_after`; this flag reports the
+    /// second bound, which fires even on a tick where no relay responded. Set
+    /// together with `relays_healed == 0` it is the worst reachable state: no
+    /// usable init key AND no published replacement.
+    pub expired_init_key_purged: bool,
 }
 
 impl From<haven_core::relay::maintenance::KpMaintenanceOutcome> for KpMaintenanceOutcomeFfi {
@@ -6360,11 +6402,61 @@ impl From<haven_core::relay::maintenance::KpMaintenanceOutcome> for KpMaintenanc
         Self {
             action: o.action.into(),
             canonical_on_relays: c(o.canonical_on_relays),
+            relays_targeted: c(o.relays_targeted),
             responders_probed: c(o.responders_probed),
             relays_healed: c(o.relays_healed),
             relay_errors: c(o.relay_errors),
+            expired_init_key_purged: o.expired_init_key_purged,
         }
     }
+}
+
+/// The tick clock for `KeyPackage` maintenance.
+///
+/// In every shipped build this is exactly the wall clock — the `#[cfg(test)]`
+/// twin below is the ONLY thing that can move it, so there is no clock-override
+/// surface in production at all. It exists because the behaviour under test
+/// (rotation at ~day 63 of a package's real, engine-stamped lifetime) is
+/// otherwise unreachable without waiting two months: the lifetime must come from
+/// genuinely minted MLS material, so the clock is the only movable input.
+#[cfg(not(test))]
+fn maintenance_now_secs() -> u64 {
+    haven_core::relay::maintenance::now_secs()
+}
+
+/// Test-only override for [`maintenance_now_secs`]. `0` means "use the wall
+/// clock", which is the default and what every test that does not opt in gets.
+#[cfg(test)]
+static MAINTENANCE_CLOCK_OVERRIDE_SECS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+fn maintenance_now_secs() -> u64 {
+    match MAINTENANCE_CLOCK_OVERRIDE_SECS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => haven_core::relay::maintenance::now_secs(),
+        overridden => overridden,
+    }
+}
+
+/// The resolved inputs for one `KeyPackage` (re)publish — a struct rather than
+/// six positional arguments, and INTERNAL (never crosses the FFI: it carries
+/// relay urls, a NIP-33 `d`, and MLS wire bytes).
+struct KpPublishPlan<'a> {
+    /// The stable slot to publish into, or `None` to mint a fresh one.
+    existing_d: Option<&'a str>,
+    /// The own-relay URLs to write to (heal subset, or every responder for a
+    /// rotation).
+    targets: &'a [String],
+    /// The currently-tracked row, read ONCE by the caller so the `d`, the cached
+    /// bytes, and the lifetime verdict all describe the same package.
+    tracked: Option<haven_core::circle::PublishedKeyPackageRow>,
+    /// Forbid reusing the cached bytes even when they exist. Set only by a
+    /// rotation — the whole point of which is that the cached material is the
+    /// thing being replaced.
+    force_mint: bool,
+    /// Overrides the reported action (a rotation reports why it rotated instead
+    /// of the generic `Republished*`). `None` keeps the pre-existing mapping.
+    mint_action: Option<haven_core::relay::maintenance::KpMaintenanceAction>,
 }
 
 /// What an M8-1 relay-list maintenance tick did for one category (FFI mirror of
@@ -6935,10 +7027,38 @@ impl RelayManagerFfi {
     ///    Dark Matter a published 30443 is a last-resort package that never dies
     ///    on join, so the presence gate is pure relay presence of the tracked
     ///    stable slot (the M8-2 live-material gate is gone).
-    /// 4. Decide via [`decide_kp_maintenance`]; on `SeedD` record the seed row;
-    ///    on `Republish` reuse-or-mint the single kind-30443 event, publish to
-    ///    OWN relays only (publish-first), record the row, and delete minted
-    ///    material on a failed publish (mdk#160).
+    /// 4. Read the tracked package's OWN MLS `Lifetime` and honour the spec's
+    ///    `not_after` init-key deletion bound (step 4a below) — unconditionally,
+    ///    before any relay decision, because that bound does not depend on the
+    ///    transport.
+    /// 5. Decide via [`decide_kp_maintenance`]; on `SeedD` record the seed row;
+    ///    on `Republish`/`Rotate` reuse-or-mint the single kind-30443 event,
+    ///    publish to OWN relays only (publish-first), record the row, and delete
+    ///    minted material on a failed publish (mdk#160).
+    ///
+    /// # Lifetime-aware rotation
+    ///
+    /// A `KeyPackage` carries an MLS `Lifetime` and stops validating at
+    /// `not_after` (84 days for the OpenMLS default Haven inherits, which is
+    /// also the Marmot maximum). Past that instant the 30443 is still on the
+    /// relay and still fetchable, but every `Add` referencing it fails
+    /// validation — the account is **silently uninvitable**. So the tick asks
+    /// the package itself, never a Nostr timestamp, whether it is past
+    /// `KP_ROTATE_AT_LIFETIME_FRACTION` of its own window. Timing this off
+    /// `event.created_at` would be wrong here even though the reference app
+    /// does it: Haven's heal path re-publishes CACHED bytes under a FRESH
+    /// `created_at`, so an event-age timer would reset on every relay heal
+    /// while the real `not_after` kept ticking.
+    ///
+    /// # 4a. The `not_after` deletion bound
+    ///
+    /// `foundation/key-packages.md`: a last-resort `KeyPackage` MUST delete its
+    /// private `init_key` at the earlier of (a) confirmed publication of a
+    /// replacement — handled by the publish-then-delete step in
+    /// [`Self::republish_key_package`] — or (b) `Lifetime.not_after`. Bound (b)
+    /// is transport-independent, so it runs here even when no relay responded
+    /// and nothing can be published. Retaining it would mean a compromise of
+    /// that one key decrypts *every recorded Welcome* ever sent to it.
     ///
     /// Returns a presence-only [`KpMaintenanceOutcomeFfi`] (counters + enum).
     ///
@@ -6955,10 +7075,24 @@ impl RelayManagerFfi {
 
         let keys = keys_from_secret_bytes(identity_secret_bytes)?;
         let own_pk = keys.public_key();
+        let circle_mgr = circle.inner.clone();
+
+        // ── Step 4a: the transport-INDEPENDENT half, first ───────────────────
+        //
+        // Read the tracked row and its package's own MLS Lifetime, and honour
+        // `foundation/key-packages.md`'s `not_after` deletion bound BEFORE any
+        // relay work. Ordering is deliberate: that bound is a MUST that does not
+        // depend on a relay answering, on a relay even being configured, or on a
+        // replacement being publishable. Every early return below it would
+        // otherwise skip it.
+        // ONE clock read for the whole tick, so the purge bound and the rotation
+        // threshold can never disagree about what "now" is.
+        let now = maintenance_now_secs();
+        let (mut tracked, tracked_lifetime, expired_init_key_purged) =
+            Self::purge_key_package_past_not_after(&circle_mgr, now).await?;
 
         // Own NIP-65 (KeyPackage-discovery) relays only — no default union, no
         // discovery plane. Persisted under the `KeyPackage` slot (W2).
-        let circle_mgr = circle.inner.clone();
         let own_relays: Vec<String> = run_blocking({
             let mgr = circle_mgr.clone();
             move || {
@@ -6971,11 +7105,16 @@ impl RelayManagerFfi {
         .await?;
 
         if own_relays.is_empty() {
+            // `relays_targeted: 0` is what tells the caller this is the
+            // await-user-action case and NOT "every relay was unreachable" —
+            // both otherwise land on AlreadyHealthy with zero responders.
             log::debug!("[maintain_key_package] no KeyPackage relays configured; skipping");
-            return Ok(KpMaintenanceOutcomeFfi::from(KpMaintenanceOutcome::no_op(
-                0,
-            )));
+            return Ok(KpMaintenanceOutcomeFfi::from(KpMaintenanceOutcome {
+                expired_init_key_purged,
+                ..KpMaintenanceOutcome::no_op(0, 0)
+            }));
         }
+        let relays_targeted = own_relays.len();
 
         // PER-RELAY probe of OWN relays for kind-30443 authored by self, so a
         // PARTIAL drop (present on A, dropped from B) is visible + healed on B.
@@ -7023,13 +7162,12 @@ impl RelayManagerFfi {
         let canonical_on_relays: usize = responders.iter().map(|r| r.canonical.len()).sum();
         let snapshot = RelayKpSnapshot { responders };
 
-        // Read the stored stable slot and decide.
-        let stored_stable_d = run_blocking({
-            let mgr = circle_mgr.clone();
-            move || mgr.latest_canonical_d_tag().map_err(|e| e.to_string())
-        })
-        .await?;
-        let decision = decide_kp_maintenance(&snapshot, stored_stable_d.as_deref());
+        // Decide. The stable slot and the tracked package's lifetime both come
+        // from the SAME row read in step 4a, so the `d` and the lifetime can
+        // never describe different packages.
+        let stored_stable_d = tracked.as_ref().map(|r| r.d_tag.clone());
+        let decision =
+            decide_kp_maintenance(&snapshot, stored_stable_d.as_deref(), tracked_lifetime, now);
 
         // Republished-relay tally, only non-zero on a successful Republish.
         let mut relays_healed: usize = 0;
@@ -7074,14 +7212,41 @@ impl RelayManagerFfi {
                 existing_d,
                 targets,
             } => {
+                let plan = KpPublishPlan {
+                    existing_d: existing_d.as_deref(),
+                    targets: &targets,
+                    tracked: tracked.take(),
+                    force_mint: false,
+                    mint_action: None,
+                };
                 let (act, healed) = self
-                    .republish_key_package(
-                        &circle_mgr,
-                        &keys,
-                        existing_d.as_deref(),
-                        &targets,
-                        &mut relay_errors,
-                    )
+                    .republish_key_package(&circle_mgr, &keys, plan, &mut relay_errors)
+                    .await?;
+                relays_healed = healed;
+                act
+            }
+            KpMaintenanceDecision::Rotate {
+                existing_d,
+                targets,
+                lifetime_unreadable,
+            } => {
+                // ROTATION: `force_mint` is the load-bearing bit. Cached bytes
+                // exist for this slot, so without it the reuse branch would
+                // re-advertise the very material that is aging out — the exact
+                // defect this path was added to fix.
+                let plan = KpPublishPlan {
+                    existing_d: Some(existing_d.as_str()),
+                    targets: &targets,
+                    tracked: tracked.take(),
+                    force_mint: true,
+                    mint_action: Some(if lifetime_unreadable {
+                        KpMaintenanceAction::RotatedUnreadableLifetime
+                    } else {
+                        KpMaintenanceAction::RotatedExpiringMaterial
+                    }),
+                };
+                let (act, healed) = self
+                    .republish_key_package(&circle_mgr, &keys, plan, &mut relay_errors)
                     .await?;
                 relays_healed = healed;
                 act
@@ -7091,41 +7256,59 @@ impl RelayManagerFfi {
         Ok(KpMaintenanceOutcomeFfi::from(KpMaintenanceOutcome {
             action,
             canonical_on_relays,
+            relays_targeted,
             responders_probed,
             relays_healed,
             relay_errors,
+            expired_init_key_purged,
         }))
     }
 
-    /// Reuses-or-mints, signs, publishes (to the confirmed-drop TARGET relays
-    /// only), and records a `KeyPackage` republish for
-    /// [`Self::maintain_key_package`]. Publish-first: only after a relay write
-    /// succeeds is the tracking row recorded; freshly-minted material that
-    /// FAILS to publish is deleted (mdk#160) so a retry loop never leaks
-    /// private init keys.
+    /// Honours `foundation/key-packages.md`'s SECOND `init_key` deletion bound:
+    /// "a last-resort KeyPackage ... MUST delete that material at the earlier of
+    /// [confirmed replacement publication]; the KeyPackage `Lifetime.not_after`
+    /// time."
     ///
-    /// `targets` is the responded-and-non-serving subset of the user's own
-    /// relays (from [`KpMaintenanceDecision::Republish`]). When the tracked slot
-    /// still holds the cached last-resort package bytes, HEAL by re-publishing
-    /// the SAME bytes verbatim (no re-mint); otherwise MINT a fresh package into
-    /// the slot (first publish / seed-handoff / rotation).
+    /// Returns `(tracked row, its lifetime, whether a purge happened)`. The row
+    /// is returned so the caller reads storage ONCE — the stable `d` and the
+    /// lifetime must describe the same package or the decision is incoherent.
     ///
-    /// [`KpMaintenanceDecision::Republish`]: haven_core::relay::maintenance::KpMaintenanceDecision::Republish
-    async fn republish_key_package(
-        &self,
+    /// # Why this is unconditional
+    ///
+    /// The first bound (confirmed replacement) is handled by
+    /// [`Self::republish_key_package`], but it only fires on a tick that can
+    /// actually reach a relay. A device that is offline, has no `KeyPackage`
+    /// relays configured, or whose relays are all down would otherwise retain
+    /// dead private init material indefinitely — and the spec is explicit that
+    /// "local retention policy MUST NOT extend either bound". The stated risk is
+    /// not abstract: compromising a retained `init_key` lets an attacker decrypt
+    /// every recorded Welcome ever encrypted to that `KeyPackage` and recover
+    /// the join secrets those Welcomes carried.
+    ///
+    /// On purge the tracking row is rewritten with EMPTY bytes rather than
+    /// deleted: that preserves the stable `d` (the transport binding forbids
+    /// minting a fresh slot for a routine replacement) while making it
+    /// structurally impossible for any later code path to re-publish material
+    /// the engine no longer holds.
+    ///
+    /// Fail-soft — a failed delete or rewrite is logged (redacted) and reported
+    /// as "not purged" rather than aborting the tick.
+    ///
+    /// `now_secs` is injected so the bound is provable without waiting 84 days;
+    /// production passes the wall clock.
+    async fn purge_key_package_past_not_after(
         circle_mgr: &Arc<CoreCircleManager>,
-        keys: &nostr::Keys,
-        existing_d: Option<&str>,
-        targets: &[String],
-        relay_errors: &mut usize,
-    ) -> Result<(haven_core::relay::maintenance::KpMaintenanceAction, usize), String> {
-        use haven_core::relay::maintenance::{
-            build_kp_maintenance_events, build_kp_maintenance_events_reusing, KpMaintenanceAction,
-        };
+        now_secs: u64,
+    ) -> Result<
+        (
+            Option<haven_core::circle::PublishedKeyPackageRow>,
+            haven_core::relay::maintenance::TrackedKpLifetime,
+            bool,
+        ),
+        String,
+    > {
+        use haven_core::relay::maintenance::{kp_init_key_purge_due, read_kp_lifetime};
 
-        // Read the currently-tracked row (bytes + d) so we can (a) HEAL by reuse
-        // when the slot matches and carries bytes, and (b) capture superseded
-        // bytes to delete on a rotation (mdk#160).
         let tracked = run_blocking({
             let mgr = circle_mgr.clone();
             move || {
@@ -7135,34 +7318,141 @@ impl RelayManagerFfi {
         })
         .await?;
 
-        // Reuse only when the tracked row is the SAME slot AND carries non-empty
-        // cached bytes (a seed row has empty bytes → mint fresh instead).
+        let Some(row) = tracked else {
+            return Ok((
+                None,
+                haven_core::relay::maintenance::TrackedKpLifetime::Absent,
+                false,
+            ));
+        };
+        // The lifetime is read off the KeyPackage's OWN bytes — never off
+        // `row.created_at`, which a heal refreshes without re-minting anything.
+        let lifetime = read_kp_lifetime(&row.key_package);
+        if !kp_init_key_purge_due(lifetime, now_secs) {
+            return Ok((Some(row), lifetime, false));
+        }
+
+        let superseded = haven_core::nostr::mls::types::KeyPackage::new(row.key_package.clone());
+        if let Err(e) = circle_mgr.delete_key_package(&superseded).await {
+            log::debug!(
+                "[maintain_key_package] expired init-key delete failed: {}",
+                haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+            );
+            return Ok((Some(row), lifetime, false));
+        }
+        // Blank the cached bytes so no later path can re-advertise material the
+        // engine no longer has; keep the slot id and its timestamp floor.
+        let blanked = haven_core::circle::PublishedKeyPackageRow {
+            key_package: Vec::new(),
+            ..row
+        };
+        let recorded = run_blocking({
+            let mgr = circle_mgr.clone();
+            let blanked = blanked.clone();
+            move || {
+                mgr.record_published_key_package(&blanked)
+                    .map_err(|e| e.to_string())
+            }
+        })
+        .await;
+        if let Err(e) = recorded {
+            log::debug!(
+                "[maintain_key_package] expired KP row blanking failed: {}",
+                haven_core::nostr::mls::redact_hex_sequences(&e)
+            );
+        }
+        log::info!(
+            "[maintain_key_package] deleted a KeyPackage init key that reached \
+             Lifetime.not_after"
+        );
+        // The lifetime verdict is deliberately UNCHANGED: the material is gone,
+        // but the account still needs a published replacement, so the decision
+        // must still resolve to `Rotate` (not a heal that skips serving relays).
+        Ok((Some(blanked), lifetime, true))
+    }
+
+    /// Reuses-or-mints, signs, publishes (to the confirmed-drop TARGET relays
+    /// only), and records a `KeyPackage` republish for
+    /// [`Self::maintain_key_package`]. Publish-first: only after a relay write
+    /// succeeds is the tracking row recorded; freshly-minted material that
+    /// FAILS to publish is deleted (mdk#160) so a retry loop never leaks
+    /// private init keys.
+    ///
+    /// `plan.targets` is the relay subset the decision resolved (the
+    /// non-serving responders for a heal, EVERY responder for a rotation). When
+    /// the tracked slot still holds cached last-resort bytes AND
+    /// `plan.force_mint` is false, HEAL by re-publishing the SAME bytes verbatim
+    /// (no re-mint); otherwise MINT a fresh package into the slot (first publish
+    /// / seed-handoff / rotation).
+    ///
+    /// [`KpMaintenanceDecision::Republish`]: haven_core::relay::maintenance::KpMaintenanceDecision::Republish
+    async fn republish_key_package(
+        &self,
+        circle_mgr: &Arc<CoreCircleManager>,
+        keys: &nostr::Keys,
+        plan: KpPublishPlan<'_>,
+        relay_errors: &mut usize,
+    ) -> Result<(haven_core::relay::maintenance::KpMaintenanceAction, usize), String> {
+        use haven_core::relay::maintenance::{
+            build_kp_maintenance_events, build_kp_maintenance_events_reusing, KpMaintenanceAction,
+        };
+
+        let KpPublishPlan {
+            existing_d,
+            targets,
+            tracked,
+            force_mint,
+            mint_action,
+        } = plan;
+
+        // Reuse only when the tracked row is the SAME slot, carries non-empty
+        // cached bytes (a seed row has empty bytes → mint fresh instead), and the
+        // decision did not demand a re-mint. `force_mint` is what makes a
+        // rotation a rotation: without it, a package past its lifetime threshold
+        // would be "healed" by re-advertising the very bytes that are expiring.
         let reuse_bytes: Option<Vec<u8>> = match (&tracked, existing_d) {
+            _ if force_mint => None,
             (Some(row), Some(d)) if row.d_tag == d && !row.key_package.is_empty() => {
                 Some(row.key_package.clone())
             }
             _ => None,
         };
         let minted_fresh = reuse_bytes.is_none();
+        // NIP-01 tie-break floor: a replacement landing in the same second as
+        // its predecessor loses the lowest-event-id tiebreaker ~half the time
+        // and silently fails to replace anything. See `monotonic_kp_created_at`.
+        let prev_created_at = tracked.as_ref().map(|r| r.created_at);
 
         let events = if let Some(bytes) = reuse_bytes {
             // HEAL: re-advertise the cached last-resort package into the same slot.
             let d = existing_d.unwrap_or_default().to_owned();
-            build_kp_maintenance_events_reusing(keys, &bytes, targets, &d)
+            build_kp_maintenance_events_reusing(keys, &bytes, targets, &d, prev_created_at)
                 .map_err(|e| format!("build (reuse) key package events: {e}"))?
         } else {
             // MINT: a fresh last-resort package into `existing_d` (or a new slot).
             // Reuses the single process-global session (Rule 14) via the manager.
-            build_kp_maintenance_events(circle_mgr.session(), keys, targets, existing_d)
-                .await
-                .map_err(|e| format!("build (mint) key package events: {e}"))?
+            build_kp_maintenance_events(
+                circle_mgr.session(),
+                keys,
+                targets,
+                existing_d,
+                prev_created_at,
+            )
+            .await
+            .map_err(|e| format!("build (mint) key package events: {e}"))?
         };
 
         let event_id = events.event.id.to_hex();
         let d_tag = events.d_tag.clone();
         let kp_bytes = events.key_package.bytes().to_vec();
+        // Record the EVENT's own `created_at`, not the wall clock at insert
+        // time, so the next publish's monotonic floor is exact rather than
+        // merely conservative.
+        let event_created_at = i64::try_from(events.event.created_at.as_secs()).unwrap_or(i64::MAX);
 
         // Publish-first to the TARGET relays only (targets ⊆ configured ⊆ own).
+        // `publish_event` returns `Ok` only when at least one relay OK-ACKED, so
+        // `published` means acked, never merely sent.
         let published = match self.inner.publish_event(&events.event, targets).await {
             Ok(_) => true,
             Err(e) => {
@@ -7177,7 +7467,6 @@ impl RelayManagerFfi {
 
         if published {
             // Record the single-row-per-slot tracking row (drops the prior row).
-            let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(0);
             let record = run_blocking({
                 let mgr = circle_mgr.clone();
                 move || {
@@ -7185,7 +7474,7 @@ impl RelayManagerFfi {
                         event_id,
                         d_tag,
                         key_package: kp_bytes,
-                        created_at: now,
+                        created_at: event_created_at,
                     })
                     .map_err(|e| e.to_string())
                 }
@@ -7195,10 +7484,12 @@ impl RelayManagerFfi {
                 *relay_errors += 1;
             }
 
-            // ROTATION cleanup (mdk#160): a fresh mint into a slot that held
-            // DIFFERENT live material supersedes it — delete the old private
-            // material so it does not accumulate. (No-op for a heal/reuse, a
-            // first publish, or a seed-handoff row with empty bytes.)
+            // ROTATION cleanup — the spec's FIRST deletion bound ("confirmed
+            // publication of a replacement"), and mdk#160's leak fix. Ordering
+            // is the point: this runs only inside `published`, i.e. only after a
+            // relay OK-acked the replacement, so the account is never left with
+            // zero fetchable packages and no init key. (No-op for a heal/reuse, a
+            // first publish, or a row already blanked by the `not_after` purge.)
             if minted_fresh {
                 if let Some(row) = &tracked {
                     if !row.key_package.is_empty() && row.key_package != events.key_package.bytes()
@@ -7225,11 +7516,11 @@ impl RelayManagerFfi {
             }
         }
 
-        let action = if minted_fresh {
+        let action = mint_action.unwrap_or(if minted_fresh {
             KpMaintenanceAction::RepublishedFreshD
         } else {
             KpMaintenanceAction::RepublishedStableD
-        };
+        });
         // `relays_healed` = the target count only when the write succeeded.
         let healed = if published { targets.len() } else { 0 };
         Ok((action, healed))
@@ -10069,6 +10360,532 @@ mod maintenance_real_ffi_tests {
             .maintain_key_package(circle, secret)
             .await
             .expect("maintain_key_package must not error")
+    }
+
+    // ------------------------------------------------------------------------
+    // TC-4: an UNREADABLE tracked lifetime rotates through the REAL FFI, into
+    // the SAME slot, and reports its reason distinctly.
+    //
+    // The unreadable branch is the one where the two possible policies diverge
+    // most sharply: "assume fresh" would leave the account silently uninvitable
+    // forever, "assume stale" rotates. This drives the chosen policy end to end
+    // and pins the DISTINCT action, which is the only thing that makes an
+    // unreadable-lifetime loop diagnosable instead of a silent init-key churn.
+    // ------------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc4_unreadable_tracked_lifetime_rotates_into_the_same_slot_via_real_ffi() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let relay = MockRelay::run().await.expect("start MockRelay");
+        let url = relay.url().await.to_string();
+
+        let keys = Keys::generate();
+        let author = keys.public_key();
+        let secret = secret_bytes(&keys);
+
+        let dir = DataDir::new("unreadable");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        circle
+            .add_user_relay(url.clone(), RelayTypeFfi::Nip65)
+            .await
+            .expect("register own NIP-65 relay");
+
+        // First tick publishes a real package into a fresh slot.
+        let first = circle_maintain(&relay_mgr, &circle, secret.clone()).await;
+        assert_eq!(first.action, KpMaintenanceActionFfi::RepublishedFreshD);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let tracked = circle
+            .inner
+            .latest_published_key_package()
+            .expect("read tracked row")
+            .expect("a row exists after the first publish");
+        let stable_d = tracked.d_tag.clone();
+        let original_bytes = tracked.key_package.clone();
+
+        // Corrupt the tracked BYTES only (slot + timestamps untouched), which is
+        // exactly the state a truncated write or a wire-format change would
+        // leave behind.
+        circle
+            .inner
+            .record_published_key_package(&haven_core::circle::PublishedKeyPackageRow {
+                key_package: vec![0xDE, 0xAD, 0xBE, 0xEF],
+                ..tracked
+            })
+            .expect("write corrupted row");
+
+        let outcome = circle_maintain(&relay_mgr, &circle, secret).await;
+        assert_eq!(
+            outcome.action,
+            KpMaintenanceActionFfi::RotatedUnreadableLifetime,
+            "an unreadable tracked lifetime must rotate AND say so — folding it \
+             into a generic republish would hide a reader that is broken for \
+             every package"
+        );
+        assert_eq!(
+            outcome.relays_healed, 1,
+            "the rotation must have been acked by the own relay"
+        );
+        assert!(
+            !outcome.expired_init_key_purged,
+            "an unreadable lifetime yields no `not_after`, so the second \
+             deletion bound must NOT be claimed to have fired"
+        );
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        // Same slot, new material.
+        let after = circle
+            .inner
+            .latest_published_key_package()
+            .expect("read tracked row")
+            .expect("row");
+        assert_eq!(
+            after.d_tag, stable_d,
+            "a routine replacement MUST reuse the same `d`"
+        );
+        assert_ne!(
+            after.key_package, original_bytes,
+            "the rotation must have minted NEW material"
+        );
+        assert!(
+            !after.key_package.is_empty() && after.key_package != vec![0xDE, 0xAD, 0xBE, 0xEF],
+            "the corrupted bytes must have been replaced, not re-tracked"
+        );
+
+        let on_relay = fetch_by_kind(author, Kind::Custom(30443), &url).await;
+        assert_eq!(
+            on_relay.len(),
+            1,
+            "same-`d` supersession must leave exactly one canonical on the relay"
+        );
+        assert_eq!(
+            kp_d_tag(&on_relay[0]).as_deref(),
+            Some(stable_d.as_str()),
+            "the replacement must occupy the tracked slot"
+        );
+
+        relay.shutdown();
+    }
+
+    // ------------------------------------------------------------------------
+    // TC-5: the spec's SECOND init-key deletion bound (`Lifetime.not_after`),
+    // driven against a REAL tracked package with only the CLOCK moved.
+    //
+    // `foundation/key-packages.md`: a last-resort KeyPackage "MUST delete that
+    // material at the earlier of: confirmed publication of a replacement ...;
+    // the KeyPackage `Lifetime.not_after` time." Retaining it past that means a
+    // compromise of the one key decrypts every recorded Welcome ever sent to it.
+    // ------------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc5_init_key_is_deleted_at_not_after_even_with_no_relay_reachable() {
+        use haven_core::relay::maintenance::{read_kp_lifetime, TrackedKpLifetime};
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+
+        let keys = Keys::generate();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("not_after");
+        let circle = CircleManagerFfi::new(dir.as_str(), secret).expect("CircleManagerFfi::new");
+
+        // A REAL minted package, tracked exactly as a publish would track it.
+        // NOTE: no relay is started and none is configured — the whole point is
+        // that this bound does not depend on the transport.
+        let kp = circle.inner.fresh_key_package().await.expect("mint");
+        let bytes = kp.bytes().to_vec();
+        circle
+            .inner
+            .record_published_key_package(&haven_core::circle::PublishedKeyPackageRow {
+                event_id: "00".repeat(32),
+                d_tag: "aa".repeat(16),
+                key_package: bytes.clone(),
+                created_at: 1,
+            })
+            .expect("track the published package");
+
+        let TrackedKpLifetime::Known(lifetime) = read_kp_lifetime(&bytes) else {
+            panic!("a freshly minted package must have a readable lifetime");
+        };
+
+        // One second BEFORE `not_after`: the material is still usable — a peer
+        // may be mid-Welcome against it — so it must be RETAINED.
+        let (row, _, purged) = super::RelayManagerFfi::purge_key_package_past_not_after(
+            &circle.inner,
+            lifetime.not_after - 1,
+        )
+        .await
+        .expect("purge check");
+        assert!(!purged, "the bound must not fire early");
+        assert_eq!(
+            row.expect("row").key_package,
+            bytes,
+            "a live package's cached bytes must be left intact"
+        );
+
+        // AT `not_after`: the bound fires, with no relay in sight.
+        let (row, _, purged) = super::RelayManagerFfi::purge_key_package_past_not_after(
+            &circle.inner,
+            lifetime.not_after,
+        )
+        .await
+        .expect("purge");
+        assert!(
+            purged,
+            "the `not_after` bound MUST fire even on a tick that contacts no \
+             relay — local retention policy may not extend it"
+        );
+        let row = row.expect("row");
+        assert!(
+            row.key_package.is_empty(),
+            "the cached bytes must be blanked so no later heal can re-advertise \
+             material the engine no longer holds"
+        );
+        assert_eq!(
+            row.d_tag,
+            "aa".repeat(16),
+            "the stable slot must SURVIVE the purge — a routine replacement must \
+             reuse it, not mint a fresh coordinate"
+        );
+
+        // Idempotent: a second tick over the blanked row is a clean no-op.
+        let (row, lifetime_after, purged_again) =
+            super::RelayManagerFfi::purge_key_package_past_not_after(
+                &circle.inner,
+                lifetime.not_after,
+            )
+            .await
+            .expect("second purge");
+        assert!(!purged_again, "the purge must not repeat every tick");
+        assert_eq!(
+            lifetime_after,
+            TrackedKpLifetime::Absent,
+            "blanked bytes must read as Absent, not Unreadable — otherwise every \
+             later tick would report a spurious unreadable-lifetime rotation"
+        );
+        assert!(row.expect("row").key_package.is_empty());
+    }
+
+    // ------------------------------------------------------------------------
+    // TC-7: the `not_after` bound fires — and is REPORTED — on a tick that has
+    // no `KeyPackage` relays configured at all, and that same tick is
+    // distinguishable from "every relay was unreachable".
+    //
+    // Two claims in one, both about ORDERING in `maintain_key_package`:
+    //   * the purge runs BEFORE the "no relays configured" early return, so a
+    //     transport-independent MUST is not skipped by a transport check;
+    //   * `relays_targeted == 0` is what separates await-user-action (nothing
+    //     configured) from retry-promptly (nothing reachable), which every other
+    //     field reports identically.
+    // ------------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc7_not_after_purge_runs_and_reports_even_with_no_relays_configured() {
+        use haven_core::relay::maintenance::{read_kp_lifetime, TrackedKpLifetime};
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+
+        let keys = Keys::generate();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("no_relays_purge");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+
+        // A REAL tracked package. NO relay is configured — deliberately.
+        let kp = circle.inner.fresh_key_package().await.expect("mint");
+        let bytes = kp.bytes().to_vec();
+        circle
+            .inner
+            .record_published_key_package(&haven_core::circle::PublishedKeyPackageRow {
+                event_id: "11".repeat(32),
+                d_tag: "bb".repeat(16),
+                key_package: bytes.clone(),
+                created_at: 1,
+            })
+            .expect("track");
+        let TrackedKpLifetime::Known(lifetime) = read_kp_lifetime(&bytes) else {
+            panic!("readable lifetime expected");
+        };
+
+        // Before `not_after`: nothing to purge, and the tick is the plain
+        // "no relays configured" shape.
+        let before = circle_maintain(&relay_mgr, &circle, secret.clone()).await;
+        assert_eq!(before.action, KpMaintenanceActionFfi::AlreadyHealthy);
+        assert_eq!(
+            before.relays_targeted, 0,
+            "no KeyPackage relay is configured — this is await-user-action, not \
+             a transient outage"
+        );
+        assert_eq!(before.responders_probed, 0);
+        assert!(!before.expired_init_key_purged);
+
+        // At `not_after`: the bound MUST fire even though the tick never
+        // contacts (or even resolves) a relay.
+        super::MAINTENANCE_CLOCK_OVERRIDE_SECS.store(lifetime.not_after, Ordering::Relaxed);
+        let after = circle_maintain(&relay_mgr, &circle, secret).await;
+        super::MAINTENANCE_CLOCK_OVERRIDE_SECS.store(0, Ordering::Relaxed);
+
+        assert!(
+            after.expired_init_key_purged,
+            "the `not_after` deletion bound is transport-independent — putting \
+             the relay-configuration check ahead of it silently converts a MUST \
+             into a no-op for exactly the accounts least able to recover"
+        );
+        assert_eq!(
+            after.relays_targeted, 0,
+            "still nothing configured; the purge does not invent a target"
+        );
+        let row = circle
+            .inner
+            .latest_published_key_package()
+            .expect("read row")
+            .expect("row");
+        assert!(
+            row.key_package.is_empty(),
+            "the dead package's cached bytes must be blanked"
+        );
+        assert_eq!(
+            row.d_tag,
+            "bb".repeat(16),
+            "the stable slot must survive the purge"
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // TC-6: PUBLISH-BEFORE-DELETE, proved with a relay that answers reads and
+    // refuses writes, and with the ONLY external oracle for "is the private
+    // init key still there?" — whether a Welcome encrypted to that package can
+    // still be processed.
+    //
+    // `foundation/key-packages.md`'s FIRST deletion bound is "confirmed
+    // publication of a replacement". Deleting the superseded init key before
+    // that confirmation would leave the account with a dead key AND no
+    // replacement on any relay: uninvitable, and unable to process Welcomes
+    // already in flight to the old package.
+    // ------------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc6_superseded_init_key_survives_a_failed_rotation_and_dies_on_a_confirmed_one() {
+        use haven_core::nostr::mls::types::{LocationGroupConfig, PublishWork};
+        use haven_core::relay::maintenance::{read_kp_lifetime, TrackedKpLifetime};
+        use nostr_relay_builder::builder::{PolicyResult, WritePolicy};
+        use nostr_relay_builder::{LocalRelay, RelayBuilder};
+        use std::sync::atomic::AtomicBool;
+
+        /// Accepts writes until flipped, then rejects them. Reads are untouched,
+        /// so the maintenance probe still sees a live responder — which is what
+        /// makes a *targeted publish failure* reachable at all.
+        #[derive(Debug)]
+        struct RejectWritesWhenFlipped(std::sync::Arc<AtomicBool>);
+
+        impl WritePolicy for RejectWritesWhenFlipped {
+            fn admit_event<'a>(
+                &'a self,
+                _event: &'a nostr::Event,
+                _addr: &'a std::net::SocketAddr,
+            ) -> nostr_sdk::prelude::BoxedFuture<'a, PolicyResult> {
+                Box::pin(async move {
+                    if self.0.load(Ordering::Relaxed) {
+                        PolicyResult::Reject("write refused by test policy".to_string())
+                    } else {
+                        PolicyResult::Accept
+                    }
+                })
+            }
+        }
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+
+        let reject = std::sync::Arc::new(AtomicBool::new(false));
+        let relay = LocalRelay::new(
+            RelayBuilder::default().write_policy(RejectWritesWhenFlipped(reject.clone())),
+        );
+        relay.run().await.expect("run relay");
+        let url = relay.url().await.to_string();
+
+        // Bob is the account under maintenance; Alice only exists to mint
+        // Welcomes to Bob's KeyPackage, which is the oracle.
+        let bob_keys = Keys::generate();
+        let bob_secret = secret_bytes(&bob_keys);
+        let bob_dir = DataDir::new("pbd_bob");
+        let bob = CircleManagerFfi::new(bob_dir.as_str(), bob_secret.clone())
+            .expect("bob CircleManagerFfi::new");
+        let alice_keys = Keys::generate();
+        let alice_dir = DataDir::new("pbd_alice");
+        let alice = CircleManagerFfi::new(alice_dir.as_str(), secret_bytes(&alice_keys))
+            .expect("alice CircleManagerFfi::new");
+
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        bob.add_user_relay(url.clone(), RelayTypeFfi::Nip65)
+            .await
+            .expect("register own NIP-65 relay");
+
+        // Tick 1 (writes allowed): Bob publishes KeyPackage #1.
+        let first = circle_maintain(&relay_mgr, &bob, bob_secret.clone()).await;
+        assert_eq!(first.action, KpMaintenanceActionFfi::RepublishedFreshD);
+        assert_eq!(first.relays_healed, 1, "the first publish must be acked");
+        assert_eq!(first.relays_targeted, 1);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        let tracked = bob
+            .inner
+            .latest_published_key_package()
+            .expect("read row")
+            .expect("row");
+        let kp1_bytes = tracked.key_package.clone();
+        let stable_d = tracked.d_tag.clone();
+        let TrackedKpLifetime::Known(kp1_lifetime) = read_kp_lifetime(&kp1_bytes) else {
+            panic!("KeyPackage #1 must have a readable lifetime");
+        };
+
+        // Alice mints TWO Welcomes to KeyPackage #1 — one to cash in while the
+        // init key must still be alive, one for after the confirmed rotation.
+        //
+        // The KeyPackage must come from the PUBLISHED EVENT, not from raw bytes:
+        // the engine needs the `KeyPackageSource` (event id + relays) the event
+        // carries to build the Welcome's routing metadata.
+        let kp1_event = fetch_by_kind(bob_keys.public_key(), Kind::Custom(30443), &url)
+            .await
+            .into_iter()
+            .next()
+            .expect("Bob's published KeyPackage #1 must be fetchable");
+        let kp1 = haven_core::nostr::mls::SessionManager::key_package_from_event(&kp1_event)
+            .expect("parse Bob's KeyPackage #1");
+        let mint_welcome = |name: &'static str| {
+            let alice_inner = alice.inner.clone();
+            let alice_pk = alice_keys.public_key().to_hex();
+            let kp = kp1.clone();
+            async move {
+                let config = LocationGroupConfig::new(name)
+                    .with_relay("wss://relay.test.com")
+                    .with_admin(alice_pk);
+                let created = alice_inner
+                    .session()
+                    .create_group(vec![kp], config)
+                    .await
+                    .expect("alice creates a group with Bob's KeyPackage #1");
+                let mut welcome = None;
+                for work in &created.effects.publish {
+                    if let PublishWork::GroupCreated { welcomes, pending } = work {
+                        alice_inner
+                            .session()
+                            .confirm_published(*pending)
+                            .await
+                            .expect("confirm");
+                        welcome = Some(
+                            haven_core::nostr::mls::SessionManager::transport_message_to_event(
+                                &welcomes[0],
+                            )
+                            .expect("welcome event"),
+                        );
+                    }
+                }
+                welcome.expect("a welcome")
+            }
+        };
+        let welcome_during_failure = mint_welcome("DuringFailure").await;
+        let welcome_after_success = mint_welcome("AfterSuccess").await;
+
+        // Move the tick clock to KeyPackage #1's rotation instant, and refuse
+        // every write. Reads still work, so the probe sees a live responder and
+        // the decision genuinely resolves to Rotate.
+        super::MAINTENANCE_CLOCK_OVERRIDE_SECS.store(kp1_lifetime.rotate_at(), Ordering::Relaxed);
+        reject.store(true, Ordering::Relaxed);
+
+        let failed = circle_maintain(&relay_mgr, &bob, bob_secret.clone()).await;
+        assert_eq!(
+            failed.action,
+            KpMaintenanceActionFfi::RotatedExpiringMaterial,
+            "the tick must have taken the rotation branch"
+        );
+        assert_eq!(
+            failed.relays_healed, 0,
+            "no relay acked, so nothing was rotated in fact — the action names \
+             the branch, `relays_healed` is the only evidence of a landing"
+        );
+        assert_eq!(
+            failed.relays_targeted, 1,
+            "relays WERE configured; this is a publish failure, not an \
+             unconfigured account"
+        );
+        assert!(
+            !failed.expired_init_key_purged,
+            "the package is past its ROTATION threshold but nowhere near \
+             `not_after`, so the second deletion bound must not fire"
+        );
+
+        // The tracking row is untouched: no replacement exists, so none is
+        // recorded, and the superseded bytes stay available for the retry.
+        let after_failure = bob
+            .inner
+            .latest_published_key_package()
+            .expect("read row")
+            .expect("row");
+        assert_eq!(
+            after_failure.key_package, kp1_bytes,
+            "a failed publish must not overwrite the tracking row"
+        );
+        assert_eq!(after_failure.d_tag, stable_d);
+
+        // THE ASSERTION: KeyPackage #1's private init key is still alive, so a
+        // Welcome already encrypted to it can still be processed. If the
+        // superseded delete had run before the ack, this would fail — and the
+        // account would be holding a dead key with no replacement anywhere.
+        bob.inner
+            .session()
+            .accept_welcome(&welcome_during_failure)
+            .await
+            .expect(
+                "after a FAILED rotation publish, the superseded KeyPackage's \
+                 init key MUST still be usable — deleting it before a relay \
+                 confirmed the replacement leaves the account with neither",
+            );
+
+        // Now allow writes and rotate for real.
+        reject.store(false, Ordering::Relaxed);
+        let ok = circle_maintain(&relay_mgr, &bob, bob_secret).await;
+        assert_eq!(ok.action, KpMaintenanceActionFfi::RotatedExpiringMaterial);
+        assert_eq!(
+            ok.relays_healed, 1,
+            "the retried rotation must be acked by the own relay"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        let after_success = bob
+            .inner
+            .latest_published_key_package()
+            .expect("read row")
+            .expect("row");
+        assert_eq!(
+            after_success.d_tag, stable_d,
+            "the rotation must reuse the stable slot"
+        );
+        assert_ne!(
+            after_success.key_package, kp1_bytes,
+            "the rotation must have tracked the NEW material"
+        );
+
+        // And only NOW is the superseded init key gone — the first deletion
+        // bound fires exactly on confirmed publication, not before.
+        bob.inner
+            .session()
+            .accept_welcome(&welcome_after_success)
+            .await
+            .expect_err(
+                "once the replacement is confirmed published, the superseded \
+                 init key MUST be deleted — retaining it means a compromise of \
+                 that one key decrypts every Welcome ever recorded to it",
+            );
+
+        super::MAINTENANCE_CLOCK_OVERRIDE_SECS.store(0, Ordering::Relaxed);
+        relay.shutdown();
     }
 
     // ------------------------------------------------------------------------

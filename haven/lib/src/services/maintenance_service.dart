@@ -20,6 +20,7 @@ import 'package:flutter/foundation.dart';
 
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/relay_service.dart';
+import 'package:meta/meta.dart' show useResult;
 
 /// Runs the scheduled M8 maintenance tasks.
 class MaintenanceService {
@@ -39,15 +40,32 @@ class MaintenanceService {
 
   /// Runs a `KeyPackage` maintenance tick (kinds 30443 + 443).
   ///
-  /// Returns [KeyPackageMaintenanceResult.empty] on any failure (no identity,
-  /// uninitialized manager, FFI error) — a scheduled tick must never throw.
-  Future<KeyPackageMaintenanceResult> maintainKeyPackage() async {
+  /// Never throws — a scheduled tick that throws kills its own reschedule.
+  /// Failure is returned as a [KeyPackageMaintenanceFailed] instead, carrying
+  /// the phase that broke so the caller can tell "logged out" (nothing to
+  /// retry) from "the tick blew up" (retry, with a back-off).
+  ///
+  /// It does NOT reuse the other tasks' `.empty()` fallback: that fallback is
+  /// what made a dead publish path read as a healthy one for as long as it did.
+  @useResult
+  Future<KeyPackageMaintenanceOutcome> maintainKeyPackage() async {
     return _withSecret(
       (circle, secret) => _relayService.maintainKeyPackage(
         circle: circle,
         identitySecretBytes: secret,
       ),
-      onFailure: const KeyPackageMaintenanceResult.empty(),
+      onFailure: (phase) => KeyPackageMaintenanceFailed(
+        switch (phase) {
+          // No secret to sign a KeyPackage with — logged out, or secure
+          // storage is unreadable. Not a relay problem, and not retryable
+          // until the user is back.
+          _MaintenancePhase.identitySecret =>
+            KeyPackageFailureKind.identityUnavailable,
+          // The MLS handle or the tick itself failed.
+          _MaintenancePhase.circleHandle ||
+          _MaintenancePhase.task => KeyPackageFailureKind.tickErrored,
+        },
+      ),
       label: 'KeyPackage',
     );
   }
@@ -62,7 +80,7 @@ class MaintenanceService {
         circle: circle,
         identitySecretBytes: secret,
       ),
-      onFailure: const RelayListMaintenanceResult.empty(),
+      onFailure: (_) => const RelayListMaintenanceResult.empty(),
       label: 'relay-list',
     );
   }
@@ -83,7 +101,7 @@ class MaintenanceService {
         circle: circle,
         identitySecretBytes: secret,
       ),
-      onFailure: const LegacyRetractionResult.empty(),
+      onFailure: (_) => const LegacyRetractionResult.empty(),
       label: 'legacy-retraction',
     );
   }
@@ -104,25 +122,51 @@ class MaintenanceService {
   }
 
   /// Resolves the circle handle + a scrubbed-in-`finally` secret buffer, runs
-  /// [op], and returns [onFailure] if any step throws (fail-soft).
+  /// [op], and returns `onFailure(phase)` if any step throws (fail-soft).
+  ///
+  /// [onFailure] takes the [_MaintenancePhase] that threw rather than being a
+  /// fixed value, because the phases are not equally actionable: a missing
+  /// identity secret and a broken FFI call want different responses from the
+  /// caller. Tasks that genuinely cannot act on the difference ignore the
+  /// argument.
   Future<T> _withSecret<T>(
     Future<T> Function(CircleManagerFfi circle, Uint8List secret) op, {
-    required T onFailure,
+    required T Function(_MaintenancePhase phase) onFailure,
     required String label,
   }) async {
     // Hold the secret-bytes copy in a typed buffer so we can `fillRange` it on
     // exit, minimising the window the secret sits in Dart's managed heap after
     // the FFI has consumed it. Mirrors `key_package_provider.dart`.
     Uint8List? secretBuffer;
+    // Tracks how far we got, so the catch can attribute the throw. Assigned
+    // immediately before entering each phase.
+    var phase = _MaintenancePhase.circleHandle;
     try {
       final circle = await _circleManagerFactory();
+      phase = _MaintenancePhase.identitySecret;
       secretBuffer = Uint8List.fromList(await _identitySecretBytes());
+      phase = _MaintenancePhase.task;
       return await op(circle, secretBuffer);
     } on Object catch (e) {
-      debugPrint('[Maintenance] $label orchestration failed: ${e.runtimeType}');
-      return onFailure;
+      debugPrint(
+        '[Maintenance] $label orchestration failed in ${phase.name}: '
+        '${e.runtimeType}',
+      );
+      return onFailure(phase);
     } finally {
       secretBuffer?.fillRange(0, secretBuffer.length, 0);
     }
   }
+}
+
+/// Which step of a secret-bearing maintenance tick was running.
+enum _MaintenancePhase {
+  /// Resolving the circle-manager FFI handle.
+  circleHandle,
+
+  /// Reading the identity secret out of secure storage.
+  identitySecret,
+
+  /// Running the task itself (the FFI call).
+  task,
 }

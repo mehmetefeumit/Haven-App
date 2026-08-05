@@ -21,9 +21,34 @@
 #             a re-pin. Defaults to 5; raise it only for a path so small that
 #             one line is worth several points.
 #
-# Regenerate every row against a fresh report with:
-#   scripts/ci/check_coverage_floors.sh --list rust    haven-core/coverage.lcov
-#   scripts/ci/check_coverage_floors.sh --list flutter haven/coverage/lcov.info
+# ===========================================================================
+# DO NOT EDIT A FLOOR BY HAND. TWO COMMANDS MAINTAIN THIS FILE.
+#
+#   scripts/ci/check_coverage_floors.sh --lint [--fix]
+#       Static, no coverage run, ~50 ms. Every floor must equal the pin rule
+#       applied to its own `# measured N%` provenance. Runs in repo-guards.yml,
+#       in the pre-commit hook, and as the first step of the local gate.
+#
+#   scripts/ci/check_coverage_floors.sh --repin <stack> <lcov>
+#       Raises floors the code has outgrown and refreshes their provenance,
+#       in place, preserving every comment and column. It NEVER lowers one: a
+#       row whose coverage fell is left byte-for-byte alone.
+#
+# Hand-editing is what broke this file. Three rows had been tightened past the
+# rule over time — `lib/src/services/` at 51 against a measured 51.06%,
+# `src/relay/catchup.rs` at 97 against 97.14%, `geolocator_location_service.dart`
+# at 86 against 86.72% — leaving 0.06, 0.14 and 0.72 points of headroom on rows
+# the rule pins at 49, 95 and 84. Those are tripwires, not floors. The first
+# reddened CI (run 30964250098) when unrelated work moved the services
+# aggregate by seven hundredths of a point; the other two were one line of new
+# code from the same. `--lint` now fails on that shape in under a second.
+#
+# THE PIN RULE: floor = floor(measured) - 2, clamped at 0, or exactly 100 for a
+# fully covered path (the margin rule cannot ratchet a 100% path — there is no
+# 103% to reach). Two points of headroom below absorbs run-to-run wobble and a
+# few new lines landing in a pinned path; the ratchet margin above (default 5)
+# asks for a re-pin once the code has genuinely outgrown the number.
+# ===========================================================================
 #
 # ===========================================================================
 # LOWERING A FLOOR IS NOT A FIX.
@@ -36,66 +61,55 @@
 # running; editing the number down converts a measured regression into a
 # permitted one and leaves nothing behind to notice it again.
 #
-# The legitimate reasons to EDIT a number are: the ratchet asked you to raise
-# it (do so, using the value in the failure message), or the path genuinely
-# moved (update the pattern — do not delete the row, an entry matching nothing
-# fails on purpose).
+# This is why `--repin` is one-directional, and why a row it reports as HOLD
+# (measured now below the pin rule) needs TESTS, not a smaller number. The two
+# legitimate reasons a floor changes are: the tooling raised it, or the path
+# genuinely moved (update the pattern — do not delete the row, an entry
+# matching nothing fails on purpose).
 # ===========================================================================
 #
-# All values below were measured on 2026-08-03 from
+# All values below were measured from CI run 30964250098 (2026-08-04) on the
+# toolchains pinned in scripts/ci/coverage_toolchain.env, via
 #   cargo llvm-cov --all-features --lcov --ignore-filename-regex 'frb_generated'
 #   flutter test --coverage
-# and pinned at floor(measured) - 2, or exactly 100 where the path is fully
-# covered (see the guard header: the margin rule cannot ratchet a 100% path).
 #
 # ===========================================================================
 # MEASURE WITH THE TOOLCHAIN CI USES, OR THE NUMBERS ARE NOT COMPARABLE.
 #
-# The denominator here is INSTRUMENTED LINES, and how many lines LLVM
-# instruments is a property of the LLVM version, not of the tests. The rust
-# rows were first pinned against rustc 1.92 and CI runs `dtolnay/rust-
-# toolchain@stable` — 1.97.1 at the time of writing, LLVM 22.1.6 — which
-# instruments 1-4% FEWER lines per path. Same tests, same hits, smaller
-# denominator, so every percentage read higher in CI than in the pin: seven
-# paths tripped the ratchet on the first run (30833142781) with nothing about
-# the code having changed. They are re-pinned below against 1.97.1.
+# The denominator here is INSTRUMENTED LINES, and how many lines get
+# instrumented is a property of the compiler, not of the tests. The rust rows
+# were first pinned against rustc 1.92 while CI floated on
+# `dtolnay/rust-toolchain@stable`, which had moved to 1.97.1: 400 fewer
+# instrumented lines in haven-core, same tests, same hits, every path reading
+# 1-4 points higher, and seven rows tripping the ratchet in one run
+# (30833142781) with nothing about the code having changed.
 #
-# The dangerous direction is the other one. Re-running `--list` on an OLDER
-# toolchain reads every path 1-4 points LOW and emits a row for each — which,
-# pasted in, silently LOWERS all thirty floors while looking like routine
-# maintenance. So: re-pin from a CI report, or from a local run on the
-# toolchain CI resolves (`rustup toolchain install <ver>` and
-# `cargo +<ver> llvm-cov …`). If the numbers you measure sit uniformly below
-# the comments below, that is the toolchain, not a regression.
+# The dangerous direction is the other one. Re-measuring on an OLDER toolchain
+# reads every path 1-4 points LOW, and a re-pin taken from that would silently
+# lower thirty floors while looking like routine maintenance. `--repin` cannot
+# do it (it never lowers), but a hand edit could.
 #
-# Hit counts also wobble a few lines run to run on the concurrency-sensitive
+# So the coverage jobs no longer float: scripts/ci/coverage_toolchain.env pins
+# the rustc and Flutter versions that both .github/workflows/coverage.yml and
+# scripts/ci/check_coverage.sh measure with, and the local gate refuses to run
+# on a different rustc rather than compare against floors it may be unable to
+# satisfy. On rustc 1.92, for instance, `src/profile/fetch.rs` tops out at
+# 96.26% under a floor of 97 and `src/keyring_policy.rs` at 88.00% under 89 —
+# with EVERY remaining production line covered, because the rest are
+# assertion-failure messages that only execute when a test fails. Bumping the
+# pin and re-pinning the floors belong in ONE commit; see that file's header.
+#
+# Hit counts still wobble a few lines run to run on the concurrency-sensitive
 # paths (src/relay/live_sync/ moved 4 lines between two runs of the same
-# commit). That is what the two points of headroom absorb, and it is why the
-# pin is floor(measured) - 2 rather than the tighter value the ratchet's
-# failure message suggests — `--list` implements the former, and it is the
-# supported way to re-pin.
-#
-# THE PRE-PUSH HOOK RUNS THIS FILE TOO, and it runs on whatever `cargo` is
-# default. On a toolchain older than CI's, some rows are not merely tighter —
-# they are UNSATISFIABLE. Measured on rustc 1.92 against these 1.97.1 pins:
-#
-#   src/profile/fetch.rs   floor 97, ceiling 96.26%  (2 uncovered production
-#                          lines; 410+2 = 412/428)
-#   src/keyring_policy.rs  floor 89, ceiling 88.00%  (4 uncovered production
-#                          lines; 172+4 = 176/200)
-#
-# "Ceiling" is with EVERY remaining production line covered. The rest of each
-# file's uncovered lines are assertion-failure messages inside passing tests,
-# which execute only when the assertion fails — no test can cover them. So on
-# 1.92 those two rows cannot be satisfied by writing tests, only by matching
-# CI's toolchain (`rustup update`, or run the hook with `cargo +<ci-ver>`).
+# commit). That is what the two points of headroom absorb.
 # ===========================================================================
 
 
 # ===========================================================================
-# haven-core (Rust) — aggregate at pinning time: 93.43% (19618/20997) on
-# rustc 1.97.1. The first pin read 90.74% (19419/21400) on 1.92: ~400 fewer
-# lines instrumented, near-identical hits. See the toolchain note above.
+# haven-core (Rust) — aggregate ~93% against an 80% gate, i.e. ~2700 lines of
+# slack that any single file below is free to spend. Measured on rustc 1.97.1;
+# the first pin read 90.74% (19419/21400) on 1.92, ~400 more lines
+# instrumented for near-identical hits. See the toolchain note above.
 # ===========================================================================
 
 # --- MLS: the protocol core -------------------------------------------------
@@ -103,7 +117,7 @@
 # separation, per-message ephemeral keys, unsigned kind-444 welcomes, group-ID
 # privacy, exporter-secret lifecycle, publish-before-apply. welcome.rs is pinned
 # at 100 because Rule 3 (kind 444 MUST remain unsigned) has no partial form.
-rust|src/nostr/mls/|91                       # measured 93.29% (1419/1521)
+rust|src/nostr/mls/|92                       # measured 94.00% (1551/1650)
 rust|src/nostr/mls/manager.rs|90             # measured 92.56% (697/753)
 rust|src/nostr/mls/storage.rs|91             # measured 93.12% (325/349)
 rust|src/nostr/mls/signer.rs|94              # measured 96.47% (82/85)
@@ -177,13 +191,13 @@ rust|src/avatar/image.rs|96                  # measured 98.63% (504/511)
 # line; anything lower licenses one of those branches to stop being exercised.
 # Pinned exactly (the margin rule cannot ratchet a 100% path — see the guard
 # header). Proofs: tests/selfremove_autopublish_e2e.rs.
-rust|src/relay/live_sync/|94                 # measured 96.52% (2495/2585)
+rust|src/relay/live_sync/|95                 # measured 97.24% (2921/3004)
 rust|src/relay/live_sync/session.rs|94       # measured 96.19% (1491/1550)
 rust|src/relay/publishers.rs|88              # measured 90.28% (260/288)
 rust|src/relay/maintenance/|96               # measured 98.46% (640/650)
-rust|src/relay/manager.rs|71                 # measured 73.54% (720/979)
+rust|src/relay/manager.rs|73                 # measured 75.64% (832/1100)
 rust|src/relay/auto_commit.rs|100            # measured 100.00% (59/59)
-rust|src/relay/catchup.rs|97                 # measured 97.14%; was 92 (94.61%) before the
+rust|src/relay/catchup.rs|95                 # measured 97.14%; was 92 (94.61%) before the
                                              # fetch-window cursor anchor brought its own tests
 
 # --- Encrypted tile cache ---------------------------------------------------
@@ -193,14 +207,19 @@ rust|src/tiles/|94                           # measured 96.11% (642/668)
 
 
 # ===========================================================================
-# haven (Flutter) — aggregate at pinning time: 64.82% (6944/10712)
+# haven (Flutter) — aggregate ~65% against a 50% gate, i.e. ~1600 lines of
+# slack shared across the package.
 # ===========================================================================
 
 # --- The service layer as a whole -------------------------------------------
-# 48.96% — BELOW the 50% package gate, inside a package that gates green,
-# because the widget and provider suites pay for it out of the shared budget.
-# This single row is the clearest statement of why A5 exists.
-flutter|lib/src/services/|51                 # measured 51.06%; was 46 (48.96%) before the
+# The clearest statement of why these floors exist: the whole service layer
+# sat at 48.96% — BELOW the 50% package gate — inside a package that gated
+# green, because the widget and provider suites paid for it out of the shared
+# budget. It has since crossed 51%, but with 2828 instrumented lines one
+# percentage point is 28 lines, so a single new uncovered file still moves this
+# row several points. That is exactly what the two points of headroom are for,
+# and why this row must never be pinned tight.
+flutter|lib/src/services/|49                 # measured 51.06%; was 46 (48.96%) before the
                                              # location-access gate, clock-skew detector and
                                              # session/cursor work brought their own tests
 
@@ -216,10 +235,10 @@ flutter|lib/src/services/mls_session_handover.dart|91       # measured 93.75% (1
 flutter|lib/src/services/foreground_liveness_probe.dart|58  # measured 60.98% (25/41)
 
 # --- Location send/receive pipeline -----------------------------------------
-flutter|lib/src/services/location_sharing_service.dart|84   # measured 86.04% (339/394)
-flutter|lib/src/services/geolocator_location_service.dart|86 # measured 86.72% (111/128)
+flutter|lib/src/services/location_sharing_service.dart|85   # measured 87.02% (342/393)
+flutter|lib/src/services/geolocator_location_service.dart|84 # measured 86.72% (111/128)
 flutter|lib/src/services/live_sync_resubscriber.dart|100    # measured 100.00% (117/117)
-flutter|lib/src/services/subscription_service.dart|86       # measured 88.33% (53/60)
+flutter|lib/src/services/subscription_service.dart|87       # measured 89.66% (52/58)
 
 # --- Background publishing and catch-up -------------------------------------
 # background_location_task.dart is the foreground-service isolate — the file
@@ -240,7 +259,14 @@ flutter|lib/src/services/background_catchup_worker.dart|26  # measured 28.40% (2
 flutter|lib/src/services/nostr_circle_service.dart|9        # measured 11.63% (60/516)
 flutter|lib/src/services/nostr_identity_service.dart|29     # measured 31.07% (32/103)
 flutter|lib/src/services/nostr_profile_service.dart|21      # measured 23.33% (21/90)
-flutter|lib/src/services/nostr_relay_service.dart|0         # measured  0.63% (1/158)
+flutter|lib/src/services/nostr_relay_service.dart|14        # measured 16.76% (31/185); was 0 (0.63%, 1/158)
+                                                            # before classifyKeyPackageMaintenance was lifted
+                                                            # out of the class. It decides whether a KeyPackage
+                                                            # tick counts as reachable, and every branch of it is
+                                                            # now provable from a host test because
+                                                            # KpMaintenanceOutcomeFfi is a plain value type. The
+                                                            # rest of this file is FFI call-forwarding that needs
+                                                            # the bridge.
 flutter|lib/src/services/nostr_relay_preferences_service.dart|0 # measured 0.00% (0/88)
 
 # --- Leave / wipe paths -----------------------------------------------------
@@ -258,7 +284,7 @@ flutter|lib/src/network/pinned_tile_client.dart|59|10       # measured 61.54% (8
 # --- Riverpod state and validators ------------------------------------------
 # The providers layer is where service results become UI state; the validators
 # are the input filters on relay URLs and npubs.
-flutter|lib/src/providers/|80                # measured 82.34% (1138/1382)
+flutter|lib/src/providers/|81                # measured 83.54% (1218/1458)
 flutter|lib/src/utils/|87                    # measured 89.15% (189/212)
 flutter|lib/src/utils/relay_url_validator.dart|93           # measured 95.83% (23/24)
 flutter|lib/src/utils/npub_validator.dart|60                # measured 62.50% (20/32)

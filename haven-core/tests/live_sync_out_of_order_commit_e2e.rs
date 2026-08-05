@@ -64,6 +64,7 @@ async fn build_circle(num_members: usize) -> BuiltCircle {
             &keys,
             &["wss://kp.example.com".to_string()],
             None,
+            None,
         )
         .await
         .expect("member key package")

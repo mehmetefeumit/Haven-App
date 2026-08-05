@@ -330,28 +330,47 @@ flutter test
 dart format --set-exit-if-changed . && dart analyze && flutter test
 ```
 
-### Coverage gate (local, mirrors CI)
+### Coverage gate (local — a superset of CI)
 
 CI enforces line-coverage thresholds (`.github/workflows/coverage.yml`): **80%**
-for Rust (`haven-core`) and **10%** for Flutter (`haven`). Run the same gate
-locally to catch a regression — or a failing/flaky test, which is what actually
-fails the CI "Rust Coverage" job — before it reaches CI:
+for Rust (`haven-core`), **50%** for Flutter (`haven`), plus the per-path floors
+in `scripts/ci/coverage_floors.txt`. The local gate runs **every gate that
+workflow can fail on** — both suites with coverage, both aggregates, the floors,
+the undeclared-skip check and the rollback-path flag-off run — so a green run
+here means a green run there.
 
 ```bash
-scripts/ci/check_coverage.sh                 # both stacks (~4-6 min)
+scripts/ci/install_git_hooks.sh              # once per clone: enables both hooks below
+scripts/ci/check_coverage.sh --static-only   # < 1 s  (pre-commit)
+scripts/ci/check_coverage.sh                 # ~6-11 min, stacks in parallel (pre-push)
 CHECK_FLUTTER=0 scripts/ci/check_coverage.sh # Rust (haven-core) only
 CHECK_RUST=0    scripts/ci/check_coverage.sh # Flutter (haven) only
 ```
 
-Enable it as a **pre-push** hook (runs automatically before every `git push`):
+`--static-only` needs no toolchain and no test run. It checks that every floor
+in the manifest obeys the file's pin rule, and that the coverage guards' own
+self-tests pass — which is the single most common way the Coverage workflow goes
+red, and the one that used to take an 11-minute `llvm-cov` run to discover.
+
+**Never hand-edit a floor.** When coverage climbs past one, re-pin it:
 
 ```bash
-scripts/ci/install_git_hooks.sh   # sets core.hooksPath = .githooks (once per clone)
+scripts/ci/check_coverage_floors.sh --lint                 # what is wrong, and the number to write
+scripts/ci/check_coverage_floors.sh --lint --fix           # correct the mechanical ones
+scripts/ci/check_coverage_floors.sh --repin rust    haven-core/coverage.lcov
+scripts/ci/check_coverage_floors.sh --repin flutter haven/coverage/lcov_filtered.info
 ```
 
-Bypass a single push with `git push --no-verify`; disable with
+`--repin` only ever raises a floor. A path whose coverage **fell** is left
+alone: that needs tests, not a smaller number.
+
+Bypass once with `git commit --no-verify` / `git push --no-verify`; disable with
 `git config --unset core.hooksPath`. Requires `cargo-llvm-cov`
-(`cargo install cargo-llvm-cov`); otherwise only `flutter`/`cargo` are needed.
+(`cargo install cargo-llvm-cov`) and the pinned rustc from
+`scripts/ci/coverage_toolchain.env` (`rustup toolchain install <version>`) —
+coverage is measured on a fixed toolchain because instrumented-line counts move
+between compiler releases. If your Flutter SDK differs from the pin, the Flutter
+percentages are reported but marked **advisory**; everything else still gates.
 Thresholds can be overridden via `RUST_COVERAGE_MIN` / `FLUTTER_COVERAGE_MIN`.
 
 ## Troubleshooting

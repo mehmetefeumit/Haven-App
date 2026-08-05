@@ -21,6 +21,7 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
+
 import 'package:haven/src/rust/api.dart';
 // Prefixed alias so the top-level `maintainSubscriptionHealth` FRB free
 // function can be called from the identically-named method below without
@@ -29,6 +30,7 @@ import 'package:haven/src/rust/api.dart' as rust_ffi;
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/clock_skew_detector.dart';
 import 'package:haven/src/services/relay_service.dart';
+import 'package:meta/meta.dart' show useResult;
 
 // Re-exported for backward compatibility: `DataDirectoryProvider` +
 // `PathProviderDataDirectory` moved to `data_directory_provider.dart` (the
@@ -36,6 +38,123 @@ import 'package:haven/src/services/relay_service.dart';
 // keep resolving them.
 export 'package:haven/src/services/data_directory_provider.dart'
     show DataDirectoryProvider, PathProviderDataDirectory;
+
+/// Turns a Rust `KeyPackage` maintenance tick's counters into the three-way
+/// [KeyPackageMaintenanceOutcome].
+///
+/// A top-level function rather than a private method because it is the whole
+/// of the health verdict, and it must stay provable without an FFI bridge:
+/// `KpMaintenanceOutcomeFfi` is a plain generated value type, so every branch
+/// here is reachable from a host `flutter test`.
+///
+/// **The Rust action alone is NOT the verdict.** It names the branch the tick
+/// took, not what that branch achieved, and several of its values are
+/// ambiguous about whether anything actually landed. Before this function
+/// existed, every one of those ambiguities resolved to "healthy":
+///
+/// - `alreadyHealthy` is also what the tick reports when it probed nothing.
+///   `decide_kp_maintenance` fails closed on an empty responder set ("we cannot
+///   confirm a drop, so do nothing"), which is right as a *decision* and wrong
+///   as a *verdict*: a tick that reached no relay confirmed no canonical
+///   either. Only `respondersProbed > 0` makes it health. The same shape is
+///   returned when the account has no `KeyPackage` relays configured at all —
+///   `relaysTargeted` is the only field that separates those two, and their
+///   remedies are opposite (retry the network vs. add a relay), so the split
+///   is made here rather than left to each caller.
+/// - `republishedStableD` / `republishedFreshD` / the two `rotated*` values are
+///   all picked by `RelayManagerFfi::republish_key_package` *before* it knows
+///   whether the write was acked; the ack is reported separately, through
+///   `relaysHealed` — which is `0` when `publish_event` returned
+///   `AllRelaysFailed`. That counter is the one the pre-fix Dart result type
+///   dropped, so a `KeyPackage` that reached no relay arrived in Dart labelled
+///   "republished" and the login publisher scored it as success.
+/// - `expiredInitKeyPurged` is set on any tick that deleted the tracked
+///   package's private `init_key` at `Lifetime.not_after`. It fires
+///   independently of the action — including on ticks where no relay was even
+///   contacted — and once it is set the account cannot be invited through that
+///   package at all, whatever else the tick reports.
+///
+/// Reads only counters, booleans and a closed enum; carries nothing that could
+/// leak (Security Rule 4/6/8).
+@visibleForTesting
+KeyPackageMaintenanceOutcome classifyKeyPackageMaintenance(
+  KpMaintenanceOutcomeFfi r,
+) {
+  switch (r.action) {
+    case KpMaintenanceActionFfi.republishedStableD:
+    case KpMaintenanceActionFfi.republishedFreshD:
+    // A lifetime rotation is a publish like any other, so it reads the same
+    // way: the action names the branch that ran, `relaysHealed` says whether a
+    // relay acked it. `mintedFreshSlot` stays false below — a rotation re-mints
+    // the MATERIAL into the SAME `d` (the transport binding forbids a fresh
+    // slot for a routine replacement), so it is not a new slot.
+    case KpMaintenanceActionFfi.rotatedExpiringMaterial:
+    case KpMaintenanceActionFfi.rotatedUnreadableLifetime:
+      // "Sent" is not "acked" (Security Rule 13's principle, applied to the
+      // reachability plane).
+      if (r.relaysHealed == 0) {
+        return KeyPackageMaintenanceFailed(
+          // A rotation that did not land is the worse of the two: the old
+          // material is on its way out (and may already be purged) with no
+          // replacement advertised.
+          r.expiredInitKeyPurged
+              ? KeyPackageFailureKind.initKeyPurgedUnreplaced
+              : KeyPackageFailureKind.publishNotAcked,
+          relayErrors: r.relayErrors,
+          expiredInitKeyPurged: r.expiredInitKeyPurged,
+        );
+      }
+      return KeyPackageMaintenancePublished(
+        relaysAcked: r.relaysHealed,
+        mintedFreshSlot: r.action == KpMaintenanceActionFfi.republishedFreshD,
+        respondersProbed: r.respondersProbed,
+        relayErrors: r.relayErrors,
+        expiredInitKeyPurged: r.expiredInitKeyPurged,
+      );
+    case KpMaintenanceActionFfi.alreadyHealthy:
+    case KpMaintenanceActionFfi.seededD:
+      // The purge bound fires ahead of (and independently of) the relay work,
+      // so it can arrive on a no-publish action — including the
+      // no-relays-configured early return. The engine no longer holds the
+      // private half of whatever is on those relays, so nothing here can be
+      // health, however many canonicals the probe saw.
+      if (r.expiredInitKeyPurged) {
+        return KeyPackageMaintenanceFailed(
+          KeyPackageFailureKind.initKeyPurgedUnreplaced,
+          relayErrors: r.relayErrors,
+          expiredInitKeyPurged: true,
+        );
+      }
+      // Nothing was probed, or nothing was found: either way this tick has no
+      // evidence the account is reachable, and absence of evidence must not be
+      // reported as evidence of health.
+      if (r.respondersProbed == 0 || r.canonicalOnRelays == 0) {
+        // WHICH failure it is comes from `relaysTargeted` — the configured
+        // own-relay count, taken before any relay is contacted — and from
+        // nothing else: an account with no relays and an account whose every
+        // relay is down report the same action and the same zero counters.
+        // `respondersProbed == 0` is implied by `relaysTargeted == 0` on any
+        // coherent tick (responders are a subset of the targets), and is
+        // re-stated so a contradictory shape — a relay answered, yet the count
+        // says none were targeted — falls to the transient reading instead of
+        // telling the user to configure a relay that evidently exists.
+        final nothingConfigured =
+            r.relaysTargeted == 0 && r.respondersProbed == 0;
+        return KeyPackageMaintenanceFailed(
+          nothingConfigured
+              ? KeyPackageFailureKind.noRelaysConfigured
+              : KeyPackageFailureKind.noRelayResponded,
+          relayErrors: r.relayErrors,
+        );
+      }
+      return KeyPackageMaintenanceHealthy(
+        canonicalOnRelays: r.canonicalOnRelays,
+        respondersProbed: r.respondersProbed,
+        seededStableSlot: r.action == KpMaintenanceActionFfi.seededD,
+        relayErrors: r.relayErrors,
+      );
+  }
+}
 
 /// Production implementation of [RelayService].
 ///
@@ -271,7 +390,8 @@ class NostrRelayService implements RelayService {
   }
 
   @override
-  Future<KeyPackageMaintenanceResult> maintainKeyPackage({
+  @useResult
+  Future<KeyPackageMaintenanceOutcome> maintainKeyPackage({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
   }) async {
@@ -283,14 +403,12 @@ class NostrRelayService implements RelayService {
         circle: circle,
         identitySecretBytes: identitySecretBytes,
       );
-      return KeyPackageMaintenanceResult(
-        action: _mapKpAction(r.action),
-        canonicalOnRelays: r.canonicalOnRelays,
-        relayErrors: r.relayErrors,
-      );
+      return classifyKeyPackageMaintenance(r);
     } on Object catch (e) {
       debugPrint('[Maintenance] KeyPackage tick failed: ${e.runtimeType}');
-      return const KeyPackageMaintenanceResult.empty();
+      return const KeyPackageMaintenanceFailed(
+        KeyPackageFailureKind.tickErrored,
+      );
     }
   }
 
@@ -338,20 +456,6 @@ class NostrRelayService implements RelayService {
     } on Object catch (e) {
       debugPrint('[Cutover] legacy retraction failed: ${e.runtimeType}');
       return const LegacyRetractionResult.empty();
-    }
-  }
-
-  /// Maps the FFI `KeyPackage` action enum to the service enum.
-  KeyPackageMaintenanceAction _mapKpAction(KpMaintenanceActionFfi a) {
-    switch (a) {
-      case KpMaintenanceActionFfi.alreadyHealthy:
-        return KeyPackageMaintenanceAction.alreadyHealthy;
-      case KpMaintenanceActionFfi.seededD:
-        return KeyPackageMaintenanceAction.seededD;
-      case KpMaintenanceActionFfi.republishedStableD:
-        return KeyPackageMaintenanceAction.republishedStableD;
-      case KpMaintenanceActionFfi.republishedFreshD:
-        return KeyPackageMaintenanceAction.republishedFreshD;
     }
   }
 

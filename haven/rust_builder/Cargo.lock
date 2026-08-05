@@ -1395,6 +1395,8 @@ dependencies = [
  "log",
  "nostr",
  "nostr-sdk",
+ "openmls",
+ "openmls_rust_crypto",
  "rand 0.8.5",
  "reqwest",
  "rusqlite",

@@ -90,6 +90,7 @@ async fn mint_member(relays: &[String]) -> (Arc<CircleManager>, Keys, MemberKeyP
         &keys,
         &["wss://kp.example.com".to_string()],
         None,
+        None,
     )
     .await
     .expect("member key package")

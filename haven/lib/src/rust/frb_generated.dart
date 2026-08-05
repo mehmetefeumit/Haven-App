@@ -7195,14 +7195,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   KpMaintenanceOutcomeFfi dco_decode_kp_maintenance_outcome_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 5)
-      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
     return KpMaintenanceOutcomeFfi(
       action: dco_decode_kp_maintenance_action_ffi(arr[0]),
       canonicalOnRelays: dco_decode_u_32(arr[1]),
       respondersProbed: dco_decode_u_32(arr[2]),
-      relaysHealed: dco_decode_u_32(arr[3]),
-      relayErrors: dco_decode_u_32(arr[4]),
+      relaysTargeted: dco_decode_u_32(arr[3]),
+      relaysHealed: dco_decode_u_32(arr[4]),
+      relayErrors: dco_decode_u_32(arr[5]),
+      expiredInitKeyPurged: dco_decode_bool(arr[6]),
     );
   }
 
@@ -8620,14 +8622,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_action = sse_decode_kp_maintenance_action_ffi(deserializer);
     var var_canonicalOnRelays = sse_decode_u_32(deserializer);
     var var_respondersProbed = sse_decode_u_32(deserializer);
+    var var_relaysTargeted = sse_decode_u_32(deserializer);
     var var_relaysHealed = sse_decode_u_32(deserializer);
     var var_relayErrors = sse_decode_u_32(deserializer);
+    var var_expiredInitKeyPurged = sse_decode_bool(deserializer);
     return KpMaintenanceOutcomeFfi(
       action: var_action,
       canonicalOnRelays: var_canonicalOnRelays,
       respondersProbed: var_respondersProbed,
+      relaysTargeted: var_relaysTargeted,
       relaysHealed: var_relaysHealed,
       relayErrors: var_relayErrors,
+      expiredInitKeyPurged: var_expiredInitKeyPurged,
     );
   }
 
@@ -10224,8 +10230,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_kp_maintenance_action_ffi(self.action, serializer);
     sse_encode_u_32(self.canonicalOnRelays, serializer);
     sse_encode_u_32(self.respondersProbed, serializer);
+    sse_encode_u_32(self.relaysTargeted, serializer);
     sse_encode_u_32(self.relaysHealed, serializer);
     sse_encode_u_32(self.relayErrors, serializer);
+    sse_encode_bool(self.expiredInitKeyPurged, serializer);
   }
 
   @protected
@@ -11184,9 +11192,11 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
 
   /// Reads the persisted relay sync cursor (raw ms) for `stream`.
   ///
-  /// Returns `None` when the stream has never been seeded — callers MUST
-  /// seed a floor before opening a subscription. See
-  /// [`haven_core::relay::cursor`] for stream keys and semantics.
+  /// Returns `None` when the stream has never been seeded. Seeding — like
+  /// every other operation that can RAISE a cursor — happens in haven-core,
+  /// on the receive plane that is about to issue the REQ; this boundary is
+  /// read-only on that axis. See [`haven_core::relay::cursor`] for stream
+  /// keys and semantics.
   ///
   /// # Errors
   ///
@@ -12768,10 +12778,38 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
   ///    Dark Matter a published 30443 is a last-resort package that never dies
   ///    on join, so the presence gate is pure relay presence of the tracked
   ///    stable slot (the M8-2 live-material gate is gone).
-  /// 4. Decide via [`decide_kp_maintenance`]; on `SeedD` record the seed row;
-  ///    on `Republish` reuse-or-mint the single kind-30443 event, publish to
-  ///    OWN relays only (publish-first), record the row, and delete minted
-  ///    material on a failed publish (mdk#160).
+  /// 4. Read the tracked package's OWN MLS `Lifetime` and honour the spec's
+  ///    `not_after` init-key deletion bound (step 4a below) — unconditionally,
+  ///    before any relay decision, because that bound does not depend on the
+  ///    transport.
+  /// 5. Decide via [`decide_kp_maintenance`]; on `SeedD` record the seed row;
+  ///    on `Republish`/`Rotate` reuse-or-mint the single kind-30443 event,
+  ///    publish to OWN relays only (publish-first), record the row, and delete
+  ///    minted material on a failed publish (mdk#160).
+  ///
+  /// # Lifetime-aware rotation
+  ///
+  /// A `KeyPackage` carries an MLS `Lifetime` and stops validating at
+  /// `not_after` (84 days for the OpenMLS default Haven inherits, which is
+  /// also the Marmot maximum). Past that instant the 30443 is still on the
+  /// relay and still fetchable, but every `Add` referencing it fails
+  /// validation — the account is **silently uninvitable**. So the tick asks
+  /// the package itself, never a Nostr timestamp, whether it is past
+  /// `KP_ROTATE_AT_LIFETIME_FRACTION` of its own window. Timing this off
+  /// `event.created_at` would be wrong here even though the reference app
+  /// does it: Haven's heal path re-publishes CACHED bytes under a FRESH
+  /// `created_at`, so an event-age timer would reset on every relay heal
+  /// while the real `not_after` kept ticking.
+  ///
+  /// # 4a. The `not_after` deletion bound
+  ///
+  /// `foundation/key-packages.md`: a last-resort `KeyPackage` MUST delete its
+  /// private `init_key` at the earlier of (a) confirmed publication of a
+  /// replacement — handled by the publish-then-delete step in
+  /// [`Self::republish_key_package`] — or (b) `Lifetime.not_after`. Bound (b)
+  /// is transport-independent, so it runs here even when no relay responded
+  /// and nothing can be published. Retaining it would mean a compromise of
+  /// that one key decrypts *every recorded Welcome* ever sent to it.
   ///
   /// Returns a presence-only [`KpMaintenanceOutcomeFfi`] (counters + enum).
   ///

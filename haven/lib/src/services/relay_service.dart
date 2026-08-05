@@ -10,6 +10,7 @@ import 'package:flutter/foundation.dart';
 
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:meta/meta.dart' show useResult;
 
 /// Presence-only result of an M7 receive-only catch-up sweep (plain counters,
 /// no coordinates/group-ids/secrets — mirrors the Rust `CatchupResultFfi`).
@@ -50,48 +51,252 @@ class CatchupResult {
   final int relayErrors;
 }
 
-/// What an M8 `KeyPackage` maintenance tick did (presence-only, leak-free —
-/// mirrors the Rust `KpMaintenanceActionFfi`).
-enum KeyPackageMaintenanceAction {
-  /// A live-material canonical `KeyPackage` was already reachable — no change.
-  alreadyHealthy,
+/// Why a `KeyPackage` maintenance tick left the account without confirmed
+/// reachable init-key material.
+///
+/// Presence-only (a closed token, never relay text) — Security Rule 8.
+enum KeyPackageFailureKind {
+  /// Relays WERE configured and none of them answered the probe, so the tick
+  /// neither confirmed a canonical nor published one.
+  ///
+  /// Transient by construction — the account's own `KeyPackage` relays exist,
+  /// they were simply unreachable this tick — so it retries on the prompt
+  /// ladder. Told apart from [noRelaysConfigured] purely by the FFI's
+  /// `relaysTargeted` count; every other field of the tick is identical in the
+  /// two cases (see [RelayService.maintainKeyPackage]).
+  noRelayResponded,
 
-  /// A stable `d` was seeded from an on-relay canonical this tick; no publish.
-  seededD,
+  /// The account has **no own `KeyPackage` relays configured at all**, so the
+  /// tick returned before contacting anything.
+  ///
+  /// Not a network condition and not retryable: the Rust tick's early return
+  /// is deterministic until the user adds a relay, so escalating the retry
+  /// ladder against it only burns wakeups. Distinct from [noRelayResponded]
+  /// because the remedies are opposite — wait for the network vs. change a
+  /// setting — and both were one value until the FFI started reporting
+  /// `relaysTargeted`.
+  noRelaysConfigured,
 
-  /// A `KeyPackage` was (re)published into a reused, tracked/seeded stable `d`.
-  republishedStableD,
+  /// A `KeyPackage` was built and sent, and **no relay acknowledged it**. The
+  /// account is not invitable until a later tick lands one. This is the case
+  /// the pre-fix result type reported as a successful republish.
+  publishNotAcked,
 
-  /// A `KeyPackage` was published into a freshly-minted `d` (first-ever slot).
-  republishedFreshD,
+  /// The tick deleted the tracked package's private `init_key` because it
+  /// reached its MLS `Lifetime.not_after`, and no replacement was published in
+  /// the same tick.
+  ///
+  /// The strongest form of "not invitable": whatever is still on the relays,
+  /// the engine no longer holds the private half of it, so a peer that fetches
+  /// it cannot produce a Welcome this device can process. Distinct from
+  /// [publishNotAcked] because the account is *known* to be unreachable rather
+  /// than merely unconfirmed.
+  initKeyPurgedUnreplaced,
+
+  /// The identity secret could not be resolved (logged out, secure storage
+  /// unavailable), so the tick could not sign anything.
+  identityUnavailable,
+
+  /// The tick itself errored — FFI, MLS storage, or the circle-manager handle.
+  tickErrored,
 }
 
-/// Presence-only result of an M8 `KeyPackage` maintenance tick.
+/// What a caller should do about a [KeyPackageMaintenanceFailed].
 ///
-/// Counters + an action enum only — never a relay url, `d`, hex, or group id —
-/// so it is leak-free (Security Rule 4/6). Mirrors the Rust
-/// `KpMaintenanceOutcomeFfi` without coupling the service interface to the
-/// FFI-generated type (so it stays mockable in pure-Dart tests).
+/// Derived from [KeyPackageFailureKind] so the retry policy has exactly one
+/// definition and a caller never re-derives it from the kind by hand.
+enum KeyPackageRetryDisposition {
+  /// A transient relay/network condition. Retry sooner than the nominal
+  /// cadence — until this lands, nobody can invite the user.
+  retryPromptly,
+
+  /// Something local is broken. Retrying helps eventually, but hammering does
+  /// not; back off.
+  retryLater,
+
+  /// Nothing to retry until the user acts (log back in, configure a relay).
+  /// Keep the ordinary cadence; do not escalate.
+  awaitUserAction,
+}
+
+/// Presence-only outcome of an M8 `KeyPackage` maintenance tick.
+///
+/// **Sealed on purpose.** The type this replaced
+/// (`KeyPackageMaintenanceResult`) had an `.empty()` constructor whose `action`
+/// defaulted to `alreadyHealthy`, so every best-effort failure path — a
+/// throwing FFI call, an unresolvable identity, and (via the dropped
+/// `relaysHealed` counter) a publish no relay ever acknowledged — produced a
+/// value byte-identical to "nothing needed doing". A failure was spellable as
+/// health by *omission*, and that is how a `KeyPackage` that was never
+/// re-minted stayed invisible.
+///
+/// Three states, and no way to land in one by defaulting into it:
+///
+/// - [KeyPackageMaintenanceHealthy] — a canonical was confirmed reachable.
+/// - [KeyPackageMaintenancePublished] — material was written and **at least one
+///   relay acked it** (the constructor asserts it).
+/// - [KeyPackageMaintenanceFailed] — work was needed and did not land.
+///
+/// There is no default constructor, no `empty()`, and no field on the base
+/// class that answers "was this fine?" — a caller that wants to know must
+/// `switch`, and a `switch` that omits a variant does not compile. The methods
+/// returning it are `@useResult`, so discarding it entirely is an analyzer
+/// warning (a CI failure under `flutter analyze`), not a silent read of failure
+/// as health.
+///
+/// Counters + closed tokens only — never a relay url, `d`, hex, or group id —
+/// so it stays leak-free (Security Rule 4/6/8).
 @immutable
-class KeyPackageMaintenanceResult {
-  /// Creates a `KeyPackage` maintenance result.
-  const KeyPackageMaintenanceResult({
-    this.action = KeyPackageMaintenanceAction.alreadyHealthy,
-    this.canonicalOnRelays = 0,
-    this.relayErrors = 0,
+sealed class KeyPackageMaintenanceOutcome {
+  /// Creates an outcome carrying the tick's relay-error tally.
+  const KeyPackageMaintenanceOutcome({
+    required this.relayErrors,
+    required this.expiredInitKeyPurged,
   });
 
-  /// An empty result (e.g. a best-effort tick that failed / no-op'd).
-  const KeyPackageMaintenanceResult.empty() : this();
+  /// Relay probes/publishes/record-writes that errored (tallied, never fatal).
+  ///
+  /// Non-zero on a healthy or published tick too: a partial failure is not the
+  /// same thing as an overall one.
+  final int relayErrors;
 
-  /// What the tick did.
-  final KeyPackageMaintenanceAction action;
+  /// Whether this tick deleted the tracked package's private `init_key`
+  /// because it reached its MLS `Lifetime.not_after`.
+  ///
+  /// Orthogonal to the three-way verdict — it can arrive on a tick that then
+  /// published a replacement (fine) or on one that did not
+  /// ([KeyPackageFailureKind.initKeyPurgedUnreplaced]) — and it is carried on
+  /// the base class so it cannot be dropped by whichever variant the tick
+  /// happens to produce. Dropping a counter on the way out of the FFI is the
+  /// original defect; this is the same counter class as `relaysHealed`.
+  final bool expiredInitKeyPurged;
+}
+
+/// Nothing needed doing: the probe reached at least one of the user's own
+/// relays and found the tracked canonical `KeyPackage` slot served there.
+final class KeyPackageMaintenanceHealthy extends KeyPackageMaintenanceOutcome {
+  /// Creates a healthy outcome.
+  ///
+  /// [respondersProbed] must be non-zero: "no relay answered" is *not* health,
+  /// it is [KeyPackageFailureKind.noRelayResponded].
+  const KeyPackageMaintenanceHealthy({
+    required this.canonicalOnRelays,
+    required this.respondersProbed,
+    this.seededStableSlot = false,
+    super.relayErrors = 0,
+  }) : assert(
+         respondersProbed > 0,
+         'health requires a relay to have answered — an unprobed tick is a '
+         'KeyPackageMaintenanceFailed(noRelayResponded)',
+       ),
+       assert(
+         canonicalOnRelays > 0,
+         'health requires an observed canonical — zero is not "nothing to do"',
+       ),
+       super(expiredInitKeyPurged: false);
 
   /// Own-relay canonical (kind 30443) events the probe observed.
   final int canonicalOnRelays;
 
-  /// Relay probes/publishes that errored (tallied, never fatal).
-  final int relayErrors;
+  /// Responding own relays the probe reached (non-responders excluded).
+  final int respondersProbed;
+
+  /// Whether this tick adopted an on-relay `d` into the local stable slot.
+  ///
+  /// Local bookkeeping only — no relay write happens, and the canonical it
+  /// adopted was observed on a relay *this tick*, so the account is reachable
+  /// either way. Surfaced because it is the one healthy tick that changed
+  /// local state.
+  /// [expiredInitKeyPurged] is fixed at `false` here rather than being a
+  /// parameter: a tick that deleted the tracked package's private `init_key`
+  /// without replacing it is not health, and is classified as
+  /// [KeyPackageFailureKind.initKeyPurgedUnreplaced] instead of arriving here.
+  final bool seededStableSlot;
+
+  @override
+  String toString() =>
+      'KeyPackageMaintenanceHealthy(canonical: $canonicalOnRelays, '
+      'responders: $respondersProbed, seeded: $seededStableSlot, '
+      'relayErrors: $relayErrors)';
+}
+
+/// Work was done: a `KeyPackage` was (re)published and **acknowledged** by at
+/// least one relay.
+final class KeyPackageMaintenancePublished
+    extends KeyPackageMaintenanceOutcome {
+  /// Creates a published outcome.
+  ///
+  /// [relaysAcked] must be non-zero — a publish nobody acked is a
+  /// [KeyPackageFailureKind.publishNotAcked], never this. Enforced here rather
+  /// than left to the mapping layer so the invariant cannot be lost by a
+  /// future edit to the mapper (Security Rule 13's "acked means acked, never
+  /// merely sent", applied to the reachability plane).
+  const KeyPackageMaintenancePublished({
+    required this.relaysAcked,
+    required this.mintedFreshSlot,
+    this.respondersProbed = 0,
+    super.relayErrors = 0,
+    super.expiredInitKeyPurged = false,
+  }) : assert(
+         relaysAcked > 0,
+         'a publish no relay acked is a failure, not a publish',
+       );
+
+  /// Relays that acknowledged the write (always >= 1).
+  final int relaysAcked;
+
+  /// Whether the material went into a freshly-minted `d` slot (first publish
+  /// or a rotation) rather than the tracked stable one.
+  final bool mintedFreshSlot;
+
+  /// Responding own relays the probe reached this tick.
+  final int respondersProbed;
+
+  @override
+  String toString() =>
+      'KeyPackageMaintenancePublished(acked: $relaysAcked, '
+      'freshSlot: $mintedFreshSlot, responders: $respondersProbed, '
+      'relayErrors: $relayErrors, initKeyPurged: $expiredInitKeyPurged)';
+}
+
+/// Work was needed and did not land: after this tick the account may not be
+/// invitable, and nothing about the tick says otherwise.
+final class KeyPackageMaintenanceFailed extends KeyPackageMaintenanceOutcome {
+  /// Creates a failed outcome.
+  const KeyPackageMaintenanceFailed(
+    this.kind, {
+    super.relayErrors = 0,
+    super.expiredInitKeyPurged = false,
+  });
+
+  /// Why the tick failed (a closed token — never relay-supplied text).
+  final KeyPackageFailureKind kind;
+
+  /// What a caller should do about it. One definition, so two callers cannot
+  /// disagree about whether a given kind is worth retrying.
+  KeyPackageRetryDisposition get disposition => switch (kind) {
+    // The relays are the problem and the user is uninvitable meanwhile —
+    // the cases worth escalating above the nominal cadence.
+    KeyPackageFailureKind.noRelayResponded ||
+    KeyPackageFailureKind.publishNotAcked ||
+    KeyPackageFailureKind.initKeyPurgedUnreplaced =>
+      KeyPackageRetryDisposition.retryPromptly,
+    // Local breakage: retry, but a tight loop over a broken FFI/store buys
+    // nothing but wakeups.
+    KeyPackageFailureKind.tickErrored => KeyPackageRetryDisposition.retryLater,
+    // Nothing a timer can fix. No secret to sign with (re-login re-arms
+    // maintenance anyway), or no relay to publish to — the Rust tick returns
+    // before any network work until the user adds one, so every "retry" would
+    // be the same early return at a faster cadence.
+    KeyPackageFailureKind.identityUnavailable ||
+    KeyPackageFailureKind.noRelaysConfigured =>
+      KeyPackageRetryDisposition.awaitUserAction,
+  };
+
+  @override
+  String toString() =>
+      'KeyPackageMaintenanceFailed(${kind.name}, ${disposition.name}, '
+      'relayErrors: $relayErrors, initKeyPurged: $expiredInitKeyPurged)';
 }
 
 /// What an M8 relay-list maintenance tick did for one category (mirrors the
@@ -485,9 +690,38 @@ abstract class RelayService {
   /// [CircleService.getCircleManagerFfi]); the secret bytes are consumed by
   /// the FFI and zeroized Rust-side.
   ///
-  /// Best-effort — returns a [KeyPackageMaintenanceResult.empty] on failure
-  /// rather than throwing (a background/timer tick must never throw).
-  Future<KeyPackageMaintenanceResult> maintainKeyPackage({
+  /// Best-effort — it does not throw (a background/timer tick must never
+  /// throw). It reports failure *as a value*: a
+  /// [KeyPackageMaintenanceFailed], which is a distinct variant of the sealed
+  /// [KeyPackageMaintenanceOutcome] and therefore cannot be mistaken for
+  /// [KeyPackageMaintenanceHealthy].
+  ///
+  /// ## Two zero-responder cases, separated by `relaysTargeted` (gap closed)
+  ///
+  /// "No `KeyPackage` relays are configured" and "every configured relay was
+  /// unreachable" are reported identically by every OTHER field of
+  /// `KpMaintenanceOutcomeFfi` — action `alreadyHealthy`,
+  /// `respondersProbed == 0`, `relayErrors == 0` — because the Rust decision
+  /// fails closed in both cases. They used to collapse into a single
+  /// [KeyPackageFailureKind.noRelayResponded] here, which retried a
+  /// misconfigured account forever on the fast ladder and told an offline user
+  /// to go change a setting.
+  ///
+  /// The core now reports `relaysTargeted` (the configured own-relay count,
+  /// taken before any relay is contacted) and it is the ONLY field that tells
+  /// them apart:
+  ///
+  /// * `relaysTargeted == 0` → [KeyPackageFailureKind.noRelaysConfigured] →
+  ///   [KeyPackageRetryDisposition.awaitUserAction].
+  /// * `relaysTargeted > 0` with `respondersProbed == 0` →
+  ///   [KeyPackageFailureKind.noRelayResponded] →
+  ///   [KeyPackageRetryDisposition.retryPromptly].
+  ///
+  /// `classifyKeyPackageMaintenance` owns that split; the reasoning is kept
+  /// here because the two cases still look identical on the wire, so anything
+  /// that drops the field re-collapses them silently.
+  @useResult
+  Future<KeyPackageMaintenanceOutcome> maintainKeyPackage({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
   });

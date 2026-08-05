@@ -4,49 +4,60 @@ Utility scripts for Haven project development and CI.
 
 ## Coverage Testing
 
-### `coverage.sh`
+One gate, three entry points, all reading the same manifest, the same filters
+and the same pinned toolchains. There is deliberately no fourth way to compute
+Haven's coverage — there used to be, and the numbers it printed matched nothing
+that was enforced.
 
-Runs unit tests with coverage for both Rust and Flutter packages.
+| Command | Cost | What it checks |
+|---------|------|----------------|
+| `scripts/ci/check_coverage.sh --static-only` | < 1 s | Manifest pin rule + guard self-tests. Runs on **pre-commit**. |
+| `scripts/ci/check_coverage.sh` | ~6-11 min | **Everything** `.github/workflows/coverage.yml` runs. Runs on **pre-push**. |
+| `scripts/coverage.sh` | ~6-11 min | The same gate, plus HTML reports. |
 
-**Usage:**
 ```bash
-./scripts/coverage.sh
+scripts/ci/install_git_hooks.sh              # once per clone — enables both hooks
+scripts/ci/check_coverage.sh --static-only   # instant; catches most red coverage runs
+scripts/ci/check_coverage.sh                 # full gate, both stacks in parallel
+CHECK_FLUTTER=0 scripts/ci/check_coverage.sh # Rust (haven-core) only
+CHECK_RUST=0    scripts/ci/check_coverage.sh # Flutter (haven) only
+scripts/coverage.sh                          # full gate + HTML reports
 ```
 
-**Requirements:**
-- `cargo-llvm-cov` (installed automatically if missing)
-- `lcov` tools for HTML report generation (optional)
-  - Ubuntu/Debian: `sudo apt-get install lcov`
-  - macOS: `brew install lcov`
+### The per-path floors
 
-**Output:**
-- Rust: `haven-core/target/llvm-cov/html/index.html`
-- Flutter: `haven/coverage/html/index.html`
-- lcov files for both packages
+The 80%/50% aggregates are budgets the whole crate shares, so
+`scripts/ci/coverage_floors.txt` pins a MINIMUM PER PATH for the security- and
+privacy-critical ones. **Never edit a floor by hand** — two commands maintain
+the file:
 
-### Manual Coverage Commands
-
-**Rust (haven-core):**
 ```bash
-cd haven-core
-cargo llvm-cov --open  # Run tests + open HTML report in browser
+scripts/ci/check_coverage_floors.sh --lint          # does every floor obey the pin rule?
+scripts/ci/check_coverage_floors.sh --lint --fix    # correct the mechanical ones
+scripts/ci/check_coverage_floors.sh --repin flutter haven/coverage/lcov_filtered.info
+scripts/ci/check_coverage_floors.sh --repin rust    haven-core/coverage.lcov
 ```
 
-**Flutter (haven):**
-```bash
-cd haven
-flutter test --coverage
-genhtml coverage/lcov.info -o coverage/html
-open coverage/html/index.html  # macOS
-xdg-open coverage/html/index.html  # Linux
-```
+`--repin` raises floors the code has outgrown and refreshes their recorded
+measurement. It **never lowers one**: a path whose coverage fell needs tests,
+not a smaller number.
+
+### Measuring toolchains are pinned
+
+`scripts/ci/coverage_toolchain.env` fixes the rustc and Flutter versions the
+coverage job measures with, because a coverage percentage is a ratio whose
+denominator is instrumented lines — a property of the compiler, not of the
+tests. Every other workflow keeps floating on `stable`, so new-SDK breakage
+still surfaces; it just no longer surfaces as a coverage number nobody changed.
+The local Rust gate refuses to run on a different rustc; a Flutter mismatch is
+reported and its percentages marked advisory.
 
 ### CI Coverage
 
-Coverage is automatically run on all PRs and commits to main branch:
-- **Threshold:** 70% minimum line coverage
-- **Reports:** Uploaded as GitHub Actions artifacts
-- **CI fails** if coverage is below threshold
+Coverage runs on every PR and push to main (`.github/workflows/coverage.yml`):
+- **Thresholds:** 80% (Rust, `haven-core`), 50% (Flutter, `haven`), plus the
+  per-path floors above.
+- **Reports:** uploaded as GitHub Actions artifacts.
 
 View coverage reports:
 1. Go to Actions tab in GitHub

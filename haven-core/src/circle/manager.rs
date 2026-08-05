@@ -2497,7 +2497,7 @@ mod tests {
     /// builder (the real publish path), so `create_group`/`add_members` consume a
     /// `KeyPackage` the receiver actually produced, exactly as in production.
     async fn make_kp_event(manager: &CircleManager, keys: &Keys, relays: &[String]) -> Event {
-        build_kp_maintenance_events(manager.session(), keys, relays, None)
+        build_kp_maintenance_events(manager.session(), keys, relays, None, None)
             .await
             .expect("build key package event")
             .event

@@ -96,6 +96,7 @@ async fn real_circle(
         &peer_keys,
         &["wss://kp.example.com".to_string()],
         None,
+        None,
     )
     .await
     .expect("peer key package")

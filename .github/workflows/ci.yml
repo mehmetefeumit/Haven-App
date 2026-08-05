@@ -191,6 +191,23 @@ jobs:
     needs: [rust]
     uses: ./.github/workflows/e2e-clock-skew.yml
 
+  # Runtime proof that a ROTATED KeyPackage still works for somebody ELSE.
+  # `decide_kp_maintenance` re-mints at 0.75 of a package's own MLS `Lifetime`,
+  # and that is densely covered on the host — but every one of those tests
+  # observes the rotation from the PUBLISHER's side. RFC 9420 puts the
+  # `not_before`/`not_after` check on the INVITER, so a rotation that publishes
+  # successfully while producing material an inviter rejects would pass all of
+  # them and still leave the account uninvitable. This lane ages a KeyPackage
+  # 70 days by moving the device clock BACKWARDS before the first mint, then
+  # asserts off a real relay that a separate participant fetches the rotated
+  # package, adds its owner, and that the owner DECRYPTS a message in the
+  # resulting group — because an accepted Welcome that yields an unusable group
+  # is exactly what a "did the Add succeed" check would miss.
+  e2e-kp-rotation:
+    name: E2E KeyPackage Rotation (Android)
+    needs: [rust]
+    uses: ./.github/workflows/e2e-kp-rotation.yml
+
   # The iOS twin of the lane above (backlog B4): `simctl privacy grant location`
   # + `simctl location set`, no `locationServiceProvider` override, and the same
   # numeric assertion on the coordinates a PEER decrypts. Kept as its own lane

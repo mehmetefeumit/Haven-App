@@ -63,7 +63,7 @@ pub async fn create_key_package_event(
     keys: &Keys,
     relays: &[String],
 ) -> Event {
-    build_kp_maintenance_events(session, keys, relays, None)
+    build_kp_maintenance_events(session, keys, relays, None, None)
         .await
         .expect("build key package event")
         .event

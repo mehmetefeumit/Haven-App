@@ -16,8 +16,8 @@ use std::time::Duration;
 use haven_core::circle::RelayType;
 use haven_core::relay::maintenance::{
     build_legacy_key_package_retraction, decide_kp_maintenance, decide_relay_list,
-    list_relay_healthy, KpMaintenanceDecision, RelayKpEntry, RelayKpPerRelay, RelayKpSnapshot,
-    RelayListDecision, RelayListPerRelay, RelayListSnapshot,
+    list_relay_healthy, KeyPackageLifetime, KpMaintenanceDecision, RelayKpEntry, RelayKpPerRelay,
+    RelayKpSnapshot, RelayListDecision, RelayListPerRelay, RelayListSnapshot, TrackedKpLifetime,
 };
 use haven_core::relay::RelayManager;
 use nostr::{EventBuilder, Keys, Kind, Tag};
@@ -35,6 +35,22 @@ use nostr_relay_builder::MockRelay;
 // ---------------------------------------------------------------------------
 // Helpers that mirror the FFI's per-relay snapshot construction.
 // ---------------------------------------------------------------------------
+
+/// Fixed clock for the decision calls below (Unix seconds, ~2027).
+const NOW: u64 = 1_800_000_000;
+
+/// A tracked package minted "now": far from its rotation threshold, so these
+/// tests exercise the HEAL / SEED branches rather than lifetime rotation
+/// (which has its own suite in `tests/kp_rotation_e2e.rs`).
+const fn fresh_tracked() -> TrackedKpLifetime {
+    // 84 days + the 1 h clock-skew margin — the `OpenMLS` default Haven inherits.
+    TrackedKpLifetime::Known(KeyPackageLifetime::new(NOW, NOW + 7_261_200))
+}
+
+/// `decide_kp_maintenance` with a fresh tracked package at [`NOW`].
+fn decide_fresh(snap: &RelayKpSnapshot, stored_d: Option<&str>) -> KpMaintenanceDecision {
+    decide_kp_maintenance(snap, stored_d, fresh_tracked(), NOW)
+}
 
 /// Extracts a kind-30443 event's NIP-33 `d` tag (mirrors the FFI helper).
 fn kp_d_tag(ev: &nostr::Event) -> String {
@@ -203,7 +219,7 @@ async fn test20_kp_partial_drop_heals_b_only_a_untouched() {
     assert_eq!(snapshot.responders.len(), 2, "both relays should respond");
 
     // The decision must republish into the SAME slot, targeting B only.
-    let decision = decide_kp_maintenance(&snapshot, Some(d));
+    let decision = decide_fresh(&snapshot, Some(d));
     let KpMaintenanceDecision::Republish {
         existing_d,
         targets,
@@ -361,7 +377,7 @@ async fn test22_non_responder_plus_healthy_is_noop_not_error() {
 
     // Every responder serves live ⇒ NoOp. The non-responder is NOT an error and
     // NOT a heal target (you cannot write to an unreachable relay).
-    let decision = decide_kp_maintenance(&snapshot, Some(d));
+    let decision = decide_fresh(&snapshot, Some(d));
     assert_eq!(decision, KpMaintenanceDecision::NoOp);
 }
 
@@ -423,7 +439,7 @@ async fn test22b_malformed_url_plus_live_relay_does_not_collapse_probe() {
     // Every responder serves live ⇒ NoOp. Crucially this is a DECISION over a
     // populated snapshot, not a probe-collapse: maintenance for the good relay
     // is intact.
-    let decision = decide_kp_maintenance(&snapshot, Some(d));
+    let decision = decide_fresh(&snapshot, Some(d));
     assert_eq!(decision, KpMaintenanceDecision::NoOp);
 }
 
@@ -458,7 +474,7 @@ async fn test23_seed_d_then_next_tick_is_noop_when_slot_already_served() {
     // Tick 1: no stored `d` ⇒ SeedD (record-only, no publish).
     let snap1 = kp_snapshot(&mgr, author, &own).await;
     assert_eq!(snap1.responders.len(), 1);
-    let d1 = decide_kp_maintenance(&snap1, None);
+    let d1 = decide_fresh(&snap1, None);
     assert_eq!(
         d1,
         KpMaintenanceDecision::SeedD {
@@ -470,7 +486,7 @@ async fn test23_seed_d_then_next_tick_is_noop_when_slot_already_served() {
     // Tick 2: the seed is now the stored stable slot and A already serves it ⇒
     // NoOp. No republish (the last-resort package on A is still valid).
     let snap2 = kp_snapshot(&mgr, author, &own).await;
-    let d2 = decide_kp_maintenance(&snap2, Some(seed_d));
+    let d2 = decide_fresh(&snap2, Some(seed_d));
     assert_eq!(
         d2,
         KpMaintenanceDecision::NoOp,
@@ -502,7 +518,7 @@ async fn test24_target_url_byte_matches_configured_entry() {
     seed_event_on(&url_a, &ev_a).await;
 
     let snapshot = kp_snapshot(&mgr, author, &own).await;
-    let decision = decide_kp_maintenance(&snapshot, Some(d));
+    let decision = decide_fresh(&snapshot, Some(d));
     let KpMaintenanceDecision::Republish { targets, .. } = decision else {
         panic!("expected Republish");
     };

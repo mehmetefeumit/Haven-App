@@ -1,6 +1,22 @@
 # Reusable workflow: Coverage testing
 # Runs unit tests with coverage for both Rust and Flutter packages
-# Enforces 80% minimum coverage threshold for Rust, 50% for Flutter
+# Enforces 80% minimum coverage threshold for Rust, 50% for Flutter, plus the
+# per-path floors in scripts/ci/coverage_floors.txt.
+#
+# EVERY gate in this file is also runnable locally, as a superset, with
+# `scripts/ci/check_coverage.sh` (wired as the pre-push hook). When you add a
+# step here, add it there — the local gate's whole value is the claim that a
+# green run locally means a green run here, and each step that exists in only
+# one of the two erodes it.
+#
+# The measuring toolchains are PINNED (scripts/ci/coverage_toolchain.env),
+# unlike every other workflow, which floats on `stable`. Coverage is a ratio
+# whose denominator is instrumented lines — a property of the compiler, not of
+# the tests — so a floating toolchain silently re-measures every path on
+# someone else's release schedule. It did: `stable` moving 1.92 -> 1.97.1
+# tripped seven per-path ratchets in one run with no code change. Compiler
+# breakage still gets caught, by rust-check/flutter-check/build-check, which
+# keep floating deliberately.
 
 name: Coverage
 
@@ -19,9 +35,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # The pin lives in a checked-in file rather than inline here so the local
+      # gate reads the same value; a version duplicated across a workflow and a
+      # script is a version that drifts.
+      - name: Read pinned coverage toolchains
+        id: toolchain
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          . scripts/ci/coverage_toolchain.env
+          : "${HAVEN_COVERAGE_RUST_TOOLCHAIN:?not set in scripts/ci/coverage_toolchain.env}"
+          echo "rust=${HAVEN_COVERAGE_RUST_TOOLCHAIN}" >> "$GITHUB_OUTPUT"
+          echo "Measuring with rustc ${HAVEN_COVERAGE_RUST_TOOLCHAIN}"
+
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.toolchain.outputs.rust }}
           components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov
@@ -112,9 +142,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Read pinned coverage toolchains
+        id: toolchain
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          . scripts/ci/coverage_toolchain.env
+          : "${HAVEN_COVERAGE_FLUTTER_VERSION:?not set in scripts/ci/coverage_toolchain.env}"
+          echo "flutter=${HAVEN_COVERAGE_FLUTTER_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Measuring with Flutter ${HAVEN_COVERAGE_FLUTTER_VERSION}"
+
+      # Pinned for the same reason the Rust job pins rustc: `channel: stable`
+      # already moved this measurement from 3.41 to 3.44.8 underneath a manifest
+      # of per-path floors. Every OTHER Flutter job keeps `channel: stable` — a
+      # new SDK breaking the app must still surface, just not as a coverage
+      # number nobody changed.
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: ${{ steps.toolchain.outputs.flutter }}
           channel: stable
           cache: true
 
@@ -170,44 +216,44 @@ jobs:
           test/providers/location_sharing_provider_test.dart
           --dart-define=HAVEN_LIVE_SYNC=false
 
+      # The exclusion set is defined ONCE, in a checked-in script that the local
+      # gate calls too. It used to be `lcov --remove` here and a hand-written
+      # awk equivalent in check_coverage.sh, with nothing comparing them — and
+      # they did differ (the awk `/\/test\//` cannot match a package-relative
+      # `test/foo.dart` record). Sharing the implementation also drops the
+      # apt-get from the gates' critical path; lcov is now installed only for
+      # the HTML report, after every gate has voted.
       - name: Remove generated files from coverage
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y lcov
-          lcov --remove coverage/lcov.info \
-            '**/test/**' \
-            '**/src/rust/**' \
-            '**/*.g.dart' \
-            '**/*.freezed.dart' \
-            '**/l10n/app_localizations*.dart' \
-            -o coverage/lcov_filtered.info \
-            --ignore-errors unused
+        run: bash ../scripts/ci/filter_lcov.sh coverage/lcov.info coverage/lcov_filtered.info
 
-      # NOTE: very_good_coverage@v3 still runs on Node.js 20 (deprecated June 2026).
-      # No upstream Node 24 release as of 2026-05-10. Track the action repo and
-      # replace with a Node 24-capable alternative (or a small inline lcov check)
-      # before GitHub forces Node 24.
+      # Was `VeryGoodOpenSource/very_good_coverage@v3`, which still targets
+      # Node.js 20 (deprecated June 2026, already force-run on Node 24 by the
+      # runner) with no upstream release — the workflow carried a NOTE to
+      # replace it "before GitHub forces Node 24", which is a plan that works
+      # only if someone reads it in time. The gate is a sum over LH/LF; owning
+      # it removes a dependency on a deprecated runtime AND lets the local gate
+      # run the identical computation instead of a second awk of its own.
       - name: Check coverage threshold
-        uses: VeryGoodOpenSource/very_good_coverage@v3
-        with:
-          path: haven/coverage/lcov_filtered.info
-          min_coverage: 50
+        run: bash ../scripts/ci/check_lcov_aggregate.sh coverage/lcov_filtered.info 50 "Flutter (haven)"
 
       # The 50% above is an aggregate over the whole package, and the package
-      # clears it (64.82% when these floors were pinned) only because the widget
-      # and provider suites pay for the service layer — which measures 48.96%,
-      # i.e. BELOW the very threshold the package passes. Three services sit at
-      # or near zero (nostr_relay_preferences_service.dart 0.00%,
-      # nostr_relay_service.dart 0.63%, background_location_task.dart 1.69% —
-      # the file P0-1 lives in) and the aggregate cannot see any of it. Runs on
-      # the same filtered report the gate above reads, and with `!cancelled()`
-      # so one red run reports both the aggregate and the per-path verdicts.
+      # clears it (~65%) only because the widget and provider suites pay for the
+      # service layer — which sat at 48.96%, i.e. BELOW the very threshold the
+      # package passes. Three services are still at or near zero
+      # (nostr_relay_preferences_service.dart 0.00%, nostr_relay_service.dart
+      # 0.61%, background_location_task.dart 1.69% — the file P0-1 lives in) and
+      # the aggregate cannot see any of it. Runs on the same filtered report the
+      # gate above reads, and with `!cancelled()` so one red run reports both
+      # the aggregate and the per-path verdicts.
       - name: Per-path coverage floors (haven)
         if: ${{ !cancelled() }}
         run: bash ../scripts/ci/check_coverage_floors.sh flutter coverage/lcov_filtered.info
 
       - name: Generate HTML report
-        run: genhtml coverage/lcov_filtered.info -o coverage/html
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lcov
+          genhtml coverage/lcov_filtered.info -o coverage/html
 
       - name: Upload coverage reports
         uses: actions/upload-artifact@v6

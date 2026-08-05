@@ -1,68 +1,32 @@
 #!/usr/bin/env bash
-# Coverage testing script for local development
-# Runs coverage for both Rust and Flutter packages
-
-set -e
+#
+# Coverage for local development — reports AND gates, in one command.
+#
+# This used to be a third, independent way of computing Haven's coverage, and
+# the numbers it printed were not the numbers anything enforced:
+#
+#   * it excluded `(frb_generated\.rs|\.g\.rs)` where CI excludes `frb_generated`,
+#   * it measured `rust_builder` as well, which no gate covers,
+#   * it read Flutter's RAW lcov, where CI reads the filtered one,
+#   * it measured on whatever toolchain happened to be default, where the
+#     per-path floors are pinned to a specific rustc/LLVM,
+#   * and it applied no thresholds at all, so it printed a cheerful summary for
+#     a tree that CI would reject.
+#
+# Three implementations of one measurement is three answers, and the one people
+# ran by hand was the one that agreed with nothing. So this is now a thin front
+# end on the real gate: same flags, same filters, same toolchain pins, same
+# thresholds, plus the HTML reports that made this script worth having.
+#
+#   scripts/coverage.sh                # both stacks, gated, with HTML reports
+#   scripts/ci/check_coverage.sh       # the gate itself (no HTML) — pre-push hook
+#   scripts/ci/check_coverage.sh --static-only   # instant manifest/guard checks
+#
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
-echo "📊 Running coverage tests for Haven project..."
+echo "📊 Coverage for Haven — running the same gates CI does, plus HTML reports."
 echo ""
 
-# Check if cargo-llvm-cov is installed
-if ! command -v cargo-llvm-cov &> /dev/null; then
-    echo "⚠️  cargo-llvm-cov not found. Installing..."
-    cargo install cargo-llvm-cov
-fi
-
-# Check if lcov is installed (for Flutter)
-if ! command -v genhtml &> /dev/null; then
-    echo "⚠️  lcov tools not found. Please install lcov:"
-    echo "   Ubuntu/Debian: sudo apt-get install lcov"
-    echo "   macOS: brew install lcov"
-    echo ""
-fi
-
-# Run Rust coverage
-echo "🦀 Running Rust coverage (haven-core)..."
-cd "$PROJECT_ROOT/haven-core"
-cargo llvm-cov --all-features --html --ignore-filename-regex '(frb_generated\.rs|\.g\.rs)'
-RUST_COVERAGE=$(cargo llvm-cov --all-features --ignore-filename-regex '(frb_generated\.rs|\.g\.rs)' --summary-only | grep 'TOTAL' | awk '{print $10}')
-echo "   Coverage: $RUST_COVERAGE"
-echo "   Report: haven-core/target/llvm-cov/html/index.html"
-echo ""
-
-# Run rust_builder coverage (keyring tests are #[ignore]'d in CI)
-echo "🦀 Running Rust coverage (rust_builder)..."
-cd "$PROJECT_ROOT/haven/rust_builder"
-cargo llvm-cov --all-features --html --ignore-filename-regex '(frb_generated\.rs|\.g\.rs)'
-BUILDER_COVERAGE=$(cargo llvm-cov --all-features --ignore-filename-regex '(frb_generated\.rs|\.g\.rs)' --summary-only | grep 'TOTAL' | awk '{print $10}')
-echo "   Coverage: $BUILDER_COVERAGE"
-echo "   Report: haven/rust_builder/target/llvm-cov/html/index.html"
-echo ""
-
-# Run Flutter coverage
-echo "🎯 Running Flutter coverage (haven)..."
-cd "$PROJECT_ROOT/haven"
-flutter test --coverage
-
-if command -v genhtml &> /dev/null; then
-    genhtml coverage/lcov.info -o coverage/html --quiet
-    FLUTTER_COVERAGE=$(lcov --summary coverage/lcov.info 2>&1 | grep 'lines' | awk '{print $2}')
-    echo "   Coverage: $FLUTTER_COVERAGE"
-    echo "   Report: haven/coverage/html/index.html"
-else
-    echo "   lcov.info generated at: haven/coverage/lcov.info"
-    echo "   (Install lcov to generate HTML report)"
-fi
-echo ""
-
-echo "✅ Coverage tests complete!"
-echo ""
-echo "To view reports:"
-echo "  Rust (core):    open $PROJECT_ROOT/haven-core/target/llvm-cov/html/index.html"
-echo "  Rust (builder): open $PROJECT_ROOT/haven/rust_builder/target/llvm-cov/html/index.html"
-if command -v genhtml &> /dev/null; then
-    echo "  Flutter:        open $PROJECT_ROOT/haven/coverage/html/index.html"
-fi
+exec "$SCRIPT_DIR/ci/check_coverage.sh" --html "$@"

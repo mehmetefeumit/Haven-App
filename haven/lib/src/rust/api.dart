@@ -6,8 +6,8 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_commit_to_publish`, `convert_location_result`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_legacy_mls_db_files`, `delete_mls_session_db_files`, `delete_tile_db_files`, `fetch_own_profile_across_pool`, `from_cached`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `kp_event_d_tag`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `nip65_relay_list_urls`, `now_ms`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `redact_profile_err`, `reinstall_after_timed_out_stop`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `republish_key_package`, `run_blocking`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`, `usable_profile_pool`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`, `ProfileStampLists`
+// These functions are ignored because they are not marked as `pub`: `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_commit_to_publish`, `convert_location_result`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_legacy_mls_db_files`, `delete_mls_session_db_files`, `delete_tile_db_files`, `fetch_own_profile_across_pool`, `from_cached`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `kp_event_d_tag`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `maintenance_now_secs`, `nip65_relay_list_urls`, `now_ms`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `purge_key_package_past_not_after`, `redact_profile_err`, `reinstall_after_timed_out_stop`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `republish_key_package`, `run_blocking`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`, `usable_profile_pool`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`, `KpPublishPlan`, `ProfileStampLists`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`, `default`
 
@@ -732,9 +732,11 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
 
   /// Reads the persisted relay sync cursor (raw ms) for `stream`.
   ///
-  /// Returns `None` when the stream has never been seeded — callers MUST
-  /// seed a floor before opening a subscription. See
-  /// [`haven_core::relay::cursor`] for stream keys and semantics.
+  /// Returns `None` when the stream has never been seeded. Seeding — like
+  /// every other operation that can RAISE a cursor — happens in haven-core,
+  /// on the receive plane that is about to issue the REQ; this boundary is
+  /// read-only on that axis. See [`haven_core::relay::cursor`] for stream
+  /// keys and semantics.
   ///
   /// # Errors
   ///
@@ -1947,10 +1949,38 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
   ///    Dark Matter a published 30443 is a last-resort package that never dies
   ///    on join, so the presence gate is pure relay presence of the tracked
   ///    stable slot (the M8-2 live-material gate is gone).
-  /// 4. Decide via [`decide_kp_maintenance`]; on `SeedD` record the seed row;
-  ///    on `Republish` reuse-or-mint the single kind-30443 event, publish to
-  ///    OWN relays only (publish-first), record the row, and delete minted
-  ///    material on a failed publish (mdk#160).
+  /// 4. Read the tracked package's OWN MLS `Lifetime` and honour the spec's
+  ///    `not_after` init-key deletion bound (step 4a below) — unconditionally,
+  ///    before any relay decision, because that bound does not depend on the
+  ///    transport.
+  /// 5. Decide via [`decide_kp_maintenance`]; on `SeedD` record the seed row;
+  ///    on `Republish`/`Rotate` reuse-or-mint the single kind-30443 event,
+  ///    publish to OWN relays only (publish-first), record the row, and delete
+  ///    minted material on a failed publish (mdk#160).
+  ///
+  /// # Lifetime-aware rotation
+  ///
+  /// A `KeyPackage` carries an MLS `Lifetime` and stops validating at
+  /// `not_after` (84 days for the OpenMLS default Haven inherits, which is
+  /// also the Marmot maximum). Past that instant the 30443 is still on the
+  /// relay and still fetchable, but every `Add` referencing it fails
+  /// validation — the account is **silently uninvitable**. So the tick asks
+  /// the package itself, never a Nostr timestamp, whether it is past
+  /// `KP_ROTATE_AT_LIFETIME_FRACTION` of its own window. Timing this off
+  /// `event.created_at` would be wrong here even though the reference app
+  /// does it: Haven's heal path re-publishes CACHED bytes under a FRESH
+  /// `created_at`, so an event-age timer would reset on every relay heal
+  /// while the real `not_after` kept ticking.
+  ///
+  /// # 4a. The `not_after` deletion bound
+  ///
+  /// `foundation/key-packages.md`: a last-resort `KeyPackage` MUST delete its
+  /// private `init_key` at the earlier of (a) confirmed publication of a
+  /// replacement — handled by the publish-then-delete step in
+  /// [`Self::republish_key_package`] — or (b) `Lifetime.not_after`. Bound (b)
+  /// is transport-independent, so it runs here even when no relay responded
+  /// and nothing can be published. Retaining it would mean a compromise of
+  /// that one key decrypts *every recorded Welcome* ever sent to it.
   ///
   /// Returns a presence-only [`KpMaintenanceOutcomeFfi`] (counters + enum).
   ///
@@ -2909,6 +2939,23 @@ enum KpMaintenanceActionFfi {
 
   /// A `KeyPackage` was published into a freshly-minted `d` (first-ever slot).
   republishedFreshD,
+
+  /// FRESH material was minted into the existing stable `d` because the
+  /// tracked package passed the rotation point of its own MLS `Lifetime`
+  /// (~day 63 of 84). The healthy steady state.
+  rotatedExpiringMaterial,
+
+  /// FRESH material was minted into the existing stable `d` because the
+  /// tracked package's MLS `Lifetime` could not be read.
+  ///
+  /// Rotating on an unreadable lifetime is deliberate (the alternative —
+  /// assume-fresh — is the silent, unbounded failure this whole path exists
+  /// to prevent), and it is safe because it self-corrects: the replacement is
+  /// minted by our own engine. Seeing this REPEATEDLY means the reader itself
+  /// is broken and every tick is burning init-key material — which is exactly
+  /// why it is a distinct value rather than folded into
+  /// [`Self::RotatedExpiringMaterial`].
+  rotatedUnreadableLifetime,
 }
 
 /// Presence-only result of an M8-2 `KeyPackage` maintenance tick.
@@ -2928,18 +2975,47 @@ class KpMaintenanceOutcomeFfi {
   /// excluded).
   final int respondersProbed;
 
-  /// Responding + non-live relays this tick republished to.
+  /// Own `KeyPackage` relays this tick TARGETED — the account's configured
+  /// NIP-65 set after dedup, counted before any is contacted.
+  ///
+  /// Separates two situations every other field reports identically, and whose
+  /// remedies are opposite:
+  ///
+  /// * `0` — the account has **no `KeyPackage` relays configured**. Nothing to
+  ///   retry; this is await-user-action.
+  /// * `> 0` with `responders_probed == 0` — every configured relay was
+  ///   **unreachable this tick**. Transient; retry promptly.
+  final int relaysTargeted;
+
+  /// Responding relays that ACKED this tick's publish.
+  ///
+  /// The only evidence in this struct that anything landed. The `action` names
+  /// the branch that RAN and is chosen before the write is attempted, so a
+  /// `Republished*` / `Rotated*` action with `relays_healed == 0` is a publish
+  /// nobody accepted — not a completed rotation.
   final int relaysHealed;
 
   /// Relay probes/publishes that errored (tallied, never fatal).
   final int relayErrors;
 
+  /// Whether this tick deleted the tracked `KeyPackage`'s private `init_key`
+  /// because it reached `Lifetime.not_after`.
+  ///
+  /// `foundation/key-packages.md` makes that deletion a MUST at the earlier of
+  /// a confirmed replacement publication or `not_after`; this flag reports the
+  /// second bound, which fires even on a tick where no relay responded. Set
+  /// together with `relays_healed == 0` it is the worst reachable state: no
+  /// usable init key AND no published replacement.
+  final bool expiredInitKeyPurged;
+
   const KpMaintenanceOutcomeFfi({
     required this.action,
     required this.canonicalOnRelays,
     required this.respondersProbed,
+    required this.relaysTargeted,
     required this.relaysHealed,
     required this.relayErrors,
+    required this.expiredInitKeyPurged,
   });
 
   @override
@@ -2947,8 +3023,10 @@ class KpMaintenanceOutcomeFfi {
       action.hashCode ^
       canonicalOnRelays.hashCode ^
       respondersProbed.hashCode ^
+      relaysTargeted.hashCode ^
       relaysHealed.hashCode ^
-      relayErrors.hashCode;
+      relayErrors.hashCode ^
+      expiredInitKeyPurged.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -2958,8 +3036,10 @@ class KpMaintenanceOutcomeFfi {
           action == other.action &&
           canonicalOnRelays == other.canonicalOnRelays &&
           respondersProbed == other.respondersProbed &&
+          relaysTargeted == other.relaysTargeted &&
           relaysHealed == other.relaysHealed &&
-          relayErrors == other.relayErrors;
+          relayErrors == other.relayErrors &&
+          expiredInitKeyPurged == other.expiredInitKeyPurged;
 }
 
 /// A persisted last-known location for a circle member (FFI-friendly).

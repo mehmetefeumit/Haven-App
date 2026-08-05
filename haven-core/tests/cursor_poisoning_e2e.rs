@@ -164,6 +164,7 @@ async fn mint_member(
         &keys,
         &["wss://kp.example.com".to_string()],
         None,
+        None,
     )
     .await
     .expect("member key package")

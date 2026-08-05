@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+#
+# Pre-commit: the coverage checks that need no toolchain and no test run.
+#
+# Under a second, every commit. It exists because the most common way the
+# Coverage workflow goes red is not a coverage regression at all — it is an
+# edit to scripts/ci/coverage_floors.txt that does not obey the file's own pin
+# rule. Run 30964250098 died on a floor hand-set to 51 against a measured
+# 51.06%: a verdict that took an 11-minute llvm-cov run to reach, on a defect
+# that is visible in the diff.
+#
+# The full gate (which runs both suites, ~6-11 min) stays on pre-push.
+#
+# Enable once per clone:  scripts/ci/install_git_hooks.sh
+# Bypass a single commit: git commit --no-verify
+#
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+exec "$ROOT/scripts/ci/check_coverage.sh" --static-only

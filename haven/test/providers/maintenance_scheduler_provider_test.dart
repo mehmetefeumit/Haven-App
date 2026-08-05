@@ -57,14 +57,21 @@ class _FakeMaintenanceService extends MaintenanceService {
   /// When true, the KP task throws (fail-soft tests).
   bool throwOnKp = false;
 
+  /// What the KP task reports. Defaults to a confirmed-healthy tick; set it to
+  /// a [KeyPackageMaintenanceFailed] to drive the retry ladder.
+  KeyPackageMaintenanceOutcome kpOutcome = const KeyPackageMaintenanceHealthy(
+    canonicalOnRelays: 1,
+    respondersProbed: 1,
+  );
+
   @override
-  Future<KeyPackageMaintenanceResult> maintainKeyPackage() async {
+  Future<KeyPackageMaintenanceOutcome> maintainKeyPackage() async {
     final callIndex = kpCalls;
     kpCalls++;
     if (throwOnKp) throw StateError('kp boom');
     final gate = kpGateFor?.call(callIndex) ?? kpGate;
     if (gate != null) await gate.future;
-    return const KeyPackageMaintenanceResult.empty();
+    return kpOutcome;
   }
 
   @override
@@ -104,14 +111,21 @@ final _testIdentity = Identity(
 /// immediately-resolved success.
 ProviderContainer _containerWith(
   _FakeMaintenanceService fake, {
-  Future<bool>? loginPublish,
+  Future<KeyPackageMaintenanceOutcome>? loginPublish,
   MockProfileService? profileService,
 }) {
   return ProviderContainer(
     overrides: [
       maintenanceServiceProvider.overrideWithValue(fake),
       keyPackagePublisherProvider.overrideWith(
-        (ref) => loginPublish ?? Future.value(true),
+        (ref) =>
+            loginPublish ??
+            Future.value(
+              const KeyPackageMaintenanceHealthy(
+                canonicalOnRelays: 1,
+                respondersProbed: 1,
+              ),
+            ),
       ),
       // The profile anti-entropy tick resolves the roster union through the
       // circle + identity providers. Without these the tick would reach the
@@ -127,6 +141,40 @@ ProviderContainer _containerWith(
     ],
   );
 }
+
+/// Granularity of [_timeToNextKpTick]'s sampling — every measured gap is
+/// accurate to within one of these.
+const _tickSamplingStep = Duration(seconds: 1);
+
+/// Steps [async] forward until [fake] records another `KeyPackage` tick, and
+/// returns how long that took.
+///
+/// Measures WHEN the loop actually came back, which is the only externally
+/// visible consequence of the scheduler having understood the outcome. Fails
+/// the test if no tick arrives inside [deadline].
+Duration _timeToNextKpTick(
+  FakeAsync async,
+  _FakeMaintenanceService fake, {
+  Duration deadline = const Duration(minutes: 25),
+}) {
+  final before = fake.kpCalls;
+  var waited = Duration.zero;
+  while (waited < deadline) {
+    async
+      ..elapse(_tickSamplingStep)
+      ..flushMicrotasks();
+    waited += _tickSamplingStep;
+    if (fake.kpCalls > before) return waited;
+  }
+  fail('no KeyPackage tick arrived within $deadline');
+}
+
+/// Matches a duration inside the scheduler's documented ±25 % jitter envelope
+/// around [nominal], allowing one sampling step of slack on each side.
+Matcher _withinJitterOf(Duration nominal) => allOf(
+      greaterThanOrEqualTo(nominal * 0.75 - _tickSamplingStep),
+      lessThanOrEqualTo(nominal * 1.25 + _tickSamplingStep),
+    );
 
 void main() {
   group('MaintenanceScheduler — fire-on-start', () {
@@ -163,7 +211,7 @@ void main() {
   group('MaintenanceScheduler — causal handoff', () {
     test('first KeyPackage tick waits for the login publish to settle', () {
       fakeAsync((async) {
-        final loginPublish = Completer<bool>();
+        final loginPublish = Completer<KeyPackageMaintenanceOutcome>();
         final fake = _FakeMaintenanceService();
         final container = _containerWith(
           fake,
@@ -181,7 +229,12 @@ void main() {
         );
 
         // Settle the login publish → the tick proceeds to the FFI probe.
-        loginPublish.complete(true);
+        loginPublish.complete(
+          const KeyPackageMaintenanceHealthy(
+            canonicalOnRelays: 1,
+            respondersProbed: 1,
+          ),
+        );
         async.flushMicrotasks();
         expect(fake.kpCalls, 1);
 
@@ -196,7 +249,7 @@ void main() {
         final fake = _FakeMaintenanceService();
         final container = _containerWith(
           fake,
-          loginPublish: Completer<bool>().future,
+          loginPublish: Completer<KeyPackageMaintenanceOutcome>().future,
         )..read(maintenanceSchedulerProvider.notifier);
 
         // 2 min initial delay + 60 s timeout cap = ~3 min before the probe.
@@ -536,6 +589,196 @@ void main() {
           ..elapse(const Duration(minutes: 60));
         expect(fake.kpCalls, 1, reason: 'no reschedule after invalidate');
         expect(fake.relayListCalls, 1);
+
+        container.dispose();
+      });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // The scheduler is the consumer that ACTS on the three-way KeyPackage
+  // outcome. Before it could tell a failure from health, a `KeyPackage` that
+  // reached no relay left the account uninvitable and the loop went back to
+  // sleep for a full jittered 10 minutes, exactly as if everything were fine.
+  //
+  // These assert the effect — when the next tick actually fires — not that
+  // some method was called on a double.
+  // -------------------------------------------------------------------------
+  group('MaintenanceScheduler — KeyPackage retry on failure', () {
+    /// The nominal cadence's earliest possible firing (jitter floor). Every
+    /// retry must land strictly inside this, or it is not a retry.
+    const nominalFloor = Duration(minutes: 7, seconds: 30);
+
+    test('a failed tick retries long before the nominal cadence could', () {
+      fakeAsync((async) {
+        final fake = _FakeMaintenanceService()
+          ..kpOutcome = const KeyPackageMaintenanceFailed(
+            KeyPackageFailureKind.publishNotAcked,
+          );
+        final container = _containerWith(fake)
+          ..read(maintenanceSchedulerProvider.notifier);
+
+        // The first tick is the scheduled one at its 2 min initial delay.
+        _timeToNextKpTick(async, fake);
+
+        final retry = _timeToNextKpTick(async, fake);
+        expect(
+          retry,
+          lessThan(nominalFloor),
+          reason: 'the nominal cadence cannot fire this early — so this tick '
+              'exists only because the failure was visible to the scheduler',
+        );
+        expect(
+          retry,
+          _withinJitterOf(keyPackageRetryPromptDelay),
+          reason: 'a relay-side failure retries on the prompt ladder',
+        );
+
+        container.dispose();
+      });
+    });
+
+    test('the retry ladder widens while the failure persists', () {
+      fakeAsync((async) {
+        final fake = _FakeMaintenanceService()
+          ..kpOutcome = const KeyPackageMaintenanceFailed(
+            KeyPackageFailureKind.noRelayResponded,
+          );
+        final container = _containerWith(fake)
+          ..read(maintenanceSchedulerProvider.notifier);
+
+        _timeToNextKpTick(async, fake); // the scheduled first tick
+
+        // 60 s, 2 min, 4 min, then capped at 5 min — each jittered ±25 %.
+        final expected = <Duration>[
+          keyPackageRetryPromptDelay,
+          keyPackageRetryPromptDelay * 2,
+          keyPackageRetryPromptDelay * 4,
+          keyPackageRetryMaxDelay,
+        ];
+        for (var i = 0; i < expected.length; i++) {
+          final gap = _timeToNextKpTick(async, fake);
+          expect(
+            gap,
+            _withinJitterOf(expected[i]),
+            reason: 'retry ${i + 1} should sit on the ladder at ${expected[i]}',
+          );
+          expect(
+            gap,
+            lessThan(nominalFloor),
+            reason: 'no rung of the ladder may be slower than doing nothing',
+          );
+        }
+
+        container.dispose();
+      });
+    });
+
+    test('a healthy tick clears the ladder and restores the nominal cadence',
+        () {
+      fakeAsync((async) {
+        final fake = _FakeMaintenanceService()
+          ..kpOutcome = const KeyPackageMaintenanceFailed(
+            KeyPackageFailureKind.publishNotAcked,
+          );
+        final container = _containerWith(fake)
+          ..read(maintenanceSchedulerProvider.notifier);
+
+        _timeToNextKpTick(async, fake); // scheduled first tick
+        _timeToNextKpTick(async, fake); // retry 1 (ladder now at 2 min)
+        _timeToNextKpTick(async, fake); // retry 2 (ladder now at 4 min)
+
+        // The relays come back.
+        fake.kpOutcome = const KeyPackageMaintenanceHealthy(
+          canonicalOnRelays: 1,
+          respondersProbed: 1,
+        );
+        _timeToNextKpTick(async, fake); // the tick that observes health
+
+        final afterRecovery = _timeToNextKpTick(async, fake);
+        expect(
+          afterRecovery,
+          greaterThanOrEqualTo(nominalFloor),
+          reason: 'one bad relay window must not permanently accelerate the '
+              'loop — a confirmed-healthy tick resets the streak',
+        );
+        expect(afterRecovery, _withinJitterOf(keyPackageMaintenanceInterval));
+
+        container.dispose();
+      });
+    });
+
+    test('a published tick also clears the ladder', () {
+      fakeAsync((async) {
+        final fake = _FakeMaintenanceService()
+          ..kpOutcome = const KeyPackageMaintenanceFailed(
+            KeyPackageFailureKind.publishNotAcked,
+          );
+        final container = _containerWith(fake)
+          ..read(maintenanceSchedulerProvider.notifier);
+
+        _timeToNextKpTick(async, fake); // scheduled first tick
+        _timeToNextKpTick(async, fake); // retry 1
+
+        fake.kpOutcome = const KeyPackageMaintenancePublished(
+          relaysAcked: 1,
+          mintedFreshSlot: true,
+        );
+        _timeToNextKpTick(async, fake); // the tick that lands the publish
+
+        expect(
+          _timeToNextKpTick(async, fake),
+          greaterThanOrEqualTo(nominalFloor),
+          reason: 'an acked publish is a success, same as health',
+        );
+
+        container.dispose();
+      });
+    });
+
+    test('a missing identity does NOT accelerate the loop', () {
+      fakeAsync((async) {
+        // Nothing to retry: no secret means nothing can be signed, and
+        // re-login rebuilds the scheduler anyway. Escalating here would just
+        // spin the timer against a logged-out app.
+        final fake = _FakeMaintenanceService()
+          ..kpOutcome = const KeyPackageMaintenanceFailed(
+            KeyPackageFailureKind.identityUnavailable,
+          );
+        final container = _containerWith(fake)
+          ..read(maintenanceSchedulerProvider.notifier);
+
+        _timeToNextKpTick(async, fake); // scheduled first tick
+
+        expect(
+          _timeToNextKpTick(async, fake),
+          greaterThanOrEqualTo(nominalFloor),
+          reason: 'awaitUserAction keeps the ordinary cadence',
+        );
+
+        container.dispose();
+      });
+    });
+
+    test('a throwing tick backs off rather than looping fast', () {
+      fakeAsync((async) {
+        // A throw from the service is a local breakage, not a relay one: it
+        // gets the slower `retryLater` delay, still inside the nominal floor.
+        final fake = _FakeMaintenanceService()..throwOnKp = true;
+        final container = _containerWith(fake)
+          ..read(maintenanceSchedulerProvider.notifier);
+
+        _timeToNextKpTick(async, fake); // scheduled first tick
+
+        final gap = _timeToNextKpTick(async, fake);
+        expect(gap, _withinJitterOf(keyPackageRetryLaterDelay));
+        expect(
+          gap,
+          greaterThan(keyPackageRetryPromptDelay * 1.25),
+          reason: 'a broken local call must not be hammered on the prompt '
+              'ladder',
+        );
+        expect(gap, lessThan(nominalFloor));
 
         container.dispose();
       });

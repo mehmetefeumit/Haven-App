@@ -1148,7 +1148,7 @@ mod mls_dependent_tests {
     /// Mints a signed kind-30443 `KeyPackage` event for `manager` (whose identity
     /// MUST be `keys`), via the real DM-2b publish path.
     async fn kp_event(manager: &CircleManager, keys: &Keys, relays: &[String]) -> nostr::Event {
-        build_kp_maintenance_events(manager.session(), keys, relays, None)
+        build_kp_maintenance_events(manager.session(), keys, relays, None, None)
             .await
             .expect("build key package event")
             .event

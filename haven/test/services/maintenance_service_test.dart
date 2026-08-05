@@ -14,6 +14,7 @@ class _RecordingRelay extends MockRelayService {
   int healthCalls = 0;
   int retractCalls = 0;
   bool throwOnHealth = false;
+  bool throwOnKp = false;
 
   /// The exact `identitySecretBytes` reference passed to the last KP call, so
   /// the test can assert the orchestrator scrubbed it afterwards.
@@ -26,23 +27,26 @@ class _RecordingRelay extends MockRelayService {
     relayListRetracted: true,
   );
 
-  KeyPackageMaintenanceResult kpResult = const KeyPackageMaintenanceResult(
-    action: KeyPackageMaintenanceAction.republishedFreshD,
-    canonicalOnRelays: 2,
-    relayErrors: 1,
-  );
+  KeyPackageMaintenanceOutcome kpResult =
+      const KeyPackageMaintenancePublished(
+        relaysAcked: 2,
+        mintedFreshSlot: true,
+        respondersProbed: 2,
+        relayErrors: 1,
+      );
 
   /// Optional gate: when set, the KP call blocks on it (for overlap tests).
   Completer<void>? kpGate;
 
   @override
-  Future<KeyPackageMaintenanceResult> maintainKeyPackage({
+  Future<KeyPackageMaintenanceOutcome> maintainKeyPackage({
     required CircleManagerFfi circle,
     required List<int> identitySecretBytes,
   }) async {
     kpCalls++;
     capturedKpSecret = identitySecretBytes;
     if (kpGate != null) await kpGate!.future;
+    if (throwOnKp) throw StateError('kp boom');
     return kpResult;
   }
 
@@ -102,9 +106,11 @@ void main() {
       final result = await service.maintainKeyPackage();
 
       expect(relay.kpCalls, 1);
-      expect(result.action, KeyPackageMaintenanceAction.republishedFreshD);
-      expect(result.canonicalOnRelays, 2);
-      expect(result.relayErrors, 1);
+      expect(result, isA<KeyPackageMaintenancePublished>());
+      final published = result as KeyPackageMaintenancePublished;
+      expect(published.relaysAcked, 2);
+      expect(published.mintedFreshSlot, isTrue);
+      expect(published.relayErrors, 1);
     });
 
     test('scrubs the secret buffer after the call (Rule 9)', () async {
@@ -115,7 +121,8 @@ void main() {
         identitySecretBytes: () async => [9, 8, 7, 6, 5],
       );
 
-      await service.maintainKeyPackage();
+      final outcome = await service.maintainKeyPackage();
+      expect(outcome, isA<KeyPackageMaintenancePublished>());
 
       // The orchestrator copies the secret into a buffer it owns and
       // `fillRange`s it in `finally` — the reference the relay captured must
@@ -127,8 +134,9 @@ void main() {
           reason: 'secret buffer must be zeroized after the FFI consumes it');
     });
 
-    test('returns empty (never throws) when the handle factory throws',
-        () async {
+    test(
+        'reports a failure (never throws, never health) when the handle '
+        'factory throws', () async {
       final relay = _RecordingRelay();
       final service = MaintenanceService(
         relayService: relay,
@@ -139,12 +147,21 @@ void main() {
       final result = await service.maintainKeyPackage();
 
       expect(relay.kpCalls, 0);
-      expect(result.action, KeyPackageMaintenanceAction.alreadyHealthy);
-      expect(result.canonicalOnRelays, 0);
+      expect(result, isA<KeyPackageMaintenanceFailed>());
+      expect(
+        (result as KeyPackageMaintenanceFailed).kind,
+        KeyPackageFailureKind.tickErrored,
+      );
+      expect(
+        result.disposition,
+        KeyPackageRetryDisposition.retryLater,
+        reason: 'a broken local handle is worth retrying, but not in a loop',
+      );
     });
 
-    test('returns empty (never throws) when the secret fetch throws',
-        () async {
+    test(
+        'reports identityUnavailable (never health) when the secret fetch '
+        'throws', () async {
       final relay = _RecordingRelay();
       final service = MaintenanceService(
         relayService: relay,
@@ -155,7 +172,77 @@ void main() {
       final result = await service.maintainKeyPackage();
 
       expect(relay.kpCalls, 0);
-      expect(result.canonicalOnRelays, 0);
+      expect(result, isA<KeyPackageMaintenanceFailed>());
+      expect(
+        (result as KeyPackageMaintenanceFailed).kind,
+        KeyPackageFailureKind.identityUnavailable,
+        reason: 'no secret to sign with is not the same failure as a broken '
+            'FFI call, and does not warrant the same retry',
+      );
+      expect(
+        result.disposition,
+        KeyPackageRetryDisposition.awaitUserAction,
+      );
+    });
+
+    test('reports tickErrored (never health) when the relay call throws',
+        () async {
+      final relay = _RecordingRelay()..throwOnKp = true;
+      final service = MaintenanceService(
+        relayService: relay,
+        circleManagerFactory: () async => _FakeCircleManager(),
+        identitySecretBytes: () async => [1, 2, 3],
+      );
+
+      final result = await service.maintainKeyPackage();
+
+      expect(result, isA<KeyPackageMaintenanceFailed>());
+      expect(
+        (result as KeyPackageMaintenanceFailed).kind,
+        KeyPackageFailureKind.tickErrored,
+      );
+    });
+
+    test('passes a relay-reported failure straight through', () async {
+      // The relay layer classifies the FFI counters; the orchestrator must not
+      // launder that verdict into anything softer on its way out.
+      final relay = _RecordingRelay()
+        ..kpResult = const KeyPackageMaintenanceFailed(
+          KeyPackageFailureKind.publishNotAcked,
+          relayErrors: 1,
+        );
+      final service = MaintenanceService(
+        relayService: relay,
+        circleManagerFactory: () async => _FakeCircleManager(),
+        identitySecretBytes: () async => [1, 2, 3],
+      );
+
+      final result = await service.maintainKeyPackage();
+
+      expect(result, isA<KeyPackageMaintenanceFailed>());
+      expect(
+        (result as KeyPackageMaintenanceFailed).kind,
+        KeyPackageFailureKind.publishNotAcked,
+      );
+    });
+
+    test('scrubs the secret buffer even when the tick fails (Rule 9)',
+        () async {
+      // Fail-soft must not cost the scrub: the `finally` runs on the failure
+      // path too, or a failing relay would leave the secret in the Dart heap.
+      final relay = _RecordingRelay()..throwOnKp = true;
+      final service = MaintenanceService(
+        relayService: relay,
+        circleManagerFactory: () async => _FakeCircleManager(),
+        identitySecretBytes: () async => [3, 1, 4, 1, 5],
+      );
+
+      final outcome = await service.maintainKeyPackage();
+      expect(outcome, isA<KeyPackageMaintenanceFailed>());
+
+      final captured = relay.capturedKpSecret;
+      expect(captured, isNotNull);
+      expect(captured!.every((b) => b == 0), isTrue);
     });
   });
 

@@ -261,6 +261,7 @@ async fn build_real_circle(
         &bob_keys,
         &["wss://kp.example.com".to_string()],
         None,
+        None,
     )
     .await
     .expect("bob key package")
