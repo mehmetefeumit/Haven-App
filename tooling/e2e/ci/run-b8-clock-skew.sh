@@ -56,6 +56,16 @@
 # Same evidence-vs-finding split B1, B5, B6 and B9 use. EVIDENCE is printed on
 # every run, green or red; it is a standing record of a live residual defect.
 #
+# CAVEAT (2026-08-05) on the last two bullets above. They describe RECEIVER-side
+# costs, and a NIP-40-enforcing relay refuses a born-expired event at INGEST —
+# so on this hermetic relay there is no accepted event for the receiver gate or
+# the cursor window to act on, and those two measurements do not run. The drive
+# says so explicitly via `[b8] EVIDENCE backward-skew-readside` rather than
+# skipping them in silence, which would leave the lane's output looking as
+# though they had been checked and found clean. Both remain covered by unit
+# tests; re-homing them somewhere they can execute end-to-end is open work
+# tracked in docs/CI_HARDENING_BACKLOG.md.
+#
 # ## Why the clock is moved from HERE and not from Dart
 #
 # The app process cannot set the system clock, and a Dart-side fake would test
@@ -273,8 +283,11 @@ run_self_test() {
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
 
-  # THE HEALTHY RUN: every jump landed, every gating oracle held, and the two
-  # residual delivery costs were recorded as EVIDENCE. This is what the lane
+  # THE HEALTHY RUN: every jump landed, every gating oracle held, and the
+  # residual delivery costs were recorded as EVIDENCE. Both skew directions
+  # bottom out the same way against a NIP-40-enforcing relay — the fast clock's
+  # event is too far in the future, the slow clock's is born already expired —
+  # so both are refused at ingest and neither is gated. This is what the lane
   # must read as green.
   printf '%s\n' \
     '08-03 04:41:02.001  1234  1300 I flutter : [b8] phase 0/5 complete' \
@@ -291,11 +304,12 @@ run_self_test() {
     '08-03 04:43:34.001  1234  1300 I flutter : [b8] OK peer-single-source-silent' \
     '08-03 04:43:35.001  1234  1300 I flutter : [b8] OK peer-corroborated' \
     '08-03 04:43:36.001  1234  1300 I flutter : [b8] OK surface-behind' \
-    '08-03 04:43:50.001  1234  1300 I flutter : [b8] EVIDENCE backward-skew-receive: a correctly-clocked peer discards it' \
+    '08-03 04:43:50.001  1234  1300 I flutter : [b8] EVIDENCE backward-skew-publish: born already expired, refused at ingest' \
+    '08-03 04:43:51.001  1234  1300 I flutter : [b8] EVIDENCE backward-skew-readside: retention/receive/catch-up not measurable' \
     '08-03 04:44:03.001  1234  1300 I flutter : [b8] REQ_CLOCK 4 0' \
     '08-03 04:44:33.001  1234  1300 I flutter : [b8] CLOCK_OBSERVED 4 21600' \
     '08-03 04:44:50.001  1234  1300 I flutter : [b8] OK surface-distinct' \
-    '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=0 evidence=2' \
+    '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=0 evidence=3' \
     > "${tmp}/green.log"
 
   # (1) All four requests are seen, in order, exactly once.
@@ -331,8 +345,8 @@ run_self_test() {
     fail=1
   fi
   got="$(evidence_lines "${tmp}/green.log" | wc -l | tr -d ' ')"
-  if [[ "${got}" != "2" ]]; then
-    echo "SELF-TEST FAIL (4b): expected 2 evidence lines on the healthy log," \
+  if [[ "${got}" != "3" ]]; then
+    echo "SELF-TEST FAIL (4b): expected 3 evidence lines on the healthy log," \
          "got ${got} — the delivery cost this lane RECORDS is not being read" >&2
     fail=1
   fi

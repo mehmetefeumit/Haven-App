@@ -330,12 +330,35 @@ class ClockSkewDetector {
 
   /// Records a publish that threw.
   ///
-  /// Raises the relay signal when the error carries
-  /// [deviceClockRejectedToken]; leaves the current verdict untouched
-  /// otherwise, because an ordinary transport failure says nothing either way
-  /// about the clock — clearing the verdict there would let one dropped
-  /// connection hide a clock that is still wrong.
+  /// Raises the relay signal when the error is a [RelayClockRejectionException]
+  /// or carries [deviceClockRejectedToken]; leaves the current verdict
+  /// untouched otherwise, because an ordinary transport failure says nothing
+  /// either way about the clock — clearing the verdict there would let one
+  /// dropped connection hide a clock that is still wrong.
+  ///
+  /// The typed branch makes this method total over the error vocabulary its own
+  /// service layer actually throws. [RelayClockRejectionException.toString]
+  /// deliberately does not embed [deviceClockRejectedToken] — the token lives
+  /// in a field so the relay layer needs no dependency on this enum — so
+  /// [complaintFromError] cannot parse one out of it. A caller that reaches for
+  /// the generic entry point with the typed exception in hand would otherwise
+  /// drop the classification silently. Production catches the typed exception
+  /// first and calls [recordPublishClockRejection] directly; this is the
+  /// backstop for every other caller, not a replacement for that call site.
+  ///
+  /// The two branches differ on ONE input, deliberately: an *unrecognised*
+  /// token. The typed branch degrades it to
+  /// [DeviceClockComplaint.unspecified] (a fault the relays typed as a clock
+  /// complaint is still a clock complaint, whatever direction word it used),
+  /// while the text branch stays silent (arbitrary error prose must not be
+  /// read as a verdict). Not reachable in production — the token is built from
+  /// a [DeviceClockComplaint]'s `name`, a closed enum — so this is a contract
+  /// for future wire tokens, not a live divergence.
   void recordPublishError(Object error) {
+    if (error is RelayClockRejectionException) {
+      recordPublishClockRejection(error.complaintToken);
+      return;
+    }
     final complaint = complaintFromError(error);
     if (complaint == null) return;
     _setRelayComplaint(complaint);

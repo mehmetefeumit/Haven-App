@@ -294,6 +294,63 @@ void main() {
       expect(detector.status.signal, ClockSkewSignal.relayRejectedTimestamp);
     });
 
+    test('the generic entry point still classifies the TYPED rejection', () {
+      // `RelayClockRejectionException.toString()` is
+      // `'RelayClockRejectionException(device clock ahead)'` — it carries no
+      // `haven.clock.device_clock_rejected:` marker, because the token lives in
+      // a field so the relay layer needs no dependency on this enum. So the
+      // text parser cannot see it, and a caller that hands the typed exception
+      // to the generic entry point used to drop the classification in silence.
+      //
+      // That silence is not hypothetical: it is exactly what made the B8 lane
+      // report three findings (verdict, surface, copy) against production code
+      // that was correct — the drive had copied the publish call site and read
+      // the token out of `toString()`. Production catches the typed exception
+      // first and never relied on this path; this pins the backstop so the
+      // next caller to reach for it cannot lose the verdict the same way.
+      final detector = ClockSkewDetector();
+      addTearDown(detector.dispose);
+
+      const error = RelayClockRejectionException('ahead');
+      expect(
+        ClockSkewDetector.complaintFromError(error),
+        isNull,
+        reason: 'the marker is deliberately absent from toString()',
+      );
+
+      detector.recordPublishError(error);
+
+      expect(detector.status.signal, ClockSkewSignal.relayRejectedTimestamp);
+      expect(detector.status.complaint, DeviceClockComplaint.ahead);
+    });
+
+    test('the typed rejection carries the slow direction through too', () {
+      final detector = ClockSkewDetector();
+      addTearDown(detector.dispose);
+
+      detector.recordPublishError(const RelayClockRejectionException('behind'));
+
+      expect(detector.status.complaint, DeviceClockComplaint.behind);
+    });
+
+    test('an unknown typed token degrades to unspecified, not silence', () {
+      // Not reachable from production today — NostrRelayService builds the
+      // token from `DeviceClockComplaint.name`, a closed enum — so this pins
+      // the CONTRACT rather than a live path: if a future wire token arrives
+      // that this build does not know, the fault must still surface as "the
+      // clock is wrong, direction unknown" rather than vanish. Degrading
+      // loudly beats dropping it.
+      final detector = ClockSkewDetector();
+      addTearDown(detector.dispose);
+
+      detector.recordPublishError(
+        const RelayClockRejectionException('sideways'),
+      );
+
+      expect(detector.status.signal, ClockSkewSignal.relayRejectedTimestamp);
+      expect(detector.status.complaint, DeviceClockComplaint.unspecified);
+    });
+
     test('two relays disagreeing about direction collapse to unspecified', () {
       final detector = ClockSkewDetector();
       addTearDown(detector.dispose);

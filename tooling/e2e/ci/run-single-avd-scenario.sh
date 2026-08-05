@@ -79,37 +79,115 @@ attempt_slice_after() {
 }
 
 # -----------------------------------------------------------------
-# guest_has_default_route <text> — exit 0 iff <text> (the guest's
-# /proc/net/route) carries a usable default route.
+# guest_can_route_to <text> <ipv4> — exit 0 iff <text> (the guest's
+# /proc/net/route) carries a route that covers <ipv4>.
 #
 # `sys.boot_completed=1` is the ONLY readiness signal the emulator action waits
 # for, and it is not the one that matters here. It fires while the guest's
-# network is still coming up: on a COLD boot the virtio-wifi interface has to
-# associate and take a DHCP lease afterwards, and until it does the guest has
-# no default route at all. A `connect()` to the host-loopback alias then fails
-# instantly with ENETUNREACH (errno 101) rather than blocking, so nothing in the
-# app retries it — in CI run 30925179141 the e2e_android live-sync lane's
+# network is still coming up: on a COLD boot the interface has to come up and
+# take its lease afterwards, and until it does the guest has no route to the
+# relay at all. A `connect()` to the host-loopback alias then fails instantly
+# with ENETUNREACH (errno 101) rather than blocking, so nothing in the app
+# retries it — in CI run 30925179141 the e2e_android live-sync lane's
 # `setUpAll` died on exactly that, two seconds into the drive, while its
 # sibling poll lane won the same race on the same cold boot.
 #
+# THE INVARIANT IS REACHABILITY OF THE RELAY, NOT THE EXISTENCE OF A DEFAULT
+# ROUTE. This predicate used to demand `Destination == 00000000` with a non-null
+# gateway, and that is a different — and wrong — question. `ENETUNREACH` is what
+# the kernel returns when NO route matches the destination; a route that covers
+# the destination is exactly what prevents it, whether or not it is the default
+# one. On the api-34 google_apis image the guest settles with on-link routes and
+# no default route at all:
+#
+#   eth0   0000000A / 000000FF  ->  10.0.0.0/8    RTF_UP
+#   wlan0  0002000A / 00FFFFFF  ->  10.0.2.0/24   RTF_UP
+#
+# 10.0.2.2 is inside BOTH, so the guest could reach the relay — and the old
+# predicate rejected it anyway. In CI run 30964250098 that failed five lanes
+# (e2e_android poll + live-sync, e2e_integration, e2e_relay_customization,
+# e2e_profile_android) with an identical table on every boot: not a race, a
+# gate that could never pass. Fixture (6b) below had encoded the same mistake,
+# asserting that this reachable table must read as NOT ready, so `--self-test`
+# ratified the bug instead of catching it.
+#
 # It has to be `/proc/net/route`: it exists on every Android image, needs no
 # toybox applet, and reports the kernel's own routing state rather than a
-# framework's opinion of it. Format is one route per line, tab-separated:
+# framework's opinion of it. Format is one route per line, tab-separated, with
+# addresses as LITTLE-ENDIAN hex:
 #
 #   Iface  Destination  Gateway   Flags  RefCnt  Use  Metric  Mask  ...
 #   wlan0  00000000     0202000A  0003   0       0    0       00000000
 #
-# A default route is `Destination == 00000000`. Loopback is excluded (it is up
-# from the first instant and would make this vacuous), and a null Gateway is
-# excluded because an on-link default with no next hop cannot reach the host
-# alias. Pure text inspection: takes no device and is unit-tested below.
-guest_has_default_route() {
-  awk '
-    NR == 1 { next }                                   # header
-    $1 == "lo" { next }                                # up from boot: vacuous
-    $2 == "00000000" && $3 != "00000000" { found = 1 }
-    END { exit(found ? 0 : 1) }
-  ' <<<"$1"
+# Loopback is excluded (it is up from the first instant and would make this
+# vacuous), and RTF_UP (0x1) must be set — a route on a downed interface routes
+# nothing. Pure text inspection: takes no device and is unit-tested below.
+#
+# Deliberately pure bash rather than awk arithmetic: `strtonum()` and `and()`
+# are gawk extensions, and `/usr/bin/awk` on the Ubuntu runners is mawk, which
+# has neither. Bash's own `$(( ))` has the bitwise operators and is always
+# present, so the predicate cannot silently degrade on a different runner image.
+
+# _le_hex_to_u32 <8-hex-chars> — decode one little-endian /proc/net/route field.
+_le_hex_to_u32() {
+  local h="$1"
+  [[ "${h}" =~ ^[0-9A-Fa-f]{8}$ ]] || return 1
+  printf '%u' $(( (16#${h:6:2} << 24) | (16#${h:4:2} << 16) \
+                | (16#${h:2:2} << 8)  |  16#${h:0:2} ))
+}
+
+# _ipv4_to_u32 <a.b.c.d> — 1 if the argument is not a dotted-quad IPv4.
+# Octets must be `0` or start with a non-zero digit. Bash arithmetic reads a
+# leading-zero literal as OCTAL, so a permissive pattern would decode
+# `010.0.2.2` as 8.0.2.2 and quietly wait for a route to a network nobody asked
+# about — and `08`/`09` would emit a raw `value too great for base` instead.
+# Rejecting the form outright is the honest answer: it is not a spelling this
+# harness accepts, and "cannot evaluate" is a verdict the caller already handles.
+_ipv4_to_u32() {
+  local ip="$1" a b c d oct='(0|[1-9][0-9]*)'
+  IFS=. read -r a b c d <<<"${ip}"
+  [[ "${a}" =~ ^${oct}$ && "${b}" =~ ^${oct}$ \
+  && "${c}" =~ ^${oct}$ && "${d}" =~ ^${oct}$ ]] || return 1
+  (( a <= 255 && b <= 255 && c <= 255 && d <= 255 )) || return 1
+  printf '%u' $(( (a << 24) | (b << 16) | (c << 8) | d ))
+}
+
+guest_can_route_to() {
+  local table="$1" target="$2" tgt iface dest gw flags mask dnum mnum
+  tgt="$(_ipv4_to_u32 "${target}")" || return 1
+  while read -r iface dest gw flags _ _ _ mask _; do
+    [[ -z "${iface}" || "${iface}" == "Iface" || "${iface}" == "lo" ]] && continue
+    # Anything that is not three well-formed hex fields is adb noise ("device
+    # offline", "cat: ... No such file"), i.e. not-ready — never a match.
+    [[ "${dest}" =~ ^[0-9A-Fa-f]{8}$ && "${mask}" =~ ^[0-9A-Fa-f]{8}$ \
+    && "${flags}" =~ ^[0-9A-Fa-f]+$ ]] || continue
+    (( 16#${flags} & 1 )) || continue                  # RTF_UP
+    dnum="$(_le_hex_to_u32 "${dest}")" || continue
+    mnum="$(_le_hex_to_u32 "${mask}")" || continue
+    # `if …; then return 0; fi` rather than `(( … )) && return 0`: the latter is
+    # a failing command at the end of a loop body whenever the row does not
+    # match, which is only safe because every current caller happens to invoke
+    # this from an `if` condition (where errexit is suspended). Spelling the
+    # branch out keeps it safe from any caller.
+    if (( (tgt & mnum) == (dnum & mnum) )); then
+      return 0
+    fi
+  done <<<"${table}"
+  return 1
+}
+
+# relay_host_ipv4 <ws-url> — the dotted-quad host of <ws-url>, or empty when the
+# URL names a host that is not a literal IPv4. The gate can only reason about
+# addresses (a name would need the guest's resolver, which is a different
+# readiness question), so a non-literal host means "cannot evaluate" and the
+# caller skips the wait rather than inventing a verdict.
+relay_host_ipv4() {
+  local url="$1" hostport host
+  hostport="${url#*://}"
+  hostport="${hostport%%/*}"
+  host="${hostport%%:*}"
+  _ipv4_to_u32 "${host}" >/dev/null 2>&1 || return 0
+  printf '%s' "${host}"
 }
 
 # is_connect_flake <drive-log> — exit 0 (retryable) iff the drive died in
@@ -287,57 +365,110 @@ run_self_test() {
   fi
 
   # ---------------------------------------------------------------
-  # (6) guest_has_default_route — the cold-boot network gate.
+  # (6) guest_can_route_to — the cold-boot network gate.
+  #
+  # Every fixture targets 10.0.2.2, the host-loopback alias the relay listens
+  # on, because that address — not "a default route" — is what the gate exists
+  # to prove reachable.
   # ---------------------------------------------------------------
   local hdr='Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask		MTU	Window	IRTT'
 
   # (6a) THE READY SHAPE: wlan0 default route via a real gateway.
-  if ! guest_has_default_route "${hdr}
+  if ! guest_can_route_to "${hdr}
 wlan0	00000000	0202000A	0003	0	0	0	00000000	0	0	0
-wlan0	0002000A	00000000	0001	0	0	0	00FFFFFF	0	0	0"; then
+wlan0	0002000A	00000000	0001	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
     echo "SELF-TEST FAIL (6a): a wlan0 default route must read as ready" >&2
     fail=1
   fi
 
-  # (6b) THE FAILING SHAPE, and the one that actually cost a CI run: the
-  # interface is up with an on-link route but has NOT taken its lease yet, so
-  # there is no default route and every connect() is ENETUNREACH.
-  if guest_has_default_route "${hdr}
-wlan0	0002000A	00000000	0001	0	0	0	00FFFFFF	0	0	0"; then
-    echo "SELF-TEST FAIL (6b): an on-link route with no default must read as" \
-         "NOT ready — this is the state the lane drove into" >&2
+  # (6b) THE REGRESSION FIXTURE — the settled api-34 table verbatim from CI run
+  # 30964250098, where the guest carries on-link routes and NO default route.
+  # 10.0.2.2 is inside both 10.0.0.0/8 and 10.0.2.0/24, so connect() does NOT
+  # return ENETUNREACH and the lane must be allowed to drive. The predicate this
+  # replaced rejected exactly this table and cost five lanes; the fixture that
+  # stood here asserted the rejection was correct, which is why --self-test
+  # stayed green through it. If this ever flips back to NOT ready, the gate has
+  # gone back to asking about default routes instead of about the relay.
+  if ! guest_can_route_to "${hdr}
+eth0	0000000A	00000000	0001	0	0	0	000000FF	0	0	0
+wlan0	0002000A	00000000	0001	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
+    echo "SELF-TEST FAIL (6b): on-link routes covering 10.0.2.2 must read as" \
+         "READY — this is the settled table CI run 30964250098 rejected" >&2
     fail=1
   fi
 
-  # (6c) THE VACUITY CASE. Loopback is up from the first instant of boot and
-  # carries no default route, but a predicate that merely looked for
-  # "00000000 somewhere" would pass on it and gate nothing at all.
-  if guest_has_default_route "${hdr}
-lo	00000000	00000000	0001	0	0	0	00000000	0	0	0"; then
-    echo "SELF-TEST FAIL (6c): loopback must never satisfy the gate" >&2
+  # (6c) THE STATE THE LANE ACTUALLY DROVE INTO (run 30925179141): the guest is
+  # up enough for adb but has no route to the relay at all, so setUpAll died on
+  # ENETUNREACH two seconds in. This is the case the gate exists for, and the
+  # corrected predicate must still catch it.
+  if guest_can_route_to "${hdr}
+lo	0000007F	00000000	0001	0	0	0	000000FF	0	0	0" 10.0.2.2; then
+    echo "SELF-TEST FAIL (6c): loopback alone must read as NOT ready" >&2
     fail=1
   fi
 
-  # (6d) A default route with a NULL gateway cannot reach the host alias, so it
-  # is not readiness either.
-  if guest_has_default_route "${hdr}
-wlan0	00000000	00000000	0001	0	0	0	00000000	0	0	0"; then
-    echo "SELF-TEST FAIL (6d): a default route with no next hop is not ready" >&2
+  # (6d) A route that is up but covers a DIFFERENT network is not readiness:
+  # matching must be on the relay address, never on "some route exists".
+  if guest_can_route_to "${hdr}
+wlan0	0001A8C0	00000000	0001	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
+    echo "SELF-TEST FAIL (6d): a 192.168.1.0/24 route must not satisfy a" \
+         "10.0.2.2 target" >&2
     fail=1
   fi
 
-  # (6e) Empty / header-only / error output (adb raced the shell, the device
+  # (6e) A covering route on a DOWNED interface routes nothing. RTF_UP (0x1) is
+  # the kernel's own opinion of whether the row is live, so it is a veto.
+  if guest_can_route_to "${hdr}
+wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
+    echo "SELF-TEST FAIL (6e): a covering route without RTF_UP is not ready" >&2
+    fail=1
+  fi
+
+  # (6f) Empty / header-only / error output (adb raced the shell, the device
   # went offline) must read as NOT ready — fail closed, then keep waiting.
-  if guest_has_default_route ""; then
-    echo "SELF-TEST FAIL (6e): empty route output must read as NOT ready" >&2
+  if guest_can_route_to "" 10.0.2.2; then
+    echo "SELF-TEST FAIL (6f): empty route output must read as NOT ready" >&2
     fail=1
   fi
-  if guest_has_default_route "${hdr}"; then
-    echo "SELF-TEST FAIL (6e2): a header-only table must read as NOT ready" >&2
+  if guest_can_route_to "${hdr}" 10.0.2.2; then
+    echo "SELF-TEST FAIL (6f2): a header-only table must read as NOT ready" >&2
     fail=1
   fi
-  if guest_has_default_route "cat: /proc/net/route: No such file or directory"; then
-    echo "SELF-TEST FAIL (6e3): an error string must read as NOT ready" >&2
+  if guest_can_route_to "cat: /proc/net/route: No such file or directory" 10.0.2.2; then
+    echo "SELF-TEST FAIL (6f3): an error string must read as NOT ready" >&2
+    fail=1
+  fi
+  if guest_can_route_to "adb: device offline" 10.0.2.2; then
+    echo "SELF-TEST FAIL (6f4): adb noise must read as NOT ready" >&2
+    fail=1
+  fi
+
+  # (6g) relay_host_ipv4 — the gate can only reason about literal addresses.
+  if [[ "$(relay_host_ipv4 'ws://10.0.2.2:7777')" != "10.0.2.2" ]]; then
+    echo "SELF-TEST FAIL (6g): the relay host must parse out of the ws:// URL" >&2
+    fail=1
+  fi
+  if [[ -n "$(relay_host_ipv4 'ws://localhost:7777')" ]]; then
+    echo "SELF-TEST FAIL (6g2): a non-literal host must report 'cannot" \
+         "evaluate' (empty), never a bogus address" >&2
+    fail=1
+  fi
+  # (6h) LEADING-ZERO OCTETS. Bash arithmetic reads `010` as OCTAL 8, so a
+  # permissive parser would silently wait for a route to 8.0.2.2 while claiming
+  # to be waiting for 10.0.2.2 — a gate watching the wrong network and saying
+  # nothing. `08`/`09` would additionally spray `value too great for base` on
+  # stderr. Neither is a spelling this harness accepts.
+  if [[ -n "$(relay_host_ipv4 'ws://010.0.2.2:7777')" ]]; then
+    echo "SELF-TEST FAIL (6h): a leading-zero octet must be refused, not" \
+         "reinterpreted as octal" >&2
+    fail=1
+  fi
+  if [[ -n "$(relay_host_ipv4 'ws://10.0.09.2:7777')" ]]; then
+    echo "SELF-TEST FAIL (6h2): an invalid octal octet must be refused" >&2
+    fail=1
+  fi
+  if [[ "$(relay_host_ipv4 'ws://10.0.0.2:7777')" != "10.0.0.2" ]]; then
+    echo "SELF-TEST FAIL (6h3): a legitimate bare 0 octet must still parse" >&2
     fail=1
   fi
 
@@ -345,7 +476,7 @@ wlan0	00000000	00000000	0001	0	0	0	00000000	0	0	0"; then
     echo "run-single-avd-scenario: SELF-TEST FAILED" >&2
     return 1
   fi
-  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried; app-failure check scoped to the final attempt; the cold-boot network gate reads a lease-less guest as NOT ready and is not satisfied by loopback)."
+  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried; app-failure check scoped to the final attempt; the network gate admits a guest whose on-link routes cover the relay, still rejects one with no route to it, and is satisfied by neither loopback, a foreign subnet, a downed interface, nor adb noise)."
   return 0
 }
 
@@ -533,46 +664,69 @@ echo "Phase 3/4 — Permissions ready."
 
 # -----------------------------------------------------------------
 # The guest network. Boot-completed is not network-ready (see
-# guest_has_default_route): on a cold boot the app can reach
+# guest_can_route_to): on a cold boot the app can reach
 # `flutter drive` over adb and still have no route to the relay,
 # which surfaces as an instant ENETUNREACH inside setUpAll rather
 # than as anything the harness would recognise as an infrastructure
-# fault. Gate here, where the message can say so, instead of paying
+# fault. Wait here, where the message can say so, instead of paying
 # for a whole drive to learn it.
 #
 # Waited for, not slept through: the wait ends the moment the route
 # appears, so a warm boot pays nothing.
+#
+# WARN-AND-DRIVE, NOT FAIL-CLOSED. This wait is a DIAGNOSTIC: it makes an
+# infrastructure fault legible, it does not make the network work. A readiness
+# heuristic that hard-fails can only ever be as correct as its model of the
+# guest's networking — and when that model was wrong (CI run 30964250098) the
+# hard failure turned five healthy lanes red without driving a single test.
+# Driving anyway costs one wasted drive in the genuinely-unready case, and the
+# drive's own ENETUNREACH is caught below and relabelled as infrastructure, so
+# the diagnostic survives while the false-red cannot recur. Skipped entirely
+# when the relay host is not a literal address: the resolver is a different
+# readiness question and inventing a verdict about it would gate on nothing.
 # -----------------------------------------------------------------
 readonly GUEST_NET_TIMEOUT_SECS="${GUEST_NET_TIMEOUT_SECS:-120}"
-echo "Waiting for the guest network on ${DEVICE} (up to ${GUEST_NET_TIMEOUT_SECS}s)..."
-net_waited=0
+RELAY_HOST_IP="$(relay_host_ipv4 "${RELAY_URL}")"
+readonly RELAY_HOST_IP
+# 0 = the predicate ran and never saw a covering route; 1 = it ran and did;
+# 2 = it never ran. Three states, not two, because the post-drive note below
+# draws a different conclusion from each and "skipped" must not masquerade as
+# "judged ready" — that would blame the predicate for a verdict it never gave.
 net_ready=0
-while (( net_waited < GUEST_NET_TIMEOUT_SECS )); do
-  # `|| true`d because adb itself fails while the device is still settling
-  # ("device offline"); an unreadable table is simply not-ready, which the
-  # predicate already reports, and the loop retries.
-  route_table="$(adb -s "${DEVICE}" shell cat /proc/net/route 2>&1 | tr -d '\r' || true)"
-  if guest_has_default_route "${route_table}"; then
-    net_ready=1
-    break
-  fi
-  sleep 2
-  net_waited=$(( net_waited + 2 ))
-done
-
-if (( net_ready == 1 )); then
-  echo "Guest network ready after ${net_waited}s:"
-  printf '%s\n' "${route_table}" | sed 's/^/  /'
+route_table=""
+if [[ -z "${RELAY_HOST_IP}" ]]; then
+  echo "Guest network: relay host in '${RELAY_URL}' is not a literal IPv4," \
+       "so there is no routing question to ask here — skipping the wait."
+  net_ready=2
 else
-  # Fail closed. Driving anyway is what produced the failure this gate exists
-  # for, and it costs a full drive to reach a message that blames the app.
-  echo "ERROR: the guest never obtained a default route within" \
-       "${GUEST_NET_TIMEOUT_SECS}s, so it cannot reach the relay at" \
-       "${RELAY_URL}. Driving now would fail inside the scenario's setUpAll" \
-       "with 'Network is unreachable' and read as a product failure." >&2
-  echo "---- guest routing table (last read) ----" >&2
-  printf '%s\n' "${route_table}" >&2
-  exit 1
+  echo "Waiting for a guest route to ${RELAY_HOST_IP} on ${DEVICE} (up to ${GUEST_NET_TIMEOUT_SECS}s)..."
+  net_waited=0
+  while (( net_waited < GUEST_NET_TIMEOUT_SECS )); do
+    # `|| true`d because adb itself fails while the device is still settling
+    # ("device offline"); an unreadable table is simply not-ready, which the
+    # predicate already reports, and the loop retries.
+    route_table="$(adb -s "${DEVICE}" shell cat /proc/net/route 2>&1 | tr -d '\r' || true)"
+    if guest_can_route_to "${route_table}" "${RELAY_HOST_IP}"; then
+      net_ready=1
+      break
+    fi
+    sleep 2
+    net_waited=$(( net_waited + 2 ))
+  done
+
+  if (( net_ready == 1 )); then
+    echo "Guest network ready after ${net_waited}s — a live route covers ${RELAY_HOST_IP}:"
+    printf '%s\n' "${route_table}" | sed 's/^/  /'
+  else
+    echo "WARN: no live guest route covers ${RELAY_HOST_IP} after" \
+         "${GUEST_NET_TIMEOUT_SECS}s, so the relay at ${RELAY_URL} may be" \
+         "unreachable. Driving anyway — a drive that dies on 'Network is" \
+         "unreachable' is reported below as infrastructure, not as a product" \
+         "failure. If the suite passes, this warning was the heuristic being" \
+         "wrong about the guest, not the guest being broken." >&2
+    echo "---- guest routing table (last read) ----" >&2
+    printf '%s\n' "${route_table}" >&2
+  fi
 fi
 
 # -----------------------------------------------------------------
@@ -893,6 +1047,35 @@ fi
 readonly FINAL_ATTEMPT_LOG=/tmp/flutter-drive.final-attempt.log
 attempt_slice_after /tmp/flutter-drive.log "${final_attempt_start:-0}" \
   > "${FINAL_ATTEMPT_LOG}"
+
+# The other half of the warn-and-drive network gate. If the drive really did
+# die because the guest had no route to the relay, say so HERE, where the
+# evidence is, instead of leaving it to read as a product failure. This only
+# ever relabels: the exit code is untouched below, so an unreachable relay is
+# still a red lane — it is simply a red lane that names its own cause.
+if grep -aqF 'Network is unreachable' "${FINAL_ATTEMPT_LOG}" 2>/dev/null; then
+  case "${net_ready}" in
+    1) net_gate_note="the readiness wait had judged the guest READY, so the"
+       net_gate_note+=" predicate's model of this image is wrong and needs"
+       net_gate_note+=" widening" ;;
+    2) net_gate_note="the readiness wait was SKIPPED (the relay host is not a"
+       net_gate_note+=" literal IPv4), so no predicate is implicated — look at"
+       net_gate_note+=" name resolution on the guest, not at guest_can_route_to" ;;
+    *) net_gate_note="the readiness wait warned about exactly this before"
+       net_gate_note+=" driving" ;;
+  esac
+  echo "NOTE: the drive failed with 'Network is unreachable' — the guest had" \
+       "no route to the relay at ${RELAY_URL}. This is an INFRASTRUCTURE" \
+       "fault (the emulator's network never came up), not a product defect;" \
+       "${net_gate_note}." >&2
+  # `|| true` is NOT cosmetic under `set -o pipefail`: `head -3` closes the pipe
+  # after three lines, grep dies of SIGPIPE, pipefail propagates 141, and errexit
+  # would abort the script HERE — before the app-side failure check below runs
+  # and before the real drive_rc is returned. Every sibling guards the same
+  # construct (drive-log-lib.sh's failure_evidence, run-b5's marker dump).
+  grep -aF 'Network is unreachable' "${FINAL_ATTEMPT_LOG}" 2>/dev/null \
+    | head -3 >&2 || true
+fi
 if (( drive_rc == 0 )) && drive_log_reports_test_failure "${FINAL_ATTEMPT_LOG}"; then
   echo "ERROR: flutter drive for ${SCENARIO_FILE} exited 0, but the ON-DEVICE" \
        "suite reported failures. This is the integration_test/integrationDriver" \

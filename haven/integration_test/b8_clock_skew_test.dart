@@ -45,8 +45,19 @@
 /// failure, and a slow clock is inferred from peers' own timestamps read from
 /// INSIDE the MLS ciphertext, keyed by authenticated member id and requiring
 /// two distinct members to agree. Both raise a user-visible banner, and the
-/// two faults say different things. Those five properties are this lane's
-/// gate; each one goes red if the corresponding piece of the fix is reverted.
+/// two faults say different things. Those SEVEN properties — the seven
+/// `[b8] OK <name>` markers run-b8-clock-skew.sh requires, enumerated in its
+/// header — are this lane's gate; each one goes red if the corresponding piece
+/// of the fix is reverted.
+///
+/// One nuance on the recording side, because getting it wrong cost this lane a
+/// CI run: the two skew DIRECTIONS are symmetric and both are EVIDENCE. A fast
+/// clock's event is refused as too-far-future; a slow clock's is refused as
+/// already-expired, because Haven stamps `expiration = created_at + retention`
+/// with both values from the skewed clock. Neither has a local lever short of
+/// clock correction, so neither is gated. What IS still gated on the slow side
+/// is the refusal being the born-expired one: any OTHER rejection reason is a
+/// regression and fails the lane.
 ///
 /// ## Why one device is enough, and what breaks the clock symmetry
 ///
@@ -102,7 +113,7 @@ import 'package:haven/src/rust/api.dart'
         MemberKeyPackageFfi,
         RelayManagerFfi;
 import 'package:haven/src/services/clock_skew_detector.dart'
-    show ClockSkewDetector;
+    show ClockSkewDetector, DeviceClockComplaint;
 import 'package:haven/src/services/nostr_relay_service.dart'
     show NostrRelayService;
 import 'package:haven/src/widgets/location/clock_skew_banner.dart'
@@ -461,13 +472,29 @@ void main() {
 
       final prodError = prod.error;
       if (prodError != null) {
-        // Exactly what `LocationSharingService` does at its publish call site.
-        final token = ClockSkewDetector.complaintFromError(prodError)?.name;
-        if (token != null) {
-          relayDetector.recordPublishClockRejection(token);
-        } else {
-          relayDetector.recordPublishError(prodError);
-        }
+        // ONE call, no branch — deliberately. `recordPublishError` is total
+        // over the error vocabulary the relay layer actually throws: it routes
+        // a `RelayClockRejectionException` to `recordPublishClockRejection`
+        // using the typed field, and everything else through the text parser.
+        // The observable result is identical to production's call site
+        // (location_sharing_service.dart, `on RelayClockRejectionException` /
+        // `on Object`), which stays pinned by
+        // test/services/location_sharing_clock_skew_test.dart.
+        //
+        // Not a branch, because the branch is what rotted. This line used to be
+        // a hand-copy of that call site that read the token out of
+        // `complaintFromError(prodError)`. That parser scans
+        // `error.toString()` for `haven.clock.device_clock_rejected:`, and
+        // `RelayClockRejectionException.toString()` is
+        // `'RelayClockRejectionException(device clock <token>)'` — no marker,
+        // because the token is a FIELD precisely so the relay layer needs no
+        // dependency on the detector's enum. The parse returned null, the
+        // fallback ran, the verdict stayed `none`, and this lane reported three
+        // findings (verdict, surface, copy) against production code that was
+        // correct all along. A call site copied into a test is a call site that
+        // can rot away from the original in silence, so there is no longer a
+        // copy here to rot.
+        relayDetector.recordPublishError(prodError);
       }
       gate(
         kOkRejectionVerdict,
@@ -633,19 +660,75 @@ void main() {
         coords: _coordsSlow,
       );
       if (!slow.accepted) {
-        // GATED, not evidence: strfry's `rejectEventsOlderThanSeconds` is
-        // 94 608 000 s, so a -6 h `created_at` is well inside what the relay
-        // accepts. A refusal here would be a real, fixable regression.
-        record(
-          'backward-skew-publish',
-          'the relay refused a kind-445 from a device whose clock is '
-          '-${_skew.inHours}h ("${slow.rejection}").',
+        // REVERSES a recorded owner decision, on evidence that decision did not
+        // have. docs/CI_HARDENING_BACKLOG.md (OWNER DECISION, 2026-08-04) kept
+        // `backward-skew-publish` as a gate, reasoning that
+        // `rejectEventsOlderThanSeconds = 94 608 000` in tooling/e2e/strfry.conf
+        // means a -6 h `created_at` is accepted, so a refusal would be a real,
+        // fixable regression. That premise is wrong, and CI disproved it twice
+        // (runs 30925179141 and 30964250098, both `"invalid: event expired"`):
+        // strfry applies TWO independent write-time time checks, and NIP-40
+        // expiry is the other one — a separate ingest path with no knob in that
+        // config. Haven stamps `expiration = created_at + retention` with BOTH
+        // values from the skewed clock, so a -6 h event is born roughly 6 h
+        // expired and any NIP-40-honouring relay refuses it at ingest. The only
+        // lever is clock correction, exactly as for the +6 h case this lane
+        // already records as EVIDENCE. The backlog entry was corrected in the
+        // same change; do not re-tighten this from that doc's old text.
+        //
+        // So classify rather than gate wholesale: the born-expired refusal is
+        // the delivery cost, and ANY OTHER refusal (a rate limit, a duplicate,
+        // an auth failure, a bad signature, or `rejectEventsOlderThanSeconds`
+        // genuinely moving) is still a regression this lane must fail on — an
+        // unrecognised reason classifies as null and falls to `record()`, so
+        // this narrows the gate, it does not remove it.
+        final refusal = ClockSkewDetector.classifyRelayRejection(
+          slow.rejection,
         );
+        if (refusal == DeviceClockComplaint.behind) {
+          note(
+            'backward-skew-publish',
+            'a device whose clock is -${_skew.inHours}h cannot publish at all: '
+            'the event is born already expired (NIP-40 expiration = created_at '
+            '+ ${_expectedRetentionSecs}s, both from the skewed clock) and the '
+            'relay refuses it at ingest ("${slow.rejection}"). NOT GATED: the '
+            'expiration is derived inside the engine from the '
+            'message-retention component, so the only local lever is clock '
+            'correction, which is deferred.',
+          );
+        } else {
+          record(
+            'backward-skew-publish',
+            'the relay refused a kind-445 from a device whose clock is '
+            '-${_skew.inHours}h for a reason that is NOT the expected '
+            'born-expired one ("${slow.rejection}"). The born-expired refusal '
+            "is this lane's declared delivery cost; anything else is a real, "
+            'fixable regression.',
+          );
+        }
       }
       // Back to true time BEFORE reading: this is the whole point. The event
       // was minted at skewed time; every gate below now evaluates it against
       // a correct clock, which is what a real peer would do.
       await clock.request(4, 0);
+
+      if (!slow.accepted) {
+        // The read-side measurements below all start from an event the relay
+        // holds. Against a NIP-40-enforcing relay there is no such event: the
+        // refusal above happened at INGEST, so retention, receive and catch-up
+        // have nothing to measure. Say that, rather than skipping three
+        // EVIDENCE lines in silence and leaving the lane's output looking as
+        // though they had been checked and found clean.
+        note(
+          'backward-skew-readside',
+          'retention, receive and catch-up were NOT measured for the '
+          '-${_skew.inHours}h event: the relay refused it at ingest, so it '
+          'never reached the wire for a reader to miss. These three costs are '
+          'only observable against a relay that ACCEPTS a born-expired event '
+          'and drops it later; on this hermetic relay the loss happens one '
+          'step earlier and is already recorded as backward-skew-publish.',
+        );
+      }
 
       if (slow.accepted) {
         // --- 3a: is it still on the relay at all? --------------------------
@@ -656,10 +739,10 @@ void main() {
             'a location published by a -${_skew.inHours}h device is already '
             'expired the instant it is written (NIP-40 expiration = '
             'created_at + ${_expectedRetentionSecs}s, both from the skewed '
-            'clock) and the relay no longer serves it. The publisher saw a '
-            'successful OK-ack and reported success. NOT GATED: expiration '
-            'is derived from `created_at` inside the engine, so the only '
-            'local lever is clock correction, which is deferred.',
+            'clock) and the relay accepted it but no longer serves it. The '
+            'publisher saw a successful OK-ack and reported success. NOT '
+            'GATED: expiration is derived from `created_at` inside the engine, '
+            'so the only local lever is clock correction, which is deferred.',
           );
         } else {
           // --- 3b: does the cursor-anchored catch-up still fetch it? -------

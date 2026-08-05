@@ -177,6 +177,68 @@ readonly KILL_REASON='permissions revoked'
 # verdict rests on lives here so `--self-test` can exercise it hermetically.
 # ---------------------------------------------------------------------------
 
+# b5_record_poll <log> <found-ids-text> — append EXACTLY ONE line for this poll.
+#
+# Unconditional by contract, and that is the whole point. This write used to sit
+# inside the caller's "did we find anything?" branch, so the relay-poll log was
+# only ever written when a new location event appeared — i.e. only when the lane
+# was about to FAIL. On a passing run (no new events, which is precisely what B5
+# asserts) the file stayed 0 bytes, the mandatory secret scan classified it
+# UNUSABLE, returned rc=3, and the lane forced rc=1: B5 could not report PASS
+# with every oracle satisfied.
+#
+# Extracted here, above the `--self-test` dispatch, so the property is pinned
+# hermetically — the caller needs docker and a device, this does not.
+b5_record_poll() {
+  local log="${1:-}" found="${2:-}" count=0
+  if [[ -n "${found}" ]]; then
+    count="$(printf '%s\n' "${found}" | grep -ac . || true)"
+  fi
+  printf '%s poll: %s new location event(s) observed\n' \
+    "$(date -u +%H:%M:%S)" "${count:-0}" >> "${log}"
+}
+
+# b5_prepare_logs_for_scan <dir> — make <dir> safe to hand to the secret scanner
+# AND safe to upload, by ensuring every file left in it is a `*.log`.
+#
+# The scanner's directory walk only picks up `*.log`, so anything else would be
+# uploaded as a CI artefact WITHOUT being scanned — the hole this lane's own
+# workflow comment warns about for `diag.txt`.
+#
+# Non-empty files are promoted and therefore scanned. Empty ones are DELETED
+# rather than promoted, and that distinction is the whole point: to the scanner
+# every path is a caller ASSERTION that a capture happened, so a 0-byte input is
+# a hard rc=3. `relay-act2-new.ids` and its `.raw` are written only when a new
+# location event appears — this lane's FAILURE condition — so on a PASSING run
+# they are legitimately empty, and promoting them forced rc=1 on a green lane.
+# An empty intermediate has no bytes to leak and no evidence to keep.
+#
+# Scope, stated precisely because the obvious phrasing overclaims: this makes
+# every file the LANE CAPTURED scannable. It says nothing about files the guard
+# itself writes AFTERWARDS — `LEAK_DETECTED.txt` is created by `cleanup` on the
+# leak branch, after both this call and the scan, and is therefore uploaded
+# unscanned. That is deliberate and safe: its content is two fixed English lines
+# this script emits, not captured output, so there is nothing in it to scan.
+#
+# Extracted above the `--self-test` dispatch so the property is pinned
+# hermetically; it lived inline in `cleanup`, which no fixture can reach.
+b5_prepare_logs_for_scan() {
+  local dir="${1:-}" stray
+  [[ -d "${dir}" ]] || return 0
+  while IFS= read -r -d '' stray; do
+    if [[ -s "${stray}" ]]; then
+      mv -n -- "${stray}" "${stray}.log" 2>/dev/null || true
+      if [[ -e "${stray}" ]]; then
+        echo "WARN: could not promote ${stray} for scanning; deleting it rather" \
+             "than uploading it unscanned." >&2
+        rm -f -- "${stray}" || true
+      fi
+    else
+      rm -f -- "${stray}" || true
+    fi
+  done < <(find "${dir}" -type f ! -name '*.log' -print0 2>/dev/null)
+}
+
 # b5_has_marker <logfile> <marker> — 0 (true) when the marker appears.
 #
 # Substring match, not anchored: the same line reaches us either as raw
@@ -820,6 +882,63 @@ run_self_test() {
     "${tmp}/oracle-new.ids" 1 >/dev/null || rc=$?
   _case "an ACT2_DONE without the wedged field still passes" 0 "${rc}"
 
+  # --- the relay-poll capture must survive a PASSING run --------------------
+  #
+  # THE LANE-CANNOT-BE-GREEN FIXTURE. B5 passes when the relay sees NO new
+  # location event in the ACT 2 window, and the poll log used to be written only
+  # when one DID appear. So the passing run left a 0-byte log, the mandatory
+  # secret scan reported it UNUSABLE (rc=3), and the lane forced rc=1 — red on
+  # success, in both CI runs 30925179141 and 30964250098. If this ever regresses
+  # to a conditional write, B5 becomes unpassable again and this fixture is the
+  # only thing that says so without a device.
+  local poll_log="${tmp}/relay-poll.b5.log"
+  : > "${poll_log}"
+  b5_record_poll "${poll_log}" ""
+  _eq_case "a poll that finds nothing still writes its line" \
+    "1" "$(grep -ac . "${poll_log}" || true)"
+  _eq_case "…and the line records zero, not silence" \
+    "1" "$(grep -ac '0 new location event' "${poll_log}" || true)"
+  # Resolved here rather than via ${SECRET_SCAN}: that is declared with the rest
+  # of the config, BELOW the --self-test dispatch, so it does not exist yet.
+  local scanner
+  scanner="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scan-logs-for-secrets.sh"
+  _case "…so the scanner can read the log a PASSING lane leaves" \
+    0 "$(bash "${scanner}" "${poll_log}" >/dev/null 2>&1; echo $?)"
+
+  b5_record_poll "${poll_log}" "$(printf 'aa\nbb\n')"
+  _eq_case "a poll that finds events appends a second line" \
+    "2" "$(grep -ac . "${poll_log}" || true)"
+  _eq_case "…and counts them" \
+    "1" "$(grep -ac '2 new location event' "${poll_log}" || true)"
+
+  # --- the WHOLE LOG DIR must scan clean on a passing lane ------------------
+  #
+  # The fixtures above scan ONE file; `cleanup` scans the DIRECTORY. That gap
+  # is not academic — it is where the first version of this fix reintroduced
+  # the bug it was fixing. Promoting every non-`*.log` file so nothing is
+  # uploaded unscanned also promoted `relay-act2-new.ids` and its `.raw`, which
+  # are written ONLY when a new location event appears (the lane's failure
+  # condition) and are therefore 0 bytes on a GREEN run. Three empty
+  # assertions, scanner rc=3, `rc=1` on a passing lane.
+  local scandir="${tmp}/logdir"
+  mkdir -p "${scandir}"
+  printf '12:00:00 poll: 0 new location event(s) observed\n' \
+    > "${scandir}/relay-poll.b5.log"
+  printf 'drive output\n' > "${scandir}/drive1.log"
+  : > "${scandir}/relay-act2-new.ids"          # empty on a PASSING lane
+  : > "${scandir}/relay-act2-new.ids.raw"      # ditto
+  : > "${scandir}/relay-baseline.ids"          # ditto
+  printf 'deadbeef\n' > "${scandir}/relay-scan.tmp"   # has content -> must be scanned
+  b5_prepare_logs_for_scan "${scandir}"
+  _case "a PASSING lane's whole log dir still scans clean" \
+    0 "$(bash "${scanner}" "${scandir}" >/dev/null 2>&1; echo $?)"
+  _eq_case "…with every remaining file scannable (*.log)" \
+    "0" "$(find "${scandir}" -type f ! -name '*.log' | grep -ac . || true)"
+  _eq_case "…the non-empty intermediate kept, promoted and scanned" \
+    "1" "$(find "${scandir}" -name 'relay-scan.tmp.log' | grep -ac . || true)"
+  _eq_case "…and the empty ones dropped rather than asserted" \
+    "0" "$(find "${scandir}" -name 'relay-act2-new.ids*' | grep -ac . || true)"
+
   if (( fails != 0 )); then
     echo "run-b5-permission-revocation.sh --self-test: FAILED" >&2
     return 1
@@ -930,6 +1049,17 @@ cleanup() {
   fi
   docker logs "${STRFRY_CONTAINER}" > "${LOG_DIR}/strfry.final.log" 2>&1 \
     || true
+  # Everything in LOG_DIR is uploaded as a CI artefact, but the scanner's
+  # directory walk only picks up `*.log` (scan-logs-for-secrets.sh) — so the
+  # relay scratch and id files (`relay-scan.tmp`, `*.ids`, `*.raw`, `*.err`)
+  # were being uploaded UNSCANNED, the exact hole this lane's own workflow
+  # comment warns about for `diag.txt`. Closed here rather than by renaming
+  # every call site, so a future file cannot opt out by accident.
+  #
+  # Rules and rationale live on b5_prepare_logs_for_scan, which is above the
+  # --self-test dispatch so the "a passing lane must still scan clean" property
+  # is pinned by a fixture rather than only by this call site.
+  b5_prepare_logs_for_scan "${LOG_DIR}"
   echo "== Secret-leak scan over ${LOG_DIR} (Security Rule 6) =="
   bash "${SECRET_SCAN}" "${LOG_DIR}" || scan_rc=$?
   if (( scan_rc == 1 )); then
@@ -942,10 +1072,32 @@ cleanup() {
          "not uploaded." >&2
     rc=1
   elif (( scan_rc != 0 )); then
-    echo "ERROR: secret-leak guard could not scan the B5 logs" \
-         "(rc=${scan_rc}) — see the UNUSABLE line(s) above. Logs kept for" \
-         "triage." >&2
-    rc=1
+    # An unscannable log is only NEWS on a lane that otherwise succeeded. When
+    # the lane has already failed, the abort is why the capture is short or
+    # missing, and reporting it as a second, differently-worded ERROR buries the
+    # real cause under a downstream symptom — which is precisely what happened
+    # in CI runs 30925179141 and 30964250098, where `B5-LANE-FAIL` was followed
+    # by an rc=3 complaint about a relay-poll log the abort had prevented.
+    #
+    # The guard itself is NOT relaxed: the scan still runs unconditionally, and
+    # an unscannable log on a PASSING lane is still fatal. Only the reporting
+    # changes, and only in the direction of not overwriting a more specific rc
+    # with a less specific one. A leak (rc=1) escalates in both branches above
+    # regardless — that path is untouched.
+    if (( rc == 0 )); then
+      echo "ERROR: secret-leak guard could not scan the B5 logs" \
+           "(rc=${scan_rc}) — see the UNUSABLE line(s) above. The lane" \
+           "otherwise PASSED, so this is a real capture failure: an expected" \
+           "log was never written and the privacy scan therefore proved" \
+           "nothing. Logs kept for triage." >&2
+      rc=1
+    else
+      echo "NOTE: the secret-leak guard could not scan every B5 log" \
+           "(rc=${scan_rc}) because the lane aborted before those captures" \
+           "were written — see the UNUSABLE line(s) above and the" \
+           "B5-LANE-FAIL line for the actual failure. Preserving the original" \
+           "exit code ${rc}. Logs kept for triage." >&2
+    fi
   fi
   bash "${STOP_STRFRY}" >/dev/null 2>&1 || true
   exit "${rc}"
@@ -1036,6 +1188,20 @@ absorb_into_baseline() {
 # POLLED rather than read once at the end because a location event published
 # early in the window can EXPIRE before the window closes (created_at +
 # 228 s), and a single closing read would miss it entirely.
+# Every poll appends a line, INCLUDING the "0 new" ones. That is deliberate and
+# it is what makes this lane greenable at all.
+#
+# The write used to sit inside the `found` branch, so the file was only ever
+# written when a new location event appeared — i.e. only when the lane was about
+# to FAIL. On a passing run (no new events, which is the whole point of B5) the
+# file stayed 0 bytes, the mandatory secret scan in `cleanup` classified it
+# UNUSABLE and returned rc=3, and the lane forced rc=1. B5 could not report PASS
+# even with every oracle satisfied.
+#
+# Writing unconditionally also restores the invariant the scanner assumes and
+# b6/b9 already honour (run-b6-location-provider-toggle.sh, run-b9-network-
+# reconnect.sh both append on every iteration): an empty aux log means the
+# capture never ran, not that the run went well.
 poll_relay_for_new() {
   local scan="${LOG_DIR}/relay-scan.tmp"
   relay_scan "${scan}"
@@ -1046,10 +1212,8 @@ poll_relay_for_new() {
   if [[ -n "${found}" ]]; then
     printf '%s\n' "${found}" >> "${NEW_IDS}.raw"
     LC_ALL=C sort -u "${NEW_IDS}.raw" > "${NEW_IDS}"
-    printf '%s new location event(s) observed\n' \
-      "$(printf '%s\n' "${found}" | grep -ac . || true)" \
-      >> "${RELAY_POLL_LOG}"
   fi
+  b5_record_poll "${RELAY_POLL_LOG}" "${found}"
 }
 
 # wait_for_marker <marker> <timeout-secs> — 0 when the marker appears in the
@@ -1337,6 +1501,58 @@ echo "  relay baseline: ${baseline_ids_count:-0} ACT 1 location event(s)"
 # with the permission in whatever state `pm clear` chose.
 # ---------------------------------------------------------------------------
 echo "Phase 6/7 — clearing app state and re-asserting the revocation..."
+
+# ACT 1's `flutter drive` UNINSTALLED the package on its way out, so there is
+# nothing here to clear until it is put back.
+#
+# This is not obvious and it cost two CI runs. ACT 1 deliberately omits
+# `--keep-app-running` (Rule 14: do not leave a live MLS session behind for the
+# next job on this runner) — but `flutter drive`'s teardown does not merely stop
+# the app. `DriveCommand` calls `driverService.stop()` unconditionally, including
+# when the suite failed, and that runs `stopApp(...)` AND THEN
+# `uninstallApp(...)` (flutter_tools/lib/src/drive/drive_service.dart). By the
+# time this phase runs, `${PKG}` is gone from the device entirely.
+#
+# `pm clear` on an absent package takes AOSP's invalid-package fast path and
+# prints `Failed` — which is exactly what CI runs 30925179141 and 30964250098
+# showed, both returning in tens of milliseconds, far too fast for a real
+# force-stop plus data wipe. It also silently made the `pm revoke` and
+# `pm set-permission-flags` calls below no-ops against a package that did not
+# exist, which is why ACT 2 met the system permission dialog instead of a
+# USER_FIXED denial.
+#
+# `install -r` puts the package back. Being precise about what that buys, because
+# the obvious reading is wrong: the uninstall already deleted the data directory,
+# so there is no ACT 1 state left to preserve and the `pm clear` below is a
+# no-op in the ordinary case — a fresh install has an empty data dir and default
+# (ungranted, unflagged) permissions, which is the state this phase wanted
+# anyway. The load-bearing calls are the `pm revoke` + `pm set-permission-flags
+# user-fixed` pair further down, which need a package that EXISTS to act on;
+# without this reinstall they were writing into the void, which is why ACT 2 met
+# the system permission dialog instead of a USER_FIXED denial.
+#
+# `pm clear` and its Success gate are kept rather than dropped because they still
+# matter on the one path where the teardown did NOT run: the `timeout
+# --kill-after` above can kill the ACT 1 drive before `flutter drive` reaches
+# its stop/uninstall, leaving the package installed WITH ACT 1's data. That is
+# the case the gate's failure text describes, and it is the case that must not
+# proceed silently.
+echo "  restoring the package ACT 1's drive teardown uninstalled..."
+if ! adb -s "${DEVICE}" install -r "${APK}" 2>&1 | sed 's/^/    /'; then
+  fail "could not reinstall ${APK} before \`pm clear\`. ACT 1's drive teardown" \
+       "uninstalls the package (flutter_tools drive_service.dart: stopApp then" \
+       "uninstallApp), so this reinstall is what gives Phase 6 something to" \
+       "clear; without it every step below operates on a package that is not" \
+       "on the device."
+fi
+if ! adb -s "${DEVICE}" shell pm list packages "${PKG}" 2>/dev/null \
+     | tr -d '\r' | grep -qF "package:${PKG}"; then
+  fail "${PKG} is still not installed after \`install -r\`, so \`pm clear\`," \
+       "\`pm revoke\` and \`pm set-permission-flags\` would all be no-ops and" \
+       "ACT 2 would run with permissions in whatever state a fresh install" \
+       "chose."
+fi
+
 # `pm clear` REPORTS in its output, not in its exit status: it prints "Failed"
 # and still exits 0, so `|| true` on the exit code checked nothing. Run
 # 30925179141 printed exactly that "Failed" and the lane carried on into ACT 2

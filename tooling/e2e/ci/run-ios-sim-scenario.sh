@@ -113,6 +113,15 @@ fi
 # so `tee` would block forever on EOF and defeat the very bound we rely on —
 # the failure run-single-avd-scenario.sh documents at length (run 28056995601,
 # a ~47-min step hang). A follower streams the log to the console instead.
+#
+# APPEND (`>>`), not truncate (`>`). The caller already truncates the log once,
+# so append changes nothing about what the file contains — but it changes WHERE
+# the child writes. With `>` the child holds its own file offset, so anything it
+# emits after the watchdog has appended lands ON TOP of the watchdog's bytes
+# instead of after them. In CI run 30964250098 `flutter test`'s SIGTERM handler
+# printed exactly 22 bytes over the 22-byte head of the stall marker and cost the
+# lane its sanctioned retry. O_APPEND makes every write go to EOF, so the two
+# writers can no longer collide.
 spawn_ios_test() {
   # The `${EXTRA_DART_DEFINES[@]+"..."}` form is the nounset-safe idiom for
   # expanding a possibly-empty array under `set -u` on bash 3.2 (the macOS
@@ -125,7 +134,7 @@ spawn_ios_test() {
     --dart-define=HAVEN_LIVE_SYNC="${LIVE_SYNC}" \
     --dart-define=HAVEN_E2E_NO_BACKGROUND="${E2E_NO_BACKGROUND}" \
     ${EXTRA_DART_DEFINES[@]+"${EXTRA_DART_DEFINES[@]}"} \
-    > "$1" 2>&1 &
+    >> "$1" 2>&1 &
 }
 
 # run_ios_test_with_watchdog <log> — runs one `flutter test` under a first-test
@@ -146,6 +155,9 @@ run_ios_test_with_watchdog() {
   local log="$1"
   ios_test_rc=0
   : > "${log}"
+  # A previous attempt's stall verdict must never be inherited: that would be
+  # the blanket retry restored by the back door.
+  ios_clear_stall_evidence "${log}"
 
   spawn_ios_test "${log}"
   local test_pid=$!
@@ -191,6 +203,14 @@ run_ios_test_with_watchdog() {
       kill -0 "${test_pid}" 2>/dev/null || exit 0
       if ios_log_test_activity "${log}"; then exit 0; fi
       ios_stall_marker_line "${FIRST_TEST_WATCHDOG_SECS}" >> "${log}"
+      # Capture the verdict OUT OF BAND, before signalling. Both land after the
+      # two re-checks above, so they exist only when the watchdog has positively
+      # observed a live process with no test activity — a suite that failed on
+      # its own never reaches here. The snapshot is the evidence the watchdog
+      # actually acted on; the flag is the one artefact the dying child has no
+      # descriptor to and therefore cannot corrupt.
+      cp "${log}" "$(ios_prekill_log_path "${log}")" 2>/dev/null || true
+      : > "$(ios_stall_flag_path "${log}")"
       kill -TERM "${test_pid}" 2>/dev/null || true
       sleep 5
       kill -KILL "${test_pid}" 2>/dev/null || true
@@ -330,13 +350,129 @@ run_self_test() {
     fail=1
   fi
 
+  # (W5) THE ADMITTED FLAKE, WITH A CHILD THAT SPEAKS ON ITS WAY OUT — the case
+  #      that cost CI run 30964250098 its retry, and which NO fixture covered:
+  #      every stub above dies silently, so `>` and `>>` were indistinguishable
+  #      and a post-kill write could not be modelled at all.
+  #
+  #      `flutter test` traps SIGTERM and prints "\n🎉 0 tests passed.\n" — 22
+  #      bytes. The redirect here is deliberately `>` (truncating), so the child
+  #      keeps its OWN file offset and those 22 bytes land exactly on the 22-byte
+  #      head of the marker the watchdog just appended ("IOS-WATCHDOG: no on-de"),
+  #      leaving "vice test started within 300s…". That is the hostile case, kept
+  #      hostile on purpose: the point of this fixture is that the verdict no
+  #      longer depends on a file the dying child can still reach.
+  spawn_ios_test() {
+    {
+      trap 'printf "\n\360\237\216\211 0 tests passed.\n"; exit 1' TERM
+      echo 'Running Xcode build...'
+      echo 'Xcode build done.                                           400.0s'
+      sleep 20 & wait
+    } > "$1" 2>&1 &
+  }
+  run_ios_test_with_watchdog "${log}" >/dev/null 2>&1
+  # (W5a) The fixture must actually reproduce the hazard, or it proves nothing.
+  if LC_ALL=C grep -aqF -- "${IOS_STALL_MARKER}" "${log}"; then
+    echo "SELF-TEST FAIL (W5a): the in-log marker survived, so this fixture is" \
+         "no longer modelling the post-kill overwrite it exists for" >&2
+    fail=1
+  fi
+  # (W5b) The out-of-band evidence must exist and be intact.
+  if [[ ! -f "$(ios_stall_flag_path "${log}")" ]]; then
+    echo "SELF-TEST FAIL (W5b): the watchdog fired but left no stall flag" >&2
+    fail=1
+  fi
+  if ! LC_ALL=C grep -aqF -- "${IOS_STALL_MARKER}" "$(ios_prekill_log_path "${log}")" 2>/dev/null; then
+    echo "SELF-TEST FAIL (W5b): the pre-kill snapshot is missing or does not" \
+         "carry the marker the watchdog wrote before signalling" >&2
+    fail=1
+  fi
+  if (( ios_test_rc == 0 )); then
+    echo "SELF-TEST FAIL (W5b): a killed stall reported success" >&2
+    fail=1
+  fi
+  # (W5c) THE POINT: retryable, despite a log the dying child corrupted.
+  if ! ios_log_is_launch_stall "${log}"; then
+    echo "SELF-TEST FAIL (W5c): a post-build launch/attach stall was classified" \
+         "as GENUINE because the process we killed overwrote our evidence —" \
+         "this is exactly the CI run 30964250098 regression" >&2
+    fail=1
+  fi
+
+  # (W5d) THE PRODUCTION REDIRECT ITSELF. Every fixture here overrides
+  #       `spawn_ios_test` wholesale, so none of them can observe how the REAL
+  #       one redirects — reverting it to `>` would leave all of them green
+  #       while restoring the clobber that cost CI run 30964250098 its retry.
+  #       Read from the function's own body, with comment lines stripped, so a
+  #       comment merely *mentioning* `>>` cannot satisfy it (the assertion has
+  #       to be about the code, or it is about nothing).
+  local spawn_body
+  spawn_body="$(sed -n '/^spawn_ios_test() {/,/^}/p' "${BASH_SOURCE[0]}" \
+    | grep -v '^[[:space:]]*#')"
+  if ! grep -qE '>>[[:space:]]*"\$1"' <<<"${spawn_body}"; then
+    echo "SELF-TEST FAIL (W5d): the production spawn_ios_test no longer" \
+         "redirects in APPEND mode. With a truncating '>' the child keeps its" \
+         "own file offset and its post-SIGTERM output lands ON TOP of the" \
+         "watchdog's marker instead of after it — CI run 30964250098." >&2
+    fail=1
+  fi
+  if grep -qE '(^|[^>])>[[:space:]]*"\$1"' <<<"${spawn_body}"; then
+    echo "SELF-TEST FAIL (W5d2): the production spawn_ios_test still has a" \
+         "TRUNCATING redirect to the log." >&2
+    fail=1
+  fi
+
+  # (W6) THE NEGATIVE TWIN. The same post-kill log SHAPE, but with no flag and
+  #      no snapshot: nothing our watchdog produced. That is what an outer
+  #      attempt timeout (SIGKILL from the retry action) leaves behind, and it
+  #      must stay NOT retryable — otherwise "the log ends mid-suite" would
+  #      become a retry ticket and the blanket retry is back.
+  local orphan="${tmp}/orphan.log"
+  {
+    echo 'Running Xcode build...'
+    echo 'Xcode build done.                                           400.0s'
+    printf '\n\360\237\216\211 0 tests passed.\n'
+  } > "${orphan}"
+  ios_clear_stall_evidence "${orphan}"
+  if ios_log_is_launch_stall "${orphan}"; then
+    echo "SELF-TEST FAIL (W6): a kill this watchdog did not perform was" \
+         "classified as retryable" >&2
+    fail=1
+  fi
+
+  # (W7) A stale verdict must not be inherited. W5 left a flag and a snapshot on
+  #      `${log}`; a fresh run that fails GENUINELY must clear them, or attempt 2
+  #      would inherit attempt 1's retryable verdict.
+  spawn_ios_test() {
+    {
+      echo 'Xcode build done.                                           400.0s'
+      echo '::group::❌ (setUpAll) (failed)'
+      echo '::error::0 tests passed, 1 failed.'
+      exit 1
+    } > "$1" 2>&1 &
+  }
+  run_ios_test_with_watchdog "${log}" >/dev/null 2>&1
+  if [[ -f "$(ios_stall_flag_path "${log}")" ]]; then
+    echo "SELF-TEST FAIL (W7): a prior attempt's stall flag survived into a new" \
+         "run — a genuine failure would inherit a retryable verdict" >&2
+    fail=1
+  fi
+  if ios_log_is_launch_stall "${log}"; then
+    echo "SELF-TEST FAIL (W7): a genuine failure was classified as retryable on" \
+         "the strength of a previous attempt's evidence" >&2
+    fail=1
+  fi
+
   if (( fail != 0 )); then
     echo "run-ios-sim-scenario.sh --self-test: FAILED" >&2
     return 1
   fi
-  echo "run-ios-sim-scenario.sh --self-test: all 4 watchdog fixtures passed" \
-       "(a post-build stall is caught, marked and accepted by the classifier;" \
-       "a running suite, a genuine failure and a slow build are left alone)."
+  echo "run-ios-sim-scenario.sh --self-test: all 7 watchdog fixtures passed" \
+       "(a post-build stall is caught, marked and accepted by the classifier," \
+       "and stays retryable even when the process we kill overwrites the marker" \
+       "on its way out; a running suite, a genuine failure, a slow build, a kill" \
+       "this watchdog did not perform, and a previous attempt's stale verdict" \
+       "are all correctly NOT retried)."
   return 0
 }
 

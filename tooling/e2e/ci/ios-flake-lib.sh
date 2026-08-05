@@ -49,9 +49,13 @@
 # "built, then killed by the outer step timeout while a test was running" look
 # identical once the process is gone. So run-ios-sim-scenario.sh runs its own
 # first-test watchdog on a deadline SHORTER than the attempt timeout and, when it
-# fires, writes IOS_STALL_MARKER into the log. The marker is this classifier's
-# required positive evidence: it is written by our code, at a moment when our
-# code could still see that no test had started.
+# fires, records that fact THREE ways: IOS_STALL_MARKER into the log, an empty
+# `<log>.stall` flag, and a `<log>.prekill` snapshot of the log as it stood at the
+# moment it decided. That is this classifier's required positive evidence: all of
+# it is written by our code, at a moment when our code could still see that no
+# test had started. The flag and the snapshot exist because the log is the one
+# artefact the process we are about to kill can still write to — see the
+# out-of-band evidence block below, and CI run 30964250098.
 #
 # `ios_log_is_launch_stall` then demands, on top of that marker, that the build
 # completed, that NOTHING in the log shows a test ran, and that
@@ -122,6 +126,52 @@ ios_stall_marker_line() {
   echo "${IOS_STALL_MARKER} within ${1}s of the Xcode build finishing — killing a pre-test simulator launch/attach stall."
 }
 
+# ---------------------------------------------------------------------------
+# Out-of-band stall evidence.
+#
+# The marker above was the classifier's ONLY positive evidence, and it lived in
+# the one file the process we are about to kill can still write to. In CI run
+# 30964250098 that lost us a sanctioned retry: `flutter test` traps SIGTERM and
+# prints "\n🎉 0 tests passed.\n" on its way out — 22 bytes, written at the
+# child's OWN file offset, landing exactly on the 22-byte prefix
+# "IOS-WATCHDOG: no on-de" the watchdog had just appended. The marker was
+# mangled into "vice test started within 300s…", so clause (b) failed; and the
+# teardown line matched IOS_TEST_ACTIVITY_RE, so clause (d) failed too. Verdict:
+# `genuine`, retry refused, lane red on an infrastructure stall the watchdog had
+# correctly identified.
+#
+# The runner now writes at EOF (append mode) so that overwrite cannot recur, but
+# a log a dying process still holds a descriptor to is the wrong place to keep
+# the verdict at all. So the watchdog additionally deposits, BEFORE it signals:
+#
+#   <log>.stall    an empty flag file — existence is the whole message
+#   <log>.prekill  a snapshot of the log at the instant it decided to kill
+#
+# Both are written only on the kill path, only after the watchdog has re-checked
+# that the process is alive and that no test activity exists. A suite that fails
+# on its own exits without the watchdog ever firing, so neither file can appear
+# for a genuine failure. Classification then reads the snapshot — a strict PREFIX
+# of what the run emitted, ending before we intervened — so every veto still
+# applies to everything the suite actually said, and only our own SIGTERM's
+# artefacts are excluded. This is the pattern run-single-avd-scenario.sh already
+# uses for its Android pre-connect stall verdict.
+# ---------------------------------------------------------------------------
+
+# ios_stall_flag_path <log> — the out-of-band "the watchdog killed this" flag.
+ios_stall_flag_path() { printf '%s' "${1:-}.stall"; }
+
+# ios_prekill_log_path <log> — the log as it stood when the watchdog decided.
+ios_prekill_log_path() { printf '%s' "${1:-}.prekill"; }
+
+# ios_clear_stall_evidence <log> — drop any prior attempt's flag and snapshot.
+# Attempt 2 must never inherit attempt 1's verdict: that is precisely the
+# blanket retry this lane exists to prevent.
+ios_clear_stall_evidence() {
+  local log="${1:-}"
+  [[ -n "${log}" ]] || return 0
+  rm -f "$(ios_stall_flag_path "${log}")" "$(ios_prekill_log_path "${log}")"
+}
+
 # Evidence that the on-device suite got as far as SAYING something. Independent
 # signals, because the two reporters `flutter test` can pick emit nothing in
 # common:
@@ -187,31 +237,57 @@ ios_log_test_activity() {
 #       (A4) established that missing input must never read as the benign case.
 #       Here the benign-for-retry case is "infrastructure flake", so no evidence
 #       means no retry — the run stays red and a human reads the artifact.
-#   (b) The watchdog marker must be present. Positive evidence, written by our
-#       own watchdog at a moment it could still observe that no test had started.
+#   (b) The watchdog must have fired: either its out-of-band flag file exists or
+#       its marker is in the evidence log. Positive evidence, produced by our own
+#       watchdog at a moment it could still observe that no test had started.
 #       Without it, "built then silence" is indistinguishable from "killed by the
-#       outer timeout mid-suite".
+#       outer timeout mid-suite". The flag is checked FIRST because it is the
+#       only one of the two a dying child cannot corrupt (see above).
 #   (c) `Xcode build done.` must be present, so this is provably a launch/attach
 #       stall and not a hung or failed BUILD. A build failure is deterministic
 #       and reproducible; retrying it buys nothing and hides it for 10 minutes.
-#   (d) No test activity anywhere. Closes the watchdog/first-test race: if the
-#       suite started in the window between the watchdog's last look and its
-#       kill, the attempt is NOT retried.
-#   (e) drive-log-lib.sh's app-side failure predicate must be silent. A second,
+#   (d) No test activity in the EVIDENCE log. Closes the watchdog/first-test
+#       race: if the suite started in the window between the watchdog's last
+#       look and its kill, the attempt is NOT retried. Scoped to the pre-kill
+#       snapshot rather than "anywhere", deliberately — `flutter test`'s SIGTERM
+#       handler prints "🎉 0 tests passed." as it dies, which matches
+#       IOS_TEST_ACTIVITY_RE but is teardown noise, not the suite speaking. The
+#       snapshot ends before we signalled, so everything the suite ACTUALLY said
+#       is still in scope and only our own kill's artefacts are excluded. Note
+#       this is why clause (e) below reads BOTH logs: an unambiguous
+#       self-reported FAILURE must veto whenever it appears, including on the
+#       way out.
+#   (e) drive-log-lib.sh's app-side failure predicate must be silent — on the
+#       snapshot AND on the live log. A second,
 #       independently-maintained opinion on the same question, and the one that
 #       also catches `All tests skipped.` — so a vacuous suite cannot be retried
 #       into a green either.
 ios_log_is_launch_stall() {
-  local log="${1:-}"
-  [[ -s "${log}" ]] || return 1
-  LC_ALL=C grep -aqF -- "${IOS_STALL_MARKER}" < <(_ios_log_decolour "${log}") || return 1
+  local log="${1:-}" evidence flag
+  flag="$(ios_stall_flag_path "${log}")"
+  # Clauses (a)-(d) judge the PRE-KILL snapshot when the watchdog left one, so
+  # nothing the child wrote while dying can vote. With no snapshot — every
+  # hermetic fixture, and any path where the watchdog never fired — this is the
+  # log itself and the predicate is byte-for-byte what it always was.
+  evidence="$(ios_prekill_log_path "${log}")"
+  [[ -s "${evidence}" ]] || evidence="${log}"
+
+  [[ -s "${evidence}" ]] || return 1
+  if [[ ! -f "${flag}" ]]; then
+    LC_ALL=C grep -aqF -- "${IOS_STALL_MARKER}" < <(_ios_log_decolour "${evidence}") || return 1
+  fi
   # The build-done evidence is taken from lines that are NOT the watchdog's own.
   # The marker line is free text written by the runner; if it ever came to quote
   # the build-done literal, clause (c) would be satisfied by the watchdog talking
   # about itself and a build failure would become retryable. Fixture 8 pins this.
   LC_ALL=C grep -aqF -- "${IOS_BUILD_DONE_MARKER}" \
-    < <(_ios_log_decolour "${log}" | LC_ALL=C grep -avF -- "${IOS_STALL_MARKER}") || return 1
-  if ios_log_test_activity "${log}"; then return 1; fi
+    < <(_ios_log_decolour "${evidence}" | LC_ALL=C grep -avF -- "${IOS_STALL_MARKER}") || return 1
+  if ios_log_test_activity "${evidence}"; then return 1; fi
+  # Clause (e) is checked against the snapshot AND the full log. A suite that
+  # reported a real failure vetoes the retry no matter when it said so, and the
+  # post-SIGTERM teardown line does not match this predicate, so the extra read
+  # costs nothing and closes the "it failed as it died" case.
+  if drive_log_reports_test_failure "${evidence}"; then return 1; fi
   if drive_log_reports_test_failure "${log}"; then return 1; fi
   return 0
 }
@@ -519,6 +595,137 @@ ios_flake_lib_self_test() {
     fail=1
   fi
 
+  # (14) THE CI RUN 30964250098 BYTES. The log exactly as the artifact carried
+  #      it: the marker's 22-byte head overwritten by `flutter test`'s SIGTERM
+  #      handler, leaving "vice test started…", and the teardown's
+  #      "🎉 0 tests passed." where those bytes used to be. On the live log alone
+  #      this is unclassifiable — clause (b) has no marker and clause (d) sees
+  #      activity — which is precisely why the verdict now rests on the pre-kill
+  #      snapshot and the flag. With both present it MUST be retryable.
+  printf '%s\n' \
+    'Running Xcode build...' \
+    'Xcode build done.                                           595.2s' \
+    '' \
+    '🎉 0 tests passed.' \
+    'vice test started within 300s of the Xcode build finishing — killing a pre-test simulator launch/attach stall.' \
+    > "${tmp}/clobbered.log"
+  printf '%s\n' \
+    'Running Xcode build...' \
+    'Xcode build done.                                           595.2s' \
+    "$(ios_stall_marker_line 300)" \
+    > "$(ios_prekill_log_path "${tmp}/clobbered.log")"
+  : > "$(ios_stall_flag_path "${tmp}/clobbered.log")"
+  if ! ios_log_is_launch_stall "${tmp}/clobbered.log"; then
+    echo "SELF-TEST FAIL (14): the CI run 30964250098 log was classified as" \
+         "GENUINE — a launch/attach stall whose evidence the dying child" \
+         "overwrote must still be retryable" >&2
+    fail=1
+  fi
+
+  # (15) THE PROOF THAT (14) IS NOT A PATTERN-MATCH ESCAPE HATCH. Same clobbered
+  #      live log, same flag — but now the suite genuinely spoke BEFORE the
+  #      watchdog fired, so the activity is in the SNAPSHOT. The vacuous-suite
+  #      veto is preserved, not traded away: only artefacts written after we
+  #      signalled are excluded, and they are excluded structurally (by when they
+  #      were written), never by matching the teardown string away.
+  #      MUST NOT be retryable.
+  printf '%s\n' \
+    'Running Xcode build...' \
+    'Xcode build done.                                           595.2s' \
+    '🎉 0 tests passed.' \
+    "$(ios_stall_marker_line 300)" \
+    > "$(ios_prekill_log_path "${tmp}/clobbered.log")"
+  if ios_log_is_launch_stall "${tmp}/clobbered.log"; then
+    echo "SELF-TEST FAIL (15): a suite that spoke BEFORE the kill was retried —" \
+         "the snapshot must carry every veto the live log used to" >&2
+    fail=1
+  fi
+  ios_clear_stall_evidence "${tmp}/clobbered.log"
+
+  # (16b) THE LIVE-LOG ARM OF CLAUSE (e) — "it failed as it died". The snapshot
+  #       is clean (build done, marker, no activity) and the flag is present, so
+  #       clauses (a)-(d) all pass; the veto has to come from reading the LIVE
+  #       log, where the child reported a real failure on its way out. Without
+  #       this fixture the second `drive_log_reports_test_failure` call can be
+  #       deleted with every other fixture still green — i.e. a self-reported
+  #       failure would start being retried and nothing would say so.
+  printf '%s\n' \
+    'Running Xcode build...' \
+    'Xcode build done.                                           595.2s' \
+    '00:07 +0 -1: Some tests failed.' \
+    > "${tmp}/died-failing.log"
+  printf '%s\n' \
+    'Running Xcode build...' \
+    'Xcode build done.                                           595.2s' \
+    "$(ios_stall_marker_line 300)" \
+    > "$(ios_prekill_log_path "${tmp}/died-failing.log")"
+  : > "$(ios_stall_flag_path "${tmp}/died-failing.log")"
+  if ios_log_is_launch_stall "${tmp}/died-failing.log"; then
+    echo "SELF-TEST FAIL (16b): a suite that reported a FAILURE as it died was" \
+         "classified as retryable — clause (e) must read the live log too, not" \
+         "only the pre-kill snapshot" >&2
+    fail=1
+  fi
+  ios_clear_stall_evidence "${tmp}/died-failing.log"
+
+  # (16c) THE SNAPSHOT ARM OF CLAUSE (e). Mirror of 16b: the failure is in the
+  #       SNAPSHOT (the suite failed before the watchdog looked), live log clean.
+  #       Pins the first `drive_log_reports_test_failure` call, which 16b alone
+  #       would let be deleted.
+  printf '%s\n' \
+    'Running Xcode build...' \
+    'Xcode build done.                                           595.2s' \
+    > "${tmp}/failed-early.log"
+  printf '%s\n' \
+    'Running Xcode build...' \
+    'Xcode build done.                                           595.2s' \
+    '  00:01 +0 -1: (setUpAll) [E]' \
+    "$(ios_stall_marker_line 300)" \
+    > "$(ios_prekill_log_path "${tmp}/failed-early.log")"
+  : > "$(ios_stall_flag_path "${tmp}/failed-early.log")"
+  if ios_log_is_launch_stall "${tmp}/failed-early.log"; then
+    echo "SELF-TEST FAIL (16c): a failure recorded in the PRE-KILL snapshot was" \
+         "classified as retryable — the snapshot must carry every veto the live" \
+         "log used to" >&2
+    fail=1
+  fi
+  ios_clear_stall_evidence "${tmp}/failed-early.log"
+
+  # (16d) THE FLAG ARM OF CLAUSE (b). Snapshot exists and is clean but carries NO
+  #       marker (the watchdog's `cp` ran before its append, or the append was
+  #       lost); only the flag attests the kill. Must still be retryable, or the
+  #       flag branch is dead code that could be deleted unnoticed.
+  printf '%s\n' \
+    'Running Xcode build...' \
+    'Xcode build done.                                           595.2s' \
+    > "${tmp}/flag-only.log"
+  printf '%s\n' \
+    'Running Xcode build...' \
+    'Xcode build done.                                           595.2s' \
+    > "$(ios_prekill_log_path "${tmp}/flag-only.log")"
+  : > "$(ios_stall_flag_path "${tmp}/flag-only.log")"
+  if ! ios_log_is_launch_stall "${tmp}/flag-only.log"; then
+    echo "SELF-TEST FAIL (16d): the out-of-band flag alone must satisfy clause" \
+         "(b) — it is the one artefact the dying child cannot corrupt" >&2
+    fail=1
+  fi
+  ios_clear_stall_evidence "${tmp}/flag-only.log"
+
+  # (16) A STALL FLAG DOES NOT OVERRIDE THE OTHER CLAUSES. Flag present, but the
+  #      build never finished: clause (c) must still veto, or a hung build would
+  #      become retryable by depositing a flag.
+  printf '%s\n' \
+    'Running pod install...' \
+    'Error running pod install' \
+    > "${tmp}/flagged-buildfail.log"
+  : > "$(ios_stall_flag_path "${tmp}/flagged-buildfail.log")"
+  if ios_log_is_launch_stall "${tmp}/flagged-buildfail.log"; then
+    echo "SELF-TEST FAIL (16): a build failure with a stall flag was classified" \
+         "as retryable — the flag replaces clause (b) only, never (c)-(e)" >&2
+    fail=1
+  fi
+  ios_clear_stall_evidence "${tmp}/flagged-buildfail.log"
+
   # --- Gate fixtures — THE WIRING, not the predicate ----------------------
   #
   # The predicate can be perfect and the lane still retry everything, because
@@ -661,7 +868,7 @@ ios_flake_lib_self_test() {
     echo "ios-flake-lib.sh --self-test: FAILED" >&2
     return 1
   fi
-  echo "ios-flake-lib.sh --self-test: all 13 predicate + 8 gate + 2 recording fixtures passed" \
+  echo "ios-flake-lib.sh --self-test: all 19 predicate + 8 gate + 2 recording fixtures passed" \
        "(the one admitted stall retries; genuine failures, vacuous suites," \
        "build failures, empty/absent logs and unattributed silence do not)."
   return 0
