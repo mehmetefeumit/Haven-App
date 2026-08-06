@@ -159,6 +159,66 @@ readonly MARK_COMPLETE='[b6] SEQUENCE_COMPLETE'
 # rests on lives here so `--self-test` can exercise it hermetically.
 # ---------------------------------------------------------------------------
 
+# b6_android_system_died <file>... — 0 (true) iff the ANDROID SYSTEM PROCESS
+# died during this run, as distinct from the app crashing.
+#
+# THIS LANE PROVOKES A REAL EMULATOR BUG. It toggles the device-wide location
+# provider, and on the api-34 image the GNSS HAL can deadlock when a stop
+# arrives shortly after the provider was re-enabled. In CI run 30980908814 the
+# system server's foreground thread sat in `GnssNative.native_stop()` for 66 s
+# and the platform Watchdog SIGKILLed it:
+#
+#   W Watchdog: *** WATCHDOG KILLING SYSTEM PROCESS: Blocked in handler on
+#               foreground thread (android.fg) for 66s
+#     at com.android.server.location.gnss.hal.GnssNative.native_stop
+#     at ...GnssLocationProvider.stopNavigating
+#   I Process : Sending signal. PID: 518 SIG: 9
+#
+# The app had made exactly ONE `startPositionUpdates` / ONE stop — no thrashing.
+# Nothing the app can do makes a native HAL stop hang, so this is infrastructure
+# by construction. But the lane reported it as two PRODUCT findings ("the drive
+# never printed SEQUENCE_COMPLETE", "no PUBLISH_RESUMED line"), which are pure
+# consequences of the OS dying underneath it — a red lane blaming the app for
+# the emulator.
+#
+# DISCRIMINATION IS THE WHOLE POINT, so only markers that the SYSTEM's death
+# produces are matched:
+#
+#   * `WATCHDOG KILLING SYSTEM PROCESS` — the platform Watchdog's own verdict,
+#     emitted only when it kills system_server.
+#   * `DeadSystemException` — the framework's exception for "binder to
+#     system_server failed because system_server is gone". Its own message is
+#     "The system died".
+#
+# An ordinary app crash (`FATAL EXCEPTION` with, say, a NullPointerException in
+# the app's process) matches NEITHER, so it stays a product defect. That is
+# deliberate: an app that crashes when the location provider is toggled is
+# exactly what this lane exists to catch, and must never be excused as infra.
+b6_android_system_died() {
+  local f
+  for f in "$@"; do
+    [[ -f "${f}" ]] || continue
+    if LC_ALL=C grep -aqE \
+      'WATCHDOG KILLING SYSTEM PROCESS|DeadSystemException' "${f}"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# b6_system_death_reason <file>... — echo the one-line watchdog verdict (or the
+# DeadSystemException line) so the operator sees WHY without opening artefacts.
+b6_system_death_reason() {
+  local f
+  for f in "$@"; do
+    [[ -f "${f}" ]] || continue
+    LC_ALL=C grep -ahoE \
+      'WATCHDOG KILLING SYSTEM PROCESS[^"]*|DeadSystemException[^"]*' "${f}" \
+      | head -1 && return 0
+  done
+  return 0
+}
+
 # b6_has_marker <logfile> <marker> — 0 (true) when the marker appears.
 #
 # Substring match, not anchored: the same line reaches us either as raw
@@ -580,11 +640,69 @@ run_self_test() {
   rc=0; declare -F drive_log_reports_test_failure >/dev/null || rc=1
   _case "drive-log failure predicate is in scope" 0 "${rc}"
 
+  # --- system-death classification -----------------------------------------
+  #
+  # The discrimination is the whole value: an emulator that died must not be
+  # blamed on the app, and an app that crashed must not be excused as the
+  # emulator. Both directions are pinned, and the app-crash fixture is the one
+  # that matters — it is what stops this becoming a blanket "ignore red".
+  local sd="${tmp}/sysdeath"
+  mkdir -p "${sd}"
+
+  # (a) THE REAL SHAPE, verbatim from CI run 30980908814.
+  printf '%s\n' \
+    '08-05 06:40:32.212   518   543 W Watchdog: *** WATCHDOG KILLING SYSTEM PROCESS: Blocked in handler on  on foreground thread (android.fg) for 66s' \
+    '08-05 06:40:32.213   518   543 W Watchdog:     at com.android.server.location.gnss.hal.GnssNative.native_stop(Native Method)' \
+    '08-05 06:40:32.214   518   543 I Process : Sending signal. PID: 518 SIG: 9' \
+    > "${sd}/watchdog.log"
+  rc=0; b6_android_system_died "${sd}/watchdog.log" || rc=1
+  _case "a watchdog-killed system_server reads as INFRASTRUCTURE" 0 "${rc}"
+
+  # (b) The app's own view of the same event.
+  printf '%s\n' \
+    'E/AndroidRuntime( 3579): FATAL EXCEPTION: main' \
+    'E/AndroidRuntime( 3579): Process: com.oblivioustech.haven, PID: 3579' \
+    'E/AndroidRuntime( 3579): DeadSystemException: The system died; earlier logs will point to the root cause' \
+    > "${sd}/deadsystem.log"
+  rc=0; b6_android_system_died "${sd}/deadsystem.log" || rc=1
+  _case "DeadSystemException reads as INFRASTRUCTURE" 0 "${rc}"
+
+  # (c) THE CRITICAL NEGATIVE. An ordinary app crash — same FATAL EXCEPTION
+  #     shape, same process, no system-death marker anywhere. An app that dies
+  #     when the location provider is toggled is precisely what this lane
+  #     exists to catch and must NEVER be written off as infrastructure.
+  printf '%s\n' \
+    'E/AndroidRuntime( 3579): FATAL EXCEPTION: main' \
+    'E/AndroidRuntime( 3579): Process: com.oblivioustech.haven, PID: 3579' \
+    'E/AndroidRuntime( 3579): java.lang.NullPointerException: position was null' \
+    'E/AndroidRuntime( 3579):     at com.oblivioustech.haven.MainActivity.onResume' \
+    > "${sd}/appcrash.log"
+  rc=0; b6_android_system_died "${sd}/appcrash.log" || rc=1
+  _case "an ordinary app crash stays a PRODUCT failure" 1 "${rc}"
+
+  # (d) A clean run implicates nothing.
+  printf '%s\n' \
+    '08-05 06:38:44.764  3579  3579 I flutter : [b6] SURFACING_PRESENT' \
+    '08-05 06:38:46.817  3579  3579 I flutter : [b6] PROVIDER_REENABLED_OBSERVED' \
+    > "${sd}/clean.log"
+  rc=0; b6_android_system_died "${sd}/clean.log" || rc=1
+  _case "a healthy log is not mistaken for a system death" 1 "${rc}"
+
+  # (e) Absent/empty inputs must not read as a system death — otherwise a
+  #     missing capture would silently excuse every red.
+  rc=0; b6_android_system_died "${sd}/nope.log" || rc=1
+  _case "an absent log is not a system death" 1 "${rc}"
+
+  # (f) The reason line is extracted for the operator.
+  _eq_case "the watchdog verdict is surfaced in the message" \
+    "1" "$(b6_system_death_reason "${sd}/watchdog.log" \
+            | grep -ac 'WATCHDOG KILLING SYSTEM PROCESS' || true)"
+
   if (( fails )); then
     echo "run-b6-location-provider-toggle.sh --self-test: FAILURES" >&2
     return 1
   fi
-  echo "run-b6-location-provider-toggle.sh --self-test: all 19 fixtures passed"
+  echo "run-b6-location-provider-toggle.sh --self-test: all 25 fixtures passed"
   return 0
 }
 
@@ -715,6 +833,32 @@ cleanup() {
 trap cleanup EXIT
 
 fail() {
+  # INFRASTRUCTURE FIRST. When the Android system process died, nothing this
+  # lane observed afterwards is attributable to the app: the drive lost its VM
+  # service, `cmd` lost `activity` and `package`, and every "marker missing"
+  # finding below is a consequence of that. Reporting those as product defects
+  # is how an emulator bug becomes hours spent reading app code (CI run
+  # 30980908814). The findings are still PRINTED — they are evidence — but the
+  # verdict says what actually happened.
+  #
+  # This cannot excuse a product failure: `b6_android_system_died` matches only
+  # markers the SYSTEM's death produces, so an app crash still lands below.
+  if b6_android_system_died "${LOGCAT_FILE}" "${DRIVE_LOG}"; then
+    echo "B6-LANE-INFRA: the ANDROID SYSTEM PROCESS died during this run, so" \
+         "the lane could not observe the product at all." >&2
+    echo "  verdict: $(b6_system_death_reason "${LOGCAT_FILE}" "${DRIVE_LOG}")" >&2
+    echo "  This lane toggles the device-wide location provider, and the" \
+         "api-34 emulator's GNSS HAL can deadlock in native_stop() when a stop" \
+         "arrives soon after a re-enable; the platform Watchdog then SIGKILLs" \
+         "system_server. Haven cannot cause a native HAL stop to hang." >&2
+    echo "  What would have been reported as findings, kept as EVIDENCE only:" >&2
+    echo "    $*" >&2
+    echo "  Re-run the lane. If this recurs often, the toggle cadence or the" \
+         "emulator image is the thing to change, not the app." >&2
+    # Non-zero on purpose — an infrastructure fault must never read as a pass —
+    # but a DISTINCT code so it is greppable and separable from a product red.
+    exit 75
+  fi
   echo "B6-LANE-FAIL: $*" >&2
   if (( ${drive_failed:-0} == 1 )); then
     echo "NOTE: the drive ALSO did not complete cleanly" \

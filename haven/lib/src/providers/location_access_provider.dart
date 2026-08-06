@@ -139,6 +139,22 @@ extension LocationAccessStatusX on LocationAccessStatus {
 /// network traffic is generated — so the cost of the cadence is negligible.
 const Duration kLocationAccessProbeInterval = Duration(seconds: 30);
 
+/// How soon to re-probe when a probe answered `available` while the position
+/// stream had just faulted.
+///
+/// Short because the only thing being waited on is the OS finishing a settings
+/// write it has already begun; long enough that the recheck is a fresh read
+/// rather than the same racing one.
+const Duration kLocationAccessContradictedRetryDelay = Duration(seconds: 1);
+
+/// How many fast rechecks a contradicted probe is worth before falling back to
+/// [kLocationAccessProbeInterval].
+///
+/// Five at one second each bounds the surface's worst-case silence at ~5 s
+/// instead of 30 s, while a device that really is fine (one dropped stream
+/// event, no settings change) pays five cheap local reads and stops.
+const int _kContradictedProbeAttempts = 5;
+
 /// The probe cadence actually used, so tests can compress it.
 ///
 /// A seam, not a setting: production reads
@@ -148,6 +164,15 @@ const Duration kLocationAccessProbeInterval = Duration(seconds: 30);
 /// would be untestable except through wall-clock waits.
 final locationAccessProbeIntervalProvider = Provider<Duration>((ref) {
   return kLocationAccessProbeInterval;
+});
+
+/// How soon to re-probe after a probe contradicted a stream fault.
+///
+/// The same kind of seam as [locationAccessProbeIntervalProvider], and for the
+/// same reason: the contradiction path is only observable as a DELAY, so
+/// without an override the tests that pin it would be wall-clock waits.
+final locationAccessContradictedRetryProvider = Provider<Duration>((ref) {
+  return kLocationAccessContradictedRetryDelay;
 });
 
 /// Live location-access state, driven by the position stream plus a platform
@@ -181,6 +206,23 @@ class LocationAccessNotifier extends Notifier<LocationAccessStatus> {
   /// the map's own empty state owns that moment.
   bool _everGranted = false;
 
+  /// How many fast rechecks are still owed because a probe answered
+  /// `available` while the position stream had just reported a fault.
+  ///
+  /// The two readings CONTRADICT each other, and the probe is the one that can
+  /// be wrong for a knowable reason: on Android `isLocationServiceEnabled()`
+  /// races the OS write behind `cmd location set-location-enabled` /
+  /// Quick Settings, so a probe fired by the stream error can still read the
+  /// PRE-toggle value. Accepting that answer used to cost a full
+  /// [kLocationAccessProbeInterval] of silence — the user switches location
+  /// off, sharing dies immediately, and nothing says so for up to 30 s.
+  /// Observed in CI run 30977235075, where the whole 28 s disabled window
+  /// closed before the next probe was due and the banner never appeared at all.
+  ///
+  /// Bounded, so a genuinely-available device that merely dropped one stream
+  /// event settles back onto the normal cadence instead of probing forever.
+  int _contradictedProbesLeft = 0;
+
   @override
   LocationAccessStatus build() {
     ref
@@ -211,6 +253,10 @@ class LocationAccessNotifier extends Notifier<LocationAccessStatus> {
       debugPrint(
         '[LocationAccess] position stream error: ${next.error.runtimeType}',
       );
+      // The stream faulting is a FACT. If the probe about to run disagrees and
+      // says everything is fine, that disagreement is worth rechecking
+      // promptly rather than sleeping the full probe interval on it.
+      _contradictedProbesLeft = _kContradictedProbeAttempts;
       unawaited(refresh());
       return;
     }
@@ -218,6 +264,9 @@ class LocationAccessNotifier extends Notifier<LocationAccessStatus> {
       // A fix is proof access works. Clear any blocked state, and restart the
       // silence watchdog from now.
       _everGranted = true;
+      // A delivered fix settles the contradiction in the probe's favour: the
+      // stream is demonstrably alive, so stop paying for fast rechecks.
+      _contradictedProbesLeft = 0;
       _armWatchdog();
       _apply(LocationAccessStatus.available, restartStream: false);
       return;
@@ -448,6 +497,12 @@ class LocationAccessNotifier extends Notifier<LocationAccessStatus> {
   void _apply(LocationAccessStatus next, {required bool restartStream}) {
     final previous = state;
     if (previous == next) return;
+    // The verdict IS the surface: `available` renders nothing, everything else
+    // renders the banner. Leaving it unlogged made two CI runs with
+    // byte-identical app logs produce opposite surfacing outcomes with nothing
+    // to explain why (runs 30977235075 and 30980908814). Enum names only — no
+    // platform error text ever reaches a log line from here (Security Rule 8).
+    debugPrint('[LocationAccess] ${previous.name} -> ${next.name}');
     state = next;
 
     if (next.isBlocked) {
@@ -476,12 +531,35 @@ class LocationAccessNotifier extends Notifier<LocationAccessStatus> {
     _watchdog?.cancel();
     _watchdog = null;
     if (_disposed) return;
-    final Duration interval;
+    Duration interval;
     try {
       interval = ref.read(locationAccessProbeIntervalProvider);
     } on Object catch (e) {
       debugPrint('[LocationAccess] watchdog arm failed: ${e.runtimeType}');
       return;
+    }
+    // A probe that answered `available` while the stream had just faulted has
+    // not settled anything — recheck soon instead of on the slow cadence. The
+    // counter is spent here (not in `refresh`) so every arming path is covered
+    // by one rule, and it is only consumed while the verdict is still the
+    // unblocked one: the moment a probe agrees with the stream, the state is
+    // blocked, the banner is up, and the fast cadence has done its job.
+    if (_contradictedProbesLeft > 0 && !state.isBlocked) {
+      _contradictedProbesLeft--;
+      // The FASTER of the two, never a fixed value: a "fast" recheck that ran
+      // slower than the ordinary cadence would be a contradiction in terms.
+      Duration retry;
+      try {
+        retry = ref.read(locationAccessContradictedRetryProvider);
+      } on Object catch (e) {
+        debugPrint('[LocationAccess] retry read failed: ${e.runtimeType}');
+        retry = kLocationAccessContradictedRetryDelay;
+      }
+      if (retry < interval) interval = retry;
+      debugPrint(
+        '[LocationAccess] probe disagreed with a stream fault — rechecking in '
+        '${interval.inMilliseconds}ms ($_contradictedProbesLeft left)',
+      );
     }
     _watchdog = Timer(interval, () {
       unawaited(refresh());

@@ -222,7 +222,35 @@ jobs:
             -noaudio -no-boot-anim -camera-back none -memory 6144
           disable-animations: true
           emulator-boot-timeout: 420
-          script: bash tooling/e2e/ci/run-with-deadline.sh 24m "e2e-location-provider-toggle drive" -- bash tooling/e2e/ci/run-b6-location-provider-toggle.sh /tmp/integration-apks/b6_location_provider_toggle_test.apk integration_test/b6_location_provider_toggle_test.dart
+          # The egress guard is installed INSIDE the emulator script, after
+          # strfry is up, exactly as e2e-android.yml does it — but here it is
+          # not only a privacy belt.
+          #
+          # This lane toggles the device-wide location provider, and Google
+          # Play Services is itself a location client on the same
+          # `GnssLocationProvider`. Left able to reach the network, GMS runs a
+          # first-boot phenotype/config sync during the run: CI run
+          # 30980908814's capture carries 3097 `PhenotypeConfigurationU` lines
+          # plus `GCoreUlr`, `LocationHistory` and `LSR` traffic, all churning
+          # `onSetRequest` against the very provider whose HAL then deadlocked
+          # in `native_stop()` and got system_server watchdog-killed. Cutting
+          # GMS's egress removes that concurrent load from the subsystem under
+          # test — which is also what makes the lane's observations about the
+          # app attributable to the app.
+          script: bash tooling/e2e/ci/run-with-deadline.sh 24m "e2e-location-provider-toggle drive" -- bash -c 'bash tooling/e2e/ci/setup-network-guard.sh && bash tooling/e2e/ci/run-b6-location-provider-toggle.sh /tmp/integration-apks/b6_location_provider_toggle_test.apk integration_test/b6_location_provider_toggle_test.dart'
+
+      # Tear the guard down BEFORE anything that needs outbound HTTPS. Left
+      # installed, its `REJECT --reject-with tcp-reset` on :443 RSTs the
+      # artifact upload and cache POST steps below and silently drops the very
+      # diagnostics this lane depends on. The guard has already covered the
+      # whole drive, so removing it here costs zero coverage. Best-effort so it
+      # can never turn a run red.
+      - name: Remove network egress guard
+        if: always()
+        run: |
+          sudo iptables -D OUTPUT -j HAVEN_E2E_GUARD 2>/dev/null || true
+          sudo iptables -F HAVEN_E2E_GUARD 2>/dev/null || true
+          sudo iptables -X HAVEN_E2E_GUARD 2>/dev/null || true
 
       - name: Capture host + emulator diagnostics
         if: failure()

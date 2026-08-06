@@ -64,6 +64,15 @@ class _FakeLocationService implements LocationService {
   /// What `isLocationServiceEnabled()` answers.
   bool serviceEnabled = true;
 
+  /// Models the OS settings write LANDING BETWEEN PROBES.
+  ///
+  /// On Android `isLocationServiceEnabled()` races the write behind
+  /// `cmd location set-location-enabled` / Quick Settings, so the probe fired
+  /// by the stream error can still read the pre-toggle value while a later one
+  /// reads the truth. Expressed as a check COUNT rather than a wall-clock
+  /// delay so the test that pins this cannot become a timing race itself.
+  int? flipServiceEnabledAfterChecks;
+
   /// What `checkPermission()` answers.
   LocationPermissionStatus permission = LocationPermissionStatus.whileInUse;
 
@@ -110,6 +119,8 @@ class _FakeLocationService implements LocationService {
   Future<bool> isLocationServiceEnabled() async {
     serviceChecks++;
     if (serviceCheckError != null) throw serviceCheckError!;
+    final flipAfter = flipServiceEnabledAfterChecks;
+    if (flipAfter != null && serviceChecks > flipAfter) return false;
     return serviceEnabled;
   }
 
@@ -190,6 +201,7 @@ void main() {
   ProviderContainer harness({
     bool disclosureAccepted = true,
     Duration probeInterval = _probeInterval,
+    Duration contradictedRetry = _probeInterval,
     List<Override> extraOverrides = const [],
   }) {
     SharedPreferences.setMockInitialValues(<String, Object>{
@@ -203,6 +215,8 @@ void main() {
           (ref) => _FakeBackgroundSharingNotifier(),
         ),
         locationAccessProbeIntervalProvider.overrideWithValue(probeInterval),
+        locationAccessContradictedRetryProvider
+            .overrideWithValue(contradictedRetry),
         ...extraOverrides,
       ],
     );
@@ -854,6 +868,110 @@ void main() {
   // -------------------------------------------------------------------------
   // The watchdog's own lifecycle
   // -------------------------------------------------------------------------
+
+  group('probe racing the OS settings write', () {
+    test(
+        'a probe that answers available while the stream faulted rechecks '
+        'FAST, not on the slow cadence', () async {
+      // THE CI RUN 30977235075 DEFECT. On Android
+      // `isLocationServiceEnabled()` races the OS write behind
+      // `cmd location set-location-enabled false` / Quick Settings, so the
+      // probe fired by the stream error can still read the PRE-toggle value.
+      // The verdict was then `available`, the banner never rendered, and the
+      // next probe was a full interval away — so the user's sharing was dead
+      // and silent for up to 30 s. In that run the whole 28 s disabled window
+      // closed before the recheck was due and the banner never appeared at all.
+      //
+      // The watchdog is set to a cadence that CANNOT fire inside this test, so
+      // only the contradicted-probe fast path can produce the recovery below.
+      // Without that, a compressed interval would do the work and this test
+      // would prove nothing about the bug it was written for.
+      final container = harness(probeInterval: _watchdogDisabled);
+      service.controller.add(_position());
+      await _settle();
+      expect(container.read(locationAccessProvider),
+          LocationAccessStatus.available);
+
+      // The stream faults, and the FIRST probe after it still reads the
+      // pre-toggle value — exactly the race. Every later probe reads the truth.
+      // Sequenced on the check COUNT, not on wall-clock timing, so this test
+      // cannot itself become the flaky thing it is pinning.
+      service.flipServiceEnabledAfterChecks = service.serviceChecks + 1;
+      service.controller.addError(
+        StateError('location service disabled'),
+        StackTrace.empty,
+      );
+      await _settle();
+
+      expect(
+        container.read(locationAccessProvider),
+        LocationAccessStatus.serviceDisabled,
+        reason: 'the slow cadence is 5 minutes here, so the surface can only '
+            'have come from the contradicted-probe recheck',
+      );
+    });
+
+    test('the fast recheck is BOUNDED — a healthy device settles back down',
+        () async {
+      // A single dropped stream event on a device whose location is genuinely
+      // fine must not buy an unbounded fast-probe loop.
+      final container = harness(probeInterval: _watchdogDisabled);
+      service.controller.add(_position());
+      await _settle();
+
+      service.controller.addError(
+        StateError('transient stream blip'),
+        StackTrace.empty,
+      );
+      await _settle();
+      final afterBudget = service.serviceChecks;
+
+      // Well past the budget's worth of fast rechecks.
+      await _settle();
+      await _settle();
+
+      expect(
+        container.read(locationAccessProvider),
+        LocationAccessStatus.available,
+        reason: 'the platform never said anything was wrong',
+      );
+      expect(
+        service.serviceChecks,
+        afterBudget,
+        reason: 'the budget is spent; with a 5-minute cadence nothing further '
+            'may probe, or the fast path never stops',
+      );
+    });
+
+    test('a delivered fix cancels the fast rechecks', () async {
+      // The stream proving itself alive settles the contradiction in the
+      // probe's favour — there is nothing left to recheck.
+      final container = harness(probeInterval: _watchdogDisabled);
+      service.controller.add(_position());
+      await _settle();
+
+      service.controller.addError(
+        StateError('transient stream blip'),
+        StackTrace.empty,
+      );
+      await _settle();
+
+      service.controller.add(_position());
+      await _settle();
+      final afterFix = service.serviceChecks;
+
+      await _settle();
+      await _settle();
+
+      expect(container.read(locationAccessProvider),
+          LocationAccessStatus.available);
+      expect(
+        service.serviceChecks,
+        afterFix,
+        reason: 'a delivered fix must clear the remaining budget',
+      );
+    });
+  });
 
   group('watchdog liveness', () {
     test('a probe that THROWS does not disarm the watchdog for the session',
