@@ -222,9 +222,25 @@ jobs:
             -noaudio -no-boot-anim -camera-back none -memory 6144
           disable-animations: true
           emulator-boot-timeout: 420
-          # The egress guard is installed INSIDE the emulator script, after
-          # strfry is up, exactly as e2e-android.yml does it — but here it is
-          # not only a privacy belt.
+          # ORDERING, and it has already bitten once. This lane's orchestrator
+          # starts its OWN hermetic strfry in Phase 0 (`docker rm -f` then
+          # `docker run`), unlike the core-flow runner, which relies on the
+          # workflow's relay. The guard REJECTs outbound :443 for the rest of
+          # the job, so a Phase 0 that had to REACH the registry would be
+          # strangled by it — five failed pulls and a dead lane, reported as
+          # "Docker Hub may be unavailable" (CI run 31075503390).
+          #
+          # Two things keep that closed, and BOTH must hold:
+          #   * the "Start strfry relay" step above runs first and leaves the
+          #     digest-pinned image in the local daemon, and
+          #   * start-strfry.sh skips the pull when the image is digest-pinned
+          #     and already local — a digest is a content address, so there is
+          #     nothing a re-pull could verify that is not already proven.
+          # Do not remove the step above, and do not move this guard earlier.
+          #
+          # The guard is installed INSIDE the emulator script, after strfry is
+          # up, exactly as e2e-android.yml does it — but here it is not only a
+          # privacy belt.
           #
           # This lane toggles the device-wide location provider, and Google
           # Play Services is itself a location client on the same
@@ -237,20 +253,42 @@ jobs:
           # GMS's egress removes that concurrent load from the subsystem under
           # test — which is also what makes the lane's observations about the
           # app attributable to the app.
-          script: bash tooling/e2e/ci/run-with-deadline.sh 24m "e2e-location-provider-toggle drive" -- bash -c 'bash tooling/e2e/ci/setup-network-guard.sh && bash tooling/e2e/ci/run-b6-location-provider-toggle.sh /tmp/integration-apks/b6_location_provider_toggle_test.apk integration_test/b6_location_provider_toggle_test.dart'
+          script: bash tooling/e2e/ci/run-with-deadline.sh 24m "e2e-location-provider-toggle drive" -- bash -c 'bash tooling/e2e/ci/setup-network-guard.sh install && bash tooling/e2e/ci/run-b6-location-provider-toggle.sh /tmp/integration-apks/b6_location_provider_toggle_test.apk integration_test/b6_location_provider_toggle_test.dart'
+
+      # Publish what the guard OBSERVED (CI_HARDENING_BACKLOG C7). Runs BEFORE
+      # the teardown, because the report cross-checks its parse of the kernel
+      # log against the chain's own packet counters (gate G5) and a flushed
+      # chain has none. An absent or empty capture exits 3 and reddens the lane:
+      # "we recorded nothing" must never be read as "nothing left the device"
+      # (backlog A4).
+      - name: Report egress observations
+        if: always()
+        run: bash tooling/e2e/ci/setup-network-guard.sh report
 
       # Tear the guard down BEFORE anything that needs outbound HTTPS. Left
       # installed, its `REJECT --reject-with tcp-reset` on :443 RSTs the
       # artifact upload and cache POST steps below and silently drops the very
       # diagnostics this lane depends on. The guard has already covered the
       # whole drive, so removing it here costs zero coverage. Best-effort so it
-      # can never turn a run red.
+      # can never turn a run red. The teardown subcommand also stops the
+      # ring-buffer follower and removes the IPv6 chain.
       - name: Remove network egress guard
         if: always()
-        run: |
-          sudo iptables -D OUTPUT -j HAVEN_E2E_GUARD 2>/dev/null || true
-          sudo iptables -F HAVEN_E2E_GUARD 2>/dev/null || true
-          sudo iptables -X HAVEN_E2E_GUARD 2>/dev/null || true
+        run: bash tooling/e2e/ci/setup-network-guard.sh teardown || true
+
+      # Every outcome, not just failure: observe mode builds its baseline from
+      # GREEN runs. IP/transport headers only; already secret-scanned by the
+      # report step.
+      - name: Upload egress observation
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: egress-location-provider-toggle-${{ github.run_id }}
+          path: |
+            /tmp/haven-egress/egress-raw.log
+            /tmp/haven-egress/egress-summary.txt
+          retention-days: 14
+          if-no-files-found: ignore
 
       - name: Capture host + emulator diagnostics
         if: failure()

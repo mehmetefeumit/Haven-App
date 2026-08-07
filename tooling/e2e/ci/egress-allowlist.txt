@@ -1,0 +1,78 @@
+# Egress allow-list for the hermetic E2E lanes (CI_HARDENING_BACKLOG C7).
+#
+# ## THIS FILE IS INERT UNTIL SOMEONE FLIPS THE MODE
+#
+# `setup-network-guard.sh` defaults to HAVEN_EGRESS_MODE=observe, in which
+# this file is parsed and validated but no destination is ever rejected and
+# no destination ever fails the lane. It becomes load-bearing only in
+# HAVEN_EGRESS_MODE=enforce, where:
+#
+#   * every outbound flow NOT matching a line below is REJECTed by iptables,
+#     and
+#   * `setup-network-guard.sh report` exits 1 if any such flow was observed.
+#
+# ## The one change that flips enforcement on
+#
+# Change the default on the `HAVEN_EGRESS_MODE` line in
+# `tooling/e2e/ci/setup-network-guard.sh` from `observe` to `enforce`. That
+# single edit covers all three lanes that install the guard (e2e-android,
+# e2e-profile/android, e2e-location-provider-toggle) because they all call
+# the script with no mode argument. A per-lane staged rollout is possible by
+# setting `HAVEN_EGRESS_MODE: enforce` in one workflow's `env:` first; the
+# script's default is what the other lanes then keep.
+#
+# ## What evidence should justify the flip
+#
+# The flip is a promise that the set below is COMPLETE. Nothing in this repo
+# can prove that from a single run, so it must be earned from the nightlies:
+#
+#   1. >= 10 consecutive GREEN nightly runs of `e2e-nightly.yml` (which calls
+#      e2e-android) have uploaded an `egress-summary.txt`, i.e. the observation
+#      itself never went UNOBSERVABLE (rc 3) over that window. A baseline built
+#      from runs where the recorder was broken is not a baseline.
+#   2. The union of the EXTERNAL destinations across those runs is stable —
+#      no new destination appears in the last 5 of the 10.
+#   3. Every destination in that union is CLASSIFIED in writing: who contacts
+#      it and why. "Probably the emulator" is not a classification; see the
+#      attribution ceiling documented in setup-network-guard.sh (UID/GID only
+#      — Haven's own traffic is NOT separable from the AVD's or the
+#      toolchain's on a GitHub-hosted runner).
+#   4. Each classified destination is either added below with the NARROWEST
+#      CIDR and port that covers it, or deliberately left out because the lane
+#      should stop contacting it — in which case the flip is a real fix, not
+#      a rubber stamp.
+#   5. The flip lands in ONE commit with the measured union quoted in the
+#      commit message, so the next person can tell whether a later red is a
+#      regression or an incomplete list.
+#
+# Adding a wildcard (`0.0.0.0/0`) to shortcut any of the above turns the whole
+# control into a no-op that reads, in review, exactly like a working one. The
+# script refuses to start in enforce mode if any line here is a default route.
+#
+# ## Format
+#
+#   <cidr-or-address>  <proto>  <port>
+#
+#   cidr-or-address  IPv4 CIDR (any prefix length), bare IPv4 address, or an
+#                    IPv6 address. IPv6 CIDRs must be /128 — the matcher does
+#                    not do IPv6 prefix arithmetic, and enforce mode REFUSES
+#                    to start rather than silently mismatching a wider one.
+#   proto            TCP | UDP | ICMP | *   (case-insensitive)
+#   port             a decimal port, or *   (always * for ICMP)
+#
+# Blank lines and `#` comments are ignored. Matching is "any line matches".
+# -----------------------------------------------------------------------------
+
+# Loopback. Every hermetic lane's real traffic lives here: the strfry
+# WebSocket (127.0.0.1:$STRFRY_PORT), the local Blossom server
+# (127.0.0.1:3000), the ADB server (127.0.0.1:5037), the emulator console
+# (127.0.0.1:5554-5585) and the Dart VM service port `flutter drive`
+# forwards. Also the systemd-resolved stub on 127.0.0.53:53.
+127.0.0.0/8       *    *
+::1               *    *
+
+# Docker bridge. strfry and the Blossom server run in containers whose
+# published ports are loopback, but container startup and the daemon's own
+# bookkeeping cross the bridge subnet. Carried over verbatim from the
+# pre-C7 guard, which accepted this range unconditionally.
+172.16.0.0/12     *    *

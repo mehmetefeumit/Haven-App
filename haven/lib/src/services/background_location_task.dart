@@ -35,6 +35,7 @@ import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/rust/frb_generated.dart';
 import 'package:haven/src/services/background_identity_service.dart';
 import 'package:haven/src/services/background_location_manager.dart';
+import 'package:haven/src/services/circle_service.dart' show Circle;
 import 'package:haven/src/services/foreground_liveness_probe.dart';
 import 'package:haven/src/services/fresh_secret.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
@@ -43,6 +44,7 @@ import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/pending_mls_wipe_service.dart';
 import 'package:haven/src/services/per_circle_due_tracker.dart';
+import 'package:haven/src/services/publish_stagger.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Top-level callback required by [FlutterForegroundTask].
@@ -187,12 +189,33 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   Future<void>? _inFlightPublish;
 
   /// Independent per-circle publish scheduling (privacy: decorrelation). Each
-  /// circle is registered "due now" when the background first owns publishing,
-  /// then re-armed on its OWN jittered cadence, so a relay can't correlate a
-  /// device's circles by co-timing. Cleared whenever the foreground owns
-  /// publishing so the handoff back re-seeds every circle due-now (bounding the
-  /// inter-publish gap to one cycle).
+  /// circle is registered on its own CSPRNG-staggered due-time when the
+  /// background first owns publishing, then re-armed on its OWN jittered
+  /// cadence, so a relay can't correlate a device's circles by co-timing.
+  /// Cleared whenever the foreground owns publishing, which is why the SEED
+  /// has to be staggered: it re-runs on every foreground→background handoff.
   final PerCircleDueTracker _dueTracker = PerCircleDueTracker();
+
+  /// CSPRNG gaps that keep two circles' kind-445 events out of the same
+  /// wall-clock second (the engine stamps the outer `created_at` from the
+  /// inner event's whole-second clock — see [PublishStagger]).
+  ///
+  /// The isolate builds its own rather than reading a provider: there is no
+  /// Riverpod container here. Both planes share the same bounds via the
+  /// constants in `publish_stagger.dart`.
+  final PublishStagger _stagger = PublishStagger();
+
+  /// Completed the moment [onDestroy] begins, so a decorrelation wait inside
+  /// [_publishCycle] aborts instead of holding teardown open.
+  ///
+  /// `onDestroy` awaits [_inFlightPublish] before tearing anything down, and
+  /// Android gives a stopping foreground service a short window — a plain
+  /// `Future.delayed` between circles would spend that window sleeping. This
+  /// makes every such wait cancellable, so the cost of the stagger at teardown
+  /// is one in-flight publish, not the whole remaining spread.
+  final Completer<void> _shutdownSignal = Completer<void>();
+
+  bool get _shuttingDown => _shutdownSignal.isCompleted;
 
   /// Last time the background ran the all-circles peer-location fetch.
   /// Throttles the fetch to ~`kLocationUpdateInterval` so per-circle publish
@@ -386,6 +409,13 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   @override
   Future<void> onDestroy(DateTime timestamp, bool isTimeout) async {
     debugPrint('[BackgroundTask] onDestroy (isTimeout=$isTimeout)');
+
+    // Release any decorrelation wait FIRST, before the await below. The cycle
+    // paces its per-circle publishes seconds apart on purpose; without this
+    // signal `onDestroy` would sit in `await _inFlightPublish` for the rest of
+    // the burst's spread, inside Android's stop window. Signalling first turns
+    // that into "finish the publish already in flight, then stop".
+    if (!_shutdownSignal.isCompleted) _shutdownSignal.complete();
 
     // Await any in-flight publish cycle so it can finish its
     // `encryptLocation` + `publishEvent` calls before we tear down
@@ -889,39 +919,95 @@ class BackgroundLocationTaskHandler extends TaskHandler {
 
       if (accepted.isEmpty) return;
 
-      // Per-circle decorrelation: register each eligible circle "due now" the
-      // first time we see it while owning publishing, then publish only the
-      // circles whose own independent jittered time has come. Prune first so a
-      // left/blocked circle's schedule is dropped.
+      // Per-circle decorrelation: register each eligible circle on its OWN
+      // CSPRNG-staggered due-time the first time we see it while owning
+      // publishing, then publish only the circles whose own time has come.
+      // Prune first so a left/blocked circle's schedule is dropped.
+      //
+      // The seed MUST be staggered, not shared. `pruneToKeys({})` above empties
+      // the tracker on every cycle where the foreground owns publishing, so
+      // this seed re-runs on EVERY foreground→background handoff — a shared
+      // `timestamp` therefore made every circle due in the same instant on
+      // every handoff, and the loop below then published them all inside one
+      // wall-clock second, i.e. with one identical `created_at`.
       final eligibleKeys = <String>{
         for (final c in accepted) _bgCircleKey(c.nostrGroupId),
       };
-      _dueTracker.pruneToKeys(eligibleKeys);
-      for (final key in eligibleKeys) {
-        _dueTracker.seedIfAbsent(key, timestamp);
-      }
-      final dueCircles = accepted
-          .where(
-            (c) => _dueTracker.isDue(_bgCircleKey(c.nostrGroupId), timestamp),
-          )
-          .toList();
+      _dueTracker
+        ..pruneToKeys(eligibleKeys)
+        ..seedStaggered(eligibleKeys, timestamp, _stagger);
+
+      // Select the circles whose own due-time falls inside this cycle's
+      // stagger window, most-overdue first. The horizon (rather than a bare
+      // `isDue(key, timestamp)`) is what lets a freshly staggered circle be
+      // serviced by THIS cycle: `onRepeatEvent` is a 72 s poll, so anything
+      // not picked up now waits a full interval.
+      final byKey = <String, Circle>{
+        for (final c in accepted) _bgCircleKey(c.nostrGroupId): c,
+      };
+      final dueKeys = _dueTracker.dueKeysUpTo(
+        eligibleKeys,
+        timestamp.add(kPublishStaggerMaxSpread),
+      );
 
       // Nothing due this cycle → skip the GPS fix + publish entirely (battery:
       // no wake cost when no circle is scheduled).
-      if (dueCircles.isEmpty) return;
+      if (dueKeys.isEmpty) return;
 
       // 4. Acquire a GPS fix (only now that at least one circle is due).
       final position = await _locationService!.getCurrentLocation();
 
-      // 8. Encrypt and publish to each DUE circle (sequentially to avoid MLS
-      //    epoch counter races across groups — different groups are independent
-      //    but sequential is safer for DB locking). Re-check foreground
-      //    ownership immediately before each encryptLocation call: the user can
-      //    resume during any of the preceding awaits (GPS fix, circle fetch).
-      //    If the foreground reclaimed ownership, break out rather than
-      //    advancing an MLS epoch concurrently.
+      // 8. Encrypt and publish to each DUE circle, one at a time and MORE THAN
+      //    A SECOND APART.
+      //
+      //    Sequential alone is not enough. The engine stamps the outer
+      //    kind-445 `created_at` from the inner app event's whole-second
+      //    clock, so back-to-back publishes carry a byte-identical
+      //    `created_at` — an equality inside the SIGNED event that links two
+      //    circles to one device for anyone holding both, including from
+      //    different relays or an archive. `onRepeatEvent` is a coarse 72 s
+      //    poll, so independent per-circle due-times routinely land in the
+      //    same cycle; the per-circle tracker cannot space them on its own.
+      //
+      //    Each circle therefore waits until the later of (a) its own due-time
+      //    and (b) a fresh CSPRNG gap after the previous publish STARTED. The
+      //    spread is budgeted: once the next slot would fall past the deadline
+      //    the loop stops and leaves the rest due for the next master tick,
+      //    rather than compressing the gaps back to zero.
+      //
+      //    Re-check foreground ownership immediately before each
+      //    encryptLocation call: the user can resume during any of the
+      //    preceding awaits (GPS fix, circle fetch, decorrelation wait). If the
+      //    foreground reclaimed ownership, break out rather than advancing an
+      //    MLS epoch concurrently.
       var publishCount = 0;
-      for (final circle in dueCircles) {
+      final publishPhaseStart = DateTime.now();
+      final publishDeadline = publishPhaseStart.add(kPublishStaggerMaxSpread);
+      DateTime? lastPublishStartedAt;
+      for (final key in dueKeys) {
+        final circle = byKey[key];
+        if (circle == null) continue;
+
+        final notBefore = nextBackgroundPublishSlot(
+          dueAt: _dueTracker.dueAt(key),
+          lastPublishStartedAt: lastPublishStartedAt,
+          gap: _stagger.sampleGap(totalPublishes: dueKeys.length),
+          phaseStart: publishPhaseStart,
+          deadline: publishDeadline,
+        );
+        if (notBefore == null) {
+          debugPrint(
+            '[BackgroundTask] Stagger budget spent — deferring the remaining '
+            'due circle(s) to the next cycle.',
+          );
+          break;
+        }
+        final wait = notBefore.difference(DateTime.now());
+        if (wait > Duration.zero) {
+          await _sleepUnlessShuttingDown(wait);
+          if (_shuttingDown) break;
+        }
+
         // Fix 4: Re-check before each MLS epoch advance.
         if (await BackgroundLocationManager.isForegroundActive()) {
           debugPrint(
@@ -930,6 +1016,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
           );
           return;
         }
+        lastPublishStartedAt = DateTime.now();
 
         try {
           final encrypted = await _circleManager!.encryptLocation(
@@ -1044,7 +1131,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       // Per-circle next-publish times were re-armed inline (markPublished) as
       // each due circle published — there is no single cycle-wide reschedule.
       debugPrint(
-        '[BackgroundTask] Published to $publishCount/${dueCircles.length} due '
+        '[BackgroundTask] Published to $publishCount/${dueKeys.length} due '
         'circle(s) (${accepted.length} eligible), fetched '
         '$fetchCount/${accepted.length} circle(s).',
       );
@@ -1058,6 +1145,33 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
+
+  /// Waits [d], or returns early the moment [onDestroy] starts.
+  ///
+  /// A decorrelation gap must never become a teardown stall. `onDestroy`
+  /// completes [_shutdownSignal] before it awaits the in-flight cycle, so the
+  /// worst this costs a stopping service is the publish already under way.
+  ///
+  /// The losing `Future.delayed` timer is left to expire on its own — it holds
+  /// nothing but a timer slot in an isolate that is being torn down anyway,
+  /// and cancelling it would need a `Timer` handle this call has no other use
+  /// for.
+  Future<void> _sleepUnlessShuttingDown(Duration d) async {
+    if (d <= Duration.zero || _shuttingDown) return;
+    await Future.any<void>(<Future<void>>[
+      Future<void>.delayed(d),
+      _shutdownSignal.future,
+    ]);
+  }
+
+  /// Test seam for [_sleepUnlessShuttingDown].
+  ///
+  /// The publish cycle it lives in is bridge-bound (it drives `CircleManagerFfi`
+  /// directly, so `flutter test` cannot reach it), but the cancellability of
+  /// the wait is exactly the property that keeps a decorrelation gap from
+  /// becoming a teardown stall — so it is reachable on its own.
+  @visibleForTesting
+  Future<void> staggerWaitForTest(Duration d) => _sleepUnlessShuttingDown(d);
 
   /// Samples a jittered publish interval via the Rust CSPRNG.
   int _sampleJitteredInterval() {

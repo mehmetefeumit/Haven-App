@@ -23,6 +23,7 @@ import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
+import 'package:haven/src/services/publish_stagger.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../mocks/mock_circle_service.dart';
@@ -47,6 +48,14 @@ void main() {
   /// [MockCircleService] (returns [circles] from getVisibleCircles and records
   /// encryptLocation calls). The jitter sampler is deterministic. Disclosure is
   /// accepted unless [disclosureAccepted] is false.
+  ///
+  /// The inter-publish decorrelation stagger is neutralised here
+  /// ([PublishStagger.none]) because it is not the subject of this file: these
+  /// tests are about WHICH circle publishes, wedge recovery, and lifecycle, and
+  /// a real 2-9 s hold before each chained publish would turn every one of them
+  /// into a timing test of something else. The stagger the chain actually
+  /// applies in production is asserted, with the production constants, by
+  /// `location_publish_decorrelation_test.dart`.
   ({ProviderContainer container, MockCircleService mock}) build(
     List<Circle> circles, {
     bool disclosureAccepted = true,
@@ -72,6 +81,7 @@ void main() {
         circleServiceProvider.overrideWithValue(mock),
         locationSharingServiceProvider.overrideWithValue(sharing),
         locationPublishJitterSamplerProvider.overrideWithValue((_) => sample),
+        locationPublishStaggerProvider.overrideWithValue(PublishStagger.none()),
       ],
     );
     addTearDown(container.dispose);

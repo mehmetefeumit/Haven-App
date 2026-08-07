@@ -333,6 +333,42 @@ class MockCircleService implements CircleService {
   /// open and prove serialization; complete it to release them.
   Completer<void>? encryptGate;
 
+  /// Wall-clock instant at which each [encryptLocation] call was entered, in
+  /// call order.
+  ///
+  /// The kind-445 `created_at` is stamped inside `encryptLocation` (the engine
+  /// binds the outer event's timestamp to the inner app event's whole-second
+  /// clock), so the separation between these instants IS the separation
+  /// between two circles' published `created_at` values. Tests assert on it
+  /// directly rather than on the shape of the call, so a change back to a
+  /// parallel dispatch is caught by what an observer would see rather than by
+  /// what the source looks like.
+  final List<DateTime> encryptCallTimes = [];
+
+  /// Number of [encryptLocation] calls currently in flight, and the high-water
+  /// mark across the test. A peak above 1 means the caller dispatched
+  /// concurrently.
+  int _encryptInFlight = 0;
+  int encryptConcurrencyPeak = 0;
+
+  /// Makes [encryptLocation] yield to the event loop once while it is counted
+  /// as in flight.
+  ///
+  /// Off by default so existing tests keep their synchronous-completion
+  /// ordering. It must be ON for [encryptConcurrencyPeak] to mean anything:
+  /// without a real suspension the mock's whole body runs to completion at
+  /// call time, so even a `Future.wait` over every circle records a peak of 1
+  /// and the concurrency observation silently proves nothing. The real
+  /// `encryptLocation` is an FFI round trip and always suspends.
+  bool encryptSuspends = false;
+
+  /// Hex-encoded `mlsGroupId`s whose [encryptLocation] must fail.
+  ///
+  /// Lets a test prove that one failing circle does not abort a sequential
+  /// multi-circle burst — the isolation `Future.wait` used to provide per
+  /// element and a naive `for` loop would lose.
+  final Set<String> encryptLocationThrowKeys = {};
+
   @override
   Future<EncryptedLocation> encryptLocation({
     required List<int> mlsGroupId,
@@ -343,18 +379,36 @@ class MockCircleService implements CircleService {
   }) async {
     capturedUpdateIntervalSecs = updateIntervalSecs;
     encryptedMlsGroupIds.add(mlsGroupId);
+    encryptCallTimes.add(DateTime.now());
     methodCalls.add('encryptLocation');
-    if (encryptGate != null) {
-      await encryptGate!.future;
+    _encryptInFlight++;
+    if (_encryptInFlight > encryptConcurrencyPeak) {
+      encryptConcurrencyPeak = _encryptInFlight;
     }
-    if (_encryptIndex < encryptLocationResults.length) {
-      return encryptLocationResults[_encryptIndex++];
+    try {
+      if (encryptSuspends) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      if (encryptGate != null) {
+        await encryptGate!.future;
+      }
+      final key = mlsGroupId
+          .map((b) => b.toRadixString(16).padLeft(2, '0'))
+          .join();
+      if (encryptLocationThrowKeys.contains(key)) {
+        throw const CircleServiceException('simulated encryptLocation failure');
+      }
+      if (_encryptIndex < encryptLocationResults.length) {
+        return encryptLocationResults[_encryptIndex++];
+      }
+      return EncryptedLocation(
+        eventJson: '{"id":"mock-event-${_encryptIndex++}","kind":445}',
+        nostrGroupId: List.generate(32, (i) => i),
+        relays: const ['wss://relay.example.com'],
+      );
+    } finally {
+      _encryptInFlight--;
     }
-    return EncryptedLocation(
-      eventJson: '{"id":"mock-event-${_encryptIndex++}","kind":445}',
-      nostrGroupId: List.generate(32, (i) => i),
-      relays: const ['wss://relay.example.com'],
-    );
   }
 
   /// Last-known location rows stored in the mock.

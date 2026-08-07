@@ -15,11 +15,46 @@ publish = false
 description = "Hermetic in-memory Nostr relay for Haven's iOS E2E lane (no Docker)."
 license = "MIT"
 
+# The recording proxy's logic lives in a library so it can be unit-tested and
+# driven from an integration test; the two binaries are thin shells over it.
+[lib]
+name = "haven_local_relay"
+path = "src/lib.rs"
+
 [[bin]]
 name = "haven-local-relay"
 path = "src/main.rs"
 
+# Recording WebSocket proxy (Workstream C). Test-harness only: it writes a
+# full NDJSON transcript of every WebSocket message in both directions, which
+# is a privacy hazard by construction and must never be reachable from a
+# release build. scripts/ci/check_wire_proxy_test_only.sh enforces that.
+[[bin]]
+name = "haven-wire-proxy"
+path = "src/bin/wire_proxy.rs"
+
 [dependencies]
 # Pinned to the 0.44 line to match the app's nostr 0.44.x wire format.
 nostr-relay-builder = "0.44"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "signal",
+  "time",
+  "net",
+  "io-util",
+  "sync",
+] }
+# Already in the dependency graph via nostr-relay-builder's async-wsocket, so
+# naming them directly adds no new supply-chain surface.
+tokio-tungstenite = "0.26"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }

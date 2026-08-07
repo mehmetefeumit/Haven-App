@@ -16,6 +16,7 @@ import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/profile_service.dart';
+import 'package:haven/src/services/publish_stagger.dart';
 import 'package:haven/src/utils/member_display.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -143,10 +144,46 @@ Future<List<MemberLocation>> _withEffectiveNames(
 
 /// Publishes the user's current location to all accepted circles.
 ///
-/// Designed to be called periodically (e.g., every 5 minutes) or on
-/// manual refresh. Returns the number of circles published to.
+/// The one-shot "publish to every circle now" burst: cold start, app resume,
+/// motion trigger, and the accept/create UI. (The recurring per-circle cadence
+/// belongs to `locationPublishSchedulerProvider`.) Returns the number of
+/// circles published to.
+///
+/// ## Decorrelation (privacy)
+///
+/// The circles are published SEQUENTIALLY, in a CSPRNG order, with a CSPRNG
+/// gap of more than one second before each one after the first
+/// ([PublishStagger]). This used to be a `Future.wait` over every circle,
+/// which put all N encrypts in the same wall-clock second — and because the
+/// engine binds the outer kind-445 `created_at` to the inner event's
+/// whole-second timestamp, that produced N events carrying a byte-identical
+/// `created_at`. Exact equality inside a signed event links otherwise
+/// unlinkable pseudonymous circles to one device for anyone holding those
+/// events, including from different relays or from an archive.
+///
+/// This is the highest-frequency burst path there is — cold start
+/// (`map_shell.dart`), every resume, and every significant-motion trigger —
+/// and on iOS it is ALSO the background publish path (iOS has no foreground
+/// service; background publishes arrive through the motion trigger).
+///
+/// Freshness cost: the last circle in a burst publishes at most
+/// `PublishStagger.maxSpreadFor(n)` (≤ 30 s for realistic circle counts)
+/// later than the first, using the same GPS fix. That fix is still inside
+/// `kStreamPositionMaxAge` (168 s — the app's own bound on a publishable fix),
+/// the burst still completes well inside `kLocationPublishOverlapGuard` (60 s,
+/// so two bursts can never interleave), and the recurring per-circle schedules
+/// are untouched, so the kind-445 no-gap invariant
+/// (`LOCATION_MESSAGE_RETENTION_SECS` 228 s > `kLocationPublishMaxInterval`
+/// 168 s) is unaffected by the stagger.
 final locationPublisherProvider = FutureProvider<int>((ref) async {
   debugPrint('[LocationPublish] Provider executing...');
+
+  // A burst now spans tens of seconds, so it can outlive its own provider:
+  // every trigger does `invalidate` + `read`, and the app can background
+  // mid-burst. A superseded burst must stop rather than keep publishing
+  // behind the one that replaced it.
+  var superseded = false;
+  ref.onDispose(() => superseded = true);
 
   final identity = await ref.read(identityProvider.future);
   if (identity == null) {
@@ -199,50 +236,70 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
       return 0;
     }
 
-    // Publish to all accepted circles in parallel — each circle uses
-    // a different MLS group, so encrypt+publish operations are independent.
-    final results = await Future.wait(
-      accepted.map((circle) async {
-        debugPrint(
-          '[LocationPublish] Encrypting (${circle.relays.length} relays)',
-        );
-        try {
-          final result = await service.publishLocation(
-            mlsGroupId: circle.mlsGroupId,
-            senderPubkeyHex: identity.pubkeyHex,
-            latitude: position.latitude,
-            longitude: position.longitude,
-          );
-          debugPrint(
-            '[LocationPublish] Published — '
-            'accepted=${result.acceptedBy.length}, '
-            'rejected=${result.rejectedBy.length}, '
-            'failed=${result.failed.length}',
-          );
-          if (result.rejectedBy.isNotEmpty) {
-            for (final r in result.rejectedBy) {
-              // Relay-controlled text — bound its length so a noisy or
-              // hostile relay can't flood the (debug-only) log.
-              final reason = r.reason.length > 100
-                  ? '${r.reason.substring(0, 100)}...'
-                  : r.reason;
-              debugPrint('[LocationPublish] REJECTED by relay: $reason');
-            }
-          }
-          if (result.failed.isNotEmpty) {
-            debugPrint(
-              '[LocationPublish] FAILED relays: ${result.failed.length}',
-            );
-          }
-          return 1;
-        } on Object catch (_) {
-          debugPrint('[LocationPublish] Publish failed for circle');
-          return 0;
-        }
-      }),
-    );
+    // Publish to the accepted circles ONE AT A TIME, in a CSPRNG order, with a
+    // CSPRNG gap of more than one second before each publish after the first.
+    //
+    // NEVER restore `Future.wait` here. Parallel dispatch puts every circle's
+    // `encryptLocation` in the same wall-clock second, and the engine stamps
+    // the outer kind-445 `created_at` from the inner event's whole-second
+    // clock — so parallel dispatch is exactly the shared-`created_at` leak,
+    // not merely a co-timing hint. The gap must exceed one second for the same
+    // reason: sub-second jitter cannot move a whole-second stamp.
+    final stagger = ref.read(locationPublishStaggerProvider);
+    final order = stagger.shuffled(accepted);
+    final gaps = stagger.sampleGaps(order.length);
 
-    return results.fold<int>(0, (sum, v) => sum + v);
+    var published = 0;
+    for (var i = 0; i < order.length; i++) {
+      if (gaps[i] > Duration.zero) {
+        await Future<void>.delayed(gaps[i]);
+      }
+      if (superseded) {
+        debugPrint(
+          '[LocationPublish] Burst superseded — '
+          'stopping after $published/${order.length} circle(s)',
+        );
+        break;
+      }
+      final circle = order[i];
+      debugPrint(
+        '[LocationPublish] Encrypting (${circle.relays.length} relays)',
+      );
+      try {
+        final result = await service.publishLocation(
+          mlsGroupId: circle.mlsGroupId,
+          senderPubkeyHex: identity.pubkeyHex,
+          latitude: position.latitude,
+          longitude: position.longitude,
+        );
+        debugPrint(
+          '[LocationPublish] Published — '
+          'accepted=${result.acceptedBy.length}, '
+          'rejected=${result.rejectedBy.length}, '
+          'failed=${result.failed.length}',
+        );
+        if (result.rejectedBy.isNotEmpty) {
+          for (final r in result.rejectedBy) {
+            // Relay-controlled text — bound its length so a noisy or
+            // hostile relay can't flood the (debug-only) log.
+            final reason = r.reason.length > 100
+                ? '${r.reason.substring(0, 100)}...'
+                : r.reason;
+            debugPrint('[LocationPublish] REJECTED by relay: $reason');
+          }
+        }
+        if (result.failed.isNotEmpty) {
+          debugPrint(
+            '[LocationPublish] FAILED relays: ${result.failed.length}',
+          );
+        }
+        published++;
+      } on Object catch (_) {
+        debugPrint('[LocationPublish] Publish failed for circle');
+      }
+    }
+
+    return published;
   } on Object catch (e) {
     debugPrint('[LocationPublish] FAILED: ${e.runtimeType}');
     return 0;

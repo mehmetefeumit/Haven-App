@@ -306,7 +306,20 @@ jobs:
           # < the 45 min wrapper. The per-test `timeout:` overrides inside
           # e2e_combined.dart now have real headroom to convert any single stuck
           # scenario into a clean, named failure instead of a blind SIGKILL.
-          script: bash tooling/e2e/ci/run-with-deadline.sh ${{ inputs.live_sync && '45m' || '26m' }} "e2e-android drive (${{ inputs.live_sync && 'live-sync' || 'poll' }})" -- bash -c 'bash tooling/e2e/ci/setup-network-guard.sh && HAVEN_DRIVE_TIMEOUT=${{ inputs.live_sync && '28m' || '12m' }} bash tooling/e2e/ci/run-single-avd-scenario.sh integration_test/e2e/e2e_combined.dart'
+          script: bash tooling/e2e/ci/run-with-deadline.sh ${{ inputs.live_sync && '45m' || '26m' }} "e2e-android drive (${{ inputs.live_sync && 'live-sync' || 'poll' }})" -- bash -c 'bash tooling/e2e/ci/setup-network-guard.sh install && HAVEN_DRIVE_TIMEOUT=${{ inputs.live_sync && '28m' || '12m' }} bash tooling/e2e/ci/run-single-avd-scenario.sh integration_test/e2e/e2e_combined.dart'
+
+      # Publish what the guard OBSERVED (CI_HARDENING_BACKLOG C7). Must run
+      # BEFORE the teardown below, because the report cross-checks its parse of
+      # the kernel log against the chain's own packet counters (gate G5) and a
+      # flushed chain has none.
+      #
+      # `if: always()` and NOT best-effort: an absent or empty capture exits 3
+      # and reddens the lane. A guard whose failure mode is silence has to
+      # treat "no evidence" as a failure, or a lane that recorded nothing is
+      # indistinguishable from a lane that observed nothing — backlog A4.
+      - name: Report egress observations
+        if: always()
+        run: bash tooling/e2e/ci/setup-network-guard.sh report
 
       # Tear the egress guard down BEFORE anything that needs outbound
       # HTTPS. The guard's `REJECT ... --reject-with tcp-reset` on TCP 443
@@ -315,15 +328,29 @@ jobs:
       # over :443) and silently dropping the very diagnostics we depend on
       # — the root reason prior failures produced NO artifact. The guard
       # has already covered the entire flutter-drive run above, so removing
-      # it now costs zero coverage. Best-effort (`|| true`) so it can never
-      # turn a run red.
+      # it now costs zero coverage. Best-effort so it can never turn a run
+      # red (the teardown subcommand also stops the ring-buffer follower and
+      # removes the IPv6 chain, which the inline commands here never did).
       - name: Remove network egress guard
         if: always()
-        run: |
-          sudo iptables -D OUTPUT -j HAVEN_E2E_GUARD 2>/dev/null || true
-          sudo iptables -F HAVEN_E2E_GUARD 2>/dev/null || true
-          sudo iptables -X HAVEN_E2E_GUARD 2>/dev/null || true
-          echo "Egress guard removed (if it was present)."
+        run: bash tooling/e2e/ci/setup-network-guard.sh teardown || true
+
+      # Uploaded on EVERY outcome, unlike the failure-only artifact below.
+      # Observe mode exists to accumulate a destination baseline from GREEN
+      # runs, and an artifact that only appears on red would never produce one.
+      # Contents are IP/transport headers only — see the disclosure review in
+      # setup-network-guard.sh; the report has already run them through
+      # scan-logs-for-secrets.sh.
+      - name: Upload egress observation
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: egress-android${{ inputs.live_sync && '-live-sync' || '' }}-${{ github.run_id }}
+          path: |
+            /tmp/haven-egress/egress-raw.log
+            /tmp/haven-egress/egress-summary.txt
+          retention-days: 14
+          if-no-files-found: ignore
 
       - name: Collect strfry logs
         if: always()

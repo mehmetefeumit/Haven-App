@@ -545,7 +545,7 @@ Two further findings from the same investigation:
 | A6 | iOS lanes retry on *any* failure with no flake classifier (`e2e-ios.yml:153,173`), unlike Android's narrow `is_connect_flake` | **DONE 2026-08-03**. See below |
 | A7 | Poll/live-sync define leakage: 5 lanes omit the define and silently inherit `liveSyncEnabled = true` | **DONE 2026-08-03**. See below |
 | A8 | 4 emulator lanes lack a coreutils `timeout` wrapper; several step caps sit below worst-case runtime (integration 35m vs ~84m) | **DONE 2026-08-03** — first half held, second half was backwards. See below |
-| A9 | `haven-core` cannot take `--all-targets` clippy: 71 pre-existing lint errors in never-linted `#[cfg(test)]` code | open |
+| A9 | `haven-core` cannot take `--all-targets` clippy: 71 pre-existing lint errors in never-linted `#[cfg(test)]` code | **DONE** — the count was 123, not 71. See below |
 
 **A3 — skips are now declared, and the original counts were wrong in both
 directions.** The measured surfaces, from real runs on a clean tree:
@@ -844,6 +844,20 @@ the last place a caller could decline to answer, and `e2e-profile`'s iOS job was
 taking it. `run-single-avd-scenario.sh`'s requirement is scoped to its fallback
 branch only, so the CI drive path — which cannot influence a compiled-in define —
 is untouched.
+
+**A9 — DONE, and the count in the item was low.** `rust-check.yml` now runs
+`cargo clippy --all-targets -- -D warnings` on both crates, and the working
+tree is clean under it. The real figure was **123** findings, not 71: bare
+`cargo clippy` selects `--lib`/`--bins` only, so this crate's `#[cfg(test)]`
+modules AND its 20 `tests/*.rs` integration targets were never linted.
+`--all-targets` also pulls in dev-dependencies, which turns on the `test-utils`
+feature — so it lints the `#[cfg(feature = "test-utils")]` lib surface (e.g.
+`SessionManager::new_unencrypted`) that bare clippy never compiles either.
+
+The most consequential class among the 123: **24 discarded `#[must_use]`
+`StopOutcome`s**. A discarded `TimedOut` reports a drain that did not happen —
+the same fail-open shape as the session-teardown bug the `#[must_use]` was
+added to catch, sitting unlinted in the tests written to prove it.
 
 **A8 — the wrapper half held; the "caps too low" half was backwards, and the
 real defect is its mirror image.**
@@ -1724,11 +1738,32 @@ a cursor-window property no detection change touches.
 A permanently-red lane is worse than no lane — it trains people to ignore it
 and cannot detect a regression — so the resolution below re-scoped it rather
 than deleting the measurements or relaxing what could still hold. One of the
-four supposedly-unachievable properties turned out to be achievable and was
-KEPT as a gate: `backward-skew-publish` passes, because
-`tooling/e2e/strfry.conf` sets `rejectEventsOlderThanSeconds = 94608000`
-(3 years), so a −6 h `created_at` is accepted and a refusal there would be a
-real, fixable regression.
+four supposedly-unachievable properties looked achievable and was KEPT as a
+gate: `backward-skew-publish`, on the reasoning that `tooling/e2e/strfry.conf`
+sets `rejectEventsOlderThanSeconds = 94608000` (3 years), so a −6 h `created_at`
+is accepted and a refusal there would be a real, fixable regression.
+
+> **CORRECTION — 2026-08-05. That premise was wrong, and the gate is now
+> narrowed rather than kept whole.** `rejectEventsOlderThanSeconds` is only ONE
+> of strfry's two write-time time checks; NIP-40 expiry is a separate ingest
+> path with no knob in that config. Haven stamps `expiration = created_at +
+> LOCATION_MESSAGE_RETENTION_SECS` with BOTH values taken from the skewed clock,
+> so a −6 h event is born ~6 h expired and is refused at ingest — the same
+> "cannot publish at all" outcome as `forward-skew-publish`, and with the same
+> single lever (clock correction, deferred). CI proved it twice, both times with
+> `"invalid: event expired"`: runs 30925179141 and 30964250098. This is the same
+> reasoning error the code comment made, and it is why `backward-skew-publish`
+> and `forward-skew-publish` were treated asymmetrically when they are
+> mechanically symmetric.
+>
+> `backward-skew-publish` is therefore now **classified, not gated wholesale**:
+> a refusal that classifies as `DeviceClockComplaint.behind` (the born-expired
+> one) is recorded as EVIDENCE; every other refusal reason — including an
+> unrecognised one, which classifies as null — still emits `[b8] FINDING` and
+> fails the lane. This keeps the regression-detecting power the decision above
+> wanted while removing the part that could never pass. It is a re-scope on new
+> evidence, not a relaxation to quiet a red lane; `run-b8-clock-skew.sh:88-89`
+> and CLAUDE.md Testing Requirement #5 both forbid the latter.
 
 **OWNER DECISION — TAKEN 2026-08-04: re-scoped to the SIGNALS.** The lane now
 gates what the app is actually responsible for and RECORDS what it is not,
@@ -1741,7 +1776,14 @@ using the same evidence-vs-finding split B1, B5, B6 and B9 already use:
   in-ciphertext timestamps, and ONE outlying peer must NOT raise it; both
   faults must reach the user saying DIFFERENT things.
 * `[b8] EVIDENCE` (**recorded, not gated**) — the delivery each skew direction
-  still costs, measured every run.
+  still costs, measured every run — with one caveat added 2026-08-05: because
+  a NIP-40-enforcing relay refuses BOTH skew directions at ingest, the
+  read-side costs (`backward-skew-retention`, `-receive`, `-catchup`) have no
+  accepted event to measure and are reported as a single explicit
+  `backward-skew-readside` note stating that they were not measured and why,
+  rather than being silently skipped. Re-homing the receiver-expiration gate
+  and the cursor-window comparison somewhere they can actually run is open
+  work; today they are covered by unit tests only.
 
 This closes the gap the previous paragraph flagged: the detection work was
 gated by unit tests only, and is now proven on a device. It is a re-scope, not
@@ -1913,6 +1955,75 @@ the commit subset while `isNotEmpty` stays satisfied by commits.
 **Scope honestly:** a wire transcript is a *send-side* instrument. It says
 nothing about a hostile relay withholding, reordering, or forging inbound events
 (eclipse, welcome suppression, stale-KeyPackage serving).
+
+### Status 2026-08-07 — instruments BUILT and self-verifying; NOT YET WIRED
+
+C1–C7 are implemented and every self-test is green. The contract they share is
+published at `docs/WIRE_JOURNAL.md`; `tooling/e2e/wire_allowlist.json` is the
+day-one allow-list, linted by both consumers.
+
+| Item | Artefact | Self-test |
+|---|---|---|
+| C1 | `tooling/e2e/local-relay/src/{proxy,frame,journal,summarize}.rs`, `bin/wire_proxy.rs` — listens on 7788, forwards to 7777 | 77 Rust tests |
+| C2–C4 | `tooling/e2e/ci/check-wire-journal.sh` | 116 fixtures |
+| C5.1–C5.6 | `tooling/e2e/ci/check-wire-correlation.sh` | 79 fixtures, `MIN_CASES=71` |
+| C6 | `haven/integration_test/e2e/_lib/wire_canaries.dart`, CLI `tooling/e2e/ci/check-wire-canaries.dart` | 85 Dart tests |
+| C7 | `tooling/e2e/ci/setup-network-guard.sh` + `egress-allowlist.txt`, **observe mode** | green |
+| — | `scripts/ci/check_wire_proxy_test_only.sh` — the proxy may never be reachable from app code | green |
+
+**The load-bearing caveat: nothing has observed real traffic.** All three
+oracles have only ever seen hermetic fixtures. Lane wiring is deliberately
+deferred — see the four coordinated `e2e-android.yml` edits below — because
+wiring a *lying* instrument into CI produces confident green results that mean
+nothing. The review fleet found the instrument defective in two directions
+before any of it ran (the proxy dropped traffic it had recorded as sent; the
+canary printed the secret it protects), which is the argument for that ordering,
+not against it.
+
+**What the review round changed, worth carrying forward:**
+
+- **The proxy dropped traffic it had recorded as sent.** Teardown discarded
+  queued c2r frames after journalling them, so the journal over-claimed. Now a
+  bounded `TEARDOWN_DRAIN` (5 s) plus a `Ledger{claimed, delivered}` and an
+  explicit `conn_error` **retraction record** naming the discard count — the
+  journal is allowed to be incomplete, never allowed to lie about it.
+- **The canary printed the value it protects.** Two independent stops, each
+  proven load-bearing by its own mutation: a *shape* check on `FrameRef.verb`
+  (so novel verbs stay scanned) and a value-aware scrub of leaked terms from the
+  location string. Neither is redundant — `lat/f64-be/hex-upper` is 16 chars of
+  `[A-Z0-9]`, a well-formed verb to any shape test, and only the scrub catches it.
+- **Coverage claims must be independent of the thing they measure.** C6's
+  ledger was `terms ∪ dropped`, both from the expander — deleting an encoding
+  made the test pass with *less* work. Replaced by a hand-written
+  `CanaryEncodingLedger` reconciled in five directions, with a disagreement
+  filed as **UNUSABLE** (not a leak, not a pass). 74 → 177 live terms.
+- **Vacuity is the default failure mode of an oracle, not an edge case.** C6's
+  controls reported *clean* with no canary planted and for carriers past the
+  evidence bound. Both are now META-FLOOR, checked before any carrier check.
+- **Send-side assertions must be scoped to `dir=="c2r"`.** Inbound traffic
+  answering a send-side question is a false red. What the oracle uniquely knows
+  about inbound is now printed as `advisory (NOT asserted)` rather than
+  discarded.
+
+**The jq `index(.)` trap is repo-wide, not per-file.** `index`'s argument is
+evaluated against `index`'s own input, not the enclosing record. It has now been
+hit and caught by mutation in three separate files by three separate authors.
+Treat it as a review checklist item for any new jq oracle.
+
+**Outstanding before C can claim anything:**
+
+1. **Lane wiring** — four coordinated edits to `e2e-android.yml`, each of which
+   reds the lane if the others are missing: relay URL `:7777`→`:7788` (line 68);
+   a `start-wire-proxy.sh` step between lines 205 and 232; a sentinel-emitting
+   `testWidgets` in `e2e_combined.dart`; post-drive oracle steps after line 309
+   plus `stop-wire-proxy.sh` under `if: always()`.
+2. **A reachability guard for the oracle chain** — `check_wire_proxy_test_only.sh`
+   is the negative half; there is no positive counterpart proving the oracles
+   actually run. Precedent: `announcement_keys_reachable_test.dart`'s
+   equality-pinned `_knownUnwired`.
+3. **`_assertWirePrivacyInvariants` disposition — split, do not delete.** Its
+   ephemeral-key / MLS-group-id / no-`p`-tag checks (Security Rule 2 *on the
+   wire*) are not yet carried over, and C5.1's argument depends on them.
 
 ---
 

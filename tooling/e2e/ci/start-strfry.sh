@@ -80,6 +80,96 @@ on_exit() {
 }
 trap on_exit EXIT
 
+# ---------------------------------------------------------------------------
+# image_is_pinned_and_local [<ref>] — 0 (true) when <ref> names a sha256 DIGEST
+# and that exact content is already in the local daemon, i.e. when pulling could
+# not possibly change what we run. Defaults to ${IMAGE}.
+#
+# A digest is a content address: `foo@sha256:abc…` present locally IS the bytes
+# that digest names, so a re-pull re-verifies something already proven and buys
+# nothing but a network dependency. A TAG is deliberately excluded — a local
+# `:latest` can be stale, and silently reusing it would be a real change in what
+# the lane tests.
+#
+# This is not an optimisation. A lane may legitimately start a relay at a point
+# where outbound HTTPS is already gone: run-b6-location-provider-toggle.sh starts
+# its OWN hermetic strfry in Phase 0, and the egress guard that lane installs
+# REJECTs TCP 443 for the rest of the job. Without this, that pull failed five
+# times and took the lane down while the correct image sat in the local daemon
+# the whole time — reported as "Docker Hub may be unavailable" (CI run
+# 31075503390).
+#
+# Takes an argument so `--self-test` can exercise it without a daemon.
+image_is_pinned_and_local() {
+  local ref="${1:-${IMAGE}}"
+  [[ "${ref}" == *"@sha256:"* ]] || return 1
+  docker image inspect "${ref}" >/dev/null 2>&1
+}
+
+# --self-test — pin the pull-skip decision hermetically, with `docker` stubbed.
+#
+# One line of shell that can strand a lane in either direction: skip too eagerly
+# and a stale tag silently changes what is tested; skip too rarely and a lane
+# behind the egress guard dies on a pull it never needed. Neither shows up until
+# CI, which is where both have now been paid for.
+run_self_test() {
+  local fail=0
+  _c() { # _c <label> <SKIP|PULL> <ref> <docker-inspect-rc>
+    local label="$1" want="$2" ref="$3" rc="$4" got
+    docker() { [[ "${1:-}" == "image" ]] && return "${rc}"; return 0; }
+    if image_is_pinned_and_local "${ref}"; then got=SKIP; else got=PULL; fi
+    unset -f docker
+    if [[ "${got}" == "${want}" ]]; then
+      printf '  \033[1;32mPASS\033[0m %s\n' "${label}"
+    else
+      printf '  \033[1;31mFAIL\033[0m %s (want %s, got %s)\n' \
+        "${label}" "${want}" "${got}" >&2
+      fail=1
+    fi
+  }
+
+  echo "start-strfry.sh --self-test"
+  # The case this exists for: pinned AND already local -> no network at all.
+  _c "digest-pinned and present locally skips the pull" \
+    SKIP 'dockurr/strfry@sha256:abc123' 0
+  # Pinned but absent -> must pull, or there is no image to run.
+  _c "digest-pinned but absent still pulls" \
+    PULL 'dockurr/strfry@sha256:abc123' 1
+  # THE SAFETY CASE. A local tag may be stale, and reusing it would silently
+  # change what the lane tests — so a tag ALWAYS pulls, present or not.
+  _c "a local TAG still pulls (it may be stale)" \
+    PULL 'dockurr/strfry:latest' 0
+  _c "an absent tag pulls" \
+    PULL 'dockurr/strfry:1.1.0' 1
+
+  # THE CALL SITE, not just the predicate. A perfect predicate that nothing
+  # consults is the regression restored: disabling the skip at the `if` leaves
+  # every fixture above green while the lane dies on a pull behind the guard.
+  # Read from the code with comment lines stripped, so a comment that merely
+  # MENTIONS the call cannot satisfy it.
+  local body
+  body="$(grep -v '^[[:space:]]*#' "${BASH_SOURCE[0]}")"
+  if ! grep -qE '^if image_is_pinned_and_local; then' <<<"${body}"; then
+    printf '  \033[1;31mFAIL\033[0m %s\n' \
+      'the pull is no longer guarded by the skip predicate — a lane behind the egress guard will die on a pull it does not need' >&2
+    fail=1
+  else
+    printf '  \033[1;32mPASS\033[0m the pull path actually consults the predicate\n'
+  fi
+
+  if (( fail )); then
+    echo "start-strfry.sh --self-test: FAILED" >&2
+    return 1
+  fi
+  echo "start-strfry.sh --self-test: all 5 fixtures passed"
+  return 0
+}
+
+if [[ "${1:-}" == "--self-test" ]]; then
+  run_self_test
+  exit $?
+fi
+
 # Idempotent: remove any leftover container from a previous run so
 # `docker run --name` doesn't collide. Done BEFORE wiping the data
 # dir so a still-running container can't be holding the dir open.
@@ -124,10 +214,24 @@ pull_image() {
   return 1
 }
 
-echo "Pulling strfry image ${IMAGE} (up to ${PULL_ATTEMPTS} attempts)..."
-if ! pull_image; then
-  echo "ERROR: failed to pull strfry image after ${PULL_ATTEMPTS} attempts; Docker Hub may be unavailable (HTTP 5xx / rate limit)." >&2
-  exit 1
+if image_is_pinned_and_local; then
+  echo "strfry image ${IMAGE} is digest-pinned and already local — skipping the pull."
+else
+  echo "Pulling strfry image ${IMAGE} (up to ${PULL_ATTEMPTS} attempts)..."
+  if ! pull_image; then
+    echo "ERROR: failed to pull strfry image after ${PULL_ATTEMPTS} attempts." >&2
+    # Name the self-inflicted cause FIRST: on these lanes a refusal on :443 is
+    # far likelier to be our own egress guard than the registry. `sudo -n` so a
+    # developer machine gets a clear error instead of a password prompt.
+    if sudo -n iptables -C OUTPUT -j HAVEN_E2E_GUARD 2>/dev/null; then
+      echo "  The HAVEN_E2E_GUARD egress guard is INSTALLED and REJECTs" \
+           "outbound TCP 443 — that, not Docker Hub, is the likely cause." \
+           "setup-network-guard.sh must run AFTER every relay a job starts." >&2
+    else
+      echo "  Docker Hub may be unavailable (HTTP 5xx / rate limit)." >&2
+    fi
+    exit 1
+  fi
 fi
 
 echo "Starting strfry: image=${IMAGE} port=${PORT} data=${DATA_DIR}"

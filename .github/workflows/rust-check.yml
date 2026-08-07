@@ -1,7 +1,9 @@
 # Reusable workflow: Rust checks
-# Verifies formatting, linting, and tests for both Rust crates:
+# Verifies formatting, linting, and tests for all three Rust crates:
 #   - haven-core: the protocol/crypto library (pure Rust)
 #   - haven/rust_builder: the flutter_rust_bridge FFI surface
+#   - tooling/e2e/local-relay: the hermetic E2E relay + the recording wire proxy
+#     (harness-only; never part of a shipped build)
 #
 # Both must pass clippy individually. Until 2026-05-24, rust_builder
 # was not clippy-checked, which masked a `too_many_arguments` issue
@@ -128,3 +130,64 @@ jobs:
       # only signal would be "5 ignored" becoming "6 ignored".
       - name: No undeclared test skips
         run: bash ../../scripts/ci/check_no_undeclared_skips.sh cargo rust_builder "${RUNNER_TEMP}/rust-builder-cargo-test.log"
+
+  # ============================================================================
+  # e2e-tooling — tooling/e2e/local-relay: the hermetic relay AND the recording
+  # wire proxy that Workstream C's oracles read.
+  #
+  # It is a separate Cargo project (deliberately NOT a member of haven-core, so
+  # it can never enter the app build), which until now meant NOTHING in CI
+  # compiled it outside the iOS E2E lane's `cargo build`. A recorder that four
+  # oracles depend on cannot first be exercised on a macOS runner an hour into
+  # a lane: a break there presents as "the E2E journal is empty", which is a
+  # fail-closed red pointing at the app rather than at the instrument.
+  #
+  # `--self-test` runs the shipped binary end to end (relay + proxy + client on
+  # loopback) in addition to `cargo test`, because the two prove different
+  # things: the tests prove the code, the self-test proves the ARTIFACT the
+  # lanes actually launch.
+  # ============================================================================
+  e2e-tooling:
+    name: e2e tooling (hermetic relay + wire proxy)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tooling/e2e/local-relay
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tooling/e2e/local-relay
+          key: e2e-tooling
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      # `--all-targets`, matching the other two jobs: the proxy's unit tests and
+      # its `tests/wire_proxy_e2e.rs` integration target are where the fail-open
+      # and ordering proofs live, and bare `cargo clippy` would not compile them.
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        run: |
+          set -o pipefail
+          cargo test 2>&1 | tee "${RUNNER_TEMP}/e2e-tooling-cargo-test.log"
+
+      - name: No undeclared test skips
+        run: bash ../../../scripts/ci/check_no_undeclared_skips.sh cargo e2e_tooling "${RUNNER_TEMP}/e2e-tooling-cargo-test.log"
+
+      # The RELEASE binary is what start-wire-proxy.sh launches, and release
+      # builds disable debug_assertions — so prove the shipped artifact, not a
+      # debug twin of it.
+      - name: Wire-proxy self-test (release binary)
+        run: cargo run --release --bin haven-wire-proxy -- --self-test

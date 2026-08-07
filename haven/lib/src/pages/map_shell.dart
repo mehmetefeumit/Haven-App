@@ -1154,6 +1154,18 @@ class _MapShellState extends ConsumerState<MapShell>
       _stopMotionTrigger();
     }
 
+    // Cancel any one-shot burst still mid-flight, on every pause path above.
+    //
+    // A burst is no longer instantaneous: it paces its circles seconds apart so
+    // that two of them cannot share a kind-445 `created_at` (the engine stamps
+    // the outer event from the inner app event's whole-second clock). Without
+    // this it would keep publishing for tens of seconds AFTER the Android
+    // branch has told the background isolate the foreground is finished
+    // (`markForegroundActive(active: false)`). `locationPublisherProvider` has
+    // no permanent listeners, so invalidating it disposes it — which is exactly
+    // what its own in-burst dispose guard watches for.
+    ref.invalidate(locationPublisherProvider);
+
     // Always cancel foreground-only timers — they are restarted (with
     // platform-appropriate cadences) below where applicable.
     _receiveTimer?.cancel();

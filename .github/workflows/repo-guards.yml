@@ -199,6 +199,59 @@
 #     retry classifier + first-test watchdog must admit exactly one
 #     infrastructure signature and refuse everything else — including an empty
 #     or absent log, where "no evidence" must not read as "flake".
+#
+#   Wire-journal closed-world oracle  tooling/e2e/ci/check-wire-journal.sh
+#     The one guard here whose SUBJECT is a data file: `tooling/e2e/
+#     wire_allowlist.json` enumerates every event kind Haven may put on a relay
+#     and every tag name each kind may carry, and anything absent from it is
+#     forbidden. That inverts the forbid-list it replaces, under which a new
+#     kind, a new tag, or an MDK-introduced field reached a relay in silence.
+#     Only the self-test runs in this job — the oracle itself runs in the E2E
+#     lanes, over the journal the recording proxy writes. What the self-test
+#     protects is the oracle's ability to FAIL: every assertion in it is a set
+#     operation over a file that may be absent, empty or truncated, so without
+#     fixtures proving each of those is its own failure class, a green verdict
+#     would carry no information at all.
+#
+#   Wire correlation oracle           tooling/e2e/ci/check-wire-correlation.sh
+#     The layer under the closed-world one. That file asks which kinds and
+#     which tag NAMES appear; this one asks what the VALUES are and how events
+#     relate — two circles publishing in the same second, a REQ filter wider
+#     than the accepted multiplexed `#h` shape, a second `h` inside one event,
+#     a `g`/`alt` fingerprint, a gift wrap distinguishable from an ordinary
+#     NIP-17 one, and an event reaching a relay outside its kind's pool. None
+#     of those is visible to a union-level tag allow-list. Again only the
+#     self-test runs here; the oracle runs in the E2E lanes. Its fixtures are
+#     mostly anti-vacuity: every invariant carries a precondition, and a
+#     precondition that never fires is how a privacy check comes to certify a
+#     sample it never had.
+#
+#   Wire content-canary oracle        tooling/e2e/ci/check-wire-canaries.dart
+#     The third wire oracle, and the only one that asserts over CONTENT rather
+#     than structure: it plants values the run knows — a circle name, a
+#     petname, a coordinate — and requires them to be absent from every frame
+#     in every encoding. That is the check that survives a new MDK field or an
+#     unanticipated serialization, neither of which any allow-list sees.
+#     Only the self-test runs here. What it protects is the pair of properties
+#     that make the verdict mean anything: the oracle must CATCH a planted
+#     canary and must CLEAR a clean journal, and every way it could report a
+#     pass without having looked — absent, empty, uncovered or lossily
+#     previewed journal, unreadable manifest, or a run that recorded carriers
+#     while never confirming a plant took — must be its own non-zero code.
+#
+#   Wire proxy stays test-only          scripts/ci/check_wire_proxy_test_only.sh
+#     The recorder that produces that journal captures FULL event JSON,
+#     ciphertext, and REQ filters carrying long-term identity pubkeys, each line
+#     mapped to a named relay endpoint. It must exist for the harness and be
+#     unreachable from the shipped app, so: no production tree may name it, no
+#     shipped manifest may depend on the crate, no workflow may upload the raw
+#     `.ndjson` (CI artifacts outlive the runner by days on a public repo — the
+#     redacted summary is what a lane uploads), that summary must keep being
+#     scanned for secrets before it can become one, and every `pub fn record*`
+#     must return plain `u64`. That last one is the load-bearing invariant, not
+#     a style rule: a recorder with an error channel hands every call site a
+#     failure it can propagate into the connection pump, which is the
+#     instrument breaking the product.
 
 name: Repo Guards
 
@@ -219,6 +272,17 @@ jobs:
       # Braced group so the install only runs when xmllint is actually missing.
       - name: Ensure xmllint
         run: xmllint --version >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y libxml2-utils; }
+
+      # The one non-bash guard in this job. `check-wire-canaries.dart` is a
+      # plain Dart program with no package dependencies — it imports
+      # `dart:convert`/`math`/`typed_data` and one relative library — so it
+      # needs an SDK but no `pub get` and no Flutter. setup-dart is ~10 s,
+      # which is why the canary self-test can live here with the other
+      # invariants instead of behind the coverage job's toolchain.
+      - name: Set up Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
 
       # Every guard below carries the same `if:` — run whenever checkout
       # succeeded, even if an earlier guard failed — so one red run reports the
@@ -487,6 +551,16 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/run-b6-location-provider-toggle.sh --self-test
 
+      # Guards the relay's pull-skip decision, which is one `if` that can strand
+      # a whole lane in either direction: skip a stale TAG and the hermetic relay
+      # silently changes between runs; fail to skip a digest-pinned image that is
+      # already local and a lane whose egress guard is up dies on a pull it never
+      # needed (CI run 31075503390). The fixtures cover both, plus the call site
+      # itself — a correct predicate nothing consults is the same outage.
+      - name: E2E harness self-test (strfry pull-skip)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/start-strfry.sh --self-test
+
       # Guards the B5 permission-revocation oracle. Two halves need pinning.
       # The RELAY half is a diff over location-event ids, and its fixtures are
       # the ones that can silently rot: a commit-only capture must yield NO
@@ -549,6 +623,23 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/run-b9-network-reconnect.sh --self-test
 
+      # Egress guard (CI_HARDENING_BACKLOG C7). The kernel-side gates (rules
+      # installed, a loopback probe observed, a deliberate egress to
+      # 192.0.2.1 observed) can only be proven on a real runner and are
+      # enforced there at install time. What belongs HERE is everything that
+      # decides a VERDICT off-kernel: the CIDR matcher, the two allow-list
+      # shapes that would silently turn enforce mode into a no-op (a default
+      # route; an IPv6 CIDR the matcher cannot evaluate), the kernel-line
+      # parser against real `iptables -j LOG` output, and all four report
+      # verdicts — including the two that must NOT be confused, an empty
+      # capture (rc 3, "no evidence") versus an empty EXTERNAL set (rc 0, the
+      # healthy hermetic result). It also parses the checked-in
+      # egress-allowlist.txt, so a broken allow-list is caught now rather than
+      # on the day someone attempts the flip to enforcement.
+      - name: E2E harness self-test (egress guard)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/setup-network-guard.sh --self-test
+
       # The iOS twin of the connect-flake predicate. Both iOS lanes hand their
       # scenario to `nick-fields/retry` with no filter, so before this the second
       # attempt was a free re-roll of ANY red — measured, 19 genuine test
@@ -599,3 +690,99 @@ jobs:
       - name: E2E harness self-test (iOS real-GPS preflight + proof oracle)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/run-b4-ios-real-gps.sh --self-test
+
+      # The CLOSED-WORLD wire oracle (Workstream C, C2/C3/C4). Every assertion
+      # it makes is a set operation, and every set operation passes over an
+      # empty input — so its fixtures are almost entirely anti-vacuity ones: an
+      # absent, empty, truncated, gapped or head-truncated journal must each
+      # fail with its OWN exit code (the A4 lesson, "nothing to scan" reported
+      # as "nothing leaked"), and a journal in which only ONE participant ever
+      # transmitted must fail the meta-floor even though every kind and tag in
+      # it is legitimate. Three more pin the design decisions that a later edit
+      # would most plausibly "simplify" away: the same event published to two
+      # relays and echoed to a subscriber must NOT trip a count assertion (sets,
+      # never multisets — counts here are nondeterministic and a flaky privacy
+      # oracle is a bypassed one); an optional tag legitimately absent must NOT
+      # red (which is why C4 is a subset check AND a superset check rather than
+      # set equality); and a violation appended ABOVE the sentinel — exactly
+      # what a background wake does mid-read — must fall outside the snapshot,
+      # which is the only fixture that can tell a working sentinel from an
+      # inert one.
+      - name: E2E harness self-test (wire-journal closed-world oracle)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/check-wire-journal.sh --self-test
+
+      # The VALUE layer over the same journal (Workstream C, C5.1-C5.6). The
+      # oracle above asserts which kinds and which tag NAMES may appear, over
+      # the UNION of a kind's events; this one reads values and the relations
+      # between events, which is where the remaining linkability lives: two
+      # circles sharing a created_at, a REQ filter wider than the one accepted
+      # multiplexed `#h` shape, a second `h` on a single event, a `g`/`alt`
+      # fingerprint, a gift wrap that is distinguishable from an ordinary
+      # NIP-17 one, and an event reaching a relay outside its kind's pool.
+      #
+      # Its fixtures are dominated by ANTI-VACUITY cases, because every one of
+      # those assertions passes over a snapshot containing none of the events
+      # it reasons about — so each invariant has its own precondition and its
+      # own fixture proving the precondition fires. The sharpest is C5.1's: a
+      # floor of ">=2 distinct h" is satisfiable by COMMITS, which carry no
+      # inner timestamp and so prove nothing about the binding the invariant
+      # polices; the self-test contains the commit-only journal that must fail
+      # as a META-FLOOR, and the mutation that relaxes the floor to all 445s is
+      # caught by exactly that fixture. Three more pin rules that would
+      # otherwise pass on a neighbour's coat-tails: a `g` tag on a NON-445 kind
+      # (where C5.3 cannot also fire), a duplicated `expiration` (where the tag
+      # NAME set is unchanged), and a multiplexed `#h` filter joined to a
+      # SINGLE author (where neither cardinality rule fires).
+      - name: E2E harness self-test (wire-journal correlation + containment oracle)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/check-wire-correlation.sh --self-test
+
+      # The CONTENT layer (Workstream C, C6), and the third of the three wire
+      # oracles — the only one whose self-test was wired to nothing. Its two
+      # siblings above assert over structure and can therefore only reject a
+      # shape somebody enumerated; this one plants a value the run knows and
+      # requires it to be absent in every encoding, which is what survives a
+      # new MDK field or a debug path that stringifies a struct into a tag.
+      #
+      # Its fixtures are two-sided, because both sides can rot. A planted
+      # canary must be CAUGHT (or the oracle is decorative) and a clean
+      # journal must CLEAR (a privacy guard that cries wolf is one that gets
+      # deleted). The rest are anti-vacuity: an absent, empty, uncovered or
+      # LOSSY journal each fails with its own exit code — the lossy one
+      # because the recorder renders binary with `from_utf8_lossy` BEFORE it
+      # truncates, so a short binary frame arrives looking complete — a
+      # mistyped manifest must fail as one of the documented five codes rather
+      # than as an uncaught TypeError, and a run that recorded carriers
+      # without ever confirming a plant must be a META-FLOOR. That last one is
+      # the sharpest: carrier ids alone cannot tell a genuine carrier from any
+      # published event id, so "the value never appeared" is free when the
+      # value was never applied to anything.
+      - name: E2E harness self-test (wire-journal content-canary oracle)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: dart tooling/e2e/ci/check-wire-canaries.dart --self-test
+
+      # The recorder that PRODUCES that journal is itself a privacy hazard: it
+      # captures full event JSON, ciphertext, and REQ filters carrying identity
+      # pubkeys, mapped to named endpoints. Same shape as the exporter-label ban
+      # and the M7 test-hook boundary — a capability that must exist for the
+      # harness and must be unreachable from the shipped app. The guard also
+      # enforces the ARTIFACT decision (the raw .ndjson is never uploaded; the
+      # redacted summary is) and the one property that makes the recorder safe
+      # to run at all: fail-open is a property of the recorder's TYPE, not of
+      # its call sites.
+      - name: Wire proxy stays test-only
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_wire_proxy_test_only.sh
+
+      # The guard above is greps and one small YAML-block parser, so its
+      # fixtures pin both directions of each check plus the three ways it could
+      # rot into a rubber stamp: a .ndjson named OUTSIDE an upload step must be
+      # ALLOWED (starting the recorder has to name its path), a doc comment
+      # naming `unwrap()` must not count as code (the module has to be able to
+      # explain why it avoids it), and a rename that leaves the signature
+      # extractor matching NOTHING must fail rather than pass for want of
+      # anything to check.
+      - name: Wire-proxy guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_wire_proxy_test_only.sh --self-test

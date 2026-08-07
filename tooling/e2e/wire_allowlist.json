@@ -1,0 +1,240 @@
+{
+  "_readme": [
+    "Day-one CLOSED-WORLD allow-list for the E2E wire journal (backlog Workstream C, items C3/C4).",
+    "Consumed by tooling/e2e/ci/check-wire-journal.sh. ANYTHING ABSENT FROM `kinds` IS FORBIDDEN —",
+    "that is the whole point, and it is what makes this stronger than the forbid-list it replaces",
+    "(_assertWirePrivacyInvariants in haven/integration_test/e2e/e2e_combined.dart, which enumerated",
+    "{3, 443, 10051} and let every other new kind through in silence).",
+    "",
+    "Two directions are asserted per entry, never set equality:",
+    "  observed tags MUST be a SUBSET of `tags.allowed`   — catches anything NEW reaching a relay;",
+    "  `tags.required` MUST be a SUBSET of observed tags  — catches a feature that silently STOPPED.",
+    "`required` at the kind level is the same superset check one level up.",
+    "",
+    "Both checks are evaluated over the UNION of a kind's de-duplicated events, not per event.",
+    "That is deliberate: a kind-445 commit carries `h` alone while an application message also",
+    "carries `expiration`, so a per-event required-set would false-red on every commit. The",
+    "per-event tag-set discrimination for kind 445 is backlog item C5.3 and lives elsewhere.",
+    "",
+    "SEND-SIDE. Both directions are evaluated over CLIENT->RELAY events only. The journal records",
+    "`dir`, so the oracle knows more than a relay does, and spending that knowledge is what makes",
+    "the entries below assertions about HAVEN rather than about whoever happened to be on the",
+    "wire. Two shapes forced it: a run publishing only 30443 satisfied `required` for 445 and 1059",
+    "from INBOUND copies, and a run in which every 445 Haven sent had lost its `expiration`",
+    "reported clean because one inbound 445 still carried it. The inbound kind set is printed as",
+    "an advisory and never asserted; inbound tag/kind facts belong to check-wire-correlation.sh.",
+    "",
+    "Every entry below was derived by reading the construction sites, not from the protocol table",
+    "in CLAUDE.md. Where the two disagreed, the code won; the disagreements are recorded in `_why`.",
+    "",
+    "This file is LINTED by its consumer on every run (and standalone via `--lint-allowlist`):",
+    "shape, `tags.required` subset of `tags.allowed`, `frame_verbs.required` subset of",
+    "`frame_verbs.allowed`, and — the invariant the whole closed-world argument rests on — that no",
+    "kind appears in both `kinds` and `_forbidden_by_omission`."
+  ],
+  "version": 1,
+
+  "frame_verbs": {
+    "allowed": ["EVENT", "REQ", "CLOSE", "CLOSED", "OK", "EOSE", "NOTICE", "HAVEN_WIRE_SENTINEL"],
+    "required": ["EVENT", "REQ", "HAVEN_WIRE_SENTINEL"],
+    "_why": [
+      "AUTH (NIP-42) and COUNT (NIP-45) are deliberately EXCLUDED even though the journal",
+      "contract lists AUTH among the frames the recorder recognises. Recognised is not expected:",
+      "neither hermetic relay is configured for auth (tooling/e2e/strfry.conf:3 'no auth';",
+      "tooling/e2e/local-relay/src/main.rs is a bare RelayBuilder with none), and Haven has no",
+      "NIP-42 client support at all. An AUTH frame on this wire therefore means something changed",
+      "and is worth a human look — which is exactly the verdict a closed set should produce.",
+      "",
+      "HAVEN_WIRE_SENTINEL is the recorder's own snapshot marker (SENTINEL_VERB in",
+      "tooling/e2e/local-relay/src/frame.rs). The proxy intercepts it and never forwards it, so",
+      "no relay ever sees it — but it IS journalled as a c2r frame, so a closed verb set has to",
+      "admit it. It is also REQUIRED: a journal with no marker cannot be anchored, and having the",
+      "verb set say so keeps that fact visible in the same place the rest of the closed world is",
+      "declared, rather than only inside the script."
+    ]
+  },
+
+  "req_filters": {
+    "allowed_keys": ["ids", "authors", "kinds", "since", "limit", "#h", "#p"],
+    "_why": [
+      "A REQ is the other thing a client puts on a relay, and the structural oracle used to reduce",
+      "it to its verb — so a filter carrying `authors`, `#p`, `#h`, `search` or `#g` was clean",
+      "while the run summary printed `verbs [... REQ ...]` as if the frame had been read. These are",
+      "KEY names only; the VALUES (how many authors, how many `#h`, whether two relay sets were",
+      "merged) are check-wire-correlation.sh's C5.2 and are deliberately not duplicated here.",
+      "",
+      "Derived from the construction sites, same rule as `kinds`:",
+      "  kinds   <- Filter::kind/kinds, ~21 sites incl. haven-core/src/relay/live_sync/planes/",
+      "             group.rs:29 and every Dart harness filter map",
+      "  limit   <- Filter::limit, ~17 sites",
+      "  authors <- Filter::author (NOT Filter::pubkey; see CLAUDE.md), e.g. profile fetch",
+      "  #p      <- Filter::pubkey, e.g. haven-core/src/relay/live_sync/planes/inbox.rs (the",
+      "             user's OWN pubkey) and the harness gift-wrap filter",
+      "  #h      <- Filter::custom_tag(s)(Alphabet::H) at planes/group.rs:30 and",
+      "             haven/rust_builder/src/api.rs:8007",
+      "  since   <- Filter::since at planes/group.rs:34 and api.rs:8014",
+      "  ids     <- the harness only (haven/integration_test/b8_clock_skew_test.dart:1048); no",
+      "             Rust Filter sets it. Kept because the harness reaches the proxy on the same",
+      "             loopback as the app and its REQs land in the same journal.",
+      "",
+      "NOT admitted, and each absence is a real assertion: `search` (NIP-50 puts plaintext query",
+      "terms on the wire), `#g` (a geohash filter tells the relay which area the user watches),",
+      "`#t`, `#a`, `#d`, `#e`, `until`. None has a construction site in this repo.",
+      "",
+      "DISAGREEMENT with check-wire-correlation.sh, recorded rather than silently reconciled: its",
+      "C5.2 key set additionally admits `until`, `#a`, `#d` and `#e`. Nothing in the repo",
+      "constructs any of the four, so this file takes the narrower code-derived set — a",
+      "closed-world list should be the smallest one the code justifies, and a false red here says",
+      "'add it WITH a rationale', which is the outcome that gets a human to look."
+    ]
+  },
+
+  "kinds": {
+    "0": {
+      "required": false,
+      "tags": { "allowed": [], "required": [] },
+      "_site": "haven-core/src/profile/publish.rs:91 build_metadata_event (+ :115 blank retraction)",
+      "_why": [
+        "Zero tags: EventBuilder::metadata emits none, and the publisher deliberately adds no",
+        "client/app tag. An empty `allowed` is therefore a real assertion, not a placeholder — a",
+        "`client` tag appearing here would be a new, permanent, identity-signed public fingerprint.",
+        "NOT required: the E2E harness pre-seeds identity and skips onboarding",
+        "(TestUser.preSeedIdentityAndSkipOnboarding), so a run can legitimately publish no kind-0.",
+        "This is what the backlog means by '0/5 allowed-but-not-required'."
+      ]
+    },
+
+    "5": {
+      "required": false,
+      "tags": { "allowed": ["e", "a"], "required": [] },
+      "_site": "haven-core/src/relay/publishers.rs:291 build_nip09_deletion; haven-core/src/relay/maintenance/key_package.rs:619 build_legacy_key_package_retraction",
+      "_why": [
+        "Two shapes: {e,a} for a replaceable-coordinate deletion, and {e} ALONE for the legacy-443",
+        "retraction, which omits the coordinate on purpose (a `443:<pubkey>:` coordinate would",
+        "delete every 443 by that author — key_package.rs:586-593). Hence no required tag: either",
+        "shape is legitimate. NOT required at kind level: deletion only fires when a prior",
+        "published-event record exists, which a fresh E2E identity does not have."
+      ]
+    },
+
+    "445": {
+      "required": true,
+      "ephemeral_pubkey": true,
+      "tags": { "allowed": ["h", "expiration"], "required": ["h", "expiration"] },
+      "_site": "mdk transport-nostr-peeler/src/peeler.rs:145-173 (published by haven-core/src/relay/auto_commit.rs:99 and the Dart publishEvent sites)",
+      "_why": [
+        "`h` is unconditional; `expiration` is pushed only when the group message carries a",
+        "retention timestamp (application messages, from group component 0x8005). Requiring BOTH at",
+        "the union level is the sharpest check in this file: it fails if the NIP-40 TTL silently",
+        "stops being stamped on location events, which no subset check can see. It is safe here",
+        "precisely because the journal records what was SENT and is immune to the NIP-40 eviction",
+        "that makes the relay-query oracle degrade. A lane that shares no location must supply its",
+        "own allow-list rather than weakening this one.",
+        "`allowed` also pins the tripwire on haven-core/src/nostr/event.rs:203-227 — a live-but-",
+        "unreachable 445 builder that stamps `alt` and a truncated 5-char geohash `g`. If it ever",
+        "becomes reachable, both tags land here as violations.",
+        "`ephemeral_pubkey` marks this kind's author as a FRESH keypair per message (Security Rule",
+        "2, mdk transport-nostr-peeler). It excludes 445s from --min-distinct-publishers, which",
+        "otherwise counted one device sending four location events as six publishers — a",
+        "'participant floor' any single client could satisfy alone."
+      ]
+    },
+
+    "1059": {
+      "required": true,
+      "ephemeral_pubkey": true,
+      "tags": { "allowed": ["p"], "required": ["p"] },
+      "_site": "mdk transport-nostr-peeler/src/peeler.rs:367 (gift_wrap with empty extra-tags); published from haven/lib/src/services/nostr_circle_service.dart:581,1180",
+      "_why": [
+        "Production gift wraps carry `p` and nothing else. The orphaned-but-still-pub",
+        "haven-core/src/nostr/giftwrap.rs:123-131 wrap_welcome stamps an additional 30-day",
+        "`expiration`; excluding it here means that builder becoming reachable is a violation.",
+        "`ephemeral_pubkey`: a gift wrap is signed by a throwaway key by construction (NIP-59), so",
+        "its author can never be evidence that a distinct PARTICIPANT transmitted. See kind 445."
+      ]
+    },
+
+    "10002": {
+      "required": false,
+      "tags": { "allowed": ["r"], "required": [] },
+      "_site": "haven-core/src/relay/publishers.rs:198 build_nip65_relay_list_event",
+      "_why": [
+        "`r` (NIP-65), never the singular `relay` used by 10050 — mixing them up is the shape of a",
+        "real bug, so the two entries are deliberately asymmetric. `r` is conditional on a non-empty",
+        "URL list: the unpublish tombstone is a zero-tag replaceable event, so `r` cannot be",
+        "required without false-redding an unpublish. See _followups for the kind-level `required`."
+      ]
+    },
+
+    "10050": {
+      "required": false,
+      "tags": { "allowed": ["relay"], "required": [] },
+      "_site": "haven-core/src/relay/publishers.rs:158 build_relay_list_event (kind from circle/relay_prefs.rs:147)",
+      "_why": "Singular `relay` (NIP-17 inbox), not `r`. Same zero-tag tombstone caveat as 10002."
+    },
+
+    "30443": {
+      "required": true,
+      "tags": {
+        "allowed": ["d", "mls_protocol_version", "i", "mls_ciphersuite", "mls_extensions", "mls_proposals", "app_components"],
+        "required": ["d", "mls_protocol_version", "i", "mls_ciphersuite", "mls_extensions", "mls_proposals", "app_components"]
+      },
+      "_site": "haven-core/src/relay/maintenance/key_package.rs:479-486 build_key_package_event (constants at :88-94)",
+      "_why": [
+        "All seven are unconditional in Haven's own builder, so all seven are required — this is a",
+        "kind Haven constructs itself rather than inheriting from MDK, which makes the strict form",
+        "safe. Note there is NO `relays` and NO `encoding` tag: an earlier draft of this file",
+        "assumed both, and the code says otherwise."
+      ]
+    }
+  },
+
+  "_forbidden_by_omission": {
+    "3": "Contact list. Constructed nowhere in the repo. Would walk the user's social graph out. Was on the old forbid-list; stays forbidden here by omission.",
+    "9": "Inner application message (haven-core/src/nostr/mls/manager.rs:550). An UNSIGNED rumor serialized into the MLS payload — it becomes kind-445 ciphertext and must never appear as an event on the wire. The old forbid-list did not cover this.",
+    "13": "NIP-59 seal. Encrypted inside the 1059 content; never transmitted as an event.",
+    "443": "Legacy KeyPackage. Never minted — the Dark Matter cutover only DELETES 443s (via kind 5), it never publishes one. Was on the old forbid-list.",
+    "444": "Welcome. Gift-wrapped inside 1059 and UNSIGNED (Security Rule 3). A bare 444 on a relay is a regression, and omitting it here preserves the bare-444 check the old oracle did by hand.",
+    "450": "Account identity proof. Signed into MLS leaf extension 0xF2F1 and, per CLAUDE.md, never published. Confirmed against haven-core/src/nostr/mls/signer.rs:117.",
+    "10051": "SEE _disagreements — this is the one place this file departs from the backlog text.",
+    "10063": "Blossom server list. Constructed nowhere (v2 deferral); appears only in docs.",
+    "24242": "Blossom authorization. Base64'd into an HTTP Authorization header (haven-core/src/profile/blossom.rs:343-352) and NEVER published to a relay. A 24242 in this journal would be a serious leak, and the old forbid-list could not see it."
+  },
+
+  "_disagreements": {
+    "10051_is_forbidden_not_allowed": [
+      "The backlog's C3 line says 'Kinds 0/5/10051 allowed-but-not-required'. This file FORBIDS",
+      "10051, and the code is why.",
+      "",
+      "There is exactly one live emit path: haven-core/src/relay/maintenance/key_package.rs:643",
+      "builds an EMPTY replaceable kind-10051 (zero tags) as a retraction, published at",
+      "haven/rust_builder/src/api.rs:7666. It fires only when the probe at api.rs:7601 finds a live",
+      "10051 authored by the user on their own relays, and only once (sentinel at api.rs:7702). The",
+      "fresh-PUBLISH path is genuinely dead: RelayTypeFfi has no KeyPackage variant and",
+      "relay_list_wire_kind (api.rs:2345-2352) cannot map to it.",
+      "",
+      "So a 10051 can appear only on an install MIGRATING from the pre-Dark-Matter wire, which no",
+      "E2E lane is — every lane starts from a fresh identity. Admitting 10051 to the allow-list",
+      "would make this oracle strictly WEAKER than the forbid-list it replaces, which already",
+      "asserts 10051 absent (e2e_combined.dart:4354). A replacement that loosens a live check is a",
+      "regression, so the backlog line is treated as stale w.r.t. the Dark Matter migration.",
+      "",
+      "If a migration lane is ever added, it should pass its own --allowlist with 10051 -> zero tags",
+      "rather than loosening this one."
+    ],
+    "kind_0_tags_are_empty_not_unconstrained": [
+      "CLAUDE.md's protocol table describes kind 0 as 'signed by identity key' and says nothing",
+      "about tags. The code emits NONE, so the entry pins the empty set."
+    ]
+  },
+
+  "_followups": [
+    "Promote 10002/10050 to `required: true` and their `r`/`relay` tags to required once the first",
+    "real journal from the full e2e_combined lane confirms both are published in it. They are",
+    "published by the relay-list maintenance heal (haven/rust_builder/src/api.rs:7938) and on a",
+    "user relay save, but this file was written before any journal existed, and marking a kind",
+    "required on an assumption would redden the lane on its first run for a reason unrelated to",
+    "privacy. Marking them optional is the conservative direction: it can only miss a finding, not",
+    "manufacture one."
+  ]
+}

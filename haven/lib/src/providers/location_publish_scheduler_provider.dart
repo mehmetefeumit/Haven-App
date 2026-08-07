@@ -20,15 +20,25 @@
 /// ## Relationship to `locationPublisherProvider`
 ///
 /// This notifier owns only the RECURRING per-circle publishes. The one-shot
-/// "publish to every circle now" burst (`locationPublisherProvider`) is left
-/// intact for cold-start, app-resume, motion, and the accept/create UI — those
-/// are discrete, user-driven, non-periodic events (a far weaker correlation
-/// surface than the eliminated ~120 s lockstep). A burst that overlaps a
-/// per-circle tick can publish the same circle twice within a short window;
-/// that is benign — a kind-9 application message never advances the MLS epoch,
-/// and every publish is serialized through the engine's session mutex. The
-/// per-circle gate/serialization here plus that mutex uphold Rule 14
-/// (single writer).
+/// "publish to every circle now" burst (`locationPublisherProvider`) handles
+/// cold-start, app-resume, motion, and the accept/create UI. That burst is
+/// also staggered now, for a reason this file's original note underrated: the
+/// engine binds the outer kind-445 `created_at` to the inner app event's
+/// WHOLE-SECOND timestamp, so co-timed publishes do not merely share a
+/// connection-level moment, they share a byte-identical field inside the
+/// signed event — readable from an archive by someone who never saw the
+/// socket. Co-timing is therefore transferable evidence, not a weak hint.
+/// A burst that overlaps a per-circle tick can publish the same circle twice
+/// within a short window; that is benign — a kind-9 application message never
+/// advances the MLS epoch, and every publish is serialized through the
+/// engine's session mutex. The per-circle gate/serialization here plus that
+/// mutex uphold Rule 14 (single writer).
+///
+/// Two circles' independent jittered ticks can still land in the same second
+/// by chance (both intervals are sampled from the same 97-value window), and
+/// the FIFO chain would then run them back to back. [PublishStagger] closes
+/// that too: the chain holds each publish until more than a second has passed
+/// since the previous one.
 ///
 /// ## Lifecycle
 ///
@@ -53,6 +63,7 @@ import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/jittered_scheduler.dart';
+import 'package:haven/src/services/publish_stagger.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Circles eligible for outbound location publishing: accepted, not a
@@ -143,6 +154,11 @@ class LocationPublishSchedulerNotifier extends Notifier<void> {
 
   Duration _publishLinkTimeout = _defaultPublishLinkTimeout;
 
+  /// When the chain last STARTED a publish, so [_pacedPublish] can hold the
+  /// next one until more than a second has passed. `null` until the first
+  /// publish of this generation.
+  DateTime? _lastChainPublishAt;
+
   bool _disposed = false;
 
   /// Whether recurring publishing is active. Set false while the app is
@@ -159,6 +175,7 @@ class LocationPublishSchedulerNotifier extends Notifier<void> {
     _disposed = false;
     _active = true;
     _publishChain = Future<void>.value();
+    _lastChainPublishAt = null;
     final generation = ++_generation;
 
     ref
@@ -233,17 +250,35 @@ class LocationPublishSchedulerNotifier extends Notifier<void> {
     // the link begins rather than when it is enqueued; starting it at enqueue
     // time would make queued links expire for the sin of waiting their turn.
     _publishChain = _publishChain
-        .then(
-          (_) => _publishCircle(circle, generation).timeout(
-            _publishLinkTimeout,
-            onTimeout: () => debugPrint(
-              '[LocationPublishScheduler] per-circle publish exceeded '
-              '${_publishLinkTimeout.inSeconds}s — abandoning the link so the '
-              'chain keeps moving',
-            ),
-          ),
-        )
+        .then((_) => _pacedPublish(circle, generation))
         .catchError((Object _) {});
+  }
+
+  /// Holds the link until more than a second has passed since the chain's
+  /// previous publish, then runs it under the per-link timeout.
+  ///
+  /// The wait sits OUTSIDE [_publishLinkTimeout] deliberately: the timeout
+  /// bounds a hung publish, and folding a deliberate wait into it would make
+  /// the decorrelation gap look like a hang and abandon the link.
+  Future<void> _pacedPublish(Circle circle, int generation) async {
+    final last = _lastChainPublishAt;
+    if (last != null) {
+      final elapsed = DateTime.now().difference(last);
+      final gap = ref.read(locationPublishStaggerProvider).sampleGap();
+      if (elapsed < gap) {
+        await Future<void>.delayed(gap - elapsed);
+        if (!_isCurrent(generation) || !_active) return;
+      }
+    }
+    _lastChainPublishAt = DateTime.now();
+    await _publishCircle(circle, generation).timeout(
+      _publishLinkTimeout,
+      onTimeout: () => debugPrint(
+        '[LocationPublishScheduler] per-circle publish exceeded '
+        '${_publishLinkTimeout.inSeconds}s — abandoning the link so the '
+        'chain keeps moving',
+      ),
+    );
   }
 
   /// Publishes the current location to a single [circle]. Mirrors

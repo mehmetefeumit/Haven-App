@@ -36,6 +36,7 @@ import 'package:haven/src/services/nostr_profile_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/nostr_subscription_service.dart';
 import 'package:haven/src/services/profile_service.dart';
+import 'package:haven/src/services/publish_stagger.dart';
 import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/services/subscription_service.dart';
 
@@ -60,6 +61,21 @@ final identityServiceProvider = Provider<IdentityService>((ref) {
 /// Uses [GeolocatorLocationService] in production.
 final locationServiceProvider = Provider<LocationService>((ref) {
   return GeolocatorLocationService();
+});
+
+/// Provides the CSPRNG publish stagger shared by the foreground burst
+/// publisher (`locationPublisherProvider`) and the recurring per-circle
+/// scheduler (`locationPublishSchedulerProvider`).
+///
+/// Both planes must keep two circles' kind-445 events out of the same
+/// wall-clock second, because the engine binds the outer `created_at` to the
+/// inner event's whole-second stamp (see [PublishStagger]). A single provider
+/// means a test can neutralise the waiting where it is not the subject
+/// ([PublishStagger.none]) or drive it deterministically with a seeded
+/// `Random` where it is — and means the two planes can never drift apart on
+/// what the bound is.
+final locationPublishStaggerProvider = Provider<PublishStagger>((ref) {
+  return PublishStagger();
 });
 
 /// Provides the launcher used by the map's location-access surface to send

@@ -496,7 +496,20 @@ kill; does NOT enter stopped state; jobs survive).
   fallback `dumpsys package`) — runtime proof of manifest flip #2 AND that the plugin's intent-filter
   survived the merge → `logcat -c` → force-run → assert `sweep complete` (post-boot cold wake works).
   *The FGS-restart-on-boot (autoRunOnBoot) assert is NOT in CI* (needs a visible-activity enable flow
-  + `ACCESS_BACKGROUND_LOCATION`, which `pm grant` cannot grant on API 30+) → §5 step 7 local runbook.
+  + `ACCESS_BACKGROUND_LOCATION`) → §5 step 7 local runbook. **Correction (2026-08-01):** this line
+  previously said `pm grant` "cannot grant [ACCESS_BACKGROUND_LOCATION] on API 30+". That is false.
+  The permission is `hardRestricted` in AOSP, but `adb install` sets
+  `INSTALL_ALL_WHITELIST_RESTRICTED_PERMISSIONS` by default (only `--restrict-permissions` clears
+  it), making the package installer-exempt so the grant gate passes. The Android 11 restriction that
+  is real governs `requestPermissions()`/`GrantPermissionsActivity` — background location cannot be
+  *requested* in the same call as foreground location — and `pm grant` never enters that path. Two
+  operational traps: the hard-restricted rejection is a bare `return` after `Log.e`, so a failed
+  grant **still exits 0** (verify with `dumpsys package`, never `$?`), and the permission→app-op sync
+  is asynchronous on `FgThread`, so poll `cmd appops get` for `allow` rather than reading it once.
+  Source-level finding, verified across the android11–android15 AOSP branches; the empirical
+  read-back is recorded on every run of the `e2e-fgs-publish` lane's probe. This does **not** by
+  itself unblock the on-boot assert — API 34+ additionally refuses to create a `location` foreground
+  service from the background without that permission held, which is exactly why it is needed there.
 - **Phase C1 — pending-wipe no-op (runtime proof of the NEW gate):** `install -r` pending-wipe APK
   (data preserved) → drive → HOME + `am kill` → snapshot strfry baseline → `logcat -c` → force-run →
   poll for `[CatchupWorker] wake: pending-wipe marker set — no-op` → 5 s settle → assert strfry line

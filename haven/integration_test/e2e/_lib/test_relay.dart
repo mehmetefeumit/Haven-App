@@ -39,6 +39,62 @@ const String secondStrfryUrl = String.fromEnvironment(
   defaultValue: 'ws://localhost:7778',
 );
 
+/// Token carried by the wire-journal sentinel frame
+/// ([TestRelay.emitWireJournalSentinel]).
+///
+/// The lane generates a fresh token, hands the SAME string to the drive (via
+/// this define) and to the host oracle (via
+/// `check-wire-journal.sh --sentinel`), so the two agree without the host
+/// having to scrape it back out of a log:
+///
+/// ```sh
+/// TOKEN="HAVEN_WIRE_SENTINEL:$(openssl rand -hex 16)"
+/// flutter drive --dart-define=HAVEN_WIRE_SENTINEL="$TOKEN" …
+/// bash tooling/e2e/ci/check-wire-journal.sh --sentinel "$TOKEN" …
+/// ```
+///
+/// The default keeps a local `flutter drive` working with no extra flags; a
+/// journal only ever covers one run, so a fixed default cannot collide with a
+/// previous one. The `HAVEN_WIRE_SENTINEL:` prefix is the shared contract —
+/// keep it, because the oracle matches the token as a literal substring of the
+/// recorded line and a bare hex string could occur inside ordinary frame
+/// content.
+const String wireJournalSentinelToken = String.fromEnvironment(
+  'HAVEN_WIRE_SENTINEL',
+  defaultValue: 'HAVEN_WIRE_SENTINEL:default0000000000000000000000000000',
+);
+
+/// Frame verb the recording proxy intercepts as a snapshot marker. Must match
+/// `SENTINEL_VERB` in `tooling/e2e/local-relay/src/frame.rs`.
+const String _sentinelVerb = 'HAVEN_WIRE_SENTINEL';
+
+/// Frame verb the proxy answers a marker with. Must match
+/// `SENTINEL_ACK_VERB` in `tooling/e2e/local-relay/src/frame.rs`.
+const String _sentinelAckVerb = 'HAVEN_WIRE_SENTINEL_ACK';
+
+/// The recording proxy's answer to a sentinel marker.
+///
+/// [wireSeq] is the snapshot boundary the host oracle asserts up to;
+/// [connId] identifies the emitting connection, which lets a caller EXCLUDE
+/// its own probe traffic when attributing what the app sent.
+class WireJournalSentinel {
+  /// Constructs from a decoded `HAVEN_WIRE_SENTINEL_ACK` frame.
+  const WireJournalSentinel({
+    required this.token,
+    required this.wireSeq,
+    required this.connId,
+  });
+
+  /// The token echoed back, identical to the one emitted.
+  final String token;
+
+  /// Sequence number assigned to the sentinel line — the snapshot boundary.
+  final int wireSeq;
+
+  /// The proxy's id for the connection that emitted the marker.
+  final String connId;
+}
+
 /// A single Nostr event as observed off the relay.
 ///
 /// Holds the raw JSON object; scenarios that need to inspect tags decode
@@ -107,6 +163,7 @@ class TestRelay {
   WebSocketChannel _channel;
   final Map<String, _Subscription> _subs = <String, _Subscription>{};
   final List<_PendingOk> _pendingOks = <_PendingOk>[];
+  final List<_PendingSentinel> _pendingSentinels = <_PendingSentinel>[];
   final Random _rng = Random.secure();
 
   /// `true` once [dispose] has been called or the bounded reconnect
@@ -155,6 +212,31 @@ class TestRelay {
     }
     if (frame.isEmpty) return;
     final tag = frame.first;
+    if (tag == _sentinelAckVerb && frame.length >= 4) {
+      // Synthesized by the recording proxy, never by a relay. Matched on the
+      // echoed token so two overlapping sentinels cannot resolve each other's
+      // future with the wrong boundary.
+      final token = frame[1];
+      final seq = frame[2];
+      final connId = frame[3];
+      if (token is! String || seq is! int || connId is! String) return;
+      for (final pending in List<_PendingSentinel>.from(_pendingSentinels)) {
+        if (pending.token == token) {
+          _pendingSentinels.remove(pending);
+          if (!pending.completer.isCompleted) {
+            pending.completer.complete(
+              WireJournalSentinel(
+                token: token,
+                wireSeq: seq,
+                connId: connId,
+              ),
+            );
+          }
+          break;
+        }
+      }
+      return;
+    }
     if (tag == 'EVENT' && frame.length >= 3) {
       final subId = frame[1] as String?;
       final eventJson = frame[2];
@@ -209,6 +291,23 @@ class TestRelay {
       if (!pending.completer.isCompleted) {
         pending.completer.completeError(
           StateError('relay connection closed before OK arrived'),
+        );
+      }
+    }
+
+    // A sentinel ack can never arrive on a socket that is gone, and the marker
+    // is bound to the connection the proxy recorded it on — so surface the
+    // loss now rather than letting the caller sit out its full timeout and
+    // then blame the recorder for a frame whose answer was dropped in transit.
+    final pendingSentinels = _pendingSentinels.toList(growable: false);
+    _pendingSentinels.clear();
+    for (final pending in pendingSentinels) {
+      if (!pending.completer.isCompleted) {
+        pending.completer.completeError(
+          StateError(
+            'relay connection closed before the wire-journal sentinel was '
+            'acked',
+          ),
         );
       }
     }
@@ -308,6 +407,76 @@ class TestRelay {
     // CLOSE frame is a courtesy notification to strfry.
     if (!_writable) return;
     _channel.sink.add(jsonEncode(<dynamic>['CLOSE', subId]));
+  }
+
+  /// Emits the wire-journal SENTINEL frame and returns the token it carried.
+  ///
+  /// The host-side structural oracle
+  /// (`tooling/e2e/ci/check-wire-journal.sh`, backlog item C2) asserts only
+  /// over journal lines whose `wire_seq` is at or below this frame's. Without
+  /// that boundary the oracle races the background wakes (WorkManager /
+  /// BGTask) that keep appending to the journal while it reads, and its
+  /// sample would be irreproducible.
+  ///
+  /// The frame is `["HAVEN_WIRE_SENTINEL","<token>"]`. The recording proxy
+  /// INTERCEPTS it: the marker is journalled as an ordinary `dir:"c2r"` frame
+  /// and is never forwarded upstream, so no relay ever sees it and nothing
+  /// about the scenario is perturbed. The proxy answers with
+  /// `["HAVEN_WIRE_SENTINEL_ACK","<token>",<wire_seq>,"<conn_id>"]`, which
+  /// this method returns as [WireJournalSentinel] — the ack is synthesized by
+  /// the proxy and deliberately NOT journalled, since recording it as
+  /// `dir:"r2c"` would claim the relay sent it.
+  ///
+  /// Waiting for the ack is the point. A fire-and-forget marker that never
+  /// reached the recorder surfaces on the host as "no sentinel in the
+  /// journal" — a true failure, but one that blames the recorder for a frame
+  /// the drive never got out. Failing here instead keeps the attribution
+  /// where the fault is.
+  ///
+  /// Call this LAST, after the traffic that should be inside the snapshot.
+  /// Calling it more than once is fine: the oracle anchors on the highest
+  /// matching `wire_seq`, so the snapshot extends to the last marker emitted.
+  ///
+  /// Throws [StateError] if the marker could not be written, or if no ack
+  /// arrives within [timeout] — which is also what happens when the lane
+  /// pointed the app straight at a relay instead of through the proxy.
+  Future<WireJournalSentinel> emitWireJournalSentinel({
+    String token = wireJournalSentinelToken,
+    Duration timeout = const Duration(seconds: 15),
+  }) async {
+    if (_closed) {
+      throw StateError(
+        'TestRelay is closed; the wire-journal sentinel was never emitted.',
+      );
+    }
+    // Wait out a reconnect window rather than letting the write drop on the
+    // floor: this frame has no subscription behind it, so nothing would ever
+    // re-issue it.
+    final deadline = DateTime.now().add(timeout);
+    while (!_writable && DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    if (_closed || !_writable) {
+      throw StateError(
+        'TestRelay was not writable within ${timeout.inSeconds}s; the '
+        'wire-journal sentinel was never emitted, so the host oracle cannot '
+        'anchor its snapshot.',
+      );
+    }
+    final completer = Completer<WireJournalSentinel>();
+    _pendingSentinels.add(_PendingSentinel(token, completer));
+    _channel.sink.add(jsonEncode(<dynamic>[_sentinelVerb, token]));
+    try {
+      return await completer.future.timeout(timeout);
+    } on TimeoutException {
+      throw StateError(
+        'no wire-journal sentinel ack within ${timeout.inSeconds}s. Either '
+        'this connection does not run through the recording proxy, or the '
+        'proxy is not recording.',
+      );
+    } finally {
+      _pendingSentinels.removeWhere((p) => p.token == token);
+    }
   }
 
   /// Publishes a pre-signed Nostr event JSON to the relay.
@@ -634,4 +803,11 @@ class _PendingOk {
 
   final String eventId;
   final Completer<(bool, String)> completer;
+}
+
+class _PendingSentinel {
+  _PendingSentinel(this.token, this.completer);
+
+  final String token;
+  final Completer<WireJournalSentinel> completer;
 }

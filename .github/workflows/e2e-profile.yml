@@ -312,17 +312,42 @@ jobs:
             -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           emulator-boot-timeout: 420
-          script: bash tooling/e2e/ci/run-with-deadline.sh 26m "e2e-profile android drive" -- bash -c 'bash tooling/e2e/ci/setup-network-guard.sh && HAVEN_DRIVE_TIMEOUT=12m bash tooling/e2e/ci/run-single-avd-scenario.sh integration_test/e2e/e2e_profile_sharing.dart'
+          script: bash tooling/e2e/ci/run-with-deadline.sh 26m "e2e-profile android drive" -- bash -c 'bash tooling/e2e/ci/setup-network-guard.sh install && HAVEN_DRIVE_TIMEOUT=12m bash tooling/e2e/ci/run-single-avd-scenario.sh integration_test/e2e/e2e_profile_sharing.dart'
+
+      # Publish what the guard OBSERVED (CI_HARDENING_BACKLOG C7). Runs BEFORE
+      # the teardown: the report cross-checks its parse against the chain's own
+      # packet counters (gate G5), which a flushed chain no longer has. An
+      # absent or empty capture exits 3 and reddens the lane — "we recorded
+      # nothing" must never read as "nothing left the device" (backlog A4).
+      #
+      # This lane is the most interesting of the three to observe: it is the
+      # only one that exercises the Blossom upload/download path, i.e. the only
+      # HTTP client in the app that talks to something other than a relay.
+      - name: Report egress observations
+        if: always()
+        run: bash tooling/e2e/ci/setup-network-guard.sh report
 
       # Tear the egress guard down BEFORE anything that needs outbound HTTPS
-      # (artifact upload + cache save both POST over :443).
+      # (artifact upload + cache save both POST over :443). The teardown
+      # subcommand also stops the ring-buffer follower and removes the IPv6
+      # chain, neither of which the previous inline commands did.
       - name: Remove network egress guard
         if: always()
-        run: |
-          sudo iptables -D OUTPUT -j HAVEN_E2E_GUARD 2>/dev/null || true
-          sudo iptables -F HAVEN_E2E_GUARD 2>/dev/null || true
-          sudo iptables -X HAVEN_E2E_GUARD 2>/dev/null || true
-          echo "Egress guard removed (if it was present)."
+        run: bash tooling/e2e/ci/setup-network-guard.sh teardown || true
+
+      # Every outcome, not just failure: observe mode builds its baseline from
+      # GREEN runs. IP/transport headers only; already secret-scanned by the
+      # report step.
+      - name: Upload egress observation
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: egress-profile-android-${{ github.run_id }}
+          path: |
+            /tmp/haven-egress/egress-raw.log
+            /tmp/haven-egress/egress-summary.txt
+          retention-days: 14
+          if-no-files-found: ignore
 
       # Collect EVERY container's logs so triage can confirm the kind-0 landed
       # on a PROFILE-plane relay (never on the circle relay) AND the blob landed
