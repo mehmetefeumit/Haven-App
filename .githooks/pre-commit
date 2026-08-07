@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 #
-# Pre-commit: the coverage checks that need no toolchain and no test run.
+# Pre-commit: the checks that need no toolchain and no test run.
+#
+# Two of them, both derived rather than duplicated, both a few seconds:
+#
+#   1. the coverage-manifest lint (below), and
+#   2. the fast SOURCE guards from repo-guards.yml, in parallel
+#      (scripts/ci/run_source_guards.sh — see its header for why the slow e2e
+#      harness self-tests are deliberately left to CI and pre-push).
 #
 # Under a second, every commit. It exists because the most common way the
 # Coverage workflow goes red is not a coverage regression at all — it is an
@@ -17,4 +24,13 @@
 set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
-exec "$ROOT/scripts/ci/check_coverage.sh" --static-only
+
+# Coverage manifest lint first: it is the faster of the two, so the commonest
+# failure reports soonest.
+"$ROOT/scripts/ci/check_coverage.sh" --static-only
+
+# The source guards catch a different class entirely — invariants about the
+# SHAPE of the code (an access gate that stopped preceding a read, a publish
+# chain that lost its bound, a secret that became loggable). CI run 31216078806
+# went red on exactly one of those, and it was a two-second grep away.
+exec "$ROOT/scripts/ci/run_source_guards.sh"

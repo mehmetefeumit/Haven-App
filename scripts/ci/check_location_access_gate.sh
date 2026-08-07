@@ -275,8 +275,46 @@ check_scheduler() {
     fail "_onCircleTick() not found in $(basename "${scheduler}")"
     return
   fi
-  if ! grep -qE '\.timeout\(' <<<"${body}"; then
-    fail "_onCircleTick: the per-circle publish chain has no .timeout( — a link that never completes raises no error, so catchError cannot see it, and one hung publish (e.g. a permission prompt the OS deferred) stalls EVERY circle until the provider is rebuilt"
+  # The bound may live one call deeper than the chain link. `_onCircleTick`
+  # enqueues `.then((_) => X(...))`, and X is where the publish is actually
+  # awaited — so that is where `.timeout(` belongs once a stagger/pacing step
+  # exists between the two. Checking only `_onCircleTick` failed the healthy
+  # tree in CI run 31216078806 after exactly that refactor, while the bound was
+  # intact in the delegate.
+  #
+  # So: accept the timeout inline OR in the single function the link delegates
+  # to, and RESOLVE that delegate rather than assuming it. Unresolvable means
+  # FAIL — an unfollowable chain is not evidence of a bounded one.
+  local delegate
+  if grep -qE '\.timeout\(' <<<"${body}"; then
+    : # bounded inline
+  elif delegate="$(grep -oE '\.then\(\([^)]*\) => _[A-Za-z0-9_]+\(' <<<"${body}" \
+                   | head -1 | grep -oE '_[A-Za-z0-9_]+\($' | tr -d '(')" \
+       && [[ -n "${delegate}" ]]; then
+    # DECLARATION-shaped, for the same reason `_onCircleTick` is matched that
+    # way above: a bare `_pacedPublish(` hits the CALL SITE inside the chain
+    # link first and would slice a one-line closure that contains none of the
+    # tokens we are looking for — the guard would then fail a healthy tree
+    # while appearing to have found something.
+    local ddecl dbody
+    # Anchored on the trailing `{`, the only reliable discriminator here: a
+    # leading-keyword call site (`await _publishCircle(...).timeout(`) satisfies
+    # every "type then name" shape you can write, and it sits ABOVE the real
+    # declaration — so `head -1` picked the CALL SITE and found a `.timeout(`
+    # belonging to a different call, passing an unbounded chain. A declaration
+    # opens a body; a call does not. A signature wrapped across lines simply
+    # will not match, which lands in the unresolvable branch and fails closed.
+    ddecl="$(grep -oE "^[[:space:]]*[A-Za-z_][A-Za-z0-9_<>,?]*[[:space:]]+${delegate}\(.*\{[[:space:]]*$" \
+             "${scheduler}" | head -1 | sed 's/^[[:space:]]*//')"
+    dbody=""
+    [[ -n "${ddecl}" ]] && dbody="$(fn_slice "${ddecl}" "${scheduler}")"
+    if [[ -z "${dbody}" ]]; then
+      fail "_onCircleTick delegates its publish to ${delegate}(), which could not be found in $(basename "${scheduler}") — the per-link bound cannot be verified, so it is treated as absent"
+    elif ! grep -qE '\.timeout\(' <<<"${dbody}"; then
+      fail "_onCircleTick delegates its publish to ${delegate}(), and NEITHER has a .timeout( — a link that never completes raises no error, so catchError cannot see it, and one hung publish (e.g. a permission prompt the OS deferred) stalls EVERY circle until the provider is rebuilt"
+    fi
+  else
+    fail "_onCircleTick: the per-circle publish chain has no .timeout( and no resolvable delegate to carry one — a link that never completes raises no error, so catchError cannot see it, and one hung publish (e.g. a permission prompt the OS deferred) stalls EVERY circle until the provider is rebuilt"
   fi
   if ! grep -qE 'catchError\(' <<<"${body}"; then
     fail "_onCircleTick: the per-circle publish chain has no catchError( — one failed publish would poison the chain for every later circle"
@@ -376,6 +414,36 @@ class GeolocatorLocationService {
 DART
 )
 
+# The shape the real scheduler took once a pacing/stagger step landed between
+# the chain link and the publish: the link delegates, and the BOUND lives in the
+# delegate. Checking only `_onCircleTick` failed this healthy shape in CI run
+# 31216078806 while the bound was intact one call deeper.
+GOOD_SCHEDULER_DELEGATED=$(cat <<'DART'
+class LocationPublishSchedulerNotifier extends Notifier<void> {
+  void _onCircleTick(String key, int generation) {
+    if (!_isCurrent(generation) || !_active) return;
+    final circle = _circles[key];
+    if (circle == null) return;
+    _publishChain = _publishChain
+        .then((_) => _pacedPublish(circle, generation))
+        .catchError((Object _) {});
+  }
+
+  Future<void> _pacedPublish(Circle circle, int generation) async {
+    await _stagger();
+    await _publishCircle(circle, generation).timeout(
+      _publishLinkTimeout,
+      onTimeout: () => debugPrint('abandoned'),
+    );
+  }
+
+  Future<void> _publishCircle(Circle circle, int generation) async {
+    await service.publishLocation();
+  }
+}
+DART
+)
+
 GOOD_SCHEDULER=$(cat <<'DART'
 class LocationPublishSchedulerNotifier extends Notifier<void> {
   void _onCircleTick(String key, int generation) {
@@ -399,7 +467,7 @@ SELFTEST_TMP=""
 cleanup_selftest() { [[ -n "${SELFTEST_TMP}" ]] && rm -rf "${SELFTEST_TMP}"; }
 
 self_test() {
-  local failures=0 tmp
+  local failures=0 checked=0 tmp
   SELFTEST_TMP="$(mktemp -d)"
   # EXIT, not RETURN: bash tears down the function's locals before running a
   # RETURN trap, so the trap would fire against an unbound name.
@@ -416,6 +484,10 @@ self_test() {
   _expect() {
     local desc="$1" fn="$2" content="$3" expected="$4"
     local path="${tmp}/fixture.dart" out="${tmp}/out.txt"
+    # COUNTED, not asserted against a literal. The summary used to print a
+    # hardcoded total, so adding fixtures left it unchanged and the number said
+    # nothing about what actually ran.
+    checked=$((checked + 1))
     printf '%s\n' "${content}" >"${path}"
     FAILED=0
     "${fn}" "${path}" >"${out}" 2>&1
@@ -507,12 +579,35 @@ self_test() {
   _expect "a publish chain without catchError must fail" check_scheduler \
     "${GOOD_SCHEDULER//.catchError((Object _) {})/}" 1
 
+  # --- delegated shape: the bound may live one call deeper ------------------
+  _expect "a bounded chain whose timeout lives in the delegate passes" \
+    check_scheduler "${GOOD_SCHEDULER_DELEGATED}" 0
+
+  # The regression the delegation support must still catch: the delegate loses
+  # its bound, so nothing anywhere bounds the link.
+  _expect "an unbounded DELEGATE must fail" check_scheduler \
+    "${GOOD_SCHEDULER_DELEGATED//.timeout(/.ignoreTimeout(}" 1
+
+  # THE HOLE THAT NEARLY SHIPPED. The link stops delegating and calls an
+  # UNBOUNDED function directly, while a bounded-but-now-dead delegate remains
+  # in the file. A resolver that matched the call site `await _publishCircle(
+  # ...).timeout(` instead of the declaration would find that stray timeout and
+  # pass an unbounded chain.
+  _expect "a link calling an unbounded function directly must fail" \
+    check_scheduler \
+    "${GOOD_SCHEDULER_DELEGATED//_pacedPublish(circle, generation))/_publishCircle(circle, generation))}" 1
+
+  # Unresolvable delegate: fail CLOSED. An unfollowable chain is not evidence
+  # of a bounded one.
+  _expect "an unresolvable delegate must fail closed" check_scheduler \
+    "${GOOD_SCHEDULER_DELEGATED//Future<void> _pacedPublish(/Future<void> _pacedPublishGone(}" 1
+
   if (( failures > 0 )); then
     printf '%s[%s] self-test FAILED (%d case(s)) — this guard cannot be trusted until it is fixed%s\n' \
       "${RED}" "${SCRIPT_NAME}" "${failures}" "${RESET}" >&2
     exit 2
   fi
-  printf '%sOK: self-test passed (14 fixtures).%s\n' "${GREEN}" "${RESET}"
+  printf '%sOK: self-test passed (%d fixtures).%s\n' "${GREEN}" "${checked}" "${RESET}"
 }
 
 # ---------------------------------------------------------------------------

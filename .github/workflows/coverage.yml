@@ -65,6 +65,16 @@ jobs:
           workspaces: haven-core
 
       - name: Run tests with coverage
+        # Instrumented builds are materially slower: every basic block carries a
+        # counter update, and the e2e targets run their tests concurrently, each
+        # with its own MockRelay + LiveSyncCore, on a 2-core runner. The e2e
+        # anti-vacuity waits are sized for an uninstrumented build, so in CI run
+        # 31216078806 one of them expired here while the SAME test passed in the
+        # uninstrumented rust-check job. Scaling those DELIVERY budgets cannot
+        # mask a defect — they assert that something arrived, so a bigger budget
+        # only removes a false negative — and it leaves `cargo test` untouched.
+        env:
+          HAVEN_TEST_WAIT_SCALE: '4'
         run: |
           cargo llvm-cov --all-features --lcov --output-path coverage.lcov \
             --ignore-filename-regex 'frb_generated'

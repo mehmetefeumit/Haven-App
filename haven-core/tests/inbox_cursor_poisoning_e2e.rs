@@ -70,6 +70,38 @@ fn now_secs() -> i64 {
 /// the EOSE anchor has to beat.
 const COLD_SEED_LOOKBACK_SECS: i64 = 86_400;
 
+/// Scales the wall-clock budget of the waits below.
+///
+/// Every `wait_*` in this file bounds how long a DELIVERY may take; none of
+/// them is the property under test. That distinction is what makes scaling
+/// them safe: the assertion is always "the thing arrived", so a larger budget
+/// can only remove a false negative — it can never let a broken build pass,
+/// because a delivery that never happens still exhausts any budget.
+///
+/// The budgets are sized for an uninstrumented build. Under `cargo llvm-cov`
+/// every basic block carries counter updates, and five tests in this target run
+/// concurrently, each with its own `MockRelay` and `LiveSyncCore`, on a 2-core
+/// runner. In CI run 31216078806 the forged wrap did not surface within 10s and
+/// the anti-vacuity precondition fired — while the SAME test passed in the
+/// uninstrumented `Rust Checks / haven-core` job in that very run, and passes
+/// locally in 7.4s for the whole target. The bound was the problem, not the
+/// code under it.
+///
+/// Set by the coverage workflow. Absent or unparsable means 1, so an ordinary
+/// `cargo test` keeps today's fast feedback.
+fn wait_scale() -> u32 {
+    std::env::var("HAVEN_TEST_WAIT_SCALE")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|s| *s >= 1)
+        .unwrap_or(1)
+}
+
+/// A delivery budget of `base_secs`, scaled for instrumented runs.
+fn wait_budget(base_secs: u64) -> Duration {
+    Duration::from_secs(base_secs * u64::from(wait_scale()))
+}
+
 /// A `kind:1059` routed at `recipient`'s `#p` tag, minted by a throwaway key
 /// that belongs to nobody, at a `created_at` of the caller's choosing.
 ///
@@ -180,7 +212,7 @@ async fn a_future_dated_gift_wrap_never_pushes_the_inbox_cursor_past_the_local_c
     // matched), every cursor assertion below would hold for the trivial reason
     // that nothing was delivered — and the defect this file pins would be
     // untested rather than fixed.
-    let delivered = wait_for_welcome(&mut bus, Duration::from_secs(10)).await;
+    let delivered = wait_for_welcome(&mut bus, wait_budget(10)).await;
     assert!(
         delivered,
         "precondition: the future-dated gift wrap must have been DELIVERED on \
@@ -194,7 +226,7 @@ async fn a_future_dated_gift_wrap_never_pushes_the_inbox_cursor_past_the_local_c
     // "before" would sample the advanced value and the comparison would be
     // trivially false.
     let cold_seed_ms = (opened_at - COLD_SEED_LOOKBACK_SECS) * 1000;
-    let advanced = wait_inbox_cursor_above(&circle, Some(cold_seed_ms), Duration::from_secs(10))
+    let advanced = wait_inbox_cursor_above(&circle, Some(cold_seed_ms), wait_budget(10))
         .await
         .expect("start seeds the inbox cursor, so it always reads back");
 
@@ -276,7 +308,7 @@ async fn a_live_gift_wrap_after_eose_moves_the_inbox_cursor_nowhere() {
     // EOSE has already landed would sample the advanced value and make the
     // precondition trivially false. See the first test.
     let cold_seed_ms = (started_at - COLD_SEED_LOOKBACK_SECS) * 1000;
-    let anchored = wait_inbox_cursor_above(&circle, Some(cold_seed_ms), Duration::from_secs(10))
+    let anchored = wait_inbox_cursor_above(&circle, Some(cold_seed_ms), wait_budget(10))
         .await
         .expect("cursor reads back");
     assert!(
@@ -331,7 +363,7 @@ async fn the_anchored_inbox_cursor_survives_a_restart() {
         .await
         .expect("start session 1");
     let cold_seed_ms = (started_at - COLD_SEED_LOOKBACK_SECS) * 1000;
-    let advanced = wait_inbox_cursor_above(&circle, Some(cold_seed_ms), Duration::from_secs(10))
+    let advanced = wait_inbox_cursor_above(&circle, Some(cold_seed_ms), wait_budget(10))
         .await
         .expect("cursor reads back");
     assert!(advanced > cold_seed_ms, "precondition: the anchor redeemed");
