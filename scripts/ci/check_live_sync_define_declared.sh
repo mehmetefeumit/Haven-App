@@ -139,8 +139,60 @@ readonly INTENT_ALLOWLIST=(
 #
 # The intent token lives in a comment by construction, so it is matched against
 # the RAW block, never this filtered view.
+#   heredoc      a guard's own hermetic FIXTURES legitimately contain
+#                bodies       workflow-shaped text, including a line-initial
+#                `flutter build apk`. Check 2's command-position test below
+#                already CLAIMS to exclude heredocs, but it only tests for
+#                line-initial position — which a fixture inside a heredoc
+#                satisfies. On 2026-08-09 a new guard
+#                (scripts/ci/check_wire_oracle_lane_reachable.sh) was reported
+#                as "compiles the app but never passes --dart-define" purely on
+#                the strength of its own test fixtures. Stripping heredoc
+#                bodies is what makes that claim true, and it generalises: any
+#                future guard that parses workflows will carry the same
+#                fixtures.
 _code_only() {
-  grep -vE '^[[:space:]]*#' | grep -vF -- '--self-test'
+  # Comments are stripped FIRST, then heredoc BODIES (keeping the line that
+  # opens them — that IS a command), then --self-test lines.
+  #
+  # Order matters and the first version got it wrong. With comments still
+  # present, `# mask is 1 << FLAG_BIT` opened a heredoc whose delimiter never
+  # reappeared, so everything after it was swallowed to EOF and the file was
+  # silently exempted — a guard on a receive-path invariant failing OPEN from a
+  # prose comment.
+  #
+  # Two more over-strips came from an UNANCHORED match. `match()` scans anywhere
+  # and will slide one character right, so `<<<hello` matched as `<<hello`
+  # (delimiter "hello") and `$(( 1 << shift ))` matched as `<< shift`. Both are
+  # now excluded structurally:
+  #   * a `<` immediately before the match means it is a `<<<` herestring;
+  #   * a real opener is the END of its line (`cat > f <<'EOF'`), while an
+  #     arithmetic shift is followed by more expression (` ))`).
+  #
+  # The end-of-line anchor makes the rare `cat <<EOF > out` form go UNSTRIPPED.
+  # That direction is deliberate: an unstripped heredoc can only cause a false
+  # RED, which a human sees and fixes, whereas an over-strip is a silent green.
+  # Fail closed, not open.
+  grep -vE '^[[:space:]]*#' | awk '
+    inhere {
+      if ($0 ~ ("^[[:space:]]*" delim "[[:space:]]*$")) { inhere = 0 }
+      next
+    }
+    {
+      if (match($0, /<<-?[[:space:]]*[\047"]?[A-Za-z_][A-Za-z0-9_]*[\047"]?[[:space:]]*$/)) {
+        pre = (RSTART > 1) ? substr($0, RSTART - 1, 1) : ""
+        if (pre != "<") {
+          d = substr($0, RSTART, RLENGTH)
+          sub(/^<<-?[[:space:]]*/, "", d)
+          gsub(/[\047"]/, "", d)
+          sub(/[[:space:]]+$/, "", d)
+          delim = d
+          inhere = 1
+        }
+      }
+      print
+    }
+  ' | grep -vF -- '--self-test'
 }
 
 # Scripts that build the app and must forward the define. Value = the reason a
@@ -563,11 +615,47 @@ set -euo pipefail
 flutter build apk --release --dart-define-from-file="${defines}"
 '
 
+  # (15-19) _code_only's heredoc handling, in BOTH directions. A guard that
+  #         parses workflows carries workflow-shaped fixtures, so a real opener
+  #         must be stripped -- but three near-miss shapes must NOT be, because
+  #         over-stripping runs to EOF and silently exempts the whole file.
+  #         Every one of these was a live over-strip before it was fixed.
+  _script_case "a guard's heredoc FIXTURE is not a build" 0 "scripts/ci/check_x.sh" \
+'#!/usr/bin/env bash
+cat > "${dir}/wf.yml" <<'"'"'EOF'"'"'
+flutter build apk --debug
+EOF
+'
+  _script_case "a comment naming a shift does not open a heredoc" 1 "tooling/e2e/ci/a.sh" \
+'#!/usr/bin/env bash
+# mask is 1 << FLAG_BIT in this comment
+flutter build apk --debug
+'
+  _script_case "an arithmetic shift does not open a heredoc" 1 "tooling/e2e/ci/b.sh" \
+'#!/usr/bin/env bash
+v=$(( 1 << shift ))
+flutter build apk --debug
+'
+  _script_case "a herestring does not open a heredoc" 1 "tooling/e2e/ci/c.sh" \
+'#!/usr/bin/env bash
+grep -q x <<<hello
+flutter build apk --debug
+'
+  # ...and the declaration is still SEEN after a real heredoc closes, so the
+  # stripper cannot swallow the rest of a legitimate build script.
+  _script_case "a build after a closed heredoc is still checked" 0 "tooling/e2e/ci/d.sh" \
+'#!/usr/bin/env bash
+cat > "${f}" <<'"'"'EOF'"'"'
+irrelevant
+EOF
+flutter build apk --debug --dart-define=HAVEN_LIVE_SYNC=false
+'
+
   if (( fails )); then
     fail_msg "self-test failed — this guard cannot be trusted until it is fixed"
     exit 2
   fi
-  log "OK: self-test passed (20 fixtures)."
+  log "OK: self-test passed (25 fixtures)."
 }
 
 # ---------------------------------------------------------------------------

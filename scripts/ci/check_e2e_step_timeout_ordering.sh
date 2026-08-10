@@ -314,6 +314,11 @@ drive_timeout_token() {
 # each violation and then exit 0. Nothing here writes to stdout.
 EMU_STEPS=0
 DRIVE_STEPS=0
+# Files in which the extractor actually counted a step, newline-separated. These
+# are what the repo-derived vacuity check compares against: a NUMBER can only
+# say "fewer than expected", a SET can name the lane that went missing.
+EMU_FILES=""
+DRIVE_FILES=""
 check_dir() {
   local dir="$1"
   local files=()
@@ -322,6 +327,8 @@ check_dir() {
 
   EMU_STEPS=0
   DRIVE_STEPS=0
+  EMU_FILES=""
+  DRIVE_FILES=""
   local file job jobcap runs_on stepname stepcap uses retry_to retry_ma boot_to body
 
   local rec
@@ -339,6 +346,7 @@ check_dir() {
       }
 
       EMU_STEPS=$((EMU_STEPS + 1))
+      EMU_FILES="${EMU_FILES}${file##*/}"$'\n'
       local label="${file##*/} :: ${job} :: ${stepname}"
 
       # --- C5: a bound must exist at all.
@@ -355,6 +363,7 @@ check_dir() {
       # --- C1/C2/C4 apply to DRIVE steps (the ones that run a harness).
       if ! is_drive_body "${body}"; then continue; fi
       DRIVE_STEPS=$((DRIVE_STEPS + 1))
+      DRIVE_FILES="${DRIVE_FILES}${file##*/}"$'\n'
 
       local dl_raw dl_branches
       dl_raw="$(deadline_token "${body}")"
@@ -481,6 +490,52 @@ check_c3() {
 write_fixture() {
   local path="$1"; shift
   printf '%s\n' "$@" > "${path}"
+}
+
+check_extractor_sees_the_repo() {
+  local wf="$1"
+
+  # Full-line comments are stripped, exactly as the extractor strips them from
+  # step bodies. Without this a commented-out `uses:` line, or a comment naming
+  # a harness script, would be counted as a lane the extractor "lost" — a guard
+  # that reds on a correct repo gets deleted rather than fixed.
+  local MARKERS='uses:.*reactivecircus/android-emulator-runner|run-ios-sim-scenario\.sh|boot-ios-sim\.sh|run-b7-ios-auth-tier\.sh|run-b4-ios-real-gps\.sh'
+  _uncommented() { grep -v '^[[:space:]]*#' "$1"; }
+
+  # (a) EXACT count. `uses:` appears exactly once per step, so the number of
+  #     reactivecircus lines IS the number of emulator steps — no estimate.
+  local expect_emu=0 f base n
+  for f in "${wf}"/*.yml; do
+    n="$(_uncommented "${f}" | grep -c "uses:.*reactivecircus/android-emulator-runner" || true)"
+    expect_emu=$((expect_emu + n))
+  done
+  if (( expect_emu > EMU_STEPS )); then
+    misconfig "the extractor counted ${EMU_STEPS} emulator/simulator step(s) but ${expect_emu} \`uses: reactivecircus/android-emulator-runner\` line(s) exist. It has stopped seeing $(( expect_emu - EMU_STEPS )) emulator step(s); the record parser or is_emulator_step() has rotted."
+  fi
+
+  # (b) SET coverage. Every workflow carrying a marker must contribute at least
+  #     one counted step. Names the lane rather than reporting a shortfall.
+  local missing=""
+  for f in "${wf}"/*.yml; do
+    base="${f##*/}"
+    # repo-guards.yml invokes the same harnesses hermetically with --self-test:
+    # no emulator, no simulator, seconds long. Not a lane.
+    _uncommented "${f}" | grep -E "${MARKERS}" | grep -qv -- "--self-test" || continue
+    grep -qxF "${base}" <<<"${EMU_FILES}" || missing="${missing} ${base}"
+  done
+  [[ -z "${missing}" ]] || misconfig "these workflows carry an emulator/simulator marker but the extractor counted no step in them:${missing}. Either the lane lost its bound, or the extractor stopped parsing it."
+
+  # (c) SET coverage for drives, same argument one level down.
+  local dmissing=""
+  for f in "${wf}"/*.yml; do
+    base="${f##*/}"
+    _uncommented "${f}" | grep "tooling/e2e/ci/run-" | grep -qv -- "--self-test" || continue
+    grep -qxF "${base}" <<<"${EMU_FILES}" || continue   # not a lane at all; (b) owns that
+    grep -qxF "${base}" <<<"${DRIVE_FILES}" || dmissing="${dmissing} ${base}"
+  done
+  [[ -z "${dmissing}" ]] || misconfig "these workflows run a harness but the extractor counted no DRIVE step in them:${dmissing}. is_drive_body() has stopped matching, so C1/C2/C4 are asserting nothing there."
+
+  log "vacuity check: ${expect_emu} emulator \`uses:\` line(s) all accounted for; every marker-bearing workflow contributed a step"
 }
 
 self_test() {
@@ -723,12 +778,117 @@ self_test() {
 '        run: bash tooling/e2e/ci/run-ios-sim-scenario.sh --self-test'
   _expect "a hermetic --self-test step is not a simulator lane" "${l}" 0
 
+  # --- The vacuity check itself. It replaced a hardcoded floor (>=10 steps,
+  #     >=8 drives) that the repo had outgrown by 3.5x, so these fixtures exist
+  #     to stop the REPLACEMENT rotting the same way. `misconfig` exits, so each
+  #     case runs in a subshell.
+  _expect_vacuity() {
+    local desc="$1" dir="$2" want_rc="$3" want_grep="${4:-}"
+    local out rc=0
+    out="$( ( VIOLATIONS=0; check_dir "${dir}" >/dev/null 2>&1
+              check_extractor_sees_the_repo "${dir}" ) 2>&1 )" || rc=$?
+    if (( rc != want_rc )); then
+      echo "FAIL: ${desc}: expected rc ${want_rc}, got ${rc}" >&2
+      echo "${out}" | sed 's/^/    /' >&2
+      failures=$((failures + 1)); return
+    fi
+    if [[ -n "${want_grep}" ]] && ! grep -q -- "${want_grep}" <<<"${out}"; then
+      echo "FAIL: ${desc}: output did not mention '${want_grep}'" >&2
+      echo "${out}" | sed 's/^/    /' >&2
+      failures=$((failures + 1)); return
+    fi
+    echo "  ok: ${desc}"
+  }
+
+  # M: a well-formed lane — the extractor sees it, so nothing fires.
+  _expect_vacuity "vacuity: a lane the extractor parses is accounted for" "${a}" 0
+
+  # N: a workflow carrying the emulator marker that the extractor counts NO
+  #    step in. This is the shape the old floor could not see: with 35 real
+  #    steps, losing one lane still cleared a floor of 10.
+  local n="${tmp}/n"; mkdir -p "${n}"
+  #    The marker reaches the file through job-level `env:` indirection, so the
+  #    raw grep sees the lane but the body-matching classifier never does.
+  write_fixture "${n}/lane.yml" \
+'jobs:' \
+'  lane:' \
+'    runs-on: macos-latest' \
+'    timeout-minutes: 60' \
+'    env:' \
+'      HARNESS: tooling/e2e/ci/run-ios-sim-scenario.sh' \
+'    steps:' \
+'      - name: Drive' \
+'        timeout-minutes: 35' \
+'        run: bash "${HARNESS}" lane'
+  _expect_vacuity "vacuity: a marker-bearing lane with no counted step is named" "${n}" 2 "lane.yml"
+
+  # O: the EXACT half. Two `uses:` lines, one inside a job the extractor cannot
+  #    reach, so the count disagrees even though the file itself contributed.
+  local o="${tmp}/o"; mkdir -p "${o}"
+  write_fixture "${o}/two.yml" \
+'jobs:' \
+'  lane:' \
+'    runs-on: ubuntu-latest' \
+'    timeout-minutes: 60' \
+'    steps:' \
+'      - name: Drive' \
+'        timeout-minutes: 35' \
+'        uses: reactivecircus/android-emulator-runner@v2' \
+'        with:' \
+'          emulator-boot-timeout: 420' \
+'          script: bash tooling/e2e/ci/run-with-deadline.sh 25m lane -- bash tooling/e2e/ci/run-x.sh' \
+'  orphan:' \
+'    uses: reactivecircus/android-emulator-runner@v2'
+  _expect_vacuity "vacuity: an unparsed \`uses:\` line fails the exact count" "${o}" 2 "stopped seeing"
+
+  # P: repo-guards.yml's hermetic --self-test steps carry the marker strings but
+  #    are not lanes. They must not be DEMANDED as steps, or the guard reds on a
+  #    correct repo — the false-positive direction, which is how guards get
+  #    deleted rather than fixed.
+  _expect_vacuity "vacuity: a hermetic --self-test workflow is not demanded" "${l}" 0
+
+  # Q: check (c). The file references a harness, and its emulator step IS
+  #    counted — but no step body carries the reference, so no DRIVE is counted
+  #    and C1/C2/C4 silently assert nothing about this lane.
+  local q="${tmp}/q"; mkdir -p "${q}"
+  write_fixture "${q}/snapshot-only.yml" \
+'jobs:' \
+'  lane:' \
+'    runs-on: ubuntu-latest' \
+'    timeout-minutes: 60' \
+'    env:' \
+'      HARNESS: tooling/e2e/ci/run-x.sh' \
+'    steps:' \
+'      - name: Snapshot' \
+'        timeout-minutes: 35' \
+'        uses: reactivecircus/android-emulator-runner@v2' \
+'        with:' \
+'          emulator-boot-timeout: 420' \
+'          script: echo snapshot'
+  _expect_vacuity "vacuity: a lane whose harness call is never a step body is named" "${q}" 2 "no DRIVE step"
+
+  # R: the false-positive direction. A COMMENTED-OUT marker must not be read as
+  #    a lane the extractor lost — the extractor strips full-line comments, so
+  #    this check must too, or it reds on a correct repo.
+  local r="${tmp}/r"; mkdir -p "${r}"
+  write_fixture "${r}/commented.yml" \
+'jobs:' \
+'  lane:' \
+'    runs-on: ubuntu-latest' \
+'    timeout-minutes: 60' \
+'    steps:' \
+'      # uses: reactivecircus/android-emulator-runner@v2 — removed, see #123' \
+'      # was: bash tooling/e2e/ci/run-ios-sim-scenario.sh lane' \
+'      - name: Nothing' \
+'        run: echo hi'
+  _expect_vacuity "vacuity: a commented-out marker is not a lost lane" "${r}" 0
+
   VIOLATIONS=0
   if (( failures > 0 )); then
     echo "[${SCRIPT_NAME}] self-test FAILED (${failures} case(s))" >&2
     return 1
   fi
-  echo "[${SCRIPT_NAME}] self-test passed (12 cases)"
+  echo "[${SCRIPT_NAME}] self-test passed (18 cases)"
   return 0
 }
 
@@ -751,12 +911,20 @@ check_dir "${WF_DIR}"
 emu_steps="${EMU_STEPS}"
 drive_steps="${DRIVE_STEPS}"
 
-# A zero count means the extractor stopped recognising steps — the guard would
-# then pass vacuously forever, which is the failure mode every grep-guard dies
-# of. Assert it found the lanes it is supposed to be guarding.
-if (( emu_steps < 10 || drive_steps < 8 )); then
-  misconfig "only found ${emu_steps} emulator/simulator step(s), ${drive_steps} drive step(s) — the extractor is not seeing the lanes it guards (expected at least 10 / 8)."
-fi
+# A shrinking count means the extractor stopped recognising steps — the guard
+# would then pass vacuously, which is the failure mode every grep-guard dies of.
+#
+# This was a HARDCODED floor of 10 steps / 8 drives. That is the wrong shape: it
+# was written when the repo had ~11 lanes, and by the time the repo had 35 steps
+# and 18 drives the extractor could have lost two thirds of them and still
+# passed. A floor that does not move with the repo stops being a floor.
+#
+# So derive the expectation FROM THE REPO, by a different mechanism than the
+# extractor uses. The extractor parses workflow YAML into per-step records and
+# classifies them; the check below greps the raw files for the marker strings.
+# Two independent readings of the same source: if the record parser rots, the
+# grep still sees the lane, and the mismatch names it.
+check_extractor_sees_the_repo "${WF_DIR}"
 
 if (( VIOLATIONS > 0 )); then
   fail_msg "${VIOLATIONS} ordering violation(s). The rule is: inner deadline < step timeout-minutes < job timeout-minutes."

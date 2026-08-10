@@ -17,13 +17,35 @@
 #   C5.4  no `g` and no `alt` tag on any kind
 #   C5.5  kind-1059 tag set is exactly {p}, exactly once
 #   C5.6  publish-target containment, scoped PER KIND
+#   C5.7  every kind-445 carries a FRESH EPHEMERAL author (Security Rule 2)
+#   C5.8  the real MLS group id NEVER appears on the wire (Security Rule 4)
+#   C5.9  a kind-445 carries no `p` (recipient) tag
 #
-# Every one of these is invisible to C4, and that is why it is a separate file
-# rather than more entries in `wire_allowlist.json`. C4 asserts over the UNION
-# of a kind's tag names, so it cannot see a second `h` on one event (C5.3), it
-# never looks at a tag's value (C5.1, C5.4 pass its allow-list today), it never
-# looks at REQ frames at all (C5.2), and it has no concept of an endpoint
-# (C5.6).
+# Almost every one of these is invisible to C4, and that is why it is a
+# separate file rather than more entries in `wire_allowlist.json`. C4 asserts
+# over the UNION of a kind's tag names, so it cannot see a second `h` on one
+# event (C5.3), it never looks at a tag's value (C5.1, C5.4, C5.7, C5.8 pass
+# its allow-list today), it never looks at REQ frames at all (C5.2), it has no
+# concept of an endpoint (C5.6), and it has no concept of caller-supplied
+# ground truth (C5.7's identity keys, C5.8's group id).
+#
+# C5.9 is the one exception, and it is stated rather than hidden: a `p` tag on
+# a kind-445 is ALREADY rejected by C4's union allow-list and by C5.3's
+# per-event tag shape, so C5.9 can never be the only thing that catches it.
+# What it adds is the diagnosis — C5.3 reports "a third tag NAME", which does
+# not tell a reader that circle membership just became queryable at the relay.
+# The self-test therefore asserts C5.9's MESSAGE and not merely a red exit
+# code, because the exit code alone cannot distinguish the two rules.
+#
+# # C5.7 and C5.8 are SEND-SIDE, and say so
+#
+# C5.1-C5.6 read both directions, because the questions they ask have the same
+# answer whoever put the frame on the socket. C5.7, C5.8 and C5.9 do not: each
+# asks what HAVEN did, and an inbound frame is the RELAY's output — free to
+# echo Haven's own event back, to carry another client's 445, or to be
+# hostile. Asserting any of the three over inbound traffic would manufacture
+# findings, so they are scoped to `dir == "c2r"` and what is known about
+# inbound is printed as `advisory (NOT asserted)`.
 #
 # # Every invariant carries its own non-empty precondition, and fails closed
 #
@@ -89,7 +111,8 @@
 #        --journal <path> [--journal <path>...] \
 #        --sentinel <token> \
 #        --pool <kind>=<url>[,<url>...] [--pool ...] \
-#        [--discovery-relay <url>]... [--exclude-conn <conn_id>]...
+#        [--discovery-relay <url>]... [--exclude-conn <conn_id>]... \
+#        [--identity-pubkey <hex64>]... [--mls-group-id <hex>]...
 #   bash tooling/e2e/ci/check-wire-correlation.sh --self-test
 #
 # The E2E harness (`TestRelay`) reaches the same proxied relays as the app, so
@@ -128,7 +151,9 @@ Usage:
   check-wire-correlation.sh --journal <path> [--journal <path>...] \
                             --sentinel <token> \
                             --pool <kind>=<url>[,<url>...] [--pool ...] \
-                            [--discovery-relay <url>]...
+                            [--discovery-relay <url>]... \
+                            [--identity-pubkey <hex64>]... \
+                            [--mls-group-id <hex>]...
   check-wire-correlation.sh --self-test
 
 --pool declares the publish targets a kind is ALLOWED to reach (C5.6). At least
@@ -143,6 +168,20 @@ may not appear both as a discovery relay and inside a pool.
 harness's own socket, whose conn_id the proxy returns in the sentinel ack: its
 probes are not Haven's traffic. It can only remove evidence, so an over-broad
 exclusion fails closed on the preconditions rather than reporting clean.
+
+--identity-pubkey declares a long-term account pubkey (64 hex) that no kind-445
+may ever be signed by (C5.7). It is OPTIONAL and additive: the identity set is
+also DERIVED from the journal, from the authors of kinds 0/10002/10050/30443,
+which are identity-signed by protocol. Declare a key the run never puts on the
+wire and C5.7 covers it too; declare none and the derived set still applies. If
+BOTH are empty the identity arm is a META-FLOOR, never a pass.
+
+--mls-group-id declares the real MLS group id (hex, >= 32 chars) that must
+appear in NO tag of any published event (C5.8). It CANNOT be derived — its
+absence from the wire is the very thing asserted — and it cannot live in
+wire_allowlist.json, which is static while the id is minted per run. Publishing
+kind-445s without declaring one is a META-FLOOR: the scan would have compared
+the wire against nothing.
 EOF
 }
 
@@ -247,6 +286,16 @@ sentinel_seq() {
 # value to tell two groups apart, and C5.4 reports which kind carried a
 # forbidden name. Nothing here is ever printed — see the header of the report
 # section.
+#
+# EVERY token of a tag is kept, not the first two. The first two are still
+# materialised by name (`(.[0] // "") | tostring`, likewise `.[1]`) so that a
+# one-element tag keeps yielding `["h",""]` rather than `["h"]` — `tagVals`
+# reads `.[1]` and the `select(. != "")` filters downstream of it would change
+# meaning if that became `null`. Everything from index 2 on is then appended
+# verbatim. C5.8 scans tag tokens for a leaked MLS group id and a truncation
+# at index 1 would make any tag position beyond the first value a blind spot;
+# it also feeds `bodyKey`, so two events differing only in a third token stay
+# two events instead of collapsing into one that answers for both.
 normalize() {
   local f="$1" boundary="$2"
   jq -c --argjson b "${boundary}" '
@@ -275,7 +324,8 @@ normalize() {
                  pubkey:(($ev.pubkey // "") | ascii_downcase),
                  created_at:($ev.created_at // null),
                  tags:[ (($ev.tags // [])[] | select(type == "array")
-                         | [ ((.[0] // "") | tostring), ((.[1] // "") | tostring) ]) ]}
+                         | ( [ ((.[0] // "") | tostring), ((.[1] // "") | tostring) ]
+                             + [ .[2:][] | tostring ] )) ]}
               end
           elif $verb == "REQ" then
             {t:"req", seq:$line.wire_seq, dir:$line.dir, conn:$line.conn_id,
@@ -291,8 +341,9 @@ normalize() {
 # The assertions. jq rather than bash so the whole comparison runs on bash 3.2
 # (the macOS runners hosting the iOS lanes have no associative arrays).
 #
-# evaluate <normalized-stream> <pools-json> <discovery-json>
-# Prints {"meta":[...],"violations":[...],"summary":{...}}
+# evaluate <normalized-stream> <pools-json> <discovery-json> <exclude-json> \
+#          <identity-pubkeys-json> <mls-group-ids-json> <mls-not-asserted-reason>
+# Prints {"meta":[...],"violations":[...],"advisories":[...],"summary":{...}}
 # ---------------------------------------------------------------------------
 #
 # The jq program is emitted from a QUOTED heredoc into a temp file rather than
@@ -302,7 +353,8 @@ normalize() {
 # Rewriting the prose to dodge the shell would be letting the quoting decide
 # what the guard is allowed to say.
 evaluate() {
-  local stream="$1" pools="$2" discovery="$3" exclude="$4" prog
+  local stream="$1" pools="$2" discovery="$3" exclude="$4" identity="$5" mlsids="$6"
+  local mls_not_asserted="${7:-}" prog
   prog="$(mktemp)"
   cat > "${prog}" <<'JQPROG'
 
@@ -347,6 +399,21 @@ evaluate() {
     # another round of this analysis.
     def bodyKey: if ((.id // "") == "") then ["noid", (. | tostring)]
                  else [.id, .kind, .pubkey, .created_at, (.tags | sort)] end;
+
+    # C5.7's counting key, and deliberately NOT `bodyKey`. C5.7 asks "did one
+    # ephemeral key sign two MESSAGES", and two frames wearing one `id` but
+    # differing in their body are not two messages: at most one of them can be
+    # the event that key actually signed, and the other is a forgery or a
+    # corruption. Counting them as a key reuse would put a confident, wrong
+    # name on a completely different defect.
+    #
+    # This is not the blindfold `bodyKey` exists to prevent, because nothing
+    # goes unchecked: C5.3, C5.4 and C5.5 still read `$uniq`, so BOTH bodies
+    # are judged on their own tags — only the reuse ARITHMETIC folds them, and
+    # only where folding is the correct reading. An id-less frame still falls
+    # back to the whole body, so a frame this oracle cannot identify is never
+    # merged into another one.
+    def evKey: if ((.id // "") == "") then ("noid:" + (. | tostring)) else .id end;
 
     ($discovery | map(canon)) as $DISC
     | ($pools | with_entries(.value |= map(canon))) as $POOL
@@ -413,6 +480,61 @@ evaluate() {
     | [ $u445[] | select(nameList(.tags) | index("expiration")) ] as $u445app
     | [ $u445[] | select(nameList(.tags) | index("expiration") | not) ] as $u445nonapp
     | [ $uniq[] | select(.kind == 1059) ] as $u1059
+
+    # --- the SEND-SIDE snapshot, for C5.7 / C5.8 / C5.9 --------------------
+    #
+    # C5.1-C5.6 read `$uniq`, which spans both directions, because the
+    # questions they ask (is this timestamp shared, is this tag name allowed)
+    # have the same answer whoever put the frame on the socket. The three
+    # invariants below do NOT: each of them asks what HAVEN did, and an
+    # inbound frame is the RELAY's output. A relay is free to echo a Haven
+    # event back, to serve another client's 445, or to hand back anything at
+    # all — none of which is evidence about the app under test, and every one
+    # of which would be a false red if it were counted. So they are scoped to
+    # `dir == "c2r"`, and what is known about inbound is reported as an
+    # advisory that asserts nothing.
+    #
+    # De-duplicated by BODY and NOT by (body, endpoint): unlike C5.6, none of
+    # these three asks where an event went, so one event published to N relays
+    # must count once. Counting it per endpoint would make "no two 445s share
+    # an author" fire on the first ordinary fan-out.
+    | ( [ $events[] | select(.dir == "c2r") ]
+        | group_by(bodyKey) | map(.[0]) ) as $uSent
+    | [ $uSent[] | select(.kind == 445) ] as $s445
+
+    # The kinds whose author IS the account's long-term identity key, per the
+    # protocol table in CLAUDE.md: kind 0 (NIP-01 profile), 10002 (NIP-65),
+    # 10050 (NIP-17 inbox) and 30443 (KeyPackage) are all signed by the
+    # identity key. 445 and 1059 are signed by a fresh ephemeral key and 444
+    # is unsigned, so none of those three can contribute.
+    #
+    # Deriving the set from the journal rather than only from a flag is what
+    # keeps this honest: the identity keys ARE observable on the wire, so the
+    # oracle can build its own ground truth and cannot be starved of it by a
+    # caller who forgets a flag. `$uniq` (both directions) is read on purpose
+    # — an inbound kind-0 from a peer names a real identity key too, and
+    # learning it can only ever WIDEN the forbidden set. Widening cannot
+    # manufacture a finding on its own: a finding still requires a c2r 445
+    # signed by one of these keys.
+    | ([0, 10002, 10050, 30443]) as $IDKINDS
+    | ( ( [ $uniq[] | select(.kind as $k | $IDKINDS | index($k)) | .pubkey ]
+          + ($identityPubkeys | map(ascii_downcase)) )
+        | map(select(. != "")) | unique ) as $IDKEYS
+
+    # The FLOOR set, deliberately narrower than the assertion set above.
+    # $IDKEYS spans BOTH directions on purpose: a 445 signed by any key this run
+    # saw on an identity-scoped event is a finding, including a peer's. But the
+    # C5.7 assertion is scoped to c2r, so a floor discharged by an INBOUND key
+    # proves nothing about it -- a peer keypackage arriving on r2c would satisfy
+    # "we knew at least one identity key" while the local account's key was
+    # never in the comparison at all, and a 445 signed by it would report clean.
+    # The floor therefore requires a key this run saw the DEVICE use, or one the
+    # lane declared.
+    | ( ( [ $uSent[] | select(.kind as $k | $IDKINDS | index($k)) | .pubkey ]
+          + ($identityPubkeys | map(ascii_downcase)) )
+        | map(select(. != "")) | unique ) as $IDKEYS_SEND
+
+    | ($mlsGroupIds | map(ascii_downcase) | unique) as $MLSIDS
 
     # ======================================================================
     # C5.1 — created_at collision across distinct `h`
@@ -649,9 +771,163 @@ evaluate() {
           )
       ] as $c56viol
 
+    # ======================================================================
+    # C5.7 — a FRESH EPHEMERAL author on every kind-445 (Security Rule 2)
+    # ======================================================================
+    # Two obligations under one heading, because "fresh ephemeral key per
+    # message" is two claims: the key is EPHEMERAL (never a long-term identity
+    # key) and it is FRESH (never reused by a second message). Either alone is
+    # satisfiable while the rule is broken — a key used once but equal to the
+    # identity key attributes the message to the account, and a never-identity
+    # key reused across two messages links those two messages to one another.
+    #
+    # `$IDKEYS` is the derived-plus-declared identity set; `$s445` is the
+    # send-side, body-de-duplicated 445 set. Both are computed above.
+    | ( $s445 | group_by(.pubkey)
+        | map(select((.[0].pubkey // "") != ""))
+        | map(select((map(evKey) | unique | length) >= 2)) ) as $reused
+
+    | [ (if (($s445 | length) < 2) then
+          "C5.7 precondition: only \($s445 | length) distinct kind-445 was PUBLISHED below the sentinel, so \"no two kind-445s share an author\" is vacuously true — with fewer than two messages there is no pair to compare and the freshness half of Security Rule 2 was never tested. This is a META-FLOOR and not a pass: an ephemeral key that is reused on every single message would produce exactly this verdict in a run that published once. Make the scenario publish at least two group messages below the sentinel."
+         else empty end),
+        (if (($IDKEYS_SEND | length) == 0) then
+          "C5.7 precondition: no identity-signed event (kind 0, 10002, 10050 or 30443) was SENT below the sentinel and no --identity-pubkey was declared, so \"no kind-445 was signed by a long-term identity key\" was compared against a set containing no key this device is known to sign with, and could not have failed for the account under test. An INBOUND identity key does not discharge this: C5.7 is scoped to dir==c2r, so a key that only ever arrived from the relay can never match a c2r 445 author. Publish one identity-scoped event from the device in the scenario, or declare the account pubkey(s) with --identity-pubkey."
+         else empty end) ] as $c57meta
+
+    | [ ( $s445[]
+          | . as $e
+          | select(($e.pubkey // "") == "")
+          | "C5.7 ephemeral author: kind-445 \(short($e.id))… was PUBLISHED carrying no author pubkey at all. Security Rule 2 requires a fresh keypair per group message, and an event with no author does not carry one — either the recorder decoded a frame this oracle cannot reason about, or the publish path emitted an unsigned 445. Neither is a shape whose privacy properties anyone has established." ),
+
+        # `. as $e` before the lookup, then `$IDKEYS | index($e.pubkey)`. The
+        # repo-wide `index(.)` trap: index's argument is evaluated against
+        # index's own INPUT, so `$IDKEYS | index(.pubkey)` would ask for
+        # "$IDKEYS.pubkey inside $IDKEYS" — `null` every time, and the rule
+        # would never fire while looking exactly like it does now.
+        ( $s445[]
+          | . as $e
+          | select((($e.pubkey // "") != "") and (($IDKEYS | index($e.pubkey)) != null))
+          | "C5.7 ephemeral author: kind-445 \(short($e.id))… was signed by \(short($e.pubkey))…, which this run also saw signing an identity-scoped event (kind 0/10002/10050/30443) or which was declared with --identity-pubkey. Security Rule 2 requires a NEW keypair for each group message precisely so the outer event carries no stable handle: signing with the account key attributes every one of that circle's messages to a named person, at every relay, forever, without decrypting a byte — and it also re-links that person to every other kind this key signs, which is the whole social graph the group plane is built to keep apart." ),
+
+        ( $reused[]
+          | . as $g
+          | "C5.7 ephemeral author: one pubkey (\(short($g[0].pubkey))…) signed \($g | map(evKey) | unique | length) DIFFERENT kind-445 events (ids \($g | map(short(.id)) | unique | join(", "))). A reused author is a stable per-sender handle on the outer event: the relay cannot read the messages, but it can group them, count them, time them and — the moment any one of them is deanonymised by other means — retroactively attribute all of the others. Fan-out is not this: the same event on N relays and echoed to M subscribers is de-duplicated by body before this rule runs, so reaching it takes two genuinely different messages." ) ] as $c57viol
+
+    # ======================================================================
+    # C5.8 — the real MLS group id is NEVER on the wire (Security Rule 4)
+    # ======================================================================
+    # # How the oracle learns the id, and why it cannot infer it
+    #
+    # The real MLS group id is generated per circle at runtime and never
+    # leaves the device by design, so it is by construction absent from the
+    # journal — which is exactly the thing being asserted, and also the reason
+    # this file cannot derive it the way it derives `$IDKEYS`. There is no
+    # observable it could be recovered from without breaking the invariant
+    # first. It is therefore CALLER-SUPPLIED ground truth (`--mls-group-id`),
+    # in the same posture as C5.6's `--pool`: the check proves absence of the
+    # value the lane says it created.
+    #
+    # It cannot live in `wire_allowlist.json` either. That file is checked in
+    # and static; the id is minted fresh on every run, so a declaration there
+    # would either be a stale constant matching nothing, or a value that must
+    # be rewritten before every run to stay meaningful.
+    #
+    # # An undeclared id is a META-FLOOR, not a silent pass
+    #
+    # A caller who publishes kind-445s has, by definition, created a circle
+    # and knows its MLS group id. If none is declared while 445s were sent,
+    # the scan compared the wire against nothing at all, and reporting that as
+    # "no leak found" is the precise failure this workstream exists to remove.
+    #
+    # # Stated limits
+    #
+    # This is a HEX-SUBSTRING scan over decoded tag tokens of client->relay
+    # events. It does not see `content` (ciphertext, and not normalised here),
+    # nor an id re-encoded as base64, bech32 or raw bytes. Proving absence in
+    # EVERY encoding is C6's job — `tooling/e2e/ci/check-wire-canaries.dart`
+    # plants a value the run knows and requires it to be absent under each
+    # encoding. C5.8 is the cheap, always-on half: it catches the leak that
+    # actually happens, which is the id going out in a tag verbatim because a
+    # builder reached for the wrong field.
+    | [ (if (($MLSIDS | length) == 0) and (($s445 | length) > 0)
+             and ($mlsNotAsserted == "") then
+          "C5.8 precondition: \($s445 | length) kind-445(s) were PUBLISHED below the sentinel but no --mls-group-id was declared, so the scan for a leaked MLS group id compared the wire against an empty set of values and could not have failed. The real group id cannot be derived from the journal — its absence there is the very thing being asserted — so it must be supplied by the lane that created the circle (CircleFfi.mlsGroupId, hex-encoded). Declare it or stop asserting Security Rule 4 here."
+         else empty end),
+        (if (($MLSIDS | length) > 0) and (($s445 | length) == 0) then
+          "C5.8 precondition: an MLS group id was declared but no kind-445 was PUBLISHED below the sentinel. Kind-445 is the kind that carries a group routing value in a tag, so a snapshot with none of them contains none of the events that could have leaked the real id, and a clean verdict describes the sample rather than the app."
+         else empty end) ] as $c58meta
+
+    # Every token of every tag of every SENT event, of every kind — not just
+    # 445. Security Rule 4 says the real group id is never published, full
+    # stop: a 1059 or a 30443 carrying it discloses the same value to the same
+    # operator. `contains` is a substring test on purpose, so an id embedded
+    # in a longer token (a composite `d` slot, a URL query) is caught too;
+    # main() refuses a declared id shorter than 32 hex chars, without which a
+    # short value would match by coincidence and drown the check in noise.
+    | [ $uSent[]
+        | . as $e
+        | .tags[]
+        | . as $tag
+        | ($tag | to_entries[])
+        | . as $tok
+        | $MLSIDS[]
+        | . as $mid
+        | select(($tok.value | ascii_downcase | contains($mid)))
+        | if (($tag[0] == "h") and ($tok.key == 1) and (($tok.value | ascii_downcase) == $mid)) then
+            "C5.8 group-id privacy: kind-\($e.kind) event \(short($e.id))… routes by an `h` tag whose value IS the real MLS group id. Security Rule 4 permits only `nostr_group_id` on the wire; the two must be different values, and here they are the same one. Treat this as id ALIASING in the layer that mints the routing value, not as a stray tag: if the two ids are equal then every h-tag scan anywhere in this repo — including the rest of C5.8 — passes vacuously while the real id is broadcast on every single group message, and the relay gains a permanent, cross-epoch handle on the MLS group itself."
+          else
+            "C5.8 group-id privacy: kind-\($e.kind) event \(short($e.id))… PUBLISHED the real MLS group id inside its `\($tag[0])` tag at position \($tok.key). Only `nostr_group_id` may appear on the wire (Security Rule 4). The real id is the identifier the MLS group keeps across every epoch change, so a relay that sees it once can link the whole group's traffic together for the group's entire lifetime — through key rotations, membership changes and any later change of the nostr_group_id, which is the one thing rotating the public handle is supposed to prevent."
+          end ] as $c58viol
+
+    # ======================================================================
+    # C5.9 — no `p` tag on a kind-445 (recipient privacy)
+    # ======================================================================
+    # A NAMED diagnosis layered over a generic one, and honest about it: a `p`
+    # on a 445 also trips C5.3 (per-event tag shape) and C4's union-level
+    # allow-list, so this rule cannot be the only thing standing between the
+    # repo and the leak, and it is not claimed to be. What it adds is the
+    # reason: C5.3 reports "a third tag NAME", which tells a reader that
+    # something is out of shape without telling them that circle membership
+    # just became queryable at the relay. The two messages are asserted
+    # separately in the self-test for exactly that reason.
+    | [ (if (($s445 | length) == 0) then
+          "C5.9 precondition: no kind-445 was PUBLISHED below the sentinel, so the recipient-privacy rule had no group message to read. Group messages are the only kind whose routing this rule constrains, and a snapshot without any says nothing about how they route."
+         else empty end) ] as $c59meta
+
+    | [ $s445[]
+        | . as $e
+        | select((nameList(.tags) | index("p")) != null)
+        | "C5.9 recipient privacy: kind-445 \(short($e.id))… was PUBLISHED carrying a `p` (recipient) tag. A group message must route by its `h` tag ALONE. A `p` tag hands the relay an indexed, queryable membership edge: it can answer \"who receives this circle's messages\" with a single REQ, reconstruct the roster over time, and do it without decrypting anything — which undoes the ephemeral author key on the same event, since that key exists precisely to leave the relay with no participant names to join on."
+      ] as $c59viol
+
+    # ======================================================================
+    # Inbound: reported, never asserted
+    # ======================================================================
+    # Everything C5.7 asks is a question about the SENDER, and inbound frames
+    # are the relay's output — a relay may echo Haven's own event back (whose
+    # author then legitimately repeats), serve another client's 445, or return
+    # anything at all. Any of those would be a false red if asserted, so what
+    # is known is printed and labelled instead. It is printed rather than
+    # dropped because "we did not look" and "there was nothing to see" must
+    # not read the same in a log a human is scanning for a reason a lane went
+    # green.
+    | ( [ $events[] | select(.dir == "r2c" and .kind == 445) ]
+        | group_by(bodyKey) | map(.[0]) ) as $in445
+    | [ (if (($in445 | length) > 0) then
+          ( ([ $in445[] | .pubkey ] | unique | map(select(. != ""))) as $inAuth
+            | ( [ $in445[] | . as $e | select((($e.pubkey // "") != "") and (($IDKEYS | index($e.pubkey)) != null)) ] | length ) as $inId
+            | "\($in445 | length) inbound kind-445(s) below the sentinel, \($inAuth | length) distinct author key(s), \($inId) of them signed by a key this run also saw on an identity-scoped event. NOT asserted: an inbound frame is the relay's output, not Haven's, so a repeat or an identity-keyed author there may be the relay echoing Haven's own event, another client's traffic, or a hostile injection — none of which is evidence about the app under test. C5.7 is scoped to dir==c2r for that reason." )
+         else "no inbound kind-445 was observed below the sentinel; nothing is claimed either way about what a relay returns." end) ] as $advisories
+
     | {
-        meta: ($c51meta + $c52meta + $c53meta + $c54meta + $c55meta + $c56meta),
-        violations: ($c51viol + $c52viol + $c53viol + $c54viol + $c55viol + $c56viol),
+        meta: ($c51meta + $c52meta + $c53meta + $c54meta + $c55meta + $c56meta
+               + $c57meta + $c58meta + $c59meta),
+        violations: ($c51viol + $c52viol + $c53viol + $c54viol + $c55viol + $c56viol
+                     + $c57viol + $c58viol + $c59viol),
+        advisories: ($advisories
+          + (if ($mlsNotAsserted != "") and (($s445 | length) > 0) then
+               [ "C5.8 NOT ASSERTED (declared by the lane): \($mlsNotAsserted). \($s445 | length) kind-445(s) were published below the sentinel and were NOT scanned for a leaked real MLS group id, because the lane declared it cannot supply one. Security Rule 4 is therefore asserted for this run ONLY by the in-drive _assertWirePrivacyInvariants, which is narrower: it reads back a single circle's kind-445 stream and says nothing about 1059/30443/10002/0. This line is printed on EVERY run by design — it is the record that an invariant was skipped, not an absence to be inferred." ]
+             else [] end)),
         summary: {
           event_frames: ($events | length),
           unique_events: ($uniq | length),
@@ -663,6 +939,11 @@ evaluate() {
           app_groups: ($appH | length),
           h_filters: ($hFilters | length),
           sent_pairs: ($sent | length),
+          sent_445: ($s445 | length),
+          sent_445_authors: ([ $s445[] | .pubkey ] | unique | map(select(. != "")) | length),
+          identity_keys: ($IDKEYS | length),
+          mls_ids: ($MLSIDS | length),
+          in_445: ($in445 | length),
           endpoints: ([ $rows[] | .epKey ] | unique | map(select(. != "")))
         }
       }
@@ -671,6 +952,9 @@ JQPROG
     --argjson pools "${pools}" \
     --argjson discovery "${discovery}" \
     --argjson excludeConns "${exclude}" \
+    --argjson identityPubkeys "${identity}" \
+    --argjson mlsGroupIds "${mlsids}" \
+    --arg mlsNotAsserted "${mls_not_asserted}" \
     -f "${prog}" -- "${stream}"
   local rc=$?
   rm -f "${prog}"
@@ -684,7 +968,8 @@ JQPROG
 main() {
   local sentinel=""
   local -a journals=()
-  local pool_lines="" disc_lines="" excl_lines=""
+  local pool_lines="" disc_lines="" excl_lines="" idpk_lines="" mlsid_lines=""
+  MLS_NOT_ASSERTED=""
 
   if [[ $# -lt 1 ]]; then
     usage
@@ -734,6 +1019,60 @@ main() {
       --exclude-conn)
         [[ $# -ge 2 ]] || { echo "ERROR: --exclude-conn needs a value" >&2; usage; exit "${RC_USAGE}"; }
         excl_lines+="$2"$'\n'; shift 2 ;;
+      --identity-pubkey)
+        [[ $# -ge 2 ]] || { echo "ERROR: --identity-pubkey needs a value" >&2; usage; exit "${RC_USAGE}"; }
+        if [[ ! "$2" =~ ^[0-9a-fA-F]{64}$ ]]; then
+          echo "ERROR: --identity-pubkey expects 64 hex characters (a 32-byte x-only" >&2
+          echo "       Nostr pubkey), got: $2" >&2
+          echo "       An npub or a truncated key would silently never match any author" >&2
+          echo "       in the journal, which turns C5.7's identity arm off while looking" >&2
+          echo "       exactly like it is on." >&2
+          usage; exit "${RC_USAGE}"
+        fi
+        idpk_lines+="$2"$'\n'; shift 2 ;;
+      --mls-group-id-not-asserted)
+        # The DECLARED, LOUD alternative to supplying the id. It does not make
+        # C5.8 conditional -- a conditional check is a silent pass, and this
+        # oracle's whole premise is that "we did not look" and "there was
+        # nothing to see" must never render the same. It converts C5.8's
+        # precondition from a META-FLOOR into an advisory printed on EVERY run,
+        # and the flag itself is a visible token in the workflow diff that has
+        # to be DELETED when the id channel lands. Time-boxed by review, not by
+        # the script.
+        [[ $# -ge 2 ]] || { echo "ERROR: --mls-group-id-not-asserted needs a reason" >&2; usage; exit "${RC_USAGE}"; }
+        if [[ -z "${2// /}" ]]; then
+          echo "ERROR: --mls-group-id-not-asserted needs a NON-EMPTY reason." >&2
+          echo "       The reason is the whole point: it is what a reader sees" >&2
+          echo "       instead of the assertion, and what review deletes later." >&2
+          usage; exit "${RC_USAGE}"
+        fi
+        MLS_NOT_ASSERTED="$2"; shift 2 ;;
+      --mls-group-id)
+        [[ $# -ge 2 ]] || { echo "ERROR: --mls-group-id needs a value" >&2; usage; exit "${RC_USAGE}"; }
+        if [[ ! "$2" =~ ^[0-9a-fA-F]+$ ]]; then
+          echo "ERROR: --mls-group-id expects lowercase-or-uppercase hex, got: $2" >&2
+          echo "       C5.8 scans hex tokens on the wire; a value in any other encoding" >&2
+          echo "       cannot match one and would disable the scan silently." >&2
+          usage; exit "${RC_USAGE}"
+        fi
+        if (( ${#2} % 2 != 0 )); then
+          echo "ERROR: --mls-group-id has an odd number of hex characters (${#2}); it is" >&2
+          echo "       not a whole number of bytes and cannot be the id the app minted." >&2
+          usage; exit "${RC_USAGE}"
+        fi
+        # A SUBSTRING scan against a short needle finds itself everywhere. 32
+        # hex chars (16 bytes) is already far past the point where a chance hit
+        # inside an unrelated 64-hex token is credible; below it the check would
+        # produce noise indistinguishable from a real leak, and a reviewer who
+        # learns to dismiss its findings has lost the check either way. MDK
+        # mints 32-byte ids, so nothing legitimate is anywhere near this floor.
+        if (( ${#2} < 32 )); then
+          echo "ERROR: --mls-group-id must be at least 32 hex characters (got ${#2})." >&2
+          echo "       C5.8 is a substring scan; a short needle matches unrelated tokens" >&2
+          echo "       by coincidence and reports leaks that are not there." >&2
+          usage; exit "${RC_USAGE}"
+        fi
+        mlsid_lines+="$2"$'\n'; shift 2 ;;
       *)
         echo "ERROR: unknown argument: $1" >&2; usage; exit "${RC_USAGE}" ;;
     esac
@@ -773,6 +1112,11 @@ main() {
     split("\n") | map(select(length > 0)) | unique')"
   excl_json="$(printf '%s' "${excl_lines}" | jq -R -s '
     split("\n") | map(select(length > 0)) | unique')"
+  local idpk_json mlsid_json
+  idpk_json="$(printf '%s' "${idpk_lines}" | jq -R -s '
+    split("\n") | map(select(length > 0) | ascii_downcase) | unique')"
+  mlsid_json="$(printf '%s' "${mlsid_lines}" | jq -R -s '
+    split("\n") | map(select(length > 0) | ascii_downcase) | unique')"
 
   # A URL that is both a discovery relay and a publish target is a contradiction
   # in the caller's own model, and resolving it silently either way would make
@@ -834,8 +1178,21 @@ main() {
     exit "${RC_METAFLOOR}"
   fi
 
+  # Declaring BOTH is a contradiction: one says "here is the ground truth",
+  # the other says "no ground truth exists". Refusing is not pedantry -- the
+  # silent resolution would be to honour the id and ignore the declaration,
+  # which leaves a stale not-asserted token in the workflow claiming the
+  # invariant is skipped while it is actually running.
+  if [[ -n "${MLS_NOT_ASSERTED}" && -n "${mlsid_lines}" ]]; then
+    echo "ERROR: --mls-group-id and --mls-group-id-not-asserted are mutually exclusive." >&2
+    echo "       Supplying the id ASSERTS Security Rule 4; declaring the" >&2
+    echo "       non-assertion says it cannot be asserted. Pick one." >&2
+    exit "${RC_USAGE}"
+  fi
+
   local verdict
-  verdict="$(evaluate "${stream}" "${pools_json}" "${disc_json}" "${excl_json}")"
+  verdict="$(evaluate "${stream}" "${pools_json}" "${disc_json}" "${excl_json}" \
+                      "${idpk_json}" "${mlsid_json}" "${MLS_NOT_ASSERTED}")"
 
   local n_meta n_viol n_events
   n_meta="$(printf '%s' "${verdict}" | jq '.meta | length')"
@@ -848,7 +1205,14 @@ main() {
     "445 total \(.summary.k445) (app \(.summary.k445_app) / commit \(.summary.k445_commit)) " +
     "over \(.summary.app_groups) app-publishing group(s); 1059 \(.summary.k1059); " +
     "\(.summary.h_filters) #h filter(s); \(.summary.sent_pairs) (event,endpoint) publish pair(s); " +
+    "sent 445 \(.summary.sent_445) under \(.summary.sent_445_authors) distinct author key(s); " +
+    "\(.summary.identity_keys) known identity key(s); \(.summary.mls_ids) declared MLS group id(s); " +
     "endpoints \(.summary.endpoints)"' >&2
+
+  # Printed before the findings, and never mapped to an exit code. An advisory
+  # is what the oracle knows and deliberately does not assert; suppressing it
+  # would make "we did not look" and "there was nothing to see" read the same.
+  printf '%s' "${verdict}" | jq -r '.advisories[] | "advisory (NOT asserted): " + .' >&2
 
   if (( n_meta > 0 )); then
     printf '%s' "${verdict}" | jq -r '.meta[] | "META-FLOOR: " + .' >&2
@@ -880,10 +1244,25 @@ main() {
     exit "${RC_METAFLOOR}"
   fi
 
-  echo "wire-correlation: clean — C5.1 timestamp separation, C5.2 REQ-filter" \
-       "allow-list, C5.3 per-event 445 tag shape, C5.4 no g/alt, C5.5 1059 == {p}" \
-       "and C5.6 per-kind publish containment all hold, and all six had a" \
-       "non-empty sample."
+  # The success banner must never name an invariant that did not run. A reader
+  # greps exactly this line to conclude "green => the rule held", so listing
+  # C5.8 here while an advisory three lines above says it was not scanned is a
+  # false statement in the one place it does the most damage.
+  if [[ -n "${MLS_NOT_ASSERTED}" ]]; then
+    echo "wire-correlation: clean on EIGHT of nine — C5.1 timestamp separation," \
+         "C5.2 REQ-filter allow-list, C5.3 per-event 445 tag shape, C5.4 no g/alt," \
+         "C5.5 1059 == {p}, C5.6 per-kind publish containment, C5.7 fresh ephemeral" \
+         "445 author and C5.9 no p-tag on a 445 all hold, and all eight had a" \
+         "non-empty sample. C5.8 (no real MLS group id on the wire) was NOT" \
+         "ASSERTED — see the advisory above. This run is NOT evidence for" \
+         "Security Rule 4."
+  else
+    echo "wire-correlation: clean — C5.1 timestamp separation, C5.2 REQ-filter" \
+         "allow-list, C5.3 per-event 445 tag shape, C5.4 no g/alt, C5.5 1059 == {p}," \
+         "C5.6 per-kind publish containment, C5.7 fresh ephemeral 445 author," \
+         "C5.8 no real MLS group id on the wire and C5.9 no p-tag on a 445 all hold," \
+         "and all nine had a non-empty sample."
+  fi
   exit "${RC_CLEAN}"
 }
 
@@ -924,6 +1303,37 @@ expect_msg() {
   out="$(bash "${SELF_PATH}" "$@" 2>&1 || true)"
   if ! printf '%s' "${out}" | grep -qF -- "${needle}"; then
     echo "SELF-TEST FAIL: ${desc} — verdict did not contain: ${needle}" >&2
+    return 1
+  fi
+  return 0
+}
+
+# expect_no_msg <substring> <description> <args...> — the verdict must NOT name
+# this inference. Needed for two things nothing else in this file can express:
+# that a send-side rule stayed SILENT on inbound traffic (an absence, which
+# `expect_rc` cannot distinguish from a rule that is simply switched off), and
+# that C5.9's named diagnosis is genuinely its own — a `p` tag on a 445 also
+# trips C5.3, so a red exit code proves nothing about which rule spoke.
+#
+# The run must have reached `evaluate` for the absence to mean anything. A
+# usage error, a missing journal or a syntax error would all produce output
+# containing no needle, and the assertion would pass having proven that the
+# oracle never ran. The summary line is emitted immediately after `evaluate`
+# returns, so requiring it is what turns "did not say it" into "looked and did
+# not say it".
+expect_no_msg() {
+  local needle="$1" desc="$2"
+  shift 2
+  local out
+  CASES_RUN=$(( CASES_RUN + 1 ))
+  out="$(bash "${SELF_PATH}" "$@" 2>&1 || true)"
+  if ! printf '%s' "${out}" | grep -qF -- "wire-correlation summary:"; then
+    echo "SELF-TEST FAIL: ${desc} — the oracle never reached evaluate(), so the" >&2
+    echo "  absence of \"${needle}\" proves nothing." >&2
+    return 1
+  fi
+  if printf '%s' "${out}" | grep -qF -- "${needle}"; then
+    echo "SELF-TEST FAIL: ${desc} — verdict contained what it must not: ${needle}" >&2
     return 1
   fi
   return 0
@@ -999,6 +1409,14 @@ readonly SENTINEL="HAVEN_WIRE_SENTINEL:corrselftest01"
 readonly H1="cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe"
 readonly H2="d00dfeedd00dfeedd00dfeedd00dfeedd00dfeedd00dfeedd00dfeedd00dfeed"
 readonly H3="beefcafebeefcafebeefcafebeefcafebeefcafebeefcafebeefcafebeefcafe"
+
+# The two circles' REAL MLS group ids — the values C5.8 requires to be absent.
+# Deliberately unrelated to H1/H2 and to each other: the whole point of
+# Security Rule 4 is that the routing handle and the real id are different
+# values, and a fixture whose two ids shared a prefix would let a substring
+# scan pass by accident on the wrong one.
+readonly MLS1="7a1c93e05b48d2f6a0e17c4b9d3f8265aa11bb22cc33dd44ee55ff6600778899"
+readonly MLS2="3f8e2d1c0b9a8776655443322110ffeeddccbbaa99887766554433221100aabb"
 
 readonly RELAY_A="ws://127.0.0.1:7777"
 readonly RELAY_B="ws://127.0.0.1:7779"
@@ -1093,6 +1511,26 @@ pool_args() {
     --pool "10050=${RELAY_A}"
 }
 
+# The caller-supplied ground truth every fixture below is judged against:
+# both accounts' identity keys (C5.7) and both circles' real MLS group ids
+# (C5.8).
+#
+# The identity keys are declared even though the healthy fixture also PUTS
+# them on the wire (as kind-0/10002/10050/30443 authors), so the derived set
+# and the declared set agree. That is on purpose: several fixtures below are
+# minimal journals carrying only 445s and a 1059, which contain no
+# identity-signed event at all, and without the declaration those would
+# META-FLOOR on C5.7's identity arm for a reason that has nothing to do with
+# what they exist to prove. The derived path is exercised on its own by the
+# `c57noid` fixture, which declares nothing and relies on the journal alone.
+id_args() {
+  printf '%s\n' \
+    --identity-pubkey "${PK_A}" \
+    --identity-pubkey "${PK_B}" \
+    --mls-group-id "${MLS1}" \
+    --mls-group-id "${MLS2}"
+}
+
 self_test() {
   local tmp fail=0
   tmp="$(mktemp -d)"
@@ -1106,7 +1544,9 @@ self_test() {
 
   local -a POOLS=()
   while IFS= read -r a; do POOLS+=("${a}"); done < <(pool_args)
-  local -a base=(--sentinel "${SENTINEL}" "${POOLS[@]}" --discovery-relay "${DISCOVERY}")
+  local -a IDS=()
+  while IFS= read -r a; do IDS+=("${a}"); done < <(id_args)
+  local -a base=(--sentinel "${SENTINEL}" "${POOLS[@]}" --discovery-relay "${DISCOVERY}" "${IDS[@]}")
 
   # -------------------------------------------------------------------------
   # POSITIVE CONTROL. Without it an oracle hard-coded to red looks correct on
@@ -1676,6 +2116,380 @@ self_test() {
     --journal "${c56join}" "${base[@]}" || fail=1
 
   # =========================================================================
+  # C5.7 — fresh ephemeral author on every kind-445
+  # =========================================================================
+  # Two arg sets that DROP one declaration each. They are what prove the two
+  # halves of the identity set are independently live: with `--identity-pubkey`
+  # removed, only the journal-derived keys can fire the rule; with it present
+  # and a key the journal never shows, only the declaration can.
+  local -a base_nodecl=(--sentinel "${SENTINEL}" "${POOLS[@]}" \
+    --discovery-relay "${DISCOVERY}" --mls-group-id "${MLS1}" --mls-group-id "${MLS2}")
+
+  # THE LEAK, form 1: a 445 signed by a long-term identity key. PK_A publishes
+  # this journal's kind-0, 10002, 10050 and 30443, so it is an identity key by
+  # observation and not by declaration — which is what `base_nodecl` isolates.
+  local c57idk="${tmp}/c57-identity-author.ndjson"
+  write_healthy "${c57idk}"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "eIDK" "${PK_A}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886500\"]]" 1785886200)]"
+  emit_sentinel c1
+  expect_rc 1 "C5.7 a 445 signed by an identity key is a violation" \
+    --journal "${c57idk}" "${base[@]}" || fail=1
+  expect_msg "attributes every one of that circle's messages to a named person" \
+    "C5.7 names the attribution, not the field" \
+    --journal "${c57idk}" "${base[@]}" || fail=1
+  # The DERIVED half alone: no --identity-pubkey at all, and the rule still
+  # fires because kind 0/10002/10050/30443 are identity-signed by protocol.
+  # Without this case the derived set could rot to `[]` and every identity
+  # finding would still appear, carried entirely by the declaration.
+  expect_rc 1 "C5.7 the identity set derived from kind-0/10002/10050/30443 authors fires on its own" \
+    --journal "${c57idk}" "${base_nodecl[@]}" || fail=1
+
+  # THE LEAK, form 2: a key the JOURNAL never shows as identity-signing, named
+  # by the caller. The pair is the whole experiment — the same journal must be
+  # clean without the declaration and red with it, or the flag is decoration.
+  local c57decl="${tmp}/c57-declared-identity.ndjson"
+  write_healthy "${c57decl}"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "eDECL" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886520\"]]" 1785886250)]"
+  emit_sentinel c1
+  expect_rc 0 "C5.7 an undeclared, never-identity-signing key is an ordinary ephemeral author" \
+    --journal "${c57decl}" "${base[@]}" || fail=1
+  expect_rc 1 "C5.7 --identity-pubkey arms the rule for a key the journal never reveals" \
+    --journal "${c57decl}" "${base[@]}" --identity-pubkey "${PK_EPH4}" || fail=1
+
+  # THE LEAK, form 3: one ephemeral key, two DIFFERENT messages. This is the
+  # freshness half, and the one a single-445 run cannot test at all.
+  local c57reuse="${tmp}/c57-key-reuse.ndjson"
+  write_healthy "${c57reuse}"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "eR1" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886600\"]]" 1785886240)]"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "eR2" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886601\"]]" 1785886241)]"
+  emit_sentinel c1
+  expect_rc 1 "C5.7 one ephemeral key signing two different 445s is a violation" \
+    --journal "${c57reuse}" "${base[@]}" || fail=1
+  expect_msg "stable per-sender handle on the outer event" \
+    "C5.7 names what a reused author gives the relay" \
+    --journal "${c57reuse}" "${base[@]}" || fail=1
+
+  # ...and the SAME two events INBOUND must not red. A relay is free to return
+  # anything; attributing its output to the app would manufacture findings on
+  # every echo. This is the fixture that pins the send-side scoping, and
+  # `expect_no_msg` is the only way to state it — an rc of 0 alone cannot tell
+  # "the rule looked and stayed silent" from "the rule is switched off".
+  local c57in="${tmp}/c57-inbound-reuse.ndjson"
+  write_healthy "${c57in}"
+  jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "eR1" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886600\"]]" 1785886240)]"
+  jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "eR2" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886601\"]]" 1785886241)]"
+  emit_sentinel c1
+  expect_rc 0 "C5.7 an author repeated across two INBOUND 445s is not Haven's traffic" \
+    --journal "${c57in}" "${base[@]}" || fail=1
+  expect_no_msg "C5.7 ephemeral author" \
+    "C5.7 stays silent on inbound frames rather than being merely outvoted" \
+    --journal "${c57in}" "${base[@]}" || fail=1
+  expect_msg "NOT asserted" "the inbound sample is reported as an advisory, not dropped" \
+    --journal "${c57in}" "${base[@]}" || fail=1
+
+  # THE LEAK, form 4: a 445 with no author at all. The direct negation of
+  # "carries a fresh ephemeral pubkey" — and the shape a pubkey-blind grouping
+  # would silently fold into one bucket with every other author-less event.
+  local c57nopk="${tmp}/c57-no-pubkey.ndjson"
+  write_healthy "${c57nopk}"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "eNOPK" "" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886620\"]]" 1785886260)]"
+  emit_sentinel c1
+  expect_rc 1 "C5.7 a 445 carrying no author pubkey is a violation" \
+    --journal "${c57nopk}" "${base[@]}" || fail=1
+  expect_msg "carrying no author pubkey at all" "C5.7 names the missing author" \
+    --journal "${c57nopk}" "${base[@]}" || fail=1
+
+  # THE MULTISET TRAP, aimed at C5.7's arithmetic specifically. ONE event
+  # published to two relays and echoed to two subscriptions is four frames
+  # sharing one author, and the ONLY thing separating that from form 3 above
+  # is the body de-duplication. Drop it — or key C5.7 on (body, endpoint) the
+  # way C5.6 must be keyed — and every ordinary fan-out becomes a key reuse.
+  local c57fan="${tmp}/c57-fanout.ndjson"
+  write_healthy "${c57fan}"
+  local c57body
+  c57body="$(ev 445 "eFANK" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886640\"]]" 1785886270)"
+  jopen c5 "${RELAY_B}" "127.0.0.1:7790"
+  jline c2r c1 "[\"EVENT\",${c57body}]"
+  jline c2r c5 "[\"EVENT\",${c57body}]" "${RELAY_B}" "127.0.0.1:7790"
+  jline r2c c1 "[\"EVENT\",\"sub-h\",${c57body}]"
+  jline r2c c5 "[\"EVENT\",\"sub-h\",${c57body}]" "${RELAY_B}" "127.0.0.1:7790"
+  emit_sentinel c1
+  expect_rc 0 "C5.7 one 445 fanned out to two relays and echoed twice is one message, not four" \
+    --journal "${c57fan}" "${base[@]}" || fail=1
+
+  # THE EMPTY SUBSET, first form — and the one the charter calls out by name.
+  # With exactly ONE kind-445 below the sentinel, "no two share an author" is
+  # true because there is no pair, and a client that reused a single key
+  # forever would produce precisely this verdict. META-FLOOR, never a pass.
+  local c57one="${tmp}/c57-single-445.ndjson"
+  fx_begin "${c57one}"
+  jopen c1
+  jline c2r c1 "[\"EVENT\",$(ev 0 "e00" "${PK_A}" '[]')]"
+  jline c2r c1 "[\"EVENT\",$(ev 30443 "e04" "${PK_A}" "${KP_TAGS}")]"
+  jline c2r c1 "[\"EVENT\",$(ev 1059 "e07" "${PK_EPH1}" "[[\"p\",\"${PK_B}\"]]")]"
+  jline c2r c1 "[\"REQ\",\"sub-h\",{\"kinds\":[445],\"#h\":[\"${H1}\",\"${H2}\"]}]"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "e09" "${PK_EPH2}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886372\"]]" 1785886144)]"
+  emit_sentinel c1
+  expect_rc 4 "C5.7 precondition: a single 445 makes author-uniqueness vacuous" \
+    --journal "${c57one}" "${base[@]}" || fail=1
+  expect_msg "vacuously true" "C5.7 precondition says the silence is not evidence" \
+    --journal "${c57one}" "${base[@]}" || fail=1
+
+  # ...and the floor must LIFT once a second message exists, or it is not a
+  # floor but a permanent red that would train a reader to ignore it. Same
+  # journal plus a second circle's application message and a commit, which is
+  # also what C5.1's and C5.3's own preconditions need.
+  local c57two="${tmp}/c57-two-445.ndjson"
+  cp "${c57one}" "${c57two}"
+  FIXTURE_FILE="${c57two}"; FIXTURE_SEQ=6
+  jline c2r c1 "[\"EVENT\",$(ev 445 "e08" "${PK_EPH1}" "[[\"h\",\"${H1}\"]]" 1785886100)]"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "e10" "${PK_EPH3}" "[[\"h\",\"${H2}\"],[\"expiration\",\"1785886389\"]]" 1785886161)]"
+  emit_sentinel c1
+  renumber "${c57two}" "${c57two}.r" && mv "${c57two}.r" "${c57two}"
+  expect_rc 0 "C5.7 the single-445 floor lifts as soon as a second message exists" \
+    --journal "${c57two}" "${base[@]}" || fail=1
+
+  # ...and it must NOT lift on a FAN-OUT. The same single message published to
+  # two relays is two (event, endpoint) pairs and still one message, so a
+  # `$s445` keyed the way C5.6's `$sent` must be keyed would count two, clear
+  # the floor and report the run as having tested author freshness — over a
+  # journal containing exactly one message and therefore no pair to compare.
+  # The floor would then be satisfiable by adding a relay, which is the one
+  # way a META-FLOOR can be defeated without publishing anything new.
+  #
+  # rc alone cannot see this (C5.1 and C5.3 META-FLOOR on this journal too, so
+  # it is rc 4 either way); the C5.7 message is the discriminator.
+  local c57fanfloor="${tmp}/c57-fanout-floor.ndjson"
+  cp "${c57one}" "${c57fanfloor}"
+  FIXTURE_FILE="${c57fanfloor}"; FIXTURE_SEQ=7
+  jopen c5 "${RELAY_B}" "127.0.0.1:7790"
+  jline c2r c5 "[\"EVENT\",$(ev 445 "e09" "${PK_EPH2}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886372\"]]" 1785886144)]" \
+    "${RELAY_B}" "127.0.0.1:7790"
+  emit_sentinel c1
+  renumber "${c57fanfloor}" "${c57fanfloor}.r" && mv "${c57fanfloor}.r" "${c57fanfloor}"
+  expect_rc 4 "C5.7 precondition: a fan-out of ONE message does not clear the two-message floor" \
+    --journal "${c57fanfloor}" "${base[@]}" || fail=1
+  expect_msg "vacuously true" \
+    "C5.7 counts messages, not (message, endpoint) pairs — a second relay is not a second message" \
+    --journal "${c57fanfloor}" "${base[@]}" || fail=1
+
+  # THE EMPTY SUBSET, second form: nothing identity-signed anywhere, and no
+  # declaration either, so the forbidden set is empty and the identity arm was
+  # compared against nothing. The pair below is the proof — the same journal
+  # passes the moment the caller supplies the ground truth.
+  local c57noid="${tmp}/c57-no-identity.ndjson"
+  fx_begin "${c57noid}"
+  jopen c1
+  jline c2r c1 "[\"EVENT\",$(ev 1059 "e07" "${PK_EPH1}" "[[\"p\",\"${PK_B}\"]]")]"
+  jline c2r c1 "[\"REQ\",\"sub-h\",{\"kinds\":[445],\"#h\":[\"${H1}\",\"${H2}\"]}]"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "e08" "${PK_EPH1}" "[[\"h\",\"${H1}\"]]" 1785886100)]"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "e09" "${PK_EPH2}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886372\"]]" 1785886144)]"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "e10" "${PK_EPH3}" "[[\"h\",\"${H2}\"],[\"expiration\",\"1785886389\"]]" 1785886161)]"
+  emit_sentinel c1
+  expect_rc 4 "C5.7 precondition: an empty identity set makes the identity arm vacuous" \
+    --journal "${c57noid}" "${base_nodecl[@]}" || fail=1
+  expect_msg "no key this device is known to sign with" \
+    "C5.7 precondition names the empty comparison set" \
+    --journal "${c57noid}" "${base_nodecl[@]}" || fail=1
+
+  expect_rc 0 "C5.7 --identity-pubkey supplies the ground truth an identity-free journal lacks" \
+    --journal "${c57noid}" "${base[@]}" || fail=1
+
+  # The floor must be SEND-SIDE. An inbound identity-scoped event supplies a key
+  # to $IDKEYS, but C5.7 asserts over c2r only, so that key can never match a
+  # 445 author -- the floor would be discharged while the account under test was
+  # never in the comparison. Journal: one r2c 30443 authored by PK_B (a peer
+  # keypackage fetch, the only identity-scoped event), and a c2r 445 signed by
+  # PK_A, the LOCAL identity key. Before this was send-side scoped, that run
+  # reported CLEAN -- a Security Rule 2 break attributing every group message
+  # in the circle to a named account.
+  local c57inbound="${tmp}/c57-inbound-only.ndjson"
+  fx_begin "${c57inbound}"
+  jopen c1
+  jline r2c c1 "[\"EVENT\",\"sub-kp\",$(ev 30443 "e20" "${PK_B}" "[]")]"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "e21" "${PK_A}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886372\"]]" 1785886144)]"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "e22" "${PK_EPH2}" "[[\"h\",\"${H2}\"],[\"expiration\",\"1785886389\"]]" 1785886161)]"
+  emit_sentinel c1
+  expect_rc 4 "C5.7 floor is NOT discharged by an inbound-only identity key" \
+    --journal "${c57inbound}" "${base_nodecl[@]}" || fail=1
+  expect_msg "An INBOUND identity key does not discharge this" \
+    "C5.7 precondition says why an inbound key cannot count" \
+    --journal "${c57inbound}" "${base_nodecl[@]}" || fail=1
+
+
+  # =========================================================================
+  # C5.8 — the real MLS group id never on the wire
+  # =========================================================================
+  local -a base_nomls=(--sentinel "${SENTINEL}" "${POOLS[@]}" \
+    --discovery-relay "${DISCOVERY}" --identity-pubkey "${PK_A}" --identity-pubkey "${PK_B}")
+
+  # THE LEAK, form 1 — ID ALIASING. The `h` tag's value IS the real MLS group
+  # id, which is the failure the Dart assertion guarded with an explicit
+  # precondition: if the two ids are ever the same value, every h-tag scan in
+  # the repo passes while the real id ships on every group message. It must
+  # report as aliasing and not as a stray tag, because the fix is in the layer
+  # that mints the routing value.
+  local c58alias="${tmp}/c58-alias.ndjson"
+  write_healthy "${c58alias}"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "eALIAS" "${PK_EPH4}" "[[\"h\",\"${MLS1}\"],[\"expiration\",\"1785886700\"]]" 1785886210)]"
+  emit_sentinel c1
+  expect_rc 1 "C5.8 an h tag whose value is the real MLS group id is a violation" \
+    --journal "${c58alias}" "${base[@]}" || fail=1
+  expect_msg "id ALIASING" "C5.8 diagnoses aliasing rather than reporting a stray tag" \
+    --journal "${c58alias}" "${base[@]}" || fail=1
+
+  # THE LEAK, form 2: a tag token BEYOND index 1. This is the fixture that
+  # certifies the normalize() change — truncating tags at two elements, which
+  # is what this file did before C5.8 existed, makes every tag position from
+  # the third on a blind spot, and no other case here would notice.
+  local c58deep="${tmp}/c58-deep-token.ndjson"
+  write_healthy "${c58deep}"
+  jline c2r c1 "[\"EVENT\",$(ev 0 "eLEAK3" "${PK_A}" "[[\"client\",\"haven\",\"${MLS2}\"]]" 1785886220)]"
+  emit_sentinel c1
+  expect_rc 1 "C5.8 a leak in a tag's THIRD token is caught, not truncated away" \
+    --journal "${c58deep}" "${base[@]}" || fail=1
+  expect_msg 'tag at position 2' "C5.8 names the token position it found the id in" \
+    --journal "${c58deep}" "${base[@]}" || fail=1
+
+  # THE LEAK, form 3: the id EMBEDDED in a longer token, on a kind that is not
+  # 445 at all. Security Rule 4 is not scoped to group messages, and an
+  # equality test rather than a substring test would miss a composite slot
+  # name — the exact shape a `d` tag built by string concatenation produces.
+  local c58sub="${tmp}/c58-substring.ndjson"
+  write_healthy "${c58sub}"
+  jline c2r c1 "[\"EVENT\",$(ev 30443 "eKPLEAK" "${PK_A}" "[[\"d\",\"haven-kp-0-${MLS1}\"],[\"mls_protocol_version\",\"1.0\"]]")]"
+  emit_sentinel c1
+  expect_rc 1 "C5.8 an id embedded in a longer token on a non-445 kind is a violation" \
+    --journal "${c58sub}" "${base[@]}" || fail=1
+  expect_msg 'inside its `d` tag at position 1' "C5.8 names the tag the id was embedded in" \
+    --journal "${c58sub}" "${base[@]}" || fail=1
+
+  # ...and an INBOUND frame carrying the id is not Haven publishing it. A relay
+  # that returns the value has not made Haven leak it, and reading it as a
+  # send-side finding would be a false red on any run against a hostile or
+  # merely noisy relay.
+  local c58in="${tmp}/c58-inbound.ndjson"
+  write_healthy "${c58in}"
+  jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "eINLEAK" "${PK_EPH4}" "[[\"h\",\"${MLS1}\"],[\"expiration\",\"1785886720\"]]" 1785886230)]"
+  emit_sentinel c1
+  expect_rc 0 "C5.8 an inbound frame carrying the id is the relay's output, not Haven's" \
+    --journal "${c58in}" "${base[@]}" || fail=1
+  expect_no_msg "C5.8 group-id privacy" \
+    "C5.8 looked at the inbound frame and stayed silent rather than being switched off" \
+    --journal "${c58in}" "${base[@]}" || fail=1
+
+  # THE EMPTY SUBSET, first form — and the decision this check turns on. The id
+  # cannot be derived (its absence from the wire is the assertion), so with no
+  # declaration the scan compared the journal against nothing. Publishing 445s
+  # without declaring one is a META-FLOOR, never a clean bill of health.
+  expect_rc 4 "C5.8 precondition: 445s published with no --mls-group-id declared" \
+    --journal "${healthy}" "${base_nomls[@]}" || fail=1
+  expect_msg "compared the wire against an empty set of values" \
+    "C5.8 precondition says the scan had nothing to look for" \
+    --journal "${healthy}" "${base_nomls[@]}" || fail=1
+
+  # ...and the DECLARED alternative. A lane that genuinely cannot supply the id
+  # may say so, loudly. This must NOT behave like a conditional check: the run
+  # goes green so the other eight verdicts are readable, but the skip is on the
+  # record of every run rather than inferable from an absence.
+  expect_rc 0 "a declared non-assertion clears C5.8's precondition" \
+    --journal "${healthy}" "${base_nomls[@]}" \
+    --mls-group-id-not-asserted "no host-side channel for CircleFfi.mlsGroupId yet" || fail=1
+  expect_msg "C5.8 NOT ASSERTED (declared by the lane)" \
+    "the declared non-assertion is PRINTED, not silently honoured" \
+    --journal "${healthy}" "${base_nomls[@]}" \
+    --mls-group-id-not-asserted "no host-side channel for CircleFfi.mlsGroupId yet" || fail=1
+  expect_msg "no host-side channel for CircleFfi.mlsGroupId yet" \
+    "the declared REASON reaches the log verbatim" \
+    --journal "${healthy}" "${base_nomls[@]}" \
+    --mls-group-id-not-asserted "no host-side channel for CircleFfi.mlsGroupId yet" || fail=1
+
+  # The SUCCESS BANNER is the line a reader greps to conclude "green => the rule
+  # held". Listing C5.8 there while an advisory above says it was never scanned
+  # is a false statement in the highest-traffic place, so the banner must drop
+  # to eight-of-nine and say so. Without these two fixtures the banner fix is
+  # itself unverified -- which is the defect it exists to repair.
+  expect_msg "clean on EIGHT of nine" \
+    "the success banner drops to eight-of-nine when C5.8 is not asserted" \
+    --journal "${healthy}" "${base_nomls[@]}" \
+    --mls-group-id-not-asserted "no channel yet" || fail=1
+  expect_msg "NOT evidence for Security Rule 4" \
+    "the banner states outright that the run does not evidence Rule 4" \
+    --journal "${healthy}" "${base_nomls[@]}" \
+    --mls-group-id-not-asserted "no channel yet" || fail=1
+  # ...and the nine-of-nine claim is still made when C5.8 really did run.
+  expect_msg "all nine had a non-empty sample" \
+    "the full banner survives when the id IS declared" \
+    --journal "${healthy}" "${base_nomls[@]}" --mls-group-id "${MLS1}" || fail=1
+  # The skip must be attributable to the lane, never inferable from silence: if
+  # no 445 was published there is nothing to skip and nothing to announce.
+  expect_rc 2 "declaring the id AND its non-assertion is refused" \
+    --journal "${healthy}" "${base_nomls[@]}" \
+    --mls-group-id "${MLS1}" \
+    --mls-group-id-not-asserted "contradictory" || fail=1
+  expect_rc 2 "an empty non-assertion reason is refused" \
+    --journal "${healthy}" "${base_nomls[@]}" \
+    --mls-group-id-not-asserted "   " || fail=1
+
+  # THE EMPTY SUBSET, second form: an id was declared but no group message was
+  # ever published, so none of the events that could carry it are in the
+  # sample and a clean verdict would describe the journal, not the app.
+  local c58no445="${tmp}/c58-no-445.ndjson"
+  fx_begin "${c58no445}"
+  jopen c1
+  jline c2r c1 "[\"EVENT\",$(ev 0 "e00" "${PK_A}" '[]')]"
+  jline c2r c1 "[\"EVENT\",$(ev 1059 "e07" "${PK_EPH1}" "[[\"p\",\"${PK_B}\"]]")]"
+  jline c2r c1 "[\"REQ\",\"sub-h\",{\"kinds\":[445],\"#h\":[\"${H1}\",\"${H2}\"]}]"
+  emit_sentinel c1
+  expect_rc 4 "C5.8 precondition: a declared id with no 445 in the snapshot proves nothing" \
+    --journal "${c58no445}" "${base[@]}" || fail=1
+  expect_msg "contains none of the events that could have leaked the real id" \
+    "C5.8 precondition names the missing event class" \
+    --journal "${c58no445}" "${base[@]}" || fail=1
+
+  # =========================================================================
+  # C5.9 — no `p` tag on a kind-445
+  # =========================================================================
+  # THE LEAK. Both messages are asserted, and that is the point: a `p` on a 445
+  # also trips C5.3, so the exit code alone cannot tell which rule spoke, and a
+  # C5.9 deleted outright would leave this fixture red with C5.3's generic
+  # "a third tag NAME" and nothing telling the reader that circle membership
+  # just became queryable.
+  local c59p="${tmp}/c59-p-tag.ndjson"
+  write_healthy "${c59p}"
+  jline c2r c1 "[\"EVENT\",$(ev 445 "ePTAG" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886740\"],[\"p\",\"${PK_B}\"]]" 1785886280)]"
+  emit_sentinel c1
+  expect_rc 1 "C5.9 a p tag on a published 445 is a violation" \
+    --journal "${c59p}" "${base[@]}" || fail=1
+  expect_msg "indexed, queryable membership edge" \
+    "C5.9 names the membership disclosure, which C5.3's shape message does not" \
+    --journal "${c59p}" "${base[@]}" || fail=1
+  expect_msg "C5.3 kind-445 tag shape" \
+    "C5.3 still reports the same event, so C5.9 is a diagnosis and not a replacement" \
+    --journal "${c59p}" "${base[@]}" || fail=1
+
+  # ...and the same tag on an INBOUND 445 is the relay's frame. C5.3 spans both
+  # directions and still fires (so the event is not unexamined), but C5.9 must
+  # not accuse Haven of publishing something it received.
+  local c59in="${tmp}/c59-inbound-p.ndjson"
+  write_healthy "${c59in}"
+  jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "ePIN" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886760\"],[\"p\",\"${PK_B}\"]]" 1785886290)]"
+  emit_sentinel c1
+  expect_no_msg "C5.9 recipient privacy" \
+    "C5.9 does not accuse Haven of publishing a p tag a relay sent it" \
+    --journal "${c59in}" "${base[@]}" || fail=1
+  expect_msg "C5.3 kind-445 tag shape" \
+    "the inbound p-tagged 445 is still examined by the direction-agnostic rule" \
+    --journal "${c59in}" "${base[@]}" || fail=1
+
+  # THE EMPTY SUBSET: no group message was published, so the routing rule had
+  # nothing to read. Shares a journal with C5.8's second form on purpose — one
+  # missing event class, two invariants that must each say so for themselves.
+  expect_msg "C5.9 precondition" \
+    "C5.9 declares its own empty subset rather than riding C5.8's" \
+    --journal "${c58no445}" "${base[@]}" || fail=1
+
+  # =========================================================================
   # --exclude-conn — the harness's own socket is not Haven's traffic
   # =========================================================================
   # The E2E harness reaches the same proxied relays as the app. A TestRelay
@@ -1741,18 +2555,56 @@ self_test() {
     --journal "${healthy}" --sentinel "${SENTINEL}" \
     --pool "445=${RELAY_A}" --discovery-relay "${RELAY_A}" || fail=1
 
+  # The guards on C5.7's and C5.8's own inputs. Every one of these would, if
+  # accepted, leave the check running and matching NOTHING — the failure mode
+  # this whole file exists to refuse, arriving through the argument list
+  # instead of through the journal.
+  #
+  # An npub, a truncated key or a key with a `02`/`03` prefix never equals an
+  # x-only author hex, so C5.7's identity arm would compare against a value no
+  # event can carry while every summary line still reported it as declared.
+  expect_rc 2 "an --identity-pubkey that is not 64 hex chars is refused" \
+    --journal "${healthy}" --sentinel "${SENTINEL}" "${POOLS[@]}" \
+    --identity-pubkey "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" || fail=1
+  expect_rc 2 "an --identity-pubkey with a 33-byte compressed prefix is refused" \
+    --journal "${healthy}" --sentinel "${SENTINEL}" "${POOLS[@]}" \
+    --identity-pubkey "02${PK_A}" || fail=1
+  # A SHORT needle is the dangerous direction for a substring scan: it matches
+  # unrelated tokens by coincidence and buries the real finding in noise.
+  expect_rc 2 "an --mls-group-id shorter than 32 hex chars is refused" \
+    --journal "${healthy}" --sentinel "${SENTINEL}" "${POOLS[@]}" \
+    --mls-group-id "deadbeefdeadbeef" || fail=1
+  # Non-hex cannot match a hex token, so the scan would be off while looking on.
+  expect_rc 2 "a non-hex --mls-group-id is refused" \
+    --journal "${healthy}" --sentinel "${SENTINEL}" "${POOLS[@]}" \
+    --mls-group-id "not-a-hex-group-id-not-a-hex-group-id-xx" || fail=1
+  # An odd character count is not a whole number of bytes, so whatever it is,
+  # it is not the id the app minted — a truncated copy/paste, most likely.
+  expect_rc 2 "an --mls-group-id with an odd character count is refused" \
+    --journal "${healthy}" --sentinel "${SENTINEL}" "${POOLS[@]}" \
+    --mls-group-id "${MLS1}a" || fail=1
+  # ...and the valid form must be ACCEPTED, or the four refusals above would
+  # also be satisfied by a flag that rejects everything.
+  expect_rc 0 "the valid forms of both new flags are accepted" \
+    --journal "${healthy}" --sentinel "${SENTINEL}" "${POOLS[@]}" \
+    --discovery-relay "${DISCOVERY}" \
+    --identity-pubkey "${PK_A}" --mls-group-id "${MLS1}" || fail=1
+
   # A floor on the fixture COUNT, not just on their verdicts. Every assertion
   # here is a set operation that passes over an empty input, and the self-test
   # is no exception: deleting cases would leave it green while the thing it
   # certifies stopped being certified. If a case is genuinely retired, lower
   # this number in the same commit and say why.
   #
-  # It is a FLOOR with deliberate slack (79 cases run today), not a headcount.
-  # Every case above is unconditional, so the count is deterministic on any
-  # host and under any user — but a floor pinned to the exact number turns the
-  # first legitimately-skipped fixture into a self-test failure that says
-  # nothing about the oracle, which is how the sibling comes to fail as root.
-  readonly MIN_CASES=71
+  # It is pinned to the EXACT count, deliberately. It used to carry slack, on
+  # the reasoning that an exact pin "turns the first legitimately-skipped
+  # fixture into a self-test failure" — but the sentence above it says every
+  # case is unconditional and the count deterministic, so no fixture can be
+  # legitimately skipped and the slack bought nothing except room to delete.
+  # At 114-against-124 that room was ten cases, which is most of the C5.8
+  # section. An exact pin means retiring a case is a two-line diff that has to
+  # say why, which is the reviewable act the slack was quietly avoiding.
+  readonly MIN_CASES=134
   if (( CASES_RUN < MIN_CASES )); then
     echo "SELF-TEST FAIL: only ${CASES_RUN} fixture(s) ran; at least ${MIN_CASES} expected." >&2
     echo "  Cases have been removed without lowering MIN_CASES — the self-test is" >&2
@@ -1765,14 +2617,21 @@ self_test() {
     return 1
   fi
   echo "check-wire-correlation: self-test passed (${CASES_RUN} fixtures — a healthy" \
-       "two-circle journal clears all six invariants; each of C5.1-C5.6 goes red on" \
+       "two-circle journal clears all nine invariants; each of C5.1-C5.9 goes red on" \
        "the leak it guards AND red as a META-FLOOR on an empty relevant subset," \
-       "including the commit-only trap that would make C5.1 vacuous; two bodies under" \
-       "one event id are both checked whether they differ in tags, kind or created_at," \
-       "one event id fanned out to an out-of-pool relay is caught, and a multi-#h REQ" \
-       "that omits \`kinds\` is read at its widest; repeated event ids, an in-pool" \
-       "fan-out, the accepted multiplexed #h shape and traffic above the sentinel do" \
-       "not red)."
+       "including the commit-only trap that would make C5.1 vacuous and the" \
+       "single-445 trap that would make C5.7 vacuous; two bodies under one event id" \
+       "are both checked whether they differ in tags, kind or created_at, one event id" \
+       "fanned out to an out-of-pool relay is caught, and a multi-#h REQ that omits" \
+       "\`kinds\` is read at its widest; a 445 signed by an identity key is caught from" \
+       "the journal-derived set AND from a declaration, one ephemeral key on two" \
+       "messages is caught while the same event fanned out to two relays and echoed" \
+       "twice is not, a leaked MLS group id is caught in an h tag, in a third tag" \
+       "token and embedded in a longer one; C5.7/C5.8/C5.9 are proven SILENT on" \
+       "inbound frames rather than merely outvoted, and both new flags refuse every" \
+       "input shape that would leave their check matching nothing; repeated event" \
+       "ids, an in-pool fan-out, the accepted multiplexed #h shape and traffic above" \
+       "the sentinel do not red)."
   return 0
 }
 

@@ -45,6 +45,13 @@
 #                    relays DISJOINT from the circle relay in HAVEN_E2E_RELAY.
 #                    Same opt-in shape as HAVEN_E2E_BLOSSOM_URL — forwarded only
 #                    when set, so no other lane's build changes.
+#   HAVEN_WIRE_SENTINEL  The one-per-job wire-journal sentinel token, set only
+#                    by a lane that runs the recording proxy in front of its
+#                    relay (e2e-ios.yml). Threaded into the build as a
+#                    --dart-define so TestRelay.emitWireJournalSentinel() emits
+#                    the SAME string the host oracle anchors on. Same opt-in
+#                    shape again: unset elsewhere, so no other lane's compiled
+#                    defines change.
 #
 # Retry discipline (CI_HARDENING_BACKLOG.md A6):
 #   Both iOS callers wrap this script in `nick-fields/retry@v3` with no
@@ -597,6 +604,39 @@ if [[ -n "${HAVEN_B4_GEO_TOLERANCE_DEG:-}" ]]; then
   EXTRA_DART_DEFINES+=(
     --dart-define=HAVEN_B4_GEO_TOLERANCE_DEG="${HAVEN_B4_GEO_TOLERANCE_DEG}"
   )
+fi
+
+# Optional wire-journal SENTINEL passthrough (instrumented lanes only — set by
+# the caller when it has started the recording proxy in front of the relay),
+# same opt-in shape as the three blocks above, so every other iOS lane's
+# compiled dart-defines stay byte-identical.
+#
+# The token is minted ONCE per job and handed to BOTH halves: to the drive here
+# as `--dart-define=HAVEN_WIRE_SENTINEL=`, which is where
+# `TestRelay.emitWireJournalSentinel()` reads it from
+# (haven/integration_test/e2e/_lib/test_relay.dart's `String.fromEnvironment`),
+# and to the host oracle as `--sentinel`. One string read from one place is what
+# stops the two halves drifting: a lane that minted it twice would get two
+# different random values and the resulting "no anchor" META-FLOOR would read as
+# a flake rather than as the wiring bug it is.
+#
+# NOT echoed with its value. The token is not secret (docs/WIRE_JOURNAL.md:
+# "Never put anything sensitive in the token" — it is written to the journal
+# verbatim), but this log is uploaded as a CI failure artifact and a bare
+# confirmation that the passthrough fired is all a triager needs.
+#
+# Spelled over three lines rather than as a one-line `+=(...)`, matching the B4
+# tolerance define just above: static readers of this chain
+# (scripts/ci/check_wire_oracle_lane_reachable.sh) match the define with a
+# whitespace-delimited regex, so a closing `)` on the same token ends up INSIDE
+# the value they compare against the lane's `--sentinel`, and the two halves
+# then read as naming different strings.
+if [[ -n "${HAVEN_WIRE_SENTINEL:-}" ]]; then
+  EXTRA_DART_DEFINES+=(
+    --dart-define=HAVEN_WIRE_SENTINEL="${HAVEN_WIRE_SENTINEL}"
+  )
+  echo "iOS E2E — wire-journal sentinel supplied (${#HAVEN_WIRE_SENTINEL} chars);" \
+       "the drive will anchor the host oracle's snapshot."
 fi
 
 # Clean slate — mirror the Android lane's force-stop + `adb uninstall`

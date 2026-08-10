@@ -65,7 +65,15 @@ jobs:
     # file's pattern of a job envelope below the naive sum of per-step caps).
     timeout-minutes: ${{ inputs.live_sync && 90 || 60 }}
     env:
-      HAVEN_E2E_RELAY: ws://10.0.2.2:7777
+      # 7788, NOT the relay's own port: this lane runs the recording wire proxy
+      # (tooling/e2e/ci/start-wire-proxy.sh) in front of strfry. strfry keeps
+      # its port; the proxy listens on 7788 and forwards there, so every frame
+      # the app and the in-process synthetic peers send is journalled on the
+      # host and read post-drive by the three wire oracles below. Pointing this
+      # back at the relay port is the quietest possible break — traffic still
+      # flows, the journal is empty-but-valid, and all three oracles then
+      # certify nothing. scripts/ci/check_wire_oracle_lane_reachable.sh pins it.
+      HAVEN_E2E_RELAY: ws://10.0.2.2:7788
       FLUTTER_SUPPRESS_ANALYTICS: "true"
 
     steps:
@@ -92,7 +100,13 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: haven-core
+          # local-relay is listed because start-wire-proxy.sh release-builds it.
+          # Without it this lane cold-compiled that workspace on EVERY run, into
+          # an uncached target dir, on a runner that already needs a disk-free
+          # step. e2e-ios.yml has always listed both.
+          workspaces: |
+            haven-core
+            tooling/e2e/local-relay
           key: e2e-android-x64
 
       - name: Setup Flutter
@@ -104,6 +118,25 @@ jobs:
       - name: Get Flutter dependencies
         working-directory: haven
         run: flutter pub get
+
+      # ONE sentinel string, minted ONCE, read by both halves.
+      #
+      # The drive emits it as a wire frame (TestRelay.emitWireJournalSentinel)
+      # and the host oracles anchor their snapshot at it, so a background wake
+      # appending to the journal mid-read cannot land inside the sample. Both
+      # halves must name the SAME string: minting it twice would produce two
+      # different random tokens, and the resulting "no anchor" META-FLOOR would
+      # read as a flake rather than as the wiring bug it is.
+      #
+      # It is minted here, above the APK build, because `flutter drive
+      # --use-application-binary` cannot re-pass a --dart-define: the value is
+      # COMPILED IN, exactly like HAVEN_E2E_RELAY above it. $GITHUB_ENV carries
+      # the one string forward to the oracle steps at the bottom of the job.
+      - name: Mint the wire-journal sentinel
+        run: |
+          set -euo pipefail
+          echo "WIRE_SENTINEL=HAVEN_WIRE_SENTINEL:$(openssl rand -hex 16)" \
+            >> "${GITHUB_ENV}"
 
       # Build the test APK BEFORE the emulator boots. The Rust-NDK +
       # Gradle compile peaks at several GB; running it concurrently
@@ -142,7 +175,8 @@ jobs:
             --target=integration_test/e2e/e2e_combined.dart \
             --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
             --dart-define=HAVEN_LIVE_SYNC=${{ inputs.live_sync }} \
-            --dart-define=HAVEN_E2E_NO_BACKGROUND=true
+            --dart-define=HAVEN_E2E_NO_BACKGROUND=true \
+            --dart-define=HAVEN_WIRE_SENTINEL="${WIRE_SENTINEL}"
           cp build/app/outputs/flutter-apk/app-debug.apk /tmp/scenario.apk
           ls -lh /tmp/scenario.apk
 
@@ -203,6 +237,49 @@ jobs:
           # when the variable is unset.
           STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
         run: bash tooling/e2e/ci/start-strfry.sh
+
+      # Put the RECORDING PROXY in front of the relay, before the drive.
+      #
+      # It must start HERE and not later: it builds (cargo, release) and runs
+      # its own `--self-test` first, both of which need the network, and the
+      # drive step below installs the egress guard that rejects outbound
+      # 80/443 for everything that follows inside it. Loopback is unaffected by
+      # that guard, so the proxy hop (guest -> 10.0.2.2:7788 -> 127.0.0.1) is
+      # untouched by it for the whole run.
+      #
+      # Starting does NOT fail open. Recording does (a journal that cannot be
+      # written never stops traffic), but a proxy that cannot BIND leaves the
+      # app pointed at a dead port, so a non-zero exit here reds the lane
+      # immediately rather than producing a run whose every oracle blames the
+      # scenario.
+      #
+      # The upstream literal lives on the start line ON PURPOSE. It is the one
+      # publish target this hermetic lane has, so the oracles' `--pool`
+      # arguments below are derived from it rather than restating it — and
+      # check_wire_oracle_lane_reachable.sh reads every OTHER literal `ws://`
+      # in this job as a relay URL that must name the proxy's LISTEN port,
+      # which is precisely the mistake a second copy would look like.
+      #
+      # The journal path is CLAIMED by the instance in a sidecar next to its
+      # pid file rather than chosen here: `HAVEN_WIRE_JOURNAL` overrides the
+      # per-instance default, and a lane that hardcodes one path is a lane that
+      # silently reads the wrong file the day it runs two recorders.
+      - name: Start recording wire proxy
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          upstream=ws://127.0.0.1:7777; bash tooling/e2e/ci/start-wire-proxy.sh 7788 "${upstream}"
+          echo "WIRE_UPSTREAM=${upstream}" >> "${GITHUB_ENV}"
+          claim=/tmp/haven-wire-proxy.journalpath
+          journal="$(head -n 1 "${claim}" 2>/dev/null || true)"
+          if [[ -z "${journal}" ]]; then
+            echo "ERROR: the wire proxy started but claimed no journal path in" >&2
+            echo "       ${claim}. Every oracle below reads that sidecar, so" >&2
+            echo "       continuing would run them against a path nobody wrote." >&2
+            exit 1
+          fi
+          echo "WIRE_JOURNAL=${journal}" >> "${GITHUB_ENV}"
+          echo "wire journal: ${journal}"
 
       # Install + grant + drive ONLY — the APK was built in the
       # "Build E2E test APK" step above, so this step does no Gradle
@@ -335,6 +412,184 @@ jobs:
         if: always()
         run: bash tooling/e2e/ci/setup-network-guard.sh teardown || true
 
+      # Stop the recorder BEFORE reading its journal, and on EVERY outcome.
+      #
+      # Before, because SIGTERM is what makes the recorder flush and print its
+      # own shutdown summary ("N connection(s), N record(s) observed, N line(s)
+      # written [— DEGRADED]"); an oracle reading a live journal can catch a
+      # half-written final line and (correctly) call the whole run UNUSABLE.
+      #
+      # `if: always()` because the failure path is the one that leaks it. The
+      # proxy holds a CLAIM on its journal path and the next start refuses
+      # while a live instance holds the same path, so a leaked process on a
+      # reused runner would silently switch recording off for every later run
+      # — the first red run disabling the instrument for all of them. The
+      # script is best-effort and always exits 0, so it cannot redden a green
+      # run by itself.
+      - name: Stop recording wire proxy
+        if: always()
+        run: bash tooling/e2e/ci/stop-wire-proxy.sh
+
+      # THE POINT OF ALL OF THE ABOVE: read the transcript.
+      #
+      # Three oracles, one journal, one sentinel. They run together in one step
+      # so a single red run reports every finding instead of hiding the second
+      # and third behind the first — the same reason repo-guards.yml runs its
+      # guards with `if: always()` between steps.
+      #
+      # No `|| true` anywhere below, and no code is normalised away. The exit
+      # set is CLOSED — {0,1,2,3,4} — and only 0 is a pass:
+      #
+      #   1 VIOLATION   a privacy finding on the wire.
+      #   2 USAGE       this lane called the oracle wrong.
+      #   3 UNUSABLE    the RECORDER (or the allow-list) broke. The run proves
+      #                 nothing EITHER WAY — believe no result from it.
+      #   4 META-FLOOR  the journal parsed but the SCENARIO proved too little:
+      #                 no sentinel to anchor on, no traffic under it, a kind
+      #                 published with no declared pool, a canary never planted.
+      #
+      # 3 and 4 reddening the lane is the entire point of the workstream: an
+      # instrument that reports "I saw nothing" and a lane that reports "there
+      # was nothing to see" are indistinguishable unless one of them fails.
+      #
+      # No `if:` — the default (`success()`) is deliberate. When the drive has
+      # already failed the lane is red regardless, and a partial journal from a
+      # half-run scenario would produce META-FLOOR noise that reads as a second
+      # independent fault.
+      - name: Wire privacy oracles
+        run: |
+          set -uo pipefail
+          first_rc=0
+          failures=""
+
+          verdict() { # verdict <label> <rc>
+            case "$2" in
+              0) echo "::notice::wire oracle $1: clean" ;;
+              1) echo "::error::wire oracle $1: VIOLATION (rc=1) — a privacy finding on the wire." ;;
+              2) echo "::error::wire oracle $1: USAGE (rc=2) — this lane invoked the oracle wrong; the wiring is broken, not the app." ;;
+              3) echo "::error::wire oracle $1: UNUSABLE (rc=3) — the recorder or its inputs broke. This run proves NOTHING either way; do not read it as a pass." ;;
+              4) echo "::error::wire oracle $1: META-FLOOR (rc=4) — the journal parsed but the scenario proved too little. Not a pass." ;;
+              *) echo "::error::wire oracle $1: undocumented exit code $2 — the contract is a closed set {0,1,2,3,4}; treat the oracle itself as broken." ;;
+            esac
+            if [[ "$2" -ne 0 ]]; then
+              failures="${failures} $1(rc=$2)"
+              # Worst, not first: a C2-C4 META-FLOOR (4) must not mask a C5
+              # VIOLATION (1). Severity order is 1 > 4 > 3 > 2, so a real wire
+              # finding always names the exit code.
+              case "$2" in
+                1) first_rc=1 ;;
+                4) [[ "${first_rc}" -eq 1 ]] || first_rc=4 ;;
+                3) [[ "${first_rc}" -eq 1 || "${first_rc}" -eq 4 ]] || first_rc=3 ;;
+                *) [[ "${first_rc}" -ne 0 ]] || first_rc="$2" ;;
+              esac
+            fi
+          }
+
+          # C2-C4 — closed-world structure (kinds, tags, frame verbs, REQ keys).
+          # A participant floor is REQUIRED or the meta-floor is vacuous: this
+          # is a three-actor flow (Alice on the UI, Bob and Carol in-process
+          # over the FFI), so at least two identities must have transmitted and
+          # at least two sockets must have carried traffic.
+          rc=0
+          bash tooling/e2e/ci/check-wire-journal.sh \
+            --journal "${WIRE_JOURNAL}" \
+            --sentinel "${WIRE_SENTINEL}" \
+            --min-distinct-publishers 2 \
+            --min-distinct-conns 2 || rc=$?
+          verdict "C2-C4 structural" "${rc}"
+
+          # C5 — correlation and containment. Each pool is the set of relays a
+          # KIND may reach; this lane is hermetic, so every kind's pool is the
+          # single upstream the proxy forwards to. The pool names that UPSTREAM
+          # and not the guest-visible listen alias because the journal records
+          # `relay_url` (the endpoint behind the proxy) on every frame. Every
+          # kind the closed-world allow-list admits gets a pool: a kind that is
+          # published with none is a META-FLOOR, never a pass.
+          #
+          # C5.8 IS DECLARED NOT-ASSERTED, on purpose and out loud.
+          #   The real MLS group id cannot be derived from the journal — its
+          #   absence there is the whole assertion — and it is minted per run on
+          #   the device (CircleFfi.mlsGroupId). It must NOT travel by the drive
+          #   log: that file is uploaded with 14-day retention AND is C6's
+          #   --manifest input, and haven/integration_test/e2e/_lib/
+          #   wire_canaries.dart records the standing decision that a Rule-4
+          #   value goes only through a file the lane does not upload. The
+          #   sanctioned channel is a proxy control verb writing a host-side
+          #   sidecar (never forwarded, never journalled, never uploaded);
+          #   until that lands, this lane declares the gap rather than
+          #   pretending to close it. `--mls-group-id-not-asserted` prints
+          #   "C5.8 NOT ASSERTED" on EVERY run and is a visible token here that
+          #   must be DELETED when the sidecar lands. It is NOT a conditional
+          #   check: a conditional would go green claiming Rule 4 held.
+          #   Meanwhile Rule 4 is still asserted in-drive by
+          #   _assertWirePrivacyInvariants — narrower (one circle's kind-445
+          #   stream, nothing about 1059/30443/10002/0), which is exactly why
+          #   this is a declared gap and not a resolved one.
+          #   * --exclude-conn takes the harness's own conn_id out of every
+          #     assertion; the proxy returns it in the sentinel ack. Wire it if
+          #     TestRelay's own probes ever surface as findings — over-excluding
+          #     fails closed on the preconditions, so it cannot manufacture a
+          #     pass.
+          # C5.1 needs an APPLICATION kind-445 (one carrying `expiration`) from
+          # each of TWO distinct groups. On the poll path every publishLocation
+          # in e2e_combined targets the one family circle — the two-circle
+          # scenario lives in the M11 group, whose bodies all self-guard on
+          # `if (!liveSyncEnabled) return;` — so C5.1's precondition cannot be
+          # met and the whole C5 arm would META-FLOOR for a scenario-shape
+          # reason rather than anything on the wire. e2e-ios.yml reached this
+          # same conclusion independently; the two lanes now agree instead of
+          # contradicting each other. Skipping is ANNOUNCED, not silent: a
+          # reader must never have to infer from an absence which invariants a
+          # green run actually exercised.
+          if [[ "${{ inputs.live_sync }}" != "true" ]]; then
+            echo "C5 correlation: SKIPPED on the poll path — C5.1 requires an application kind-445 from two distinct groups, which only the live-sync two-circle scenario produces. Run the live-sync variant for the C5 verdicts."
+          else
+          rc=0
+          bash tooling/e2e/ci/check-wire-correlation.sh \
+            --journal "${WIRE_JOURNAL}" \
+            --sentinel "${WIRE_SENTINEL}" \
+            --pool "0=${WIRE_UPSTREAM}" \
+            --pool "5=${WIRE_UPSTREAM}" \
+            --pool "445=${WIRE_UPSTREAM}" \
+            --pool "1059=${WIRE_UPSTREAM}" \
+            --pool "10002=${WIRE_UPSTREAM}" \
+            --pool "10050=${WIRE_UPSTREAM}" \
+            --pool "30443=${WIRE_UPSTREAM}" \
+            --mls-group-id-not-asserted "no host-side channel for CircleFfi.mlsGroupId yet; the drive log is uploaded and is C6's manifest input, so it must not carry a Rule-4 value" || rc=$?
+          verdict "C5 correlation" "${rc}"
+          fi
+
+          # C6 — content canaries. The manifest of planted values is announced
+          # by the scenario itself; the drive log is where the device's own
+          # prints land (it is the same stream drive-log-lib.sh reads the
+          # on-device reporter out of), so it IS the manifest source.
+          rc=0
+          dart tooling/e2e/ci/check-wire-canaries.dart \
+            --journal "${WIRE_JOURNAL}" \
+            --manifest /tmp/flutter-drive.log \
+            --sentinel "${WIRE_SENTINEL}" || rc=$?
+          verdict "C6 canaries" "${rc}"
+
+          if [[ "${first_rc}" -ne 0 ]]; then
+            echo "::error::wire oracles FAILED:${failures}" >&2
+            exit "${first_rc}"
+          fi
+          echo "All three wire oracles read the journal and found it clean."
+
+      # The RAW journal is a full traffic transcript and must die with the
+      # runner (scripts/ci/check_wire_proxy_test_only.sh forbids uploading a
+      # `.ndjson` from any workflow — CI artifacts live for days on a public
+      # repo). This is the upload-safe form: counts, kinds, tag NAMES and
+      # endpoints, no values, and the summariser runs its own output through
+      # scan-logs-for-secrets.sh before it can become an artifact. Best-effort
+      # so a diagnostics step can never be the thing that reds an already-red
+      # lane; the summariser deletes its output rather than emit a leaky one.
+      - name: Summarize wire journal
+        if: failure()
+        run: |
+          bash tooling/e2e/ci/summarize-wire-journal.sh \
+            "${WIRE_JOURNAL:-}" /tmp/wire-summary.log || true
+
       # Uploaded on EVERY outcome, unlike the failure-only artifact below.
       # Observe mode exists to accumulate a destination baseline from GREEN
       # runs, and an artifact that only appears on red would never produce one.
@@ -396,6 +651,10 @@ jobs:
             /tmp/strfry.log
             /tmp/diag.txt
             /tmp/scenario.apk
+            # Redacted wire-journal summary only. The raw transcript stays on
+            # the runner (check_wire_proxy_test_only.sh check 3).
+            /tmp/wire-summary.log
+            /tmp/haven-wire-proxy.log
           retention-days: 14
           if-no-files-found: ignore
 

@@ -4,7 +4,8 @@
 # (haven/integration_test/e2e/e2e_combined.dart) on a booted iOS simulator:
 # a real iOS-"Alice" UI drives the production Flutter app while Bob/Carol/Dave
 # participate as in-process `SyntheticUser` FFI peers. All actors coordinate
-# through a host-native Nostr relay on ws://localhost:7777.
+# through a host-native Nostr relay, reached via the RECORDING WIRE PROXY on
+# ws://localhost:7788 (see "Wire recording" below).
 #
 # # Why macos-latest (Apple Silicon / arm64) works
 #
@@ -33,6 +34,35 @@
 # integration_test VM-service stays attached, so a "background execution
 # stops" bug will not surface here. That class needs a real device, which is
 # out of scope for GitHub-hosted runners (see docs/E2E_TROUBLESHOOTING.md).
+#
+# # Wire recording (docs/WIRE_JOURNAL.md, backlog Workstream C)
+#
+# The relay keeps port 7777. The recording proxy listens on 7788, forwards
+# there, and writes an NDJSON journal of every WebSocket message in both
+# directions; the app and the harness are pointed at 7788 instead. Post-drive,
+# `check-wire-journal.sh` reads that journal on the HOST and asserts the
+# closed-world kind/tag/REQ-filter allow-list in tooling/e2e/wire_allowlist.json
+# over the sample the drive's sentinel anchors.
+#
+# This is the FIRST lane to feed those oracles real traffic — until now all
+# three were green solely from their own hermetic `--self-test` fixtures, the
+# exact "written, reviewed, self-tested, executes nowhere" shape
+# docs/CI_HARDENING_BACKLOG.md catalogues. `scripts/ci/
+# check_wire_oracle_lane_reachable.sh` pins the chain from repo-guards.yml.
+#
+# Two iOS-specific notes, because the Android lane's reasoning does NOT carry
+# over:
+#
+#   * This lane's relay is tooling/e2e/local-relay, NOT strfry, and it does not
+#     implement NIP-40 — it retains everything for the process lifetime. The
+#     "expired events are evicted before the assertion runs" argument that
+#     motivates a wire transcript on the strfry lanes is simply FALSE here. The
+#     reason to record on THIS lane is different and narrower: the journal is
+#     the only place the iOS send path is observed as bytes rather than as the
+#     app's own belief about what it sent.
+#   * macos-latest has no iptables, so the C7 egress guard
+#     (tooling/e2e/ci/setup-network-guard.sh) is deliberately NOT wired here.
+#     The recorder is a send-side instrument only; it does not bound egress.
 #
 # All test-only Rust hooks are `#[cfg(debug_assertions)]` and `flutter test`
 # builds debug, so the release pipeline is unaffected.
@@ -67,9 +97,29 @@ jobs:
     # the step timeout with its diagnostics, never a blind outer-envelope
     # SIGKILL. Cached/typical runs finish in a fraction of this (macos-latest
     # allows up to 6h).
-    timeout-minutes: ${{ inputs.live_sync && 155 || 90 }}
+    #
+    # The wire recorder adds a step with its OWN 20m ceiling (release cargo
+    # build of the proxy + on-runner preflight), so the flag-on envelope is
+    # resized to keep the rule above true rather than nudged by the recorder's
+    # typical cost. Flag-on ceilings now sum to 15 (boot) + 20 (proxy) + 95
+    # (e2e_combined) + 45 (mirror) = 175, so the envelope is 180. An earlier
+    # revision of this change moved it 155->160, which left the admitted worst
+    # case ABOVE the envelope — the exact blind-SIGKILL failure the paragraph
+    # above exists to prevent. Poll takes the same +20.
+    #
+    # The per-attempt restart inside the retry command is NOT in this sum: it
+    # reuses the same warm target dir, so it is a cargo fingerprint check plus
+    # the binary's own loopback preflight, and the setup term absorbs it.
+    timeout-minutes: ${{ inputs.live_sync && 180 || 115 }}
     env:
-      HAVEN_E2E_RELAY: ws://localhost:7777
+      # 7788 is the RECORDING PROXY, not the relay. The relay stays on 7777 and
+      # the proxy forwards to it, so this one line is what puts every byte the
+      # app and the harness send through the journal. Point it back at 7777 and
+      # the recorder sees nothing, the journal is empty-but-valid, and the
+      # oracle below reports CLEAN over an empty sample — which is why
+      # scripts/ci/check_wire_oracle_lane_reachable.sh cross-checks this port
+      # against the proxy's own start invocation.
+      HAVEN_E2E_RELAY: ws://localhost:7788
       FLUTTER_SUPPRESS_ANALYTICS: "true"
 
     steps:
@@ -109,6 +159,36 @@ jobs:
       # discipline e2e-android.yml uses for the AVD.
       - name: Build and start host-native relay
         run: bash tooling/e2e/ci/start-local-relay.sh 7777
+
+      # Same build-before-boot discipline as the relay above: the proxy is
+      # another release cargo build out of tooling/e2e/local-relay (already in
+      # this job's rust-cache workspace list), and it runs its OWN --self-test
+      # on this runner before it starts serving. Doing that here, once, keeps
+      # the build peak and the ~seconds-long preflight away from a resident
+      # simulator and makes the per-attempt restart below almost free.
+      #
+      # This start is NOT the one that matters for evidence — see the retry
+      # command in the e2e_combined step, which restarts it per attempt.
+      - name: Build and start recording wire proxy
+        timeout-minutes: 20
+        run: bash tooling/e2e/ci/start-wire-proxy.sh 7788 ws://127.0.0.1:7777
+
+      # ONE token, minted ONCE, read by BOTH halves — the drive (as a
+      # --dart-define, forwarded by run-ios-sim-scenario.sh) and the host oracle
+      # (as --sentinel). Minting it in two places would yield two different
+      # random strings and the resulting "no anchor" META-FLOOR would read as a
+      # flake instead of as the wiring bug it is, which is precisely why
+      # check_wire_oracle_lane_reachable.sh compares the two halves statically.
+      #
+      # It is not secret (docs/WIRE_JOURNAL.md: it is written to the journal
+      # verbatim and echoed in the proxy's ack), but it MUST be unique per job:
+      # the oracle anchors on the highest wire_seq carrying this exact token, so
+      # a fixed token plus a stale journal on a reused runner would anchor the
+      # read at a boundary from someone else's run.
+      - name: Mint the wire-journal sentinel
+        run: |
+          token="HAVEN_WIRE_SENTINEL:$(openssl rand -hex 16)"
+          printf 'HAVEN_WIRE_SENTINEL=%s\n' "${token}" >> "${GITHUB_ENV}"
 
       - name: Boot iOS simulator
         id: sim
@@ -159,6 +239,30 @@ jobs:
       # attempt (e.g. backdated NIP-59 gift-wraps) can leak across attempts. The
       # relay binary was already compiled in the build-before-boot step, so this
       # restart is fast.
+      #
+      # THE RECORDER RESTARTS WITH IT, IN THE SAME PLACE AND FOR THE SAME
+      # REASON, and getting this wrong permanently reds a working lane:
+      #
+      #   * `wire_seq` is per-PROCESS and starts at 0, and the journal is opened
+      #     in APPEND mode (a torn write must never truncate prior evidence). A
+      #     second proxy process appending to attempt 1's file therefore
+      #     restarts the counter — the journal comes out duplicated and
+      #     non-monotonic, and check-wire-journal.sh's usability gate correctly
+      #     returns UNUSABLE (rc 3) for every run thereafter. start-wire-proxy.sh
+      #     closes this by ROTATING (`rm -f`) the journal on each start, which
+      #     only happens if the start is inside this retry command.
+      #   * Even a proxy left running across both attempts (one process, so no
+      #     seq break) would be wrong here: the relay's store IS reset per
+      #     attempt, so one journal would splice attempt 2's traffic onto the
+      #     traffic of an attempt that failed against a different store. The
+      #     oracle anchors on attempt 2's sentinel and would silently take the
+      #     dead attempt's frames into its snapshot — the likeliest source of a
+      #     finding no one can reproduce.
+      #
+      # So: the journal ROTATES PER ATTEMPT, in lockstep with the relay's clean
+      # store. The proxy build is already cached from the build-before-boot step
+      # above, so this restart costs a fingerprint check plus the proxy's own
+      # few-second preflight.
       - name: Run e2e_combined on the simulator
         timeout-minutes: ${{ inputs.live_sync && 95 || 65 }}
         # S1: live-sync scoped to THIS step via the env the shared
@@ -175,12 +279,23 @@ jobs:
           # Flutter engine colliding with `flutter drive`. NOT set on the
           # background-mirror step below, which tests the background system.
           HAVEN_E2E_NO_BACKGROUND: "true"
+          # The drive half of the sentinel. Redundant on paper — the mint step
+          # wrote it to $GITHUB_ENV, so every later step already inherits it —
+          # and deliberately kept, for the same reason HAVEN_LIVE_SYNC is
+          # spelled out above: it makes "the drive is handed the token" a
+          # statement of THIS step rather than a property of a job-wide env a
+          # future edit could rename without either half noticing. The define
+          # itself is added by run-ios-sim-scenario.sh, which forwards this env
+          # as --dart-define=HAVEN_WIRE_SENTINEL=… only when it is non-empty;
+          # that is the chain check_wire_oracle_lane_reachable.sh follows.
+          HAVEN_WIRE_SENTINEL: ${{ env.HAVEN_WIRE_SENTINEL }}
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: ${{ inputs.live_sync && 45 || 30 }}
           max_attempts: 2
           command: >-
             bash tooling/e2e/ci/start-local-relay.sh 7777 &&
+            bash tooling/e2e/ci/start-wire-proxy.sh 7788 ws://127.0.0.1:7777 &&
             bash tooling/e2e/ci/run-ios-sim-scenario.sh
             integration_test/e2e/e2e_combined.dart
             ${{ steps.sim.outputs.udid }}
@@ -196,6 +311,14 @@ jobs:
       # the same narrowing: the retry gate in run-ios-sim-scenario.sh keys on a
       # verdict file named after the SCENARIO, so this step's decisions are
       # independent of e2e_combined's and neither can retry on the other's.
+      #
+      # It deliberately does NOT restart the wire proxy. The relay is shared and
+      # already up; restarting the proxy here would ROTATE (`rm -f`) the journal
+      # e2e_combined just filled, and the oracle two steps down would read a
+      # file containing only this mirror check. This step's own traffic lands
+      # ABOVE e2e_combined's sentinel, so it is recorded but sits outside the
+      # anchored snapshot — which is the correct treatment for a scenario that
+      # is not the flow under assertion.
       - name: Run iOS background-mirror scenario on the simulator
         timeout-minutes: 45
         # S1's other half, now explicit: this step must NOT start the live-sync
@@ -205,6 +328,13 @@ jobs:
         # variants, which is precisely what S1 exists to guarantee.
         env:
           HAVEN_LIVE_SYNC: "false"
+          # Same explicitness for the sentinel, and the same reason: the mint
+          # step put it in $GITHUB_ENV, so without this line it would be
+          # inherited here and silently add a --dart-define to a build that has
+          # no TestRelay and emits no marker — a needless recompile of a
+          # scenario whose compiled defines every other iOS lane relies on
+          # staying byte-identical. Empty means "not instrumented".
+          HAVEN_WIRE_SENTINEL: ""
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 20
@@ -224,11 +354,83 @@ jobs:
       # the container — it never once passed in CI. The in-app read-back is the
       # authoritative check.
 
+      # Stop the recorder BEFORE anything reads its journal. Two reasons, and
+      # the second is the one that would be missed:
+      #   * the proxy prints its shutdown summary ("N connection(s), N
+      #     record(s) observed, N line(s) written [— DEGRADED]") on SIGTERM, and
+      #     that line is the only place a run says whether the instrument stayed
+      #     healthy for its whole life;
+      #   * it holds a CLAIM on its journal path in a sidecar next to its pid
+      #     file, and refuses to start while another live instance holds the
+      #     same path. A proxy leaked on the failure path therefore disables
+      #     recording for every later run on a reused runner — the first red run
+      #     silently switches the instrument off. `if: always()` is what closes
+      #     that, since the failure path is exactly the path a plain step skips.
+      # The script always exits 0, so this can never turn a green run red.
+      - name: Stop the recording wire proxy
+        if: always()
+        run: bash tooling/e2e/ci/stop-wire-proxy.sh
+
+      # THE assertion this lane's recording exists for. Runs on the HOST because
+      # the journal is written by the proxy on the runner, not on the device —
+      # so it cannot live inside the drive target — and it runs POST-drive, in
+      # the same slot as the mandatory secret scan inside run-ios-sim-scenario.sh.
+      #
+      # `--sentinel` anchors the read at the marker the drive emitted, so the
+      # snapshot is everything at or below that wire_seq and nothing appended
+      # afterwards (the background-mirror step's traffic, say) can drift into
+      # it. The two floors are the meta-check that the sample is not vacuous:
+      # `--min-distinct-publishers 2` means two IDENTITY keys transmitted (445
+      # and 1059 are excluded because their author is a fresh ephemeral key per
+      # message, so they cannot stand in for a participant), and
+      # `--min-distinct-conns 2` is the weaker companion that still catches a
+      # client which never opened a socket. Alice (the app) plus the Bob/Carol/
+      # Dave SyntheticUsers clear both comfortably.
+      #
+      # Exit codes are a CLOSED set {0,1,2,3,4} and each one fails the step,
+      # which is the point: 3 (UNUSABLE — the recorder broke) and 4 (META-FLOOR
+      # — the scenario proved too little) are NOT passes. A run whose instrument
+      # was broken proves nothing about privacy and must not be reported as
+      # though it did.
+      #
+      # NOT wired here, deliberately, and neither omission is an oversight:
+      #   * check-wire-correlation.sh (C5) needs a `--pool` per published kind
+      #     AND `--exclude-conn` for the harness's own socket, whose conn_id
+      #     only the drive learns (it comes back in the proxy's sentinel ack and
+      #     is not surfaced to the host today). Its C5.1 precondition also
+      #     demands an APPLICATION kind-445 from each of two distinct groups,
+      #     which only the live-sync variant's "Alice in two circles" scenario
+      #     produces — on the poll path it would be a permanent META-FLOOR.
+      #   * check-wire-canaries.dart needs a manifest announced by the drive
+      #     (WireCanaryPlant.mint/announce). e2e_combined.dart plants no
+      #     canaries yet, and an unconfirmed canary is a META-FLOOR by design,
+      #     so wiring it now would red the lane for a missing positive control
+      #     rather than for anything on the wire.
+      # Both become one step each once their drive-side halves land.
+      - name: Assert wire-journal privacy invariants
+        run: |
+          bash tooling/e2e/ci/check-wire-journal.sh \
+            --journal /tmp/haven-wire-journal.ndjson \
+            --sentinel "${HAVEN_WIRE_SENTINEL}" \
+            --min-distinct-publishers 2 \
+            --min-distinct-conns 2
+
       - name: Collect simulator diagnostics
         if: always()
         run: |
           xcrun simctl spawn booted log collect --output /tmp/sim.logarchive 2>/dev/null || true
           cp /tmp/haven-local-relay.log /tmp/relay.log 2>/dev/null || true
+          cp /tmp/haven-wire-proxy.log /tmp/wire-proxy.log 2>/dev/null || true
+          # A REDACTED transcript, never the raw journal: the .ndjson is a
+          # complete record of every event body, REQ filter and endpoint the run
+          # touched, and CI artifacts outlive the runner on a public repo.
+          # summarize-wire-journal.sh keeps kinds, tag NAMES and lengths and
+          # drops ids, pubkeys, content and every tag VALUE, then runs the
+          # result through the secret scanner and deletes it if anything trips.
+          # `|| true` because this is triage material, not a gate — the gate is
+          # the oracle step above, which has already had its say.
+          bash tooling/e2e/ci/summarize-wire-journal.sh \
+            /tmp/haven-wire-journal.ndjson /tmp/wire-summary.log || true
 
       - name: Upload failure artifacts
         if: failure()
@@ -238,10 +440,17 @@ jobs:
           # e2e-ios job's artifact when BOTH are called in one ci.yml run
           # (upload-artifact@v4+ rejects a duplicate name in the same run).
           name: e2e-ios${{ inputs.live_sync && '-live-sync' || '' }}-${{ github.run_id }}
+          # The raw wire journal (/tmp/haven-wire-journal.ndjson) is NEVER
+          # listed here — only the redacted summary. That boundary is enforced,
+          # not merely documented: scripts/ci/check_wire_proxy_test_only.sh
+          # fails CI if any workflow puts an .ndjson path in an upload-artifact
+          # step.
           path: |
             /tmp/flutter-ios-test.log
             /tmp/relay.log
             /tmp/sim.logarchive
+            /tmp/wire-proxy.log
+            /tmp/wire-summary.log
           retention-days: 14
           if-no-files-found: ignore
 

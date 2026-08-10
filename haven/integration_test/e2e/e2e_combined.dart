@@ -199,13 +199,41 @@ import '_lib/sheet_helpers.dart';
 import '_lib/synthetic_user.dart' show DecryptedCoords, SyntheticUser;
 import '_lib/test_relay.dart' show TestRelay, TestRelayEvent;
 import '_lib/test_user.dart';
+import '_lib/wire_canaries.dart' show CanaryId, WireCanaryPlant;
 
 // =============================================================================
 // Constants
 // =============================================================================
 
+/// Content canaries this scenario plants, and announces once at the very end.
+///
+/// Minted lazily on first use with a fresh per-run random suffix, so the host
+/// oracle (`tooling/e2e/ci/check-wire-canaries.dart`) has to learn the values
+/// from THIS run's manifest: a journal recorded by an earlier run cannot
+/// satisfy its positive controls, and an oracle that hard-coded them would
+/// pass against yesterday's capture.
+///
+/// Top-level rather than test-local because the three values are planted
+/// across the main scenario while the manifest is announced by the LAST test
+/// in this file, once every group has stopped generating traffic.
+///
+/// Nothing on it is secret (Security Rule 6): all three values are fabricated
+/// for this run, the coordinate is open ocean ~2000 km from land, and the
+/// manifest deliberately carries the `nostr_group_id` — which is public on the
+/// wire by design — and never the real MLS group id (Security Rule 4). The
+/// drive log is the right channel for exactly that reason.
+final WireCanaryPlant _canaries = WireCanaryPlant.mint(role: 'alice');
+
 /// Circle name Alice types into the form.
-const String _circleName = 'Family';
+///
+/// The canary display name rather than a fixed string: a circle's
+/// user-authored name is MLS group metadata that must never cross the wire in
+/// plaintext, so the value this scenario actually creates its circle with is
+/// the value the host oracle forbids in every recorded frame. Reading it back
+/// out of `circlesProvider` (see [_assertAliceCirclesProviderHasFamily]) is
+/// what proves the plant took — without that read-back the forbid half would
+/// be asserting the absence of a value that may never have been applied.
+String get _circleName => _canaries.circleDisplayName;
 
 /// Outer deadline on relay-level waits for a kind-1059 gift-wrap to
 /// land. 90 s covers a cold-AVD `create_circle` FFI + a slow strfry
@@ -472,10 +500,18 @@ void main() {
               // satisfies the production interface end-to-end so the
               // publish path runs linearly with no permission-denied
               // early exits.
+              //
+              // The CANARY coordinate, not `aliceFake*`: Alice's position is
+              // the value the wire-canary oracle forbids in every recorded
+              // frame, and it only means something if the production publish
+              // path actually carried it. The peers' cross-decrypt assertions
+              // below assert the same value, so this is a substitution, not a
+              // relaxation. `aliceFake*` stays in use by the M11 group, which
+              // pumps its own app instance and plants nothing.
               locationServiceProvider.overrideWithValue(
                 FakeLocationService(
-                  latitude: aliceFakeLatitude,
-                  longitude: aliceFakeLongitude,
+                  latitude: _canaries.latitude,
+                  longitude: _canaries.longitude,
                 ),
               ),
             ],
@@ -736,6 +772,23 @@ void main() {
           mlsGroupId: mlsGroupId,
           epochBeforeAdd: epochBeforeAdd,
           preAddLocationEvent: preAddEvent,
+        );
+
+        // -----------------------------------------------------------
+        // WIRE CANARY — plant the petname.
+        //
+        // Deliberately BEFORE Phase 4: the petname has no legitimate
+        // carrier (that is precisely what makes it a canary), so its
+        // positive control is *opportunity* coverage — proof that the
+        // journal recorded real client->relay traffic from Alice's
+        // stack AFTER the local override existed. Phase 4's publish is
+        // the first such event, and it is causally after this call
+        // returns, which is a stronger ordering claim than any
+        // comparison of one-second `created_at` stamps could make.
+        // -----------------------------------------------------------
+        await _plantPetnameCanary(
+          tester: tester,
+          memberPubkeyHex: bob.pubkeyHex,
         );
 
         // -----------------------------------------------------------
@@ -2419,6 +2472,139 @@ void main() {
       },
     );
   });
+
+  // ===========================================================================
+  // WIRE ORACLES — snapshot marker + content-canary manifest
+  //
+  // The LAST test in this file, and a test rather than a `tearDownAll`. Both
+  // of those are load-bearing.
+  //
+  // ## Why last
+  //
+  // The host oracles (`tooling/e2e/ci/check-wire-journal.sh` and
+  // `check-wire-canaries.dart`) assert only over journal lines at or below the
+  // sentinel's `wire_seq`. A marker emitted before the M11 group would leave
+  // every frame that group produced ABOVE the bound: not examined, and not
+  // reported as unexamined either. The manifest has the mirror constraint —
+  // it is one line carrying every carrier id recorded so far, so it must be
+  // written after the last plant. Tests run in declaration order, so a
+  // top-level test declared after the last `group` runs after every scenario
+  // in it (and after that group's `tearDownAll`, which is why this uses
+  // `ctx.relay` — FE-2's and M11's probe sockets are already disposed).
+  //
+  // ## Why not a `tearDownAll`
+  //
+  // A `tearDownAll` failure never reaches the results map `integrationDriver()`
+  // inspects — the same blind spot documented at `e2e_profile_sharing.dart`'s
+  // `setUpAll` and enforced by
+  // `test/lints/integration_test_propagation_test.dart`. Both facts here have
+  // to be ASSERTED rather than merely attempted:
+  //
+  //   * no sentinel ack means this run did not route through the recording
+  //     proxy at all, so whatever journal the host reads does not describe it;
+  //   * a canary with no plant proof means the forbid half was searching for
+  //     a value that was never applied to anything, which passes for free.
+  //
+  // Swallowed in a teardown, either one reaches CI only as a rc-4 META-FLOOR
+  // with no drive-side explanation of which half broke.
+  //
+  // ## Why not earlier, "so it survives a mid-run failure"
+  //
+  // If the drive dies before this test the sentinel is absent and the host
+  // reports META-FLOOR. That is the CORRECT verdict — a run that stopped
+  // early did not produce the traffic the oracles were asked to examine — and
+  // it must not be "fixed" by moving the marker earlier, which would trade a
+  // loud accurate failure for a quiet false pass.
+  // ===========================================================================
+  testWidgets(
+    'wire oracles: emit the journal sentinel and announce the canary manifest',
+    (tester) async {
+      if (!didInitCtx) {
+        fail(
+          'setUpAll never produced a ScenarioContext, so no relay socket '
+          'exists to emit the wire-journal sentinel on. The host oracles '
+          'will report META-FLOOR for this run; the cause is the harness '
+          'bootstrap, not the scenario.',
+        );
+      }
+
+      // The marker is INTERCEPTED by the proxy and never forwarded upstream,
+      // so emitting it on the probe socket perturbs nothing on the relay.
+      // Any connection will do: `wire_seq` is monotonic across the whole
+      // journal (docs/WIRE_JOURNAL.md), so the boundary it names is global.
+      Object? sentinelFailure;
+      try {
+        final sentinel = await ctx.relay.emitWireJournalSentinel();
+        _canaries.recordSentinel(
+          token: sentinel.token,
+          wireSeq: sentinel.wireSeq,
+        );
+        debugPrint(
+          '[e2e_combined] wire-journal sentinel acked — '
+          'wire_seq=${sentinel.wireSeq} conn=${sentinel.connId}',
+        );
+      } on Object catch (e) {
+        // Captured, not rethrown yet. The manifest still has to reach the
+        // drive log: without it the host loses the plant proofs as well as
+        // the anchor, and reports a second, misleading verdict on top of this
+        // one. Security Rule 8 — the runtimeType only, never the message.
+        sentinelFailure = e;
+      }
+
+      // ONE announcement, at the very end, so every carrier id recorded
+      // anywhere in this file is inside it. `debugPrint` is the sink because
+      // the lane already captures the drive log and greps it for the marker
+      // prefix; nothing on the manifest is secret (see `_canaries`).
+      _canaries.announce(debugPrint);
+
+      expect(
+        sentinelFailure,
+        isNull,
+        reason:
+            'the wire-journal sentinel was never acked '
+            '(${sentinelFailure?.runtimeType}). Either this run pointed the '
+            'app straight at strfry instead of through the recording proxy, '
+            'or the proxy stopped recording. Without the marker the host '
+            'oracles cannot tell a genuinely quiet journal from one that '
+            'never saw this run at all, so they fail closed.',
+      );
+
+      // Drive-side floor on the SAME two conditions the host reports as
+      // META-FLOOR, asserted here where the cause is still visible. This is
+      // not a duplicate of the host check: the host can only observe that a
+      // proof is missing from the manifest, while a failure here points at
+      // the phase that was supposed to produce it.
+      final manifest = _canaries.manifest();
+      for (final canaryId in CanaryId.all) {
+        expect(
+          manifest.plantProofs[canaryId],
+          isNotNull,
+          reason:
+              'wire canary "$canaryId" has no plant proof: the scenario '
+              'never read the value back out of the app, so a plant that '
+              'silently failed is indistinguishable from one that took and '
+              'the host-side forbid check would pass vacuously.',
+        );
+        expect(
+          manifest.carrierEventIds[canaryId],
+          isNotEmpty,
+          reason:
+              'wire canary "$canaryId" has an empty carrier set: no event '
+              'was recorded proving the journal covers the window in which '
+              'this value could have leaked, so "it never appeared" is '
+              'unfalsifiable.',
+        );
+      }
+
+      debugPrint(
+        '[e2e_combined] wire-canary manifest announced '
+        '(${CanaryId.all.length} canaries, '
+        '${manifest.carrierEventIds.values.expand((e) => e).length} '
+        'carrier events).',
+      );
+    },
+    timeout: const Timeout(Duration(minutes: 2)),
+  );
 }
 
 // =============================================================================
@@ -2560,7 +2746,19 @@ Future<String> _aliceCreatesTwoMemberCircle({
 
   // Bob's gift-wrap must have landed; without it his
   // acceptInvitationViaRelay would hang on the firstWhere lookup.
-  await bobGiftWrapFuture;
+  final bobGiftWrap = await bobGiftWrapFuture;
+
+  // WIRE CANARY — carrier for the circle display name.
+  //
+  // The name lives in MLS group metadata, so the frames that could leak it
+  // are the gift-wrapped Welcome (1059) and the group's commits (445). This
+  // is the Welcome; the init commit below is the 445. Recording BOTH is what
+  // lets the host oracle prove its journal window actually covers the frames
+  // in which the name could have crossed the wire — a forbid-check over a
+  // window that never contained the value passes for free.
+  _canaries
+    ..nostrGroupIdHex = familyHex
+    ..recordCircleNameCarrier(bobGiftWrap.id);
 
   // Capture the init kind-445 commit from the relay. Opened AFTER we wait for
   // the gift-wrap (guaranteeing the circle-creation flow published its commit
@@ -2592,6 +2790,12 @@ Future<String> _aliceCreatesTwoMemberCircle({
     (a, b) => a.createdAt <= b.createdAt ? a : b,
   );
   final initCommitPubkey = initCommit.pubkey;
+
+  // WIRE CANARY — the kind-445 half of the circle-name carrier set (see the
+  // gift-wrap record above). Every commit for this group is a frame that
+  // carries the group's metadata, so any of them would do; the init commit is
+  // simply the one this helper already has in hand.
+  _canaries.recordCircleNameCarrier(initCommit.id);
 
   debugPrint(
     '[e2e_combined:alice] PHASE 2a complete (2-member circle, '
@@ -3401,6 +3605,52 @@ Future<void> _publishAndObserveThreeWayLocations({
   // `locationPublisherProvider`. Invalidating + reading the provider
   // forces a publish even if the periodic timer hasn't fired yet.
   // -----------------------------------------------------------------
+  //
+  // WIRE CANARY — open the capture for Alice's own application message
+  // BEFORE the publish, so we never race the relay's echo.
+  //
+  // Identifying "Alice's location event" cannot be done by author: every
+  // kind-445 carries a fresh ephemeral pubkey (Security Rule 2), which is the
+  // whole point. Two discriminators do it instead:
+  //
+  //   * `since` = now, so nothing published earlier in this scenario (Bob's
+  //     PRE-ADD location, the create/add commits) can match; and
+  //   * an `expiration` tag, which per MIP-03 only APPLICATION messages
+  //     carry — commits and proposals are tagged `h` alone.
+  //
+  // Bob and Carol have not published yet at this point in the phase — they
+  // publish in Step 2, after the await below — so Alice is the only publisher
+  // in this window, and the first application message on this subscription is
+  // hers: the frame carrying the canary coordinate her FakeLocationService
+  // feeds the production publish path.
+  //
+  // `created_at` has one-second resolution, so `since` is anchored on a fresh
+  // second rather than on the current one: otherwise a location Alice's own
+  // MapShell timer published moments BEFORE `_plantPetnameCanary` returned
+  // could share the current second and be taken for the post-plant publish,
+  // which would leave the petname's opportunity control claiming a window
+  // that did not yet contain the override. Sub-second and bounded — a
+  // resolution boundary, not a convergence wait.
+  final nowMs = DateTime.now().millisecondsSinceEpoch;
+  await Future<void>.delayed(Duration(milliseconds: 1000 - nowMs % 1000));
+  final aliceLocationFuture = ctx.relay.firstWhere(
+    filter: <String, dynamic>{
+      'kinds': const <int>[445],
+      '#h': <String>[_hexLower(bobCircle.circle.nostrGroupId)],
+      'since': DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      'limit': 10,
+    },
+    matcher: _isApplicationMessage,
+    timeout: _peerConvergenceBudget,
+  );
+  // Attach a listener NOW. An assertion between here and the `await` below
+  // would otherwise leave this Future unhandled, and its timeout error would
+  // surface as an uncaught async error inside a LATER test — the same
+  // cross-test cascade `_pollUntil`'s bounded probe exists to prevent. A
+  // Future may have many listeners, so the real `await` still receives the
+  // event (or the error) unchanged.
+  unawaited(aliceLocationFuture.then((_) {}, onError: (Object _) {}));
+
   final container = ProviderScope.containerOf(
     tester.element(find.byType(HavenApp)),
     listen: false,
@@ -3431,6 +3681,26 @@ Future<void> _publishAndObserveThreeWayLocations({
         'accepted circle; got 0 — either encryptLocation no-op-ed or '
         'no accepted circle is in scope.',
   );
+
+  // WIRE CANARY — the coordinate's carrier, and the petname's opportunity.
+  //
+  // One event serves both controls, for different reasons. For the
+  // COORDINATE it is a carrier in the literal sense: this frame is the
+  // ciphertext of the canary position, so a journal that contains it is a
+  // journal whose window covers the moment the coordinate could have leaked.
+  // For the PETNAME it is an opportunity: the petname has no legitimate
+  // carrier at all, so the control it needs is proof that the recorder saw
+  // genuine client->relay traffic from Alice's stack after the local override
+  // existed — and this publish is causally after `_plantPetnameCanary`
+  // returned.
+  //
+  // Awaited (not fire-and-forget): if the event never lands, the drive fails
+  // here with an attributable message instead of announcing a manifest whose
+  // carrier set is quietly empty and letting the host report META-FLOOR.
+  final aliceLocationEvent = await aliceLocationFuture;
+  _canaries
+    ..recordCoordinateCarrier(aliceLocationEvent.id)
+    ..recordPetnameOpportunity(aliceLocationEvent.id);
 
   // -----------------------------------------------------------------
   // Step 2 — Bob and Carol publish their locations via FFI. Each
@@ -3660,12 +3930,16 @@ Future<void> _publishAndObserveThreeWayLocations({
   // returns the wrong lat/lon (e.g. due to a serialisation bug in the
   // kind-9 content encoding) would pass the presence check above but
   // fail here, providing an unambiguous regression signal.
+  //
+  // Alice's expected pair is the CANARY coordinate — the same value her
+  // FakeLocationService override feeds the production publish path. Same
+  // assertion, different constant.
   _assertDecryptedCoords(
     label: 'bob decrypted alice',
     coords: bobDecryptedCoords,
     senderPubkeyHex: _alicePubkeyHex(),
-    expectedLatitude: aliceFakeLatitude,
-    expectedLongitude: aliceFakeLongitude,
+    expectedLatitude: _canaries.latitude,
+    expectedLongitude: _canaries.longitude,
   );
   _assertDecryptedCoords(
     label: 'bob decrypted carol',
@@ -3678,8 +3952,8 @@ Future<void> _publishAndObserveThreeWayLocations({
     label: 'carol decrypted alice',
     coords: carolDecryptedCoords,
     senderPubkeyHex: _alicePubkeyHex(),
-    expectedLatitude: aliceFakeLatitude,
-    expectedLongitude: aliceFakeLongitude,
+    expectedLatitude: _canaries.latitude,
+    expectedLongitude: _canaries.longitude,
   );
   _assertDecryptedCoords(
     label: 'carol decrypted bob',
@@ -3689,7 +3963,48 @@ Future<void> _publishAndObserveThreeWayLocations({
     expectedLongitude: bobFakeLongitude,
   );
 
+  // WIRE CANARY — the coordinate's PLANT PROOF, taken from a PEER'S decrypt
+  // rather than from the value we minted.
+  //
+  // This is the strongest of the three proofs and the only one that survives
+  // a full round trip: the number recorded here came back out of the MLS
+  // ciphertext Bob pulled off the relay, so it cannot be satisfied by a
+  // scenario that fed the location service a canary and then quietly failed
+  // to publish. The host compares it numerically against the manifest within
+  // ~11 m; nothing but the canary is within 2000 km of that point.
+  final aliceAsBobSawIt =
+      bobDecryptedCoords[_alicePubkeyHex().toLowerCase()];
+  expect(
+    aliceAsBobSawIt,
+    isNotNull,
+    reason:
+        "PHASE 4: Bob must have decrypted Alice's location before the "
+        'wire-canary coordinate plant proof can be recorded from it. The '
+        'convergence loop above should already have guaranteed this.',
+  );
+  _canaries.confirmCoordinatePlanted(
+    latitude: aliceAsBobSawIt!.latitude,
+    longitude: aliceAsBobSawIt.longitude,
+  );
+
   debugPrint('[e2e_combined] PHASE 4 complete (3-way locations + coords).');
+}
+
+/// Whether [event] is a kind-445 APPLICATION message rather than a commit or
+/// a proposal.
+///
+/// Per MIP-03 the two are distinguished on the wire by their tags: commits
+/// and proposals carry `h` alone, while application messages additionally
+/// carry the NIP-40 `expiration` tag that gives them their TTL. No other tag
+/// is permitted on either, so this is a total discriminator and not a
+/// heuristic. Used to attribute a location publish without reading the
+/// author, which is a fresh ephemeral key on every message by design.
+bool _isApplicationMessage(TestRelayEvent event) {
+  final tags = event.raw['tags'];
+  if (tags is! List) return false;
+  return tags.any(
+    (tag) => tag is List && tag.isNotEmpty && tag.first == 'expiration',
+  );
 }
 
 /// Repeatedly awaits [probe] until [satisfied] holds or [budget]
@@ -4770,15 +5085,120 @@ void _assertCircleHasMembers({
   );
 }
 
+// =============================================================================
+// WIRE CANARY helpers — plant, prove the plant took
+// =============================================================================
+
+/// Sets Alice's local petname for [memberPubkeyHex] to the canary value, then
+/// reads it back through the app's own read path and records that read as the
+/// plant proof.
+///
+/// ## Why the read-back is not ceremony
+///
+/// A petname is a local-only override; nothing on the wire is supposed to
+/// carry it, which is exactly what makes it the sharpest of the three
+/// canaries. But "the petname never appeared in any frame" is free to satisfy
+/// if the petname was never stored: a renamed column, a validator, or a
+/// contact upsert that silently no-ops would leave the host-side forbid check
+/// green while proving nothing. Reading the value back out of
+/// `circlesProvider` — which resolves each member's `displayName` from the
+/// same contacts table `setContactDisplayName` writes — is the only evidence
+/// available to a host oracle that the value existed on the device at all.
+///
+/// ## Why `circlesProvider` and not the FFI
+///
+/// `CircleManagerFfi.getContact` would be a shorter route, but it reads the
+/// row this function just wrote through the same object that wrote it. The
+/// provider path goes storage -> `get_members` -> FFI -> `_convertMember` ->
+/// Riverpod, which is the path a leak would also have to traverse, and is the
+/// path the UI actually renders from.
+///
+/// The poll (rather than one read) absorbs the documented Riverpod race in
+/// this file: `circlesProvider` can be invalidated by the app's own
+/// background pollers between our `invalidate()` and our `.future` read,
+/// which orphans the read. An orphaned attempt returns `null` and is retried
+/// rather than aborting the plant.
+///
+/// Throws a [StateError] (via [_pollUntil]) if the petname never surfaces —
+/// a failed plant must be red HERE, where the cause is visible, rather than
+/// only as a host-side META-FLOOR after the run.
+Future<void> _plantPetnameCanary({
+  required WidgetTester tester,
+  required String memberPubkeyHex,
+}) async {
+  final container = ProviderScope.containerOf(
+    tester.element(find.byType(HavenApp)),
+    listen: false,
+  );
+  await container
+      .read(circleServiceProvider)
+      .setContactDisplayName(
+        pubkey: memberPubkeyHex,
+        displayName: _canaries.petname,
+      );
+
+  final wanted = memberPubkeyHex.toLowerCase();
+  final observed = await _pollUntil<String?>(
+    describe:
+        'alice: circlesProvider surfacing the canary petname for '
+        '${_redactPk(memberPubkeyHex)} (wire-canary plant proof)',
+    budget: const Duration(seconds: 30),
+    probe: () async {
+      container.invalidate(circlesProvider);
+      try {
+        final circles = await container
+            .read(circlesProvider.future)
+            .timeout(_riverpodPollerReadTimeout);
+        for (final circle in circles) {
+          for (final member in circle.members) {
+            if (member.pubkey.toLowerCase() == wanted) {
+              return member.displayName;
+            }
+          }
+        }
+      } on TimeoutException {
+        // An orphaned Riverpod read, not a failed plant — retry.
+        return null;
+      }
+      return null;
+    },
+    satisfied: (name) => name != null && name.trim().isNotEmpty,
+  );
+
+  // Recorded BEFORE the assertion, so a mismatch is reported by both halves
+  // rather than losing the manifest to the throw.
+  _canaries.confirmPetnamePlanted(observed!);
+  expect(
+    observed,
+    equals(_canaries.petname),
+    reason:
+        "Alice's circlesProvider must surface the canary petname for "
+        '${_redactPk(memberPubkeyHex)} after setContactDisplayName. The '
+        'local override is what the wire-canary oracle then forbids from '
+        'every recorded frame; if it was never stored, that forbid check '
+        'proves nothing.',
+  );
+  debugPrint(
+    '[e2e_combined:alice] wire-canary petname planted + read back for '
+    '${_redactPk(memberPubkeyHex)}',
+  );
+}
+
 /// Reads Alice's production [circlesProvider] and asserts that it
 /// contains exactly one circle whose [Circle.displayName] is
-/// [_circleName] ("Family") with exactly the [expectedMemberPubkeyHexes]
-/// set as accepted members.
+/// [_circleName] (the canary name) with exactly the
+/// [expectedMemberPubkeyHexes] set as accepted members.
 ///
 /// Call this after Phase 4 (locations converged) to prove Alice's
 /// production circle/evolution state is correct end-to-end — not just
 /// the `memberLocationsProvider` — via the same `ProviderScope`
 /// container the production app uses.
+///
+/// Doubles as the circle-name canary's PLANT PROOF: the name is read back out
+/// of the app through its own read path, which is the only evidence that the
+/// name the oracle forbids was ever applied to anything. A validator, a
+/// truncation or a renamed field that silently dropped it would otherwise
+/// leave the host-side forbid check passing for free.
 Future<void> _assertAliceCirclesProviderHasFamily({
   required WidgetTester tester,
   required List<String> expectedMemberPubkeyHexes,
@@ -4801,6 +5221,12 @@ Future<void> _assertAliceCirclesProviderHasFamily({
   );
 
   final family = circles.first;
+  // WIRE CANARY — plant proof, recorded BEFORE the assertion so the manifest
+  // carries what the app actually returned even when the two disagree. A
+  // mismatch is then reported by both halves: red here, and META-FLOOR on the
+  // host, which is the honest verdict for "the forbid half was searching for
+  // something other than what this run put on the wire".
+  _canaries.confirmCircleNamePlanted(family.displayName);
   expect(
     family.displayName,
     equals(_circleName),

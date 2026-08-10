@@ -192,6 +192,18 @@
 #     its fixtures pin each exclusion and pin that an empty or fully-excluded
 #     report is reported as a broken filter rather than as 0%.
 #
+#   Coverage lcov aggregate self-test scripts/ci/check_lcov_aggregate.sh
+#     The implementation of the AGGREGATE percentage both stacks are gated on.
+#     It replaced `very_good_coverage@v3` and an inline `bc` pipeline, so it is
+#     now the only thing enforcing the Flutter 50% threshold — and its
+#     self-test ran nowhere in CI until 2026-08-09, only in the local pre-push
+#     gate. A gate whose own fixtures never run in CI is the shape this job
+#     exists to prevent: the inline version it replaced failed OPEN on an empty
+#     report (`echo " < 80" | bc -l` writes a syntax error to stderr and
+#     nothing to stdout, and `(( ))` on an empty string is false), printing
+#     "meets threshold" and exiting 0. Its fixtures pin that an empty, absent
+#     or fully-excluded report fails as a BROKEN REPORT rather than passing.
+#
 #   E2E harness self-tests            tooling/e2e/ci/*.sh --self-test
 #     The bash guards embedded in the E2E tooling must not silently rot: the
 #     connect-flake retry predicate must never retry a genuine test failure,
@@ -252,6 +264,40 @@
 #     a style rule: a recorder with an error channel hands every call site a
 #     failure it can propagate into the connection pump, which is the
 #     instrument breaking the product.
+#
+#   Wire oracles are reached by a lane scripts/ci/check_wire_oracle_lane_reachable.sh
+#     The POSITIVE counterpart to the guard above, and the only thing standing
+#     between the three wire oracles and instance 11 of the recurring failure
+#     mode: every green result they produce today comes from their own
+#     `--self-test`, and none has ever read a journal from a real run. A lane
+#     instruments itself by starting the recording proxy, and four links have
+#     to hold or the oracles report CLEAN over nothing — the relay URL must
+#     name the PROXY's port and not the relay's (the quietest break: starting
+#     the proxy is the visible edit, re-pointing the URL is the one-line change
+#     elsewhere in the file), the proxy must be stopped under `if: always()`
+#     (a leaked instance holds its journal claim and the next start refuses, so
+#     the first red run disables recording for every run after it), an oracle
+#     must run after both the proxy start AND a drive, and the `--sentinel` the
+#     oracle anchors on must be the same string the drive is handed via
+#     `--dart-define=HAVEN_WIRE_SENTINEL` — following the chain into the
+#     harness script, because that is where the Android and iOS lanes build.
+#     Expectations are derived FROM the repo (the population is every job that
+#     starts a hermetic relay), the unwired set is pinned by EQUALITY so that
+#     excusing a lane is a reviewable act and a lane LOSING its wiring reds,
+#     and ZERO wired lanes fails loudly rather than passing for want of
+#     anything to check.
+#
+#   Wire-reachability guard self-test scripts/ci/check_wire_oracle_lane_reachable.sh --self-test
+#     The guard above reasons about absence, which is the one thing a green
+#     verdict cannot demonstrate, so its fixtures carry the proof: each of the
+#     four links has a lane that breaks exactly it, each anti-vacuity route has
+#     a fixture that must be BROKEN rather than clean, and both false-positive
+#     directions (a correctly wired lane, an explicitly exempted one) must
+#     pass. Two of them exist because the guard's own first draft got them
+#     wrong: a sentinel variable both halves name and NOBODY sets is trivially
+#     "the same string" (the empty one), and a `--dart-define` that appears
+#     only in `check-wire-journal.sh`'s DOC COMMENT would have satisfied link 4
+#     in every lane, since every wired lane invokes that oracle.
 
 name: Repo Guards
 
@@ -467,6 +513,16 @@ jobs:
       - name: Coverage lcov filter self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/filter_lcov.sh --self-test
+
+      # The AGGREGATE percentage both stacks are gated on. This script is the
+      # only thing enforcing the Flutter 50% threshold since it replaced
+      # very_good_coverage@v3 and an inline `bc` pipeline that failed OPEN on an
+      # empty report. Its self-test ran only in the local pre-push gate until
+      # now, so the one gate nobody could see decaying was the one holding the
+      # threshold up.
+      - name: Coverage lcov aggregate self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_lcov_aggregate.sh --self-test
 
       # An emulator lane with no inner deadline routes every hang to the JOB
       # cap, which SIGKILLs the runner before the if: failure() diagnostics,
@@ -786,3 +842,33 @@ jobs:
       - name: Wire-proxy guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_wire_proxy_test_only.sh --self-test
+
+      # The POSITIVE half. Everything above proves the wire instrument is
+      # SAFE — unreachable from the app, and each oracle able to fail its own
+      # fixtures. None of it proves the instrument is USED. The three oracle
+      # steps in this job are `--self-test` invocations; that is the whole of
+      # their CI presence, and it is precisely the shape
+      # docs/CI_HARDENING_BACKLOG.md catalogues ten times over as "written,
+      # reviewed, passes its own self-test, executes nowhere".
+      #
+      # So this guard asserts the chain that makes those verdicts mean
+      # something: some lane starts the recorder, points the app at IT rather
+      # than past it, stops it on every path, and runs an oracle over the
+      # journal afterwards under the same sentinel the drive emitted. It is
+      # pure bash over the workflow YAML, so it belongs here rather than in a
+      # lane — and putting it in a lane would be circular anyway.
+      - name: Wire oracles are reached by a lane
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_wire_oracle_lane_reachable.sh
+
+      # ...and its own fixtures, for the same reason every other guard in this
+      # job has them: this one's entire subject is an ABSENCE, and a check that
+      # has stopped matching reports every lane as compliant. The fixtures pin
+      # a break of each of the four links, every route by which the guard could
+      # find nothing to reason over (which must be BROKEN, a distinct exit
+      # code, never a clean pass), and both false-positive directions — a
+      # correctly wired lane and a declared exemption must BOTH stay green, or
+      # the guard gets deleted rather than fixed.
+      - name: Wire-reachability guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_wire_oracle_lane_reachable.sh --self-test

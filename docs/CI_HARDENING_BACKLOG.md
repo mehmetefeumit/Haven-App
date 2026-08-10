@@ -1,20 +1,30 @@
 # CI Hardening Backlog
 
-Tracking document for the CI/privacy-verification audit of 2026-08-01. Items are
-open unless marked DONE. Each carries evidence so it can be picked up cold.
+Tracking document for the CI/privacy-verification audit of 2026-08-01.
+**Last updated 2026-08-10.** Items are open unless marked DONE, FIXED,
+IMPLEMENTED or RESOLVED. Each carries evidence so it can be picked up cold.
 
 **Context.** The audit asked three questions: is location sharing reliable in
 foreground and background on both platforms; can we prove from the relay's side
 that only the expected data leaves the device; and can CI self-confirm that the
 docs, the code, and the tests still agree. The audit found four live product
-defects and a systematic blind spot — **CI verifies structure, logic and
-liveness, but almost never verifies delivery** (that the user-visible promise
-actually held end to end on a real platform).
+defects (a fifth, P0-5, surfaced later while building Workstream B) and a
+systematic blind spot — **CI verified structure, logic and liveness, but almost
+never delivery** (that the user-visible promise actually held end to end on a
+real platform).
 
 The session that produced this document then pivoted to implementing the
 profile-plane relay separation (see `haven-core/SECURITY.md`, "Profile-plane
-relay separation — accepted deviations"). That work is complete; almost
-everything below is not.
+relay separation — accepted deviations").
+
+**Status roll-up as of 2026-08-10.** Done: the relay separation; Workstream A
+(A1–A10); Workstream B (B1–B9, which closed most of the delivery blind spot —
+B3/B4/B9 now assert a *peer's decrypted* coordinates); P0-1, P0-3, P0-5; and
+Workstream C, whose oracles are now WIRED into the Android and iOS lanes —
+though they have still never read a journal from a real run, so the first CI
+run is the first evidence. Still open: P0-2, P0-4's backward paging, C's
+follow-ups (the MLS group-id channel and `--exclude-conn`), and Workstreams D,
+E and F.
 
 ---
 
@@ -22,16 +32,23 @@ everything below is not.
 
 ### P0-1 · Android background location publishing is dead — FIXED 2026-08-03, UNVERIFIED ON A DEVICE
 
-`MapShell._onPaused()` (`haven/lib/src/pages/map_shell.dart:699-813`) stops the
-main-isolate publish scheduler and hands off to the foreground service. The FGS
-isolate then calls `CircleManagerFfi.newInstance`
-(`haven/lib/src/services/background_location_task.dart:200`) while the
-foreground `NostrCircleService` still holds the Rule-14 `LiveSessionGuard`
-(`circleServiceProvider` is a plain `Provider`, released only at logout). Both
-isolates share one OS process (`haven/android/app/src/main/AndroidManifest.xml`,
-no `android:process`), therefore one `LIVE_SESSIONS` registry, so `acquire`
-fails closed. The error is swallowed at `:245-247`, `_circleManager` stays null,
-and `_publishCycle` returns forever at `:344`. `onStart` runs once; no retry.
+**As found on 2026-08-02** — line citations refreshed 2026-08-07; the tree no
+longer behaves this way (see the fix below).
+
+`MapShell._onPaused()` (`haven/lib/src/pages/map_shell.dart:1049`, handing off
+via `_handOffMlsSession` at `:763`) stops the main-isolate publish scheduler and
+hands off to the foreground service. The FGS isolate then called
+`CircleManagerFfi.newInstance`
+(`haven/lib/src/services/background_location_task.dart:513`, inside
+`_openCircleManager`) while the foreground `NostrCircleService` still held the
+Rule-14 `LiveSessionGuard` (`circleServiceProvider` is a plain `Provider`,
+released only at logout). Both isolates share one OS process
+(`haven/android/app/src/main/AndroidManifest.xml`, no `android:process`),
+therefore one `LIVE_SESSIONS` registry, so `acquire` failed closed. The error
+was swallowed at `:365-367`, `_circleManager` stayed null, and `_publishCycle`
+returned forever at the `_circleManager == null` gate (now `:859`). `onStart`
+ran once; no retry. *(The current code re-attempts the open every cycle via
+`_ensureSession()` at `:859` and `_attemptSessionReclaim` at `:764`/`:795`.)*
 
 So backgrounding shuts down the only working publisher and hands off to one that
 cannot open the database. Permanent per session, not a rare race.
@@ -90,12 +107,18 @@ cannot open the database. Permanent per session, not a rare race.
   interesting for other reasons (`docs/P0_1_FGS_SESSION_PLAN.md` §4-§7), and its
   own costs are recorded there.
 
+**The lane that caught this twice is now green — 2026-08-07** (CI run
+31216078806). `e2e_fgs_publish` passes with the durable handoff in place, so the
+fix has runtime proof on the same oracle that produced both reproductions above.
+Still an emulator: what remains unverified is a physical device and the
+multi-process case, not the mechanism.
+
 ### P0-2 · `locationSettingsIntro` ships a false claim in 13 locales — OPEN
 
 `haven/lib/l10n/app_en.arb` promises "if the system closes Haven, updates resume
 when you move or when the system next wakes the app." Every wake path is
 receive-only — `catchup_service.dart` and `ios_background_catchup.dart` contain
-zero publish call sites, and `haven/ios/Runner/HavenSLCHandler.swift:11` says so
+zero publish call sites, and `haven/ios/Runner/HavenSLCHandler.swift:9-12` says so
 in its own doc comment. There is no SLC, geofence or activity-recognition
 anywhere in `haven/android` or `haven/lib`, so "when you move" has no Android
 mechanism at all. `locationSettingsIosLimitedNote` repeats the over-claim.
@@ -105,10 +128,12 @@ Fix the English, then re-translate. Batch with the other copy fixes below so the
 
 ### P0-3 · KeyPackage expires at 84 days → accounts silently uninvitable — FIXED 2026-08-04
 
-`decide_kp_maintenance`
-(`haven-core/src/relay/maintenance/key_package.rs:236-278`) has four branches,
-none time-aware; the module contains zero references to
-`not_after`/`not_before`/`Lifetime`/`expire`. After the first successful
+**As found on 2026-08-04.** `decide_kp_maintenance` (then at
+`haven-core/src/relay/maintenance/key_package.rs:236-278`; now `:307`) had four
+branches, none time-aware; the module contained zero references to
+`not_after`/`not_before`/`Lifetime`/`expire`. It now has five, and branch 2a is
+the rotation gate — so the citation above points at the remedy, not the defect.
+After the first successful
 publish the `existing_d: Some(_)` branch always routes to
 `build_kp_maintenance_events_reusing`, which republishes cached bytes, so the
 KeyPackage is never re-minted. OpenMLS stamps a default 84-day `Lifetime`
@@ -116,9 +141,11 @@ KeyPackage is never re-minted. OpenMLS stamps a default 84-day `Lifetime`
 to validate it at Add time.
 
 Amplifier: the heal path runs the same lifetime gate, so post-expiry a relay drop
-cannot be repaired, and `MaintenanceService` swallows the failure into a state
-indistinguishable from "already healthy"
-(`haven/lib/src/services/maintenance_service.dart:44-53`).
+cannot be repaired, and `MaintenanceService` swallowed the failure into a state
+indistinguishable from "already healthy" (then
+`haven/lib/src/services/maintenance_service.dart:44-53`; those lines now carry
+the fix's own rationale — that the `.empty()` fallback is what let a dead
+publish path read as a healthy one).
 
 **FIXED 2026-08-04 — owner chose lifetime-keyed rotation.** Rotate at
 `KP_ROTATE_AT_LIFETIME_FRACTION = 0.75` of the package's OWN lifetime, read off
@@ -226,6 +253,10 @@ simulated, not waited. And the converse heal case is unreachable on the wire by
 construction (rotate precedes heal, so a past-threshold package can never be
 healed), so the wire lane proves the reachable half and the host suite covers
 the other with a fabricated lifetime.
+
+**Lane status:** wired at `ci.yml:206-209` and green as of CI run 31216078806
+(2026-08-07). Host-side, `relay::maintenance::kp_lifetime` is 21/21,
+`kp_rotation_e2e` 11/11, and `run-kp-rotation.sh --self-test` 36/36.
 
 **Adjacent spec deviation found, NOT fixed:** `mint_d()` generates 16 random
 bytes → a 32-char hex `d`, but the Nostr binding requires exactly one
@@ -500,15 +531,6 @@ Two further findings from the same investigation:
   routed, a cursor assertion passes vacuously, so those oracles were re-anchored
   on decrypted `LiveSyncEvent::Location` instead.
 
-* **STILL OPEN — the Dart poll path has the same defect.**
-  `NostrCircleService.advanceGroupCursorToEventSecs`
-  (`haven/lib/src/services/nostr_circle_service.dart:1548`) →
-  `cursor_advance_group_to_event` (`haven/rust_builder/src/api.rs:3752`)
-  advances `STREAM_GROUP_445` straight from an event's `created_at`, with no
-  clamp and no window. It writes a different, non-per-circle stream, so it does
-  not interfere with the fix above — but it is the same hole in the
-  Dart-driven receive path and should be closed the same way.
-
 * **Deliberately NOT done:** moving the expiration screen after MLS
   authentication. It is tractable, but it is not the stronger fix — the
   attacker still reaches the cursor gate via `Processed` and `PeelFailed`
@@ -523,29 +545,23 @@ Two further findings from the same investigation:
   (`nostr-database-0.44.0/src/helper.rs:193,216`), so conformant relays
   genuinely evict; re-dropping is cheap and idempotent regardless.
 
-* **Third plane, inert but loaded.** The Dart poll path advances a *bare*
-  `group_445` cursor via `cursor_advance_group_to_event`
-  (`haven/rust_builder/src/api.rs:3764`) on `maxSeenCreatedAtSecs` with no
-  screening at all. That cursor is never read — every REQ anchor uses the
-  per-circle `group_cursor_stream(hex)` key — so it is write-only today. It is
-  a loaded gun if anyone ever wires it up.
-
 ---
 
 ## Workstream A — make "green" mean something
 
 | # | Item | Status |
 |---|---|---|
-| A1 | `cargo test` + `--all-targets` clippy for `rust_builder` (31 tests, incl. 4 privacy oracles, never ran) | **DONE** |
+| A1 | `cargo test` + `--all-targets` clippy for `rust_builder` (31 tests at the time, 46 today, incl. 4 privacy oracles, never ran) | **DONE** |
 | A2 | Wire orphaned `scripts/ci/check_no_tile_cache_secrets.sh` into repo-guards | **DONE** |
 | A3 | Fail the run when tests *skip*; an all-skipped run is textually identical to an all-passed run | **DONE (host suites)** — see below |
 | A3b | **Fail the run when tests FAIL but `flutter drive` exits 0** — CONFIRMED LIVE and **DONE 2026-08-02**. See below | **DONE** |
 | A4 | `scan-logs-for-secrets.sh` exits 0 when its log files are absent — the crash case. 3 of 6 lane runners never invoke it. Extend `PATTERNS` to hex/base64/bech32 | **DONE 2026-08-03**. See below |
 | A5 | Per-path coverage floors + a ratchet. The gate is a single global aggregate (80%/50%), so any critical file may sit at 0%. The Rust threshold also passes on a parse failure | **DONE 2026-08-03**. See below |
-| A6 | iOS lanes retry on *any* failure with no flake classifier (`e2e-ios.yml:153,173`), unlike Android's narrow `is_connect_flake` | **DONE 2026-08-03**. See below |
+| A6 | iOS lanes retry on *any* failure with no flake classifier (`e2e-ios.yml:181,211`), unlike Android's narrow `is_connect_flake` | **DONE 2026-08-03**. See below |
 | A7 | Poll/live-sync define leakage: 5 lanes omit the define and silently inherit `liveSyncEnabled = true` | **DONE 2026-08-03**. See below |
 | A8 | 4 emulator lanes lack a coreutils `timeout` wrapper; several step caps sit below worst-case runtime (integration 35m vs ~84m) | **DONE 2026-08-03** — first half held, second half was backwards. See below |
 | A9 | `haven-core` cannot take `--all-targets` clippy: 71 pre-existing lint errors in never-linted `#[cfg(test)]` code | **DONE** — the count was 123, not 71. See below |
+| A10 | The vacuity floors keeping the E2E guards honest were hardcoded minimums, not repo-derived counts (≥10 steps / ≥8 drives against an actual 35 / 18) | **DONE 2026-08-09**. See below |
 
 **A3 — skips are now declared, and the original counts were wrong in both
 directions.** The measured surfaces, from real runs on a clean tree:
@@ -568,11 +584,13 @@ have gone to zero silently.
 
 Enforced by `scripts/ci/check_no_undeclared_skips.sh` against
 `scripts/ci/expected_test_skips.txt`, wired into the jobs that already run the
-tests: both `rust-check.yml` cargo jobs (`cargo test | tee`, `set -o pipefail`
+tests: all three `rust-check.yml` cargo jobs — `haven-core`, `rust_builder`, and
+the `e2e-tooling` job added since (`tooling/e2e/local-relay`, surface
+`e2e_tooling`, currently zero declared skips) — (`cargo test | tee`, `set -o pipefail`
 so `tee` cannot eat the exit code) and `coverage.yml`'s Flutter job (via
 `--file-reporter=json:` — a second reporter alongside the console one, so it
 costs no extra run). `repo-guards.yml` carries only the hermetic `--self-test`
-(12 fixtures). Failure is symmetric: an undeclared skip fails, and so does a
+(14 fixtures). Failure is symmetric: an undeclared skip fails, and so does a
 manifest entry no longer matched, because a stale allowance means the proof it
 guarded is gone. The reason string is matched verbatim, so a gate changing cause
 (keyring → "flaky") is also a failure. The extractor cross-checks its own parse
@@ -583,10 +601,11 @@ declared".
 (3 + 5 keyring, plus 4 Blossom) and misses the 14 doctests entirely. "8 of 10
 `e2e_combined` tests" does not hold: `e2e_combined.dart` declares 2
 `testWidgets` and contains **zero** `markTestSkipped`. The real integration
-figure is **16 of 37** `testWidgets` under `haven/integration_test/` carrying a
+figure is **24 of 55** `testWidgets` under `haven/integration_test/` carrying a
 `markTestSkipped` escape hatch, concentrated in `relay_customization_publish`
-(5/6), `relay_resync_convergence` (3/4), `encryption_pipeline` (2/2) and
-`circle_service_remove_member` (2/2).
+(5/6), `relay_resync_convergence` (3/4), `encryption_pipeline` (2/3) and
+`circle_service_remove_member` (2/4) — plus every B-series lane target added
+since, each of which is 1/1 or 2/2.
 
 **Still open: the `flutter drive` half.** A skip there is *invisible to the
 driver by construction* — a `testWidgets` body that calls `markTestSkipped()`
@@ -595,10 +614,17 @@ cannot distinguish it from a pass. `Response.toJson` serializes only failures,
 so no driver-side backstop is possible either. The only signal is the `~N`
 column of the device reporter forwarded into the drive log, which
 `drive-log-lib.sh` already tolerates but does not assert on. Asserting `~0`
-there is a one-line predicate, but which of the 16 actually skip on an emulator
+there is a one-line predicate, but which of the 24 actually skip on an emulator
 is unknown without a run, and guessing wrong turns honestly-green lanes red —
 the exact inverse mistake recorded in A3b below. Left for a run that can
 measure it.
+
+*Re-verified 2026-08-07:* still open. `DRIVE_LOG_FAILURE_RE`
+(`drive-log-lib.sh:74`) tolerates the `~N` column but asserts nothing on it, and
+nothing in `tooling/e2e/ci/` or `.github/workflows/` asserts `~0` on a drive log.
+The declared-skip counts the manifest pins do still reconcile exactly: `haven-core`
+reports 21 ignored, `rust_builder` 5, `flutter test` `~22` — all three matching
+`scripts/ci/expected_test_skips.txt` row for row.
 
 **A3b — the worst instance of "green means nothing" found so far, and it was
 live in `main`.** In CI run 30753193231 `e2e_profile_android` reported SUCCESS
@@ -625,8 +651,11 @@ Fixed by `tooling/e2e/ci/drive-log-lib.sh`: a shared predicate that reads what
 the APP said rather than trusting the exit code, sourced by
 `run-single-avd-scenario.sh` (which `run-integration-tests.sh`,
 `run-relay-customization.sh` and `run-flake-stress.sh` all delegate to),
-`run-m7-background-catchup.sh`, and `run-b1-fgs-publish.sh` — every direct
-`flutter drive` call site except the iOS runner, which does not need it.
+`run-m7-background-catchup.sh`, `run-b1-fgs-publish.sh`, and every direct
+`flutter drive` runner added since (`run-b3`, `run-b5`, `run-b6`, `run-b8`,
+`run-b9`, `run-kp-rotation`). The iOS runner does not need it as an exit-code
+backstop but consumes it anyway: `ios-flake-lib.sh` reuses the predicate as one
+of the four conditions its retry gate requires.
 Self-tested in `repo-guards` with the verbatim run-30753193231 log as the
 critical fixture. Verified at adoption that no other Android lane in that run
 carried a swallowed failure, so the guard reddened nothing that was honestly
@@ -688,8 +717,9 @@ scan. Under rc 3 that would have destroyed the truncated crash artefacts triage
 most needs, while labelling them "withheld: secret-leak guard tripped".
 Containment now fires on rc 1 only.
 
-`PATTERNS` already covered hex / base64 / bech32 (patterns 3, 5, 6, added for
-the FGS lane); no extension was required.
+`PATTERNS` already covered bech32 (pattern 3, long-standing) and hex / base64
+(patterns 5 and 6, added for the FGS lane alongside pattern 7); no extension was
+required.
 
 **A5 — both halves of the premise held, and the Flutter half is worse than
 "may sit at 0%": three services already do.** Measured from real reports on a
@@ -697,32 +727,38 @@ clean tree (`cargo llvm-cov --all-features --lcov`, `flutter test --coverage`):
 
 | Stack | Aggregate | Gate | Slack |
 |---|---|---|---|
-| haven-core | 90.74% (19419/21400) | 80% | ~2290 lines |
-| haven | 64.82% (6944/10712) | 50% | ~1588 lines |
+| haven-core | 90.74% (19419/21400) at pinning; ~91.7% today | 80% | ~2290 → ~2700 lines |
+| haven | 64.82% (6944/10712) at pinning; 66.40% (7477/11261) today | 50% | ~1588 → ~1850 lines |
 
 2290 lines is more than any single file in haven-core, so `src/nostr/mls/
-manager.rs` (755), `src/nostr/giftwrap.rs` (208) and all of
+manager.rs` (853), `src/nostr/giftwrap.rs` (207) and all of
 `src/nostr/encryption/` (126) could go to zero *together* with the gate still
-green. Rust's real weak points are `src/relay/catchup.rs` **28.50%** (59/207 —
-the same file as the open `limit(512)` defect), `src/relay/auto_commit.rs`
-50.85%, `src/location/nostr.rs` 52.54%, `src/relay/manager.rs` 71.59%.
+green. Rust's weak points AT PINNING TIME were `src/relay/catchup.rs` **28.50%**
+(the same file as the open `limit(512)` defect, `catchup.rs:160`),
+`src/relay/auto_commit.rs` 50.85%, `src/location/nostr.rs` 52.54%,
+`src/relay/manager.rs` 71.59%. **Three have since been closed and re-pinned** —
+catchup.rs 97.14% (floor 95), auto_commit.rs 100.00% (floor 100), manager.rs
+75.64% (floor 73) — which is the ratchet working. `src/location/nostr.rs` (~52%)
+is the one still open, and `limit(512)` remains uncovered.
 
-Flutter is the literal case the item described:
+Flutter was the literal case the item described (→ shows movement since pinning):
 
 | Path | Coverage |
 |---|---|
-| `lib/src/services/nostr_relay_preferences_service.dart` | **0.00%** (0/88) |
-| `lib/src/services/nostr_relay_service.dart` | 0.63% (1/158) |
-| `lib/src/services/background_location_task.dart` | 1.69% (4/236) — the file P0-1 lives in |
-| `lib/src/services/nostr_circle_service.dart` | 11.63% (60/516) |
+| `lib/src/services/nostr_relay_preferences_service.dart` | **0.00%** (0/88) — unchanged |
+| `lib/src/services/nostr_relay_service.dart` | 0.63% (1/158) → 17.20% (32/186) |
+| `lib/src/services/background_location_task.dart` | 1.69% (4/236) → 11.63% (30/258) — the file P0-1 lives in |
+| `lib/src/services/nostr_circle_service.dart` | 11.76% (60/510) |
 | `lib/src/services/nostr_profile_service.dart` | 23.33% (21/90) |
-| `lib/src/services/background_catchup_worker.dart` | 28.40% (23/81) |
+| `lib/src/services/background_catchup_worker.dart` | 27.71% (23/83) |
 | `lib/src/services/nostr_identity_service.dart` | 31.07% (32/103) |
-| **`lib/src/services/` (whole layer)** | **48.96%** (1317/2690) |
+| **`lib/src/services/` (whole layer)** | **48.96%** (1317/2690) → **53.57%** (1584/2957) |
 
-The service layer — every relay connection, every MLS call, the background
-publisher — measures *below the 50% threshold the package passes*, because the
-widget and provider suites pay for it out of the shared budget.
+When these floors were pinned, the service layer — every relay connection, every
+MLS call, the background publisher — measured 48.96%, *below the 50% threshold
+the package passes*, because the widget and provider suites paid for it out of
+the shared budget. It has since crossed 53%. At 2957 instrumented lines one point
+is ~30 lines, so a single new uncovered file still moves it several points.
 
 The second half held too, and is verified: with `COVERAGE` empty,
 `echo " < 80" | bc -l` writes a syntax error to stderr and nothing to stdout,
@@ -754,11 +790,13 @@ Three properties make it more than a floor:
   the Dart-specific trap that a lib file no test *imports* is ABSENT from lcov,
   not 0%, and thus invisible to the aggregate in both directions.
 
-Rows for the near-zero services are pinned at 0 by arithmetic, and that is the
+One row is still pinned at 0 by arithmetic (`nostr_relay_preferences_service.dart`,
+0/88); the other two near-zeros have since ratcheted up
+(`background_location_task.dart` to 9, `nostr_relay_service.dart` to 15). That is the
 point: the number is now written down in a reviewed file instead of hidden
 inside a green aggregate, and the ratchet fires the moment anyone covers 5%.
 
-*Verification.* 18 hermetic self-test fixtures (wired into repo-guards per that
+*Verification.* 31 hermetic self-test fixtures (wired into repo-guards per that
 workflow's convention); the guard green against both real reports; **15 mutation
 tests** — 5 perturbations of the real lcov (hollowing `mls/manager.rs`, dropping
 one line from `welcome.rs`, improving `catchup.rs` to 59%, deleting a pinned
@@ -769,6 +807,19 @@ empty-manifest check, broken SF extractor, deleted parser-rot guard, ignored
 margin override, last-file-wins aggregation, tolerated missing report) — **all
 15 killed**. `--list` round-trips to the checked-in floors exactly, margin
 overrides included.
+
+*Superseded in part, 2026-08-04.* The floors work above was hardened after a CI
+red (run 30964250098) caused by three HAND-EDITED floors sitting 0.06–0.72 points
+above their measured values. The manifest is now maintained by two commands and
+never by hand: `--lint [--fix]` (the static pin rule, wired at
+`repo-guards.yml:462` and in the pre-commit hook) and `--repin <stack> <lcov>`
+(raises only, never lowers). The measuring toolchains are pinned in
+`scripts/ci/coverage_toolchain.env` (rustc 1.97.1 / Flutter 3.44.8), because a
+coverage percentage's denominator is a compiler property, not a test property.
+The Flutter aggregate moved out of inline `bc` into the shared
+`scripts/ci/check_lcov_aggregate.sh` (`coverage.yml:247`); the Rust one is still
+inline but shape-validated. One local gate, `scripts/ci/check_coverage.sh`, now
+runs every check `coverage.yml` does.
 
 **A7 — the count was right, the diagnosis was one lane short of the damage.**
 "5 lanes omit the define" holds exactly for the E2E lanes: `e2e-integration`,
@@ -835,10 +886,12 @@ through it. Comments and `--self-test` invocations are stripped before matching
 in both directions, so a job can neither be accused of building because it
 mentions a build, nor credited with declaring because it discusses a value.
 
-*Belt and braces at runtime.* The three wrappers that compile the app —
-`build-integration-apks.sh`, `run-ios-sim-scenario.sh`, and the local-fallback
-builds in `run-single-avd-scenario.sh` / `run-m7-background-catchup.sh` (plus
-`scripts/run_e2e_local.sh`) — now REQUIRE `HAVEN_LIVE_SYNC` and fail closed on
+*Belt and braces at runtime.* EVERY wrapper that compiles the app —
+`build-integration-apks.sh`, `run-ios-sim-scenario.sh`, the local-fallback
+builds in `run-single-avd-scenario.sh` / `run-m7-background-catchup.sh`,
+`scripts/run_e2e_local.sh`, and the per-lane builders added since
+(`build-b3-real-gps-apk.sh`, `build-kp-rotation-apk.sh`) — REQUIRES
+`HAVEN_LIVE_SYNC` and fail closed on
 unset or non-`true`/`false`. The former `:-false` default in the iOS runner was
 the last place a caller could decline to answer, and `e2e-profile`'s iOS job was
 taking it. `run-single-avd-scenario.sh`'s requirement is scoped to its fallback
@@ -846,10 +899,10 @@ branch only, so the CI drive path — which cannot influence a compiled-in defin
 is untouched.
 
 **A9 — DONE, and the count in the item was low.** `rust-check.yml` now runs
-`cargo clippy --all-targets -- -D warnings` on both crates, and the working
-tree is clean under it. The real figure was **123** findings, not 71: bare
+`cargo clippy --all-targets -- -D warnings` on all three crates (`haven-core`,
+`rust_builder`, `tooling/e2e/local-relay`), and the working tree is clean under it. The real figure was **123** findings, not 71: bare
 `cargo clippy` selects `--lib`/`--bins` only, so this crate's `#[cfg(test)]`
-modules AND its 20 `tests/*.rs` integration targets were never linted.
+modules AND its ~29 `tests/*.rs` integration targets (32 today) were never linted.
 `--all-targets` also pulls in dev-dependencies, which turns on the `test-utils`
 feature — so it lints the `#[cfg(feature = "test-utils")]` lib surface (e.g.
 `SessionManager::new_unencrypted`) that bare clippy never compiles either.
@@ -915,8 +968,8 @@ is an aggregate deadline between them, which is what the wrapper now is.
    and the per-drive default is now 10m in `run-relay-customization.sh`, matching
    its structural sibling `run-integration-tests.sh` — at 20m that retry could
    not complete inside any deadline that also fits under the job cap.
-3. **The `Create AVD snapshot` steps (all 7 lanes) and the `Boot iOS simulator`
-   steps (both iOS lanes) had no bound of any kind** — not a wrapper, not a step
+3. **The `Create AVD snapshot` steps (7 lanes then, 13 today) and the
+   `Boot iOS simulator` steps (2 then, 4 today) had no bound of any kind** — not a wrapper, not a step
    cap, not an `emulator-boot-timeout`. A step whose entire job is booting an
    emulator, with nothing bounding the boot, and boot is the most common
    emulator hang. Measured 91-130 s (Android snapshot, 23 runs) and 136-215 s
@@ -945,7 +998,9 @@ to the wrong bound. Every Android lane now runs its drive under it. The iOS
 lanes keep `nick-fields/retry`'s `timeout_minutes` — the macos-* runners have no
 GNU `timeout` — and were already correctly ordered.
 
-The resulting ladder, verified by the guard on every lane:
+The resulting ladder, verified by the guard on every lane (which now covers 35
+emulator/simulator steps and 18 drives; the table lists the lanes that existed at
+the time — every lane added since inherits the same shape):
 
 | Lane | per-drive | deadline | step cap | job cap |
 |---|---|---|---|---|
@@ -961,9 +1016,10 @@ The resulting ladder, verified by the guard on every lane:
 | `e2e-ios` bg-mirror | 20m x2 | (retry action) | 45 | 90 / 155 |
 | `e2e-profile` (iOS) | 30m x2 | (retry action) | 65 | 90 |
 
-Step caps are `deadline + 1m kill grace + 7m emulator boot`, which is the
-arithmetic `e2e-android.yml` already did by hand; it is now enforced rather than
-maintained by hand.
+Step caps must CLEAR `deadline + 1m kill grace + 7m emulator boot`, which is the
+arithmetic `e2e-android.yml` already did by hand; the guard now enforces it as a
+strict lower bound rather than leaving it maintained by hand (real caps sit 1-2m
+above the sum, e.g. 26+1+7=34 against a 35 cap).
 
 *Kept true by `scripts/ci/check_e2e_step_timeout_ordering.sh`* (repo-guards),
 which fails on: a drive step with no inner deadline (C1); an inner budget at or
@@ -971,9 +1027,41 @@ above the step cap (C2); any step cap at or above its job cap (C3); a per-drive
 timeout at or above the deadline that would preempt it (C4); an
 emulator/simulator step with no cap or no boot timeout (C5). Both branches of
 every `${{ inputs.live_sync && A || B }}` are checked, so a lane cannot be
-correct in one variant and broken in the other. The guard refuses to pass if it
-finds fewer lanes than the repo has, so an extractor that stops matching fails
-loudly rather than vacuously. 12 hermetic fixtures, each a lane shape that
+correct in one variant and broken in the other.
+
+**A10 — the anti-vacuity floor was itself vacuous, FIXED 2026-08-09.** The guard
+refused to pass on fewer than 10 emulator/simulator steps or 8 drives. That is
+the wrong SHAPE, not merely the wrong number: it was written when the repo had
+~11 lanes, and by 35 steps / 18 drives the extractor could have lost two thirds
+of them and still cleared it. A floor that does not move with the repo stops
+being a floor.
+
+It is now derived FROM the repo, by a different mechanism than the extractor
+uses — the extractor parses workflow YAML into per-step records and classifies
+them; the check greps the raw files for the marker strings. Two independent
+readings of one source, so when the record parser rots the grep still sees the
+lane and the mismatch NAMES it. Three layers:
+
+* **an exact count** — `uses:` appears exactly once per step, so the number of
+  `reactivecircus/android-emulator-runner` lines *is* the number of emulator
+  steps (26 today). Not a floor, an equality.
+* **set coverage** — every workflow carrying an emulator/simulator marker must
+  contribute at least one counted step, reported by filename.
+* **set coverage for drives** — same argument one level down, so a broken
+  `is_drive_body()` cannot leave C1/C2/C4 silently asserting nothing.
+
+Full-line comments are stripped first, exactly as the extractor strips them from
+step bodies: a commented-out `uses:` line would otherwise read as a lane the
+extractor had lost, and a guard that reds on a correct repo gets deleted rather
+than fixed. `repo-guards.yml`'s hermetic `--self-test` invocations carry the same
+marker strings and are excluded for the same reason.
+
+Six hermetic fixtures (18 cases total, up from 12), and the check was
+mutation-tested in both directions: neutering any of the three layers, dropping
+either file-set accumulator, or removing the comment stripping is caught by the
+self-test ALONE — no real repo needed. Breaking `is_emulator_step`,
+`is_simulator_body` or `is_drive_body` against the real tree is caught too, each
+naming the lanes that went dark. 12 hermetic fixtures, each a lane shape that
 actually occurred here; both it and the wrapper are mutation-tested.
 
 *Not addressed, deliberately.* The iOS poll `e2e_combined` attempt cap (30m) sits
@@ -983,8 +1071,9 @@ watch-item rather than a change without a failure to justify it.
 
 
 **A6 — the premise held, and the evidence is stronger than the item claimed.**
-`e2e-ios.yml:153,173` are the two `max_attempts: 2` lines, and neither step (nor
-`e2e-profile.yml`'s iOS job, a **third** retry site the item missed) sets
+`e2e-ios.yml:181,211` are the two `max_attempts: 2` lines, and neither step (nor
+`e2e-profile.yml`'s iOS job, a **third** retry site the item missed — five sites
+today, all narrowed the same way) sets
 `retry_on`, so `nick-fields/retry`'s default `any` applied: every non-zero exit
 was retried, a genuine assertion failure exactly like a simulator that never
 launched.
@@ -1034,8 +1123,8 @@ outer-timeout SIGKILL, an unparseable verdict — makes attempt 2 exit immediate
 with the original code. Fails closed: absence of evidence is not evidence of a
 flake, which is A4's lesson pointed the other way.
 
-*Gated by two `--self-test`s in `repo-guards.yml`* (13 predicate + 8 gate + 2
-recording fixtures; 4 watchdog fixtures). The watchdog set drives the REAL
+*Gated by two `--self-test`s in `repo-guards.yml`* (19 predicate + 8 gate + 2
+recording fixtures; 7 watchdog fixtures). The watchdog set drives the REAL
 watchdog against a stubbed process and then hands its output to the REAL
 classifier, so the marker one writes and the marker the other requires cannot
 drift apart. Mutation-tested: 16 of 18 mutations are caught, and the 2 survivors
@@ -1077,15 +1166,52 @@ PID column of `logcat -v threadtime` is enough).
 
 | # | Scenario | Mechanism | Est. |
 |---|---|---|---|
-| B1 | FGS-with-live-foreground (catches P0-1) — **IMPLEMENTED + FIRST RUN 2026-08-02**, `e2e-fgs-publish` lane. **P0-1 REPRODUCED** (see below) | in-drive lifecycle pause, then: `Initialized (… locationSharing=true)` present (positive Rule-14 oracle, not an absence check), `onStart FAILED` absent, `Published to N/…` N≥1 **parsed and windowed to after the pause**, and publishing PID == handoff PID | ~5m |
+| B1 | FGS-with-live-foreground (catches P0-1) — **IMPLEMENTED 2026-08-02**, `e2e-fgs-publish` lane. **P0-1 was REPRODUCED on the first run**; green since (CI 31216078806, 2026-08-07) | in-drive lifecycle pause, then: `Initialized (… locationSharing=true)` present (positive Rule-14 oracle, not an absence check), `onStart FAILED` absent, `Published to N/…` N≥1 **parsed and windowed to after the pause**, and publishing PID == handoff PID | ~5m |
 | B2 | **Background delivery assertion — IMPLEMENTED 2026-08-03.** The premise held exactly; the prescribed *mechanism* was not needed — see below | the lane's cold worker now arms the `ws://` opt-in through a CI-only WorkManager dispatcher that delegates to the production wake body, and `M7_REQUIRE_DECRYPT=1` is set in the workflow | M |
 | B3 | Android real GPS — **IMPLEMENTED 2026-08-03**, `e2e-real-gps` lane. **The premise was HALF FALSE: three of the four mechanisms already existed in B1; the missing piece was the ORACLE — see below** | no `locationServiceProvider` override; `pm grant` verified through `dumpsys package`; `adb emu geo fix` on a re-issue loop; and the part nothing else did — a SEPARATE peer decrypts the kind-445 and its coordinates are compared numerically against the injection within 1e-5 | ~10m |
 | B4 | iOS real GPS — **IMPLEMENTED 2026-08-03**, `e2e-ios-real-gps` lane. **The premise HELD; two corrections to the ordering and the cadence it implies — see below** | `simctl privacy grant location` + `simctl location set`, in the only order that works (build → install → grant → seed → drive, with `HAVEN_E2E_IOS_SKIP_UNINSTALL=1`), both subcommands probed for support rather than assumed; the drive asserts a peer's decrypted coordinates against the seed within 1e-5 and prints a terminal `[b4] PEER_DECRYPT_MATCH` the shell requires | ~15m |
 | B5 | Permission revocation mid-session — **IMPLEMENTED 2026-08-03**, `e2e-permission-revocation` lane. **The premise held, but the item's own mechanism ENDS the session it wants to observe — see below** | `pm revoke` (+ `set-permission-flags user-fixed`), VERIFIED via `dumpsys package`, issued under a backgrounded drive; then a SECOND drive of the same target against the same install, because the revoke kills the app process. Absence is proven off the RELAY: a diff over kind-445-with-`expiration` event ids, polled across a bounded window | ~30m |
 | B6 | Location provider toggle — **IMPLEMENTED 2026-08-03**, `e2e-location-provider-toggle` lane. **The item's claim was HALF wrong; the app does NOT surface the disabled state — see below** | `cmd location set-location-enabled false` mid-drive (the drive is backgrounded and toggled underneath, since the subject is one continuous session), then back on | ~25m |
 | B7 | iOS WhenInUse vs Always — **IMPLEMENTED 2026-08-03**, `e2e-ios-auth-tier` lane. **The obvious framing of this item was INVERTED — see below** | one drive target run twice on one sim: `simctl privacy grant location-always` then `grant location`; each run reads the tier back through the production `MethodChannel` bridge and asserts the honest per-tier copy + continued background publishing; the shell then requires the two runs to have observed DIFFERENT tiers | ~35m |
-| B8 | Clock jump ±6h — **IMPLEMENTED 2026-08-03**, `e2e-clock-skew` lane. **The premise HELD and the app is defective in both directions — see below** | `adb root` + a pinned `auto_time`, then a shell servo that fulfils `[b8] REQ_CLOCK` requests the drive emits, with an adb read-back per jump; the drive publishes and receives across +6h / −6h / restore and asserts relay acceptance, peer decrypt, and cursor-anchored catch-up reach | ~30m |
+| B8 | Clock jump ±6h — **IMPLEMENTED 2026-08-03, RE-SCOPED 2026-08-05**, `e2e-clock-skew` lane. **The premise HELD and the app was defective in both directions — see below** | `adb root` + a pinned `auto_time`, then a shell servo that fulfils `[b8] REQ_CLOCK` requests the drive emits, with an adb read-back per jump; the drive GATES the two skew SIGNALS (typed `DeviceClockRejected`, two-member in-ciphertext corroboration) and RECORDS the delivery cost as evidence. It does **not** assert relay acceptance or peer decrypt: a NIP-40-enforcing strfry refuses both skew directions at ingest, so there is no accepted event to measure | ~30m |
 | B9 | Network loss/reconnect — **IMPLEMENTED 2026-08-03**, `e2e-network-reconnect` lane. **The item's MECHANISM does not exist; the premise it stands on HELD — see below** | `cmd connectivity airplane-mode enable` (device-wide, read back through `settings get global airplane_mode_on`) + a host-side iptables REJECT of the relay port for immediacy, both applied under a backgrounded drive; the drive proves the outage with its own in-process WebSocket probe and asserts a PEER location published after the reconnect is DECRYPTED (new coordinates, not presence) | ~25m |
+
+**Lane status 2026-08-07.** All nine lanes are wired into the PR orchestrator
+(`ci.yml:168, 180, 192, 220, 234, 249, 261, 274`, plus `e2e-background-catchup.yml:157`)
+and every one was `success` in CI run 31216078806: `e2e_fgs_publish`,
+`e2e_background_catchup`, `e2e_real_gps`, `e2e_ios_real_gps`,
+`e2e_permission_revocation`, `e2e_location_provider_toggle`, `e2e_ios_auth_tier`,
+`e2e_clock_skew`, `e2e_network_reconnect`. Every `--self-test` is invoked from
+`repo-guards.yml`; none is orphaned. Several findings below still read as
+though B2, B6 and B8 are unproven — that was the 2026-08-03 state.
+
+**Also landed in this workstream: the publish-timestamp correlation fix.**
+Parallel multi-circle publishing put one `created_at` on every circle's
+kind-445, which a relay reads as "these circles share a member" without
+decrypting anything. `haven/lib/src/services/publish_stagger.dart` spaces them
+by a CSPRNG gap — `kPublishStaggerMinGap` 2 s (`:72`), `kPublishStaggerMaxGap`
+9 s (`:75`), `kPublishStaggerMaxSpread` 30 s (`:78`) — and shuffles per-circle
+order. Wired into the foreground path at
+`providers/location_sharing_provider.dart:249-256` (which carries the
+`NEVER restore Future.wait here` comment) and into the Android **foreground
+service** at `services/background_location_task.dart:206, 938, 950, 985, 994` —
+`flutter_foreground_task`'s `TaskHandler`, NOT WorkManager. Pinned by
+`test/services/publish_stagger_test.dart`, which asserts
+`kPublishStaggerMaxSpread < kStreamPositionMaxAge` (`:142`) so the stagger can
+never outlive the freshness window it publishes into.
+
+**Two guards this workstream produced, named here so they are findable:**
+`scripts/ci/check_no_event_timestamp_cursor_advance.sh` (`repo-guards.yml:349`)
+fails the build if any sync-cursor advance is derived from an inbound event's
+`created_at`, or if any FFI entry point raises a cursor at all;
+`scripts/ci/check_clock_skew_policy_parity.sh` pins the Dart mirrors
+`kClockSkewAlertThreshold` 120 s and `kClockSkewTotalLossThreshold` 288 s
+(`constants/location.dart:231`, `:207`) against `CLOCK_SKEW_ALERT_THRESHOLD_SECS`
+/ `TOTAL_LOSS_SKEW_SECS` (`relay/clock_skew.rs:111`, `:78`). The user-facing
+surface for the slow-clock verdict is
+`widgets/location/clock_skew_banner.dart`, rendered from
+`widgets/map/map_status_banners.dart:82` behind `LocationAccessBanner` so the
+two never stack.
 
 **B9 — `adb emu network disable/enable` IS NOT A COMMAND.** The emulator
 console's `network` takes exactly four subcommands — `status`, `speed`,
@@ -1110,9 +1236,12 @@ Three independent mechanisms can restore live receive, spanning two orders of
 magnitude:
 
 1. the relay pool's own reconnect. `build_engine_client`
-   (`haven-core/src/relay/live_sync/session.rs`) takes `RelayOptions::default()`
-   — `reconnect: true`, `DEFAULT_RETRY_INTERVAL` 10 s adapting to
-   `MAX_RETRY_INTERVAL` 60 s — and `post_connection` calls `resubscribe()`,
+   (`haven-core/src/relay/live_sync/session.rs:64`) builds the client from
+   `RelayPoolOptions::default()` / `ClientOptions::default()` and adds every
+   relay with a bare `client.add_relay(...)` (`:485`, `:1045`), so each relay
+   carries `RelayOptions::default()` — `reconnect: true`,
+   `DEFAULT_RETRY_INTERVAL` 10 s adapting to `MAX_RETRY_INTERVAL` 60 s — and
+   `post_connection` calls `resubscribe()`,
    which re-sends every stored filter VERBATIM (same subscription id, same
    `since`), so the relay replays whatever landed during the gap.
    `should_resubscribe` returns true after a drop because
@@ -1201,13 +1330,13 @@ Two things came out of it beyond the assertion itself:
   default 240 s; measured 11–63 s across six 2026-08 runs) and fails with that
   reason named, so a slow run can never pass as a delivered one.
 
-Not yet observed green: this lane needs the emulator, so the assertion's first
-real exercise is its next CI run.
+First observed green 2026-08-05 (CI 30980908814) with `M7_REQUIRE_DECRYPT=1`,
+and green on every run since (31075503390, 31216078806).
 
 **B3 — the premise was HALF FALSE, and the half that was missing is the
 ORACLE, not the plumbing. IMPLEMENTED 2026-08-03.** Read against the tree, three
 of the four mechanisms this item prescribes were ALREADY in the B1 lane
-(`run-b1-fgs-publish.sh` + `b1_fgs_publish_test.dart`): it declines the
+(`run-b1-fgs-publish.sh` + `b1_fgs_live_foreground_test.dart`): it declines the
 `locationServiceProvider` override, it `pm grant`s the location permissions, and
 it seeds `adb emu geo fix`. Writing B3 as specified would have re-plumbed all
 three and added nothing.
@@ -1259,7 +1388,7 @@ pinned by hermetic `--self-test` fixtures in repo-guards.
 **B4 — the premise HELD; two corrections to the mechanism the item implies.
 IMPLEMENTED 2026-08-03.** Unlike B3, this one was true as written. Every iOS
 scenario overrides `locationServiceProvider` with `FakeLocationService`
-(`e2e_combined.dart:475` and `:5171`, `e2e_profile_sharing.dart:706`), and
+(`e2e_combined.dart:475` and `:5172`, `e2e_profile_sharing.dart:706`), and
 `run-ios-sim-scenario.sh`'s own header says so — "No native location-permission
 grant … so CLLocationManager is never touched". On iOS the "GPS fix" was a Dart
 constant, and the authorization path, `AppleSettings` and the simulator location
@@ -1325,7 +1454,7 @@ against correct code:
 * A CLLocationManager session started while foregrounded with
   `allowsBackgroundLocationUpdates = true` and the `location` UIBackgroundMode
   declared **keeps delivering under When-In-Use**; the blue status-bar indicator
-  is the price. `MapShell._onPaused()`'s iOS branch (`map_shell.dart:957-1030`)
+  is the price. `MapShell._onPaused()`'s iOS branch (`map_shell.dart:1049`, branch at `:1111`)
   keeps the per-circle scheduler and the motion trigger running purely on
   `shouldKeepPublishingWhilePaused(backgroundSharingEnabled, isIOS)` — the tier
   is never consulted, deliberately, and `geolocator_location_service.dart:186-199`
@@ -1356,7 +1485,7 @@ the discrimination gate satisfied while nothing was proved about the copy or the
 background publish. The shell now also requires both terminal proofs —
 `[b7] COPY_OK` and `[b7] BACKGROUND_PUBLISH_OK`, **one per tier log** — and says
 in its failure message that a rc-0 drive missing them is a body that never ran,
-not an assertion that fired (21 hermetic `--self-test` fixtures in repo-guards
+not an assertion that fired (24 hermetic `--self-test` fixtures in repo-guards
 pin all of it). Not provable on a hosted runner, and still owner-checklist items:
 real background delivery on hardware, an actual SLC or BGTask fire.
 
@@ -1364,12 +1493,12 @@ real background delivery on hardware, an actual SLC or BGTask fire.
 to observe.** The item's claim — that `pm revoke` "reaches the
 denied/deniedForever branches the fake can never produce" — is correct about
 the gap: those branches
-(`geolocator_location_service.dart:267-277`, `:316-326`) are exercised only by
+(`geolocator_location_service.dart:410-448`, `:726-727`, `:751-754`) are exercised only by
 a mocked `GeolocatorWrapper` in
 `haven/test/services/geolocator_location_service_test.dart`, and every E2E
 scenario injects `FakeLocationService`, whose `checkPermission()` is a
 hardcoded `LocationPermissionStatus.always`
-(`e2e/_lib/fake_location_service.dart:57`). Three things the item did not
+(`e2e/_lib/fake_location_service.dart:58-59`). Three things the item did not
 anticipate shaped the lane:
 
 * **`pm revoke` KILLS the app process, so "mid-session" is over the moment it
@@ -1388,13 +1517,15 @@ anticipate shaped the lane:
   not redden the lane.
 * **THE STALE-FIX CACHE BYPASSES THE PERMISSION GATE TOO — same root cause as
   B6's first finding, now confirmed on the permission path.**
-  `getCurrentLocation()` returns the cached `_lastStreamPosition` at
-  `geolocator_location_service.dart:233` whenever the cached GPS **fix time**
-  is within `kStreamPositionMaxAge` (**168 s**) — *before* it consults
-  `isLocationServiceEnabled()` (`:258`) **and before it consults
-  `checkPermission()` (`:266`)**. Nothing clears that cache on permission loss:
-  `clearCachedPosition()` is called only on logout and on background-sharing
-  opt-out (`:163`, `location_provider.dart:47`). So wherever the process
+  `getCurrentLocation()` **returned** the cached `_lastStreamPosition` whenever
+  the cached GPS **fix time** was within `kStreamPositionMaxAge` (**168 s**) —
+  *before* it consulted `isLocationServiceEnabled()` **and before it consulted
+  `checkPermission()`**. Nothing cleared that cache on permission loss:
+  `clearCachedPosition()` was called only on logout and on background-sharing
+  opt-out (`location_provider.dart:47`). *(Pre-fix offsets deliberately omitted
+  — the file has since drifted ~340 lines. Post-fix the gate
+  `_ensureAccessOrThrow()` runs at `geolocator_location_service.dart:552`, ahead
+  of the cache read at `:572`.)* So wherever the process
   survives losing location access, Haven keeps publishing the user's last known
   position for up to 168 s after the permission is gone. On Android `pm revoke`
   masks this — the cache is process-local and dies with the kill — which is
@@ -1448,12 +1579,14 @@ anticipate shaped the lane:
   ordering was reverted). The lane's windows were deliberately NOT tightened —
   they bound an ABSENCE, so a generous bound makes the assertion stronger and
   is the only thing that would still catch the regression.
-* **The publish path RE-PROMPTS.** `getCurrentLocation()` calls
-  `requestPermission()` whenever `checkPermission()` returns `denied`
-  (`:268`) — and on Android `checkPermissionStatus` can only ever return
-  `denied`, never `deniedForever`, without an Activity round-trip. So the first
-  periodic publish tick after a revocation raises the SYSTEM permission dialog
-  with no user gesture behind it. The lane pins `pm set-permission-flags ...
+* **The publish path RE-PROMPTS — but, since the fix, only while foregrounded.**
+  `_ensureAccessOrThrow()` calls `requestPermission()` when `checkPermission()`
+  returns `denied` AND `_foregroundActive` is true
+  (`geolocator_location_service.dart:410-425`); backgrounded it logs and fails
+  closed without prompting. On Android `checkPermissionStatus` can only ever
+  return `denied`, never `deniedForever`, without an Activity round-trip, so a
+  FOREGROUND publish tick after a revocation raises the SYSTEM permission dialog
+  with no user gesture behind it. A background tick can no longer do so. The lane pins `pm set-permission-flags ...
   user-fixed` to keep ACT 2 deterministic and RECORDS the read-back, so a
   missing flag presents as a named finding rather than a hang; the drive target
   bounds the probe and reports a `TimeoutException` as exactly this.
@@ -1473,37 +1606,45 @@ runtime permissions, so the revoke is re-applied and re-verified after it.
 
 **B6 — the premise held only halfway, and the other half is a live defect.**
 The item asks for a lane that "asserts the app stops publishing and surfaces
-the disabled state rather than failing silently". Read against the tree, Haven
-does the first and **not** the second:
+the disabled state rather than failing silently". Read against the tree **as
+found on 2026-08-03**, Haven did the first and **not** the second. Both halves
+were fixed the same day; the findings are kept because the lane was built
+against them:
 
 * **Stops publishing — yes, but not immediately.** `getCurrentLocation()`
-  serves the cached `_lastStreamPosition` whenever the cached GPS **fix time**
-  is within `kStreamPositionMaxAge` (= `kLocationPublishMaxInterval`, **168 s**)
-  and only *then* consults `isLocationServiceEnabled()`
-  (`geolocator_location_service.dart:233-263`). So for up to 168 s after the
+  served the cached `_lastStreamPosition` whenever the cached GPS **fix time**
+  was within `kStreamPositionMaxAge` (= `kLocationPublishMaxInterval`, **168 s**)
+  and only *then* consulted `isLocationServiceEnabled()` — the ordering the fix
+  reversed (`geolocator_location_service.dart:552` now precedes the cache read
+  at `:572`). So for up to 168 s after the
   user switches location off, Haven keeps publishing their last known position.
   No *new* information leaves the device, but the peers' "last seen" freshness
   keeps advancing for nearly three minutes after the user said stop. The lane
   MEASURES that tail (`PUBLISH_STOPPED tail=<S>s`) rather than assuming it, and
   only asserts "stopped" outside it — four consecutive zero-publish cycles.
-* **Surfaces the disabled state — NO. It fails silently.** Both listeners of
-  `locationStreamProvider` handle it with `next.whenData(...)`
-  (`map_page.dart:441-443`, `map_shell.dart:736-742`), which discards the
-  `LocationServiceDisabledException` the Android plugin raises from
-  `LocationManagerClient.onProviderDisabled`. The map's only error surface is
-  gated on `_obfuscatedLocation == null` (`map_page.dart:568`) — false in every
-  mid-session case, since a fix is already on screen. The publish paths swallow
-  the `LocationServiceException` into a `debugPrint` and return 0
-  (`location_sharing_provider.dart:246`,
-  `location_publish_scheduler_provider.dart:227`). Net effect: **location
+* **Surfaces the disabled state — NO. It failed silently.** Both listeners of
+  `locationStreamProvider` handled it with `next.whenData(...)` (in
+  `haven/lib/src/pages/map/map_page.dart` and `map_shell.dart`), which discards
+  the `LocationServiceDisabledException` the Android plugin raises from
+  `LocationManagerClient.onProviderDisabled`. Both call sites are now gone —
+  only the comments recording their removal remain (`map_page.dart:274`,
+  `map_shell.dart:865`). The map's only error surface was gated on
+  `_obfuscatedLocation == null` — false in every mid-session case, since a fix
+  is already on screen. The publish paths swallowed the
+  `LocationServiceException` into a `debugPrint` and returned 0. Net effect: **location
   sharing stops, the map keeps showing the last fix, and the user is told
   nothing.** The lane asserted the surfacing anyway and WAS expected red on that
   step — the B1 precedent: the red is the deliverable. It is no longer red; see
   the fix below.
 
-  **FIXED 2026-08-03.** A new `locationAccessProvider` owns detection and a new
-  `LocationAccessBanner` renders it from `_MapShellState.build`
-  (`map_shell.dart:1475`). Both `whenData` sites are gone.
+  **FIXED 2026-08-03.** A new `locationAccessProvider`
+  (`providers/location_access_provider.dart:180`) owns detection, and a new
+  `LocationAccessBanner` (`widgets/map/location_access_banner.dart:137`) renders
+  it through `MapStatusBanners` (`widgets/map/map_status_banners.dart:81`),
+  which `_MapShellState.build` passes to `MapShell.buildLayers` as
+  `statusBanners:` (`map_shell.dart:1570`, positioned at `:216-226`). Both
+  `whenData` sites are gone — only the comments recording their removal remain
+  (`pages/map/map_page.dart:274`, `map_shell.dart:865`).
 
   Three design points worth keeping:
 
@@ -1621,11 +1762,17 @@ has been wrong several times:
   (`haven-core/src/nostr/mls/manager.rs:338-343`,
   `haven-core/src/location/ttl.rs:80`) and the engine derives the NIP-40
   `expiration` as `inner_created_at + retention` for APPLICATION messages only.
-* The `since` cursor is real: `run_catchup_all_circles` advances the persisted
-  cursor to the **sender's** `created_at` (`catchup.rs:336-348`) and
-  `since_for_stream` re-derives the next REQ floor as
-  `cursor − GROUP_RESUBSCRIBE_BUFFER_SECS` (60 s), capped to `now`
-  (`cursor.rs:114-130`).
+* The `since` cursor is real, but — since the P0-5 fix — it is **not
+  event-derived**. `run_catchup_all_circles` advances the persisted cursor to
+  the fetch WINDOW's own local open time (`cursor_advance_ms`, `catchup.rs:234`
+  → `cursor::cursor_ms_for_window`, `cursor.rs:222`); an unapplied event's
+  `created_at` may only hold the advance BACK, never raise it
+  (`catchup.rs:23-25` states the contract verbatim). `since_for_stream`
+  (`cursor.rs:261-276`) re-derives the next REQ floor as
+  `cursor − GROUP_RESUBSCRIBE_BUFFER_SECS` (60 s, `cursor.rs:72`), capped to
+  `now`. *(As found on 2026-08-03 the cursor did advance to the sender's
+  `created_at`; findings 3 and its mirror below are written against that older
+  contract and are marked RESOLVED accordingly.)*
 * **Nothing in `haven-core` or `haven/lib` compares the device clock against
   any external reference.** The only clock-skew hardening in the tree is the
   reclaim backoff's backward-jump tolerance
@@ -1644,13 +1791,18 @@ each rather than documenting the current one:
    created_at + 228`, both from the skewed clock, so an event published 6 h
    behind carries an expiration ~6 h in the past *at the moment it is written*.
    A NIP-40-honouring relay may drop it, and a correctly-clocked peer's
-   `SessionManager::process_event` (`manager.rs:594-624`) discards it before
+   `SessionManager::process_event` (`manager.rs:633-641`) discards it before
    decryption on `RECEIVER_EXPIRATION_GRACE_SECS = 60`. The publisher still
    sees a successful OK-ack and reports success: the loss is total and
    indistinguishable from working.
-3. **A backdated event is below the `since` floor forever.** The cursor sits at
-   the newest applied `created_at` and the next window opens only 60 s below
-   it, so anything minted further back is outside **every** subsequent REQ.
+3. **A backdated event was below the `since` floor forever — RESOLVED by the
+   P0-5 cursor fix.** The cursor then sat at the newest applied `created_at`
+   and the next window opened only 60 s below it, so anything minted further
+   back was outside **every** subsequent REQ. It is now anchored on the fetch
+   window's local open time with unapplied events only holding it BACK, so a
+   backdated event is re-fetched rather than stranded — CI-enforced by
+   `scripts/ci/check_no_event_timestamp_cursor_advance.sh`
+   (`repo-guards.yml:349`).
    The Rule-12 saturation guard does not cover this — the window is never full,
    it simply never contains the event — and the same shape is reachable
    without any clock jump, from a peer whose clock merely runs behind. A
@@ -1658,14 +1810,19 @@ each rather than documenting the current one:
    epoch chain, which is the exact consequence `catchup.rs`'s own doc gives as
    the reason saturation must hold the cursor.
 
-The mirror of (3) is analysis-only in the lane and worth recording: a
-*future-dated* peer event would advance the cursor past `now`
-(`contiguous_prefix_cursor_ms` applies no ceiling), after which
-`since_for_stream`'s `cap_timestamp_to_now` pins every subsequent floor at
+The mirror of (3) was analysis-only in the lane and is **also RESOLVED**: a
+*future-dated* peer event would then have advanced the cursor past `now`, after
+which `since_for_stream`'s `cap_timestamp_to_now` pins every subsequent floor at
 `now` for the duration of the skew — i.e. catch-up degrades to "only what is
-published after each fetch". The lane cannot exercise it because strfry
-refuses the ±6 h write in the first place (finding 1), so it is left as a
-derivation rather than an assertion that cannot fail.
+published after each fetch". It can no longer happen: `cursor_ms_for_window`
+clamps through `cap_timestamp_to_now` (`cursor.rs:231`), and no advance is
+derived from an event timestamp at all. The lane could not exercise it in any
+case, because strfry refuses the ±6 h write in the first place (finding 1).
+
+*(The 2026-08-03 text named `contiguous_prefix_cursor_ms` as the function
+applying no ceiling. No such symbol has ever existed in this repo — it was a
+misremembered name, and is recorded here so a future reader does not go looking
+for it.)*
 
 **That mirror turned out to be the mild form of a SECURITY defect — see P0-5.**
 The cursor is derived from the inbound event's OUTER `created_at`, which is
@@ -1762,7 +1919,7 @@ is accepted and a refusal there would be a real, fixable regression.
 > unrecognised one, which classifies as null — still emits `[b8] FINDING` and
 > fails the lane. This keeps the regression-detecting power the decision above
 > wanted while removing the part that could never pass. It is a re-scope on new
-> evidence, not a relaxation to quiet a red lane; `run-b8-clock-skew.sh:88-89`
+> evidence, not a relaxation to quiet a red lane; `run-b8-clock-skew.sh:104-105`
 > and CLAUDE.md Testing Requirement #5 both forbid the latter.
 
 **OWNER DECISION — TAKEN 2026-08-04: re-scoped to the SIGNALS.** The lane now
@@ -1839,9 +1996,9 @@ clamps the catch-up REQ to 500 and `fo.events.len() >= 512` can never be true
 against the hermetic relay — P0-4's saturation detection is untestable in CI as
 configured. Belongs to P0-4, not B8.
 
-Also: make the Phase-B re-arm failure fatal (`run-m7-background-catchup.sh:696-701`
+Also: make the Phase-B re-arm failure fatal (`run-m7-background-catchup.sh:818-821`
 is a non-fatal NOTE), and remove the `|| true` from `strfry_conn_count` /
-`strfry_line_count` (`:552-559`) — an unreadable container currently makes the
+`strfry_line_count` (`:618-625`) — an unreadable container currently makes the
 silence proof pass vacuously as `0 == 0`.
 
 **The `|| true` is the smaller half of that defect — CONFIRMED against a real
@@ -1927,13 +2084,15 @@ true Doze deferral timing, real GPS radio behaviour.
 ## Workstream C — relay-observer privacy oracle
 
 Today's `_assertWirePrivacyInvariants`
-(`haven/integration_test/e2e/e2e_combined.dart:4225-4408`) is a **forbid-list by
-explicit design** (`:4336-4338`) scoped to one circle's kind-445 stream. A new
+(`haven/integration_test/e2e/e2e_combined.dart:4226-4409`) is a **forbid-list by
+explicit design** (`:4334-4341`) scoped to one circle's kind-445 stream. A new
 kind, a new tag, or an MDK-introduced field passes silently.
 
 It is also **silently degrading**: application kind-445s carry
-`expiration = created_at + 228`, both hermetic relays enforce NIP-40, and the
-oracle's `collectN` runs late in a 720s scenario — so on slow runs the location
+`expiration = created_at + 228`, the Android lane's strfry enforces NIP-40 (the
+iOS lane's `haven-local-relay` does NOT — it retains every event for the process
+lifetime, `tooling/e2e/local-relay/src/main.rs`), and the oracle's `collectN`
+runs late in a 720s scenario — so on slow runs the location
 events are already evicted and the ephemeral-key and no-`p`-tag checks shrink to
 the commit subset while `isNotEmpty` stays satisfied by commits.
 
@@ -1941,10 +2100,10 @@ the commit subset while `isNotEmpty` stays satisfied by commits.
 |---|---|
 | C1 | **Recording WebSocket proxy** in `tooling/e2e/local-relay` — NDJSON of every frame both directions, with `wire_seq`/`conn_id`. Not in-relay hooks: those see only EVENT and REQ, and strfry vs `LocalRelay` differ. Immune to NIP-40 eviction because it records what was *sent*. Fail open |
 | C2 | Meta-floors: journal non-empty; ≥1 event per participant pubkey; sentinel-anchored snapshot so background wakes can't race the read |
-| C3 | Closed kind set over de-duplicated lines. Use a **set, never a multiset** — counts are nondeterministic. Kinds 0/5/10051 allowed-but-not-required |
+| C3 | Closed kind set over de-duplicated lines. Use a **set, never a multiset** — counts are nondeterministic. Kinds 0/5 allowed-but-not-required. 10051 is **forbidden**, not allowed: its only live emit path is a one-shot empty retraction on a pre-Dark-Matter migrating install, which no lane is, and allowing it would loosen a check `e2e_combined.dart:4354` already makes (recorded in `wire_allowlist.json` `_disagreements`) |
 | C4 | Per-kind `observed ⊆ allowed` **and** `required ⊆ observed` — not exact set equality, which false-reds on absent optional tags. Day-one allow-list is recorded in the audit notes |
 | C5.1 | **No two 445s with different `h` share a `created_at`** — the peeler binds outer to inner timestamp, so a relay learns two circles share a member. Live leak |
-| C5.2 | **REQ-filter allow-list** — kind-3 is banned as an event, then the roster walks out in `Filter::authors([...])` from `profile/fetch.rs`. Same information, different frame type |
+| C5.2 | **REQ-filter allow-list** — kind-3 is banned as an event; a multi-author `Filter::authors([...])` would re-create the same social-graph disclosure as a different frame type. Currently ABSENT from the tree (`profile/fetch.rs` uses singular `Filter::author`, one relay per author) and banned by `check_profile_privacy_boundaries.sh:628-644`; the wire allow-list is the regression tripwire, not a live-leak finding |
 | C5.3 | 445 tag-names ∈ {`h`}, {`h`,`expiration`} — the MDK-bump tripwire |
 | C5.4 | No `g`/`alt` tag on any kind — guards `haven-core/src/nostr/event.rs:203-227`, a live-but-unreachable builder emitting a truncated geohash |
 | C5.5 | 1059 tag-set == {`p`} — guards the orphaned `giftwrap::wrap_welcome`, still `pub`, which stamps a 30-day expiration |
@@ -1956,74 +2115,111 @@ the commit subset while `isNotEmpty` stays satisfied by commits.
 nothing about a hostile relay withholding, reordering, or forging inbound events
 (eclipse, welcome suppression, stale-KeyPackage serving).
 
-### Status 2026-08-07 — instruments BUILT and self-verifying; NOT YET WIRED
+### Status 2026-08-10 — WIRED into both lanes; not yet PROVEN on real traffic
 
-C1–C7 are implemented and every self-test is green. The contract they share is
-published at `docs/WIRE_JOURNAL.md`; `tooling/e2e/wire_allowlist.json` is the
-day-one allow-list, linted by both consumers.
+C1–C7 are implemented, wired, and green. The contract they share is published at
+`docs/WIRE_JOURNAL.md`; `tooling/e2e/wire_allowlist.json` is the day-one
+allow-list, linted by both consumers.
 
 | Item | Artefact | Self-test |
 |---|---|---|
 | C1 | `tooling/e2e/local-relay/src/{proxy,frame,journal,summarize}.rs`, `bin/wire_proxy.rs` — listens on 7788, forwards to 7777 | 77 Rust tests |
 | C2–C4 | `tooling/e2e/ci/check-wire-journal.sh` | 116 fixtures |
-| C5.1–C5.6 | `tooling/e2e/ci/check-wire-correlation.sh` | 79 fixtures, `MIN_CASES=71` |
-| C6 | `haven/integration_test/e2e/_lib/wire_canaries.dart`, CLI `tooling/e2e/ci/check-wire-canaries.dart` | 85 Dart tests |
-| C7 | `tooling/e2e/ci/setup-network-guard.sh` + `egress-allowlist.txt`, **observe mode** | green |
-| — | `scripts/ci/check_wire_proxy_test_only.sh` — the proxy may never be reachable from app code | green |
+| C5.1–C5.9 | `tooling/e2e/ci/check-wire-correlation.sh` | **134 fixtures**, `MIN_CASES=134` (pinned exactly) |
+| C6 | `haven/integration_test/e2e/_lib/wire_canaries.dart`, CLI `tooling/e2e/ci/check-wire-canaries.dart` | 85 Dart tests, 177 live terms |
+| C7 | `tooling/e2e/ci/setup-network-guard.sh` + `egress-allowlist.txt`, **observe mode** | wired on e2e-android, e2e-profile, e2e-location-provider-toggle |
+| — | `scripts/ci/check_wire_proxy_test_only.sh` — the proxy may never be reachable from app code (NEGATIVE half) | green |
+| — | `scripts/ci/check_wire_oracle_lane_reachable.sh` — the oracles must be REACHED by a lane (POSITIVE half) | 40 fixtures |
 
-**The load-bearing caveat: nothing has observed real traffic.** All three
-oracles have only ever seen hermetic fixtures. Lane wiring is deliberately
-deferred — see the four coordinated `e2e-android.yml` edits below — because
-wiring a *lying* instrument into CI produces confident green results that mean
-nothing. The review fleet found the instrument defective in two directions
-before any of it ran (the proxy dropped traffic it had recorded as sent; the
-canary printed the secret it protects), which is the argument for that ordering,
-not against it.
+**Wiring, 2026-08-10.** Both `e2e-android.yml` and `e2e-ios.yml` point the app at
+the proxy on 7788, mint ONE sentinel token and thread the same string through the
+APK build, the drive and the host-side oracles. `e2e_combined.dart` emits the
+sentinel from a final `testWidgets` (not `tearDownAll`, whose failures never
+reach the map `integrationDriver()` inspects) and plants three canaries with
+plant proofs. Android runs all three oracles; iOS runs the journal oracle and C6.
 
-**What the review round changed, worth carrying forward:**
+**C5.7/C5.8/C5.9 were added** to carry the Security Rule 2 wire checks that until
+now lived only inside `_assertWirePrivacyInvariants`: fresh ephemeral key per
+kind-445, no real MLS group id on the wire, no `p` tag on a 445. **The in-drive
+assertion is deliberately KEPT, not replaced** — nothing has yet proven the
+oracles read real traffic correctly, and porting a check while deleting its only
+other implementation leaves a window where neither is proven. Delete it only
+after a green journal shows the oracle equivalent firing.
 
-- **The proxy dropped traffic it had recorded as sent.** Teardown discarded
-  queued c2r frames after journalling them, so the journal over-claimed. Now a
-  bounded `TEARDOWN_DRAIN` (5 s) plus a `Ledger{claimed, delivered}` and an
-  explicit `conn_error` **retraction record** naming the discard count — the
-  journal is allowed to be incomplete, never allowed to lie about it.
-- **The canary printed the value it protects.** Two independent stops, each
-  proven load-bearing by its own mutation: a *shape* check on `FrameRef.verb`
-  (so novel verbs stay scanned) and a value-aware scrub of leaked terms from the
-  location string. Neither is redundant — `lat/f64-be/hex-upper` is 16 chars of
-  `[A-Z0-9]`, a well-formed verb to any shape test, and only the scrub catches it.
-- **Coverage claims must be independent of the thing they measure.** C6's
-  ledger was `terms ∪ dropped`, both from the expander — deleting an encoding
-  made the test pass with *less* work. Replaced by a hand-written
-  `CanaryEncodingLedger` reconciled in five directions, with a disagreement
-  filed as **UNUSABLE** (not a leak, not a pass). 74 → 177 live terms.
-- **Vacuity is the default failure mode of an oracle, not an edge case.** C6's
-  controls reported *clean* with no canary planted and for carriers past the
-  evidence bound. Both are now META-FLOOR, checked before any carrier check.
-- **Send-side assertions must be scoped to `dir=="c2r"`.** Inbound traffic
-  answering a send-side question is a false red. What the oracle uniquely knows
-  about inbound is now printed as `advisory (NOT asserted)` rather than
-  discarded.
+**What is NOT asserted, declared out loud:**
 
-**The jq `index(.)` trap is repo-wide, not per-file.** `index`'s argument is
-evaluated against `index`'s own input, not the enclosing record. It has now been
-hit and caught by mutation in three separate files by three separate authors.
-Treat it as a review checklist item for any new jq oracle.
+* **C5.8 (real MLS group id absent from the wire).** Asserting a value is absent
+  requires knowing the value, and it cannot be derived from the journal — its
+  absence there is the assertion. It must NOT travel by the drive log, which is
+  uploaded with 14-day retention AND is C6's `--manifest` input;
+  `wire_canaries.dart:117-131` records that standing decision. Both lanes
+  therefore pass `--mls-group-id-not-asserted "<reason>"`, which prints
+  `C5.8 NOT ASSERTED` on EVERY run and drops the success banner to
+  "clean on EIGHT of nine … NOT evidence for Security Rule 4". It is a visible
+  token in the workflow that must be DELETED when the channel lands. It is **not**
+  a conditional check: a conditional would go green claiming Rule 4 held.
+* **C5 on the Android poll path.** C5.1 needs an *application* kind-445 from two
+  distinct groups; on the poll path every publish targets one circle, because the
+  two-circle scenario lives in the M11 group behind `if (!liveSyncEnabled) return;`.
+  The arm is gated on `inputs.live_sync` and announces the skip.
 
-**Outstanding before C can claim anything:**
+**The load-bearing caveat: the oracles have still never read a journal produced
+by a real run.** Everything above is green from hermetic fixtures. The first CI
+run is the first evidence, and the allow-list has never been calibrated against
+real traffic — an early rc 1 is more likely an allow-list gap than a privacy
+finding, which is why the lane text distinguishes "missing REQUIRED" from
+"unexpected OBSERVED".
 
-1. **Lane wiring** — four coordinated edits to `e2e-android.yml`, each of which
-   reds the lane if the others are missing: relay URL `:7777`→`:7788` (line 68);
-   a `start-wire-proxy.sh` step between lines 205 and 232; a sentinel-emitting
-   `testWidgets` in `e2e_combined.dart`; post-drive oracle steps after line 309
-   plus `stop-wire-proxy.sh` under `if: always()`.
-2. **A reachability guard for the oracle chain** — `check_wire_proxy_test_only.sh`
-   is the negative half; there is no positive counterpart proving the oracles
-   actually run. Precedent: `announcement_keys_reachable_test.dart`'s
-   equality-pinned `_knownUnwired`.
-3. **`_assertWirePrivacyInvariants` disposition — split, do not delete.** Its
-   ephemeral-key / MLS-group-id / no-`p`-tag checks (Security Rule 2 *on the
-   wire*) are not yet carried over, and C5.1's argument depends on them.
+**Outstanding**
+
+1. **The MLS group-id channel.** Sanctioned design: a second intercepted proxy
+   control verb carrying the hex id, written to a per-instance host-side sidecar
+   that is never forwarded, never journalled, never uploaded; the lane reads it
+   into `--mls-group-id`. Then delete the not-asserted tokens. Extend
+   `check_wire_proxy_test_only.sh`'s upload ban to `/tmp/haven-wire-*` in the
+   same change.
+2. **`--exclude-conn` on both lanes.** Bob/Carol/Dave are in-process
+   `SyntheticUser` FFI peers publishing real 30443/1059/445 through the same
+   proxy, and `TestRelay` publishes its own probes — so `--min-distinct-publishers 2`
+   can be satisfied **entirely by non-UI actors**. A run in which the production
+   Flutter app transmitted nothing would report CLEAN. The proxy returns the
+   emitting `conn_id` in the sentinel ack and `e2e_combined.dart` already prints
+   it. This is the largest remaining "passes but proves less than it claims".
+3. **`_assertWirePrivacyInvariants` trim**, after item 1 and a green journal.
+4. **Kinds 10002/10050** are `required: false` in the allow-list pending the
+   first real journal (`wire_allowlist.json` `_followups`).
+5. **C5.6 is structurally vacuous in these lanes** — one endpoint exists, so
+   containment cannot fire. Honest to keep (the pool is the true configuration),
+   but the lane must not be read as proving containment; the two-relay proof is
+   `e2e-relay-customization.yml`.
+6. **iOS C5** stays unwired even on live-sync; revisit with item 1.
+
+**Review-fleet lessons, 2026-08-10** — five reviewers over the wiring round:
+
+* **A success banner is an assertion.** The C5.8 opt-out left the clean line
+  still reading "all nine … hold", three lines under an advisory saying C5.8 was
+  never scanned. The line a reader greps to conclude "green ⇒ the rule held" must
+  never name an invariant that did not run.
+* **A precondition must be scoped like the assertion it guards.** C5.7's floor
+  was discharged by an identity key seen in EITHER direction while the assertion
+  is send-side only, so an inbound peer keypackage satisfied it while the local
+  account's key was never in the comparison — a 445 signed by the local identity
+  key reported CLEAN.
+* **An escape hatch needs its own fixture.** The first banner fix shipped without
+  one and survived mutation M6 — the same defect it was repairing.
+* **A guard's fixtures are workflow-shaped, and other guards read them.** A new
+  guard's heredoc fixtures tripped `check_live_sync_define_declared.sh`. The
+  repair over-stripped three ways (comments processed after the awk; unanchored
+  `match()` sliding into `<<<` and `1 << shift`) and failed OPEN on a
+  receive-path invariant. When stripping is ambiguous, leave it unstripped: a
+  false red is seen, an over-strip is a silent green.
+* **Set-membership pins leak at the population edge.** `candidates` and `wired`
+  derived from the same text meant a lane leaving both simultaneously landed in
+  neither, exiting every check silently. The population now reads one call
+  deeper, as the link-4 check already did.
+* **An exact pin beats slack.** `MIN_CASES` sat 10 below the fixture count on a
+  self-refuting rationale (slack "for legitimately-skipped fixtures", one line
+  after "every case is unconditional"). Ten cases could be deleted silently.
 
 ---
 
@@ -2033,15 +2229,15 @@ Treat it as a review checklist item for any new jq oracle.
 |---|---|---|
 | 12 backpressure | **NONE** — constant referenced at 2 lines, tested nowhere | Fix P0-4, then: publish `limit+k`, assert cursor didn't advance past the batch's oldest and a second sweep delivers the rest |
 | 11 nonce | **NONE** (label half guarded; nonce half not) | Pure `haven-core` test using `encrypt_location`'s `event_json` — no relay. All 12-byte prefixes distinct, no fixed-prefix+counter shape, ≥28 decoded bytes. **Drop the uniformity assertion** (powerless at N≈30). Gets Rule 2 distinctness free |
-| 8 no raw errors | **NONE** | Dart lint test binding `catch (<ident>)`, flagging interpolation outside `debugPrint`/`assert`, allowlisting `${e.runtimeType}`. A literal `$e` grep is defeated by renaming the variable |
-| 14 single session | WEAK | Static: `newInstance` ⇒ `dispose()` same file. Runtime: B1 |
-| 5 retention | WEAK — test observes a policy *refusal*, not deletion | Pin `app_message_past_epoch_limit == 5` **and** `DEFAULT_MAX_PAST_EPOCHS == 5`; behavioural: ciphertext at epoch N decrypts at N+5, reports expired at N+6. **Not** an at-rest byte scan — SQLCipher always encrypts and no past-epoch exporter secret is persisted, so that check is doubly vacuous |
+| 8 no raw errors | WEAK — per-site redaction tests at ~5 call sites (`profile_service_test.dart:250`, `live_sync_resubscriber_test.dart:762`, `map_shell_detached_release_test.dart:116/265`, `nostr_subscription_service_test.dart:33`); no repo-wide lint | Dart lint test binding `catch (<ident>)`, flagging interpolation outside `debugPrint`/`assert`, allowlisting `${e.runtimeType}`. A literal `$e` grep is defeated by renaming the variable |
+| 14 single session | WEAK — `check_mls_session_single_owner.sh` (`repo-guards.yml:101`) already pins the three-opener set and the handoff latch; the open half is disposal | Static: `newInstance` ⇒ `dispose()` same file. Runtime: B1 |
+| 5 retention | WEAK — the behavioural half already exists (`mls_e2e_security_tests.rs:366`: an N+6 ciphertext does not decrypt), but the constants are unpinned (both appear only in comments, `nostr/mls/manager.rs:201-202`, `:962`) and the N+5 positive edge is untested | Pin `app_message_past_epoch_limit == 5` **and** `DEFAULT_MAX_PAST_EPOCHS == 5`; behavioural: ciphertext at epoch N decrypts at N+5, reports expired at N+6. **Not** an at-rest byte scan — SQLCipher always encrypts and no past-epoch exporter secret is persisted, so that check is doubly vacuous |
 | 3 444 unsigned | WEAK — type-level only; `UnsignedEvent` silently drops a stray `sig` | Assert the raw decrypted rumor JSON has no `"sig"` key |
 | 13 publish-before-apply | WEAK on send side (ack/sent distinction is correct; no test) | DI seam + table test {acked, NAK, timeout, throw} × 4 ops |
-| 6 no key logging | WEAK — scan allowlisted to 6 files, misses `background_location_task.dart` and all 47 Rust log sites | Repo-wide log-interpolation guard with inline `// log-scan-ok:` suppressions; make the `keyring_core`→Off filter platform-independent |
+| 6 no key logging | WEAK — the only enforcement is `tooling/e2e/ci/scan-logs-for-secrets.sh`: 7 secret-SHAPE patterns over CAPTURED RUNTIME logs, which are device-wide, so the FGS isolate IS covered. There is no source-level log-interpolation guard over the 58 `log::{debug,info,warn}!` sites in `haven-core/src` or the 33 in `rust_builder/src` | Repo-wide log-interpolation guard with inline `// log-scan-ok:` suppressions; make the `keyring_core`→Off filter platform-independent |
 | 7 zeroize | WEAK — hand-maintained 2-type whitelist, one type dead | Source-scanning test: secret-shaped field ⇒ `Zeroizing`/`ZeroizeOnDrop` |
-| 9 Dart secret lifetime | WEAK — `withFreshSecret` used at 1 of 4 sites | Lint test: `getSecretBytes()` ⇒ `withFreshSecret` or explicit `fillRange` |
-| 1 key separation | WEAK | *Positive* test: mint a real KeyPackage, assert `leaf.signature_key() != identity_pubkey`. (A negative equality `if` is near-tautological — the MLS key is Ed25519, engine-generated) |
+| 9 Dart secret lifetime | WEAK — `withFreshSecret` covers all 3 `CircleManagerFfi.newInstance` sites (pinned per-site by `identity_secret_scrub_test.dart:55`, which also asserts the helper really `fillRange`s at `:129`); the gap is ~7 other `getSecretBytes()` sites fetching into a bare unscrubbed local (`name_circle_page.dart:290`, `invitation_provider.dart:114`, `invitation_poll_status_provider.dart:272`, `nostr_profile_service.dart:116/138/185`) | Lint test: `getSecretBytes()` ⇒ `withFreshSecret` or explicit `fillRange` |
+| 1 key separation | WEAK — `p3a_…` (`mls_e2e_security_tests.rs:303`) asserts only that the identity key did not sign the 445 | A positive leaf-level test needs an MDK API exposing the leaf signature key; the existing test's own header records that `get_ratchet_tree_info` is gone and Haven no longer deps `openmls` directly, so **first identify the API**, then assert `leaf.signature_key() != identity_pubkey`. Until then the on-wire `assert_ne!` plus the mandatory `account-identity-proof.v2` leaf extension is the whole gate |
 
 Also: `haven/rust_builder` has no `clippy.toml` yet mints both SQLCipher keys —
 copy `haven-core`'s `thread_rng` ban.
@@ -2068,8 +2264,10 @@ Two tiers. **The AI can only fail a build, never pass one.**
   warning*.
 * **E4 — constant pinning.** Every constant backing a user-facing claim must be
   pinned by a test that fails on change **in either direction**. Today the
-  jitter-fraction test catches widening but not narrowing (narrowing is the
-  privacy regression); `kMotionTriggerDistanceMeters = 100` is tested only as
+  jitter-fraction test catches widening and *severe* narrowing only
+  (`publish_jitter_within_bounds` bounds the range,
+  `publish_jitter_distribution_not_degenerate` needs >100 distinct draws — so a
+  40%→20% narrowing passes both, and narrowing is the privacy regression); `kMotionTriggerDistanceMeters = 100` is tested only as
   `greaterThan(0)`; `LOCATION_RETENTION_SECS`'s derivation is untested; both
   screenshot protections have no test or guard at all.
 * **E5 — AI layer, advisory.** Copy `l10n-ai-review.yml`'s wiring exactly:
@@ -2093,8 +2291,11 @@ A full claim register found **113 claims: 9 contradicted, 3 stale, 6 unpinned
 constants, 12 undisclosed behaviours**. Only 2 contradictions are fixed (the
 relay-list ones, corrected during the relay-separation work).
 
-**Sweep-level finding: no test anywhere reads the Privacy copy.** All 81
-`privacy*` ARB keys can drift from behaviour with fully green CI. That is the
+**Sweep-level finding: no test checks any Privacy claim against BEHAVIOUR.**
+`haven/test/pages/settings/privacy_page_test.dart` renders
+`privacyHubSummary`/`privacyTitle` and pins the topic list, but asserts only that
+the strings APPEAR — never that they are true. All 83 `privacy*` ARB keys can
+therefore drift from behaviour with fully green CI. That is the
 hole Workstream E exists to close.
 
 Still contradicted:
@@ -2110,23 +2311,31 @@ Still contradicted:
 | `privacyWhatOthersSeeDetailTag` (stale) | "not something Haven can change" is false — MDK 0.9.4 supports rotating the transport group id |
 | `privacyRelaysDetailIndexers` | may now overlap the formalized profile pool; needs a look |
 
-Undisclosed behaviours worth deciding on (disclose or change): the roster +
-own npub sent as one `authors[]` request to six public indexers every ~45 min;
+Undisclosed behaviours worth deciding on (disclose or change): each roster
+member's npub queried ALONE from its one salted-assigned relay out of a curated
+pool of **8** public indexers every ~45 min — so an indexer still learns a ~1/8
+slice of the union across all circles, with the assignment stable per install;
 one socket carrying the npub-bearing `#p` filter *and* every circle's `#h`;
-membership-change timing as a public tag discriminator; the FGS isolate's
-`debugPrint`s **not silenced in release**; `circles.db` retaining every member's
-coordinates for 24h and `haven.security.pending_leaves` sitting in plaintext.
+membership-change timing as a public tag discriminator; `circles.db` retaining
+every member's coordinates for 24h; and `haven.security.pending_leaves` sitting
+in plaintext (it survives `deleteIdentity`).
+
+*(Two items were struck 2026-08-07 as already false of the tree: the roster was
+never sent as one batched `authors[]` request — `.authors(` occurs nowhere in
+`haven-core/src` and is CI-banned in profile paths — and the FGS isolate's
+`debugPrint`s ARE silenced in release, at `background_location_task.dart:67-68`,
+with `background_catchup_worker.dart` and `main.dart:77-78` doing the same.)*
 
 ---
 
 ## Relay separation — residuals
 
 The implementation is complete (`haven-core/SECURITY.md` P1–P7 records the
-accepted deviations). Two residuals:
+accepted deviations). One residual remains:
 
-* **The E2E lane has never been run.** Every emulator/simulator change — three
-  hermetic relays, harness wiring, the plane-separation lane — is verified
-  statically only.
+* **RESOLVED 2026-08-07.** Both `e2e_profile_android` and `e2e_profile_ios` ran
+  green in CI run 31216078806, exercising the hermetic relay pool, the harness
+  wiring and the plane-separation lane. One residual is left, below.
 * **The relay pool is behaviourally unvetted.** Two of five selection criteria
   (accepts unauthenticated kind-0 writes; no NIP-42 AUTH on read) require
   probing each host. A relay that silently rejects our publish makes the user
@@ -2143,8 +2352,10 @@ Six times during this audit, code was found that looked complete, passed review,
 and executed nowhere:
 
 1. `check_no_tile_cache_secrets.sh` — written, passing, wired into no workflow.
-2. `contamination.rs` — 281 lines, never declared in `circle/mod.rs`, so never
-   compiled and its 6 tests never ran.
+   **RESOLVED** (A2) — now a step in `repo-guards.yml:301`.
+2. `contamination.rs` — 281 lines at the time, never declared in `circle/mod.rs`,
+   so never compiled and its 6 tests never ran. **RESOLVED** — now
+   `pub mod contamination;` at `circle/mod.rs:31` (319 lines today).
 3. A welcome-cascade write site — 17 lines of doc comment explaining why it was
    essential, with the actual call missing.
 4. A debug-only relay override that two runtime call sites bypassed by reading
@@ -2153,9 +2364,15 @@ and executed nowhere:
    the effective accessor — with a comment asserting they were the same.
 6. `profile_pool_status` itself: exported, bindings generated, called by nothing,
    while another doc claimed Dart surfaced it. **RESOLVED 2026-08-02** — it is
-   now the oracle in `e2e_profile_sharing`'s `setUpAll`, asserting
-   `configured == 3`, `excluded == 0`, `isUnderflow == false` immediately after
-   the first `CircleManagerFfi` is built. That converts the scenario's
+   now the oracle in `e2e_profile_sharing`: the counts are SAMPLED in `setUpAll`
+   immediately after the first `CircleManagerFfi` is built (`:587`) and ASSERTED
+   in the scenario's first `testWidgets` (`:628-651` —
+   `configured == _profileRelayUrls.length`, `excluded == 0`,
+   `isUnderflow == false`). Deliberately not asserted in `setUpAll`, whose
+   failures never reach the results map `integrationDriver()` inspects
+   (`e2e_profile_sharing.dart:578-586` records the reasoning). It is also
+   surfaced in production now, via `profilePoolStatusProvider` →
+   `relay_settings_page.dart`'s underflow banner. That converts the scenario's
    install-before-any-DB *ordering argument* into a test: a `configured` of 8
    or 11 is the unmistakable signature of the curated PUBLIC pool having been
    seeded, which previously surfaced only as kind-0 timeouts pointing nowhere
@@ -2168,18 +2385,36 @@ checker cannot detect a stale translation because it only verifies key presence.
 — which is the point: the shape is not historical, it is what this codebase
 generates by default when work is done in parallel.
 
-7. `haven-core/src/relay/clock_skew.rs` — 582 lines, complete and tested, **not
-   declared in `relay/mod.rs`**. It compiled nowhere and ran nowhere until the
-   omission was caught.
+7. `haven-core/src/relay/clock_skew.rs` — 582 lines when found (601 today),
+   complete and tested, **not declared in `relay/mod.rs`**. It compiled nowhere
+   and ran nowhere until the omission was caught. **RESOLVED** —
+   `pub mod clock_skew;` at `relay/mod.rs:28`.
 8. `LocationAccessBanner` and later `ClockSkewBanner` — both written, both
    analyzer-clean, both with passing widget tests, and **rendered by nothing**.
    A widget test that pumps a widget in isolation proves it works; it says
-   nothing about whether the app ever builds it.
+   nothing about whether the app ever builds it. **RESOLVED** — both are built
+   by `widgets/map/map_status_banners.dart:81-82`, and a source lint
+   (`test/lints/location_stream_error_handling_test.dart:526`) now iterates both
+   names so a future un-wiring reds.
 9. `clockSkewAnnouncement` — an ARB key with a `@` description citing WCAG 2.1
    SC 4.1.3, **translated into 13 locales, and spoken by no code path**. The
    banner set its live-region label to title+body instead. Found by a
    *localization* reviewer, not by any code review, because it was the only
-   agent whose job was to trace where each string is consumed.
+   agent whose job was to trace where each string is consumed. **RESOLVED** —
+   the key was deleted from all locales, and
+   `test/lints/announcement_keys_reachable_test.dart` now fails any announcement
+   key no code path consumes. Its expected set is deliberately EMPTY; that is
+   the steady state, and the durable part of the fix.
+
+10. `check_lcov_aggregate.sh --self-test` — 8 fixtures, **wired into no
+    workflow**. It runs only inside `scripts/ci/check_coverage.sh:155`, i.e. in
+    the local pre-commit/pre-push gate, and nowhere in CI (`repo-guards.yml`
+    wires the floors and filter self-tests but not this one). Since this gate
+    replaced `very_good_coverage@v3` as the only thing enforcing the Flutter 50%
+    aggregate, its self-test decaying would be invisible to CI. Found 2026-08-07
+    by the audit of this very list. **RESOLVED 2026-08-09** — now a
+    `Coverage lcov aggregate self-test` step in `repo-guards.yml`, with a header
+    entry matching its two siblings.
 
 **The fourth shape, and the one that generalises furthest: a test that passes
 for a reason other than the one it is named for.** Found four times in one
@@ -2324,7 +2559,13 @@ thing that could observe a bad pin was a full 11-minute `llvm-cov` run, or a
 
 * **`--lint`, a static check of the manifest against its own rule.** Every row
   must carry its `# measured N%` provenance and must be pinned no tighter than
-  `floor(measured) - 2` (or exactly 100). No report, no toolchain, ~50 ms. Also
+  `floor(measured) - 2` (or exactly 100). It is a **two-sided band**, not a
+  one-sided floor: `check_coverage_floors.sh:681` also fails rows pinned too
+  LOOSE (5 or more points below their own provenance), so the enforced rule is
+  `[measured - RATCHET_MARGIN, floor(measured) - 2]`. (CLAUDE.md's one-line
+  summary says every floor "must equal `floor(measured) - 2`", which is stricter
+  than what `--lint` enforces — a row one point looser still passes.) No report,
+  no toolchain, ~50 ms. Also
   catches duplicate rows and rows with no recorded measurement — a floor nobody
   can re-derive is a floor nobody can review. Wired into repo-guards.yml **and**
   a new pre-commit hook, so the defect above is now caught in the diff that
@@ -2335,11 +2576,14 @@ thing that could observe a bad pin was a full 11-minute `llvm-cov` run, or a
   coverage FELL is left byte-for-byte alone, because re-pinning downward is
   exactly how a measured regression gets laundered into a permitted one, and
   because rewriting the provenance alone would leave the row failing its own
-  lint. Six floors were raised from this run's report; four rows held.
+  lint. Seven floors were raised in the commit that landed this; three tight
+  rows were corrected downward by `--lint --fix`, and the rest held.
 * **A low-headroom notice.** A row above its floor but within one point of it
   is reported (as a `::warning`, not a failure — the band exists to permit that
-  state). `src/location/nostr.rs` is at exactly 50.00% against a floor of 50
-  and had said nothing.
+  state). `src/location/nostr.rs` measured exactly 50.00% against a floor of 50
+  in this run and had said nothing. (Its manifest row still records the earlier
+  `# measured 52.54%` — `--repin` never lowers, so a HOLD keeps its old
+  provenance.)
 
 **The second failure this run could not have caught: the instrument moves.**
 The coverage jobs ran `dtolnay/rust-toolchain@stable` and `channel: stable`.
@@ -2380,7 +2624,12 @@ it knows it cannot measure is a gate that teaches `--no-verify`.
 *Verification.* 31 hermetic fixtures on the floors guard (18 existing + 13 new,
 covering the tight pin, the fix's column/margin/comment preservation, the
 one-directional repin, duplicate rows, missing provenance, and the CHECKED-IN
-manifest against the rule), 12 on the filter, 8 on the aggregate — all wired into
-repo-guards. Verified end to end against a real local run of both stacks: the
-Rust per-path table reproduces CI's numbers line for line on the paths whose
-sources are unchanged.
+manifest against the rule), 12 on the filter, and 8 on the aggregate. The floors
+and filter self-tests are wired into repo-guards (`:451`, `:462`, `:469`);
+the aggregate's 8 ran only inside `scripts/ci/check_coverage.sh:155` — the local
+pre-commit/pre-push gate — and nowhere in CI, even though this gate replaced
+`very_good_coverage@v3` as the only thing enforcing the Flutter 50% aggregate.
+**RESOLVED 2026-08-09**: wired as its own `repo-guards.yml` step.
+Verified end to end against a real local run of both stacks: the Rust per-path
+table reproduces CI's numbers line for line on the paths whose sources are
+unchanged.
