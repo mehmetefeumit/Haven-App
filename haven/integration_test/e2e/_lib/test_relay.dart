@@ -39,6 +39,12 @@ const String secondStrfryUrl = String.fromEnvironment(
   defaultValue: 'ws://localhost:7778',
 );
 
+/// The compiled-in value when a lane passes no `--dart-define`. Named so the
+/// "is this an instrumented run?" test below is a comparison against one
+/// constant rather than a magic string repeated at each call site.
+const String kDefaultWireSentinelToken =
+    'HAVEN_WIRE_SENTINEL:default0000000000000000000000000000';
+
 /// Token carried by the wire-journal sentinel frame
 /// ([TestRelay.emitWireJournalSentinel]).
 ///
@@ -61,8 +67,24 @@ const String secondStrfryUrl = String.fromEnvironment(
 /// content.
 const String wireJournalSentinelToken = String.fromEnvironment(
   'HAVEN_WIRE_SENTINEL',
-  defaultValue: 'HAVEN_WIRE_SENTINEL:default0000000000000000000000000000',
+  defaultValue: kDefaultWireSentinelToken,
 );
+
+/// Whether THIS BUILD was made by a lane that declared a recording proxy.
+///
+/// The token is minted per run by the lane and passed to the drive and to the
+/// host oracles as one string; `scripts/ci/check_wire_oracle_lane_reachable.sh`
+/// (link 4) pins that a lane which runs an oracle also passes this define. So a
+/// non-default token is a lane's explicit statement that a recorder is in path.
+///
+/// This gates [TestRelay.announceMlsGroupId], and it is a SECURITY gate, not a
+/// convenience one. `e2e-flakiness-stress.yml` drives this same scenario
+/// against strfry directly (`HAVEN_E2E_RELAY: ws://10.0.2.2:7777`, no proxy).
+/// An unconditional announce there would put the REAL MLS group id on a relay
+/// socket every night — a direct Security Rule 4 violation — because the frame
+/// is written before the missing ack can be noticed 15 s later.
+bool get wireRecorderDeclared =>
+    wireJournalSentinelToken != kDefaultWireSentinelToken;
 
 /// Frame verb the recording proxy intercepts as a snapshot marker. Must match
 /// `SENTINEL_VERB` in `tooling/e2e/local-relay/src/frame.rs`.
@@ -71,6 +93,103 @@ const String _sentinelVerb = 'HAVEN_WIRE_SENTINEL';
 /// Frame verb the proxy answers a marker with. Must match
 /// `SENTINEL_ACK_VERB` in `tooling/e2e/local-relay/src/frame.rs`.
 const String _sentinelAckVerb = 'HAVEN_WIRE_SENTINEL_ACK';
+
+/// Frame verb the recording proxy intercepts as a real-MLS-group-id
+/// announcement ([TestRelay.announceMlsGroupId]). Must match
+/// `MLS_GROUP_ID_VERB` in `tooling/e2e/local-relay/src/frame.rs`.
+const String _mlsGroupIdVerb = 'HAVEN_WIRE_MLS_GROUP_ID';
+
+/// Frame verb the proxy answers an announcement with. Must match
+/// `MLS_GROUP_ID_ACK_VERB` in `tooling/e2e/local-relay/src/frame.rs`.
+const String _mlsGroupIdAckVerb = 'HAVEN_WIRE_MLS_GROUP_ID_ACK';
+
+/// Shortest MLS group id [encodeWireMlsGroupId] accepts, in bytes.
+///
+/// The floor is EXACT, not generous: OpenMLS mints a 16-byte group id
+/// (`openmls/src/group/mod.rs:73`, `rng.random_vec(16)`), so every real id sits
+/// precisely on this value. Do NOT raise it "for safety" — that rejects every
+/// id the app actually creates and hard-fails every lane. 16 bytes is 128 bits,
+/// which is what the coincidence argument below needs. A short literal is the
+/// dangerous failure mode, not a missing one — the host oracle greps the
+/// journal for this string, and a handful of hex characters occurs inside
+/// ordinary event ids by chance, so a truncated announcement would make the
+/// oracle report a leak on frames that never carried the id.
+const int kMinWireMlsGroupIdBytes = 16;
+
+/// Longest id [encodeWireMlsGroupId] accepts, in bytes.
+///
+/// Mirrors `MLS_GROUP_ID_MAX_HEX = 128` in
+/// `tooling/e2e/local-relay/src/frame.rs`. Without it the two sides disagree:
+/// Dart would TRANSMIT an over-long id that the proxy silently refuses, and the
+/// caller would learn about it 15 s later as "the proxy is not recording the
+/// ids it is handed" — blaming the recorder for a caller bug. Unreachable at
+/// the real 16 bytes; it exists so the two validators fail on the same inputs.
+const int kMaxWireMlsGroupIdBytes = 64;
+
+/// The one representation the drive, the proxy's sidecar and the host oracle
+/// all agree on. Anchored, so a partial match cannot satisfy it.
+final RegExp _lowercaseHexOnly = RegExp(r'^[0-9a-f]+$');
+
+/// Encodes [mlsGroupId] as the lowercase hex the wire-correlation oracle
+/// searches the journal for, rejecting anything that would make that search
+/// meaningless.
+///
+/// The contract is: lowercase hex, even length, at least
+/// [kMinWireMlsGroupIdBytes] * 2 characters. Validating it HERE — before the
+/// frame is written — is what keeps a malformed id from becoming a host-side
+/// search term that either can never match (wrong case) or matches by chance
+/// (too short). Both of those read as a C5.8 result rather than as an error,
+/// which is precisely the failure this channel exists to avoid.
+///
+/// Throws [ArgumentError] if [mlsGroupId] is shorter than
+/// [kMinWireMlsGroupIdBytes] or holds a value outside a byte. The thrown
+/// message names lengths and positions only, never the id or any part of it
+/// (Security Rule 6).
+String encodeWireMlsGroupId(List<int> mlsGroupId) {
+  if (mlsGroupId.length > kMaxWireMlsGroupIdBytes) {
+    throw ArgumentError(
+      'MLS group id is ${mlsGroupId.length} byte(s); the recording proxy '
+      'refuses anything over $kMaxWireMlsGroupIdBytes '
+      '(MLS_GROUP_ID_MAX_HEX). Sending it would be refused silently and '
+      'surface as an ack timeout that blames the proxy for a caller bug.',
+    );
+  }
+  if (mlsGroupId.length < kMinWireMlsGroupIdBytes) {
+    throw ArgumentError(
+      'MLS group id is ${mlsGroupId.length} byte(s); the wire-correlation '
+      'oracle needs at least $kMinWireMlsGroupIdBytes so the literal it '
+      'searches for cannot collide with ordinary frame content. A short id '
+      'here is usually the pre-accept gift-wrap stand-in rather than the real '
+      'group id.',
+    );
+  }
+  for (var i = 0; i < mlsGroupId.length; i++) {
+    final b = mlsGroupId[i];
+    if (b < 0 || b > 255) {
+      throw ArgumentError(
+        'MLS group id byte $i is outside 0..255, so it did not come from '
+        'CircleFfi.mlsGroupId. Encoding it would produce a hex string of the '
+        'wrong length and the oracle would search for a value no frame can '
+        'contain.',
+      );
+    }
+  }
+  final hex =
+      mlsGroupId.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  // A self-check on the encoder, not on the caller. The frame's whole purpose
+  // is to hand the host a literal it can grep for, so an odd-length or
+  // upper-case string would search for something the journal cannot contain
+  // and report clean. The loop above cannot currently produce one; the check
+  // costs nothing and pins the property for whoever changes the encoding.
+  if (hex.length.isOdd || !_lowercaseHexOnly.hasMatch(hex)) {
+    throw ArgumentError(
+      'MLS group id did not encode to even-length lowercase hex '
+      '(${hex.length} char(s)); the host oracle would search the journal for '
+      'a literal it can never match.',
+    );
+  }
+  return hex;
+}
 
 /// The recording proxy's answer to a sentinel marker.
 ///
@@ -164,6 +283,7 @@ class TestRelay {
   final Map<String, _Subscription> _subs = <String, _Subscription>{};
   final List<_PendingOk> _pendingOks = <_PendingOk>[];
   final List<_PendingSentinel> _pendingSentinels = <_PendingSentinel>[];
+  final List<_PendingMlsGroupId> _pendingMlsGroupIds = <_PendingMlsGroupId>[];
   final Random _rng = Random.secure();
 
   /// `true` once [dispose] has been called or the bounded reconnect
@@ -232,6 +352,24 @@ class TestRelay {
               ),
             );
           }
+          break;
+        }
+      }
+      return;
+    }
+    if (tag == _mlsGroupIdAckVerb && frame.length >= 2) {
+      // Synthesized by the recording proxy, never by a relay. Matched on the
+      // echoed id so two announcements in flight cannot resolve each other's
+      // future — the ids differ, and an ack for a circle the drive did not
+      // announce is ignored rather than credited to another one.
+      final hex = frame[1];
+      if (hex is! String) return;
+      for (final pending in List<_PendingMlsGroupId>.from(
+        _pendingMlsGroupIds,
+      )) {
+        if (pending.hex == hex) {
+          _pendingMlsGroupIds.remove(pending);
+          if (!pending.completer.isCompleted) pending.completer.complete();
           break;
         }
       }
@@ -307,6 +445,24 @@ class TestRelay {
           StateError(
             'relay connection closed before the wire-journal sentinel was '
             'acked',
+          ),
+        );
+      }
+    }
+
+    // Same reasoning for a group-id announcement, with a sharper consequence:
+    // an announcement whose ack was lost in transit leaves the host oracle
+    // searching for FEWER ids than the wire could carry, which still reports
+    // clean. Surface the loss at the disconnect instead of letting the caller
+    // sit out its timeout and blame the proxy.
+    final pendingIds = _pendingMlsGroupIds.toList(growable: false);
+    _pendingMlsGroupIds.clear();
+    for (final pending in pendingIds) {
+      if (!pending.completer.isCompleted) {
+        pending.completer.completeError(
+          StateError(
+            'relay connection closed before the MLS group id announcement '
+            'was acked',
           ),
         );
       }
@@ -476,6 +632,104 @@ class TestRelay {
       );
     } finally {
       _pendingSentinels.removeWhere((p) => p.token == token);
+    }
+  }
+
+  /// Announces one circle's REAL MLS group id to the recording proxy.
+  ///
+  /// The wire-correlation oracle's C5.8 asserts Security Rule 4: the real MLS
+  /// group id never appears on the wire. To assert that a value is ABSENT the
+  /// oracle has to know it, and it cannot learn it from the journal — its
+  /// absence there *is* the assertion. So the drive has to hand it over out of
+  /// band, and this is that channel.
+  ///
+  /// It is deliberately NOT the drive log. That log is uploaded as a CI
+  /// artifact with weeks of retention and doubles as the canary oracle's
+  /// `--manifest` input; `wire_canaries.dart` ("Where the manifest may be
+  /// written, and what may go in it") records the decision that a Rule-4 value
+  /// must never go there. The frame is
+  /// `["HAVEN_WIRE_MLS_GROUP_ID","<lowercase-hex>"]`; the proxy INTERCEPTS it,
+  /// never forwards it upstream and never journals it, and writes it to a
+  /// host-side sidecar the lane does not upload. It answers with
+  /// `["HAVEN_WIRE_MLS_GROUP_ID_ACK","<hex>"]`, which is what this method
+  /// waits for.
+  ///
+  /// Waiting for the ack is the point, and for a sharper reason than
+  /// [emitWireJournalSentinel]'s. A marker that never arrives makes the host
+  /// fail closed; an ANNOUNCEMENT that never arrives makes it scan for fewer
+  /// ids than the wire could carry — a weaker check that still reports clean.
+  /// Failing here converts that silent weakening into a loud failure with the
+  /// blame in the right place.
+  ///
+  /// Call once per circle the scenario creates, as soon as the id exists.
+  /// Order does not matter: the sidecar is read on the host after the run, so
+  /// an id announced late still covers frames recorded early. Announcing the
+  /// same id twice is harmless — the host searches for a set.
+  ///
+  /// [mlsGroupId] is `CircleFfi.mlsGroupId`; [encodeWireMlsGroupId] validates
+  /// it. Nothing derived from it is returned, so no caller can accidentally
+  /// route it into a log or a manifest (Security Rules 4 and 6).
+  ///
+  /// Throws [ArgumentError] if the id fails the contract, and [StateError] if
+  /// the frame could not be written or no ack arrives within [timeout] —
+  /// which is also what happens when the lane pointed the app straight at a
+  /// relay instead of through the proxy.
+  Future<void> announceMlsGroupId({
+    required List<int> mlsGroupId,
+    Duration timeout = const Duration(seconds: 15),
+  }) async {
+    // FIRST STATEMENT, before validation and before the writability poll.
+    // `wireRecorderDeclared` is a compile-time constant, so there is nothing to
+    // wait for — and the ack timeout further down cannot stand in for this
+    // check, because it fires 15 s AFTER the frame is written. On an unproxied
+    // lane the id would already be on the relay by then. Security Rule 4: the
+    // real MLS group id must never reach a relay.
+    if (!wireRecorderDeclared) {
+      throw StateError(
+        'refusing to announce an MLS group id: this build declares no '
+        'recording proxy (HAVEN_WIRE_SENTINEL is the compiled default), so '
+        'the frame would go to the relay itself. Callers must gate on '
+        'wireRecorderDeclared.',
+      );
+    }
+    // Validate second, so a malformed id fails identically whatever state the
+    // socket is in: that is the caller's bug, not the transport's.
+    final hex = encodeWireMlsGroupId(mlsGroupId);
+    if (_closed) {
+      throw StateError(
+        'TestRelay is closed; the MLS group id was never announced, so the '
+        'wire-correlation oracle will not know to look for it.',
+      );
+    }
+    // Wait out a reconnect window rather than letting the write drop on the
+    // floor: like the sentinel, this frame has no subscription behind it, so
+    // nothing would ever re-issue it.
+    final deadline = DateTime.now().add(timeout);
+    while (!_writable && DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    if (_closed || !_writable) {
+      throw StateError(
+        'TestRelay was not writable within ${timeout.inSeconds}s; the MLS '
+        'group id was never announced, so the wire-correlation oracle would '
+        'scan for fewer ids than the wire could carry and still report clean.',
+      );
+    }
+    final pending = _PendingMlsGroupId(hex, Completer<void>());
+    _pendingMlsGroupIds.add(pending);
+    _channel.sink.add(jsonEncode(<dynamic>[_mlsGroupIdVerb, hex]));
+    try {
+      await pending.completer.future.timeout(timeout);
+    } on TimeoutException {
+      throw StateError(
+        'no MLS-group-id ack within ${timeout.inSeconds}s. Either this '
+        'connection does not run through the recording proxy, or the proxy '
+        'is not recording the ids it is handed.',
+      );
+    } finally {
+      // By identity, not by value: a re-announcement of the SAME circle must
+      // not have its still-pending twin cancelled out from under it.
+      _pendingMlsGroupIds.remove(pending);
     }
   }
 
@@ -810,4 +1064,15 @@ class _PendingSentinel {
 
   final String token;
   final Completer<WireJournalSentinel> completer;
+}
+
+/// One in-flight [TestRelay.announceMlsGroupId] awaiting its proxy ack.
+///
+/// [hex] is held only to match the echoed ack; it is never logged and never
+/// leaves this file (Security Rules 4 and 6).
+class _PendingMlsGroupId {
+  _PendingMlsGroupId(this.hex, this.completer);
+
+  final String hex;
+  final Completer<void> completer;
 }

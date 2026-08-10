@@ -2146,53 +2146,66 @@ oracles read real traffic correctly, and porting a check while deleting its only
 other implementation leaves a window where neither is proven. Delete it only
 after a green journal shows the oracle equivalent firing.
 
-**What is NOT asserted, declared out loud:**
+**The MLS group-id channel — LANDED 2026-08-10.** C5.8 needs the real id as
+ground truth, and it cannot come from the journal (its absence there IS the
+assertion) or from the drive log (uploaded, 14-day retention, and C6's
+`--manifest` input). It now travels a device→host control channel:
+`["HAVEN_WIRE_MLS_GROUP_ID","<hex>"]` on the same socket as the sentinel, which
+the proxy INTERCEPTS — never forwarded, never journalled — appending each
+distinct id to a per-instance sidecar the lanes read into `--mls-group-id`.
+Interception sits BEFORE `journal.record`, because the journal has no retraction
+for a line it already wrote. The ack is emitted only for a value that validated
+AND reached the sidecar: an ack meaning merely "I parsed your frame" would let a
+lane run C5.8 against a needle set the host never received.
 
-* **C5.8 (real MLS group id absent from the wire).** Asserting a value is absent
-  requires knowing the value, and it cannot be derived from the journal — its
-  absence there is the assertion. It must NOT travel by the drive log, which is
-  uploaded with 14-day retention AND is C6's `--manifest` input;
-  `wire_canaries.dart:117-131` records that standing decision. Both lanes
-  therefore pass `--mls-group-id-not-asserted "<reason>"`, which prints
-  `C5.8 NOT ASSERTED` on EVERY run and drops the success banner to
-  "clean on EIGHT of nine … NOT evidence for Security Rule 4". It is a visible
-  token in the workflow that must be DELETED when the channel lands. It is **not**
-  a conditional check: a conditional would go green claiming Rule 4 held.
-* **C5 on the Android poll path.** C5.1 needs an *application* kind-445 from two
-  distinct groups; on the poll path every publish targets one circle, because the
-  two-circle scenario lives in the M11 group behind `if (!liveSyncEnabled) return;`.
-  The arm is gated on `inputs.live_sync` and announces the skip.
+`--exclude-conn` and iOS C5 (gated on `live_sync`) are wired. The
+`--mls-group-id-not-asserted` escape hatch remains implemented and fixture-tested
+but is **used by no lane**.
 
-**The load-bearing caveat: the oracles have still never read a journal produced
-by a real run.** Everything above is green from hermetic fixtures. The first CI
-run is the first evidence, and the allow-list has never been calibrated against
-real traffic — an early rc 1 is more likely an allow-list gap than a privacy
-finding, which is why the lane text distinguishes "missing REQUIRED" from
-"unexpected OBSERVED".
+**A Rule 4 violation this work introduced, and closed.** The announce was
+unconditional, and `e2e-flakiness-stress.yml` drives this same scenario straight
+at strfry (`ws://10.0.2.2:7777`, no proxy) nightly — so the real MLS group id
+would have gone to a relay, 15 s before the missing ack could be noticed. Both
+halves now fail closed: `TestRelay.announceMlsGroupId` throws before anything
+reaches the socket when `wireRecorderDeclared` is false, and the caller skips.
+The gate is the sentinel define, which `check_wire_oracle_lane_reachable.sh`
+link 4 already pins as a lane's declaration that a recorder is in path. Pinned by
+`haven/test/lints/wire_mls_group_id_announce_sites_test.dart`.
 
-**Outstanding**
+**Open, from the 2026-08-10 review fleet** (all latent, none blocking):
 
-1. **The MLS group-id channel.** Sanctioned design: a second intercepted proxy
-   control verb carrying the hex id, written to a per-instance host-side sidecar
-   that is never forwarded, never journalled, never uploaded; the lane reads it
-   into `--mls-group-id`. Then delete the not-asserted tokens. Extend
-   `check_wire_proxy_test_only.sh`'s upload ban to `/tmp/haven-wire-*` in the
-   same change.
-2. **`--exclude-conn` on both lanes.** Bob/Carol/Dave are in-process
-   `SyntheticUser` FFI peers publishing real 30443/1059/445 through the same
-   proxy, and `TestRelay` publishes its own probes — so `--min-distinct-publishers 2`
-   can be satisfied **entirely by non-UI actors**. A run in which the production
-   Flutter app transmitted nothing would report CLEAN. The proxy returns the
-   emitting `conn_id` in the sentinel ack and `e2e_combined.dart` already prints
-   it. This is the largest remaining "passes but proves less than it claims".
-3. **`_assertWirePrivacyInvariants` trim**, after item 1 and a green journal.
-4. **Kinds 10002/10050** are `required: false` in the allow-list pending the
-   first real journal (`wire_allowlist.json` `_followups`).
-5. **C5.6 is structurally vacuous in these lanes** — one endpoint exists, so
-   containment cannot fire. Honest to keep (the pool is the true configuration),
-   but the lane must not be read as proving containment; the two-relay proof is
-   `e2e-relay-customization.yml`.
-6. **iOS C5** stays unwired even on live-sync; revisit with item 1.
+1. **The lanes hardcode the `default` instance's sidecar name** rather than
+   reading a claim, which is exactly the mistake the journal path is written to
+   avoid 330 lines above it. Harmless today (every `start-wire-proxy.sh` call
+   passes no instance), but a two-recorder lane would read a *previous plane's*
+   ids: `MLSIDS > 0` and `s445 > 0`, so no precondition fires and C5.8 scans for
+   values never on the wire and reports clean.
+2. **Interception is keyed on a successful JSON parse.** A declaration that
+   fails the structural test — or arrives as a Binary frame — is forwarded AND
+   journalled with the id inside `raw_preview` (200 chars > the ~95-char frame).
+   Unreachable from today's drive (`jsonEncode` always emits a well-formed text
+   frame), but the doc comment claims the stronger property. Fix is a byte-level
+   test for the verb before classification.
+3. **`--exclude-conn` names ONE socket; the drive opens three** (`ctx.relay`,
+   FE-2's, M11's) plus a reconnect path, and only `ctx.relay` emits the
+   sentinel. Under-exclusion INFLATES the participant floors, so a green run
+   does not establish that the production app transmitted. The Android comment
+   claimed otherwise and has been corrected to say so; making the floor mean
+   what it says needs every `TestRelay` to emit its own sentinel.
+4. **`_announcedMlsGroupIds > 0` cannot catch removing ONE call site.** The new
+   lint pins the site COUNT by equality, which closes the concrete case; a
+   drive-side equality against circles-actually-created would be stronger.
+5. **The `Duplicate` ack is issued from an in-memory set**, not re-read from the
+   file, so an id acked after an external rotation would be acked but absent.
+   Self-heals in practice and collapses to `mls_count == 0` → red.
+6. **No cap on distinct declarations** — `seen` is an unbounded `BTreeSet`.
+   Loopback-only, so inside the runner's trust boundary.
+
+**Still blocked on a real journal** (cannot be closed by more code):
+`_assertWirePrivacyInvariants`'s trim, and kinds 10002/10050 at
+`required: false`. Both need the first green run to confirm what is actually
+published. C5.6 remains structurally vacuous in a single-endpoint lane — honest
+to keep, but the lane must not be read as proving containment.
 
 **Review-fleet lessons, 2026-08-10** — five reviewers over the wiring round:
 

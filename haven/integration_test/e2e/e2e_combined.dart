@@ -197,7 +197,8 @@ import '_lib/pump_helpers.dart';
 import '_lib/scenario_harness.dart';
 import '_lib/sheet_helpers.dart';
 import '_lib/synthetic_user.dart' show DecryptedCoords, SyntheticUser;
-import '_lib/test_relay.dart' show TestRelay, TestRelayEvent;
+import '_lib/test_relay.dart'
+    show TestRelay, TestRelayEvent, wireRecorderDeclared;
 import '_lib/test_user.dart';
 import '_lib/wire_canaries.dart' show CanaryId, WireCanaryPlant;
 
@@ -590,6 +591,21 @@ void main() {
         // _aliceAddsCarolViaUi touches the UI.
         // -----------------------------------------------------------
         final mlsGroupId = bobCircle.circle.mlsGroupId;
+
+        // The family circle's real MLS group id, handed to the recording
+        // proxy for C5.8. Taken from Bob's accepted view because Alice
+        // created the circle through the UI and the drive holds no CircleFfi
+        // of her own — the id is a property of the GROUP, identical in every
+        // member's view (the UI-created circle is the same group Bob just
+        // joined). Announced here, before any 445 is published into it, so
+        // the whole of this circle's traffic is covered. See
+        // `_announceMlsGroupId` for why this must not go via the drive log.
+        await _announceMlsGroupId(
+          relay: ctx.relay,
+          mlsGroupId: mlsGroupId,
+          label: 'core flow: family circle',
+        );
+
         final nostrGroupIdHexForPreAdd = _hexLower(
           bobCircle.circle.nostrGroupId,
         );
@@ -1332,6 +1348,17 @@ void main() {
         }
       }
 
+      // FE-2's circle is a circle this run created, so C5.8 must know its id
+      // too. Dave never accepts and no location is published into it, but the
+      // create itself puts gift-wraps and the group's `#h` on the wire, and
+      // "this id could not have leaked because nothing used the group" is
+      // exactly the reasoning the oracle exists to check rather than assume.
+      await _announceMlsGroupId(
+        relay: fe2Relay,
+        mlsGroupId: creationResult.circle.mlsGroupId,
+        label: 'FE-2 circle',
+      );
+
       // Publish Dave's gift-wrap so the relay `firstWhere` below is
       // non-vacuous. Without publishing, Dave would never have a real
       // gift-wrap to "ignore", and the invite-ignore assertion would pass
@@ -1972,6 +1999,15 @@ void main() {
               bobSecret[i] = 0;
             }
           }
+          // Bob is the creator here, but the id is the group's, not the
+          // creator's — Alice joins this same group and the engine subscribes
+          // to it, so its frames are in the journal C5.8 scans.
+          await _announceMlsGroupId(
+            relay: m11Relay,
+            mlsGroupId: creation.circle.mlsGroupId,
+            label: 'M11:f circle (Bob-created)',
+          );
+
           final aliceWelcome = creation.welcomeEvents.firstWhere(
             (e) =>
                 e.recipientPubkey.toLowerCase() ==
@@ -2398,6 +2434,14 @@ void main() {
               bobSecret[i] = 0;
             }
           }
+          // Same reasoning as scenario f: a group Alice joins, so its id is a
+          // value C5.8 has to be able to search for.
+          await _announceMlsGroupId(
+            relay: m11Relay,
+            mlsGroupId: creation.circle.mlsGroupId,
+            label: 'M11:g circle (Bob-created)',
+          );
+
           final aliceWelcome = creation.welcomeEvents.firstWhere(
             (e) =>
                 e.recipientPubkey.toLowerCase() ==
@@ -2602,6 +2646,28 @@ void main() {
         '${manifest.carrierEventIds.values.expand((e) => e).length} '
         'carrier events).',
       );
+
+      // Same "a missing proof is not a pass" floor, for the OTHER host input:
+      // the real MLS group ids, which reach the host over the proxy's control
+      // channel rather than through this manifest (Security Rule 4 — see
+      // `_announceMlsGroupId`). C5.8 asserts those ids never appear on the
+      // wire, and a run that announced none would give it nothing to search
+      // for and report clean. No exact count is asserted because the figure is
+      // lane-dependent: the M11 group self-skips on the poll build.
+      // Only meaningful on a lane that declared a recorder; an unproxied lane
+      // deliberately announces nothing (see `_announceMlsGroupId`).
+      if (wireRecorderDeclared) {
+        expect(
+          _announcedMlsGroupIds,
+          greaterThan(0),
+          reason:
+              'no circle announced its real MLS group id to the recording '
+              'proxy, so the wire-correlation oracle has no value to assert '
+              'the absence of and its Rule-4 check passes vacuously. Either '
+              'every announce call site was removed, or no scenario that '
+              'creates a circle ran in this lane.',
+        );
+      }
     },
     timeout: const Timeout(Duration(minutes: 2)),
   );
@@ -4728,6 +4794,62 @@ String _hexLower(Uint8List bytes) =>
     bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
 // =============================================================================
+// Real-MLS-group-id announcements (wire-correlation oracle, check C5.8)
+// =============================================================================
+
+/// How many circle ids this run has handed to the recording proxy.
+///
+/// Asserted non-zero by the wire-oracle test at the end of the file. The exact
+/// figure is lane-dependent — the M11 group self-skips on the poll build — so
+/// there is no fixed number to compare against; what a floor does catch is the
+/// case where every call site was removed or every announcement was skipped,
+/// which would leave C5.8 searching for nothing and reporting clean.
+int _announcedMlsGroupIds = 0;
+
+/// Hands one circle's REAL MLS group id to the recording proxy so the
+/// wire-correlation oracle can assert its ABSENCE from the journal (Security
+/// Rule 4, check C5.8).
+///
+/// Call after every circle this scenario creates, as soon as the id exists.
+/// The oracle can only assert that a value never appeared if it knows the
+/// value, and it cannot recover it from the journal — the absence there is the
+/// assertion. Announcing FEWER circles than the run creates does not fail: it
+/// narrows what C5.8 searches for and still reports clean, which is why
+/// [TestRelay.announceMlsGroupId] treats a lost ack as fatal rather than
+/// best-effort, and why this helper does not swallow it either.
+///
+/// The channel is the proxy's control socket, never the drive log: that log is
+/// an uploaded CI artifact and is the wire-canary oracle's `--manifest` input,
+/// so a Rule-4 value must not reach it (see `_lib/wire_canaries.dart`, "Where
+/// the manifest may be written, and what may go in it"). The id is therefore
+/// never passed to `_canaries` and never printed — the line below carries a
+/// running count and a length, nothing derived from the id itself (Security
+/// Rule 6).
+Future<void> _announceMlsGroupId({
+  required TestRelay relay,
+  required List<int> mlsGroupId,
+  required String label,
+}) async {
+  // Lanes that declare NO recording proxy must not transmit this value at all.
+  // `e2e-flakiness-stress.yml` drives this same scenario straight at strfry
+  // (`HAVEN_E2E_RELAY: ws://10.0.2.2:7777`), and the real MLS group id reaching
+  // a relay is a Security Rule 4 violation, not a missing test signal. The
+  // library refuses too (TestRelay.announceMlsGroupId throws), so this gate is
+  // the polite half of a fail-closed pair rather than the only one.
+  if (!wireRecorderDeclared) {
+    return;
+  }
+  await relay.announceMlsGroupId(mlsGroupId: mlsGroupId);
+  _announcedMlsGroupIds += 1;
+  debugPrint(
+    '[e2e_combined] announced MLS group id #$_announcedMlsGroupIds to the '
+    'recording proxy ($label, ${mlsGroupId.length * 2} hex chars). The id is '
+    'intercepted by the proxy, never forwarded to a relay, never journalled, '
+    'and never logged or put in the canary manifest.',
+  );
+}
+
+// =============================================================================
 // PHASE 6 helpers — non-admin leaves; admin observes
 // =============================================================================
 
@@ -5703,6 +5825,17 @@ Future<CircleFfi> _m11AliceCreatesCircle({
   } finally {
     secret.fillRange(0, secret.length, 0);
   }
+
+  // Every M11 circle Alice creates funnels through here, so one announcement
+  // at this point covers all of them — including the two the multi-circle
+  // scenario creates back to back, whose 445s are exactly what C5.8 scans.
+  // Announced before the provider mutation below, which is what starts the
+  // live-sync engine publishing into the new group.
+  await _announceMlsGroupId(
+    relay: relay,
+    mlsGroupId: result.circle.mlsGroupId,
+    label: 'M11 circle "$name"',
+  );
 
   // Mirror the UI's post-create provider mutation: refresh circlesProvider (so
   // getVisibleCircles re-reads and the resubscriber's circlesProvider listener

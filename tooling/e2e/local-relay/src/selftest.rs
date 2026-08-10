@@ -21,13 +21,13 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::frame::{SENTINEL_ACK_VERB, SENTINEL_VERB};
+use crate::frame::{MLS_GROUP_ID_ACK_VERB, MLS_GROUP_ID_VERB, SENTINEL_ACK_VERB, SENTINEL_VERB};
 use crate::journal::{Degraded, WireJournal, TYPE_CONN_OPEN, TYPE_FRAME};
-use crate::proxy::{Proxy, ProxyConfig, Route};
+use crate::proxy::{MlsGroupIdSink, Proxy, ProxyConfig, Route};
 
 /// Number of cases [`run`] must execute. A case that stops running is a case
 /// that stops proving anything, and silence is how that goes unnoticed.
-const DECLARED_CASES: usize = 6;
+const DECLARED_CASES: usize = 7;
 
 /// Everything the self-test can conclude.
 type Case = Result<(), String>;
@@ -48,6 +48,7 @@ pub async fn run() -> Result<(), String> {
         ("D ordering and conn_id", case_ordering().await),
         ("E fail-open", case_fail_open().await),
         ("F endpoint attribution", case_endpoints().await),
+        ("G mls-group-id channel", case_mls_group_id().await),
     ] {
         executed += 1;
         match result {
@@ -211,6 +212,7 @@ async fn rig(tag: &str) -> Result<Rig, String> {
             }],
         },
         journal,
+        Arc::new(MlsGroupIdSink::disabled()),
     )
     .await
     .map_err(|e| format!("proxy start: {:?}", e.kind()))?;
@@ -432,6 +434,7 @@ async fn case_unparseable() -> Case {
             }],
         },
         journal,
+        Arc::new(MlsGroupIdSink::disabled()),
     )
     .await
     .map_err(|e| format!("proxy start: {:?}", e.kind()))?;
@@ -493,6 +496,7 @@ async fn case_sentinel() -> Case {
             }],
         },
         journal,
+        Arc::new(MlsGroupIdSink::disabled()),
     )
     .await
     .map_err(|e| format!("proxy start: {:?}", e.kind()))?;
@@ -668,6 +672,7 @@ async fn case_fail_open() -> Case {
             }],
         },
         Arc::clone(&journal),
+        Arc::new(MlsGroupIdSink::disabled()),
     )
     .await
     .map_err(|e| format!("proxy start: {:?}", e.kind()))?;
@@ -738,6 +743,7 @@ async fn case_endpoints() -> Case {
             ],
         },
         journal,
+        Arc::new(MlsGroupIdSink::disabled()),
     )
     .await
     .map_err(|e| format!("proxy start: {:?}", e.kind()))?;
@@ -787,5 +793,142 @@ async fn case_endpoints() -> Case {
     close(client_b).await;
     drop(relay_a);
     drop(relay_b);
+    Ok(())
+}
+
+/// G: the device→host MLS-group-id channel, proved on THIS runner.
+///
+/// Three claims, all of which the lane's Rule-4 assertion rests on and none of
+/// which a unit test can establish:
+///
+/// * the declared id reaches the SIDECAR (a lane with no sidecar has no ground
+///   truth and C5.8 would scan for an empty set of needles),
+/// * it never reaches the JOURNAL (the journal is the corpus C5.8 scans; the
+///   announcement appearing there would make the oracle find itself), and
+/// * it never reaches the UPSTREAM (Security Rule 4, committed or not
+///   committed by this proxy).
+///
+/// The upstream is the ECHO server rather than `LocalRelay` for the same
+/// reason case C uses it: a real relay ignores an unknown verb in silence, so
+/// a forwarded declaration would be invisible and the most important claim
+/// here would be guarded by a check that cannot fail.
+async fn case_mls_group_id() -> Case {
+    // 32 bytes, the size MDK mints. Declared UPPERCASE to prove normalization.
+    const ID: &str = "A1B2C3D4E5F60718293A4B5C6D7E8F90A1B2C3D4E5F60718293A4B5C6D7E8F90";
+    // Below the oracle's 32-hex substring floor, so it must be refused.
+    const SHORT: &str = "deadbeefdeadbeef";
+
+    let dir = TempDir::new("mlsgroupid")?;
+    let journal_path = dir.0.join("journal.ndjson");
+    let sidecar_path = dir.0.join("ids.txt");
+    let (upstream, echo) = start_echo_upstream().await?;
+    let journal = Arc::new(WireJournal::open(&journal_path));
+    let sink = Arc::new(MlsGroupIdSink::new(sidecar_path.clone()));
+    let proxy = Proxy::start(
+        &ProxyConfig {
+            routes: vec![Route {
+                listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+                upstream,
+            }],
+        },
+        journal,
+        Arc::clone(&sink),
+    )
+    .await
+    .map_err(|e| format!("proxy start: {:?}", e.kind()))?;
+    let mut client = connect(proxy.local_addr()).await?;
+
+    // Confirm the upstream really is receiving, or "the declaration did not
+    // arrive" would be true of everything and prove nothing.
+    send(&mut client, r#"["REQ","before",{"kinds":[1]}]"#).await?;
+    recv_until(&mut client, "the echo of the pre-declaration REQ", |v| {
+        verb_is(v, "ECHO") && v[1].as_str().is_some_and(|t| t.contains("before"))
+    })
+    .await?;
+
+    send(&mut client, &format!(r#"["{MLS_GROUP_ID_VERB}","{ID}"]"#)).await?;
+    let ack = recv_until(&mut client, "mls-group-id ack", |v| {
+        verb_is(v, MLS_GROUP_ID_ACK_VERB)
+    })
+    .await?;
+    if ack[1].as_str() != Some(ID.to_ascii_lowercase().as_str()) {
+        return Err("the ack did not echo the NORMALIZED id".to_owned());
+    }
+
+    // A value the oracle would reject must be rejected here, so a lane can
+    // never be handed a needle that finds unrelated tokens by coincidence.
+    send(
+        &mut client,
+        &format!(r#"["{MLS_GROUP_ID_VERB}","{SHORT}"]"#),
+    )
+    .await?;
+
+    // THE BARRIER: the echo upstream answers in order on one connection, so
+    // once the echo of a message sent AFTER both declarations comes back, a
+    // forwarded declaration would already have arrived. No sleep, no flake.
+    send(&mut client, r#"["REQ","after",{"kinds":[1]}]"#).await?;
+    let seen = recv_collecting(&mut client, "the echo of the post-declaration REQ", |v| {
+        verb_is(v, "ECHO") && v[1].as_str().is_some_and(|t| t.contains("after"))
+    })
+    .await?;
+
+    if seen
+        .iter()
+        .any(|m| m.contains("ECHO") && m.contains(MLS_GROUP_ID_VERB))
+    {
+        return Err(
+            "the MLS group id was FORWARDED upstream — Security Rule 4 says the real \
+             group id must never reach a relay, and this interception is what guarantees it"
+                .to_owned(),
+        );
+    }
+    if seen.iter().any(|m| m.contains(SHORT)) {
+        return Err("a REFUSED declaration was forwarded upstream".to_owned());
+    }
+    if seen
+        .iter()
+        .filter(|m| m.contains(MLS_GROUP_ID_ACK_VERB))
+        .count()
+        != 0
+    {
+        return Err("a refused declaration was acked".to_owned());
+    }
+
+    // The journal must hold the surrounding traffic and none of the ids: its
+    // silence only means something if it recorded anything at all.
+    let text = std::fs::read_to_string(&journal_path).unwrap_or_default();
+    if !text.contains("\"after\"") {
+        return Err("the journal did not record the barrier".to_owned());
+    }
+    for needle in [ID, &ID.to_ascii_lowercase(), SHORT, MLS_GROUP_ID_VERB] {
+        if text.contains(needle) {
+            return Err(
+                "an MLS group id declaration reached the JOURNAL. C5.8 scans that file \
+                 for exactly this value, so recording it makes Security Rule 4 read as \
+                 satisfied by the instrument talking to itself."
+                    .to_owned(),
+            );
+        }
+    }
+
+    let recorded = std::fs::read_to_string(&sidecar_path).unwrap_or_default();
+    let lines: Vec<&str> = recorded.lines().filter(|l| !l.is_empty()).collect();
+    if lines != vec![ID.to_ascii_lowercase().as_str()] {
+        return Err(format!(
+            "the sidecar holds {} line(s); it must hold exactly the one accepted id, \
+             lowercased",
+            lines.len()
+        ));
+    }
+    let stats = sink.stats();
+    if stats.distinct != 1 || stats.refused != 1 || stats.lost != 0 {
+        return Err(format!(
+            "sidecar stats are wrong: {} distinct, {} refused, {} lost",
+            stats.distinct, stats.refused, stats.lost
+        ));
+    }
+
+    close(client).await;
+    echo.abort();
     Ok(())
 }

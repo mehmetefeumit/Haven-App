@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use haven_local_relay::journal::{WireJournal, TYPE_FRAME};
-use haven_local_relay::proxy::{Proxy, ProxyConfig, Route};
+use haven_local_relay::proxy::{MlsGroupIdSink, Proxy, ProxyConfig, Route};
 use serde_json::Value;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -195,6 +195,7 @@ async fn start_proxy(upstream: String, journal: Arc<WireJournal>) -> Proxy {
             }],
         },
         journal,
+        Arc::new(MlsGroupIdSink::disabled()),
     )
     .await
     .expect("proxy binds")

@@ -29,10 +29,20 @@
 #   2. NOT IN A BUILD PATH. No shipped manifest may depend on the crate, so it
 #      cannot enter an APK, an IPA or the release wrapper.
 #
-#   3. THE RAW JOURNAL IS NEVER AN ARTIFACT. No workflow may name a `.ndjson`
-#      path in an upload-artifact step. CI artifacts are retained for days on a
-#      public repository; the redacted summary
+#   3. THE RAW EVIDENCE IS NEVER AN ARTIFACT. No workflow may name a `.ndjson`
+#      path, or any `/tmp/haven-wire-*` path other than a `.log`, in an
+#      upload-artifact step. CI artifacts are retained for days on a public
+#      repository; the redacted summary
 #      (tooling/e2e/ci/summarize-wire-journal.sh) is what a lane uploads.
+#
+#      The prefix half of that ban exists for the MLS-GROUP-ID SIDECAR
+#      (`/tmp/haven-wire-proxy.mlsgroupid`), which the device fills over the
+#      proxy's control channel so a host-side oracle can assert Security Rule 4
+#      — that the real MLS group id never appears on the wire. Asserting an
+#      ABSENCE requires holding the value, so that file is the one thing on the
+#      runner MORE sensitive than the journal, and uploading it would publish
+#      exactly what Rule 4 protects. The proxy's own `.log` is exempt: Rule 6
+#      keeps it to lengths, counts and fixed labels, never a recorded value.
 #
 #   4. THE SUMMARY STAYS SCANNED. That summary script must keep running its
 #      output through scan-logs-for-secrets.sh, so a redaction bug is caught
@@ -75,12 +85,19 @@ readonly PRODUCTION_TREES=(
 )
 
 # Every name that would betray the proxy having been wired into the app.
+#
+# HAVEN_WIRE_MLS_GROUP_ID covers both the control VERB and the
+# HAVEN_WIRE_MLS_GROUP_ID_FILE env var, and belongs here for a reason the
+# others do not have: a shipped app that could emit that verb would be handing
+# its real MLS group id to whatever it is connected to. The harness is where
+# the emitter belongs (haven/integration_test is not scanned).
 readonly FORBIDDEN_TOKENS=(
   'haven-wire-proxy'
   'haven_local_relay'
   'HAVEN_WIRE_PROXY'
   'HAVEN_WIRE_JOURNAL'
   'HAVEN_WIRE_SENTINEL'
+  'HAVEN_WIRE_MLS_GROUP_ID'
 )
 
 # Manifests and wrappers that decide what gets built into a shipped artifact.
@@ -140,11 +157,49 @@ check_not_in_build_path() {
   return "${rc}"
 }
 
-# Prints `<file>:<line>` for every `.ndjson` inside the `path:` block of an
+# Prints `<file>:<line>` for every FORBIDDEN path inside the `path:` block of an
 # upload-artifact step. Comment text is stripped first, so documenting the ban
 # does not trip it.
-upload_ndjson_hits() { # upload_ndjson_hits <workflow-file>
+#
+# Two rules, and the second is a PREFIX ban with one narrow exemption:
+#
+#   * any `.ndjson` — the raw journal, wherever it lives;
+#   * any `/tmp/haven-wire-*` path that does NOT end in `.log`.
+#
+# The prefix form is what covers the MLS-group-id sidecar
+# (`/tmp/haven-wire-proxy.mlsgroupid`), and covers it by default rather than by
+# extension: anything else the proxy ever writes beside its journal — a claim
+# file, a future dump — is caught without this guard having to learn its name
+# first. The `.log` exemption is deliberate and load-bearing: two lanes already
+# upload `/tmp/haven-wire-proxy.log`, which by Security Rule 6 carries only
+# lengths, counts and fixed labels, never a recorded value.
+upload_forbidden_path_hits() { # upload_forbidden_path_hits <workflow-file>
   awk '
+    function forbidden(text,   rest, tok) {
+      if (text ~ /\.ndjson/) return 1
+      # The sidecar carries a Security Rule 4 value, so it is banned by the
+      # shape of its NAME, wherever it lives. An earlier version banned the
+      # literal prefix /tmp/haven-wire- and exempted *.log, which two review
+      # passes independently defeated: the path is caller-controlled, so
+      # HAVEN_WIRE_MLS_GROUP_ID_FILE=/tmp/haven-wire-ids.log took the .log
+      # exemption, and HAVEN_WIRE_PROXY_RUN_DIR=${RUNNER_TEMP} moved the file
+      # out from under the prefix entirely. A guard whose subject can be
+      # relocated by an env var must key on what the file IS.
+      if (text ~ /\.mlsgroupid/) return 1
+      # A wholesale directory upload sweeps up whatever the recorder wrote,
+      # including a relocated sidecar.
+      if (text ~ /^[[:space:]]*-?[[:space:]]*\/tmp\/?\*?[[:space:]]*$/) return 1
+      rest = text
+      while (match(rest, /\/tmp\/haven-wire-[^[:space:]]*/)) {
+        tok = substr(rest, RSTART, RLENGTH)
+        rest = substr(rest, RSTART + RLENGTH)
+        # The .log exemption stays: e2e-android.yml legitimately uploads
+        # /tmp/haven-wire-proxy.log, and every write to that fd is a length, a
+        # count, a fixed label or an ErrorKind — verified, never a value.
+        if (tok !~ /\.log$/) return 1
+      }
+      return 0
+    }
     {
       line = $0
       sub(/[[:space:]]*#.*$/, "", line)
@@ -156,7 +211,7 @@ upload_ndjson_hits() { # upload_ndjson_hits <workflow-file>
 
       if (in_path) {
         if (indent > path_indent) {
-          if (line ~ /\.ndjson/) print FILENAME ":" NR
+          if (forbidden(line)) print FILENAME ":" NR
           next
         }
         in_path = 0
@@ -165,24 +220,24 @@ upload_ndjson_hits() { # upload_ndjson_hits <workflow-file>
       if (in_step && line ~ /^[[:space:]]*path:/) {
         in_path = 1
         path_indent = indent
-        if (line ~ /\.ndjson/) print FILENAME ":" NR
+        if (forbidden(line)) print FILENAME ":" NR
         next
       }
     }
   ' "$1"
 }
 
-# 3. The raw journal is never uploaded.
+# 3. Neither the raw journal nor the MLS-group-id sidecar is ever uploaded.
 check_raw_journal_not_uploaded() {
   local root="$1" rc=0 workflow hits
   local dir="${root}/.github/workflows"
   [[ -d "${dir}" ]] || { fail ".github/workflows not found"; return 1; }
   for workflow in "${dir}"/*.yml "${dir}"/*.yaml; do
     [[ -f "${workflow}" ]] || continue
-    hits="$(upload_ndjson_hits "${workflow}")"
+    hits="$(upload_forbidden_path_hits "${workflow}")"
     if [[ -n "${hits}" ]]; then
       printf '%s\n' "${hits}" >&2
-      fail "$(basename "${workflow}") uploads a .ndjson path as an artifact. The RAW wire journal is a full traffic transcript and must die with the runner; upload the redacted summary from ${SUMMARIZE_SH} instead."
+      fail "$(basename "${workflow}") uploads a wire-proxy evidence path as an artifact. The RAW journal (.ndjson) is a full traffic transcript, and /tmp/haven-wire-*.mlsgroupid holds the REAL MLS group ids — the very values Security Rule 4 says must never leave the device. Both must die with the runner. Only the proxy's own .log (lengths and fixed labels, never a value) and the redacted summary from ${SUMMARIZE_SH} may be uploaded."
       rc=1
     fi
   done
@@ -298,8 +353,9 @@ self_test() {
     printf 'void main() {}\n' > "${r}/haven/lib/src/app.dart"
     printf 'pub fn x() {}\n' > "${r}/haven-core/src/lib.rs"
     printf 'pub fn y() {}\n' > "${r}/haven/rust_builder/src/api.rs"
-    # The harness legitimately names the sentinel; it must never be flagged.
-    printf "const t = String.fromEnvironment('HAVEN_WIRE_SENTINEL');\n" \
+    # The harness legitimately names BOTH control verbs; it must never be
+    # flagged for either.
+    printf "const t = String.fromEnvironment('HAVEN_WIRE_SENTINEL');\nconst m = 'HAVEN_WIRE_MLS_GROUP_ID';\n" \
       > "${r}/haven/integration_test/e2e/_lib/test_relay.dart"
 
     printf '[package]\nname = "haven-local-relay"\npublish = false\n' \
@@ -353,6 +409,7 @@ jobs:
           path: |
             /tmp/flutter-test.log
             /tmp/wire-summary.log
+            /tmp/haven-wire-proxy.log
           retention-days: 14
       - name: Start the recorder
         run: HAVEN_WIRE_JOURNAL=/tmp/haven-wire-journal.ndjson bash tooling/e2e/ci/start-wire-proxy.sh
@@ -380,6 +437,19 @@ YAML
   printf '// never call haven-wire-proxy from here\nvoid main() {}\n' \
     > "${commented}/haven/lib/src/app.dart"
   _case "even a comment mentioning the proxy fails" 1 check_no_production_reach "${commented}"
+
+  # A shipped app that could emit the MLS-group-id verb would be handing its
+  # real group id to whatever it is connected to — Security Rule 4, in the app
+  # rather than in the harness.
+  local mlsleak="${tmp}/mlsleak"; _mk "${mlsleak}"
+  printf "void main() { ws.send('[\"HAVEN_WIRE_MLS_GROUP_ID\",\$id]'); }\n" \
+    > "${mlsleak}/haven/lib/src/app.dart"
+  _case "the mls-group-id verb in haven/lib fails" 1 check_no_production_reach "${mlsleak}"
+
+  local mlsenv="${tmp}/mlsenv"; _mk "${mlsenv}"
+  printf 'pub const P: &str = "HAVEN_WIRE_MLS_GROUP_ID_FILE";\n' \
+    > "${mlsenv}/haven-core/src/lib.rs"
+  _case "the sidecar env var in haven-core fails" 1 check_no_production_reach "${mlsenv}"
 
   echo "self-test: check 2 — not in a build path"
   _case "healthy manifests pass" 0 check_not_in_build_path "${ok}"
@@ -450,6 +520,144 @@ jobs:
         run: cp /tmp/haven-wire-journal.ndjson /tmp/keep.ndjson
 YAML
   _case "a later non-upload step is not attributed to the upload" 0 check_raw_journal_not_uploaded "${later}"
+
+  # ---------------------------------------------------------------------------
+  # ...and the same four directions for the MLS-GROUP-ID SIDECAR, which is the
+  # reason check 3 grew a path-prefix ban. The file holds the REAL MLS group
+  # ids: uploading it would publish precisely the values Security Rule 4 exists
+  # to keep off the wire, and the oracle that reads it would then be proving a
+  # property about a value anyone could fetch from the artifact.
+  # ---------------------------------------------------------------------------
+  local sidecar="${tmp}/sidecar"; _mk "${sidecar}"
+  cat > "${sidecar}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - name: Upload failure artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          path: |
+            /tmp/flutter-test.log
+            /tmp/haven-wire-proxy.mlsgroupid
+YAML
+  _case "a lane uploading the mls-group-id sidecar fails" 1 check_raw_journal_not_uploaded "${sidecar}"
+
+  local sidecar_inline="${tmp}/sidecarinline"; _mk "${sidecar_inline}"
+  cat > "${sidecar_inline}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - uses: actions/upload-artifact@v6
+        with:
+          path: /tmp/haven-wire-proxy-planeA.mlsgroupid
+YAML
+  _case "the single-line sidecar path form also fails" 1 check_raw_journal_not_uploaded "${sidecar_inline}"
+
+  # The two bypasses two independent review passes found. Both defeat a ban
+  # keyed on LOCATION rather than on what the file is: the sidecar's path is
+  # caller-controlled by HAVEN_WIRE_MLS_GROUP_ID_FILE (whole path) and
+  # HAVEN_WIRE_PROXY_RUN_DIR (directory), both of which start-wire-proxy.sh
+  # honours by design.
+  local sidecar_dotlog="${tmp}/sidecardotlog"; _mk "${sidecar_dotlog}"
+  cat > "${sidecar_dotlog}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - run: HAVEN_WIRE_MLS_GROUP_ID_FILE=/tmp/haven-wire-ids.mlsgroupid bash tooling/e2e/ci/start-wire-proxy.sh
+      - uses: actions/upload-artifact@v6
+        with:
+          path: /tmp/haven-wire-ids.mlsgroupid
+YAML
+  _case "a sidecar renamed via HAVEN_WIRE_MLS_GROUP_ID_FILE still fails" 1 \
+    check_raw_journal_not_uploaded "${sidecar_dotlog}"
+
+  local sidecar_reloc="${tmp}/sidecarreloc"; _mk "${sidecar_reloc}"
+  cat > "${sidecar_reloc}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - uses: actions/upload-artifact@v6
+        with:
+          path: ${{ runner.temp }}/haven-wire-proxy.mlsgroupid
+YAML
+  _case "a sidecar RELOCATED out of /tmp still fails" 1 \
+    check_raw_journal_not_uploaded "${sidecar_reloc}"
+
+  local tmp_sweep="${tmp}/tmpsweep"; _mk "${tmp_sweep}"
+  cat > "${tmp_sweep}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - uses: actions/upload-artifact@v6
+        with:
+          path: |
+            /tmp/*
+YAML
+  _case "a wholesale /tmp upload fails" 1 check_raw_journal_not_uploaded "${tmp_sweep}"
+
+  # ...and the .log exemption must SURVIVE, or the guard reds the real repo:
+  # e2e-android.yml uploads /tmp/haven-wire-proxy.log, whose every line is a
+  # length, a count, a fixed label or an ErrorKind.
+  local proxylog_ok="${tmp}/proxylogok"; _mk "${proxylog_ok}"
+  cat > "${proxylog_ok}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - uses: actions/upload-artifact@v6
+        with:
+          path: |
+            /tmp/haven-wire-proxy.log
+YAML
+  _case "the proxy's own .log stays uploadable" 0 \
+    check_raw_journal_not_uploaded "${proxylog_ok}"
+
+  local sidecar_named="${tmp}/sidecarnamed"; _mk "${sidecar_named}"
+  cat > "${sidecar_named}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - name: Read the ground truth
+        run: |
+          while read -r id; do args+=(--mls-group-id "${id}"); done \
+            < /tmp/haven-wire-proxy.mlsgroupid
+      - name: Upload failure artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          # NEVER add /tmp/haven-wire-proxy.mlsgroupid here.
+          path: /tmp/wire-summary.log
+YAML
+  _case "naming the sidecar outside an upload step is allowed" 0 check_raw_journal_not_uploaded "${sidecar_named}"
+
+  # The EXEMPTION, pinned: two lanes already upload the proxy's own log, which
+  # Security Rule 6 keeps to lengths, counts and fixed labels. A prefix ban
+  # without this hole would red the repository on day one — and a hole nobody
+  # tests is a hole that quietly widens.
+  local proxylog="${tmp}/proxylog"; _mk "${proxylog}"
+  cat > "${proxylog}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - uses: actions/upload-artifact@v6
+        with:
+          path: |
+            /tmp/haven-wire-proxy.log
+            /tmp/haven-wire-proxy-planeA.log
+YAML
+  _case "the proxy's own .log stays uploadable" 0 check_raw_journal_not_uploaded "${proxylog}"
+
+  # The claim file is neither a .ndjson nor a .log, so the prefix ban is what
+  # catches it — the point of a prefix ban being that it needs no new rule for
+  # each new file the proxy learns to write.
+  local claimup="${tmp}/claimup"; _mk "${claimup}"
+  cat > "${claimup}/.github/workflows/e2e.yml" <<'YAML'
+jobs:
+  lane:
+    steps:
+      - uses: actions/upload-artifact@v6
+        with:
+          path: /tmp/haven-wire-proxy.journalpath
+YAML
+  _case "an unnamed future wire-proxy file is banned by default" 1 check_raw_journal_not_uploaded "${claimup}"
 
   echo "self-test: check 4 — the summary stays scanned"
   _case "healthy summary script passes" 0 check_summary_is_scanned "${ok}"
@@ -559,12 +767,13 @@ main() {
   if (( FAILED )); then
     echo >&2
     echo "The recording wire proxy is a test instrument that captures a complete" >&2
-    echo "transcript of relay traffic. It must stay out of the shipped app, out" >&2
-    echo "of every build path, and out of CI artifacts. See the header of this" >&2
-    echo "script and docs/WIRE_JOURNAL.md." >&2
+    echo "transcript of relay traffic, plus a sidecar holding the REAL MLS group" >&2
+    echo "ids. It must stay out of the shipped app, out of every build path, and" >&2
+    echo "out of CI artifacts. See the header of this script and" >&2
+    echo "docs/WIRE_JOURNAL.md." >&2
     exit 1
   fi
-  echo "wire-proxy test-only guard: OK (no production reach, no build-path dependency, raw journal never uploaded, summary scanned, recorder cannot break traffic)."
+  echo "wire-proxy test-only guard: OK (no production reach, no build-path dependency, neither the raw journal nor the mls-group-id sidecar uploaded, summary scanned, recorder cannot break traffic)."
 }
 
 main "$@"

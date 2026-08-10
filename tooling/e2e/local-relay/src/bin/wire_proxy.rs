@@ -12,6 +12,14 @@
 //! uploaded as a CI artifact — use `--summarize` for that.
 //! `scripts/ci/check_wire_proxy_test_only.sh` enforces both.
 //!
+//! It also writes an MLS-GROUP-ID SIDECAR (`HAVEN_WIRE_MLS_GROUP_ID_FILE`):
+//! the real MLS group ids a device declares over the control channel, so a
+//! host-side oracle can assert Security Rule 4 (they never appear on the
+//! wire). Asserting an absence needs the value, and the value cannot come from
+//! the journal — its absence there IS the assertion. That file is the one
+//! thing on this runner more sensitive than the journal, and the same guard
+//! keeps it out of every artifact.
+//!
 //! # Usage
 //!
 //! ```text
@@ -32,8 +40,8 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use haven_local_relay::journal::WireJournal;
-use haven_local_relay::proxy::Proxy;
-use haven_local_relay::{config, selftest, summarize, ENV_JOURNAL};
+use haven_local_relay::proxy::{MlsGroupIdSink, Proxy};
+use haven_local_relay::{config, selftest, summarize, ENV_JOURNAL, ENV_MLS_GROUP_ID_FILE};
 
 /// Exit code for a usage error (a mistyped routing table, a missing file).
 const RC_USAGE: u8 = 2;
@@ -140,8 +148,16 @@ async fn serve() -> ExitCode {
     );
     warn_if_journal_is_stale(&journal_path);
 
+    let mls_group_id_path = std::env::var(ENV_MLS_GROUP_ID_FILE).map_or_else(
+        |_| PathBuf::from(haven_local_relay::DEFAULT_MLS_GROUP_ID_PATH),
+        PathBuf::from,
+    );
+    warn_if_sidecar_is_stale(&mls_group_id_path);
+
     let journal = Arc::new(WireJournal::open(&journal_path));
-    let proxy = match Proxy::start(&config, Arc::clone(&journal)).await {
+    let mls_group_ids = Arc::new(MlsGroupIdSink::new(mls_group_id_path.clone()));
+    let proxy = match Proxy::start(&config, Arc::clone(&journal), Arc::clone(&mls_group_ids)).await
+    {
         Ok(proxy) => proxy,
         Err(err) => {
             // NOT fail-open: a proxy that cannot listen leaves the app pointed
@@ -162,6 +178,14 @@ async fn serve() -> ExitCode {
             route.listen, route.upstream
         );
     }
+    // BEFORE the journal line, which is what start-wire-proxy.sh greps for as
+    // its readiness signal: everything printed after that line races the
+    // script's `cat` of the log.
+    eprintln!(
+        "[haven-wire-proxy] mls-group-id sidecar: {} \
+         (NEVER an artifact — it holds the values Security Rule 4 forbids on the wire)",
+        mls_group_id_path.display()
+    );
     eprintln!(
         "[haven-wire-proxy] journal: {} ({})",
         journal_path.display(),
@@ -185,6 +209,16 @@ async fn serve() -> ExitCode {
         stats
             .degraded
             .map_or(String::new(), |reason| format!(" — DEGRADED ({reason:?})")),
+    );
+    // COUNTS ONLY, never the ids themselves (Security Rule 6). A lane whose
+    // declarations were refused or lost has no Rule-4 ground truth, and the
+    // stop script tails these lines into the step log precisely so that is
+    // visible to someone reading an otherwise green run.
+    let mls_stats = mls_group_ids.stats();
+    eprintln!(
+        "[haven-wire-proxy] mls-group-id sidecar: {} distinct id(s) recorded, \
+         {} refused, {} lost",
+        mls_stats.distinct, mls_stats.refused, mls_stats.lost,
     );
     ExitCode::SUCCESS
 }
@@ -236,6 +270,23 @@ fn warn_if_journal_is_stale(path: &Path) {
             "[haven-wire-proxy] NOTE: {} already exists and will be APPENDED to. \
              wire_seq restarts at 0, so a consumer would see two interleaved \
              sequence spaces. start-wire-proxy.sh rotates it; a hand-run should too.",
+            path.display()
+        );
+    }
+}
+
+/// The sidecar is appended to as well, and a leftover file is worse here than
+/// a merged journal: the ids of a PREVIOUS run's circles would be handed to
+/// this run's oracle as ground truth. It would then scan this journal for
+/// values that were never on this wire — an assertion that cannot fail, which
+/// is the one failure mode a privacy oracle must never have.
+fn warn_if_sidecar_is_stale(path: &Path) {
+    if path.exists() {
+        eprintln!(
+            "[haven-wire-proxy] NOTE: {} already exists and will be APPENDED to, so an \
+             earlier run's MLS group ids would be handed to this run's oracle as ground \
+             truth and could never be found. start-wire-proxy.sh rotates it; a hand-run \
+             should too.",
             path.display()
         );
     }

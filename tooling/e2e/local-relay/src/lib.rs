@@ -37,6 +37,12 @@
 //! enforces that boundary, and also enforces that no workflow uploads the raw
 //! journal as an artifact. Use [`summarize`] to produce the redacted,
 //! upload-safe transcript instead.
+//!
+//! The same applies, harder, to the MLS-group-id sidecar
+//! ([`DEFAULT_MLS_GROUP_ID_PATH`]): it holds the REAL MLS group ids, which
+//! Security Rule 4 says must never reach a relay. It is written so a host-side
+//! oracle can assert their ABSENCE from the journal, and it must never become
+//! an artifact — the same guard enforces that.
 
 pub mod config;
 pub mod frame;
@@ -58,6 +64,13 @@ pub const DEFAULT_UPSTREAM: &str = "ws://127.0.0.1:7777";
 /// Default journal path.
 pub const DEFAULT_JOURNAL_PATH: &str = "/tmp/haven-wire-journal.ndjson";
 
+/// Default path of the MLS-group-id sidecar.
+///
+/// Follows `start-wire-proxy.sh`'s instance-file convention (the `default`
+/// instance's files are unsuffixed), so the shell and the binary agree without
+/// either having to parse the other's naming.
+pub const DEFAULT_MLS_GROUP_ID_PATH: &str = "/tmp/haven-wire-proxy.mlsgroupid";
+
 /// Environment variable naming the listen port.
 pub const ENV_LISTEN_PORT: &str = "HAVEN_WIRE_PROXY_PORT";
 
@@ -66,6 +79,13 @@ pub const ENV_UPSTREAM: &str = "HAVEN_WIRE_PROXY_UPSTREAM";
 
 /// Environment variable naming the journal path.
 pub const ENV_JOURNAL: &str = "HAVEN_WIRE_JOURNAL";
+
+/// Environment variable naming the MLS-group-id sidecar path.
+///
+/// Named `..._FILE` rather than `..._PATH` so it can never be mistaken for the
+/// `HAVEN_WIRE_MLS_GROUP_ID` control VERB, which is a wire token and not an
+/// environment variable.
+pub const ENV_MLS_GROUP_ID_FILE: &str = "HAVEN_WIRE_MLS_GROUP_ID_FILE";
 
 /// Environment variable naming a multi-relay routing table
 /// (`<listen>=<upstream>,...`). Wins over [`ENV_LISTEN_PORT`] /

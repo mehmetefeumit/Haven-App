@@ -101,16 +101,19 @@ jobs:
     # The wire recorder adds a step with its OWN 20m ceiling (release cargo
     # build of the proxy + on-runner preflight), so the flag-on envelope is
     # resized to keep the rule above true rather than nudged by the recorder's
-    # typical cost. Flag-on ceilings now sum to 15 (boot) + 20 (proxy) + 95
-    # (e2e_combined) + 45 (mirror) = 175, so the envelope is 180. An earlier
-    # revision of this change moved it 155->160, which left the admitted worst
-    # case ABOVE the envelope — the exact blind-SIGKILL failure the paragraph
-    # above exists to prevent. Poll takes the same +20.
+    # typical cost. Flag-on ceilings now sum to 15 (relay build) + 15 (boot) +
+    # 20 (proxy) + 95 (e2e_combined) + 45 (mirror) = 190, so the envelope is
+    # 195. Two earlier revisions got this wrong in the same direction: one
+    # moved it 155->160 while inserting a 20m step, and one omitted the relay
+    # build from the sum ENTIRELY because that step carried no ceiling at all.
+    # Both left the admitted worst case ABOVE the envelope — the exact
+    # blind-SIGKILL failure the paragraph above exists to prevent. Every step
+    # in the sum is now bounded, which is what makes the sum checkable.
     #
     # The per-attempt restart inside the retry command is NOT in this sum: it
     # reuses the same warm target dir, so it is a cargo fingerprint check plus
     # the binary's own loopback preflight, and the setup term absorbs it.
-    timeout-minutes: ${{ inputs.live_sync && 180 || 115 }}
+    timeout-minutes: ${{ inputs.live_sync && 195 || 130 }}
     env:
       # 7788 is the RECORDING PROXY, not the relay. The relay stays on 7777 and
       # the proxy forwards to it, so this one line is what puts every byte the
@@ -158,6 +161,12 @@ jobs:
       # never coincide with a resident simulator — the same build-before-boot
       # discipline e2e-android.yml uses for the AVD.
       - name: Build and start host-native relay
+        # BOUNDED, and counted in the envelope below. This is a release cargo
+        # build, and it sat unbounded while the job envelope's arithmetic
+        # omitted it entirely — so a cold run could reach the outer envelope
+        # through a step nobody had budgeted, which is the blind-SIGKILL
+        # outcome that arithmetic exists to prevent.
+        timeout-minutes: 15
         run: bash tooling/e2e/ci/start-local-relay.sh 7777
 
       # Same build-before-boot discipline as the relay above: the proxy is
@@ -169,9 +178,24 @@ jobs:
       #
       # This start is NOT the one that matters for evidence — see the retry
       # command in the e2e_combined step, which restarts it per attempt.
+      #
+      # The upstream is bound to a shell variable ON THE START LINE and exported
+      # from there, rather than written as a job-level `env:`. C5's `--pool`
+      # arguments below need that URL, and
+      # scripts/ci/check_wire_oracle_lane_reachable.sh reads every OTHER literal
+      # relay URL in this job as an app-facing endpoint that must name the
+      # PROXY's listen port — which a second copy of the upstream would fail,
+      # correctly, since an app pointed at the relay port bypasses the recorder
+      # entirely. Keeping the one literal where it is recognisable as an
+      # upstream (the start invocation) is what makes that check meaningful.
+      # The per-attempt restart inside the retry command passes the same
+      # upstream, so this string stays true for the journal the oracles read.
       - name: Build and start recording wire proxy
         timeout-minutes: 20
-        run: bash tooling/e2e/ci/start-wire-proxy.sh 7788 ws://127.0.0.1:7777
+        run: |
+          set -euo pipefail
+          upstream=ws://127.0.0.1:7777; bash tooling/e2e/ci/start-wire-proxy.sh 7788 "${upstream}"
+          echo "WIRE_UPSTREAM=${upstream}" >> "${GITHUB_ENV}"
 
       # ONE token, minted ONCE, read by BOTH halves — the drive (as a
       # --dart-define, forwarded by run-ios-sim-scenario.sh) and the host oracle
@@ -300,6 +324,34 @@ jobs:
             integration_test/e2e/e2e_combined.dart
             ${{ steps.sim.outputs.udid }}
 
+      # THE HARNESS'S OWN SOCKET, captured HERE and nowhere later, because the
+      # next step destroys the evidence: run-ios-sim-scenario.sh truncates
+      # (`: > "${log}"`) the single fixed /tmp/flutter-ios-test.log at the start
+      # of every invocation, so once the background-mirror scenario runs, the
+      # e2e_combined drive log — and the sentinel ack printed in it — is gone.
+      #
+      # `TestRelay` reaches the same proxied relay the app does, so its probes
+      # are IN the journal and are NOT Haven's privacy surface. The proxy returns
+      # the emitting `conn_id` in the sentinel ack and the drive prints that ack;
+      # that print is the ONLY path by which the host can learn the id.
+      #
+      # This step never fails the lane on its own. A missing id is a real
+      # problem, but it is REPORTED where the rest of the wire verdicts are
+      # reported, under the same closed exit-code taxonomy — failing here would
+      # skip the oracle step entirely and lose every other finding with it.
+      # `tail -n 1` because a retried attempt appends nothing to this file (it is
+      # truncated per attempt), so the last ack is always the surviving one.
+      - name: Capture the harness conn id
+        run: |
+          set -uo pipefail
+          conn="$(LC_ALL=C grep -aoE 'wire-journal sentinel acked.*conn=[A-Za-z0-9_-]+' /tmp/flutter-ios-test.log 2>/dev/null | tail -n 1 | sed -E 's/.*conn=//' || true)"
+          echo "HARNESS_CONN=${conn}" >> "${GITHUB_ENV}"
+          if [[ -n "${conn}" ]]; then
+            echo "::notice::harness conn_id ${conn} captured; it is excluded from wire attribution below."
+          else
+            echo "no '[e2e_combined] wire-journal sentinel acked … conn=<id>' line in /tmp/flutter-ios-test.log; the wire oracle step will report this."
+          fi
+
       # Background-mirror check (docs/M7_BACKGROUND_SHARING.md D7): a SECOND,
       # cheap scenario on the SAME booted sim + relay. It proves the two iOS
       # wiring facts a host-side Dart unit test cannot see:
@@ -384,36 +436,172 @@ jobs:
       # and 1059 are excluded because their author is a fresh ephemeral key per
       # message, so they cannot stand in for a participant), and
       # `--min-distinct-conns 2` is the weaker companion that still catches a
-      # client which never opened a socket. Alice (the app) plus the Bob/Carol/
-      # Dave SyntheticUsers clear both comfortably.
+      # client which never opened a socket.
+      #
+      # Read honestly, that floor is weaker than it looks. Bob/Carol/Dave are
+      # in-process SyntheticUser FFI peers publishing real 30443/1059/445 over
+      # their own Rust-side sockets, and TestRelay publishes its own probes, so
+      # two distinct publishers can be reached with the production Flutter app
+      # having transmitted nothing at all. `--exclude-conn` removes the only
+      # non-product actor the host can NAME — and that is one connection
+      # segment, not one actor: the drive opens three TestRelay sockets
+      # (ctx.relay, FE-2's, M11's), only ctx.relay emits the sentinel, and a
+      # strfry drop mid-scenario mints a fresh conn_id that the captured id no
+      # longer covers. So this narrows the claim; it does not make the floor a
+      # proof that the UI transmitted. Making it one needs every TestRelay to
+      # emit its own sentinel, re-emitted after each reconnect.
       #
       # Exit codes are a CLOSED set {0,1,2,3,4} and each one fails the step,
       # which is the point: 3 (UNUSABLE — the recorder broke) and 4 (META-FLOOR
       # — the scenario proved too little) are NOT passes. A run whose instrument
       # was broken proves nothing about privacy and must not be reported as
-      # though it did.
+      # though it did. Both oracles run in ONE step so a single red run reports
+      # every finding, and the step exits on the WORST verdict rather than the
+      # first: a C2-C4 META-FLOOR must never mask a C5 VIOLATION.
       #
-      # NOT wired here, deliberately, and neither omission is an oversight:
-      #   * check-wire-correlation.sh (C5) needs a `--pool` per published kind
-      #     AND `--exclude-conn` for the harness's own socket, whose conn_id
-      #     only the drive learns (it comes back in the proxy's sentinel ack and
-      #     is not surfaced to the host today). Its C5.1 precondition also
-      #     demands an APPLICATION kind-445 from each of two distinct groups,
-      #     which only the live-sync variant's "Alice in two circles" scenario
-      #     produces — on the poll path it would be a permanent META-FLOOR.
-      #   * check-wire-canaries.dart needs a manifest announced by the drive
-      #     (WireCanaryPlant.mint/announce). e2e_combined.dart plants no
-      #     canaries yet, and an unconfirmed canary is a META-FLOOR by design,
-      #     so wiring it now would red the lane for a missing positive control
-      #     rather than for anything on the wire.
-      # Both become one step each once their drive-side halves land.
-      - name: Assert wire-journal privacy invariants
+      # C5 IS GATED ON live_sync, for a scenario-shape reason and nothing else.
+      # C5.1 needs an APPLICATION kind-445 (one carrying `expiration`) from each
+      # of TWO distinct groups. On the poll path every publishLocation in
+      # e2e_combined targets the one family circle — the two-circle scenario
+      # lives in the M11 group, whose bodies all self-guard on
+      # `if (!liveSyncEnabled) return;` — so the precondition cannot be met and
+      # the whole C5 arm would META-FLOOR for a reason that is not on the wire.
+      # e2e-android.yml gates it identically; the two lanes agree.
+      #
+      # STILL NOT wired here: check-wire-canaries.dart (C6). Not for want of
+      # canaries — e2e_combined.dart plants them (haven/integration_test/e2e/
+      # _lib/wire_canaries.dart, announced at the end of the run) — but for want
+      # of a manifest to read them from. C6's manifest source is the drive log,
+      # and run-ios-sim-scenario.sh truncates the single fixed
+      # /tmp/flutter-ios-test.log on every invocation, so by the time this step
+      # runs the background-mirror scenario has overwritten e2e_combined's log.
+      # Wiring C6 here needs a preserved copy of that log taken in the same slot
+      # as the conn-id capture above; that is a separate change, and stating the
+      # real obstacle is worth more than an out-of-date one.
+      - name: Assert wire privacy invariants
         run: |
+          set -uo pipefail
+          first_rc=0
+          failures=""
+
+          verdict() { # verdict <label> <rc>
+            case "$2" in
+              0) echo "::notice::wire oracle $1: clean" ;;
+              1) echo "::error::wire oracle $1: VIOLATION (rc=1) — a privacy finding on the wire." ;;
+              2) echo "::error::wire oracle $1: USAGE (rc=2) — this lane invoked the oracle wrong; the wiring is broken, not the app." ;;
+              3) echo "::error::wire oracle $1: UNUSABLE (rc=3) — the recorder or its inputs broke. This run proves NOTHING either way; do not read it as a pass." ;;
+              4) echo "::error::wire oracle $1: META-FLOOR (rc=4) — the journal parsed but the scenario proved too little. Not a pass." ;;
+              *) echo "::error::wire oracle $1: undocumented exit code $2 — the contract is a closed set {0,1,2,3,4}; treat the oracle itself as broken." ;;
+            esac
+            if [[ "$2" -ne 0 ]]; then
+              failures="${failures} $1(rc=$2)"
+              # Worst, not first. Severity order is 1 > 4 > 3 > 2, so a real
+              # wire finding always names the exit code.
+              case "$2" in
+                1) first_rc=1 ;;
+                4) [[ "${first_rc}" -eq 1 ]] || first_rc=4 ;;
+                3) [[ "${first_rc}" -eq 1 || "${first_rc}" -eq 4 ]] || first_rc=3 ;;
+                *) [[ "${first_rc}" -ne 0 ]] || first_rc="$2" ;;
+              esac
+            fi
+          }
+
+          # `${a[@]+"${a[@]}"}`, not `"${a[@]}"`: expanding an EMPTY array under
+          # `set -u` is an unbound-variable error on the bash 3.2 that ships as
+          # /bin/bash on the macOS runners.
+          excl=()
+          if [[ -n "${HARNESS_CONN:-}" ]]; then
+            excl=(--exclude-conn "${HARNESS_CONN}")
+          else
+            echo "::error::the harness conn_id was never captured from the e2e_combined drive log, so --exclude-conn cannot be passed and TestRelay's own probes count toward every floor and every attribution below: a run in which the production Flutter app transmitted NOTHING could still satisfy --min-distinct-publishers 2. Either the sentinel ack never came back (the oracles will also report no anchor) or the drive's print of it changed shape; fix the channel rather than dropping the flag." >&2
+            verdict "harness conn_id channel" 3
+          fi
+
+          rc=0
           bash tooling/e2e/ci/check-wire-journal.sh \
             --journal /tmp/haven-wire-journal.ndjson \
             --sentinel "${HAVEN_WIRE_SENTINEL}" \
             --min-distinct-publishers 2 \
-            --min-distinct-conns 2
+            --min-distinct-conns 2 \
+            ${excl[@]+"${excl[@]}"} || rc=$?
+          verdict "C2-C4 structural" "${rc}"
+
+          # C5 — correlation and containment. Each pool is the set of relays a
+          # KIND may reach; this lane is hermetic, so every kind's pool is the
+          # single upstream the proxy forwards to, exported by the proxy-start
+          # step. The pool names that UPSTREAM and not the app-facing listen
+          # alias because the journal records `relay_url` (the endpoint behind
+          # the proxy) on every frame. Every kind the closed-world allow-list
+          # admits gets a pool: a kind published with none is a META-FLOOR.
+          #
+          # C5.8 declares the real MLS group ids from the proxy SIDECAR. They
+          # cannot be derived from the journal — their absence there is the
+          # whole assertion — and they must not travel by the drive log, which
+          # is uploaded as a failure artifact. The drive announces each id as a
+          # proxy control frame; the proxy intercepts it (never forwarded, never
+          # journalled) and appends the distinct ids to a host-side file next to
+          # its pid file, which is read here and never uploaded. The VALUES are
+          # never echoed into this step log either — a job log on a public repo
+          # is as durable a disclosure as an artifact — so only the count is
+          # printed. An absent or empty sidecar FAILS: it is deliberately not
+          # downgraded to `--mls-group-id-not-asserted`, which would convert a
+          # broken control channel into a permanently-skipped invariant that
+          # reports green (and the oracle refuses both flags together anyway).
+          if [[ "${{ inputs.live_sync }}" != "true" ]]; then
+            echo "C5 correlation: SKIPPED on the poll path — C5.1 requires an application kind-445 from two distinct groups, which only the live-sync two-circle scenario produces. Run the live-sync variant for the C5 verdicts."
+          else
+          # Same precedence start-wire-proxy.sh resolves the path with, in the
+          # same order, so an override set for the recorder is honoured here
+          # instead of silently reading the default path it stopped writing.
+          mls_claim="${HAVEN_WIRE_PROXY_RUN_DIR:-/tmp}/haven-wire-proxy.mlsgroupidpath"
+          # Read the path the recorder CLAIMED, exactly as the journal path is
+          # read above, instead of rebuilding the default instance's filename.
+          # A guessed name reads the wrong file the day a lane runs two
+          # recorders, and a stale sidecar is worse than a missing one: C5.8
+          # would scan for a previous plane's ids, find none, and report clean.
+          mls_sidecar="$(head -n 1 "${mls_claim}" 2>/dev/null || true)"
+          if [[ -z "${mls_sidecar}" ]]; then
+            echo "::error::the recorder claimed no MLS-group-id sidecar (${mls_claim} absent or empty). Without it C5.8 has no ground truth for Security Rule 4."
+            verdict "C5.8 mls-group-id channel" 3
+            mls_sidecar="/nonexistent"
+          fi
+          mls_args=()
+          mls_count=0
+          if [[ -r "${mls_sidecar}" ]]; then
+            while IFS= read -r mls_id || [[ -n "${mls_id}" ]]; do
+              mls_id="${mls_id//[[:space:]]/}"
+              [[ -n "${mls_id}" ]] || continue
+              mls_args+=(--mls-group-id "${mls_id}")
+              mls_count=$((mls_count + 1))
+            done < "${mls_sidecar}"
+          fi
+          if [[ "${mls_count}" -eq 0 ]]; then
+            echo "::error::the MLS group-id sidecar ${mls_sidecar} is absent or empty, so the drive never announced a group id through the proxy control channel. C5.8 would then scan the wire against an EMPTY set of values and could not have failed — Security Rule 4 would be reported as holding by a check that looked for nothing. This is a broken control channel (drive announcement -> proxy interception -> sidecar), not a scenario finding." >&2
+            verdict "C5.8 mls-group-id channel" 3
+          else
+            echo "::notice::C5.8: ${mls_count} MLS group id(s) declared from the proxy sidecar (values withheld — Security Rule 4)."
+          fi
+          rc=0
+          bash tooling/e2e/ci/check-wire-correlation.sh \
+            --journal /tmp/haven-wire-journal.ndjson \
+            --sentinel "${HAVEN_WIRE_SENTINEL}" \
+            --pool "0=${WIRE_UPSTREAM}" \
+            --pool "5=${WIRE_UPSTREAM}" \
+            --pool "445=${WIRE_UPSTREAM}" \
+            --pool "1059=${WIRE_UPSTREAM}" \
+            --pool "10002=${WIRE_UPSTREAM}" \
+            --pool "10050=${WIRE_UPSTREAM}" \
+            --pool "30443=${WIRE_UPSTREAM}" \
+            ${excl[@]+"${excl[@]}"} \
+            ${mls_args[@]+"${mls_args[@]}"} || rc=$?
+          verdict "C5 correlation" "${rc}"
+          fi
+
+          if [[ "${first_rc}" -ne 0 ]]; then
+            echo "::error::wire oracles FAILED:${failures}" >&2
+            exit "${first_rc}"
+          fi
+          echo "The wire oracles read the journal and found it clean."
 
       - name: Collect simulator diagnostics
         if: always()

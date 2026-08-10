@@ -6029,7 +6029,39 @@ pub fn set_profile_relays_for_test(_relays: Vec<String>) -> Result<(), String> {
 #[cfg(debug_assertions)]
 #[frb(sync)]
 pub fn allow_ws_loopback_for_test() -> Result<(), String> {
-    haven_core::relay::allow_ws_loopback_for_test()
+    match haven_core::relay::allow_ws_loopback_for_test() {
+        Ok(()) => Ok(()),
+        Err(already) => {
+            // POSTCONDITION, not "did THIS call install it".
+            //
+            // haven-core's opt-in is install-once and reports a second call as
+            // an `Err`. That is the right answer to "did I install it" and the
+            // wrong answer to the only question a caller has — "may this
+            // process dial ws:// loopback" — because a second call failing
+            // means the opt-in is PRESENT.
+            //
+            // It bit the M7 background lane in CI run 31453547292. The CI
+            // dispatcher arms the opt-in for what it calls the "cold" worker,
+            // but WorkManager ran that task in the SAME process that had just
+            // finished the foreground drive (one pid logged every Flutter line
+            // in that run), where `TestUser` had already armed it. The lane
+            // then failed with "could not arm the ws:// loopback opt-in" while
+            // the opt-in was installed and the relay reachable the whole time.
+            // `test_user.dart` calls this bare, with no catch, so a second
+            // TestUser in one process would have thrown outright.
+            //
+            // The presence check is a QUERY, never a classification of
+            // `already`: FFI error text is remote prose and must not be
+            // branched on. The probe URL is a loopback host with a port nothing
+            // dials — `ws_loopback_allowed_for_test` is pure, so this reads the
+            // opt-in flag and opens no socket.
+            if haven_core::relay::ws_loopback_allowed_for_test("ws://127.0.0.1:1") {
+                Ok(())
+            } else {
+                Err(already)
+            }
+        }
+    }
 }
 
 /// Release-build stub for [`allow_ws_loopback_for_test`]. See
@@ -8051,6 +8083,34 @@ impl std::fmt::Debug for RelayManagerFfi {
 /// headless CI environments (Docker, SSH without a session bus).
 #[cfg(test)]
 mod tests {
+
+    /// The FFI opt-in reports the POSTCONDITION, not who installed it.
+    ///
+    /// haven-core's `allow_ws_loopback_for_test` is install-once and errors on
+    /// a second call — correct there, and the wrong answer at this boundary,
+    /// where every caller is asking "may this process dial ws:// loopback".
+    /// CI run 31453547292's M7 lane failed on exactly that: WorkManager ran the
+    /// supposedly-cold worker inside the process that had already armed the
+    /// opt-in, and the lane reported "could not arm" while it was armed.
+    ///
+    /// Deliberately calls it TWICE: the first call may or may not be the first
+    /// in this test binary (OnceLock is process-global and other tests may have
+    /// armed it), so only the second is a guaranteed already-installed path.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn allow_ws_loopback_for_test_reports_the_postcondition() {
+        assert!(
+            super::allow_ws_loopback_for_test().is_ok(),
+            "arming must succeed, or report an installed opt-in"
+        );
+        assert!(
+            super::allow_ws_loopback_for_test().is_ok(),
+            "a SECOND call must still report Ok — the opt-in is installed, and \
+             that is the only thing a caller can act on. Returning the \
+             install-once Err here is what made the M7 lane fail while the \
+             relay was reachable."
+        );
+    }
     use super::*;
 
     /// Builds a `Known` cached profile row for the `from_cached` tests.

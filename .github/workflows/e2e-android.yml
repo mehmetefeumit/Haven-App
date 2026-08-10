@@ -485,17 +485,74 @@ jobs:
             fi
           }
 
+          # ONE of the harness's sockets, removed from every assertion that
+          # accepts it. `TestRelay` reaches the same proxied relay the app does,
+          # so its probes are IN the journal and are NOT Haven's privacy
+          # surface.
+          #
+          # Scope, stated honestly: the drive opens THREE TestRelay connections
+          # (`ctx.relay`, FE-2's, M11's) plus a reconnect path that mints a
+          # fresh conn_id, and only `ctx.relay` emits the sentinel — so only its
+          # id reaches the host and only its traffic is excluded here. The error
+          # direction is UNDER-exclusion, which INFLATES the participant floors:
+          # `--min-distinct-publishers 2` and `--min-distinct-conns 2` can still
+          # be satisfied by the in-process SyntheticUser peers and the other two
+          # harness sockets, so a green run does NOT establish that the
+          # production Flutter app transmitted. Making it establish that needs
+          # every TestRelay to emit its own sentinel; until then read these
+          # floors as "the scenario transmitted", not "the app did".
+          #
+          # The
+          # proxy returns the emitting `conn_id` in the sentinel ack and the
+          # drive prints that ack — which is the ONLY path by which the host can
+          # learn the id, so this grep is a load-bearing link of the recorder
+          # chain, not a convenience.
+          #
+          # It is NOT best-effort. A missing id would silently drop the flag and
+          # leave both oracles attributing the harness's own traffic to the app,
+          # which is precisely the weakness --exclude-conn exists to remove, so
+          # the absence is reported LOUDLY (rc 3 — an input to the instrument
+          # broke) and the oracles still run underneath it, unexcluded, so their
+          # other findings are not lost behind this one. Exclusion can only ever
+          # REMOVE evidence: an over-broad one fails closed on the oracles' own
+          # preconditions and can never manufacture a pass.
+          #
+          # `tail -n 1` because the drive log ACCUMULATES retried attempts
+          # (run-single-avd-scenario.sh appends each attempt with a header). Only
+          # a pre-test connect flake is ever retried, so a retried attempt emits
+          # no sentinel at all — but if that ever changes, the LAST ack is the
+          # one belonging to the attempt whose traffic the journal ends with.
+          harness_conn="$(LC_ALL=C grep -aoE 'wire-journal sentinel acked.*conn=[A-Za-z0-9_-]+' /tmp/flutter-drive.log 2>/dev/null | tail -n 1 | sed -E 's/.*conn=//' || true)"
+          # `${a[@]+"${a[@]}"}`, not `"${a[@]}"`: an EMPTY array expanded under
+          # `set -u` is an unbound-variable error on bash < 4.4, and this same
+          # shape is used verbatim by e2e-ios.yml, whose runner ships bash 3.2.
+          excl=()
+          if [[ -n "${harness_conn}" ]]; then
+            excl=(--exclude-conn "${harness_conn}")
+            echo "::notice::harness conn_id ${harness_conn} excluded from wire attribution (TestRelay's own probes are not Haven's traffic)."
+          else
+            echo "::error::the harness conn_id is not in /tmp/flutter-drive.log — no '[e2e_combined] wire-journal sentinel acked … conn=<id>' line was found. Without it --exclude-conn cannot be passed, so TestRelay's own probes count toward every floor and every attribution below: a run in which the production Flutter app transmitted NOTHING could still satisfy --min-distinct-publishers 2. Either the sentinel ack never came back (the oracles will also report no anchor) or the drive's print of it changed shape; fix the channel rather than dropping the flag." >&2
+            verdict "harness conn_id channel" 3
+          fi
+
           # C2-C4 — closed-world structure (kinds, tags, frame verbs, REQ keys).
-          # A participant floor is REQUIRED or the meta-floor is vacuous: this
-          # is a three-actor flow (Alice on the UI, Bob and Carol in-process
+          # A participant floor is REQUIRED or the meta-floor is vacuous: this is
+          # a four-actor flow (Alice on the UI; Bob, Carol and Dave in-process
           # over the FFI), so at least two identities must have transmitted and
           # at least two sockets must have carried traffic.
+          #
+          # Read honestly, that floor is weaker than it looks even with the
+          # harness socket excluded: the SyntheticUsers publish real 30443/1059/
+          # 445 over their own Rust-side sockets, so two distinct publishers can
+          # still be two synthetic peers. --exclude-conn removes the one actor
+          # the host can name; it does not yet prove the UI itself transmitted.
           rc=0
           bash tooling/e2e/ci/check-wire-journal.sh \
             --journal "${WIRE_JOURNAL}" \
             --sentinel "${WIRE_SENTINEL}" \
             --min-distinct-publishers 2 \
-            --min-distinct-conns 2 || rc=$?
+            --min-distinct-conns 2 \
+            ${excl[@]+"${excl[@]}"} || rc=$?
           verdict "C2-C4 structural" "${rc}"
 
           # C5 — correlation and containment. Each pool is the set of relays a
@@ -506,30 +563,33 @@ jobs:
           # kind the closed-world allow-list admits gets a pool: a kind that is
           # published with none is a META-FLOOR, never a pass.
           #
-          # C5.8 IS DECLARED NOT-ASSERTED, on purpose and out loud.
+          # C5.8 IS NOW ASSERTED, over ids the lane learns from a SIDECAR.
           #   The real MLS group id cannot be derived from the journal — its
           #   absence there is the whole assertion — and it is minted per run on
-          #   the device (CircleFfi.mlsGroupId). It must NOT travel by the drive
-          #   log: that file is uploaded with 14-day retention AND is C6's
-          #   --manifest input, and haven/integration_test/e2e/_lib/
-          #   wire_canaries.dart records the standing decision that a Rule-4
-          #   value goes only through a file the lane does not upload. The
-          #   sanctioned channel is a proxy control verb writing a host-side
-          #   sidecar (never forwarded, never journalled, never uploaded);
-          #   until that lands, this lane declares the gap rather than
-          #   pretending to close it. `--mls-group-id-not-asserted` prints
-          #   "C5.8 NOT ASSERTED" on EVERY run and is a visible token here that
-          #   must be DELETED when the sidecar lands. It is NOT a conditional
-          #   check: a conditional would go green claiming Rule 4 held.
-          #   Meanwhile Rule 4 is still asserted in-drive by
-          #   _assertWirePrivacyInvariants — narrower (one circle's kind-445
-          #   stream, nothing about 1059/30443/10002/0), which is exactly why
-          #   this is a declared gap and not a resolved one.
-          #   * --exclude-conn takes the harness's own conn_id out of every
-          #     assertion; the proxy returns it in the sentinel ack. Wire it if
-          #     TestRelay's own probes ever surface as findings — over-excluding
-          #     fails closed on the preconditions, so it cannot manufacture a
-          #     pass.
+          #   the device (CircleFfi.mlsGroupId), so it has to be declared. It
+          #   must NOT travel by the drive log: that file is uploaded with
+          #   14-day retention AND is C6's --manifest input, and haven/
+          #   integration_test/e2e/_lib/wire_canaries.dart records the standing
+          #   decision that a Rule-4 value goes only through a file the lane does
+          #   not upload. The sanctioned channel is the one that now exists: the
+          #   drive announces each id as a proxy CONTROL frame, the proxy
+          #   intercepts it (never forwarded upstream, never journalled) and
+          #   appends the distinct ids to a host-side sidecar next to its pid
+          #   file. The sidecar is read here and never uploaded, and the VALUES
+          #   are never echoed into this step log either — a job log on a public
+          #   repo is as durable a disclosure as an artifact. Only the COUNT is
+          #   printed; check-wire-correlation.sh does the same (its summary line
+          #   reports "N declared MLS group id(s)", and a C5.8 finding names the
+          #   event id and the tag, never the needle).
+          #
+          #   This replaces `--mls-group-id-not-asserted`, whose whole purpose
+          #   was to be deleted here. Do NOT reintroduce it as a fallback for an
+          #   empty sidecar: that would convert a broken control channel into a
+          #   permanently-skipped invariant that reports green. An empty or
+          #   absent sidecar is a FAILURE below (and the oracle independently
+          #   META-FLOORs on the same fact, since 445s are published with no id
+          #   declared). The two flags are also mutually exclusive by the
+          #   oracle's own argument parsing, so passing both is rc 2.
           # C5.1 needs an APPLICATION kind-445 (one carrying `expiration`) from
           # each of TWO distinct groups. On the poll path every publishLocation
           # in e2e_combined targets the one family circle — the two-circle
@@ -544,6 +604,40 @@ jobs:
           if [[ "${{ inputs.live_sync }}" != "true" ]]; then
             echo "C5 correlation: SKIPPED on the poll path — C5.1 requires an application kind-445 from two distinct groups, which only the live-sync two-circle scenario produces. Run the live-sync variant for the C5 verdicts."
           else
+          # One `--mls-group-id` per line of the sidecar. Values are NOT echoed
+          # (Security Rule 4); the count is, so a reader can see the channel
+          # carried something without the log carrying the id.
+          # Same precedence start-wire-proxy.sh resolves the path with, in the
+          # same order, so an override set for the recorder is honoured here
+          # instead of silently reading the default path it stopped writing.
+          mls_claim="${HAVEN_WIRE_PROXY_RUN_DIR:-/tmp}/haven-wire-proxy.mlsgroupidpath"
+          # Read the path the recorder CLAIMED, exactly as the journal path is
+          # read above, instead of rebuilding the default instance's filename.
+          # A guessed name reads the wrong file the day a lane runs two
+          # recorders, and a stale sidecar is worse than a missing one: C5.8
+          # would scan for a previous plane's ids, find none, and report clean.
+          mls_sidecar="$(head -n 1 "${mls_claim}" 2>/dev/null || true)"
+          if [[ -z "${mls_sidecar}" ]]; then
+            echo "::error::the recorder claimed no MLS-group-id sidecar (${mls_claim} absent or empty). Without it C5.8 has no ground truth for Security Rule 4."
+            verdict "C5.8 mls-group-id channel" 3
+            mls_sidecar="/nonexistent"
+          fi
+          mls_args=()
+          mls_count=0
+          if [[ -r "${mls_sidecar}" ]]; then
+            while IFS= read -r mls_id || [[ -n "${mls_id}" ]]; do
+              mls_id="${mls_id//[[:space:]]/}"
+              [[ -n "${mls_id}" ]] || continue
+              mls_args+=(--mls-group-id "${mls_id}")
+              mls_count=$((mls_count + 1))
+            done < "${mls_sidecar}"
+          fi
+          if [[ "${mls_count}" -eq 0 ]]; then
+            echo "::error::the MLS group-id sidecar ${mls_sidecar} is absent or empty, so the drive never announced a group id through the proxy control channel. C5.8 would then scan the wire against an EMPTY set of values and could not have failed — Security Rule 4 would be reported as holding by a check that looked for nothing. This is a broken control channel (drive announcement -> proxy interception -> sidecar), not a scenario finding, and it is deliberately NOT downgraded to --mls-group-id-not-asserted: a fallback would turn this into a permanently-skipped invariant that goes green." >&2
+            verdict "C5.8 mls-group-id channel" 3
+          else
+            echo "::notice::C5.8: ${mls_count} MLS group id(s) declared from the proxy sidecar (values withheld — Security Rule 4)."
+          fi
           rc=0
           bash tooling/e2e/ci/check-wire-correlation.sh \
             --journal "${WIRE_JOURNAL}" \
@@ -555,7 +649,8 @@ jobs:
             --pool "10002=${WIRE_UPSTREAM}" \
             --pool "10050=${WIRE_UPSTREAM}" \
             --pool "30443=${WIRE_UPSTREAM}" \
-            --mls-group-id-not-asserted "no host-side channel for CircleFfi.mlsGroupId yet; the drive log is uploaded and is C6's manifest input, so it must not carry a Rule-4 value" || rc=$?
+            ${excl[@]+"${excl[@]}"} \
+            ${mls_args[@]+"${mls_args[@]}"} || rc=$?
           verdict "C5 correlation" "${rc}"
           fi
 

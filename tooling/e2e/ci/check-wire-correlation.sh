@@ -1050,7 +1050,11 @@ main() {
       --mls-group-id)
         [[ $# -ge 2 ]] || { echo "ERROR: --mls-group-id needs a value" >&2; usage; exit "${RC_USAGE}"; }
         if [[ ! "$2" =~ ^[0-9a-fA-F]+$ ]]; then
-          echo "ERROR: --mls-group-id expects lowercase-or-uppercase hex, got: $2" >&2
+          # Length and a fixed label only. A partly-corrupted sidecar line is
+          # hex-plus-junk, and echoing it would put a fragment of a Rule-4
+          # value into a public job log. The two sibling rejections below
+          # already print ${#2} for exactly this reason.
+          echo "ERROR: --mls-group-id expects hex; got a ${#2}-char non-hex value (withheld)." >&2
           echo "       C5.8 scans hex tokens on the wire; a value in any other encoding" >&2
           echo "       cannot match one and would disable the scan silently." >&2
           usage; exit "${RC_USAGE}"
@@ -1064,8 +1068,13 @@ main() {
         # hex chars (16 bytes) is already far past the point where a chance hit
         # inside an unrelated 64-hex token is credible; below it the check would
         # produce noise indistinguishable from a real leak, and a reviewer who
-        # learns to dismiss its findings has lost the check either way. MDK
-        # mints 32-byte ids, so nothing legitimate is anywhere near this floor.
+        # learns to dismiss its findings has lost the check either way.
+        #
+        # The floor is EXACT. OpenMLS mints a 16-BYTE group id
+        # (openmls/src/group/mod.rs:73, rng.random_vec(16)) = 32 hex chars, so
+        # every real id sits precisely here with zero headroom. Do NOT raise it
+        # "for safety": that rejects every id the app creates and hard-fails
+        # every lane. 128 bits is what the coincidence argument needs.
         if (( ${#2} < 32 )); then
           echo "ERROR: --mls-group-id must be at least 32 hex characters (got ${#2})." >&2
           echo "       C5.8 is a substring scan; a short needle matches unrelated tokens" >&2

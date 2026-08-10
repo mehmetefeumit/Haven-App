@@ -55,6 +55,22 @@
 # this script refuses to start when another LIVE instance already holds the one
 # it was asked for. Like binding, this does not fail open.
 #
+# ## The MLS-group-id sidecar
+#
+# The proxy also writes a SIDECAR file: one lowercase-hex line per distinct
+# REAL MLS group id the device declares over the control channel
+# (["HAVEN_WIRE_MLS_GROUP_ID","<hex>"], intercepted — never forwarded, never
+# journalled). A host-side oracle needs those literal values to assert Security
+# Rule 4 (the real group id never appears on the wire): asserting an ABSENCE
+# requires knowing the value, and it cannot come from the journal, because its
+# absence there is the assertion.
+#
+# That file is the most sensitive thing on the runner. It is NOT the drive log
+# (uploaded, 14-day retention) and NOT the journal (the corpus the oracle
+# scans). It is rotated here, deliberately NOT deleted by stop-wire-proxy.sh —
+# the lane reads it after teardown — and check_wire_proxy_test_only.sh check 3
+# fails CI if any workflow ever puts it in an upload-artifact step.
+#
 # Usage: start-wire-proxy.sh [listen-port] [upstream-url] [instance]
 #        (defaults: 7788 ws://127.0.0.1:7777 default)
 #        start-wire-proxy.sh --self-test
@@ -62,14 +78,15 @@
 # Optional env:
 #   HAVEN_WIRE_PROXY_ROUTES        '<listen>=<upstream>,...' — wins over argv.
 #   HAVEN_WIRE_JOURNAL             Journal path (default per instance, below).
+#   HAVEN_WIRE_MLS_GROUP_ID_FILE   Sidecar path (default per instance, below).
 #   HAVEN_WIRE_PROXY_ALLOW_REMOTE  '1' to permit a non-loopback upstream.
 #   HAVEN_WIRE_PROXY_SKIP_SELFTEST '1' to skip the preflight (NOT for CI).
 #   HAVEN_WIRE_PROXY_RUN_DIR       Where pid/log/claim files live (default /tmp).
 #
 # Files, mirroring start-local-relay.sh's instance convention:
-#   default  -> /tmp/haven-wire-proxy.pid  .log  .journalpath
+#   default  -> /tmp/haven-wire-proxy.pid  .log  .journalpath  .mlsgroupid
 #               /tmp/haven-wire-journal.ndjson
-#   <name>   -> /tmp/haven-wire-proxy-<name>.{pid,log,journalpath}
+#   <name>   -> /tmp/haven-wire-proxy-<name>.{pid,log,journalpath,mlsgroupid}
 #               /tmp/haven-wire-journal-<name>.ndjson
 
 set -euo pipefail
@@ -85,17 +102,23 @@ RUN_DIR="${HAVEN_WIRE_PROXY_RUN_DIR:-/tmp}"
 # self-test can drive it against fixtures without starting anything.
 # ---------------------------------------------------------------------------
 
-# instance_files <instance> — echoes "<pid> <log> <claim> <default-journal>".
+# instance_files <instance> — echoes
+#   "<pid> <log> <claim> <default-journal> <default-mlsgroupid>".
+#
+# The MLS-group-id sidecar is LAST so the positional reads that only want the
+# first few fields keep working; a reader that wants it must name it.
 instance_files() {
   local instance="$1"
   if [[ "${instance}" == "default" ]]; then
     echo "${RUN_DIR}/haven-wire-proxy.pid ${RUN_DIR}/haven-wire-proxy.log" \
-      "${RUN_DIR}/haven-wire-proxy.journalpath ${RUN_DIR}/haven-wire-journal.ndjson"
+      "${RUN_DIR}/haven-wire-proxy.journalpath ${RUN_DIR}/haven-wire-journal.ndjson" \
+      "${RUN_DIR}/haven-wire-proxy.mlsgroupid"
   else
     echo "${RUN_DIR}/haven-wire-proxy-${instance}.pid" \
       "${RUN_DIR}/haven-wire-proxy-${instance}.log" \
       "${RUN_DIR}/haven-wire-proxy-${instance}.journalpath" \
-      "${RUN_DIR}/haven-wire-journal-${instance}.ndjson"
+      "${RUN_DIR}/haven-wire-journal-${instance}.ndjson" \
+      "${RUN_DIR}/haven-wire-proxy-${instance}.mlsgroupid"
   fi
 }
 
@@ -230,6 +253,44 @@ self_test() {
   HAVEN_WIRE_PROXY_RUN_DIR="${tmp}" \
     bash "${SCRIPT_DIR}/stop-wire-proxy.sh" planeB >/dev/null 2>&1 || true
 
+  # -------------------------------------------------------------------------
+  # The MLS-group-id sidecar's PATH and LIFECYCLE.
+  #
+  # Both halves are load-bearing and both are silent when wrong. A path this
+  # script and the oracle disagree on gives the oracle an empty needle set, and
+  # a sidecar the teardown deletes gives it a missing file — and C5.8's
+  # precondition then reports "no --mls-group-id declared", which reads like a
+  # lane that never wired the channel rather than one that lost the evidence.
+  # -------------------------------------------------------------------------
+  echo "self-test: the mls-group-id sidecar's path and lifecycle"
+  local m_default m_named
+  read -r _ _ _ _ m_default < <(instance_files "default")
+  read -r _ _ _ _ m_named < <(instance_files "planeZ")
+  _path_case() { # _path_case <label> <got> <want>
+    if [[ "$2" == "$3" ]]; then
+      printf '  \033[1;32mPASS\033[0m %s\n' "$1"
+    else
+      printf '  \033[1;31mFAIL\033[0m %s (want %s, got %s)\n' "$1" "$3" "$2" >&2
+      fails=1
+    fi
+  }
+  _path_case "the default instance's sidecar is unsuffixed" \
+    "${m_default}" "${tmp}/haven-wire-proxy.mlsgroupid"
+  _path_case "a named instance's sidecar carries its name" \
+    "${m_named}" "${tmp}/haven-wire-proxy-planeZ.mlsgroupid"
+
+  # ROTATION, and the fact that teardown LEAVES it: the lane reads this file
+  # after stop-wire-proxy.sh has run.
+  printf 'staleid\n' >"${m_named}"
+  HAVEN_WIRE_PROXY_RUN_DIR="${tmp}" \
+    bash "${SCRIPT_DIR}/stop-wire-proxy.sh" planeZ >/dev/null 2>&1 || true
+  if [[ -f "${m_named}" ]]; then
+    printf '  \033[1;32mPASS\033[0m teardown leaves the sidecar for the lane to read\n'
+  else
+    printf '  \033[1;31mFAIL\033[0m stop-wire-proxy.sh deleted the sidecar\n' >&2
+    fails=1
+  fi
+
   kill "${live}" 2>/dev/null || true
   wait "${live}" 2>/dev/null || true
 
@@ -255,9 +316,16 @@ if [[ ! "${INSTANCE}" =~ ^[A-Za-z0-9._-]+$ ]]; then
   exit 2
 fi
 
-read -r PID_FILE LOG_FILE CLAIM_FILE DEFAULT_JOURNAL < <(instance_files "${INSTANCE}")
-readonly PID_FILE LOG_FILE CLAIM_FILE DEFAULT_JOURNAL
+read -r PID_FILE LOG_FILE CLAIM_FILE DEFAULT_JOURNAL DEFAULT_MLS_GROUP_ID_FILE \
+  < <(instance_files "${INSTANCE}")
+readonly PID_FILE LOG_FILE CLAIM_FILE DEFAULT_JOURNAL DEFAULT_MLS_GROUP_ID_FILE
 readonly JOURNAL="${HAVEN_WIRE_JOURNAL:-${DEFAULT_JOURNAL}}"
+# Honoured rather than silently overridden, so `HAVEN_WIRE_MLS_GROUP_ID_FILE=x
+# start-wire-proxy.sh` means what it looks like it means. Do NOT export it when
+# running more than one instance: two proxies pointed at one sidecar would
+# rotate each other's ground truth away, exactly as HAVEN_WIRE_JOURNAL does to
+# the journal (which is what the claim gate above exists for).
+readonly MLS_GROUP_ID_FILE="${HAVEN_WIRE_MLS_GROUP_ID_FILE:-${DEFAULT_MLS_GROUP_ID_FILE}}"
 
 # ---------------------------------------------------------------------------
 # Hermeticity gate.
@@ -351,17 +419,38 @@ fi
 # would see wire_seq go backwards with no way to tell which run a line is from.
 rm -f "${JOURNAL}"
 
+# ROTATE the MLS-group-id sidecar too, and for a sharper reason: it is the
+# GROUND TRUTH a host-side oracle scans the journal for. A leftover file would
+# hand this run's oracle the ids of a PREVIOUS run's circles, which were never
+# on this wire and therefore can never be found — an assertion that cannot
+# fail, which is the one failure mode a privacy oracle must not have.
+rm -f "${MLS_GROUP_ID_FILE}"
+
 echo "Starting wire proxy instance '${INSTANCE}': ${PORT} -> ${UPSTREAM}"
 echo "  journal: ${JOURNAL}"
+# NEVER upload this file. It holds the REAL MLS group ids the device declares,
+# which Security Rule 4 says must never reach a relay; it exists so a host-side
+# oracle can assert their ABSENCE from the journal. stop-wire-proxy.sh
+# deliberately leaves it in place, because the lane reads it after teardown,
+# and check_wire_proxy_test_only.sh check 3 keeps it out of every artifact.
+echo "  mls-group-id sidecar: ${MLS_GROUP_ID_FILE} (host-only, never an artifact)"
 HAVEN_WIRE_PROXY_PORT="${PORT}" \
 HAVEN_WIRE_PROXY_UPSTREAM="${UPSTREAM}" \
 HAVEN_WIRE_JOURNAL="${JOURNAL}" \
+HAVEN_WIRE_MLS_GROUP_ID_FILE="${MLS_GROUP_ID_FILE}" \
   nohup "${BIN}" "--haven-wire-proxy-instance=${INSTANCE}" \
   >"${LOG_FILE}" 2>&1 &
 echo $! >"${PID_FILE}"
 # CLAIM the journal, so a second instance pointed at the same path refuses to
 # start rather than unlinking this one's file out from under it.
 printf '%s\n' "${JOURNAL}" >"${CLAIM_FILE}"
+# The sidecar gets a claim of its own, for the same reason the journal has one:
+# a reader that GUESSES the filename reads the wrong instance's file the day a
+# lane runs two recorders, and for the sidecar that is worse than for the
+# journal — a stale file makes C5.8 scan for a previous plane's ids, find
+# nothing, and report clean. Derived from CLAIM_FILE so it carries the instance
+# suffix automatically.
+printf '%s\n' "${MLS_GROUP_ID_FILE}" >"${CLAIM_FILE%.journalpath}.mlsgroupidpath"
 
 # Readiness is the proxy's OWN log line, not a port probe.
 #
