@@ -94,6 +94,16 @@ const String _sentinelVerb = 'HAVEN_WIRE_SENTINEL';
 /// `SENTINEL_ACK_VERB` in `tooling/e2e/local-relay/src/frame.rs`.
 const String _sentinelAckVerb = 'HAVEN_WIRE_SENTINEL_ACK';
 
+/// Payload of a harness-socket declaration ([TestRelay._declareHarnessSocket]).
+///
+/// Deliberately shares NO substring with [wireJournalSentinelToken]: it must
+/// never satisfy a token match, because both the snapshot boundary
+/// (`check-wire-journal.sh`'s `sentinel_seq`) and `emitWireJournalSentinel`'s
+/// pending-ack matching key on that token. The host oracles identify a harness
+/// socket by the intercepted VERB, so the payload carries no information they
+/// read — it exists to be recognisably NOT the anchor.
+const String _harnessSocketDeclaration = 'HAVEN_WIRE_CONN';
+
 /// Frame verb the recording proxy intercepts as a real-MLS-group-id
 /// announcement ([TestRelay.announceMlsGroupId]). Must match
 /// `MLS_GROUP_ID_VERB` in `tooling/e2e/local-relay/src/frame.rs`.
@@ -271,7 +281,9 @@ class TestRelay {
     final target = Uri.parse(url ?? defaultStrfryUrl);
     final channel = WebSocketChannel.connect(target);
     await channel.ready;
-    return TestRelay._(target.toString(), channel).._listen();
+    return TestRelay._(target.toString(), channel)
+      .._listen()
+      .._declareHarnessSocket();
   }
 
   /// The relay URL this client is connected to.
@@ -516,6 +528,11 @@ class TestRelay {
       _writable = true;
       _reconnectAttempt = 0;
       _listen();
+      // A reconnect mints a fresh conn_id, so the new socket has to declare
+      // itself too — see [_declareHarnessSocket]. Before the REQ re-issue, so
+      // the declaration is the connection's first journalled frame and no
+      // window exists in which harness traffic is attributable to the app.
+      _declareHarnessSocket();
       // Re-issue REQ for each surviving subscription so events
       // continue flowing through the same completers/listeners that
       // were registered before the disconnect. Strfry's `since=`
@@ -633,6 +650,76 @@ class TestRelay {
     } finally {
       _pendingSentinels.removeWhere((p) => p.token == token);
     }
+  }
+
+  /// Marks THIS socket, in the journal, as one the harness owns.
+  ///
+  /// ## Why the host cannot work this out for itself
+  ///
+  /// A `TestRelay` is a multiplexed socket: `SyntheticUser.publishLocation`
+  /// puts every synthetic peer's kind-445 on whichever `TestRelay` its
+  /// scenario holds, so ONE connection carries several simulated devices'
+  /// traffic. The host oracles reason per publisher — `check-wire-correlation`
+  /// C5.1 asks whether ONE device published to two circles in the same second
+  /// — and a connection is the only device boundary the journal has. Left
+  /// undeclared, this socket looks like a single device that publishes to
+  /// every circle at once, which is the exact defect C5.1 exists to find: two
+  /// peers publishing 35 ms apart to two different circles reported as a
+  /// co-membership leak by the app. That is a false finding AND it hides the
+  /// real one, because the app's own traffic is then judged inside the same
+  /// bucket as the harness's.
+  ///
+  /// The marker frame is the only thing that distinguishes the two. It uses
+  /// the same proxy-intercepted VERB as [emitWireJournalSentinel] — journalled
+  /// as an ordinary `c2r` line, never forwarded upstream — so a connection
+  /// that carries one is, by construction, a harness socket: no production
+  /// code path can emit that verb
+  /// (`scripts/ci/check_wire_proxy_test_only.sh` keeps the recorder and its
+  /// vocabulary out of `haven/lib` and `haven-core`). Both host oracles key
+  /// off the VERB, never off the payload.
+  ///
+  /// ## Why the payload is NOT the sentinel token
+  ///
+  /// A declaration must not be able to answer for the snapshot marker. Two
+  /// things would go wrong if it carried the same token:
+  ///
+  ///   * `emitWireJournalSentinel` resolves its pending future by matching the
+  ///     ECHOED token, so a reconnect firing a declaration while that call is
+  ///     in flight would complete it with the DECLARATION's `wire_seq` — and
+  ///     `_canaries.recordSentinel` would then anchor the canary oracle at a
+  ///     boundary lower than the run it is meant to cover, reporting a
+  ///     narrowed scan as a clean one.
+  ///   * `check-wire-journal.sh`'s `sentinel_seq` matches `frame[1]` exactly
+  ///     against the token, so a declaration carrying it is a line that can
+  ///     MOVE the boundary — the exact failure that function's doc was
+  ///     rewritten to prevent.
+  ///
+  /// [_harnessSocketDeclaration] is therefore a fixed marker that shares no
+  /// substring with the run's token. It needs no per-run uniqueness: a journal
+  /// only ever covers one run, and nothing anchors on it.
+  ///
+  /// ## Why it is fire-and-forget, and why it repeats per socket
+  ///
+  /// The ack carries the `conn_id`, but nothing here needs it: the host reads
+  /// the declaration out of the JOURNAL, where the line already names its own
+  /// connection. Not waiting keeps `connect` off a 15 s failure path, and the
+  /// ack (which echoes [_harnessSocketDeclaration]) matches no pending
+  /// sentinel, so `_onMessage` ignores it.
+  ///
+  /// Called on the initial connect AND after every successful reconnect,
+  /// because a reconnect mints a FRESH `conn_id` — one declaration per socket
+  /// would leave the connections after a mid-run disconnect attributed to the
+  /// app.
+  ///
+  /// A no-op unless [wireRecorderDeclared]: on a lane with no proxy in path
+  /// (`e2e-flakiness-stress.yml` drives straight at strfry) the frame would
+  /// reach a real relay, which is pointless traffic and an unknown command.
+  void _declareHarnessSocket() {
+    if (!wireRecorderDeclared) return;
+    if (_closed || !_writable) return;
+    _channel.sink.add(
+      jsonEncode(<dynamic>[_sentinelVerb, _harnessSocketDeclaration]),
+    );
   }
 
   /// Announces one circle's REAL MLS group id to the recording proxy.

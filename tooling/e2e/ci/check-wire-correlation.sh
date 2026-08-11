@@ -11,7 +11,7 @@
 # file is the layer underneath it — the one that reads VALUES and the
 # relationships between events:
 #
-#   C5.1  no two kind-445s with different `h` share a `created_at`
+#   C5.1  no ONE publisher sends two kind-445s with different `h` in one second
 #   C5.2  REQ-filter allow-list (the multiplexed `#h` shape, and nothing wider)
 #   C5.3  per-EVENT kind-445 tag shape ∈ { {h}, {h,expiration} }
 #   C5.4  no `g` and no `alt` tag on any kind
@@ -37,15 +37,39 @@
 # The self-test therefore asserts C5.9's MESSAGE and not merely a red exit
 # code, because the exit code alone cannot distinguish the two rules.
 #
-# # C5.7 and C5.8 are SEND-SIDE, and say so
+# # C5.1, C5.7 and C5.8 are SEND-SIDE, and say so
 #
-# C5.1-C5.6 read both directions, because the questions they ask have the same
-# answer whoever put the frame on the socket. C5.7, C5.8 and C5.9 do not: each
-# asks what HAVEN did, and an inbound frame is the RELAY's output — free to
-# echo Haven's own event back, to carry another client's 445, or to be
-# hostile. Asserting any of the three over inbound traffic would manufacture
+# C5.2-C5.6 read both directions, because the questions they ask have the same
+# answer whoever put the frame on the socket. C5.1, C5.7, C5.8 and C5.9 do not:
+# each asks what ONE DEVICE did, and an inbound frame is the RELAY's output —
+# free to echo Haven's own event back, to carry another client's 445, or to be
+# hostile. Asserting any of them over inbound traffic would manufacture
 # findings, so they are scoped to `dir == "c2r"` and what is known about
 # inbound is printed as `advisory (NOT asserted)`.
+#
+# # Attribution: a connection is the publisher, and harness sockets are nobody
+#
+# C5.1 goes one step further than direction, because it is the one invariant
+# whose subject is a RELATIONSHIP between two events rather than a property of
+# one. It partitions the sent traffic by CONNECTION and asks its question
+# inside each partition.
+#
+# The journal is not single-tenant. One E2E process runs the app under test
+# plus a dozen in-process `SyntheticUser` peers, each with its own relay
+# client, and the harness's own `TestRelay` sockets on top — and on a
+# `TestRelay` several simulated peers publish through ONE socket
+# (`SyntheticUser.publishLocation` → `TestRelay.publishAndAwaitOk`). Asserted
+# over the union, "two circles shared a second" says nothing about Haven: it
+# reports two peers publishing 35 ms apart as a co-membership leak by the app,
+# and reports it on essentially every run, because fifteen devices in a
+# twenty-minute window collide by birthday. That was not a hypothetical — it
+# is what this oracle did on its first three live-sync runs.
+#
+# So: harness sockets are excluded (they self-declare — see the exclusion note
+# in `evaluate`), inbound is dropped, and what remains is partitioned per
+# connection. A device that co-times two circles is still caught, on the one
+# socket its relay client publishes over; two devices coinciding no longer
+# manufactures a finding, because there is no shared device to infer.
 #
 # # Every invariant carries its own non-empty precondition, and fails closed
 #
@@ -64,26 +88,33 @@
 # as a clean one.
 #
 # C5.1's precondition is where that trap bites hardest, so it is stated
-# explicitly: it is NOT "≥2 distinct `h`". Commits and proposals carry no inner
-# timestamp and keep the wrap-time default (`transport-nostr-peeler/src/
-# peeler.rs:166`), so two commits satisfy "≥2 distinct `h`" while proving
-# nothing whatever about the timestamp binding the invariant exists to police.
-# The precondition is "≥1 APPLICATION message (a 445 carrying `expiration`) per
-# distinct `h`, for at least two distinct `h`".
+# explicitly: it is NOT "≥2 distinct `h`", and it is not journal-wide either.
+# Commits and proposals carry no inner timestamp and keep the wrap-time default
+# (`transport-nostr-peeler/src/peeler.rs:166`), so two commits satisfy "≥2
+# distinct `h`" while proving nothing whatever about the timestamp binding the
+# invariant exists to police. And a collision is a statement about ONE device,
+# so two circles served by two different devices cannot exhibit it however many
+# messages they send. The precondition is therefore "ONE CONNECTION published
+# an APPLICATION message (a 445 carrying `expiration`) for each of two distinct
+# `h`" — i.e. the run actually put a device in the situation the decorrelation
+# work exists for.
+#
+# That floor also fails closed on the way the attribution could rot: if the
+# app's publishes ever split across connections, no single connection covers
+# two groups and this META-FLOORs instead of quietly checking half the burst.
 #
 # # Why C5.1 asserts over commits too, even though only application messages
 # # carry the binding
 #
-# The PRECONDITION excludes commits; the ASSERTION does not. Two 445s in the
-# same second with different `h` are linkable by an observer whichever kind of
-# message they are — kind-445 events are signed by a fresh ephemeral key per
-# message (Security Rule 2), so `created_at` is the ONLY thing on the outer
-# event that can bind two of them, and it binds them regardless of what is
-# inside. The strict form is also the only one that is honest: because the keys
-# are ephemeral, this oracle CANNOT distinguish "one client published to two
-# circles at once" (the defect) from "two devices coincided" (a false
-# inference) — and neither can the relay, which is precisely why the collision
-# is a disclosure and not merely an artefact.
+# The PRECONDITION excludes commits; the ASSERTION does not. Two 445s from one
+# device in the same second with different `h` are linkable by an observer
+# whichever kind of message they are — kind-445 events are signed by a fresh
+# ephemeral key per message (Security Rule 2), so `created_at` is the ONLY
+# thing on the outer event that can bind two of them, and it binds them
+# regardless of what is inside. Note what this means for a finding: an
+# observer cannot tell a commit from an application message here either, so a
+# location publish that lands in the same second as a protocol commit for
+# another circle is a real disclosure, not a technicality.
 #
 # # Why C5.2 permits the multiplexed `#h` REQ
 #
@@ -168,6 +199,9 @@ may not appear both as a discovery relay and inside a pool.
 harness's own socket, whose conn_id the proxy returns in the sentinel ack: its
 probes are not Haven's traffic. It can only remove evidence, so an over-broad
 exclusion fails closed on the preconditions rather than reporting clean.
+It is ADDITIVE to what the journal already declares: any connection that
+emitted the intercepted sentinel verb is a harness socket by construction and
+is excluded whether or not the lane names it.
 
 --identity-pubkey declares a long-term account pubkey (64 hex) that no kind-445
 may ever be signed by (C5.7). It is OPTIONAL and additive: the identity set is
@@ -332,6 +366,16 @@ normalize() {
              up:$up, listen:$lst,
              sub:(($line.frame[1] // "") | tostring),
              filters:[ $line.frame[2:][] | select(type == "object") ]}
+          elif ($verb == "HAVEN_WIRE_SENTINEL" and $line.dir == "c2r") then
+            # A HARNESS-SOCKET DECLARATION. The verb exists only in the E2E
+            # harness (`TestRelay._declareHarnessSocket` /
+            # `emitWireJournalSentinel`); the recording proxy intercepts it and
+            # never forwards it, and `scripts/ci/check_wire_proxy_test_only.sh`
+            # keeps the recorder vocabulary out of `haven/lib` and
+            # `haven-core`. So a connection that emitted one IS a harness
+            # socket, established from the journal rather than from a flag the
+            # caller might forget. See the exclusion note in `evaluate`.
+            {t:"harness", seq:$line.wire_seq, conn:$line.conn_id}
           else empty end
       else empty end
   ' -- "${f}"
@@ -433,16 +477,33 @@ evaluate() {
     # this journal too — and they are NOT Haven-s privacy surface. Attributing
     # a harness probe to the app would manufacture findings; worse, normalising
     # its traffic as ordinary would teach a reader to ignore the real thing.
-    # The proxy-s sentinel ack hands the caller the emitting `conn_id` for
-    # exactly this purpose (tooling/e2e/local-relay/src/frame.rs:137-146), and
-    # --exclude-conn feeds it back. This can only ever REMOVE evidence, never
-    # add it, so it is safe against a caller who over-excludes: every
-    # precondition below is computed AFTER exclusion, and a lane that excludes
-    # its way to an empty sample fails closed as a META-FLOOR rather than
-    # reporting clean.
+    #
+    # A harness socket is worse than noise for C5.1, which reasons per
+    # PUBLISHER: `SyntheticUser.publishLocation` puts every simulated peer-s
+    # kind-445 on whichever `TestRelay` its scenario holds, so ONE connection
+    # multiplexes several devices. Judged as a device it looks exactly like the
+    # defect C5.1 hunts — two circles served in one second by one publisher —
+    # when what happened is two peers publishing 35 ms apart.
+    #
+    # Two sources, unioned, because each covers what the other cannot:
+    #   * --exclude-conn, fed from the proxy-s sentinel ack, which hands the
+    #     caller the emitting `conn_id` (tooling/e2e/local-relay/src/
+    #     frame.rs:137-146). Needs the drive to print the ack and the lane to
+    #     grep it back out.
+    #   * $harness, read straight out of the journal: every connection that
+    #     EMITTED the intercepted sentinel verb declared itself, so a socket
+    #     opened mid-run (a TestRelay reconnect mints a fresh conn_id) is
+    #     covered without any host-side plumbing at all.
+    #
+    # This can only ever REMOVE evidence, never add it, so it is safe against a
+    # caller who over-excludes: every precondition below is computed AFTER
+    # exclusion, and a lane that excludes its way to an empty sample fails
+    # closed as a META-FLOOR rather than reporting clean.
     # `. as $x` first: see the KNOWNKEYS note below — a bare `.` inside
     # `index(...)` binds to index-s input, not to the row.
-    | [ .[] | . as $x | select(($excludeConns | index($x.conn)) == null) ]
+    | ( [ .[] | select(.t == "harness") | .conn ] | unique ) as $harness
+    | (( $excludeConns + $harness ) | unique) as $EXCL
+    | [ .[] | . as $x | select(($EXCL | index($x.conn)) == null) ]
     | [ .[]
         | . as $r
         | ($connEp[$r.conn] // {up:"", listen:""}) as $fb
@@ -475,6 +536,17 @@ evaluate() {
     | ( [ $events[] | select(.dir == "c2r") ]
         | group_by([bodyKey, .epKey])
         | map(.[0]) ) as $sent
+
+    # C5.1 needs (event, CONNECTION) pairs, and neither `$uniq` nor `$sent`
+    # is that. `$uniq` folds the connection away entirely (it is one of the
+    # axes along which one event legitimately repeats), and `$sent` keys on the
+    # ENDPOINT, so two sockets talking to the same relay — the app-s and a
+    # peer-s — collapse into one row that then answers for both. The
+    # connection is the only publisher boundary this journal has, so it has to
+    # survive into the key.
+    | ( [ $events[] | select(.dir == "c2r") ]
+        | group_by([bodyKey, .conn])
+        | map(.[0]) ) as $sentByConn
 
     | [ $uniq[] | select(.kind == 445) ] as $u445
     | [ $u445[] | select(nameList(.tags) | index("expiration")) ] as $u445app
@@ -537,22 +609,103 @@ evaluate() {
     | ($mlsGroupIds | map(ascii_downcase) | unique) as $MLSIDS
 
     # ======================================================================
-    # C5.1 — created_at collision across distinct `h`
+    # C5.1 — created_at collision across distinct `h`, PER PUBLISHER
     # ======================================================================
+    # Scoped to `dir == "c2r"` and partitioned by the sending CONNECTION, for
+    # the reason C5.7-C5.9 are scoped the same way: the question is what ONE
+    # DEVICE did. A device that publishes to two circles in the same second
+    # hands anyone holding both events a co-membership edge; two SEPARATE
+    # devices whose publishes happen to land in the same second hand over
+    # nothing, because there is no shared device to be inferred. Asserting
+    # over the union of every publisher in the journal does not measure a
+    # property of Haven at all — it measures how many simulated devices the
+    # scenario ran and how fast, and in a lane that runs fifteen of them in one
+    # process it is a birthday collision waiting to happen.
+    #
+    # The connection is the device boundary the journal has: the app under test
+    # publishes through its own relay client, each in-process SyntheticUser
+    # peer through its own, and the harness-s multiplexed sockets are excluded
+    # above (a TestRelay carries several peers-  traffic and is nobody-s
+    # device). Inbound frames are dropped for the same reason C5.7 drops them:
+    # an r2c 445 is the RELAY-s output — Haven-s own event echoed back, another
+    # client-s message, or an injection — and none of that is evidence about
+    # what this app transmitted. What is known about the traffic this scoping
+    # sets aside is printed as an advisory, never as silence.
+    #
+    # LIMIT, stated rather than hidden: co-timing that a device splits across
+    # two relays lands on two connections and so in two partitions. The
+    # per-endpoint META-FLOOR below refuses to report clean when the journal
+    # carries more than one upstream, so the day a multi-relay lane runs C5
+    # this fails LOUDLY and gets a real device channel rather than quietly
+    # checking half of what it claims.
+    | ( [ $sentByConn[] | select(.kind == 445) ] ) as $c51pool
+    | ( [ $c51pool[] | select(nameList(.tags) | index("expiration")) ] ) as $c51app
     | ( [ $u445app[] | (tagVals(.tags; "h") | first) // "" ] | unique
         | map(select(. != "")) ) as $appH
-    | ( [ $u445[]
-          | select(.created_at != null)
-          | {ts:.created_at, h:((tagVals(.tags; "h") | first) // ""), id:.id}
-          | select(.h != "") ]
-        | group_by(.ts)
-        | map(select((map(.h) | unique | length) >= 2)) ) as $collisions
 
-    | [ (if (($appH | length) < 2) then
-          "C5.1 precondition: only \($appH | length) distinct group(s) published an APPLICATION kind-445 (a 445 carrying `expiration`) below the sentinel; at least 2 are needed for a created_at collision to be observable at all. Commits and proposals do NOT count towards this floor: they carry no inner timestamp and keep the wrap-time default (transport-nostr-peeler/src/peeler.rs:166), so a run whose second group emitted only commits would satisfy a naive \">=2 distinct h\" floor while proving nothing about the timestamp binding — which is exactly where the leak lives."
-         else empty end) ] as $c51meta
+    # The precondition is per CONNECTION, matching the assertion. A run in
+    # which two circles published an application 445 but never the same device
+    # cannot exhibit the leak, so its silence is not evidence — the whole point
+    # of the decorrelation work is that ONE device serves several circles, and
+    # only a device that did so can prove it kept them apart.
+    #
+    # Commits and proposals still do NOT count towards this floor: they carry
+    # no inner timestamp and keep the wrap-time default
+    # (transport-nostr-peeler/src/peeler.rs:166), so a device whose second
+    # group emitted only commits would satisfy a naive ">=2 distinct h" floor
+    # while proving nothing about the timestamp binding — which is exactly
+    # where the leak lives.
+    | ( [ $c51app[]
+          | {conn:.conn, h:((tagVals(.tags; "h") | first) // "")}
+          | select(.h != "") ]
+        | group_by(.conn)
+        | map({conn: .[0].conn, groups: ([ .[] | .h ] | unique | length)}) )
+      as $c51byConn
+    | ( [ $c51byConn[] | select(.groups >= 2) ] ) as $c51multi
+
+    # The one shape a per-CONNECTION partition is blind to: two groups whose
+    # kind-445s reached DISJOINT sets of relays. One device publishing to both
+    # in the same second would then necessarily use two connections, so the
+    # pair could never land in one partition and the collision would go
+    # unreported. Overlapping relay sets are fine — the ordinary fan-out of one
+    # circle to several relays does not hide anything, because both groups
+    # still meet on the shared endpoint's connection.
+    | ( [ $c51pool[]
+          | {h: ((tagVals(.tags; "h") | first) // ""), ep: .epKey} ]
+        | map(select(.h != "" and .ep != ""))
+        | group_by(.h)
+        | map({h: .[0].h, eps: ([ .[] | .ep ] | unique)}) ) as $c51groupEps
+    | ( [ $c51groupEps[] as $a
+          | $c51groupEps[] as $b
+          | select($a.h < $b.h)
+          | select((($a.eps) - (($a.eps) - ($b.eps))) | length == 0)
+          | "\(short($a.h))…/\(short($b.h))…" ] ) as $c51blind
+
+    # The ASSERTION spans every 445 the device sent, commits included: two 445s
+    # in the same second under different `h` are linkable whichever kind of
+    # message they carry. Kind-445s are signed by a fresh ephemeral key per
+    # message (Security Rule 2), so `created_at` is the ONLY field on the outer
+    # event that can bind two of them — and it binds them regardless of what is
+    # inside.
+    | ( [ $c51pool[]
+          | select(.created_at != null)
+          | {conn:.conn, ts:.created_at,
+             h:((tagVals(.tags; "h") | first) // ""), id:.id}
+          | select(.h != "") ]
+        | group_by([.conn, .ts])
+        | map(select(([ .[] | .h ] | unique | length) >= 2)) ) as $collisions
+
+    # Array concatenation, never `\(a) + \(b)` over two `if … else empty end`
+    # arms: `empty + "text"` is EMPTY in jq, so a stream-valued `+` would
+    # DELETE the precondition message on exactly the runs that have one.
+    | ( (if (($c51multi | length) == 0) then
+          [ "C5.1 precondition: no single connection PUBLISHED an application kind-445 (a 445 carrying `expiration`) for two distinct groups below the sentinel — \($c51byConn | length) publishing connection(s), the widest covering \([ 0, ($c51byConn[] | .groups) ] | max) group(s), over \($appH | length) app-publishing group(s) in the journal as a whole. A created_at collision is a statement about ONE device serving two circles, so a run in which no device ever served two circles cannot exhibit it and its silence is not evidence. Commits and proposals do NOT count towards this floor: they carry no inner timestamp and keep the wrap-time default (transport-nostr-peeler/src/peeler.rs:166), so a device whose second group emitted only commits would satisfy a naive \">=2 distinct h\" floor while proving nothing about the timestamp binding — which is exactly where the leak lives. Either the scenario never put the app in two circles at once with location sharing live, or the publishes it made were split across connections — which would ALSO break the attribution this invariant is partitioned by. Fix the SCENARIO (or the attribution), not this floor." ]
+         else [] end)
+      + (if (($c51blind | length) > 0) then
+          [ "C5.1 attribution: \($c51blind | length) pair(s) of groups published their kind-445s to DISJOINT relay sets (\($c51blind | join(", "))). This invariant partitions by CONNECTION to tell one device from another, and a device publishing to two such groups in the same second would necessarily do it over two connections — so that collision would sit in two partitions and go unreported. A clean verdict here would be a claim about pairs this run cannot see. Give the oracle a real device channel (a declared per-device identity), or keep the C5 lane on relay sets that overlap, rather than reading this run as a pass." ]
+         else [] end) ) as $c51meta
     | [ ( $collisions[]
-          | "C5.1 timestamp correlation: \(map(.h) | unique | length) DIFFERENT groups published a kind-445 at the same created_at (\(.[0].ts); h values \(map(.h) | unique | map(short(.)) | join(", "))). The peeler binds the outer event's created_at to the inner application message's timestamp (transport-nostr-peeler/src/peeler.rs:169-170, fed by cgka-engine/src/message_processor/send.rs:770-771), so anyone holding both events reads them as ONE publisher serving two circles — and that is the co-membership edge the whole h-tag design exists to withhold. The events need not have come from the same relay: created_at is inside the SIGNED event, so the correlation survives every relay hop, an archive, and any two operators comparing notes months later. Kind-445s are signed by a fresh ephemeral key per message, so created_at is the only thing that can bind two of them — which is why it must not." ) ] as $c51viol
+          | "C5.1 timestamp correlation: ONE publisher (connection \(.[0].conn)) published a kind-445 to \([ .[] | .h ] | unique | length) DIFFERENT groups at the same created_at (\(.[0].ts); h values \([ .[] | .h ] | unique | map(short(.)) | join(", "))). The peeler binds the outer event's created_at to the inner application message's timestamp (transport-nostr-peeler/src/peeler.rs:169-170, fed by cgka-engine/src/message_processor/send.rs:770-771), so anyone holding both events reads them as ONE publisher serving two circles — and that is the co-membership edge the whole h-tag design exists to withhold. The events need not have come from the same relay: created_at is inside the SIGNED event, so the correlation survives every relay hop, an archive, and any two operators comparing notes months later. Kind-445s are signed by a fresh ephemeral key per message, so created_at is the only thing that can bind two of them — which is why it must not." ) ] as $c51viol
 
     # ======================================================================
     # C5.2 — REQ-filter allow-list
@@ -917,7 +1070,13 @@ evaluate() {
           ( ([ $in445[] | .pubkey ] | unique | map(select(. != ""))) as $inAuth
             | ( [ $in445[] | . as $e | select((($e.pubkey // "") != "") and (($IDKEYS | index($e.pubkey)) != null)) ] | length ) as $inId
             | "\($in445 | length) inbound kind-445(s) below the sentinel, \($inAuth | length) distinct author key(s), \($inId) of them signed by a key this run also saw on an identity-scoped event. NOT asserted: an inbound frame is the relay's output, not Haven's, so a repeat or an identity-keyed author there may be the relay echoing Haven's own event, another client's traffic, or a hostile injection — none of which is evidence about the app under test. C5.7 is scoped to dir==c2r for that reason." )
-         else "no inbound kind-445 was observed below the sentinel; nothing is claimed either way about what a relay returns." end) ] as $advisories
+         else "no inbound kind-445 was observed below the sentinel; nothing is claimed either way about what a relay returns." end)
+      ,
+        # The attribution C5.1 rests on, printed on every run — a reader must
+        # be able to see WHICH publishers were judged and how wide each one's
+        # circle set was, without re-deriving it from the journal.
+        ( "C5.1 attribution: \($c51byConn | length) connection(s) published an application kind-445 below the sentinel, \($c51multi | length) of them to more than one group (widest \([ 0, ($c51byConn[] | .groups) ] | max) group(s)); \($EXCL | length) connection(s) excluded from EVENT attribution (\($harness | length) self-declared harness socket(s), \($excludeConns | length) named by the lane). A connection is the only publisher boundary this journal has; co-timing BETWEEN connections is not asserted, because two devices coinciding in one second discloses no shared device." )
+      ] as $advisories
 
     | {
         meta: ($c51meta + $c52meta + $c53meta + $c54meta + $c55meta + $c56meta
@@ -944,6 +1103,10 @@ evaluate() {
           identity_keys: ($IDKEYS | length),
           mls_ids: ($MLSIDS | length),
           in_445: ($in445 | length),
+          publishing_conns: ($c51byConn | length),
+          multi_circle_conns: ($c51multi | length),
+          excluded_conns: ($EXCL | length),
+          harness_conns: ($harness | length),
           endpoints: ([ $rows[] | .epKey ] | unique | map(select(. != "")))
         }
       }
@@ -1216,6 +1379,8 @@ main() {
     "\(.summary.h_filters) #h filter(s); \(.summary.sent_pairs) (event,endpoint) publish pair(s); " +
     "sent 445 \(.summary.sent_445) under \(.summary.sent_445_authors) distinct author key(s); " +
     "\(.summary.identity_keys) known identity key(s); \(.summary.mls_ids) declared MLS group id(s); " +
+    "\(.summary.publishing_conns) publishing connection(s) of which \(.summary.multi_circle_conns) served >1 group; " +
+    "\(.summary.excluded_conns) connection(s) excluded (\(.summary.harness_conns) self-declared harness); " +
     "endpoints \(.summary.endpoints)"' >&2
 
   # Printed before the findings, and never mapped to an exit code. An advisory
@@ -1258,7 +1423,7 @@ main() {
   # C5.8 here while an advisory three lines above says it was not scanned is a
   # false statement in the one place it does the most damage.
   if [[ -n "${MLS_NOT_ASSERTED}" ]]; then
-    echo "wire-correlation: clean on EIGHT of nine — C5.1 timestamp separation," \
+    echo "wire-correlation: clean on EIGHT of nine — C5.1 per-publisher timestamp separation," \
          "C5.2 REQ-filter allow-list, C5.3 per-event 445 tag shape, C5.4 no g/alt," \
          "C5.5 1059 == {p}, C5.6 per-kind publish containment, C5.7 fresh ephemeral" \
          "445 author and C5.9 no p-tag on a 445 all hold, and all eight had a" \
@@ -1266,7 +1431,7 @@ main() {
          "ASSERTED — see the advisory above. This run is NOT evidence for" \
          "Security Rule 4."
   else
-    echo "wire-correlation: clean — C5.1 timestamp separation, C5.2 REQ-filter" \
+    echo "wire-correlation: clean — C5.1 per-publisher timestamp separation, C5.2 REQ-filter" \
          "allow-list, C5.3 per-event 445 tag shape, C5.4 no g/alt, C5.5 1059 == {p}," \
          "C5.6 per-kind publish containment, C5.7 fresh ephemeral 445 author," \
          "C5.8 no real MLS group id on the wire and C5.9 no p-tag on a 445 all hold," \
@@ -1412,6 +1577,14 @@ readonly PK_EPH1="11111111111111111111111111111111111111111111111111111111111111
 readonly PK_EPH2="2222222222222222222222222222222222222222222222222222222222222222"
 readonly PK_EPH3="3333333333333333333333333333333333333333333333333333333333333333"
 readonly PK_EPH4="4444444444444444444444444444444444444444444444444444444444444444"
+# Kept distinct from PK_EPH1-4 on purpose: C5.7 forbids one ephemeral key from
+# signing two kind-445s, so a fixture that reuses a key the healthy base
+# already spent would go red on C5.7 while claiming to be about something else.
+readonly PK_EPH5="5555555555555555555555555555555555555555555555555555555555555555"
+readonly PK_EPH6="6666666666666666666666666666666666666666666666666666666666666666"
+readonly PK_EPH7="7777777777777777777777777777777777777777777777777777777777777777"
+readonly PK_EPH8="8888888888888888888888888888888888888888888888888888888888888888"
+readonly PK_EPH9="9999999999999999999999999999999999999999999999999999999999999999"
 readonly SENTINEL="HAVEN_WIRE_SENTINEL:corrselftest01"
 
 # Two circles' hex nostr_group_ids.
@@ -1447,6 +1620,15 @@ sentinel_frame() {
 
 # emit_sentinel <conn> [bare] — ONLY the client→relay marker.
 #
+# Fixtures emit it on `c0`, a connection that carries NOTHING ELSE, because
+# that is the real topology: the marker comes off the drive's own `TestRelay`
+# socket (`TestRelay._declareHarnessSocket` / `emitWireJournalSentinel`), never
+# off the relay client the app under test publishes through. Emitting it on the
+# publishing connection — as these fixtures did while the sentinel was only an
+# anchor — now declares that connection a HARNESS socket and drops every event
+# on it from attribution, which is the correct reading of that journal and the
+# wrong shape for a fixture about the app.
+#
 # The proxy's `HAVEN_WIRE_SENTINEL_ACK` is deliberately NOT emitted here: the
 # ack is generated by the proxy and pushed straight onto the client sink
 # (`tooling/e2e/local-relay/src/proxy.rs:339-345` sends it via `client_tx`),
@@ -1462,6 +1644,16 @@ emit_sentinel() {
   else
     jline c2r "${conn}" "$(sentinel_frame)"
   fi
+}
+
+# emit_declaration <conn> — a HARNESS-SOCKET DECLARATION, verbatim.
+#
+# Same intercepted verb, deliberately NOT the run's token
+# (`TestRelay._harnessSocketDeclaration`). Attribution keys on the verb; the
+# payload is what keeps a declaration from answering for the snapshot boundary
+# or for a pending sentinel ack.
+emit_declaration() {
+  jline c2r "$1" '["HAVEN_WIRE_SENTINEL","HAVEN_WIRE_CONN"]'
 }
 
 # write_healthy <path> — a journal a healthy two-circle scenario produces.
@@ -1505,7 +1697,7 @@ write_healthy() {
   jline c2r c2 "[\"EVENT\",$(ev 445 "e09" "${PK_EPH2}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886372\"]]" 1785886144)]"
   jline r2c c2 "[\"EVENT\",\"sub-h\",$(ev 445 "e09" "${PK_EPH2}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886372\"]]" 1785886144)]"
   jline c2r c1 '["CLOSE","sub-kp"]'
-  emit_sentinel c1
+  emit_sentinel c0
 }
 
 # The pools every fixture below is judged against. 445/1059/30443/0/10002/10050
@@ -1580,7 +1772,7 @@ self_test() {
   jline c2r c2 "[\"EVENT\",${e09body}]"
   jline r2c c1 "[\"EVENT\",\"sub-h\",${e09body}]"
   jline r2c c2 "[\"EVENT\",\"sub-h\",${e09body}]"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 0 "one event repeated across connections and subscriptions de-duplicates to one" \
     --journal "${multiset}" "${base[@]}" || fail=1
 
@@ -1597,7 +1789,7 @@ self_test() {
   write_healthy "${idcollision}"
   jline c2r c1 "[\"EVENT\",$(ev 445 "eDUP" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886500\"]]" 1785886200)]"
   jline c2r c1 "[\"EVENT\",$(ev 445 "eDUP" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"h\",\"${H2}\"],[\"g\",\"u4pru\"],[\"alt\",\"Encrypted group message\"]]" 1785886200)]"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 1 "two bodies under one event id are both checked, not collapsed" \
     --journal "${idcollision}" "${base[@]}" || fail=1
   expect_msg 'carried 2 `h` tags' \
@@ -1618,7 +1810,7 @@ self_test() {
   write_healthy "${kindcollapse}"
   jline c2r c1 "[\"EVENT\",$(ev 0 "eGHOST" "${PK_EPH1}" "[[\"p\",\"${PK_B}\"],[\"p\",\"${PK_A}\"]]" 1785886210)]"
   jline c2r c1 "[\"EVENT\",$(ev 1059 "eGHOST" "${PK_EPH1}" "[[\"p\",\"${PK_B}\"],[\"p\",\"${PK_A}\"]]" 1785886210)]"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 1 "a gift wrap sharing everything but its KIND with another event is still checked" \
     --journal "${kindcollapse}" "${base[@]}" || fail=1
   expect_msg 'carried 2 `p` tags' \
@@ -1637,7 +1829,7 @@ self_test() {
   write_healthy "${tscollapse}"
   jline c2r c1 "[\"EVENT\",$(ev 445 "eTS" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886389\"]]" 1785886200)]"
   jline c2r c1 "[\"EVENT\",$(ev 445 "eTS" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886389\"]]" 1785886161)]"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 1 "a 445 sharing everything but its CREATED_AT with another event is still checked" \
     --journal "${tscollapse}" "${base[@]}" || fail=1
   expect_msg "at the same created_at (1785886161" \
@@ -1733,6 +1925,80 @@ self_test() {
   expect_msg "peeler.rs:166" "C5.1 precondition cites why commits do not count" \
     --journal "${c51commitonly}" "${base[@]}" || fail=1
 
+  # TWO DEVICES, ONE SECOND — the false finding this invariant used to
+  # manufacture. Two SEPARATE connections publish to two different circles at
+  # the same created_at. No device served both, so there is no co-membership
+  # edge to infer and this must NOT be a violation. The healthy base still
+  # supplies a connection (c1) that served two circles, so the precondition is
+  # met and the clean verdict is a real one rather than an empty sample.
+  local c51two="${tmp}/c51-two-devices.ndjson"
+  write_healthy "${c51two}"
+  jopen c3
+  jopen c4
+  jline c2r c3 "[\"EVENT\",$(ev 445 "eDEV1" "${PK_EPH5}" "[[\"h\",\"${H3}\"],[\"expiration\",\"1785886500\"]]" 1785886228)]"
+  jline c2r c4 "[\"EVENT\",$(ev 445 "eDEV2" "${PK_EPH6}" "[[\"h\",\"${H2}\"],[\"expiration\",\"1785886500\"]]" 1785886228)]"
+  emit_sentinel c0
+  expect_rc 0 "C5.1 two DIFFERENT devices coinciding in one second is not a finding" \
+    --journal "${c51two}" "${base[@]}" || fail=1
+  expect_no_msg "C5.1 timestamp correlation" \
+    "C5.1 examined the coincidence and stayed silent rather than being switched off" \
+    --journal "${c51two}" "${base[@]}" || fail=1
+
+  # ...and the same two events on ONE connection still are. Same second, same
+  # two circles, one publisher: this is the leak, and the per-connection
+  # partition must not have blunted it.
+  local c51same="${tmp}/c51-one-device.ndjson"
+  write_healthy "${c51same}"
+  jopen c3
+  jline c2r c3 "[\"EVENT\",$(ev 445 "eDEV1" "${PK_EPH5}" "[[\"h\",\"${H3}\"],[\"expiration\",\"1785886500\"]]" 1785886228)]"
+  jline c2r c3 "[\"EVENT\",$(ev 445 "eDEV2" "${PK_EPH6}" "[[\"h\",\"${H2}\"],[\"expiration\",\"1785886500\"]]" 1785886228)]"
+  emit_sentinel c0
+  expect_rc 1 "C5.1 ONE device publishing to two circles in one second is still a violation" \
+    --journal "${c51same}" "${base[@]}" || fail=1
+  expect_msg "connection c3" "C5.1 names the publisher it attributed the collision to" \
+    --journal "${c51same}" "${base[@]}" || fail=1
+
+  # INBOUND: two groups delivered to a subscriber in one second. An r2c frame is
+  # the RELAY's output — its timing is the relay's, not Haven's — so C5.1 must
+  # be silent, and provably silent rather than merely outvoted.
+  local c51in="${tmp}/c51-inbound.ndjson"
+  write_healthy "${c51in}"
+  jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "eIN1" "${PK_EPH7}" "[[\"h\",\"${H3}\"],[\"expiration\",\"1785886500\"]]" 1785886229)]"
+  jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "eIN2" "${PK_EPH8}" "[[\"h\",\"${H2}\"],[\"expiration\",\"1785886500\"]]" 1785886229)]"
+  emit_sentinel c0
+  expect_rc 0 "C5.1 two inbound 445s in one second are the relay's output, not Haven's" \
+    --journal "${c51in}" "${base[@]}" || fail=1
+  expect_no_msg "C5.1 timestamp correlation" \
+    "C5.1 read the inbound pair and stayed silent rather than being switched off" \
+    --journal "${c51in}" "${base[@]}" || fail=1
+
+  # THE EMPTY SUBSET, second form — the one the per-connection partition
+  # introduces. Two circles DID publish application messages, but never the
+  # same device, so no run of this scenario could have exhibited the leak. A
+  # journal-wide ">=2 app-publishing groups" floor would call this a sample;
+  # it is not one, and it must META-FLOOR.
+  local c51split="${tmp}/c51-split-devices.ndjson"
+  jq -c 'if (.frame | tostring | test("e10")) then .conn_id = "c6" else . end' \
+    "${healthy}" > "${c51split}"
+  expect_rc 4 "C5.1 precondition: two circles served by two different devices is not a sample" \
+    --journal "${c51split}" "${base[@]}" || fail=1
+  expect_msg "no single connection PUBLISHED" \
+    "C5.1 names the per-device floor rather than reporting a journal-wide one" \
+    --journal "${c51split}" "${base[@]}" || fail=1
+
+  # THE ATTRIBUTION LIMIT, declared rather than hidden: two circles whose 445s
+  # reached DISJOINT relay sets can never share a connection, so a co-timed
+  # pair would land in two partitions and go unseen. That is not a pass.
+  local c51disjoint="${tmp}/c51-disjoint-relays.ndjson"
+  write_healthy "${c51disjoint}"
+  jopen c5 "${RELAY_B}" "127.0.0.1:7790"
+  jline c2r c5 "[\"EVENT\",$(ev 445 "eFAR" "${PK_EPH9}" "[[\"h\",\"${H3}\"],[\"expiration\",\"1785886500\"]]" 1785886231)]" "${RELAY_B}" "127.0.0.1:7790"
+  emit_sentinel c0
+  expect_rc 4 "C5.1 refuses to report clean when two groups' relay sets are disjoint" \
+    --journal "${c51disjoint}" "${base[@]}" || fail=1
+  expect_msg "DISJOINT relay sets" "C5.1 names the pairs its partition cannot see" \
+    --journal "${c51disjoint}" "${base[@]}" || fail=1
+
   # =========================================================================
   # C5.2 — REQ-filter allow-list
   # =========================================================================
@@ -1786,7 +2052,7 @@ self_test() {
   jopen c5 "${RELAY_B}" "127.0.0.1:7790"
   jline c2r c5 "[\"REQ\",\"sub-b\",{\"kinds\":[445],\"#h\":[\"${H3}\"],\"since\":1785886000}]" "${RELAY_B}" "127.0.0.1:7790"
   jline c2r c1 "[\"REQ\",\"sub-h2\",{\"kinds\":[445],\"#h\":[\"${H1}\",\"${H3}\"],\"since\":1785886000}]"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 1 "C5.2 a filter merging two relay sets is a violation" \
     --journal "${c52span}" "${base[@]}" || fail=1
   expect_msg "DIFFERENT relay routing" "C5.2 names the relay-set widening" \
@@ -1800,7 +2066,7 @@ self_test() {
   write_healthy "${c52ok}"
   jopen c5 "${RELAY_B}" "127.0.0.1:7790"
   jline c2r c5 "[\"REQ\",\"sub-b\",{\"kinds\":[445],\"#h\":[\"${H1}\",\"${H2}\"],\"since\":1785886000}]" "${RELAY_B}" "127.0.0.1:7790"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 0 "C5.2 two circles sharing a relay set multiplex legitimately over two relays" \
     --journal "${c52ok}" "${base[@]}" || fail=1
 
@@ -1994,7 +2260,7 @@ self_test() {
   write_healthy "${c56out}"
   jopen c6 "ws://127.0.0.1:7900" "127.0.0.1:7901"
   jline c2r c6 "[\"EVENT\",$(ev 445 "eOUT" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886500\"]]" 1785886200)]" "ws://127.0.0.1:7900" "127.0.0.1:7901"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 1 "C5.6 a 445 outside its circle's relays is a violation" \
     --journal "${c56out}" "${base[@]}" || fail=1
 
@@ -2013,7 +2279,7 @@ self_test() {
   jopen c6 "ws://127.0.0.1:7900" "127.0.0.1:7901"
   jline c2r c1 "[\"EVENT\",${fanbody}]"
   jline c2r c6 "[\"EVENT\",${fanbody}]" "ws://127.0.0.1:7900" "127.0.0.1:7901"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 1 "C5.6 one event id fanned out to an in-pool AND an out-of-pool relay is a violation" \
     --journal "${c56fan}" "${base[@]}" || fail=1
   # Named endpoint, not just the rule: the finding must be about the copy that
@@ -2031,7 +2297,7 @@ self_test() {
   jopen c5 "${RELAY_B}" "127.0.0.1:7790"
   jline c2r c1 "[\"EVENT\",${fanbody}]"
   jline c2r c5 "[\"EVENT\",${fanbody}]" "${RELAY_B}" "127.0.0.1:7790"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 0 "C5.6 one event id fanned out across two IN-pool relays is contained, not a finding" \
     --journal "${c56fanok}" "${base[@]}" || fail=1
 
@@ -2047,7 +2313,7 @@ self_test() {
   jopen c5 "${RELAY_B}" "127.0.0.1:7790"
   jline c2r c5 "[\"EVENT\",$(ev 445 "eSHARED" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886500\"]]" 1785886200)]" "${RELAY_B}" "127.0.0.1:7790"
   jline c2r c5 "[\"EVENT\",$(ev 30443 "eSHARED" "${PK_A}" "${KP_TAGS}")]" "${RELAY_B}" "127.0.0.1:7790"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 1 "C5.6 a second KIND under one event id at one endpoint is contained on its own terms" \
     --journal "${c56idkind}" "${base[@]}" || fail=1
   expect_msg "a kind-30443 EVENT was PUBLISHED to ${RELAY_B}" \
@@ -2060,7 +2326,7 @@ self_test() {
   local c56disc="${tmp}/c56-discovery.ndjson"
   write_healthy "${c56disc}"
   jline c2r c8 "[\"EVENT\",$(ev 30443 "eDISC" "${PK_A}" "${KP_TAGS}")]" "${DISCOVERY}" "127.0.0.1:7998"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 1 "C5.6 an EVENT to a discovery relay is a violation" \
     --journal "${c56disc}" "${base[@]}" || fail=1
   expect_msg "REQ yes; EVENT never" "C5.6 names the read-only discovery rule" \
@@ -2092,7 +2358,7 @@ self_test() {
   jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "e10" "${PK_EPH3}" "[[\"h\",\"${H2}\"],[\"expiration\",\"1785886389\"]]" 1785886161)]"
   jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "e08" "${PK_EPH1}" "[[\"h\",\"${H1}\"]]" 1785886100)]"
   jline r2c c1 "[\"EVENT\",\"sub-p\",$(ev 1059 "e07" "${PK_EPH1}" "[[\"p\",\"${PK_B}\"]]")]"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 4 "C5.6 precondition: a receive-only snapshot has no publish targets" \
     --journal "${c56noev}" "${base[@]}" || fail=1
 
@@ -2106,7 +2372,7 @@ self_test() {
   jline_bare c2r c1 "[\"EVENT\",$(ev 445 "e10" "${PK_EPH3}" "[[\"h\",\"${H2}\"],[\"expiration\",\"1785886389\"]]" 1785886161)]"
   jline_bare c2r c1 "[\"EVENT\",$(ev 1059 "e07" "${PK_EPH1}" "[[\"p\",\"${PK_B}\"]]")]"
   jline_bare c2r c1 "[\"REQ\",\"sub-h\",{\"kinds\":[445],\"#h\":[\"${H1}\",\"${H2}\"]}]"
-  emit_sentinel c1 bare
+  emit_sentinel c0 bare
   expect_rc 4 "C5.6 precondition: an endpoint-less journal cannot bound containment" \
     --journal "${c56blind}" "${base[@]}" || fail=1
 
@@ -2120,7 +2386,7 @@ self_test() {
   jline_bare c2r c1 "[\"EVENT\",$(ev 445 "e10" "${PK_EPH3}" "[[\"h\",\"${H2}\"],[\"expiration\",\"1785886389\"]]" 1785886161)]"
   jline_bare c2r c1 "[\"EVENT\",$(ev 1059 "e07" "${PK_EPH1}" "[[\"p\",\"${PK_B}\"]]")]"
   jline_bare c2r c1 "[\"REQ\",\"sub-h\",{\"kinds\":[445],\"#h\":[\"${H1}\",\"${H2}\"]}]"
-  emit_sentinel c1 bare
+  emit_sentinel c0 bare
   expect_rc 0 "C5.6 a conn_open record resolves a journal in the bare contract shape" \
     --journal "${c56join}" "${base[@]}" || fail=1
 
@@ -2140,7 +2406,7 @@ self_test() {
   local c57idk="${tmp}/c57-identity-author.ndjson"
   write_healthy "${c57idk}"
   jline c2r c1 "[\"EVENT\",$(ev 445 "eIDK" "${PK_A}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886500\"]]" 1785886200)]"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 1 "C5.7 a 445 signed by an identity key is a violation" \
     --journal "${c57idk}" "${base[@]}" || fail=1
   expect_msg "attributes every one of that circle's messages to a named person" \
@@ -2159,7 +2425,7 @@ self_test() {
   local c57decl="${tmp}/c57-declared-identity.ndjson"
   write_healthy "${c57decl}"
   jline c2r c1 "[\"EVENT\",$(ev 445 "eDECL" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886520\"]]" 1785886250)]"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 0 "C5.7 an undeclared, never-identity-signing key is an ordinary ephemeral author" \
     --journal "${c57decl}" "${base[@]}" || fail=1
   expect_rc 1 "C5.7 --identity-pubkey arms the rule for a key the journal never reveals" \
@@ -2171,7 +2437,7 @@ self_test() {
   write_healthy "${c57reuse}"
   jline c2r c1 "[\"EVENT\",$(ev 445 "eR1" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886600\"]]" 1785886240)]"
   jline c2r c1 "[\"EVENT\",$(ev 445 "eR2" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886601\"]]" 1785886241)]"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 1 "C5.7 one ephemeral key signing two different 445s is a violation" \
     --journal "${c57reuse}" "${base[@]}" || fail=1
   expect_msg "stable per-sender handle on the outer event" \
@@ -2187,7 +2453,7 @@ self_test() {
   write_healthy "${c57in}"
   jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "eR1" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886600\"]]" 1785886240)]"
   jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "eR2" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886601\"]]" 1785886241)]"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 0 "C5.7 an author repeated across two INBOUND 445s is not Haven's traffic" \
     --journal "${c57in}" "${base[@]}" || fail=1
   expect_no_msg "C5.7 ephemeral author" \
@@ -2202,7 +2468,7 @@ self_test() {
   local c57nopk="${tmp}/c57-no-pubkey.ndjson"
   write_healthy "${c57nopk}"
   jline c2r c1 "[\"EVENT\",$(ev 445 "eNOPK" "" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886620\"]]" 1785886260)]"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 1 "C5.7 a 445 carrying no author pubkey is a violation" \
     --journal "${c57nopk}" "${base[@]}" || fail=1
   expect_msg "carrying no author pubkey at all" "C5.7 names the missing author" \
@@ -2222,7 +2488,7 @@ self_test() {
   jline c2r c5 "[\"EVENT\",${c57body}]" "${RELAY_B}" "127.0.0.1:7790"
   jline r2c c1 "[\"EVENT\",\"sub-h\",${c57body}]"
   jline r2c c5 "[\"EVENT\",\"sub-h\",${c57body}]" "${RELAY_B}" "127.0.0.1:7790"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 0 "C5.7 one 445 fanned out to two relays and echoed twice is one message, not four" \
     --journal "${c57fan}" "${base[@]}" || fail=1
 
@@ -2238,7 +2504,7 @@ self_test() {
   jline c2r c1 "[\"EVENT\",$(ev 1059 "e07" "${PK_EPH1}" "[[\"p\",\"${PK_B}\"]]")]"
   jline c2r c1 "[\"REQ\",\"sub-h\",{\"kinds\":[445],\"#h\":[\"${H1}\",\"${H2}\"]}]"
   jline c2r c1 "[\"EVENT\",$(ev 445 "e09" "${PK_EPH2}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886372\"]]" 1785886144)]"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 4 "C5.7 precondition: a single 445 makes author-uniqueness vacuous" \
     --journal "${c57one}" "${base[@]}" || fail=1
   expect_msg "vacuously true" "C5.7 precondition says the silence is not evidence" \
@@ -2253,7 +2519,7 @@ self_test() {
   FIXTURE_FILE="${c57two}"; FIXTURE_SEQ=6
   jline c2r c1 "[\"EVENT\",$(ev 445 "e08" "${PK_EPH1}" "[[\"h\",\"${H1}\"]]" 1785886100)]"
   jline c2r c1 "[\"EVENT\",$(ev 445 "e10" "${PK_EPH3}" "[[\"h\",\"${H2}\"],[\"expiration\",\"1785886389\"]]" 1785886161)]"
-  emit_sentinel c1
+  emit_sentinel c0
   renumber "${c57two}" "${c57two}.r" && mv "${c57two}.r" "${c57two}"
   expect_rc 0 "C5.7 the single-445 floor lifts as soon as a second message exists" \
     --journal "${c57two}" "${base[@]}" || fail=1
@@ -2274,7 +2540,7 @@ self_test() {
   jopen c5 "${RELAY_B}" "127.0.0.1:7790"
   jline c2r c5 "[\"EVENT\",$(ev 445 "e09" "${PK_EPH2}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886372\"]]" 1785886144)]" \
     "${RELAY_B}" "127.0.0.1:7790"
-  emit_sentinel c1
+  emit_sentinel c0
   renumber "${c57fanfloor}" "${c57fanfloor}.r" && mv "${c57fanfloor}.r" "${c57fanfloor}"
   expect_rc 4 "C5.7 precondition: a fan-out of ONE message does not clear the two-message floor" \
     --journal "${c57fanfloor}" "${base[@]}" || fail=1
@@ -2294,7 +2560,7 @@ self_test() {
   jline c2r c1 "[\"EVENT\",$(ev 445 "e08" "${PK_EPH1}" "[[\"h\",\"${H1}\"]]" 1785886100)]"
   jline c2r c1 "[\"EVENT\",$(ev 445 "e09" "${PK_EPH2}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886372\"]]" 1785886144)]"
   jline c2r c1 "[\"EVENT\",$(ev 445 "e10" "${PK_EPH3}" "[[\"h\",\"${H2}\"],[\"expiration\",\"1785886389\"]]" 1785886161)]"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 4 "C5.7 precondition: an empty identity set makes the identity arm vacuous" \
     --journal "${c57noid}" "${base_nodecl[@]}" || fail=1
   expect_msg "no key this device is known to sign with" \
@@ -2318,7 +2584,7 @@ self_test() {
   jline r2c c1 "[\"EVENT\",\"sub-kp\",$(ev 30443 "e20" "${PK_B}" "[]")]"
   jline c2r c1 "[\"EVENT\",$(ev 445 "e21" "${PK_A}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886372\"]]" 1785886144)]"
   jline c2r c1 "[\"EVENT\",$(ev 445 "e22" "${PK_EPH2}" "[[\"h\",\"${H2}\"],[\"expiration\",\"1785886389\"]]" 1785886161)]"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 4 "C5.7 floor is NOT discharged by an inbound-only identity key" \
     --journal "${c57inbound}" "${base_nodecl[@]}" || fail=1
   expect_msg "An INBOUND identity key does not discharge this" \
@@ -2341,7 +2607,7 @@ self_test() {
   local c58alias="${tmp}/c58-alias.ndjson"
   write_healthy "${c58alias}"
   jline c2r c1 "[\"EVENT\",$(ev 445 "eALIAS" "${PK_EPH4}" "[[\"h\",\"${MLS1}\"],[\"expiration\",\"1785886700\"]]" 1785886210)]"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 1 "C5.8 an h tag whose value is the real MLS group id is a violation" \
     --journal "${c58alias}" "${base[@]}" || fail=1
   expect_msg "id ALIASING" "C5.8 diagnoses aliasing rather than reporting a stray tag" \
@@ -2354,7 +2620,7 @@ self_test() {
   local c58deep="${tmp}/c58-deep-token.ndjson"
   write_healthy "${c58deep}"
   jline c2r c1 "[\"EVENT\",$(ev 0 "eLEAK3" "${PK_A}" "[[\"client\",\"haven\",\"${MLS2}\"]]" 1785886220)]"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 1 "C5.8 a leak in a tag's THIRD token is caught, not truncated away" \
     --journal "${c58deep}" "${base[@]}" || fail=1
   expect_msg 'tag at position 2' "C5.8 names the token position it found the id in" \
@@ -2367,7 +2633,7 @@ self_test() {
   local c58sub="${tmp}/c58-substring.ndjson"
   write_healthy "${c58sub}"
   jline c2r c1 "[\"EVENT\",$(ev 30443 "eKPLEAK" "${PK_A}" "[[\"d\",\"haven-kp-0-${MLS1}\"],[\"mls_protocol_version\",\"1.0\"]]")]"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 1 "C5.8 an id embedded in a longer token on a non-445 kind is a violation" \
     --journal "${c58sub}" "${base[@]}" || fail=1
   expect_msg 'inside its `d` tag at position 1' "C5.8 names the tag the id was embedded in" \
@@ -2380,7 +2646,7 @@ self_test() {
   local c58in="${tmp}/c58-inbound.ndjson"
   write_healthy "${c58in}"
   jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "eINLEAK" "${PK_EPH4}" "[[\"h\",\"${MLS1}\"],[\"expiration\",\"1785886720\"]]" 1785886230)]"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 0 "C5.8 an inbound frame carrying the id is the relay's output, not Haven's" \
     --journal "${c58in}" "${base[@]}" || fail=1
   expect_no_msg "C5.8 group-id privacy" \
@@ -2449,7 +2715,7 @@ self_test() {
   jline c2r c1 "[\"EVENT\",$(ev 0 "e00" "${PK_A}" '[]')]"
   jline c2r c1 "[\"EVENT\",$(ev 1059 "e07" "${PK_EPH1}" "[[\"p\",\"${PK_B}\"]]")]"
   jline c2r c1 "[\"REQ\",\"sub-h\",{\"kinds\":[445],\"#h\":[\"${H1}\",\"${H2}\"]}]"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 4 "C5.8 precondition: a declared id with no 445 in the snapshot proves nothing" \
     --journal "${c58no445}" "${base[@]}" || fail=1
   expect_msg "contains none of the events that could have leaked the real id" \
@@ -2467,7 +2733,7 @@ self_test() {
   local c59p="${tmp}/c59-p-tag.ndjson"
   write_healthy "${c59p}"
   jline c2r c1 "[\"EVENT\",$(ev 445 "ePTAG" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886740\"],[\"p\",\"${PK_B}\"]]" 1785886280)]"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_rc 1 "C5.9 a p tag on a published 445 is a violation" \
     --journal "${c59p}" "${base[@]}" || fail=1
   expect_msg "indexed, queryable membership edge" \
@@ -2483,7 +2749,7 @@ self_test() {
   local c59in="${tmp}/c59-inbound-p.ndjson"
   write_healthy "${c59in}"
   jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "ePIN" "${PK_EPH4}" "[[\"h\",\"${H1}\"],[\"expiration\",\"1785886760\"],[\"p\",\"${PK_B}\"]]" 1785886290)]"
-  emit_sentinel c1
+  emit_sentinel c0
   expect_no_msg "C5.9 recipient privacy" \
     "C5.9 does not accuse Haven of publishing a p tag a relay sent it" \
     --journal "${c59in}" "${base[@]}" || fail=1
@@ -2504,15 +2770,55 @@ self_test() {
   # The E2E harness reaches the same proxied relays as the app. A TestRelay
   # probe that legitimately names two authors (a lane asserting what the relay
   # holds) would otherwise be reported as a Haven social-graph disclosure.
+  #
+  # UNDECLARED first: a socket that never emitted the marker is indistinguish-
+  # able from the app's own, and only the lane can name it. This is the case
+  # --exclude-conn exists for, and it is kept as its own fixture so the flag
+  # cannot rot into a no-op behind the self-declaration below.
   local xharness="${tmp}/exclude-harness.ndjson"
   write_healthy "${xharness}"
   jopen c7
   jline c2r c7 "[\"REQ\",\"probe\",{\"kinds\":[30443],\"authors\":[\"${PK_A}\",\"${PK_B}\"],\"limit\":25}]"
-  emit_sentinel c7
-  expect_rc 1 "a harness probe is a finding while its connection is attributed to Haven" \
+  # Re-anchor: every line appended after `write_healthy`'s marker would sit
+  # ABOVE the snapshot boundary and never be examined at all.
+  emit_sentinel c0
+  expect_rc 1 "an UNDECLARED harness probe is a finding while its connection is attributed to Haven" \
     --journal "${xharness}" "${base[@]}" || fail=1
   expect_rc 0 "--exclude-conn removes the harness socket from attribution" \
     --journal "${xharness}" "${base[@]}" --exclude-conn c7 || fail=1
+
+  # DECLARED: the same probe on a socket that emitted the intercepted sentinel
+  # verb needs no flag at all. `TestRelay._declareHarnessSocket` marks every
+  # socket the harness opens, including the ones a mid-run reconnect mints,
+  # which is the half a drive-log grep for one ack can never cover.
+  local xdeclared="${tmp}/declared-harness.ndjson"
+  write_healthy "${xdeclared}"
+  jopen c7
+  emit_declaration c7
+  jline c2r c7 "[\"REQ\",\"probe\",{\"kinds\":[30443],\"authors\":[\"${PK_A}\",\"${PK_B}\"],\"limit\":25}]"
+  emit_sentinel c0
+  expect_rc 0 "a self-declared harness socket is excluded with no --exclude-conn at all" \
+    --journal "${xdeclared}" "${base[@]}" || fail=1
+
+  # The reason the declaration exists, as its own fixture: ONE harness socket
+  # multiplexes several simulated peers (`SyntheticUser.publishLocation` →
+  # `TestRelay.publishAndAwaitOk`), so two peers publishing to two circles 35 ms
+  # apart put two different-`h` 445s in one second on one connection. Judged as
+  # a device that is precisely C5.1's leak; judged as what it is, it is two
+  # devices coinciding and says nothing about Haven. This is the exact journal
+  # that reddened three consecutive live-sync runs.
+  local xpeers="${tmp}/harness-multiplexed-peers.ndjson"
+  write_healthy "${xpeers}"
+  jopen c7
+  emit_declaration c7
+  jline c2r c7 "[\"EVENT\",$(ev 445 "ePEER1" "${PK_EPH5}" "[[\"h\",\"${H3}\"],[\"expiration\",\"1785886500\"]]" 1785886228)]"
+  jline c2r c7 "[\"EVENT\",$(ev 445 "ePEER2" "${PK_EPH6}" "[[\"h\",\"${H2}\"],[\"expiration\",\"1785886500\"]]" 1785886228)]"
+  emit_sentinel c0
+  expect_rc 0 "two peers multiplexed onto ONE harness socket in one second are not a Haven finding" \
+    --journal "${xpeers}" "${base[@]}" || fail=1
+  expect_no_msg "C5.1 timestamp correlation" \
+    "C5.1 read the multiplexed socket and stayed silent rather than being switched off" \
+    --journal "${xpeers}" "${base[@]}" || fail=1
 
   # ...and it must NOT become a silencer. Excluding the connection that carries
   # the real traffic empties the sample, and an empty sample is a META-FLOOR,
@@ -2613,7 +2919,7 @@ self_test() {
   # At 114-against-124 that room was ten cases, which is most of the C5.8
   # section. An exact pin means retiring a case is a two-line diff that has to
   # say why, which is the reviewable act the slack was quietly avoiding.
-  readonly MIN_CASES=134
+  readonly MIN_CASES=147
   if (( CASES_RUN < MIN_CASES )); then
     echo "SELF-TEST FAIL: only ${CASES_RUN} fixture(s) ran; at least ${MIN_CASES} expected." >&2
     echo "  Cases have been removed without lowering MIN_CASES — the self-test is" >&2
@@ -2629,7 +2935,12 @@ self_test() {
        "two-circle journal clears all nine invariants; each of C5.1-C5.9 goes red on" \
        "the leak it guards AND red as a META-FLOOR on an empty relevant subset," \
        "including the commit-only trap that would make C5.1 vacuous and the" \
-       "single-445 trap that would make C5.7 vacuous; two bodies under one event id" \
+       "single-445 trap that would make C5.7 vacuous; C5.1 is proven to attribute" \
+       "PER PUBLISHER — one connection serving two circles in one second is a" \
+       "violation, two connections coinciding is not, a multiplexed harness socket" \
+       "is excluded by its own declaration, inbound pairs are silent, two circles" \
+       "served by two devices is a META-FLOOR rather than a sample, and disjoint" \
+       "relay sets refuse to report clean; two bodies under one event id" \
        "are both checked whether they differ in tags, kind or created_at, one event id" \
        "fanned out to an out-of-pool relay is caught, and a multi-#h REQ that omits" \
        "\`kinds\` is read at its widest; a 445 signed by an identity key is caught from" \

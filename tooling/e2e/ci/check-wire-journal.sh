@@ -187,11 +187,16 @@
 #
 # # --exclude-conn, and why it prints what it dropped
 #
-# The harness's own TestRelay socket reaches the proxy exactly as the app does,
-# and nothing in the journal distinguishes them; the sentinel ack names the
-# harness's `conn_id`, which is the one handle a lane has. `--exclude-conn`
-# drops that connection from the EVENT-level attribution — the kind set, the
-# tag sets and both floors — so those become statements about the app.
+# The harness's own TestRelay socket reaches the proxy exactly as the app does.
+# Two things separate them, and both are needed. A socket DECLARES itself by
+# emitting the intercepted `["HAVEN_WIRE_SENTINEL",<token>]` marker
+# (`TestRelay._declareHarnessSocket`), which is journalled as an ordinary c2r
+# frame and which no production path can produce — that covers every socket the
+# harness opens, including the ones a mid-run reconnect mints. `--exclude-conn`
+# covers the rest: a lane naming a `conn_id` it learned from the sentinel ack.
+# Either way the connection is dropped from the EVENT-level attribution — the
+# kind set, the tag sets and both floors — so those become statements about the
+# app rather than about the scenario.
 #
 # Partial exclusion can hide a real finding, so two things bound it. First, the
 # exclusion applies to EVENT records ONLY: unrecognised frames, malformed
@@ -686,10 +691,23 @@ evaluate() {
     # the argument is evaluated against the INPUT of index, so a bare `.conn`
     # there means "index $exclude by the key .conn OF $exclude" — which is a
     # type error on an array, and was one.
-    | ( [ $allEvents[] | . as $e | select(($exclude | index($e.conn)) == null) ] ) as $inScope
+    #
+    # SELF-DECLARED HARNESS SOCKETS are unioned into the list the lane gave. A
+    # connection that EMITTED the intercepted `HAVEN_WIRE_SENTINEL` verb is the
+    # drive-s own `TestRelay` (`TestRelay._declareHarnessSocket`); no
+    # production path can emit it. The lane can only name the ONE socket whose
+    # ack it greps out of the drive log, and a scenario opens several (plus a
+    # fresh one per reconnect) — so without this the participant floors below
+    # are discharged by the harness-s own traffic and "the app transmitted"
+    # is not what a green run means.
+    | ( [ .[] | select(.t == "verb" and .dir == "c2r"
+                       and .verb == "HAVEN_WIRE_SENTINEL") | .conn ]
+        | unique ) as $harness
+    | (( $exclude + $harness ) | unique) as $EXCL
+    | ( [ $allEvents[] | . as $e | select(($EXCL | index($e.conn)) == null) ] ) as $inScope
     | ( [ $inScope[]   | select(.dir == "c2r") ] ) as $sent
     | ( [ $inScope[]   | select(.dir == "r2c") ] ) as $inbound
-    | ( [ $allEvents[] | . as $e | select(($exclude | index($e.conn)) != null)
+    | ( [ $allEvents[] | . as $e | select(($EXCL | index($e.conn)) != null)
                        | select(.dir == "c2r") ] ) as $dropped
 
     # ---- de-duplication: SET, never multiset (see header) -------------------
@@ -850,7 +868,8 @@ evaluate() {
           req_filter_keys: $observedFilterKeys,
           publishers: ($publishers | length),
           sending_conns: ($sendingConns | length),
-          excluded_conns: $exclude,
+          excluded_conns: $EXCL,
+          declared_harness_conns: $harness,
           excluded_frames: ($dropped | length),
           excluded_kinds: ( $dropped | map(.kind) | unique ),
           tags_by_kind: ( reduce $observedKinds[] as $k ({};
@@ -1213,7 +1232,7 @@ main() {
   # exclusion can hide a real finding, so the exclusion is never silent.
   printf '%s' "${verdict}" | jq -r '
     if ((.summary.excluded_conns | length) > 0) then
-      "  --exclude-conn dropped \(.summary.excluded_conns) from the EVENT-level attribution: \(.summary.excluded_frames) client->relay frame(s), kinds \(.summary.excluded_kinds). Null frames, malformed records, the frame-verb set and REQ filter keys are still evaluated over those connections."
+      "  \(.summary.excluded_conns) dropped from the EVENT-level attribution (\(.summary.declared_harness_conns | length) self-declared harness socket(s), the rest named by the lane): \(.summary.excluded_frames) client->relay frame(s), kinds \(.summary.excluded_kinds). Null frames, malformed records, the frame-verb set and REQ filter keys are still evaluated over those connections."
     else empty end' >&2
 
   if (( n_meta > 0 )); then
@@ -1379,6 +1398,13 @@ jconn() {
 # this and no relay ever sees it.
 jsentinel() { jline c2r "$1" "[\"HAVEN_WIRE_SENTINEL\",\"${SENTINEL}\"]"; }
 
+# jdeclare <conn> — a HARNESS-SOCKET DECLARATION, verbatim
+# (`TestRelay._harnessSocketDeclaration`). Same intercepted verb, deliberately
+# NOT the run's token: attribution keys on the verb, while the boundary keys on
+# `frame[1] == <token>` — so a declaration marks its connection without being
+# able to move the snapshot.
+jdeclare() { jline c2r "$1" '["HAVEN_WIRE_SENTINEL","HAVEN_WIRE_CONN"]'; }
+
 # ev <kind> <id> <pubkey> <tags-json>
 ev() {
   printf '{"id":"%s","kind":%s,"pubkey":"%s","created_at":1785886144,"tags":%s,"content":"","sig":"%s"}' \
@@ -1455,6 +1481,12 @@ readonly KP_TAGS='[["d","haven-kp-0"],["mls_protocol_version","1.0"],["i","0001"
 #     the first of those.
 write_healthy() {
   fx_begin "$1"
+  # c0 carries NOTHING but the harness marker, which is the real topology: the
+  # sentinel comes off the drive's own TestRelay socket, never off the relay
+  # client the app under test publishes through. A marker on the publishing
+  # connection would now declare THAT connection a harness socket and drop its
+  # events from attribution.
+  jconn c0
   jconn c1
   jconn c2
   jconn c3
@@ -1483,7 +1515,7 @@ write_healthy() {
   jline r2c c2 "[\"EVENT\",\"sub-h\",$(ev 445 "e09" "${PK_EPH2}" '[["h","cafebabe"],["expiration","1785886372"]]')]"
   jline c2r c2 "[\"EVENT\",$(ev 445 "e10" "${PK_EPH1}" '[["h","cafebabe"],["expiration","1785886372"]]')]"
   jline c2r c1 '["CLOSE","sub-kp"]'
-  jsentinel c1
+  jsentinel c0
 }
 
 self_test() {
@@ -1551,7 +1583,7 @@ self_test() {
   for i in 1 2 3 4 5 6; do
     jline c2r c1 "[\"EVENT\",$(ev 445 "eONE" "${PK_EPH2}" '[["h","cafebabe"],["expiration","1785886372"]]')]"
   done
-  jsentinel c1
+  jsentinel c0
   expect_msg "1 unique SENT event(s) from 6 client->relay EVENT frame(s)" \
     "the repeats de-duplicate to one, and the summary says so" \
     --journal "${onebody}" --sentinel "${SENTINEL}" --allowlist "${allow}" \
@@ -1637,7 +1669,7 @@ self_test() {
   jline c2r c1 '["REQ","sub-kp",{"kinds":[30443],"limit":50}]'
   jline c2r c1 "[\"EVENT\",$(ev 1059 "e07" "${PK_EPH1}" "[[\"p\",\"${PK_B}\"]]")]"
   jline c2r c1 "[\"EVENT\",$(ev 445 "e09" "${PK_EPH2}" '[["h","cafebabe"],["expiration","1785886372"]]')]"
-  jsentinel c1
+  jsentinel c0
   expect_rc 3 "an EVENT smuggled onto a conn_open line is UNUSABLE, not invisible" \
     --journal "${lifecycletraffic}" "${base[@]}" || fail=1
   expect_msg "lifecycle record carries a \`frame\` key" \
@@ -1649,7 +1681,7 @@ self_test() {
   fx_begin "${lifecycledir}"
   jraw '{"type":"conn_open","conn_id":"c1","ts_ms":1,"dir":"c2r","relay_url":"ws://127.0.0.1:7777","listen":"127.0.0.1:7877"}'
   jline c2r c1 "[\"EVENT\",$(ev 30443 "e04" "${PK_A}" "${KP_TAGS}")]"
-  jsentinel c1
+  jsentinel c0
   expect_rc 3 "a lifecycle record carrying \`dir\` is UNUSABLE" \
     --journal "${lifecycledir}" --sentinel "${SENTINEL}" --allowlist "${allow}" \
     --min-distinct-conns 2 || fail=1
@@ -1661,7 +1693,7 @@ self_test() {
   fx_begin "${noreason}"
   jraw '{"type":"conn_error","conn_id":"c1","ts_ms":1,"relay_url":"ws://127.0.0.1:7777","listen":"127.0.0.1:7877"}'
   jline c2r c1 "[\"EVENT\",$(ev 30443 "e04" "${PK_A}" "${KP_TAGS}")]"
-  jsentinel c1
+  jsentinel c0
   expect_rc 3 "a conn_error with no reason is UNUSABLE" \
     --journal "${noreason}" --sentinel "${SENTINEL}" --allowlist "${allow}" \
     --min-distinct-conns 2 || fail=1
@@ -1689,7 +1721,7 @@ self_test() {
   jline c2r c1 "[\"EVENT\",$(ev 445 "e08" "${PK_EPH1}" '[["h","cafebabe"]]')]"
   jline c2r c1 "[\"EVENT\",$(ev 445 "e09" "${PK_EPH2}" '[["h","cafebabe"],["expiration","1785886372"]]')]"
   jline c2r c1 '["REQ","sub-kp",{"kinds":[30443],"limit":50}]'
-  jsentinel c1
+  jsentinel c0
   expect_rc 4 "only one participant transmitted (per-pubkey floor)" \
     --journal "${onlyA}" --sentinel "${SENTINEL}" --allowlist "${allow}" \
     --participant "${PK_A}" --participant "${PK_B}" || fail=1
@@ -1725,7 +1757,7 @@ self_test() {
   # A journal whose sentinel is the FIRST line: the snapshot is empty, so every
   # assertion below it would pass over nothing.
   fx_begin "${sentinelfirst}"
-  jsentinel c1
+  jsentinel c0
   jline c2r c1 "[\"EVENT\",$(ev 445 "e99" "${PK_EPH1}" '[["h","cafebabe"]]')]"
   expect_rc 4 "sentinel at the head yields an empty snapshot" \
     --journal "${sentinelfirst}" --sentinel "${SENTINEL}" --allowlist "${allow}" \
@@ -1836,7 +1868,7 @@ self_test() {
   # An UNRECOGNISED frame. The contract records these as `frame:null` rather
   # than dropping them; a frame this oracle cannot classify cannot be shown to
   # be safe, so it is a finding, not noise.
-  jq -c 'if (.wire_seq == 4) then (.frame = null | .raw_preview = "<binary frame>") else . end' \
+  jq -c 'if (.wire_seq == 5) then (.frame = null | .raw_preview = "<binary frame>") else . end' \
     "${healthy}" > "${nullframe}"
   expect_rc 1 "an unrecognised (null) frame is a finding, not noise" \
     --journal "${nullframe}" "${base[@]}" || fail=1
@@ -1844,7 +1876,7 @@ self_test() {
     --journal "${nullframe}" "${base[@]}" || fail=1
 
   # An unknown frame VERB — the same closed-world argument one level up.
-  jq -c 'if (.wire_seq == 4) then .frame = ["SLURP","everything"] else . end' \
+  jq -c 'if (.wire_seq == 5) then .frame = ["SLURP","everything"] else . end' \
     "${healthy}" > "${badverb}"
   expect_rc 1 "an unknown frame verb fails the closed frame set" \
     --journal "${badverb}" "${base[@]}" || fail=1
@@ -1955,7 +1987,7 @@ self_test() {
   fx_begin "${onlymalformed}"
   jline c2r c1 "[\"EVENT\",$(ev_raw 3 0 "\"${PK_A}\"" "[[\"p\",\"${PK_B}\"]]")]"
   jline c2r c1 "[\"EVENT\",$(ev_raw 24242 0 "\"${PK_A}\"" '[["t","upload"]]')]"
-  jsentinel c1
+  jsentinel c0
   expect_rc 1 "a snapshot of ONLY malformed records is a VIOLATION, not a META-FLOOR" \
     --journal "${onlymalformed}" --sentinel "${SENTINEL}" --allowlist "${allow}" \
     --min-distinct-conns 2 || fail=1
@@ -2034,7 +2066,7 @@ self_test() {
   jline c2r c1 '["REQ","sub-kp",{"kinds":[30443],"limit":50}]'
   jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "eIN1" "${PK_EPH2}" '[["h","cafebabe"],["expiration","1785886372"]]')]"
   jline r2c c1 "[\"EVENT\",\"sub-w\",$(ev 1059 "eIN2" "${PK_EPH1}" "[[\"p\",\"${PK_B}\"]]")]"
-  jsentinel c1
+  jsentinel c0
   expect_rc 1 "inbound 445/1059 do NOT satisfy the required kind set" \
     --journal "${inboundonly}" "${base[@]}" || fail=1
   expect_msg "kind 445 is required by the allow-list and was never SENT" \
@@ -2059,7 +2091,7 @@ self_test() {
   jline c2r c1 "[\"EVENT\",$(ev 445 "e08" "${PK_EPH1}" '[["h","cafebabe"]]')]"
   jline c2r c2 "[\"EVENT\",$(ev 445 "e09" "${PK_EPH2}" '[["h","cafebabe"]]')]"
   jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "eIN" "${PK_EPH2}" '[["h","cafebabe"],["expiration","1785886372"]]')]"
-  jsentinel c1
+  jsentinel c0
   expect_rc 1 "an inbound 445 does NOT vouch for the TTL Haven stopped stamping" \
     --journal "${ttldropped}" "${base[@]}" || fail=1
   expect_msg "required tag \"expiration\"" "...naming the TTL rule" \
@@ -2082,7 +2114,7 @@ self_test() {
   jline c2r c1 "[\"EVENT\",$(ev 445 "e09" "${PK_EPH2}" '[["h","cafebabe"],["expiration","1785886372"]]')]"
   # The ONLY REQ in the snapshot, and it is the relay's, not Haven's.
   jline r2c c1 '["REQ","sub-relay-side",{"kinds":[30443],"limit":50}]'
-  jsentinel c1
+  jsentinel c0
   expect_rc 1 "an INBOUND REQ does not satisfy the required frame-verb set" \
     --journal "${inboundreq}" "${base[@]}" || fail=1
   expect_msg "frame verb \"REQ\" was never sent" \
@@ -2099,7 +2131,7 @@ self_test() {
   jline r2c c1 "[\"EVENT\",\"sub-kp\",$(ev 30443 "eIN1" "${PK_B}" "${KP_TAGS}")]"
   jline r2c c1 "[\"EVENT\",\"sub-h\",$(ev 445 "eIN2" "${PK_EPH2}" '[["h","cafebabe"],["expiration","1785886372"]]')]"
   jline r2c c1 "[\"EVENT\",\"sub-w\",$(ev 1059 "eIN3" "${PK_EPH1}" "[[\"p\",\"${PK_B}\"]]")]"
-  jsentinel c1
+  jsentinel c0
   expect_rc 4 "a snapshot with only INBOUND events is a META-FLOOR, not a sample" \
     --journal "${inboundnosend}" --sentinel "${SENTINEL}" --allowlist "${allow}" \
     --min-distinct-conns 2 || fail=1
@@ -2171,7 +2203,7 @@ self_test() {
   jline r2c c1 "[\"NOTICE\",\"unknown frame: ${SENTINEL}\"]"
   expect_rc 0 "a NOTICE echoing the token does not move the boundary" \
     --journal "${echoedtoken}" "${base[@]}" || fail=1
-  expect_msg "anchored at wire_seq 21" "...the boundary is the marker FRAME, not the echo" \
+  expect_msg "anchored at wire_seq 22" "...the boundary is the marker FRAME, not the echo" \
     --journal "${echoedtoken}" "${base[@]}" || fail=1
 
   # The token present but never as a marker frame: a distinct META-FLOOR with a
@@ -2212,16 +2244,67 @@ self_test() {
   # META-FLOOR: without that, the flag would be decorative.
   expect_rc 4 "--exclude-conn removes that connection from the floors" \
     --journal "${healthy}" "${base[@]}" --exclude-conn c2 || fail=1
-  expect_msg "--exclude-conn dropped" "...and the run PRINTS what it dropped" \
+  expect_msg "dropped from the EVENT-level attribution" \
+    "...and the run PRINTS what it dropped" \
     --journal "${healthy}" "${base[@]}" --exclude-conn c2 || fail=1
 
   # ...and it cannot hide a null frame, which is evaluated over every
   # connection precisely because a partial exclusion must not be able to.
   local exclnull="${tmp}/exclnull.ndjson"
-  jq -c 'if (.wire_seq == 20) then (.conn_id = "c5" | .frame = null | .raw_preview = "<binary>") else . end' \
+  jq -c 'if (.wire_seq == 21) then (.conn_id = "c5" | .frame = null | .raw_preview = "<binary>") else . end' \
     "${healthy}" > "${exclnull}"
   expect_rc 1 "--exclude-conn cannot hide an unrecognised frame" \
     --journal "${exclnull}" "${base[@]}" --exclude-conn c5 || fail=1
+
+  # SELF-DECLARATION: a socket that emitted the intercepted marker needs no
+  # flag. The lane can only name the ONE conn_id it greps out of the drive log,
+  # while a scenario opens a TestRelay per group and mints a fresh conn_id on
+  # every reconnect — so without this the harness's own traffic discharges the
+  # participant floors and "the app transmitted" is not what green means.
+  # The forbidden kind-3 makes the fixture unambiguous: attributed to Haven it
+  # is a violation, so a clean verdict can only mean the socket was excluded.
+  local declared="${tmp}/declared-harness.ndjson"
+  write_healthy "${declared}"
+  jconn c6
+  jdeclare c6
+  jline c2r c6 "[\"EVENT\",$(ev 3 "eHARNESS" "${PK_A}" "[[\"p\",\"${PK_B}\"]]")]"
+  jsentinel c0
+  expect_rc 0 "a self-declared harness socket is excluded with no --exclude-conn" \
+    --journal "${declared}" "${base[@]}" || fail=1
+  expect_msg "2 self-declared harness socket(s)" \
+    "...and the run names how many sockets declared themselves" \
+    --journal "${declared}" "${base[@]}" || fail=1
+  # ...and the declaration cannot hide the classes evaluated over EVERY
+  # connection either: a null frame on a declared socket is still a finding.
+  local declarednull="${tmp}/declared-harness-null.ndjson"
+  write_healthy "${declarednull}"
+  jconn c6
+  jdeclare c6
+  jline c2r c6 '["EVENT",{"kind":445}]'
+  jq -c 'if (.frame == ["EVENT",{"kind":445}]) then (.frame = null | .raw_preview = "<binary>") else . end' \
+    "${declarednull}" > "${declarednull}.tmp"
+  mv "${declarednull}.tmp" "${declarednull}"
+  FIXTURE_FILE="${declarednull}"
+  jsentinel c0
+  expect_rc 1 "a self-declared socket cannot hide an unrecognised frame either" \
+    --journal "${declarednull}" "${base[@]}" || fail=1
+
+  # ...and a declaration must not be able to MOVE the boundary. It shares the
+  # intercepted verb with the snapshot marker but not the token, and
+  # `sentinel_seq` matches `frame[1]` exactly — so a declaration emitted AFTER
+  # the marker (a reconnect mid-teardown) must leave the anchor where it was,
+  # and the violation above it must stay outside the snapshot. Without this the
+  # attribution channel would silently become a second boundary source.
+  local declaredlate="${tmp}/declared-after-sentinel.ndjson"
+  write_healthy "${declaredlate}"
+  jconn c6
+  jdeclare c6
+  jline c2r c6 "[\"EVENT\",$(ev 3 "eLATEHARNESS" "${PK_A}" "[[\"p\",\"${PK_B}\"]]")]"
+  expect_rc 0 "a declaration after the sentinel does not extend the snapshot" \
+    --journal "${declaredlate}" "${base[@]}" || fail=1
+  expect_msg "anchored at wire_seq 22" \
+    "...the boundary is still the marker's, not the declaration's" \
+    --journal "${declaredlate}" "${base[@]}" || fail=1
 
   # -------------------------------------------------------------------------
   # The SENTINEL actually truncates. This is the fixture that proves the
@@ -2411,7 +2494,7 @@ self_test() {
   # it exactly, and deleting any case still trips it. If a case is genuinely
   # retired, lower this number in the same commit and say why.
   # -------------------------------------------------------------------------
-  readonly MIN_CASES=116
+  readonly MIN_CASES=121
   if (( CASES_RUN + CASES_SKIPPED < MIN_CASES )); then
     echo "SELF-TEST FAIL: only $(( CASES_RUN + CASES_SKIPPED )) fixture(s) accounted for" >&2
     echo "  (${CASES_RUN} run + ${CASES_SKIPPED} skipped); at least ${MIN_CASES} expected." >&2

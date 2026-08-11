@@ -19,7 +19,7 @@ relay separation — accepted deviations").
 
 **Status roll-up as of 2026-08-10.** Done: the relay separation; Workstream A
 (A1–A10); Workstream B (B1–B9, which closed most of the delivery blind spot —
-B3/B4/B9 now assert a *peer's decrypted* coordinates); P0-1, P0-3, P0-5; and
+B3/B4/B9 now assert a *peer's decrypted* coordinates); P0-1 through P0-5 except P0-4; and
 Workstream C, whose oracles are now WIRED into the Android and iOS lanes —
 though they have still never read a journal from a real run, so the first CI
 run is the first evidence. C's follow-ups are done — the MLS group-id channel
@@ -2157,7 +2157,7 @@ the commit subset while `isNotEmpty` stays satisfied by commits.
 | C2 | Meta-floors: journal non-empty; ≥1 event per participant pubkey; sentinel-anchored snapshot so background wakes can't race the read |
 | C3 | Closed kind set over de-duplicated lines. Use a **set, never a multiset** — counts are nondeterministic. Kinds 0/5 allowed-but-not-required. 10051 is **forbidden**, not allowed: its only live emit path is a one-shot empty retraction on a pre-Dark-Matter migrating install, which no lane is, and allowing it would loosen a check `e2e_combined.dart:4354` already makes (recorded in `wire_allowlist.json` `_disagreements`) |
 | C4 | Per-kind `observed ⊆ allowed` **and** `required ⊆ observed` — not exact set equality, which false-reds on absent optional tags. Day-one allow-list is recorded in the audit notes |
-| C5.1 | **No two 445s with different `h` share a `created_at`** — the peeler binds outer to inner timestamp, so a relay learns two circles share a member. Live leak |
+| C5.1 | **No ONE publisher sends two 445s with different `h` in the same `created_at` second** — the peeler binds outer to inner timestamp, so a relay learns two circles share a member. Live leak. Asserted per sending connection over `dir == "c2r"`: the journal is multi-tenant (the app, a dozen in-process `SyntheticUser` peers, the harness's own multiplexed sockets), and a journal-wide reading reports two devices coinciding as one device serving two circles — see "First real traffic" below |
 | C5.2 | **REQ-filter allow-list** — kind-3 is banned as an event; a multi-author `Filter::authors([...])` would re-create the same social-graph disclosure as a different frame type. Currently ABSENT from the tree (`profile/fetch.rs` uses singular `Filter::author`, one relay per author) and banned by `check_profile_privacy_boundaries.sh:628-644`; the wire allow-list is the regression tripwire, not a live-leak finding |
 | C5.3 | 445 tag-names ∈ {`h`}, {`h`,`expiration`} — the MDK-bump tripwire |
 | C5.4 | No `g`/`alt` tag on any kind — guards `haven-core/src/nostr/event.rs:203-227`, a live-but-unreachable builder emitting a truncated geohash |
@@ -2179,8 +2179,8 @@ allow-list, linted by both consumers.
 | Item | Artefact | Self-test |
 |---|---|---|
 | C1 | `tooling/e2e/local-relay/src/{proxy,frame,journal,summarize}.rs`, `bin/wire_proxy.rs` — listens on 7788, forwards to 7777 | 77 Rust tests |
-| C2–C4 | `tooling/e2e/ci/check-wire-journal.sh` | 116 fixtures |
-| C5.1–C5.9 | `tooling/e2e/ci/check-wire-correlation.sh` | **134 fixtures**, `MIN_CASES=134` (pinned exactly) |
+| C2–C4 | `tooling/e2e/ci/check-wire-journal.sh` | 121 fixtures |
+| C5.1–C5.9 | `tooling/e2e/ci/check-wire-correlation.sh` | **147 fixtures**, `MIN_CASES=147` (pinned exactly) |
 | C6 | `haven/integration_test/e2e/_lib/wire_canaries.dart`, CLI `tooling/e2e/ci/check-wire-canaries.dart` | 85 Dart tests, 177 live terms |
 | C7 | `tooling/e2e/ci/setup-network-guard.sh` + `egress-allowlist.txt`, **observe mode** | wired on e2e-android, e2e-profile, e2e-location-provider-toggle |
 | — | `scripts/ci/check_wire_proxy_test_only.sh` — the proxy may never be reachable from app code (NEGATIVE half) | green |
@@ -2274,13 +2274,12 @@ each finding fixed and mutation-proven):
 
 **Open, and honestly scoped:**
 
-1. **`--exclude-conn` names one connection SEGMENT, not one actor.** The drive
-   opens three `TestRelay` sockets and only `ctx.relay` emits the sentinel; a
-   strfry drop mid-scenario mints a fresh `conn_id` the captured value no longer
-   covers. Direction is UNDER-exclusion, which INFLATES the participant floors —
-   so a green run does not establish the production app transmitted. Both lanes'
-   comments now say this. The real fix is every `TestRelay` emitting its own
-   sentinel, re-emitted after each reconnect.
+1. ~~**`--exclude-conn` names one connection SEGMENT, not one actor.**~~ CLOSED
+   2026-08-11 by the fix below: every `TestRelay` now emits the sentinel on
+   every socket it opens and re-emits it after each reconnect
+   (`TestRelay._declareHarnessSocket`), and both oracles read those declarations
+   out of the journal and union them with `--exclude-conn`. The flag is kept as
+   an independent liveness check on the recorder chain, not as the only source.
 2. **The `Duplicate` ack is issued from an in-memory set**, not re-read from the
    file, so an id acked after an external rotation would be acked but absent.
    Self-heals in practice and collapses to `mls_count == 0` → red.
@@ -2302,6 +2301,55 @@ round** (the count above is now 13):
 `required: false`. Both need the first green run to confirm what is actually
 published. C5.6 remains structurally vacuous in a single-endpoint lane — honest
 to keep, but the lane must not be read as proving containment.
+
+### First real traffic, 2026-08-11 — C5.1 was measuring the harness, not the app
+
+Run 31461369362 (and the two before it) reddened BOTH live-sync lanes on the
+same finding: `C5.1 timestamp correlation: 2 DIFFERENT groups published a
+kind-445 at the same created_at`. It reproduced 3/3, and it was not a Haven
+defect. The device logs name the two events outright:
+
+```
+05:44:37.830 [SyntheticUser:bob]   published location evt=f53009cd…   (group 1e24a149…)
+05:44:37.865 [SyntheticUser:carol] published location evt=4ea4dc02…   (group 32051d08…)
+```
+
+Two SIMULATED PEERS, 35 ms apart, in M11 scenario (e). Both went out over the
+M11 group's `TestRelay` socket, because `SyntheticUser.publishLocation`
+publishes through whichever `TestRelay` its scenario holds.
+
+Three faults compounded, and all three are fixed:
+
+1. **The oracle asserted a per-device property over a multi-tenant journal.**
+   One E2E process runs the app under test, a dozen in-process peers with their
+   own relay clients, and the harness's sockets. "Two circles shared a second"
+   over that union is not a statement about Haven — with fifteen devices in a
+   twenty-minute window it is a birthday collision, which is why it reproduced.
+   C5.1 now partitions by sending CONNECTION, the only publisher boundary the
+   journal has.
+2. **C5.1 read BOTH directions.** Even excluding the harness socket, the relay
+   echoes a peer's 445 to Alice's live-sync subscription, so the same pair
+   re-entered the sample inbound. It is now scoped to `dir == "c2r"`, for the
+   reason C5.7–C5.9 already were: an inbound frame is the relay's output.
+3. **A `TestRelay` is not a device.** It multiplexes several peers onto one
+   socket, so even per-connection it would look like one publisher serving two
+   circles. Harness sockets now self-declare (open item 1 above).
+
+**The coverage this exposed as missing.** With attribution corrected, the run
+had NO sample at all: `[LocationPublish] 0 visible circle(s), 0 accepted` on
+every M11 pump, and the pre-M11 scenario has one circle. Nothing in the live-sync
+lane ever put the app in two circles *and* made it publish — so C5.1 had never
+asserted anything about Haven's decorrelation, in either direction. M11 (e) now
+drives the production `locationPublisherProvider` burst after Alice's second
+circle exists and asserts it reached both, which is the sample the invariant was
+written for. Without it the new per-connection precondition META-FLOORs, which
+is the correct verdict for a run that proves nothing.
+
+**Trap for the next instrument.** An oracle that "cannot distinguish the defect
+from a coincidence" is not conservative, it is unusable: in a harness that runs
+many simulated devices, the coincidence arrives every run and the finding is
+noise. Ground truth for attribution has to be designed in — here, a connection
+plus a self-declaration — not argued away in a header comment.
 
 **Review-fleet lessons, 2026-08-10** — five reviewers over the wiring round:
 

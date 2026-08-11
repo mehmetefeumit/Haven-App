@@ -287,6 +287,23 @@ const Duration _convergencePollInterval = Duration(seconds: 3);
 /// underlying provider Future was orphaned.
 const Duration _riverpodPollerReadTimeout = Duration(seconds: 10);
 
+/// The same bound, sized for a burst that is DELIBERATELY slow.
+///
+/// [_riverpodPollerReadTimeout] is 10 s because the call sites it guards
+/// publish to ONE circle, where `PublishStagger` inserts no gap at all (the
+/// first publish of a burst is never delayed). A burst that spans several
+/// circles is a different shape: every publish after the first waits a CSPRNG
+/// gap of `[kPublishStaggerMinGap, kPublishStaggerMaxGap]` = 2–9 s, on purpose
+/// — a gap under one second cannot move a whole-second `created_at`, which is
+/// the entire decorrelation property. A two-circle burst can therefore take 9 s
+/// of pure waiting before either relay round-trip has even started, and reusing
+/// the 10 s bound would turn the privacy control itself into a flake.
+///
+/// 45 s is ~4x the worst scheduled spread for two circles and still an order of
+/// magnitude inside the M11 scenario's 4-minute budget, so a genuine hang is
+/// still reported as a hang rather than absorbed.
+const Duration _staggeredBurstReadTimeout = Duration(seconds: 45);
+
 /// Tolerance when comparing a decrypted coordinate to its sentinel.
 ///
 /// The sentinel coords are plain f64 constants round-tripped through
@@ -2303,6 +2320,72 @@ void main() {
             '[M11:e] Alice received locations from BOTH circles via one '
             'engine session (no per-circle poll timers, no engine restart '
             'between the two deliveries).',
+          );
+
+          // ---- the SEND half, and the only place the wire oracles can see
+          // ---- the decorrelation work at all.
+          //
+          // Everything above is Alice RECEIVING. `check-wire-correlation.sh`
+          // C5.1 asserts the opposite direction — that one device never puts
+          // kind-445s for two circles in the same wall-clock second, because
+          // the engine binds the outer `created_at` to the inner event's
+          // whole-second timestamp and that equality links two otherwise
+          // unlinkable circles to one device inside a SIGNED event
+          // (`PublishStagger`).
+          //
+          // It is asserted PER PUBLISHER, so the only journal that can prove
+          // it is one in which the app under test published to two circles.
+          // This is the single scenario in the file where Alice is in two at
+          // once, so without this burst C5.1 has no sample and the lane
+          // META-FLOORs — correctly, because a green run would then be saying
+          // nothing about the app. The synthetic peers cannot stand in: they
+          // publish over the harness's own multiplexed socket, which the
+          // oracle excludes precisely because it is not a device.
+          //
+          // `locationPublisherProvider` is the production one-shot burst
+          // (cold start, resume, motion, and the accept/create UI), reached
+          // exactly as `map_page.dart` reaches it — invalidate, then read.
+          // The invalidate is load-bearing: the burst MapShell fired on this
+          // scenario's cold start already resolved (with zero circles, since
+          // `_m11WipeAliceMlsState` empties her storage between scenarios), so
+          // a bare read would hand back that cached 0 and assert nothing.
+          //
+          // Superseded-guarded on both sides, like every other M11 step that
+          // can straddle a scenario boundary: this is the longest single await
+          // in the scenario, so it is the likeliest to still be running when a
+          // later scenario has taken over the container.
+          if (_m11Superseded(generation)) throw const _M11ScenarioSuperseded();
+          container.invalidate(locationPublisherProvider);
+          final published = await container
+              .read(locationPublisherProvider.future)
+              .timeout(
+                _staggeredBurstReadTimeout,
+                onTimeout: () => throw StateError(
+                  '[M11:e] locationPublisherProvider read timed out after '
+                  '${_staggeredBurstReadTimeout.inSeconds}s — either a '
+                  'concurrent background-poller invalidate orphaned this '
+                  "read's Riverpod future, or a publish is wedged on the "
+                  'relay. Without the burst the wire snapshot has no '
+                  'two-circle publisher and C5.1 META-FLOORs on the host.',
+                ),
+              );
+          if (_m11Superseded(generation)) throw const _M11ScenarioSuperseded();
+          expect(
+            published,
+            2,
+            reason:
+                'Alice is in two accepted circles here, so the production '
+                'publish burst must reach BOTH — the wire oracle C5.1 is '
+                'partitioned per publisher and takes its sample from exactly '
+                'this burst. A count of $published means either a circle was '
+                'filtered out of the publish set or the burst was superseded '
+                'mid-flight, and in both cases the run stops proving that '
+                'co-timed publishes are kept out of the same second.',
+          );
+          debugPrint(
+            '[M11:e] Alice published to $published circle(s) through the '
+            'production burst; their kind-445 created_at separation is '
+            'asserted on the host by check-wire-correlation.sh C5.1.',
           );
         } finally {
           await _m11StopEngine(container, generation);

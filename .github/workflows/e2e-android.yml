@@ -485,25 +485,29 @@ jobs:
             fi
           }
 
-          # ONE of the harness's sockets, removed from every assertion that
-          # accepts it. `TestRelay` reaches the same proxied relay the app does,
-          # so its probes are IN the journal and are NOT Haven's privacy
-          # surface.
+          # The harness's sockets, removed from every assertion that accepts
+          # them. `TestRelay` reaches the same proxied relay the app does, so
+          # its probes are IN the journal and are NOT Haven's privacy surface.
           #
-          # Scope, stated honestly: the drive opens THREE TestRelay connections
-          # (`ctx.relay`, FE-2's, M11's) plus a reconnect path that mints a
-          # fresh conn_id, and only `ctx.relay` emits the sentinel — so only its
-          # id reaches the host and only its traffic is excluded here. The error
-          # direction is UNDER-exclusion, which INFLATES the participant floors:
-          # `--min-distinct-publishers 2` and `--min-distinct-conns 2` can still
-          # be satisfied by the in-process SyntheticUser peers and the other two
-          # harness sockets, so a green run does NOT establish that the
-          # production Flutter app transmitted. Making it establish that needs
-          # every TestRelay to emit its own sentinel; until then read these
-          # floors as "the scenario transmitted", not "the app did".
+          # Exclusion now has TWO sources, and the oracles union them:
           #
-          # The
-          # proxy returns the emitting `conn_id` in the sentinel ack and the
+          #   * SELF-DECLARATION, read out of the journal. Every TestRelay emits
+          #     the proxy-intercepted sentinel VERB on every socket it opens
+          #     (`TestRelay._declareHarnessSocket`), including the fresh
+          #     conn_id a mid-run reconnect mints, so all three of the drive's
+          #     sockets (`ctx.relay`, FE-2's, M11's) are covered with no host
+          #     plumbing at all. This is what closed the gap that used to make
+          #     these floors mean "the scenario transmitted" rather than "the
+          #     app did" — and, more sharply, what stopped C5.1 reading two
+          #     SyntheticUser peers publishing 35 ms apart over ONE multiplexed
+          #     harness socket as a co-membership leak by the app.
+          #   * THIS GREP, which names the socket whose ack the drive printed.
+          #     Kept because it is an independent check that the recorder chain
+          #     is live end to end: a missing ack means the drive never reached
+          #     the proxy, and that has to be loud rather than inferred from a
+          #     journal that would then be describing some other run.
+          #
+          # The proxy returns the emitting `conn_id` in the sentinel ack and the
           # drive prints that ack — which is the ONLY path by which the host can
           # learn the id, so this grep is a load-bearing link of the recorder
           # chain, not a convenience.
@@ -541,11 +545,15 @@ jobs:
           # over the FFI), so at least two identities must have transmitted and
           # at least two sockets must have carried traffic.
           #
-          # Read honestly, that floor is weaker than it looks even with the
-          # harness socket excluded: the SyntheticUsers publish real 30443/1059/
-          # 445 over their own Rust-side sockets, so two distinct publishers can
-          # still be two synthetic peers. --exclude-conn removes the one actor
-          # the host can name; it does not yet prove the UI itself transmitted.
+          # Read honestly, that floor is still weaker than it looks even now
+          # that every harness socket is excluded: the SyntheticUsers publish
+          # real 30443/1059/445 over their own Rust-side sockets, so two
+          # distinct publishers can still be two synthetic peers. What the
+          # exclusion fixed is attribution — no harness traffic is counted as
+          # the app's any more — not the question of WHICH non-harness device a
+          # given frame came from. C5.1 is the one invariant that needs that
+          # answer, and it gets it by partitioning per connection rather than by
+          # naming the app; see check-wire-correlation.sh.
           rc=0
           bash tooling/e2e/ci/check-wire-journal.sh \
             --journal "${WIRE_JOURNAL}" \

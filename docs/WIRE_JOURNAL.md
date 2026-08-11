@@ -283,6 +283,42 @@ considered and rejected: it is a second listening socket on the runner — more
 surface, not less — and it could not return a `wire_seq` synchronously without
 a second synchronisation.
 
+### The second job the same frame does: declaring a harness socket
+
+The marker is also how a connection says **"I belong to the harness"**.
+
+`SyntheticUser.publishLocation` publishes through whichever `TestRelay` its
+scenario holds, so ONE harness socket multiplexes several simulated devices —
+and an oracle that reasons per publisher (`check-wire-correlation.sh` C5.1: did
+one device serve two circles in the same second?) reads that socket as a device
+that publishes to every circle at once. That is the exact defect C5.1 hunts, so
+an undeclared harness socket manufactures the finding it exists to detect.
+
+`TestRelay._declareHarnessSocket()` therefore emits the same intercepted VERB
+on **every** socket the harness opens, and re-emits it after every reconnect (a
+reconnect mints a fresh `conn_id`):
+
+```json
+["HAVEN_WIRE_SENTINEL","HAVEN_WIRE_CONN"]
+```
+
+It is fire-and-forget: the ack carries the `conn_id`, but the journal line
+already names its own connection, so consumers read the declaration out of the
+journal rather than out of a drive log. It is a no-op when no recorder was
+declared for the build, since the frame would otherwise reach a real relay.
+
+Consumers treat `frame[0] == "HAVEN_WIRE_SENTINEL"` on a `c2r` line as making
+that `conn_id` harness-owned — no production code path can emit that verb, and
+`scripts/ci/check_wire_proxy_test_only.sh` is what keeps it that way.
+
+**The payload is deliberately not the run's token, and the two roles must not
+be merged.** A boundary keys on `frame[1] == <token>`; attribution keys on the
+verb. Were a declaration to carry the token it could move the snapshot (a
+reconnect declaration written after the marker would extend it) and it could
+satisfy a pending `HAVEN_WIRE_SENTINEL_ACK` wait, handing the emitter the
+declaration's `wire_seq` for the marker it thought it sent. Both failures are
+silent and both narrow what a green run covers.
+
 ### How a drive target emits one
 
 `TestRelay.emitWireJournalSentinel()`
@@ -505,9 +541,17 @@ suppression, stale-KeyPackage serving. Do not let an oracle's name imply
 otherwise.
 
 It also cannot, on its own, tell the app's connections from the harness's: on
-these lanes both run on the same host and reach the proxy identically. The
-sentinel's `conn_id` lets a harness exclude the connection it emitted from;
-anything finer needs a mechanism this proxy does not have.
+these lanes both run on the same host and reach the proxy identically. What it
+CAN do is let a connection declare itself — every harness socket emits the
+sentinel (see above), so consumers can subtract the harness exactly. Telling one
+NON-harness device from another is finer than that, and the journal answers it
+only as far as "a connection is a publisher": a single client keeps one
+connection per relay, so co-timing within a connection is one device's, while
+co-timing across two connections may be two devices coinciding and is not
+asserted. Distinguishing a device that spreads one burst across several relays
+needs a mechanism this proxy does not have — C5.1 refuses to report clean when
+the journal shows two groups on disjoint relay sets, rather than checking less
+than it claims.
 
 ## Commands
 

@@ -335,6 +335,12 @@ jobs:
       # the emitting `conn_id` in the sentinel ack and the drive prints that ack;
       # that print is the ONLY path by which the host can learn the id.
       #
+      # The oracles no longer DEPEND on it for exclusion — every harness socket
+      # declares itself in the journal (`TestRelay._declareHarnessSocket`) — but
+      # capturing it stays load-bearing as a liveness check on the recorder
+      # chain: no ack means the drive never reached the proxy, and a journal
+      # that describes some other run must be reported, not inferred.
+      #
       # This step never fails the lane on its own. A missing id is a real
       # problem, but it is REPORTED where the rest of the wire verdicts are
       # reported, under the same closed exit-code taxonomy — failing here would
@@ -438,18 +444,24 @@ jobs:
       # `--min-distinct-conns 2` is the weaker companion that still catches a
       # client which never opened a socket.
       #
-      # Read honestly, that floor is weaker than it looks. Bob/Carol/Dave are
-      # in-process SyntheticUser FFI peers publishing real 30443/1059/445 over
-      # their own Rust-side sockets, and TestRelay publishes its own probes, so
-      # two distinct publishers can be reached with the production Flutter app
-      # having transmitted nothing at all. `--exclude-conn` removes the only
-      # non-product actor the host can NAME — and that is one connection
-      # segment, not one actor: the drive opens three TestRelay sockets
-      # (ctx.relay, FE-2's, M11's), only ctx.relay emits the sentinel, and a
-      # strfry drop mid-scenario mints a fresh conn_id that the captured id no
-      # longer covers. So this narrows the claim; it does not make the floor a
-      # proof that the UI transmitted. Making it one needs every TestRelay to
-      # emit its own sentinel, re-emitted after each reconnect.
+      # Read honestly, that floor is still weaker than it looks. Bob/Carol/Dave
+      # are in-process SyntheticUser FFI peers publishing real 30443/1059/445
+      # over their own Rust-side sockets, so two distinct publishers can be
+      # reached with the production Flutter app having transmitted nothing at
+      # all. What no longer inflates it is the harness itself: every TestRelay
+      # now emits the proxy-intercepted sentinel VERB on every socket it opens and
+      # re-emits it after each reconnect (`TestRelay._declareHarnessSocket`), so
+      # all three of the drive's sockets — and any a strfry drop mints
+      # mid-scenario — declare themselves in the journal and the oracles exclude
+      # them without needing a captured id. `--exclude-conn` below is the
+      # independent, host-side confirmation that the recorder chain ran at all.
+      #
+      # Attribution matters most to C5.1, which asks whether ONE device served
+      # two circles in one second: a TestRelay multiplexes several simulated
+      # peers, so counting it as a device turned two peers publishing 35 ms
+      # apart into a co-membership finding against the app. See
+      # check-wire-correlation.sh for the per-connection partition that
+      # replaced the journal-wide reading.
       #
       # Exit codes are a CLOSED set {0,1,2,3,4} and each one fails the step,
       # which is the point: 3 (UNUSABLE — the recorder broke) and 4 (META-FLOOR
