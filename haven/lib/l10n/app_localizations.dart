@@ -756,10 +756,10 @@ abstract class AppLocalizations {
   /// **'Something went wrong'**
   String get locationSettingsErrorSnack;
 
-  /// Framing paragraph at the top of the location settings page.
+  /// Framing paragraph at the top of the location settings page. MUST NOT promise that the user's OWN sharing resumes after the system closes the app: every background wake path (catchup_service.dart, ios_background_catchup.dart, HavenSLCHandler.swift) is receive-only and contains no publish call site, and Android has no movement trigger at all. An earlier version claimed 'updates resume when you move or when the system next wakes the app', which was false on both platforms.
   ///
   /// In en, this message translates to:
-  /// **'Haven shares your location with your circles whenever the app is open. Turn this on and your circles keep seeing it while Haven is in the background; if the system closes Haven, updates resume when you move or when the system next wakes the app.'**
+  /// **'Haven shares your location with your circles whenever the app is open. Turn this on and your circles keep seeing it while Haven is in the background. If the system closes Haven, sharing stops until you open it again — background wake-ups only fetch your circles\' locations, they never send yours.'**
   String get locationSettingsIntro;
 
   /// Title of the background-sharing toggle tile.
@@ -768,16 +768,16 @@ abstract class AppLocalizations {
   /// **'Share in background'**
   String get locationSettingsToggleTitle;
 
-  /// Subtitle of the background-sharing toggle tile.
+  /// Subtitle of the background-sharing toggle tile. MUST NOT say "when the app is closed": this toggle keeps sharing alive while Haven is BACKGROUNDED, and sharing stops when the system TERMINATES the app (every background wake path is receive-only). It renders directly beneath the toggle, immediately above locationSettingsIntro, so an over-claim here contradicts the paragraph that states the limit.
   ///
   /// In en, this message translates to:
-  /// **'Keep sharing when the app is closed'**
+  /// **'Keep sharing while Haven runs in the background'**
   String get locationSettingsToggleSubtitle;
 
-  /// iOS-only note shown when background sharing is on but the location permission is only 'while in use'. Must stay honest in both directions: While-In-Use IS sufficient for continued background sharing while the app stays running (never claim 'Always' is required for that), and 'Always' still genuinely improves catch-up after iOS terminates the app (never present While-In-Use as loss-free).
+  /// iOS-only note shown when background sharing is on but the location permission is only 'while in use'. Must stay honest in both directions: While-In-Use IS sufficient for continued background sharing while the app stays running (never claim 'Always' is required for that), and 'Always' still genuinely improves catch-up after iOS terminates the app (never present While-In-Use as loss-free), and 'Always' does NOT resume the user's own sharing — the SLC relaunch it enables is receive-only (HavenSLCHandler.swift), so never imply the user keeps being seen.
   ///
   /// In en, this message translates to:
-  /// **'Sharing keeps working in the background with your current permission. Choose \'Always\' for Haven in Settings so updates can also resume after iOS closes the app.'**
+  /// **'Sharing keeps working in the background with your current permission. Choose \'Always\' for Haven in Settings so Haven can also catch up on your circles\' locations after iOS closes the app. Your own sharing resumes when you reopen Haven.'**
   String get locationSettingsIosLimitedNote;
 
   /// Android-only heading above the reliability guidance card.

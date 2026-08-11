@@ -379,17 +379,17 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'Haven は、アプリを開いている間は常に、あなたの位置情報をサークルに共有します。これをオンにすると、Haven がバックグラウンドにある間もサークルのメンバーは位置情報を見続けられます。システムが Haven を終了させた場合は、あなたが移動したとき、またはシステムが次にアプリを起動したときに更新が再開されます。';
+      'Haven は、アプリを開いている間は常に、あなたの位置情報をサークルに共有します。これをオンにすると、Haven がバックグラウンドにある間もサークルのメンバーは位置情報を見続けられます。システムが Haven を終了させた場合は共有が停止し、あなたが再びアプリを開くまで再開されません。バックグラウンドでの起動時に行われるのはサークルの位置情報の受信だけで、あなたの位置情報が送信されることはありません。';
 
   @override
   String get locationSettingsToggleTitle => 'バックグラウンドで共有';
 
   @override
-  String get locationSettingsToggleSubtitle => 'アプリを閉じても共有を続けます';
+  String get locationSettingsToggleSubtitle => 'Haven がバックグラウンドにある間も共有を続けます';
 
   @override
   String get locationSettingsIosLimitedNote =>
-      '現在の権限のままでも、バックグラウンドでの共有は継続されます。設定で Haven の位置情報を「常に許可」にすると、iOS がアプリを終了した後も更新を再開できるようになります。';
+      '現在の権限のままでも、バックグラウンドでの共有は継続されます。設定で Haven の位置情報を「常に許可」にすると、iOS がアプリを終了した後も、Haven がサークルの位置情報に追いつけるようになります。あなた自身の位置情報の共有は、Haven を開き直したときに再開されます。';
 
   @override
   String get locationSettingsAndroidHeader => '確実に動かすためのOS設定';

@@ -403,18 +403,18 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'O Haven compartilha sua localização com seus círculos sempre que o app está aberto. Ative esta opção e seus círculos continuam vendo a localização enquanto o Haven está em segundo plano; se o sistema fechar o Haven, as atualizações voltam quando você se desloca ou quando o sistema acorda o app da próxima vez.';
+      'O Haven compartilha sua localização com seus círculos sempre que o app está aberto. Ative esta opção e seus círculos continuam vendo a localização enquanto o Haven está em segundo plano. Se o sistema fechar o Haven, o compartilhamento é interrompido até você abrir o app de novo — quando o sistema acorda o Haven em segundo plano, ele apenas busca a localização dos seus círculos, nunca envia a sua.';
 
   @override
   String get locationSettingsToggleTitle => 'Compartilhar em segundo plano';
 
   @override
   String get locationSettingsToggleSubtitle =>
-      'Continuar compartilhando com o app fechado';
+      'Continuar compartilhando enquanto o Haven estiver em segundo plano';
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'O compartilhamento continua funcionando em segundo plano com sua permissão atual. Escolha \"Sempre\" para o Haven nos Ajustes para que as atualizações também possam ser retomadas depois que o iOS fechar o app.';
+      'O compartilhamento continua funcionando em segundo plano com sua permissão atual. Escolha \"Sempre\" para o Haven nos Ajustes para que ele também possa recuperar as localizações dos seus círculos depois que o iOS fechar o app. Seu próprio compartilhamento é retomado quando você reabre o Haven.';
 
   @override
   String get locationSettingsAndroidHeader =>

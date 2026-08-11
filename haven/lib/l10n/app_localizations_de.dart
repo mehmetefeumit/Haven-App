@@ -403,18 +403,18 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'Haven teilt deinen Standort mit deinen Kreisen, sobald die App geöffnet ist. Schaltest du das hier ein, sehen deine Kreise ihn auch weiter, während Haven im Hintergrund läuft; beendet das System Haven, laufen die Aktualisierungen wieder an, sobald du dich bewegst oder das System die App das nächste Mal aufweckt.';
+      'Haven teilt deinen Standort mit deinen Kreisen, solange die App geöffnet ist. Schaltest du das hier ein, sehen deine Kreise ihn auch weiter, während Haven im Hintergrund läuft. Beendet das System Haven, wird dein Standort nicht mehr geteilt, bis du die App wieder öffnest – im Hintergrund wird Haven nur aufgeweckt, um die Standorte deiner Kreise abzurufen; dein eigener Standort wird dabei nie gesendet.';
 
   @override
   String get locationSettingsToggleTitle => 'Im Hintergrund teilen';
 
   @override
   String get locationSettingsToggleSubtitle =>
-      'Weiter teilen, wenn die App geschlossen ist';
+      'Weiter teilen, solange Haven im Hintergrund läuft';
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'Das Teilen läuft mit deiner aktuellen Berechtigung auch im Hintergrund weiter. Setze in den Einstellungen für Haven den Standortzugriff auf „Immer“, damit Aktualisierungen auch dann wieder anlaufen können, wenn iOS die App beendet.';
+      'Das Teilen läuft mit deiner aktuellen Berechtigung auch im Hintergrund weiter. Setze in den Einstellungen für Haven den Standortzugriff auf „Immer“, damit Haven auch dann noch die verpassten Standorte deiner Kreise nachholen kann, wenn iOS die App beendet hat. Dein eigener Standort wird erst wieder geteilt, wenn du Haven erneut öffnest.';
 
   @override
   String get locationSettingsAndroidHeader =>

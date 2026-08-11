@@ -398,18 +398,18 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'Haven, uygulama açık olduğu sürece konumunuzu çevrelerinizle paylaşır. Bunu açarsanız Haven arka plandayken de çevreleriniz konumunuzu görmeye devam eder; sistem Haven\'ı kapatırsa güncellemeler, siz hareket ettiğinizde ya da sistem uygulamayı bir sonraki uyandırışında yeniden başlar.';
+      'Haven, uygulama açık olduğu sürece konumunuzu çevrelerinizle paylaşır. Bunu açarsanız Haven arka plandayken de çevreleriniz konumunuzu görmeye devam eder. Sistem Haven\'ı kapatırsa paylaşım, siz uygulamayı yeniden açana kadar durur; sistem uygulamayı arka planda uyandırdığında yalnızca çevrelerinizin konumları alınır, sizin konumunuz hiçbir zaman gönderilmez.';
 
   @override
   String get locationSettingsToggleTitle => 'Arka planda paylaş';
 
   @override
   String get locationSettingsToggleSubtitle =>
-      'Uygulama kapalıyken de paylaşmaya devam et';
+      'Haven arka planda çalışırken paylaşmaya devam et';
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'Paylaşım, mevcut izninizle arka planda çalışmaya devam eder. iOS uygulamayı kapatsa bile güncellemelerin sürebilmesi için Ayarlar\'da Haven için Konum\'u \'Her Zaman\' olarak ayarlayın.';
+      'Paylaşım, mevcut izninizle arka planda çalışmaya devam eder. Ayarlar\'da Haven için Konum\'u \"Her Zaman\" olarak ayarlayın; böylece Haven, iOS uygulamayı kapattıktan sonra çevrelerinizin konumlarını da sonradan yakalayabilir. Kendi paylaşımınız ise Haven\'ı tekrar açtığınızda yeniden başlar.';
 
   @override
   String get locationSettingsAndroidHeader =>

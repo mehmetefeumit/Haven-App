@@ -22,9 +22,14 @@ relay separation — accepted deviations").
 B3/B4/B9 now assert a *peer's decrypted* coordinates); P0-1, P0-3, P0-5; and
 Workstream C, whose oracles are now WIRED into the Android and iOS lanes —
 though they have still never read a journal from a real run, so the first CI
-run is the first evidence. Still open: P0-2, P0-4's backward paging, C's
-follow-ups (the MLS group-id channel and `--exclude-conn`), and Workstreams D,
-E and F.
+run is the first evidence. C's follow-ups are done — the MLS group-id channel
+carries the Rule-4 ground truth over an intercepted control frame, and
+`--exclude-conn` is wired on both lanes. Still open: P0-4's backward paging, three latent C findings recorded below, and Workstreams D, E and F.
+
+**Nothing left in Workstream C can be closed by more code.** The two remaining
+substantive items — trimming `_assertWirePrivacyInvariants` and the two
+allow-list kinds parked at `required: false` — both need the first green
+journal to confirm what is actually published.
 
 ---
 
@@ -113,18 +118,68 @@ fix has runtime proof on the same oracle that produced both reproductions above.
 Still an emulator: what remains unverified is a physical device and the
 multi-process case, not the mechanism.
 
-### P0-2 · `locationSettingsIntro` ships a false claim in 13 locales — OPEN
+### P0-2 · location-settings copy shipped a false claim in 13 locales — FIXED 2026-08-10
 
-`haven/lib/l10n/app_en.arb` promises "if the system closes Haven, updates resume
-when you move or when the system next wakes the app." Every wake path is
-receive-only — `catchup_service.dart` and `ios_background_catchup.dart` contain
-zero publish call sites, and `haven/ios/Runner/HavenSLCHandler.swift:9-12` says so
-in its own doc comment. There is no SLC, geofence or activity-recognition
-anywhere in `haven/android` or `haven/lib`, so "when you move" has no Android
-mechanism at all. `locationSettingsIosLimitedNote` repeats the over-claim.
+`app_en.arb` promised "if the system closes Haven, updates resume when you move
+or when the system next wakes the app." Re-verified before the fix rather than
+taken on trust: `catchup_service.dart` and `ios_background_catchup.dart` contain
+zero publish call sites, `HavenSLCHandler.swift:9-12` describes its own sweep as
+"receive-only", and no SLC, geofence or activity-recognition exists anywhere in
+`haven/android` or `haven/lib` — so "when you move" had no Android mechanism at
+all, and the iOS one that does exist never sends.
 
-Fix the English, then re-translate. Batch with the other copy fixes below so the
-12 locales are touched once.
+**THREE strings carried it, not two.** `locationSettingsIntro` and
+`locationSettingsIosLimitedNote` were known. The third —
+`locationSettingsToggleSubtitle`, "Keep sharing when the app is closed" — was
+found by a TRANSLATOR, not by the code audit, and it was the worst placed: it
+renders directly beneath the toggle, immediately above the paragraph stating the
+limit, so it contradicted the correction on the same screen. Same lesson as the
+`clockSkewAnnouncement` find: an l10n reviewer traces where each string is
+CONSUMED, which a code-first pass does not.
+
+All three now say sharing stops until the user reopens the app, and that
+background wake-ups only fetch other members' locations. Each `@description`
+carries the reasoning and the file references, so the next editor inherits the
+argument rather than the conclusion.
+
+Translated into all 12 locales by four agents on disjoint file sets, then
+reviewed by independent agents that translated none of the languages they
+checked. Every language ACCEPT; nothing above MINOR; every MINOR either cosmetic
+or pre-existing in an untouched neighbour.
+
+**What the round taught, worth keeping:**
+
+* **"Closed" is ambiguous in seven of the twelve languages.** `kapalı`, `بسته`,
+  `بند`, `बंद`, `बन्द`, `geschlossen` and `إغلاق` all span "not on screen" and
+  "shut down" — so the subtitle was not merely imprecise abroad, it was read as
+  the false claim. Each fix pairs the platform term for background with an
+  explicit RUNNING verb, which is what carries "still alive".
+* **Grammar can carry a claim English can only state lexically.** Russian
+  perfective future (`возобновится … только когда вы снова откроете`) binds
+  resumption to a single user act; the old imperfective-habitual framing is what
+  made the false promise readable. Japanese needed a cleft
+  (`行われるのは…受信だけで`) because `だけ` after a noun phrase scopes over the
+  NOUN — a literal rendering would have excluded fetching other data while
+  saying nothing about sending.
+* **Translators improved on the source.** Hindi and Nepali each added an
+  exclusivity marker the English lacks ("resumes ONLY when you reopen"), and
+  French added a contrastive `lui`, on exactly the privacy-critical point.
+* **Reviewers caught what translators structurally could not:** cross-string
+  inconsistency. German `sobald` / French `dès que` render "whenever" as a
+  trigger moment, contradicting each file's own `Solange` / `Tant que` in the
+  sibling `privacyWhatOthersSeeCannotPause`. Fixed.
+* **One accessibility find worth the whole review:** German elided *Standort* in
+  `dein eigener wird dabei nie gesendet`, leaving the nearest overt antecedent
+  the PLURAL "circles' locations" — forcing a screen-reader user to reconstruct
+  a singular in the one clause where being wrong means believing you are still
+  visible. Two words fixed it.
+
+**Left open, deliberately:** the iOS setting labels are wrong or untranslatable
+in two locales — Japanese uses `「常に許可」` (Android's label; iOS ships `「常に」`)
+and Nepali uses `'सधैँ'` though iOS has no Nepali UI, so that literal string is
+never on screen. Both are pre-existing, both also appear in untouched neighbour
+strings, and fixing one of a pair breaks the consistency that currently exists.
+They belong to a separate pass over the OS-label strings.
 
 ### P0-3 · KeyPackage expires at 84 days → accounts silently uninvitable — FIXED 2026-08-04
 
@@ -2172,34 +2227,75 @@ The gate is the sentinel define, which `check_wire_oracle_lane_reachable.sh`
 link 4 already pins as a lane's declaration that a recorder is in path. Pinned by
 `haven/test/lints/wire_mls_group_id_announce_sites_test.dart`.
 
-**Open, from the 2026-08-10 review fleet** (all latent, none blocking):
+**Closed by the 2026-08-10 review fleet** (three reviewers over the channel;
+each finding fixed and mutation-proven):
 
-1. **The lanes hardcode the `default` instance's sidecar name** rather than
-   reading a claim, which is exactly the mistake the journal path is written to
-   avoid 330 lines above it. Harmless today (every `start-wire-proxy.sh` call
-   passes no instance), but a two-recorder lane would read a *previous plane's*
-   ids: `MLSIDS > 0` and `s445 > 0`, so no precondition fires and C5.8 scans for
-   values never on the wire and reports clean.
-2. **Interception is keyed on a successful JSON parse.** A declaration that
-   fails the structural test — or arrives as a Binary frame — is forwarded AND
-   journalled with the id inside `raw_preview` (200 chars > the ~95-char frame).
-   Unreachable from today's drive (`jsonEncode` always emits a well-formed text
-   frame), but the doc comment claims the stronger property. Fix is a byte-level
-   test for the verb before classification.
-3. **`--exclude-conn` names ONE socket; the drive opens three** (`ctx.relay`,
-   FE-2's, M11's) plus a reconnect path, and only `ctx.relay` emits the
-   sentinel. Under-exclusion INFLATES the participant floors, so a green run
-   does not establish that the production app transmitted. The Android comment
-   claimed otherwise and has been corrected to say so; making the floor mean
-   what it says needs every `TestRelay` to emit its own sentinel.
-4. **`_announcedMlsGroupIds > 0` cannot catch removing ONE call site.** The new
-   lint pins the site COUNT by equality, which closes the concrete case; a
-   drive-side equality against circles-actually-created would be stronger.
-5. **The `Duplicate` ack is issued from an in-memory set**, not re-read from the
+* **A Rule 4 violation this work introduced.** The announce was unconditional
+  and `e2e-flakiness-stress.yml` drives the same scenario at strfry with no
+  recorder, so the real id would have gone out nightly, 15 s before the missing
+  ack could reveal it. Both halves now refuse before anything reaches the
+  socket, gated on the sentinel define that CI already pins as a lane's
+  declaration that a recorder is in path. The refusal is the FIRST statement —
+  it was briefly behind a 15 s writability poll despite gating on a
+  compile-time constant.
+* **Interception was a PARSER property, not a verb property.** Malformed JSON,
+  a non-array, or a Binary frame fell through and was both journalled (whole id
+  inside a 200-char `raw_preview`) and forwarded. Now a byte-level gate ahead
+  of classification; refused without an ack, because acking an unrecordable
+  declaration tells the drive the host holds a value it does not.
+* **The artifact ban keyed on LOCATION for a file whose path is caller-chosen.**
+  Two reviewers defeated it from opposite directions — the `.log` exemption and
+  relocating out of `/tmp`. It now keys on the name shape, with fixtures for
+  both bypasses and one proving the `.log` exemption is still load-bearing.
+* **Three comments claimed a wide safety margin that does not exist.** OpenMLS
+  mints a **16-byte** group id (`openmls/src/group/mod.rs:73`,
+  `rng.random_vec(16)`) = 32 hex chars, sitting EXACTLY on all three floors.
+  Anyone "tightening" one on the strength of those comments hard-fails every
+  lane. All three now say the floor is exact.
+* **Dart accepted ids Rust rejects** (no maximum vs a 128-hex cap), so an
+  over-long id would transmit, be refused silently, and surface as an ack
+  timeout blaming the recorder for a caller bug. Both validators now fail on
+  the same inputs.
+* **The lanes rebuilt the `default` instance's sidecar filename** while reading
+  the journal path from a claim in the same file. A stale sidecar is worse than
+  a missing one: C5.8 would scan for a previous plane's ids and report clean.
+  The recorder now claims the path and both lanes read it.
+* **`_announcedMlsGroupIds > 0` could not catch removing ONE call site** — and
+  one is enough, since `_m11AliceCreatesCircle` covers the two-circle scenario
+  whose 445s are the only ones satisfying C5.1. A source lint pins the site
+  count by equality.
+* **The iOS envelope omitted an unbounded release cargo build** from its own
+  arithmetic. That step is now bounded and counted (195/130). The envelope has
+  been wrong twice in the same direction, so every step in the sum is now
+  bounded — which is what makes the sum checkable.
+* Smaller: `LC_ALL=C` on the two harness-log greps (repo convention, and the
+  sentinel line carries a UTF-8 em-dash amid binary log noise); a rejected
+  `--mls-group-id` reported by length instead of echoed into a public job log.
+
+**Open, and honestly scoped:**
+
+1. **`--exclude-conn` names one connection SEGMENT, not one actor.** The drive
+   opens three `TestRelay` sockets and only `ctx.relay` emits the sentinel; a
+   strfry drop mid-scenario mints a fresh `conn_id` the captured value no longer
+   covers. Direction is UNDER-exclusion, which INFLATES the participant floors —
+   so a green run does not establish the production app transmitted. Both lanes'
+   comments now say this. The real fix is every `TestRelay` emitting its own
+   sentinel, re-emitted after each reconnect.
+2. **The `Duplicate` ack is issued from an in-memory set**, not re-read from the
    file, so an id acked after an external rotation would be acked but absent.
    Self-heals in practice and collapses to `mls_count == 0` → red.
-6. **No cap on distinct declarations** — `seen` is an unbounded `BTreeSet`.
+3. **No cap on distinct declarations** — `seen` is an unbounded `BTreeSet`.
    Loopback-only, so inside the runner's trust boundary.
+
+**Two more instances of the recurring failure mode, both self-inflicted this
+round** (the count above is now 13):
+
+11. The `--mls-group-id-not-asserted` escape hatch shipped WITHOUT a fixture,
+    and its first mutation survived — the same defect it was written to repair.
+12. The success banner still read "all nine … hold" three lines under an
+    advisory saying C5.8 was never scanned. A banner is an assertion: the line
+    a reader greps to conclude "green ⇒ the rule held" must never name an
+    invariant that did not run.
 
 **Still blocked on a real journal** (cannot be closed by more code):
 `_assertWirePrivacyInvariants`'s trim, and kinds 10002/10050 at

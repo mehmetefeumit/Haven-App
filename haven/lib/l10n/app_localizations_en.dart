@@ -393,18 +393,18 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'Haven shares your location with your circles whenever the app is open. Turn this on and your circles keep seeing it while Haven is in the background; if the system closes Haven, updates resume when you move or when the system next wakes the app.';
+      'Haven shares your location with your circles whenever the app is open. Turn this on and your circles keep seeing it while Haven is in the background. If the system closes Haven, sharing stops until you open it again — background wake-ups only fetch your circles\' locations, they never send yours.';
 
   @override
   String get locationSettingsToggleTitle => 'Share in background';
 
   @override
   String get locationSettingsToggleSubtitle =>
-      'Keep sharing when the app is closed';
+      'Keep sharing while Haven runs in the background';
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'Sharing keeps working in the background with your current permission. Choose \'Always\' for Haven in Settings so updates can also resume after iOS closes the app.';
+      'Sharing keeps working in the background with your current permission. Choose \'Always\' for Haven in Settings so Haven can also catch up on your circles\' locations after iOS closes the app. Your own sharing resumes when you reopen Haven.';
 
   @override
   String get locationSettingsAndroidHeader => 'OS settings for reliability';

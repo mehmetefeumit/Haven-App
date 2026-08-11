@@ -404,18 +404,18 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'Haven partage votre position avec vos cercles dès que l\'application est ouverte. Activez cette option et vos cercles continueront de la voir pendant que Haven est en arrière-plan ; si le système ferme Haven, les mises à jour reprennent lorsque vous vous déplacez ou au prochain réveil de l\'application par le système.';
+      'Haven partage votre position avec vos cercles tant que l\'application est ouverte. Activez cette option et vos cercles continueront de la voir pendant que Haven est en arrière-plan. Si le système ferme Haven, votre position n\'est plus partagée jusqu\'à ce que vous rouvriez l\'application : en arrière-plan, le système ne réveille Haven que pour récupérer les positions de vos cercles, jamais pour envoyer la vôtre.';
 
   @override
   String get locationSettingsToggleTitle => 'Partager en arrière-plan';
 
   @override
   String get locationSettingsToggleSubtitle =>
-      'Continuer le partage lorsque l\'application est fermée';
+      'Continuer le partage tant que Haven fonctionne en arrière-plan';
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'Le partage continue de fonctionner en arrière-plan avec votre autorisation actuelle. Choisissez « Toujours » pour Haven dans Réglages afin que les mises à jour puissent aussi reprendre après qu\'iOS a fermé l\'application.';
+      'Le partage continue de fonctionner en arrière-plan avec votre autorisation actuelle. Choisissez « Toujours » pour Haven dans Réglages afin que Haven puisse aussi récupérer les positions de vos cercles après qu\'iOS a fermé l\'application. Votre propre partage, lui, ne reprend que lorsque vous rouvrez Haven.';
 
   @override
   String get locationSettingsAndroidHeader =>
