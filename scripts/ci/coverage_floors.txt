@@ -174,12 +174,13 @@ rust|src/avatar/image.rs|96                  # measured 98.63% (504/511)
 # tests/catchup_sweep_e2e.rs only its cursor ARITHMETIC was exercised — the
 # sweep itself ran nowhere, which is how a path that decides what a
 # backgrounded device keeps and what it silently skips sat at 28.92%. The
-# remaining ~5% is deliberate: the saturation counter needs a 512-event
-# window, the `Buffered` arm needs an out-of-order epoch, and the rest are
-# defensive arms (storage down, whole-batch fetch error, a circle stored with
-# no relays) that the public API cannot reach — forcing them would mean
-# fabricating states production cannot produce. The open `limit(512)` paging
-# defect (P0-4) is NOT covered by these tests and must not be read as settled.
+# remaining ~5% is deliberate: the `Buffered` arm needs an out-of-order epoch,
+# and the rest are defensive arms (storage down, whole-batch fetch error, a
+# circle stored with no relays) that the public API cannot reach — forcing them
+# would mean fabricating states production cannot produce. P0-4's backward
+# paging IS covered: catchup_sweep_e2e drives a window larger than one page, a
+# limit-clamping relay, a poisoned paging boundary, an unserved chase page and
+# an unfinishable window, and the pager's termination rule has pure unit tests.
 #
 # auto_commit.rs is pinned at 100, not because a round number is tidy but
 # because it is the whole of Rule 13's RECEIVE side: every branch there ends in

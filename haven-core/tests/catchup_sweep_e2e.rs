@@ -53,8 +53,11 @@ use haven_core::relay::catchup::run_catchup_all_circles;
 use haven_core::relay::live_sync::group_cursor_stream;
 use haven_core::relay::maintenance::build_kp_maintenance_events;
 use haven_core::relay::{allow_ws_loopback_for_test, RelayManager};
-use nostr::Keys;
-use nostr_relay_builder::MockRelay;
+use nostr::{Event, EventBuilder, Keys, Kind, Tag, Timestamp};
+use nostr_relay_builder::prelude::{
+    BoxedFuture, MemoryDatabase, MemoryDatabaseOptions, NostrDatabase, PolicyResult, QueryPolicy,
+};
+use nostr_relay_builder::{LocalRelay, MockRelay, RelayBuilder};
 use tempfile::TempDir;
 
 /// Alice (admin) + Bob as real co-members, each with their own MLS store, with
@@ -568,5 +571,487 @@ async fn an_uningestable_event_defers_and_holds_the_cursor() {
         again.events_deferred, 1,
         "the un-applied event must be re-fetched by the next sweep — that is \
          what holding the cursor is FOR",
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Backward paging: a window larger than one page (Security Rule 12)
+//
+// NIP-01 `limit: n` serves the NEWEST n, so a circle holding more than the
+// sweep's page limit gets its window truncated at the BOTTOM. Holding the cursor
+// there stops the silent loss but retrieves nothing; the sweep therefore pages
+// backwards, bounded above by the oldest event it has been served, until every
+// responding relay answers short.
+//
+// These six drive the real `run_catchup_all_circles` against relays holding more
+// than one page: the happy path (everything retrieved, cursor advances), a
+// poisoned paging boundary (must not curtail an honest relay's chase), a relay
+// that CLAMPS our `limit` the way every strfry deployment does (the truncation
+// signal must still fire), a chase whose second page is never served (a failed
+// read must not read as "drained"), a flood of future-dated events (must not
+// freeze the cursor), and an unpageable window (must terminate, and must NOT
+// claim to have caught up).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The sweep's per-page fetch limit, mirrored from the private
+/// `catchup::CATCHUP_MAX_EVENTS_PER_PAGE`.
+///
+/// A window larger than one page is the whole premise here, so the number has to
+/// be named. It is deliberately the ONLY thing these tests take from the
+/// implementation: nothing below asserts a page count, a request shape, or a
+/// boundary value — only which events came back and where the cursor landed.
+const PAGE_LIMIT: usize = 500;
+
+/// A relay whose store the test seeds DIRECTLY, bypassing the socket.
+///
+/// Publishing a window larger than `PAGE_LIMIT` over the wire is not merely slow
+/// — `MockRelay` rate-limits writes to 60 events per minute, so it is
+/// impossible. Writing into the relay's own `MemoryDatabase` (shared with the
+/// running relay by `Arc`) stages the same relay CONTENTS deterministically and
+/// in milliseconds, and every read still goes through a real socket, a real REQ,
+/// and the relay's real NIP-01 `limit` / `until` handling — which is the part
+/// under test.
+struct SeededRelay {
+    _relay: LocalRelay,
+    url: String,
+    db: MemoryDatabase,
+}
+
+impl SeededRelay {
+    async fn run() -> Self {
+        Self::with_cap(None).await
+    }
+
+    /// `cap` is the relay's NIP-11 `limitation.max_limit`: a REQ asking for more
+    /// is CLAMPED to it, never rejected (`nostr-relay-builder`'s
+    /// `max_filter_limit`, which is strfry's `maxFilterLimit` behaviour).
+    async fn with_cap(cap: Option<usize>) -> Self {
+        let mut builder = RelayBuilder::default();
+        if let Some(cap) = cap {
+            builder = builder.max_filter_limit(cap);
+        }
+        Self::from_builder(builder).await
+    }
+
+    async fn from_builder(builder: RelayBuilder) -> Self {
+        let _ = allow_ws_loopback_for_test();
+        let db = MemoryDatabase::with_opts(MemoryDatabaseOptions {
+            events: true,
+            max_events: None,
+        });
+        let relay = LocalRelay::new(builder.database(db.clone()));
+        relay.run().await.expect("seeded relay");
+        let url = relay.url().await.to_string();
+        Self {
+            _relay: relay,
+            url,
+            db,
+        }
+    }
+
+    /// Stores `events` verbatim. A rejected save would silently shrink the
+    /// window under test, so each one is asserted.
+    async fn seed(&self, events: &[Event]) {
+        for ev in events {
+            assert!(
+                self.db.save_event(ev).await.expect("seed").is_success(),
+                "the relay must really hold every seeded event, or the window \
+                 under test is smaller than the test believes"
+            );
+        }
+    }
+}
+
+/// `count` `kind:445`s addressed to `h`, dated one second apart ending at
+/// `newest_secs`, that every sweep classifies as `NoEvidence`.
+///
+/// Two `#h` tags: a conformant relay serves such an event to a `#h` REQ for
+/// either value, and Haven's pure pre-engine parse then refuses it ("exactly one
+/// h tag") without touching key material. That is deliberate — `NoEvidence`
+/// contributes NOTHING in either cursor direction, so a window built from it
+/// isolates the paging property under test from every hold-back. Junk the engine
+/// takes instead would defer, and a deferral pins the cursor at the oldest event
+/// whether or not paging works, making the advance assertion vacuous.
+fn unparseable_window(h: &str, count: usize, newest_secs: i64) -> Vec<Event> {
+    let signer = Keys::generate();
+    (0..count)
+        .map(|i| {
+            let age = i64::try_from(count - 1 - i).expect("window size fits i64");
+            let secs = newest_secs - age;
+            EventBuilder::new(Kind::Custom(445), format!("b3BhcXVl-{i}"))
+                .tags(vec![
+                    Tag::parse(["h", h]).unwrap(),
+                    Tag::parse(["h", &hex::encode([0x11u8; 32])]).unwrap(),
+                ])
+                .custom_created_at(Timestamp::from(u64::try_from(secs).unwrap()))
+                .sign_with_keys(&signer)
+                .unwrap()
+        })
+        .collect()
+}
+
+/// A window bigger than one page must be retrieved WHOLE, and only then may the
+/// cursor advance.
+///
+/// Before backward paging this circle was stuck: the first page came back
+/// saturated, the oldest events below it were never delivered, and the cursor
+/// was held (correctly — advancing would have dropped them) sweep after sweep,
+/// re-fetching a window that only grew.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_window_larger_than_one_page_is_retrieved_whole_and_then_advances() {
+    let relay = SeededRelay::run().await;
+    let relay_mgr = RelayManager::new();
+    let fx = build_two_member_circle(vec![relay.url.clone()]).await;
+
+    let backlog = PAGE_LIMIT + 88;
+    let newest_secs = chrono::Utc::now().timestamp() - 60;
+    let window = unparseable_window(&hex::encode(fx.nostr_group_id), backlog, newest_secs);
+    let oldest_secs = i64::try_from(window[0].created_at.as_secs()).expect("created_at fits");
+    relay.seed(&window).await;
+
+    let swept_from = chrono::Utc::now().timestamp();
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+    let swept_to = chrono::Utc::now().timestamp();
+
+    assert!(
+        swept_from > newest_secs,
+        "precondition: the whole backlog must predate the window that fetches \
+         it, so an advance read off an event could not land in the bracket below"
+    );
+    assert_eq!(out.circles_swept, 1);
+    assert_eq!(
+        out.events_rejected_pre_auth,
+        backlog,
+        "every event in the window must be retrieved and ingested — a single \
+         page would have delivered only the newest {PAGE_LIMIT}, leaving the \
+         oldest {} stranded below a floor no later sweep would ever lower",
+        backlog - PAGE_LIMIT,
+    );
+    assert_eq!(out.events_applied, 0);
+    assert_eq!(out.events_deferred, 0);
+    assert_eq!(
+        out.windows_truncated, 0,
+        "the chase finished, so the window is complete — reporting it as \
+         truncated would freeze this circle's cursor forever"
+    );
+
+    let cursor = fx.alice_cursor().expect("the completed window advanced");
+    assert!(
+        cursor >= swept_from * 1000 && cursor <= swept_to * 1000,
+        "and the advance is still the fetch window's own open time, taken ONCE \
+         before the first page rather than re-read per page (between \
+         {swept_from} s and {swept_to} s); got {cursor} ms"
+    );
+    assert!(
+        cursor > oldest_secs * 1000,
+        "which is above the retrieved tail ({oldest_secs} s) — legitimate only \
+         because that tail really was retrieved; got {cursor} ms"
+    );
+}
+
+/// A relay that proposes an ANCIENT paging boundary must not curtail the chase
+/// of the relay that is still visibly holding a backlog.
+///
+/// The next page's `until` is the one remotely-written number steering a
+/// request: it is the oldest `created_at` of a page the relay itself cut short.
+/// A relay whose full page bottoms out at an ancient timestamp therefore
+/// proposes an ancient `until`, at which the following page legitimately comes
+/// back SHORT. If "short page ⇒ window complete" were the rule, the sweep would
+/// conclude the window was complete and advance the cursor past a backlog it
+/// never retrieved — the silent loss Rule 12 forbids, re-introduced through the
+/// termination condition.
+///
+/// The boundary is therefore the MAXIMUM across the relays that truncated, so
+/// the chain descends only as fast as the slowest-draining relay allows. This
+/// stages exactly that: a poisoned relay holding one page that bottoms out a day
+/// ago, alongside an honest relay holding a page and a half of recent events.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_ancient_paging_boundary_cannot_curtail_another_relays_backlog() {
+    let poisoned = SeededRelay::run().await;
+    let honest = SeededRelay::run().await;
+    let relay_mgr = RelayManager::new();
+    let fx = build_two_member_circle(vec![poisoned.url.clone(), honest.url.clone()]).await;
+    let h = hex::encode(fx.nostr_group_id);
+
+    let now = chrono::Utc::now().timestamp();
+    // The honest relay: more than one page of recent events, so its own page
+    // comes back truncated with a RECENT bottom.
+    let honest_backlog = PAGE_LIMIT + 88;
+    let honest_window = unparseable_window(&h, honest_backlog, now - 60);
+    honest.seed(&honest_window).await;
+
+    // The poisoned relay: EXACTLY one page, so all of it is served at once and
+    // its bottom is the ancient event — a full page proposing a boundary 23
+    // hours below where the honest relay's tail actually starts.
+    let mut poisoned_window = unparseable_window(&h, PAGE_LIMIT - 1, now - 30);
+    poisoned_window.push(
+        unparseable_window(&h, 1, now - 23 * 3600)
+            .pop()
+            .expect("the ancient event"),
+    );
+    assert_eq!(poisoned_window.len(), PAGE_LIMIT);
+    poisoned.seed(&poisoned_window).await;
+
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+
+    assert_eq!(
+        out.events_rejected_pre_auth,
+        honest_backlog + PAGE_LIMIT,
+        "the honest relay's oldest {} events must still be retrieved: a paging \
+         boundary is a claim about ONE relay's page, and the ancient one must \
+         not be allowed to end the chase for the other",
+        honest_backlog - PAGE_LIMIT,
+    );
+    assert_eq!(out.events_deferred, 0);
+    assert_eq!(
+        out.windows_truncated, 0,
+        "both relays did drain, so the window really is complete here — the \
+         defect this guards is a window called complete while short, not a \
+         window needlessly held"
+    );
+    // The advance is what makes the count above load-bearing rather than
+    // cosmetic: this sweep DOES move the cursor past the honest relay's tail,
+    // and that is legitimate only because the tail was actually retrieved. Under
+    // a boundary that followed the ancient proposal, the very same advance would
+    // have happened over 88 events nobody ever fetched.
+    assert!(
+        fx.alice_cursor().is_some(),
+        "a completed window advances, so the count above is the only thing \
+         standing between this advance and a silent drop"
+    );
+}
+
+/// A relay that CLAMPS our `limit` must not be able to hide its own backlog.
+///
+/// Truncation is detected as "the relay returned as many events as we asked
+/// for", and NIP-11 lets a relay clamp a larger `limit` down to its
+/// `limitation.max_limit` instead of rejecting the REQ. strfry ships that cap at
+/// 500 — and all three of Haven's default relays run strfry, as does the E2E
+/// harness. Ask for more than the cap and every page comes back one short of our
+/// own limit however much backlog remains: the signal never fires, the chase
+/// never starts, and the cursor sails over the tail. That is the Rule-12 silent
+/// drop arrived at through the REQUEST rather than the response, and it is
+/// invisible to every other test here, all of which run against an unclamped
+/// relay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_relay_that_clamps_our_limit_still_gets_fully_drained() {
+    // Exactly the strfry default, and exactly `tooling/e2e/strfry.conf`.
+    let relay = SeededRelay::with_cap(Some(500)).await;
+    let relay_mgr = RelayManager::new();
+    let fx = build_two_member_circle(vec![relay.url.clone()]).await;
+
+    let backlog = PAGE_LIMIT + 100;
+    let window = unparseable_window(
+        &hex::encode(fx.nostr_group_id),
+        backlog,
+        chrono::Utc::now().timestamp() - 60,
+    );
+    let oldest_secs = i64::try_from(window[0].created_at.as_secs()).expect("created_at fits");
+    relay.seed(&window).await;
+
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+
+    assert_eq!(
+        out.events_rejected_pre_auth, backlog,
+        "a page that came back at the relay's cap is a page that was cut short, \
+         and the sweep must chase it like any other — asking for more than a \
+         relay serves cannot be allowed to turn every truncated page into a \
+         'complete' one"
+    );
+    assert!(
+        fx.alice_cursor()
+            .is_some_and(|cursor| cursor > oldest_secs * 1000),
+        "and only then may the cursor pass the tail at {oldest_secs} s; got {:?}",
+        fx.alice_cursor(),
+    );
+}
+
+/// A relay that serves the FIRST page and then fails to answer the second must
+/// not be read as drained.
+///
+/// The blocking hole this closes needs no attacker: `fetch_events_per_relay`
+/// reports a post-handshake fetch failure (a read that errors, or the SDK's
+/// 10 s fetch timeout elapsing) as `responded == true` with zero events, which
+/// is byte-for-byte what a relay holding nothing looks like. Mid-chase that is
+/// catastrophic in a way it is not on the first page: page 1 already PROVED the
+/// relay has a tail below the boundary, so treating page 2's silence as "nothing
+/// left" advances the cursor over a backlog we have local proof exists, and the
+/// next sweep's floor sits only `GROUP_RESUBSCRIBE_BUFFER_SECS` below the
+/// cursor — a stranded COMMIT there breaks the epoch chain for good.
+///
+/// A `QueryPolicy` that refuses every bounded-below REQ stages exactly that: the
+/// first page (which asks only for `until = window open`) is served in full, and
+/// the chase's second page (`until = boundary`, strictly older) is closed
+/// unanswered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chase_page_that_is_never_served_holds_the_cursor() {
+    /// Refuses any REQ whose `until` is older than `serve_above`, i.e. every
+    /// page of a backward chase but not the first.
+    #[derive(Debug)]
+    struct RefuseChasePages {
+        serve_above: Timestamp,
+    }
+
+    impl QueryPolicy for RefuseChasePages {
+        fn admit_query<'a>(
+            &'a self,
+            query: &'a nostr::Filter,
+            _addr: &'a std::net::SocketAddr,
+        ) -> BoxedFuture<'a, PolicyResult> {
+            Box::pin(async move {
+                match query.until {
+                    Some(until) if until < self.serve_above => {
+                        PolicyResult::Reject("chase page withheld".to_string())
+                    }
+                    _ => PolicyResult::Accept,
+                }
+            })
+        }
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    let newest_secs = now - 60;
+    let relay = SeededRelay::from_builder(RelayBuilder::default().query_policy(RefuseChasePages {
+        // Above every seeded event, so only the un-chased first page passes.
+        serve_above: Timestamp::from(u64::try_from(newest_secs).unwrap()),
+    }))
+    .await;
+    let relay_mgr = RelayManager::new();
+    let fx = build_two_member_circle(vec![relay.url.clone()]).await;
+
+    let backlog = PAGE_LIMIT + 88;
+    let window = unparseable_window(&hex::encode(fx.nostr_group_id), backlog, newest_secs);
+    relay.seed(&window).await;
+
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+
+    assert_eq!(
+        out.events_rejected_pre_auth, PAGE_LIMIT,
+        "precondition: the first page must have been served in full and the \
+         chase page not at all — otherwise this asserts nothing about a failed \
+         read"
+    );
+    assert_eq!(
+        out.windows_truncated, 1,
+        "a chase that produced nothing from the relay it was draining is an \
+         unfinished window, not a finished one"
+    );
+    assert_eq!(
+        fx.alice_cursor(),
+        None,
+        "and the cursor must not move: the {} events below the boundary are \
+         reachable only while `since` stays below them",
+        backlog - PAGE_LIMIT,
+    );
+}
+
+/// Future-dated events must not be able to freeze a circle's cursor.
+///
+/// A circle's `#h` is its PUBLIC `nostr_group_id`, so any observer can mint
+/// `kind:445`s at a `created_at` of its choosing. Were the first page unbounded
+/// above, a page-full of future-dated forgeries would fill it, put the paging
+/// boundary at or above the band's ceiling, and halt the chase on arrival — the
+/// cursor frozen for the price of one publish, and re-frozen on every wake for
+/// as long as the relay serves them. Bounding every page by the window's own
+/// open time puts them outside the request entirely.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_flood_of_future_dated_events_cannot_freeze_the_cursor() {
+    let relay = SeededRelay::run().await;
+    let relay_mgr = RelayManager::new();
+    let fx = build_two_member_circle(vec![relay.url.clone()]).await;
+    let h = hex::encode(fx.nostr_group_id);
+
+    let now = chrono::Utc::now().timestamp();
+    // A full page of forgeries dated an hour ahead, plus three genuine events in
+    // the window that must still be delivered and applied.
+    relay
+        .seed(&unparseable_window(&h, PAGE_LIMIT, now + 3600))
+        .await;
+    relay.seed(&unparseable_window(&h, 3, now - 120)).await;
+
+    let swept_from = chrono::Utc::now().timestamp();
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+    let swept_to = chrono::Utc::now().timestamp();
+
+    assert_eq!(
+        out.events_rejected_pre_auth, 3,
+        "only the three events inside the window may be fetched; the future-\
+         dated page is outside the band the anchor can vouch for"
+    );
+    assert_eq!(
+        out.windows_truncated, 0,
+        "and no page was truncated, so nothing freezes"
+    );
+    let cursor = fx.alice_cursor().expect("the window still advances");
+    assert!(
+        cursor >= swept_from * 1000 && cursor <= swept_to * 1000,
+        "the cursor advances to the window's own open time (between \
+         {swept_from} s and {swept_to} s) rather than stalling at the forgeries \
+         or being dragged up to them; got {cursor} ms"
+    );
+}
+
+/// A window the pager CANNOT finish must terminate the sweep and hold the
+/// cursor — never quietly report itself as caught up.
+///
+/// A full page of events all sharing one `created_at` is the shape that breaks
+/// the `until` chain: the next page can only be requested at that same second,
+/// and a relay is free to answer it with the same events forever. Real or
+/// hostile, the answer must be the same — stop asking, keep what was fetched,
+/// and leave the cursor exactly where it was so the next sweep re-opens the same
+/// window rather than skipping over it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_window_the_pager_cannot_finish_holds_the_cursor_and_says_so() {
+    let relay = SeededRelay::run().await;
+    let relay_mgr = RelayManager::new();
+    let fx = build_two_member_circle(vec![relay.url.clone()]).await;
+
+    // One second, more than one page of events in it.
+    let pileup = PAGE_LIMIT + 88;
+    let at_secs = chrono::Utc::now().timestamp() - 300;
+    let window = unparseable_window(&hex::encode(fx.nostr_group_id), pileup, at_secs)
+        .into_iter()
+        .map(|ev| {
+            EventBuilder::new(ev.kind, ev.content.clone())
+                .tags(ev.tags.to_vec())
+                .custom_created_at(Timestamp::from(u64::try_from(at_secs).unwrap()))
+                .sign_with_keys(&Keys::generate())
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    relay.seed(&window).await;
+
+    assert_eq!(
+        fx.alice_cursor(),
+        None,
+        "precondition: the cursor is unseeded, so a Some() below would be this \
+         sweep's doing"
+    );
+
+    // Terminating at all is half the property: an `until` chain that trusted the
+    // relay to descend would re-request this same second forever.
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+
+    assert_eq!(
+        out.windows_truncated, 1,
+        "an unfinished chase must be REPORTED as unfinished, not rounded down \
+         to a clean sweep"
+    );
+    assert!(
+        out.events_rejected_pre_auth >= PAGE_LIMIT,
+        "ingest still runs on what was fetched, so the engine makes progress \
+         even on a window that cannot complete; got {}",
+        out.events_rejected_pre_auth,
+    );
+    assert!(
+        out.events_rejected_pre_auth < pileup,
+        "precondition: this window must really be unfinishable — if the whole \
+         pileup came back, the assertion above proves nothing about holding"
+    );
+    assert_eq!(
+        fx.alice_cursor(),
+        None,
+        "and the cursor must not move one millisecond: the un-retrieved \
+         remainder is only reachable while `since` still sits below it"
     );
 }

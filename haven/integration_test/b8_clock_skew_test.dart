@@ -1089,10 +1089,11 @@ Future<_SweepResult> _sweep(
 }
 
 /// Counter view of one catch-up sweep. Mirrors `CatchupResultFfi`; note that
-/// `windows_truncated` (the Rule-12 saturation flag) is NOT exposed across
-/// the FFI, so this lane cannot read it and instead rules saturation out by
-/// construction — the hermetic relay holds a handful of events, far under
-/// `CATCHUP_MAX_EVENTS_PER_CIRCLE`.
+/// `windows_truncated` (the Rule-12 incomplete-window flag) is NOT exposed
+/// across the FFI, so this lane cannot read it and instead rules truncation out
+/// by construction — the hermetic relay holds a handful of events, far under
+/// `CATCHUP_MAX_EVENTS_PER_PAGE`, so no page is ever cut short and the backward
+/// pager never engages.
 typedef _SweepResult = ({
   int circlesSwept,
   int eventsApplied,

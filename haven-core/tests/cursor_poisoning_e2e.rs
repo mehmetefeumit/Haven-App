@@ -82,6 +82,7 @@ use haven_core::location::LocationMessage;
 use haven_core::nostr::mls::types::GroupId;
 use haven_core::nostr::mls::SessionManager;
 use haven_core::relay::catchup::run_catchup_all_circles;
+use haven_core::relay::live_sync::planes::group::group_filter;
 use haven_core::relay::live_sync::{
     group_cursor_stream, EngineProcessor, EventBus, GroupProcessOutcome,
 };
@@ -906,12 +907,30 @@ async fn catchup_a_completed_window_advances_to_its_own_open_time() {
 }
 
 /// THE ATTACK, end to end through the real sweep: an un-expired re-wrap dated
-/// far in the future is fetched, reaches the engine, gets a clean verdict — and
-/// cannot drag the cursor past the window's open time.
+/// far in the future cannot drag the cursor past the window's open time.
 ///
 /// Under the old contiguous-prefix rule this single event moved the persisted
 /// cursor to its own `created_at`, and `since_for_stream` then stranded every
 /// genuine event below it on every subsequent sweep, across restarts.
+///
+/// # Why this now asserts that the forgery is not even INGESTED
+///
+/// It used to be fetched and handed to the engine, and the cursor arithmetic was
+/// the only thing standing between its timestamp and the persisted cursor. Since
+/// backward paging, every page — the first included — is bounded above by the
+/// window's own open time, so a future-dated event is outside the request band
+/// entirely. That is a second, structural defence rather than a replacement: the
+/// arithmetic still caps the advance, and
+/// `livesync_a_future_dated_event_cannot_push_the_cursor_past_now` drives THAT
+/// end to end on the plane where a future-dated event is still deliverable (a
+/// live subscription has no `until`). What this asserts, therefore, is the
+/// stronger catch-up statement — the forged timestamp reaches neither the engine
+/// nor the cursor — plus every cursor property it asserted before.
+///
+/// The bound costs a genuinely fast-clocked peer a DELAY and never a loss: the
+/// event stays on the relay, and the first sweep whose open time reaches its
+/// timestamp fetches it, because the cursor this sweep writes always sits below
+/// it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn catchup_a_rewrapped_forgery_cannot_drag_the_cursor_forward() {
     let (_relay, url, relay_mgr) = relay_under_test().await;
@@ -920,7 +939,20 @@ async fn catchup_a_rewrapped_forgery_cannot_drag_the_cursor_forward() {
     let floor = (now_secs() - 7200) * 1000;
     fx.seed_alice_cursor(floor);
 
-    let observed = fx.bob_location(1.0, 2.0).await;
+    // The control: a genuine, in-band peer location. Without it, "the forgery
+    // contributed nothing" would pass just as well for a sweep that fetched
+    // nothing at all.
+    let genuine = fx.bob_location(1.0, 2.0).await;
+    relay_mgr
+        .publish_event(&genuine, std::slice::from_ref(&url))
+        .await
+        .expect("the genuine location reaches the relay");
+
+    // A DIFFERENT observed location, re-wrapped and dated forward. Its inner
+    // message is one the engine has never seen (the original is never
+    // published), so were it ever fetched it would apply, sort LAST, and
+    // overwrite the peer row below — which is what makes that row a witness.
+    let observed = fx.bob_location(3.0, 4.0).await;
     // A relay accepts `created_at` up to roughly `now + 900 s`, so this needs no
     // malicious relay at all — and a peer with a fast clock reaches it by
     // accident.
@@ -935,10 +967,50 @@ async fn catchup_a_rewrapped_forgery_cannot_drag_the_cursor_forward() {
     let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 20).await;
     let after = now_secs();
 
+    // Anti-vacuity, both halves: the forgery IS on the relay, and it IS above
+    // the REQ's own lower bound — so the only thing that kept it out of the
+    // window is the window's ceiling, not a failed publish or a `since` floor.
+    let held: Vec<_> = relay_mgr
+        .fetch_events_per_relay(
+            group_filter(&[fx.group_hex()], 0),
+            std::slice::from_ref(&url),
+        )
+        .await
+        .expect("relay read-back")
+        .iter()
+        .flat_map(|fo| fo.events.iter().map(|e| e.id))
+        .collect();
+    assert!(
+        held.contains(&forged.id) && held.contains(&genuine.id),
+        "precondition: the relay must really be serving both events"
+    );
+    assert!(
+        secs_of(&forged) * 1000 > floor,
+        "precondition: the forgery sits ABOVE the seeded cursor floor, so the \
+         REQ's `since` cannot be what excluded it"
+    );
+
     assert_eq!(
         out.events_applied, 1,
-        "precondition: the forgery really was fetched and given an engine verdict"
+        "exactly one of the two reached the engine"
     );
+    assert_eq!(out.events_deferred, 0);
+    assert_eq!(
+        out.events_rejected_pre_auth, 0,
+        "and the forgery was excluded by the REQUEST, not screened after \
+         arriving — a screened event would be tallied here"
+    );
+    let rows = fx
+        .alice
+        .snapshot_last_known_for_circle(&fx.nostr_group_id, now_secs())
+        .expect("snapshot");
+    assert_eq!(rows.len(), 1);
+    assert!(
+        (rows[0].latitude - 1.0).abs() < 1e-9,
+        "the applied one was the GENUINE event: the forgery's coordinates would \
+         have overwritten this row, since its forward date sorts it last"
+    );
+
     let cursor = fx.alice_cursor().expect("the cursor advanced");
     assert!(
         cursor <= after * 1000,
@@ -947,7 +1019,8 @@ async fn catchup_a_rewrapped_forgery_cannot_drag_the_cursor_forward() {
     );
     assert!(
         cursor >= before * 1000,
-        "and the window's own advance must still happen (not a reset to zero); \
+        "and the window's own advance must still happen (not a reset to zero, \
+         and not the frozen cursor a future-dated flood would otherwise buy); \
          got {cursor} ms",
     );
 }
