@@ -6,6 +6,13 @@
 
 use nostr::{Alphabet, Filter, Kind, SingleLetterTag, Timestamp};
 
+/// The group-message kind this plane subscribes to (MIP-04 `kind:445`).
+///
+/// Shared by the REQ filter and the worker's local re-check of it
+/// ([`crate::relay::live_sync::supervisor::plane_wants_event`]) so the two can
+/// never drift apart.
+pub const GROUP_EVENT_KIND: Kind = Kind::Custom(445);
+
 /// Builds the `kind:445` group filter for a set of circles.
 ///
 /// `group_ids_hex` are the circles' `hex(nostr_group_id)` values (NOT the real
@@ -26,7 +33,7 @@ use nostr::{Alphabet, Filter, Kind, SingleLetterTag, Timestamp};
 pub fn group_filter(group_ids_hex: &[String], since_secs: i64) -> Filter {
     let since = u64::try_from(since_secs).unwrap_or(0);
     Filter::new()
-        .kind(Kind::Custom(445))
+        .kind(GROUP_EVENT_KIND)
         .custom_tags(
             SingleLetterTag::lowercase(Alphabet::H),
             group_ids_hex.iter().cloned(),

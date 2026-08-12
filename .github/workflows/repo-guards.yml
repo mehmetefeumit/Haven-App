@@ -81,6 +81,15 @@
 #     below the new REQ floor). The deleted Dart/FFI group-cursor advance stays
 #     deleted, and no FFI entry point may name the bare `group_445` stream.
 #
+#   Engine client options             scripts/ci/check_engine_client_options.sh
+#     The live-sync engine `Client` must not enable nostr-sdk's
+#     `verify_subscriptions`: it discards the stored events a REQ replays
+#     before nostr-relay-pool registers that REQ's filter — silently, while
+#     the EOSE still advances the cursor past them. The filter is re-checked
+#     in `live_sync::supervisor::plane_wants_event` instead, where no such
+#     window exists. Only a guard can hold this: the drop is probabilistic, so
+#     a build with the option back on still passes the suite most of the time.
+#
 #   Clock-skew policy parity          scripts/ci/check_clock_skew_policy_parity.sh
 #     The device-clock skew policy lives authoritatively in Rust and is
 #     mirrored in Dart across an FFI with no shared source of truth. If the
@@ -393,6 +402,10 @@ jobs:
       - name: No cursor advance from an event timestamp
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_no_event_timestamp_cursor_advance.sh
+
+      - name: Engine client keeps the racy pool-side filter check off
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_engine_client_options.sh
 
       - name: Clock-skew policy parity
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

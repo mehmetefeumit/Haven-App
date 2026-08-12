@@ -23,15 +23,15 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use nostr::{Event, RelayMessage, RelayUrl, SubscriptionId};
+use nostr::{Event, Kind, PublicKey, RelayMessage, RelayUrl, SubscriptionId};
 use nostr_sdk::RelayPoolNotification;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, watch, RwLock};
 
 use super::event::SyncStatusReason;
-use super::planes::PlaneKind;
+use super::planes::{group::GROUP_EVENT_KIND, PlaneKind};
 use super::processor::EngineProcessor;
-use super::router::Router;
+use super::router::{Router, SubCtx};
 
 /// One routed relay event handed from the receiver to the worker.
 #[derive(Debug, Clone)]
@@ -117,6 +117,38 @@ pub fn extract_group_id_hex(event: &Event) -> Option<String> {
             None
         }
     })
+}
+
+/// Whether `event` is what `ctx`'s REQ actually asked for — the LOCAL re-check
+/// of the subscription filter, and the ONLY one the engine has.
+///
+/// The engine `Client` deliberately does not enable nostr-sdk's
+/// `verify_subscriptions` (see [`super::session`] for why: it drops the first
+/// stored events of every fresh REQ), so a relay's answer is held to the filter
+/// it was given HERE instead — before any decrypt or peel, and without a race,
+/// because the router context is registered before the REQ goes out.
+///
+/// Only the IDENTITY dimensions of each filter are re-checked, never `since`.
+/// The floor bounds how MUCH a relay sends, not what it is allowed to say: an
+/// event below it is either one the cursor has already passed (harmless) or, on
+/// the group plane, still MLS-authenticated before anything is applied. A second
+/// local copy of the floor could drift from the live REQ and would then drop
+/// legitimate events — a worse failure than the one it would prevent.
+#[must_use]
+pub fn plane_wants_event(ctx: &SubCtx, event: &Event, own_pubkey: &PublicKey) -> bool {
+    match ctx.plane {
+        // An `#h` this REQ never multiplexed is a relay echoing a circle we did
+        // not ask about.
+        PlaneKind::Group => {
+            event.kind == GROUP_EVENT_KIND
+                && extract_group_id_hex(event).is_some_and(|hex| ctx.group_ids_hex.contains(&hex))
+        }
+        // A gift wrap is authored by a throwaway key by construction (NIP-59),
+        // so the `#p` routing tag — never the author — is what says it is ours.
+        PlaneKind::Inbox => {
+            event.kind == Kind::GiftWrap && event.tags.public_keys().any(|pk| pk == own_pubkey)
+        }
+    }
 }
 
 /// The canonical per-circle gate/settle key: lowercase hex of the decoded
@@ -228,10 +260,14 @@ pub async fn run_receiver(
 /// on a spawned task and treats a panicked join as a benign drop (the cursor +
 /// catch-up replay anything skipped), so one adversarial event can never blind
 /// the whole receive path.
+///
+/// `own_pubkey` is this session's identity key — the `#p` the inbox REQ asked
+/// for, and therefore what [`plane_wants_event`] holds an inbound gift wrap to.
 pub async fn run_worker(
     mut rx: mpsc::Receiver<RawSignal>,
     router: Arc<RwLock<Router>>,
     processor: Arc<EngineProcessor>,
+    own_pubkey: PublicKey,
 ) {
     while let Some(signal) = rx.recv().await {
         let (relay_url, subscription_id) = match &signal {
@@ -289,17 +325,22 @@ pub async fn run_worker(
             }
         };
 
+        // Hold the relay to the filter this REQ was issued with. Nothing else
+        // does: the engine `Client` runs without `verify_subscriptions`, so an
+        // unrequested event dropped here is an unrequested event never peeled,
+        // decrypted, or put on the bus.
+        if !plane_wants_event(&ctx, &raw.event, &own_pubkey) {
+            continue;
+        }
+
         match ctx.plane {
             PlaneKind::Inbox => processor.process_inbox_event(&raw.event),
             PlaneKind::Group => {
+                // Screened above, so the `#h` is present and multiplexed by this
+                // REQ; re-read it for the routing id.
                 let Some(routed_hex) = extract_group_id_hex(&raw.event) else {
                     continue;
                 };
-                // Drop an `#h` this subscription did not multiplex (a relay
-                // echoing an unrequested circle).
-                if !ctx.group_ids_hex.contains(&routed_hex) {
-                    continue;
-                }
                 let Ok(nostr_group_id) = hex::decode(&routed_hex) else {
                     continue;
                 };
@@ -384,6 +425,108 @@ mod tests {
         assert_eq!(extract_group_id_hex(&ev), None);
     }
 
+    fn giftwrap_routed_to(recipient: &nostr::PublicKey) -> Event {
+        EventBuilder::new(Kind::GiftWrap, "sealed")
+            .tags(vec![nostr::Tag::public_key(*recipient)])
+            .sign_with_keys(&Keys::generate())
+            .unwrap()
+    }
+
+    fn group_ctx(group_ids_hex: &[&str]) -> SubCtx {
+        SubCtx {
+            plane: PlaneKind::Group,
+            group_ids_hex: group_ids_hex.iter().map(|h| (*h).to_string()).collect(),
+        }
+    }
+
+    fn inbox_ctx() -> SubCtx {
+        SubCtx {
+            plane: PlaneKind::Inbox,
+            group_ids_hex: std::collections::HashSet::new(),
+        }
+    }
+
+    /// The group REQ asks for `kind:445` carrying one of ITS `#h` values; every
+    /// other shape a relay could put on that socket is unrequested.
+    #[test]
+    fn group_plane_wants_only_a_445_for_a_multiplexed_h_tag() {
+        let stranger = Keys::generate().public_key();
+        let ctx = group_ctx(&["aa00", "bb11"]);
+
+        assert!(plane_wants_event(
+            &ctx,
+            &commit_event_with_h("aa00"),
+            &stranger
+        ));
+        // An `#h` this REQ never multiplexed — a relay echoing a circle we did
+        // not ask about.
+        assert!(!plane_wants_event(
+            &ctx,
+            &commit_event_with_h("ff99"),
+            &stranger
+        ));
+        // A 445 with no `#h` at all cannot be routed to a circle.
+        let no_h = EventBuilder::new(Kind::Custom(445), "x")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        assert!(!plane_wants_event(&ctx, &no_h, &stranger));
+        // Right routing tag, wrong kind: the group REQ asked for 445 only.
+        let wrong_kind = EventBuilder::new(Kind::Custom(446), "x")
+            .tags(vec![nostr::Tag::custom(
+                nostr::TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
+                ["aa00"],
+            )])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        assert!(!plane_wants_event(&ctx, &wrong_kind, &stranger));
+    }
+
+    /// The inbox REQ asks for `kind:1059` routed at OUR `#p`. A wrap addressed
+    /// to somebody else is not ours to peel, whatever socket it arrives on.
+    #[test]
+    fn inbox_plane_wants_only_a_giftwrap_routed_at_our_own_p_tag() {
+        let own = Keys::generate().public_key();
+        let ctx = inbox_ctx();
+
+        assert!(plane_wants_event(&ctx, &giftwrap_routed_to(&own), &own));
+        // Routed at a stranger: never asked for.
+        let stranger = Keys::generate().public_key();
+        assert!(!plane_wants_event(
+            &ctx,
+            &giftwrap_routed_to(&stranger),
+            &own
+        ));
+        // No routing tag at all.
+        let untagged = EventBuilder::new(Kind::GiftWrap, "sealed")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        assert!(!plane_wants_event(&ctx, &untagged, &own));
+        // Our `#p`, but not a gift wrap: the inbox consumer peels with NIP-59
+        // alone, so anything else on this REQ is a relay speaking out of turn.
+        let wrong_kind = EventBuilder::new(Kind::Custom(445), "x")
+            .tags(vec![nostr::Tag::public_key(own)])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        assert!(!plane_wants_event(&ctx, &wrong_kind, &own));
+    }
+
+    /// A gift wrap must never be accepted on a GROUP subscription (nor a 445 on
+    /// the inbox one): the plane decides what the REQ asked for, not the event.
+    #[test]
+    fn a_plane_never_accepts_the_other_plane_s_events() {
+        let own = Keys::generate().public_key();
+        assert!(!plane_wants_event(
+            &group_ctx(&["aa00"]),
+            &giftwrap_routed_to(&own),
+            &own
+        ));
+        assert!(!plane_wants_event(
+            &inbox_ctx(),
+            &commit_event_with_h("aa00"),
+            &own
+        ));
+    }
+
     #[test]
     fn notification_disposition_classifies_each_arm() {
         let ev = commit_event_with_h("aa00");
@@ -459,7 +602,7 @@ mod supervisor_isolation_tests {
     use super::{run_receiver, run_worker, RawEvent, RawSignal};
     use crate::circle::CircleManager;
     use crate::relay::live_sync::{
-        EngineProcessor, EventBus, LiveSyncEvent, Router, SyncStatusReason,
+        EngineProcessor, EventBus, LiveSyncEvent, PlaneKind, Router, SubCtx, SyncStatusReason,
     };
 
     /// A `kind:445` carrying `#h = group_hex`, with `content`.
@@ -471,6 +614,89 @@ mod supervisor_isolation_tests {
             )])
             .sign_with_keys(&Keys::generate())
             .unwrap()
+    }
+
+    /// The worker is the ONLY thing holding a relay to the filter its REQ was
+    /// issued with — the engine `Client` runs without nostr-sdk's
+    /// `verify_subscriptions`, because that check drops the first stored events
+    /// of every fresh REQ (see `session::build_engine_client`).
+    ///
+    /// So: feed one live inbox subscription three events in order — a gift wrap
+    /// routed at a STRANGER's `#p`, a `kind:445` (wrong kind for this plane) and
+    /// finally a genuine wrap routed at us — and require the FIRST `Welcome` on
+    /// the bus to be the genuine one. The channel is FIFO and one worker drains
+    /// it, so that ordering is what proves the first two were dropped: had
+    /// either reached the consumer, it would have arrived first. No sleeps, no
+    /// timing assumptions.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_worker_drops_inbox_events_the_req_never_asked_for() {
+        let dir = TempDir::new().unwrap();
+        let keys = Keys::generate();
+        let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
+        let bus = EventBus::new();
+        let mut rx = bus.subscribe();
+        let processor = Arc::new(EngineProcessor::new(Arc::clone(&circle), bus.clone()));
+
+        let own = Keys::generate().public_key();
+        let sub = SubscriptionId::new("s_inbox_0");
+        let relay = "wss://relay.example".to_string();
+        let router = Arc::new(RwLock::new(Router::new()));
+        router.write().await.register(
+            &relay,
+            &sub,
+            SubCtx {
+                plane: PlaneKind::Inbox,
+                group_ids_hex: HashSet::new(),
+            },
+        );
+
+        let (tx, worker_rx) = mpsc::channel::<RawSignal>(16);
+        tokio::spawn(run_worker(worker_rx, Arc::clone(&router), processor, own));
+
+        let wrap_for = |recipient: nostr::PublicKey| {
+            EventBuilder::new(Kind::GiftWrap, "sealed")
+                .tags(vec![Tag::public_key(recipient)])
+                .sign_with_keys(&Keys::generate())
+                .unwrap()
+        };
+        let deliver = |event: nostr::Event| {
+            RawSignal::Event(Box::new(RawEvent {
+                relay_url: RelayUrl::parse(&relay).unwrap(),
+                subscription_id: sub.clone(),
+                event,
+            }))
+        };
+
+        tx.send(deliver(wrap_for(Keys::generate().public_key())))
+            .await
+            .unwrap();
+        tx.send(deliver(event_445("aa00", "not a wrap")))
+            .await
+            .unwrap();
+        let genuine = wrap_for(own);
+        tx.send(deliver(genuine.clone())).await.unwrap();
+
+        let welcome = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match rx.recv().await {
+                    Ok(LiveSyncEvent::Welcome { gift_wrap_json }) => return gift_wrap_json,
+                    // Another bus event, or dropped ones: keep waiting.
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        panic!("the worker dropped the bus before delivering the genuine wrap")
+                    }
+                }
+            }
+        })
+        .await
+        .expect("the genuine wrap must reach the consumer");
+
+        assert!(
+            welcome.contains(&genuine.id.to_hex()),
+            "the first welcome on the bus must be the wrap routed at OUR #p: a \
+             wrap addressed to a stranger and a kind:445 were delivered on this \
+             inbox subscription first, and neither was requested by its REQ"
+        );
     }
 
     /// R6 (GAP-A): a panic deep in the decrypt call (via the `#[cfg(test)]`
@@ -501,7 +727,12 @@ mod supervisor_isolation_tests {
         );
 
         let (tx, worker_rx) = mpsc::channel::<RawSignal>(16);
-        tokio::spawn(run_worker(worker_rx, Arc::clone(&router), processor));
+        tokio::spawn(run_worker(
+            worker_rx,
+            Arc::clone(&router),
+            processor,
+            Keys::generate().public_key(),
+        ));
 
         let raw = |content: &str| {
             RawSignal::Event(Box::new(RawEvent {

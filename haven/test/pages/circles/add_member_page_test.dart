@@ -836,6 +836,7 @@ void main() {
       TextScaler textScaler = TextScaler.noScaling,
       Locale locale = const Locale('en'),
       double bottomInset = 336,
+      KeyPackageData? keyPackage,
     }) async {
       tester.view.devicePixelRatio = 1.0;
       tester.view.physicalSize = const Size(393, 852);
@@ -847,7 +848,7 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: _overrides(
-            mockRelay: MockRelayService(),
+            mockRelay: MockRelayService(keyPackageResult: keyPackage),
             mockCircle: MockCircleService(),
           ),
           child: MaterialApp(
@@ -866,13 +867,13 @@ void main() {
       await tester.pumpAndSettle();
     }
 
-    testWidgets('11. the empty state survives the keyboard', (tester) async {
+    testWidgets('L1. the empty state survives the keyboard', (tester) async {
       await pumpSqueezed(tester);
 
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets('12a. survives 2x in a long locale with no keyboard', (
+    testWidgets('L2. survives 2x in a long locale with no keyboard', (
       tester,
     ) async {
       await pumpSqueezed(
@@ -885,7 +886,7 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets('12. survives the keyboard at 2x in a long locale', (
+    testWidgets('L3. survives the keyboard at 2x in a long locale', (
       tester,
     ) async {
       await pumpSqueezed(
@@ -897,7 +898,58 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets('13. the empty-state guidance stays reachable', (tester) async {
+    // The branch this restructure actually wrote: once a member exists the
+    // body is a CustomScrollView (SliverList + the disclosure as a trailing
+    // adapter) rather than the HavenScrollFill used when empty. Nothing else
+    // in this suite lays that branch out under a squeeze.
+    testWidgets('L5. the populated roster branch survives the keyboard at 2x', (
+      tester,
+    ) async {
+      await pumpSqueezed(
+        tester,
+        textScaler: const TextScaler.linear(2),
+        locale: const Locale('de'),
+        keyPackage: _makeKp(_newMemberHex),
+      );
+      await _addMember(tester, _newMemberNpub);
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      // The roster header only renders once a member is selected, and unlike
+      // the tile it is not a lazily-built sliver child — so it is the finder
+      // that proves the populated branch is what just laid out.
+      expect(find.byType(TextButton), findsOneWidget);
+    });
+
+    testWidgets('L6. the sharing disclosure stays reachable with a roster', (
+      tester,
+    ) async {
+      await pumpSqueezed(
+        tester,
+        textScaler: const TextScaler.linear(2),
+        keyPackage: _makeKp(_newMemberHex),
+      );
+      await _addMember(tester, _newMemberNpub);
+      await tester.pumpAndSettle();
+
+      // The disclosure is no longer pinned above the CTA, so "it is in the
+      // tree" is not the promise — "the user can get to it" is. It now trails
+      // a lazily-built SliverList, so it may not be built yet;
+      // `scrollUntilVisible` fails outright if no amount of scrolling brings
+      // it on screen, which is the clipped-vs-reachable distinction.
+      final l10n = l10nOf(tester, AddMemberPage);
+      await tester.scrollUntilVisible(
+        find.text(l10n.addMemberInfo),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text(l10n.addMemberInfo), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('L4. the empty-state guidance stays reachable', (tester) async {
       await pumpSqueezed(tester, textScaler: const TextScaler.linear(2));
 
       expect(tester.takeException(), isNull);

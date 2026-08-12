@@ -4,8 +4,10 @@
 //! gate, and the router; spawns the [`super::supervisor`] receiver/worker tasks
 //! and issues the multiplexed `#h` (group) and `#p` (inbox) subscriptions.
 //!
-//! The engine `Client` is built with `verify_subscriptions(true)` (drop
-//! filter-mismatched events), `automatic_authentication(false)` (never send a
+//! The engine `Client` is built WITHOUT `verify_subscriptions` (it would drop
+//! the first stored events of every fresh REQ — see [`build_engine_client`];
+//! [`super::supervisor::plane_wants_event`] holds the relay to the filter
+//! instead), `automatic_authentication(false)` (never send a
 //! NIP-42 AUTH on this socket — no nsec↔circle linkage), a generously-sized
 //! notification channel (so a slow decrypt cannot lag the pool), a `Monitor`
 //! (for reconnect re-anchoring), and **no** gossip (own-relays-only, PSI-8).
@@ -61,10 +63,34 @@ pub(crate) fn engine_relay_allowed(relay: &str) -> bool {
 }
 
 /// Builds the engine `Client` with the verified privacy-minimizing options.
+///
+/// # Why `verify_subscriptions` stays OFF
+///
+/// nostr-sdk's own filter re-check drops the FIRST stored events of every fresh
+/// REQ. `Relay::subscribe_long_lived` (nostr-relay-pool 0.44.3) sends the REQ
+/// and only THEN registers the filter locally; an `EVENT` that comes back inside
+/// that window finds no registered subscription and is discarded with
+/// `SubscriptionNotFound` — silently, with no signal any caller can observe.
+/// Its `EOSE` is not subject to the same check, so it still lands and still
+/// anchors the cursor to the REQ's open time, i.e. PAST the events that were
+/// just dropped: this generation never comes back for them, and only the next
+/// REQ's lookback re-requests them. On the inbox plane that is a gift-wrapped
+/// invitation that does not arrive until the next session.
+///
+/// The window is a task-scheduling gap, so it widens exactly when the app is
+/// busy and the relay is quick. It is what made
+/// `inbox_cursor_poisoning_e2e::a_future_dated_gift_wrap_never_pushes_the_inbox_cursor_past_the_local_clock`
+/// flaky (CI runs 31216078806, 31555665220), reproducible locally on two cores.
+///
+/// Nothing is given up: [`super::supervisor::plane_wants_event`] re-checks the
+/// same identity dimensions in the worker, where the router context is
+/// registered BEFORE the REQ goes out and no such window exists. Turning this
+/// back on would restore the silent drop (guarded by
+/// `scripts/ci/check_engine_client_options.sh`).
 fn build_engine_client() -> Client {
     let pool_opts = RelayPoolOptions::default().notification_channel_size(POOL_NOTIF_CAP);
     let client_opts = ClientOptions::default()
-        .verify_subscriptions(true)
+        .verify_subscriptions(false)
         .automatic_authentication(false)
         .pool(pool_opts);
     // NO `.gossip(...)` — own-relays-only (PSI-8). Monitor enables reconnect
@@ -522,6 +548,7 @@ impl LiveSyncCore {
             rx,
             Arc::clone(&self.router),
             Arc::clone(&self.processor),
+            self.own_pubkey,
         ));
         // Retained so `stop` can join them; see the `tasks` field doc.
         {

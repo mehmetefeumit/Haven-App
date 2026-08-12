@@ -26,10 +26,10 @@
 #
 # The allow-list itself is DATA, not code: `tooling/e2e/wire_allowlist.json`.
 # Anything absent from it is forbidden — that is what makes this closed-world,
-# and it is the whole point of replacing the forbid-list this supersedes
-# (`_assertWirePrivacyInvariants` in `haven/integration_test/e2e/
-# e2e_combined.dart`), under which a new kind, a new tag or an MDK-introduced
-# field passed silently.
+# and it is the whole point of complementing the drive-side forbid-list (the
+# standing forbidden-kind watch in `haven/integration_test/e2e/
+# e2e_combined.dart:513`, deliberately KEPT), under which a new kind, a new tag
+# or an MDK-introduced field passed silently.
 #
 # # Why a SET and never a multiset
 #
@@ -1805,6 +1805,39 @@ self_test() {
   expect_rc 1 "missing required kind fails the required set (C4 direction)" \
     --journal "${missingkind}" "${base[@]}" || fail=1
 
+  # The same direction for the two relay-list kinds, which became `required`
+  # only once real journals showed both. ONE FIXTURE EACH: the startup heal
+  # publishes 10002 and 10050 from a single maintenance tick
+  # (haven/rust_builder/src/api.rs:7938), so a fixture dropping both lists would
+  # fire both findings at once — and either promotion could then stop working
+  # while the other kept the case green, which is the over-determination the
+  # missing-h/missing-expiration pair above was already split to avoid.
+  local missing10002="${tmp}/missing-10002.ndjson"
+  jq -c 'select((.frame | tostring | test("\"kind\":10002")) | not)' "${healthy}" \
+    > "${tmp}/missing-10002.raw"
+  renumber "${tmp}/missing-10002.raw" "${missing10002}"
+  expect_rc 1 "a run that sent no kind-10002 fails the required set (C3)" \
+    --journal "${missing10002}" "${base[@]}" || fail=1
+  expect_msg "kind 10002 is required by the allow-list and was never SENT" \
+    "...and it is the NIP-65 relay-list rule that fired" \
+    --journal "${missing10002}" "${base[@]}" || fail=1
+  expect_no_msg "kind 10050 is required" \
+    "...and ONLY that rule: this fixture leaves the inbox list alone" \
+    --journal "${missing10002}" "${base[@]}" || fail=1
+
+  local missing10050="${tmp}/missing-10050.ndjson"
+  jq -c 'select((.frame | tostring | test("\"kind\":10050")) | not)' "${healthy}" \
+    > "${tmp}/missing-10050.raw"
+  renumber "${tmp}/missing-10050.raw" "${missing10050}"
+  expect_rc 1 "a run that sent no kind-10050 fails the required set (C3)" \
+    --journal "${missing10050}" "${base[@]}" || fail=1
+  expect_msg "kind 10050 is required by the allow-list and was never SENT" \
+    "...and it is the NIP-17 inbox-list rule that fired" \
+    --journal "${missing10050}" "${base[@]}" || fail=1
+  expect_no_msg "kind 10002 is required" \
+    "...and ONLY that rule: this fixture leaves the NIP-65 list alone" \
+    --journal "${missing10050}" "${base[@]}" || fail=1
+
   # C4, subset direction: a tag name that is not allowed on that kind. A `p`
   # tag on a kind-445 re-attaches recipients to a message whose whole design
   # is that the relay cannot enumerate the circle.
@@ -2347,6 +2380,21 @@ self_test() {
   expect_rc 0 "an optional tag may be absent (set equality would false-red)" \
     --journal "${nooptional}" "${base[@]}" || fail=1
 
+  # 10050's sibling, and NOT a copy: promoting the two relay-list kinds to
+  # `required` deliberately left their tags optional, and the fixture above
+  # pins only the `r` half. Requiring `relay` alone would have slipped past it
+  # while turning the NIP-17 tombstone (build_unpublish_event, publishers.rs:222
+  # — documented to emit the kind with NO `relay` tags) into a red lane, which
+  # is a user WITHDRAWING their inbox relays reported as a regression.
+  local nooptional_inbox="${tmp}/nooptional-inbox.ndjson"
+  jq -c 'if (.frame | tostring | test("\"kind\":10050")) then
+           .frame = (.frame | map(if (type == "object" and .kind == 10050)
+                                  then .tags = []
+                                  else . end))
+         else . end' "${healthy}" > "${nooptional_inbox}"
+  expect_rc 0 "a zero-tag kind-10050 unpublish stays clean (\`relay\` is not required)" \
+    --journal "${nooptional_inbox}" "${base[@]}" || fail=1
+
   # The same argument one level down, WITHIN a kind: the healthy journal's
   # kind-445 set contains a commit carrying `h` alone beside an application
   # message carrying `h`+`expiration`. A per-EVENT required-set would red on
@@ -2494,7 +2542,7 @@ self_test() {
   # it exactly, and deleting any case still trips it. If a case is genuinely
   # retired, lower this number in the same commit and say why.
   # -------------------------------------------------------------------------
-  readonly MIN_CASES=121
+  readonly MIN_CASES=128
   if (( CASES_RUN + CASES_SKIPPED < MIN_CASES )); then
     echo "SELF-TEST FAIL: only $(( CASES_RUN + CASES_SKIPPED )) fixture(s) accounted for" >&2
     echo "  (${CASES_RUN} run + ${CASES_SKIPPED} skipped); at least ${MIN_CASES} expected." >&2

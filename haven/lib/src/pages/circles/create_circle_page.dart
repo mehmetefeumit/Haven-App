@@ -80,8 +80,12 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
             if (_selectedMembers.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(bottom: HavenSpacing.sm),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                // Wrap, not Row: at a large text scale the count and
+                // "Clear all" together exceed the body width, and a Row can
+                // only overflow where a Wrap moves the button to its own line.
+                child: Wrap(
+                  alignment: WrapAlignment.spaceBetween,
+                  crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
                     Text(
                       l10n.createCircleSelectedCount(_selectedMembers.length),

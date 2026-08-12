@@ -2,9 +2,9 @@
   "_readme": [
     "Day-one CLOSED-WORLD allow-list for the E2E wire journal (backlog Workstream C, items C3/C4).",
     "Consumed by tooling/e2e/ci/check-wire-journal.sh. ANYTHING ABSENT FROM `kinds` IS FORBIDDEN —",
-    "that is the whole point, and it is what makes this stronger than the forbid-list it replaces",
-    "(_assertWirePrivacyInvariants in haven/integration_test/e2e/e2e_combined.dart, which enumerated",
-    "{3, 443, 10051} and let every other new kind through in silence).",
+    "that is the whole point, and it is what makes this stronger than the drive-side forbid-list it",
+    "complements (the standing forbidden-kind watch at haven/integration_test/e2e/e2e_combined.dart",
+    ":513, which enumerates {3, 443, 444, 10051} and lets every other new kind through in silence).",
     "",
     "Two directions are asserted per entry, never set equality:",
     "  observed tags MUST be a SUBSET of `tags.allowed`   — catches anything NEW reaching a relay;",
@@ -155,22 +155,42 @@
     },
 
     "10002": {
-      "required": false,
+      "required": true,
       "tags": { "allowed": ["r"], "required": [] },
       "_site": "haven-core/src/relay/publishers.rs:198 build_nip65_relay_list_event",
       "_why": [
         "`r` (NIP-65), never the singular `relay` used by 10050 — mixing them up is the shape of a",
-        "real bug, so the two entries are deliberately asymmetric. `r` is conditional on a non-empty",
-        "URL list: the unpublish tombstone is a zero-tag replaceable event, so `r` cannot be",
-        "required without false-redding an unpublish. See _followups for the kind-level `required`."
+        "real bug, so the two entries are deliberately asymmetric.",
+        "REQUIRED at the kind level. All four lanes that run this oracle (Core Flow Android and iOS,",
+        "poll and live-sync) reported 10002 among their SENT kinds on the first real journals, and",
+        "it is not incidental traffic: decide_relay_list",
+        "(haven-core/src/relay/maintenance/relay_list.rs:142) republishes to any own relay whose",
+        "copy has drifted, and a fresh E2E identity has no copy on any relay, so the startup heal",
+        "fires on every run. Requiring it is also what stops the `allowed` set above from passing",
+        "vacuously over a run that sent no 10002 at all.",
+        "`r` itself stays OPTIONAL, and that half of the promotion was declined on purpose. Haven",
+        "builds a ZERO-TAG 10002 deliberately — the unpublish replacement calls this same builder",
+        "with an empty URL list (haven/rust_builder/src/api.rs:2398) — so \"every 10002 carries `r`\"",
+        "is not a property of the wire form; it holds today only because that FFI has no UI caller",
+        "yet, which is wiring rather than contract. And the direction is wrong for this oracle:",
+        "requiring `r` asserts that the user's relay URLs MUST be on the wire, so a user withdrawing",
+        "them — strictly LESS disclosure — would read as a regression. The `allowed` direction still",
+        "fires on a new tag, which is the half that carries a privacy finding."
       ]
     },
 
     "10050": {
-      "required": false,
+      "required": true,
       "tags": { "allowed": ["relay"], "required": [] },
       "_site": "haven-core/src/relay/publishers.rs:158 build_relay_list_event (kind from circle/relay_prefs.rs:147)",
-      "_why": "Singular `relay` (NIP-17 inbox), not `r`. Same zero-tag tombstone caveat as 10002."
+      "_why": [
+        "Singular `relay` (NIP-17 inbox), not `r`. Required at the kind level on the same journals",
+        "and the same heal as 10002 — one maintenance tick covers both categories",
+        "(haven/rust_builder/src/api.rs:7938) — so a run carrying one list and not the other is a",
+        "finding rather than a scheduling accident. `relay` stays optional for the reason `r` does:",
+        "build_unpublish_event (publishers.rs:222) emits this kind with NO `relay` tags by design,",
+        "and that zero-tag tombstone is a user withdrawing a disclosure, not a publish path failing."
+      ]
     },
 
     "30443": {
@@ -216,7 +236,8 @@
       "So a 10051 can appear only on an install MIGRATING from the pre-Dark-Matter wire, which no",
       "E2E lane is — every lane starts from a fresh identity. Admitting 10051 to the allow-list",
       "would make this oracle strictly WEAKER than the forbid-list it replaces, which already",
-      "asserts 10051 absent (e2e_combined.dart:4354). A replacement that loosens a live check is a",
+      "asserts 10051 absent (the standing forbidden-kind watch, e2e_combined.dart:513). A check that",
+      "loosens a live one is a",
       "regression, so the backlog line is treated as stale w.r.t. the Dark Matter migration.",
       "",
       "If a migration lane is ever added, it should pass its own --allowlist with 10051 -> zero tags",
@@ -226,15 +247,5 @@
       "CLAUDE.md's protocol table describes kind 0 as 'signed by identity key' and says nothing",
       "about tags. The code emits NONE, so the entry pins the empty set."
     ]
-  },
-
-  "_followups": [
-    "Promote 10002/10050 to `required: true` and their `r`/`relay` tags to required once the first",
-    "real journal from the full e2e_combined lane confirms both are published in it. They are",
-    "published by the relay-list maintenance heal (haven/rust_builder/src/api.rs:7938) and on a",
-    "user relay save, but this file was written before any journal existed, and marking a kind",
-    "required on an assumption would redden the lane on its first run for a reason unrelated to",
-    "privacy. Marking them optional is the conservative direction: it can only miss a finding, not",
-    "manufacture one."
-  ]
+  }
 }

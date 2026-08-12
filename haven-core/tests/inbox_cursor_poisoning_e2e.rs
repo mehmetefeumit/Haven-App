@@ -78,14 +78,19 @@ const COLD_SEED_LOOKBACK_SECS: i64 = 86_400;
 /// can only remove a false negative — it can never let a broken build pass,
 /// because a delivery that never happens still exhausts any budget.
 ///
-/// The budgets are sized for an uninstrumented build. Under `cargo llvm-cov`
-/// every basic block carries counter updates, and five tests in this target run
-/// concurrently, each with its own `MockRelay` and `LiveSyncCore`, on a 2-core
-/// runner. In CI run 31216078806 the forged wrap did not surface within 10s and
-/// the anti-vacuity precondition fired — while the SAME test passed in the
-/// uninstrumented `Rust Checks / haven-core` job in that very run, and passes
-/// locally in 7.4s for the whole target. The bound was the problem, not the
-/// code under it.
+/// The budgets are sized for an uninstrumented build, where the whole target
+/// runs in ~7s. Under `cargo llvm-cov` every basic block carries counter
+/// updates, so the scale absorbs that.
+///
+/// It absorbs slowness and nothing else. An earlier version of this comment
+/// blamed the bound for the flake in CI runs 31216078806 and 31555665220 —
+/// "the bound was the problem, not the code under it" — and that was wrong.
+/// The code under it was the problem: the engine `Client` enabled nostr-sdk's
+/// `verify_subscriptions`, which discards the stored events a REQ replays
+/// before nostr-relay-pool registers that REQ's filter. Measured against a
+/// 120-second budget the forged wrap still never arrived: delivery was ~1ms or
+/// never, so no bound could have fixed it. See `build_engine_client` and
+/// `scripts/ci/check_engine_client_options.sh`.
 ///
 /// Set by the coverage workflow. Absent or unparsable means 1, so an ordinary
 /// `cargo test` keeps today's fast feedback.

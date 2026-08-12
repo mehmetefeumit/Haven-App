@@ -208,9 +208,11 @@ readonly KNOWN_UNWIRED_LANES=(
   'e2e-relay-customization.yml:e2e_relay_customization'
 
   # The kind-0 + Blossom plane. C7's egress guard already runs here; the wire
-  # oracles are parked on the profile lane until the `_followups` in
-  # tooling/e2e/wire_allowlist.json (kinds 10002 / 10050 required-ness) are
-  # closed by a real journal from the full flow.
+  # oracles have never been wired to this lane. The allow-list question that
+  # once parked them — whether kinds 10002 / 10050 could be marked required —
+  # is settled: both are `required: true` in tooling/e2e/wire_allowlist.json on
+  # real journals from the full flow. What remains is a standing exemption, not
+  # a wait on something else.
   'e2e-profile.yml:e2e_profile_android'
   'e2e-profile.yml:e2e_profile_ios'
 

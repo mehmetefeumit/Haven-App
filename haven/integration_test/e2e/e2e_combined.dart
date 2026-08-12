@@ -476,21 +476,44 @@ void main() {
       //      identity key — a profile signed by an ephemeral kind-445 key
       //      would link that ephemeral key to an identity, deanonymizing
       //      the group-message stream (asserted at the end of the run);
-      //   2. legacy Dark-Matter-retired wire kinds — 443 KeyPackages and
-      //      10051 KP relay lists. Haven's cutover actively retracts
-      //      them; a fresh one reappearing means a publish path regressed
-      //      to the old stack (asserted empty at the end of the run).
+      //   2. an event of a kind Haven never publishes (asserted empty at
+      //      the end of the run):
+      //        kind 3      contact/following list — would walk the user's
+      //                    social graph out to the relay.
+      //        kind 443    legacy KeyPackage, retired by Dark Matter
+      //                    (30443 only). The cutover RETRACTS old ones; a
+      //                    fresh one means a publish path regressed to
+      //                    the pre-migration stack.
+      //        kind 444    Welcome. It travels gift-wrapped inside a
+      //                    kind-1059 and is itself UNSIGNED (Security
+      //                    Rule 3 / MIP-04), so a bare one on a relay —
+      //                    signed or not — is a regression.
+      //        kind 10051  legacy KP relay list, retired for NIP-65 kind
+      //                    10002 and likewise only ever retracted.
+      //      Kind 0 and kind 10002 were forbidden pre-migration and are
+      //      published by design now, so neither is listed.
       //
-      // Buffered for the whole run. Relay-layer, so robust to any UI
-      // change.
+      // A STANDING subscription and not a mid-scenario REQ, for two
+      // reasons a query cannot match: it sees an event at relay-ACCEPT
+      // time, so NIP-40 eviction on the Android lane's strfry cannot empty
+      // the sample out from under it; and it spans the whole run —
+      // including both leave flows — rather than whatever the relay still
+      // holds at one moment. Relay-layer, so robust to any UI change.
+      //
+      // What it CANNOT see is an event the relay REJECTS. Both hermetic
+      // relays verify signatures, so an UNSIGNED bare kind-444 — the exact
+      // shape Security Rule 3 names — never reaches a subscriber here.
+      // Only the send-side journal catches that, via the 444 entry in
+      // `_forbidden_by_omission`; do not retire that entry as a duplicate
+      // of this watch.
       final profileEvents = <TestRelayEvent>[];
       final profileWatch = ctx.relay
           .events(<String, dynamic>{'kinds': const <int>[0]})
           .listen(profileEvents.add);
-      final legacyKindEvents = <TestRelayEvent>[];
-      final legacyKindWatch = ctx.relay
-          .events(<String, dynamic>{'kinds': const <int>[443, 10051]})
-          .listen(legacyKindEvents.add);
+      final forbiddenKindEvents = <TestRelayEvent>[];
+      final forbiddenKindWatch = ctx.relay
+          .events(<String, dynamic>{'kinds': const <int>[3, 443, 444, 10051]})
+          .listen(forbiddenKindEvents.add);
       try {
         // -----------------------------------------------------------
         // PHASE 1 — pump HavenApp with the pre-seeded identity and
@@ -1113,18 +1136,34 @@ void main() {
           );
         }
 
-        // Dark Matter retired kinds: no fresh kind-443 KeyPackage and no
-        // kind-10051 KP relay list may appear for the entire run — Haven
-        // publishes 30443/10002 only, and the cutover retracts legacy
-        // events rather than minting new ones.
+        // Kinds Haven never publishes, over the ENTIRE run. This is where
+        // the check lives because the watch opened before Phase 1; the
+        // same forbid-list used to be re-asserted as a one-shot REQ inside
+        // `_assertWirePrivacyInvariants`, which could only see what the
+        // relay still held at Phase 4 and nothing published after it.
+        //
+        // A bare kind-444 is reported WITH its signature state, because
+        // "a Welcome is unsigned" (Security Rule 3) and "a Welcome is
+        // never bare" are two different regressions and the message has to
+        // say which one fired.
+        final bareWelcomes = forbiddenKindEvents.where((e) => e.kind == 444);
+        final signedBareWelcomes = bareWelcomes.where((e) {
+          final dynamic sig = e.raw['sig'];
+          return sig is String && sig.isNotEmpty;
+        }).length;
         expect(
-          legacyKindEvents,
+          forbiddenKindEvents,
           isEmpty,
           reason:
-              'retired wire kind(s) observed on the relay '
-              '(${legacyKindEvents.map((e) => e.kind).toSet()}) — kinds '
-              '443/10051 are retired by the Dark Matter migration and must '
-              'never be republished.',
+              'forbidden event kind(s) observed on the relay '
+              '(${forbiddenKindEvents.map((e) => e.kind).toSet()}). Haven '
+              'must never publish a kind-3 contact list; kinds 443/10051 '
+              'are retired by the Dark Matter migration and must never be '
+              'republished (30443/10002 only); and a kind-444 Welcome must '
+              'stay gift-wrapped inside a kind-1059, never published '
+              'directly — ${bareWelcomes.length} bare Welcome(s) here, '
+              '$signedBareWelcomes of them SIGNED, which Security Rule 3 '
+              'forbids on its own.',
         );
 
         debugPrint('[e2e_combined] all phases complete ✓');
@@ -1140,7 +1179,7 @@ void main() {
         rethrow;
       } finally {
         await profileWatch.cancel();
-        await legacyKindWatch.cancel();
+        await forbiddenKindWatch.cancel();
         // Explicit, AWAITED teardown of the app instance this scenario pumped.
         // Two DISTINCT process-global slots have to be handed back, in this
         // order, or the M11 group cannot start:
@@ -4680,13 +4719,37 @@ void _assertResidualGroupAfterHandoff({
 /// - **No real MLS group id on the wire** (Security Rule #4): only the
 ///   `nostr_group_id` (the `h` tag) may appear; the real MLS group id
 ///   must never leak into any tag.
-/// - **No forbidden event kinds on the wire**: no kind-3 contact lists (no
-///   social-graph leak) and no Dark-Matter-retired kinds (443 KeyPackages /
-///   10051 KP relay lists — Haven publishes 30443/10002 only); plus
-///   **no bare kind-444 Welcomes** (they stay gift-wrapped inside kind-1059,
-///   and are unsigned per Security Rule #3). Kind-0 profiles and kind-10002
-///   NIP-65 lists are published BY DESIGN post-migration and are therefore
-///   not forbidden here.
+/// - **No `p` (recipient) tag on a kind-445**: group messages route by the
+///   `h` tag alone, or the relay can enumerate the circle.
+///
+/// # Why this survives the wire-journal oracles
+///
+/// Workstream C ported all three to `tooling/e2e/ci/check-wire-correlation.sh`
+/// as C5.7 / C5.8 / C5.9, and CI run 31507917222 proved they fire on real
+/// traffic with a non-empty sample. That green is **live-sync only**: the
+/// entire C5 arm is gated on the `live_sync` input in both `e2e-android.yml`
+/// and `e2e-ios.yml`, because C5.1 needs an application kind-445 from two
+/// distinct groups and only the two-circle live-sync scenario produces one.
+/// On the poll lanes the oracle asserts none of C5.7/C5.8/C5.9, so the
+/// ephemeral-key and group-id checks below are the ONLY wire enforcement of
+/// Security Rules 2 and 4 there. Remove one only once its C5 equivalent runs
+/// on every lane that runs this scenario.
+///
+/// The `p`-tag check is the exception and is kept for a weaker reason: a `p`
+/// on a 445 also violates C4's per-kind tag allow-list (445 → `{h,
+/// expiration}`), which is ungated and runs on both lanes. But C4 reads the
+/// wire journal, and `e2e-flakiness-stress.yml` drives this same scenario
+/// nightly with no recorder in path, so the drive-side check is not
+/// redundant there either — and it costs one `expect` in a loop that already
+/// walks every event.
+///
+/// The forbidden-KIND half that used to live here (kinds 3 / 443 / 444 /
+/// 10051) moved UP into the standing privacy watch at the top of the
+/// scenario: opened before Phase 1, it covers the whole run instead of one
+/// mid-scenario REQ and cannot be emptied by NIP-40 eviction.
+/// `check-wire-journal.sh` C3 forbids the same kinds by omission from
+/// `tooling/e2e/wire_allowlist.json` and — unlike C5 — is ungated, so both
+/// lanes carry it twice over.
 Future<void> _assertWirePrivacyInvariants({
   required TestRelay relay,
   required CircleWithMembersFfi circle,
@@ -4723,6 +4786,21 @@ Future<void> _assertWirePrivacyInvariants({
     events,
     isNotEmpty,
     reason: 'expected kind-445 group messages on the relay after Phase 4',
+  );
+  // Non-vacuity, and it is not implied by the check above. Commits carry `h`
+  // ALONE; only application messages carry NIP-40 `expiration`. So once the
+  // ~228s TTL passes, a conformant relay evicts the locations and this sample
+  // silently shrinks to the commit subset — still non-empty, still walked, but
+  // no longer saying anything about the events that carry a user's position.
+  // On the poll lanes nothing else asserts Rules 2 and 4, so that degradation
+  // has to fail loudly rather than pass quietly.
+  expect(
+    events.any((e) => e.tag('expiration') != null),
+    isTrue,
+    reason:
+        'every collected kind-445 was a commit (no NIP-40 `expiration`), so '
+        'the application messages aged out before this read and the Rule 2/4 '
+        'scan below would prove nothing about location traffic',
   );
 
   // Ephemeral-key-per-message: author pubkeys must be unique and
@@ -4793,82 +4871,6 @@ Future<void> _assertWirePrivacyInvariants({
     '[e2e_combined] wire-privacy invariants OK '
     '(${events.length} kind-445, ${distinctAuthors.length} distinct '
     'ephemeral keys, no MLS group id on the wire, no recipient p-tags)',
-  );
-
-  // These event kinds must NEVER reach a relay. Haven publishes pubkey-scoped
-  // group (445), gift-wrapped (1059), KeyPackage (30443), relay-list
-  // (10050/10002), and — since the public-profile migration (owner-directed)
-  // — kind-0 profile events. An explicit forbid-list {3, 443, 10051} is used
-  // rather than a closed allow-set so a future legitimate kind doesn't make
-  // this assertion spuriously fail on a cosmetic protocol addition.
-  //   - kind 3      contact/following list: would expose the user's social
-  //                 graph. Haven never publishes one.
-  //   - kind 443    legacy KeyPackage: retired by Dark Matter (30443 only);
-  //                 the cutover retracts old ones, it never mints new ones.
-  //   - kind 10051  legacy KP relay list: retired for NIP-65 kind 10002 and
-  //                 likewise retracted, never republished.
-  // (Kind 0 and 10002 were forbidden pre-migration; both are now published
-  // by design. Their correctness is covered by the kind-0 identity-author
-  // watch in the main scenario and the e2e_profile lane.)
-  // One combined REQ keeps the (empty-result) wait to a single timeout window
-  // and reports the offending kind(s) on failure.
-  final forbidden = await relay.collectN(
-    count: 50,
-    filter: <String, dynamic>{
-      'kinds': const <int>[3, 443, 10051],
-      'limit': 50,
-    },
-    timeout: const Duration(seconds: 3),
-  );
-  final forbiddenKindsSeen = forbidden.map((e) => e.kind).toSet();
-  expect(
-    forbidden,
-    isEmpty,
-    reason:
-        'forbidden event kind(s) $forbiddenKindsSeen reached the relay — '
-        'Haven must never publish kind-3 contact lists, and the retired '
-        'kinds 443/10051 must never reappear (Haven publishes '
-        '30443/10002 only).',
-  );
-
-  // A kind-444 Welcome must NEVER appear bare on the relay: it is always
-  // gift-wrapped inside a kind-1059 (NIP-59) and is itself UNSIGNED
-  // (Security Rule #3 / MIP-04). A bare 444 — signed or not — is a regression.
-  final welcomes = await relay.collectN(
-    count: 50,
-    filter: <String, dynamic>{
-      'kinds': const <int>[444],
-      'limit': 50,
-    },
-    timeout: const Duration(seconds: 3),
-  );
-  // Check signatures FIRST so a SIGNED bare 444 fails with a precise reason
-  // (kind-444 is unsigned per Security Rule #3 / MIP-04). The final invariant
-  // — no bare 444 on the relay at all — is the isEmpty assertion below;
-  // ordering the signature scan before it keeps BOTH checks live (an isEmpty
-  // that threw first would make this loop dead code).
-  for (final w in welcomes) {
-    final dynamic sig = w.raw['sig'];
-    final hasSignature = sig is String && sig.isNotEmpty;
-    expect(
-      hasSignature,
-      isFalse,
-      reason:
-          'an observed kind-444 carries a signature — Welcomes must remain '
-          'unsigned (Security Rule #3).',
-    );
-  }
-  expect(
-    welcomes,
-    isEmpty,
-    reason:
-        'a bare kind-444 Welcome reached the relay — Welcomes must stay '
-        'gift-wrapped inside kind-1059 (NIP-59), never published directly.',
-  );
-  debugPrint(
-    '[e2e_combined] wire-privacy invariants OK '
-    '(no kind-3 events, no retired kind-443/10051 events, no bare '
-    'kind-444 Welcomes on the relay)',
   );
 }
 

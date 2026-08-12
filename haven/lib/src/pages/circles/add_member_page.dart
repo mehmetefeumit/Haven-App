@@ -71,64 +71,89 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
       ),
       body: Padding(
         // Keep the bottom CTA clear of the gesture/home indicator without
-        // reflowing the whole body (equivalent to a bottom SafeArea inset).
+        // reflowing the whole body. `paddingOf`, NOT `viewPaddingOf`: the
+        // engine collapses `padding` to zero while the keyboard covers the
+        // home indicator, whereas `viewPadding` deliberately does not — so
+        // reading the latter reserves 34px of dead space below the keyboard
+        // line, in exactly the squeezed case this layout exists to survive.
         padding: EdgeInsets.fromLTRB(
           HavenSpacing.base,
           HavenSpacing.base,
           HavenSpacing.base,
-          HavenSpacing.base + MediaQuery.viewPaddingOf(context).bottom,
+          HavenSpacing.base + MediaQuery.paddingOf(context).bottom,
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            MemberSearchBar(
-              onMemberAdded: _onMemberAdded,
-              onQrScanRequested: _openQrScanner,
-              existingMembers: _selectedMembers,
-            ),
-            const SizedBox(height: HavenSpacing.lg),
-
-            if (_selectedMembers.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(bottom: HavenSpacing.sm),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      l10n.createCircleSelectedCount(_selectedMembers.length),
-                      style: Theme.of(context).textTheme.titleSmall,
-                    ),
-                    TextButton(
-                      onPressed: _clearAll,
-                      child: Text(l10n.commonClearAll),
-                    ),
-                  ],
-                ),
-              ),
-
-            // One viewport for the roster and the disclosure, so only the CTA
-            // is pinned. Pinning the disclosure as well made the fixed chrome
-            // taller than the body at a 2x text scale — 1092px of chrome into
-            // 428px — and a clipped disclosure discloses nothing.
+            // ONE viewport for everything except the CTA. Pinning the search
+            // field, the roster header and the disclosure above a pinned
+            // button made the fixed chrome taller than the body at a 2x text
+            // scale — the page could not lay out at all, and clipped chrome
+            // discloses nothing and cannot be tapped. Only the primary action
+            // stays put; the rest scrolls when it has to.
             Expanded(
-              child: _selectedMembers.isEmpty
-                  ? HavenScrollFill(
+              child: CustomScrollView(
+                slivers: [
+                  SliverToBoxAdapter(
+                    child: MemberSearchBar(
+                      onMemberAdded: _onMemberAdded,
+                      onQrScanRequested: _openQrScanner,
+                      existingMembers: _selectedMembers,
+                    ),
+                  ),
+                  const SliverToBoxAdapter(
+                    child: SizedBox(height: HavenSpacing.lg),
+                  ),
+                  if (_selectedMembers.isNotEmpty)
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: const EdgeInsets.only(bottom: HavenSpacing.sm),
+                        // Wrap, not Row: at a large text scale the count and
+                        // "Clear all" together exceed the body width, and a
+                        // Row can only overflow where a Wrap moves the button
+                        // to its own line.
+                        child: Wrap(
+                          alignment: WrapAlignment.spaceBetween,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            Text(
+                              l10n.createCircleSelectedCount(
+                                _selectedMembers.length,
+                              ),
+                              style: Theme.of(context).textTheme.titleSmall,
+                            ),
+                            TextButton(
+                              onPressed: _clearAll,
+                              child: Text(l10n.commonClearAll),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  if (_selectedMembers.isEmpty)
+                    SliverFillRemaining(
+                      hasScrollBody: false,
                       child: Column(
+                        // Without this the note shrink-wraps to its longest
+                        // wrapped line while the populated branch renders it
+                        // edge to edge, so the box would change width the
+                        // moment a member is added.
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
                           Expanded(child: _buildEmptyState()),
                           _buildSharingNote(),
                         ],
                       ),
                     )
-                  : CustomScrollView(
-                      slivers: [
-                        SliverList.builder(
-                          itemCount: _selectedMembers.length,
-                          itemBuilder: _buildMemberTile,
-                        ),
-                        SliverToBoxAdapter(child: _buildSharingNote()),
-                      ],
+                  else ...[
+                    SliverList.builder(
+                      itemCount: _selectedMembers.length,
+                      itemBuilder: _buildMemberTile,
                     ),
+                    SliverToBoxAdapter(child: _buildSharingNote()),
+                  ],
+                ],
+              ),
             ),
             const SizedBox(height: HavenSpacing.base),
 
