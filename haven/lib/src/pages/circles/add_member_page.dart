@@ -106,26 +106,29 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
                 ),
               ),
 
+            // One viewport for the roster and the disclosure, so only the CTA
+            // is pinned. Pinning the disclosure as well made the fixed chrome
+            // taller than the body at a 2x text scale — 1092px of chrome into
+            // 428px — and a clipped disclosure discloses nothing.
             Expanded(
               child: _selectedMembers.isEmpty
-                  ? _buildEmptyState()
-                  : _buildMemberList(),
-            ),
-
-            // What adding a member means — kept as a neutral, plain-language
-            // note (not a green security badge) per the app's color doctrine.
-            Container(
-              padding: const EdgeInsets.all(HavenSpacing.base),
-              decoration: BoxDecoration(
-                color: colorScheme.surfaceContainerHighest,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Text(
-                l10n.addMemberInfo,
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: colorScheme.onSurfaceVariant,
-                ),
-              ),
+                  ? HavenScrollFill(
+                      child: Column(
+                        children: [
+                          Expanded(child: _buildEmptyState()),
+                          _buildSharingNote(),
+                        ],
+                      ),
+                    )
+                  : CustomScrollView(
+                      slivers: [
+                        SliverList.builder(
+                          itemCount: _selectedMembers.length,
+                          itemBuilder: _buildMemberTile,
+                        ),
+                        SliverToBoxAdapter(child: _buildSharingNote()),
+                      ],
+                    ),
             ),
             const SizedBox(height: HavenSpacing.base),
 
@@ -161,50 +164,50 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
 
   Widget _buildEmptyState() {
     final l10n = AppLocalizations.of(context);
-    final colorScheme = Theme.of(context).colorScheme;
 
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Icon(
-          LucideIcons.userPlus,
-          size: 48,
-          color: colorScheme.onSurfaceVariant,
-        ),
-        const SizedBox(height: HavenSpacing.base),
-        Text(
-          l10n.createCircleEmptyTitle,
-          style: Theme.of(context).textTheme.titleMedium,
-        ),
-        const SizedBox(height: HavenSpacing.sm),
-        Text(
-          l10n.createCircleEmptyMessage,
-          style: Theme.of(
-            context,
-          ).textTheme.bodyMedium?.copyWith(color: colorScheme.onSurfaceVariant),
-          textAlign: TextAlign.center,
-        ),
-      ],
+    return HavenEmptyState(
+      density: HavenEmptyStateDensity.compact,
+      icon: LucideIcons.userPlus,
+      title: l10n.createCircleEmptyTitle,
+      message: l10n.createCircleEmptyMessage,
     );
   }
 
-  Widget _buildMemberList() {
-    return ListView.builder(
-      itemCount: _selectedMembers.length,
-      itemBuilder: (context, index) {
-        final npub = _selectedMembers[index];
-        final status = _memberStatus[npub] ?? ValidationStatus.validating;
-        final error = _memberErrors[npub];
-        final isNetworkFailure = _networkFailures.contains(npub);
+  Widget _buildMemberTile(BuildContext context, int index) {
+    final npub = _selectedMembers[index];
+    final status = _memberStatus[npub] ?? ValidationStatus.validating;
+    final error = _memberErrors[npub];
+    final isNetworkFailure = _networkFailures.contains(npub);
 
-        return PendingMemberTile(
-          npub: npub,
-          status: status,
-          errorMessage: error,
-          onRemove: () => _onMemberRemoved(npub),
-          onRetry: isNetworkFailure ? () => _retryMember(npub) : null,
-        );
-      },
+    return PendingMemberTile(
+      npub: npub,
+      status: status,
+      errorMessage: error,
+      onRemove: () => _onMemberRemoved(npub),
+      onRetry: isNetworkFailure ? () => _retryMember(npub) : null,
+    );
+  }
+
+  /// What adding a member means — kept as a neutral, plain-language note (not
+  /// a green security badge) per the app's color doctrine.
+  Widget _buildSharingNote() {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Padding(
+      padding: const EdgeInsets.only(top: HavenSpacing.base),
+      child: Container(
+        padding: const EdgeInsets.all(HavenSpacing.base),
+        decoration: BoxDecoration(
+          color: colorScheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Text(
+          AppLocalizations.of(context).addMemberInfo,
+          style: Theme.of(
+            context,
+          ).textTheme.bodySmall?.copyWith(color: colorScheme.onSurfaceVariant),
+        ),
+      ),
     );
   }
 

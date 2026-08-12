@@ -12,6 +12,12 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 ///
 /// Use this widget for error states that can potentially be recovered
 /// by retrying the failed operation.
+///
+/// Like `HavenEmptyState`, the content is intrinsically sized and centred, so
+/// the HOST must supply a `HavenScrollFill` or an equivalent
+/// `SliverFillRemaining(hasScrollBody: false)`. Clipping costs more here than
+/// in an empty state: what goes off the bottom is the retry affordance, so the
+/// user loses their way out of the error.
 class HavenErrorDisplay extends StatelessWidget {
   /// Creates an error display.
   ///
@@ -43,43 +49,42 @@ class HavenErrorDisplay extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
 
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(HavenSpacing.lg),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              icon ?? LucideIcons.circleAlert,
-              size: 48,
-              color: colorScheme.error,
-            ),
-            const SizedBox(height: HavenSpacing.base),
-            if (title != null) ...[
-              Text(
-                title!,
-                style: Theme.of(context).textTheme.titleMedium,
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: HavenSpacing.sm),
-            ],
+    return Padding(
+      padding: const EdgeInsets.all(HavenSpacing.lg),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            icon ?? LucideIcons.circleAlert,
+            size: 48,
+            color: colorScheme.error,
+          ),
+          const SizedBox(height: HavenSpacing.base),
+          if (title != null) ...[
             Text(
-              message,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                color: colorScheme.onSurfaceVariant,
-              ),
+              title!,
+              style: Theme.of(context).textTheme.titleMedium,
               textAlign: TextAlign.center,
             ),
-            if (onRetry != null) ...[
-              const SizedBox(height: HavenSpacing.lg),
-              OutlinedButton.icon(
-                onPressed: onRetry,
-                icon: const Icon(LucideIcons.refreshCw),
-                label: Text(AppLocalizations.of(context).commonTryAgain),
-              ),
-            ],
+            const SizedBox(height: HavenSpacing.sm),
           ],
-        ),
+          Text(
+            message,
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+              color: colorScheme.onSurfaceVariant,
+            ),
+            textAlign: TextAlign.center,
+          ),
+          if (onRetry != null) ...[
+            const SizedBox(height: HavenSpacing.lg),
+            OutlinedButton.icon(
+              onPressed: onRetry,
+              icon: const Icon(LucideIcons.refreshCw),
+              label: Text(AppLocalizations.of(context).commonTryAgain),
+            ),
+          ],
+        ],
       ),
     );
   }

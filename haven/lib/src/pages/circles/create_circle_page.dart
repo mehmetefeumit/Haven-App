@@ -96,10 +96,12 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
                 ),
               ),
 
-            // Member list or empty state
+            // Member list or empty state. The placeholder is intrinsically
+            // sized, so it needs a viewport rather than this Expanded's tight
+            // leftover height — see [HavenEmptyState].
             Expanded(
               child: _selectedMembers.isEmpty
-                  ? _buildEmptyState()
+                  ? HavenScrollFill(child: _buildEmptyState())
                   : _buildMemberList(),
             ),
 
@@ -127,30 +129,12 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
 
   Widget _buildEmptyState() {
     final l10n = AppLocalizations.of(context);
-    final colorScheme = Theme.of(context).colorScheme;
 
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Icon(
-          LucideIcons.userPlus,
-          size: 48,
-          color: colorScheme.onSurfaceVariant,
-        ),
-        const SizedBox(height: HavenSpacing.base),
-        Text(
-          l10n.createCircleEmptyTitle,
-          style: Theme.of(context).textTheme.titleMedium,
-        ),
-        const SizedBox(height: HavenSpacing.sm),
-        Text(
-          l10n.createCircleEmptyMessage,
-          style: Theme.of(
-            context,
-          ).textTheme.bodyMedium?.copyWith(color: colorScheme.onSurfaceVariant),
-          textAlign: TextAlign.center,
-        ),
-      ],
+    return HavenEmptyState(
+      density: HavenEmptyStateDensity.compact,
+      icon: LucideIcons.userPlus,
+      title: l10n.createCircleEmptyTitle,
+      message: l10n.createCircleEmptyMessage,
     );
   }
 

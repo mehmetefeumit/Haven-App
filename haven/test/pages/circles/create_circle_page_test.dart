@@ -14,7 +14,9 @@ import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/circles/create_circle_page.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/theme/theme.dart';
 
+import '../../helpers/localized_app_harness.dart';
 import '../../mocks/mock_relay_service.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -280,5 +282,94 @@ void main() {
         expect(button.onPressed, isNull);
       },
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // Layout robustness
+  //
+  // The empty state sits in an `Expanded` between the search field and the
+  // CTA, so its height is leftover space. Focusing the field opens the
+  // software keyboard and `Scaffold.resizeToAvoidBottomInset` takes that
+  // leftover away — the same squeeze that clipped the sibling AddMemberPage in
+  // CI run 31462924650. These pump the real shipped theme, whose text metrics
+  // are the ones the app actually renders.
+  // -------------------------------------------------------------------------
+  group('CreateCirclePage — layout under a squeeze', () {
+    Future<void> pumpSqueezed(
+      WidgetTester tester, {
+      TextScaler textScaler = TextScaler.noScaling,
+      Locale locale = const Locale('en'),
+      double bottomInset = 336,
+    }) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(393, 852);
+      tester.view.viewInsets = FakeViewPadding(bottom: bottomInset);
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetViewInsets);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            relayServiceProvider.overrideWithValue(MockRelayService()),
+          ],
+          child: MaterialApp(
+            locale: locale,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            theme: HavenTheme.light(),
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(context).copyWith(textScaler: textScaler),
+              child: child!,
+            ),
+            home: const CreateCirclePage(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('the empty state survives the keyboard', (tester) async {
+      await pumpSqueezed(tester);
+
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('survives 2x in a long locale with no keyboard', (
+      tester,
+    ) async {
+      await pumpSqueezed(
+        tester,
+        textScaler: const TextScaler.linear(2),
+        locale: const Locale('de'),
+        bottomInset: 0,
+      );
+
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('survives the keyboard at 2x in a long locale', (tester) async {
+      await pumpSqueezed(
+        tester,
+        textScaler: const TextScaler.linear(2),
+        locale: const Locale('de'),
+      );
+
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('the empty-state guidance stays reachable', (tester) async {
+      await pumpSqueezed(tester, textScaler: const TextScaler.linear(2));
+
+      expect(tester.takeException(), isNull);
+
+      // `ensureVisible` needs a Scrollable ancestor, so this fails outright if
+      // the placeholder loses its scroll host.
+      final l10n = l10nOf(tester, CreateCirclePage);
+      await tester.ensureVisible(find.text(l10n.createCircleEmptyTitle));
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+    });
   });
 }

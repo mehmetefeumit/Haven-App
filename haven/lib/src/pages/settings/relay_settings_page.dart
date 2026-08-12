@@ -75,16 +75,20 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
       ),
       body: identity.when(
         data: (id) => id == null
-            ? HavenEmptyState(
-                icon: LucideIcons.userX,
-                title: l10n.relaySettingsNoIdentityTitle,
-                message: l10n.relaySettingsNoIdentityMessage,
+            ? HavenScrollFill(
+                child: HavenEmptyState(
+                  icon: LucideIcons.userX,
+                  title: l10n.relaySettingsNoIdentityTitle,
+                  message: l10n.relaySettingsNoIdentityMessage,
+                ),
               )
             : _buildBody(l10n),
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (_, _) => HavenEmptyState(
-          icon: LucideIcons.circleAlert,
-          message: l10n.relaySettingsLoadIdentityError,
+        error: (_, _) => HavenScrollFill(
+          child: HavenEmptyState(
+            icon: LucideIcons.circleAlert,
+            message: l10n.relaySettingsLoadIdentityError,
+          ),
         ),
       ),
     );

@@ -20,6 +20,7 @@ export 'common/error_display.dart';
 export 'common/info_note.dart';
 export 'common/invitations_button.dart';
 export 'common/loading_indicator.dart';
+export 'common/scroll_fill.dart';
 export 'common/section_header.dart';
 export 'common/settings_button.dart';
 export 'common/settings_tile.dart';

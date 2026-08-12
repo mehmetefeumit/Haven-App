@@ -135,10 +135,12 @@ class _CirclesEmptyState extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
-    return HavenEmptyState(
-      icon: LucideIcons.users,
-      title: l10n.circlesEmptyTitle,
-      message: l10n.circlesEmptyMessage,
+    return HavenScrollFill(
+      child: HavenEmptyState(
+        icon: LucideIcons.users,
+        title: l10n.circlesEmptyTitle,
+        message: l10n.circlesEmptyMessage,
+      ),
     );
   }
 }

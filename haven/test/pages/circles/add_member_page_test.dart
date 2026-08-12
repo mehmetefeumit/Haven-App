@@ -25,8 +25,10 @@ import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/test_keys.dart';
+import 'package:haven/src/theme/theme.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../helpers/localized_app_harness.dart';
 import '../../mocks/mock_circle_service.dart';
 import '../../mocks/mock_relay_service.dart';
 
@@ -810,6 +812,105 @@ void main() {
         expect(button.onPressed, isNull);
       },
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // Layout robustness
+  //
+  // This page puts its empty state in an `Expanded` between a search field and
+  // ~230px of pinned chrome (the sharing disclosure plus the CTA), so the
+  // placeholder's height is leftover space. Focusing the search field opens
+  // the software keyboard, `Scaffold.resizeToAvoidBottomInset` removes its
+  // inset from the body, and the leftover drops to about 110px against ~116px
+  // of content — which is how CI run 31462924650 produced
+  // `A RenderFlex overflowed by 7.8 pixels on the bottom` on an iPhone 15.
+  //
+  // These tests pump the real shipped theme. The suite's other tests use
+  // `ThemeData(useMaterial3: false)`, whose text metrics are not the ones the
+  // app renders, so they cannot measure this.
+  // -------------------------------------------------------------------------
+  group('AddMemberPage — layout under a squeeze', () {
+    /// Lays the page out on an iPhone 15 with the keyboard up.
+    Future<void> pumpSqueezed(
+      WidgetTester tester, {
+      TextScaler textScaler = TextScaler.noScaling,
+      Locale locale = const Locale('en'),
+      double bottomInset = 336,
+    }) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(393, 852);
+      tester.view.viewInsets = FakeViewPadding(bottom: bottomInset);
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetViewInsets);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: _overrides(
+            mockRelay: MockRelayService(),
+            mockCircle: MockCircleService(),
+          ),
+          child: MaterialApp(
+            locale: locale,
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            theme: HavenTheme.light(),
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(context).copyWith(textScaler: textScaler),
+              child: child!,
+            ),
+            home: AddMemberPage(circle: _makeCircle()),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('11. the empty state survives the keyboard', (tester) async {
+      await pumpSqueezed(tester);
+
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('12a. survives 2x in a long locale with no keyboard', (
+      tester,
+    ) async {
+      await pumpSqueezed(
+        tester,
+        textScaler: const TextScaler.linear(2),
+        locale: const Locale('de'),
+        bottomInset: 0,
+      );
+
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('12. survives the keyboard at 2x in a long locale', (
+      tester,
+    ) async {
+      await pumpSqueezed(
+        tester,
+        textScaler: const TextScaler.linear(2),
+        locale: const Locale('de'),
+      );
+
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('13. the empty-state guidance stays reachable', (tester) async {
+      await pumpSqueezed(tester, textScaler: const TextScaler.linear(2));
+
+      expect(tester.takeException(), isNull);
+
+      // `ensureVisible` needs a Scrollable ancestor, so this fails outright if
+      // the placeholder ever loses its scroll parent — the difference between
+      // guidance that is scrolled to and guidance that is clipped away.
+      final l10n = l10nOf(tester, AddMemberPage);
+      await tester.ensureVisible(find.text(l10n.createCircleEmptyTitle));
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+    });
   });
 }
 

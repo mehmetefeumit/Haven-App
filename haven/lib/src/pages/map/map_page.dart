@@ -593,10 +593,12 @@ class _MapPageState extends ConsumerState<MapPage>
     }
 
     if (_isInitialized == false) {
-      return HavenErrorDisplay(
-        title: l10n.mapInitFailedTitle,
-        message: _errorMessage ?? l10n.mapInitFailedMessage,
-        onRetry: _initializeCore,
+      return HavenScrollFill(
+        child: HavenErrorDisplay(
+          title: l10n.mapInitFailedTitle,
+          message: _errorMessage ?? l10n.mapInitFailedMessage,
+          onRetry: _initializeCore,
+        ),
       );
     }
 
@@ -673,12 +675,14 @@ class _MapPageState extends ConsumerState<MapPage>
           accessBlocked: accessBlocked,
         ))
           Positioned.fill(
-            child: HavenErrorDisplay(
-              title: _locationDeclined
-                  ? l10n.mapLocationOffTitle
-                  : l10n.mapLocationErrorTitle,
-              message: _errorMessage!,
-              onRetry: _getLocation,
+            child: HavenScrollFill(
+              child: HavenErrorDisplay(
+                title: _locationDeclined
+                    ? l10n.mapLocationOffTitle
+                    : l10n.mapLocationErrorTitle,
+                message: _errorMessage!,
+                onRetry: _getLocation,
+              ),
             ),
           ),
       ],

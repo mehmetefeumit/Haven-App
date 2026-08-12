@@ -6,6 +6,63 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Secure, privacy-first location sharing app using Marmot Protocol (MLS + Nostr) for E2E encrypted group messaging. Flutter frontend with Rust cryptographic core.
 
+## Non-Negotiables (READ FIRST)
+
+These pillars are never traded off, never "temporarily" degraded, and never
+deferred to a follow-up:
+
+**privacy · security · performance · user experience · documentation accuracy
+(user-visible AND internal) · accessibility · code quality · simplicity · test
+coverage · test reliability**
+
+A change that improves one pillar by weakening another is not finished. If you
+believe a pillar genuinely must give, STOP and ask — do not decide it silently.
+
+### Simple and correct, not clever and verbose
+
+- Write the **smallest correct implementation**. No speculative abstraction, no
+  configuration nobody asked for, no defensive branches for states that cannot
+  occur. Precision beats breadth: doing less, exactly right, beats doing more,
+  subtly wrong.
+- **Comment WHY, never what.** A comment restating the code is noise — delete
+  it. Reserve prose for a non-obvious invariant, a spec/protocol constraint, or
+  a trap that will otherwise be re-introduced. One tight sentence beats a
+  paragraph.
+- Match the surrounding file's density, naming and idiom. Do not raise or lower
+  the local comment level.
+- Prefer deleting code to adding it. Fewer moving parts is a correctness
+  argument, not a style preference.
+
+### Finish the work — no stubs, ever
+
+**NEVER** leave a `TODO`, a placeholder, an empty function body, a skipped test,
+or a test whose outer interface exists with the assertions "to be filled in".
+Writing a test scaffold and deferring its body is prohibited — a test that
+asserts nothing is worse than no test, because it reports coverage it does not
+have. Every change lands complete, to the highest quality achievable. If some
+part genuinely cannot be completed, say so explicitly in your response; never
+hide it in the code.
+
+### Everything promised is tested
+
+Every promise the app makes must have a test that FAILS when the promise breaks:
+user-facing privacy and security guarantees, what does and does not leave the
+device, what appears in logs and diagnostics, every functional scenario,
+performance/battery characteristics, accessibility affordances, and the accuracy
+of user-visible copy. An untested guarantee is an aspiration, not a guarantee.
+
+### Tests must be reliable, and are never weakened
+
+- Assert **behaviour**, not implementation details or incidental strings.
+- No sleeps, no timing races, no dependence on test ordering or on wall-clock
+  chance. Injectable clocks and deterministic ordering over "usually fast
+  enough".
+- A flaky test is a broken test: fix the race the test found, never loosen the
+  assertion, shorten the scope, or add a retry to hide it.
+- If a change makes a passing test fail, the change is suspect first. Never
+  lower a test's quality or coverage to accommodate it (see Testing
+  Requirements).
+
 ## Architecture
 
 ```
@@ -105,6 +162,9 @@ commit.
 
 ## Code Quality
 
+See **Non-Negotiables** above — simplicity and correctness outrank every other
+consideration here, and comment volume is a cost, not a virtue.
+
 - **Rust lints**: `clippy::pedantic` and `clippy::nursery` are enabled; `unsafe_code` is denied
 - **Rust testing**: Uses `proptest` for property-based testing
 - **Flutter lints**: Uses `very_good_analysis` for strict Dart linting
@@ -128,6 +188,9 @@ commit.
 3. **Use test-writer agent**: For new features or bug fixes, invoke test-writer to ensure proper test coverage
 4. **Security review for crypto**: Any code touching secrets, keys, or encryption must be reviewed by security-reviewer agent
 5. **Never lower the quality of a test**: If a change makes a previously succeeding test fail, never reduce the quality or coverage of the test to accomodate for the change, unless it is technically impossible for the current change and the failing test to co-exist.
+6. **No stubbed tests**: never commit a test whose body is a `TODO`, whose assertions are deferred, or which is skipped. A test that asserts nothing reports coverage it does not have.
+7. **Test the promise, not the code path**: every privacy, security, log-privacy, performance, accessibility and functional guarantee gets a test that fails when the guarantee breaks.
+8. **No flaky tests**: no sleeps, no timing races, no order dependence. Fix the race the test caught; never add a retry or loosen an assertion to make it pass.
 
 **Widget tests with Rust FFI**: Flutter widgets that depend on Rust (e.g., IdentityPage) cannot be unit tested without the Rust bridge. Use integration tests in `integration_test/` for full widget testing, or refactor to accept services via constructor for mockability.
 
