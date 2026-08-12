@@ -37,7 +37,8 @@ mod types;
 pub mod url_norm;
 
 pub use auto_commit::{
-    resolve_receive_publish_work, rollback_receive_publish_work, AutoCommitPublisher,
+    publish_then_resolve, resolve_receive_publish_work, rollback_receive_publish_work,
+    AutoCommitPublisher,
 };
 pub use catchup::{CatchupOutcome, ReceiveOnlyOutcome};
 pub use clock_skew::{

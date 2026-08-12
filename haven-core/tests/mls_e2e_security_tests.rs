@@ -4,9 +4,11 @@
 //! stack (security F2/F9): key separation (Rule 1), ephemeral-445 uniqueness
 //! (Rule 2), 444-unsigned (Rule 3), group-id privacy (Rule 4), exporter retention
 //! (Rule 5), error redaction (Rule 6). Where the pre-migration mechanism is
-//! genuinely gone (per-send NIP-40 expiration; the `get_ratchet_tree_info` leaf
-//! walk; a public per-past-epoch exporter query) the SUBJECT deletion or an
-//! honest NARROWING is documented at the site — never a silently weakened gate.
+//! genuinely gone (per-send NIP-40 expiration; a public per-past-epoch exporter
+//! query) the SUBJECT deletion or an honest NARROWING is documented at the site
+//! — never a silently weakened gate. The `get_ratchet_tree_info` leaf walk is
+//! the one narrowing since REPAIRED: `SessionManager::members()` exposes each
+//! leaf's signature key, so Rule 1 is asserted positively again.
 
 mod helpers;
 
@@ -286,13 +288,14 @@ async fn encrypted_event_has_h_tag_with_nostr_group_id_only() {
 // Rule 1 — key separation (MLS sig key ≠ Nostr identity key)
 // ============================================================================
 
-/// P3a (Rule 1, RE-EXPRESSED with an honest NARROWING).
+/// P3a (Rule 1, ON-WIRE half).
 ///
-/// The pre-migration gate walked the ratchet tree (`get_ratchet_tree_info`) to
-/// read the leaf signature key and assert it ≠ the Nostr identity key. That API
-/// is gone, and Haven no longer deps `openmls` directly, so the leaf signature
-/// key cannot be byte-extracted from an integration test. Key separation is now
-/// formalized ON-WIRE as the mandatory `account-identity-proof.v2` leaf extension
+/// `get_ratchet_tree_info` is gone, but the leaf-level property it proved is
+/// NOT — see `p3a_leaf_signature_key_differs_from_nostr_identity_key` below,
+/// which reads each leaf's signature key through `SessionManager::members()`.
+/// This test holds the complementary half, which no leaf read can give: key
+/// separation as observed BY A RELAY. Key separation is also formalized ON-WIRE
+/// as the mandatory `account-identity-proof.v2` leaf extension
 /// (W7): the engine REJECTS any leaf whose proof does not verify. The observable
 /// re-expression: (1) a genuine Haven `KeyPackage` — created with the identity key —
 /// is ACCEPTED by `create_group` (the two-party setup succeeds), so its
@@ -314,6 +317,75 @@ async fn p3a_key_separation_identity_proof_enforced_and_identity_not_used_for_gr
     event
         .verify()
         .expect("445 must be validly signed by its ephemeral key");
+    g.cleanup();
+}
+
+/// P3a-leaf (Rule 1, POSITIVE leaf-level gate).
+///
+/// The direct statement of key separation: a member's MLS leaf signature key
+/// differs from that member's Nostr identity key. `p3a_…` above can only observe
+/// an ABSENCE (the identity key did not sign one kind-445); this reads both keys
+/// and compares them.
+///
+/// `SessionManager::members()` is the leaf-level source the deleted
+/// `get_ratchet_tree_info` walk provided. Despite the name, `Member::credential`
+/// carries the leaf's SIGNATURE key: every engine write of `Group.members`
+/// projects it off a leaf node (`marmot_members` → `OpenMLS` `Member::signature_key`
+/// ← `leaf_node.signature_key()`). `Member::id` is the `BasicCredential`
+/// identity — the 32-byte x-only Nostr account key. Read the construction sites,
+/// not `cgka-traits`' doc comment on `Member`, which has the two TRANSPOSED; a
+/// reader who trusts the doc writes this assertion backwards and it still passes.
+///
+/// Catches the mutation that reuses the Nostr secret key as the MLS signer. The
+/// `account-identity-proof.v2` extension does NOT catch it: the proof only binds
+/// the account identity to the leaf key, it never requires them to differ, so it
+/// verifies happily under that mutation.
+#[tokio::test]
+async fn p3a_leaf_signature_key_differs_from_nostr_identity_key() {
+    let g = setup_two_party_group("p3a_leafsep").await;
+
+    // Both views: Alice's tree is post-create, Bob's post-welcome-join, so a leaf
+    // key that collapsed onto the identity key on only ONE path still fails.
+    for (who, session) in [("alice", &g.alice), ("bob", &g.bob)] {
+        let members = session.members(&g.group_id).await.expect("members");
+        assert_eq!(members.len(), 2, "{who} sees both leaves");
+        for m in members {
+            let identity = m.id.as_slice();
+            let leaf_signature_key = m.credential.as_slice();
+            // Non-vacuity: an empty or truncated leaf key would satisfy the
+            // inequality below while proving nothing. Both are 32 bytes —
+            // Ed25519 (the ciphersuite's signature algorithm) and x-only
+            // secp256k1 — so this is a real byte difference between equal-length
+            // keys, never a length artifact.
+            assert_eq!(identity.len(), 32, "{who}: identity key is 32 bytes");
+            assert_eq!(
+                leaf_signature_key.len(),
+                32,
+                "{who}: leaf signature key is 32 bytes"
+            );
+            assert_ne!(
+                leaf_signature_key, identity,
+                "{who}: a leaf's MLS signature key MUST differ from that account's \
+                 Nostr identity key (Rule 1)"
+            );
+        }
+    }
+
+    // Anchored on the harness's own keypairs, so the loop above cannot pass by
+    // comparing two keys that both belong to somebody else.
+    let members = g.alice.members(&g.group_id).await.expect("members");
+    for keys in [&g.alice_keys, &g.bob_keys] {
+        let identity = keys.public_key().to_bytes();
+        let leaf = members
+            .iter()
+            .find(|m| m.id.as_slice() == identity.as_slice())
+            .expect("each harness identity holds a leaf");
+        assert_ne!(
+            leaf.credential.as_slice(),
+            identity.as_slice(),
+            "the MLS leaf signature key must never be the account's Nostr identity key"
+        );
+    }
     g.cleanup();
 }
 

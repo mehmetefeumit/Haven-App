@@ -35,7 +35,9 @@ mod welcome;
 
 pub use context::MlsGroupContext;
 pub use manager::redact_hex_sequences;
-pub use manager::{SessionManager, DEFAULT_EXPORTER_LABEL};
+pub use manager::{
+    app_message_past_epoch_limit, SessionManager, DEFAULT_EXPORTER_LABEL, DEFAULT_MAX_PAST_EPOCHS,
+};
 pub use signer::HavenIdentityProofSigner;
 pub use storage::StorageConfig;
 pub use types::{

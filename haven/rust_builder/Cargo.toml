@@ -45,6 +45,13 @@ apple-native-keyring-store = { version = "0.2", features = ["keychain"] }
 [target.'cfg(target_os = "ios")'.dependencies]
 apple-native-keyring-store = { version = "0.2", features = ["protected"] }
 
+# The Apple twin of `android_logger` below: installed BEFORE FRB's own oslog
+# backend (`log::set_boxed_logger` is first-call-wins) so our category filter can
+# drop the `keyring_core` target. Same crate and major FRB uses, so Cargo
+# resolves ONE instance. See `init_app` in src/api.rs.
+[target.'cfg(any(target_os = "ios", target_os = "macos"))'.dependencies]
+oslog = "0.2"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus-secret-service-keyring-store = { version = "0.3", features = ["crypto-rust"] }
 

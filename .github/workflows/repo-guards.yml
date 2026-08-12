@@ -109,9 +109,34 @@
 #
 #   MLS session single owner          scripts/ci/check_mls_session_single_owner.sh
 #     `CircleManagerFfi.newInstance` may appear in exactly three files — one per
-#     isolate that legitimately owns a session — and the UI isolate's one must
+#     isolate that legitimately owns a session — the UI isolate's one must
 #     latch the pause-time handoff, or the foreground service can never take
-#     the session it was handed.
+#     the session it was handed, and each of the three must release what it
+#     opened: only `dispose()` drops the Rust LIVE_SESSIONS claim, so one
+#     missed release refuses every later open in EVERY isolate for the life of
+#     the process.
+#
+#   No key logging                    scripts/ci/check_no_key_logging.sh
+#     Security Rule 6 at the SOURCE. `scan-logs-for-secrets.sh` matches seven
+#     secret shapes over captured runtime logs, so it can only catch material a
+#     lane executed, at a level the build let through, in a shape somebody
+#     anticipated — a `Zeroizing<[u8; 32]>` rendered by a `{:?}` is none of
+#     those. This reads every `log::`/`print`/`dbg!` and every
+#     `debugPrint`, extracts ONLY the interpolated expressions (never the
+#     message prose), and classifies them per identifier. It also pins the
+#     `keyring_core` → Off filter for every logger backend `init_app` installs:
+#     keyring-core logs the credential's `Debug` at DEBUG, and filtering it on
+#     Android alone left the Apple unified log unfiltered.
+#
+#   Secret fields are zeroized        scripts/ci/check_secret_fields_zeroized.sh
+#     Security Rule 7 as a scan rather than a list. The compile-time proof in
+#     `zeroization_security.rs` is the strongest possible statement about the
+#     two types on it and says nothing about the next one; it never grew past
+#     two while the tree grew to five secret-bearing types. This flags any raw
+#     byte/string field whose name — or whose STRUCT's name, which is the only
+#     secret-shaped name `ProfileRelaySalt { bytes }` has — reads as secret
+#     material and is neither `Zeroizing`-wrapped nor inside a `ZeroizeOnDrop`
+#     struct.
 #
 #   Liveness port single owner        scripts/ci/check_liveness_port_single_owner.sh
 #     Only the UI isolate may call initCommunicationPort(), and it must also
@@ -443,6 +468,55 @@ jobs:
       - name: MLS session has a single owner per isolate
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_mls_session_single_owner.sh
+
+      # The disposal half counts handle-shaped `.dispose()` calls, so it is
+      # exactly as trustworthy as its fixtures: they pin that an unrelated
+      # disposal cannot stand in for a session release, that a commented-out
+      # release does not either, and that a file which stopped opening at all
+      # is guard drift rather than a pass.
+      - name: MLS session single-owner guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_mls_session_single_owner.sh --self-test
+
+      # Security Rule 6's SOURCE half. The runtime scanner it complements can
+      # only see what a lane executed, at a level the build let through, in one
+      # of seven anticipated shapes; a key rendered by a `{:?}` on a path no
+      # lane drives is invisible to it and permanent in the source.
+      - name: No key material reaches a log call
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_no_key_logging.sh
+
+      # The guard above is a hand-written lexer over two languages, so it is
+      # exactly as trustworthy as its fixtures. They pin both directions: the
+      # secret in a placeholder, in an argument, on a continuation line and in a
+      # `dbg!` must all FAIL, and the four shapes that made earlier drafts cry
+      # wolf — the word "key" in prose, prose inside a multi-line literal, a
+      # `wire_token()`, and `dueKeys.length` — must all pass, because a log
+      # guard that flags counts is one that gets blanket-suppressed. Two more
+      # pin the suppression contract (a marker with no reason, and a marker at
+      # the top of a file, must NOT suppress) and two pin the anti-vacuity
+      # floor, without which a renamed macro would report a clean tree forever.
+      - name: Key-logging guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_no_key_logging.sh --self-test
+
+      # Security Rule 7 over every struct, not the two on a hand-kept list.
+      - name: Secret-shaped fields are zeroized
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_secret_fields_zeroized.sh
+
+      # Its fixtures pin the two regressions no compile-time whitelist can see
+      # (a NEW secret-bearing type with no derive; an existing `Zeroizing<>`
+      # demoted to a bare container), the struct-name rule that catches
+      # `ProfileRelaySalt { bytes }`, and the false-positive directions that
+      # decide whether the guard survives its first run — a `pubkey`, a
+      # `key_package` (published as kind 30443), and a composed field whose
+      # obligation belongs to the inner type. Plus the two ways it could rot:
+      # a derive drifting onto the NEXT struct, and prose that merely NAMES
+      # `ZeroizeOnDrop` counting as a derive.
+      - name: Zeroize guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_secret_fields_zeroized.sh --self-test
 
       - name: E2E publish-before-apply (staged creates resolved)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

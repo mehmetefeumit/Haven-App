@@ -31,20 +31,27 @@ use flutter_rust_bridge::frb;
 ///
 /// Independently of the level cap, the `keyring_core` crate logs
 /// `created entry {:?}` / `get secret from entry {:?}` at `DEBUG`, and the
-/// credential's `Debug` embeds the raw secret bytes (the SQLCipher DB keys).
-/// In a debug build that level is active, so those bytes would reach a
-/// world-readable logcat (and CI log artifacts). We therefore install a
-/// filtered `android_logger` BEFORE `setup_default_user_utils` — whose own
-/// `init_once` then no-ops — that drops the `keyring_core` target entirely
-/// while leaving Haven's own `log::debug!` output intact.
+/// credential's `Debug` is the store's to define — the mock store's embeds the
+/// raw secret bytes (the SQLCipher DB keys). In a debug build that level is
+/// active, so those bytes would reach a world-readable logcat / the unified
+/// log (and CI log artifacts). We therefore preempt EVERY backend FRB would
+/// install — `android_logger` on Android, `oslog` on iOS/macOS — with an
+/// identical one that drops the `keyring_core` target, installed BEFORE
+/// `setup_default_user_utils` so FRB's own call no-ops. Haven's `log::debug!`
+/// output is untouched.
+///
+/// Filtering only Android would key a confidentiality property to one target:
+/// the same records reach the Apple unified log with nothing dropping them.
 #[frb(init)]
 pub fn init_app() {
-    // Install our own android_logger FIRST so its per-target filter wins:
-    // `android_logger::init_once` is first-call-wins (shared `OnceLock`), so
-    // FRB's identical call inside `setup_default_user_utils` below becomes a
-    // no-op. The filter drops the `keyring_core` target, which would
-    // otherwise log raw DB-key bytes at DEBUG (Security Rule #6); every other
-    // target stays at the build-profile level capped below.
+    // Install our own backend FIRST so its per-target filter wins:
+    // `android_logger::init_once` is first-call-wins (shared `OnceLock`) and
+    // `oslog`'s `init` goes through `log::set_boxed_logger`, which is also
+    // first-call-wins, so FRB's identical calls inside
+    // `setup_default_user_utils` below become no-ops. The filter drops the
+    // `keyring_core` target, which would otherwise log raw DB-key bytes at
+    // DEBUG (Security Rule #6); every other target stays at the build-profile
+    // level capped below.
     #[cfg(target_os = "android")]
     android_logger::init_once(
         android_logger::Config::default()
@@ -56,6 +63,16 @@ pub fn init_app() {
                     .build(),
             ),
     );
+
+    // Same subsystem FRB uses, so routing is unchanged. `category_level_filter`
+    // matches a record's target EXACTLY (unlike `android_logger`'s prefix
+    // match), and every `debug!` in keyring-core lives in its crate root, so
+    // `keyring_core` is the whole target set.
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
+    let _ = oslog::OsLogger::new("frb_user")
+        .level_filter(log::LevelFilter::Trace)
+        .category_level_filter("keyring_core", log::LevelFilter::Off)
+        .init();
 
     flutter_rust_bridge::setup_default_user_utils();
     // Cap the global `log` level by build profile. The `android_logger`

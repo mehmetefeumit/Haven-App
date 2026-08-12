@@ -9,8 +9,8 @@
 # problem: two hydrated sessions reach the same `(epoch, leaf, generation)` in
 # the sender ratchet, which is a key/nonce reuse over location payloads.
 #
-# The handoff that makes background publishing work therefore has two halves,
-# and this guard pins both:
+# The handoff that makes background publishing work therefore has three parts,
+# and this guard pins all of them:
 #
 #   1. SINGLE SITE. `CircleManagerFfi.newInstance` may appear in exactly three
 #      files under haven/lib — one per isolate that legitimately owns a session
@@ -27,10 +27,32 @@
 #      its reclaim correctly declines, and background publishing stays dead.
 #      That is the failure the `e2e-fgs-publish` lane reproduced.
 #
+#   3. EVERY OPEN IS RELEASED. Each opener file must release at least as many
+#      SESSION handles as it opens. An open is a CLAIM on the Rust
+#      `LIVE_SESSIONS` registry, and only `dispose()` drops it; a handle that
+#      falls out of scope undisposed holds the claim until the process dies, so
+#      every later open in EVERY isolate is refused with "an MLS session is
+#      already open on this database". The registry that makes (1) and (2) safe
+#      is the same registry that makes one missed release permanent — and the
+#      damage is not confined to the leaking isolate, which is why counting per
+#      file is the check and why it belongs beside (1) rather than in a guard of
+#      its own: a separate script would have to re-derive the sanctioned opener
+#      set, and two derivations of one set drift.
+#
 # Pure-grep gate (no toolchain) so it runs in seconds alongside the other repo
 # guards. Behavioural coverage lives in
 # `haven/test/services/nostr_circle_service_test.dart` ("handoff durability");
 # this exists to stop a NEW opener appearing where no test is looking.
+#
+# Usage:
+#   check_mls_session_single_owner.sh              # check the tree
+#   check_mls_session_single_owner.sh --self-test  # hermetic fixtures for (3)
+#
+# Exit codes:
+#   0  all checks pass
+#   1  an invariant is violated
+#   2  the guard itself is broken (an opener that no longer opens; a failed
+#      self-test)
 
 set -euo pipefail
 
@@ -40,6 +62,111 @@ readonly UI_OWNER='haven/lib/src/services/nostr_circle_service.dart'
 readonly FGS_OWNER='haven/lib/src/services/background_location_task.dart'
 readonly WORKER_OWNER='haven/lib/src/services/background_catchup_worker.dart'
 status=0
+broken=0
+
+# --- check 3, factored so --self-test can drive it over fixtures -------------
+# Counted over a comment-stripped view, so the prose in these files explaining
+# why `dispose()` matters can never stand in for the call, and only over
+# disposals of a SESSION handle — a receiver whose name ENDS in `manager`, the
+# way every release in the tree is written (`manager`, `_manager`,
+# `_circleManager`, `circleManager`). Without that restriction any unrelated
+# `.dispose()` in the file — a stream controller, a ticker — counts as a release
+# of the MLS session, which is the one thing this check exists to see. A handle
+# named something else fails closed here rather than passing silently.
+#
+# The count is a FLOOR, not a matching, and the slack is real: the open is
+# written as `withFreshSecret((secret) => CircleManagerFfi.newInstance(...))`,
+# so the binding a static reader could follow is a closure result, and the UI
+# service legitimately releases its ONE handle on three exit paths (handoff,
+# wiped in-flight init, close) — two further undisposed opens THERE would still
+# pass. What a count does catch is an opener that releases on fewer paths than
+# it opens, and in the limit one that never releases at all.
+check_releases() {
+  local owner="$1" code opens frees
+  code=$(sed 's|//.*||' "${owner}")
+  opens=$(grep -c 'CircleManagerFfi\.newInstance(' <<<"${code}" || true)
+  frees=$(grep -cE '[Mm]anager\??\.dispose\(\)' <<<"${code}" || true)
+
+  if (( opens == 0 )); then
+    echo "ERROR: ${owner} no longer opens a session in code; check 1 and this one"
+    echo "have drifted apart — update the guard rather than deleting it."
+    return 2
+  fi
+  if (( frees < opens )); then
+    echo "ERROR: ${owner} opens ${opens} MLS session(s) but releases only ${frees}."
+    echo "Every CircleManagerFfi.newInstance() takes a claim on the Rust"
+    echo "LIVE_SESSIONS registry that ONLY dispose() drops. An undisposed handle"
+    echo "holds it for the life of the process, so every later open in every"
+    echo "isolate — the foreground service's, the catch-up worker's — is refused"
+    echo "with \"an MLS session is already open on this database\" (Security"
+    echo "Rule 14; docs/CI_HARDENING_BACKLOG.md workstream D)."
+    echo "A release whose receiver is not named *manager does not count here;"
+    echo "name the handle for what it is rather than widening this check."
+    return 1
+  fi
+  return 0
+}
+
+# Fixtures for check 3. Both directions, because the interesting failure is a
+# guard that reports a clean tree: the first case is the regression the receiver
+# restriction closes, and it passed before it.
+self_test() {
+  local tmp failures=0
+  tmp=$(mktemp -d)
+  trap 'rm -rf "${tmp}"' RETURN
+
+  case_is() {
+    local want="$1" name="$2" src="$3" got
+    printf '%s' "${src}" >"${tmp}/case.dart"
+    set +e
+    check_releases "${tmp}/case.dart" >/dev/null 2>&1
+    got=$?
+    set -e
+    if (( got != want )); then
+      echo "self-test FAILED [${name}]: expected exit ${want}, got ${got}" >&2
+      failures=$((failures + 1))
+    fi
+  }
+
+  # One unrelated release per LINE, and as many of them as there are opens:
+  # `grep -c` counts lines, so a fixture that stacked them on one line would
+  # fail under a receiver-blind counter too, and prove nothing about the
+  # restriction it exists to pin.
+  case_is 1 'an unrelated .dispose() is not a session release' \
+'void a() { CircleManagerFfi.newInstance(dataDir: d); }
+void b() { CircleManagerFfi.newInstance(dataDir: d); }
+void c() { _subscription.dispose(); }
+void d() { _tileController.dispose(); }'
+
+  case_is 0 'every handle-shaped receiver in the tree counts' \
+'void a() { CircleManagerFfi.newInstance(dataDir: d); }
+void b() { manager.dispose(); }
+void c() { _manager?.dispose(); }
+void d() { _circleManager?.dispose(); }
+void e() { circleManager.dispose(); }'
+
+  case_is 1 'a commented-out release does not stand in for the call' \
+'void a() { CircleManagerFfi.newInstance(dataDir: d); }
+// The handle must be released here: manager.dispose();'
+
+  case_is 1 'an open with no release at all' \
+'void a() { CircleManagerFfi.newInstance(dataDir: d); }'
+
+  case_is 2 'a file that no longer opens is a guard drift, not a pass' \
+'void a() { manager.dispose(); }'
+
+  if (( failures )); then
+    echo "check 3 cannot be trusted until the ${failures} case(s) above are fixed." >&2
+    return 2
+  fi
+  echo "MLS session single-owner guard: self-test OK (5 fixtures)."
+  return 0
+}
+
+if [[ "${1:-}" == "--self-test" ]]; then
+  self_test
+  exit $?
+fi
 
 # --- 1. Single site per isolate ----------------------------------------------
 # Matches the CALL only (`newInstance(`), so the many doc comments naming the
@@ -99,7 +226,19 @@ elif ! grep -q '_handedOff' <<<"${init_body}"; then
   status=1
 fi
 
+# --- 3. Every open is matched by a release --------------------------------
+for owner in "${UI_OWNER}" "${FGS_OWNER}" "${WORKER_OWNER}"; do
+  rc=0
+  check_releases "${owner}" || rc=$?
+  # An opener that no longer opens is guard DRIFT, not a violation of the rule:
+  # checks 1 and 3 disagree about the sanctioned set, and one of them is wrong.
+  if (( rc == 2 )); then broken=1; elif (( rc != 0 )); then status=1; fi
+done
+
+if (( broken )); then
+  exit 2
+fi
 if (( status == 0 )); then
-  echo "MLS session single-owner guard: OK (3 sanctioned openers, handoff latch intact)."
+  echo "MLS session single-owner guard: OK (3 sanctioned openers, each released, handoff latch intact)."
 fi
 exit "${status}"

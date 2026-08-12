@@ -1,0 +1,3 @@
+disallowed-methods = [
+    { path = "rand::thread_rng", reason = "use rand::rngs::OsRng directly; thread_rng's StdRng reseed path is not appropriate for jitter that must be unpredictable to relay observers" },
+]

@@ -8,8 +8,11 @@
 # harness `--self-test`s inside it drive watchdogs and sleep through fixtures
 # (run-ios-sim-scenario alone is ~24 s, the wire-journal oracles ~15 s each),
 # which is fine for CI and far too slow for something that runs on every commit.
-# The SOURCE guards are the opposite: 22 argument-less greps over the tree,
-# ~9.5 s serially and ~2.6 s in parallel.
+# The SOURCE guards are the opposite: argument-less greps over the tree, with no
+# watchdog, no fixture and nothing to wait on, and they are fanned out across
+# cores below. Neither their COUNT nor a wall-clock figure is written down here
+# — the list is DERIVED (below), so both go stale on the next guard added; the
+# count is printed at run time instead.
 #
 # That fast half is also the half that keeps catching things. In CI run
 # 31216078806 `check_location_access_gate.sh` went red because a stagger

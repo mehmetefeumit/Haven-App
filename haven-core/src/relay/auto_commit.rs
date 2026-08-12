@@ -42,7 +42,7 @@ use std::time::Duration;
 use nostr::Event;
 
 use crate::circle::CircleManager;
-use crate::nostr::mls::types::PublishWork;
+use crate::nostr::mls::types::{PendingStateRef, PublishWork};
 use crate::nostr::mls::SessionManager;
 use crate::relay::RelayManager;
 
@@ -125,6 +125,39 @@ impl AutoCommitPublisher for nostr_sdk::Client {
     }
 }
 
+/// Publishes `event` to `relays` and resolves `pending` per Rule 13.
+///
+/// [`CircleManager::confirm_published`] ONLY on a ≥1-relay OK-ack, else
+/// [`CircleManager::publish_failed`]. Returns whether it confirmed.
+///
+/// Everything short of an OK-ack — a relay that answered `OK: false`, a send
+/// the relay never acknowledged, a transport error, or a relay set that cannot
+/// be published to at all — is a rollback, because each of them leaves the group
+/// at an epoch its peers never received. An empty `relays` can never produce an
+/// ack, so it fails closed without touching the transport.
+///
+/// This is the RECEIVE path's copy of the decision, and its only non-test caller
+/// is [`resolve_receive_publish_work`] below. The send-side staged commits
+/// (`create_circle`, `add_members_with_welcomes`, `remove_members`,
+/// `update_circle_relays`) are resolved from Dart over the FFI, which calls
+/// `confirm_published` / `publish_failed` directly, so they carry this identical
+/// contract BY HAND — a change to the rule here has to be mirrored there.
+pub async fn publish_then_resolve(
+    circle: &CircleManager,
+    publisher: &dyn AutoCommitPublisher,
+    event: &Event,
+    relays: &[String],
+    pending: PendingStateRef,
+) -> bool {
+    let acked = !relays.is_empty() && publisher.publish_auto_commit(event, relays).await;
+    if acked {
+        let _ = circle.confirm_published(pending).await;
+    } else {
+        let _ = circle.publish_failed(pending).await;
+    }
+    acked
+}
+
 /// Resolves the receive-side [`PublishWork`] from an `ingest` /
 /// `advance_convergence` batch per Rule 13, publishing any auto-commit through
 /// `publisher` before confirming.
@@ -166,12 +199,7 @@ pub async fn resolve_receive_publish_work(
         // Resolve the group's relays from the commit's own `#h` (nostr_group_id).
         // No relays / unknown group ⇒ cannot publish ⇒ roll back (fail closed).
         let relays = circle.relays_for_commit_event(&event).unwrap_or_default();
-        let acked = !relays.is_empty() && publisher.publish_auto_commit(&event, &relays).await;
-        if acked {
-            let _ = circle.confirm_published(pending).await;
-        } else {
-            let _ = circle.publish_failed(pending).await;
-        }
+        publish_then_resolve(circle, publisher, &event, &relays, pending).await;
     }
 }
 

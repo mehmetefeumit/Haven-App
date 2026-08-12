@@ -3337,6 +3337,7 @@ dependencies = [
  "nostr",
  "nostr-relay-builder",
  "nostr-sdk",
+ "oslog",
  "rand 0.8.5",
  "serde_json",
  "tokio",

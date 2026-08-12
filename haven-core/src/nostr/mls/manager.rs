@@ -74,6 +74,11 @@ pub use crate::util::redact_hex_sequences;
 /// Rule-5 exporter-secret retention test (§5.7).
 pub const DEFAULT_EXPORTER_LABEL: &str = "marmot/group-event";
 
+/// The engine's past-epoch exporter-secret retention window (Rule 5). Re-exported
+/// rather than copied so a Haven gate pins the number the engine actually keeps
+/// keys for; Haven does not override it.
+pub use cgka_engine::DEFAULT_MAX_PAST_EPOCHS;
+
 /// Bound on a group's relay set for NIP-59 welcome wrapping (protocol W8,
 /// `peeler.rs:427-449`): the engine's internal `wrap_welcome_with_metadata`
 /// fail-closes above this count, so Haven validates before create/invite.
@@ -88,6 +93,40 @@ const MAX_GROUP_RELAY_URL_LEN: usize = 512;
 /// (Security Rule 6/8).
 fn map_mls_err<E: std::fmt::Display>(e: E) -> NostrError {
     NostrError::MdkError(redact_hex_sequences(&e.to_string()))
+}
+
+/// The convergence policy every Haven session installs.
+///
+/// Immediate settlement (no quiescence delay). The engine's stored convergence
+/// replaces Haven's deleted 8s settle window; the engine's OWN default
+/// `settlement_quiescence_ms = 1_000` would re-introduce a settle delay that
+/// (a) lags every membership/relay commit by ≥1s and (b) risks a commit sitting
+/// `Buffered` until an unrelated later event re-ticks `advance_convergence` —
+/// the delivery-stall class Haven fought. Deterministic branch selection
+/// (`CommitOrderingKey`) still resolves concurrent same-epoch commits, and
+/// out-of-order future-epoch buffering (the F2 gate) is independent of
+/// quiescence, so fork-safety + reordering are preserved; only the same-epoch
+/// sibling settle DELAY is removed. `app_message_past_epoch_limit` stays at the
+/// default 5 (aligns with Rule 5 / [`DEFAULT_MAX_PAST_EPOCHS`]).
+///
+/// NOTE (DM-5a, flag for security review): revisit if concurrent-commit reorg
+/// churn (visible flip → deterministic re-converge) proves material at larger
+/// group scale.
+fn session_convergence_policy() -> CanonicalizationPolicy {
+    CanonicalizationPolicy {
+        settlement_quiescence_ms: 0,
+        ..CanonicalizationPolicy::default()
+    }
+}
+
+/// How many epochs past the group's tip an application message may be sealed
+/// under and still be accepted (Rule 5).
+///
+/// Reads the policy the session is actually opened with, so a gate pinning this
+/// bound cannot pass while the engine runs a different one.
+#[must_use]
+pub fn app_message_past_epoch_limit() -> u64 {
+    session_convergence_policy().app_message_past_epoch_limit
 }
 
 /// Manager for MLS session operations over the Dark Matter engine.
@@ -188,25 +227,7 @@ impl SessionManager {
                 NOSTR_ROUTING_COMPONENT_ID,
                 GROUP_MESSAGE_RETENTION_COMPONENT_ID,
             ])
-            // Immediate settlement (no quiescence delay). The engine's stored
-            // convergence replaces Haven's deleted 8s settle window; the engine's
-            // OWN default `settlement_quiescence_ms = 1_000` would re-introduce a
-            // settle delay that (a) lags every membership/relay commit by ≥1s and
-            // (b) risks a commit sitting `Buffered` until an unrelated later event
-            // re-ticks `advance_convergence` — the delivery-stall class Haven
-            // fought. Deterministic branch selection (`CommitOrderingKey`) still
-            // resolves concurrent same-epoch commits, and out-of-order
-            // future-epoch buffering (the F2 gate) is independent of quiescence,
-            // so fork-safety + reordering are preserved; only the same-epoch
-            // sibling settle DELAY is removed. `app_message_past_epoch_limit`
-            // stays at the default 5 (aligns with Rule 5 / DEFAULT_MAX_PAST_EPOCHS).
-            // NOTE (DM-5a, flag for security review): revisit if concurrent-commit
-            // reorg churn (visible flip → deterministic re-converge) proves
-            // material at larger group scale.
-            .convergence_policy(CanonicalizationPolicy {
-                settlement_quiescence_ms: 0,
-                ..CanonicalizationPolicy::default()
-            })
+            .convergence_policy(session_convergence_policy())
             // Enable MIP-03 SelfRemove. The engine's default `FeatureRegistry` is
             // EMPTY, so a group's leaves advertise no `self-remove` proposal-type
             // capability and a remaining member's auto-commit of a peer's

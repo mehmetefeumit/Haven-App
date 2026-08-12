@@ -18,6 +18,10 @@
 //! * [`EphemeralKeypair`] — `secret_bytes: [u8; 32]`, `#[derive(ZeroizeOnDrop)]`
 //! * [`IdentityKeypair`]  — `secret_bytes: [u8; 32]`, `#[derive(ZeroizeOnDrop)]`
 //!
+//! Plus the two image types whose plaintext buffers are wrapped rather than
+//! derived, because the struct around them is not secret-only:
+//! [`ProcessedAvatar`] and [`ProfilePicture`] (RM-Z2 below).
+//!
 //! All *other* secret material in the crate is either held by MDK / `nostr`
 //! types (never owned by a haven-core struct — the `get_stored_exporter_secret`
 //! accessor returns only a `bool`, never raw bytes) or carried transiently in a
@@ -26,11 +30,13 @@
 //! re-asserting it here would test the dependency rather than haven-core, so we
 //! deliberately do not.
 //!
-//! No security/privacy data is printed here: the assertion is a compile-time
-//! trait bound only.
+//! No security/privacy data is printed here: every assertion is a compile-time
+//! trait bound or type projection, and nothing is instantiated at runtime.
 
+use haven_core::avatar::ProcessedAvatar;
 use haven_core::nostr::identity::IdentityKeypair;
 use haven_core::nostr::EphemeralKeypair;
+use haven_core::profile::ProfilePicture;
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 /// Compile-time proof that `T: ZeroizeOnDrop`. Instantiating this for a type
@@ -54,17 +60,22 @@ fn secret_bearing_types_are_zeroize_on_drop() {
     assert_zeroize_on_drop::<IdentityKeypair>();
 }
 
-/// RM-Z2 (image sanitization pipeline): every plaintext image byte buffer the
-/// avatar pipeline owns is wrapped in `Zeroizing<Vec<u8>>`, which is
-/// `ZeroizeOnDrop`. The `ProcessedAvatar` type is *not* secret-only (it also
-/// carries non-secret metadata like MIME and dimensions), so it cannot itself
-/// derive `ZeroizeOnDrop`; instead the invariant is pushed down to the field
-/// type. This compile-time assertion locks in that the buffer wrapper actually
-/// zeroizes — if someone swaps a field to a bare `Vec<u8>`, the avatar module
-/// would no longer compile against this wrapper and a reviewer would catch it.
-/// Asserting the wrapper here keeps the secret invariant explicit at the test
-/// layer.
-#[test]
-fn avatar_plaintext_buffer_wrapper_is_zeroize_on_drop() {
-    assert_zeroize_on_drop::<Zeroizing<Vec<u8>>>();
-}
+/// RM-Z2 (image pipeline): every plaintext image byte buffer the pipeline owns
+/// stays `Zeroizing<Vec<u8>>`.
+///
+/// `ProcessedAvatar` and `ProfilePicture` also carry non-secret metadata
+/// (dimensions, URL, content hash), so neither can derive `ZeroizeOnDrop`
+/// itself; the obligation lives on the field type instead. Each witness below
+/// is a projection whose RETURN TYPE is the wrapper, so demoting its field to a
+/// bare `Vec<u8>` is a type mismatch and fails the build. A bound on
+/// `Zeroizing<Vec<u8>>` alone would not: it is a property of the `zeroize`
+/// crate, and `Zeroizing<T>` derefs to `T`, so a demoted field goes on
+/// compiling everywhere it is used.
+///
+/// These fields also sit outside `check_secret_fields_zeroized.sh`'s reach —
+/// neither `canonical` nor `ProcessedAvatar` is a secret-shaped NAME — so this
+/// is the only automated hold on them.
+const _: fn(ProcessedAvatar) -> Zeroizing<Vec<u8>> = |a| a.canonical;
+const _: fn(ProcessedAvatar) -> Zeroizing<Vec<u8>> = |a| a.thumbnail;
+const _: fn(ProfilePicture) -> Zeroizing<Vec<u8>> = |p| p.canonical;
+const _: fn(ProfilePicture) -> Zeroizing<Vec<u8>> = |p| p.thumbnail;
