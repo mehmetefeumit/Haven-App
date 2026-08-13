@@ -520,6 +520,23 @@ mod tests {
     }
 
     #[test]
+    fn location_retention_secs_is_pinned_at_one_day() {
+        // Read through a `let` for the same reason as the freshness/jitter
+        // pins elsewhere in this crate — see `clock_skew_threshold_is_pinned`
+        // in `relay/clock_skew.rs`.
+        let retention = LOCATION_RETENTION_SECS;
+        // The receiver-side persistence horizon, disclosed as "stays on their
+        // phones for up to a day" (leaveCircleDialogBody). NARROWING silently
+        // makes that promise generous (a stale peer location disappears sooner
+        // than users are told); WIDENING silently makes it false. Neither
+        // direction is caught by anything else: the derivation site only
+        // asserts `purge_after > timestamp`, and the overwrite-on-write
+        // property is pinned in `circle::manager::tests::
+        // upsert_last_known_location_overwrites_caller_supplied_purge_after`.
+        assert_eq!(retention, 24 * 60 * 60, "LOCATION_RETENTION_SECS moved");
+    }
+
+    #[test]
     fn display_name_deserialization_with_field() {
         let json = r#"{"latitude":0.0,"longitude":0.0,"geohash":"s0000000","timestamp":"2025-01-01T00:00:00Z","expires_at":"2025-01-02T00:00:00Z","display_name":"Bob"}"#;
         let location = LocationMessage::from_string(json).unwrap();

@@ -1001,6 +1001,51 @@ void main() {
     });
 
     test(
+        'destroyLegacyMlsState installs the keyring before the FFI call '
+        '(same prerequisite as wipeAllMlsState)', () async {
+      // destroy_legacy_mls_state destroys a keyring entry, not just files, so
+      // — like wipeAllMlsState — the backend must be installed first; the
+      // Rust function does not install it itself.
+      var keyringCallCount = 0;
+      final service = NostrCircleService(
+        relayService: _StubRelayService(),
+        dataDirectoryProvider: _ThrowingDataDirectoryProvider(),
+        keyringInitializer: () async {
+          keyringCallCount++;
+        },
+      );
+
+      await expectLater(service.destroyLegacyMlsState(), throwsA(anything));
+      expect(
+        keyringCallCount,
+        1,
+        reason:
+            'destroyLegacyMlsState must install the keyring before the FFI '
+            'call, exactly like wipeAllMlsState',
+      );
+    });
+
+    test(
+        'destroyLegacyMlsState surfaces a generic CircleServiceException on '
+        'failure (no internal detail leak)', () async {
+      final dataDir = _ThrowingDataDirectoryProvider();
+      final service = NostrCircleService(
+        relayService: _StubRelayService(),
+        dataDirectoryProvider: dataDir,
+        keyringInitializer: () async {},
+      );
+
+      try {
+        await service.destroyLegacyMlsState();
+        fail('Expected CircleServiceException');
+      } on CircleServiceException catch (e) {
+        expect(dataDir.wasCalled, isTrue);
+        expect(e.message, 'Failed to destroy legacy MLS state');
+        expect(e.message, isNot(contains('Stub: stop before FFI')));
+      }
+    });
+
+    test(
         'closeAndInvalidate DRAINS an in-flight initialization before '
         'returning (M10 H1 in-flight-open race)', () async {
       // The dangerous window: an initialize() suspended at its awaited DB open

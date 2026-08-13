@@ -17,19 +17,37 @@ The session that produced this document then pivoted to implementing the
 profile-plane relay separation (see `haven-core/SECURITY.md`, "Profile-plane
 relay separation — accepted deviations").
 
-**Status roll-up as of 2026-08-10.** Done: the relay separation; Workstream A
+**Status roll-up as of 2026-08-12.** Done: the relay separation; Workstream A
 (A1–A10); Workstream B (B1–B9, which closed most of the delivery blind spot —
-B3/B4/B9 now assert a *peer's decrypted* coordinates); P0-1 through P0-5 except P0-4; and
-Workstream C, whose oracles are now WIRED into the Android and iOS lanes —
-though they have still never read a journal from a real run, so the first CI
-run is the first evidence. C's follow-ups are done — the MLS group-id channel
-carries the Rule-4 ground truth over an intercepted control frame, and
-`--exclude-conn` is wired on both lanes. Still open: P0-4's backward paging, three latent C findings recorded below, and Workstreams D, E and F.
+B3/B4/B9 now assert a *peer's decrypted* coordinates); P0-1 through P0-5,
+P0-4's backward paging included (with it, the page limit dropped 512 → 500,
+without which every relay running strfry clamped the REQ and the truncation
+signal could never fire); and **Workstream C, now closed** — run 31507917222 was
+green across all 34 jobs and its journal is the first real traffic the oracles
+have ever read, with all nine C5 invariants reporting a non-empty sample; and
+**Workstream D**, whose ten unenforced rules now each carry a gate (its table
+records what every one of them actually proves); and **Workstream F, now
+closed** — every contradicted and stale user-facing claim is fixed, every
+undisclosed behaviour is disclosed or changed, and the constants the copy quotes
+are pinned in both directions, with the 12 locales retranslated and
+independently reviewed. Two of F's worst items were not ARB strings at all: the
+iOS permission prompt and the Play consent dialog, i.e. the two screens where
+the user is actively deciding whether to trust the app. Still open: two latent C
+findings recorded below, **Workstream E** (whose prerequisite — the privacy copy
+— is now met), and the two things D did not close — Rule 9 ships **ratcheted**,
+not held, with four `getSecretBytes()` sites allowlisted by `path:line`, and
+Rules 12/13/14 each keep a residual recorded in their own row. One product gap
+surfaced by F is recorded there and is an owner decision: no admin can remove a
+member from a circle in the shipped UI, though the service beneath it is
+complete and integration-tested. The pipeline-gating Rust red is FIXED, and it turned
+out to be a **receive-path defect**, not a flaky test: the engine silently
+dropped the first stored events of every fresh REQ while the EOSE anchored the
+cursor past them (run-31555665220 section).
 
-**Nothing left in Workstream C can be closed by more code.** The two remaining
-substantive items — trimming `_assertWirePrivacyInvariants` and the two
-allow-list kinds parked at `required: false` — both need the first green
-journal to confirm what is actually published.
+**Workstream C's two journal-gated items are closed.** Kinds 10002/10050 are
+`required: true` (all four consuming lanes were verified to publish both), and
+`_assertWirePrivacyInvariants` was trimmed — partially, and the part that stayed
+matters more than the part that went. Detail in the C section below.
 
 ---
 
@@ -323,17 +341,79 @@ tie-break — it takes the last write. Discovered by asserting the spec and
 watching it fail. This makes the same-second hazard WORSE, not better, since
 the same tie can resolve differently on different relays.
 
-### P0-4 · Catch-up drops offline backlog — OPEN (partial)
+### P0-4 · Catch-up drops offline backlog — FIXED 2026-08-11
 
-`haven-core/src/relay/catchup.rs` fetches with `.limit(512)`. Per NIP-01, `limit`
-returns the **newest** *n*, so past 512 events the oldest are never delivered.
+`haven-core/src/relay/catchup.rs` fetched one page and stopped. Per NIP-01,
+`limit` returns the **newest** *n*, so a larger window came back truncated at the
+bottom and its oldest events were never delivered.
 
-* **DONE:** saturation detection. On a saturated window the cursor is held
-  (`cursor_advance_ms`), so the tail is no longer silently skipped past.
-* **OPEN:** the complete fix is backward paging (`until = oldest_seen`, loop
-  until a short page or the deadline). Deferred because it changes fetch
-  ordering in the MLS convergence path and wants E2E validation. Until then,
-  a circle with a persistently saturated window makes no cursor progress.
+* **DONE (earlier):** saturation detection. On a truncated window the cursor is
+  held (`cursor_advance_ms`), so the tail is no longer silently skipped past.
+* **DONE:** backward paging. `catchup::Pager` re-issues the request bounded above
+  by the oldest event served, until every responding relay answers short. The
+  termination rule is the security-critical part and is documented on
+  `Pager::step`: the next `until` is a REMOTE number, so it is taken as the
+  **maximum** across the relays that truncated (one poisoned relay cannot curtail
+  the chase of the others) and obeyed only inside a locally chosen, strictly
+  descending band `[since, window_open)`. Everything else — page budget (8), the
+  per-circle event ceiling, the deadline, a chase that produced nothing, a
+  boundary that does not descend — halts with the window still marked incomplete
+  and the cursor held. `windows_truncated` now counts "could not complete", and
+  the whole chain still rides the ONE local `opened_at_secs` anchor.
+* **DONE (found by review, blocking):** an empty page from a relay we were still
+  draining is a FAILED READ, not an empty range — `fetch_events_per_relay`
+  reports a post-handshake fetch error as `responded == true` with no events, and
+  reading that as "drained" advanced the cursor over a tail we had local proof
+  existed. Sound because `until` is inclusive and the boundary is the max across
+  truncating relays, so such a relay must return at least the event at its own
+  bottom.
+* **DONE (found by review):** every page is now bounded above by the window's
+  open time, the first one included. Left unbounded, a page-full of future-dated
+  `kind:445`s — mintable by any observer of the circle's public `#h` — put the
+  boundary at the band's ceiling and froze the cursor for the price of one
+  publish.
+* **Also fixed, and the reason the earlier half was inert in production:** the
+  page limit was 512 while NIP-11 lets a relay CLAMP a larger `limit` to its
+  `limitation.max_limit`. strfry ships that cap at 500 — as do all three of
+  Haven's default relays, and `tooling/e2e/strfry.conf` — so `len() >= 512` could
+  never be true, saturation was never detected, and the cursor advanced straight
+  over every tail. The limit is now 500 and
+  `catchup_sweep_e2e::a_relay_that_clamps_our_limit_still_gets_fully_drained`
+  drives a relay configured exactly like strfry. This supersedes the B8 note
+  below about saturation being untestable in CI.
+
+**Residuals, all conservative (they cost a re-fetch or a delay, never a skip),
+each documented at its own definition site:**
+
+1. *A relay capping BELOW 500* still defeats the truncation signal. Needs a page
+   size under the ecosystem floor or NIP-11 cap discovery; both cost round trips.
+2. *A PARTIAL read reads as a short page.* `RelayPool::fetch_events_from` returns
+   `Ok(collected)` however its stream ended and swallows per-relay stream errors
+   in its driver task, so a fetch timing out mid-delivery is indistinguishable
+   from a complete short answer — no flag derived from that call's `Result` can
+   see it, because it returns `Ok`. The total-failure half IS caught (residual
+   above). Closing the partial half means observing per-relay EOSE, i.e. driving
+   `Relay::stream_events` instead of `fetch_events_from`: a change to the shared
+   fetch primitive and every caller. **Follow-up.**
+3. *A window that stays above `8 × 500` never finishes.* Every sweep restarts the
+   chase at the newest end, so its oldest tail is fetched by no sweep. Nothing is
+   dropped (the cursor holds), but nothing reaches it either. Resuming across
+   sweeps needs a persisted per-circle backfill floor — new remotely-influenced
+   state that needs its own safety argument. Narrow in practice: application
+   messages carry a ~4-minute NIP-40 expiration, and commits/proposals are rare.
+   **Follow-up.**
+4. *A relay that misses round 1 but answers a later one* contributes a page
+   bounded by that round's `until`, so its events above the boundary were never
+   requested — the same coverage assumption `cursor_advance_ms` already documents
+   for partial relay coverage, now reachable inside one chain. Fix if wanted:
+   record round 1's responder set and require the completing round's responders
+   to be a subset. **Follow-up.**
+5. *Wake-budget shape change.* Eight sequential rounds cannot fit a 20–25 s wake,
+   so the deadline is the real bound; one badly backlogged circle can now consume
+   a whole wake where it previously cost one round, leaving later circles for the
+   next wake. And because the chase fetches every page before ingesting any, a
+   deadline landing mid-chase applies nothing and defers the whole union.
+   Per-page ingest is the obvious answer and is a **follow-up**.
 
 ### P0-5 · Unauthenticated remote cursor poisoning — FIXED 2026-08-04 (all paths)
 
@@ -789,12 +869,14 @@ clean tree (`cargo llvm-cov --all-features --lcov`, `flutter test --coverage`):
 manager.rs` (853), `src/nostr/giftwrap.rs` (207) and all of
 `src/nostr/encryption/` (126) could go to zero *together* with the gate still
 green. Rust's weak points AT PINNING TIME were `src/relay/catchup.rs` **28.50%**
-(the same file as the open `limit(512)` defect, `catchup.rs:160`),
+(the same file as the then-open P0-4 single-page defect),
 `src/relay/auto_commit.rs` 50.85%, `src/location/nostr.rs` 52.54%,
 `src/relay/manager.rs` 71.59%. **Three have since been closed and re-pinned** —
 catchup.rs 97.14% (floor 95), auto_commit.rs 100.00% (floor 100), manager.rs
 75.64% (floor 73) — which is the ratchet working. `src/location/nostr.rs` (~52%)
-is the one still open, and `limit(512)` remains uncovered.
+is the one still open. The page limit is now covered: P0-4's backward pager and
+its bounds are driven end to end by `tests/catchup_sweep_e2e.rs`, including a
+window larger than one page and a relay that clamps the `limit`.
 
 Flutter was the literal case the item described (→ shows movement since pinning):
 
@@ -2045,11 +2127,12 @@ structurally that every global the script pins to 0 has a matching restore to 1
 AND that `cleanup()` actually calls it — an unreferenced restore helper restores
 nothing.
 
-*Also noted while deriving this, not acted on:* `strfry.conf` sets
-`maxFilterLimit = 500` while `CATCHUP_MAX_EVENTS_PER_CIRCLE = 512`, so strfry
-clamps the catch-up REQ to 500 and `fo.events.len() >= 512` can never be true
-against the hermetic relay — P0-4's saturation detection is untestable in CI as
-configured. Belongs to P0-4, not B8.
+*Also noted while deriving this, since FIXED under P0-4:* `strfry.conf` sets
+`maxFilterLimit = 500` while the catch-up page limit was 512, so strfry clamped
+the REQ to 500 and `fo.events.len() >= 512` could never be true — saturation was
+undetectable in CI, and (the larger half of the finding) equally undetectable in
+production, where all three default relays run strfry. The page limit is now 500
+so our own `limit` is the binding one. Belonged to P0-4, not B8.
 
 Also: make the Phase-B re-arm failure fatal (`run-m7-background-catchup.sh:818-821`
 is a non-fatal NOTE), and remove the `|| true` from `strfry_conn_count` /
@@ -2138,10 +2221,12 @@ true Doze deferral timing, real GPS radio behaviour.
 
 ## Workstream C — relay-observer privacy oracle
 
-Today's `_assertWirePrivacyInvariants`
-(`haven/integration_test/e2e/e2e_combined.dart:4226-4409`) is a **forbid-list by
-explicit design** (`:4334-4341`) scoped to one circle's kind-445 stream. A new
-kind, a new tag, or an MDK-introduced field passes silently.
+*As found.* `_assertWirePrivacyInvariants` was a **forbid-list by explicit
+design**, scoped to one circle's kind-445 stream: a new kind, a new tag, or an
+MDK-introduced field passed silently. (It has since been trimmed to its Rule 2/4
+core; the forbid-list half now lives in the scenario's standing watch. Line
+citations in this section predate that change — the function now begins at
+`e2e_combined.dart:4690`.)
 
 It is also **silently degrading**: application kind-445s carry
 `expiration = created_at + 228`, the Android lane's strfry enforces NIP-40 (the
@@ -2155,13 +2240,13 @@ the commit subset while `isNotEmpty` stays satisfied by commits.
 |---|---|
 | C1 | **Recording WebSocket proxy** in `tooling/e2e/local-relay` — NDJSON of every frame both directions, with `wire_seq`/`conn_id`. Not in-relay hooks: those see only EVENT and REQ, and strfry vs `LocalRelay` differ. Immune to NIP-40 eviction because it records what was *sent*. Fail open |
 | C2 | Meta-floors: journal non-empty; ≥1 event per participant pubkey; sentinel-anchored snapshot so background wakes can't race the read |
-| C3 | Closed kind set over de-duplicated lines. Use a **set, never a multiset** — counts are nondeterministic. Kinds 0/5 allowed-but-not-required. 10051 is **forbidden**, not allowed: its only live emit path is a one-shot empty retraction on a pre-Dark-Matter migrating install, which no lane is, and allowing it would loosen a check `e2e_combined.dart:4354` already makes (recorded in `wire_allowlist.json` `_disagreements`) |
+| C3 | Closed kind set over de-duplicated lines. Use a **set, never a multiset** — counts are nondeterministic. Kinds 0/5 allowed-but-not-required. 10051 is **forbidden**, not allowed: its only live emit path is a one-shot empty retraction on a pre-Dark-Matter migrating install, which no lane is, and allowing it would loosen a check `e2e_combined.dart:513` already makes (recorded in `wire_allowlist.json` `_disagreements`) |
 | C4 | Per-kind `observed ⊆ allowed` **and** `required ⊆ observed` — not exact set equality, which false-reds on absent optional tags. Day-one allow-list is recorded in the audit notes |
 | C5.1 | **No ONE publisher sends two 445s with different `h` in the same `created_at` second** — the peeler binds outer to inner timestamp, so a relay learns two circles share a member. Live leak. Asserted per sending connection over `dir == "c2r"`: the journal is multi-tenant (the app, a dozen in-process `SyntheticUser` peers, the harness's own multiplexed sockets), and a journal-wide reading reports two devices coinciding as one device serving two circles — see "First real traffic" below |
 | C5.2 | **REQ-filter allow-list** — kind-3 is banned as an event; a multi-author `Filter::authors([...])` would re-create the same social-graph disclosure as a different frame type. Currently ABSENT from the tree (`profile/fetch.rs` uses singular `Filter::author`, one relay per author) and banned by `check_profile_privacy_boundaries.sh:628-644`; the wire allow-list is the regression tripwire, not a live-leak finding |
 | C5.3 | 445 tag-names ∈ {`h`}, {`h`,`expiration`} — the MDK-bump tripwire |
 | C5.4 | No `g`/`alt` tag on any kind — guards `haven-core/src/nostr/event.rs:203-227`, a live-but-unreachable builder emitting a truncated geohash |
-| C5.5 | 1059 tag-set == {`p`} — guards the orphaned `giftwrap::wrap_welcome`, still `pub`, which stamps a 30-day expiration |
+| C5.5 | 1059 tag-set == {`p`} — the MDK-bump tripwire for invitation delivery. Written against `giftwrap::wrap_welcome`, an orphaned `pub` builder stamping a 30-day expiration whose own unit test therefore asserted the OPPOSITE of the shipped wire; that builder was DELETED 2026-08-12 on the P0-5 reasoning, and the expiration-free property is now also asserted host-side against the engine's real wrap (`mls_e2e_security_tests::rm_welcome_gift_wrap_privacy_sweep`) |
 | C5.6 | Publish-target containment; no event ever reaches an unconfigured default relay |
 | C6 | Canaries: circle display name (high value), petname, coordinates. **Drop locale and timezone** — no wire field can carry a timezone, and locale already has a stronger static gate |
 | C7 | Egress guard: currently rejects only TCP 80/443 and records nothing. Move to logging-only first (`-j LOG`, publish observed destinations), assert once nightlies show it stable. **Skip the iOS half** — that lane is `macos-latest` (no iptables) and hermeticity is already enforced in-process |
@@ -2179,12 +2264,12 @@ allow-list, linted by both consumers.
 | Item | Artefact | Self-test |
 |---|---|---|
 | C1 | `tooling/e2e/local-relay/src/{proxy,frame,journal,summarize}.rs`, `bin/wire_proxy.rs` — listens on 7788, forwards to 7777 | 77 Rust tests |
-| C2–C4 | `tooling/e2e/ci/check-wire-journal.sh` | 121 fixtures |
+| C2–C4 | `tooling/e2e/ci/check-wire-journal.sh` | **128 fixtures**, `MIN_CASES` pinned exactly |
 | C5.1–C5.9 | `tooling/e2e/ci/check-wire-correlation.sh` | **147 fixtures**, `MIN_CASES=147` (pinned exactly) |
 | C6 | `haven/integration_test/e2e/_lib/wire_canaries.dart`, CLI `tooling/e2e/ci/check-wire-canaries.dart` | 85 Dart tests, 177 live terms |
 | C7 | `tooling/e2e/ci/setup-network-guard.sh` + `egress-allowlist.txt`, **observe mode** | wired on e2e-android, e2e-profile, e2e-location-provider-toggle |
 | — | `scripts/ci/check_wire_proxy_test_only.sh` — the proxy may never be reachable from app code (NEGATIVE half) | green |
-| — | `scripts/ci/check_wire_oracle_lane_reachable.sh` — the oracles must be REACHED by a lane (POSITIVE half) | 40 fixtures |
+| — | `scripts/ci/check_wire_oracle_lane_reachable.sh` — the oracles must be REACHED by a lane (POSITIVE half) | 39 fixtures |
 
 **Wiring, 2026-08-10.** Both `e2e-android.yml` and `e2e-ios.yml` point the app at
 the proxy on 7788, mint ONE sentinel token and thread the same string through the
@@ -2200,6 +2285,46 @@ assertion is deliberately KEPT, not replaced** — nothing has yet proven the
 oracles read real traffic correctly, and porting a check while deleting its only
 other implementation leaves a window where neither is proven. Delete it only
 after a green journal shows the oracle equivalent firing.
+
+**PARTIALLY TRIMMED 2026-08-11, and the remainder is not deletable yet.** Run
+31507917222 is green across all 34 jobs and the Android live-sync lane reports
+all nine C5 invariants holding with a non-empty sample each, including the
+sidecar-fed C5.8. That discharges the exit condition **for the live-sync lanes
+only**: the whole C5 arm is gated on the `live_sync` input in both
+`e2e-android.yml` and `e2e-ios.yml` (C5.1 needs an application kind-445 from two
+distinct groups, which only the two-circle live-sync scenario produces), so on
+the poll lanes the oracle asserts none of C5.7/C5.8/C5.9. Deleting the in-drive
+ephemeral-key and group-id checks would therefore have left Security Rules 2 and
+4 unenforced on the wire for half the lanes — a coverage cut disguised as a
+de-duplication. They stay, with the gate written into the function's doc comment
+so the next reader has the exact, checkable condition rather than a judgement
+call.
+
+What DID come out is the forbidden-KIND half, and not by trusting C3 either. The
+kind-443/10051 REQ was a strictly weaker duplicate of a check already in the same
+test: the scenario's standing privacy watch opens before Phase 1 and asserts the
+same kinds empty at the end of the run. Kinds 3 and 444 moved into that same
+watch, which upgrades them from a 3-second REQ at Phase 4 to whole-run coverage
+that also spans both leave flows and — because a standing subscription sees an
+event at relay-ACCEPT time — cannot be emptied by the NIP-40 eviction this
+section already flags as the in-drive oracle's silent-degradation mode. What a
+standing watch canNOT see is an event the relay REJECTS: both hermetic relays
+verify signatures, so an UNSIGNED bare 444 — the exact shape Rule 3 names —
+never reaches a subscriber. Only C3's send-side `_forbidden_by_omission` entry
+catches that, so it is not a duplicate of this watch and must not be retired as
+one. The bare-444
+signature scan folded into that assertion's reason string, where it was always
+purely diagnostic: it could only fire in a world where "no bare 444" had already
+failed. Net effect on every lane, including `e2e-flakiness-stress.yml`, which
+runs this drive nightly with no recorder in path: strictly more coverage, one
+fewer duplicate, two fewer empty-result relay round-trips. C3 forbids the same
+four kinds by omission from `wire_allowlist.json` and is ungated, so both
+journalled lanes now carry them twice over.
+
+The `p`-tag check also stays, for a weaker reason recorded honestly: C4's
+per-kind tag allow-list (445 → `{h, expiration}`) is ungated and catches it on
+both lanes — its own self-test fixture is literally a `p` on a 445 — but C4 reads
+the journal, and the stress lane has none.
 
 **The MLS group-id channel — LANDED 2026-08-10.** C5.8 needs the real id as
 ground truth, and it cannot come from the journal (its absence there IS the
@@ -2296,11 +2421,65 @@ round** (the count above is now 13):
     a reader greps to conclude "green ⇒ the rule held" must never name an
     invariant that did not run.
 
-**Still blocked on a real journal** (cannot be closed by more code):
-`_assertWirePrivacyInvariants`'s trim, and kinds 10002/10050 at
-`required: false`. Both need the first green run to confirm what is actually
-published. C5.6 remains structurally vacuous in a single-endpoint lane — honest
-to keep, but the lane must not be read as proving containment.
+**Both journal-gated items are now CLOSED 2026-08-11** against run 31507917222
+— see "The journal-gated items, closed" below.
+
+### The journal-gated items, closed 2026-08-11
+
+Run **31507917222** (commit `825bdf6`) is green across all 34 jobs, and the
+Android live-sync lane's journal is the first real traffic these oracles have
+ever read. It is also non-vacuous, which is the part that mattered:
+
+```
+wire-correlation: clean — C5.1 … C5.9 all hold, and all nine had a non-empty sample.
+C5.8: 12 MLS group id(s) declared from the proxy sidecar (values withheld — Security Rule 4).
+wire-journal summary: 30 unique SENT event(s) …; kinds [445,1059,10002,10050,30443]
+```
+
+**Kinds 10002 and 10050 → `required: true`.** All four consuming lanes were
+checked, not just the one that produced the quote above: iOS 16 events, Android
+16, Android live-sync 30, iOS live-sync 30 — every one reports the same kind set.
+Without the promotion the `allowed` tag sets for these kinds passed vacuously
+over a run that sent neither.
+
+**Their `r`/`relay` tags stay optional, against what the now-deleted `_followups` block instructed.**
+The recorded reason for the caveat — that a zero-tag unpublish tombstone would
+false-red — turns out not to be reachable: `decide_relay_list`
+(`relay/maintenance/relay_list.rs:143`) returns `Suppressed` on an empty relay
+list, the heal is the only production publisher of either kind, and the two
+zero-tag builders reach Dart as `buildUnpublishRelayList` with no caller in
+`haven/lib`. So the false-red is latent, not active — which is an argument FOR
+promoting the tags. Declined anyway, on a ground that does not depend on lane
+reachability: requiring `r`/`relay` asserts the user's relay URLs MUST be on the
+wire, so a user withdrawing them — strictly LESS disclosure — would read as a
+regression. That is the wrong direction for a privacy oracle. What it would buy
+is a functionality assertion whose failure mode is privacy-benign.
+
+**One new red-lane vector, recorded so the first occurrence is diagnosed and not
+"fixed" by demoting the kind.** `decide_relay_list` returns `NoOp` when no relay
+responds, and unlike the 30443 tick the relay-list tick has no retry ladder — it
+re-arms at 30 min, longer than a run. Several invalidation-driven attempts per
+run make this unlikely, but a lane reddening here is a probe hiccup, not a
+privacy finding.
+
+**The trim's own non-vacuity hole, closed in the same pass.** The retained Rule
+2/4 scan reads its sample with a `collectN` guarded only by `isNotEmpty` — and
+commits carry `h` alone while only application messages carry NIP-40
+`expiration`. So the exact degradation this section's opening already warned
+about (the sample "shrink[ing] to the commit subset while `isNotEmpty` stays
+satisfied by commits") could still happen silently, on the poll lanes where
+nothing else asserts Rules 2 and 4. The function now also requires at least one
+collected 445 to carry an `expiration`, which turns that documented degradation
+into a loud failure for one `expect` over a list it already walks.
+
+**Fixture counts** moved 121 → **128** (`MIN_CASES` pinned by equality), all
+seven proving the new `required` actually fails when the kind is absent —
+mutation-tested in both directions, including that promoting either tag would
+false-red a zero-tag unpublish.
+
+ C5.6 remains structurally vacuous
+in a single-endpoint lane — honest to keep, but the lane must not be read as
+proving containment.
 
 ### First real traffic, 2026-08-11 — C5.1 was measuring the harness, not the app
 
@@ -2382,22 +2561,76 @@ plus a self-declaration — not argued away in a header comment.
 
 ## Workstream D — security-rule enforcement
 
-| Rule | Status | Check |
+| Rule | Status | Residual |
 |---|---|---|
-| 12 backpressure | **NONE** — constant referenced at 2 lines, tested nowhere | Fix P0-4, then: publish `limit+k`, assert cursor didn't advance past the batch's oldest and a second sweep delivers the rest |
-| 11 nonce | **NONE** (label half guarded; nonce half not) | Pure `haven-core` test using `encrypt_location`'s `event_json` — no relay. All 12-byte prefixes distinct, no fixed-prefix+counter shape, ≥28 decoded bytes. **Drop the uniformity assertion** (powerless at N≈30). Gets Rule 2 distinctness free |
-| 8 no raw errors | WEAK — per-site redaction tests at ~5 call sites (`profile_service_test.dart:250`, `live_sync_resubscriber_test.dart:762`, `map_shell_detached_release_test.dart:116/265`, `nostr_subscription_service_test.dart:33`); no repo-wide lint | Dart lint test binding `catch (<ident>)`, flagging interpolation outside `debugPrint`/`assert`, allowlisting `${e.runtimeType}`. A literal `$e` grep is defeated by renaming the variable |
-| 14 single session | WEAK — `check_mls_session_single_owner.sh` (`repo-guards.yml:101`) already pins the three-opener set and the handoff latch; the open half is disposal | Static: `newInstance` ⇒ `dispose()` same file. Runtime: B1 |
-| 5 retention | WEAK — the behavioural half already exists (`mls_e2e_security_tests.rs:366`: an N+6 ciphertext does not decrypt), but the constants are unpinned (both appear only in comments, `nostr/mls/manager.rs:201-202`, `:962`) and the N+5 positive edge is untested | Pin `app_message_past_epoch_limit == 5` **and** `DEFAULT_MAX_PAST_EPOCHS == 5`; behavioural: ciphertext at epoch N decrypts at N+5, reports expired at N+6. **Not** an at-rest byte scan — SQLCipher always encrypts and no past-epoch exporter secret is persisted, so that check is doubly vacuous |
-| 3 444 unsigned | WEAK — type-level only; `UnsignedEvent` silently drops a stray `sig` | Assert the raw decrypted rumor JSON has no `"sig"` key |
-| 13 publish-before-apply | WEAK on send side (ack/sent distinction is correct; no test) | DI seam + table test {acked, NAK, timeout, throw} × 4 ops |
-| 6 no key logging | WEAK — the only enforcement is `tooling/e2e/ci/scan-logs-for-secrets.sh`: 7 secret-SHAPE patterns over CAPTURED RUNTIME logs, which are device-wide, so the FGS isolate IS covered. There is no source-level log-interpolation guard over the 58 `log::{debug,info,warn}!` sites in `haven-core/src` or the 33 in `rust_builder/src` | Repo-wide log-interpolation guard with inline `// log-scan-ok:` suppressions; make the `keyring_core`→Off filter platform-independent |
-| 7 zeroize | WEAK — hand-maintained 2-type whitelist, one type dead | Source-scanning test: secret-shaped field ⇒ `Zeroizing`/`ZeroizeOnDrop` |
-| 9 Dart secret lifetime | WEAK — `withFreshSecret` covers all 3 `CircleManagerFfi.newInstance` sites (pinned per-site by `identity_secret_scrub_test.dart:55`, which also asserts the helper really `fillRange`s at `:129`); the gap is ~7 other `getSecretBytes()` sites fetching into a bare unscrubbed local (`name_circle_page.dart:290`, `invitation_provider.dart:114`, `invitation_poll_status_provider.dart:272`, `nostr_profile_service.dart:116/138/185`) | Lint test: `getSecretBytes()` ⇒ `withFreshSecret` or explicit `fillRange` |
-| 1 key separation | WEAK — `p3a_…` (`mls_e2e_security_tests.rs:303`) asserts only that the identity key did not sign the 445 | A positive leaf-level test needs an MDK API exposing the leaf signature key; the existing test's own header records that `get_ratchet_tree_info` is gone and Haven no longer deps `openmls` directly, so **first identify the API**, then assert `leaf.signature_key() != identity_pubkey`. Until then the on-wire `assert_ne!` plus the mandatory `account-identity-proof.v2` leaf extension is the whole gate |
+| 12 backpressure | **COVERED** by P0-4's paging suite (`catchup_sweep_e2e`: a `limit+k` window is drained whole and only then advances; a clamping relay is drained too; an unpageable window holds the cursor and reports `windows_truncated`), plus pure `Pager::step` cases for each bound | Remaining: the convergence-buffer intake cap, which is a different Rule-12 surface from the fetch bound |
+| 11 nonce | **COVERED** — `security_rule_gates.rs::rule11_kind_445_nonces_never_repeat_under_one_epoch_key`. Two bursts of 445s asserted to sit in ONE epoch, the second drawn after the `SessionManager` is dropped and reopened on the same MLS database: a nonce source that is per-run-random but deterministic ACROSS restarts repeats its whole sequence under the same `group_event_key` (a restart does not advance the epoch), and no single-session sample can see that. The union must be distinct, no byte position may be constant (fixed prefix), and the sequence may not be monotonic (counter) | Byte-level uniformity is deliberately NOT asserted: at this sample size no distribution test separates a CSPRNG from a biased source, so it buys flakiness and no power. Rule 2 rides the same sample — a fresh ephemeral author per 445, never the identity key |
+| 8 no raw errors | **COVERED** — `haven/test/lints/caught_error_interpolation_test.dart` parses every `catch` / `on … catch` clause for the identifier it actually BINDS, then flags interpolation of that identifier outside `debugPrint` and `assert`, exempting only `${e.runtimeType}`. Binding rather than grepping is the point: the repo convention is `catch (e)`, nothing stops `catch (err)`, and a literal `$e` grep dies on the rename. Whole-`lib/` scan, no allowlist, all sites clean | Two anti-vacuity floors: >50 files scanned and >50 bound catch clauses found, so the scan cannot pass by having gone blind |
+| 14 single session | **COVERED (static half)** — `check_mls_session_single_owner.sh` (a `repo-guards.yml` step) pins the three-opener set, the `releaseForHandoff` latch and `initialize`'s consultation of it, and now check 3: each opener file must release at least as many SESSION handles as it opens, counted over handle-shaped receivers on a comment-stripped view, so an unrelated `.dispose()` can no longer stand in for a session release | Residual: a count is a FLOOR, not a matching. `nostr_circle_service.dart` releases its one handle on three exit paths (`:282`, `:394`, `:1755`), so two further undisposed opens there would still pass, and the guard states that slack at the check rather than implying a matching. Tracing the handle is out of a grep's reach: the open is a closure result inside `withFreshSecret`. Its fixtures (`--self-test`, five cases, mutation-proved against a receiver-blind counter, an unstripped comment view and a dropped drift branch) run as their own `repo-guards.yml` step beside the guard. Runtime proof is B1 |
+| 5 retention | **COVERED** — `security_rule_gates.rs::rule5_retention_constants_are_pinned` pins `app_message_past_epoch_limit() == 5` **and** `DEFAULT_MAX_PAST_EPOCHS == 5` in both directions (widening keeps stale exporter secrets alive, narrowing drops legitimate offline backlog), plus their mutual agreement — an accept window outrunning the epochs whose keys still exist accepts what it can never decrypt. `rule5_epoch_n_ciphertext_still_decrypts_at_the_window_edge` supplies the positive edge, driven off the pinned bound, against the existing N+6 negative in `mls_e2e_security_tests` | Deliberately **not** an at-rest byte scan: SQLCipher always encrypts and no past-epoch exporter secret is persisted, so that check would be doubly vacuous |
+| 3 444 unsigned | **COVERED** — `security_rule_gates.rs::rule3_welcome_rumor_json_carries_no_signature` peels the 1059 by hand (two `nip44::decrypt` layers, asserting the kind-13 seal itself IS signed) rather than through `unwrap_welcome`, whose `UnsignedEvent` serde shape has no `sig` field and would therefore report a signature the sender really put on the wire as absent, then asserts the raw rumor JSON object carries no `"sig"` key | — |
+| 13 publish-before-apply | **COVERED** — `publish_before_apply_send_e2e.rs`, two tiers, because the halves fail differently. The production `RelayManager` plane is driven against in-process relays that ack, answer `OK: false`, accept-and-never-answer, or break the transport, pinning the boolean each yields — the third is the whole rule, since onto the socket is not acked. Those outcomes are then crossed with the four publish-bearing ops (`create_circle`, `add_members_with_welcomes`, `remove_members`, `update_circle_relays`), asserting the engine consequence: an epoch/roster/relay-set that moved only on an ack, the commit handed to the transport exactly when the transport was usable, and the staged reference spent either way so a stray confirm cannot resurrect a commit the relays never took | Residual: the SHIPPED send path is Dart calling `confirmPublished` / `publishFailed` directly (`nostr_circle_service.dart:600/602`, `:1162/1170`, `:1260/1300/1302`, `:1507/1520`). `publish_then_resolve` is production code for the RECEIVE path only — its one non-test caller is `resolve_receive_publish_work` — so this pins the decision and its engine consequences, not those Dart call sites |
+| 6 no key logging | **COVERED** — `check_no_key_logging.sh` (a `repo-guards.yml` step, its `--self-test` fixtures a second one) reads Rust and Dart SOURCE, so it reaches every path, build profile and encoding the runtime scanner cannot: `scan-logs-for-secrets.sh` matches seven secret shapes over captured device logs, and a `Zeroizing<[u8; 32]>` rendered `[171, 205, …]` by a `{:?}` on a path no lane drives is none of them. It analyses ONLY the interpolated placeholders and argument expressions — never the message prose, which is what lets it be aggressive about the word "key" without drowning in `"…key migration deferred: {e}"` — and classifies whole identifiers, so `wire_token()` is not a token and `pubkey` is not a key. String state carries ACROSS lines, so a multi-line literal cannot leak prose into the analysed text. Reviewed sites take an inline `// log-scan-ok:` with a reason, unhoistable to the top of a file. It also pins the `keyring_core` → Off filter on EVERY backend `init_app` installs, and their install ORDER: both are first-call-wins, so a filtered backend installed after FRB's pair silently no-ops | Anti-vacuity floors of 70 Rust / 380 Dart call sites (measured 92 / 479) and ≥2 backends. Blind by construction to a secret bound to a name that says nothing (`canonical`, `buf`); banning `{:?}` outright would ban the redacting `Debug` impls this codebase writes on purpose |
+| 7 zeroize | **COVERED** — `check_secret_fields_zeroized.sh` (a `repo-guards.yml` step, its `--self-test` fixtures a second one) flags any raw byte/string field (`[u8; N]`, `Vec<u8>`, `String`, `Box<[u8]>`, `&[u8]`, `&str`) whose name — or whose enclosing STRUCT's name — reads as secret material and which is neither `Zeroizing`-wrapped nor inside a `ZeroizeOnDrop` struct. The struct-name half is load-bearing: `ProfileRelaySalt`'s field is called `bytes`. Composed fields are covered by induction (the inner type is scanned by the same guard) rather than by a type whitelist, which is what rotted the compile-time list — never grown past two entries while the tree reached five secret-bearing types, one of the two dead since Dark Matter | Anti-vacuity floors: ≥110 structs scanned, ≥3 secret-shaped fields found. A secret whose field name says nothing (`ProcessedAvatar.canonical`) stays covered by the RM-Z2 projection witnesses in `zeroization_security.rs`, whose return type is the wrapper — so demoting one is a build error, not a change the scan cannot see |
+| 9 Dart secret lifetime | **RATCHETED, not covered** — `haven/test/lints/secret_bytes_scrub_test.dart` walks every `getSecretBytes()` call in `lib/`, follows `await` / parens / the `Uint8List.fromList` repackaging idiom to the local it binds, and requires a `fillRange` on THAT local in the SAME enclosing function; a sibling-method fixture proves it is not a whole-file substring match that would launder an unrelated scrub. Pass-through shapes bind no name and need none: the `withFreshSecret` tear-off (never a `MethodInvocation`), an arrow-closure provider, a direct return, an argument handed straight on | **Four live violations ship, allowlisted individually by `path:line`** — `name_circle_page.dart:290`, `invitation_provider.dart:114`, `nostr_identity_service.dart:184` and `:211`. The set is exact, so a new violation anywhere else fails and a fixed site left in the list fails too; but the rule is ratcheted, not held. (The earlier list here named `invitation_poll_status_provider.dart:272` and `nostr_profile_service.dart:116/138/185`, since scrubbed, and missed the `nostr_identity_service` pair.) |
+| 1 key separation | **COVERED** — `mls_e2e_security_tests.rs::p3a_leaf_signature_key_differs_from_nostr_identity_key` reads both keys off every leaf through `SessionManager::members()`, the leaf-level source the deleted `get_ratchet_tree_info` walk provided: `Member::credential` carries the leaf SIGNATURE key and `Member::id` the 32-byte x-only account key — `cgka-traits`' doc comment has the two TRANSPOSED, so a reader who trusts it writes the assertion backwards and it still passes. Asserted over Alice's post-create AND Bob's post-welcome view, anchored on the harness's own keypairs so it cannot pass comparing two strangers' keys, with both lengths pinned at 32 so the inequality is a real byte difference and not a truncation artifact. It catches the mutation that reuses the Nostr secret as the MLS signer, which `account-identity-proof.v2` does NOT: the proof binds the account to the leaf, it never requires them to differ | `p3a_key_separation_identity_proof_enforced_and_identity_not_used_for_group_messages` keeps the complementary half no leaf read can give — key separation as observed BY A RELAY |
 
-Also: `haven/rust_builder` has no `clippy.toml` yet mints both SQLCipher keys —
-copy `haven-core`'s `thread_rng` ban.
+Also: `haven/rust_builder/clippy.toml` now carries `haven-core`'s `thread_rng`
+ban, so the crate that mints both SQLCipher keys (`api.rs:832`, `:1171`) sits
+under the same `disallowed-methods` lint as the core.
+
+### What writing the gates FOUND, 2026-08-12
+
+Enforcing the rules turned up three live defects and one item that was never
+actually blocked. Each is recorded in its row above; collected here because the
+pattern is the point — an unenforced rule is not a rule that happens to hold, it
+is a rule nobody has checked.
+
+**Rule 6 was violated on a shipped platform.** The `keyring_core` → Off log
+filter was `#[cfg(target_os = "android")]`-only, while FRB installs an
+*unfiltered* `oslog` backend at `Trace` on iOS/macOS — so keyring-core's
+`debug!("get secret from entry {:?}", …)` reached the Apple unified log with
+nothing dropping it. Scope, stated precisely rather than dramatically: this bites
+DEBUG builds, where the mock store's `CredData` derives `Debug` over the raw
+secret and `set_max_level(Debug)` is in force. Release sets `Warn` and ships a
+store whose credential `Debug` renders specifiers, not secrets. The concrete
+exposure was therefore **iOS E2E lanes, whose logs upload as CI artifacts** — not
+a shipped-app leak. Filtering one target keyed a confidentiality property to one
+platform.
+
+**Rule 3's gate could not have detected a violation.** The pre-existing check was
+type-level (`UnsignedEvent`), and `UnsignedEvent` has no `sig` field at all — so
+a genuinely signed kind-444 peels into a rumor with the signature silently gone
+and the gate stays green. Demonstrated during development against a hand-signed
+444; the replacement asserts on the raw rumor JSON object instead, and asserts
+the SEAL's signature is present so it cannot pass by decrypting the wrong layer.
+
+**Rule 9's gap was larger and differently shaped than recorded.** The lint found
+four unscrubbed `getSecretBytes()` locals, only two of which this document had
+named; two sites it *did* name were already fixed. Two of the four
+(`nostr_identity_service.dart:184`, `:211`) `base64Encode` the bytes into an
+immutable Dart `String`, which cannot be scrubbed at all — so the prescribed
+`fillRange` remedy does not reach them and the encoding has to move.
+
+**Rule 1 was never blocked.** This document recorded it as waiting on "an MDK API
+exposing the leaf signature key". `SessionManager::members()` has been `pub` the
+whole time, and P0-3 had already added a direct `openmls` dependency, so the
+premise was stale in both of its parts. The trap that kept it looking blocked is
+worth carrying: **`cgka-traits`' own doc comment on `Member` has `id` and
+`credential` transposed** relative to every construction site in the engine. A
+reader who trusts the doc writes the assertion backwards — and it still passes,
+because both values are 32 bytes and differ. Only reading the construction sites
+gets it right.
+
+**Two traps for the next round of gate-writing.** A guard's *ordering* assumption
+needs its own fixture: the Apple fix rests entirely on first-call-wins, and the
+first version of its guard would have stayed green with `setup_default_user_utils`
+moved above the backend installs — i.e. green while the leak was re-opened. And a
+sample drawn inside one process cannot see a source that is per-run-random but
+**deterministic across restarts**: the first nonce gate passed all three of its
+assertions against a splitmix sequence keyed on burst index, which is exactly the
+repeat-under-a-fixed-key shape Rule 11 exists to forbid. Both were caught by
+review, not by the suite.
 
 ---
 
@@ -2425,8 +2658,9 @@ Two tiers. **The AI can only fail a build, never pass one.**
   (`publish_jitter_within_bounds` bounds the range,
   `publish_jitter_distribution_not_degenerate` needs >100 distinct draws — so a
   40%→20% narrowing passes both, and narrowing is the privacy regression); `kMotionTriggerDistanceMeters = 100` is tested only as
-  `greaterThan(0)`; `LOCATION_RETENTION_SECS`'s derivation is untested; both
-  screenshot protections have no test or guard at all.
+  `greaterThan(0)`; `LOCATION_RETENTION_SECS`'s derivation is untested; the iOS
+  app-switcher blur has no test or guard at all (the Android `FLAG_SECURE` half
+  is pinned by `check_flag_secure_app_wide.sh` since 2026-08-12).
 * **E5 — AI layer, advisory.** Copy `l10n-ai-review.yml`'s wiring exactly:
   `claude-code-action@v1`, `pull_request` (never `_target`),
   `continue-on-error: true`, sticky comment, prompt declaring diff content
@@ -2442,46 +2676,246 @@ Two tiers. **The AI can only fail a build, never pass one.**
 
 ---
 
-## Workstream F — user-facing copy
+## Workstream F — user-facing copy — CLOSED 2026-08-12
 
-A full claim register found **113 claims: 9 contradicted, 3 stale, 6 unpinned
-constants, 12 undisclosed behaviours**. Only 2 contradictions are fixed (the
-relay-list ones, corrected during the relay-separation work).
+**The register was rebuilt before anything was edited, and it was wrong in both
+directions.** The original count of 113 was ARB-only and treated keys as claims:
+of the 83 `privacy*` keys only **54** assert anything checkable, the rest being
+headings, labels and announcements. Against that, the rebuild found **10 factual
+claims living OUTSIDE the ARB entirely** — 4 iOS `Info.plist` usage strings and 6
+hardcoded `LocationDisclosureStrings` constants — and two of those were the worst
+items in the whole workstream. Final register: **139 claims, 13 non-TRUE**.
 
-**Sweep-level finding: no test checks any Privacy claim against BEHAVIOUR.**
-`haven/test/pages/settings/privacy_page_test.dart` renders
-`privacyHubSummary`/`privacyTitle` and pins the topic list, but asserts only that
-the strings APPEAR — never that they are true. All 83 `privacy*` ARB keys can
-therefore drift from behaviour with fully green CI. That is the
-hole Workstream E exists to close.
+The lesson generalises past this workstream: *a claim register scoped to the
+localization files cannot see the claims a user is most likely to believe.* The
+iOS permission prompt and the Play consent dialog are the two screens where the
+user is actively deciding whether to trust the app, and neither is an ARB string.
 
-Still contradicted:
+**What "fixed" meant here.** Where a promise could be made TRUE more cheaply than
+it could be re-litigated across 13 locales, the CODE changed and the copy stood —
+that is how `privacyWhatOthersSeeScreenshots` and `identityAdvancedDeleteBody`
+were closed. Weakening copy was the fallback, not the default.
 
-| Key | Problem |
-|---|---|
-| `locationSettingsIntro` / `locationSettingsIosLimitedNote` | see P0-2 |
-| `privacyWhatOthersSeeScreenshots` | "blocks screenshots everywhere in the app" — `UCropActivity` (`AndroidManifest.xml`) has no `FLAG_SECURE`. Also: **neither screenshot protection has any test or guard**; deleting them breaks nothing |
-| `identityAdvancedDeleteBody` | "deletes all circle data from this phone" — `haven.security.pending_leaves` keeps hex `nostr_group_id`s in **plaintext SharedPreferences**, cleared only per-circle on a completed leave; `deleteIdentity` never removes it |
-| `privacyHubSummary` | "the one thing that is public is the display name and photo" — kind-10002/10050 relay lists and the kind-30443 KeyPackage are also public and identity-signed. Self-contradicted by the app's own `privacyRelaysDetailKeyListIsPublic` |
-| `privacyWhatHavenIsMeansForYou` | "nobody can be made to hand over your data, because nobody is holding it" — Blossom holds the photo permanently (no DELETE exists), relays retain kind-0/10002/10050/30443 |
-| `privacyInferenceActivityPattern` | states the 100m movement trigger unconditionally; it does not exist in the Android background isolate at all, and is capped at one publish per 60s |
-| `privacyWhatOthersSeeDetailTag` (stale) | "not something Haven can change" is false — MDK 0.9.4 supports rotating the transport group id |
-| `privacyRelaysDetailIndexers` | may now overlap the formalized profile pool; needs a look |
+**Sweep-level finding, as found: no test checked any Privacy claim against
+BEHAVIOUR.** `haven/test/pages/settings/privacy_page_test.dart` renders
+`privacyHubSummary`/`privacyTitle` and pins the topic list, but asserted only
+that the strings APPEAR — never that they are true. All 83 `privacy*` ARB keys
+could therefore drift from behaviour with fully green CI.
 
-Undisclosed behaviours worth deciding on (disclose or change): each roster
-member's npub queried ALONE from its one salted-assigned relay out of a curated
-pool of **8** public indexers every ~45 min — so an indexer still learns a ~1/8
-slice of the union across all circles, with the assignment stable per install;
-one socket carrying the npub-bearing `#p` filter *and* every circle's `#h`;
-membership-change timing as a public tag discriminator; `circles.db` retaining
-every member's coordinates for 24h; and `haven.security.pending_leaves` sitting
-in plaintext (it survives `deleteIdentity`).
+That hole is now **partly** closed, and it is worth being precise about which
+part, because the remainder is exactly Workstream E's job. Every claim this
+workstream corrected acquired a test or guard that fails when the claim breaks:
+four new CI guards (app-wide `FLAG_SECURE`, delete-identity prefs residue,
+jitter-fraction cross-stack parity, plus the disclosure-claim lint), both-direction
+pins on every constant the copy quotes, and copy-tie tests that read `app_en.arb`
+so a constant and the prose that quotes it cannot drift apart. What is still
+missing is the *general* mechanism: nothing stops a NEW claim from being written
+tomorrow with no invariant behind it. Only E1's join table does that.
+
+**A latent test defect surfaced while doing this, and it is the recurring shape
+again.** Correcting `privacyHubSummary` made the hub summary one line taller,
+which turned two privacy-hub navigation tests red. The change was not at fault:
+`_reveal` returned as soon as the tile's finder evaluated non-empty, and a
+`ListView` BUILDS children inside its cache extent while they are still
+off-screen — so the helper reported "revealed" for a tile the subsequent `tap`
+could not hit. The tests had been passing on luck about where the tiles landed.
+Existence is not visibility; the helper now ensures both. This is the same lesson
+the 2026-08-12 review round recorded for slivers, arriving from the other
+direction.
+
+All contradicted and stale claims are now closed. What each one turned out to be:
+
+| Key | Problem as found | Resolution |
+|---|---|---|
+| `privacyWhatOthersSeeScreenshots` | "blocks screenshots everywhere in the app" — `FLAG_SECURE` was set on ONE Activity's window, so `UCropActivity` rendered the user's picked photo full-screen unprotected | **CODE**: registered from `ActivityLifecycleCallbacks` in `HavenApplication.onCreate`, reaching every Activity in the process including ones Haven does not own the source of. Copy unchanged because it became true. `check_flag_secure_app_wide.sh` (14 fixtures) pins the union |
+| `identityAdvancedDeleteBody` | "deletes all circle data" — `haven.security.pending_leaves` kept hex `nostr_group_id`s in plaintext prefs; a publish timestamp and a *decryptable* stranded legacy MLS DB + its keyring key also survived | **CODE**: all three cleared. `check_identity_delete_prefs_residue.sh` now forces EVERY SharedPreferences key to be either cleared on delete or on an explicit reasoned keep-list (17 confirmed, 11 kept), so new residue cannot appear silently. Copy corrected only where it mis-stated *where* the photo survives (a Blossom image host, not a relay) |
+| `privacyHubSummary` | "the one thing that is public is the display name and photo" — 10002/10050/30443 are public and identity-signed, and relay-list publishing is on by default | Copy: enumerates the keys and relay lists too, reusing the phrasing `privacyRelaysMeansForYou` already established |
+| `privacyWhatHavenIsMeansForYou` | "nobody is holding it" — relays retain 0/10002/10050/30443 with no deletion path for the KeyPackage, and Blossom holds the photo with no DELETE | Copy: scoped to LOCATION (genuinely unreadable to a relay) and paired with published-is-permanent |
+| `privacyInferenceActivityPattern` | stated the 100 m trigger unconditionally; verified TRUE in only **3 of 8** app states — it lives in the Flutter UI isolate, so the Android background service has no motion awareness at all | Copy: scoped to on-screen plus iOS-background-alive, and now states the 60 s rate bound |
+| `privacyWhatOthersSeeDetailTag` | "not something Haven can change" — **false, not merely stale**: the Marmot routing component explicitly permits rotation and pinned MDK v0.9.4 implements it end to end | Copy: attributes the choice to Haven, and keeps that rotation is forward-only |
+| `privacyRelaysDetailIndexers` | described one pool where the profile-plane separation created two disjoint ones (8 profile / 6 discovery) | Copy: rewritten; new `privacyRelaysDetailProfileLookups` discloses one-author-per-request, the never-rotating salted assignment, and publish fan-out to all eight |
+| `privacyRelaysMeansForYou` (stale) | attributed name+photo, keys and relay lists all to one relay — false since the plane separation | Copy: split, since no single relay sees all three |
+| `privacyWhatOthersSeeCannotPause` (stale) | "after you close the app" — a **fourth** carrier of the claim P0-2 believed it had killed in three | Copy: matched to `locationSettingsIntro` |
+| `NSLocationAlwaysAndWhenInUseUsageDescription` | the same dead claim, live in the **iOS permission prompt** — shown at the moment the user grants Always-location | Copy: describes what iOS actually does (background wakes are receive-only) |
+| `LocationDisclosureStrings.background` | true on Android, FALSE on iOS, shown ungated on both | **CODE**: split per platform behind an injectable `isIOS` seam. Android's Play wording untouched — its behaviour genuinely is stronger |
+| `LocationDisclosureStrings.how` | asserted a third party's privacy policy as fact, human-verified once with nothing re-checking it | Copy: attributed ("Stadia Maps says…") so the sentence stays true whatever Stadia later does; dated provenance kept in source |
+| `circleDetailsRelaysNote` | "copied from your inbox relays" — a circle's relays are the union of the **invitees'** published lists; the creator's inbox is only the first fallback | Copy corrected; the three-tier derivation is now pinned by tests |
+| `nameCircleCreatedSnack` | **not a copy bug at all** — the call site passed the invitee count, so 1-of-3 delivered reported "3 invitations sent" | **CODE**: reuses the existing `addMemberPartialDelivery` string on partial delivery |
+
+*(`privacyWhatOthersSeeScreenshots` was struck 2026-08-12, the one row here
+fixed by making the CODE true rather than the copy weaker: `FLAG_SECURE` is now
+set from an `ActivityLifecycleCallbacks` registered in
+`HavenApplication.onCreate`, so it reaches every Activity in the process —
+`UCropActivity`, which rendered the user's picked photo full-screen with no
+flag, included — and the union is pinned by
+`scripts/ci/check_flag_secure_app_wide.sh`. The iOS half of that sentence was
+already accurate.)*
+
+**The undisclosed behaviours are now disclosed** — each was decided as
+*disclose*, except the last, which was decided as *change*:
+
+* the ~1/8 slice, the never-rotating per-install assignment and the publish
+  fan-out to all eight → `privacyRelaysDetailProfileLookups` (new). Both halves
+  of the trade-off are stated: no relay sees everyone you look up, **but** the
+  one assigned to a person accumulates a durable record of your interest in them
+  — the honest cost of not rotating the salt (SECURITY.md P5).
+* one socket carrying both filters → `privacyWhatOthersSeeDetailOneConnection`
+  (new). The correction that matters: the `#p` filter carries the reader's OWN
+  key (the gift-wrap recipient tag), not their contacts' — every locale was
+  warned, because the wrong reading says Haven ships your contacts to a relay.
+  It also states the overlap is the DEFAULT, not a misconfiguration.
+* membership-change timing as a public discriminator → folded into
+  `privacyWhatOthersSeeDetailExpiry`, where the mechanism already lives.
+* 24 h retention of members' coordinates → `privacyWhatOthersSeeDetailOnDevice`
+  (new), separating the automatic purge from what a member deliberately saved.
+* `haven.security.pending_leaves` in plaintext → **changed, not disclosed.** It
+  is now cleared on identity deletion; see the table above.
+
+**The counts in that copy are load-bearing and are now pinned.** Writing "eight"
+and "six" into user-facing prose created a dependency nothing enforced —
+`relay_pool.rs`/`discovery.rs` only compared a runtime value to the constant's
+OWN length, so growing a pool stayed green while the copy silently went false.
+`tests/privacy_copy_ties.rs` now reads `app_en.arb` and holds constant and
+prose together. Same treatment there for `DEFAULT_BLOSSOM_SERVER` (named
+verbatim in copy), and in Dart for `kTileMaxRetention` (7 days) and the
+circle-name limit (50).
+
+**The jitter fraction was the most dangerous unpinned constant, and it was not on
+the original list.** `PUBLISH_INTERVAL_JITTER_FRACTION_BP = 4000` (±40 %) backs
+"Haven varies the gap between updates on purpose", and every existing test was
+inclusion-style: narrowing to ±20 % — *the direction that is a privacy
+regression* — passed all of them, and would silently falsify the Dart 72/168
+constants too. Now pinned in both directions, with
+`check_publish_jitter_fraction_parity.sh` computing the Dart bounds from the Rust
+fraction so the two stacks cannot drift apart.
 
 *(Two items were struck 2026-08-07 as already false of the tree: the roster was
 never sent as one batched `authors[]` request — `.authors(` occurs nowhere in
 `haven-core/src` and is CI-banned in profile paths — and the FGS isolate's
 `debugPrint`s ARE silenced in release, at `background_location_task.dart:67-68`,
 with `background_catchup_worker.dart` and `main.dart:77-78` doing the same.)*
+
+### What the review fleet found, and why a copy workstream needs one
+
+Five independent reviewers (completeness, security, test quality, code quality,
+and four localization reviewers) read the finished work. The security review
+found **no privacy regression** — every change moves in the disclosing or
+hardening direction, and no key material, `nostr_group_id` or internal
+identifier reaches any log, string or persisted field. The completeness audit
+returned **INCOMPLETE**, and it was right: the copy workstream had itself shipped
+three new false sentences. All are fixed, and the pattern in them is worth more
+than the fixes:
+
+* **A correction can overshoot into a new falsehood.** `privacyRelaysDetailProfileLookups`
+  said Haven "always asks the same server about the same person" and that the
+  pairing "never changes". The real bound is **at most two of the eight** — a
+  retry ladder (`PROFILE_MAX_RELAY_RANK = 2`) promotes an author to a second
+  relay when the first misses, which is the normal case for a new contact. The
+  paragraph whose entire job is to state the honest cost of never rotating the
+  salt was stating half of it.
+* **The dangerous direction is the one that reads as reassurance.** "If the
+  system closes Haven, sharing stops until you open it again" — a P0-2
+  correction, inherited and extended here — is FALSE on Android: `RebootReceiver`
+  is enabled with `autoRunOnBoot`, so a device reboot resurrects the foreground
+  service and location transmission resumes with **no user action**, and the
+  service also survives a swipe from recents. A user who reboots believing they
+  are not sharing is still broadcasting. This is now stated per platform.
+* **Our own new disclosure contradicted an older claim.** `privacyWhatOthersSeeDetailOnDevice`
+  (new) says every member's phone holds your last position for a day; that makes
+  `privacyWhatHavenIsMeansForYou`'s "Nobody can be made to hand over your
+  location" false, since a seized member device is somebody. Narrowed to relay
+  operators.
+* **A deleted test's assertions must be counted, not assumed relocated.** The
+  gift-wrap deletion moved three of four privacy properties onto the real
+  engine-produced artifact — a genuine strengthening — but **ephemeral-key
+  uniqueness for welcomes simply vanished**, with no successor anywhere. That is
+  invitation unlinkability. It is now asserted against three real engine wraps
+  drawn from two different batch shapes, which is stronger than what was deleted.
+* **A guard's headline claim outran the guard.** The prefs-residue guard promised
+  every SharedPreferences key has a deliberate fate, while its extractor matched
+  only `^const String`, missing a string-literal key already in `main.dart`.
+
+An agent also **refused an instruction and was right to**: told to correct
+`privacyRelaysDetailIndexers` to say the eight profile relays are user-chosen, it
+found that removals silently do not take effect, and that making the requested
+edit would have shipped a *new* false claim in the dangerous direction.
+
+### The localization round, and why the reviewer layer is not ceremony
+
+13 English strings changed or were added; 12 locales were retranslated by four
+agents on disjoint file sets, then checked by four **independent** reviewers that
+translated none of the languages they reviewed. The reviewers were not a rubber
+stamp — they caught a **truncated French sentence** (`Cela ne montre jamais où.`,
+missing its complement) and a Spanish rendering that had dropped its subject
+entirely, in the one paragraph whose whole job is to bound a privacy claim.
+Neither is visible to `arb_parity_check.dart`, which was green on both.
+
+Two findings worth carrying:
+
+* **A stale translation outlives the English correction that caused it.** Two of
+  the strings still carried, in all 12 locales, the claim P0-2 deleted from the
+  English months earlier — `privacyWhatOthersSeeCannotPause` said the toggle
+  governs sharing *after the app is closed*, contradicting each file's own
+  already-corrected `locationSettingsIntro`. Correcting an English string does
+  not correct the app; the locales are where most users read it.
+* **Translators improved on the source, again.** The register the source needed
+  was recovered per language — Russian perfective binding resumption to a single
+  user act, a Japanese cleft because `だけ` after a noun scopes over the NOUN, and
+  explicit head nouns wherever an English pronoun's nearest antecedent was the
+  wrong one. Three separate reviewers independently flagged the same weakness in
+  the English (`"by its absence"`, whose nearest antecedent was "a location
+  update" — a misreading that yields a different and false claim); the English
+  was fixed because of it.
+
+### Left open, deliberately
+
+* **`circleMemberRemoveTooltip` is unreachable, and the reason is a FEATURE GAP,
+  not a redundant string.** `CircleService.removeMember` is fully implemented and
+  integration-tested, including a forward-secrecy proof, and has **zero callers
+  in `haven/lib`** — so no admin can evict anyone from a circle in the shipped
+  app. Membership is add-only plus voluntary departure. The string was kept (its
+  metadata now records this accurately) because deleting it would also delete a
+  genuine accessibility regression test and foreclose the fix. Shipping the
+  affordance is an owner decision, not a copy change.
+* **Two English cohesion nits**, both reported by more than one reviewer and both
+  resolved correctly in every locale: `privacyInferenceActivityPattern` opens
+  "From that pattern" while the preceding paragraph names the referent
+  "metadata", and each locale had to invent the noun. Not a truth defect; left
+  rather than spending another 12-locale sync.
+* **The iOS OS-label strings** (`「常に許可」` where iOS ships `「常に」`; Nepali
+  `'सधैँ'` where iOS has no Nepali UI) remain as P0-2 left them — pre-existing,
+  paired with untouched neighbours, and fixing one of a pair breaks the
+  consistency that currently exists.
+* **A copy string can silently degrade a gesture, and only English is guarded.**
+  Lengthening `circleDetailsRelaysNote` to name the third relay fallback made the
+  circle-details sheet scrollable at 1.0x, which breaks its drag-to-dismiss (once
+  the body scrolls, the drag scrolls instead of dismissing). Two
+  `circle_details_layout_test.dart` cases caught it — but **only for `en`**: that
+  file's per-locale sweep asserts no overflow at 1.5x, and scrolling raises no
+  overflow exception, so an over-long TRANSLATION of the same string is caught by
+  nothing. The English was tightened and the twelve locales re-synced by hand;
+  extending the "not gratuitously scrollable" assertion across the locale sweep
+  is the durable fix and is **not done**.
+* **Two consent artefacts survive identity deletion**, deliberately and now
+  explicitly: `haven.location.disclosure_accepted` and its background twin are on
+  the residue guard's keep-list. Consequence, stated rather than implied — delete
+  identity, hand the phone to someone else, create a new identity, and neither
+  the Play prominent-disclosure dialog nor the corrected iOS sentence is shown
+  again; location proceeds on the previous user's consent. Defensible as a device
+  preference, but it is the one keep-list entry governing a consent artefact
+  rather than a UI preference, and it is an owner call.
+* **The profile relay list lies about removal.** Settings → Relays offers
+  add/remove/restore-defaults for the eight profile relays, but
+  `usable_profile_relays()` unions the curated pool back in, so removing one has
+  no effect — the UI shows seven while Haven keeps contacting eight. The copy was
+  written truthfully around this ("you can add your own, but you cannot take
+  these eight out"), which is why it is not a false claim today; the UI/behaviour
+  divergence itself is a code fix and is **not done**.
+* **One keyring-init asymmetry remains.** `NostrIdentityService.deleteIdentity`
+  calls the raw `tileCacheWipe()` FFI with no keyring init of its own; it is safe
+  only because its single caller always runs it after two calls that do install
+  the backend. That is order-dependent safety, not a self-contained guarantee —
+  the same shape as the legacy-cutover bug this workstream fixed.
 
 ---
 
@@ -2596,6 +3030,220 @@ shape the code actually had *before* the fix.
 new module, function, constant, guard, widget, ARB key and test, ask whether it
 is actually *reached*; and for every test, ask what else could make it pass.
 The first question found nine instances, the second four.
+
+---
+
+### Review round 2026-08-12 — what three independent reviewers found
+
+The layout fix and the two Workstream-C items went through a security review, a
+UI/accessibility review and a principles audit, none written by the implementer.
+All three verdicts were "merge-ready with findings"; the findings were real and
+are folded in above. What is worth keeping:
+
+**A test written for a promise can assert the wrong thing and still look right.**
+The first version of the populated-roster test asserted `find.byIcon(...)` on a
+member tile. It failed — not because the layout was broken, but because at a 2x
+text scale the tile is a lazily-built `SliverList` child below the viewport and
+therefore *not in the widget tree at all*. `find` cannot see an unbuilt sliver
+child. The assertion had to move to the roster header (eagerly built) and, for
+the disclosure, to `scrollUntilVisible` rather than `ensureVisible`. Any sliver
+test that asserts presence with a plain finder is testing the cache extent.
+
+**Two real defects only surfaced once the populated branch was tested at all.**
+The restructure shipped with tests covering only the empty branch — the code it
+actually wrote had none. Adding that coverage immediately produced a **261px
+horizontal** overflow in the selected-count header (a `Row` holding the count
+and "Clear all", which at 2x cannot fit; now a `Wrap`, which moves the button to
+its own line instead of overflowing) and a **488px vertical** overflow of the
+page body. The second is the deeper one: unpinning the disclosure fixed the
+empty case, but with a roster present the remaining pinned chrome — search
+field, header, CTA — still exceeded the body. The whole body is now one
+`CustomScrollView` with only the CTA pinned. Clipped chrome cannot be read and
+cannot be tapped, so scrolling it is strictly better than pinning it.
+
+**`viewPaddingOf` was reserving dead space in exactly the squeezed case.** The
+engine collapses `padding` to zero while the keyboard covers the home indicator
+but deliberately keeps `viewPadding`, so the page held 34px below the keyboard
+line — against an original overflow of 7.8px. Now `paddingOf`. Note the harness
+sets only `viewInsets`, so **no current test can tell the two readings apart**;
+that gap is real and unclosed.
+
+**A claim this document made was wrong, and the audit disproved it by deletion.**
+An earlier draft called `mainAxisSize: min` "load-bearing in both directions".
+Removing it from both widgets leaves the entire suite green: `SliverFillRemaining`
+lays its child out TIGHT, and `RenderFlex` already shrink-wraps on an unbounded
+main axis. Corrected above. The lesson is the method — the way to test a claim
+about a safety mechanism is to delete the mechanism and see whether anything
+goes red.
+
+**Documentation drift is the failure mode that keeps recurring.** This round
+alone: a `_followups` block deleted while three files still described the check
+it governed; a citation moved to `:508` that landed on a comment rather than the
+`:513` it meant; a sentence in `wire_allowlist.json`'s own README left
+unparseable by a careless replace; and two sibling docs (`docs/WIRE_JOURNAL.md`,
+`check-wire-correlation.sh`) still asserting a commit-subset degradation that
+the new `expiration` assertion now closes. Every one was introduced by an edit
+whose *code* was correct.
+
+**Known-open from this round, not fixed:** `circles_page.dart` renders the "no
+circles yet" empty state on a circles *load failure*, telling a user with five
+circles that they have none and offering no retry (pre-existing);
+`HavenEmptyStateDensity` has no test pinning its values; the placeholder host
+contract over-enumerates (`relay_settings_page.dart`'s two in-`ListView` sites
+are compliant but read as violations, because the real invariant is an unbounded
+max, not a min-height floor); and the two sibling docs above.
+
+---
+
+## CI run 31555665220 — the engine dropped the first stored events of every REQ — FIXED 2026-08-12
+
+`Rust Checks / haven-core` failed on
+`a_future_dated_gift_wrap_never_pushes_the_inbox_cursor_past_the_local_clock`,
+and because every E2E lane is `needs: [rust]`, **all 28 E2E jobs skipped** — the
+whole delivery-verification surface going dark behind one tidy failure. It was
+not caused by the commit it landed on (`2302760` is Dart-only), and it was not a
+slow test. It was a **receive-path defect in the engine**.
+
+**Root cause.** The engine `Client` was built with
+`verify_subscriptions(true)`. nostr-relay-pool 0.44.3's
+`Relay::subscribe_long_lived` SENDS the REQ and only THEN registers that REQ's
+filter locally. An `EVENT` the relay replays inside that window finds no
+registered subscription and is discarded as `SubscriptionNotFound` — **silently**:
+no error reaches a caller, no notification is emitted, and nothing downstream can
+distinguish "the relay had nothing" from "the pool threw away what it sent". The
+matching `EOSE` is NOT subject to the check, so it still lands and still anchors
+the sync cursor to the REQ's open time — *past* the events just dropped. That
+generation never returns for them; only the next REQ's lookback does.
+
+**So this was a production bug, not a test bug.** On the inbox plane the dropped
+event is a gift-wrapped invitation (kind 1059) that does not arrive until the
+next session. The window is a task-scheduling gap, so it widens exactly when the
+device is busy and the relay answers quickly.
+
+**Fix.** `verify_subscriptions` is off, and the same identity dimensions are
+re-checked in the worker by `live_sync::supervisor::plane_wants_event`, where the
+router context is registered BEFORE the REQ goes out and no such window exists —
+so nothing is given up. Covered by unit tests per plane (a group bucket wants
+only a 445 on a multiplexed `#h`; the inbox wants only a gift wrap on our own
+`#p`; neither accepts the other's events) plus a worker-level test that an inbox
+event the REQ never asked for is dropped.
+
+**Only a guard can hold this, which is why one exists.**
+`scripts/ci/check_engine_client_options.sh` (wired into `repo-guards.yml`) fails
+if the option is ever re-enabled: the drop is probabilistic, so
+a build with it back on still passes the suite most of the time. No test can
+replace that.
+
+**What the measurement contributed, and the wrong turn it corrected.** The
+`wait_scale` doc in the test file blamed the 10 s bound — "the bound was the
+problem, not the code under it" — and an earlier fix added
+`HAVEN_TEST_WAIT_SCALE` for the coverage job on that basis. Instrumenting the
+delivery disproved it outright:
+
+```
+DELIVERY_MS 1      delivered=true
+DELIVERY_MS 120001 delivered=false      <- 120-SECOND budget
+DELIVERY_MS 120000 delivered=false
+DELIVERY_MS 0      delivered=true       (+7 more at 1-2 ms)
+```
+
+Delivery is **binary — ~1 ms or never**. No bound removes a dropped event. That
+single measurement is what ruled out the whole "budget" family of fixes and
+forced the search into the receive path; the knob is kept only for honest
+instrumentation slowness, and its doc now says so.
+
+**Reproduction, for the next one of these:** `taskset -c 0,1 <test-bin>
+--test-threads=5`, ideally under competing CPU load — a few percent per run. It
+needs TRUE parallelism (pinned to one core the target passes 10/10 at a steady
+7.0 s), because the window is a scheduling gap rather than starvation. Ruled out
+along the way: deadlock (the 120 s timer fired at `120001 ms`), a failed
+subscribe (`subscribe_bucket` inspects `Output.success` and returns `Err` on
+exhaustion, which panics differently), router-vs-REQ ordering, the receiver
+racing the subscribe, and bus lag (`BUS_CAP` 8192 against one event).
+
+**A workaround was drafted and discarded.** Serializing the target behind a
+process-wide mutex made the symptom go away (0/30 under the pinned-and-loaded
+configuration that reproduced it) — but it treats a silent receive-path drop as
+harness contention, and would have left the production defect in place with the
+tests green. Removed once the real cause was found. Worth recording because it
+is the seductive fix: it works, it is cheap, and it is wrong.
+
+**One trap, so it is not repeated.** An earlier attempt added
+`tracing-subscriber` as a dev-dependency (**+80 lines of `Cargo.lock`** in a
+crate `cargo-audit` runs over) plus two probe files, one of which did not
+compile. All reverted. Instrumentation is not a reason to grow this crate's
+dependency tree — every measurement above needed only `eprintln!`.
+
+---
+
+## CI run 31462924650 — the iOS lane's RenderFlex overflow, FIXED 2026-08-11
+
+`E2E Core Flow (iOS)` failed 10-passed/1-failed on `A RenderFlex overflowed by
+7.8 pixels on the bottom`, reported at test completion with a `DISPOSED` render
+object and a `DEFUNCT` creator chain that named no source line.
+
+**Not the commit it landed on.** The only functional change in `2e0131a` was
+three localized strings on the location-settings page, which `e2e_combined.dart`
+never opens. This was latent, and the trigger is structural:
+`IntegrationTestWidgetsFlutterBinding.registerTestTextInput` is **false**, so
+integration tests drive the REAL platform text input — focusing the member
+search field raises the actual iOS keyboard, `Scaffold.resizeToAvoidBottomInset`
+removes its inset, and the empty state's `Expanded` slot drops to ~108px against
+116px of content. Host widget tests register the mock text input, so `viewInsets`
+stays 0 and **this whole class of overflow is invisible to `flutter test`**
+unless the test sets `viewInsets` itself. That is why nothing caught it.
+
+**The defect was duplicated verbatim.** `create_circle_page.dart` and
+`add_member_page.dart` each carried a byte-identical `_buildEmptyState()`, and a
+shared `HavenEmptyState` already existed that neither used — and that had the
+same latent bug at its five whole-body call sites, plus `HavenErrorDisplay`.
+
+**The fix is a contract, not a wrapper.** `SliverFillRemaining(hasScrollBody:
+false)` measures its child's intrinsic height, which no `LayoutBuilder` or
+nested viewport can report — so a self-scrolling placeholder can never sit in a
+sliver, and the first attempt at "make the widget scroll itself" broke every
+host that composes it. The placeholders therefore stay plain, intrinsically
+sized and `mainAxisSize: min`, and the HOST supplies the
+min-height-with-unbounded-max slot (`HavenScrollFill`, or an existing
+`SliverFillRemaining`). What does the work is the HOST, not `mainAxisSize`:
+`RenderSliverFillRemaining` lays its child out TIGHT at
+`max(viewportRemaining, maxIntrinsicHeight)`, so the flex is centred by
+`mainAxisAlignment` within a height it was given, and `min` vs `max` is inert
+there. It is inert in the unbounded case too — `RenderFlex` falls back to
+`allocatedSize` when the main axis is unbounded. `min` is a statement of intent,
+not a safety mechanism. An earlier draft of this entry called it "load-bearing
+in both directions"; that was wrong, and deleting it from both widgets leaves
+the whole suite green — which is the honest measure of the claim.
+
+**A second, deeper defect surfaced and was fixed with it.** `AddMemberPage`
+pinned its sharing disclosure above the CTA, so at a 2x text scale the fixed
+chrome alone needed 1092px against 428px of body — the page could not lay out
+**at all**, and in German it overflowed by 328px with no keyboard involved. The
+body is now one `CustomScrollView` (roster or empty state, then the disclosure)
+with only the CTA pinned. Owner-directed trade, taken explicitly: with a long
+roster the disclosure now sits below the fold, where before it was always on
+screen — but a clipped disclosure discloses nothing, so scrollable beats pinned.
+
+**Attribution, and why this cost archaeology.**
+`IntegrationTestWidgetsFlutterBinding` overrides `reportExceptionNoticed` with an
+EMPTY body, commented "they will also be eventually logged again at the end of
+the tests" (upstream TODO flutter#81534). True but lossy:
+`FlutterErrorDetails.toString()` resolves the creator chain lazily, and by test
+end the element is deactivated. Verified locally — rendering the same error at
+throw time yields `The relevant error-causing widget was: Column` plus its
+`file:line`; deferred, it yields the bare overflow sentence. Restoring throw-time
+rendering needs a chained `FlutterError.onError` installed INSIDE each test body
+(`runTest` replaces the handler, so a `setUpAll` hook is bypassed — confirmed by
+observation). **Open**, and the highest-value follow-up here: every future layout
+failure in any E2E lane is unattributable until it lands.
+
+**Coverage added:** `test/widgets/common/empty_state_layout_test.dart` (7 cases
+over both placeholders — keyboard, 2x, long locale, action reachable, and a
+centring assertion that pins the normal case to within 1px), plus per-page
+squeeze groups on both member-picker pages asserting no exception and
+`ensureVisible` on the guidance. Non-vacuity checked by stashing the widget
+changes: the new tests reproduce 7.8px/328px/664px overflows against the old
+tree.
 
 ---
 

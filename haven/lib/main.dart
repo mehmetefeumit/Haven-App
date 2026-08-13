@@ -166,7 +166,21 @@ Future<void> main() async {
   final hasExistingIdentity = await _probeHasNostrIdentity();
   var showLegacyCutoverExplainer = false;
   try {
-    final cutoverService = LegacyCutoverService(prefs: prefs);
+    // A dedicated NostrCircleService (own instance, mirrors launchWipeCircle
+    // above) so the cutover reuses CircleService.destroyLegacyMlsState() —
+    // which installs the keyring backend BEFORE the FFI call — rather than
+    // invoking the raw FFI directly. Without that prerequisite the Rust side
+    // treats "no store installed" as a no-op success, so the destroy would
+    // always report success while never actually removing the legacy
+    // SQLCipher key (see LegacyCutoverService's doc comment).
+    final cutoverCircle = NostrCircleService(
+      relayService: NostrRelayService(),
+      dataDirectoryProvider: FixedDataDirectoryProvider(dataDir),
+    );
+    final cutoverService = LegacyCutoverService(
+      prefs: prefs,
+      destroyLegacyMls: destroyLegacyMlsViaCircleService(cutoverCircle),
+    );
     showLegacyCutoverExplainer = await cutoverService.runIfNeeded(
       dataDir: dataDir,
       hasIdentity: hasExistingIdentity,

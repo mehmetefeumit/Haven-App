@@ -44,6 +44,8 @@ mixin CircleServiceRetentionStubs {
 
   Future<void> wipeAllMlsState() async {}
 
+  Future<void> destroyLegacyMlsState() async {}
+
   Future<void> pruneProcessedGiftWraps({DateTime? now}) async {}
 
   Future<void> resetAllSyncCursors() async {}

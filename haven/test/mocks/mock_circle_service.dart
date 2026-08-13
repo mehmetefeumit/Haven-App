@@ -119,6 +119,14 @@ class MockCircleService implements CircleService {
     return circle?.members ?? [];
   }
 
+  /// Configurable return value for [createCircle].
+  ///
+  /// When non-null, [createCircle] returns this value. When null, returns a
+  /// default [CircleCreationResult] with welcomesSent == welcomesTotal ==
+  /// `memberKeyPackages.length` (full delivery) and a circle built via
+  /// [TestCircleFactory.createCircle] with the given [name].
+  CircleCreationResult? createCircleResult;
+
   @override
   Future<CircleCreationResult> createCircle({
     required List<int> identitySecretBytes,
@@ -130,7 +138,12 @@ class MockCircleService implements CircleService {
     List<String> creatorFallbackRelays = const [],
   }) async {
     methodCalls.add('createCircle');
-    throw UnimplementedError('createCircle not implemented in mock');
+    return createCircleResult ??
+        CircleCreationResult(
+          circle: TestCircleFactory.createCircle(displayName: name),
+          welcomesSent: memberKeyPackages.length,
+          welcomesTotal: memberKeyPackages.length,
+        );
   }
 
   @override
@@ -499,6 +512,11 @@ class MockCircleService implements CircleService {
   @override
   Future<void> wipeAllMlsState() async {
     methodCalls.add('wipeAllMlsState');
+  }
+
+  @override
+  Future<void> destroyLegacyMlsState() async {
+    methodCalls.add('destroyLegacyMlsState');
   }
 
   @override

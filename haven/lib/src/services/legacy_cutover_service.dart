@@ -15,33 +15,46 @@
 ///
 /// This service stores a **boolean-only** durable marker in
 /// [SharedPreferences] under [kLegacyCutoverDoneKey] and, the first time an
-/// identity is present with the marker unset, calls
-/// [destroyLegacyMlsState] to delete the old database and destroy its
+/// identity is present with the marker unset, calls the injected
+/// `destroyLegacyMls` function to delete the old database and destroy its
 /// keyring key — BEFORE anything constructs a `CircleManagerFfi` (mirrors
 /// the M10.1 `PendingMlsWipeService` launch-retry pattern: `main.dart` runs
 /// this before `runApp`, so it always precedes the first
 /// `circleServiceProvider` read).
+///
+/// `destroyLegacyMls` has NO default and MUST be supplied by the caller: the
+/// raw FFI `destroyLegacyMlsState` does not install a keyring backend
+/// itself, and `storage.rs`'s `destroy_legacy_mls_key_material` treats "no
+/// store installed" as an idempotent success (nothing left at rest) — a
+/// property that is only true if a backend genuinely was attempted first.
+/// Calling the raw FFI directly here would therefore ALWAYS report success
+/// while NEVER removing the legacy SQLCipher key, permanently stranding it
+/// while this marker latches "done". Production (`main.dart`) wires this to
+/// `CircleService.destroyLegacyMlsState()`, which installs the keyring
+/// backend before the FFI call.
 ///
 /// ### Marker semantics
 ///
 /// - Marker UNSET + no identity → no-op (nothing to migrate yet; a brand
 ///   new install has no legacy state, and a user still mid-onboarding has
 ///   not created an identity in THIS process yet — see `runIfNeeded`).
-/// - Marker UNSET + identity present → calls [destroyLegacyMlsState]; on
-///   success, sets the marker (never runs the destructive call again) and
-///   reports that the first-launch cutover explainer should be shown. On
-///   failure, leaves the marker unset so the next launch retries — mirrors
+/// - Marker UNSET + identity present → calls `destroyLegacyMls`; on success,
+///   sets the marker (never runs the destructive call again) and reports
+///   that the first-launch cutover explainer should be shown. On failure,
+///   leaves the marker unset so the next launch retries — mirrors
 ///   `PendingMlsWipeService`'s "only a genuine fault surfaces `Err`" the
 ///   contract.
 /// - Marker SET → no-op, always.
 ///
-/// [destroyLegacyMlsState] is itself idempotent (deleting an already-absent
-/// legacy DB is a no-op success), so a retried call after a transient
-/// failure is safe.
+/// The marker means "the destroy call completed without throwing", not "the
+/// key is confirmably gone" — matching `destroyLegacyMls`'s own idempotent
+/// contract (deleting an already-absent legacy DB/key is a defined success,
+/// not just an unchecked one), so a retried call after a transient failure
+/// is safe.
 library;
 
 import 'package:flutter/foundation.dart';
-import 'package:haven/src/rust/api.dart' show destroyLegacyMlsState;
+import 'package:haven/src/services/circle_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// [SharedPreferences] key for the durable "legacy cutover already ran"
@@ -53,23 +66,43 @@ const String kLegacyCutoverDoneKey = 'haven.security.legacy_cutover_done_v1';
 
 /// Function type matching `destroyLegacyMlsState`, injectable so tests can
 /// exercise [LegacyCutoverService.runIfNeeded]'s success/failure branches
-/// without the Rust FFI bridge.
+/// without the Rust FFI bridge. There is deliberately no default — see
+/// [LegacyCutoverService]'s constructor doc for why an implementation MUST
+/// install the keyring backend before calling the raw FFI.
 typedef DestroyLegacyMlsState = Future<void> Function({
   required String dataDir,
 });
+
+/// Adapts a [CircleService] to the [DestroyLegacyMlsState] shape.
+///
+/// The SANCTIONED way to obtain [LegacyCutoverService]'s `destroyLegacyMls`
+/// argument: [CircleService.destroyLegacyMlsState] (implemented by
+/// `NostrCircleService`) installs the keyring backend BEFORE calling the raw
+/// FFI, exactly like [CircleService.wipeAllMlsState]. `main.dart` wires
+/// production through this adapter rather than the raw FFI directly, so the
+/// bug this guards against — reporting success while never actually removing
+/// the legacy SQLCipher key — cannot recur through this call site.
+DestroyLegacyMlsState destroyLegacyMlsViaCircleService(
+  CircleService circleService,
+) => ({required String dataDir}) => circleService.destroyLegacyMlsState();
 
 /// Runs the once-only Dark Matter cutover guard.
 ///
 /// Inject [SharedPreferences] for testability; production callers obtain an
 /// instance via [SharedPreferences.getInstance] (`main.dart` already loads
 /// one for the M10.1 launch-retry and reuses it here). `destroyLegacyMls` is
-/// also injectable (defaults to the real FFI call) so tests can simulate a
-/// success or a genuine failure without the Rust bridge.
+/// also injectable — REQUIRED, not defaulted — so tests can simulate a
+/// success or a genuine failure without the Rust bridge, and so production
+/// cannot silently fall back to the keyring-unsafe raw FFI call (see the
+/// library doc comment above).
 class LegacyCutoverService {
   /// Creates the service over an injected [SharedPreferences] instance.
+  ///
+  /// [destroyLegacyMls] has no default: see the library doc comment for why
+  /// the raw FFI call is unsafe to use directly here.
   LegacyCutoverService({
     required SharedPreferences prefs,
-    DestroyLegacyMlsState destroyLegacyMls = destroyLegacyMlsState,
+    required DestroyLegacyMlsState destroyLegacyMls,
   }) : _prefs = prefs,
        _destroyLegacyMls = destroyLegacyMls;
 

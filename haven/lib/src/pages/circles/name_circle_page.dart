@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/constants/circle_name_policy.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/join_watcher_provider.dart';
@@ -124,7 +125,7 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
                           if (value == null || value.trim().isEmpty) {
                             return l10n.nameCircleNameEmptyError;
                           }
-                          if (value.length > 50) {
+                          if (value.length > kCircleNameMaxLength) {
                             return l10n.nameCircleNameTooLongError;
                           }
                           return null;
@@ -305,10 +306,6 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
       final total = result.welcomesTotal;
       final sentCount = result.welcomesSent;
 
-      if (sentCount < total) {
-        debugPrint('[CircleCreate] partial invitation send');
-      }
-
       // Auto-select the newly created circle so the map immediately
       // shows member locations without requiring a manual tap.
       ref.read(selectedCircleIdProvider.notifier).state =
@@ -338,10 +335,23 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
       if (mounted) {
         final name = _nameController.text.trim();
 
+        // Report delivery truthfully: sentCount is the number of Welcomes
+        // that actually reached a relay, which can be less than `total` (the
+        // number of invitees) — `nostr_circle_service.dart` confirms the
+        // circle as long as at least one Welcome landed. The partial message
+        // still leads with the circle being created: this screen pops twice on
+        // success, so a snackbar reporting only delivery would leave the user
+        // without confirmation of the thing they just did.
+        final String message;
+        if (sentCount < total) {
+          debugPrint('[CircleCreate] partial invitation send');
+          message = l10n.nameCircleCreatedPartialSnack(name, sentCount, total);
+        } else {
+          message = l10n.nameCircleCreatedSnack(name, total);
+        }
+
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(l10n.nameCircleCreatedSnack(name, total)),
-          ),
+          SnackBar(content: Text(message)),
         );
 
         // Pop back to circles page (pop twice: NameCircle and CreateCircle)

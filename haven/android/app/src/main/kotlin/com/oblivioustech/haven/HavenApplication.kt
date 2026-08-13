@@ -1,12 +1,16 @@
 package com.oblivioustech.haven
 
+import android.app.Activity
 import android.app.Application
+import android.os.Bundle
 import android.util.Log
+import android.view.WindowManager
 import io.crates.keyring.Keyring
 
 /**
- * Registers the Android context with the Rust `ndk_context` crate on every
- * process start.
+ * Process-wide setup that must run before any Activity, Service or worker: the
+ * app-wide screenshot block, and the Android context the Rust `ndk_context`
+ * crate needs.
  *
  * The Rust keyring backend
  * (`android_native_keyring_store::Store::from_ndk_context()`) reads this context
@@ -31,6 +35,7 @@ import io.crates.keyring.Keyring
 class HavenApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        registerActivityLifecycleCallbacks(SecureWindowCallbacks)
         try {
             Keyring.initializeNdkContext(applicationContext)
         } catch (t: Throwable) {
@@ -41,4 +46,42 @@ class HavenApplication : Application() {
     companion object {
         private const val TAG = "HavenApplication"
     }
+}
+
+/**
+ * Sets `FLAG_SECURE` on EVERY Activity in the process, which is what makes the
+ * app's stated promise ("Haven blocks screenshots and screen recording
+ * everywhere in the app") true.
+ *
+ * Setting the flag per Activity only covers the Activities we write. Haven also
+ * shows the user's picked photo full-screen in
+ * `com.yalantis.ucrop.UCropActivity` — a dependency's Activity, whose
+ * `onCreate` we cannot touch — so the promise held for [MainActivity] and
+ * nowhere else. Registering here covers every Activity hosted in this process,
+ * including ones added by a future plugin.
+ *
+ * [Application.ActivityLifecycleCallbacks.onActivityCreated] is the earliest
+ * hook available at minSdk 23 (`onActivityPreCreated` is API 29+), and it still
+ * runs before the window is added to the WindowManager — the deadline for
+ * `FLAG_SECURE` to take effect — and again on every recreation.
+ */
+private object SecureWindowCallbacks : Application.ActivityLifecycleCallbacks {
+    override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+        activity.window.setFlags(
+            WindowManager.LayoutParams.FLAG_SECURE,
+            WindowManager.LayoutParams.FLAG_SECURE,
+        )
+    }
+
+    override fun onActivityStarted(activity: Activity) = Unit
+
+    override fun onActivityResumed(activity: Activity) = Unit
+
+    override fun onActivityPaused(activity: Activity) = Unit
+
+    override fun onActivityStopped(activity: Activity) = Unit
+
+    override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+
+    override fun onActivityDestroyed(activity: Activity) = Unit
 }

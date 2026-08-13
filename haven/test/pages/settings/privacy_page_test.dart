@@ -15,11 +15,18 @@ import '../../helpers/localized_app_harness.dart';
 
 /// Scrolls [finder] into view, tolerating a target that is already visible.
 ///
-/// The hub grows a tile per topic, so it outgrows one viewport; a [ListView]
-/// builds no element for an off-screen child.
+/// The hub grows a tile per topic, so it outgrows one viewport. Both steps are
+/// needed and neither implies the other: a [ListView] builds no element at all
+/// for a child beyond its cache extent, so an absent finder must be scrolled to
+/// before it can be found — but a child *within* the cache extent is built while
+/// still off-screen, so a finder that evaluates non-empty can still be untappable.
+/// Returning on existence alone let a tap silently miss.
 Future<void> _reveal(WidgetTester tester, Finder finder) async {
-  if (finder.evaluate().isNotEmpty) return;
-  await tester.scrollUntilVisible(finder, 200);
+  if (finder.evaluate().isEmpty) {
+    await tester.scrollUntilVisible(finder, 200);
+  }
+  await tester.ensureVisible(finder);
+  await tester.pumpAndSettle();
 }
 
 void main() {

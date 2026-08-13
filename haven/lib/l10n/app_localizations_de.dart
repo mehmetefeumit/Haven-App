@@ -403,7 +403,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'Haven teilt deinen Standort mit deinen Kreisen, solange die App geöffnet ist. Schaltest du das hier ein, sehen deine Kreise ihn auch weiter, während Haven im Hintergrund läuft. Beendet das System Haven, wird dein Standort nicht mehr geteilt, bis du die App wieder öffnest – im Hintergrund wird Haven nur aufgeweckt, um die Standorte deiner Kreise abzurufen; dein eigener Standort wird dabei nie gesendet.';
+      'Haven teilt deinen Standort mit deinen Kreisen, solange die App geöffnet ist. Schaltest du das hier ein, sehen deine Kreise ihn auch weiter, während Haven im Hintergrund läuft. Beendet das System Haven, wird dein Standort nicht mehr geteilt – im Hintergrund wird Haven nur aufgeweckt, um die Standorte deiner Kreise abzurufen; dein eigener Standort wird dabei nie gesendet. Unter Android wird dein Standort aber auch dann weiter geteilt, wenn du Haven aus dem App-Umschalter wischst, und nach einem Neustart des Geräts beginnt das Teilen deines Standorts von allein wieder; auf dem iPhone bleibt das Teilen gestoppt, bis du Haven öffnest.';
 
   @override
   String get locationSettingsToggleTitle => 'Im Hintergrund teilen';
@@ -531,7 +531,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get privacyHubSummary =>
-      'Haven teilt deinen Standort nur mit kleinen Gruppen deiner Wahl, den sogenannten Kreisen, und verschlüsselt ihn auf deinem Handy, bevor er es verlässt. Es gibt keine Anmeldung und keinen Haven-Server. Öffentlich ist nur eines: der Anzeigename und das Foto, die du festlegst. Die folgenden Seiten erklären das und alles Weitere in einfachen Worten.';
+      'Haven teilt deinen Standort nur mit kleinen Gruppen deiner Wahl, den sogenannten Kreisen, und verschlüsselt ihn auf deinem Handy, bevor er es verlässt. Es gibt keine Anmeldung und keinen Haven-Server. Öffentlich sind der Anzeigename und das Foto, die du festlegst, und dazu die Schlüssel und Relay-Listen, die andere brauchen, um dich einzuladen. Die folgenden Seiten erklären das und alles Weitere in einfachen Worten.';
 
   @override
   String get privacyGroupBasicsHeading => 'Die Grundlagen';
@@ -573,7 +573,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get privacyWhatHavenIsMeansForYou =>
-      'Niemand kann gezwungen werden, deine Daten herauszugeben, weil niemand sie hat. Der Preis dafür ist, dass auch niemand deine Identität für dich wiederherstellen kann. Unter „Deine zwei Schlüssel“ steht, was du sichern solltest.';
+      'Kein Relay-Betreiber kann gezwungen werden, deinen Standort herauszugeben, denn die Server, über die dein Standort läuft, können ihn nicht lesen. Der Preis dafür ist, dass niemand deine Identität für dich wiederherstellen kann und dass alles, was du bereits veröffentlicht hast, veröffentlicht bleibt. Unter „Deine zwei Schlüssel“ steht, was du sichern solltest.';
 
   @override
   String get privacyWhatHavenIsDetailNoTelemetry =>
@@ -681,11 +681,15 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get privacyRelaysMeansForYou =>
-      'Ein Relay sieht deinen Standort nie, denn er wird verschlüsselt, bevor er dein Handy verlässt. Es sieht aber, was öffentlich sein muss, damit andere dich erreichen können: deinen Namen und dein Foto, die Schlüssel, die andere zum Einladen brauchen, und deine Relay-Liste selbst. Haven bringt von Anfang an funktionierende Relays mit, du musst also nichts ändern.';
+      'Ein Relay sieht deinen Standort nie, denn er wird verschlüsselt, bevor er dein Handy verlässt. Es sieht aber, was öffentlich sein muss, damit andere dich erreichen können: die Schlüssel, die andere zum Einladen brauchen, und die Listen, die angeben, welche Relays genutzt werden sollen. Dein Name und dein Foto sind ebenfalls öffentlich, gehen aber an eine getrennte Gruppe von Relays. Haven bringt von Anfang an funktionierende Relays mit, du musst also nichts ändern.';
 
   @override
   String get privacyRelaysDetailIndexers =>
-      'Unabhängig von deinen eigenen Listen fragt Haven eine kleine Gruppe öffentlicher Verzeichnis-Relays ab, um Profile und Schlüssel anderer Leute nachzuschlagen. Diese kontaktiert Haven auch dann, wenn du selbst ausschließlich private Relays eingerichtet hast. Sie sehen deine Netzwerkadresse und nach welchen Konten du gefragt hast.';
+      'Unabhängig von deinen eigenen Listen nutzt Haven zwei Gruppen öffentlicher Server, die du nicht auswählst: acht, um die Namen und Fotos anderer Leute nachzuschlagen, und sechs, um die Schlüssel nachzuschlagen, die man zum Einladen braucht. Die beiden Gruppen überschneiden sich nie. Du kannst der Profil-Gruppe eigene Server hinzufügen, diese acht aber nicht daraus entfernen. Haven kontaktiert beide Gruppen auch dann, wenn alle Relays, die du für dich selbst gewählt hast, privat sind, und jeder dieser Server sieht deine Netzwerkadresse.';
+
+  @override
+  String get privacyRelaysDetailProfileLookups =>
+      'Bei Namen und Fotos fragt Haven immer nur nach einer Person auf einmal. Jeder Person wird auf deinem Gerät ein Server zugeordnet; hat dieser Server nichts zu dieser Person, fragt Haven noch einen zweiten. Schlägst du jemanden nach, erfahren davon also höchstens zwei der acht Server, nie die ganze Gruppe. Haven mischt diese Zuordnungen nie von sich aus neu; sie verschieben sich aber, wenn sich die Gruppe der Server ändert. So verteilen sich deine Anfragen, statt alle bei einem einzigen Server zu landen. Jeder zugeordnete Server sammelt trotzdem mit der Zeit eine dauerhafte Spur davon, dass dein Handy immer wieder nach derselben Person fragt, und wenn es nur wenige Personen sind, können mehrere von ihnen demselben Server zugeordnet sein. Wenn du deinen eigenen Namen oder dein Foto speicherst, geht das an alle Profil-Relays, die du gerade nutzt – das sind die acht Server, minus die von Haven ausgeschlossenen und plus die von dir selbst hinzugefügten –, und jedes dieser Relays erfährt dadurch deinen öffentlichen Schlüssel.';
 
   @override
   String get privacyRelaysDetailKeyListIsPublic =>
@@ -744,7 +748,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeCannotPause =>
-      'Solange Haven geöffnet ist und du zu einem Kreis gehörst, wird dein Standort alle paar Minuten von allein gesendet. Einen Pausenknopf gibt es nicht: Der Schalter auf der Seite „Standort“ legt nur fest, ob das weiterläuft, nachdem du die App geschlossen hast. Willst du mit einem Kreis nicht mehr teilen, öffne ihn und wähle „Kreis verlassen“.';
+      'Solange Haven geöffnet ist und du zu einem Kreis gehörst, wird dein Standort alle paar Minuten von allein gesendet. Einen Pausenknopf gibt es nicht: Der Schalter auf der Seite „Standort“ legt nur fest, ob das weitergeht, während Haven im Hintergrund läuft. Beendet das System Haven, wird dein Standort nicht mehr geteilt. Unter Android wird dein Standort aber auch dann weiter geteilt, wenn du Haven aus dem App-Umschalter wischst, und nach einem Neustart des Geräts beginnt das Teilen deines Standorts von allein wieder; auf dem iPhone bleibt das Teilen gestoppt, bis du Haven öffnest. Willst du deinen Standort mit einem Kreis nicht mehr teilen, öffne diesen Kreis und wähle „Kreis verlassen“.';
 
   @override
   String get privacyWhatOthersSeeMembersLearnKey =>
@@ -771,7 +775,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeDetailTag =>
-      'Das Kennzeichen eines Kreises bleibt über die gesamte Lebensdauer des Kreises gleich, sodass ein Relay alle seine Nachrichten dauerhaft miteinander verknüpfen kann. Das liegt am zugrunde liegenden Protokoll und lässt sich von Haven nicht ändern.';
+      'Das Kennzeichen eines Kreises bleibt über die gesamte Lebensdauer des Kreises gleich, sodass ein Relay alle seine Nachrichten dauerhaft miteinander verknüpfen kann. Das Protokoll erlaubt einem Kreis durchaus, auf ein neues Kennzeichen zu wechseln, aber Haven tut das bisher nicht – und ein Wechsel würde auch nicht rückgängig machen, was ein Relay bereits verknüpft hat.';
 
   @override
   String get commonLearnMore => 'Mehr erfahren';
@@ -786,7 +790,15 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeDetailExpiry =>
-      'Haven bittet die Relays, Standortnachrichten nach etwa vier Minuten zu verwerfen. Diese Bitte ist nur ein Hinweis: Ein Relay darf sie auch länger behalten. Einladungen haben überhaupt kein Verfallsdatum und können unbegrenzt auf deinem Posteingangs-Relay liegen bleiben.';
+      'Haven bittet die Relays, Standortnachrichten nach etwa vier Minuten zu verwerfen. Diese Bitte ist nur ein Hinweis: Ein Relay darf die Nachrichten auch länger behalten. Nur Standortnachrichten tragen dieses Verfallsdatum; fehlt es, kann ein Relay daran eine Mitgliederänderung von einer Standortnachricht unterscheiden. Einladungen haben überhaupt kein Verfallsdatum und können unbegrenzt auf deinem Posteingangs-Relay liegen bleiben.';
+
+  @override
+  String get privacyWhatOthersSeeDetailOnDevice =>
+      'Das Handy jedes Mitglieds zeigt den letzten Standort, den es von dir empfangen hat, nach einem Tag nicht mehr an und löscht ihn, sobald das Mitglied Haven das nächste Mal öffnet. Davon unberührt bleibt, was ein Mitglied selbst gespeichert oder als Screenshot festgehalten hat – darauf hat Haven keinen Einfluss.';
+
+  @override
+  String get privacyWhatOthersSeeDetailOneConnection =>
+      'Haven öffnet zu jedem Relay eine einzige Verbindung und wickelt darüber alles ab, was auf diesem Relay passiert. Trägt ein Relay sowohl deine Einladungen als auch die Nachrichten eines Kreises, fragt diese eine Verbindung gleichzeitig nach Einladungen, die an deinen eigenen öffentlichen Schlüssel gerichtet sind, und nach den Nachrichten dieses Kreises anhand seines Kennzeichens – und genau das erlaubt dem Relay, beides miteinander zu verknüpfen. Bei einer neuen Installation werden für beides dieselben Relays verwendet.';
 
   @override
   String get privacyGroupTheLimitsHeading => 'Die Grenzen';
@@ -805,7 +817,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get privacyInferenceActivityPattern =>
-      'Aus diesem Muster kann ein Relay, das du nutzt, ungefähr ablesen, wann du aktiv bist und wie oft. Haven sendet außerdem eine zusätzliche Aktualisierung, sobald du dich etwa hundert Meter bewegst. Über Stunden hinweg kann das einem Relay zeigen, ob du unterwegs warst oder an einem Ort geblieben bist. Wo das war, zeigt es nie.';
+      'Aus diesem Muster kann ein Relay, das du nutzt, ungefähr ablesen, wann du aktiv bist und wie oft. Solange Haven auf dem Bildschirm ist – und auf dem iPhone auch, solange das Teilen im Hintergrund die App am Laufen hält –, sendet Haven außerdem jedes Mal, wenn du dich etwa hundert Meter bewegst, eine zusätzliche Standortmeldung, höchstens jedoch einmal pro Minute. Über Stunden hinweg kann das einem Relay zeigen, ob du unterwegs warst oder an einem Ort geblieben bist. Wo du bist, zeigt dieses Muster nie.';
 
   @override
   String get privacyInferencePresence =>
@@ -1011,6 +1023,19 @@ class AppLocalizationsDe extends AppLocalizations {
     final String percentString = percentNumberFormat.format(percent);
 
     return '$percentString Prozent abgeschlossen';
+  }
+
+  @override
+  String nameCircleCreatedPartialSnack(String name, int sent, int total) {
+    final intl.NumberFormat sentNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String sentString = sentNumberFormat.format(sent);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return 'Kreis „$name“ erstellt. Einladungen gesendet ($sentString von $totalString); die Zustellung der übrigen steht noch aus.';
   }
 
   @override
@@ -1334,7 +1359,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get circleDetailsRelaysNote =>
-      'Diese Relays wurden bei der Erstellung dieses Kreises aus deinen Posteingangs-Relays übernommen und lassen sich noch nicht ändern. Spätere Änderungen an deiner persönlichen Relay-Liste wirken sich nicht auf sie aus.';
+      'Diese Relays stammen aus den veröffentlichten Listen der eingeladenen Mitglieder – hatten diese Mitglieder keine, aus deinen Posteingangs-Relays oder aus von Haven gewählten Relays. Sie lassen sich noch nicht ändern, und spätere Änderungen an deiner Relay-Liste wirken sich nicht auf sie aus.';
 
   @override
   String get circleDetailsAddMember => 'Mitglied hinzufügen';
@@ -1622,7 +1647,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get identityAdvancedDeleteBody =>
-      'Dadurch werden deine Identität und alle Kreisdaten von diesem Handy gelöscht. Alles, was bereits darunter veröffentlicht wurde, auch dein Name, dein Foto und deine Schlüssel, bleibt auf den Relays, die es haben. Stelle sicher, dass du deinen geheimen Schlüssel gesichert hast, falls du sie wiederherstellen möchtest.';
+      'Dadurch werden deine Identität und alle Kreisdaten von diesem Handy gelöscht. Alles, was bereits unter dieser Identität veröffentlicht wurde, bleibt dort, wo es ist: dein Name und deine Schlüssel auf den Relays, die sie haben, dein Foto auf dem Bild-Host, der es speichert. Stelle sicher, dass du deinen geheimen Schlüssel gesichert hast, falls du die Identität später wiederherstellen möchtest.';
 
   @override
   String get identityAdvancedDeleteConfirm => 'Löschen';

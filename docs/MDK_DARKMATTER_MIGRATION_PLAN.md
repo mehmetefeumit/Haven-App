@@ -356,7 +356,7 @@ Box::new(NostrMlsPeeler::new().with_welcome_signer(keys))).account_identity_proo
 | 12 | `get_group` | `session.group_record(&gid)? → Group{id,name,description,epoch,members,required_capabilities,removed,join_epoch}` **[V]** (**sync `&self`, NOT async** — corrected) | field renames: no `state`/`nostr_group_id` field — `removed` bool + hydration-quarantine replace `GroupState`; `nostr_group_id` from routing component |
 | 13 | `get_groups` | **GAP — no session `list_groups`** **[V]** (upstream friction note). Keep Haven's group registry in `circles.db` | **GAP** |
 | 14 | `get_members` | `session.members(&gid)? → Vec<Member{id,credential}>` + `session.admin_pubkeys(&gid)? → Vec<[u8;32]>` **[V]** | 1:1-ish (two calls) |
-| 15 | `get_ratchet_tree_info` | no ratchet-tree API on the session → **GAP** for the MIP-00 key-separation test; re-express via identity-proof leaf check (§5.7, security F9) | **GAP** |
+| 15 | `get_ratchet_tree_info` | no ratchet-tree API on the session, but the leaf-level property it proved is reachable: `session.members()` projects each leaf's signature key (`Member::credential`) beside the account identity (`Member::id`) | **RESOLVED** — `mls_e2e_security_tests.rs::p3a_leaf_signature_key_differs_from_nostr_identity_key` |
 | 16 | `get_stored_exporter_secret` (probe) | `session.exporter_secret(&gid,label,len)` presence **[V]** | rewrite/test-only |
 | 17 | `leave_group` | `session.send(SendIntent::Leave{group_id}).await → Proposal{msg}` **[V]** | rewrite (no pending/confirm for a bare Proposal) |
 | 18 | `self_demote` | `SendIntent::UpdateAppComponents` on `admin-policy.v1` **[V]** | rewrite → app components. No first-class self-demote intent; Haven encodes the policy itself (`encode_admin_policy_v1`) and sends the update — see §11.1. |
@@ -490,9 +490,15 @@ migrates to an **automated black-box gate over `SessionManager` / the new stack*
   multi-party real-out-of-order convergence e2e**: all members converge to one epoch, no stuck/poisoned
   message, location delivered. Delete only the workaround-*internal* assertions, never the end-state
   proof — trusting an unproven engine is exactly when this gate matters most.
-- **Rule 1 key-separation** (was `get_ratchet_tree_info` leaf inspection) → the ratchet-tree API is
-  gone; re-express as **identity-proof present + verifies + MLS sig-key ≠ Nostr identity key** (on-wire
-  enforced by W7).
+- **Rule 1 key-separation** (was `get_ratchet_tree_info` leaf inspection) → **DONE.** The ratchet-tree
+  API is gone, but the leaf read is not: `session.members()` carries each leaf's signature key
+  (`Member::credential`) beside the account identity (`Member::id`), so the direct assertion
+  **MLS sig-key ≠ Nostr identity key** survives verbatim in
+  `p3a_leaf_signature_key_differs_from_nostr_identity_key`. The weaker re-expression this plan
+  proposed — "identity-proof present + verifies" — is kept as the complementary ON-WIRE half
+  (`p3a_key_separation_identity_proof_enforced_and_identity_not_used_for_group_messages`, W7), never
+  as the substitute: the proof binds the account to the leaf and never requires the two keys to
+  differ, so it verifies happily under the mutation that reuses the Nostr secret as the MLS signer.
 - **Rule 2 ephemeral-445 uniqueness** (fresh ephemeral per 445), **Rule 3 444-unsigned** (rumor
   unsigned, only 1059 seal signed), **Rule 4 group-id privacy** (**no real MLS `GroupId` in any
   published event**) → each an assertion over the send/publish path.

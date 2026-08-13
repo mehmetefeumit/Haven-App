@@ -273,6 +273,7 @@ List<PrivacyBlock> privacyBlocksFor(
     PrivacyMeansForYou(l10n.privacyRelaysMeansForYou),
     PrivacyMoreDetail([
       l10n.privacyRelaysDetailIndexers,
+      l10n.privacyRelaysDetailProfileLookups,
       l10n.privacyRelaysDetailKeyListIsPublic,
     ]),
   ],
@@ -317,9 +318,14 @@ List<PrivacyBlock> privacyBlocksFor(
     PrivacyPara(l10n.privacyWhatOthersSeeRelaysCannot),
     PrivacyPara(l10n.privacyWhatOthersSeeRelaysCan),
     PrivacyMeansForYou(l10n.privacyWhatOthersSeeMeansForYou),
+    // Ordered members-then-relays to mirror the two headings above, so the
+    // collapsed region reads as a continuation of the page rather than a
+    // separate list.
     PrivacyMoreDetail([
+      l10n.privacyWhatOthersSeeDetailOnDevice,
       l10n.privacyWhatOthersSeeDetailTag,
       l10n.privacyWhatOthersSeeDetailExpiry,
+      l10n.privacyWhatOthersSeeDetailOneConnection,
     ]),
   ],
   PrivacyTopic.inference => [

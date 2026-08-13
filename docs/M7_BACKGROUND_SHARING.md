@@ -1027,10 +1027,13 @@ nostr_group_id_hex=?` in the `delete_circle` cascade (`storage.rs:824-877`) = wi
 
 ## DoS + presence-only hardening (folded during implementation)
 
-- `run_catchup_all_circles` caps the per-circle batch (`group_filter(...).limit(
-  CATCHUP_MAX_EVENTS_PER_CIRCLE=512)`) AND deadline-checks the inner decrypt loop — a malicious relay
-  can't flood a circle's REQ into a background CPU/battery DoS (events re-fetch next sweep — not a
-  fork).
+- `run_catchup_all_circles` caps every REQ (`group_filter(...).limit(CATCHUP_MAX_EVENTS_PER_PAGE=500)`,
+  at strfry's `maxFilterLimit` so our own limit is the binding one) AND bounds the backward chase that
+  follows a truncated page — `CATCHUP_MAX_PAGES_PER_CIRCLE=8`,
+  `CATCHUP_MAX_EVENTS_PER_CIRCLE=4000` accumulated, plus the sweep deadline between pages — AND
+  deadline-checks the inner decrypt loop. A malicious relay can't flood a circle's REQ into a
+  background CPU/battery DoS, and hitting any bound marks the window incomplete so the cursor holds
+  rather than skipping the tail (not a fork).
 - `decrypt_receive_only` does NOT call `resync_circle_relays_from_mdk`; `ReceiveOnlyOutcome` /
   `CatchupOutcome` are all-counter structs (leak-free `Debug` by construction); storage-error debug
   logs route through `redact_hex_sequences`.

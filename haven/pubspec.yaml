@@ -1,5 +1,9 @@
 name: haven
-description: Private, forward-secret family location sharing.
+# "forward-secret" was removed deliberately: haven-core/SECURITY.md records
+# periodic key rotation as an accepted deviation, so keys change only on
+# membership change. The app's own privacy copy is forbidden from using the
+# term, and a relay-settings test asserts it never reaches the UI.
+description: Private, end-to-end encrypted family location sharing.
 publish_to: none
 version: 0.1.0+1
 

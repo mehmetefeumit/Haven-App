@@ -91,7 +91,10 @@ final memberLocationsProvider = FutureProvider<List<MemberLocation>>((
       '[LocationFetch] Got ${locations.length} member location(s), '
       'showing ${otherMembers.length} (excluding self)',
     );
-    return _withEffectiveNames(otherMembers, profileService);
+    // Awaited inside the try so name resolution is covered by the fallback
+    // below: returning the future un-awaited put it outside the catch, and a
+    // failure there surfaced as a provider error instead of an empty map.
+    return await _withEffectiveNames(otherMembers, profileService);
   } on Object catch (e) {
     debugPrint('[LocationFetch] FAILED: ${e.runtimeType}');
     return [];

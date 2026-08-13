@@ -393,7 +393,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'Haven shares your location with your circles whenever the app is open. Turn this on and your circles keep seeing it while Haven is in the background. If the system closes Haven, sharing stops until you open it again — background wake-ups only fetch your circles\' locations, they never send yours.';
+      'Haven shares your location with your circles whenever the app is open. Turn this on and your circles keep seeing it while Haven is in the background. If the system closes Haven, sharing stops — background wake-ups only fetch your circles\' locations, they never send yours. On Android, sharing survives swiping Haven away and starts again by itself after a reboot; on iPhone it stays stopped until you open Haven.';
 
   @override
   String get locationSettingsToggleTitle => 'Share in background';
@@ -518,7 +518,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get privacyHubSummary =>
-      'Haven shares your location only with the small groups you choose, called circles, and encrypts it on your phone before it leaves. There is no sign-up and no Haven server. The one thing that is public is the display name and photo you set. The pages below explain that, and everything else, in plain language.';
+      'Haven shares your location only with the small groups you choose, called circles, and encrypts it on your phone before it leaves. There is no sign-up and no Haven server. The display name and photo you set are public, along with the keys and relay lists that others need in order to invite you. The pages below explain that, and everything else, in plain language.';
 
   @override
   String get privacyGroupBasicsHeading => 'The basics';
@@ -559,7 +559,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get privacyWhatHavenIsMeansForYou =>
-      'Nobody can be made to hand over your data, because nobody is holding it. The cost is that nobody can restore your identity for you either. See “Your two keys” for what to back up.';
+      'No relay operator can be made to hand over your location, because the servers that carry it cannot read it. The cost is that nobody can restore your identity for you, and whatever you have already published stays published. See “Your two keys” for what to back up.';
 
   @override
   String get privacyWhatHavenIsDetailNoTelemetry =>
@@ -665,11 +665,15 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get privacyRelaysMeansForYou =>
-      'A relay never sees your location, because it is encrypted before it leaves your phone. It does see what has to be public for people to reach you: your name and photo, the keys others need to invite you, and your relay list itself. Haven starts you with working relays, so there is nothing you must change.';
+      'A relay never sees your location, because it is encrypted before it leaves your phone. It does see what has to be public for people to reach you: the keys others need to invite you, and the lists saying which relays to use. Your name and photo are public too, but they go to a separate set of relays. Haven starts you with working relays, so there is nothing you must change.';
 
   @override
   String get privacyRelaysDetailIndexers =>
-      'Separately from your own lists, Haven queries a small set of public directory relays to look up other people\'s profiles and keys. It contacts these even if you have configured only private relays of your own. They see your network address and which accounts you asked about.';
+      'Separately from your own lists, Haven uses two groups of public servers that you do not choose: eight for looking up other people\'s names and photos, and six for looking up the keys needed to invite them. The two groups never overlap. You can add your own servers to the profile group, but you cannot take these eight out of it. Haven contacts both groups even if every relay you chose for yourself is private, and each of them sees your network address.';
+
+  @override
+  String get privacyRelaysDetailProfileLookups =>
+      'For names and photos, Haven asks about one person at a time. Each person is assigned a server on your device; if that server has nothing for them, Haven tries one more. Looking someone up therefore discloses them to at most two of the eight, never to the whole set. Haven never reshuffles those assignments on its own, though they do shift if the set of servers changes. That spreads your lookups rather than sending them all to one server. Each assigned server still builds a lasting record that your phone keeps asking about someone, and with only a few people, several of them can land on the same server. When you save your own name or photo, it goes to every profile relay you are using — the eight, minus any Haven has excluded, plus any you added — so each of those learns your public key.';
 
   @override
   String get privacyRelaysDetailKeyListIsPublic =>
@@ -727,7 +731,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeCannotPause =>
-      'While Haven is open and you are in a circle, your position goes out every couple of minutes on its own. There is no pause button: the switch on the Location page only controls whether that continues after you close the app. To stop sharing with a circle, open it and choose Leave Circle.';
+      'While Haven is open and you are in a circle, your position goes out every couple of minutes on its own. There is no pause button: the switch on the Location page only controls whether that continues while Haven is in the background. If the system closes Haven, sharing stops. On Android, sharing survives swiping Haven away and starts again by itself after a reboot; on iPhone it stays stopped until you open Haven. To stop sharing with a circle, open it and choose Leave Circle.';
 
   @override
   String get privacyWhatOthersSeeMembersLearnKey =>
@@ -754,7 +758,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeDetailTag =>
-      'A circle\'s tag stays the same for the life of that circle, so a relay can link all of its messages together indefinitely. That is a property of the underlying protocol, not something Haven can change.';
+      'A circle\'s tag stays the same for the life of that circle, so a relay can link all of its messages together indefinitely. The protocol does allow a circle to move to a new tag, but Haven does not do that today — and moving would not undo what a relay has already linked.';
 
   @override
   String get commonLearnMore => 'Learn more';
@@ -769,7 +773,15 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeDetailExpiry =>
-      'Haven asks relays to drop location messages after about four minutes. That request is advisory: a relay is free to keep them for longer. Invitations carry no expiry at all, and may sit on your inbox relay indefinitely.';
+      'Haven asks relays to drop location messages after about four minutes. That request is advisory: a relay is free to keep them for longer. Only location updates carry that expiry request, so a message without one is visibly a membership change rather than a location update. Invitations carry no expiry at all, and may sit on your inbox relay indefinitely.';
+
+  @override
+  String get privacyWhatOthersSeeDetailOnDevice =>
+      'Each member\'s phone stops showing the last position it received from you after a day, and deletes it the next time they open Haven. That is separate from anything a member chose to save or screenshot themselves, which Haven has no say over.';
+
+  @override
+  String get privacyWhatOthersSeeDetailOneConnection =>
+      'Haven opens one connection to each relay and uses it for everything on that relay. Where a relay carries both your invitations and a circle\'s messages, that single connection asks for invitations addressed to your public key and for that circle\'s messages by its tag at the same time, which is what lets the relay tie the two together. On a new install the same relays are used for both.';
 
   @override
   String get privacyGroupTheLimitsHeading => 'The limits';
@@ -786,7 +798,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get privacyInferenceActivityPattern =>
-      'From that pattern, a relay you use can tell roughly when you are active and how often. Haven also sends an extra update whenever you move about a hundred metres. Over hours, that can show a relay whether you were on the move or staying put. It never shows where.';
+      'From that pattern, a relay you use can tell roughly when you are active and how often. While Haven is on screen — and on iPhone, while background sharing keeps it running — it also sends an extra update, at most once a minute, whenever you move about a hundred metres. Over hours, that can show a relay whether you were on the move or staying put. That pattern never shows where you are.';
 
   @override
   String get privacyInferencePresence =>
@@ -988,6 +1000,19 @@ class AppLocalizationsEn extends AppLocalizations {
     final String percentString = percentNumberFormat.format(percent);
 
     return '$percentString percent complete';
+  }
+
+  @override
+  String nameCircleCreatedPartialSnack(String name, int sent, int total) {
+    final intl.NumberFormat sentNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String sentString = sentNumberFormat.format(sent);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return 'Circle \"$name\" created. Invitations sent ($sentString of $totalString); delivery pending for the rest.';
   }
 
   @override
@@ -1307,7 +1332,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get circleDetailsRelaysNote =>
-      'These relays were copied from your inbox relays when this circle was created, and cannot be changed yet. Later edits to your personal relay list do not change them.';
+      'These relays came from the lists the invited members published — or, if they had none, from your inbox relays or ones Haven chose. They cannot be changed yet, and later edits to your relay list do not affect them.';
 
   @override
   String get circleDetailsAddMember => 'Add member';
@@ -1590,7 +1615,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get identityAdvancedDeleteBody =>
-      'This deletes your identity and all circle data from this phone. Anything already published under it, including your name, photo and keys, stays on the relays that have it. Make sure you have backed up your secret key if you want to recover it.';
+      'This deletes your identity and all circle data from this phone. Anything already published under it stays where it is: your name and keys on the relays that have them, your photo on the image host that stores it. Make sure you have backed up your secret key if you want to recover this identity later.';
 
   @override
   String get identityAdvancedDeleteConfirm => 'Delete';

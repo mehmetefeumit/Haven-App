@@ -95,6 +95,20 @@ class PendingLeaveService {
   Future<void> clearLeaving(List<int> nostrGroupId) =>
       _clearHex(_hex(nostrGroupId));
 
+  /// Clears every leave-in-progress marker unconditionally, removing the key
+  /// entirely (not merely emptying it).
+  ///
+  /// Wired into identity deletion, to be called AFTER the caller has already
+  /// destroyed every local MLS group (`CircleService.wipeAllMlsState`): once
+  /// every group and the signing secret are gone there is nothing left to
+  /// resume, and a marker that survived would be a plaintext residue of the
+  /// deleted identity's past circle memberships (their public
+  /// `nostr_group_id`s). Throws on a prefs failure; the delete path treats
+  /// that as best-effort.
+  Future<void> clearAll() async {
+    await _prefs.remove(kPendingLeaveKey);
+  }
+
   Future<void> _clearHex(String hex) async {
     final set = pendingLeaves..remove(hex);
     await _write(set);

@@ -855,6 +855,18 @@ abstract class CircleService {
   /// SQLite handle before this; otherwise file deletion races an open fd.
   Future<void> wipeAllMlsState();
 
+  /// Destroys any stranded PRE-Dark-Matter MLS state (`haven_mdk.db` + its
+  /// keyring key) unconditionally.
+  ///
+  /// Independent of [wipeAllMlsState]: that wipes the CURRENT stack
+  /// (`session.sqlite`); this targets the legacy `haven_mdk.db` a failed
+  /// one-time cutover (`LegacyCutoverService`) may have left behind. Wired
+  /// into identity deletion because the cutover's own launch retry is gated
+  /// on an identity being present — once the identity is deleted that gate
+  /// can never fire again, so deletion is the last chance to remove it.
+  /// Idempotent and safe to call even when no legacy state exists.
+  Future<void> destroyLegacyMlsState();
+
   /// Prunes the dedup cache of processed gift-wrap events.
   ///
   /// Removes rows older than the retention window and caps the table at the

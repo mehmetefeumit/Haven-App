@@ -372,7 +372,7 @@ class _S {
     const knownOpenViolations = <String>{
       // `_createCircle`: fetched once for `createCircle(identitySecretBytes:
       // ...)`, never scrubbed after the call returns.
-      'lib/src/pages/circles/name_circle_page.dart:290',
+      'lib/src/pages/circles/name_circle_page.dart:291',
       // `invitationPollerProvider`: fetched once for the whole gift-wrap
       // batch, never scrubbed after `Future.wait` completes.
       'lib/src/providers/invitation_provider.dart:114',

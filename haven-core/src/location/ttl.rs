@@ -330,4 +330,22 @@ mod tests {
         let max = MAX_UPDATE_INTERVAL_SECS * 140 / 100; // 1.4 * MAX
         assert!((min..=max).contains(&v), "out of range: {v}");
     }
+
+    #[test]
+    fn publish_interval_jitter_fraction_bp_is_pinned() {
+        // Read through a `let` for the same reason as the other constant pins
+        // in this crate — see `clock_skew_threshold_is_pinned` in
+        // `relay/clock_skew.rs`.
+        let bp = PUBLISH_INTERVAL_JITTER_FRACTION_BP;
+        // The inclusion-style tests above only assert membership in the WIDE
+        // range this constant produces, so they pass unchanged under both a
+        // narrowing and a widening. NARROWING sharpens the publish-cadence
+        // fingerprint a relay can extract (fewer distinct sampled intervals,
+        // faster convergence to the mean than the "~200 samples" claim this
+        // module documents); WIDENING silently invalidates the Dart mirror
+        // `kLocationPublishMinInterval`/`kLocationPublishMaxInterval`
+        // (72s/168s), which is checked against this value by
+        // `scripts/ci/check_publish_jitter_fraction_parity.sh`.
+        assert_eq!(bp, 4_000, "PUBLISH_INTERVAL_JITTER_FRACTION_BP moved");
+    }
 }

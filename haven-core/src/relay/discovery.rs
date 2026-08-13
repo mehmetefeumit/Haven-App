@@ -157,6 +157,16 @@ mod tests {
     }
 
     #[test]
+    fn discovery_plane_size_is_exactly_six() {
+        // The size is quoted verbatim to the user — `privacyRelaysDetailIndexers`
+        // says "six for looking up the keys needed to invite them" — so resizing
+        // this list is a copy change in every locale, not just a config change;
+        // `tests/privacy_copy_ties.rs` holds the constant and the English
+        // copy together.
+        assert_eq!(PRODUCTION_DISCOVERY_RELAYS.len(), 6);
+    }
+
+    #[test]
     fn discovery_relays_returns_curated_list_by_default() {
         // No discovery or default override is installed in this unit-test
         // binary, so the production indexer set is returned verbatim.

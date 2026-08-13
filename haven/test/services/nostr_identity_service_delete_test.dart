@@ -170,5 +170,32 @@ void main() {
       await expectLater(service.deleteIdentity(), completes);
       expect(manager.deleted, isTrue);
     });
+
+    test('wipes the encrypted map-tile cache', () async {
+      // Every other test in this file (and nostr_identity_service_retry_test)
+      // injects wipeTileCache as a no-op closure, so a regression that deletes
+      // the `_wipeTileCache()` call from deleteIdentity would break nothing
+      // there. This spy asserts the call is actually made.
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      var tileCacheWiped = false;
+      final manager = _FakeIdentityManager();
+      final service = NostrIdentityService(
+        storage: _MemoryStorage(validSecret),
+        wipeTileCache: () async {
+          tileCacheWiped = true;
+        },
+        managerFactory: () async => manager,
+      );
+
+      await service.deleteIdentity();
+
+      expect(
+        tileCacheWiped,
+        isTrue,
+        reason:
+            'deleteIdentity must wipe the encrypted tile cache so a new '
+            "identity never inherits the prior identity's cached map areas",
+      );
+    });
   });
 }

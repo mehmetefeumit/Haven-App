@@ -756,10 +756,10 @@ abstract class AppLocalizations {
   /// **'Something went wrong'**
   String get locationSettingsErrorSnack;
 
-  /// Framing paragraph at the top of the location settings page. MUST NOT promise that the user's OWN sharing resumes after the system closes the app: every background wake path (catchup_service.dart, ios_background_catchup.dart, HavenSLCHandler.swift) is receive-only and contains no publish call site, and Android has no movement trigger at all. An earlier version claimed 'updates resume when you move or when the system next wakes the app', which was false on both platforms.
+  /// Framing paragraph at the top of the location settings page. MUST NOT promise that the user's OWN sharing resumes after the system closes the app: every background wake path (catchup_service.dart, ios_background_catchup.dart, HavenSLCHandler.swift) is receive-only and contains no publish call site, and Android has no movement trigger at all. An earlier version claimed 'updates resume when you move or when the system next wakes the app', which was false on both platforms. The final sentence is a SECOND, later correction and is platform-asymmetric on purpose, the same way privacyWhatOthersSeeScreenshots is: a version after that one said flatly 'sharing stops until you open it again', which is false on Android in the dangerous direction. RebootReceiver is android:enabled="true" (AndroidManifest.xml) and ForegroundTaskOptions sets autoRunOnBoot:true (background_location_manager.dart), so a reboot resurrects the PUBLISHING foreground service with no user action; and no android:stopWithTask is set anywhere, so the service also survives the app being swiped out of recents. A user who reboots believing sharing stopped is still broadcasting, so never flatten these two platforms back into one sentence. The Android exception stops exactly there and must not be widened: RestartReceiver is android:enabled="false", so an OS or OEM kill of the service is never auto-restarted, and iOS has no publishing wake path at all.
   ///
   /// In en, this message translates to:
-  /// **'Haven shares your location with your circles whenever the app is open. Turn this on and your circles keep seeing it while Haven is in the background. If the system closes Haven, sharing stops until you open it again — background wake-ups only fetch your circles\' locations, they never send yours.'**
+  /// **'Haven shares your location with your circles whenever the app is open. Turn this on and your circles keep seeing it while Haven is in the background. If the system closes Haven, sharing stops — background wake-ups only fetch your circles\' locations, they never send yours. On Android, sharing survives swiping Haven away and starts again by itself after a reboot; on iPhone it stays stopped until you open Haven.'**
   String get locationSettingsIntro;
 
   /// Title of the background-sharing toggle tile.
@@ -768,13 +768,13 @@ abstract class AppLocalizations {
   /// **'Share in background'**
   String get locationSettingsToggleTitle;
 
-  /// Subtitle of the background-sharing toggle tile. MUST NOT say "when the app is closed": this toggle keeps sharing alive while Haven is BACKGROUNDED, and sharing stops when the system TERMINATES the app (every background wake path is receive-only). It renders directly beneath the toggle, immediately above locationSettingsIntro, so an over-claim here contradicts the paragraph that states the limit.
+  /// Subtitle of the background-sharing toggle tile. MUST NOT say "when the app is closed": this toggle keeps sharing alive while Haven is BACKGROUNDED, and sharing stops when the system TERMINATES the app (every background wake path is receive-only). It renders directly beneath the toggle, immediately above locationSettingsIntro, so an over-claim here contradicts the paragraph that states the limit. That termination rule is not the whole truth, and this string is deliberately silent on the remainder rather than half-stating it: on Android the foreground service survives the app being swiped out of recents and is resurrected after a reboot (RebootReceiver + autoRunOnBoot), so sharing there resumes with no user action. locationSettingsIntro, directly below, is the one place that asymmetry is stated — keep it that way, because one tile line has no room to qualify it without misleading.
   ///
   /// In en, this message translates to:
   /// **'Keep sharing while Haven runs in the background'**
   String get locationSettingsToggleSubtitle;
 
-  /// iOS-only note shown when background sharing is on but the location permission is only 'while in use'. Must stay honest in both directions: While-In-Use IS sufficient for continued background sharing while the app stays running (never claim 'Always' is required for that), and 'Always' still genuinely improves catch-up after iOS terminates the app (never present While-In-Use as loss-free), and 'Always' does NOT resume the user's own sharing — the SLC relaunch it enables is receive-only (HavenSLCHandler.swift), so never imply the user keeps being seen.
+  /// iOS-only note shown when background sharing is on but the location permission is only 'while in use'. Must stay honest in both directions: While-In-Use IS sufficient for continued background sharing while the app stays running (never claim 'Always' is required for that), and 'Always' still genuinely improves catch-up after iOS terminates the app (never present While-In-Use as loss-free), and 'Always' does NOT resume the user's own sharing — the SLC relaunch it enables is receive-only (HavenSLCHandler.swift), so never imply the user keeps being seen. The closing 'resumes when you reopen Haven' is true ONLY because this note is iOS-scoped — it renders behind `sharingEnabled && iosLimited`, and iosLimited is always false off iOS (location_settings_page.dart). The same sentence would be false on Android, where a reboot restarts the publishing foreground service by itself (see locationSettingsIntro), so never lift it into a cross-platform string.
   ///
   /// In en, this message translates to:
   /// **'Sharing keeps working in the background with your current permission. Choose \'Always\' for Haven in Settings so Haven can also catch up on your circles\' locations after iOS closes the app. Your own sharing resumes when you reopen Haven.'**
@@ -972,10 +972,10 @@ abstract class AppLocalizations {
   /// **'How Haven works and what others can see'**
   String get privacySubtitle;
 
-  /// Always-visible summary paragraph at the top of the Privacy hub — the thirty-second answer for a reader who taps nothing else. Audience: non-technical, no Nostr knowledge assumed. Must promise honesty about limits, not only reassurance. Keep sentences under 25 words.
+  /// Always-visible summary paragraph at the top of the Privacy hub — the thirty-second answer for a reader who taps nothing else. Audience: non-technical, no Nostr knowledge assumed. Must promise honesty about limits, not only reassurance. Keep sentences under 25 words. The third sentence is factually load-bearing: the profile (kind 0) is NOT the only public thing — the kind-10002/10050 relay lists and the kind-30443 KeyPackage are published under the same identity key, and relay-list publishing is on by default (haven-core/src/circle/storage_relay_prefs.rs). An earlier version claimed the name and photo were 'the one thing that is public', which the app's own privacyRelaysMeansForYou and privacyRelaysDetailKeyListIsPublic contradicted. Match the enumeration already used in privacyRelaysMeansForYou in this locale.
   ///
   /// In en, this message translates to:
-  /// **'Haven shares your location only with the small groups you choose, called circles, and encrypts it on your phone before it leaves. There is no sign-up and no Haven server. The one thing that is public is the display name and photo you set. The pages below explain that, and everything else, in plain language.'**
+  /// **'Haven shares your location only with the small groups you choose, called circles, and encrypts it on your phone before it leaves. There is no sign-up and no Haven server. The display name and photo you set are public, along with the keys and relay lists that others need in order to invite you. The pages below explain that, and everything else, in plain language.'**
   String get privacyHubSummary;
 
   /// Header for the first group of Privacy topics on the hub (what Haven is, your keys, your public profile).
@@ -1044,10 +1044,10 @@ abstract class AppLocalizations {
   /// **'Haven also runs no servers of its own. Your encrypted location updates pass through independent servers called relays, run by other people. Haven\'s developers cannot see your location and put no tracking in the app. The one thing they can see is how much the map is used in total, because map tiles are fetched with a single shared key, never who fetched them.'**
   String get privacyWhatHavenIsNoServers;
 
-  /// The practical takeaway for Privacy → What Haven is. Deliberately pairs the benefit with its cost. The quoted phrase is the title of another Privacy topic — translate it identically to privacyYourKeysTitle so the cross-reference matches.
+  /// The practical takeaway for Privacy → What Haven is. Deliberately pairs the benefit with its cost. Factually load-bearing: an earlier version said 'nobody is holding it', which is false — relays retain the kind-0 profile, the kind-10002/10050 relay lists and the kind-30443 KeyPackage indefinitely, no deletion path exists for the KeyPackage, and the photo sits on a Blossom image host with no DELETE (haven-core/src/profile/). Scope the 'cannot hand over' claim to LOCATION, which is genuinely unreadable to a relay, and keep the published-is-permanent clause — the app states the same thing in privacyPublicProfileRemovalIsNotDeletion. The quoted phrase is the leading phrase of the privacyYourKeysTitle topic title — translate it identically to the way that title opens in this locale so the cross-reference is recognisable.
   ///
   /// In en, this message translates to:
-  /// **'Nobody can be made to hand over your data, because nobody is holding it. The cost is that nobody can restore your identity for you either. See “Your two keys” for what to back up.'**
+  /// **'No relay operator can be made to hand over your location, because the servers that carry it cannot read it. The cost is that nobody can restore your identity for you, and whatever you have already published stays published. See “Your two keys” for what to back up.'**
   String get privacyWhatHavenIsMeansForYou;
 
   /// Technical-detail paragraph (collapsed by default), Privacy → What Haven is. Register may be more technical than the main body.
@@ -1206,17 +1206,23 @@ abstract class AppLocalizations {
   /// **'Haven keeps three lists for you. Your inbox relays are where invitations reach you, and your KeyPackage relays are where people fetch the keys they need in order to invite you — Haven publishes both of these lists so others can find them. Your profile relays are different: that is where your name and photo are looked up and published, but the list itself stays on your device and is never published. A relay that only carries your location traffic or invitations therefore has no public list telling it which relays you use for your profile. Each circle also carries its own list, and that is where the circle\'s encrypted updates travel.'**
   String get privacyRelaysYourLists;
 
-  /// The practical takeaway for Privacy → Relays. Reassuring rather than actionable, deliberately — there is no setting the reader must change.
+  /// The practical takeaway for Privacy → Relays. Reassuring rather than actionable, deliberately — there is no setting the reader must change. The split in the middle is factually load-bearing: since the profile-plane relay separation (haven-core/SECURITY.md) no single relay sees all three things. The profile pool carries the name and photo; the user's own inbox/KeyPackage relays carry the keys and the published lists, and the two sets are disjoint by construction. An earlier version attributed all three to one relay, which is now false. Do not merge the sentences back together.
   ///
   /// In en, this message translates to:
-  /// **'A relay never sees your location, because it is encrypted before it leaves your phone. It does see what has to be public for people to reach you: your name and photo, the keys others need to invite you, and your relay list itself. Haven starts you with working relays, so there is nothing you must change.'**
+  /// **'A relay never sees your location, because it is encrypted before it leaves your phone. It does see what has to be public for people to reach you: the keys others need to invite you, and the lists saying which relays to use. Your name and photo are public too, but they go to a separate set of relays. Haven starts you with working relays, so there is nothing you must change.'**
   String get privacyRelaysMeansForYou;
 
-  /// Technical-detail paragraph (collapsed by default), Privacy → Relays. Discloses the unconditional discovery-relay lookups, which are not surfaced anywhere else in the app. Do NOT soften 'even if you have configured only private relays' — that is the point of the paragraph.
+  /// Technical-detail paragraph (collapsed by default), Privacy → Relays. Discloses the unconditional lookups on servers the user never chose, which are not surfaced anywhere else in the app. Do NOT soften 'even if every relay you chose for yourself is private' — that is the point of the paragraph. The two-pool split is factually load-bearing and post-dates an earlier version that described a single 'set of public directory relays': profiles (kind 0) go to the eight-relay profile pool (haven-core/src/profile/relay_pool.rs) and keys go to the six discovery relays (haven-core/src/relay/discovery.rs), and the two sets are disjoint by construction — that disjointness is the whole point of the profile-plane relay separation (haven-core/SECURITY.md). Keep the counts accurate; if a pool changes size, this string changes with it. 'that you do not choose' was challenged as false for the eight, on the grounds that they seed a user-editable RelayType::Profile list (haven-core/src/circle/storage_relay_prefs.rs) with a full add/remove/restore-defaults section in Settings → Relays (relay_settings_page.dart). It was VERIFIED AND KEPT, because removal does not take effect: usable_profile_relays() unions profile_relay_pool_default() back in on every resolution (haven-core/src/circle/storage_contamination.rs), and every fetch and publish path resolves through it, so the only thing that ever drops one of the eight is the contamination ledger. Removing one in Settings shortens the displayed list while Haven keeps contacting it — so 'you can edit the eight' would be a NEW false claim in the dangerous direction. Do not make that edit. The third sentence is what reconciles this paragraph with privacyRelaysYourLists, which correctly calls the profile list user-editable: additions are real, removals of the curated eight are not.
   ///
   /// In en, this message translates to:
-  /// **'Separately from your own lists, Haven queries a small set of public directory relays to look up other people\'s profiles and keys. It contacts these even if you have configured only private relays of your own. They see your network address and which accounts you asked about.'**
+  /// **'Separately from your own lists, Haven uses two groups of public servers that you do not choose: eight for looking up other people\'s names and photos, and six for looking up the keys needed to invite them. The two groups never overlap. You can add your own servers to the profile group, but you cannot take these eight out of it. Haven contacts both groups even if every relay you chose for yourself is private, and each of them sees your network address.'**
   String get privacyRelaysDetailIndexers;
+
+  /// Technical-detail paragraph (collapsed by default), Privacy → Relays. Discloses three properties of profile lookups that were previously stated nowhere in the app: one author per request (never a batched roster, which is CI-enforced), a salted per-install assignment that is deliberately NEVER rotated, and that publishing fans out to the whole pool. The never-changing pairing is the honest cost of not rotating the salt (haven-core/SECURITY.md, 'Profile-plane relay separation — accepted deviations', point P5) and must not be presented as a pure benefit — keep the cost sentence alongside the spreading claim. Do NOT strengthen the spreading claim into 'no single server sees everyone you look up': that is a statistical property of a per-install hash, not an invariant, and P1 records that collisions follow the birthday bound (~79% for a five-member roster over eight relays), so for a small circle one server genuinely can be assigned everyone. The final clause of the second sentence exists to say so. The publish fan-out is point P2, and it targets the ENTIRE usable pool, so keep it phrased as every profile relay in use. Two claims here are corrections and must not drift back. (1) An earlier version said Haven 'always asks the same server about the same person' and that the pairing 'never changes'. Both were false: PROFILE_MAX_RELAY_RANK is 2 (haven-core/src/profile/assignment.rs) and assigned_relay_for_attempt walks a retry ladder fed by a persisted miss counter (haven-core/src/circle/storage_profile.rs), so an author whose kind-0 misses — the normal case for a brand-new contact — is asked of a SECOND relay; and because the ranking is rendezvous-hashed over the resolved pool, assignments shift for roughly 1/N of authors whenever the pool changes (resolve_profile_pool subtracts contaminated relays, haven-core/src/profile/relay_pool.rs). State the bound as at most TWO of the eight — that cap is the actual privacy parameter, and understating it as one makes the paragraph read as a stronger guarantee than the code gives. (2) An earlier version said a saved profile 'goes to all eight' unconditionally; the publish uses usable_profile_relays() (haven/rust_builder/src/api.rs, haven-core/src/circle/storage_contamination.rs), which is the curated pool minus the contamination ledger plus the user's own additions. 'the eight' must agree with the count in privacyRelaysDetailIndexers.
+  ///
+  /// In en, this message translates to:
+  /// **'For names and photos, Haven asks about one person at a time. Each person is assigned a server on your device; if that server has nothing for them, Haven tries one more. Looking someone up therefore discloses them to at most two of the eight, never to the whole set. Haven never reshuffles those assignments on its own, though they do shift if the set of servers changes. That spreads your lookups rather than sending them all to one server. Each assigned server still builds a lasting record that your phone keeps asking about someone, and with only a few people, several of them can land on the same server. When you save your own name or photo, it goes to every profile relay you are using — the eight, minus any Haven has excluded, plus any you added — so each of those learns your public key.'**
+  String get privacyRelaysDetailProfileLookups;
 
   /// Technical-detail paragraph (collapsed by default), Privacy → Relays. Warns that following the app's own 'use your own private relay' advice publishes that relay's address. Factually load-bearing — do not weaken to 'may become public'.
   ///
@@ -1302,10 +1308,10 @@ abstract class AppLocalizations {
   /// **'Everyone in a circle sees your exact position on the map, not a rough area. There is no setting that shares a vaguer location with some members and a precise one with others.'**
   String get privacyWhatOthersSeeMembersExact;
 
-  /// Body paragraph, Privacy → What members see. Factually load-bearing and easy to get wrong: only BACKGROUND sharing is toggleable (locationSettingsToggleTitle); foreground sharing is unconditional. Do not imply a pause or ghost mode exists.
+  /// Body paragraph, Privacy → What members see. Factually load-bearing and easy to get wrong: only BACKGROUND sharing is toggleable (locationSettingsToggleTitle); foreground sharing is unconditional. Do not imply a pause or ghost mode exists. The second and third sentences carry the same correction as locationSettingsIntro and must stay consistent with it in this locale: an earlier version said the switch governs sharing 'after you close the app', which overstated it — no background wake path publishes, so once the system closes Haven, sharing stops. The per-platform sentence is a SECOND, later correction: the version that carried the first one ended 'sharing stops until you open it again', which is false on Android and false in the dangerous direction, because RebootReceiver (android:enabled="true") plus autoRunOnBoot:true resurrect the publishing foreground service after a reboot with no user action, and nothing sets android:stopWithTask, so it also survives being swiped out of recents. That matters most in THIS paragraph, whose whole subject is how a user stops being seen — someone who swipes Haven away or reboots to stop sharing has not stopped sharing, and the closing Leave Circle sentence is the only advice here that actually works. Keep both platforms named; never flatten them. Match the phrasing this locale already uses in locationSettingsIntro.
   ///
   /// In en, this message translates to:
-  /// **'While Haven is open and you are in a circle, your position goes out every couple of minutes on its own. There is no pause button: the switch on the Location page only controls whether that continues after you close the app. To stop sharing with a circle, open it and choose Leave Circle.'**
+  /// **'While Haven is open and you are in a circle, your position goes out every couple of minutes on its own. There is no pause button: the switch on the Location page only controls whether that continues while Haven is in the background. If the system closes Haven, sharing stops. On Android, sharing survives swiping Haven away and starts again by itself after a reboot; on iPhone it stays stopped until you open Haven. To stop sharing with a circle, open it and choose Leave Circle.'**
   String get privacyWhatOthersSeeCannotPause;
 
   /// Body paragraph, Privacy → What members see.
@@ -1344,10 +1350,10 @@ abstract class AppLocalizations {
   /// **'Only join a circle with people you would give your home address to. Encryption holds against relays and outsiders, and a VPN hides the address your phone connects from. Nothing protects you from a member who takes a screenshot.'**
   String get privacyWhatOthersSeeMeansForYou;
 
-  /// Technical-detail paragraph (collapsed by default), Privacy → What members see and what relays see. Describes the stable per-circle routing tag without naming the 'h' tag or the group ID.
+  /// Technical-detail paragraph (collapsed by default), Privacy → What members see and what relays see. Describes the stable per-circle routing tag without naming the 'h' tag or the group ID. The second sentence is a correction and must not drift back: an earlier version said the stability was 'a property of the underlying protocol, not something Haven can change', which is false. The Marmot nostr-routing-v1 app component explicitly permits rotation ('an update MAY also change nostr_group_id'), and the pinned MDK v0.9.4 implements it end to end. Haven simply does not rotate — a product choice, not a protocol limit — so the copy must attribute it to Haven. Keep the final clause: rotation is forward-only and does not retract prior correlation.
   ///
   /// In en, this message translates to:
-  /// **'A circle\'s tag stays the same for the life of that circle, so a relay can link all of its messages together indefinitely. That is a property of the underlying protocol, not something Haven can change.'**
+  /// **'A circle\'s tag stays the same for the life of that circle, so a relay can link all of its messages together indefinitely. The protocol does allow a circle to move to a new tag, but Haven does not do that today — and moving would not undo what a relay has already linked.'**
   String get privacyWhatOthersSeeDetailTag;
 
   /// Shared label for a link that opens the matching Privacy topic for a fuller explanation. Used on the Relay settings, Public key QR and Location settings pages. Keep it short — it sits under a paragraph as a TextButton.
@@ -1362,17 +1368,29 @@ abstract class AppLocalizations {
   /// **'Haven has no server of its own. Your encrypted updates pass through independent servers called relays, which cannot read your location or your messages.'**
   String get relaySettingsBackendCaption;
 
-  /// Warning callout, Privacy → What members see. Factually load-bearing and asymmetric: Android sets FLAG_SECURE app-wide (MainActivity.kt), whereas iOS has no equivalent and only the app-switcher snapshot is blurred (AppDelegate.swift). Do NOT flatten this into a single claim covering both platforms, and never imply iOS blocks in-app screenshots.
+  /// Warning callout, Privacy → What members see. Factually load-bearing and asymmetric: Android sets FLAG_SECURE on every Activity in the process, registered once in HavenApplication.kt (which is what makes 'everywhere in the app' true — it covers the photo-crop screen and any future plugin Activity, not just MainActivity), whereas iOS has no equivalent and only the app-switcher snapshot is blurred (AppDelegate.swift). Do NOT flatten this into a single claim covering both platforms, and never imply iOS blocks in-app screenshots.
   ///
   /// In en, this message translates to:
   /// **'This depends on your phone. On Android, Haven blocks screenshots and screen recording everywhere in the app. On iPhone it cannot: Haven blurs the app-switcher preview, but a member can still capture what is on screen.'**
   String get privacyWhatOthersSeeScreenshots;
 
-  /// Technical-detail paragraph (collapsed by default), Privacy → What members see and what relays see. 'Advisory' is essential — the expiry is a NIP-40 hint a relay may ignore, so never phrase this as a guarantee that messages are deleted.
+  /// Technical-detail paragraph (collapsed by default), Privacy → What members see and what relays see. 'Advisory' is essential — the expiry is a NIP-40 hint a relay may ignore, so never phrase this as a guarantee that messages are deleted. The third sentence discloses a public discriminator that was previously stated nowhere: Haven stamps the expiration on application messages only, while commits and proposals carry the routing tag alone, so its presence or absence separates membership-change traffic from location traffic to any observer. Phrase that sentence so the thing that is absent is unmistakably the EXPIRY REQUEST — an earlier version ended 'by its absence', where the nearest antecedent was 'a location update', and that misreading turns the sentence into a different and false claim.
   ///
   /// In en, this message translates to:
-  /// **'Haven asks relays to drop location messages after about four minutes. That request is advisory: a relay is free to keep them for longer. Invitations carry no expiry at all, and may sit on your inbox relay indefinitely.'**
+  /// **'Haven asks relays to drop location messages after about four minutes. That request is advisory: a relay is free to keep them for longer. Only location updates carry that expiry request, so a message without one is visibly a membership change rather than a location update. Invitations carry no expiry at all, and may sit on your inbox relay indefinitely.'**
   String get privacyWhatOthersSeeDetailExpiry;
+
+  /// Technical-detail paragraph (collapsed by default), Privacy → What members see and what relays see. Discloses the on-device retention of other members' coordinates, which the app previously stated only in passing in leaveCircleDialogBody. 'a day' is the fixed 24-hour purge window (LOCATION_RETENTION_SECS, haven-core/src/location/types.rs); it is not configurable and does not follow any hint in the payload, so do not translate it as an approximation or a setting. The second sentence keeps the automatic purge from being read as a guarantee about what a member kept deliberately.
+  ///
+  /// In en, this message translates to:
+  /// **'Each member\'s phone stops showing the last position it received from you after a day, and deletes it the next time they open Haven. That is separate from anything a member chose to save or screenshot themselves, which Haven has no say over.'**
+  String get privacyWhatOthersSeeDetailOnDevice;
+
+  /// Technical-detail paragraph (collapsed by default), Privacy → What members see and what relays see. Discloses socket-level correlation, previously undisclosed: a single connection carries both the inbox filter naming the user's OWN public key and every subscribed circle's routing-tag filter (haven-core/src/relay/live_sync/session.rs). The public key here is the reader's own — it is the gift-wrap recipient tag — NOT other members' keys, so do not translate this as though Haven were sending its contacts' keys to a relay. The final sentence matters: the overlap is the default configuration, not a rare misconfiguration, because the inbox and per-circle relay sets both seed from the same defaults.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven opens one connection to each relay and uses it for everything on that relay. Where a relay carries both your invitations and a circle\'s messages, that single connection asks for invitations addressed to your public key and for that circle\'s messages by its tag at the same time, which is what lets the relay tie the two together. On a new install the same relays are used for both.'**
+  String get privacyWhatOthersSeeDetailOneConnection;
 
   /// Header for the third group of Privacy topics on the hub — the honest disclosures about what Haven does not protect. Grouping them under one candid heading is deliberate: it reads as candour, where scattering the same caveats through the reassuring topics would read as hedging.
   ///
@@ -1398,10 +1416,10 @@ abstract class AppLocalizations {
   /// **'Encryption hides what you send. It cannot hide that you sent something. That leftover trail is called metadata: when a message went out, how big it was, and which servers you were connected to. It stays visible even when the contents do not.'**
   String get privacyInferenceWhatIsMetadata;
 
-  /// Body paragraph, Privacy → What can still be worked out. Discloses that motion-triggered publishes make moving-vs-stationary inferable, which is a real activity-level leak and is disclosed nowhere else in the app. Keep the closing 'without ever showing where' — it bounds the claim.
+  /// Body paragraph, Privacy → What can still be worked out. Discloses that motion-triggered publishes make moving-vs-stationary inferable, which is a real activity-level leak and is disclosed nowhere else in the app. Keep the closing 'That pattern never shows where you are' — it bounds the claim, and it names its subject explicitly because the preceding sentences use 'it' for Haven, so a bare pronoun here collides with that referent when the paragraph is read aloud. The scoping in the second sentence is factually load-bearing and must not be flattened back into an unconditional claim: the motion trigger lives only in the Flutter UI isolate (haven/lib/src/pages/map_shell.dart, gated on kMotionTriggerDistanceMeters and rate-limited by kLocationPublishOverlapGuard), so it exists in the foreground on both platforms and on iOS while background sharing keeps the process alive, but NOT in the Android background service, which is a plain timer with no awareness of movement at all. 'at most once a minute' states the rate limit and bounds the leak — keep it.
   ///
   /// In en, this message translates to:
-  /// **'From that pattern, a relay you use can tell roughly when you are active and how often. Haven also sends an extra update whenever you move about a hundred metres. Over hours, that can show a relay whether you were on the move or staying put. It never shows where.'**
+  /// **'From that pattern, a relay you use can tell roughly when you are active and how often. While Haven is on screen — and on iPhone, while background sharing keeps it running — it also sends an extra update, at most once a minute, whenever you move about a hundred metres. Over hours, that can show a relay whether you were on the move or staying put. That pattern never shows where you are.'**
   String get privacyInferenceActivityPattern;
 
   /// Body paragraph, Privacy → What can still be worked out. Discloses the continuous online-presence signal created by the live connection, and names the benefit it buys so the disclosure is not merely alarming.
@@ -1692,6 +1710,12 @@ abstract class AppLocalizations {
   /// **'{percent} percent complete'**
   String nameCirclePercentComplete(int percent);
 
+  /// Snackbar after creating a circle when only SOME invitations reached a relay. Replaces reusing addMemberPartialDelivery here: that string was written for the add-member page, where the circle already exists and the user knows it, so on the create flow it reported delivery while silently dropping the primary outcome — that the circle was created at all. Both facts must survive translation, and the circle name must stay present, because the user is popped two screens back immediately after seeing this. Keep the counts honest: {sent} is the number of invitations a relay actually acked, not the number of people invited.
+  ///
+  /// In en, this message translates to:
+  /// **'Circle \"{name}\" created. Invitations sent ({sent} of {total}); delivery pending for the rest.'**
+  String nameCircleCreatedPartialSnack(String name, int sent, int total);
+
   /// Success snackbar after creating a circle, naming it and how many invitations were sent. {name} is the user-entered circle name.
   ///
   /// In en, this message translates to:
@@ -1800,7 +1824,7 @@ abstract class AppLocalizations {
   /// **'No recent location'**
   String get circleMemberNoRecentLocation;
 
-  /// Tooltip on the admin button that removes a member from the circle. UNREACHABLE IN PRODUCTION as of 2026-07-29: CircleMemberTile takes an optional onRemove, and its only production call site (circles_bottom_sheet.dart) never passes one, so the button never renders. RelayService.removeMember is called only from integration tests. Kept because the string is correct for the capability and the widget branch still references it, but do NOT write user-facing copy that assumes members can be removed until the UI ships.
+  /// Tooltip on the admin button that removes a member from the circle. UNREACHABLE IN PRODUCTION, re-verified 2026-08-12: CircleMemberTile takes an optional onRemove, and its only production call site (circles_bottom_sheet.dart) never passes one, so the button never renders. The service beneath it is fully implemented and integration-tested — CircleService.removeMember (NOT RelayService, as an earlier version of this note said) has no caller anywhere in haven/lib, only in integration_test/ — so the gap is UI wiring alone, and no admin can currently evict anyone from a circle. Do NOT confuse this with the sibling pendingMemberRemoveTooltip, which IS live and removes an npub from the local pre-invite picker rather than a member from a circle. Kept because the string is correct for the capability and the widget branch still references it, but do NOT write user-facing copy that assumes members can be removed until the UI ships.
   ///
   /// In en, this message translates to:
   /// **'Remove from circle'**
@@ -2106,10 +2130,10 @@ abstract class AppLocalizations {
   /// **'(none recorded)'**
   String get circleDetailsNoRelays;
 
-  /// Explanatory note under the relay list in the circle-details sheet.
+  /// Explanatory note under the relay list in the circle-details sheet. Factually load-bearing and previously wrong: a circle's relay set is the union of the INVITEES' published inbox relays (nostr_circle_service.dart builds it from the fetched key packages), not a copy of the creator's own list. Both fallbacks must stay in the copy — the creator's stored inbox relays first, then Haven's built-in defaults — because in the empty-inbox case the circle's location traffic travels over relays the user never chose, and naming only the first fallback implies they always did. Do not restore the old 'copied from your inbox relays' framing — it told the user their own relay choices govern where that traffic goes, which is false in the normal case. LENGTH IS A CORRECTNESS CONSTRAINT HERE, not a style preference: this renders in the circle-details bottom sheet, which is content-sized, and once the body scrolls the sheet's drag-to-dismiss gesture scrolls instead of dismissing. A longer draft of this string broke both `circle_details_layout_test.dart` cases at normal text scale. Keep every fact and keep it tight; note that the locale sweep in that file only asserts no overflow at 1.5x, and scrolling raises no overflow, so a too-long TRANSLATION will not be caught by any test.
   ///
   /// In en, this message translates to:
-  /// **'These relays were copied from your inbox relays when this circle was created, and cannot be changed yet. Later edits to your personal relay list do not change them.'**
+  /// **'These relays came from the lists the invited members published — or, if they had none, from your inbox relays or ones Haven chose. They cannot be changed yet, and later edits to your relay list do not affect them.'**
   String get circleDetailsRelaysNote;
 
   /// Button in the circle-details sheet that opens the add-member page.
@@ -2484,10 +2508,10 @@ abstract class AppLocalizations {
   /// **'Delete Identity?'**
   String get identityAdvancedDeleteTitle;
 
-  /// Body of the delete-identity confirmation dialog. 'secret key' is the nsec; preserve this exact warning wording.
+  /// Body of the delete-identity confirmation dialog. 'secret key' is the nsec; preserve this exact warning wording. The middle sentence was corrected: the profile photo is not on a relay at all — it is a blob on a Blossom image host (haven-core/src/profile/blossom.rs) for which no delete request exists, so naming relays as the only destination mis-stated where the photo survives. Keep the two destinations distinct in translation.
   ///
   /// In en, this message translates to:
-  /// **'This deletes your identity and all circle data from this phone. Anything already published under it, including your name, photo and keys, stays on the relays that have it. Make sure you have backed up your secret key if you want to recover it.'**
+  /// **'This deletes your identity and all circle data from this phone. Anything already published under it stays where it is: your name and keys on the relays that have them, your photo on the image host that stores it. Make sure you have backed up your secret key if you want to recover this identity later.'**
   String get identityAdvancedDeleteBody;
 
   /// Confirm button in the delete-identity dialog.

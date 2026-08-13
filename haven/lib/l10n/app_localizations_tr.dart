@@ -398,7 +398,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'Haven, uygulama açık olduğu sürece konumunuzu çevrelerinizle paylaşır. Bunu açarsanız Haven arka plandayken de çevreleriniz konumunuzu görmeye devam eder. Sistem Haven\'ı kapatırsa paylaşım, siz uygulamayı yeniden açana kadar durur; sistem uygulamayı arka planda uyandırdığında yalnızca çevrelerinizin konumları alınır, sizin konumunuz hiçbir zaman gönderilmez.';
+      'Haven, uygulama açık olduğu sürece konumunuzu çevrelerinizle paylaşır. Bunu açarsanız Haven arka plandayken de çevreleriniz konumunuzu görmeye devam eder. Sistem Haven\'ı kapatırsa paylaşım durur; sistem uygulamayı arka planda uyandırdığında yalnızca çevrelerinizin konumları alınır, sizin konumunuz hiçbir zaman gönderilmez. Android\'de paylaşım, Haven\'ı son kullanılanlar listesinden kaydırıp çıkarsanız bile sürer ve telefon yeniden başlatıldıktan sonra kendiliğinden tekrar çalışmaya başlar; iPhone\'da ise siz Haven\'ı açana kadar paylaşım yeniden başlamaz.';
 
   @override
   String get locationSettingsToggleTitle => 'Arka planda paylaş';
@@ -525,7 +525,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyHubSummary =>
-      'Haven konumunuzu yalnızca kendi seçtiğiniz küçük gruplarla paylaşır; bu gruplara çevre denir. Konumunuz telefonunuzdan çıkmadan önce şifrelenir. Ne bir kayıt vardır ne de bir Haven sunucusu. Herkese açık olan tek şey, belirlediğiniz görünen ad ve fotoğraftır. Aşağıdaki sayfalar bunu ve geri kalan her şeyi sade bir dille anlatır.';
+      'Haven konumunuzu yalnızca kendi seçtiğiniz küçük gruplarla paylaşır; bu gruplara çevre denir. Konumunuz telefonunuzdan çıkmadan önce şifrelenir. Ne bir kayıt vardır ne de bir Haven sunucusu. Belirlediğiniz görünen ad ve fotoğrafın yanı sıra, başkalarının sizi davet etmek için ihtiyaç duyduğu anahtarlar ve aktarıcı listeleri de herkese açıktır. Aşağıdaki sayfalar bunu ve geri kalan her şeyi sade bir dille anlatır.';
 
   @override
   String get privacyGroupBasicsHeading => 'Temel bilgiler';
@@ -566,7 +566,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyWhatHavenIsMeansForYou =>
-      'Kimse verilerinizi teslim etmeye zorlanamaz, çünkü onları tutan kimse yok. Bunun bedeli, kimliğinizi sizin için geri getirebilecek kimsenin de olmamasıdır. Neleri yedeklemeniz gerektiğini “İki anahtarınız” bölümünde bulabilirsiniz.';
+      'Hiçbir aktarıcı işletmecisi konumunuzu teslim etmeye zorlanamaz, çünkü konumunuzu taşıyan sunucular onu okuyamaz. Bunun bedeli, kimliğinizi sizin için geri getirebilecek kimsenin olmaması ve daha önce yayımladığınız her şeyin yayımlanmış olarak kalmasıdır. Neleri yedeklemeniz gerektiğini “İki anahtarınız” bölümünde bulabilirsiniz.';
 
   @override
   String get privacyWhatHavenIsDetailNoTelemetry =>
@@ -673,11 +673,15 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyRelaysMeansForYou =>
-      'Bir aktarıcı konumunuzu hiçbir zaman görmez, çünkü konum telefonunuzdan çıkmadan önce şifrelenir. Görebildiği şey, insanların size ulaşabilmesi için herkese açık olması gerekenlerdir: adınız ve fotoğrafınız, başkalarının sizi davet etmek için ihtiyaç duyduğu anahtarlar ve aktarıcı listenizin kendisi. Haven size çalışır durumda aktarıcılarla başlar; değiştirmeniz gereken bir şey yoktur.';
+      'Bir aktarıcı konumunuzu hiçbir zaman görmez, çünkü konumunuz telefonunuzdan çıkmadan önce şifrelenir. Aktarıcının gördüğü şey, insanların size ulaşabilmesi için herkese açık olması gerekenlerdir: başkalarının sizi davet etmek için ihtiyaç duyduğu anahtarlar ve hangi aktarıcıların kullanılacağını belirten listeler. Adınız ve fotoğrafınız da herkese açıktır, ama bunlar ayrı bir aktarıcı grubuna gider. Haven, çalışır durumdaki aktarıcılarla hazır gelir; değiştirmeniz gereken bir şey yoktur.';
 
   @override
   String get privacyRelaysDetailIndexers =>
-      'Haven, kendi listelerinizden bağımsız olarak, başkalarının profillerini ve anahtarlarını aramak için herkese açık az sayıda dizin aktarıcısına başvurur. Yalnızca kendinize ait özel aktarıcılar tanımlamış olsanız bile bunlara bağlanır. Bu aktarıcılar ağ adresinizi ve hangi hesapları sorduğunuzu görür.';
+      'Haven, kendi listelerinizden ayrı olarak, sizin seçmediğiniz iki herkese açık sunucu grubu kullanır: başkalarının adlarını ve fotoğraflarını aramak için sekiz sunucu, onları davet etmek için gereken anahtarları aramak için de altı sunucu. Bu iki grup hiçbir zaman örtüşmez. Profil grubuna kendi sunucularınızı ekleyebilirsiniz, ama bu sekiz sunucuyu o gruptan çıkaramazsınız. Kendiniz için seçtiğiniz aktarıcıların hepsi özel olsa bile Haven her iki gruba da başvurur ve bu sunucuların her biri ağ adresinizi görür.';
+
+  @override
+  String get privacyRelaysDetailProfileLookups =>
+      'Adlar ve fotoğraflar için Haven her seferinde tek bir kişiyi sorar. Her kişiye cihazınızda bir sunucu atanır; o sunucuda o kişiye dair bir şey yoksa Haven bir sunucu daha dener. Bu nedenle birini aradığınızda o kişiyi sekiz sunucudan en fazla ikisi öğrenir, hiçbir zaman tamamı değil. Haven bu atamaları kendiliğinden yeniden dağıtmaz; yine de sunucu kümesi değişirse atamalar da değişir. Böylece sorularınız tek bir sunucuya yığılmak yerine dağılır. Yine de atanan her sunucuda, telefonunuzun aynı kişiyi tekrar tekrar sorduğuna dair kalıcı bir kayıt birikir ve ortada yalnızca birkaç kişi varken bu kişilerden birkaçına aynı sunucu düşebilir. Kendi adınızı ya da fotoğrafınızı kaydettiğinizde bunlar, kullandığınız bütün profil aktarıcılarına gider: Haven\'ın dışladıkları hariç o sekiz sunucuya ve sizin eklediklerinize. Böylece bu aktarıcıların her biri açık anahtarınızı öğrenir.';
 
   @override
   String get privacyRelaysDetailKeyListIsPublic =>
@@ -735,7 +739,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeCannotPause =>
-      'Haven açıkken ve bir çevrede bulunuyorken konumunuz birkaç dakikada bir kendiliğinden gönderilir. Duraklatma düğmesi yoktur: Konum sayfasındaki ayar yalnızca uygulamayı kapattıktan sonra bunun sürüp sürmeyeceğini belirler. Bir çevreyle paylaşmayı durdurmak için o çevreyi açın ve Çevreden Ayrıl\'ı seçin.';
+      'Haven açıkken ve bir çevrede bulunuyorken konumunuz birkaç dakikada bir kendiliğinden gönderilir. Duraklatma düğmesi yoktur: Konum sayfasındaki ayar yalnızca, Haven arka planda çalışmaya devam ederken bunun sürüp sürmeyeceğini belirler. Sistem Haven\'ı kapatırsa paylaşım durur. Android\'de paylaşım, Haven\'ı son kullanılanlar listesinden kaydırıp çıkarsanız bile sürer ve telefon yeniden başlatıldıktan sonra kendiliğinden tekrar çalışmaya başlar; iPhone\'da ise siz Haven\'ı açana kadar paylaşım yeniden başlamaz. Bir çevreyle paylaşmayı durdurmak için o çevreyi açın ve Çevreden Ayrıl\'ı seçin.';
 
   @override
   String get privacyWhatOthersSeeMembersLearnKey =>
@@ -762,7 +766,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeDetailTag =>
-      'Bir çevrenin etiketi, o çevre var olduğu sürece aynı kalır; bu nedenle bir aktarıcı onun bütün mesajlarını süresiz olarak birbirine bağlayabilir. Bu, temeldeki protokolün bir özelliğidir; Haven\'ın değiştirebileceği bir şey değildir.';
+      'Bir çevrenin etiketi, o çevre var olduğu sürece aynı kalır; bu nedenle bir aktarıcı o çevrenin bütün mesajlarını süresiz olarak birbirine bağlayabilir. Protokol, bir çevrenin yeni bir etikete geçmesine izin verir; ama Haven bunu bugün yapmıyor — üstelik etiket değiştirmek, bir aktarıcının daha önce kurduğu bağlantıları geri almaz.';
 
   @override
   String get commonLearnMore => 'Daha fazla bilgi';
@@ -777,7 +781,15 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeDetailExpiry =>
-      'Haven, aktarıcılardan konum mesajlarını yaklaşık dört dakika sonra silmelerini ister. Bu istek yalnızca bir tavsiyedir: bir aktarıcı onları daha uzun süre tutabilir. Davetlerin ise hiç geçerlilik süresi yoktur; gelen kutusu aktarıcınızda süresiz olarak kalabilirler.';
+      'Haven, aktarıcılardan konum mesajlarını yaklaşık dört dakika sonra silmelerini ister. Bu istek yalnızca bir tavsiyedir: bir aktarıcı onları daha uzun süre tutabilir. Bu geçerlilik süresi yalnızca konum güncellemelerinde bulunur; dolayısıyla bir aktarıcı, sürenin bulunmayışına bakarak bir üyelik değişikliğini konum güncellemesinden ayırt edebilir. Davetlerin ise hiç geçerlilik süresi yoktur; gelen kutusu aktarıcınızda süresiz olarak kalabilirler.';
+
+  @override
+  String get privacyWhatOthersSeeDetailOnDevice =>
+      'Her üyenin telefonu, sizden aldığı son konumu bir gün sonra göstermeyi bırakır ve bu konumu, o üye Haven\'ı bir sonraki açışında siler. Bu, bir üyenin kendi isteğiyle kaydettiği ya da ekran görüntüsünü aldığı şeylerden ayrıdır; onların üzerinde Haven\'ın hiçbir yetkisi yoktur.';
+
+  @override
+  String get privacyWhatOthersSeeDetailOneConnection =>
+      'Haven her aktarıcıya tek bir bağlantı açar ve o aktarıcıdaki her şey için bu bağlantıyı kullanır. Bir aktarıcı hem sizin davetlerinizi hem de bir çevrenin mesajlarını taşıyorsa, bu tek bağlantı aynı anda hem kendi açık anahtarınıza gönderilen davetleri hem de o çevrenin mesajlarını etiketine göre ister; aktarıcının ikisini birbirine bağlamasını sağlayan da budur. Yeni bir kurulumda her ikisi için de aynı aktarıcılar kullanılır.';
 
   @override
   String get privacyGroupTheLimitsHeading => 'Korumanın sınırları';
@@ -795,7 +807,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyInferenceActivityPattern =>
-      'Bu örüntüden, kullandığınız bir aktarıcı kabaca ne zaman ve ne sıklıkta etkin olduğunuzu anlayabilir. Haven ayrıca yaklaşık yüz metre hareket ettiğinizde ek bir güncelleme gönderir. Saatler boyunca bu, bir aktarıcıya yolda mı olduğunuzu yoksa bir yerde mi kaldığınızı gösterebilir. Nerede olduğunuzu ise hiçbir zaman göstermez.';
+      'Bu örüntüden, kullandığınız bir aktarıcı kabaca ne zaman ve ne sıklıkta etkin olduğunuzu anlayabilir. Haven ekranda açıkken — ve iPhone\'da, arka planda paylaşım Haven\'ı çalışır durumda tuttuğu sürece — yaklaşık yüz metre hareket ettiğinizde Haven ayrıca, dakikada en fazla bir kez olmak üzere, ek bir güncelleme gönderir. Saatler boyunca bu, bir aktarıcıya yolda mı olduğunuzu yoksa bir yerde mi kaldığınızı gösterebilir. Bu örüntü ise nerede olduğunuzu hiçbir zaman göstermez.';
 
   @override
   String get privacyInferencePresence =>
@@ -997,6 +1009,19 @@ class AppLocalizationsTr extends AppLocalizations {
     final String percentString = percentNumberFormat.format(percent);
 
     return 'yüzde $percentString tamamlandı';
+  }
+
+  @override
+  String nameCircleCreatedPartialSnack(String name, int sent, int total) {
+    final intl.NumberFormat sentNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String sentString = sentNumberFormat.format(sent);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '\"$name\" çevresi oluşturuldu. Davetler gönderildi ($totalString davetten $sentString tanesi); geri kalanın iletimi bekleniyor.';
   }
 
   @override
@@ -1317,7 +1342,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get circleDetailsRelaysNote =>
-      'Bu aktarıcılar, çevre oluşturulurken gelen kutusu aktarıcılarınızdan kopyalanmıştır ve henüz değiştirilemez. Kişisel aktarıcı listenizde sonradan yaptığınız değişiklikler bunları etkilemez.';
+      'Bu aktarıcılar, davet edilen üyelerin yayımladığı listelerden, o üyeler liste yayımlamamışsa gelen kutusu aktarıcılarınızdan ya da Haven\'ın seçtiği aktarıcılardan alınmıştır. Henüz değiştirilemez; aktarıcı listenizdeki sonraki değişiklikler de bunları etkilemez.';
 
   @override
   String get circleDetailsAddMember => 'Üye ekle';
@@ -1605,7 +1630,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get identityAdvancedDeleteBody =>
-      'Bu işlem, kimliğinizi ve tüm çevre verilerinizi bu telefondan siler. Bu kimlikle daha önce yayımlanmış her şey, adınız, fotoğrafınız ve anahtarlarınız dahil, onlara sahip aktarıcılarda kalır. Geri kurtarmak istiyorsanız gizli anahtarınızı yedeklediğinizden emin olun.';
+      'Bu işlem, kimliğinizi ve tüm çevre verilerinizi bu telefondan siler. Bu kimlikle daha önce yayımlanmış her şey olduğu yerde kalır: adınız ve anahtarlarınız onlara sahip aktarıcılarda, fotoğrafınız da onu saklayan görsel barındırma hizmetinde. Kimliğinizi geri getirmek istiyorsanız gizli anahtarınızı yedeklediğinizden emin olun.';
 
   @override
   String get identityAdvancedDeleteConfirm => 'Sil';

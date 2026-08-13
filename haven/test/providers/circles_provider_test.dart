@@ -269,6 +269,9 @@ class _ThrowingCircleService implements CircleService {
   Future<void> wipeAllMlsState() async {}
 
   @override
+  Future<void> destroyLegacyMlsState() async {}
+
+  @override
   Future<void> pruneProcessedGiftWraps({DateTime? now}) async {}
 
   @override
@@ -438,6 +441,9 @@ class _ThrowingErrorCircleService implements CircleService {
 
   @override
   Future<void> wipeAllMlsState() async {}
+
+  @override
+  Future<void> destroyLegacyMlsState() async {}
 
   @override
   Future<void> pruneProcessedGiftWraps({DateTime? now}) async {}

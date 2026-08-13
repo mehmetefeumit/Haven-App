@@ -33,7 +33,6 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Mutex;
-use std::time::Duration;
 
 use haven_core::circle::{CircleConfig, CircleManager, MemberKeyPackage};
 use haven_core::nostr::mls::types::{GroupId, PendingStateRef};
@@ -109,9 +108,10 @@ impl WritePolicy for RejectEverything {
 ///
 /// The policy is awaited inside the connection's own message loop, so the EVENT
 /// has provably been transmitted — this is "sent", with the acknowledgement
-/// withheld, which is exactly the state Rule 13 forbids confirming on. The sleep
-/// outlives the publish budget by a wide margin; it is never a race, because the
-/// assertion is on the verdict and not on when it arrives.
+/// withheld, which is exactly the state Rule 13 forbids confirming on. The
+/// pending future never resolves, so the OK is withheld BY CONSTRUCTION rather
+/// than by out-sleeping the publish budget: no margin to get wrong, and no
+/// wall-clock race for the verdict to run against.
 #[derive(Debug)]
 struct NeverAnswer;
 
@@ -122,7 +122,7 @@ impl WritePolicy for NeverAnswer {
         _addr: &'a SocketAddr,
     ) -> BoxedFuture<'a, PolicyResult> {
         Box::pin(async {
-            tokio::time::sleep(Duration::from_secs(600)).await;
+            std::future::pending::<()>().await;
             PolicyResult::Accept
         })
     }

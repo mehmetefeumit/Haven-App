@@ -55,8 +55,11 @@
 	<true/>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Haven needs your location to share it securely with your trusted circles. Your location is always end-to-end encrypted.</string>
+	<!-- MUST NOT promise that the user's OWN sharing survives iOS closing the
+	     app; see test/lints/background_claim_accuracy_test.dart, which states
+	     why and enforces it here. -->
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>Haven uses background location to keep your trusted circles updated even when the app is closed. Your location is always end-to-end encrypted.</string>
+	<string>Haven shares your location with your trusted circles while it runs in the background. After iOS closes Haven, it wakes only to fetch your circles' locations; your own sharing resumes when you reopen Haven. Your location is always end-to-end encrypted.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Haven uses the camera only to scan a QR code when you add someone to a circle. No photos or video are taken or stored.</string>
 	<key>NSPhotoLibraryUsageDescription</key>

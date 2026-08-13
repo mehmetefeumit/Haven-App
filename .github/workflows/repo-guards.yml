@@ -36,6 +36,18 @@
 #     The production manifest must keep android.permission.INTERNET — it is
 #     the relay receive path; a release without it ships silently broken.
 #
+#   App-wide FLAG_SECURE              scripts/ci/check_flag_secure_app_wide.sh
+#     `privacyWhatOthersSeeScreenshots` promises, in thirteen languages, that
+#     Haven blocks screenshots "everywhere in the app". FLAG_SECURE is a WINDOW
+#     flag, so the per-Activity `setFlags` this replaced made that true of
+#     MainActivity and of nothing else — including `UCropActivity`, a
+#     dependency's Activity that renders the user's picked photo full-screen.
+#     The guard is a union: HavenApplication.onCreate registers the lifecycle
+#     callbacks, onActivityCreated SETS (never clears) the flag, no Activity
+#     sets it in isolation, and the manifest still names the Application class —
+#     because with that attribute gone every other link is intact and runs
+#     never.
+#
 #   Background-wake invariants        scripts/ci/check_m7_native_wake_guards.sh
 #     Static correctness invariants of the Android WorkManager + iOS
 #     SLC/BGTask background wakes (DartPluginRegistrant order, RebootReceiver
@@ -95,6 +107,14 @@
 #     mirrored in Dart across an FFI with no shared source of truth. If the
 #     wire token drifts, Dart silently stops recognising a fast-clock
 #     rejection and the failure goes invisible again with nothing else red.
+#
+#   Publish-jitter fraction parity    scripts/ci/check_publish_jitter_fraction_parity.sh
+#     The ±40% publish-cadence jitter spread lives authoritatively in Rust
+#     (`PUBLISH_INTERVAL_JITTER_FRACTION_BP`) and is mirrored in Dart as the
+#     hard-coded endpoints `kLocationPublishMinInterval`/`kLocationPublishMaxInterval`.
+#     Narrowing or widening the Rust fraction alone — constant and pinning
+#     test moved together, correctly — leaves every existing gate green while
+#     the Dart constants become false documentation of the sampled window.
 #
 #   MDK supply-chain shape            scripts/ci/check_mdk_supply_chain.sh
 #     haven-core/Cargo.lock must hold exactly the five Dark Matter crates —
@@ -332,6 +352,20 @@
 #     "the same string" (the empty one), and a `--dart-define` that appears
 #     only in `check-wire-journal.sh`'s DOC COMMENT would have satisfied link 4
 #     in every lane, since every wired lane invokes that oracle.
+#
+#   Identity-delete prefs residue     scripts/ci/check_identity_delete_prefs_residue.sh
+#     `identityAdvancedDeleteBody` promises deleting the identity removes ALL
+#     circle data. `haven.security.pending_leaves` (the public nostr_group_id
+#     of every circle being left), the background publish-history timestamps,
+#     and a stranded pre-Dark-Matter legacy MLS key all survived a delete
+#     before this landed, because nothing ever asked "does EVERY
+#     SharedPreferences key have a deliberate fate here". This guard discovers
+#     every SharedPreferences key constant by USAGE (not naming convention, so
+#     it is not fooled by the `flutter_secure_storage` identity-key literal or
+#     the isolate-liveness ping/pong Map keys, both also named `*Key`) and
+#     requires each to be either cleared on the delete path or on an explicit,
+#     reasoned keep-list — so a key added tomorrow forces a decision instead of
+#     silently becoming residue.
 
 name: Repo Guards
 
@@ -388,6 +422,24 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_internet_permission.sh
 
+      - name: FLAG_SECURE covers every Activity
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_flag_secure_app_wide.sh
+
+      # The guard above is four greps and a brace-slicer over Kotlin, so its
+      # fixtures pin one mutation per link — a registration moved out of
+      # onCreate, a registration left only in the KDoc, a callback that stopped
+      # setting the flag, a `clearFlags` exemption, a per-Activity copy, a
+      # dropped `android:name` — plus both false-positive directions and the
+      # anti-vacuity floor, without which a renamed source directory would
+      # report a clean tree forever. Two of them earned their keep immediately:
+      # the guard's first draft ran its method slice to EOF on Kotlin's
+      # expression-body form (`= Unit`), silently widening a check bound to
+      # onActivityCreated into a check on the whole file.
+      - name: App-wide FLAG_SECURE guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_flag_secure_app_wide.sh --self-test
+
       - name: Background-wake invariants
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_m7_native_wake_guards.sh
@@ -435,6 +487,18 @@ jobs:
       - name: Clock-skew policy parity
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_clock_skew_policy_parity.sh
+
+      - name: Publish-jitter fraction parity
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_publish_jitter_fraction_parity.sh
+
+      # The guard above extracts both sides' declarations by pattern; the
+      # fixtures below prove it still fails on the drift it exists for (the
+      # fraction moved on one side alone) and does not cry wolf on a
+      # consistent edit, before trusting it to gate the real files.
+      - name: Publish-jitter fraction parity guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_publish_jitter_fraction_parity.sh --self-test
 
       - name: MDK supply-chain shape
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
@@ -959,3 +1023,18 @@ jobs:
       - name: Wire-reachability guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_wire_oracle_lane_reachable.sh --self-test
+
+      - name: Identity-delete prefs residue
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_identity_delete_prefs_residue.sh
+
+      # The guard above is a hand-written extractor, so its fixtures pin the
+      # regression found while writing it: a mutated-out clear left behind as
+      # a comment still contains the literal `.remove(name)` text and must not
+      # read as live. The rest cover the read-vs-clear distinction the whole
+      # guard exists for, a stale keep-list entry, and both anti-vacuity floors
+      # — zero keys found at all, and a partially-broken extractor that finds
+      # some but far fewer than the real tree has.
+      - name: Identity-delete residue guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_identity_delete_prefs_residue.sh --self-test

@@ -548,6 +548,15 @@ mod tests {
     use crate::nostr::mls::types::GroupIdExt;
 
     #[test]
+    fn production_default_relays_count_is_pinned() {
+        // The count is load-bearing for `privacyRelaysWhyMany`, which promises
+        // "several relays, so no single one can cut you off" — false at one
+        // relay, and thinner than disclosed at two. Pinned exactly so any
+        // change to the seed list is a deliberate, reviewed act.
+        assert_eq!(PRODUCTION_DEFAULT_RELAYS.len(), 3);
+    }
+
+    #[test]
     fn circle_type_default() {
         assert_eq!(CircleType::default(), CircleType::LocationSharing);
     }

@@ -12,10 +12,11 @@
 /// timer that drives it — the same "Dart owns cadence, Rust owns logic" split
 /// the maintenance scheduler already uses.
 ///
-/// Tuning note: each refresh opens fresh sockets to the discovery relays, so
+/// Tuning note: each refresh opens fresh sockets to the profile relay pool, so
 /// these are deliberately not aggressive. Shortening them increases how often
-/// Haven contacts discovery relays; it does **not** widen what is disclosed
-/// (the union of member pubkeys is identical every time).
+/// Haven contacts those relays; it does **not** widen what is disclosed (the
+/// union of member pubkeys is identical every time, and each pubkey's assigned
+/// relay is fixed for the install).
 library;
 
 /// Tolerance for a user-visible, intent-driven refresh: cold start, circle

@@ -83,7 +83,8 @@ only a new iOS string. Corrected error count: **5 errors + 1 omission**.)
    case as if it were the bound, understating the leak by an order of magnitude. Never let ~1.5–2.5 km
    reach user copy.
 4. **`aboutScreenshotBody`** — Android-only framing. Android sets `FLAG_SECURE` app-wide
-   (`MainActivity.kt:10-19`); iOS only blurs the app-switcher snapshot
+   (registered for every Activity from `HavenApplication.onCreate`); iOS only blurs the
+   app-switcher snapshot
    (`AppDelegate.swift:6-11`, `:110-124`) and **cannot block in-app screenshots or recording**.
    Put the iOS position in the title.
 5. **`onboardingValueProp3Body`** — "nothing linking it to the real you" is overstated (IP is visible

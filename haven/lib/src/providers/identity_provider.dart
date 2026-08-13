@@ -17,6 +17,7 @@ import 'package:haven/src/providers/tile_prefetch_provider.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/pending_leave_service.dart';
 import 'package:haven/src/services/pending_mls_wipe_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -359,6 +360,37 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
         );
       }
     }
+    // Destroy any stranded PRE-Dark-Matter legacy MLS state (haven_mdk.db +
+    // its keyring key). Independent of the M10.1 marker above (a different
+    // file, a different keyring key) — a previously-FAILED one-time cutover
+    // (`LegacyCutoverService`) retries only while an identity is present, so
+    // once this delete completes that retry can never fire again. This is the
+    // last chance to remove it. Idempotent and a no-op when nothing legacy
+    // exists. Best-effort — a failure here must not block the primary
+    // objective of removing the identity's secret key.
+    try {
+      await circleServiceForWipe.destroyLegacyMlsState();
+    } on Object catch (e) {
+      debugPrint(
+        '[SECURITY][IdentityNotifier] legacy MLS state destroy failed during '
+        'identity deletion: ${e.runtimeType}',
+      );
+    }
+    // Clear every durable "leave in progress" marker (public nostr_group_ids
+    // of circles this identity was leaving). Must run AFTER wipeAllMlsState:
+    // once every local MLS group is destroyed and the signing secret is gone,
+    // there is nothing left to resume — a marker that survived would be a
+    // plaintext residue of the deleted identity's past circle memberships.
+    // Best-effort.
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await PendingLeaveService(prefs: prefs).clearAll();
+    } on Object catch (e) {
+      debugPrint(
+        '[SECURITY][IdentityNotifier] pending-leave marker clear failed '
+        'during identity deletion: ${e.runtimeType}',
+      );
+    }
     // circleServiceProvider is deliberately NOT invalidated anywhere in the
     // logout. `invalidate` would hand the NEXT read a FRESH, un-wiped instance,
     // and anything still running while logged out would use it to re-create
@@ -384,6 +416,18 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
     } on Object catch (e) {
       debugPrint(
         '[IdentityNotifier] background scheduling teardown failed during '
+        'identity deletion: ${e.runtimeType}',
+      );
+    }
+    // Clear the background-publish HISTORY timestamps (last publish time,
+    // last session-reclaim attempt) — a record of what the DELETED identity
+    // did, distinct from the coordination keys disableBackgroundScheduling
+    // already cleared above. Best-effort.
+    try {
+      await BackgroundLocationManager.clearPublishHistoryOnIdentityDelete();
+    } on Object catch (e) {
+      debugPrint(
+        '[IdentityNotifier] background publish-history clear failed during '
         'identity deletion: ${e.runtimeType}',
       );
     }

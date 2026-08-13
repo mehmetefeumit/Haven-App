@@ -20,6 +20,7 @@ library;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/constants/tiles.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/live_sync_provider.dart' show liveSyncEnabled;
@@ -28,6 +29,7 @@ import 'package:haven/src/providers/tile_prefetch_provider.dart';
 import 'package:haven/src/rust/api.dart' show FfiGroupSpec;
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/pending_leave_service.dart' show kPendingLeaveKey;
 import 'package:haven/src/services/pending_mls_wipe_service.dart';
 import 'package:haven/src/services/subscription_service.dart'
     show SubscriptionService;
@@ -887,6 +889,273 @@ void main() {
   });
 
   // ---------------------------------------------------------------------------
+  // Identity-delete residue fix — every promise `identityAdvancedDeleteBody`
+  // makes ("This deletes your identity and all circle data from this phone")
+  // must be backed by a test that fails if the corresponding clear is
+  // removed. Each group below pins ONE such promise.
+  // ---------------------------------------------------------------------------
+
+  group('IdentityNotifier.deleteIdentity — stranded legacy MLS state', () {
+    test('destroyLegacyMlsState is called on the circle service', () async {
+      final mockService = _MockIdentityService(
+        initialIdentity: createdIdentity,
+        deleteClears: true,
+      );
+      final mockCircle = MockCircleService();
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockService),
+          circleServiceProvider.overrideWithValue(mockCircle),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(identityNotifierProvider.notifier).deleteIdentity();
+
+      expect(
+        mockCircle.methodCalls,
+        contains('destroyLegacyMlsState'),
+        reason:
+            'a previously-failed one-time Dark Matter cutover must not '
+            'survive identity deletion — its own launch retry is gated on '
+            'an identity being present, so deletion is the last chance to '
+            'remove the stranded haven_mdk.db + its keyring key',
+      );
+    });
+  });
+
+  group('IdentityNotifier.deleteIdentity — pending-leave markers', () {
+    test(
+      'kPendingLeaveKey becomes entirely absent (not merely emptied)',
+      () async {
+        SharedPreferences.setMockInitialValues({
+          kPendingLeaveKey: <String>['aa' * 16],
+        });
+        final mockService = _MockIdentityService(
+          initialIdentity: createdIdentity,
+          deleteClears: true,
+        );
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockService),
+            circleServiceProvider.overrideWithValue(MockCircleService()),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container
+            .read(identityNotifierProvider.notifier)
+            .deleteIdentity();
+
+        final prefs = await SharedPreferences.getInstance();
+        expect(
+          prefs.containsKey(kPendingLeaveKey),
+          isFalse,
+          reason:
+              'a durable leave-in-progress marker records the PUBLIC '
+              'nostr_group_id of a circle this identity belonged to — it '
+              'must not survive "delete my identity and all circle data"',
+        );
+      },
+    );
+
+    test(
+      'kPendingLeaveKey is cleared AFTER wipeAllMlsState, not before',
+      () async {
+        // There is nothing left to resume once every local MLS group is
+        // destroyed and the signing secret is gone — clearing the marker
+        // any earlier would risk losing durable leave-in-progress intent
+        // while the state it refers to might still exist.
+        SharedPreferences.setMockInitialValues({
+          kPendingLeaveKey: <String>['aa' * 16],
+        });
+        final capturingCircle = _CapturingWipePendingLeaveMockCircleService();
+        final mockService = _MockIdentityService(
+          initialIdentity: createdIdentity,
+          deleteClears: true,
+        );
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockService),
+            circleServiceProvider.overrideWithValue(capturingCircle),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container
+            .read(identityNotifierProvider.notifier)
+            .deleteIdentity();
+
+        expect(
+          capturingCircle.pendingLeaveKeyPresentAtWipeTime,
+          isTrue,
+          reason:
+              'the pending-leave marker must still be present WHILE '
+              'wipeAllMlsState runs — proving the clear happens strictly '
+              'after it, not before',
+        );
+        final prefs = await SharedPreferences.getInstance();
+        expect(prefs.containsKey(kPendingLeaveKey), isFalse);
+      },
+    );
+  });
+
+  group(
+    'IdentityNotifier.deleteIdentity — background publish-history residue',
+    () {
+      test('clears kBackgroundLastPublishMsKey', () async {
+        SharedPreferences.setMockInitialValues({
+          kBackgroundLastPublishMsKey: DateTime.now().millisecondsSinceEpoch,
+        });
+        final mockService = _MockIdentityService(
+          initialIdentity: createdIdentity,
+          deleteClears: true,
+        );
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockService),
+            circleServiceProvider.overrideWithValue(MockCircleService()),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container
+            .read(identityNotifierProvider.notifier)
+            .deleteIdentity();
+
+        final prefs = await SharedPreferences.getInstance();
+        expect(
+          prefs.containsKey(kBackgroundLastPublishMsKey),
+          isFalse,
+          reason:
+              'the wall-clock time of the deleted identity\'s last location '
+              'transmission must not survive "delete my identity"',
+        );
+      });
+
+      test('clears kBackgroundSessionReclaimAtMsKey', () async {
+        SharedPreferences.setMockInitialValues({
+          kBackgroundSessionReclaimAtMsKey:
+              DateTime.now().millisecondsSinceEpoch,
+        });
+        final mockService = _MockIdentityService(
+          initialIdentity: createdIdentity,
+          deleteClears: true,
+        );
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockService),
+            circleServiceProvider.overrideWithValue(MockCircleService()),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container
+            .read(identityNotifierProvider.notifier)
+            .deleteIdentity();
+
+        final prefs = await SharedPreferences.getInstance();
+        expect(
+          prefs.containsKey(kBackgroundSessionReclaimAtMsKey),
+          isFalse,
+        );
+      });
+    },
+  );
+
+  group(
+    'IdentityNotifier.deleteIdentity — background scheduling coordination '
+    'keys (M7-A, full container)',
+    () {
+      test(
+        'clears kBackgroundIdleKey and kForegroundActiveAtMsKey via '
+        'disableBackgroundScheduling',
+        () async {
+          SharedPreferences.setMockInitialValues({
+            kBackgroundIdleKey: false,
+            kForegroundActiveAtMsKey: DateTime.now().millisecondsSinceEpoch,
+          });
+          final mockService = _MockIdentityService(
+            initialIdentity: createdIdentity,
+            deleteClears: true,
+          );
+          final container = ProviderContainer(
+            overrides: [
+              identityServiceProvider.overrideWithValue(mockService),
+              circleServiceProvider.overrideWithValue(MockCircleService()),
+            ],
+          );
+          addTearDown(container.dispose);
+
+          await container
+              .read(identityNotifierProvider.notifier)
+              .deleteIdentity();
+
+          final prefs = await SharedPreferences.getInstance();
+          expect(
+            prefs.containsKey(kBackgroundIdleKey),
+            isFalse,
+            reason:
+                'deleteIdentity must call disableBackgroundScheduling, which '
+                'removes kBackgroundIdleKey',
+          );
+          expect(
+            prefs.containsKey(kForegroundActiveAtMsKey),
+            isFalse,
+            reason:
+                'deleteIdentity must call disableBackgroundScheduling, which '
+                'removes kForegroundActiveAtMsKey',
+          );
+        },
+      );
+    },
+  );
+
+  group(
+    'IdentityNotifier.deleteIdentity — locationSharingService.wipeAll() '
+    'wiring',
+    () {
+      test(
+        'wipeAll() reaches the circle service (wipeAllLastKnownLocations is '
+        'called)',
+        () async {
+          // locationSharingServiceProvider is not overridden in this test —
+          // it composes the SAME circleServiceProvider override, so an
+          // observed wipeAllLastKnownLocations() call proves deleteIdentity
+          // actually invoked locationSharingServiceProvider.wipeAll()
+          // end-to-end, not merely that the provider exists.
+          final mockService = _MockIdentityService(
+            initialIdentity: createdIdentity,
+            deleteClears: true,
+          );
+          final mockCircle = MockCircleService();
+          final container = ProviderContainer(
+            overrides: [
+              identityServiceProvider.overrideWithValue(mockService),
+              circleServiceProvider.overrideWithValue(mockCircle),
+            ],
+          );
+          addTearDown(container.dispose);
+
+          await container
+              .read(identityNotifierProvider.notifier)
+              .deleteIdentity();
+
+          expect(
+            mockCircle.methodCalls,
+            contains('wipeAllLastKnownLocations'),
+            reason:
+                'deleteIdentity must call '
+                'locationSharingServiceProvider.wipeAll(), which wipes '
+                'every persisted last-known-location row via the circle '
+                'service',
+          );
+        },
+      );
+    },
+  );
+
+  // ---------------------------------------------------------------------------
   // M10.1 — reconcile a pending wipe BEFORE a new identity writes circle state
   //
   // A marker left set by a prior failed logout must be resolved when a NEW
@@ -1298,6 +1567,21 @@ class _CapturingWipeMockCircleService extends MockCircleService {
   Future<void> wipeAllMlsState() async {
     await onWipe();
     // Delegate to parent for the methodCalls record.
+    return super.wipeAllMlsState();
+  }
+}
+
+/// A [CircleService] that records whether [kPendingLeaveKey] was still
+/// present in [SharedPreferences] at the exact moment [wipeAllMlsState] ran —
+/// proving the pending-leave clear in `deleteIdentity()` happens strictly
+/// AFTER the MLS wipe, not before.
+class _CapturingWipePendingLeaveMockCircleService extends MockCircleService {
+  bool? pendingLeaveKeyPresentAtWipeTime;
+
+  @override
+  Future<void> wipeAllMlsState() async {
+    final prefs = await SharedPreferences.getInstance();
+    pendingLeaveKeyPresentAtWipeTime = prefs.containsKey(kPendingLeaveKey);
     return super.wipeAllMlsState();
   }
 }

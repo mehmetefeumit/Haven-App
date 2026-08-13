@@ -1,7 +1,8 @@
 //! MLS end-to-end SECURITY GATES over the Dark Matter engine (DM-5a).
 //!
 //! Re-expresses Haven's security black-box gates on the new `SessionManager`
-//! stack (security F2/F9): key separation (Rule 1), ephemeral-445 uniqueness
+//! stack (security F2/F9): key separation (Rule 1), fresh ephemeral authors on
+//! both the 445 and the 1059 welcome wrap
 //! (Rule 2), 444-unsigned (Rule 3), group-id privacy (Rule 4), exporter retention
 //! (Rule 5), error redaction (Rule 6). Where the pre-migration mechanism is
 //! genuinely gone (per-send NIP-40 expiration; a public per-past-epoch exporter
@@ -14,7 +15,9 @@ mod helpers;
 
 use haven_core::location::LocationMessage;
 use haven_core::nostr::giftwrap::unwrap_welcome;
-use haven_core::nostr::mls::types::{GroupId, LocationMessageResult, PublishWork};
+use haven_core::nostr::mls::types::{
+    GroupId, LocationGroupConfig, LocationMessageResult, PublishWork, SessionEffects,
+};
 use haven_core::nostr::mls::{redact_hex_sequences, SessionManager};
 use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, Timestamp};
 
@@ -539,15 +542,153 @@ fn rm_error_redaction_strips_group_id_hex() {
 }
 
 /// Belt-and-suspenders privacy sweep over ALL relay-visible welcome bytes.
+///
+/// Every assertion here reads the wrap the ENGINE produced and Haven actually
+/// publishes. The same four properties used to be asserted against
+/// `giftwrap::wrap_welcome`, a `pub` builder with no production caller — so
+/// they described a wire form no relay ever saw, and the expiration one
+/// asserted the OPPOSITE of what ships. That builder is deleted; the promises
+/// moved here, onto the real artifact. Its remaining one — a fresh ephemeral
+/// author per wrap — takes more than one wrap to see, so it lives below.
 #[test]
 fn rm_welcome_gift_wrap_privacy_sweep() {
     let g = block_on(setup_two_party_group_capturing_welcome("rm_sweep"));
+    let wrap = &g.bob_welcome_gift_wrap;
+    let json = wrap.as_json();
+
     let raw_mls_hex = hex::encode(g.group.group_id.as_slice());
     assert!(
-        !g.bob_welcome_gift_wrap.as_json().contains(&raw_mls_hex),
+        !json.contains(&raw_mls_hex),
         "no relay-visible welcome byte may carry the raw MLS group id"
     );
+    assert!(
+        !json.contains(&g.group.alice_keys.public_key().to_hex()),
+        "the outer 1059 must not reveal the inviter's real pubkey — the seal exists to hide it"
+    );
+    assert!(
+        !json.contains("\"kind\":444"),
+        "the outer 1059 must not reveal that the rumor inside it is a Welcome"
+    );
+
+    // Backs the user-facing claim that invitations carry no expiry
+    // (`privacyWhatOthersSeeDetailExpiry`). A NIP-40 tag here would not only
+    // publish a retention claim in cleartext, it would single Haven's
+    // invitations out of every other NIP-17 gift wrap on the relay, which carry
+    // none.
+    assert!(
+        !wrap
+            .tags
+            .iter()
+            .any(|t| t.as_slice().first().map(String::as_str) == Some("expiration")),
+        "a welcome gift wrap must carry NO expiration tag"
+    );
+
     g.group.cleanup();
+}
+
+/// Publishable welcome gift wraps carried by `effects`, confirming each pending
+/// state they ride on (publish-before-apply, Rule 13) so the caller may keep
+/// driving the group afterwards.
+async fn confirm_and_take_welcomes(
+    session: &SessionManager,
+    effects: &SessionEffects,
+) -> Vec<Event> {
+    let mut wraps = Vec::new();
+    for work in &effects.publish {
+        let (welcomes, pending) = match work {
+            PublishWork::GroupCreated { welcomes, pending }
+            | PublishWork::GroupEvolution {
+                welcomes, pending, ..
+            } => (welcomes, *pending),
+            _ => continue,
+        };
+        wraps.extend(
+            welcomes
+                .iter()
+                .map(|w| SessionManager::transport_message_to_event(w).expect("welcome → event")),
+        );
+        session
+            .confirm_published(pending)
+            .await
+            .expect("confirm the published welcome");
+    }
+    wraps
+}
+
+/// Rule 2's kind-1059 half: separate invitations must be UNLINKABLE.
+///
+/// NIP-59 requires a fresh ephemeral key per gift wrap. One wrap can only show
+/// the inviter's identity key is absent (the sweep above); reuse is visible only
+/// ACROSS wraps, and it hands any relay holding two of them the fact that one
+/// inviter sent both. Sampled over both routes the engine emits a welcome on —
+/// the batch of a single create, and a later add — because a key cached per
+/// batch and a key cached per session are different bugs.
+#[tokio::test]
+async fn rm_each_welcome_gift_wrap_carries_a_fresh_ephemeral_author() {
+    let relays = vec!["wss://relay.test.com".to_string()];
+    let alice_dir = helpers::unique_temp_dir("rm_fresh_alice");
+    let alice_keys = Keys::generate();
+    let alice = SessionManager::new_unencrypted(&alice_dir, &alice_keys).expect("alice session");
+
+    let mut invitee_dirs = Vec::new();
+    let mut key_packages = Vec::new();
+    for who in ["bob", "carol", "dave"] {
+        let dir = helpers::unique_temp_dir(&format!("rm_fresh_{who}"));
+        let keys = Keys::generate();
+        let session = SessionManager::new_unencrypted(&dir, &keys).expect("invitee session");
+        let event = helpers::create_key_package_event(&session, &keys, &relays).await;
+        key_packages.push(SessionManager::key_package_from_event(&event).expect("parse kp"));
+        invitee_dirs.push(dir);
+    }
+    // Held back so one welcome is produced by a LATER commit, not by the create.
+    let dave_kp = key_packages.pop().expect("three key packages were minted");
+
+    let config = LocationGroupConfig::new("Test Group")
+        .with_relay("wss://relay.test.com")
+        .with_admin(alice_keys.public_key().to_hex());
+    let created = alice
+        .create_group(key_packages, config)
+        .await
+        .expect("create group");
+    let mut wraps = confirm_and_take_welcomes(&alice, &created.effects).await;
+    assert_eq!(
+        wraps.len(),
+        2,
+        "a create with two invitees must emit one welcome each"
+    );
+
+    let added = alice
+        .add_members(&created.group_id, vec![dave_kp])
+        .await
+        .expect("add the third invitee");
+    let later = confirm_and_take_welcomes(&alice, &added).await;
+    assert_eq!(later.len(), 1, "adding one member must emit one welcome");
+    wraps.extend(later);
+
+    let mut authors = std::collections::HashSet::new();
+    for wrap in &wraps {
+        assert_eq!(
+            wrap.kind,
+            Kind::GiftWrap,
+            "a welcome ships to the invitee in a kind-1059 gift wrap"
+        );
+        assert_ne!(
+            wrap.pubkey,
+            alice_keys.public_key(),
+            "a welcome gift wrap MUST NOT be authored by the inviter's identity key — \
+             hiding it is the whole point of the seal (NIP-59)"
+        );
+        assert!(
+            authors.insert(wrap.pubkey.to_hex()),
+            "every welcome gift wrap MUST carry a FRESH ephemeral author (NIP-59): two \
+             that share one let a relay link the invitations to a single inviter"
+        );
+    }
+
+    helpers::cleanup_dir(&alice_dir);
+    for dir in &invitee_dirs {
+        helpers::cleanup_dir(dir);
+    }
 }
 
 // ============================================================================

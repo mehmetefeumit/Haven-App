@@ -23,6 +23,16 @@ void main() {
       );
     });
 
+    test('overlap guard is pinned at 60 seconds', () {
+      // This ordering test alone does not bound the value: a guard far below
+      // 60s still satisfies "strictly below the min interval" while letting
+      // the disclosed motion trigger (kMotionTriggerDistanceMeters) fire far
+      // more often than intended, sharpening the movement signal a relay
+      // sees. Widening it dampens the motion trigger's responsiveness beyond
+      // what the ordering test alone would ever flag.
+      expect(kLocationPublishOverlapGuard, const Duration(seconds: 60));
+    });
+
     test('kLocationPublishMinInterval is 72s (nominal * 0.6)', () {
       // Authoritative bound lives in Rust at
       // `PUBLISH_INTERVAL_JITTER_FRACTION_BP = 4000` (40% spread).
@@ -69,8 +79,12 @@ void main() {
       );
     });
 
-    test('motion trigger distance is positive', () {
-      expect(kMotionTriggerDistanceMeters, greaterThan(0));
+    test('motion trigger distance is pinned at 100 metres', () {
+      // Narrowing lets a moving device leak a finer-grained motion signal to
+      // a relay (a motion-triggered publish fires on much smaller
+      // displacements, subject only to the overlap guard); widening delays a
+      // legitimate publish behind a displacement well past what is disclosed.
+      expect(kMotionTriggerDistanceMeters, 100);
     });
   });
 }

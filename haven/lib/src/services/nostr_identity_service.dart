@@ -229,7 +229,11 @@ class NostrIdentityService implements IdentityService {
     final manager = await _ensureInitialized();
 
     try {
-      return manager.exportNsec();
+      // Awaited INSIDE the try (Security Rule 8): returning the future
+      // un-awaited would hand a rejecting FFI future straight to the caller,
+      // and the redaction below would never run — the raw Rust error string
+      // reaches the UI instead of a generic message.
+      return await manager.exportNsec();
     } on Exception catch (_) {
       debugPrint('[Identity] Export failed');
       throw const IdentityServiceException('Failed to export secret key');
@@ -247,7 +251,7 @@ class NostrIdentityService implements IdentityService {
     final manager = await _ensureInitialized();
 
     try {
-      return manager.sign(messageHash: messageHash.toList());
+      return await manager.sign(messageHash: messageHash.toList());
     } on Exception catch (e) {
       debugPrint('Failed to sign: ${e.runtimeType}');
       throw const IdentityServiceException('Failed to sign');
@@ -271,7 +275,7 @@ class NostrIdentityService implements IdentityService {
     final manager = await _ensureInitialized();
 
     try {
-      return manager.getSecretBytes();
+      return await manager.getSecretBytes();
     } on Exception catch (_) {
       debugPrint('[Identity] Secret bytes retrieval failed');
       throw const IdentityServiceException('Failed to get secret bytes');

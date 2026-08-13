@@ -2479,6 +2479,7 @@ mod tests {
     //!   (Rule 14: at most one session per DB file).
 
     use super::*;
+    use crate::circle::types::LastKnownLocation;
     use crate::nostr::mls::types::LocationMessageResult;
     use crate::relay::maintenance::build_kp_maintenance_events;
     use nostr::JsonUtil as _;
@@ -2696,6 +2697,137 @@ mod tests {
         assert!(
             circles.is_empty(),
             "fail-closed create_circle must leave no circle in storage"
+        );
+    }
+
+    // ── Group-relay-set derivation (`circle.relays`, `create_circle`) ────────
+    //
+    // Pins the exact source of the value the circle-details sheet's
+    // `circleDetailsRelaysNote` describes. The Dart caller
+    // (`NostrCircleService.createCircle`) passes `relays` as the UNION of the
+    // invitees' own published `KeyPackage` relays (their kind 10050 inbox
+    // lists) — never the creator's own relay preferences — and only when that
+    // union is completely empty does `create_circle` substitute anything, in
+    // two tiers: the creator's LOCALLY STORED inbox relays first, then the
+    // hard-coded production default list. These three tests keep that whole
+    // chain honest so the Dart-side copy, which now names both fallbacks,
+    // cannot silently drift from what the code actually does.
+
+    #[tokio::test]
+    async fn create_circle_relays_are_the_passed_relays_not_the_creator_inbox() {
+        // Mirrors the common case: at least one invitee published a relay, so
+        // Dart's `circleRelays` union is non-empty and is passed straight
+        // through. The creator's OWN configured inbox relay is seeded to a
+        // DIFFERENT URL, so a passing assertion can only be explained by the
+        // passed-in value winning — never by a fallback to storage.
+        const INVITEE_RELAY: &str = "wss://invitee.example.com";
+        const CREATOR_INBOX_RELAY: &str = "wss://creator-inbox.example.com";
+
+        let dir = TempDir::new().unwrap();
+        let alice_keys = Keys::generate();
+        let alice = CircleManager::new_unencrypted(dir.path(), &alice_keys).unwrap();
+        alice
+            .add_user_relay(
+                CREATOR_INBOX_RELAY,
+                crate::circle::relay_prefs::RelayType::Inbox,
+            )
+            .unwrap();
+
+        let member = make_member_with_relays(vec![INVITEE_RELAY.to_string()], vec![]).await;
+        let config =
+            CircleConfig::new("Invitee Relay Circle").with_relays(vec![INVITEE_RELAY.to_string()]);
+
+        let creation = alice
+            .create_circle(&alice_keys, vec![member], &config, &[])
+            .await
+            .expect("create");
+
+        assert_eq!(
+            creation.circle.relays,
+            vec![INVITEE_RELAY.to_string()],
+            "a non-empty passed-in relay set must be used as-is"
+        );
+        assert!(
+            !creation
+                .circle
+                .relays
+                .contains(&CREATOR_INBOX_RELAY.to_string()),
+            "the creator's own configured inbox relay must NOT appear when the \
+             invitee already supplied one"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_circle_falls_back_to_stored_creator_inbox_when_relays_empty() {
+        // No invitee supplied a relay (config.relays is empty, matching Dart
+        // passing memberRelays == []). The fallback reads the creator's inbox
+        // relays from LOCAL STORAGE — not from the `creator_fallback_relays`
+        // parameter, which is deliberately set to a DIFFERENT URL here so a
+        // passing assertion can only be explained by the storage read, never
+        // by an accidental echo of that parameter.
+        const STORED_INBOX_RELAY: &str = "wss://creator-inbox-storage.example.com";
+        const WELCOME_TIER3_PARAM_RELAY: &str = "wss://different-tier3-param.example.com";
+
+        let dir = TempDir::new().unwrap();
+        let alice_keys = Keys::generate();
+        let alice = CircleManager::new_unencrypted(dir.path(), &alice_keys).unwrap();
+        alice
+            .add_user_relay(
+                STORED_INBOX_RELAY,
+                crate::circle::relay_prefs::RelayType::Inbox,
+            )
+            .unwrap();
+
+        let member = make_member_with_relays(vec![], vec![]).await; // no relays
+        let config = CircleConfig::new("Fallback Circle"); // relays left empty
+
+        let creation = alice
+            .create_circle(
+                &alice_keys,
+                vec![member],
+                &config,
+                &[WELCOME_TIER3_PARAM_RELAY.to_string()],
+            )
+            .await
+            .expect("create using the stored creator inbox as the group relay set");
+
+        assert_eq!(
+            creation.circle.relays,
+            vec![STORED_INBOX_RELAY.to_string()],
+            "an empty passed-in relay set must fall back to the creator's \
+             LOCALLY STORED inbox relays"
+        );
+        assert_ne!(
+            creation.circle.relays,
+            vec![WELCOME_TIER3_PARAM_RELAY.to_string()],
+            "the group relay set must come from storage, not from the \
+             creator_fallback_relays parameter"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_circle_falls_back_to_default_relays_when_relays_and_creator_inbox_empty() {
+        // Neither the passed-in relays nor the creator's stored inbox has
+        // anything — the deepest fallback tier, production DEFAULT_RELAYS.
+        let dir = TempDir::new().unwrap();
+        let alice_keys = Keys::generate();
+        let alice = CircleManager::new_unencrypted(dir.path(), &alice_keys).unwrap();
+        // Deliberately never seeded / never called add_user_relay: the
+        // creator's stored inbox relay list stays empty.
+
+        let member = make_member_with_relays(vec![], vec![]).await; // no relays
+        let config = CircleConfig::new("Default Fallback Circle"); // relays empty
+        let welcome_tier3 = vec!["wss://tier3.example.com".to_string()];
+
+        let creation = alice
+            .create_circle(&alice_keys, vec![member], &config, &welcome_tier3)
+            .await
+            .expect("create using the production default relays");
+
+        assert_eq!(
+            creation.circle.relays,
+            crate::circle::types::default_relays(),
+            "both fallback tiers empty must land on the production default relays"
         );
     }
 
@@ -3946,6 +4078,51 @@ mod tests {
         assert!(results
             .iter()
             .any(|r| matches!(r, LocationMessageResult::GroupUpdate { .. })));
+    }
+
+    // ── Last-known location retention ────────────────────────────────────────
+
+    #[test]
+    fn upsert_last_known_location_overwrites_caller_supplied_purge_after() {
+        // The privacy property behind LOCATION_RETENTION_SECS is that
+        // `purge_after` is DERIVED at the receiver, never trusted from a
+        // caller — a peer's location message carries no retention hint of its
+        // own. Seeding the row with an already-expired caller-supplied
+        // `purge_after` makes this non-vacuous: if the upsert ever started
+        // passing the field through unchanged, this row would read back as
+        // already purged instead of retained for a day.
+        let (manager, keys, _dir) = create_test_manager();
+        let timestamp = 1_000_000_i64;
+        let location = LastKnownLocation {
+            nostr_group_id: [7; 32],
+            sender_pubkey: keys.public_key().to_hex(),
+            latitude: 40.7128,
+            longitude: -74.0060,
+            geohash: "dr5regw".to_string(),
+            display_name: None,
+            timestamp,
+            expires_at: timestamp + 900,
+            purge_after: timestamp, // caller-supplied — an already-expired sentinel
+            updated_at: timestamp,
+        };
+        manager
+            .upsert_last_known_location(&location)
+            .expect("upsert succeeds");
+
+        let rows = manager
+            .snapshot_last_known_for_circle(&[7; 32], timestamp)
+            .expect("snapshot succeeds");
+        assert_eq!(
+            rows.len(),
+            1,
+            "the caller-supplied purge_after must not have read as already-expired"
+        );
+        assert_eq!(
+            rows[0].purge_after,
+            timestamp + i64::try_from(crate::location::LOCATION_RETENTION_SECS).unwrap(),
+            "purge_after must be derived from timestamp + LOCATION_RETENTION_SECS, \
+             never the caller-supplied value"
+        );
     }
 
     // ── Key packages ─────────────────────────────────────────────────────────

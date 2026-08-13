@@ -146,9 +146,13 @@
       "tags": { "allowed": ["p"], "required": ["p"] },
       "_site": "mdk transport-nostr-peeler/src/peeler.rs:367 (gift_wrap with empty extra-tags); published from haven/lib/src/services/nostr_circle_service.dart:581,1180",
       "_why": [
-        "Production gift wraps carry `p` and nothing else. The orphaned-but-still-pub",
-        "haven-core/src/nostr/giftwrap.rs:123-131 wrap_welcome stamps an additional 30-day",
-        "`expiration`; excluding it here means that builder becoming reachable is a violation.",
+        "Production gift wraps carry `p` and nothing else, and the user-facing privacy copy says so",
+        "(`privacyWhatOthersSeeDetailExpiry`: invitations carry no expiry). A NIP-40 `expiration`",
+        "here would publish a retention claim in cleartext AND single Haven's invitations out of",
+        "every other NIP-17 gift wrap on the relay, which carry none. This entry was written when",
+        "haven-core/src/nostr/giftwrap.rs held an orphaned-but-still-pub wrap_welcome that stamped a",
+        "30-day expiration; it was deleted 2026-08-12, so the only way a tag reaches this kind now is",
+        "an MDK peeler change — which is exactly what this entry is here to catch.",
         "`ephemeral_pubkey`: a gift wrap is signed by a throwaway key by construction (NIP-59), so",
         "its author can never be evidence that a distinct PARTICIPANT transmitted. See kind 445."
       ]

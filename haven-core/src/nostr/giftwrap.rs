@@ -1,7 +1,4 @@
-//! NIP-59 Gift Wrap for secure event delivery.
-//!
-//! This module provides gift-wrapping and unwrapping functionality
-//! for Welcome events (kind 444) following NIP-59 specification.
+//! NIP-59 Gift Wrap peeling for received Welcome events.
 //!
 //! # Gift Wrap Structure
 //!
@@ -24,21 +21,15 @@
 //! └─────────────────────────────────────────────────────┘
 //! ```
 //!
-//! # Security
-//!
-//! - **Metadata protection**: Sender identity hidden behind ephemeral key
-//! - **Unsigned rumor**: Kind 444 cannot be published even if leaked
-//! - **Ephemeral keys**: Fresh keypair per wrap, never stored
-//! - **Timestamp randomization**: ±48 hours to prevent timing correlation
-
-use std::time::Duration;
+//! Haven does NOT build this envelope. Both directions belong to the engine:
+//! the MDK peeler wraps outbound welcomes (`transport-nostr-peeler`, with an
+//! empty extra-tag set, so a production 1059 carries `p` and nothing else) and
+//! peels inbound ones inside `SessionManager::accept_welcome`. What lives here
+//! is the read-only peel used by tests that need to inspect an engine-produced
+//! gift wrap from the recipient's side.
 
 use nostr::nips::nip59::UnwrappedGift as NostrUnwrappedGift;
-use nostr::{Event, EventBuilder, EventId, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
-
-/// Welcome events expire after 30 days. Recipients who haven't processed
-/// the invitation by then must be re-invited.
-const WELCOME_EXPIRATION_SECS: u64 = 30 * 24 * 60 * 60;
+use nostr::{Event, EventId, Keys, Kind, PublicKey, UnsignedEvent};
 
 use super::error::{NostrError, Result};
 
@@ -69,67 +60,6 @@ impl std::fmt::Debug for UnwrappedWelcome {
             .field("rumor", &"<redacted>")
             .finish()
     }
-}
-
-/// Gift-wraps a Welcome rumor for secure delivery (NIP-59).
-///
-/// Creates a three-layer encrypted envelope:
-/// 1. Rumor (unsigned kind 444 Welcome) - the actual invitation
-/// 2. Seal (NIP-44 encrypted, sender authenticated)
-/// 3. Gift Wrap (kind 1059, ephemeral key, public)
-///
-/// # Arguments
-///
-/// * `sender_keys` - The inviter's Nostr identity keys
-/// * `recipient_pubkey` - The invitee's public key
-/// * `welcome_rumor` - The unsigned kind 444 event from MDK
-///
-/// # Returns
-///
-/// A kind 1059 event ready to publish to the recipient's inbox relays.
-///
-/// # Errors
-///
-/// Returns error if:
-/// - The rumor is not kind 444
-/// - Encryption fails
-///
-/// # Security
-///
-/// - Uses a fresh ephemeral keypair for the outer layer
-/// - Randomizes timestamp by ±48 hours
-/// - Never stores or logs ephemeral keys
-pub async fn wrap_welcome(
-    sender_keys: &Keys,
-    recipient_pubkey: &PublicKey,
-    welcome_rumor: UnsignedEvent,
-) -> Result<Event> {
-    // Verify this is a kind 444 Welcome event
-    if welcome_rumor.kind != Kind::Custom(KIND_WELCOME) {
-        return Err(NostrError::GiftWrap(format!(
-            "Welcome rumor must be kind {KIND_WELCOME}, got {}",
-            welcome_rumor.kind.as_u16()
-        )));
-    }
-
-    // Use nostr's built-in gift wrapping via EventBuilder
-    // This automatically:
-    // - Creates seal (kind 13) with sender's key
-    // - Generates ephemeral keypair for outer layer
-    // - Randomizes timestamp ±48 hours
-    // - NIP-44 encrypts both layers
-    let expiration = Timestamp::now() + Duration::from_secs(WELCOME_EXPIRATION_SECS);
-
-    let gift_wrap = EventBuilder::gift_wrap(
-        sender_keys,
-        recipient_pubkey,
-        welcome_rumor,
-        [Tag::expiration(expiration)],
-    )
-    .await
-    .map_err(|e| NostrError::GiftWrap(e.to_string()))?;
-
-    Ok(gift_wrap)
 }
 
 /// Unwraps a received gift-wrapped Welcome event.
@@ -194,106 +124,37 @@ pub async fn unwrap_welcome(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{JsonUtil, Timestamp};
+    use nostr::{EventBuilder, Timestamp};
 
-    fn create_test_welcome_rumor(sender: &Keys) -> UnsignedEvent {
-        UnsignedEvent::new(
+    /// Wraps `rumor` exactly the way production does — `EventBuilder::gift_wrap`
+    /// with an EMPTY extra-tag set, mirroring the MDK peeler
+    /// (`transport-nostr-peeler/src/peeler.rs`). Peeling a fixture built any
+    /// other way would test a wire shape Haven never emits.
+    async fn production_shaped_wrap(sender: &Keys, recipient: &PublicKey, kind: u16) -> Event {
+        let rumor = UnsignedEvent::new(
             sender.public_key(),
             Timestamp::now(),
-            Kind::Custom(KIND_WELCOME),
+            Kind::Custom(kind),
             Vec::new(),
             "test_mls_welcome_bytes".to_string(),
-        )
-    }
-
-    fn create_wrong_kind_rumor(sender: &Keys) -> UnsignedEvent {
-        UnsignedEvent::new(
-            sender.public_key(),
-            Timestamp::now(),
-            Kind::Custom(9), // Wrong kind
-            Vec::new(),
-            "test".to_string(),
-        )
-    }
-
-    #[tokio::test]
-    async fn wrap_welcome_creates_kind_1059() {
-        let sender = Keys::generate();
-        let recipient = Keys::generate();
-        let rumor = create_test_welcome_rumor(&sender);
-
-        let wrapped = wrap_welcome(&sender, &recipient.public_key(), rumor)
-            .await
-            .unwrap();
-
-        assert_eq!(wrapped.kind, Kind::GiftWrap);
-        // Ephemeral pubkey should differ from sender
-        assert_ne!(wrapped.pubkey, sender.public_key());
-    }
-
-    #[tokio::test]
-    async fn wrap_welcome_sets_30_day_expiration() {
-        let sender = Keys::generate();
-        let recipient = Keys::generate();
-        let before = Timestamp::now();
-        let rumor = create_test_welcome_rumor(&sender);
-
-        let wrapped = wrap_welcome(&sender, &recipient.public_key(), rumor)
-            .await
-            .unwrap();
-
-        // Find the expiration tag
-        let expiration = wrapped
-            .tags
-            .iter()
-            .find(|t| t.as_slice().first().map(std::string::String::as_str) == Some("expiration"))
-            .expect("Gift wrap should have an expiration tag");
-
-        let exp_timestamp: u64 = expiration.as_slice()[1]
-            .parse()
-            .expect("Expiration should be a valid timestamp");
-
-        let thirty_days = 30 * 24 * 60 * 60;
-        let lower = before.as_secs() + thirty_days - 5; // 5s tolerance
-        let upper = before.as_secs() + thirty_days + 5;
-        assert!(
-            exp_timestamp >= lower && exp_timestamp <= upper,
-            "Expiration should be ~30 days from now, got {exp_timestamp} (expected {lower}..{upper})"
         );
-    }
-
-    #[tokio::test]
-    async fn wrap_welcome_rejects_wrong_kind() {
-        let sender = Keys::generate();
-        let recipient = Keys::generate();
-        let wrong_rumor = create_wrong_kind_rumor(&sender);
-
-        let result = wrap_welcome(&sender, &recipient.public_key(), wrong_rumor).await;
-
-        assert!(result.is_err());
-        if let Err(NostrError::GiftWrap(msg)) = result {
-            assert!(msg.contains("kind 444"));
-        } else {
-            panic!("Expected GiftWrap error");
-        }
+        EventBuilder::gift_wrap(sender, recipient, rumor, [])
+            .await
+            .expect("wrap the fixture")
     }
 
     #[tokio::test]
     async fn unwrap_recovers_sender_and_rumor() {
         let sender = Keys::generate();
         let recipient = Keys::generate();
-        let rumor = create_test_welcome_rumor(&sender);
-        let original_content = rumor.content.clone();
 
-        let wrapped = wrap_welcome(&sender, &recipient.public_key(), rumor)
-            .await
-            .unwrap();
+        let wrapped = production_shaped_wrap(&sender, &recipient.public_key(), KIND_WELCOME).await;
 
         let unwrapped = unwrap_welcome(&recipient, &wrapped).await.unwrap();
 
         assert_eq!(unwrapped.sender_pubkey, sender.public_key());
         assert_eq!(unwrapped.rumor.kind, Kind::Custom(KIND_WELCOME));
-        assert_eq!(unwrapped.rumor.content, original_content);
+        assert_eq!(unwrapped.rumor.content, "test_mls_welcome_bytes");
         assert_eq!(unwrapped.wrapper_event_id, wrapped.id);
     }
 
@@ -302,86 +163,45 @@ mod tests {
         let sender = Keys::generate();
         let intended_recipient = Keys::generate();
         let wrong_recipient = Keys::generate();
-        let rumor = create_test_welcome_rumor(&sender);
 
-        let wrapped = wrap_welcome(&sender, &intended_recipient.public_key(), rumor)
-            .await
-            .unwrap();
+        let wrapped =
+            production_shaped_wrap(&sender, &intended_recipient.public_key(), KIND_WELCOME).await;
 
-        // Wrong recipient should fail to unwrap
         let result = unwrap_welcome(&wrong_recipient, &wrapped).await;
         assert!(result.is_err());
     }
 
+    /// The kind check runs before any decryption, so a relay cannot get an
+    /// arbitrary event peeled by addressing it at the recipient.
     #[tokio::test]
-    async fn ephemeral_keys_are_unique() {
-        let sender = Keys::generate();
+    async fn unwrap_rejects_an_event_that_is_not_a_gift_wrap() {
         let recipient = Keys::generate();
+        let not_a_wrap = EventBuilder::new(Kind::Custom(1), "hello")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign fixture");
 
-        let rumor1 = create_test_welcome_rumor(&sender);
-        let rumor2 = create_test_welcome_rumor(&sender);
+        let result = unwrap_welcome(&recipient, &not_a_wrap).await;
 
-        let wrapped1 = wrap_welcome(&sender, &recipient.public_key(), rumor1)
-            .await
-            .unwrap();
-        let wrapped2 = wrap_welcome(&sender, &recipient.public_key(), rumor2)
-            .await
-            .unwrap();
-
-        // Each wrap should use a different ephemeral key
-        assert_ne!(wrapped1.pubkey, wrapped2.pubkey);
-        // Neither should be the sender's real key
-        assert_ne!(wrapped1.pubkey, sender.public_key());
-        assert_ne!(wrapped2.pubkey, sender.public_key());
+        match result {
+            Err(NostrError::GiftUnwrap(msg)) => assert!(msg.contains("1059")),
+            other => panic!("expected a GiftUnwrap rejection, got {other:?}"),
+        }
     }
 
-    // ====================================================================
-    // D8: Gift-wrapped Welcome outer layer contains no readable MLS data
-    // ====================================================================
-
-    /// Verifies the gift-wrap outer layer (kind 1059) does not contain
-    /// readable MLS data or recipient identifying information in its
-    /// serialized JSON form.
+    /// A well-formed 1059 addressed to us may still carry something other than
+    /// a Welcome. Fail closed rather than hand a foreign rumor to the caller.
     #[tokio::test]
-    async fn d8_gift_wrap_hides_mls_data_and_recipient_pubkey() {
+    async fn unwrap_rejects_a_gift_wrap_whose_rumor_is_not_a_welcome() {
         let sender = Keys::generate();
         let recipient = Keys::generate();
 
-        // Use identifiable content that we can search for
-        let mls_welcome_data = "KNOWN_MLS_WELCOME_BYTES_abc123def456";
-        let rumor = UnsignedEvent::new(
-            sender.public_key(),
-            Timestamp::now(),
-            Kind::Custom(KIND_WELCOME),
-            Vec::new(),
-            mls_welcome_data.to_string(),
-        );
+        let wrapped = production_shaped_wrap(&sender, &recipient.public_key(), 9).await;
 
-        let wrapped = wrap_welcome(&sender, &recipient.public_key(), rumor)
-            .await
-            .unwrap();
+        let result = unwrap_welcome(&recipient, &wrapped).await;
 
-        // Serialize the outer event to JSON
-        let json = wrapped.as_json();
-
-        // The outer event must NOT contain the MLS welcome content
-        assert!(
-            !json.contains(mls_welcome_data),
-            "Gift wrap JSON must not contain MLS welcome data in plaintext"
-        );
-
-        // The outer event must NOT contain the sender's real pubkey
-        let sender_hex = sender.public_key().to_hex();
-        assert!(
-            !json.contains(&sender_hex),
-            "Gift wrap JSON must not reveal sender's real pubkey"
-        );
-
-        // The outer event must NOT contain "444" as a kind marker
-        // (the inner kind should be encrypted away)
-        assert!(
-            !json.contains("\"kind\":444"),
-            "Gift wrap JSON must not reveal inner event kind"
-        );
+        match result {
+            Err(NostrError::GiftUnwrap(msg)) => assert!(msg.contains("444")),
+            other => panic!("expected a GiftUnwrap rejection, got {other:?}"),
+        }
     }
 }

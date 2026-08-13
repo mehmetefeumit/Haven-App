@@ -406,7 +406,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'Haven comparte tu ubicación con tus círculos siempre que la app está abierta. Activa esto y tus círculos la seguirán viendo mientras Haven está en segundo plano. Si el sistema cierra Haven, tu ubicación deja de compartirse hasta que vuelvas a abrir la app: en segundo plano, el sistema despierta Haven solo para recibir las ubicaciones de tus círculos, nunca para enviar la tuya.';
+      'Haven comparte tu ubicación con tus círculos siempre que la app está abierta. Activa esto y tus círculos la seguirán viendo mientras Haven está en segundo plano. Si el sistema cierra Haven, tu ubicación deja de compartirse: en segundo plano, el sistema despierta Haven solo para recibir las ubicaciones de tus círculos, nunca para enviar la tuya. En Android, en cambio, tu ubicación se sigue compartiendo aunque deslices Haven fuera del selector de apps, y el envío de tu ubicación se reanuda por sí solo tras reiniciar el teléfono; en iPhone, ese envío sigue detenido hasta que abras Haven.';
 
   @override
   String get locationSettingsToggleTitle => 'Compartir en segundo plano';
@@ -534,7 +534,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get privacyHubSummary =>
-      'Haven comparte tu ubicación solo con los grupos pequeños que tú eliges, llamados círculos, y la cifra en tu teléfono antes de que salga de él. No hay registro ni servidor de Haven. Lo único que es público es el nombre visible y la foto que configuras. Las páginas siguientes explican eso, y todo lo demás, en lenguaje claro.';
+      'Haven comparte tu ubicación solo con los grupos pequeños que tú eliges, llamados círculos, y la cifra en tu teléfono antes de que salga de él. No hay registro ni servidor de Haven. Son públicos el nombre visible y la foto que configuras, y también las claves y las listas de relés que los demás necesitan para invitarte. Las páginas siguientes explican eso, y todo lo demás, en lenguaje claro.';
 
   @override
   String get privacyGroupBasicsHeading => 'Lo básico';
@@ -576,7 +576,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get privacyWhatHavenIsMeansForYou =>
-      'A nadie se le puede obligar a entregar tus datos, porque nadie los tiene. El precio es que tampoco hay nadie que pueda restaurarte la identidad. Consulta «Tus dos claves» para saber qué respaldar.';
+      'A ningún operador de relés se le puede obligar a entregar tu ubicación, porque los servidores por los que pasa esa ubicación no pueden leerla. El precio es que nadie puede restaurarte la identidad, y que todo lo que ya has publicado sigue publicado. Consulta «Tus dos claves» para saber qué respaldar.';
 
   @override
   String get privacyWhatHavenIsDetailNoTelemetry =>
@@ -683,11 +683,15 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get privacyRelaysMeansForYou =>
-      'Un relé nunca ve tu ubicación, porque se cifra antes de salir de tu teléfono. Sí ve lo que tiene que ser público para que otras personas puedan llegar hasta ti: tu nombre y tu foto, las claves que los demás necesitan para invitarte y tu propia lista de relés. Haven te da desde el principio relés que funcionan, así que no tienes que cambiar nada.';
+      'Un relé nunca ve tu ubicación, porque se cifra antes de salir de tu teléfono. Sí ve lo que tiene que ser público para que otras personas puedan llegar hasta ti: las claves que los demás necesitan para invitarte y las listas que indican qué relés usar. Tu nombre y tu foto también son públicos, pero van a un conjunto de relés aparte. Haven te da desde el principio relés que funcionan, así que no tienes que cambiar nada.';
 
   @override
   String get privacyRelaysDetailIndexers =>
-      'Al margen de tus propias listas, Haven consulta un pequeño conjunto de relés de directorio públicos para buscar los perfiles y las claves de otras personas. Los contacta incluso si solo has configurado relés privados tuyos. Ven tu dirección de red y qué cuentas has consultado.';
+      'Al margen de tus propias listas, Haven usa dos grupos de servidores públicos que tú no eliges: ocho para consultar los nombres y las fotos de otras personas, y seis para consultar las claves que hacen falta para invitarlas. Los dos grupos nunca se solapan. Puedes añadir tus propios servidores al grupo de perfil, pero no puedes sacar de él esos ocho. Haven contacta con ambos grupos aunque todos los relés que hayas elegido tú sean privados, y cada uno de esos servidores ve tu dirección de red.';
+
+  @override
+  String get privacyRelaysDetailProfileLookups =>
+      'Para los nombres y las fotos, Haven pregunta por una sola persona cada vez. A cada persona se le asigna un servidor en tu dispositivo; si ese servidor no tiene nada sobre ella, Haven prueba con un segundo. Buscar a alguien expone a esa persona ante dos de los ocho servidores como máximo, nunca ante el grupo entero. Haven nunca redistribuye esas asignaciones por su cuenta, aunque sí se modifican si cambia el grupo de servidores. Así tus consultas se reparten, en lugar de ir todas a un mismo servidor. Aun así, cada servidor asignado va acumulando un registro duradero de que tu teléfono pregunta una y otra vez por una misma persona, y cuando las personas son pocas, varias de ellas pueden quedar asignadas al mismo servidor. Cuando guardas tu propio nombre o tu propia foto, eso se envía a todos los relés de perfil que estés usando —los ocho, menos los que Haven haya descartado y más los que hayas añadido tú—, y cada uno de ellos conoce así tu clave pública.';
 
   @override
   String get privacyRelaysDetailKeyListIsPublic =>
@@ -746,7 +750,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeCannotPause =>
-      'Mientras Haven está abierto y perteneces a un círculo, tu ubicación sale por sí sola cada dos o tres minutos. No hay botón de pausa: el interruptor de la página Ubicación solo decide si eso continúa después de cerrar la app. Para dejar de compartir con un círculo, ábrelo y elige «Salir del círculo».';
+      'Mientras Haven está abierto y perteneces a un círculo, tu ubicación sale por sí sola cada dos o tres minutos. No hay botón de pausa: el interruptor de la página Ubicación solo decide si eso continúa mientras Haven está en segundo plano. Si el sistema cierra Haven, tu ubicación deja de compartirse. En Android, en cambio, tu ubicación se sigue compartiendo aunque deslices Haven fuera del selector de apps, y el envío de tu ubicación se reanuda por sí solo tras reiniciar el teléfono; en iPhone, ese envío sigue detenido hasta que abras Haven. Para dejar de compartir con un círculo, ábrelo y elige «Salir del círculo».';
 
   @override
   String get privacyWhatOthersSeeMembersLearnKey =>
@@ -773,7 +777,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeDetailTag =>
-      'La etiqueta de un círculo se mantiene igual durante toda la vida de ese círculo, así que un relé puede vincular indefinidamente todos sus mensajes entre sí. Eso es una propiedad del protocolo subyacente, no algo que Haven pueda cambiar.';
+      'La etiqueta de un círculo se mantiene igual durante toda la vida de ese círculo, así que un relé puede vincular indefinidamente todos sus mensajes entre sí. El protocolo sí permite que un círculo pase a una etiqueta nueva, pero Haven no lo hace hoy por hoy, y cambiarla tampoco deshace lo que un relé ya haya vinculado.';
 
   @override
   String get commonLearnMore => 'Más información';
@@ -788,7 +792,15 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeDetailExpiry =>
-      'Haven pide a los relés que descarten los mensajes de ubicación al cabo de unos cuatro minutos. Esa petición es solo orientativa: un relé puede quedárselos más tiempo. Las invitaciones no llevan ninguna caducidad y pueden quedarse indefinidamente en tu relé de bandeja de entrada.';
+      'Haven pide a los relés que descarten los mensajes de ubicación al cabo de unos cuatro minutos. Esa petición es solo orientativa: un relé puede quedarse con esos mensajes más tiempo. Solo los mensajes de ubicación llevan esa caducidad, así que un mensaje sin ella se reconoce a simple vista como un cambio de miembros y no como una actualización de ubicación. Las invitaciones no llevan ninguna caducidad y pueden quedarse indefinidamente en tu relé de bandeja de entrada.';
+
+  @override
+  String get privacyWhatOthersSeeDetailOnDevice =>
+      'El teléfono de cada miembro deja de mostrar al cabo de un día la última ubicación que recibió de ti, y la borra la próxima vez que ese miembro abra Haven. Eso es aparte de lo que un miembro haya decidido guardar o capturar en pantalla por sí mismo, sobre lo que Haven no tiene ningún control.';
+
+  @override
+  String get privacyWhatOthersSeeDetailOneConnection =>
+      'Haven abre una sola conexión con cada relé y la usa para todo lo que pasa por ese relé. Cuando un relé lleva tanto tus invitaciones como los mensajes de un círculo, esa única conexión pide a la vez las invitaciones dirigidas a tu propia clave pública y los mensajes de ese círculo por su etiqueta: eso es justo lo que le permite al relé vincular las dos cosas. En una instalación nueva, los mismos relés se usan para ambas cosas.';
 
   @override
   String get privacyGroupTheLimitsHeading => 'Los límites';
@@ -806,7 +818,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get privacyInferenceActivityPattern =>
-      'A partir de ese rastro, un relé que uses puede deducir aproximadamente cuándo estás activo y con qué frecuencia. Haven envía además una actualización extra cada vez que te mueves unos cien metros. A lo largo de varias horas, eso puede mostrarle a un relé si te estabas desplazando o si seguías en el mismo sitio. Nunca muestra dónde.';
+      'A partir de ese rastro, un relé que uses puede deducir aproximadamente cuándo estás activo y con qué frecuencia. Mientras Haven está en pantalla —y, en el iPhone, mientras el uso compartido en segundo plano mantiene Haven en marcha—, la app envía además una actualización extra, como mucho una vez por minuto, cada vez que te mueves unos cien metros. A lo largo de varias horas, eso puede mostrarle a un relé si te estabas desplazando o si seguías en el mismo sitio. Ese rastro nunca muestra dónde estás.';
 
   @override
   String get privacyInferencePresence =>
@@ -1014,6 +1026,19 @@ class AppLocalizationsEs extends AppLocalizations {
     final String percentString = percentNumberFormat.format(percent);
 
     return '$percentString por ciento completado';
+  }
+
+  @override
+  String nameCircleCreatedPartialSnack(String name, int sent, int total) {
+    final intl.NumberFormat sentNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String sentString = sentNumberFormat.format(sent);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return 'Círculo \"$name\" creado. Invitaciones enviadas ($sentString de $totalString); la entrega del resto está pendiente.';
   }
 
   @override
@@ -1345,7 +1370,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get circleDetailsRelaysNote =>
-      'Estos relés se copiaron de tus relés de bandeja de entrada al crear este círculo y todavía no se pueden cambiar. Los cambios que hagas después en tu lista de relés personal no los modifican.';
+      'Estos relés vienen de las listas publicadas por los miembros invitados; si esos miembros no tenían ninguna, de tus relés de bandeja de entrada o de algunos que eligió Haven. Aún no se pueden cambiar, y los cambios posteriores en tu lista de relés no los afectan.';
 
   @override
   String get circleDetailsAddMember => 'Añadir miembro';
@@ -1637,7 +1662,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get identityAdvancedDeleteBody =>
-      'Esto elimina tu identidad y todos los datos de tus círculos de este teléfono. Todo lo que ya se haya publicado con ella, incluidos tu nombre, tu foto y tus claves, sigue en los relés que lo tengan. Asegúrate de haber respaldado tu clave secreta si quieres poder recuperarla.';
+      'Esto elimina tu identidad y todos los datos de tus círculos de este teléfono. Todo lo que ya se haya publicado con ella se queda donde está: tu nombre y tus claves en los relés que los tengan, y tu foto en el alojamiento de imágenes que la guarda. Asegúrate de haber respaldado tu clave secreta si quieres poder recuperar esa identidad.';
 
   @override
   String get identityAdvancedDeleteConfirm => 'Eliminar';

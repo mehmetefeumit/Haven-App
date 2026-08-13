@@ -16,9 +16,17 @@ void main() {
   /// Builds a host widget whose only button calls
   /// [LocationDisclosureDialog.show] with the given [includeBackground]
   /// flag and stores the resolved value in [result].
+  ///
+  /// [isIOS] selects the background sentence. It is pinned rather than left to
+  /// `Platform.isIOS` because the host running `flutter test` is neither
+  /// platform, so an implicit default would silently decide which of two
+  /// compliance strings these tests assert on. Platform-specific accuracy of
+  /// that sentence is covered in `test/lints/background_claim_accuracy_test
+  /// .dart`.
   Widget buildHost({
     required bool includeBackground,
     required ValueNotifier<bool?> result,
+    required bool isIOS,
   }) {
     return MaterialApp(
       home: Scaffold(
@@ -28,6 +36,7 @@ void main() {
               result.value = await LocationDisclosureDialog.show(
                 context,
                 includeBackground: includeBackground,
+                isIOS: isIOS,
               );
             },
             child: const Text('Show dialog'),
@@ -41,7 +50,7 @@ void main() {
     testWidgets('dialog appears after triggering show', (tester) async {
       final result = ValueNotifier<bool?>(null);
       await tester.pumpWidget(
-        buildHost(includeBackground: false, result: result),
+        buildHost(includeBackground: false, result: result, isIOS: false),
       );
 
       await tester.tap(find.text('Show dialog'));
@@ -57,7 +66,7 @@ void main() {
       (tester) async {
         final result = ValueNotifier<bool?>(null);
         await tester.pumpWidget(
-          buildHost(includeBackground: false, result: result),
+          buildHost(includeBackground: false, result: result, isIOS: false),
         );
 
         await tester.tap(find.text('Show dialog'));
@@ -81,7 +90,7 @@ void main() {
         // A disclosure must name third-party transmission, not deny it.
         final result = ValueNotifier<bool?>(null);
         await tester.pumpWidget(
-          buildHost(includeBackground: false, result: result),
+          buildHost(includeBackground: false, result: result, isIOS: false),
         );
         await tester.tap(find.text('Show dialog'));
         await tester.pumpAndSettle();
@@ -109,7 +118,11 @@ void main() {
         for (final includeBackground in [false, true]) {
           final result = ValueNotifier<bool?>(null);
           await tester.pumpWidget(
-            buildHost(includeBackground: includeBackground, result: result),
+            buildHost(
+              includeBackground: includeBackground,
+              result: result,
+              isIOS: false,
+            ),
           );
           await tester.tap(find.text('Show dialog'));
           await tester.pumpAndSettle();
@@ -133,7 +146,7 @@ void main() {
     testWidgets('tapping Agree resolves the future to true', (tester) async {
       final result = ValueNotifier<bool?>(null);
       await tester.pumpWidget(
-        buildHost(includeBackground: false, result: result),
+        buildHost(includeBackground: false, result: result, isIOS: false),
       );
 
       await tester.tap(find.text('Show dialog'));
@@ -150,7 +163,7 @@ void main() {
       (tester) async {
         final result = ValueNotifier<bool?>(null);
         await tester.pumpWidget(
-          buildHost(includeBackground: false, result: result),
+          buildHost(includeBackground: false, result: result, isIOS: false),
         );
 
         await tester.tap(find.text('Show dialog'));
@@ -166,11 +179,11 @@ void main() {
 
   group('LocationDisclosureDialog (background)', () {
     testWidgets(
-      'includeBackground:true shows background-specific copy',
+      'includeBackground:true shows background-specific copy (Android)',
       (tester) async {
         final result = ValueNotifier<bool?>(null);
         await tester.pumpWidget(
-          buildHost(includeBackground: true, result: result),
+          buildHost(includeBackground: true, result: result, isIOS: false),
         );
 
         await tester.tap(find.text('Show dialog'));
@@ -186,22 +199,50 @@ void main() {
     );
 
     testWidgets(
-      'includeBackground:false does NOT show background sentence',
+      'includeBackground:true shows background-specific copy (iOS)',
       (tester) async {
         final result = ValueNotifier<bool?>(null);
         await tester.pumpWidget(
-          buildHost(includeBackground: false, result: result),
+          buildHost(includeBackground: true, result: result, isIOS: true),
         );
 
         await tester.tap(find.text('Show dialog'));
         await tester.pumpAndSettle();
 
         expect(
-          find.textContaining(
-            'even when the app is closed or not in use',
-          ),
-          findsNothing,
+          find.textContaining('If iOS closes Haven, sharing stops'),
+          findsAtLeastNWidgets(1),
         );
+      },
+    );
+
+    testWidgets(
+      'includeBackground:false does NOT show background sentence',
+      (tester) async {
+        for (final isIOS in [false, true]) {
+          final result = ValueNotifier<bool?>(null);
+          await tester.pumpWidget(
+            buildHost(includeBackground: false, result: result, isIOS: isIOS),
+          );
+
+          await tester.tap(find.text('Show dialog'));
+          await tester.pumpAndSettle();
+
+          expect(
+            find.textContaining(
+              'even when the app is closed or not in use',
+            ),
+            findsNothing,
+            reason: 'leaked with isIOS=$isIOS',
+          );
+          expect(
+            find.textContaining('If iOS closes Haven'),
+            findsNothing,
+            reason: 'leaked with isIOS=$isIOS',
+          );
+          await tester.tap(find.byKey(WidgetKeys.locationDisclosureNotNow));
+          await tester.pumpAndSettle();
+        }
       },
     );
 
@@ -210,7 +251,7 @@ void main() {
       (tester) async {
         final result = ValueNotifier<bool?>(null);
         await tester.pumpWidget(
-          buildHost(includeBackground: true, result: result),
+          buildHost(includeBackground: true, result: result, isIOS: false),
         );
 
         await tester.tap(find.text('Show dialog'));
@@ -228,7 +269,7 @@ void main() {
       (tester) async {
         final result = ValueNotifier<bool?>(null);
         await tester.pumpWidget(
-          buildHost(includeBackground: false, result: result),
+          buildHost(includeBackground: false, result: result, isIOS: false),
         );
 
         await tester.tap(find.text('Show dialog'));

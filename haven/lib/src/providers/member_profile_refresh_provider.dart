@@ -47,7 +47,7 @@ class MemberProfileRefreshNotifier extends Notifier<void> {
   ///
   /// Triggers overlap by design (a circle select can land on top of an
   /// anti-entropy tick), and without this they would each open their own
-  /// sockets to the discovery relays for the same pubkey set.
+  /// sockets to the profile relay pool for the same pubkey set.
   bool _inFlight = false;
 
   /// Tolerance of a request that arrived while [_inFlight], to be run once

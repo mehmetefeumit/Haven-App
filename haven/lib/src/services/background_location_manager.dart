@@ -418,6 +418,31 @@ class BackgroundLocationManager {
     debugPrint('[BackgroundManager] disableBackgroundScheduling: complete');
   }
 
+  /// Clears the background-publish HISTORY timestamps left behind after an
+  /// identity is deleted: [kBackgroundLastPublishMsKey] (wall-clock time of
+  /// the deleted identity's last location transmission) and
+  /// [kBackgroundSessionReclaimAtMsKey] (last MLS session-reclaim attempt).
+  ///
+  /// Deliberately separate from [disableBackgroundScheduling], which owns
+  /// only the cross-isolate COORDINATION keys ([kBackgroundIdleKey] /
+  /// [kForegroundActiveAtMsKey]) — those are reset on every disable
+  /// (including a mere background-sharing toggle-off) because a resumed
+  /// session needs them neutral. These two are a record of what the DELETED
+  /// identity did and must not survive account deletion, but must NOT be
+  /// cleared by a toggle-off (the values remain meaningful if the user
+  /// re-enables sharing under the SAME identity).
+  ///
+  /// Throws on a prefs failure; the delete path treats that as best-effort so
+  /// it never blocks the primary objective of removing the identity's secret
+  /// key.
+  static Future<void> clearPublishHistoryOnIdentityDelete() async {
+    final prefs = await SharedPreferences.getInstance();
+    await Future.wait([
+      prefs.remove(kBackgroundLastPublishMsKey),
+      prefs.remove(kBackgroundSessionReclaimAtMsKey),
+    ]);
+  }
+
   /// Whether it is appropriate for a background CATCH-UP wake (M7) to run.
   ///
   /// True only when NO other MLS writer is active — the foreground UI isolate

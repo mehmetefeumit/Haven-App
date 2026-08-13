@@ -450,8 +450,8 @@ class MaintenanceSchedulerNotifier extends Notifier<void> {
   /// backgrounded — only on logout/route teardown — and the main isolate stays
   /// alive while background location sharing holds its session. So widget
   /// lifetime is not a foreground proxy: without this check the profile sweep
-  /// would fire while backgrounded, contacting discovery relays with no UI to
-  /// render the result.
+  /// would fire while backgrounded, contacting the profile relay pool with no
+  /// UI to render the result.
   ///
   /// A null `lifecycleState` (before the first lifecycle event, i.e. startup,
   /// and in unit tests) counts as foregrounded.

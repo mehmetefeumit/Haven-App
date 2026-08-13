@@ -1793,6 +1793,31 @@ class NostrCircleService implements CircleService {
   }
 
   @override
+  Future<void> destroyLegacyMlsState() async {
+    // Same prerequisite as wipeAllMlsState above: the FFI call destroys a
+    // keyring entry, not just files, so the backend must be installed first
+    // (destroy_legacy_mls_state does not install it itself).
+    try {
+      await _keyringInitializer();
+    } on Object catch (e) {
+      debugPrint(
+        '[SECURITY][NostrCircleService] keyring init before legacy destroy '
+        'failed (file deletion still proceeds): ${e.runtimeType}',
+      );
+    }
+    try {
+      final dataDir = await _dataDirectoryProvider.getDataDirectory();
+      await frb_api.destroyLegacyMlsState(dataDir: dataDir);
+    } on Object catch (e) {
+      debugPrint(
+        '[SECURITY][NostrCircleService] legacy MLS state destroy failed: '
+        '${e.runtimeType}',
+      );
+      throw const CircleServiceException('Failed to destroy legacy MLS state');
+    }
+  }
+
+  @override
   Future<void> pruneProcessedGiftWraps({DateTime? now}) async {
     final manager = await _ensureInitialized();
     final nowSecs = (now ?? DateTime.now()).millisecondsSinceEpoch ~/ 1000;

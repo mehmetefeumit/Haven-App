@@ -11,11 +11,32 @@
 ///     called again
 /// (e) marker never stores any secret/id — assert the stored value is a
 ///     plain bool
+/// (f) [destroyLegacyMlsViaCircleService] routes through
+///     [CircleService.destroyLegacyMlsState] — the interface method that
+///     installs the keyring backend — rather than bypassing it
+/// (g) wired the way `main.dart` wires it (a real `NostrCircleService`),
+///     the keyring backend is installed BEFORE the destroy is attempted,
+///     and a destroy that could not have removed the key never sets the
+///     marker
 library;
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/legacy_cutover_service.dart';
+import 'package:haven/src/services/nostr_circle_service.dart';
+import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import '../mocks/mock_circle_service.dart';
+
+/// [DataDirectoryProvider] that always throws, so a test never reaches the
+/// real Rust FFI call — mirrors `nostr_circle_service_test.dart`'s
+/// `_ThrowingDataDirectoryProvider`.
+class _ThrowingDataDirectoryProvider implements DataDirectoryProvider {
+  @override
+  Future<String> getDataDirectory() async =>
+      throw Exception('stub: stop before FFI');
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -180,5 +201,81 @@ void main() {
       expect(stored, isA<bool>());
       expect(stored, isTrue);
     });
+  });
+
+  group('destroyLegacyMlsViaCircleService', () {
+    test(
+      'routes the destroy through CircleService.destroyLegacyMlsState '
+      'rather than bypassing it',
+      () async {
+        // Regression guard for the bug where LegacyCutoverService called the
+        // raw FFI directly: no keyring backend was ever installed, so the
+        // Rust side's "no store installed ⇒ Ok(())" idempotence clause made
+        // every destroy a silent no-op that still reported success. Routing
+        // through CircleService.destroyLegacyMlsState (which installs the
+        // backend first) is the fix; this asserts the adapter actually calls
+        // through to it rather than doing nothing.
+        final mock = MockCircleService();
+
+        await destroyLegacyMlsViaCircleService(mock)(dataDir: '/fake/dir');
+
+        expect(mock.methodCalls, contains('destroyLegacyMlsState'));
+      },
+    );
+  });
+
+  group('production wiring — composed with a real NostrCircleService', () {
+    // Mirrors exactly how `main.dart` wires LegacyCutoverService: a real
+    // NostrCircleService (not a mock) adapted via
+    // destroyLegacyMlsViaCircleService. A throwing DataDirectoryProvider
+    // stands in for the Rust FFI boundary (unavailable under `flutter
+    // test`) while still proving the keyring-install step that precedes it.
+    test(
+      'installs the keyring backend BEFORE the destroy is attempted, and '
+      'does not set the marker when the destroy could not have removed '
+      'the key',
+      () async {
+        var keyringCallCount = 0;
+        final circleService = NostrCircleService(
+          relayService: NostrRelayService(),
+          dataDirectoryProvider: _ThrowingDataDirectoryProvider(),
+          keyringInitializer: () async {
+            keyringCallCount++;
+          },
+        );
+
+        SharedPreferences.setMockInitialValues(const {});
+        final prefs = await SharedPreferences.getInstance();
+        final cutoverService = LegacyCutoverService(
+          prefs: prefs,
+          destroyLegacyMls: destroyLegacyMlsViaCircleService(circleService),
+        );
+
+        final showExplainer = await cutoverService.runIfNeeded(
+          dataDir: '/fake/dir',
+          hasIdentity: true,
+        );
+
+        expect(
+          keyringCallCount,
+          1,
+          reason:
+              'the cutover path must install the keyring backend before '
+              'attempting the destroy, exactly once',
+        );
+        expect(
+          showExplainer,
+          isFalse,
+          reason: 'the underlying destroy failed, so no explainer is owed',
+        );
+        expect(
+          cutoverService.isDone,
+          isFalse,
+          reason: 'a destroy that could not have removed the key must never '
+              'set the done marker — the marker would then latch forever '
+              'and the destructive call would never be retried',
+        );
+      },
+    );
   });
 }
