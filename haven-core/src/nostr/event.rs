@@ -133,7 +133,7 @@ impl UnsignedLocationEvent {
 ///   "created_at": 123456,  // Unix timestamp
 ///   "kind": 445,           // Marmot group message
 ///   "tags": [["h", "..."], ["expiration", "..."]],
-///   "content": "...",      // NIP-44 encrypted content
+///   "content": "...",      // ChaCha20-Poly1305 under the MLS exporter
 ///   "sig": "..."           // Schnorr signature
 /// }
 /// ```
@@ -154,7 +154,9 @@ pub struct SignedLocationEvent {
     /// Event tags: [["h", `group_id`], ["expiration", timestamp], ...]
     pub tags: Vec<Vec<String>>,
 
-    /// NIP-44 encrypted content (base64-encoded)
+    /// Ciphertext (base64-encoded). ChaCha20-Poly1305 under the
+    /// MLS-exporter-derived `marmot/group-event` key — NOT NIP-44, which has
+    /// not been on the kind-445 path since the Dark Matter cutover.
     pub content: String,
 
     /// Schnorr signature (64 bytes, hex-encoded)
@@ -186,7 +188,8 @@ impl SignedLocationEvent {
     /// # Arguments
     ///
     /// * `nostr_group_id` - The Nostr group identifier for the `h` tag
-    /// * `encrypted_content` - The NIP-44 encrypted inner event
+    /// * `encrypted_content` - The already-encrypted inner event (on the
+    ///   production path, ChaCha20-Poly1305 under the MLS exporter)
     /// * `expires_at` - When this event should expire (NIP-40)
     /// * `keypair` - Ephemeral keypair for signing
     /// * `geohash` - Optional geohash for relay filtering (truncated to max 5 chars internally)

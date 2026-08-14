@@ -36,10 +36,17 @@ the user is actively deciding whether to trust the app. Still open: two latent C
 findings recorded below, **Workstream E** (whose prerequisite — the privacy copy
 — is now met), and the two things D did not close — Rule 9 ships **ratcheted**,
 not held, with four `getSecretBytes()` sites allowlisted by `path:line`, and
-Rules 12/13/14 each keep a residual recorded in their own row. One product gap
-surfaced by F is recorded there and is an owner decision: no admin can remove a
-member from a circle in the shipped UI, though the service beneath it is
-complete and integration-tested. The pipeline-gating Rust red is FIXED, and it turned
+Rules 12/13/14 each keep a residual recorded in their own row. F also left
+**four owner decisions**, listed in its "Left open" section — the loudest being
+that no admin can remove a member from a circle in the shipped UI, though the
+service beneath it is complete and integration-tested including a
+forward-secrecy proof. And auditing copy turned up a **security defect that was
+not copy**: the one-time legacy-MLS cutover called its destroy FFI without
+installing the keyring backend, so a missing store returned `Ok`, the done-marker
+latched, and the SQLCipher key that decrypts the pre-Dark-Matter database
+survived permanently while both layers reported success. Fixed, and the unsafe
+default is now a required parameter so the shape cannot recur silently. The
+pipeline-gating Rust red is FIXED, and it turned
 out to be a **receive-path defect**, not a flaky test: the engine silently
 dropped the first stored events of every fresh REQ while the EOSE anchored the
 cursor past them (run-31555665220 section).
@@ -2652,15 +2659,23 @@ Two tiers. **The AI can only fail a build, never pass one.**
   accepted deviations; disclosures **required and non-removable**. Yields the
   most valuable check in the design: *you cannot silently delete a privacy
   warning*.
-* **E4 — constant pinning.** Every constant backing a user-facing claim must be
-  pinned by a test that fails on change **in either direction**. Today the
-  jitter-fraction test catches widening and *severe* narrowing only
-  (`publish_jitter_within_bounds` bounds the range,
-  `publish_jitter_distribution_not_degenerate` needs >100 distinct draws — so a
-  40%→20% narrowing passes both, and narrowing is the privacy regression); `kMotionTriggerDistanceMeters = 100` is tested only as
-  `greaterThan(0)`; `LOCATION_RETENTION_SECS`'s derivation is untested; the iOS
-  app-switcher blur has no test or guard at all (the Android `FLAG_SECURE` half
-  is pinned by `check_flag_secure_app_wide.sh` since 2026-08-12).
+* **E4 — constant pinning. Largely DONE by Workstream F 2026-08-12**; what
+  remains is the rule, not the backlog. Every constant backing a user-facing
+  claim must be pinned by a test that fails on change **in either direction**,
+  and where the copy quotes the value the pin should tie the constant to the
+  STRING (`haven-core/tests/privacy_copy_ties.rs` reads `app_en.arb` and is the
+  pattern to copy) so the two cannot drift apart independently. Closed since this
+  item was written: the jitter fraction (was inclusion-style, so a 40 %→20 %
+  narrowing — the privacy-regressing direction — passed every test; now pinned
+  both ways plus `check_publish_jitter_fraction_parity.sh` deriving the Dart
+  window from it), `kMotionTriggerDistanceMeters` (was `greaterThan(0)`),
+  `kLocationPublishOverlapGuard`, `LOCATION_RETENTION_SECS` **and** its
+  derivation, `kTileMaxRetention`, the circle-name limit, `DEFAULT_BLOSSOM_SERVER`
+  and both relay-pool counts. Still open: the iOS app-switcher blur has no test
+  or guard at all (the Android `FLAG_SECURE` half is pinned by
+  `check_flag_secure_app_wide.sh`), and `LOCATION_MESSAGE_RETENTION_SECS = 228`
+  — quoted as "about four minutes" — survives only as a conjunction of two
+  unrelated `clock_skew.rs` assertions, so loosening either silently unpins it.
 * **E5 — AI layer, advisory.** Copy `l10n-ai-review.yml`'s wiring exactly:
   `claude-code-action@v1`, `pull_request` (never `_target`),
   `continue-on-error: true`, sticky comment, prompt declaring diff content
@@ -2672,7 +2687,10 @@ Two tiers. **The AI can only fail a build, never pass one.**
   artifact, never in the verdict path. Empty/failed output ⇒ NEUTRAL.
 * **Prerequisites:** no `.github/CODEOWNERS` exists and branch protection on
   `main` is still open, so manifest poisoning is only partly mitigable from CI.
-  Land the privacy-page copy rewrite before authoring the manifest.
+  The copy prerequisite — "land the privacy-page copy rewrite before authoring
+  the manifest" — is **met**: Workstream F closed below. Author the manifest
+  against that corrected copy, and start from F's resolution table, which already
+  maps each claim to the code and the test or guard that now backs it.
 
 ---
 
@@ -2733,32 +2751,27 @@ All contradicted and stale claims are now closed. What each one turned out to be
 | `privacyWhatHavenIsMeansForYou` | "nobody is holding it" — relays retain 0/10002/10050/30443 with no deletion path for the KeyPackage, and Blossom holds the photo with no DELETE | Copy: scoped to LOCATION (genuinely unreadable to a relay) and paired with published-is-permanent |
 | `privacyInferenceActivityPattern` | stated the 100 m trigger unconditionally; verified TRUE in only **3 of 8** app states — it lives in the Flutter UI isolate, so the Android background service has no motion awareness at all | Copy: scoped to on-screen plus iOS-background-alive, and now states the 60 s rate bound |
 | `privacyWhatOthersSeeDetailTag` | "not something Haven can change" — **false, not merely stale**: the Marmot routing component explicitly permits rotation and pinned MDK v0.9.4 implements it end to end | Copy: attributes the choice to Haven, and keeps that rotation is forward-only |
-| `privacyRelaysDetailIndexers` | described one pool where the profile-plane separation created two disjoint ones (8 profile / 6 discovery) | Copy: rewritten; new `privacyRelaysDetailProfileLookups` discloses one-author-per-request, the never-rotating salted assignment, and publish fan-out to all eight |
+| `privacyRelaysDetailIndexers` | described one pool where the profile-plane separation created two disjoint ones (8 profile / 6 discovery) | Copy: rewritten as two disjoint pools, and it now also states that you may ADD your own profile relays but cannot REMOVE the eight — which is what the code does, since `usable_profile_relays()` unions the curated pool back in. New `privacyRelaysDetailProfileLookups` discloses one-author-per-request, the **at-most-two** disclosure bound, the never-reshuffled assignment, and the real publish target |
 | `privacyRelaysMeansForYou` (stale) | attributed name+photo, keys and relay lists all to one relay — false since the plane separation | Copy: split, since no single relay sees all three |
-| `privacyWhatOthersSeeCannotPause` (stale) | "after you close the app" — a **fourth** carrier of the claim P0-2 believed it had killed in three | Copy: matched to `locationSettingsIntro` |
+| `privacyWhatOthersSeeCannotPause` (stale) | "after you close the app" — a **fourth** carrier of the claim P0-2 believed it had killed in three | Copy: first matched to `locationSettingsIntro`, then BOTH were corrected again when the completeness audit found the sentence they now shared was itself false on Android. Final state is platform-split — see the review-fleet section |
 | `NSLocationAlwaysAndWhenInUseUsageDescription` | the same dead claim, live in the **iOS permission prompt** — shown at the moment the user grants Always-location | Copy: describes what iOS actually does (background wakes are receive-only) |
 | `LocationDisclosureStrings.background` | true on Android, FALSE on iOS, shown ungated on both | **CODE**: split per platform behind an injectable `isIOS` seam. Android's Play wording untouched — its behaviour genuinely is stronger |
 | `LocationDisclosureStrings.how` | asserted a third party's privacy policy as fact, human-verified once with nothing re-checking it | Copy: attributed ("Stadia Maps says…") so the sentence stays true whatever Stadia later does; dated provenance kept in source |
-| `circleDetailsRelaysNote` | "copied from your inbox relays" — a circle's relays are the union of the **invitees'** published lists; the creator's inbox is only the first fallback | Copy corrected; the three-tier derivation is now pinned by tests |
-| `nameCircleCreatedSnack` | **not a copy bug at all** — the call site passed the invitee count, so 1-of-3 delivered reported "3 invitations sent" | **CODE**: reuses the existing `addMemberPartialDelivery` string on partial delivery |
-
-*(`privacyWhatOthersSeeScreenshots` was struck 2026-08-12, the one row here
-fixed by making the CODE true rather than the copy weaker: `FLAG_SECURE` is now
-set from an `ActivityLifecycleCallbacks` registered in
-`HavenApplication.onCreate`, so it reaches every Activity in the process —
-`UCropActivity`, which rendered the user's picked photo full-screen with no
-flag, included — and the union is pinned by
-`scripts/ci/check_flag_secure_app_wide.sh`. The iOS half of that sentence was
-already accurate.)*
+| `circleDetailsRelaysNote` | "copied from your inbox relays" — a circle's relays are the union of the **invitees'** published lists; the creator's inbox is only the FIRST fallback, and Haven's built-in defaults are the second, so in the empty-inbox case the circle's traffic rides relays the user never chose | Copy corrected to name all three tiers; the derivation is pinned by three tests that seed a distinct sentinel URL per tier, so a pass cannot come from the wrong source winning. Length is now a correctness constraint on this string — see "Left open" |
+| `nameCircleCreatedSnack` | **not a copy bug at all** — the call site passed the invitee count, so 1-of-3 delivered reported "3 invitations sent" | **CODE**: reports the acked count. A dedicated `nameCircleCreatedPartialSnack` was added rather than reusing `addMemberPartialDelivery`: that string was written for the add-member screen, where the circle already exists, so on the create flow it reported delivery while silently dropping the outcome the user came for |
 
 **The undisclosed behaviours are now disclosed** — each was decided as
 *disclose*, except the last, which was decided as *change*:
 
-* the ~1/8 slice, the never-rotating per-install assignment and the publish
-  fan-out to all eight → `privacyRelaysDetailProfileLookups` (new). Both halves
-  of the trade-off are stated: no relay sees everyone you look up, **but** the
-  one assigned to a person accumulates a durable record of your interest in them
-  — the honest cost of not rotating the salt (SECURITY.md P5).
+* the per-install assignment, its disclosure bound and the publish fan-out →
+  `privacyRelaysDetailProfileLookups` (new). Both halves of the trade-off are
+  stated: lookups are SPREAD across the eight, **but** each assigned server
+  accumulates a durable record of your interest in that person — the honest cost
+  of not rotating the salt (SECURITY.md P5). Note the phrasing that must never
+  come back: "no single server sees everyone you look up" states an invariant the
+  code does not have. The assignment is a hash, so collisions follow the birthday
+  bound (P1 records ~79 % for a five-member roster over eight relays) and for a
+  small circle one server genuinely can be assigned everyone. The copy says so.
 * one socket carrying both filters → `privacyWhatOthersSeeDetailOneConnection`
   (new). The correction that matters: the `#p` filter carries the reader's OWN
   key (the gift-wrap recipient tag), not their contacts' — every locale was
@@ -2840,18 +2853,58 @@ An agent also **refused an instruction and was right to**: told to correct
 found that removals silently do not take effect, and that making the requested
 edit would have shipped a *new* false claim in the dangerous direction.
 
+### Three defects found by auditing copy that were not copy at all
+
+* **A destructive security operation reported success while doing nothing, then
+  latched itself off.** `destroy_legacy_mls_state` deletes the pre-Dark-Matter
+  `haven_mdk.db` AND destroys its SQLCipher keyring entry, but the keyring half
+  needs a backend installed in the process first — the FFI does not install one,
+  and `storage.rs` treats a missing store as `Ok(())`. `LegacyCutoverService`,
+  the path that runs on every upgraded install, called the RAW FFI with no init,
+  so: no store → `Ok` → `_markDone()` writes the sentinel → the destroy is never
+  attempted again. The database file went, **the key that decrypts its
+  wear-levelled residue stayed, permanently**, and both layers reported success.
+  The fix routes the cutover through the interface method that installs the
+  backend, and makes the destroy function a REQUIRED constructor parameter, so
+  the bug class is now a compile error rather than a warning in a doc comment.
+  One residual of the same shape is recorded under "Left open".
+* **A snackbar reported an outcome it had not verified** — recorded in the table.
+* **A translation had its placeholders reversed.** Nepali
+  `addMemberPartialDelivery` read `({sent} मध्ये {total})`, and Nepali *X मध्ये Y*
+  means "Y out of X" — so one-of-three delivered rendered as "3 out of 1". Found
+  by a translator writing the sibling string, not by any gate: `arb_parity_check`
+  verifies that both placeholders are PRESENT, never that they are in an order
+  the language reads correctly.
+
+Also corrected while here: `haven/pubspec.yaml` described the app as
+"forward-secret", which `haven-core/SECURITY.md` records as an accepted
+deviation, the privacy copy is forbidden from claiming, and a relay-settings test
+already asserts never reaches the UI. It is not distributed (`publish_to: none`),
+but internal documentation accuracy is a listed pillar.
+
 ### The localization round, and why the reviewer layer is not ceremony
 
-13 English strings changed or were added; 12 locales were retranslated by four
-agents on disjoint file sets, then checked by four **independent** reviewers that
-translated none of the languages they reviewed. The reviewers were not a rubber
+15 English strings were touched — 11 corrected and 4 added; 12 locales were
+retranslated by four agents on disjoint file sets, then checked by four
+**independent** reviewers that translated none of the languages they reviewed.
+It took three passes, because two rounds of corrections landed in the English
+*after* translation: see the process trap recorded below. The reviewers were not a rubber
 stamp — they caught a **truncated French sentence** (`Cela ne montre jamais où.`,
 missing its complement) and a Spanish rendering that had dropped its subject
 entirely, in the one paragraph whose whole job is to bound a privacy claim.
 Neither is visible to `arb_parity_check.dart`, which was green on both.
 
-Two findings worth carrying:
+Three findings worth carrying:
 
+* **Correcting the source after dispatching translators poisons the round, and
+  parity cannot see it.** Two corrections landed in the English mid-flight. The
+  first left nine locales carrying "no single server sees everyone you look up" —
+  the exact wording the final English forbids as false — while three carried the
+  corrected text, and `arb_parity_check.dart` was green throughout, because every
+  key was present with matching placeholders. It was caught only because the last
+  reviewer noticed the brief it had been given was already stale. Freeze the
+  source before dispatching, or budget an explicit re-sync pass; a mid-round edit
+  is not free, and nothing mechanical will tell you it happened.
 * **A stale translation outlives the English correction that caused it.** Two of
   the strings still carried, in all 12 locales, the claim P0-2 deleted from the
   English months earlier — `privacyWhatOthersSeeCannotPause` said the toggle
@@ -2877,11 +2930,14 @@ Two findings worth carrying:
   metadata now records this accurately) because deleting it would also delete a
   genuine accessibility regression test and foreclose the fix. Shipping the
   affordance is an owner decision, not a copy change.
-* **Two English cohesion nits**, both reported by more than one reviewer and both
-  resolved correctly in every locale: `privacyInferenceActivityPattern` opens
-  "From that pattern" while the preceding paragraph names the referent
-  "metadata", and each locale had to invent the noun. Not a truth defect; left
-  rather than spending another 12-locale sync.
+* **One English cohesion nit**, reported by more than one reviewer and resolved
+  correctly in every locale anyway: `privacyInferenceActivityPattern` opens "From
+  that pattern" while the preceding paragraph names the referent "metadata", so
+  each locale had to invent the noun. Not a truth defect; left rather than
+  spending another 12-locale sync. (The sibling nit reviewers raised — "by its
+  absence", whose nearest antecedent was "a location update", a misreading that
+  yields a different and false claim — WAS fixed, because that one changed the
+  meaning.)
 * **The iOS OS-label strings** (`「常に許可」` where iOS ships `「常に」`; Nepali
   `'सधैँ'` where iOS has no Nepali UI) remain as P0-2 left them — pre-existing,
   paired with untouched neighbours, and fixing one of a pair breaks the

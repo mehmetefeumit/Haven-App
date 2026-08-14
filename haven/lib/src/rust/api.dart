@@ -954,14 +954,17 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// * `sender_pubkey_hex` - The sender's Nostr public key (hex)
   /// * `latitude` - GPS latitude (exact)
   /// * `longitude` - GPS longitude (exact)
-  /// * `update_interval_secs` - Publish-cadence hint used to compute the
-  ///   jittered NIP-40 `expiration` tag on the outer kind:445 wrapper.
-  ///   Must be in `[60, 3600]`. The Dart call site normally passes
-  ///   `kLocationPublishMaxInterval.inSeconds + 30` so the minimum
-  ///   sampled TTL comfortably exceeds the maximum jittered publish delay
-  ///   plus a network-propagation buffer — see `location.dart`. The
-  ///   absolute expiration timestamp is sampled uniformly from
-  ///   `[interval, 2 * interval]` seconds in the future.
+  /// * `update_interval_secs` - **Retired, and no longer reaches the wire.**
+  ///   It once seeded a per-send jittered NIP-40 TTL; since the Dark Matter
+  ///   cutover the expiration is stamped by the ENGINE from the group-level
+  ///   `marmot.group.message-retention.v1` component (0x8005) as
+  ///   `inner_created_at + LOCATION_MESSAGE_RETENTION_SECS` (228 s), so
+  ///   `CircleManager::encrypt_location` binds this argument as
+  ///   `_update_interval_secs` and discards it. The `[60, 3600]` range check
+  ///   below is therefore the parameter's only remaining effect. Kept because
+  ///   removing it is an FFI signature change; do NOT reintroduce a per-send
+  ///   TTL path here without re-reading `haven-core/SECURITY.md`, "Outer
+  ///   kind:445 metadata".
   Future<EncryptedLocationFfi> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
@@ -3863,7 +3866,9 @@ class SignedLocationEventFfi {
   /// Event tags: `[["h", group_id], ["expiration", ts], ...]`.
   final List<List<String>> tags;
 
-  /// NIP-44 encrypted content (base64).
+  /// Ciphertext (base64). ChaCha20-Poly1305 under the MLS-exporter-derived
+  /// `marmot/group-event` key — NOT NIP-44, which has not been on the
+  /// kind-445 path since the Dark Matter cutover.
   final String content;
 
   /// Schnorr signature (128 hex chars).

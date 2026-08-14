@@ -53,7 +53,11 @@
 #   2  expected files/paths missing (misconfiguration). NOTE: until the
 #      profile module lands, exit 2 ("haven-core/src/profile not found") is
 #      the INTENDED red state — the guard lands first (plan §7.3 / M1) and
-#      goes green only when the module exists and satisfies checks 1-6.
+#      goes green only when the module exists and satisfies every check below.
+#      (This said "checks 1-6" until 2026-08-13, six checks after it stopped
+#      being true; the count is deliberately not restated here so it cannot
+#      go stale again — Check 10 in particular is what SECURITY.md P3 cites
+#      as its enforcement.)
 
 set -euo pipefail
 
@@ -109,7 +113,8 @@ KIND0_PATTERN="Kind::Metadata|Kind\.metadata|EventBuilder::metadata|Kind(${KIND0
 # content (blank kind-0 or kind-5 deletion only). Names per plan §4.1/§5.
 # ---------------------------------------------------------------------------
 readonly -a CONSENT_GATE_EXEMPT_FNS=(
-  delete_public_profile      # core publish.rs: blank kind-0 + kind-5 + Blossom DELETE (plan D10)
+  delete_public_profile      # core publish.rs: blank kind-0 + kind-5 (plan D10). NOT a Blossom
+                             # DELETE — none exists in the profile module; the blob survives.
   delete_my_public_profile   # FFI wrapper of the above (plan §5)
   remove_my_profile_picture  # FFI: clears the picture field via retraction republish (plan §5)
 )
@@ -124,7 +129,7 @@ if [[ ! -d "${CORE_PROFILE_DIR}" ]]; then
   echo "ERROR: haven-core/src/profile not found (expected: ${CORE_PROFILE_DIR})" >&2
   echo "       The public-profile module has not landed yet. This exit-2 RED state is" >&2
   echo "       the intended M1 baseline (docs/PUBLIC_PROFILE_MIGRATION_PLAN.md §7.3);" >&2
-  echo "       the guard goes green once the module exists and passes checks 1-6." >&2
+  echo "       the guard goes green once the module exists and passes every check." >&2
   exit 2
 fi
 

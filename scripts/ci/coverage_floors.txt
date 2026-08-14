@@ -220,7 +220,7 @@ rust|src/tiles/|94                           # measured 96.11% (642/668)
 # percentage point is 28 lines, so a single new uncovered file still moves this
 # row several points. That is exactly what the two points of headroom are for,
 # and why this row must never be pinned tight.
-flutter|lib/src/services/|51                 # measured 53.57% (1584/2957); was 46 (48.96%) before the
+flutter|lib/src/services/|52                 # measured 54.20% (1612/2974); was 46 (48.96%) before the
                                              # location-access gate, clock-skew detector and
                                              # session/cursor work brought their own tests
 
@@ -248,7 +248,7 @@ flutter|lib/src/services/subscription_service.dart|87       # measured 89.66% (5
 # hidden inside a green aggregate, and the ratchet fires the moment anyone
 # covers 5% of it, forcing the number to be written down.
 flutter|lib/src/services/background_location_task.dart|9    # measured 11.63% (30/258)
-flutter|lib/src/services/background_location_manager.dart|49 # measured 51.61% (48/93)
+flutter|lib/src/services/background_location_manager.dart|52 # measured 54.08% (53/98)
 flutter|lib/src/services/background_catchup_worker.dart|26  # measured 28.40% (23/81)
 
 # --- MLS / relay / identity / profile FFI seams -----------------------------
@@ -257,8 +257,8 @@ flutter|lib/src/services/background_catchup_worker.dart|26  # measured 28.40% (2
 # nostr_relay_preferences_service.dart is at literal 0.00% — 88 instrumented
 # lines, not one of them executed by any test, entirely invisible to the 50%
 # gate.
-flutter|lib/src/services/nostr_circle_service.dart|9        # measured 11.63% (60/516)
-flutter|lib/src/services/nostr_identity_service.dart|29     # measured 31.07% (32/103)
+flutter|lib/src/services/nostr_circle_service.dart|10       # measured 12.55% (65/518)
+flutter|lib/src/services/nostr_identity_service.dart|42     # measured 44.66% (46/103)
 flutter|lib/src/services/nostr_profile_service.dart|21      # measured 23.33% (21/90)
 flutter|lib/src/services/nostr_relay_service.dart|15        # measured 17.20% (32/186); was 0 (0.63%, 1/158)
                                                             # before classifyKeyPackageMaintenance was lifted
@@ -272,7 +272,7 @@ flutter|lib/src/services/nostr_relay_preferences_service.dart|0 # measured 0.00%
 
 # --- Leave / wipe paths -----------------------------------------------------
 # The proofs that leaving a circle and logging out actually destroy state.
-flutter|lib/src/services/pending_leave_service.dart|86      # measured 88.89% (32/36)
+flutter|lib/src/services/pending_leave_service.dart|87      # measured 89.47% (34/38)
 flutter|lib/src/services/pending_mls_wipe_service.dart|75   # measured 77.78% (14/18)
 
 # --- Tile privacy -----------------------------------------------------------

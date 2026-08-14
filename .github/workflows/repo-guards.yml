@@ -2,12 +2,24 @@
 #
 # All of Haven's fast, deterministic policy/privacy/correctness invariants,
 # consolidated into ONE job. Every step is a pure grep/bash check over the
-# checked-out tree — no Flutter/Rust toolchain, no emulator — so the whole job
-# costs seconds. Each guard runs even if an earlier guard failed, so a single
-# red run reports EVERY violated guard, not just the first.
+# checked-out tree — no Flutter/Rust toolchain, no emulator. Each guard runs
+# even if an earlier guard failed, so a single red run reports EVERY violated
+# guard, not just the first.
 #
-# The guards (one step per checked-in script; scripts are the single source of
-# truth for what each check enforces — see each script's header):
+# "The whole job costs seconds" is what this line used to say, and it stopped
+# being true well before the privacy-invariant gate arrived: measured
+# sequentially the job is a few MINUTES, dominated by pre-existing wire-oracle
+# self-tests. No figure is written down here on purpose — it would go stale on
+# the next guard added, which is the mistake install_git_hooks.sh made. The
+# job carries an explicit timeout instead, because it now also makes one
+# network call (the ratchet's baseline fetch).
+#
+# The guards. Scripts are the single source of truth for what each check
+# enforces — see each script's header; this index says only why the check is
+# here. It is NOT one entry per step: a guard with fixtures contributes two
+# steps (its enforcing run and its `--self-test`) under one entry, and the
+# `tooling/e2e/ci` harness self-tests are indexed as a single group. Every
+# `scripts/ci/check_*.sh` invoked below has an entry.
 #
 #   Committed-secrets scan            scripts/ci/check_no_committed_secrets.sh
 #     The Stadia Maps API key (or any UUID-shaped secret) must never be
@@ -30,7 +42,19 @@
 #     privacy boundary: global Image.network ban, no circle/group tokens in
 #     profile paths, no circle/MLS/mdk imports inside the profile module (key
 #     separation), kind-0 construction confined to the profile module,
-#     HTTPS-only Blossom, retraction no-op gate.
+#     HTTPS-only Blossom, the retraction no-op gate, the §1.7 fetch-union
+#     invariant, no batched kind-0 filter, CSPRNG-only inside the module, no
+#     NIP-65 relay list for the profile plane (what SECURITY.md P3 cites as its
+#     enforcement), and the Dart/Rust fallback-relay mirror. This entry listed
+#     the first six alone until 2026-08-13, six checks after that stopped being
+#     true; the script's header carries the authoritative enumeration and
+#     deliberately restates no count.
+#
+#   Profile-relay override single site scripts/ci/check_profile_override_single_site.sh
+#     The kind-0 plane's test-only relay override is install-once, so a second
+#     call site throws and the winner depends on call order — which is how
+#     e2e_profile broke on both platforms in CI run 30753193231, under a comment
+#     asserting the invariant this now enforces.
 #
 #   Android INTERNET permission       scripts/ci/check_internet_permission.sh
 #     The production manifest must keep android.permission.INTERNET — it is
@@ -48,6 +72,26 @@
 #     because with that attribute gone every other link is intact and runs
 #     never.
 #
+#   iOS app-switcher blur             scripts/ci/check_ios_privacy_blur.sh
+#     The iOS half of that same sentence. iPhone cannot block capture, so what
+#     Haven promises there is a blurred app-switcher preview — six lines of
+#     AppDelegate.swift that were backed by nothing at all. Delete them and
+#     every other gate stays green while thirteen translations keep promising
+#     the blur. Union: installed on applicationWillResignActive (the switcher
+#     card is on screen while the app is still FOREGROUND, so
+#     didEnterBackground is too late), covering the window with a real
+#     .systemMaterial blur, removed and re-armed only on
+#     applicationDidBecomeActive, no UIApplicationSceneManifest in Info.plist
+#     (adopting scenes stops UIKit calling any of those callbacks, leaving
+#     every other link intact and executing never), and the claim itself still
+#     made — which is deliberately split across the locale set: the key must
+#     exist and be non-empty in ALL THIRTEEN locale ARBs and there must still be
+#     thirteen of them (so "promised in thirteen languages" cannot quietly
+#     become twelve by deleting a file), while only app_en.arb is checked for
+#     STRUCTURE, i.e. that the value still names Android, iPhone/iOS and the
+#     blur. Presence across locales, wording in English — a softened
+#     translation is an l10n-review problem, a deleted locale is this guard's.
+#
 #   Background-wake invariants        scripts/ci/check_m7_native_wake_guards.sh
 #     Static correctness invariants of the Android WorkManager + iOS
 #     SLC/BGTask background wakes (DartPluginRegistrant order, RebootReceiver
@@ -55,6 +99,20 @@
 #     iOS-safe registration gate, wake-path intent re-check). The runtime
 #     proofs live in the E2E background catch-up lane; this covers only what
 #     a static check can prove.
+#     Check 9b is the odd one out: it backs
+#     privacyWhatHavenIsDetailNoTelemetry ("no analytics, crash reporting, or
+#     advertising code ... can be checked rather than taken on trust") the way
+#     check 9 backs the no-push claim next to it. It refuses such a dependency
+#     in every position that reaches a build — pubspec (direct AND dev), the
+#     transitive pubspec.lock, both Cargo manifests and lockfiles, every
+#     haven/android build file, AndroidManifest components, Info.plist keys,
+#     PrivacyInfo.xcprivacy, a Podfile when present, and the config files whose
+#     mere presence is an SDK. Names in dependency POSITIONS, never free text,
+#     so prose explaining the ban stays legal. It cannot see a hand-rolled
+#     http.post of usage data, an SDK vendored inside another plugin's own
+#     native artifact, or a coordinate assembled from variables; what it does
+#     make impossible is scanning nothing, which is why it fails on a missing
+#     or reshaped manifest and prints the file and position counts it read.
 #
 #   iOS background publish            scripts/ci/check_ios_background_publish.sh
 #     The unified-stream invariants that keep iOS background location
@@ -366,6 +424,35 @@
 #     requires each to be either cleared on the delete path or on an explicit,
 #     reasoned keep-list — so a key added tomorrow forces a decision instead of
 #     silently becoming residue.
+#
+#   Privacy invariants                scripts/ci/check_privacy_invariants.sh
+#     The headline gate of Workstream E. `docs/privacy/privacy_invariants.json`
+#     joins each user-facing privacy CLAIM to the code implementing it and the
+#     test or guard proving it; this re-derives every row from the tree, so a
+#     renamed test, an unwired guard or a deleted warning fails instead of
+#     leaving the manifest asserting a world that no longer exists. It is the
+#     one guard that CITES the others, which is why it runs last — and why it
+#     refuses a citation satisfied only by a `--self-test` invocation: a
+#     self-test proves the guard's fixtures pass and says nothing about this
+#     repository. Its ratchet compares against the commit the change is built
+#     on and forces any weakening to be named in the diff; CI cannot judge
+#     whether a downgrade is justified, only make it visible. Contract and
+#     known gaps: `docs/privacy/README.md`.
+#
+#   Advisory-finding anchors          scripts/ci/check_ai_finding_anchors.sh
+#     Infrastructure for the advisory AI review (privacy-invariants-ai-review
+#     .yml), never an enforcing run here. It re-checks that every finding the
+#     model reports really appears at the file:line it cites, and DEMOTES the
+#     ones that do not — so a hallucination degrades to a labelled non-finding
+#     instead of being published as verified. Only its fixtures can prove that
+#     still works, since its subject is another workflow's behaviour.
+#
+#   Manifest-author diff bound        scripts/ci/check_manifest_author_diff.sh
+#     The blast-radius bound on the weekly Manifest Author job: if the model's
+#     proposal touches anything outside `docs/privacy/`, the job fails and
+#     opens no PR. Same shape as above — fixtures are the only proof, and the
+#     one that matters is an untracked scratch file, which `git diff` cannot
+#     see.
 
 name: Repo Guards
 
@@ -376,6 +463,10 @@ jobs:
   guards:
     name: Static checks
     runs-on: ubuntu-latest
+    # Generous against the measured few minutes, but far below GitHub's 6-hour
+    # default: a hung guard (or a baseline fetch that never returns) should
+    # surface as a bounded red, not burn a runner for the afternoon.
+    timeout-minutes: 20
     steps:
       - name: Checkout
         id: checkout
@@ -386,6 +477,12 @@ jobs:
       # Braced group so the install only runs when xmllint is actually missing.
       - name: Ensure xmllint
         run: xmllint --version >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y libxml2-utils; }
+
+      # Same doctrine as xmllint above: jq ships on ubuntu-latest, but the ARB
+      # and privacy-manifest checks parse JSON rather than grep it, so ensure it
+      # instead of depending on the image.
+      - name: Ensure jq
+        run: jq --version >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y jq; }
 
       # The one non-bash guard in this job. `check-wire-canaries.dart` is a
       # plain Dart program with no package dependencies — it imports
@@ -440,9 +537,37 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_flag_secure_app_wide.sh --self-test
 
+      - name: iOS app-switcher privacy blur
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_ios_privacy_blur.sh
+
+      # Every interesting mutation here leaves the file compiling and reading
+      # correctly: the overlay installed but transparent, the add moved one
+      # callback later, the removal moved one callback earlier, or the handle
+      # never re-nil'd — which blurs the FIRST backgrounding and no later one,
+      # with nothing on screen ever looking wrong. So the fixtures pin one per
+      # link plus both false-positive directions. The runaway that matters here
+      # is not a slice reaching EOF but one that stays brace-BALANCED by
+      # swallowing the next method — the Swift form of the trap that widened
+      # the FLAG_SECURE guard's own first draft.
+      - name: iOS app-switcher blur guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_ios_privacy_blur.sh --self-test
+
       - name: Background-wake invariants
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_m7_native_wake_guards.sh
+
+      # Check 9b's ban is a name scan, and a name scan dies two ways: it stops
+      # matching (a renamed manifest, a reshaped dependencies: block) or it
+      # matches prose (the words "analytics" and "crash" appear in comments,
+      # usage descriptions and identifiers all over this repo). The fixtures
+      # pin one violation per arrival path, both false-positive directions,
+      # and every anti-vacuity floor — a scan with nothing to read must be red,
+      # never green.
+      - name: Background-wake guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_m7_native_wake_guards.sh --self-test
 
       - name: iOS background publish
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
@@ -1038,3 +1163,95 @@ jobs:
       - name: Identity-delete residue guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_identity_delete_prefs_residue.sh --self-test
+
+      # Both guards below are advisory-layer infrastructure, and both reason
+      # about things a green verdict cannot demonstrate: that a hallucinated
+      # citation is DEMOTED rather than published, and that a model edit
+      # outside the manifest is REFUSED rather than proposed. Neither ever runs
+      # in an enforcing mode here — their subject is another workflow's
+      # behaviour — so the fixtures are the only proof they still work.
+      - name: Advisory-finding anchor verifier self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_ai_finding_anchors.sh --self-test
+
+      - name: Manifest-author diff bound self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_manifest_author_diff.sh --self-test
+
+      # The manifest is a join table between what the app PROMISES the user and
+      # what makes that promise true, and nothing about a JSON file resists rot:
+      # a test gets renamed, a guard stops being wired, a warning gets deleted,
+      # and the manifest keeps asserting the world it was written against. This
+      # re-derives every row from the tree — cited symbols, cited tests (present,
+      # not `#[ignore]`d, not `skip:`ed, not in expected_test_skips.txt, no
+      # `markTestSkipped` under integration_test/, and actually asserting),
+      # cited guards (present AND wired in an ENFORCING run here, not merely as
+      # their own --self-test), every `privacy*` string classified, every iOS
+      # usage description and consent-dialog sentence classified, and every
+      # event-kind construction token declared. The ratchet then compares
+      # against the base ref: CI cannot judge whether weakening a guarantee is
+      # justified, only force it to be stated where review sees it. The fetch
+      # lives in the same step as the check because `actions/checkout` is
+      # shallow — a separate step could be skipped, and a ratchet that cannot
+      # read its baseline must fail, never pass. It runs LAST because it cites
+      # the other guards, so every specific verdict has already printed above.
+      # The baseline this step names is the commit the change is BUILT ON,
+      # never the live tip of the default branch. On a pull request that is
+      # `pull_request.base.sha`; on a push it is `event.before`, the PREVIOUS
+      # TIP OF THE SAME BRANCH — a push to main therefore ratchets against what
+      # main was a moment earlier, not against a diverged branch. Anchoring on
+      # the tip was wrong twice: a tag build (release-build.yml calls this job
+      # too) would fetch a main that had moved on and report every newer
+      # invariant as `.deleted`, failing the release gate on a phantom
+      # weakening; and on a push to main the tip IS the pushed commit, so the
+      # baseline equalled HEAD and the ratchet — the thing this workstream is
+      # built around — was silently vacuous on the one path that has no branch
+      # protection in front of it. `event.before` fixes that: a direct push that
+      # deletes an invariant is now caught.
+      #
+      # NAMING THE REF IS NOT OPTIONAL. The script's own default when invoked
+      # with no flags is `origin/main` — precisely the live tip condemned above
+      # — so every caller that cares must pass `--baseline-ref`. This step does;
+      # `privacy-manifest-author.yml` does NOT, and validates its proposal
+      # against main's tip on purpose (its branch is cut from that tip, so the
+      # two coincide, and its proposals are additive by construction).
+      # Where no base commit exists (tag, new branch, manual run) there is no
+      # "change" to ratchet, so rules 1-14 run and only the comparison is
+      # skipped — announced, never silent.
+      - name: Privacy invariants describe this repository
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -Eeuo pipefail
+          baseline=""
+          if [[ -n "${PR_BASE_SHA:-}" ]]; then
+            baseline="${PR_BASE_SHA}"
+          elif [[ -n "${PUSH_BEFORE:-}" \
+               && "${PUSH_BEFORE}" != "0000000000000000000000000000000000000000" ]]; then
+            baseline="${PUSH_BEFORE}"
+          fi
+          if [[ -z "${baseline}" ]]; then
+            echo "::notice::no base commit for this event (tag build, new branch or manual run) —" \
+                 "running every rule, skipping only the ratchet comparison"
+            bash scripts/ci/check_privacy_invariants.sh --no-ratchet
+            exit 0
+          fi
+          git fetch --no-tags --depth=1 origin "${baseline}"
+          bash scripts/ci/check_privacy_invariants.sh --baseline-ref "${baseline}"
+
+      # The guard above is a hand-written extractor over four languages, so its
+      # fixtures pin each way it could be wrong on CORRECT input as well as on
+      # broken input: a PROSE `#[ignore]` comment must not read as an attribute
+      # (there are five such comments in-tree), a Dart name split across
+      # adjacent literals with a `\u` escape must resolve, one key may be an
+      # assertion under one invariant and a disclosure under another (~24
+      # strings promise and warn in one paragraph), and a decoy kind inside
+      # `#[cfg(test)]` must not read as a new wire kind. The five that matter
+      # most are the ones this workstream exists for: an assertion on an
+      # accepted deviation, a deleted disclosure, an unwired guard, a
+      # self-test-only wiring cited as proof, and a stale ratchet override.
+      - name: Privacy-invariants guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_privacy_invariants.sh --self-test

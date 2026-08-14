@@ -639,10 +639,11 @@ abstract class CircleService {
   /// Creates an MLS-encrypted kind 445 event containing the location data,
   /// ready for publishing to the circle's relays.
   ///
-  /// [updateIntervalSecs] is the publish-cadence hint used to compute the
-  /// jittered NIP-40 `expiration` tag on the outer kind:445 wrapper. Must be
-  /// in `[60, 3600]`; the Rust FFI validates the range. The absolute
-  /// expiration is sampled uniformly from `[interval, 2 * interval]`.
+  /// [updateIntervalSecs] is retired and no longer reaches the wire: the
+  /// engine stamps the outer NIP-40 `expiration` from the group's
+  /// `message-retention.v1` component (228 s), and the core discards this
+  /// argument. Must still be in `[60, 3600]`, which the Rust FFI validates —
+  /// that range check is now its only effect.
   ///
   /// Throws [CircleServiceException] if encryption fails.
   Future<EncryptedLocation> encryptLocation({

@@ -98,6 +98,22 @@ async fn decrypt_445_content(receiver: &SessionManager, event: &Event) -> Option
     })
 }
 
+/// Every location plaintext a batch of engine effects delivers.
+///
+/// [`decrypt_445_content`] answers "did THIS event yield plaintext"; this answers
+/// "did anything at all", which is the shape a history backfill would take.
+fn location_contents(effects: &SessionEffects) -> Vec<String> {
+    effects
+        .events
+        .iter()
+        .filter_map(SessionManager::location_result_from_event)
+        .filter_map(|r| match r {
+            LocationMessageResult::Location { content, .. } => Some(content),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Advances a two-party group by `count` admin (routing) commits, converging both
 /// Alice and Bob, so both reach epoch N+`count`.
 async fn advance_both(g: &TwoPartyGroup, count: usize) {
@@ -134,6 +150,53 @@ async fn advance_both(g: &TwoPartyGroup, count: usize) {
             let _ = g.bob.advance_convergence(gid).await;
         }
     }
+}
+
+/// Moves the group one routing commit forward, delivers it to `member`, and
+/// returns every location plaintext that member's ingest and convergence drain
+/// released.
+///
+/// The epoch move is the whole point: a buffered message surfaces when the
+/// epoch it was waiting for arrives, so a drain taken without one can only
+/// re-observe a queue that was already drained.
+async fn advance_and_collect_released(
+    g: &TwoPartyGroup,
+    member: &SessionManager,
+    relay: &str,
+) -> Vec<String> {
+    let effects = g
+        .alice
+        .update_relays(&g.group_id, vec![relay.to_string()])
+        .await
+        .expect("alice routing commit");
+    let (commit, pending) = effects
+        .publish
+        .iter()
+        .find_map(|w| match w {
+            PublishWork::GroupEvolution { msg, pending, .. } => Some((msg.clone(), *pending)),
+            _ => None,
+        })
+        .expect("group evolution");
+    g.alice
+        .confirm_published(pending)
+        .await
+        .expect("alice confirms");
+    let commit_event = SessionManager::transport_message_to_event(&commit).unwrap();
+    let ingest = member
+        .process_event(&commit_event)
+        .await
+        .expect("member ingests the commit")
+        .ingested()
+        .expect("a commit must reach the engine, not Haven's pre-auth screen");
+    let mut released = location_contents(&ingest.effects);
+    for gid in &ingest.effects.pending_convergence {
+        let more = member
+            .advance_convergence(gid)
+            .await
+            .expect("member drains their own live group");
+        released.extend(location_contents(&more));
+    }
+    released
 }
 
 // ============================================================================
@@ -469,6 +532,142 @@ async fn p3b_old_epoch_ciphertext_is_undecryptable_after_retention_window() {
          yield plaintext after the window closes"
     );
     g.cleanup();
+}
+
+// ============================================================================
+// Joiner boundary — a member added at epoch N reads nothing sealed before it
+// ============================================================================
+
+/// The forward mirror of `circle_integration_test`'s
+/// `removed_member_cannot_decrypt_post_removal_location`: that one proves an
+/// evicted member loses the future, this one proves a fresh member never gets
+/// the past. It backs the two user-facing promises that a joiner "can read what
+/// is sent after they arrive, and nothing from before it", and that Haven "never
+/// sends a new member any past locations".
+///
+/// The property falls out of MLS, so the test is written to fail for the RIGHT
+/// reason: Carol is handed the actual pre-add kind-445 — the same bytes a relay
+/// backfill or a catch-up sweep would hand her — while holding a live membership
+/// in that exact group at the post-add epoch. Each assertion below names the
+/// wrong-reason pass it rules out.
+#[tokio::test]
+async fn new_member_cannot_decrypt_location_sent_before_the_add() {
+    let g = setup_two_party_group("join_no_history").await;
+    let relays = vec!["wss://relay.test.com".to_string()];
+
+    // L0, sealed while the group is Alice + Bob only.
+    let l0 = LocationMessage::new(12.5, -34.25).to_string().unwrap();
+    let l0_event = send_445(&g.alice, &g.group_id, &l0).await;
+    // Rules out "L0 was never decryptable by anybody": a member holding the
+    // pre-add epoch's material recovers it exactly, so Carol's refusal below is
+    // about her join epoch and not about a malformed or empty event.
+    assert_eq!(
+        decrypt_445_content(&g.bob, &l0_event).await.as_deref(),
+        Some(l0.as_str()),
+        "a member at the pre-add epoch decrypts L0 (control: L0 is real location ciphertext)"
+    );
+
+    let carol_dir = helpers::unique_temp_dir("join_no_history_carol");
+    let carol_keys = Keys::generate();
+    let carol = SessionManager::new_unencrypted(&carol_dir, &carol_keys).expect("carol session");
+    let carol_kp_event = helpers::create_key_package_event(&carol, &carol_keys, &relays).await;
+    let carol_kp = SessionManager::key_package_from_event(&carol_kp_event).expect("parse carol kp");
+
+    let epoch_before = g.alice.epoch(&g.group_id).await.unwrap();
+    let added = g
+        .alice
+        .add_members(&g.group_id, vec![carol_kp])
+        .await
+        .expect("alice adds carol");
+    // The Haven-side half of the promise: an Add stages a commit and a welcome,
+    // and nothing else. An `ApplicationMessage` staged here would BE the
+    // re-send-on-join the copy says never happens.
+    assert!(
+        !added
+            .publish
+            .iter()
+            .any(|w| matches!(w, PublishWork::ApplicationMessage { .. })),
+        "adding a member must publish a commit + welcome only, never a replayed location"
+    );
+    let welcomes = confirm_and_take_welcomes(&g.alice, &added).await;
+    assert_eq!(welcomes.len(), 1, "adding one member emits one welcome");
+
+    let epoch_after = g.alice.epoch(&g.group_id).await.unwrap();
+    assert!(
+        epoch_after > epoch_before,
+        "an Add MUST advance the epoch: a joiner landing in L0's own epoch would hold \
+         exactly the material L0 was sealed under"
+    );
+
+    let joined = carol
+        .accept_welcome(&welcomes[0])
+        .await
+        .expect("carol accepts the welcome");
+    // The welcome is the one channel that could smuggle history in alongside the
+    // keys — it must deliver the join and the epoch, never a past location.
+    assert!(
+        location_contents(&joined.effects).is_empty(),
+        "the welcome must hand the joiner no past location"
+    );
+    assert_eq!(
+        carol.epoch(&g.group_id).await.unwrap(),
+        epoch_after,
+        "the joiner starts AT the post-add epoch, never inside an earlier one"
+    );
+    assert!(
+        carol
+            .member_pubkeys(&g.group_id)
+            .await
+            .unwrap()
+            .contains(&carol_keys.public_key().to_hex()),
+        "carol holds a live membership in this exact group"
+    );
+
+    // Rules out "she was never handed the event": Carol ingests the very bytes
+    // Alice published, through the receive path a relay backfill would use, as a
+    // member in good standing. A pre-auth rejection is `Ok(RejectedBeforeAuth)`,
+    // never an `Err`, so it survives `decrypt_445_content`'s `?` and trips the
+    // `.ingested()` expect instead: the refusal below is the ENGINE's, not
+    // Haven's local screen dropping the event before any crypto ran. (A hard
+    // engine-raised ingest error WOULD read as `None` through that `?`; the L1
+    // control below is what rules out a session that simply cannot ingest.)
+    assert!(
+        decrypt_445_content(&carol, &l0_event).await.is_none(),
+        "a member added at epoch N must NOT recover a location sealed before the add"
+    );
+
+    // Rules out the vacuous joiner who can decrypt nothing at all — the shape
+    // that would make every assertion above pass on a broken session.
+    let l1 = LocationMessage::new(56.75, -78.125).to_string().unwrap();
+    let l1_event = send_445(&g.alice, &g.group_id, &l1).await;
+    assert_eq!(
+        decrypt_445_content(&carol, &l1_event).await.as_deref(),
+        Some(l1.as_str()),
+        "the joiner reads everything sent AFTER the add"
+    );
+
+    // Deferred release: an engine that had merely BUFFERED L0 rather than
+    // refusing it would surface it on a later drain, once Carol's group moved.
+    //
+    // Moving her epoch is what makes this a test rather than a restatement of
+    // the refusal above. `decrypt_445_content` already drains
+    // `pending_convergence` at the epoch the refusal happened in, so a drain
+    // taken there can only re-observe an empty queue; a buffered message is
+    // released when the epoch it was waiting for arrives, so the group has to
+    // actually advance first.
+    let epoch_before_move = carol.epoch(&g.group_id).await.unwrap();
+    let released = advance_and_collect_released(&g, &carol, "wss://post-join.example.com").await;
+    assert!(
+        carol.epoch(&g.group_id).await.unwrap() > epoch_before_move,
+        "the drain is only meaningful after Carol's group actually moved epoch"
+    );
+    assert!(
+        !released.contains(&l0),
+        "no later convergence drain may release the pre-add location"
+    );
+
+    g.cleanup();
+    helpers::cleanup_dir(&carol_dir);
 }
 
 // ============================================================================

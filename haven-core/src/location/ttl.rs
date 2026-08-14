@@ -1,22 +1,27 @@
-//! Jittered timing helpers for kind:445 outer-event metadata and publish
-//! cadence.
+//! Timing constants and helpers for kind:445 outer-event metadata and
+//! publish cadence.
 //!
-//! This module hosts two independent CSPRNG-backed jitters that share a
-//! common rationale (unpredictable to relay observers, so `OsRng` only —
-//! `thread_rng`/`SmallRng` are forbidden by `clippy::disallowed_methods`)
-//! but address different leaks and MUST remain sampled independently:
+//! **Only ONE jitter is live.** `compute_jittered_publish_interval_secs`
+//! samples the next publish delay in
+//! `[nominal*(1-spread), nominal*(1+spread)]` seconds, breaking short-window
+//! fingerprinting of the publish rhythm. It must stay unpredictable to relay
+//! observers, so `OsRng` only — `thread_rng`/`SmallRng` are forbidden by
+//! `clippy::disallowed_methods`.
 //!
-//! - `compute_jittered_ttl_secs` — samples the NIP-40 `expiration` tag on
-//!   the outer kind:445 wrapper. Bounds relay-side residency to roughly
-//!   one to two publish cycles and prevents a constant-TTL Haven
-//!   fingerprint.
-//! - `compute_jittered_publish_interval_secs` — samples the next publish
-//!   delay in `[nominal*(1-spread), nominal*(1+spread)]` seconds. Breaks
-//!   short-window fingerprinting of the publish rhythm.
+//! `compute_jittered_ttl_secs` is **retired** and has no production caller.
+//! Since the Dark Matter cutover the NIP-40 `expiration` tag is stamped by the
+//! engine from the group's `message-retention.v1` component (0x8005) as the
+//! fixed `LOCATION_MESSAGE_RETENTION_SECS`. The helper is kept, with its unit
+//! tests, as the reference implementation should a per-send TTL path return.
+//! Do not read it as describing the wire.
 //!
-//! See `SECURITY.md` for the full threat model — in particular, these
-//! jitters do NOT address other remaining leaks (stable `h` tag per
-//! circle, predictable ciphertext length).
+//! The consequence is recorded rather than hidden: a deterministic TTL IS the
+//! constant-TTL fingerprint the retired sampling existed to prevent. See
+//! `SECURITY.md`, "Outer kind:445 metadata".
+//!
+//! See `SECURITY.md` for the full threat model — in particular, the surviving
+//! jitter does NOT address other remaining leaks (stable `h` tag per circle,
+//! predictable ciphertext length).
 
 use rand::rngs::OsRng;
 use rand::Rng;

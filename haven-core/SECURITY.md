@@ -560,66 +560,72 @@ exactly the posture of a member who had not yet chosen to leave — so no
 forward-secrecy property is weakened for anyone else. It is net-positive versus
 the unbounded ghost that a race-losing leave would otherwise leave behind.
 
-### Outer kind:445 metadata: jittered NIP-40 expiration
+### Outer kind:445 metadata: group-governed NIP-40 expiration
 
-> **Dark Matter update (2026-07-17).** The per-send jittered NIP-40 TTL below
-> was retired at the Dark Matter cutover: the engine's send path takes no
-> per-send expiration — NIP-40 expiration on kind-445 is now governed by the
-> group-level `marmot.group.message-retention.v1` component (0x8005), which
-> Haven has **not yet configured**. Until that retention wiring lands, Haven
-> 445s carry **no** expiration tag and the receiver-side expiration enforcement
-> is inactive (the jitter/grace helpers in `src/location/ttl.rs` are retained
-> for the re-wiring). The analysis below — including the no-gap invariant in
-> the publish-cadence section — is kept as the design of record for the
-> retention parameters.
+> **Corrected 2026-08-13.** A "Dark Matter update (2026-07-17)" note here said
+> the retention component was one "Haven has **not yet configured**", and that
+> until it landed Haven 445s carried **no** expiration tag with receiver-side
+> enforcement inactive. That stopped being true when retention was wired in the
+> Dark Matter round-2 fix, and the note outlived it — describing a gap the code
+> had closed, and forbidding a claim (`privacyWhatOthersSeeDetailExpiry`, "Haven
+> asks relays to drop location messages after about four minutes") that the code
+> actually makes true. The section below describes what ships.
 
-Each kind:445 wrapper for a **location update** carries a NIP-40
-`["expiration", ts]` tag with `ts` sampled uniformly from
-`[update_interval, 2 × update_interval]` seconds in the future, using
-`OsRng` (CSPRNG). See `src/location/ttl.rs`.
+The per-send jittered TTL this section used to document is retired: the engine's
+send path takes no per-send expiration. NIP-40 expiration on kind-445 is
+governed by the group-level `marmot.group.message-retention.v1` component
+(0x8005), which Haven declares in `supported_app_components` and supplies at
+group creation with `LOCATION_MESSAGE_RETENTION_SECS` (`src/nostr/mls/manager.rs`,
+`src/location/ttl.rs`). The engine then stamps every **application** kind:445
+with `expiration = inner_created_at + retention`.
 
-The Dart call site in `location_sharing_service.dart` passes
-`kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds`
-(= 168 + 30 = 198 s) — this lifts the TTL floor above the maximum
-jittered publish delay (168 s) with a 30 s network-propagation buffer,
-producing an on-wire TTL window of `[198, 396] s`. See the "Publish
-cadence: jittered scheduler" section below for the no-gap invariant
-that motivates this choice.
+`LOCATION_MESSAGE_RETENTION_SECS = 228 s` = 168 s maximum publish interval
+(`kLocationPublishMaxInterval`, the ceiling of the ±40 % cadence jitter) + 2 × 30 s
+network buffer. That is the data-minimizing value that still satisfies the no-gap
+invariant in the publish-cadence section below: a member re-publishes at most
+every 168 s, and per-circle schedules are independent, so a circle's worst-case
+inter-publish gap stays 168 s.
+
+Receivers enforce the tag with a `RECEIVER_EXPIRATION_GRACE_SECS = 60` skew
+window, in `SessionManager::process_event` — the choke point every receive plane
+(poll drain, live-sync, background catch-up) funnels through.
 
 What this provides:
 
-- Bounds relay-side residency to ~1–2 publish cycles, so stale ciphertext
-  does not accumulate on relays indefinitely.
-- Prevents a constant-TTL fingerprint that would identify Haven clients
-  among mixed MLS-over-Nostr traffic on shared relays.
-- Defense-in-depth against relay replay past the inner
-  `LocationMessage.expires_at`. Receivers also enforce the expiration
-  tag in `CircleManager::decrypt_location` with a 60-second
-  clock-skew grace window.
+- Bounds relay-side residency to roughly two publish cycles, so stale
+  ciphertext does not accumulate on relays indefinitely.
+- Defense-in-depth against a relay replaying stale ciphertext.
+- A single group-level value, so the TTL cannot drift per call site — the
+  per-send design had one Dart caller computing it, and nothing checked it.
 
-What this does **not** provide:
+What this does **not** provide, including one property the retired design had:
 
-- It does not hide publish cadence on its own — publish-cadence
-  fingerprinting is addressed separately by the jittered scheduler
-  documented in the next section.
-- It does not prevent a relay (or NIP-42-authed observer) from estimating
-  the user's local clock skew from the absolute expiration timestamp.
-  A single observation leaks `±interval` worth of uncertainty, but an
-  attacker observing `N` events from the same author can average
-  `(expiration − created_at)` across samples; the estimate converges to
-  within roughly `interval / √(12 N)` of the true mean offset, so
-  repeated observation narrows the leak below one interval. Mitigation
-  is bounded by the desire to keep the tag wire-format self-evident;
-  we accept the residual leak.
-- Welcomes (kind:444 gift-wrapped inner), commits, and proposals
-  (also kind:445) intentionally do **not** carry an expiration tag —
-  expiring those would break late joiners. Only the location path uses
-  the jittered tag.
+- **It no longer defeats a constant-TTL fingerprint — it creates one.** The
+  retired per-send design sampled the TTL to avoid identifying Haven clients
+  among mixed MLS-over-Nostr traffic; a deterministic 228 s is exactly the
+  fingerprint that was being avoided. Accepted: group-level retention is what
+  the protocol now offers, and the alternative is no expiry at all.
+- **Carrying the tag at all is a public discriminator.** Only application
+  messages are stamped — commits and proposals are never stamped, because
+  expiring group history would break late joiners — so a 445 *without* an
+  expiration is visibly a membership change rather than a location update. This
+  is disclosed to the user in `privacyWhatOthersSeeDetailExpiry`.
+- It does not hide publish cadence; that is the jittered scheduler's job, in
+  the next section.
+- Expiry is a **request**. A relay is free to ignore NIP-40 and retain the
+  event; the copy says "asks", deliberately, and must never be phrased as a
+  guarantee.
 
-The randomness source is gated with a `clippy.toml`
-`disallowed-methods` deny on `rand::thread_rng`; the jitter path must
-go through `rand::rngs::OsRng`, which wraps `getrandom` directly
-without a cached PRNG.
+The clock-skew leak the retired design carried is gone with it: `expiration −
+created_at` is now the constant 228 s and reveals nothing about the publisher's
+offset that the outer `created_at` did not already reveal.
+
+`compute_jittered_ttl_secs` is retained in `src/location/ttl.rs` (dead-code
+allowed, with its unit tests) as the reference helper should a per-send TTL path
+ever return. The `clippy.toml` `disallowed-methods` deny on `rand::thread_rng`
+still governs the surviving randomness in this file — the publish-cadence jitter
+must go through `rand::rngs::OsRng`, which wraps `getrandom` directly without a
+cached PRNG.
 
 ### Publish cadence: jittered scheduler
 
@@ -679,48 +685,51 @@ What this does **not** provide:
   pattern at relays; see "Post-Compromise Security window from polling cadence"
   below for the related security-side trade-off.
 
-#### Independence from the TTL jitter, and the no-gap invariant
+#### The no-gap invariant
 
-The publish-interval jitter and the outer-event TTL jitter are sampled
-**independently** — coupling their per-tick values would entangle the
-relay-residency bound (TTL) with arrival-time unlinkability (publish
-interval), two knobs we want to tune separately.
+> **Corrected 2026-08-13**, together with the retention section above. This
+> subsection described the retired per-send jittered TTL as if it were live —
+> "sampled independently", a Dart-supplied `update_interval_secs = 198 s`, a
+> `[198, 396] s` residency window, and a two-timestamp joint distribution. None
+> of that ships. The retention rewrite 60 lines above had left this half behind.
 
-However, the *range parameter* of the TTL jitter is deliberately
-chosen so that a relay always has at least one non-expired event from
-every active publisher. Formally, for events `E_n` published at time
-`T_n` with TTL `τ_n`, gap-freeness requires:
+There is only ONE jitter now: the publish interval. The TTL is not sampled at
+all — it is the group's fixed `message-retention.v1` value.
 
-```
-δ_n ≤ τ_n   for every n   where   δ_n = T_{n+1} − T_n
-```
+A relay must always hold at least one non-expired event from every active
+publisher. For events `E_n` published at `T_n` with TTL `τ`, gap-freeness
+requires `δ_n ≤ τ` for every `n`, where `δ_n = T_{n+1} − T_n`; worst case
+`δ_max ≤ τ`.
 
-Worst-case: `δ_max ≤ τ_min`.
+With `PUBLISH_INTERVAL_JITTER_FRACTION_BP = 4_000` around a 2-minute nominal,
+the publish gap `δ` is uniform in `[72, 168] s`, so `δ_max = 168 s`. The TTL is
+the constant `LOCATION_MESSAGE_RETENTION_SECS = 228 s`. Thus
+`τ = 228 s > δ_max = 168 s` ✓, with a 60 s margin for network propagation.
 
-With `PUBLISH_INTERVAL_JITTER_FRACTION_BP = 4_000` and a 2-minute
-nominal publish cadence, the publish gap `δ` is uniform in
-`[72, 168] s`, so `δ_max = 168 s`. The Dart call site passes
-`update_interval_secs = 198 s` (`publish_max + 30 s` network buffer)
-to `encrypt_location`, which makes the Rust-side TTL `τ` uniform in
-`[198, 396] s`. Thus `τ_min = 198 s > δ_max = 168 s` ✓ — a relay with
-any queried publisher always has a valid event, with a 30 s margin for
-network propagation latency.
+That margin is the constant's own derivation (`168 + 2 × 30`), and it is pinned
+in **both** directions by `narrowing_the_retention_would_strand_a_returning
+_member` and `widening_the_retention_would_outlive_the_disclosed_expiry`
+(`tests/privacy_copy_ties.rs`), which read the Dart ceiling rather than
+mirroring it — so widening the publish jitter without widening retention fails
+loudly instead of silently reopening the gap.
 
-`RECEIVER_EXPIRATION_GRACE_SECS = 60 s` sits on top of this as
-clock-skew defense-in-depth against a replay-near-boundary attack;
-it is **not** load-bearing for gap coverage.
+`RECEIVER_EXPIRATION_GRACE_SECS = 60 s` sits on top as clock-skew
+defense-in-depth against a replay-near-boundary attack; it is **not**
+load-bearing for gap coverage.
 
-Cost of the 2-minute cadence: relay-side residency is `[198, 396] s`
-(mean ≈ 297 s). More frequent publishes increase relay traffic by ~2.5×
-compared to the prior 5-minute cadence, but each event carries a
-shorter TTL so mean residency decreases from 630 s to 297 s. We accept
-the traffic cost for the UX improvement (worst-case viewer staleness
-drops from ~7.5 min to ~3.5 min for scheduled publishes, and to
-sub-minute via the motion-triggered publish path).
+Cost: relay-side residency is a constant 228 s, shorter than the retired
+design's `[198, 396] s`. The traffic cost of the 2-minute cadence is accepted
+for the UX improvement (worst-case viewer staleness ~3.5 min for scheduled
+publishes, sub-minute via the motion-triggered path).
 
-A low-priority residual: a relay that correlates both timestamps
-(`created_at`, `expiration`) per event could detect the joint
-distribution across consecutive events. Filed as a follow-up.
+The two-timestamp correlation residual this subsection used to file as a
+follow-up is **closed by construction**: `expiration − created_at` is now the
+same constant on every application 445, so there is no joint distribution left
+to observe. That closure depends on the engine binding the outer `created_at`
+to the inner one it derives the expiration from — currently pinned only
+incidentally, by `encrypt_location_attaches_group_retention_expiration`
+comparing against the OUTER `created_at` (`src/circle/manager.rs`). An engine
+change that decouples the two would re-open the leak, and would do so silently.
 
 ### Relay-observable metadata and correlation (accepted)
 
@@ -956,10 +965,19 @@ the FFI, and `Image.network` stays banned.
   eliminated for legitimate public hosts. VPN recommended.
 - **Roster-association leak.** Profile fetches reveal to the discovery relay
   which pubkeys a client is interested in (see *Network Threat Model*).
-- **Best-effort delete.** "Delete public profile" republishes a blank kind-0,
-  emits a NIP-09 kind-5 deletion, and issues a Blossom DELETE — all
-  cooperative-server best-effort, and per the retraction no-op gate it only
-  runs when a profile was actually published. It does not guarantee erasure.
+- **Best-effort delete, and the photo is NOT part of it.** "Delete public
+  profile" republishes a blank kind-0 and emits a NIP-09 kind-5 deletion —
+  both cooperative-server best-effort, and per the retraction no-op gate they
+  only run when a profile was actually published. **No Blossom DELETE is
+  issued.** This bullet claimed one until 2026-08-13; there is no `.delete(`,
+  `Method::DELETE` or `"DELETE"` anywhere under `src/profile/` or `src/avatar/`,
+  and the FFI's own doc comment on `delete_my_public_profile` records the blob
+  DELETE as deferred. The uploaded image therefore survives profile deletion
+  indefinitely, as does any copy already fetched. The user-facing copy has
+  always said so (`privacyPublicProfileRemovalIsNotDeletion`,
+  `photoHeaderRemoveBody`, `identityAdvancedDeleteBody`); it was this document
+  that was wrong, in the direction that would make a maintainer read the copy
+  as over-cautious. Nothing here guarantees erasure.
 - **Same pubkey as your circles.** The public profile is not a separate
   persona: it binds the name/photo to the same pubkey used for circle
   invitations and KeyPackages. The onboarding and Identity-page disclosures

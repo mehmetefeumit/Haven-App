@@ -5,13 +5,13 @@
 # core.hooksPath is a LOCAL git setting (not committed), so each clone runs this
 # once. After that:
 #
-#   pre-commit  ~5 s, every commit. No toolchain, no test run. Two halves:
+#   pre-commit  every commit. No toolchain, no test run. Two halves:
 #                 - scripts/ci/check_coverage.sh --static-only
 #                   The coverage-floor manifest lint and the two guard
 #                   self-tests: catches a bad manifest edit in the diff that
 #                   made it, instead of 11 minutes into llvm-cov.
 #                 - scripts/ci/run_source_guards.sh
-#                   The 22 fast source guards from repo-guards.yml, in
+#                   The fast source guards from repo-guards.yml, in
 #                   parallel. These catch invariants about the SHAPE of the
 #                   code — an access gate that stopped preceding a read, a
 #                   publish chain that lost its bound. The list is DERIVED
@@ -35,7 +35,7 @@ chmod +x .githooks/* scripts/ci/check_coverage.sh scripts/ci/check_coverage_floo
 git config core.hooksPath .githooks
 
 echo "✅ Git hooks enabled (core.hooksPath = .githooks)."
-echo "   'git commit' now runs the instant coverage checks + the 22 fast source guards (~5 s)."
+echo "   'git commit' now runs the instant coverage checks + the fast source guards."
 echo "   'git push'   now runs the full coverage gate (~6-11 min, both stacks in parallel)."
 echo "   Bypass once with: git commit --no-verify / git push --no-verify"
 echo "   Disable entirely: git config --unset core.hooksPath"

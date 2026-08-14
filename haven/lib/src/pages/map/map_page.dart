@@ -88,6 +88,20 @@ class MapPage extends ConsumerStatefulWidget {
     required bool accessBlocked,
   }) => hasError && !hasFix && !accessBlocked;
 
+  /// Builds the Apple Maps handoff URL for [latitude]/[longitude].
+  ///
+  /// Carries the coordinate and nothing else — no member name, petname,
+  /// pubkey or circle name — which is the promise `mapOpenInAppleMapsBody`
+  /// makes in the confirmation sheet shown before this URL is opened.
+  ///
+  /// Pure and static so the promise is unit-testable without pumping
+  /// [MapPage] (same reasoning as [showOwnLocationMarker]).
+  @visibleForTesting
+  static Uri appleMapsHandoffUri({
+    required double latitude,
+    required double longitude,
+  }) => Uri.https('maps.apple.com', '/', {'ll': '$latitude,$longitude'});
+
   @override
   ConsumerState<MapPage> createState() => _MapPageState();
 }
@@ -494,13 +508,17 @@ class _MapPageState extends ConsumerState<MapPage>
 
   /// Opens the given coordinate in Apple Maps via an https universal link.
   ///
-  /// Sends only the latitude/longitude — never identity (pubkey) or timestamp.
+  /// Sends only the latitude/longitude — never identity (pubkey) or
+  /// timestamp. See [MapPage.appleMapsHandoffUri] for the URL itself.
   Future<void> _openInAppleMaps({
     required double latitude,
     required double longitude,
   }) async {
     final l10n = AppLocalizations.of(context);
-    final uri = Uri.https('maps.apple.com', '/', {'ll': '$latitude,$longitude'});
+    final uri = MapPage.appleMapsHandoffUri(
+      latitude: latitude,
+      longitude: longitude,
+    );
     try {
       await launchUrl(uri, mode: LaunchMode.externalApplication);
     } on Object catch (e) {

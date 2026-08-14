@@ -92,24 +92,32 @@ attempt_slice_after() {
 # `setUpAll` died on exactly that, two seconds into the drive, while its
 # sibling poll lane won the same race on the same cold boot.
 #
-# THE INVARIANT IS REACHABILITY OF THE RELAY, NOT THE EXISTENCE OF A DEFAULT
-# ROUTE. This predicate used to demand `Destination == 00000000` with a non-null
-# gateway, and that is a different — and wrong — question. `ENETUNREACH` is what
-# the kernel returns when NO route matches the destination; a route that covers
-# the destination is exactly what prevents it, whether or not it is the default
-# one. On the api-34 google_apis image the guest settles with on-link routes and
-# no default route at all:
+# WHAT THIS CAN AND CANNOT PROVE. It is a NECESSARY-not-sufficient smoke
+# signal, and the difference has cost two CI runs in opposite directions.
+#
+# Not sufficient: `/proc/net/route` is the legacy MAIN table, and Android does
+# not route app sockets through it. netd installs each network's routes into its
+# own table and picks the table from the socket's fwmark, so the main table can
+# carry a covering route while the app's default network has none. In CI run
+# 31667128290 it did exactly that — see the Wi-Fi note at the readiness wait
+# below — and this predicate read READY at 0s against a default network that
+# returned ENETUNREACH for the whole boot. Widening the predicate cannot fix
+# that: the file simply does not carry the answer.
+#
+# Not a hard gate either: demanding `Destination == 00000000` with a non-null
+# gateway asks a different and wrong question. On the api-34 google_apis image
+# the guest settles with on-link routes and no default route in main at all:
 #
 #   eth0   0000000A / 000000FF  ->  10.0.0.0/8    RTF_UP
 #   wlan0  0002000A / 00FFFFFF  ->  10.0.2.0/24   RTF_UP
 #
-# 10.0.2.2 is inside BOTH, so the guest could reach the relay — and the old
-# predicate rejected it anyway. In CI run 30964250098 that failed five lanes
-# (e2e_android poll + live-sync, e2e_integration, e2e_relay_customization,
-# e2e_profile_android) with an identical table on every boot: not a race, a
-# gate that could never pass. Fixture (6b) below had encoded the same mistake,
-# asserting that this reachable table must read as NOT ready, so `--self-test`
-# ratified the bug instead of catching it.
+# In CI run 30964250098 rejecting that table failed five lanes (e2e_android poll
+# + live-sync, e2e_integration, e2e_relay_customization, e2e_profile_android) on
+# every boot: not a race, a gate that could never pass.
+#
+# So it stays permissive AND stays advisory (warn-and-drive, below). It catches
+# the guest that has no route to the relay at all; it does not certify one that
+# has.
 #
 # It has to be `/proc/net/route`: it exists on every Android image, needs no
 # toybox applet, and reports the kernel's own routing state rather than a
@@ -150,6 +158,20 @@ _ipv4_to_u32() {
   && "${c}" =~ ^${oct}$ && "${d}" =~ ^${oct}$ ]] || return 1
   (( a <= 255 && b <= 255 && c <= 255 && d <= 255 )) || return 1
   printf '%u' $(( (a << 24) | (b << 16) | (c << 8) | d ))
+}
+
+# wifi_is_off <settings-output> — exit 0 iff the guest reports Wi-Fi OFF.
+#
+# `settings get global wifi_on` answers `0` or `1`, `null` when the key was
+# never written, and adb noise ("device offline", "error: closed") when the
+# shell raced the device. ONLY a literal `0` is off. `null` is "the platform has
+# no opinion", which is not evidence the second network is gone — treating it as
+# off would silence the warning in precisely the case that needs it, and the
+# warning is the only thing standing between a silent no-op and a lane that
+# quietly went back to racing two networks. Pure text inspection: takes no
+# device and is unit-tested below.
+wifi_is_off() {
+  [[ "$(printf '%s' "${1:-}" | tr -d '\r' | head -n 1)" == "0" ]]
 }
 
 guest_can_route_to() {
@@ -381,14 +403,19 @@ wlan0	0002000A	00000000	0001	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
     fail=1
   fi
 
-  # (6b) THE REGRESSION FIXTURE — the settled api-34 table verbatim from CI run
-  # 30964250098, where the guest carries on-link routes and NO default route.
-  # 10.0.2.2 is inside both 10.0.0.0/8 and 10.0.2.0/24, so connect() does NOT
-  # return ENETUNREACH and the lane must be allowed to drive. The predicate this
-  # replaced rejected exactly this table and cost five lanes; the fixture that
-  # stood here asserted the rejection was correct, which is why --self-test
-  # stayed green through it. If this ever flips back to NOT ready, the gate has
-  # gone back to asking about default routes instead of about the relay.
+  # (6b) THE MUST-NOT-BLOCK FIXTURE — the settled api-34 table verbatim from CI
+  # run 30964250098, where the guest carries on-link routes and NO default route
+  # in main. Rejecting it cost five lanes on every boot, so the predicate must
+  # let it through. If this ever flips to NOT ready, the gate has gone back to
+  # asking about default routes instead of about the relay.
+  #
+  # READY here means "nothing in the main table says the relay is unreachable",
+  # NOT "the relay is reachable". CI run 31667128290 carried this exact table
+  # while the app's default network had no IPv4 route and every socket got
+  # ENETUNREACH. That is not a hole to be closed by tightening this predicate —
+  # the main table cannot see the per-network tables — which is why the lane
+  # now disables the racy second network outright rather than trying to detect
+  # it here, and why this check stays advisory.
   if ! guest_can_route_to "${hdr}
 eth0	0000000A	00000000	0001	0	0	0	000000FF	0	0	0
 wlan0	0002000A	00000000	0001	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
@@ -472,11 +499,52 @@ wlan0	0002000A	00000000	0000	0	0	0	00FFFFFF	0	0	0" 10.0.2.2; then
     fail=1
   fi
 
+  # ---------------------------------------------------------------
+  # (7) wifi_is_off — the read-back on the Wi-Fi disable. `svc wifi disable`
+  # exits 0 whether or not it took effect, so this is the only thing that can
+  # tell a real disable from a silent no-op.
+  # ---------------------------------------------------------------
+  if ! wifi_is_off '0'; then
+    echo "SELF-TEST FAIL (7a): wifi_on=0 must read as OFF" >&2
+    fail=1
+  fi
+  if ! wifi_is_off '0
+'; then
+    echo "SELF-TEST FAIL (7a2): a trailing newline must not defeat the read-back" >&2
+    fail=1
+  fi
+  if ! wifi_is_off "$(printf '0\r\n')"; then
+    echo "SELF-TEST FAIL (7a3): adb's CRLF must not defeat the read-back" >&2
+    fail=1
+  fi
+  if wifi_is_off '1'; then
+    echo "SELF-TEST FAIL (7b): wifi_on=1 must read as ON" >&2
+    fail=1
+  fi
+  # `null` is the platform having no opinion, NOT a disabled radio. Reading it
+  # as OFF would report success for a disable that never happened.
+  if wifi_is_off 'null'; then
+    echo "SELF-TEST FAIL (7c): 'null' must NOT read as OFF" >&2
+    fail=1
+  fi
+  if wifi_is_off ''; then
+    echo "SELF-TEST FAIL (7c2): empty output must NOT read as OFF" >&2
+    fail=1
+  fi
+  if wifi_is_off 'error: closed'; then
+    echo "SELF-TEST FAIL (7d): adb noise must NOT read as OFF" >&2
+    fail=1
+  fi
+  if wifi_is_off 'adb: device offline'; then
+    echo "SELF-TEST FAIL (7d2): adb noise must NOT read as OFF" >&2
+    fail=1
+  fi
+
   if (( fail )); then
     echo "run-single-avd-scenario: SELF-TEST FAILED" >&2
     return 1
   fi
-  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried; app-failure check scoped to the final attempt; the network gate admits a guest whose on-link routes cover the relay, still rejects one with no route to it, and is satisfied by neither loopback, a foreign subnet, a downed interface, nor adb noise)."
+  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried; app-failure check scoped to the final attempt; the network gate admits a guest whose on-link routes cover the relay, still rejects one with no route to it, and is satisfied by neither loopback, a foreign subnet, a downed interface, nor adb noise; the Wi-Fi read-back accepts only a literal 0, never 'null' or adb noise)."
   return 0
 }
 
@@ -661,6 +729,62 @@ do
   fi
 done
 echo "Phase 3/4 — Permissions ready."
+
+# -----------------------------------------------------------------
+# ONE TRANSPORT, DETERMINISTICALLY.
+#
+# The api-34 google_apis image brings up TWO networks that both NAT to the host
+# alias: CELLULAR on eth0 (10.0.2.15/24) and WIFI on wlan0 (10.0.2.16/24).
+# Either would carry this lane, but Wi-Fi outscores cellular, so
+# ConnectivityService makes it the default network — and its route install is
+# racy. In CI run 31667128290 netd lost that race:
+#
+#   networkSetDefault(101)                                         04:48:29.166
+#   networkAddRouteParcel(101, 0.0.0.0/0 via 10.0.2.2, wlan0)
+#     -> ServiceSpecificException(101, "Network is unreachable")    04:48:30.220
+#
+# and never retried it. Wi-Fi stayed the default network for the rest of the
+# boot with no IPv4 default route, so every app socket got ENETUNREACH — errno
+# 101, the very error netd had logged — and the drive died in setUpAll two
+# seconds in. The sibling live-sync lane won the same race on the same commit
+# and passed, which is what makes it a race and not a defect. On a healthy boot
+# the same install fails once with error 64 ("Machine is not on the network",
+# the interface not yet in the network) and SUCCEEDS on the retry.
+#
+# Cellular needs none of that luck: it installed `0.0.0.0/0 via 10.0.2.2`
+# cleanly on the failing boot too, and its DNS probe resolved. Nothing here
+# wants Wi-Fi either — the app's only WorkManager constraint is
+# `NetworkType.connected`, which cellular satisfies, and the B9 lane drops
+# connectivity with airplane mode, which is transport-agnostic. So delete the
+# second network rather than keep racing it.
+#
+# READ BACK, NEVER ASSUMED: `svc wifi disable` exits 0 whether or not it took
+# effect, so the state is re-read from `settings get global wifi_on`. A guest
+# that keeps Wi-Fi is the status quo ante, not a new failure, so a mismatch
+# WARNS and drives on — this must never be the thing that reddens a lane.
+# -----------------------------------------------------------------
+readonly WIFI_OFF_TIMEOUT_SECS="${WIFI_OFF_TIMEOUT_SECS:-20}"
+wifi_state() {
+  adb -s "${DEVICE}" shell settings get global wifi_on 2>/dev/null \
+    | tr -d '\r' | head -n 1
+}
+echo "Disabling guest Wi-Fi on ${DEVICE} so the slirp NAT is the only network..."
+adb -s "${DEVICE}" shell svc wifi disable >/dev/null 2>&1 || true
+wifi_waited=0
+wifi_on="$(wifi_state)"
+while (( wifi_waited < WIFI_OFF_TIMEOUT_SECS )) && ! wifi_is_off "${wifi_on}"; do
+  sleep 2
+  wifi_waited=$(( wifi_waited + 2 ))
+  wifi_on="$(wifi_state)"
+done
+if wifi_is_off "${wifi_on}"; then
+  echo "  Wi-Fi off after ${wifi_waited}s (wifi_on=0); cellular/eth0 is the default network."
+else
+  echo "WARN: guest Wi-Fi did not report off within ${WIFI_OFF_TIMEOUT_SECS}s" \
+       "(wifi_on=${wifi_on:-<unreadable>}). Driving anyway — that restores the" \
+       "two-network behaviour CI run 31667128290 raced, it does not break" \
+       "anything that worked before." >&2
+fi
 
 # -----------------------------------------------------------------
 # The guest network. Boot-completed is not network-ready (see
@@ -1055,9 +1179,14 @@ attempt_slice_after /tmp/flutter-drive.log "${final_attempt_start:-0}" \
 # still a red lane — it is simply a red lane that names its own cause.
 if grep -aqF 'Network is unreachable' "${FINAL_ATTEMPT_LOG}" 2>/dev/null; then
   case "${net_ready}" in
-    1) net_gate_note="the readiness wait had judged the guest READY, so the"
-       net_gate_note+=" predicate's model of this image is wrong and needs"
-       net_gate_note+=" widening" ;;
+    1) net_gate_note="the readiness wait had judged the guest READY, which it"
+       net_gate_note+=" can only ever do from the MAIN routing table — not the"
+       net_gate_note+=" per-network table the app's default network actually"
+       net_gate_note+=" uses. Do NOT widen guest_can_route_to; it is already"
+       net_gate_note+=" maximally permissive. Read netd's"
+       net_gate_note+=" networkAddRouteParcel/networkSetDefault lines in the"
+       net_gate_note+=" logcat artifact: run 31667128290 failed because the"
+       net_gate_note+=" default network never got an IPv4 default route" ;;
     2) net_gate_note="the readiness wait was SKIPPED (the relay host is not a"
        net_gate_note+=" literal IPv4), so no predicate is implicated — look at"
        net_gate_note+=" name resolution on the guest, not at guest_can_route_to" ;;

@@ -242,22 +242,16 @@ class LocationSharingService {
       senderPubkeyHex: senderPubkeyHex,
       latitude: latitude,
       longitude: longitude,
-      // Pass `kLocationPublishMaxInterval + kTtlNetworkBufferSeconds`
-      // (168 + 30 = 198 s). Rust samples the outer NIP-40 `expiration`
-      // tag uniformly in `[interval, 2 * interval]`, so this yields a
-      // TTL window of `[198, 396] s`. The floor (198 s) exceeds the
-      // maximum jittered publish delay (168 s) by 30 s, providing a
-      // network-propagation buffer so L₁ reaches the relay before
-      // L₀'s TTL expires even under moderate latency.
+      // This argument no longer reaches the wire. It once seeded a
+      // per-send jittered NIP-40 TTL; since the Dark Matter cutover the
+      // engine stamps `expiration = inner_created_at + 228 s` from the
+      // group's `message-retention.v1` component, and the core binds this
+      // value as `_update_interval_secs` and discards it. Only the FFI's
+      // `[60, 3600]` range check still observes it, which 198 satisfies.
       //
-      // The two jitters (publish interval and TTL) remain sampled
-      // independently — only the range parameter of the TTL jitter
-      // is lifted from `nominal` to `publish_max + buffer`.
-      //
-      // Receiver contract: `RECEIVER_EXPIRATION_GRACE_SECS = 60 s` in
-      // `haven-core/src/location/ttl.rs` sits on top as clock-skew
-      // defense-in-depth; it is NOT relied on to cover the publish/
-      // TTL gap.
+      // The no-gap reasoning the old comment carried now lives on
+      // `LOCATION_MESSAGE_RETENTION_SECS` itself, which encodes the same
+      // margin (168 s publish ceiling + 2 × 30 s buffer = 228 s).
       updateIntervalSecs:
           kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
     );

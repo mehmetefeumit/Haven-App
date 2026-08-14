@@ -69,16 +69,6 @@ void main() {
       expect(kTtlNetworkBufferSeconds, greaterThan(0));
     });
 
-    test('TTL floor exceeds max publish delay', () {
-      // The no-gap invariant: τ_min > δ_max. The TTL floor passed to
-      // Rust is `kLocationPublishMaxInterval + kTtlNetworkBufferSeconds`
-      // which must strictly exceed the max publish delay.
-      expect(
-        kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
-        greaterThan(kLocationPublishMaxInterval.inSeconds),
-      );
-    });
-
     test('motion trigger distance is pinned at 100 metres', () {
       // Narrowing lets a moving device leak a finer-grained motion signal to
       // a relay (a motion-triggered publish fires on much smaller

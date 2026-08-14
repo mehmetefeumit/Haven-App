@@ -27,7 +27,10 @@ pub(crate) mod ttl;
 pub mod types;
 
 pub use geohash::{geohash_to_location, location_to_geohash};
-pub use ttl::{compute_jittered_publish_interval_secs, PUBLISH_INTERVAL_JITTER_FRACTION_BP};
+pub use ttl::{
+    compute_jittered_publish_interval_secs, LOCATION_MESSAGE_RETENTION_SECS,
+    PUBLISH_INTERVAL_JITTER_FRACTION_BP,
+};
 pub use types::{
     LocationMessage, LocationSettings, LOCATION_FRESHNESS_TTL_SECS, LOCATION_RETENTION_SECS,
 };

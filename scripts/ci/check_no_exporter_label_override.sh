@@ -4,10 +4,25 @@
 # Dark Matter's `transport-nostr-peeler` derives the kind-445 outer
 # ChaCha20-Poly1305 key (`group_event_key`) via
 # MLS-Exporter("marmot", "group-event", 32) — `DEFAULT_EXPORTER_LABEL =
-# "marmot/group-event"` (peeler/src/lib.rs:37). Because the engine runs a
-# pure-plaintext MLS wire-format policy, that outer wrap is the SOLE MLS-level
-# confidentiality layer for group traffic (migration plan §7 Rule 5), so the
-# label that keys it is load-bearing for confidentiality, not just interop.
+# "marmot/group-event"` (peeler/src/lib.rs:37).
+#
+# What that wrap protects is NOT uniform across the group's traffic, and this
+# header said it was until 2026-08-13 ("the SOLE MLS-level confidentiality
+# layer for group traffic"). Corrected, per MARMOT_PROTOCOL_KNOWLEDGE.md
+# "PURE_PLAINTEXT wire format: the confidentiality caveat":
+#
+#   * APPLICATION messages (the kind-9 location rumors) are PrivateMessage
+#     ALWAYS. OpenMLS's `create_message` encrypts unconditionally, and the
+#     pure-plaintext policy is enforced only against `is_handshake_message()`.
+#     A location is therefore double-sealed: AES-128-GCM under the epoch
+#     secret tree, inside this outer wrap.
+#   * COMMITS and PROPOSALS are PublicMessage, so the roster, each member's
+#     Nostr identity pubkey, their 0xF2F1 identity proofs and the circle name
+#     rest on this outer wrap ALONE.
+#
+# So the label that keys it is load-bearing for confidentiality, not just
+# interop — decisively so for group-control traffic, which has no second
+# layer to fall back on.
 #
 # The peeler exposes exactly ONE local lever that can change the derivation:
 # the `with_exporter_label` override hook. Calling it — e.g. to stay on the

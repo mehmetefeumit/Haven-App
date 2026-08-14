@@ -137,6 +137,13 @@ patrol_screenshots/
 # strfry data volume (E2E hermetic relay)
 tooling/e2e/strfry-data/
 
+# Advisory privacy-review scratch space (privacy-invariants-ai-review.yml). The
+# workflow wipes and recreates it after checkout, so a committed findings.json
+# cannot be mistaken for the reviewer's output — this keeps one from being
+# committed by accident in the first place, and keeps the reviewer's legitimate
+# write out of the tree-drift check that bounds it.
+.privacy-ai-review/
+
 # Exceptions to above rules
 !**/ios/**/default.mode1v3
 !**/ios/**/default.mode2v3
