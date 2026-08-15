@@ -39,6 +39,7 @@ import 'package:haven/src/services/ios_background_catchup.dart'
     show writeCatchupEnabledMirror;
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'e2e/_lib/throw_time_error_capture.dart';
 
 /// Mirror key written by `writeCatchupEnabledMirror()` (Dart side; Swift reads
 /// it prefixed as `flutter.background_catchup_enabled`). Pinned in source by
@@ -58,6 +59,7 @@ void main() {
   group('iOS M7-E wiring', () {
     testWidgets('mirror writes true and Swift teardown channels are reachable',
         (tester) async {
+      installThrowTimeErrorLogging();
       if (!Platform.isIOS) {
         // This target only proves iOS-specific wiring; it is driven only on the
         // sim. An honest skip (not a failure) elsewhere.

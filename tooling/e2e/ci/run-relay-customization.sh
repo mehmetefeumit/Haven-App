@@ -274,8 +274,9 @@ run_one() {
   # --- Drive the target. run-single-avd-scenario.sh installs, grants
   # runtime permissions, and runs `flutter drive`. Its exit code is
   # flutter drive's (pipefail), so a genuine assertion failure / driver
-  # error fails here; a `markTestSkipped` is reported as a SKIP by the
-  # Flutter reporter and exits 0 (honest skip, not a failure). Only R1
+  # error fails here. A `markTestSkipped` exits 0 on its own (the
+  # reporter counts it as passed), so the scenario's drive-log check is
+  # what turns a fired hatch red — see `expected_drive_skips.txt`. Only R1
   # (HAVEN_E2E_RELAY) is forwarded as env — R2 was baked into the APK
   # at build time; the drive step never re-passes dart-defines.
   local rc=0

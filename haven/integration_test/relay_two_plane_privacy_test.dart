@@ -36,6 +36,7 @@ import 'package:integration_test/integration_test.dart';
 
 import 'e2e/_lib/test_relay.dart';
 import 'e2e/_lib/test_user.dart';
+import 'e2e/_lib/throw_time_error_capture.dart';
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -68,6 +69,7 @@ void main() {
   testWidgets('precondition: R1 is a default relay and R2 is not', (
     tester,
   ) async {
+    installThrowTimeErrorLogging();
     expect(
       defaultRelays(),
       contains(defaultStrfryUrl),
@@ -211,6 +213,7 @@ void main() {
   testWidgets(
     'TP-INBOX: private-only inbox (10050) never leaks to the public relay',
     (tester) async {
+      installThrowTimeErrorLogging();
       await runLeakProof(
         category: RelayTypeFfi.inbox,
         listKind: 10050,
@@ -222,6 +225,7 @@ void main() {
   testWidgets(
     'TP-KP: private-only KeyPackage list (10002) never leaks to the public relay',
     (tester) async {
+      installThrowTimeErrorLogging();
       // Dark Matter: the KeyPackage-discovery list is the NIP-65 kind 10002
       // (the dedicated kind 10051 is retired), so the leak proof observes
       // 10002 on the wire for the nip65 category.

@@ -23,10 +23,13 @@
 # Keychain that would normally fail — but the bootstrap installs the
 # in-memory keyring (`useInMemoryKeyringForTest`) where it can, and any
 # test that still can't get a keyring calls `markTestSkipped(...)`
-# rather than silently returning. A skipped test is reported as a
-# SKIP by the Flutter test reporter and does NOT fail this script. We
-# never convert "no keyring on this AVD" into a red build; we only fail
-# on a genuine assertion failure / driver error.
+# rather than silently returning. Such a skip is NOT visible as a skip:
+# `Result.skipped` satisfies `isPassing`, so the on-device reporter
+# files it under `passed` and `integrationDriver()` exits 0. It is
+# caught instead by matching the reason text in the drive log, and a
+# hatch that fires now FAILS this script — every one of them is argued
+# unreachable in `tooling/e2e/expected_drive_skips.txt`, so firing is a
+# broken precondition, not an honest skip.
 #
 # # Per-target relay reset (isolation)
 #
@@ -218,8 +221,9 @@ run_one() {
   # --- Drive the target. run-single-avd-scenario.sh installs, grants
   # runtime permissions, and runs `flutter drive`. Its exit code is
   # flutter drive's (pipefail), so a genuine assertion failure / driver
-  # error fails here; a `markTestSkipped` is reported as a SKIP by the
-  # Flutter reporter and exits 0 (honest skip, not a failure).
+  # error fails here. A `markTestSkipped` exits 0 on its own (the
+  # reporter counts it as passed), so the scenario's drive-log check is
+  # what turns a fired hatch red — see `expected_drive_skips.txt`.
   local rc=0
   bash "${SINGLE_AVD}" "${target}" || rc=$?
 

@@ -22,7 +22,6 @@
 //! ```
 
 pub mod geohash;
-pub mod nostr;
 pub(crate) mod ttl;
 pub mod types;
 

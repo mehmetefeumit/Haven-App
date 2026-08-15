@@ -57,6 +57,37 @@
 # (3) landed precisely because nothing restarted a dead engine. A network
 # drop is its realistic trigger, and this lane is its runtime proof.
 #
+# # The BACKLOG import — the one publisher that survives the blackout
+#
+# A reconnect proof is only half the story: the other half is whether an
+# event a PEER put on the relay WHILE THE RECEIVER WAS PARTITIONED is
+# replayed and decrypted afterwards. Bob and Alice share one emulator, so
+# Bob cannot publish across the outage — but he can ENCRYPT across it
+# (purely local MLS work), and the host can put the result on the relay for
+# him.
+#
+# So, inside the blackout and in this order:
+#
+#   1. the drive encrypts Bob's backlog kind-445, writes it to the app's
+#      private data dir, re-probes the relay to confirm it is STILL
+#      unreachable, and prints `[b9] BACKLOG_STAGED offline=true path=…`;
+#   2. this script reads the file with `adb exec-out run-as` — adb rides the
+#      emulator's control channel, not the guest IP stack, so airplane mode
+#      does not touch it — and imports it with `strfry import` INSIDE the
+#      relay container;
+#   3. only then is connectivity restored.
+#
+# The ordering is enforced by this script's control flow, never by comparing
+# a guest clock to a host clock.
+#
+# A host-side WebSocket publisher was rejected twice over. The host cannot
+# mint a genuine kind-445 (that needs the circle's MLS exporter secret, which
+# must never leave the device), and layer L2 REJECTs tcp/<strfry> in the host
+# OUTPUT chain, which applies to locally-generated packets too — during the
+# blackout the host cannot reach the relay's published port either. A writer
+# inside the container is the only one that survives, and `strfry import` is
+# that writer.
+#
 # # The oracle
 #
 #   1. SEQUENCE_COMPLETE                the drive finished (checked FIRST, so
@@ -66,20 +97,48 @@
 #   3. ENGINE_BASELINE running=true     anti-vacuity: something was connected
 #   4. OUTAGE_OBSERVED                  the drop reached the app process
 #   5. NETWORK_RESTORED                 connectivity came back
-#   6. PEER_PUBLISHED_POST_OUTAGE       something was sent to receive
-#   7. RECEIVE_RESUMED ms=<N>           THE HEADLINE: a PEER event decrypted
-#                                       after the reconnect
+#   6. BACKLOG_STAGED offline=true      + [b9-host] BACKLOG_IMPORTED
+#      airplane_before/after=1 prescan=0 postscan=1, + BACKLOG_ON_RELAY
+#      served=true                      the event really did reach the relay
+#                                       DURING a real partition, and the
+#                                       RUNNING relay really does serve it
+#   7. PEER_PUBLISHED_POST_OUTAGE       something was sent to receive
+#   8. RECEIVE_RESUMED ms=<N>           a PEER event decrypted after the
+#                                       reconnect
+#   9. BACKLOG_REPLAYED ms=<N>          THE HEADLINE: the event imported
+#                                       while the device was in airplane mode
+#                                       was decrypted after the reconnect
 #
-# Step 7 is the point. A socket that reopened proves nothing a user cares
-# about, so the drive asserts on the peer's NEW coordinates reaching
+# Steps 8 and 9 are the point. A socket that reopened proves nothing a user
+# cares about, so the drive asserts on DECRYPTED COORDINATES reaching
 # `memberLocationsProvider` — the pre-outage entry survives the blackout, so
 # a presence check would pass on an app whose receive path never came back.
+# The two use different SENDERS (Bob backlogs, Carol publishes live) because
+# the cache keeps one latest entry per sender and a post-restore event from
+# Bob would overwrite his own backlog entry before a poll could see it.
 #
-# Steps 2, 3, 4 and 6 all exist to stop step 7 passing or failing vacuously:
-# without a baseline, "it did not arrive" is unattributable; without a
-# running engine there was no subscription to drop; without an observed
-# outage nothing was disconnected; and without a published peer event there
-# was nothing to receive.
+# Steps 2, 3, 4, 6 and 7 all exist to stop 8 and 9 passing or failing
+# vacuously: without a baseline, "it did not arrive" is unattributable;
+# without a running engine there was no subscription to drop; without an
+# observed outage nothing was disconnected; without step 6 the "backlog" was
+# never on the relay, or was never out of the device's reach, or was put
+# there by the device itself; and without a published peer event there was
+# nothing to receive.
+#
+# # What one emulator still cannot prove, stated so nobody over-reads a green
+#
+# Bob's process is Alice's process. This proves that an event which reached
+# the relay while the receiver was partitioned is replayed and decrypted
+# after reconnect. It does NOT prove a second physical device kept publishing
+# across the blackout, and it cannot: the publisher and the receiver share
+# one network stack. Everything except the transport of that one event is
+# real — genuine MLS ciphertext from the production FFI, signed, and accepted
+# by strfry's ordinary ingest validation.
+#
+# Separately, `BACKLOG_MISSED reason=expired` is a run on which the backlog
+# claim went UNPROVEN rather than one on which it passed: see step (9) in
+# b9_run_oracle for why that is not scored as a defect and why it cannot be
+# reached by an import that quietly did nothing.
 #
 # Usage:
 #   run-b9-network-reconnect.sh [<apk> [<target.dart>]]
@@ -89,6 +148,7 @@
 #   B9_DRIVE_TIMEOUT        per-drive bound. Default 20m.
 #   B9_STRFRY_PORT          host port strfry is published on. Default 7777.
 #   B9_SKIP_HOST_BLOCK      set to 1 to skip layer L2 (local dev).
+#   STRFRY_CONTAINER        relay container name. Default 'strfry'.
 
 set -Eeuo pipefail
 
@@ -100,6 +160,12 @@ readonly SCRIPT_DIR="${script_dir}"
 # hermetic self-test runs against a fully-wired script.
 # shellcheck source=tooling/e2e/ci/drive-log-lib.sh
 source "${SCRIPT_DIR}/drive-log-lib.sh"
+
+# Shared `detect_strfry_bin`. The candidate path list is a property of the
+# pinned relay IMAGE, not of this lane, and B5 probes the same one — sourced
+# rather than copied so the two cannot drift.
+# shellcheck source=tooling/e2e/ci/strfry-lib.sh
+source "${SCRIPT_DIR}/strfry-lib.sh"
 
 # ---------------------------------------------------------------------------
 # VERBATIM markers. MUST match the `k*Marker` constants in
@@ -129,7 +195,25 @@ readonly MARK_PEER_PUB_FAIL='[b9] PEER_PUBLISH_FAILED'
 readonly MARK_RESUMED='[b9] RECEIVE_RESUMED'
 readonly MARK_RECEIVE_DEAD='[b9] RECEIVE_DEAD'
 readonly MARK_ENGINE_RECOVERED='[b9] ENGINE_AFTER_RECOVERY'
+readonly MARK_BACKLOG_STAGED='[b9] BACKLOG_STAGED'
+readonly MARK_BACKLOG_STAGE_FAIL='[b9] BACKLOG_STAGE_FAILED'
+readonly MARK_BACKLOG_ON_RELAY='[b9] BACKLOG_ON_RELAY'
+readonly MARK_BACKLOG_REPLAYED='[b9] BACKLOG_REPLAYED'
+readonly MARK_BACKLOG_MISSED='[b9] BACKLOG_MISSED'
 readonly MARK_COMPLETE='[b9] SEQUENCE_COMPLETE'
+
+# HOST-side markers, written by THIS script to its own log rather than by the
+# drive. They record facts only the host can know — that the import ran while
+# the guest was in airplane mode, and that the relay's store changed because
+# of it — and the oracle reads them alongside the drive's capture.
+readonly MARK_HOST_IMPORTED='[b9-host] BACKLOG_IMPORTED'
+readonly MARK_HOST_IMPORT_FAIL='[b9-host] BACKLOG_IMPORT_FAILED'
+
+# Declared HERE rather than in the Config block below because the hermetic
+# --self-test needs it too: the device path the drive prints is anchored to
+# this package, and a self-test with its own copy of the string would keep
+# passing after a rename that broke the real export.
+readonly PKG="com.oblivioustech.haven"
 
 # ---------------------------------------------------------------------------
 # Oracle predicates — pure text, no device. Everything the lane's verdict
@@ -174,6 +258,72 @@ b9_marker_flag() {
       | sed "s/^${key}=//" | tail -1 | tr -d '\r'; } || true
 }
 
+# b9_marker_path <logfile> <marker> — echoes the LAST `path=<value>` on any
+# line carrying <marker>.
+#
+# Separate from b9_marker_flag because that helper's value charset
+# deliberately excludes `/`: reusing it here would silently truncate
+# `/data/user/0/...` to the empty string and the lane would report "the drive
+# printed no path" for a drive that printed a perfectly good one.
+b9_marker_path() {
+  local logfile="${1:-}" marker="${2:-}"
+  [[ -f "${logfile}" ]] || return 0
+  { grep -aF -- "${marker}" "${logfile}" 2>/dev/null \
+      | grep -aoE 'path=[A-Za-z0-9._/-]+' \
+      | sed 's/^path=//' | tail -1 | tr -d '\r'; } || true
+}
+
+# b9_event_id <file> — echoes the 64-hex `id` of the Nostr event in <file>.
+#
+# Anchored on the `"id"` KEY, never on the shape: a kind-445 carries a 64-hex
+# `pubkey` and a 128-hex `sig` too, and a bare hex match would return
+# whichever came first in the serialization.
+b9_event_id() {
+  local f="${1:-}"
+  [[ -f "${f}" ]] || return 0
+  { grep -aoE '"id"[[:space:]]*:[[:space:]]*"[0-9a-f]{64}"' "${f}" 2>/dev/null \
+      | grep -aoE '[0-9a-f]{64}' | head -1; } || true
+}
+
+# b9_prune_empty_export_stderr <path> — delete <path> when it is 0 bytes.
+#
+# THE LANE-CANNOT-BE-GREEN GUARD. `adb exec-out run-as … cat 2>FILE` creates
+# FILE at redirection time, so a SUCCESSFUL export leaves it empty — and the
+# mandatory secret scan treats a 0-byte `*.log` as UNUSABLE (rc=3), which
+# `cleanup` turns into rc=1. Keeping it would make B9 red on exactly the runs
+# where everything worked, which is what the relay-poll log did to B5 in CI
+# runs 30925179141 and 30964250098.
+#
+# Deliberately narrow: ONLY this capture is legitimately empty on a healthy
+# run. Every other file the lane writes (logcat, the drive log, the toggle
+# log, the host import record, the exported event) is non-empty whenever its
+# phase ran, so an empty one there IS the evidence the scanner says it is and
+# must never be pruned. A non-empty stderr is kept — it is the diagnosis for a
+# refused `run-as`.
+#
+# Extracted above the `--self-test` dispatch so the property is pinned by a
+# fixture; it belongs to `cleanup`, which no fixture can reach.
+b9_prune_empty_export_stderr() {
+  local f="${1:-}"
+  [[ -e "${f}" ]] || return 0
+  [[ -s "${f}" ]] || rm -f -- "${f}"
+}
+
+# b9_device_path_ok <path> <package> — 0 when <path> is a file inside
+# <package>'s own private data dir.
+#
+# The path comes out of a log line, and it is about to become an argument to
+# `adb exec-out run-as`. Constraining it to the app's own data dir keeps a
+# corrupted capture from pointing the export at something else, and rejecting
+# `..` keeps the anchor from being walked out of.
+b9_device_path_ok() {
+  local p="${1:-}" pkg="${2:-}" pkg_re
+  [[ -n "${pkg}" ]] || return 1
+  [[ "${p}" != *".."* ]] || return 1
+  pkg_re="${pkg//./\\.}"
+  [[ "${p}" =~ ^/data/(data|user/0)/${pkg_re}/[A-Za-z0-9._/-]+$ ]]
+}
+
 # ---------------------------------------------------------------------------
 # The oracle itself, as a testable function over a capture file.
 #
@@ -189,7 +339,7 @@ b9_note() { printf '  NOTE: %s\n' "$*"; }
 b9_finding() { B9_FINDINGS+=("$*"); }
 
 b9_run_oracle() {
-  local log="${1:-}"
+  local log="${1:-}" hostlog="${2:-}"
   B9_FINDINGS=()
 
   if [[ ! -f "${log}" ]]; then
@@ -261,7 +411,92 @@ HAVEN_B9_OUTAGE chain teardown."
 the network came back."
   fi
 
-  # (6) Something was sent to receive.
+  # (6) THE BACKLOG PRECONDITIONS. Every one of these is a HARNESS statement:
+  #     a failure here says the lane never created the situation it claims,
+  #     and NONE of them may ever be read as a product defect. They are the
+  #     reason a no-op import cannot reach a green run — the route by which
+  #     this whole addition would otherwise be silently vacuous.
+  if b9_has_marker "${log}" "${MARK_BACKLOG_STAGE_FAIL}"; then
+    b9_finding "the drive could not produce the backlog event at all \
+('${MARK_BACKLOG_STAGE_FAIL}'), so there was nothing for the host to import \
+and the backlog-replay proof did not run. HARNESS failure — look at the \
+encrypt/write step, not at the receive path."
+  elif ! b9_has_marker "${log}" "${MARK_BACKLOG_STAGED}"; then
+    b9_finding "no '${MARK_BACKLOG_STAGED}' line — the drive never staged a \
+backlog event, so nothing below is a backlog observation."
+  else
+    local staged_offline
+    staged_offline="$(b9_marker_flag "${log}" "${MARK_BACKLOG_STAGED}" \
+      'offline')"
+    if [[ "${staged_offline}" != "true" ]]; then
+      b9_finding "the app process could still reach the relay when the \
+backlog event was staged (${MARK_BACKLOG_STAGED} offline=${staged_offline:-\
+<unreadable>}). The event the host then imported was NOT out of this \
+device's reach, so 'it could only have arrived by replay' does not hold."
+    fi
+  fi
+
+  if [[ -z "${hostlog}" || ! -f "${hostlog}" ]]; then
+    b9_finding "no host-side backlog-import record at \
+'${hostlog:-<none>}' — without it there is no evidence the event ever \
+reached the relay DURING the partition, which is the entire claim."
+  elif b9_has_marker "${hostlog}" "${MARK_HOST_IMPORT_FAIL}"; then
+    b9_finding "the host could not import the backlog event \
+(${MARK_HOST_IMPORT_FAIL} stage=$(b9_marker_flag "${hostlog}" \
+"${MARK_HOST_IMPORT_FAIL}" 'stage')). HARNESS failure — see the detail= line \
+in ${hostlog}. Any backlog verdict below is a CONSEQUENCE of this."
+  elif ! b9_has_marker "${hostlog}" "${MARK_HOST_IMPORTED}"; then
+    b9_finding "no '${MARK_HOST_IMPORTED}' line — the import phase never \
+reported either way, so the relay's contents during the blackout are unknown."
+  else
+    # Each field is a separate claim, and each is asserted, because each has
+    # its own way of going quietly wrong: a toggle that did not take, an
+    # event the DEVICE had already published, and an import that returned 0
+    # while writing nothing.
+    local air_before air_after prescan postscan
+    air_before="$(b9_marker_flag "${hostlog}" "${MARK_HOST_IMPORTED}" \
+      'airplane_before')"
+    air_after="$(b9_marker_flag "${hostlog}" "${MARK_HOST_IMPORTED}" \
+      'airplane_after')"
+    prescan="$(b9_marker_flag "${hostlog}" "${MARK_HOST_IMPORTED}" 'prescan')"
+    postscan="$(b9_marker_flag "${hostlog}" "${MARK_HOST_IMPORTED}" 'postscan')"
+    if [[ "${air_before}" != "1" || "${air_after}" != "1" ]]; then
+      b9_finding "the backlog event was imported while the guest was NOT \
+verifiably in airplane mode (airplane_before=${air_before:-<unreadable>} \
+airplane_after=${air_after:-<unreadable>}). The device may have been able to \
+receive it live, so a later decrypt proves nothing about backlog replay."
+    fi
+    if [[ "${prescan}" != "0" ]]; then
+      b9_finding "the relay ALREADY held the staged event before the import \
+(prescan=${prescan}). It reached the relay from the DEVICE, not from the \
+host, so it is not backlog and the partition is not what delivered it."
+    fi
+    if [[ "${postscan}" == "0" ]]; then
+      b9_finding "the import reported success but the relay did not hold the \
+event afterwards (postscan=0) — a SILENT NO-OP import. Everything downstream \
+would have failed for a reason that has nothing to do with the app."
+    elif [[ -z "${postscan}" ]]; then
+      b9_finding "the host import line carries no postscan= reading, so \
+there is no evidence the relay's store actually changed."
+    fi
+  fi
+
+  local backlog_served
+  backlog_served="$(b9_marker_flag "${log}" "${MARK_BACKLOG_ON_RELAY}" \
+    'served')"
+  if [[ -z "${backlog_served}" ]]; then
+    b9_finding "no '${MARK_BACKLOG_ON_RELAY} served=<bool>' line — the drive \
+never asked the RUNNING relay for the imported event, so an import that \
+landed in LMDB but was never served is indistinguishable from one that was."
+  elif [[ "${backlog_served}" != "true" ]]; then
+    b9_finding "the running relay did NOT serve the imported backlog event \
+over a real subscription (${MARK_BACKLOG_ON_RELAY} \
+served=${backlog_served}). HARNESS failure: \`strfry import\` writes straight \
+to LMDB, and this is the check that the relay's query path sees it. Alice \
+could not have received what the relay would not send."
+  fi
+
+  # (7) Something was sent to receive.
   if b9_has_marker "${log}" "${MARK_PEER_PUB_FAIL}"; then
     b9_finding "the peer could not publish after connectivity returned \
 ('${MARK_PEER_PUB_FAIL}'). The receive verdict below is UNREADABLE: a silent \
@@ -273,7 +508,7 @@ confirmed onto the relay, so 'the location never arrived' says nothing about \
 the receive path."
   fi
 
-  # (7) THE HEADLINE — a PEER EVENT DECRYPTED AFTER THE RECONNECT.
+  # (8) THE HEADLINE — a PEER EVENT DECRYPTED AFTER THE RECONNECT.
   if ! b9_has_marker "${log}" "${MARK_RESUMED}"; then
     if b9_has_marker "${log}" "${MARK_RECEIVE_DEAD}"; then
       b9_finding "live location receive did NOT recover after the network \
@@ -295,7 +530,63 @@ returned, with \
 $(b9_marker_number "${log}" "${MARK_RESUMED}" 'republishes') re-publish(es)."
   fi
 
-  # (8) EVIDENCE ONLY — which recovery mechanism this run exercised. An
+  # (9) THE BACKLOG HEADLINE — an event that reached the relay while this
+  #     device was in airplane mode, decrypted after the reconnect.
+  #
+  #     `reason=expired` is deliberately NOT a finding. The kind-445 wire TTL
+  #     is a fixed created_at + 228 s and strfry deletes on its own cron, so a
+  #     recovery that legitimately took the slow MapShell heal path can outlive
+  #     the event — and scoring that as a defect is exactly the "report a
+  #     product defect every time the slow path ran" mistake the recovery
+  #     budget above exists to avoid. It cannot be abused into a silent green,
+  #     and now for two independent reasons: the precondition block above
+  #     hard-fails without `${MARK_BACKLOG_ON_RELAY} served=true`, and the
+  #     drive no longer PRINTS `expired` when the relay never served the event
+  #     — that case is its own `reason=unserved`, so an import that reached
+  #     LMDB and nothing else can no longer borrow the TTL's excuse.
+  if b9_has_marker "${log}" "${MARK_BACKLOG_REPLAYED}"; then
+    b9_note "BACKLOG PROVEN: an event imported to the relay while the guest \
+was in airplane mode was decrypted \
+$(b9_marker_number "${log}" "${MARK_BACKLOG_REPLAYED}" 'ms')ms after \
+connectivity returned."
+  else
+    case "$(b9_marker_flag "${log}" "${MARK_BACKLOG_MISSED}" 'reason')" in
+      live)
+        b9_finding "THE BACKLOG WAS DROPPED. The relay was STILL SERVING the \
+imported event when the post-restore peer location arrived, so live receive \
+was demonstrably back while the event was demonstrably there, and Alice never \
+decrypted it (${MARK_BACKLOG_MISSED} reason=live). The reconnect replayed the \
+gap and the app discarded what came back. This is a receive-path defect, not \
+a timing artefact — do NOT widen a window to make it pass."
+        ;;
+      expired)
+        b9_note "the backlog proof did NOT run on this run: the relay had \
+already GC'd the imported event by the time live receive came back, which the \
+228 s kind-445 TTL permits when recovery takes the slow heal path. Read \
+'${MARK_ENGINE_OUTAGE}' below for which path ran. The lane is green on its \
+other assertions; the backlog claim is simply unproven here."
+        ;;
+      none)
+        b9_note "the backlog proof did not run because live receive never \
+came back at all — the finding is the ${MARK_RECEIVE_DEAD} one above."
+        ;;
+      unserved)
+        b9_note "the backlog proof did not run because the RUNNING relay \
+never served the imported event in the first place — the finding is the \
+${MARK_BACKLOG_ON_RELAY} served=false one above. Reported separately from \
+'expired' on purpose: an event the relay never served was not GC'd by the \
+228 s TTL, and saying so would send the next reader to the wrong half."
+        ;;
+      *)
+        b9_finding "neither '${MARK_BACKLOG_REPLAYED}' nor a readable \
+'${MARK_BACKLOG_MISSED} reason=<live|expired|none|unserved>' was recorded — \
+the drive never reached the backlog verdict, so this run says nothing about \
+backlog replay either way."
+        ;;
+    esac
+  fi
+
+  # (10) EVIDENCE ONLY — which recovery mechanism this run exercised. An
   #     engine that survived the outage recovered through the relay pool's
   #     own reconnect; one that died needed MapShell's self-heal, which is
   #     an order of magnitude slower and is the path that had no runtime
@@ -334,13 +625,14 @@ the one this lane exists to prove."
 # or fail for a reason that is not about reconnect at all.
 # ---------------------------------------------------------------------------
 run_self_test() {
-  local tmp fails=0
+  local tmp fails=0 checks=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
 
   _case() { # _case <label> <expected-rc> <actual-rc>
     local label="$1" want="$2" got="$3"
+    checks=$(( checks + 1 ))
     if [[ "${got}" -eq "${want}" ]]; then
       printf '  \033[1;32mPASS\033[0m %s\n' "${label}"
     else
@@ -352,6 +644,7 @@ run_self_test() {
 
   _eq_case() { # _eq_case <label> <expected> <actual>
     local label="$1" want="$2" got="$3"
+    checks=$(( checks + 1 ))
     if [[ "${got}" == "${want}" ]]; then
       printf '  \033[1;32mPASS\033[0m %s\n' "${label}"
     else
@@ -361,12 +654,18 @@ run_self_test() {
     fi
   }
 
+  # The device path the drive really prints, reused by every fixture so a
+  # change to b9_device_path_ok cannot pass here while failing in the lane.
+  local dev_path="/data/user/0/${PKG}/app_flutter/b9_backlog_event.json"
+
   # A complete, PASSING capture: live before, genuinely disconnected,
-  # reconnected, and a PEER EVENT decrypted afterwards. Written as a function
-  # so each negative fixture mutates exactly one line and nothing else.
-  _fixture_full() { # _fixture_full <outfile> [recovery-line]
+  # reconnected, a PEER EVENT decrypted afterwards, and the imported backlog
+  # event decrypted too. Written as a function so each negative fixture
+  # mutates exactly one line and nothing else.
+  _fixture_full() { # _fixture_full <outfile> [recovery-line] [backlog-line]
     local out="$1"
     local rec="${2:-I/flutter ( 40): ${MARK_RESUMED} ms=41210 republishes=1}"
+    local back="${3:-I/flutter ( 40): ${MARK_BACKLOG_REPLAYED} ms=18400}"
     printf '%s\n' \
       "I/flutter ( 40): ${MARK_ARMED}" \
       "I/flutter ( 40): ${MARK_BASELINE} ms=1840" \
@@ -374,16 +673,29 @@ run_self_test() {
       "I/flutter ( 40): ${MARK_AWAIT_DOWN}" \
       "I/flutter ( 40): ${MARK_OUTAGE} ms=9120" \
       "I/flutter ( 40): ${MARK_ENGINE_OUTAGE} running=false" \
+      "I/flutter ( 40): ${MARK_BACKLOG_STAGED} offline=true path=${dev_path}" \
       "I/flutter ( 40): ${MARK_AWAIT_UP}" \
       "I/flutter ( 40): ${MARK_RESTORED} ms=6030" \
+      "I/flutter ( 40): ${MARK_BACKLOG_ON_RELAY} served=true" \
       "I/flutter ( 40): ${MARK_PEER_PUB}" \
       "${rec}" \
+      "${back}" \
       "I/flutter ( 40): ${MARK_ENGINE_RECOVERED} running=true" \
       "I/flutter ( 40): ${MARK_COMPLETE}" \
       > "${out}"
   }
 
+  # The host-side import record. Its default is the only combination that
+  # means "a genuine event reached the relay during a genuine partition".
+  _fixture_host() { # _fixture_host <outfile> [line]
+    local out="$1"
+    local line="${2:-${MARK_HOST_IMPORTED} airplane_before=1 airplane_after=1 \
+prescan=0 postscan=1}"
+    printf '12:00:00 %s\n' "${line}" > "${out}"
+  }
+
   echo "run-b9-network-reconnect.sh --self-test"
+  _fixture_host "${tmp}/host.log"
 
   # --- b9_has_marker ------------------------------------------------------
   # (1) A raw drive-log line (no logcat prefix).
@@ -454,8 +766,9 @@ run_self_test() {
   #      receive never came back. MUST be reported, or the lane blesses the
   #      defect it exists to find.
   _fixture_full "${tmp}/dead.log" \
-    "I/flutter ( 40): ${MARK_RECEIVE_DEAD} republishes=7"
-  rc=0; b9_run_oracle "${tmp}/dead.log" >/dev/null || rc=1
+    "I/flutter ( 40): ${MARK_RECEIVE_DEAD} republishes=7" \
+    "I/flutter ( 40): ${MARK_BACKLOG_MISSED} reason=none"
+  rc=0; b9_run_oracle "${tmp}/dead.log" "${tmp}/host.log" >/dev/null || rc=1
   _case "never-recovered capture is REPORTED" 1 "${rc}"
   if (( rc == 1 )) && [[ "${B9_FINDINGS[*]}" != *"did NOT recover"* ]]; then
     printf '  \033[1;31mFAIL\033[0m never-recovered finding does not name the recovery defect\n' >&2
@@ -465,7 +778,7 @@ run_self_test() {
   # (12) THE HEALTHY APP — identical except that the peer event arrived.
   #      Must PASS, or an oracle hard-coded to red would look correct above.
   _fixture_full "${tmp}/ok.log"
-  rc=0; b9_run_oracle "${tmp}/ok.log" >/dev/null || rc=1
+  rc=0; b9_run_oracle "${tmp}/ok.log" "${tmp}/host.log" >/dev/null || rc=1
   _case "fully-recovered capture PASSES" 0 "${rc}"
 
   # (13) VACUITY ROUTE A — the engine was never running, so there was no
@@ -473,7 +786,7 @@ run_self_test() {
   _fixture_full "${tmp}/noengine.log"
   sed -i 's/ENGINE_BASELINE running=true/ENGINE_BASELINE running=false/' \
     "${tmp}/noengine.log"
-  rc=0; b9_run_oracle "${tmp}/noengine.log" >/dev/null || rc=1
+  rc=0; b9_run_oracle "${tmp}/noengine.log" "${tmp}/host.log" >/dev/null || rc=1
   _case "engine never running fails as vacuous" 1 "${rc}"
   if (( rc == 1 )) && [[ "${B9_FINDINGS[*]}" != *"VACUOUS"* ]]; then
     printf '  \033[1;31mFAIL\033[0m non-running engine is not reported as vacuous\n' >&2
@@ -485,7 +798,7 @@ run_self_test() {
   #      have produced silently.
   _fixture_full "${tmp}/nodrop.log"
   sed -i "s/OUTAGE_OBSERVED ms=9120/OUTAGE_NOT_OBSERVED/" "${tmp}/nodrop.log"
-  rc=0; b9_run_oracle "${tmp}/nodrop.log" >/dev/null || rc=1
+  rc=0; b9_run_oracle "${tmp}/nodrop.log" "${tmp}/host.log" >/dev/null || rc=1
   _case "outage that never happened fails the lane" 1 "${rc}"
   if (( rc == 1 )) && [[ "${B9_FINDINGS[*]}" != *"HARNESS failure"* ]]; then
     printf '  \033[1;31mFAIL\033[0m missing outage is not attributed to the harness\n' >&2
@@ -496,16 +809,17 @@ run_self_test() {
   #      "it did not come back" is unattributable.
   _fixture_full "${tmp}/nobase.log"
   sed -i "s/BASELINE_RECEIVED ms=1840/BASELINE_DEAD/" "${tmp}/nobase.log"
-  rc=0; b9_run_oracle "${tmp}/nobase.log" >/dev/null || rc=1
+  rc=0; b9_run_oracle "${tmp}/nobase.log" "${tmp}/host.log" >/dev/null || rc=1
   _case "dead baseline fails the lane" 1 "${rc}"
 
   # (16) VACUITY ROUTE D — nothing was published after the outage, so a
   #      silent receive path and a silent send path are indistinguishable.
   _fixture_full "${tmp}/nopub.log" \
-    "I/flutter ( 40): ${MARK_RECEIVE_DEAD} republishes=0"
+    "I/flutter ( 40): ${MARK_RECEIVE_DEAD} republishes=0" \
+    "I/flutter ( 40): ${MARK_BACKLOG_MISSED} reason=none"
   sed -i "s/PEER_PUBLISHED_POST_OUTAGE/PEER_PUBLISH_FAILED reason=StateError/" \
     "${tmp}/nopub.log"
-  rc=0; b9_run_oracle "${tmp}/nopub.log" >/dev/null || rc=1
+  rc=0; b9_run_oracle "${tmp}/nopub.log" "${tmp}/host.log" >/dev/null || rc=1
   _case "unsent peer event fails the lane" 1 "${rc}"
   if (( rc == 1 )) && [[ "${B9_FINDINGS[*]}" != *"UNREADABLE"* ]]; then
     printf '  \033[1;31mFAIL\033[0m unsent peer event is not reported as unreadable\n' >&2
@@ -520,7 +834,7 @@ run_self_test() {
     "I/flutter ( 40): ${MARK_ENGINE_BASE} running=true" \
     "I/flutter ( 40): ${MARK_AWAIT_DOWN}" \
     > "${tmp}/truncated.log"
-  rc=0; b9_run_oracle "${tmp}/truncated.log" >/dev/null || rc=1
+  rc=0; b9_run_oracle "${tmp}/truncated.log" "${tmp}/host.log" >/dev/null || rc=1
   _case "truncated capture fails the lane" 1 "${rc}"
   if (( rc == 1 )) && [[ "${B9_FINDINGS[0]}" != *"${MARK_COMPLETE}"* ]]; then
     printf '  \033[1;31mFAIL\033[0m truncated capture does not report the drive first\n' >&2
@@ -528,7 +842,7 @@ run_self_test() {
   fi
 
   # (18) A missing capture proves nothing and must never pass.
-  rc=0; b9_run_oracle "${tmp}/absent.log" >/dev/null || rc=1
+  rc=0; b9_run_oracle "${tmp}/absent.log" "${tmp}/host.log" >/dev/null || rc=1
   _case "missing capture fails the lane" 1 "${rc}"
 
   # (19) The drive-log failure predicate this lane leans on is exercised by
@@ -537,11 +851,247 @@ run_self_test() {
   rc=0; declare -F drive_log_reports_test_failure >/dev/null || rc=1
   _case "drive-log failure predicate is in scope" 0 "${rc}"
 
+  # (19b) Same for the shared strfry reader. Its real probe needs docker, so
+  #      what is checkable here is that the `source` is still wired — a lane
+  #      that lost it would fail at the import, twenty minutes in.
+  rc=0; declare -F detect_strfry_bin >/dev/null || rc=1
+  _case "shared strfry reader is in scope" 0 "${rc}"
+
+  # --- b9_prune_empty_export_stderr ---------------------------------------
+  #
+  # THE LANE-CANNOT-BE-GREEN FIXTURE. `adb exec-out … 2>FILE` creates FILE at
+  # redirection time, so a SUCCESSFUL export leaves 0 bytes — and the mandatory
+  # secret scan calls a 0-byte `*.log` UNUSABLE (rc=3), which `cleanup` turns
+  # into rc=1. Without the prune, B9 was red on exactly the runs where the
+  # export worked, the same way the relay-poll log made B5 unpassable in CI
+  # runs 30925179141 and 30964250098.
+  local prunedir="${tmp}/prune"
+  mkdir -p "${prunedir}"
+  printf 'logcat content\n' > "${prunedir}/logcat.b9.log"
+  printf '{"id":"aa"}\n' > "${prunedir}/backlog-event.b9.log"
+  : > "${prunedir}/backlog-export-stderr.b9.log"   # a SUCCESSFUL export
+  b9_prune_empty_export_stderr "${prunedir}/backlog-export-stderr.b9.log"
+  # (19c) The empty capture is gone…
+  _eq_case "an empty export stderr is dropped, not asserted" "0" \
+    "$(find "${prunedir}" -name 'backlog-export-stderr.b9.log' \
+       | grep -ac . || true)"
+  # (19d) …so the scan a PASSING lane runs comes back clean.
+  _case "…so a PASSING lane's log dir still scans clean" 0 \
+    "$(bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scan-logs-for-secrets.sh" \
+       "${prunedir}" >/dev/null 2>&1; echo $?)"
+  # (19e) A NON-empty one is the diagnosis for a refused `run-as` and is KEPT —
+  #      pruning by name rather than by emptiness would delete the evidence.
+  printf 'run-as: package not debuggable\n' \
+    > "${prunedir}/backlog-export-stderr.b9.log"
+  b9_prune_empty_export_stderr "${prunedir}/backlog-export-stderr.b9.log"
+  _eq_case "a non-empty export stderr is kept" "1" \
+    "$(find "${prunedir}" -name 'backlog-export-stderr.b9.log' \
+       | grep -ac . || true)"
+
+  # --- b9_event_id --------------------------------------------------------
+  # A realistic kind-445 line: `id`, `pubkey` and `sig` are all hex, and the
+  # first two are the same width. Only the `id` may ever be returned.
+  printf '%s\n' \
+    '{"id":"aa11bb22cc33dd44ee55ff6607788990aa11bb22cc33dd44ee55ff6607788990","pubkey":"11111111111111111111111111111111111111111111111111111111111111111","kind":445,"sig":"ff00"}' \
+    > "${tmp}/evt.json"
+  # (20) THE FIELD, NOT THE SHAPE.
+  _eq_case "event id is read from the \"id\" key" \
+    "aa11bb22cc33dd44ee55ff6607788990aa11bb22cc33dd44ee55ff6607788990" \
+    "$(b9_event_id "${tmp}/evt.json")"
+
+  # (21) A pubkey-first serialization must not answer for the id — this is
+  #      the exact way a bare `[0-9a-f]{64}` match would import the wrong id
+  #      and then "prove" the relay never received it.
+  printf '%s\n' \
+    '{"pubkey":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","id":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}' \
+    > "${tmp}/evt2.json"
+  _eq_case "pubkey does not answer for the id" \
+    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" \
+    "$(b9_event_id "${tmp}/evt2.json")"
+
+  # (22) An empty export yields nothing, never a stale or partial id.
+  : > "${tmp}/evt3.json"
+  _eq_case "an empty export yields no id" "" "$(b9_event_id "${tmp}/evt3.json")"
+
+  # --- b9_marker_path -----------------------------------------------------
+  printf '%s\n' \
+    "I/flutter ( 40): ${MARK_BACKLOG_STAGED} offline=true path=${dev_path}" \
+    > "${tmp}/path.log"
+  # (23) THE REASON THIS HELPER EXISTS: b9_marker_flag's value charset stops
+  #      at the first `/`, so reusing it here would silently yield "" and the
+  #      lane would blame the drive for a path it printed correctly.
+  _eq_case "device path survives its slashes" "${dev_path}" \
+    "$(b9_marker_path "${tmp}/path.log" "${MARK_BACKLOG_STAGED}")"
+
+  # --- b9_device_path_ok --------------------------------------------------
+  # (24) The real shape the drive prints.
+  rc=0; b9_device_path_ok "${dev_path}" "${PKG}" || rc=1
+  _case "the app's own data path is accepted" 0 "${rc}"
+
+  # (25) Another app's data dir is not ours to read.
+  rc=0; b9_device_path_ok "/data/user/0/com.example.other/f.json" "${PKG}" \
+    || rc=1
+  _case "another package's path is rejected" 1 "${rc}"
+
+  # (26) The anchor must not be walkable.
+  rc=0; b9_device_path_ok "/data/user/0/${PKG}/../../x" "${PKG}" || rc=1
+  _case "a traversal out of the anchor is rejected" 1 "${rc}"
+
+  # (27) A path outside /data entirely.
+  rc=0; b9_device_path_ok "/sdcard/b9.json" "${PKG}" || rc=1
+  _case "an external-storage path is rejected" 1 "${rc}"
+
+  # (28) THE DOT TRAP. `.` is a regex wildcard, so an unescaped package would
+  #      accept a look-alike package name from a hostile-ish capture.
+  rc=0; b9_device_path_ok "/data/user/0/comXoblivioustechXhaven/f" "${PKG}" \
+    || rc=1
+  _case "package dots are matched literally" 1 "${rc}"
+
+  # --- the backlog branches of the oracle ---------------------------------
+  # (29) THE BACKLOG DEFECT: the relay was still serving the imported event
+  #      when live receive demonstrably came back, and it was never
+  #      decrypted. This is the whole reason the addition exists and MUST be
+  #      reported.
+  _fixture_full "${tmp}/blive.log" \
+    "I/flutter ( 40): ${MARK_RESUMED} ms=41210 republishes=1" \
+    "I/flutter ( 40): ${MARK_BACKLOG_MISSED} reason=live"
+  rc=0; b9_run_oracle "${tmp}/blive.log" "${tmp}/host.log" >/dev/null || rc=1
+  _case "a dropped backlog event is REPORTED" 1 "${rc}"
+  if (( rc == 1 )) && [[ "${B9_FINDINGS[*]}" != *"BACKLOG WAS DROPPED"* ]]; then
+    printf '  \033[1;31mFAIL\033[0m dropped backlog is not named as the defect\n' >&2
+    fails=1
+  fi
+
+  # (30) THE HONEST NON-PROOF. A recovery slower than the 228 s kind-445 TTL
+  #      is correct behaviour on both sides, so it must NOT fail the lane —
+  #      and it must not be reachable without served=true, which (33) pins.
+  _fixture_full "${tmp}/bexp.log" \
+    "I/flutter ( 40): ${MARK_RESUMED} ms=280400 republishes=6" \
+    "I/flutter ( 40): ${MARK_BACKLOG_MISSED} reason=expired"
+  rc=0; b9_run_oracle "${tmp}/bexp.log" "${tmp}/host.log" >/dev/null || rc=1
+  _case "an expired backlog event does NOT fail the lane" 0 "${rc}"
+
+  # (30b) THE EXCUSE THAT MAY NOT BE BORROWED. An import that landed in LMDB
+  #      and was never SERVED is not an event the 228 s TTL removed, and the
+  #      drive must not label it `expired` — the note would send the next
+  #      reader to the TTL when the fault is the import. The run is red on the
+  #      served= finding; what this pins is that the verdict says why.
+  _fixture_full "${tmp}/bunserved.log" \
+    "I/flutter ( 40): ${MARK_RESUMED} ms=41210 republishes=1" \
+    "I/flutter ( 40): ${MARK_BACKLOG_MISSED} reason=unserved"
+  sed -i "s/BACKLOG_ON_RELAY served=true/BACKLOG_ON_RELAY served=false/" \
+    "${tmp}/bunserved.log"
+  rc=0
+  local unserved_notes
+  unserved_notes="$(b9_run_oracle "${tmp}/bunserved.log" "${tmp}/host.log")" \
+    || rc=1
+  _case "an unserved backlog verdict fails the lane" 1 "${rc}"
+  if [[ "${unserved_notes}" == *"228 s kind-445 TTL"* ]]; then
+    printf '  \033[1;31mFAIL\033[0m an unserved import is excused by the TTL\n' >&2
+    fails=1
+  fi
+  if [[ "${unserved_notes}" != *"never served the imported event"* ]]; then
+    printf '  \033[1;31mFAIL\033[0m an unserved import is not named as such\n' >&2
+    fails=1
+  fi
+
+  # (31) A drive that never reached the verdict proved nothing either way.
+  _fixture_full "${tmp}/bnone.log" \
+    "I/flutter ( 40): ${MARK_RESUMED} ms=41210 republishes=1" \
+    "I/flutter ( 40): (no backlog verdict was printed)"
+  rc=0; b9_run_oracle "${tmp}/bnone.log" "${tmp}/host.log" >/dev/null || rc=1
+  _case "a missing backlog verdict fails the lane" 1 "${rc}"
+
+  # (32) The drive could not produce a backlog event at all. The MESSAGE is
+  #      pinned for the same reason as (37): the neighbouring "no
+  #      BACKLOG_STAGED line" branch fails this fixture too, so only naming
+  #      the diagnosis keeps this from passing over a deleted one.
+  _fixture_full "${tmp}/bstage.log"
+  sed -i "s/BACKLOG_STAGED offline=true/BACKLOG_STAGE_FAILED reason=StateError/" \
+    "${tmp}/bstage.log"
+  rc=0; b9_run_oracle "${tmp}/bstage.log" "${tmp}/host.log" >/dev/null || rc=1
+  _case "an unstaged backlog event fails the lane" 1 "${rc}"
+  if (( rc == 1 )) && [[ "${B9_FINDINGS[*]}" != *"could not produce the backlog event"* ]]; then
+    printf '  \033[1;31mFAIL\033[0m an unstaged backlog event is not named as such\n' >&2
+    fails=1
+  fi
+
+  # (33) THE IMPORT THAT WROTE NOTHING. `strfry import` exiting 0 over a
+  #      rejected event is the single most dangerous silent green available
+  #      here: every app-side marker below it would still read green.
+  _fixture_full "${tmp}/bnoop.log"
+  _fixture_host "${tmp}/hostnoop.log" \
+    "${MARK_HOST_IMPORTED} airplane_before=1 airplane_after=1 prescan=0 postscan=0"
+  rc=0; b9_run_oracle "${tmp}/bnoop.log" "${tmp}/hostnoop.log" >/dev/null || rc=1
+  _case "a no-op import fails the lane" 1 "${rc}"
+  if (( rc == 1 )) && [[ "${B9_FINDINGS[*]}" != *"SILENT NO-OP"* ]]; then
+    printf '  \033[1;31mFAIL\033[0m a no-op import is not named as such\n' >&2
+    fails=1
+  fi
+
+  # (34) THE PARTITION THAT WAS NOT ONE. An import made while the guest still
+  #      had connectivity proves nothing about backlog replay.
+  _fixture_host "${tmp}/hostair.log" \
+    "${MARK_HOST_IMPORTED} airplane_before=0 airplane_after=1 prescan=0 postscan=1"
+  rc=0; b9_run_oracle "${tmp}/ok.log" "${tmp}/hostair.log" >/dev/null || rc=1
+  _case "an import outside airplane mode fails the lane" 1 "${rc}"
+
+  # (35) THE EVENT THE DEVICE PUBLISHED ITSELF. If the relay already held it,
+  #      the partition is not what delivered it.
+  _fixture_host "${tmp}/hostpre.log" \
+    "${MARK_HOST_IMPORTED} airplane_before=1 airplane_after=1 prescan=1 postscan=1"
+  rc=0; b9_run_oracle "${tmp}/ok.log" "${tmp}/hostpre.log" >/dev/null || rc=1
+  _case "an event already on the relay fails the lane" 1 "${rc}"
+
+  # (36) A recorded import failure must be reported with its stage, so the
+  #      next reader debugs the export/import and not the receive path.
+  _fixture_host "${tmp}/hostfail.log" \
+    "${MARK_HOST_IMPORT_FAIL} stage=export detail=run-as refused"
+  rc=0; b9_run_oracle "${tmp}/ok.log" "${tmp}/hostfail.log" >/dev/null || rc=1
+  _case "a failed import fails the lane" 1 "${rc}"
+  if (( rc == 1 )) && [[ "${B9_FINDINGS[*]}" != *"stage=export"* ]]; then
+    printf '  \033[1;31mFAIL\033[0m import failure does not name its stage\n' >&2
+    fails=1
+  fi
+
+  # (37) No host record at all — the lane cannot claim a partition it never
+  #      documented. The MESSAGE is pinned too: without that, deleting this
+  #      branch leaves the neighbouring "no BACKLOG_IMPORTED line" one to fail
+  #      the fixture for a different reason, and the self-test stays green over
+  #      a diagnosis that no longer exists (found by mutation).
+  rc=0; b9_run_oracle "${tmp}/ok.log" "${tmp}/absent-host.log" >/dev/null \
+    || rc=1
+  _case "a missing host import record fails the lane" 1 "${rc}"
+  if (( rc == 1 )) && [[ "${B9_FINDINGS[*]}" != *"no host-side backlog-import record"* ]]; then
+    printf '  \033[1;31mFAIL\033[0m absent host record is not named as such\n' >&2
+    fails=1
+  fi
+
+  # (38) THE LMDB-ONLY IMPORT. The bytes are in the database and the running
+  #      relay will not serve them — every app-side assertion would then fail
+  #      for a reason that is not about the app.
+  _fixture_full "${tmp}/bserved.log"
+  sed -i "s/BACKLOG_ON_RELAY served=true/BACKLOG_ON_RELAY served=false/" \
+    "${tmp}/bserved.log"
+  rc=0; b9_run_oracle "${tmp}/bserved.log" "${tmp}/host.log" >/dev/null || rc=1
+  _case "an unserved backlog event fails the lane" 1 "${rc}"
+
+  # (39) THE STAGING THAT WAS NOT OFFLINE — the drive could still reach the
+  #      relay when it staged, so the event was never out of its reach.
+  _fixture_full "${tmp}/bonline.log"
+  sed -i "s/BACKLOG_STAGED offline=true/BACKLOG_STAGED offline=false/" \
+    "${tmp}/bonline.log"
+  rc=0; b9_run_oracle "${tmp}/bonline.log" "${tmp}/host.log" >/dev/null || rc=1
+  _case "staging while still online fails the lane" 1 "${rc}"
+
   if (( fails )); then
     echo "run-b9-network-reconnect.sh --self-test: FAILURES" >&2
     return 1
   fi
-  echo "run-b9-network-reconnect.sh --self-test: all 19 fixtures passed"
+  # COUNTED, never restated: a hardcoded total goes stale the moment a
+  # fixture is added, and a self-test that misreports its own size is the
+  # first thing a reader stops trusting.
+  echo "run-b9-network-reconnect.sh --self-test: all ${checks} checks passed"
   return 0
 }
 
@@ -553,7 +1103,6 @@ fi
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-readonly PKG="com.oblivioustech.haven"
 readonly DEVICE="emulator-5554"
 readonly DRIVER_FILE="test_driver/integration_test.dart"
 readonly LOG_DIR="/tmp/b9-logs"
@@ -586,6 +1135,15 @@ fi
 # and leave up for the whole job).
 readonly HOST_CHAIN="HAVEN_B9_OUTAGE"
 
+# The relay container the backlog event is imported into. Same default as
+# start-strfry.sh's own STRFRY_CONTAINER, and read from the same variable so
+# a job that renames the container does not have to rename it twice.
+readonly STRFRY_CONTAINER="${STRFRY_CONTAINER:-strfry}"
+
+# Resolved by detect_strfry_bin at import time — the dockurr/strfry image has
+# moved the binary between paths, so it is probed rather than assumed.
+STRFRY_BIN=""
+
 # How long to wait for each of the drive's cue markers. Generous relative to
 # the drive's own internal budgets: a late marker is still usable evidence,
 # while a marker wait that fires early destroys the run.
@@ -606,6 +1164,18 @@ mkdir -p "${LOG_DIR}"
 readonly LOGCAT_FILE="${LOG_DIR}/logcat.b9.log"
 readonly DRIVE_LOG="${LOG_DIR}/flutter-drive.log"
 readonly NET_LOG="${LOG_DIR}/network-toggles.b9.log"
+
+# Host-side backlog evidence. Both named `.log` on purpose: the secret-leak
+# scanner's directory walk only picks up `*.log`, and an artifact this lane
+# uploads unscanned is exactly what the workflow's own diag step warns about.
+# The exported event is MLS ciphertext plus public keys and a signature, so
+# no pattern can fire on it — being scanned anyway is the correct default,
+# not an exception to argue for.
+readonly HOST_LOG="${LOG_DIR}/backlog-import.b9.log"
+readonly BACKLOG_FILE="${LOG_DIR}/backlog-event.b9.log"
+# `.b9.log`, not `.log.err` — the scanner's walk globs `*.log`, and a suffix
+# it does not match is an artifact this lane would upload unscanned.
+readonly BACKLOG_ERR="${LOG_DIR}/backlog-export-stderr.b9.log"
 
 # ---------------------------------------------------------------------------
 # Layer L2 — host-side REJECT of the relay port.
@@ -677,7 +1247,11 @@ cleanup() {
   if [[ -n "${LOGCAT_PID}" ]] && kill -0 "${LOGCAT_PID}" 2>/dev/null; then
     kill "${LOGCAT_PID}" 2>/dev/null || true
   fi
-  docker logs strfry > "${LOG_DIR}/strfry.final.log" 2>&1 || true
+  docker logs "${STRFRY_CONTAINER}" > "${LOG_DIR}/strfry.final.log" 2>&1 \
+    || true
+  # See b9_prune_empty_export_stderr: a SUCCESSFUL export leaves this file at
+  # 0 bytes, and a 0-byte `*.log` is fatal to the scan below.
+  b9_prune_empty_export_stderr "${BACKLOG_ERR}"
   echo "== Secret-leak scan over ${LOG_DIR} (Security Rule 6) =="
   bash "${SECRET_SCAN}" "${LOG_DIR}" || scan_rc=$?
   if (( scan_rc == 1 )); then
@@ -690,10 +1264,30 @@ cleanup() {
          "not uploaded." >&2
     rc=1
   elif (( scan_rc != 0 )); then
-    echo "ERROR: secret-leak guard could not scan the B9 logs" \
-         "(rc=${scan_rc}) — see the UNUSABLE line(s) above. Logs kept for" \
-         "triage." >&2
-    rc=1
+    # An unscannable log is only NEWS on a lane that otherwise succeeded. When
+    # the lane has already failed, the abort is WHY the capture is short or
+    # missing, and re-reporting it as a second, differently-worded ERROR buries
+    # the real cause under a downstream symptom (run-b5-permission-revocation.sh
+    # carries the same asymmetry, and the CI runs that taught it).
+    #
+    # The guard is NOT relaxed: the scan still runs unconditionally, a leak
+    # (rc=1) still escalates in the branch above, and an unscannable log on a
+    # PASSING lane is still fatal. Only the reporting changes, and only in the
+    # direction of not overwriting a more specific rc with a less specific one.
+    if (( rc == 0 )); then
+      echo "ERROR: secret-leak guard could not scan the B9 logs" \
+           "(rc=${scan_rc}) — see the UNUSABLE line(s) above. The lane" \
+           "otherwise PASSED, so this is a real capture failure: an expected" \
+           "log was never written and the privacy scan therefore proved" \
+           "nothing. Logs kept for triage." >&2
+      rc=1
+    else
+      echo "NOTE: the secret-leak guard could not scan every B9 log" \
+           "(rc=${scan_rc}) because the lane aborted before those captures" \
+           "were written — see the UNUSABLE line(s) above and the" \
+           "B9-LANE-FAIL line for the actual failure. Preserving the original" \
+           "exit code ${rc}. Logs kept for triage." >&2
+    fi
   fi
   bash "${STOP_STRFRY}" >/dev/null 2>&1 || true
   exit "${rc}"
@@ -713,6 +1307,8 @@ fail() {
     || echo "(none — the drive target reached no checkpoint at all)" >&2
   echo "---- network toggle log ----" >&2
   cat "${NET_LOG}" >&2 2>/dev/null || echo "(no toggles recorded)" >&2
+  echo "---- backlog import log ----" >&2
+  cat "${HOST_LOG}" >&2 2>/dev/null || echo "(no import attempted)" >&2
   echo "---- guest connectivity state ----" >&2
   {
     echo "airplane_mode_on=$(airplane_state)"
@@ -783,6 +1379,143 @@ wait_for_marker() {
 }
 
 # ---------------------------------------------------------------------------
+# The backlog import. See the header for WHY this, and not a host-side relay
+# client, is the publisher that survives the blackout.
+#
+# Every step is a hard gate that records WHICH one failed, because each has a
+# distinct diagnosis and lumping them together is how a lane ends up being
+# "fixed" by widening the wrong window.
+# ---------------------------------------------------------------------------
+
+# backlog_host_fail <stage> <detail...> — records a host-side import failure
+# and returns 1. Never fatal here: the drive must still be drained and
+# connectivity must still be restored, so the oracle turns this into the
+# finding at the end.
+backlog_host_fail() {
+  local stage="$1"
+  shift
+  printf '%s %s stage=%s detail=%s\n' \
+    "$(date -u +%H:%M:%S)" "${MARK_HOST_IMPORT_FAIL}" "${stage}" "$*" \
+    >> "${HOST_LOG}"
+  echo "  BACKLOG IMPORT FAILED (stage=${stage}): $*" >&2
+  return 1
+}
+
+# backlog_scan_count <event-id> — echoes how many lines the relay's store
+# returns for that id. Non-zero rc only when the scan itself could not run,
+# so "the relay would not answer" is never mistaken for "the event is absent".
+backlog_scan_count() {
+  local id="$1" out
+  out="$(docker exec "${STRFRY_CONTAINER}" "${STRFRY_BIN}" scan \
+        "{\"ids\":[\"${id}\"]}" 2>/dev/null)" || return 1
+  grep -acF -- "${id}" <<<"${out}" || true
+}
+
+# backlog_import — export the staged event off the device and put it on the
+# relay, with the guest still partitioned. 0 on success.
+backlog_import() {
+  local device_path id air_before air_after prescan postscan
+
+  # Read the toggle state FIRST. An import that ran outside the blackout
+  # proves nothing, and finding that out afterwards would mean discovering it
+  # only once the whole recovery window had already been spent.
+  air_before="$(airplane_state)"
+  if [[ "${air_before}" != "1" ]]; then
+    backlog_host_fail airplane "the guest was NOT in airplane mode when the \
+import was about to run (airplane_mode_on=${air_before:-<unreadable>}), so \
+the event would not have been out of this device's reach"
+    return 1
+  fi
+
+  device_path="$(b9_marker_path "${LOGCAT_FILE}" "${MARK_BACKLOG_STAGED}")"
+  if ! b9_device_path_ok "${device_path}" "${PKG}"; then
+    backlog_host_fail path "no usable device path on the \
+'${MARK_BACKLOG_STAGED}' line (got '${device_path:-<none>}'); the drive \
+either never staged the event or printed a path outside ${PKG}'s data dir"
+    return 1
+  fi
+
+  # `exec-out`, never `shell`: `adb shell` translates LF to CRLF, which would
+  # corrupt the signed event and turn this into an unattributable "the relay
+  # rejected it". `run-as` needs a DEBUG build — which is what
+  # build-integration-apks.sh produces.
+  if ! adb -s "${DEVICE}" exec-out run-as "${PKG}" cat "${device_path}" \
+       > "${BACKLOG_FILE}" 2>"${BACKLOG_ERR}"; then
+    backlog_host_fail export "\`adb exec-out run-as ${PKG} cat\` failed: \
+$(tr -d '\r' < "${BACKLOG_ERR}" 2>/dev/null | head -c 200). run-as \
+requires a debuggable APK."
+    return 1
+  fi
+
+  id="$(b9_event_id "${BACKLOG_FILE}")"
+  if [[ -z "${id}" ]]; then
+    backlog_host_fail parse "the exported file carries no 64-hex \"id\" \
+($(wc -c < "${BACKLOG_FILE}" 2>/dev/null || echo 0) bytes exported)"
+    return 1
+  fi
+
+  if ! detect_strfry_bin; then
+    backlog_host_fail strfry "no \`strfry\` binary in the \
+'${STRFRY_CONTAINER}' container could answer a scan"
+    return 1
+  fi
+
+  # PRE-SCAN — the anti-vacuity check that matters most. If the relay ALREADY
+  # holds this event, the DEVICE published it, and a later decrypt would say
+  # nothing whatever about a partition.
+  if ! prescan="$(backlog_scan_count "${id}")"; then
+    backlog_host_fail prescan "\`${STRFRY_BIN} scan\` failed; a relay that \
+will not answer must never be read as a relay holding nothing"
+    return 1
+  fi
+  if [[ "${prescan}" != "0" ]]; then
+    backlog_host_fail prescan "the relay already held the staged event \
+before the import (${prescan} hit(s)) — it got there from the device"
+    return 1
+  fi
+
+  # No `--no-verify`: the signature check is a feature here. It is the last
+  # thing standing between "a genuine kind-445 crossed the gap" and "some
+  # bytes were written into a database".
+  if ! docker exec -i "${STRFRY_CONTAINER}" "${STRFRY_BIN}" import \
+       < "${BACKLOG_FILE}" >> "${HOST_LOG}" 2>&1; then
+    backlog_host_fail import "\`${STRFRY_BIN} import\` returned non-zero; \
+see the lines above it in ${HOST_LOG}"
+    return 1
+  fi
+
+  # POST-SCAN — catches the silent no-op: an import that exits 0 having
+  # written nothing (a rejected event, a second LMDB env, a read-only mount).
+  if ! postscan="$(backlog_scan_count "${id}")"; then
+    backlog_host_fail postscan "\`${STRFRY_BIN} scan\` failed after the \
+import, so there is no evidence the store changed"
+    return 1
+  fi
+  if [[ "${postscan}" == "0" ]]; then
+    backlog_host_fail postscan "\`${STRFRY_BIN} import\` reported success \
+but the relay does not hold the event — a SILENT NO-OP import"
+    return 1
+  fi
+
+  # And re-read the toggle: if connectivity came back mid-import, the device
+  # may have been able to receive the event live and the claim collapses.
+  air_after="$(airplane_state)"
+  if [[ "${air_after}" != "1" ]]; then
+    backlog_host_fail airplane "connectivity returned WHILE the import was \
+running (airplane_mode_on=${air_after:-<unreadable>}), so the device may have \
+been able to receive the event live"
+    return 1
+  fi
+
+  printf '%s %s airplane_before=%s airplane_after=%s prescan=%s postscan=%s\n' \
+    "$(date -u +%H:%M:%S)" "${MARK_HOST_IMPORTED}" \
+    "${air_before}" "${air_after}" "${prescan}" "${postscan}" >> "${HOST_LOG}"
+  echo "  backlog event imported into strfry with the guest still in" \
+       "airplane mode (prescan=${prescan} postscan=${postscan})"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Phase 0 — hermetic relay + device readiness.
 # ---------------------------------------------------------------------------
 echo "Phase 0/6 — starting hermetic strfry..."
@@ -829,6 +1562,7 @@ done
 # ---------------------------------------------------------------------------
 echo "Phase 3/6 — verifying the guest starts with connectivity..."
 : > "${NET_LOG}"
+: > "${HOST_LOG}"
 if ! set_airplane 0; then
   fail "could not put the guest into a known-connected state:" \
        "\`settings get global airplane_mode_on\` did not read 0 after" \
@@ -888,10 +1622,21 @@ unreachability, NOT device-wide network loss"
   echo "Phase 4/6 — waiting for the outage window to complete" \
        "(${MARK_AWAIT_UP})..."
   if wait_for_marker "${MARK_AWAIT_UP}" "${OUTAGE_MARKER_TIMEOUT}"; then
+    # THE BACKLOG IMPORT GOES HERE, and only here. The drive prints
+    # BACKLOG_STAGED immediately before the cue we just observed, so the file
+    # is on disk by now; and the restore below has not happened yet, so the
+    # guest is still partitioned. Waiting on AWAIT_UP rather than on
+    # BACKLOG_STAGED is deliberate: it gives one ordering guarantee instead of
+    # two racing waits, and it cannot burn the drive's own 120 s restore
+    # window on a marker that is already there.
+    echo "Phase 4/6 — importing the backlog event (guest still offline)..."
+    backlog_import || true
     echo "Phase 4/6 — restoring the network..."
   else
     toggle_failed=1
     toggle_reason="the drive never reached ${MARK_AWAIT_UP}"
+    backlog_host_fail cue "the drive never reached ${MARK_AWAIT_UP}, so the \
+backlog event was never imported and the backlog proof could not run" || true
   fi
   # Restore unconditionally: the drive's recovery phase must be able to run
   # and record evidence, and the runner must not be left disconnected.
@@ -903,6 +1648,8 @@ unreachability, NOT device-wide network loss"
 else
   toggle_failed=1
   toggle_reason="the drive never reached ${MARK_AWAIT_DOWN}"
+  backlog_host_fail cue "the drive never armed, so the network was never \
+dropped and no backlog event was ever staged or imported" || true
 fi
 
 echo "Phase 5/6 — draining the drive..."
@@ -950,11 +1697,13 @@ fi
 # ---------------------------------------------------------------------------
 echo "Phase 6/6 — asserting the network-loss/reconnect sequence..."
 oracle_rc=0
-b9_run_oracle "${LOGCAT_FILE}" || oracle_rc=$?
+b9_run_oracle "${LOGCAT_FILE}" "${HOST_LOG}" || oracle_rc=$?
 
 if (( oracle_rc != 0 )); then
   echo "---- network toggle log ----" >&2
   cat "${NET_LOG}" >&2 2>/dev/null || true
+  echo "---- backlog import log ----" >&2
+  cat "${HOST_LOG}" >&2 2>/dev/null || true
   {
     echo "B9 findings (${#B9_FINDINGS[@]}):"
     for finding in "${B9_FINDINGS[@]}"; do
@@ -980,4 +1729,6 @@ fi
 
 echo "B9 PASS — live receive was up, the app lost the network device-wide," \
      "and a PEER location published after connectivity returned was" \
-     "decrypted and surfaced."
+     "decrypted and surfaced. Read the BACKLOG note above for whether the" \
+     "backlog-replay claim was PROVEN on this run or left unproven by the" \
+     "228s kind-445 TTL — a green lane does not imply the former."

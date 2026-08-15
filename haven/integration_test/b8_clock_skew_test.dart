@@ -128,6 +128,7 @@ import 'e2e/_lib/synthetic_user.dart' show SyntheticUser;
 import 'e2e/_lib/test_relay.dart'
     show TestRelay, TestRelayEvent, defaultStrfryUrl;
 import 'e2e/_lib/test_user.dart' show TestUser, bytesToHex;
+import 'e2e/_lib/throw_time_error_capture.dart';
 
 // ---------------------------------------------------------------------------
 // Markers. Every literal here is matched by `run-b8-clock-skew.sh`; changing
@@ -234,6 +235,7 @@ void main() {
   testWidgets(
     'B8: a +/-6h device clock jump is detected, surfaced, and measured',
     (tester) async {
+      installThrowTimeErrorLogging();
       final findings = <String>[];
       final evidence = <String>[];
       final clock = _ClockServo();

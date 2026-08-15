@@ -53,6 +53,7 @@ import 'package:haven/src/rust/api.dart';
 import 'package:integration_test/integration_test.dart';
 
 import 'e2e/_lib/test_user.dart';
+import 'e2e/_lib/throw_time_error_capture.dart';
 
 /// Synthetic relay URL stamped into MIP-00 KeyPackage and MIP-04 Welcome
 /// events. The test runs in-process between two `CircleManagerFfi`
@@ -171,6 +172,7 @@ void main() {
     // exercise the FFI directly and never pump a widget tree.
     testWidgets('kind 445 event JSON contains no plaintext coordinates and '
         'uses ephemeral pubkey', (tester) async {
+      installThrowTimeErrorLogging();
       // ----------------------------------------------------------------
       // 1. Verify keyring availability — skip honestly if unavailable.
       //    CircleManagerFfi.newInstance calls init_keyring_store() and
@@ -641,6 +643,7 @@ void main() {
         'null (encrypt→decrypt round-trip + cross-group isolation)', (
       tester,
     ) async {
+      installThrowTimeErrorLogging();
       // ------------------------------------------------------------------
       // Skip honestly if keyring unavailable — same pattern as above.
       // ------------------------------------------------------------------

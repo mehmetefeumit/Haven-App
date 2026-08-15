@@ -90,6 +90,7 @@ import 'e2e/_lib/scenario_harness.dart';
 import 'e2e/_lib/synthetic_user.dart' show SyntheticUser;
 import 'e2e/_lib/test_relay.dart' show defaultStrfryUrl;
 import 'e2e/_lib/test_user.dart';
+import 'e2e/_lib/throw_time_error_capture.dart';
 
 /// Sentinel coordinates for Bob's seeded location. Non-identifying; never
 /// logged (the kind-445 is MLS-encrypted on the wire — see `SyntheticUser`).
@@ -106,6 +107,7 @@ void main() {
   testWidgets(
     'M7 setup: arm the WorkManager catch-up worker (real keyring, seeded peer)',
     (tester) async {
+      installThrowTimeErrorLogging();
       // Guard: this target only makes sense with the flag ON. A rolled-back
       // build would register nothing and the lane would prove nothing.
       expect(

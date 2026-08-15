@@ -36,6 +36,7 @@ import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:path_provider/path_provider.dart';
+import 'e2e/_lib/throw_time_error_capture.dart';
 
 /// Pins the service to this lane's dedicated directory instead of the app's
 /// real one, so nothing here can contend with a session another target holds.
@@ -84,6 +85,7 @@ void main() {
     testWidgets('a second open fails closed while the first handle lives', (
       tester,
     ) async {
+      installThrowTimeErrorLogging();
       final first = await open();
       try {
         // The property the reclaim, the handover, and the liveness query all
@@ -104,6 +106,7 @@ void main() {
     });
 
     testWidgets('releasing the handle frees the database', (tester) async {
+      installThrowTimeErrorLogging();
       // The other half. Without this, "fails closed" could be satisfied by a
       // guard that never releases — which would lock the app out of its own
       // database for the life of the process rather than protecting it.
@@ -118,6 +121,7 @@ void main() {
     testWidgets('the handover observes a real release through the registry', (
       tester,
     ) async {
+      installThrowTimeErrorLogging();
       // Drives the UI isolate's recovery against the REAL guard and the REAL
       // registry, rather than the injected doubles its unit tests use. The
       // "service" here is a stub that releases the handle when asked to stop,
@@ -159,6 +163,7 @@ void main() {
     testWidgets('a handed-off session is not taken back while backgrounded', (
       tester,
     ) async {
+      installThrowTimeErrorLogging();
       // The other direction of the same guard, and the one that had no
       // coverage: handing the session DOWN to the foreground service.
       //
@@ -218,6 +223,7 @@ void main() {
     });
 
     testWidgets('the handover declines when the guard is free', (tester) async {
+      installThrowTimeErrorLogging();
       // A failure with a free guard is something a handover cannot fix — a
       // locked keyring, a full disk. Stopping the service then would cost the
       // user background sharing for nothing.

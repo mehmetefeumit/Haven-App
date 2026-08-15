@@ -118,7 +118,7 @@
 # privacy, exporter-secret lifecycle, publish-before-apply. welcome.rs is pinned
 # at 100 because Rule 3 (kind 444 MUST remain unsigned) has no partial form.
 rust|src/nostr/mls/|92                       # measured 94.00% (1551/1650)
-rust|src/nostr/mls/manager.rs|90             # measured 92.56% (697/753)
+rust|src/nostr/mls/manager.rs|91             # measured 93.04% (789/848)
 rust|src/nostr/mls/storage.rs|91             # measured 93.12% (325/349)
 rust|src/nostr/mls/signer.rs|94              # measured 96.47% (82/85)
 rust|src/nostr/mls/welcome.rs|100            # measured 100.00% (124/124)
@@ -142,17 +142,18 @@ rust|src/nostr/tags.rs|100                   # measured 100.00% (102/102)
 rust|src/keyring_policy.rs|89                # measured 91.49% (172/188)
 
 # --- Circles: group state and its encrypted store ---------------------------
-rust|src/circle/|90                          # measured 92.94% (7727/8314)
+rust|src/circle/|91                          # measured 93.04% (7906/8497)
 rust|src/circle/storage.rs|93                # measured 95.07% (2333/2454)
 rust|src/circle/leave.rs|94                  # measured 96.23% (102/106)
 
 # --- Location: the payload the whole app exists to protect ------------------
-# ttl.rs derives the NIP-40 expiration from group component 0x8005; nostr.rs
-# encodes the location event. nostr.rs is the weakest link in this group and is
-# pinned low deliberately — the number is the evidence, not an endorsement.
-rust|src/location/|91                        # measured 93.36% (450/482)
+# ttl.rs derives the NIP-40 expiration from group component 0x8005; types.rs is
+# the payload itself. The weak row here used to be nostr.rs, pinned at 50 and
+# sitting on it exactly — because half of it was an encrypt/decrypt path with
+# no caller anywhere. Deleted 2026-08-14 rather than tested, so the numbers here
+# now describe code that runs.
+rust|src/location/|97                        # measured 99.07% (427/431)
 rust|src/location/ttl.rs|94                  # measured 96.90% (125/129)
-rust|src/location/nostr.rs|50                # measured 52.54% (31/59)
 
 # --- Public profile plane (kind 0 + Blossom) --------------------------------
 # The Rule-10 exception. Its privacy boundary — HTTPS-only Blossom, anti-SSRF
@@ -196,7 +197,7 @@ rust|src/relay/live_sync/|95                 # measured 97.24% (2921/3004)
 rust|src/relay/live_sync/session.rs|94       # measured 96.19% (1491/1550)
 rust|src/relay/publishers.rs|88              # measured 90.28% (260/288)
 rust|src/relay/maintenance/|96               # measured 98.46% (640/650)
-rust|src/relay/manager.rs|73                 # measured 75.64% (832/1100)
+rust|src/relay/manager.rs|74                 # measured 76.18% (838/1100)
 rust|src/relay/auto_commit.rs|100            # measured 100.00% (59/59)
 rust|src/relay/catchup.rs|95                 # measured 97.14%; was 92 (94.61%) before the
                                              # fetch-window cursor anchor brought its own tests

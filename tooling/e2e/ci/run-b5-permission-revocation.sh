@@ -8,7 +8,7 @@
 #
 # `haven/test/services/geolocator_location_service_test.dart` reaches
 # `GeolocatorLocationService`'s `denied` / `deniedForever` branches
-# (geolocator_location_service.dart:267-277, :316-326) only through a mocked
+# (geolocator_location_service.dart:471-473, :474-482) only through a mocked
 # `GeolocatorWrapper`, and every E2E scenario injects `FakeLocationService`,
 # whose `checkPermission()` is a hardcoded `LocationPermissionStatus.always`
 # (e2e/_lib/fake_location_service.dart:57). The REAL platform refusal — what
@@ -45,12 +45,37 @@
 # policy, a future AOSP change) it observes the revocation from the inside
 # and MEASURES how long publishing continues — see the stale-cache trap.
 #
+# # Phase 4a: the APP-OP window, and why the revoke needs it
+#
+# The kill is also what makes `pm revoke` UNABLE to test the thing the
+# stale-cache trap describes: the cache is process-local, so it dies with the
+# app and a green revoke half is compatible with a cache that would have
+# leaked. `cmd appops set PKG android:fine_location deny` is the reachable
+# variant — it withdraws location access with the process still running and
+# with every permission read still answering "granted" — so ACT 1 runs THAT
+# first, in the same live session, and asserts the promise itself: after
+# access is withdrawn, no coordinate is produced and none is published.
+#
+# It is gated twice because either gate alone passes vacuously. `cmd appops
+# set` exits 0 whether or not it took and an app-op has no `dumpsys package`
+# line, so the mode is READ BACK (`cmd appops get`) and a mode that is not
+# `deny` is fatal on the spot. A mode that reads `deny` and changes nothing
+# is a different failure the read-back cannot see, so the drive target must
+# independently report that real location reads stopped working.
+#
 # # The oracle
 #
 #   1. BASELINE_PUBLISHED n=<N>, N >= 1    permission held -> the app
 #                                          publishes (PARSED, not grepped:
 #                                          `n=0` is the failing case and
 #                                          contains the marker)
+#   A. the APP-OP window (see below)       access withdrawn from a LIVE
+#                                          process: the app-op read back as
+#                                          `deny` and back out again, the app
+#                                          SAW reads stop, no coordinate was
+#                                          produced (APPOPS_GPS_REFUSED, not
+#                                          _LEAKED), APPOPS_DONE max=0, and
+#                                          the relay saw nothing new
 #   2. the RELAY independently holds >= 1  the same claim, off the wire, and
 #      location event                      the self-validation of the
 #                                          absence proof in (7): a scanner
@@ -89,16 +114,21 @@
 #   1. A REJECTED `pm grant`/`pm revoke` STILL EXITS 0 — the hard-restricted
 #      gate is a bare `return` after a `Log.e`. `dumpsys package` is the
 #      gate, in both directions.
-#   2. THE STALE-FIX CACHE. `getCurrentLocation()` serves
-#      `_lastStreamPosition` whenever the cached GPS FIX TIME is within
-#      `kStreamPositionMaxAge` (168 s) — at :233, BEFORE it consults
-#      `isLocationServiceEnabled()` (:258) and BEFORE it consults
-#      `checkPermission()` (:266). Wherever the process survives losing
-#      location access, publishing continues on the last fix for up to
-#      168 s; the cache is cleared only on logout and background-sharing
-#      opt-out. On Android the kill hides this for `pm revoke` (the cache is
-#      process-local), which is WHY ACT 1 measures it rather than assuming
-#      either outcome, and why ACT 2's window is sized above 168 s.
+#   2. THE STALE-FIX CACHE — and the reason `pm revoke` alone cannot see it.
+#      `getCurrentLocation()` serves `_lastStreamPosition` whenever the
+#      cached GPS FIX TIME is within `kStreamPositionMaxAge` (168 s), so
+#      wherever the process survives losing location access, publishing
+#      would continue on the last fix. `pm revoke` KILLS the process and the
+#      cache is process-local, so the revoke half is compatible with a cache
+#      that would have leaked; ACT 1 measures the tail anyway, and Phase 4a's
+#      APP-OP window is what actually settles it (see below).
+#   2b. AN APP-OP DENIAL IS INVISIBLE TO THE APP. `checkPermission()` and
+#      `getLocationAccuracy()` both read the permission GRANT via
+#      `ContextCompat.checkSelfPermission`, which does not consult the
+#      app-op, and AOSP drops deliveries with neither a stream error nor a
+#      close. So the drive target cannot tell when the denial landed by
+#      asking — it waits for a real one-shot read to stop working, which is
+#      also why the mode is read back HERE rather than trusted.
 #   3. RE-PROMPTING. `getCurrentLocation()` calls `requestPermission()`
 #      whenever it sees `denied` (:268), which raises the SYSTEM permission
 #      dialog unless the grant is USER_FIXED — from a periodic publish tick,
@@ -109,7 +139,11 @@
 #   4. `adb emu geo fix` is a ONE-SHOT injection into the goldfish GNSS HAL.
 #      The re-issue loop keeps running THROUGH ACT 2 on purpose: a publish
 #      that survived the revoke then proves the app ignored the permission,
-#      not that its position source dried up.
+#      not that its position source dried up. It also has to MOVE the point
+#      between re-issues — the app's stream carries `distanceFilter: 1`, so
+#      re-issuing the same coordinates emits once and never again, and the
+#      cache the app-op window is about would age out on its own. See
+#      GEO_STEP_DEG.
 #   5. `pm clear` between acts resets runtime permissions to their default,
 #      so the revoke MUST be re-applied and re-verified afterwards. It is
 #      used because ACT 2 needs a fresh MLS database: the E2E keyring is
@@ -130,6 +164,16 @@
 #   B5_RELAY_POLL_SECS     ACT 2 relay poll period. Default 20.
 #   B5_GEO_REISSUE_SECS    `geo fix` re-issue period. Default 5.
 #   B5_GEO_LAT/B5_GEO_LON  injected point. Defaults to a public landmark.
+#   B5_GEO_STEP_DEG        how far each re-issue moves the point. Default
+#                          0.00003 (~3.3 m). MUST stay above the stream's 1 m
+#                          distance filter — see Phase 3.
+#   B5_APPOPS_VERIFY_TIMEOUT   `cmd appops get` read-back poll. Default 40s.
+#   B5_APPOPS_SETTLE           seconds absorbed into the baseline after the
+#                              app-op is verified denied. Default 20.
+#   B5_APPOPS_WINDOW_TIMEOUT   wait for the app-op window to close. Default
+#                              480s.
+#   B5_APPOPS_MIN_DENY_SECS    minimum time the app-op stays denied. Default
+#                              168 (one kLocationPublishMaxInterval).
 
 set -Eeuo pipefail
 
@@ -142,6 +186,12 @@ readonly SCRIPT_DIR="${script_dir}"
 # shellcheck source=tooling/e2e/ci/drive-log-lib.sh
 source "${SCRIPT_DIR}/drive-log-lib.sh"
 
+# Shared `detect_strfry_bin`. The candidate path list is a property of the
+# pinned relay IMAGE, not of this lane, and B9 probes the same one — sourced
+# rather than copied so the two cannot drift.
+# shellcheck source=tooling/e2e/ci/strfry-lib.sh
+source "${SCRIPT_DIR}/strfry-lib.sh"
+
 # ---------------------------------------------------------------------------
 # VERBATIM markers. MUST match the `k*Marker` constants in
 # haven/integration_test/b5_permission_revocation_test.dart — change both
@@ -152,6 +202,12 @@ source "${SCRIPT_DIR}/drive-log-lib.sh"
 # ---------------------------------------------------------------------------
 readonly MARK_PHASE='[b5] PHASE'
 readonly MARK_BASELINE='[b5] BASELINE_PUBLISHED'
+readonly MARK_APPOPS_ARMED='[b5] APPOPS_ARMED'
+readonly MARK_APPOPS_OBSERVED='[b5] APPOPS_OBSERVED'
+readonly MARK_APPOPS_NOT_OBSERVED='[b5] APPOPS_NOT_OBSERVED'
+readonly MARK_APPOPS_REFUSED='[b5] APPOPS_GPS_REFUSED'
+readonly MARK_APPOPS_LEAKED='[b5] APPOPS_GPS_LEAKED'
+readonly MARK_APPOPS_DONE='[b5] APPOPS_DONE'
 readonly MARK_AWAIT_REVOKE='[b5] AWAITING_REVOKE'
 readonly MARK_REVOKE_OBSERVED='[b5] REVOKE_OBSERVED'
 readonly MARK_MIDSESSION_TAIL='[b5] MIDSESSION_TAIL'
@@ -165,6 +221,23 @@ readonly MARK_ACT2_DONE='[b5] ACT2_DONE'
 # ACT2_CYCLE: see the gate on `wedged=` in b5_assert_act2.
 readonly MARK_ACT2_WEDGED='[b5] ACT2_WEDGED'
 readonly MARK_COMPLETE='[b5] SEQUENCE_COMPLETE'
+
+# The app-ops this lane denies and restores. `android:fine_location` is the
+# one AOSP notes for an app holding ACCESS_FINE_LOCATION
+# (`LocationPermissions.asAppOp`); the coarse op is denied alongside it so the
+# withdrawal matches the both-permissions posture the revoke half uses.
+readonly APPOPS_FINE='android:fine_location'
+readonly APPOPS_COARSE='android:coarse_location'
+
+# Mirrors `_maxArmingStreamAge` in b5_permission_revocation_test.dart. The
+# app-op window is about a WARM cache, so an arming fix older than this means
+# there was nothing left to leak.
+readonly APPOPS_MAX_ARMING_STREAM_AGE_MS=60000
+
+# Mirrors `kStreamPositionMaxAge` (haven/lib/src/constants/location.dart). A
+# refusal recorded with a stream fix older than this discriminates nothing:
+# the cache would have been refused with the app-op untouched.
+readonly APPOPS_MAX_PROBE_STREAM_AGE_MS=168000
 
 # The AOSP kill reason posted by `revokeRuntimePermissionInternal`. Recorded
 # as EVIDENCE, never asserted: a platform that stops killing on revoke would
@@ -305,6 +378,37 @@ b5_permission_user_fixed() {
   grep -aE "${perm}: granted=" "${dump}" 2>/dev/null | grep -q 'USER_FIXED'
 }
 
+# b5_appops_mode <appops-get-dump> <op> — echoes the mode `cmd appops get`
+# reported for <op>, or nothing when the dump has no entry for it.
+#
+# THE GATE THAT KEEPS THIS LANE FROM PROVING NOTHING. `cmd appops set` exits 0
+# whether or not it took, exactly like `pm revoke` (trap 1), and unlike the
+# permission there is no `dumpsys package` line to fall back on — the app-op
+# is invisible to the app by construction, so a silent no-op would leave every
+# app-side assertion in the app-op phase satisfied by an app that never lost
+# access.
+#
+# Three output shapes have shipped across AOSP releases and all three are
+# accepted, because pinning one and reading an empty string on an image that
+# uses another would fail OPEN, in the one place this lane cannot afford it:
+#
+#   android:fine_location: deny; rejectTime=+1m2s
+#   FINE_LOCATION: deny
+#   android:fine_location: mode=deny
+#
+# `cmd appops get` printing NOTHING is a real state (no entry recorded — see
+# the probe caveat in CI_HARDENING_BACKLOG.md, Workstream B), which is why
+# this echoes the empty string rather than guessing a default: the caller
+# decides, and both callers here treat "not the mode I asked for" as a
+# failure.
+b5_appops_mode() {
+  local dump="${1:-}" op="${2:-}" short
+  [[ -f "${dump}" ]] || return 0
+  short="$(printf '%s' "${op#android:}" | tr '[:lower:]' '[:upper:]')"
+  { grep -aoE "(${op}|${short}):[[:space:]]*(mode=)?[a-z_]+" "${dump}" \
+      2>/dev/null | grep -aoE '[a-z_]+$' | tail -1; } || true
+}
+
 # b5_expiring_445_ids <scanfile> — echoes the sorted, unique ids of every
 # kind-445 event in a `strfry scan` capture that carries a NIP-40
 # `expiration` tag, i.e. every LOCATION event.
@@ -360,8 +464,10 @@ b5_note() { printf '  NOTE: %s\n' "$*"; }
 b5_finding() { B5_FINDINGS+=("$*"); }
 
 # b5_run_oracle <logfile> <baseline-ids> <new-ids> [<killed:0|1>]
+#                [<appops-new-ids> <appops-denied-mode> <appops-restored-mode>]
 b5_run_oracle() {
   local log="${1:-}" baseline_ids="${2:-}" new_ids="${3:-}" killed="${4:-0}"
+  local appops_new_ids="${5:-}" appops_denied="${6:-}" appops_restored="${7:-}"
   B5_FINDINGS=()
 
   if [[ ! -f "${log}" ]]; then
@@ -417,6 +523,149 @@ unconditionally would pass it."
 event(s) — the absence oracle at (7) is proven able to see a publish."
   fi
 
+  # --- (A) THE APP-OP PHASE — access withdrawn from a LIVE process. --------
+  #
+  # The only arrangement in which the stale-fix cache is observable at all:
+  # `pm revoke` kills the process and takes the cache with it, so everything
+  # ACT 1's revoke half and ACT 2 assert is compatible with a cache that
+  # would have leaked. This block is where that is settled.
+
+  # (A1) DISCRIMINATION. Did the app-op actually change, and was it put back?
+  #      `cmd appops set` exits 0 either way and there is no `dumpsys` line
+  #      to fall back on, so without this a no-op `set` passes everything.
+  if [[ "${appops_denied}" != "deny" ]]; then
+    b5_finding "\`cmd appops get\` read '${appops_denied:-<nothing>}' for \
+${APPOPS_FINE} after the lane denied it, not 'deny'. The app-op never \
+changed, so nothing in this phase observed an app that lost location access \
+— and every assertion in it passes trivially."
+  elif [[ "${appops_restored}" == "deny" ]]; then
+    b5_finding "${APPOPS_FINE} was still denied after the lane restored it. \
+The runner is left with location access withheld from the package, which \
+poisons every later scenario on it."
+  else
+    b5_note "the location app-op read 'deny' while the window ran and \
+'${appops_restored:-<default>}' after it — the condition this phase rests on \
+provably varied."
+  fi
+
+  # (A2) ANTI-VACUITY. A cold cache has nothing to leak, and a phase with no
+  #      eligible circle has nowhere to leak it to.
+  local appops_stream_age appops_eligible
+  appops_stream_age="$(b5_marker_number "${log}" "${MARK_APPOPS_ARMED}" \
+    'streamAgeMs')"
+  appops_eligible="$(b5_marker_number "${log}" "${MARK_APPOPS_ARMED}" \
+    'eligible')"
+  if [[ -z "${appops_stream_age}" || -z "${appops_eligible}" ]]; then
+    b5_finding "no '${MARK_APPOPS_ARMED} streamAgeMs=<ms> eligible=<n>' \
+line — the app-op phase never armed, so the one scenario that can observe \
+the stale-fix cache did not run. (The drive target prints streamAgeMs=-1 \
+when it never saw a fresh stream fix, which reads as missing here on \
+purpose.)"
+  else
+    if (( appops_stream_age > APPOPS_MAX_ARMING_STREAM_AGE_MS )); then
+      b5_finding "the app-op phase armed with its newest stream fix \
+${appops_stream_age}ms old. The cached fix it is supposed to withhold had \
+already aged out, so refusing to serve it proves nothing. The emulator GPS \
+must MOVE — an \`adb emu geo fix\` re-issued at one point is filtered out by \
+the stream's 1 m distance filter."
+    fi
+    if (( appops_eligible < 1 )); then
+      b5_finding "the app-op window ran with ${appops_eligible} \
+publish-eligible circles, so 'the app published nothing' is vacuous there."
+    fi
+  fi
+
+  # (A3) The denial has to be OBSERVABLE to the app. Unlike the revoke, it
+  #      does not kill the process, so an app that never notices is an app
+  #      the denial never reached — the second half of (A1)'s question, and
+  #      the half a read-back cannot answer.
+  if b5_has_marker "${log}" "${MARK_APPOPS_NOT_OBSERVED}"; then
+    b5_finding "real location reads went on working for the whole app-op \
+observation window ('${MARK_APPOPS_NOT_OBSERVED}'). The app-op read back as \
+denied but had no effect on this app."
+  elif ! b5_has_marker "${log}" "${MARK_APPOPS_OBSERVED}"; then
+    b5_finding "neither '${MARK_APPOPS_OBSERVED}' nor \
+'${MARK_APPOPS_NOT_OBSERVED}' was recorded — the app-op phase never reached \
+the point where it checks whether the denial took effect."
+  fi
+
+  # (A4) THE PROMISE: no coordinate is produced from a live process whose
+  #      access was withdrawn.
+  if b5_has_marker "${log}" "${MARK_APPOPS_LEAKED}"; then
+    b5_finding "getCurrentLocation() RETURNED A POSITION after the location \
+app-op was denied ('${MARK_APPOPS_LEAKED}'). The permission gate cannot see \
+an app-op, so this is the cached fix being served past the consent that \
+produced it — the defect this phase exists to catch."
+  elif ! b5_has_marker "${log}" "${MARK_APPOPS_REFUSED}"; then
+    b5_finding "neither '${MARK_APPOPS_REFUSED}' nor '${MARK_APPOPS_LEAKED}' \
+was recorded — the app-op phase never made its decisive read."
+  else
+    local probe_age
+    probe_age="$(b5_marker_number "${log}" "${MARK_APPOPS_REFUSED}" \
+      'streamAgeMs')"
+    if [[ -z "${probe_age}" ]]; then
+      b5_finding "'${MARK_APPOPS_REFUSED}' carries no streamAgeMs, so there \
+is no evidence the withheld cache was warm and the refusal cannot be \
+attributed to the app-op."
+    elif (( probe_age > APPOPS_MAX_PROBE_STREAM_AGE_MS )); then
+      b5_finding "the app-op probe refused with its newest stream fix \
+${probe_age}ms old, past kStreamPositionMaxAge \
+(${APPOPS_MAX_PROBE_STREAM_AGE_MS}ms). A cache that stale is refused with \
+the app-op untouched, so this refusal discriminates nothing."
+    fi
+  fi
+
+  # (A5) …and none is published, by the app's own count.
+  local appops_cycles appops_max appops_wedged
+  appops_cycles="$(b5_marker_number "${log}" "${MARK_APPOPS_DONE}" 'cycles')"
+  appops_max="$(b5_marker_number "${log}" "${MARK_APPOPS_DONE}" 'max')"
+  if [[ -z "${appops_cycles}" || -z "${appops_max}" ]]; then
+    b5_finding "no '${MARK_APPOPS_DONE} cycles=<c> max=<m>' line — the \
+app-op absence window never closed, so the app-side half of that proof is \
+missing."
+  else
+    if (( appops_cycles < 1 )); then
+      b5_finding "the app-op absence window ran ${appops_cycles} publish \
+cycles — it proved nothing about what the app does once access is withdrawn."
+    fi
+    appops_wedged="$(b5_marker_number "${log}" "${MARK_APPOPS_DONE}" \
+      'wedged')"
+    appops_wedged="${appops_wedged:-0}"
+    if (( appops_wedged > 0 )); then
+      b5_finding "${appops_wedged} of ${appops_cycles} app-op publish \
+cycle(s) never returned ('${MARK_ACT2_WEDGED}'). A hung publish path is not \
+evidence that the app declined to publish, so max=${appops_max} proves \
+nothing here."
+    elif (( appops_max > 0 )); then
+      b5_finding "the app published location to ${appops_max} circle(s) with \
+the location app-op DENIED. Access was withdrawn from the running process \
+and the app went on broadcasting the position it already held."
+    else
+      b5_note "app-op window: ${appops_cycles} production publish cycles, \
+all returning and all reaching 0 circles, with location access withdrawn \
+from the live process."
+    fi
+  fi
+
+  # (A6) …and the relay agrees, which is the only check that also covers the
+  #      per-circle scheduler ticking in the background.
+  if [[ ! -f "${appops_new_ids}" ]]; then
+    b5_finding "no app-op relay-diff file at '${appops_new_ids:-<unset>}' — \
+the bounded-window absence proof did not run for the app-op phase."
+  else
+    local appops_new_count
+    appops_new_count="$(grep -ac . "${appops_new_ids}" 2>/dev/null || true)"
+    appops_new_count="${appops_new_count:-0}"
+    if (( appops_new_count > 0 )); then
+      b5_finding "${appops_new_count} NEW location event(s) reached the relay \
+while the location app-op was denied. The app is still broadcasting the \
+user's position after the platform stopped letting it collect one."
+    else
+      b5_note "the relay saw no new location event for the whole app-op \
+window."
+    fi
+  fi
+
   # (3) What the OS did with the live session. EVIDENCE, never a gate.
   if (( killed == 1 )); then
     b5_note "the OS terminated the app process as part of the revocation \
@@ -441,17 +690,18 @@ is a privacy failure, not a liveness one."
     local tail_secs
     tail_secs="$(b5_marker_number "${log}" "${MARK_MIDSESSION_TAIL}" 'tail')"
     b5_note "publishing stopped ${tail_secs:-?}s after the app observed the \
-revocation. Anything above ~0s is the kStreamPositionMaxAge (168s) stale-fix \
-cache: getCurrentLocation() serves _lastStreamPosition \
-(geolocator_location_service.dart:233) BEFORE it consults checkPermission() \
-(:266), and nothing clears that cache on permission loss."
+revocation. Expected ~0s; anything approaching kStreamPositionMaxAge (168s) \
+means the access gate was reordered back BELOW the cache read in \
+getCurrentLocation() (geolocator_location_service.dart:639 must stay ahead of \
+:651). The app-op window above is the direct test of the same property — this \
+is only reachable when the process outlives the revoke."
   fi
 
   # --- ACT 2 — where the denied/deniedForever branches actually run. -----
   if [[ -z "${act2_pid}" ]]; then
     b5_finding "no '${MARK_PHASE} act=2' line — the app was never relaunched \
 with the permission revoked, so the production denied/deniedForever branches \
-(geolocator_location_service.dart:267-277, :316-326) were not exercised at \
+(geolocator_location_service.dart:471-473, :474-482) were not exercised at \
 all. This lane's whole subject is missing."
   elif [[ -n "${act1_pid}" && "${act1_pid}" == "${act2_pid}" ]]; then
     b5_finding "ACT 1 and ACT 2 both report pid ${act2_pid} — the same OS \
@@ -559,13 +809,14 @@ window."
 # look correct.
 # ---------------------------------------------------------------------------
 run_self_test() {
-  local tmp fails=0
+  local tmp fails=0 checks=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
 
   _case() { # _case <label> <expected-rc> <actual-rc>
     local label="$1" want="$2" got="$3"
+    checks=$(( checks + 1 ))
     if [[ "${got}" -eq "${want}" ]]; then
       printf '  \033[1;32mPASS\033[0m %s\n' "${label}"
     else
@@ -577,11 +828,32 @@ run_self_test() {
 
   _eq_case() { # _eq_case <label> <expected> <actual>
     local label="$1" want="$2" got="$3"
+    checks=$(( checks + 1 ))
     if [[ "${got}" == "${want}" ]]; then
       printf '  \033[1;32mPASS\033[0m %s\n' "${label}"
     else
       printf '  \033[1;31mFAIL\033[0m %s (want "%s", got "%s")\n' \
         "${label}" "${want}" "${got}" >&2
+      fails=1
+    fi
+  }
+
+  # _assert_mutated <fixture-no> <file> <expected-substring>
+  #
+  # A mutation that did not apply leaves a COPY of the passing capture, so the
+  # "negative" fixture asserts nothing and the self-test reports a green it did
+  # not earn. The fixture's own rc cannot tell the two apart, so the mutation
+  # itself is checked here.
+  #
+  # Both ways of getting this wrong have already happened in this file: a
+  # reworded marker line silently stops matching, and a `\`+newline inside a
+  # `sed` REPLACEMENT inserts a LITERAL newline — splitting the line so the
+  # field survives a `grep -F` but lands where the oracle never reads it.
+  _assert_mutated() { # <fixture-no> <file> <expected-substring>
+    local n="$1" file="$2" want="$3"
+    if ! grep -qF -- "${want}" "${file}"; then
+      printf '  \033[1;31mFAIL\033[0m self-test setup (%s): the mutation did \
+not apply — expected %s\n' "${n}" "${want}" >&2
       fails=1
     fi
   }
@@ -595,6 +867,12 @@ run_self_test() {
     printf '%s\n' \
       "I/flutter ( 40): ${MARK_PHASE} act=1 perm=whileInUse pid=40" \
       "I/flutter ( 40): ${MARK_BASELINE} n=1" \
+      "I/flutter ( 40): ${MARK_APPOPS_ARMED} streamAgeMs=4200 eligible=1" \
+      "I/flutter ( 40): ${MARK_APPOPS_OBSERVED} after=41" \
+      "I/flutter ( 40): ${MARK_APPOPS_REFUSED} \
+type=LocationServiceException streamAgeMs=52000" \
+      "I/flutter ( 40): [b5] APPOPS_CYCLE i=1 n=0" \
+      "I/flutter ( 40): ${MARK_APPOPS_DONE} cycles=5 max=0 wedged=0" \
       "I/flutter ( 40): ${MARK_AWAIT_REVOKE}" \
       "I/flutter ( 91): ${MARK_PHASE} act=2 perm=denied pid=91" \
       "I/flutter ( 91): ${MARK_ACT2_ARMED} eligible=1" \
@@ -750,15 +1028,57 @@ run_self_test() {
     'android.permission.ACCESS_BACKGROUND_LOCATION' || rc=1
   _case "an unlisted permission reads as not granted" 1 "${rc}"
 
+  # --- b5_appops_mode -----------------------------------------------------
+  #
+  # THE READ-BACK IS THE ONLY THING THAT KNOWS THE APP-OP CHANGED, so a
+  # parser that silently answers "" on an image whose `cmd appops get`
+  # wording differs would fail OPEN — the lane would call a no-op `set` a
+  # denial and pass every app-side assertion. All three shipped shapes are
+  # pinned here, and so is the genuinely-empty case.
+  printf 'android:fine_location: deny; rejectTime=+1m2s743ms\n' \
+    > "${tmp}/appops-semi.log"
+  _eq_case "appops mode read from the 'deny; rejectTime=' shape" \
+    "deny" "$(b5_appops_mode "${tmp}/appops-semi.log" "${APPOPS_FINE}")"
+
+  printf 'FINE_LOCATION: deny\n' > "${tmp}/appops-short.log"
+  _eq_case "appops mode read from the short op-name shape" \
+    "deny" "$(b5_appops_mode "${tmp}/appops-short.log" "${APPOPS_FINE}")"
+
+  printf 'android:fine_location: mode=allow\n' > "${tmp}/appops-mode.log"
+  _eq_case "appops mode read from the 'mode=' shape" \
+    "allow" "$(b5_appops_mode "${tmp}/appops-mode.log" "${APPOPS_FINE}")"
+
+  printf 'No operations.\n' > "${tmp}/appops-none.log"
+  _eq_case "an op with no recorded entry reads empty, never a guess" \
+    "" "$(b5_appops_mode "${tmp}/appops-none.log" "${APPOPS_FINE}")"
+  _eq_case "a missing appops dump reads empty" \
+    "" "$(b5_appops_mode "${tmp}/nope.log" "${APPOPS_FINE}")"
+
+  printf 'android:coarse_location: deny\n' > "${tmp}/appops-coarse.log"
+  _eq_case "the fine op is not answered by a neighbouring coarse entry" \
+    "" "$(b5_appops_mode "${tmp}/appops-coarse.log" "${APPOPS_FINE}")"
+
+  # --- shared libs are still wired ----------------------------------------
+  # Their real behaviour is exercised elsewhere (drive-log-lib.sh's own
+  # self-test; detect_strfry_bin needs docker). What is checkable here is that
+  # the `source` survived a refactor — a lost one fails at Phase 0, after the
+  # APK build.
+  rc=0; declare -F drive_log_reports_test_failure >/dev/null || rc=1
+  _case "drive-log failure predicate is in scope" 0 "${rc}"
+  rc=0; declare -F detect_strfry_bin >/dev/null || rc=1
+  _case "shared strfry reader is in scope" 0 "${rc}"
+
   # --- b5_run_oracle ------------------------------------------------------
   printf '%s\n' "${id_a}" > "${tmp}/oracle-baseline.ids"
   : > "${tmp}/oracle-new.ids"
+  : > "${tmp}/oracle-appops.ids"
 
   # (20) THE PASSING CAPTURE. Without it a hard-coded "always red" oracle
   #      would look correct.
   rc=0
   b5_run_oracle "${tmp}/full.log" "${tmp}/oracle-baseline.ids" \
-    "${tmp}/oracle-new.ids" 1 >/dev/null || rc=$?
+    "${tmp}/oracle-new.ids" 1 \
+    "${tmp}/oracle-appops.ids" deny allow >/dev/null || rc=$?
   _case "a correct capture passes the oracle" 0 "${rc}"
 
   # (21) THE HEADLINE FAILURE — a new location event on the relay during the
@@ -766,7 +1086,8 @@ run_self_test() {
   printf '%s\n' "${id_b}" > "${tmp}/oracle-leak.ids"
   rc=0
   b5_run_oracle "${tmp}/full.log" "${tmp}/oracle-baseline.ids" \
-    "${tmp}/oracle-leak.ids" 1 >/dev/null || rc=$?
+    "${tmp}/oracle-leak.ids" 1 \
+    "${tmp}/oracle-appops.ids" deny allow >/dev/null || rc=$?
   _case "a new relay location event fails the oracle" 1 "${rc}"
 
   # (22) The app's own leak marker fails it too, independently of the relay.
@@ -774,7 +1095,8 @@ run_self_test() {
     "I/flutter ( 91): ${MARK_ACT2_LEAKED}"
   rc=0
   b5_run_oracle "${tmp}/leaked.log" "${tmp}/oracle-baseline.ids" \
-    "${tmp}/oracle-new.ids" 1 >/dev/null || rc=$?
+    "${tmp}/oracle-new.ids" 1 \
+    "${tmp}/oracle-appops.ids" deny allow >/dev/null || rc=$?
   _case "ACT2_GPS_LEAKED fails the oracle" 1 "${rc}"
 
   # (23) VACUITY GUARD — an empty relay baseline means the scanner never saw
@@ -782,7 +1104,8 @@ run_self_test() {
   : > "${tmp}/oracle-nobaseline.ids"
   rc=0
   b5_run_oracle "${tmp}/full.log" "${tmp}/oracle-nobaseline.ids" \
-    "${tmp}/oracle-new.ids" 1 >/dev/null || rc=$?
+    "${tmp}/oracle-new.ids" 1 \
+    "${tmp}/oracle-appops.ids" deny allow >/dev/null || rc=$?
   _case "an empty relay baseline fails the oracle" 1 "${rc}"
 
   # (24) VACUITY GUARD — ACT 2 with no eligible circle proves nothing.
@@ -797,14 +1120,16 @@ run_self_test() {
     "${tmp}/full.log" > "${tmp}/noeligible.log"
   rc=0
   b5_run_oracle "${tmp}/noeligible.log" "${tmp}/oracle-baseline.ids" \
-    "${tmp}/oracle-new.ids" 1 >/dev/null || rc=$?
+    "${tmp}/oracle-new.ids" 1 \
+    "${tmp}/oracle-appops.ids" deny allow >/dev/null || rc=$?
   _case "ACT 2 with no eligible circle fails the oracle" 1 "${rc}"
 
   # (25) ACT 2 never ran at all — the lane's whole subject missing.
   grep -avF -- "${MARK_PHASE} act=2" "${tmp}/full.log" > "${tmp}/noact2.log"
   rc=0
   b5_run_oracle "${tmp}/noact2.log" "${tmp}/oracle-baseline.ids" \
-    "${tmp}/oracle-new.ids" 1 >/dev/null || rc=$?
+    "${tmp}/oracle-new.ids" 1 \
+    "${tmp}/oracle-appops.ids" deny allow >/dev/null || rc=$?
   _case "a missing ACT 2 fails the oracle" 1 "${rc}"
 
   # (26) SAME-PROCESS GUARD — both acts reporting one pid means no relaunch.
@@ -812,7 +1137,8 @@ run_self_test() {
     "${tmp}/full.log" > "${tmp}/samepid.log"
   rc=0
   b5_run_oracle "${tmp}/samepid.log" "${tmp}/oracle-baseline.ids" \
-    "${tmp}/oracle-new.ids" 1 >/dev/null || rc=$?
+    "${tmp}/oracle-new.ids" 1 \
+    "${tmp}/oracle-appops.ids" deny allow >/dev/null || rc=$?
   _case "both acts in one process fails the oracle" 1 "${rc}"
 
   # (27) The baseline near-miss: the app never published WITH the permission.
@@ -820,7 +1146,8 @@ run_self_test() {
     > "${tmp}/nobaseline.log"
   rc=0
   b5_run_oracle "${tmp}/nobaseline.log" "${tmp}/oracle-baseline.ids" \
-    "${tmp}/oracle-new.ids" 1 >/dev/null || rc=$?
+    "${tmp}/oracle-new.ids" 1 \
+    "${tmp}/oracle-appops.ids" deny allow >/dev/null || rc=$?
   _case "a zero baseline publish fails the oracle" 1 "${rc}"
 
   # (28) THE SURVIVING-PROCESS PATH — publishing that never stopped after a
@@ -833,7 +1160,8 @@ run_self_test() {
   } > "${tmp}/neverstopped.log"
   rc=0
   b5_run_oracle "${tmp}/neverstopped.log" "${tmp}/oracle-baseline.ids" \
-    "${tmp}/oracle-new.ids" 0 >/dev/null || rc=$?
+    "${tmp}/oracle-new.ids" 0 \
+    "${tmp}/oracle-appops.ids" deny allow >/dev/null || rc=$?
   _case "mid-session publishing that never stopped fails the oracle" 1 "${rc}"
 
   # (29) …while a MEASURED stale-cache tail is recorded, not failed: the
@@ -846,13 +1174,15 @@ run_self_test() {
   } > "${tmp}/tail.log"
   rc=0
   b5_run_oracle "${tmp}/tail.log" "${tmp}/oracle-baseline.ids" \
-    "${tmp}/oracle-new.ids" 0 >/dev/null || rc=$?
+    "${tmp}/oracle-new.ids" 0 \
+    "${tmp}/oracle-appops.ids" deny allow >/dev/null || rc=$?
   _case "a measured stale-cache tail is a note, not a failure" 0 "${rc}"
 
   # (30) A missing relay-diff file is fail-closed.
   rc=0
   b5_run_oracle "${tmp}/full.log" "${tmp}/oracle-baseline.ids" \
-    "${tmp}/absent-new.ids" 1 >/dev/null || rc=$?
+    "${tmp}/absent-new.ids" 1 \
+    "${tmp}/oracle-appops.ids" deny allow >/dev/null || rc=$?
   _case "a missing relay diff fails the oracle" 1 "${rc}"
 
   # (31) THE WEDGED-CYCLE FIXTURE, and the reason the gate exists at all: a
@@ -869,7 +1199,8 @@ run_self_test() {
   fi
   rc=0
   b5_run_oracle "${tmp}/wedged.log" "${tmp}/oracle-baseline.ids" \
-    "${tmp}/oracle-new.ids" 1 >/dev/null || rc=$?
+    "${tmp}/oracle-new.ids" 1 \
+    "${tmp}/oracle-appops.ids" deny allow >/dev/null || rc=$?
   _case "publish cycles that never returned fail the oracle" 1 "${rc}"
 
   # (32) BACKWARD COMPATIBILITY, and the other direction of the same risk: a
@@ -879,8 +1210,149 @@ run_self_test() {
     "${tmp}/full.log" > "${tmp}/nowedgefield.log"
   rc=0
   b5_run_oracle "${tmp}/nowedgefield.log" "${tmp}/oracle-baseline.ids" \
-    "${tmp}/oracle-new.ids" 1 >/dev/null || rc=$?
+    "${tmp}/oracle-new.ids" 1 \
+    "${tmp}/oracle-appops.ids" deny allow >/dev/null || rc=$?
   _case "an ACT2_DONE without the wedged field still passes" 0 "${rc}"
+
+  # --- the app-op phase ----------------------------------------------------
+  #
+  # Every fixture below mutates exactly ONE field of the PASSING capture, so
+  # each names the single thing it catches. Mutations quote markers WITHOUT
+  # their `[b5]` prefix and exclusions use `grep -F` — see (24) for why.
+
+  # (33) THE VACUOUS-ORACLE FIXTURE, and the reason this phase has a
+  #      read-back at all: `cmd appops set` no-opped, so the app never lost
+  #      access and every app-side marker above is still the passing one.
+  #      Only the read-back can tell, which is exactly why it is a gate.
+  rc=0
+  b5_run_oracle "${tmp}/full.log" "${tmp}/oracle-baseline.ids" \
+    "${tmp}/oracle-new.ids" 1 "${tmp}/oracle-appops.ids" foreground allow \
+    >/dev/null || rc=$?
+  _case "an app-op that never changed fails the oracle" 1 "${rc}"
+
+  # (34) …and the same for a read-back that answered nothing at all.
+  rc=0
+  b5_run_oracle "${tmp}/full.log" "${tmp}/oracle-baseline.ids" \
+    "${tmp}/oracle-new.ids" 1 "${tmp}/oracle-appops.ids" '' allow \
+    >/dev/null || rc=$?
+  _case "an empty app-op read-back fails the oracle" 1 "${rc}"
+
+  # (35) CONTAINMENT — a lane that left the app-op denied poisons the runner.
+  rc=0
+  b5_run_oracle "${tmp}/full.log" "${tmp}/oracle-baseline.ids" \
+    "${tmp}/oracle-new.ids" 1 "${tmp}/oracle-appops.ids" deny deny \
+    >/dev/null || rc=$?
+  _case "an app-op left denied fails the oracle" 1 "${rc}"
+
+  # (36) The op changed and had NO EFFECT — the half a read-back cannot see.
+  #
+  #      The MESSAGE is pinned, not just the rc. Deleting the
+  #      APPOPS_NOT_OBSERVED branch leaves the neighbouring "neither marker was
+  #      recorded" one to fail this fixture for a DIFFERENT reason, so an
+  #      rc-only assertion stays green over a diagnosis that no longer exists.
+  #      Found by mutating the branch to `if false`.
+  grep -avF -- 'APPOPS_OBSERVED' "${tmp}/full.log" > "${tmp}/notobserved.log"
+  printf '%s\n' "I/flutter ( 40): ${MARK_APPOPS_NOT_OBSERVED}" \
+    >> "${tmp}/notobserved.log"
+  rc=0
+  b5_run_oracle "${tmp}/notobserved.log" "${tmp}/oracle-baseline.ids" \
+    "${tmp}/oracle-new.ids" 1 "${tmp}/oracle-appops.ids" deny allow \
+    >/dev/null || rc=$?
+  _case "a denial the app never observed fails the oracle" 1 "${rc}"
+  if [[ "${B5_FINDINGS[*]}" != *"had no effect on this app"* ]]; then
+    printf '  \033[1;31mFAIL\033[0m an ineffective denial is not named as such\n' >&2
+    fails=1
+  fi
+
+  # (37) THE HEADLINE — a coordinate produced after access was withdrawn from
+  #      the live process. The defect `pm revoke` structurally cannot reach,
+  #      and therefore the one finding in this phase that must be named rather
+  #      than merely counted: with an rc-only assertion, deleting the leak
+  #      branch outright still fails this fixture (through the neighbouring
+  #      "never made its decisive read" one) and the self-test stays green over
+  #      a missing detector. Found by mutating the branch to `if false`.
+  grep -avF -- 'APPOPS_GPS_REFUSED' "${tmp}/full.log" > "${tmp}/appleak.log"
+  printf '%s\n' "I/flutter ( 40): ${MARK_APPOPS_LEAKED} streamAgeMs=52000" \
+    >> "${tmp}/appleak.log"
+  rc=0
+  b5_run_oracle "${tmp}/appleak.log" "${tmp}/oracle-baseline.ids" \
+    "${tmp}/oracle-new.ids" 1 "${tmp}/oracle-appops.ids" deny allow \
+    >/dev/null || rc=$?
+  _case "APPOPS_GPS_LEAKED fails the oracle" 1 "${rc}"
+  if [[ "${B5_FINDINGS[*]}" != *"RETURNED A POSITION after the location"* ]]; then
+    printf '  \033[1;31mFAIL\033[0m the app-op leak is not named as the defect\n' >&2
+    fails=1
+  fi
+
+  # (38) VACUITY — armed with a cache that had already aged out. Every
+  #      assertion still passes; there was simply nothing to withhold.
+  sed 's/ARMED streamAgeMs=4200/ARMED streamAgeMs=140000/' \
+    "${tmp}/full.log" > "${tmp}/coldarm.log"
+  _assert_mutated 38 "${tmp}/coldarm.log" 'streamAgeMs=140000'
+  rc=0
+  b5_run_oracle "${tmp}/coldarm.log" "${tmp}/oracle-baseline.ids" \
+    "${tmp}/oracle-new.ids" 1 "${tmp}/oracle-appops.ids" deny allow \
+    >/dev/null || rc=$?
+  _case "an app-op window armed on a stale cache fails the oracle" 1 "${rc}"
+
+  # (39) VACUITY — the refusal itself made against a cache past
+  #      kStreamPositionMaxAge, which is refused with the app-op untouched.
+  sed 's/streamAgeMs=52000/streamAgeMs=200000/' "${tmp}/full.log" \
+    > "${tmp}/staleprobe.log"
+  _assert_mutated 39 "${tmp}/staleprobe.log" \
+    "APPOPS_GPS_REFUSED type=LocationServiceException streamAgeMs=200000"
+  rc=0
+  b5_run_oracle "${tmp}/staleprobe.log" "${tmp}/oracle-baseline.ids" \
+    "${tmp}/oracle-new.ids" 1 "${tmp}/oracle-appops.ids" deny allow \
+    >/dev/null || rc=$?
+  _case "a refusal made against a stale cache fails the oracle" 1 "${rc}"
+
+  # (40) The app's own count says it published with access withdrawn.
+  sed 's/DONE cycles=5 max=0/DONE cycles=5 max=2/' \
+    "${tmp}/full.log" > "${tmp}/apppublished.log"
+  _assert_mutated 40 "${tmp}/apppublished.log" 'cycles=5 max=2'
+  rc=0
+  b5_run_oracle "${tmp}/apppublished.log" "${tmp}/oracle-baseline.ids" \
+    "${tmp}/oracle-new.ids" 1 "${tmp}/oracle-appops.ids" deny allow \
+    >/dev/null || rc=$?
+  _case "publishing during the app-op window fails the oracle" 1 "${rc}"
+
+  # (41) …and a window whose cycles never ANSWERED reports max=0 too.
+  sed 's/cycles=5 max=0 wedged=0/cycles=5 max=0 wedged=3/' "${tmp}/full.log" \
+    > "${tmp}/appwedged.log"
+  _assert_mutated 41 "${tmp}/appwedged.log" 'cycles=5 max=0 wedged=3'
+  rc=0
+  b5_run_oracle "${tmp}/appwedged.log" "${tmp}/oracle-baseline.ids" \
+    "${tmp}/oracle-new.ids" 1 "${tmp}/oracle-appops.ids" deny allow \
+    >/dev/null || rc=$?
+  _case "wedged app-op publish cycles fail the oracle" 1 "${rc}"
+
+  # (42) The RELAY saw a location event while the op was denied — the half
+  #      the app's own cycles cannot see, because the per-circle scheduler
+  #      ticks behind them.
+  printf '%s\n' "${id_b}" > "${tmp}/oracle-appops-leak.ids"
+  rc=0
+  b5_run_oracle "${tmp}/full.log" "${tmp}/oracle-baseline.ids" \
+    "${tmp}/oracle-new.ids" 1 "${tmp}/oracle-appops-leak.ids" deny allow \
+    >/dev/null || rc=$?
+  _case "a relay location event during the app-op window fails" 1 "${rc}"
+
+  # (43) A missing app-op relay diff is fail-closed, like (30).
+  rc=0
+  b5_run_oracle "${tmp}/full.log" "${tmp}/oracle-baseline.ids" \
+    "${tmp}/oracle-new.ids" 1 "${tmp}/absent-appops.ids" deny allow \
+    >/dev/null || rc=$?
+  _case "a missing app-op relay diff fails the oracle" 1 "${rc}"
+
+  # (44) The phase never ran at all. Not a silent skip: `pm revoke` cannot
+  #      substitute for it, so its absence removes the lane's only proof
+  #      about the stale-fix cache.
+  grep -avF -- 'APPOPS_ARMED' "${tmp}/full.log" > "${tmp}/noappops.log"
+  rc=0
+  b5_run_oracle "${tmp}/noappops.log" "${tmp}/oracle-baseline.ids" \
+    "${tmp}/oracle-new.ids" 1 "${tmp}/oracle-appops.ids" deny allow \
+    >/dev/null || rc=$?
+  _case "a missing app-op phase fails the oracle" 1 "${rc}"
 
   # --- the relay-poll capture must survive a PASSING run --------------------
   #
@@ -943,7 +1415,10 @@ run_self_test() {
     echo "run-b5-permission-revocation.sh --self-test: FAILED" >&2
     return 1
   fi
-  echo "run-b5-permission-revocation.sh --self-test: all fixtures passed"
+  # COUNTED, never restated: a hardcoded total goes stale the moment a
+  # fixture is added, and a self-test that misreports its own size is the
+  # first thing a reader stops trusting.
+  echo "run-b5-permission-revocation.sh --self-test: all ${checks} checks passed"
   return 0
 }
 
@@ -984,6 +1459,50 @@ readonly REVOKE_SETTLE="${B5_REVOKE_SETTLE:-20}"
 readonly RELAY_POLL_SECS="${B5_RELAY_POLL_SECS:-20}"
 readonly GEO_REISSUE_SECS="${B5_GEO_REISSUE_SECS:-5}"
 
+# Poll bound on the `cmd appops get` read-back. Polled rather than read once
+# because the permission→app-op path is asynchronous (PermissionPolicyService
+# posts to FgThread), and a single immediate read can still show the old mode
+# (CI_HARDENING_BACKLOG.md, Workstream B).
+readonly APPOPS_VERIFY_TIMEOUT="${B5_APPOPS_VERIFY_TIMEOUT:-40}"
+
+# Absorbed into the relay baseline after the app-op is verified denied, for
+# the same reason REVOKE_SETTLE exists: a publish already IN FLIGHT when
+# access was withdrawn is a race with the platform, not a product behaviour,
+# and asserting on it is a flaky red.
+#
+# It cannot hide the leak this window hunts. A served stale fix is not a
+# one-shot: the cache stays inside `kStreamPositionMaxAge` for 168 s after the
+# denial, the per-circle scheduler ticks at most every
+# `kLocationPublishMaxInterval`, and the denial is held at least that long —
+# so a leak necessarily publishes again after this settle. The app-side probe
+# is a direct call and return, with no such race at all.
+readonly APPOPS_SETTLE="${B5_APPOPS_SETTLE:-20}"
+
+# Bound on ACT 1's app-op window, from the denial to the drive target's
+# `APPOPS_DONE`. Above the target's own budget (arm + observation + probe +
+# window) so a lane-side timeout means the drive is stuck, not merely slow.
+readonly APPOPS_WINDOW_TIMEOUT="${B5_APPOPS_WINDOW_TIMEOUT:-480}"
+
+# How long the app-op stays denied REGARDLESS of when the app-side window
+# closes.
+#
+# `kLocationPublishMaxInterval` (haven/lib/src/constants/location.dart) is the
+# longest interval the per-circle scheduler can sample, so holding the denial
+# at least this long is what makes the relay-side absence proof cover a
+# scheduled publish the app's own explicit cycles never see.
+#
+# COUPLED, and not obviously: this hold delays `pm revoke` past the drive
+# target's `AWAITING_REVOKE`, and the target only waits
+# `_revokeObservationTimeout` (120 s) for the revoke to become visible. The
+# slack is `_revokeObservationTimeout - (this - the target's minimum app-op
+# window)`; with `_appOpsAbsenceWindow` at 90 s the earliest APPOPS_DONE is
+# ~100 s after the denial, so the revoke lands ~73 s into a 120 s wait. Raise
+# this much above ~215, or shrink `_appOpsAbsenceWindow`, and ACT 1's
+# mid-session half silently stops running WHEREVER THE PROCESS SURVIVES THE
+# REVOKE — on stock Android the OS kill makes that half unreachable anyway,
+# which is exactly why the regression would go unnoticed.
+readonly APPOPS_MIN_DENY_SECS="${B5_APPOPS_MIN_DENY_SECS:-168}"
+
 # Synthetic coordinates fed to the emulator's GPS: Dam Square, Amsterdam — a
 # well-known public landmark, chosen precisely BECAUSE it is obviously not a
 # real user's position. The kind-445 carrying it is MLS-encrypted on the wire.
@@ -993,6 +1512,24 @@ readonly GEO_REISSUE_SECS="${B5_GEO_REISSUE_SECS:-5}"
 # hardcoded landmark; NOT fine for anything derived from a real device.
 readonly GEO_LON="${B5_GEO_LON:-4.895168}"
 readonly GEO_LAT="${B5_GEO_LAT:-52.370216}"
+
+# How far each re-issue moves the point, in degrees of latitude.
+#
+# NOT cosmetic, and NOT jitter for its own sake. The app's position stream
+# carries `distanceFilter: 1` (metres), so a `geo fix` re-issued at the SAME
+# point is filtered out by the platform and the stream emits exactly once for
+# the life of the lane. The stale-fix cache the app-op window is about would
+# then age out on its own long before the denial lands, the window would have
+# nothing to withhold, and it would pass having proved nothing — which the
+# drive target's `streamAgeMs` reports and the oracle treats as a finding.
+#
+# 0.00003° of latitude is ~3.3 m: comfortably above the filter, and still
+# inside the same public landmark, so the "obviously not a real user's
+# position" property of GEO_LAT/GEO_LON is unchanged.
+readonly GEO_STEP_DEG="${B5_GEO_STEP_DEG:-0.00003}"
+GEO_LAT_B="$(awk -v a="${GEO_LAT}" -v s="${GEO_STEP_DEG}" \
+  'BEGIN { printf "%.6f", a + s }')"
+readonly GEO_LAT_B
 
 readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 readonly HAVEN_DIR="${REPO_ROOT}/haven"
@@ -1014,6 +1551,9 @@ readonly PERM_REVOKED_DUMP="${LOG_DIR}/permissions.revoked.b5.log"
 readonly PERM_ACT2_DUMP="${LOG_DIR}/permissions.act2-end.b5.log"
 readonly BASELINE_IDS="${LOG_DIR}/relay-baseline.ids"
 readonly NEW_IDS="${LOG_DIR}/relay-act2-new.ids"
+readonly APPOPS_NEW_IDS="${LOG_DIR}/relay-appops-new.ids"
+readonly APPOPS_DENIED_DUMP="${LOG_DIR}/appops.denied.b5.log"
+readonly APPOPS_RESTORED_DUMP="${LOG_DIR}/appops.restored.b5.log"
 readonly RELAY_POLL_LOG="${LOG_DIR}/relay-poll.b5.log"
 
 # ---------------------------------------------------------------------------
@@ -1039,6 +1579,17 @@ cleanup() {
     kill "${GEO_PID}" 2>/dev/null || true
   fi
   # Restore BEFORE logcat is stopped so the restore itself is captured.
+  #
+  # The app-ops go back to `default` rather than to the `allow` Phase 4 uses
+  # mid-lane: `allow` is what makes the mid-lane restore VERIFIABLE and lets
+  # ACT 1 carry on, while `default` is what leaves the runner in the state the
+  # platform would have chosen for itself. Unconditional, because the lane can
+  # die inside the denied window and a package left without location access
+  # silently poisons every later job on this runner.
+  for op in "${APPOPS_FINE}" "${APPOPS_COARSE}"; do
+    adb -s "${DEVICE}" shell cmd appops set "${PKG}" "${op}" default \
+      >/dev/null 2>&1 || true
+  done
   adb -s "${DEVICE}" shell pm clear-permission-flags "${PKG}" \
     android.permission.ACCESS_FINE_LOCATION user-fixed >/dev/null 2>&1 || true
   adb -s "${DEVICE}" shell pm clear-permission-flags "${PKG}" \
@@ -1113,6 +1664,9 @@ fail() {
   echo "---- permission state (revoked dump) ----" >&2
   grep -aE 'ACCESS_(FINE|COARSE)_LOCATION' "${PERM_REVOKED_DUMP}" 2>/dev/null \
     | sed 's/^/    /' >&2 || echo "(no revoked dump captured)" >&2
+  echo "---- app-op read-backs ----" >&2
+  cat "${APPOPS_DENIED_DUMP}" "${APPOPS_RESTORED_DUMP}" 2>/dev/null \
+    | sed 's/^/    /' >&2 || echo "(no appops dumps captured)" >&2
   # The injected point is a hardcoded public landmark, so printing it is
   # acceptable here (same posture as run-b1/b3/b6).
   echo "---- emulator location state ----" >&2
@@ -1130,24 +1684,8 @@ fail() {
 # (CI_HARDENING_BACKLOG.md, Workstream B).
 # ---------------------------------------------------------------------------
 
-# detect_strfry_bin — finds a `strfry` that can actually answer a scan.
-#
-# Probed with the REAL query rather than `--version`: the capability this
-# lane needs is "can read the event store", and a binary that exists but
-# cannot open the LMDB would otherwise be discovered 20 minutes later, as an
-# unexplained empty baseline.
-detect_strfry_bin() {
-  local candidate
-  for candidate in strfry /app/strfry /usr/local/bin/strfry /usr/bin/strfry
-  do
-    if docker exec "${STRFRY_CONTAINER}" "${candidate}" scan \
-         '{"kinds":[445],"limit":1}' >/dev/null 2>&1; then
-      STRFRY_BIN="${candidate}"
-      return 0
-    fi
-  done
-  return 1
-}
+# `detect_strfry_bin` lives in strfry-lib.sh, sourced at the top: B9 probes
+# the same pinned image and the candidate list must not drift between them.
 
 # relay_scan <outfile> — captures every kind-445 the relay holds.
 #
@@ -1202,7 +1740,13 @@ absorb_into_baseline() {
 # b6/b9 already honour (run-b6-location-provider-toggle.sh, run-b9-network-
 # reconnect.sh both append on every iteration): an empty aux log means the
 # capture never ran, not that the run went well.
-poll_relay_for_new() {
+#
+# Takes the diff file as an argument because this lane now bounds TWO
+# absence windows against the same baseline — the app-op one in ACT 1 and
+# ACT 2's — and folding both into one file would let a leak in either be
+# reported against the other.
+poll_relay_for_new() { # poll_relay_for_new <new-ids-file>
+  local out="$1"
   local scan="${LOG_DIR}/relay-scan.tmp"
   relay_scan "${scan}"
   local ids="${LOG_DIR}/relay-scan.ids"
@@ -1210,10 +1754,40 @@ poll_relay_for_new() {
   local found
   found="$(b5_new_ids "${ids}" "${BASELINE_IDS}")"
   if [[ -n "${found}" ]]; then
-    printf '%s\n' "${found}" >> "${NEW_IDS}.raw"
-    LC_ALL=C sort -u "${NEW_IDS}.raw" > "${NEW_IDS}"
+    printf '%s\n' "${found}" >> "${out}.raw"
+    LC_ALL=C sort -u "${out}.raw" > "${out}"
   fi
   b5_record_poll "${RELAY_POLL_LOG}" "${found}"
+}
+
+# read_appops_mode <op> <dumpfile> — capture `cmd appops get` and echo the
+# mode it reports for <op>. The dump is kept: it is the lane's evidence that
+# the condition varied, and `fail()` has nothing else to show for it.
+read_appops_mode() {
+  local op="$1" dump="$2"
+  adb -s "${DEVICE}" shell cmd appops get "${PKG}" "${op}" > "${dump}" 2>&1 \
+    || true
+  b5_appops_mode "${dump}" "${op}"
+}
+
+# wait_for_appops_mode <op> <want> <timeout-secs> <dumpfile> — poll the
+# read-back until it reports <want>, then echo it.
+#
+# Echoes whatever it LAST read on timeout rather than failing here, so the
+# caller reports the actual mode ("foreground", or nothing at all) instead of
+# a generic timeout — the difference between "the set was refused" and "this
+# image words its output differently".
+wait_for_appops_mode() {
+  local op="$1" want="$2" timeout_s="$3" dump="$4" waited=0 mode=""
+  while (( waited < timeout_s )); do
+    mode="$(read_appops_mode "${op}" "${dump}")"
+    if [[ "${mode}" == "${want}" ]]; then
+      break
+    fi
+    sleep 2
+    waited=$(( waited + 2 ))
+  done
+  printf '%s' "${mode}"
 }
 
 # wait_for_marker <marker> <timeout-secs> — 0 when the marker appears in the
@@ -1235,6 +1809,34 @@ wait_for_marker() {
     fi
     sleep 2
     waited=$(( waited + 2 ))
+  done
+  echo "  timed out after ${timeout_s}s waiting for '${marker}'" >&2
+  return 1
+}
+
+# wait_for_marker_polling_relay <marker> <timeout-secs> <new-ids-file> —
+# [wait_for_marker] that also runs a relay poll on every iteration.
+#
+# The app-op window is the one stretch of this lane where the app is alive,
+# has lost location access, and is NOT being watched by a relay poll unless
+# this does it: ACT 2's loop only starts later, and the per-circle scheduler
+# ticks behind the drive target's explicit publish cycles where its own
+# markers cannot see it.
+wait_for_marker_polling_relay() {
+  local marker="$1" timeout_s="$2" out="$3" waited=0
+  while (( waited < timeout_s )); do
+    if grep -aqF -- "${marker}" "${LOGCAT_FILE}" 2>/dev/null; then
+      echo "  observed '${marker}' after ${waited}s"
+      return 0
+    fi
+    if [[ -n "${DRIVE_PID}" ]] && ! kill -0 "${DRIVE_PID}" 2>/dev/null; then
+      echo "  the drive exited before '${marker}' appeared (after ${waited}s)" \
+        >&2
+      return 1
+    fi
+    sleep "${RELAY_POLL_SECS}"
+    waited=$(( waited + RELAY_POLL_SECS ))
+    poll_relay_for_new "${out}"
   done
   echo "  timed out after ${timeout_s}s waiting for '${marker}'" >&2
   return 1
@@ -1357,15 +1959,19 @@ done
 #
 # NOTE the argument order: `geo fix` takes LONGITUDE first, then LATITUDE.
 # ---------------------------------------------------------------------------
-echo "Phase 3/7 — seeding emulator GPS (lon=${GEO_LON} lat=${GEO_LAT})..."
+echo "Phase 3/7 — seeding emulator GPS (lon=${GEO_LON} lat=${GEO_LAT}," \
+     "alternating with lat=${GEO_LAT_B})..."
 adb -s "${DEVICE}" emu geo fix "${GEO_LON}" "${GEO_LAT}" \
   || fail "\`adb emu geo fix\` was rejected by the emulator console — no" \
           "position can be injected, so this lane cannot establish a" \
           "baseline and has nothing to take away."
 (
   while sleep "${GEO_REISSUE_SECS}"; do
-    adb -s "${DEVICE}" emu geo fix "${GEO_LON}" "${GEO_LAT}" >/dev/null 2>&1 \
-      || true
+    adb -s "${DEVICE}" emu geo fix "${GEO_LON}" "${GEO_LAT_B}" \
+      >/dev/null 2>&1 || true
+    sleep "${GEO_REISSUE_SECS}"
+    adb -s "${DEVICE}" emu geo fix "${GEO_LON}" "${GEO_LAT}" \
+      >/dev/null 2>&1 || true
   done
 ) &
 GEO_PID=$!
@@ -1394,6 +2000,105 @@ LOGCAT_PID=$!
       --target "${TARGET}"
 ) > "${DRIVE1_LOG}" 2>&1 &
 DRIVE_PID=$!
+
+# ---------------------------------------------------------------------------
+# Phase 4a — THE APP-OP WINDOW. Location access withdrawn from a process that
+# STAYS ALIVE.
+#
+# This is the half `pm revoke` structurally cannot reach: the revoke kills the
+# app, and the stale-fix cache it would have to serve from is process-local,
+# so it dies with it. `cmd appops set ... deny` removes access without the
+# kill and without touching anything the app's permission gate reads, so the
+# app goes on believing it has access while the platform delivers nothing.
+#
+# Two gates, because either alone passes vacuously:
+#
+#   * `cmd appops set` exits 0 whether or not it took, and there is no
+#     `dumpsys package` line for an app-op — so the mode is READ BACK, and a
+#     mode that is not `deny` is fatal here rather than a finding 20 minutes
+#     later. (B7's discrimination gate, in this lane's terms.)
+#   * a mode that reads `deny` and changes nothing is a different failure and
+#     invisible to the read-back, so the DRIVE TARGET has to report that real
+#     location reads stopped working (`APPOPS_OBSERVED`).
+#
+# The denial is then held for at least APPOPS_MIN_DENY_SECS whatever the app
+# does, so the relay-side absence spans a full scheduler interval.
+# ---------------------------------------------------------------------------
+: > "${APPOPS_NEW_IDS}"
+: > "${APPOPS_NEW_IDS}.raw"
+appops_denied_mode=""
+appops_restored_mode=""
+
+if wait_for_marker "${MARK_APPOPS_ARMED}" "${ARM_MARKER_TIMEOUT}"; then
+  # Everything published while access was intact belongs to the baseline.
+  absorb_into_baseline
+
+  echo "Phase 4/7 — denying the location app-op (the process stays alive)..."
+  for op in "${APPOPS_FINE}" "${APPOPS_COARSE}"; do
+    adb -s "${DEVICE}" shell cmd appops set "${PKG}" "${op}" deny 2>&1 \
+      | sed 's/^/    /' || true
+  done
+  appops_denied_at="$(date +%s)"
+
+  appops_denied_mode="$(wait_for_appops_mode "${APPOPS_FINE}" deny \
+    "${APPOPS_VERIFY_TIMEOUT}" "${APPOPS_DENIED_DUMP}")"
+  if [[ "${appops_denied_mode}" != "deny" ]]; then
+    sed 's/^/    /' "${APPOPS_DENIED_DUMP}" >&2 || true
+    fail "\`cmd appops get ${PKG} ${APPOPS_FINE}\` reads" \
+         "'${appops_denied_mode:-<nothing>}' after \`cmd appops set ... deny\`," \
+         "not 'deny'. \`set\` exits 0 even when it refuses and an app-op has no" \
+         "\`dumpsys package\` line, so this read-back is the ONLY thing that" \
+         "knows the condition changed — and every app-side assertion in this" \
+         "window passes trivially against an app that never lost access."
+  fi
+  echo "  verified ${APPOPS_FINE}: ${appops_denied_mode}"
+
+  # Close the baseline on anything that was already in flight — see
+  # APPOPS_SETTLE for why this cannot swallow the leak.
+  sleep "${APPOPS_SETTLE}"
+  absorb_into_baseline
+
+  if ! wait_for_marker_polling_relay "${MARK_APPOPS_DONE}" \
+       "${APPOPS_WINDOW_TIMEOUT}" "${APPOPS_NEW_IDS}"; then
+    echo "WARN: ACT 1 never printed '${MARK_APPOPS_DONE}'. The oracle reports" \
+         "the missing app-side half; the relay-side window below still ran." >&2
+  fi
+
+  # Hold the denial for a full scheduler interval however early the app-side
+  # window closed, and keep polling: the per-circle scheduler ticks behind the
+  # drive target's explicit cycles, and this is the only thing watching it.
+  held=$(( $(date +%s) - appops_denied_at ))
+  while (( held < APPOPS_MIN_DENY_SECS )); do
+    sleep "${RELAY_POLL_SECS}"
+    poll_relay_for_new "${APPOPS_NEW_IDS}"
+    held=$(( $(date +%s) - appops_denied_at ))
+  done
+  poll_relay_for_new "${APPOPS_NEW_IDS}"
+  echo "  app-op held denied for ${held}s (>= ${APPOPS_MIN_DENY_SECS}s, one" \
+       "full kLocationPublishMaxInterval)"
+
+  echo "Phase 4/7 — restoring the location app-op..."
+  for op in "${APPOPS_FINE}" "${APPOPS_COARSE}"; do
+    adb -s "${DEVICE}" shell cmd appops set "${PKG}" "${op}" allow 2>&1 \
+      | sed 's/^/    /' || true
+  done
+  appops_restored_mode="$(wait_for_appops_mode "${APPOPS_FINE}" allow \
+    "${APPOPS_VERIFY_TIMEOUT}" "${APPOPS_RESTORED_DUMP}")"
+  if [[ "${appops_restored_mode}" == "deny" ]]; then
+    sed 's/^/    /' "${APPOPS_RESTORED_DUMP}" >&2 || true
+    fail "${APPOPS_FINE} still reads 'deny' after the restore. The revoke" \
+         "half below would then be measuring an app that had already lost" \
+         "access for a second reason, and the runner would be left with" \
+         "location withheld from ${PKG}."
+  fi
+  echo "  restored ${APPOPS_FINE}: ${appops_restored_mode:-<default>}"
+
+  # Whatever the app publishes now that access is back belongs to the
+  # baseline, not to either absence window.
+  absorb_into_baseline
+else
+  echo "WARN: ACT 1 never printed '${MARK_APPOPS_ARMED}'." >&2
+fi
 
 revoke_issued=0
 if wait_for_marker "${MARK_AWAIT_REVOKE}" "${ARM_MARKER_TIMEOUT}"; then
@@ -1629,7 +2334,7 @@ DRIVE_PID=$!
 # the relay (created_at + 228 s) before the window closes.
 while kill -0 "${DRIVE_PID}" 2>/dev/null; do
   sleep "${RELAY_POLL_SECS}"
-  poll_relay_for_new
+  poll_relay_for_new "${NEW_IDS}"
 done
 
 drc=0
@@ -1637,7 +2342,7 @@ wait "${DRIVE_PID}" || drc=$?
 DRIVE_PID=""
 # One final read, after the drive is gone, so the tail of the window is
 # covered too.
-poll_relay_for_new
+poll_relay_for_new "${NEW_IDS}"
 report_drive "ACT 2" "${DRIVE2_LOG}" "${drc}"
 act2_drive_failed="${DRIVE_FAILED}"
 act2_drive_reason="${DRIVE_REASON}"
@@ -1661,7 +2366,8 @@ done
 echo "Phase 7/7 — asserting the revocation sequence..."
 oracle_rc=0
 b5_run_oracle "${LOGCAT_FILE}" "${BASELINE_IDS}" "${NEW_IDS}" \
-  "${act1_killed}" || oracle_rc=$?
+  "${act1_killed}" "${APPOPS_NEW_IDS}" "${appops_denied_mode}" \
+  "${appops_restored_mode}" || oracle_rc=$?
 
 if (( oracle_rc != 0 )); then
   if [[ -s "${RELAY_POLL_LOG}" ]]; then
@@ -1685,7 +2391,9 @@ if (( act2_drive_failed == 1 )); then
        "app that is not running trivially publishes nothing."
 fi
 
-echo "B5 PASS — the app published with ACCESS_FINE_LOCATION granted, and" \
-     "published nothing at all across the relaunch its revocation forced:" \
-     "the production denied/deniedForever branch refused every location" \
-     "read, and the relay saw no location event for the whole window."
+echo "B5 PASS — the app published with ACCESS_FINE_LOCATION granted; produced" \
+     "and published NOTHING once the location app-op was denied under a live" \
+     "process (verified denied and verified restored); and published nothing" \
+     "at all across the relaunch its revocation forced, with the production" \
+     "denied/deniedForever branch refusing every location read and the relay" \
+     "seeing no location event for either window."

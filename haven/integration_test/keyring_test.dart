@@ -10,6 +10,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/rust/frb_generated.dart';
 import 'package:integration_test/integration_test.dart';
+import 'e2e/_lib/throw_time_error_capture.dart';
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -26,12 +27,14 @@ void main() {
     // integration_test_propagation_test.dart. The `tester` is unused — these
     // exercise the FFI directly and never pump a widget tree.
     testWidgets('keyring store initializes successfully', (tester) async {
+      installThrowTimeErrorLogging();
       // initKeyringStore should complete without error when a platform
       // keyring backend is available.
       await expectLater(initKeyringStore(), completes);
     });
 
     testWidgets('keyring store initialization is idempotent', (tester) async {
+      installThrowTimeErrorLogging();
       // Calling initKeyringStore multiple times should succeed — the Rust
       // implementation caches success in a static Mutex<Option<()>>.
       await initKeyringStore();

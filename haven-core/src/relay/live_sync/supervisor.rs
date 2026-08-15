@@ -7,11 +7,28 @@
 //! `Lagged` (it treats both `Lagged` and `Closed` as a clean stop). A slow
 //! `SQLCipher` ingest could lag the pool's notification channel and silently
 //! kill the receive path forever. Instead [`run_receiver`] consumes
-//! `client.notifications()` directly, treats `Lagged` as `continue` (the cursor
-//! and catch-up replay anything skipped) and only `Closed`/`Shutdown` as a stop.
-//! It also **decouples** receive from ingest: it only `try_send`s onto a bounded
-//! channel so the notification consumer never blocks, while a separate
-//! [`run_worker`] drains that channel and awaits the engine ingest.
+//! `client.notifications()` directly, treats `Lagged` as `continue` (losing
+//! deliveries beats losing the plane, and what the skip costs the CURSOR is
+//! suppressed — see the `Lagged` arm) and only `Closed`/`Shutdown` as a stop.
+//! It also **decouples**
+//! receive from ingest: it only `try_send`s onto a bounded channel so the
+//! notification consumer never blocks, while a separate [`run_worker`] drains
+//! that channel and awaits the engine ingest.
+//!
+//! # The intake cap (Security Rule 12)
+//!
+//! That bounded channel is the live plane's intake cap
+//! ([`super::config::WORKER_QUEUE_CAP`]). A `try_send` onto a full queue drops
+//! the DELIVERY, so the drop must not also cost the BACKLOG: the dropped event
+//! holds its circle's cursor generation ([`note_intake_drop`]) and the next REQ
+//! asks for it again. Nothing downstream can do this instead — a dropped event
+//! reaches no worker and no engine, and this generation's `EOSE` would otherwise
+//! advance the persisted cursor straight over it.
+//!
+//! A broadcast `Lagged` on the notification stream is the same loss with no
+//! event left to hold: it reports a count. The receiver suppresses the pending
+//! advance of every generation open at that moment instead, which is as narrow
+//! as an unattributable skip allows (see the `Lagged` arm).
 //!
 //! # Write serialization (Rule 14)
 //!
@@ -28,6 +45,7 @@ use nostr_sdk::RelayPoolNotification;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, watch, RwLock};
 
+use super::config::WORKER_QUEUE_CAP;
 use super::event::SyncStatusReason;
 use super::planes::{group::GROUP_EVENT_KIND, PlaneKind};
 use super::processor::EngineProcessor;
@@ -151,6 +169,46 @@ pub fn plane_wants_event(ctx: &SubCtx, event: &Event, own_pubkey: &PublicKey) ->
     }
 }
 
+/// Builds the receive→ingest queue at the Rule-12 intake cap
+/// ([`WORKER_QUEUE_CAP`]).
+///
+/// The cap lives behind a constructor rather than inline at the one call site so
+/// that "the live plane's ingest is BOUNDED" is a property something other than
+/// `session.rs` can observe: an unbounded queue is the shape Rule 12 forbids,
+/// and swapping one in here changes this signature rather than passing silently.
+#[must_use]
+pub fn intake_queue() -> (mpsc::Sender<RawSignal>, mpsc::Receiver<RawSignal>) {
+    mpsc::channel(WORKER_QUEUE_CAP)
+}
+
+/// Holds the circle of an event the intake cap just dropped at that event's
+/// `created_at`, so the drop costs a re-fetch instead of the backlog (Rule 12).
+///
+/// Screened by kind and keyed by the RAW `#h`, so it accepts exactly what
+/// [`plane_wants_event`] accepts on the group plane — which is what makes it
+/// safe: an event the worker would have discarded cannot conjure a hold-back.
+/// The anchor table's keys ARE the (lowercase) hexes the REQ was issued with, so
+/// [`CursorAnchors::note_unapplied`] no-ops on any other tag. The kind screen is
+/// load-bearing rather than belt-and-braces: the inbox REQ filters on kind and
+/// `#p` alone, so a fully conformant relay will deliver a `kind:1059` carrying
+/// whatever `#h` its author chose. A dropped gift wrap needs no hold-back of its
+/// own — the inbox stream's 7-day lookback re-requests it (see
+/// [`super::anchor::InboxAnchor`]).
+///
+/// [`CursorAnchors::note_unapplied`]: super::anchor::CursorAnchors::note_unapplied
+fn note_intake_drop(processor: &EngineProcessor, event: &Event) {
+    if event.kind != GROUP_EVENT_KIND {
+        return;
+    }
+    let Some(routed_hex) = extract_group_id_hex(event) else {
+        return;
+    };
+    processor.note_dropped_before_ingest(
+        &routed_hex,
+        i64::try_from(event.created_at.as_secs()).unwrap_or(i64::MAX),
+    );
+}
+
 /// The canonical per-circle gate/settle key: lowercase hex of the decoded
 /// `nostr_group_id` bytes, NOT the raw `#h` tag string (L2).
 ///
@@ -185,9 +243,19 @@ pub fn canonical_group_hex(nostr_group_id: &[u8]) -> String {
 /// → the Rule-14 `LiveSessionGuard`. The result is an unowned MLS writer and a
 /// database no isolate can ever reopen. `cancel` is the independent wake that
 /// breaks that cycle.
+///
+/// # Why the receiver needs the processor
+///
+/// Only to hold a cursor generation back for a delivery this loop lost: at the
+/// event the full intake queue forced it to drop ([`note_intake_drop`]), or —
+/// when the notification stream skipped an unattributable set — across every
+/// generation then open. The receiver still routes nothing and ingests nothing.
+/// It shares the `Arc` graph the `mpsc::Sender` already keeps alive, so it adds
+/// no new lifetime edge for `cancel` to break.
 pub async fn run_receiver(
     mut notifications: broadcast::Receiver<RelayPoolNotification>,
     tx: mpsc::Sender<RawSignal>,
+    processor: Arc<EngineProcessor>,
     shutdown: Arc<AtomicBool>,
     mut cancel: watch::Receiver<bool>,
 ) {
@@ -216,12 +284,19 @@ pub async fn run_receiver(
                     {
                         // try_send (never await) so the notification consumer
                         // cannot lag the pool; a full channel drops to cursor
-                        // replay, never to a wedged receiver.
-                        let _ = tx.try_send(RawSignal::Event(Box::new(RawEvent {
-                            relay_url,
-                            subscription_id,
-                            event: *event,
-                        })));
+                        // replay, never to a wedged receiver. Rule 12: the drop
+                        // must THROTTLE, so the dropped event holds its circle's
+                        // generation — nothing else records it, and the EOSE
+                        // would otherwise advance the cursor straight over it.
+                        if let Err(mpsc::error::TrySendError::Full(RawSignal::Event(dropped))) = tx
+                            .try_send(RawSignal::Event(Box::new(RawEvent {
+                                relay_url,
+                                subscription_id,
+                                event: *event,
+                            })))
+                        {
+                            note_intake_drop(&processor, &dropped.event);
+                        }
                     }
                 }
                 NotifDisposition::ForwardEose => {
@@ -243,10 +318,29 @@ pub async fn run_receiver(
                 NotifDisposition::Stop => break,
                 NotifDisposition::Ignore => {}
             },
-            // A lagged broadcast must NOT kill the receiver (the cursor +
-            // catch-up are the net); the loop simply iterates again. Only a
-            // closed channel stops it.
-            Err(RecvError::Lagged(_)) => {}
+            // A lagged broadcast must NOT kill the receiver; the loop simply
+            // iterates again. Only a closed channel stops it.
+            //
+            // Rule 12, coarsely: `Lagged` reports a COUNT, not the events, so
+            // there is no `created_at` to hold a cursor at and no circle to hold
+            // — but "an unknown set was skipped" is still expressible. Every
+            // generation still OWED an advance loses it, so no EOSE this session
+            // has yet to redeem moves a cursor past events the process never
+            // saw, and the next REQ, floored on the untouched cursor, asks for
+            // them again. The price is one window re-fetch per affected circle;
+            // the alternative is the silent backlog loss the rule names,
+            // permanent and across restarts.
+            //
+            // Reaching this needs the pool's `POOL_NOTIF_CAP` broadcast to
+            // overrun while this loop — which does nothing but `try_send` and,
+            // on overflow, one anchor write — is unscheduled. Not necessarily
+            // 8192 EVENTS, though: the pool broadcasts every relay MESSAGE too,
+            // and those cost the sender no signature, so a connected relay can
+            // reach the cap with chatter. That is why the suppression is the
+            // safe side of the trade — under exactly that flood, advancing
+            // would let the flooder choose which of its own deliveries we lose
+            // for good.
+            Err(RecvError::Lagged(_)) => processor.note_delivery_gap(),
             Err(RecvError::Closed) => break,
         }
     }
@@ -605,6 +699,17 @@ mod supervisor_isolation_tests {
         EngineProcessor, EventBus, LiveSyncEvent, PlaneKind, Router, SubCtx, SyncStatusReason,
     };
 
+    /// A bare processor over a throwaway MLS database, for the receiver tests
+    /// that exercise the loop's LIFECYCLE rather than its cursor side effects.
+    /// The `TempDir` comes back with it because dropping it would delete the
+    /// database out from under the still-running receiver.
+    fn bare_processor() -> (Arc<EngineProcessor>, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let circle =
+            Arc::new(CircleManager::new_unencrypted(dir.path(), &Keys::generate()).unwrap());
+        (Arc::new(EngineProcessor::new(circle, EventBus::new())), dir)
+    }
+
     /// A `kind:445` carrying `#h = group_hex`, with `content`.
     fn event_445(group_hex: &str, content: &str) -> nostr::Event {
         EventBuilder::new(Kind::Custom(445), content)
@@ -775,11 +880,15 @@ mod supervisor_isolation_tests {
         );
     }
 
-    /// R7 (GAP-B+F): a broadcast `Lagged` must NOT kill `run_receiver` (the cursor
-    /// + catch-up are the net), and a `Closed` channel must stop it cleanly. We
-    /// overfill a cap-4 broadcast BEFORE the receiver is polled so its first
-    /// `recv()` yields `Lagged`, then require a post-lag MARKER to still be
-    /// forwarded; then drop the sender and require the task to exit.
+    /// R7 (GAP-B+F): a broadcast `Lagged` must NOT kill `run_receiver` (losing
+    /// deliveries beats losing the plane), and a `Closed` channel must stop it
+    /// cleanly. We overfill a cap-4 broadcast BEFORE the receiver is polled so
+    /// its first `recv()` yields `Lagged`, then require a post-lag MARKER to
+    /// still be forwarded; then drop the sender and require the task to exit.
+    ///
+    /// What the skip costs the CURSOR is the other half, and it is not visible
+    /// here: this processor has no open generation to suppress. It is gated in
+    /// `security_rule_gates.rs` (Rule 12) against real cursors.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_receiver_survives_lagged_then_stops_on_closed() {
         let (btx, brx) = broadcast::channel::<RelayPoolNotification>(4);
@@ -805,7 +914,14 @@ mod supervisor_isolation_tests {
             btx.send(n).unwrap();
         }
         let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-        let handle = tokio::spawn(run_receiver(brx, mtx, Arc::clone(&shutdown), cancel_rx));
+        let (processor, _dir) = bare_processor();
+        let handle = tokio::spawn(run_receiver(
+            brx,
+            mtx,
+            processor,
+            Arc::clone(&shutdown),
+            cancel_rx,
+        ));
 
         // A distinctive event AFTER the lag.
         let (marker_id, marker) = notif("MARKER");
@@ -859,8 +975,15 @@ mod supervisor_isolation_tests {
         let (mtx, _mrx) = mpsc::channel::<RawSignal>(4);
         let shutdown = Arc::new(AtomicBool::new(false));
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let (processor, _dir) = bare_processor();
 
-        let handle = tokio::spawn(run_receiver(brx, mtx, Arc::clone(&shutdown), cancel_rx));
+        let handle = tokio::spawn(run_receiver(
+            brx,
+            mtx,
+            processor,
+            Arc::clone(&shutdown),
+            cancel_rx,
+        ));
 
         // The task is now parked in `recv().await`: nothing has been sent, and
         // `btx` is deliberately kept alive so the channel never closes.
@@ -906,7 +1029,14 @@ mod supervisor_isolation_tests {
         cancel_tx.send_replace(true);
         let cancel_rx = cancel_tx.subscribe();
 
-        let handle = tokio::spawn(run_receiver(brx, mtx, Arc::clone(&shutdown), cancel_rx));
+        let (processor, _dir) = bare_processor();
+        let handle = tokio::spawn(run_receiver(
+            brx,
+            mtx,
+            processor,
+            Arc::clone(&shutdown),
+            cancel_rx,
+        ));
         tokio::time::timeout(Duration::from_secs(2), handle)
             .await
             .expect("a pre-existing cancel must still be observed")

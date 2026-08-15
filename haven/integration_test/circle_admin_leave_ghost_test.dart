@@ -64,6 +64,7 @@ import 'package:haven/src/rust/api.dart';
 import 'package:integration_test/integration_test.dart';
 
 import 'e2e/_lib/test_user.dart';
+import 'e2e/_lib/throw_time_error_capture.dart';
 
 /// Sentinel seeds — deterministic, public test values. Mirror the
 /// `aliceSeed` / `bobSeed` constants in
@@ -118,6 +119,7 @@ void main() {
       'MDK rejects proposeLeave from a still-admin caller with a structured '
       'self-demote error (regression target for the upstream ghost-admin fix)',
       (tester) async {
+        installThrowTimeErrorLogging();
         // ----------------------------------------------------------------
         // Per-test isolated data directories so a re-run can't pick up
         // SQLCipher state from a previous attempt.

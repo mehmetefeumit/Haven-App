@@ -139,6 +139,7 @@ import '_lib/scenario_harness.dart';
 import '_lib/synthetic_user.dart' show SyntheticUser;
 import '_lib/test_relay.dart' show TestRelay, TestRelayEvent, defaultStrfryUrl;
 import '_lib/test_user.dart';
+import '_lib/throw_time_error_capture.dart';
 
 // =============================================================================
 // Constants
@@ -627,6 +628,7 @@ void main() {
   // the sampling site is what makes a failure actually fail the build.
   testWidgets('the kind-0 plane resolved onto the hermetic pool, not the '
       'curated public one', (tester) async {
+    installThrowTimeErrorLogging();
     expect(
       poolStatusAtFirstManager.configured,
       _profileRelayUrls.length,
@@ -655,6 +657,7 @@ void main() {
     'Alice UI/providers + Bob FFI: public profile publish → resolve → '
     'name-only edit (photo preserved) → delete → npub fallback',
     (tester) async {
+      installThrowTimeErrorLogging();
       // Plane-separation watch: buffer EVERY kind-0 the CIRCLE relay sees
       // authored by Alice, from before anything is pumped. That relay carries
       // her Welcome and kind-445, so a kind-0 landing there is exactly the

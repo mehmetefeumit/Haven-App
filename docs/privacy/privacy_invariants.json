@@ -1,0 +1,3228 @@
+{
+  "schema_version": 1,
+  "pinned_dependencies": {
+    "mdk_rev": "e391adc133a9b60e420da7a0446f014a180ac8d2"
+  },
+  "accepted_deviations": [
+    {
+      "id": "P1",
+      "source": "haven-core/SECURITY.md#the-guarantee-is-bounded--collisions-are-expected-p1",
+      "summary": "Profile-relay assignment hashes the pubkey, so two contacts can land on the same pool relay; collisions follow the birthday bound (~79% for a 5-member roster over the 8-relay pool). Collision-free-per-roster assignment would require the profile module to know roster membership, which its import boundary forbids by design.",
+      "forbidden_claim": "Copy must not claim 'no relay ever learns two members of the same circle', nor 'no single server sees everyone you look up'. The spreading claim must stay statistical and must keep the collision sentence beside it."
+    },
+    {
+      "id": "P2",
+      "source": "haven-core/SECURITY.md#publish-fans-out-to-the-whole-pool-p2",
+      "summary": "A peer's assignment salt is private to their install, so Haven cannot know which pool relay a peer reads from; publishing the user's own kind-0 therefore targets the ENTIRE usable pool. Every pool relay learns (our pubkey, our IP), and one that also serves our reads can link identity to our ~1/N contact sample.",
+      "forbidden_claim": "Copy must not claim profile publishing is limited to a subset of the pool, nor that profile publishing is unlinkable to the identity. It MAY state that reads are unauthenticated (the fetch path is built with no signer and structurally cannot answer NIP-42)."
+    },
+    {
+      "id": "P3",
+      "source": "haven-core/SECURITY.md#no-kind-10002-for-the-profile-plane-p3",
+      "summary": "Haven publishes no NIP-65 / kind-10002 relay list naming the profile pool, because that event is identity-signed and publicly fetchable and would rebuild the cross-plane link the pool exists to break. Accepted cost: outbox-model external clients may fail to resolve a Haven profile. Enforced by check_profile_privacy_boundaries.sh Check 10 and by RelayType::Profile::to_kind() returning None.",
+      "forbidden_claim": "Copy must not imply that no relay can ever learn a device uses it for the profile plane — a pool relay sees that traffic directly. Only the narrower claim is true: Haven never publishes a list naming the profile relays, so a relay OUTSIDE the pool has no public pointer to it."
+    },
+    {
+      "id": "P4",
+      "source": "haven-core/SECURITY.md#merge-base-narrowing-reverses-medium-4-p4",
+      "summary": "The kind-0 merge base is fetched from the profile pool only — a deliberate reversal of the MEDIUM-4 fix (self_merge_base_relays deleted). A Haven save can therefore drop kind-0 fields another client set on relays outside the pool.",
+      "forbidden_claim": "Copy must not claim that editing your profile in Haven preserves everything set by another Nostr client. NOTE: no user-facing string discloses this today — see the report's disclosure-gap section; no invariant references P4 because filing one would require inventing a disclosure that does not exist."
+    },
+    {
+      "id": "P5",
+      "source": "haven-core/SECURITY.md#the-assignment-salt-is-never-rotated-p5",
+      "summary": "The per-install profile-relay assignment salt is NEVER rotated: rotation discloses each contact to an additional relay, converging on full disclosure, so a stable salt is strictly better in aggregate. Accepted cost: the assigned relay accumulates a durable 'this IP is persistently interested in this pubkey' observation. Bounded by PROFILE_MAX_RELAY_RANK = 2 and destroyed by two distinct paths (wipe_all_profiles; deletion of the circles.db file set).",
+      "forbidden_claim": "Copy must not present the stable pairing as a pure benefit, and must not claim the pairing 'never changes' — the retry ladder reaches a second relay and rendezvous ranking shifts when the pool changes. State the bound as at most TWO of the eight, and keep the durable-record cost sentence alongside the spreading claim."
+    },
+    {
+      "id": "P6",
+      "source": "haven-core/SECURITY.md#ip-level-linkage-is-out-of-scope-p6",
+      "summary": "Haven ships no Tor or proxy support. A pool relay, a circle relay, the tile provider and any host serving a co-member's profile picture all observe the user's real IP on publish and on read. The salted partition limits WHAT a relay learns, not WHO it is talking to.",
+      "forbidden_claim": "Copy must make no network-level unlinkability or anonymity claim, and must never say Haven hides your IP address. A VPN may be described as the mitigation, attributed to the VPN, never to Haven."
+    },
+    {
+      "id": "P7",
+      "source": "haven-core/SECURITY.md#historical-contamination-is-unrecoverable-p7",
+      "summary": "The contamination ledger is append-only because contamination is historical — a relay that routed a circle's kind-445 last month saw those events, and leaving does not un-see them. Welcome-delivery relays were persisted nowhere before the change, so refresh_contamination_ledger cannot fold them in and will not exclude them.",
+      "forbidden_claim": "Copy must not claim that leaving a circle removes all relay exposure, nor that the contamination warnings cover every relay that has ever carried this identity's traffic."
+    },
+    {
+      "id": "M5",
+      "source": "haven-core/SECURITY.md#self-update-disabled-m5--accepted-mip-02mip-03-deviation",
+      "summary": "Post-join leaf-key self-update — a SHOULD in protocol-core/joining.md, carried forward from the retired MIP-02 which stated it as a MUST within 24 h — is disabled (enablePeriodicSelfUpdate = false). The MIP-03 successor protocol-core/group-messaging.md states no periodic-rotation requirement at all, so the earlier 'MIP-03 SHOULD' framing overstated the deviation. Keys rotate only on membership change.",
+      "forbidden_claim": "Copy must never say keys rotate regularly or periodically, and must never use this locale's term for forward secrecy. Key change may only be described as following membership change. The spec's own words support this: 'a member who never rotates is a forward-secrecy weakness for itself' (protocol-core/joining.md)."
+    },
+    {
+      "id": "RC1",
+      "source": "haven-core/SECURITY.md#relay-observable-metadata-and-correlation-accepted",
+      "summary": "One persistent client per relay: a relay serving BOTH the gift-wrap inbox (kind 1059 by #p = user pubkey) and group messages (kind 445 by #h = nostr_group_id) over the same connection can correlate the real identity pubkey with circle membership by connection continuity. Since M11 that connection is STANDING while the app runs, so the correlation is continuous rather than bursty. Not protocol-forced: the kind-10050 inbox list and the group's 0x8004 relay set are independent, and seeding them disjointly — as the profile pool already is — would remove the single-socket join. Declined because it doubles connection count and because P6 (no Tor/proxy) leaves IP-level joining intact; recorded so the trade-off stays re-decidable.",
+      "forbidden_claim": "Copy must not claim relays cannot link your identity to your circle membership, and must not present the ephemeral per-message kind-445 author keys as making you unlinkable at the relay."
+    },
+    {
+      "id": "R10",
+      "source": "CLAUDE.md#privacy-model",
+      "summary": "Owner-directed reversal (recorded 2026-07-12, made public-by-default 2026-07-16) of Security Rule 10's no-public-profiles posture: the kind-0 + Blossom public profile module deliberately publishes the display name and photo, unconditionally, on save. Onboarding pre-fills an anonymous pseudonym and publishes it; there is no skip / pubkey-only path and no consent toggle. Its remaining boundaries are CI-enforced by check_profile_privacy_boundaries.sh.",
+      "forbidden_claim": "Copy must not say a saved name or photo 'may be' published, must not imply a setting exists that keeps them private, and must not offer a circles-only name. Equally, this must not be described as a regression to be reverted."
+    },
+    {
+      "id": "IOS-KEYCHAIN",
+      "source": "haven-core/SECURITY.md#database-encryption",
+      "summary": "On iOS the SQLCipher DB keys use kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly rather than the library default kSecAttrAccessibleWhenUnlocked, so a background wake can open the database while the device is locked. Owner-approved to enable locked-device background location sharing.",
+      "forbidden_claim": "Copy must not claim a locked phone protects Haven's data at rest. A still-powered-on device unlocked at least once since boot can have the OS surrender the DB key WHILE LOCKED; only a device powered off and not yet unlocked keeps it sealed. NOTE: no user-facing string discloses this today — see docs/privacy/README.md, known gaps."
+    },
+    {
+      "id": "CONV-BUFFER",
+      "source": "haven-core/SECURITY.md#convergence-buffer-flooding-upstream-757--open",
+      "summary": "The engine's stored convergence buffer has no per-group cap and no eviction API (upstream MDK #757, OPEN). A Haven-side intake cap throttles ingest but cannot bound engine storage — an accepted insider-threat storage-DoS exposure.",
+      "forbidden_claim": "Copy must not claim a circle member cannot consume unbounded device storage. Security Rule 12's backpressure bounds the FETCH, not the engine's buffer."
+    },
+    {
+      "id": "TTL-FINGERPRINT",
+      "source": "haven-core/SECURITY.md#outer-kind445-metadata-group-governed-nip-40-expiration",
+      "summary": "kind-445 application messages carry a DETERMINISTIC NIP-40 expiration (a constant 228 s, client-wide and fixed at group creation). The retired per-send design sampled it precisely to avoid a constant-TTL fingerprint identifying Haven clients among mixed MLS-over-Nostr traffic; group-level retention is what the protocol now offers, so the fingerprint is accepted.",
+      "forbidden_claim": "Copy must not present the expiry as making Haven traffic less distinguishable. It does the opposite: the constant is a client-wide discriminator visible to any relay or member, and cannot be changed for circles that already exist."
+    },
+    {
+      "id": "LEAVE-GHOST",
+      "source": "haven-core/SECURITY.md#bounded-leave-removal-window-under-live-sync-rev-1",
+      "summary": "The corroboration gate deliberately keeps NO admin-side record of a departing member's intent, so there is no automatic admin-side backstop. In the conjunction of: the leaver crashes mid-leave, AND its SelfRemove was deferred or lost the order race, AND it never re-opens the app — no removal commit is ever produced and a stale roster ghost stays authorized until an admin manually removes it. SECURITY.md labels this 'Precisely-bounded residual (accepted)'.",
+      "forbidden_claim": "Copy must not state that leaving always re-keys the circle within a bounded time. The automatically-unconverged case needs a manual admin removal and there is no admin-visible signal one is owed. NOTE: no user-facing string discloses this, and privacyEncryptionWhenSomeoneLeaves currently ASSERTS the bounded form ('usually within a few minutes') — an owner decision."
+    }
+  ],
+  "non_claim_arb_keys": {
+    "privacyTitle": "Page title on the Privacy hub; no factual claim.",
+    "privacySubtitle": "One-line hub subtitle; describes what the section covers, asserts nothing.",
+    "privacyGroupBasicsHeading": "Section grouping heading; no factual claim.",
+    "privacyGroupHowLocationTravelsHeading": "Section grouping heading; no factual claim.",
+    "privacyGroupTheLimitsHeading": "Section grouping heading; no factual claim.",
+    "privacyMeansForYouLabel": "Structural label introducing each topic's consequence paragraph; the claim lives in the paragraph it labels.",
+    "privacyMoreDetailLabel": "Structural label for the expandable technical detail; the claims live in the detail strings.",
+    "privacyMoreDetailExpandHint": "Accessibility hint for the expand affordance; describes the control, not the app's behaviour.",
+    "privacyMoreDetailCollapseHint": "Accessibility hint for the collapse affordance; describes the control, not the app's behaviour.",
+    "privacyMoreDetailExpandedAnnouncement": "Screen-reader announcement of a UI state change; no factual claim about privacy.",
+    "privacyMoreDetailCollapsedAnnouncement": "Screen-reader announcement of a UI state change; no factual claim about privacy.",
+    "privacyWhatHavenIsTitle": "Topic title. Presupposes the no-account fact, but the checkable claim is asserted by privacyWhatHavenIsNoAccount, which carries the proof.",
+    "privacyYourKeysTitle": "Topic title on the Privacy hub; no factual claim.",
+    "privacyYourKeysSubtitle": "One-line topic preview; no factual claim.",
+    "privacyYourKeysWhatTheyAre": "Explanatory username/password analogy introducing the keypair. The clause 'the public key is what others use to find and invite you' describes the invitation flow rather than promising a privacy property; the checkable halves are asserted by privacyYourKeysSecretStaysHere and privacyYourKeysPublicIsSafe.",
+    "privacyRelaysTitle": "Topic title on the Privacy hub; no factual claim.",
+    "privacyRelaysSubtitle": "One-line topic preview; no factual claim.",
+    "privacyEncryptionTitle": "Topic title on the Privacy hub; no factual claim.",
+    "privacyWhatOthersSeeTitle": "Topic title on the Privacy hub; no factual claim.",
+    "privacyWhatOthersSeeSubtitle": "One-line topic preview; no factual claim.",
+    "privacyWhatOthersSeeMembersHeading": "Sub-section heading naming the audience; no factual claim.",
+    "privacyWhatOthersSeeRelaysHeading": "Sub-section heading naming the audience; no factual claim.",
+    "privacyInferenceTitle": "Topic title on the Privacy hub; no factual claim.",
+    "privacyInferenceSubtitle": "One-line topic preview; no factual claim.",
+    "privacyInferenceIpHeading": "Sub-section heading; no factual claim.",
+    "privacyInferenceMapTilesHeading": "Sub-section heading; no factual claim.",
+    "privacyInferenceVpnHeading": "Sub-section heading; no factual claim.",
+    "relaySettingsKeyPackageSubtitle": {
+      "reason": "Section subtitle naming where KeyPackage relays live. Correct only by omission: the profile plane moved to the separate local-only Profile list, so this line must stay silent about the public profile.",
+      "forbidden_additions": [
+        "public profile",
+        "your profile is published",
+        "name and photo"
+      ]
+    },
+    "locationSettingsToggleSubtitle": {
+      "reason": "Toggle subtitle. Correct only by omission: it must describe the background scope without claiming sharing survives the system closing Haven, and is deliberately silent on the Android reboot/swipe-out asymmetry, which locationSettingsIntro states in full.",
+      "forbidden_additions": [
+        "when the app is closed",
+        "when Haven is closed",
+        "even when closed"
+      ]
+    },
+    "avatarPickerPhotoRemoved": {
+      "reason": "Snackbar confirming the local removal action. Honest only because the confirmation dialog (photoHeaderRemoveBody) precedes it and states that the hosted image survives; on its own it must never read as a deletion promise. Its @description does not yet record this constraint.",
+      "forbidden_additions": [
+        "deleted",
+        "permanently",
+        "from the server",
+        "erased"
+      ]
+    }
+  },
+  "invariants": [
+    {
+      "id": "INV-L-CIPHERTEXT-ONLY-EGRESS",
+      "title": "Location leaves the device only as MLS ciphertext",
+      "statement": "Every coordinate that crosses the network boundary does so inside an MLS application message sealed by the group's exporter-derived key and framed as a kind-445 event; adding any publish path that writes a coordinate (or a geohash derived from one) into event content, a tag, or an HTTP body falsifies this.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "privacyRelaysMeansForYou",
+        "privacyWhatHavenIsMeansForYou",
+        "privacyWhatOthersSeeRelaysCannot",
+        "privacyHubSummary"
+      ],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [
+        {
+          "carrier": "ios_infoplist",
+          "id": "NSLocationWhenInUseUsageDescription",
+          "kind": "assertion"
+        },
+        {
+          "carrier": "dart_source",
+          "id": "LocationDisclosureStrings.how",
+          "kind": "assertion"
+        },
+        {
+          "carrier": "dart_source",
+          "id": "haven/lib/src/services/background_location_manager.dart:channelDescription",
+          "kind": "assertion"
+        }
+      ],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#network-threat-model"
+      ],
+      "event_kinds": [
+        {
+          "kind": 445,
+          "token": "out_of_tree:transport-nostr-peeler",
+          "note": "Built by the rev-pinned peeler (transport-nostr-peeler/src/peeler.rs); reached from location/nostr.rs and nostr/mls/manager.rs::send_location. No repo-local grep can see the kind."
+        },
+        {
+          "kind": 9,
+          "token": "Kind::Custom(KIND_LOCATION_DATA)",
+          "note": "Inner application rumor carrying the coordinate; never published as a relay event — it exists only as 445 plaintext before the engine seals it."
+        },
+        {
+          "kind": 9,
+          "token": "Kind::Custom(9)",
+          "note": "The inner rumor built at nostr/mls/manager.rs:571, spelled as a literal rather than via KIND_LOCATION_DATA. Never leaves the device unencrypted; it becomes 445 ciphertext."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/location/nostr.rs",
+          "symbol": "KIND_LOCATION_DATA"
+        },
+        {
+          "file": "haven-core/src/nostr/mls/manager.rs",
+          "symbol": "send_location"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "g2_location_encryption_roundtrip"
+        },
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "g3_cross_group_decryption_fails"
+        },
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "encrypted_event_has_h_tag_with_nostr_group_id_only"
+        }
+      ],
+      "guards": [
+        "tooling/e2e/ci/check-wire-journal.sh#workflow=e2e-android.yml"
+      ]
+    },
+    {
+      "id": "INV-L-PAYLOAD-FIELDS-MINIMAL",
+      "title": "The location payload carries a coordinate and a timestamp, nothing else",
+      "statement": "The serialized LocationMessage contains no device_id, altitude, speed, heading or raw_accuracy field even when those fields are populated in memory, and coordinates are full precision with no obfuscation tier to select; removing a serde(skip) or reintroducing a coarsening mode falsifies this.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyWhatOthersSeeMembersExact"
+      ],
+      "non_arb_claims": [
+        {
+          "carrier": "dart_source",
+          "id": "LocationDisclosureStrings.why",
+          "kind": "disclosure"
+        }
+      ],
+      "event_kinds": [
+        {
+          "kind": 9,
+          "token": "Kind::Custom(KIND_LOCATION_DATA)",
+          "note": "The rumor whose JSON body this invariant constrains."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/location/types.rs",
+          "symbol": "LocationMessage"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/location/types.rs",
+          "name": "location_message_json_excludes_private_fields"
+        },
+        {
+          "file": "haven-core/tests/proptest_location.rs",
+          "name": "d3_private_fields_absent_when_populated"
+        },
+        {
+          "file": "haven-core/tests/proptest_location.rs",
+          "name": "d3_private_fields_never_in_json"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-L-ACCESS-GATE-PRECEDES-FIX",
+      "title": "No coordinate is produced after location access is withdrawn",
+      "statement": "getCurrentLocation and getCurrentLocationFresh call _ensureAccessOrThrow before they read the cached stream position, before getLastKnownPosition() and before getCurrentPosition(), and both stored-coordinate shortcuts sit inside the granted branch; reordering the gate below any of those reads — a one-line change that still compiles and still passes the unit tests — falsifies this.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "symbols": [
+        {
+          "file": "haven/lib/src/services/geolocator_location_service.dart",
+          "symbol": "_ensureAccessOrThrow"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/pages/map/map_page_location_access_test.dart",
+          "name": "a fix held from BEFORE the outage is NOT drawn"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_location_access_gate.sh"
+      ]
+    },
+    {
+      "id": "INV-L-STOPPED-BANNER-NAMES-ITS-CAUSE",
+      "title": "Each way sharing stops names its own cause and its own remedy",
+      "statement": "Every blocked LocationAccessStatus resolves to a distinct, non-empty message: device-provider-off, promptable denial, permanently-denied, both-blocked and unknown never share copy, and the unknown case asserts no cause; collapsing two statuses onto one string, or giving the unknown case a specific cause, falsifies this.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "mapLocationSharingStoppedServiceOff",
+        "mapLocationSharingStoppedPermission",
+        "mapLocationSharingStoppedPermissionSettings",
+        "mapLocationSharingStoppedBoth",
+        "mapLocationSharingStoppedUnknown"
+      ],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "symbols": [
+        {
+          "file": "haven/lib/src/widgets/map/location_access_banner.dart",
+          "symbol": "resolveLocationAccessCopy"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/widgets/map/location_access_banner_test.dart",
+          "name": "service-disabled names the device toggle"
+        },
+        {
+          "file": "haven/test/widgets/map/location_access_banner_test.dart",
+          "name": "permission-denied names the permission"
+        },
+        {
+          "file": "haven/test/widgets/map/location_access_banner_test.dart",
+          "name": "permanently-denied reads differently from denied"
+        },
+        {
+          "file": "haven/test/widgets/map/location_access_banner_test.dart",
+          "name": "both-blocked names both remedies"
+        },
+        {
+          "file": "haven/test/widgets/map/location_access_banner_test.dart",
+          "name": "unknown claims no cause and offers a retry"
+        },
+        {
+          "file": "haven/test/widgets/map/location_access_banner_test.dart",
+          "name": "every blocked status resolves to distinct, non-empty copy"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-L-FOREGROUND-SHARING-UNPAUSABLE",
+      "title": "Foreground sharing is unconditional; leaving is the only per-circle stop",
+      "statement": "While Haven is foregrounded and the user is in a circle, the publish scheduler runs unconditionally: the only user control is the BACKGROUND toggle, and the only way to stop being seen by a circle's members is to leave that circle; introducing a pause/ghost switch that suppresses foreground publishing falsifies this.",
+      "status": "ratcheted",
+      "residual": "No test asserts the ABSENCE of a foreground pause control. The disclosure gate tests prove publishing is refused before consent, and check_ios_background_publish.sh pins that the pause decision routes through shouldKeepPublishingWhilePaused, but nothing fails if a pause affordance is added — the copy would silently become false in the reassuring direction.",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyWhatOthersSeeCannotPause",
+        "leaveCircleDialogBody"
+      ],
+      "non_arb_claims": [
+        {
+          "carrier": "dart_source",
+          "id": "LocationDisclosureStrings.sharing",
+          "kind": "disclosure"
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven/lib/src/pages/map_shell.dart",
+          "symbol": "shouldKeepPublishingWhilePaused"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/services/background_location_disclosure_gate_test.dart",
+          "name": "the foreground publisher still enforces its own gate"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_ios_background_publish.sh"
+      ]
+    },
+    {
+      "id": "INV-L-BACKGROUND-DISCLOSURE-GATE",
+      "title": "No background cycle collects or publishes location before both disclosures are accepted",
+      "statement": "background_location_task.dart consults backgroundPublishDisclosureAccepted as a refusal branch that precedes both getCurrentLocation() and encryptLocation(), and reads both the foreground and background disclosure keys; moving the gate below the GPS read, or deleting the call site while leaving the declaration, falsifies this.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [
+        {
+          "carrier": "dart_source",
+          "id": "LocationDisclosureStrings.manage",
+          "kind": "assertion"
+        },
+        {
+          "carrier": "dart_source",
+          "id": "LocationDisclosureStrings.backgroundAndroid",
+          "kind": "disclosure"
+        },
+        {
+          "carrier": "play_disclosure",
+          "id": "LocationDisclosureStrings.title",
+          "kind": "none",
+          "reason": "Dialog heading ('Sharing your location'). Names the subject; every checkable claim lives in the why/how/sharing/background/manage fields below it."
+        },
+        {
+          "carrier": "play_disclosure",
+          "id": "LocationDisclosureStrings.agree",
+          "kind": "none",
+          "reason": "Affirmative button label. Records consent; asserts nothing about behaviour."
+        },
+        {
+          "carrier": "play_disclosure",
+          "id": "LocationDisclosureStrings.notNow",
+          "kind": "none",
+          "reason": "Dismissal button label. Declines consent; asserts nothing about behaviour."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven/lib/src/services/background_location_task.dart",
+          "symbol": "backgroundPublishDisclosureAccepted"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/services/background_location_disclosure_gate_test.dart",
+          "name": "the background publish cycle consults the disclosure gate"
+        },
+        {
+          "file": "haven/test/services/background_location_disclosure_gate_test.dart",
+          "name": "the cycle reads both disclosure keys"
+        },
+        {
+          "file": "haven/test/services/background_location_disclosure_gate_test.dart",
+          "name": "the gate precedes location COLLECTION, not just publication"
+        },
+        {
+          "file": "haven/test/services/background_location_disclosure_gate_test.dart",
+          "name": "permits publishing only when BOTH disclosures are accepted"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-L-IOS-WAKES-RECEIVE-ONLY",
+      "title": "Every iOS background wake path is receive-only",
+      "statement": "Once iOS terminates Haven, no wake path (SLC relaunch, BGAppRefreshTask, catch-up sweep) contains a publish call site, so the user's own sharing does not resume until they reopen the app; adding a publish to catchup_service.dart, ios_background_catchup.dart or HavenSLCHandler.swift — or shipping copy that mentions the app not running without saying what stops — falsifies this.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "locationSettingsIosLimitedNote",
+        "locationSettingsIosGuidance"
+      ],
+      "disclosure_arb_keys": [
+        "locationSettingsIntro"
+      ],
+      "non_arb_claims": [
+        {
+          "carrier": "ios_infoplist",
+          "id": "NSLocationAlwaysAndWhenInUseUsageDescription",
+          "kind": "assertion"
+        },
+        {
+          "carrier": "dart_source",
+          "id": "LocationDisclosureStrings.backgroundIos",
+          "kind": "assertion"
+        }
+      ],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#scheduled-background-wakes-m7"
+      ],
+      "symbols": [
+        {
+          "file": "haven/ios/Runner/Info.plist",
+          "symbol": "NSLocationAlwaysAndWhenInUseUsageDescription"
+        },
+        {
+          "file": "haven/lib/src/widgets/location/location_disclosure_dialog.dart",
+          "symbol": "backgroundIos"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/lints/background_claim_accuracy_test.dart",
+          "name": "no usage description claims sharing survives iOS closing the app"
+        },
+        {
+          "file": "haven/test/lints/background_claim_accuracy_test.dart",
+          "name": "the Always description still justifies Always specifically"
+        },
+        {
+          "file": "haven/test/lints/background_claim_accuracy_test.dart",
+          "name": "the iOS copy states the limit affirmatively"
+        },
+        {
+          "file": "haven/test/lints/background_claim_accuracy_test.dart",
+          "name": "the background sentence differs by platform"
+        },
+        {
+          "file": "haven/test/lints/background_claim_accuracy_test.dart",
+          "name": "the parser actually found the usage descriptions (anti-vacuity)"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_m7_native_wake_guards.sh",
+        "scripts/ci/check_ios_background_publish.sh"
+      ]
+    },
+    {
+      "id": "INV-L-ANDROID-REBOOT-RESURRECTS-PUBLISHING",
+      "title": "On Android a reboot restarts the publishing foreground service with no user action",
+      "statement": "RebootReceiver is android:enabled=\"true\" and ForegroundTaskOptions sets autoRunOnBoot:true, so the location-publishing foreground service comes back by itself after a reboot; and the exception stops there, because RestartReceiver stays android:enabled=\"false\" so an OS/OEM kill is never auto-restarted. Flipping any of those three falsifies the platform-split sentence the copy carries.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "locationSettingsIntro",
+        "privacyWhatOthersSeeCannotPause"
+      ],
+      "non_arb_claims": [
+        {
+          "carrier": "dart_source",
+          "id": "LocationDisclosureStrings.backgroundAndroid",
+          "kind": "disclosure"
+        },
+        {
+          "carrier": "dart_source",
+          "id": "haven/lib/src/services/background_location_manager.dart:notificationText",
+          "kind": "disclosure"
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven/android/app/src/main/AndroidManifest.xml",
+          "symbol": "RebootReceiver"
+        },
+        {
+          "file": "haven/lib/src/services/background_location_manager.dart",
+          "symbol": "autoRunOnBoot"
+        }
+      ],
+      "tests": [],
+      "guards": [
+        "scripts/ci/check_m7_native_wake_guards.sh"
+      ]
+    },
+    {
+      "id": "INV-L-ANDROID-SWIPE-OUT-SURVIVES",
+      "title": "On Android the publishing service survives the app being swiped out of recents",
+      "statement": "No android:stopWithTask is declared anywhere in the production manifest, so the location foreground service is not torn down when the user swipes Haven out of recents and it keeps publishing on its own timer; adding android:stopWithTask=\"true\" would make the Play prominent-disclosure sentence and the platform-split privacy copy false in the reassuring direction.",
+      "status": "ratcheted",
+      "residual": "Nothing pins the ABSENCE of android:stopWithTask. check_m7_native_wake_guards.sh covers RebootReceiver/RestartReceiver/autoRunOnBoot but not this attribute, and the e2e-fgs-publish (b1) lane exercises a BACKGROUNDED app, not a swiped-out one — its go_cold helper kills the process outright. The claim is true in the tree and unproven by CI.",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyWhatOthersSeeCannotPause",
+        "locationSettingsIntro"
+      ],
+      "non_arb_claims": [
+        {
+          "carrier": "dart_source",
+          "id": "LocationDisclosureStrings.backgroundAndroid",
+          "kind": "disclosure"
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven/lib/src/widgets/location/location_disclosure_dialog.dart",
+          "symbol": "backgroundAndroid"
+        }
+      ],
+      "tests": [],
+      "guards": []
+    },
+    {
+      "id": "INV-L-MOTION-TRIGGER-BOUNDED",
+      "title": "The motion-triggered publish is foreground-only and rate-bounded",
+      "statement": "The extra motion-triggered publish exists only in the Flutter UI isolate, fires no sooner than kMotionTriggerDistanceMeters = 100 m of travel, and is suppressed within kLocationPublishOverlapGuard = 60 s of the previous publish, so the activity-level leak is at most one extra event per minute; lowering either constant, or adding a motion trigger to the Android background service, widens the disclosed leak.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyInferenceActivityPattern"
+      ],
+      "non_arb_claims": [],
+      "symbols": [
+        {
+          "file": "haven/lib/src/constants/location.dart",
+          "symbol": "kMotionTriggerDistanceMeters"
+        },
+        {
+          "file": "haven/lib/src/constants/location.dart",
+          "symbol": "kLocationPublishOverlapGuard"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/constants/location_test.dart",
+          "name": "motion trigger distance is pinned at 100 metres"
+        },
+        {
+          "file": "haven/test/constants/location_test.dart",
+          "name": "overlap guard is pinned at 60 seconds"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-L-RECEIVER-PURGE-ONE-DAY",
+      "title": "A received position is purged from the receiver's device after one day",
+      "statement": "Every stored peer position carries purge_after = timestamp + LOCATION_RETENTION_SECS (86400 s), a fixed constant that no payload field and no setting can extend; changing the constant without changing both the privacy paragraph and the leave-circle dialog fails the copy tie, and changing the copy without the constant fails it the other way.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyWhatOthersSeeDetailOnDevice",
+        "leaveCircleDialogBody"
+      ],
+      "non_arb_claims": [],
+      "symbols": [
+        {
+          "file": "haven-core/src/location/types.rs",
+          "symbol": "LOCATION_RETENTION_SECS"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/location/types.rs",
+          "name": "location_retention_secs_is_pinned_at_one_day"
+        },
+        {
+          "file": "haven-core/tests/privacy_copy_ties.rs",
+          "name": "on_device_retention_copy_states_the_purge_window"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-L-APPLE-MAPS-COORDINATE-ONLY",
+      "title": "The Apple Maps handoff URL carries a coordinate and nothing else",
+      "statement": "_openInAppleMaps builds Uri.https('maps.apple.com', '/', {'ll': '<lat>,<lon>'}) — no member name, petname, pubkey, circle name or routing tag is ever added to that URL; adding a q= label or any identifier parameter falsifies the sheet's subtitle.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "mapOpenInAppleMapsBody"
+      ],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "symbols": [
+        {
+          "file": "haven/lib/src/pages/map/map_page.dart",
+          "symbol": "_openInAppleMaps"
+        },
+        {
+          "file": "haven/lib/src/pages/map/map_page.dart",
+          "symbol": "appleMapsHandoffUri"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/pages/map/map_page_apple_maps_handoff_test.dart",
+          "name": "carries exactly the coordinate parameter, nothing else"
+        },
+        {
+          "file": "haven/test/pages/map/map_page_apple_maps_handoff_test.dart",
+          "name": "_openInAppleMaps builds its URL through the tested helper"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-L-CLOCK-SKEW-FAULTS-DISTINCT",
+      "title": "The two clock-skew faults are told apart, and neither leaks a measurement",
+      "statement": "A relay timestamp REJECTION and a slow-clock born-expired loss resolve to different messages — the first says nothing was accepted, the second says the send succeeded and was discarded — and neither renders the measured offset or the corroborating-source count; merging the two bodies, or interpolating offsetSecs into either, falsifies this.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "clockSkewBodyRejected",
+        "clockSkewBodyBehind"
+      ],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "symbols": [
+        {
+          "file": "haven/lib/src/widgets/location/clock_skew_banner.dart",
+          "symbol": "resolveClockSkewCopy"
+        },
+        {
+          "file": "haven-core/src/relay/clock_skew.rs",
+          "symbol": "CLOCK_SKEW_ALERT_THRESHOLD_SECS"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/widgets/location/clock_skew_banner_test.dart",
+          "name": "names the clock, not a generic failure, for a relay rejection"
+        },
+        {
+          "file": "haven/test/widgets/location/clock_skew_banner_test.dart",
+          "name": "uses different wording for the invisible (behind) failure"
+        },
+        {
+          "file": "haven/test/widgets/location/clock_skew_banner_test.dart",
+          "name": "never renders the measured offset"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_clock_skew_policy_parity.sh"
+      ]
+    },
+    {
+      "id": "INV-E-PER-CIRCLE-ISOLATION",
+      "title": "Each circle is an independent MLS group with its own keys",
+      "statement": "Two circles never share key material or a group identifier, and ciphertext produced in one circle is undecryptable by a member of another even when that member is in both; deriving any circle's keys from a shared or account-level secret falsifies this.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "privacyEncryptionPerCircle",
+        "nameCircleSharingInfo",
+        "privacyEncryptionSubtitle"
+      ],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "event_kinds": [
+        {
+          "kind": 445,
+          "token": "out_of_tree:transport-nostr-peeler",
+          "note": "The per-circle ciphertext whose cross-group undecryptability this invariant asserts."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/nostr/mls/manager.rs",
+          "symbol": "create_group"
+        },
+        {
+          "file": "haven-core/src/nostr/mls/context.rs",
+          "symbol": "MlsGroupContext"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "g3_cross_group_decryption_fails"
+        },
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "rm7_independent_groups_have_distinct_ids"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-E-KEY-SEPARATION",
+      "title": "MLS signing keys are never the Nostr identity key",
+      "statement": "The MLS leaf signature key and the Nostr identity key can never be the same key, structurally: ciphersuite 0x0001 fixes the leaf signature scheme to Ed25519 while the Nostr identity is secp256k1 Schnorr. The account-identity proof does NOT enforce inequality — validate_leaf_account_identity_proof authenticates the binding (a proof binding a key to itself would verify) — so the engine rejecting an unverifiable proof is not what makes this true.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "privacyEncryptionDetailMls"
+      ],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "event_kinds": [
+        {
+          "kind": 450,
+          "token": "cgka-engine:account_identity_proof",
+          "note": "Built by AccountIdentityProofRequest::proof_event() in cgka-engine, reached from the IN-TREE call site haven-core/src/nostr/mls/signer.rs. NOT the peeler. Never published. Note the shipped code (v2 / 0xF2F1 / kind-450-framed) diverges from foundation/account-identity-proof-v1.md, which specifies v0x01 and says the proof is not a Nostr event at all — a spec catch-up would be a wire-format change."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/nostr/mls/manager.rs",
+          "symbol": "HavenIdentityProofSigner"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "p3a_leaf_signature_key_differs_from_nostr_identity_key"
+        },
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "p3a_key_separation_identity_proof_enforced_and_identity_not_used_for_group_messages"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-E-EPHEMERAL-AUTHOR-PER-MESSAGE",
+      "title": "Every kind-445 carries a fresh, single-use author key",
+      "statement": "Each group message is signed by a newly generated keypair, so no two location events share an author pubkey and none of them is the sender's identity key; reusing a keypair across messages, or letting the exporter-derived ChaCha20-Poly1305 nonce repeat under one epoch key, falsifies this.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "privacyWhatOthersSeeRelaysCannot",
+        "privacyYourKeysPublicIsSafe"
+      ],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "event_kinds": [
+        {
+          "kind": 445,
+          "token": "out_of_tree:transport-nostr-peeler",
+          "note": "wire_allowlist.json marks this kind ephemeral_pubkey:true, which the wire-journal oracle enforces on real published events."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/nostr/keys.rs",
+          "symbol": "EphemeralKeypair"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "g4_unique_ephemeral_pubkeys_per_message"
+        },
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "g4_ephemeral_pubkey_differs_from_sender_identity"
+        },
+        {
+          "file": "haven-core/tests/security_rule_gates.rs",
+          "name": "rule11_kind_445_nonces_never_repeat_under_one_epoch_key"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_no_exporter_label_override.sh",
+        "tooling/e2e/ci/check-wire-journal.sh#workflow=e2e-android.yml"
+      ]
+    },
+    {
+      "id": "INV-E-NO-PERIODIC-REKEY",
+      "title": "Keys change on membership change only, never on a timer",
+      "statement": "Both periodic (MIP-03 SHOULD) and post-join 24 h (MIP-02 MUST) leaf-key self-update are disabled, so one epoch key can cover weeks of messages and a former member keeps whatever they saved during their epochs; re-introducing a production self-update timer would change the property the copy describes.",
+      "status": "accepted_deviation",
+      "accepted_deviation_id": "M5",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyEncryptionKeysChangeOnMembership",
+        "privacyEncryptionMeansForYou"
+      ],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#self-update-disabled-m5--accepted-mip-02mip-03-deviation"
+      ],
+      "symbols": [],
+      "tests": [
+        {
+          "file": "haven/test/lints/self_update_disabled_test.dart",
+          "name": "no production self-update timer is re-introduced"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-E-REMOVAL-ADVANCES-EPOCH",
+      "title": "Removing a member advances the epoch and locks them out of new location",
+      "statement": "An ADMIN removal is a commit that advances the group epoch, and a member removed at epoch N cannot decrypt a location published at epoch N+1; the commit is applied only after at least one relay acked it, so a member is never treated as removed on a commit nobody received.",
+      "status": "ratcheted",
+      "assertion_arb_keys": [
+        "privacyEncryptionWhenSomeoneLeaves"
+      ],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "event_kinds": [
+        {
+          "kind": 445,
+          "token": "out_of_tree:transport-nostr-peeler",
+          "note": "Removal commits ride the same kind as application messages, distinguished only by the absence of the expiration tag."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/circle/manager.rs",
+          "symbol": "confirm_published"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/circle_integration_test.rs",
+          "name": "removed_member_cannot_decrypt_post_removal_location"
+        },
+        {
+          "file": "haven-core/tests/publish_before_apply_send_e2e.rs",
+          "name": "remove_members_confirms_only_on_an_ack"
+        }
+      ],
+      "guards": [],
+      "residual": "Scoped to ADMIN removal — both cited tests exercise that path. The assertion key privacyEncryptionWhenSomeoneLeaves also covers the SELF-LEAVE path, which has an accepted unconverged case (deviation LEAVE-GHOST) where the ghost stays authorized until a manual admin removal. Nothing fails when that path breaks and no copy discloses it; filing LEAVE-GHOST as an accepted_deviation invariant would require inventing a disclosure that does not exist."
+    },
+    {
+      "id": "INV-E-JOINER-GETS-NO-HISTORY",
+      "title": "A joiner receives current-epoch keys only and no replayed history",
+      "statement": "A member added at epoch N cannot DECRYPT any kind-445 sealed before the commit that added them, regardless of what a relay serves: the Welcome conveys only the current epoch's joiner_secret path and the MLS key schedule is one-way, so no earlier exporter_secret is derivable. Haven additionally has no backfill path — the Add stages no application message and the welcome ingest carries no location results.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "privacyEncryptionWhenSomeoneJoins",
+        "addMemberInfo"
+      ],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "symbols": [
+        {
+          "file": "haven-core/src/circle/manager.rs",
+          "symbol": "add_members_with_welcomes"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "new_member_cannot_decrypt_location_sent_before_the_add"
+        }
+      ],
+      "guards": [],
+      "note": "Delivery of pre-join ciphertext to a joiner is REACHABLE and harmless: SEED_LOOKBACK_SECS = 86_400 (relay/live_sync/session.rs:54) seeds a new circle's kind-445 cursor to now-24h rather than to the join epoch, so the first sweep's REQ window legitimately covers up to a day before the join. The 228 s NIP-40 expiration means a conformant relay holds almost nothing that old, but a buggy or hostile one may serve it. The claim holds because the ciphertext is UNREADABLE, not because it is never delivered — which is exactly what the cited test pins, by handing the joiner the real pre-join event through process_event."
+    },
+    {
+      "id": "INV-E-EXPORTER-RETENTION-FIVE-EPOCHS",
+      "title": "Exactly five past epochs of exporter secrets are retained",
+      "statement": "The engine keeps DEFAULT_MAX_PAST_EPOCHS = 5 past epochs' exporter secrets and its application-message accept window equals that bound, so a ciphertext exactly at the window edge still decrypts and one past it does not; widening the window keeps stale secrets alive, narrowing it drops legitimate offline backlog, and either direction fails the pin.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyEncryptionDetailEpochs"
+      ],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#mls-security"
+      ],
+      "symbols": [],
+      "tests": [
+        {
+          "file": "haven-core/tests/security_rule_gates.rs",
+          "name": "rule5_retention_constants_are_pinned"
+        },
+        {
+          "file": "haven-core/tests/security_rule_gates.rs",
+          "name": "rule5_epoch_n_ciphertext_still_decrypts_at_the_window_edge"
+        },
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "p3b_old_epoch_ciphertext_is_undecryptable_after_retention_window"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-E-ROSTER-EXPOSES-IDENTITY-KEY",
+      "title": "Every co-member learns your Nostr identity public key",
+      "statement": "Each MLS leaf carries a kind-450 account-identity proof binding the member to their Nostr identity key, and the engine rejects a leaf whose proof does not verify, so joining a circle necessarily discloses that pubkey to every other member and to everyone already in the circle; there is no pseudonymous-within-circle mode.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyWhatOthersSeeMembersLearnKey",
+        "addMemberInfo"
+      ],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#identity-proof-rebroadcast-kind-450--irreducible-by-design-f12"
+      ],
+      "event_kinds": [
+        {
+          "kind": 450,
+          "token": "cgka-engine:account_identity_proof",
+          "note": "Built by AccountIdentityProofRequest::proof_event() in cgka-engine, reached from the IN-TREE call site haven-core/src/nostr/mls/signer.rs. NOT the peeler. Never published. Note the shipped code (v2 / 0xF2F1 / kind-450-framed) diverges from foundation/account-identity-proof-v1.md, which specifies v0x01 and says the proof is not a Nostr event at all — a spec catch-up would be a wire-format change."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/nostr/mls/manager.rs",
+          "symbol": "account_identity_proof_signer"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "p3a_key_separation_identity_proof_enforced_and_identity_not_used_for_group_messages"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-W-445-TAG-SHAPE",
+      "title": "A kind-445 carries h and expiration and no other tag",
+      "statement": "Published group events carry only the h routing tag (plus a NIP-40 expiration on application messages); no alt tag, no geohash g tag and no client tag ever reaches a relay — in particular the dead local 445 builder at nostr/event.rs, which stamps alt and a truncated 5-char geohash, must stay unreachable.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyWhatOthersSeeRelaysCan"
+      ],
+      "non_arb_claims": [],
+      "event_kinds": [
+        {
+          "kind": 445,
+          "token": "out_of_tree:transport-nostr-peeler",
+          "note": "wire_allowlist.json pins tags.allowed = [h, expiration] and tags.required = [h, expiration]; a geohash or alt tag landing on the wire is a violation."
+        },
+        {
+          "kind": 445,
+          "token": "Kind::Custom(445)",
+          "note": "Read-side subscription filter for the group plane (live_sync/planes/group.rs:14) — same kind, spelled as a numeric literal rather than reached through the peeler."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/nostr/event.rs",
+          "symbol": "KIND_GROUP_MESSAGE"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "encrypted_event_has_h_tag_with_nostr_group_id_only"
+        }
+      ],
+      "guards": [
+        "tooling/e2e/ci/check-wire-journal.sh#workflow=e2e-android.yml"
+      ]
+    },
+    {
+      "id": "INV-W-445-EXPIRATION-SCOPE",
+      "title": "The NIP-40 expiry is advisory, 228 s, and stamped on application messages only",
+      "statement": "For every circle THIS device created, the engine stamps application kind-445s with a NIP-40 expiration of inner_created_at + LOCATION_MESSAGE_RETENTION_SECS (228 s), derived from the group's message-retention.v1 component (0x8005) supplied at CreateGroupRequest; commits and proposals are never stamped, so a 445 without an expiration is visibly a membership change.",
+      "status": "ratcheted",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyWhatOthersSeeDetailExpiry"
+      ],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#outer-kind445-metadata-group-governed-nip-40-expiration"
+      ],
+      "event_kinds": [
+        {
+          "kind": 445,
+          "token": "out_of_tree:transport-nostr-peeler",
+          "note": "The engine derives the expiration from the group component; Haven's send path takes no per-send expiration."
+        },
+        {
+          "kind": 1059,
+          "token": "out_of_tree:transport-nostr-peeler",
+          "note": "Welcome gift wraps carry no expiration — the invitation may sit on an inbox relay indefinitely."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/location/ttl.rs",
+          "symbol": "LOCATION_MESSAGE_RETENTION_SECS"
+        },
+        {
+          "file": "haven-core/src/location/ttl.rs",
+          "symbol": "RECEIVER_EXPIRATION_GRACE_SECS"
+        },
+        {
+          "file": "haven-core/src/nostr/mls/manager.rs",
+          "symbol": "GROUP_MESSAGE_RETENTION_COMPONENT_ID"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/circle/manager.rs",
+          "name": "encrypt_location_attaches_group_retention_expiration"
+        },
+        {
+          "file": "haven-core/src/circle/manager.rs",
+          "name": "evolution_commit_carries_no_expiration_tag"
+        },
+        {
+          "file": "haven-core/src/circle/manager.rs",
+          "name": "decrypt_location_drops_expired_event"
+        }
+      ],
+      "guards": [
+        "tooling/e2e/ci/check-wire-journal.sh#workflow=e2e-android.yml"
+      ],
+      "residual": "Scoped to locally-created circles. The 0x8005 component is supplied at exactly one site (nostr/mls/manager.rs, CreateGroupRequest.app_components) and there is NO read-back, no validation on accept_welcome, and no UpdateAppComponents path that adds it to a group lacking it. For a circle created by a client that did not declare the component (an older Haven build, another Marmot client), this device's own application 445s carry no expiration — and then BOTH halves of privacyWhatOthersSeeDetailExpiry invert: the four-minute claim is false for that circle, and a location update reads as a membership change. The cited test exercises a locally-created two-party circle only, so nothing fails when the joined-group case breaks."
+    },
+    {
+      "id": "INV-W-GROUP-TAG-PSEUDONYMOUS-AND-STABLE",
+      "title": "The routing tag is a pseudonym, and Haven never rotates it",
+      "statement": "Published events carry nostr_group_id in the h tag and the real MLS group ID appears nowhere in the event JSON or any tag; the tag is stable for the life of a circle because Haven never invokes the rotation the nostr-routing component permits, so a relay can group one circle's traffic indefinitely. Publishing the raw MLS group ID, or leaving the copy attributing the stability to the protocol rather than to Haven, falsifies this.",
+      "status": "ratcheted",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyWhatOthersSeeDetailTag"
+      ],
+      "non_arb_claims": [],
+      "event_kinds": [
+        {
+          "kind": 445,
+          "token": "out_of_tree:transport-nostr-peeler",
+          "note": "h tag carries nostr_group_id."
+        },
+        {
+          "kind": 1059,
+          "token": "out_of_tree:transport-nostr-peeler",
+          "note": "The welcome gift wrap must also not leak the raw MLS group ID."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/relay/live_sync/planes/group.rs",
+          "symbol": "GROUP_EVENT_KIND"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "encrypted_event_has_h_tag_with_nostr_group_id_only"
+        },
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "rm1b_welcome_gift_wrap_does_not_leak_raw_mls_group_id"
+        },
+        {
+          "file": "haven-core/tests/circle_integration_test.rs",
+          "name": "group_epoch_error_never_leaks_the_queried_group_id"
+        }
+      ],
+      "guards": [
+        "tooling/e2e/ci/check-wire-journal.sh#workflow=e2e-android.yml"
+      ],
+      "residual": "Component presence is the invariant, NOT engine behaviour. cgka-engine's transport_group_id_of_group falls back to the RAW MLS GroupId when a group carries no NostrRoutingV1 (0x8004) component, and that value is what the peeler hex-encodes into the h tag — a direct Security Rule 4 violation with no engine-side refusal. Haven is safe today for two incidental reasons, neither tested: create_circle always mints the component, and accept_invitation fails closed if a joined group lacks routing. Residual path: an admin co-member clearing the component via UpdateAppComponents on an existing circle. encrypt_location reads circle.nostr_group_id from STORAGE for publish targeting while the h tag comes from the ENGINE at wrap time, and nothing cross-checks the two. The cited test exercises only a Haven-created group with an intact component, so it cannot see this."
+    },
+    {
+      "id": "INV-W-WELCOME-UNSIGNED-GIFTWRAPPED",
+      "title": "Invitations travel as unsigned rumors inside gift wraps with fresh authors",
+      "statement": "The kind-444 Welcome rumor carries no signature (so a recipient cannot republish it as the inviter), it is delivered inside a NIP-59 kind-1059 gift wrap authored by a freshly generated key, and neither the wrap nor its tags leak the MLS group ID, the circle name or the roster; signing the rumor, reusing a wrap author, or adding any tag beyond p falsifies this.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyRelaysYourLists"
+      ],
+      "non_arb_claims": [],
+      "event_kinds": [
+        {
+          "kind": 444,
+          "token": "out_of_tree:transport-nostr-peeler",
+          "note": "Unsigned rumor; never published on its own, only sealed inside 1059."
+        },
+        {
+          "kind": 1059,
+          "token": "out_of_tree:transport-nostr-peeler",
+          "note": "peeler.rs builds the wrap with empty extra tags, so the only tag is p (recipient)."
+        },
+        {
+          "kind": 13,
+          "token": "out_of_tree:transport-nostr-peeler",
+          "note": "NIP-59 seal, constructed inside the nostr crate; never a standalone Haven relay event."
+        },
+        {
+          "kind": 444,
+          "token": "Kind::Custom(KIND_WELCOME)",
+          "note": "The READ side (nostr/giftwrap.rs:110) — unwrap_welcome validating the inner rumor kind. Haven never builds a 444; the peeler does."
+        },
+        {
+          "kind": 1059,
+          "token": "Kind::GiftWrap",
+          "note": "The READ side (nostr/giftwrap.rs:93) — the named nostr variant, which carries no number a numeric scan could find."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/nostr/giftwrap.rs",
+          "symbol": "KIND_WELCOME"
+        },
+        {
+          "file": "haven-core/src/nostr/giftwrap.rs",
+          "symbol": "KIND_GIFT_WRAP"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "rm1_welcome_rumor_is_unsigned_kind_444"
+        },
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "rm_welcome_gift_wrap_privacy_sweep"
+        },
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "rm_each_welcome_gift_wrap_carries_a_fresh_ephemeral_author"
+        },
+        {
+          "file": "haven-core/tests/security_rule_gates.rs",
+          "name": "rule3_welcome_rumor_json_carries_no_signature"
+        }
+      ],
+      "guards": [
+        "tooling/e2e/ci/check-wire-journal.sh#workflow=e2e-android.yml"
+      ]
+    },
+    {
+      "id": "INV-W-RELAY-LISTS-PUBLISHED-KINDS",
+      "title": "The inbox and KeyPackage relay lists are published under the identity key",
+      "statement": "Haven publishes a kind-10050 inbox relay list and a kind-10002 NIP-65 list, both signed by the identity key and both fanned out to the relays already on them, and it publishes kind-30443 KeyPackages to those relays; consequently every URL a user adds to those lists becomes public and permanently linked to their pubkey, and the retired kind-10051 is emitted only as an empty replaceable retraction.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "privacyRelaysYourLists"
+      ],
+      "disclosure_arb_keys": [
+        "privacyRelaysDetailKeyListIsPublic",
+        "privacyRelaysMeansForYou"
+      ],
+      "non_arb_claims": [],
+      "event_kinds": [
+        {
+          "kind": 10050,
+          "token": "Kind::InboxRelays",
+          "note": "Built at relay/publishers.rs::build_relay_list_event with the kind COMPUTED across the FFI via RelayType::to_kind (circle/relay_prefs.rs); no literal 10050 appears."
+        },
+        {
+          "kind": 10002,
+          "token": "Kind::RelayList",
+          "note": "Built at relay/publishers.rs::build_nip65_relay_list_event; KeyPackage discovery plane since the Dark Matter cutover."
+        },
+        {
+          "kind": 10051,
+          "token": "Kind::MlsKeyPackageRelays",
+          "note": "RETIRED. Emitted only as an empty replaceable retraction (relay/maintenance/key_package.rs::build_key_package_relay_list_retraction). Live on the wire but MISSING from CLAUDE.md's protocol table; wire_allowlist.json forbids it (recorded in _disagreements)."
+        },
+        {
+          "kind": 30443,
+          "token": "Kind::Custom(KIND_MARMOT_KEY_PACKAGE)",
+          "note": "Addressable KeyPackage; the constant is duplicated as KEY_PACKAGE_KIND in circle/storage_key_packages.rs."
+        },
+        {
+          "kind": 5,
+          "token": "EventBuilder::delete",
+          "note": "NIP-09 deletion, THREE construction sites (relay/publishers.rs::build_nip09_deletion, relay/maintenance/key_package.rs, rust_builder/src/api.rs — the last with no live caller). Carries NO kind token or number. Live on the wire but MISSING from CLAUDE.md's protocol table."
+        },
+        {
+          "kind": 30443,
+          "token": "Kind::Custom(30443)",
+          "note": "Read-side filter at relay/manager.rs:853, spelled as a literal rather than via KIND_MARMOT_KEY_PACKAGE."
+        },
+        {
+          "kind": 0,
+          "token": "Kind::Custom(event_kind)",
+          "note": "COMPUTED, not literal (rust_builder/src/api.rs:6763): the kind is an FFI parameter Dart supplies from relay_status_provider.dart as 30443/10002/10050. Read-only probe. Declared at kind 0 as a placeholder because no single number describes it — the token is what the gate keys on."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/relay/publishers.rs",
+          "symbol": "build_nip65_relay_list_event"
+        },
+        {
+          "file": "haven-core/src/relay/publishers.rs",
+          "symbol": "build_relay_list_event"
+        },
+        {
+          "file": "haven-core/src/relay/maintenance/key_package.rs",
+          "symbol": "KIND_MARMOT_KEY_PACKAGE"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/relay/publishers.rs",
+          "name": "build_inbox_event_has_relay_tags_and_empty_content"
+        },
+        {
+          "file": "haven-core/src/relay/publishers.rs",
+          "name": "build_nip65_event_uses_kind_10002_and_r_tags"
+        },
+        {
+          "file": "haven-core/tests/relay_preferences_integration_test.rs",
+          "name": "publish_targets_are_exactly_the_user_list"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-R-PROFILE-RELAY-LIST-NEVER-PUBLISHED",
+      "title": "No wire kind exists for the profile relay category",
+      "statement": "RelayType::Profile::to_kind() returns None, so there is no kind an EventBuilder could be handed for a profile relay list and no code path can serialize that list into a published event; a relay that only carries location or invitation traffic therefore has no signed pointer telling it which relays the device uses for its profile. Adding a kind mapping, or publishing a kind-10002 that names the profile pool, falsifies this.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "privacyRelaysYourLists"
+      ],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#no-kind-10002-for-the-profile-plane-p3"
+      ],
+      "event_kinds": [
+        {
+          "kind": 10002,
+          "token": "Kind::RelayList",
+          "note": "The kind that must NEVER be built for the profile plane; check_profile_privacy_boundaries.sh Check 10 bans Kind::RelayList / build_nip65_relay_list_event / Kind.relayList from the profile module."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/circle/relay_prefs.rs",
+          "symbol": "to_kind"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/circle/relay_prefs.rs",
+          "name": "profile_relay_type_has_no_publishable_kind"
+        },
+        {
+          "file": "haven-core/tests/relay_preferences_integration_test.rs",
+          "name": "no_relay_type_maps_to_nip65_kind_10002"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_profile_privacy_boundaries.sh"
+      ]
+    },
+    {
+      "id": "INV-R-NO-FIRST-PARTY-SERVER",
+      "title": "Haven operates no server of its own on any plane",
+      "statement": "There is no Haven-operated relay, no Haven backend, and no account record: the seeded relays are third-party Nostr relays, identity creation takes no email, phone number or password, and the map plane's only first-party artefact is a single shared Stadia API key carrying no per-user identifier. Introducing a Haven-hosted endpoint that receives user data falsifies this.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "privacyWhatHavenIsNoAccount",
+        "privacyWhatHavenIsNoServers",
+        "privacyRelaysWhatIsARelay",
+        "privacyHubSummary",
+        "privacyWhatHavenIsSubtitle"
+      ],
+      "disclosure_arb_keys": [
+        "privacyWhatHavenIsMeansForYou"
+      ],
+      "non_arb_claims": [
+        {
+          "carrier": "dart_source",
+          "id": "LocationDisclosureStrings.how",
+          "kind": "assertion"
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/circle/types.rs",
+          "symbol": "PRODUCTION_DEFAULT_RELAYS"
+        },
+        {
+          "file": "haven/lib/src/constants/tiles.dart",
+          "symbol": "osmRawDevFallback"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/circle/types.rs",
+          "name": "production_default_relays_count_is_pinned"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_tile_provider.sh"
+      ]
+    },
+    {
+      "id": "INV-R-NO-PUSH-PLANE",
+      "title": "No push notification plane exists",
+      "statement": "No FCM/APNs/OneSignal-class dependency is declared in pubspec.yaml, and nothing under haven/ios registers for remote notifications (no remote-notification background mode, no aps-environment entitlement, no registerForRemoteNotifications), so no coordinator ever learns when someone in a circle has something to deliver.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "privacyWhatHavenIsDetailNoPush"
+      ],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#scheduled-background-wakes-m7"
+      ],
+      "symbols": [],
+      "tests": [],
+      "guards": [
+        "scripts/ci/check_m7_native_wake_guards.sh"
+      ]
+    },
+    {
+      "id": "INV-R-NO-TELEMETRY-SDK",
+      "title": "No analytics, crash-reporting or advertising code ships",
+      "statement": "The app declares no analytics, crash-reporting or ad SDK and contains no code path that reports usage, exceptions or identifiers to any third party; adding a Sentry/Crashlytics/Firebase-Analytics-class dependency, or a hand-rolled event-reporting HTTP call, falsifies this.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "privacyWhatHavenIsDetailNoTelemetry"
+      ],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "symbols": [],
+      "tests": [],
+      "guards": [
+        "scripts/ci/check_m7_native_wake_guards.sh"
+      ],
+      "note": "Backed by check 9b of that guard — the analytics/crash-reporting/advertising dependency surface, the sibling of check 9's push ban. Refuses such a dependency in every position that reaches a build (pubspec direct AND dev, the transitive pubspec.lock, both Cargo manifests and lockfiles, every haven/android build file, AndroidManifest components, Info.plist keys, PrivacyInfo.xcprivacy, a Podfile when present, and marker config files whose presence alone is an SDK). It cannot see a hand-rolled http.post of usage data, an SDK vendored inside another plugin's native artifact, or a Gradle coordinate assembled from variables."
+    },
+    {
+      "id": "INV-R-MULTI-RELAY-NO-SINGLE-POINT",
+      "title": "More than one relay is seeded, so no single relay can cut a user off",
+      "statement": "PRODUCTION_DEFAULT_RELAYS holds exactly three wss:// relays run by independent operators, and no relay in that set is Haven-operated or individually required; shrinking the set to one — or to two, which is thinner than the copy discloses — falsifies the \"several relays, so no single one can cut you off\" promise.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "privacyRelaysWhyMany"
+      ],
+      "disclosure_arb_keys": [
+        "circleDetailsRelaysNote"
+      ],
+      "non_arb_claims": [],
+      "symbols": [
+        {
+          "file": "haven-core/src/circle/types.rs",
+          "symbol": "PRODUCTION_DEFAULT_RELAYS"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/circle/types.rs",
+          "name": "production_default_relays_count_is_pinned"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-R-CIRCLE-RELAYS-FROM-INVITEES",
+      "title": "A circle's relay set comes from the invitees, not from the creator's list",
+      "statement": "create_circle uses the relays supplied by the invited members' fetched KeyPackages; only when that union is empty does it fall back to the creator's stored inbox relays, and only when those are also empty does it fall back to the built-in defaults. Restoring a \"copied from your inbox relays\" derivation would make the circle-details note false in the normal case.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "circleDetailsRelaysNote"
+      ],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "symbols": [
+        {
+          "file": "haven/lib/src/services/nostr_circle_service.dart",
+          "symbol": "memberRelays"
+        },
+        {
+          "file": "haven-core/src/circle/manager.rs",
+          "symbol": "create_circle"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/circle/manager.rs",
+          "name": "create_circle_relays_are_the_passed_relays_not_the_creator_inbox"
+        },
+        {
+          "file": "haven-core/src/circle/manager.rs",
+          "name": "create_circle_falls_back_to_stored_creator_inbox_when_relays_empty"
+        },
+        {
+          "file": "haven-core/src/circle/manager.rs",
+          "name": "create_circle_falls_back_to_default_relays_when_relays_and_creator_inbox_empty"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-R-ENGINE-NO-GOSSIP-NO-AUTH",
+      "title": "The live-sync engine never authenticates and never fans out beyond the configured relays",
+      "statement": "The engine Client is built with automatic_authentication(false) and no gossip, so it refuses every NIP-42 AUTH challenge (never signing a kind-22242 that would join the identity key to the circle traffic on that socket) and its relay pool equals exactly the configured circle-union-inbox set even after a kind-10002 advertises a phantom relay. verify_subscriptions must also stay off, or fresh REQs silently drop their first stored events.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyInferencePresence"
+      ],
+      "non_arb_claims": [],
+      "event_kinds": [
+        {
+          "kind": 10002,
+          "token": "Kind::RelayList",
+          "note": "Read-side: a kind-10002 advertising a phantom relay must not expand the engine's pool."
+        },
+        {
+          "kind": 22242,
+          "token": "never-constructed:nip42-auth",
+          "note": "NIP-42 AUTH. Haven never signs one — build_engine_client sets automatic_authentication(false). Declared so the kind-based closed world can see the one kind whose appearance would falsify this invariant."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/relay/live_sync/session.rs",
+          "symbol": "build_engine_client"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/live_sync_privacy_config_e2e.rs",
+          "name": "engine_never_authenticates_to_an_auth_required_relay"
+        },
+        {
+          "file": "haven-core/tests/live_sync_privacy_config_e2e.rs",
+          "name": "engine_connects_only_to_configured_relays_never_gossip_discovered"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_engine_client_options.sh"
+      ]
+    },
+    {
+      "id": "INV-R-CROSS-PLANE-CORRELATION",
+      "title": "One standing connection lets a relay link identity to circle membership",
+      "statement": "Since live sync became standing, a single persistent socket per relay carries both the inbox filter naming the user's own pubkey (gift-wrap #p) and every subscribed circle's routing-tag filter (#h), so a relay serving both planes can correlate identity to circle membership by connection continuity — the ephemeral per-message 445 author keys do not prevent this, and on a new install the inbox and per-circle relay sets seed from the same defaults so the overlap is the default configuration.",
+      "status": "accepted_deviation",
+      "accepted_deviation_id": "RC1",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyWhatOthersSeeDetailOneConnection",
+        "privacyWhatOthersSeeRelaysCannot",
+        "privacyWhatOthersSeeMeansForYou",
+        "privacyInferencePresence"
+      ],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#relay-observable-metadata-and-correlation-accepted"
+      ],
+      "event_kinds": [
+        {
+          "kind": 1059,
+          "token": "out_of_tree:transport-nostr-peeler",
+          "note": "The inbox-plane filter side of the correlation: a #p filter naming the reader's own pubkey."
+        },
+        {
+          "kind": 445,
+          "token": "out_of_tree:transport-nostr-peeler",
+          "note": "The group-plane filter side: an #h filter naming each subscribed circle's routing tag."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/relay/live_sync/session.rs",
+          "symbol": "subscribe_bucket"
+        }
+      ],
+      "tests": [],
+      "guards": []
+    },
+    {
+      "id": "INV-R-TRAFFIC-METADATA-OBSERVABLE",
+      "title": "Timing and size metadata stay visible; jitter narrows it but padding does not exist",
+      "statement": "The publish cadence is jittered uniformly over [nominal*(1-0.4), nominal*(1+0.4)] = [72 s, 168 s] from a CSPRNG, which defeats short-window rhythm fingerprinting but not long-run averaging; message sizes are NOT padded, so location updates fall in a narrow, recognisable size band. Narrowing the Rust spread without the Dart endpoints, or presenting the jitter as defeating traffic analysis, falsifies this.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyInferenceWhatIsMetadata",
+        "privacyInferenceDetailJitter",
+        "privacyWhatOthersSeeRelaysCan"
+      ],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#publish-cadence-jittered-scheduler"
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/location/ttl.rs",
+          "symbol": "PUBLISH_INTERVAL_JITTER_FRACTION_BP"
+        },
+        {
+          "file": "haven/lib/src/constants/location.dart",
+          "symbol": "kLocationPublishMaxInterval"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/constants/location_test.dart",
+          "name": "kLocationPublishMinInterval is 72s (nominal * 0.6)"
+        },
+        {
+          "file": "haven/test/constants/location_test.dart",
+          "name": "kLocationPublishMaxInterval is 168s (nominal * 1.4)"
+        },
+        {
+          "file": "haven/test/lints/publish_decorrelation_wiring_test.dart",
+          "name": "the production stagger draws from a CSPRNG"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_publish_jitter_fraction_parity.sh"
+      ]
+    },
+    {
+      "id": "INV-R-PER-CIRCLE-PUBLISH-DECORRELATED",
+      "title": "Multiple circles publish on independent schedules",
+      "statement": "Each circle's publish cycle is seeded from a staggered per-circle offset and paced by the running-gap slot rule, so a user in several circles does not emit one synchronous burst that ties those circles together for an observer watching more than one relay; collapsing the per-circle schedules back onto one shared timer falsifies this.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyInferenceDetailJitter"
+      ],
+      "non_arb_claims": [],
+      "symbols": [
+        {
+          "file": "haven/lib/src/constants/location.dart",
+          "symbol": "kLocationPublishOverlapGuard"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/lints/publish_decorrelation_wiring_test.dart",
+          "name": "seeds per-circle schedules through the STAGGERED seed"
+        },
+        {
+          "file": "haven/test/lints/publish_decorrelation_wiring_test.dart",
+          "name": "does not seed every circle at the cycle timestamp"
+        },
+        {
+          "file": "haven/test/lints/publish_decorrelation_wiring_test.dart",
+          "name": "paces each publish through the running-gap slot rule"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-R-IP-VISIBLE-TO-EVERY-SERVER",
+      "title": "Every server Haven contacts observes the device IP",
+      "statement": "Haven ships no Tor, proxy or onion transport, so each relay it publishes to or reads from, the map tile provider, and whatever host a co-member chose for their profile picture all observe the device's IP address on every request — including the eight profile relays and six discovery relays the user did not choose and cannot remove. Any copy implying network-level unlinkability, anonymity or IP hiding is false.",
+      "status": "accepted_deviation",
+      "accepted_deviation_id": "P6",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyInferenceIpAddress",
+        "privacyWhatOthersSeeCoMemberIp",
+        "privacyRelaysDetailIndexers"
+      ],
+      "non_arb_claims": [
+        {
+          "carrier": "dart_source",
+          "id": "LocationDisclosureStrings.how",
+          "kind": "disclosure"
+        }
+      ],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#ip-level-linkage-is-out-of-scope-p6"
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/profile/relay_pool.rs",
+          "symbol": "PRODUCTION_PROFILE_RELAYS"
+        },
+        {
+          "file": "haven-core/src/relay/discovery.rs",
+          "symbol": "PRODUCTION_DISCOVERY_RELAYS"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/privacy_copy_ties.rs",
+          "name": "indexer_paragraph_spells_both_pool_sizes"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-R-DISCOVERY-POOL-DISJOINT-AND-NOT-USER-CHOSEN",
+      "title": "The eight profile relays and six discovery relays never overlap, and the user cannot remove them",
+      "statement": "PRODUCTION_PROFILE_RELAYS (8) and PRODUCTION_DISCOVERY_RELAYS (6) are disjoint by construction and disjoint from the account seed defaults, and both are contacted unconditionally even when every relay the user chose is private; removals of the curated eight do not take effect because usable_profile_relays() unions the defaults back in on every resolution, so the copy must keep saying \"that you do not choose\". Resizing either pool without updating the paragraph that spells both counts fails the copy tie.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyRelaysDetailIndexers"
+      ],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#profile-plane-relay-separation--accepted-deviations"
+      ],
+      "event_kinds": [
+        {
+          "kind": 30443,
+          "token": "Kind::Custom(KIND_MARMOT_KEY_PACKAGE)",
+          "note": "The discovery pool exists to fetch these; the profile pool never carries them."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/profile/relay_pool.rs",
+          "symbol": "PRODUCTION_PROFILE_RELAYS"
+        },
+        {
+          "file": "haven-core/src/relay/discovery.rs",
+          "symbol": "PRODUCTION_DISCOVERY_RELAYS"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/profile_plane_separation.rs",
+          "name": "pool_is_disjoint_from_discovery_plane"
+        },
+        {
+          "file": "haven-core/tests/profile_plane_separation.rs",
+          "name": "pool_is_disjoint_from_account_seed_defaults"
+        },
+        {
+          "file": "haven-core/tests/privacy_copy_ties.rs",
+          "name": "indexer_paragraph_spells_both_pool_sizes"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_profile_privacy_boundaries.sh"
+      ]
+    },
+    {
+      "id": "INV-R-TILE-COORDS-CARRY-MEMBER-POSITIONS",
+      "title": "Map tiles are prefetched around member positions, so member coordinates reach the tile provider",
+      "statement": "The tile prefetcher warms rings around the coordinates of visible circle members, not only around the viewport, so the map provider receives tile coordinates derived from where the user's circle is — not merely where the user is looking; it never receives a name, key or member list. Making the prefetch viewport-only would narrow the leak; removing the disclosure while keeping the prefetch would make the copy false.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyInferenceMapTiles"
+      ],
+      "non_arb_claims": [
+        {
+          "carrier": "dart_source",
+          "id": "LocationDisclosureStrings.how",
+          "kind": "disclosure"
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven/lib/src/services/tile_prefetch_service.dart",
+          "symbol": "TilePrefetchService"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/services/tile_prefetch_service_test.dart",
+          "name": "missing tiles → GET + putTile for each"
+        },
+        {
+          "file": "haven/test/services/tile_prefetch_service_test.dart",
+          "name": "total tiles capped at kPrefetchMaxTilesTotal"
+        },
+        {
+          "file": "haven/test/services/tile_prefetch_service_test.dart",
+          "name": "empty points list → 0 HTTP requests"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_tile_provider.sh"
+      ]
+    },
+    {
+      "id": "INV-R-STADIA-POLICY-ATTRIBUTED",
+      "title": "The tile provider's policy is reported, never asserted as Haven's own fact",
+      "statement": "The consent artefact states the Stadia Maps policy in attributed form (\"Stadia Maps says … — its own policy, which Haven cannot enforce\") and never as an unqualified Haven guarantee; collapsing it into \"Stadia Maps does not sell your data\", or shortening it to a \"no logging\" or \"anonymous\" claim, states as Haven's fact something Haven has no standing to know and nothing in this tree re-checks.",
+      "status": "enforced",
+      "attributed_arb_keys": [],
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [
+        {
+          "carrier": "dart_source",
+          "id": "LocationDisclosureStrings.how",
+          "kind": "attributed"
+        }
+      ],
+      "attribution": {
+        "source": "Stadia Maps privacy policy",
+        "url": "https://stadiamaps.com/privacy-policy/",
+        "read_on": "2026-07-29"
+      },
+      "symbols": [
+        {
+          "file": "haven/lib/src/constants/tiles.dart",
+          "symbol": "kStadiaPrivacyUrl"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/lints/background_claim_accuracy_test.dart",
+          "name": "third-party policy is attributed, never asserted as Haven’s own fact"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-R-VPN-NOT-BYPASSED",
+      "title": "Nothing in Haven bypasses an OS-level VPN tunnel or echoes the IP into a payload",
+      "statement": "This claim is about VPN technology, not Haven code; it becomes false only through a Haven change — a raw socket or DNS path that escapes the system tunnel, or a payload field that carries the device's observed IP. No such path exists: all relay traffic goes through the nostr-sdk WebSocket client and all HTTP through package:http, both of which use the platform stack, and LocationMessage carries no address field.",
+      "status": "ratcheted",
+      "residual": "UNPROVEN in the tunnel-bypass direction. No test or guard forbids a raw socket, a custom DNS resolver, or a dart:io HttpClient configured with a proxy override. The no-IP-in-payload half is covered by the LocationMessage field tests cited here; the no-bypass half rests on the current dependency set alone.",
+      "attributed_arb_keys": [
+        "privacyInferenceVpnHelps"
+      ],
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyInferenceVpnLimits",
+        "privacyInferenceMeansForYou"
+      ],
+      "non_arb_claims": [],
+      "symbols": [
+        {
+          "file": "haven-core/src/location/types.rs",
+          "symbol": "LocationMessage"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/proptest_location.rs",
+          "name": "d3_private_fields_never_in_json"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-R-THREAT-MODEL-BOUNDARY",
+      "title": "Global passive observation and a compromised device are out of scope",
+      "statement": "Haven's design makes no claim against an adversary who can watch many relays simultaneously, nor against an adversary who controls the user's own device; no mixing, cover traffic, padding or remote-wipe mechanism exists, so removing this disclosure would leave the reader to assume coverage the code does not provide.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyInferenceDetailOutOfScope"
+      ],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#network-threat-model"
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/location/ttl.rs",
+          "symbol": "PUBLISH_INTERVAL_JITTER_FRACTION_BP"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/constants/location_test.dart",
+          "name": "kLocationPublishMaxInterval is 168s (nominal * 1.4)"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_publish_jitter_fraction_parity.sh"
+      ]
+    },
+    {
+      "id": "INV-K-SECRET-KEY-NEVER-LEAVES-DEVICE",
+      "title": "The Nostr secret key stays in OS-protected storage",
+      "statement": "The 32-byte identity secret is persisted only in flutter_secure_storage (Keychain / Keystore), is read back per use rather than held, and no code path serializes it into a Nostr event, an HTTP body or a log line; this becomes false the moment a secret-bytes value is bound to a long-lived field or interpolated into any outbound payload.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "privacyYourKeysSecretStaysHere",
+        "onboardingCreateIdentityBody",
+        "onboardingValueProp3Body",
+        "onboardingValueProp3Summary"
+      ],
+      "disclosure_arb_keys": [
+        "privacyYourKeysNeverShareSecret",
+        "identityAdvancedSecretKeyWarning"
+      ],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#database-encryption"
+      ],
+      "symbols": [
+        {
+          "file": "haven/lib/src/services/fresh_secret.dart",
+          "symbol": "withFreshSecret"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/services/identity_secret_scrub_test.dart",
+          "name": "every manager open is wrapped in withFreshSecret"
+        },
+        {
+          "file": "haven/test/services/identity_secret_scrub_test.dart",
+          "name": "withFreshSecret actually scrubs"
+        },
+        {
+          "file": "haven/test/services/nostr_identity_service_test.dart",
+          "name": "secret bytes are not exposed in Identity class"
+        },
+        {
+          "file": "haven/test/services/nostr_identity_service_test.dart",
+          "name": "storage uses platform secure mechanisms"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_no_key_logging.sh",
+        "scripts/ci/check_no_committed_secrets.sh"
+      ]
+    },
+    {
+      "id": "INV-K-SECRET-MATERIAL-ZEROIZED",
+      "title": "Secret-bearing values are zeroized after use",
+      "statement": "Every Rust struct field holding key material is either Zeroizing<T> or lives in a ZeroizeOnDrop type, and every Dart capture of getSecretBytes() is scrubbed on completion and on throw; this becomes false when a raw [u8; 32] field is added without the derive, or a Dart secret list is bound to a local that no finally clears.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "privacyYourKeysDetailFormats"
+      ],
+      "disclosure_arb_keys": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#database-encryption"
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/nostr/keys.rs",
+          "symbol": "EphemeralKeypair"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/zeroization_security.rs",
+          "name": "secret_bearing_types_are_zeroize_on_drop"
+        },
+        {
+          "file": "haven-core/src/nostr/keys.rs",
+          "name": "ephemeral_keypair_implements_zeroize_on_drop"
+        },
+        {
+          "file": "haven/test/services/fresh_secret_test.dart",
+          "name": "scrubs the copy the instant use completes (Rule 9)"
+        },
+        {
+          "file": "haven/test/services/fresh_secret_test.dart",
+          "name": "scrubs the copy even when use throws"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_secret_fields_zeroized.sh"
+      ]
+    },
+    {
+      "id": "INV-K-NO-KEY-MATERIAL-IN-LOGS",
+      "title": "No key material reaches a log, print or Debug rendering",
+      "statement": "No value whose name or type marks it as key material is interpolated into a log/print call anywhere in haven-core, rust_builder or haven/lib, and the Debug impls of the secret-bearing types render redacted placeholders; this becomes false the first time a Zeroizing<[u8; 32]> or a SecretKey is passed to a formatting macro.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#database-encryption"
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/nostr/keys.rs",
+          "symbol": "EphemeralKeypair"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/nostr/keys.rs",
+          "name": "debug_does_not_leak_secret_key"
+        },
+        {
+          "file": "haven-core/src/profile/assignment.rs",
+          "name": "salt_debug_is_redacted"
+        },
+        {
+          "file": "haven-core/src/avatar/image.rs",
+          "name": "processed_avatar_debug_redacts_bytes_and_content_hash"
+        },
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "rm_error_redaction_strips_group_id_hex"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_no_key_logging.sh"
+      ]
+    },
+    {
+      "id": "INV-K-MLS-KEYS-SEPARATE-FROM-IDENTITY-KEY",
+      "title": "Circle encryption keys are not the identity key",
+      "statement": "The MLS leaf signature key of every circle differs from the Nostr identity key, and the identity key is never used to sign a kind-445 group message; this becomes false if a group's credential is minted from the identity keypair or if the identity signer is handed to the group-message builder.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "privacyYourKeysDetailSeparation"
+      ],
+      "disclosure_arb_keys": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#mls-security"
+      ],
+      "event_kinds": [
+        {
+          "kind": 445,
+          "token": "out_of_tree:transport-nostr-peeler",
+          "note": "Built by the rev-pinned peeler (peeler.rs); reached from nostr/mls/manager.rs send_location. No repo-local kind token exists."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/nostr/mls/manager.rs",
+          "symbol": "send_location"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "p3a_leaf_signature_key_differs_from_nostr_identity_key"
+        },
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "p3a_key_separation_identity_proof_enforced_and_identity_not_used_for_group_messages"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_profile_privacy_boundaries.sh"
+      ]
+    },
+    {
+      "id": "INV-K-PUBLIC-KEY-IS-NOT-A-LOCATION-ORACLE",
+      "title": "Handing out the public key discloses no location",
+      "statement": "A kind-445 location event carries a fresh ephemeral author key and an h tag holding only the nostr_group_id, so possession of an npub yields no filter that returns that user's location events and no key that decrypts them; this becomes false if the identity pubkey is ever used as the 445 author or added as a tag.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "privacyYourKeysPublicIsSafe",
+        "qrCodeExplainerKeys",
+        "qrCodeExplainerUsername"
+      ],
+      "disclosure_arb_keys": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#relay-observable-metadata-and-correlation-accepted"
+      ],
+      "event_kinds": [
+        {
+          "kind": 445,
+          "token": "out_of_tree:transport-nostr-peeler",
+          "note": "Ephemeral author key per message; tag set is h only (plus NIP-40 expiration on application messages)."
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "g4_ephemeral_pubkey_differs_from_sender_identity"
+        },
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "g4_unique_ephemeral_pubkeys_per_message"
+        },
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "encrypted_event_has_h_tag_with_nostr_group_id_only"
+        },
+        {
+          "file": "haven/test/pages/settings/qr_code_page_test.dart",
+          "name": "explains the public key in plain language (mentions Nostr)"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-K-IDENTITY-LOSS-IS-UNRECOVERABLE",
+      "title": "Losing the phone loses the identity",
+      "statement": "There is no escrow, no server-side backup and no recovery flow: the secret exists only in the device keystore, so the only recovery path is a user-made nsec backup. This becomes false the moment any code path uploads or shares the secret for recovery.",
+      "status": "ratcheted",
+      "residual": "Nothing fails if a key-escrow or cloud-backup path is added: the guarantee rests on INV-K-SECRET-KEY-NEVER-LEAVES-DEVICE's log/commit guards, which detect logging and committed secrets but not a deliberate upload. No test asserts the absence of a recovery endpoint.",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyYourKeysMeansForYou",
+        "onboardingCreateIdentityWarning"
+      ],
+      "symbols": [
+        {
+          "file": "haven/lib/src/services/identity_service.dart",
+          "symbol": "deleteIdentity"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/pages/onboarding/create_identity_screen_test.dart",
+          "name": "renders title, body, warning, disclosure, field, and CTA"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-K-IDENTITY-DELETE-IS-LOCAL-ONLY",
+      "title": "Delete Identity clears the device and nothing else",
+      "statement": "deleteIdentity destroys the Rust identity, the secure-storage entry, the SQLCipher circle state, every SharedPreferences key on the reviewed delete path and the encrypted tile cache — and issues no unpublish for anything already on a relay or on the Blossom host. This becomes false if a SharedPreferences key is added without a decided fate, or if the tile-cache wipe is dropped from the path.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "identityAdvancedDeleteBody"
+      ],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#sync-state-at-rest--account-wipe-on-logout-m10"
+      ],
+      "symbols": [
+        {
+          "file": "haven/lib/src/services/nostr_identity_service.dart",
+          "symbol": "deleteIdentity"
+        },
+        {
+          "file": "haven-core/src/circle/storage_profile.rs",
+          "symbol": "wipe_all_profiles"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/services/nostr_identity_service_delete_test.dart",
+          "name": "purges the display name from SharedPreferences"
+        },
+        {
+          "file": "haven/test/services/nostr_identity_service_delete_test.dart",
+          "name": "wipes the encrypted map-tile cache"
+        },
+        {
+          "file": "haven/test/providers/identity_provider_test.dart",
+          "name": "deleteIdentity calls closeAndInvalidate and wipeAllMlsState (M10)"
+        },
+        {
+          "file": "haven/test/providers/identity_provider_test.dart",
+          "name": "deleteIdentity resets all sync cursors (M7 teardown)"
+        },
+        {
+          "file": "haven-core/tests/sync_state_at_rest_test.rs",
+          "name": "wiped_sync_state_leaves_nothing_decryptable_at_rest"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_identity_delete_prefs_residue.sh"
+      ]
+    },
+    {
+      "id": "INV-K-SECRET-EXPORT-IS-USER-DRIVEN",
+      "title": "Revealing or copying the secret key is an explicit user act with no cleanup",
+      "statement": "The nsec is rendered only behind an explicit Reveal action, and copying it puts it on the system clipboard which Haven never clears; this becomes false if the reveal is made automatic, or if the copy warning is dropped while the clipboard behaviour stays the same.",
+      "status": "ratcheted",
+      "residual": "No test or guard pins that the clipboard is left uncleared, nor that a clipboard auto-clear is not silently added and the warning left stale. The disclosure's accuracy rests on review of identity_advanced_page.dart.",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "identityAdvancedSecretCopiedWarning"
+      ],
+      "tests": [],
+      "guards": [
+        "scripts/ci/check_no_key_logging.sh"
+      ]
+    },
+    {
+      "id": "INV-K-M5-SELF-UPDATE-DISABLED",
+      "title": "Leaf keys do not rotate on a timer (M5)",
+      "statement": "enablePeriodicSelfUpdate is false and no production file drives the self-update provider outside a flag-gated call site, so MLS epoch keys advance only on real membership change — never periodically and never 24h post-join.",
+      "status": "accepted_deviation",
+      "accepted_deviation_id": "M5",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyEncryptionKeysChangeOnMembership"
+      ],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#self-update-disabled-m5--accepted-mip-02mip-03-deviation"
+      ],
+      "symbols": [
+        {
+          "file": "haven/lib/src/providers/self_update_provider.dart",
+          "symbol": "enablePeriodicSelfUpdate"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/lints/self_update_disabled_test.dart",
+          "name": "no production self-update timer is re-introduced"
+        },
+        {
+          "file": "haven/test/lints/self_update_disabled_test.dart",
+          "name": "every selfUpdateProvider read/invalidate is in a flag-gated file"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-P-PROFILE-PUBLISH-IS-UNCONDITIONAL",
+      "title": "A saved name or photo is published publicly, with no gate",
+      "statement": "Saving a display name or avatar reaches publish_metadata for a kind-0 signed by the identity key with no consent flag, no toggle and no Dart-side short-circuit; this becomes false only by adding a gate, which the copy would then be wrong about.",
+      "status": "accepted_deviation",
+      "accepted_deviation_id": "R10",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyPublicProfileTitle",
+        "privacyPublicProfileSubtitle",
+        "privacyPublicProfileIsPublic",
+        "privacyPublicProfileOnSave",
+        "profileIsPublicNoticeTitle",
+        "profileIsPublicNoticeBody",
+        "avatarPickerPhotoUpdated",
+        "qrCodeExplainerUsername"
+      ],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#public-nostr-profiles-kind-0--blossom",
+        "CLAUDE.md#privacy-model"
+      ],
+      "event_kinds": [
+        {
+          "kind": 0,
+          "token": "EventBuilder::metadata",
+          "note": "haven-core/src/profile/publish.rs build_metadata_event and build_blank_metadata_event. Carries NO kind token and NO numeric literal — a number-based scan cannot see the plane that publishes the display name and avatar."
+        },
+        {
+          "kind": 0,
+          "token": "Kind::Metadata",
+          "note": "The READ side (profile/fetch.rs:345) — the named nostr variant used in the one-author-per-REQ kind-0 filter. Carries no number."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/profile/publish.rs",
+          "symbol": "publish_metadata"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/profile/publish.rs",
+          "name": "publish_metadata_publishes_without_any_consent_gate"
+        },
+        {
+          "file": "haven/test/pages/identity_page_test.dart",
+          "name": "never shows a Public Profile toggle — publishing is unconditional"
+        },
+        {
+          "file": "haven/test/pages/identity_page_test.dart",
+          "name": "shows the combined public-profile disclosure notice"
+        },
+        {
+          "file": "haven/test/pages/onboarding/create_identity_screen_test.dart",
+          "name": "an edited name is what gets saved and published"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_profile_privacy_boundaries.sh"
+      ]
+    },
+    {
+      "id": "INV-P-PROFILE-REMOVAL-IS-NOT-DELETION",
+      "title": "Removing a photo republishes a blank profile; the hosted blob stays",
+      "statement": "delete_my_public_profile republishes a blank kind-0 and best-effort NIP-09-deletes the last kind-0, and issues NO Blossom blob DELETE (no delete helper exists in the profile module); this becomes false only if a Blossom DELETE lands, at which point the copy would understate what Haven does.",
+      "status": "ratcheted",
+      "residual": "No test or guard fails if the blank-republish is removed, and none asserts the absence of a Blossom DELETE. (The internal docs that used to claim a DELETE is issued — SECURITY.md's best-effort-delete bullet and check_profile_privacy_boundaries.sh's CONSENT_GATE_EXEMPT_FNS comment — were both corrected 2026-08-13; do not 'restore consistency' by reinstating the false claim.)",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyPublicProfileRemovalIsNotDeletion",
+        "photoHeaderRemoveBody"
+      ],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#public-nostr-profiles-kind-0--blossom"
+      ],
+      "event_kinds": [
+        {
+          "kind": 0,
+          "token": "EventBuilder::metadata",
+          "note": "build_blank_metadata_event — the retraction republish."
+        },
+        {
+          "kind": 5,
+          "token": "EventBuilder::delete",
+          "note": "haven-core/src/relay/publishers.rs build_nip09_deletion. Live on the wire but MISSING from CLAUDE.md's protocol table."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/profile/publish.rs",
+          "symbol": "build_blank_metadata_event"
+        },
+        {
+          "file": "haven/rust_builder/src/api.rs",
+          "symbol": "delete_my_public_profile"
+        }
+      ],
+      "tests": [],
+      "guards": [
+        "scripts/ci/check_profile_privacy_boundaries.sh"
+      ]
+    },
+    {
+      "id": "INV-P-EXIF-GPS-STRIPPED-BEFORE-UPLOAD",
+      "title": "Pictures are re-encoded and stripped of EXIF/GPS before any network write",
+      "statement": "upload_profile_picture routes every input through process_own_avatar, which decodes, bakes orientation and re-encodes to a fresh JPEG, so no EXIF/GPS block and no PNG text chunk survives into the uploaded bytes; this becomes false if the raw input bytes are ever handed to the uploader.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "privacyPublicProfileDetailExifStripped"
+      ],
+      "disclosure_arb_keys": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#public-nostr-profiles-kind-0--blossom"
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/avatar/image.rs",
+          "symbol": "process_own_avatar"
+        },
+        {
+          "file": "haven-core/src/profile/blossom.rs",
+          "symbol": "process_own_avatar"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/avatar/image.rs",
+          "name": "exif_gps_is_stripped_by_pipeline"
+        },
+        {
+          "file": "haven-core/src/avatar/image.rs",
+          "name": "process_own_bakes_orientation_then_strips_exif"
+        },
+        {
+          "file": "haven-core/src/avatar/image.rs",
+          "name": "png_text_chunks_are_dropped_after_reencode"
+        },
+        {
+          "file": "haven-core/src/profile/blossom.rs",
+          "name": "upload_hash_is_post_pipeline_not_raw_input"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-P-BLOSSOM-HTTPS-ONLY-AND-SSRF-FILTERED",
+      "title": "The Blossom host is HTTPS-only and every download is IP-filtered",
+      "statement": "DEFAULT_BLOSSOM_SERVER is an https:// URL, no plaintext http:// literal exists in the profile module outside the debug loopback exemption, and the download client refuses redirects and rejects loopback, RFC1918, ULA, link-local, CGNAT, multicast, NAT64/IPv4-compatible-embedded and documentation addresses at connect time; this becomes false if the scheme check is relaxed or the resolver filter is bypassed.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyPublicProfileDetailKindZero"
+      ],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#public-nostr-profiles-kind-0--blossom"
+      ],
+      "event_kinds": [
+        {
+          "kind": 24242,
+          "token": "Kind::Custom(BLOSSOM_AUTH_KIND)",
+          "note": "haven-core/src/profile/blossom.rs:344. Base64'd into an HTTP Authorization header — it LEAVES THE DEVICE but is never a relay event."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/profile/config.rs",
+          "symbol": "DEFAULT_BLOSSOM_SERVER"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/profile/blossom.rs",
+          "name": "download_rejects_loopback_ip"
+        },
+        {
+          "file": "haven-core/src/profile/blossom.rs",
+          "name": "download_rejects_rfc1918"
+        },
+        {
+          "file": "haven-core/src/profile/blossom.rs",
+          "name": "upload_rejects_non_https_server"
+        },
+        {
+          "file": "haven-core/src/profile/blossom.rs",
+          "name": "download_refuses_redirect"
+        },
+        {
+          "file": "haven-core/src/profile/blossom.rs",
+          "name": "download_revalidates_through_inbound_pipeline"
+        },
+        {
+          "file": "haven-core/src/profile/blossom.rs",
+          "name": "upload_auth_header_is_standard_base64_24242_event"
+        },
+        {
+          "file": "haven-core/tests/privacy_copy_ties.rs",
+          "name": "public_profile_paragraph_names_the_blossom_host"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_profile_privacy_boundaries.sh"
+      ]
+    },
+    {
+      "id": "INV-P-NO-IMAGE-URL-CROSSES-THE-FFI",
+      "title": "Flutter renders profile pictures from bytes, never from a URL",
+      "statement": "No Image.network( or CachedNetworkImage( call exists under haven/lib and cached_network_image is not a dependency, so a hostile kind-0 picture URL can only be dereferenced by the Rust downloader behind the anti-SSRF filter; this becomes false the first time a widget takes a remote URL.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#public-nostr-profiles-kind-0--blossom"
+      ],
+      "tests": [
+        {
+          "file": "haven/test/security/image_network_ban_test.dart",
+          "name": "no Image.network( call exists anywhere under lib/"
+        },
+        {
+          "file": "haven/test/security/image_network_ban_test.dart",
+          "name": "no CachedNetworkImage( call exists anywhere under lib/"
+        },
+        {
+          "file": "haven/test/security/image_network_ban_test.dart",
+          "name": "cached_network_image is not a pubspec dependency"
+        },
+        {
+          "file": "haven/test/pages/settings/qr_code_page_test.dart",
+          "name": "never renders a NetworkImage"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_profile_privacy_boundaries.sh"
+      ]
+    },
+    {
+      "id": "INV-P-KIND0-CARRIES-NO-CIRCLE-IDENTIFIER",
+      "title": "The public profile plane is unlinkable to circles at the source level",
+      "statement": "haven-core/src/profile/** imports neither crate::circle nor crate::nostr::mls nor mdk, the published kind-0 carries no group, circle or client-identifying tag, and kind-0 construction is confined to the profile module plus the profile FFI banner block; this becomes false the moment a circle identifier or an MLS handle becomes reachable from the profile module.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#public-nostr-profiles-kind-0--blossom"
+      ],
+      "event_kinds": [
+        {
+          "kind": 0,
+          "token": "EventBuilder::metadata",
+          "note": "Confined to haven-core/src/profile/ + the api.rs profile banner block by check_profile_privacy_boundaries.sh Check 4."
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/profile_group_isolation_e2e.rs",
+          "name": "published_kind0_carries_no_group_identifier"
+        },
+        {
+          "file": "haven-core/src/profile/publish.rs",
+          "name": "event_contains_no_group_or_client_identifying_tags"
+        },
+        {
+          "file": "haven-core/src/profile/publish.rs",
+          "name": "signs_with_identity_key"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_profile_privacy_boundaries.sh"
+      ]
+    },
+    {
+      "id": "INV-P-DEFAULT-NAME-IS-A-LOCAL-PSEUDONYM",
+      "title": "The pre-filled display name is a local pseudonym derived from nothing about the user",
+      "statement": "generateAnonymousName picks one adjective and one archetype uniformly at random from two disjoint, curated ASCII word lists compiled into the app, with no device identifier, contact, locale or pubkey as input; this becomes false if any device- or user-derived value is mixed into the selection, or the word lists stop being English ASCII while the copy keeps quoting \"Quiet Wanderer\".",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "privacyPublicProfilePseudonym"
+      ],
+      "disclosure_arb_keys": [],
+      "doc_anchors": [
+        "CLAUDE.md#privacy-model"
+      ],
+      "symbols": [
+        {
+          "file": "haven/lib/src/utils/anonymous_name_generator.dart",
+          "symbol": "generateAnonymousName"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/utils/anonymous_name_generator_test.dart",
+          "name": "adjectives are lowercase ASCII, 2-12 chars, and unique"
+        },
+        {
+          "file": "haven/test/utils/anonymous_name_generator_test.dart",
+          "name": "archetypes are lowercase ASCII, 2-12 chars, and unique"
+        },
+        {
+          "file": "haven/test/utils/anonymous_name_generator_test.dart",
+          "name": "the two lists are disjoint (no \"Sage Sage\" style collisions)"
+        },
+        {
+          "file": "haven/test/utils/anonymous_name_generator_test.dart",
+          "name": "the cross product provides ample entropy (>= 150k)"
+        },
+        {
+          "file": "haven/test/pages/onboarding/create_identity_screen_test.dart",
+          "name": "the display-name field is pre-filled with an anonymous name"
+        },
+        {
+          "file": "haven/test/pages/onboarding/create_identity_screen_test.dart",
+          "name": "a cleared field falls back to a generated name (never empty)"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-P-PROFILE-POOL-DISJOINT-FROM-TRANSPORT-RELAYS",
+      "title": "The eight profile relays and the six discovery relays never overlap, and neither carries circle traffic",
+      "statement": "profile_relay_pool_default() has exactly eight entries, PRODUCTION_DISCOVERY_RELAYS exactly six, the two sets are disjoint by construction, and the profile pool is disjoint from the account seed defaults that carry kind-445/1059 traffic; this becomes false if a URL is added to one pool that already appears in the other, or if a pool relay is seeded into the circle plane.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "privacyRelaysDetailIndexers"
+      ],
+      "disclosure_arb_keys": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#profile-plane-relay-separation--accepted-deviations"
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/profile/relay_pool.rs",
+          "symbol": "profile_relay_pool_default"
+        },
+        {
+          "file": "haven-core/src/relay/discovery.rs",
+          "symbol": "PRODUCTION_DISCOVERY_RELAYS"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/profile_plane_separation.rs",
+          "name": "pool_is_disjoint_from_account_seed_defaults"
+        },
+        {
+          "file": "haven-core/tests/profile_plane_separation.rs",
+          "name": "pool_is_disjoint_from_discovery_plane"
+        },
+        {
+          "file": "haven-core/src/profile/relay_pool.rs",
+          "name": "pool_size_is_exactly_eight"
+        },
+        {
+          "file": "haven-core/src/relay/discovery.rs",
+          "name": "discovery_plane_size_is_exactly_six"
+        },
+        {
+          "file": "haven-core/tests/privacy_copy_ties.rs",
+          "name": "indexer_paragraph_spells_both_pool_sizes"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_profile_privacy_boundaries.sh"
+      ]
+    },
+    {
+      "id": "INV-P-PROFILE-RELAY-LIST-IS-NEVER-PUBLISHED",
+      "title": "No published event names the profile relays",
+      "statement": "RelayType::Profile::to_kind() returns None, so no NIP-65 kind-10002 (or any other event) is ever built that serializes the profile relay list; this becomes false the moment Profile maps to a publishable kind or the list is written into an event's tags.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "privacyRelaysYourLists",
+        "relaySettingsProfileSubtitle"
+      ],
+      "disclosure_arb_keys": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#no-kind-10002-for-the-profile-plane-p3"
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/circle/relay_prefs.rs",
+          "symbol": "to_kind"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/relay_preferences_integration_test.rs",
+          "name": "no_relay_type_maps_to_nip65_kind_10002"
+        },
+        {
+          "file": "haven/test/pages/settings/relay_settings_page_test.dart",
+          "name": "renders three relay sections"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_profile_privacy_boundaries.sh"
+      ]
+    },
+    {
+      "id": "INV-P-PROFILE-LOOKUPS-ARE-ONE-AUTHOR-PER-REQ",
+      "title": "Profile lookups ask one relay about one person, bounded at two relays",
+      "statement": "Every kind-0 filter carries exactly one author, no p tag and kind 0 only; each author resolves to its own assigned relay by salted rendezvous hash, and PROFILE_MAX_RELAY_RANK = 2 caps the retry ladder — so a lookup discloses an author to at most two of the eight. This becomes false if authors are batched into one filter, if the rank cap is raised, or if a fetch fans out beyond the assignment.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "privacyRelaysDetailProfileLookups"
+      ],
+      "disclosure_arb_keys": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#profile-plane-relay-separation--accepted-deviations"
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/profile/assignment.rs",
+          "symbol": "PROFILE_MAX_RELAY_RANK"
+        },
+        {
+          "file": "haven-core/src/profile/assignment.rs",
+          "symbol": "assigned_relay_for_attempt"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/profile/fetch.rs",
+          "name": "filter_has_exactly_one_author"
+        },
+        {
+          "file": "haven-core/src/profile/fetch.rs",
+          "name": "filter_is_kind0_and_carries_no_pubkey_tag"
+        },
+        {
+          "file": "haven-core/src/profile/fetch.rs",
+          "name": "each_author_maps_to_its_assigned_relay_only"
+        },
+        {
+          "file": "haven-core/src/profile/assignment.rs",
+          "name": "retry_ladder_never_exceeds_two_relays"
+        },
+        {
+          "file": "haven-core/src/profile/assignment.rs",
+          "name": "assignment_is_deterministic_for_same_salt_and_pool"
+        },
+        {
+          "file": "haven-core/src/profile/assignment.rs",
+          "name": "assignment_is_independent_of_pool_input_order"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_profile_privacy_boundaries.sh"
+      ]
+    },
+    {
+      "id": "INV-P-ASSIGNMENT-SALT-DOES-NOT-OUTLIVE-THE-IDENTITY",
+      "title": "The assignment salt is zeroized, redacted and destroyed with the identity",
+      "statement": "The per-install salt is ZeroizeOnDrop, renders redacted in Debug, never crosses the FFI, and is destroyed by BOTH the profile-delete path (wipe_all_profiles drops the row) and the logout wipe (the user_settings row is its only persistence, so deleting the circles.db file set takes it with it); this becomes false if a second identity on the same device can inherit the first's salt.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#the-assignment-salt-is-never-rotated-p5"
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/circle/storage_profile.rs",
+          "symbol": "wipe_all_profiles"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/profile/assignment.rs",
+          "name": "salt_implements_zeroize_on_drop"
+        },
+        {
+          "file": "haven-core/src/profile/assignment.rs",
+          "name": "salt_debug_is_redacted"
+        },
+        {
+          "file": "haven-core/src/circle/storage_profile.rs",
+          "name": "profile_relay_salt_is_cleared_by_wipe_all_profiles"
+        },
+        {
+          "file": "haven-core/src/circle/storage_profile.rs",
+          "name": "profile_relay_salt_does_not_outlive_the_circles_db_file"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_secret_fields_zeroized.sh"
+      ]
+    },
+    {
+      "id": "INV-P-P1-ASSIGNMENT-COLLISIONS-ARE-EXPECTED",
+      "title": "Two contacts can be assigned the same profile relay (P1)",
+      "statement": "Assignment hashes the pubkey against a per-install salt with no knowledge of roster membership, so for a small circle several members genuinely can land on one pool relay; the spreading property is statistical, not an invariant.",
+      "status": "accepted_deviation",
+      "accepted_deviation_id": "P1",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyRelaysDetailProfileLookups"
+      ],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#the-guarantee-is-bounded--collisions-are-expected-p1"
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/profile/assignment.rs",
+          "symbol": "assigned_relay"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/profile/assignment.rs",
+          "name": "assignment_is_deterministic_for_same_salt_and_pool"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-P-P2-PUBLISH-FANS-OUT-TO-THE-WHOLE-POOL",
+      "title": "Publishing your own profile reaches every usable pool relay (P2)",
+      "statement": "publish_metadata targets the entire usable profile pool (it fails closed on an empty relay set rather than narrowing), so every pool relay learns (our pubkey, our IP) on every save; a subset publish would make the user invisible to peers assigned elsewhere.",
+      "status": "accepted_deviation",
+      "accepted_deviation_id": "P2",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyRelaysDetailProfileLookups"
+      ],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#publish-fans-out-to-the-whole-pool-p2"
+      ],
+      "event_kinds": [
+        {
+          "kind": 0,
+          "token": "EventBuilder::metadata",
+          "note": "Published to the whole usable pool via publish_metadata."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/profile/publish.rs",
+          "symbol": "publish_metadata"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/profile/publish.rs",
+          "name": "publish_metadata_fails_closed_on_empty_relays"
+        },
+        {
+          "file": "haven-core/tests/privacy_copy_ties.rs",
+          "name": "profile_publish_paragraph_spells_the_profile_pool_size"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-P-P3-POOL-RELAYS-SEE-THE-PROFILE-PLANE",
+      "title": "The eight profile relays are contacted unconditionally and see the device's IP (P3)",
+      "statement": "usable_profile_relays() unions the eight defaults back in on every resolution, so the pool is contacted even when every user-chosen relay is private and a removal in Settings does not take effect; what the missing kind-10002 buys is only that relays OUTSIDE the pool get no public pointer to it.",
+      "status": "accepted_deviation",
+      "accepted_deviation_id": "P3",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyRelaysDetailIndexers"
+      ],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#no-kind-10002-for-the-profile-plane-p3"
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/profile/relay_pool.rs",
+          "symbol": "profile_relay_pool_default"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/privacy_copy_ties.rs",
+          "name": "indexer_paragraph_spells_both_pool_sizes"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_profile_privacy_boundaries.sh"
+      ]
+    },
+    {
+      "id": "INV-P-P5-ASSIGNMENT-SALT-NEVER-ROTATES",
+      "title": "The profile-relay pairing is durable by design (P5)",
+      "statement": "The per-install salt is minted once and never rotated on a schedule, because each rotation would disclose every contact to an additional relay; the accepted cost is that the assigned relay accumulates a durable record that this IP keeps asking about this pubkey. The pairing still shifts for roughly 1/N of authors whenever the resolved pool changes.",
+      "status": "accepted_deviation",
+      "accepted_deviation_id": "P5",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyRelaysDetailProfileLookups"
+      ],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#the-assignment-salt-is-never-rotated-p5"
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/profile/assignment.rs",
+          "symbol": "PROFILE_MAX_RELAY_RANK"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/profile/assignment.rs",
+          "name": "retry_ladder_never_exceeds_two_relays"
+        },
+        {
+          "file": "haven-core/src/circle/storage_profile.rs",
+          "name": "profile_relay_salt_is_cleared_by_wipe_all_profiles"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-P-P6-NO-NETWORK-LEVEL-UNLINKABILITY",
+      "title": "Every host Haven contacts sees the real IP (P6)",
+      "statement": "There is no Tor, proxy or onion transport: pool relays, circle relays, the tile provider and any host serving a co-member's profile picture observe the device's IP, and the co-member picture fetch happens automatically with no user action.",
+      "status": "accepted_deviation",
+      "accepted_deviation_id": "P6",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyWhatOthersSeeCoMemberIp"
+      ],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#ip-level-linkage-is-out-of-scope-p6"
+      ],
+      "symbols": [
+        {
+          "file": "haven/lib/src/constants/tiles.dart",
+          "symbol": "kMullvadUrl"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/profile/blossom.rs",
+          "name": "download_revalidates_through_inbound_pipeline"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-P-P7-CONTAMINATION-IS-HISTORICAL",
+      "title": "Relay exposure already incurred cannot be undone (P7)",
+      "statement": "The contamination ledger is append-only, and Welcome-delivery relays from before the change were never persisted so refresh_contamination_ledger cannot fold them in; the UI can therefore only warn about an overlap it knows of, and excluding relays can shrink the profile pool below its usable floor.",
+      "status": "accepted_deviation",
+      "accepted_deviation_id": "P7",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "relaySettingsProfileContaminationTooltip",
+        "relaySettingsProfileContaminationSemantics",
+        "relaySettingsProfileUnderflowMessage"
+      ],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#historical-contamination-is-unrecoverable-p7"
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/profile/relay_pool.rs",
+          "name": "exclusion_underflow_errors_and_never_falls_back_to_discovery"
+        },
+        {
+          "file": "haven/test/pages/settings/relay_settings_page_test.dart",
+          "name": "hides the profile-pool-underflow banner when the pool is healthy"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-D-CIRCLE-STATE-ENCRYPTED-AT-REST",
+      "title": "MLS, circle and sync state are SQLCipher-encrypted on disk",
+      "statement": "The sync-state and relay-state tables are unreadable in the raw database file without the keyring-held key, and an account wipe leaves nothing decryptable behind; this becomes false if a table is written outside the encrypted database or the wipe stops deleting the file set.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#database-encryption",
+        "haven-core/SECURITY.md#sync-state-at-rest--account-wipe-on-logout-m10"
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/sync_state_at_rest_test.rs",
+          "name": "sync_and_relay_state_tables_are_encrypted_at_rest"
+        },
+        {
+          "file": "haven-core/tests/sync_state_at_rest_test.rs",
+          "name": "wiped_sync_state_leaves_nothing_decryptable_at_rest"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_mls_session_single_owner.sh"
+      ]
+    },
+    {
+      "id": "INV-D-TILE-CACHE-ENCRYPTED-AND-BOUNDED",
+      "title": "The map-tile cache is encrypted, capped at seven days, and wiped on identity deletion",
+      "statement": "Tile blobs are stored only as SQLCipher-encrypted rows keyed by (style,z,x,y,retina) with the Stadia api_key stripped in Dart before the FFI, kTileMaxRetention is seven days and is the value the privacy copy quotes, and the wipe runs inside NostrIdentityService.deleteIdentity; this becomes false if a raw URL or api_key reaches the store, if the retention constant and the copy diverge, or if the wipe leaves the delete path.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "privacyInferenceMapTiles"
+      ],
+      "disclosure_arb_keys": [],
+      "symbols": [
+        {
+          "file": "haven/lib/src/constants/tile_cache_policy.dart",
+          "symbol": "kTileMaxRetention"
+        },
+        {
+          "file": "haven/lib/src/services/tile_key.dart",
+          "symbol": "TileKey"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/tile_at_rest_test.rs",
+          "name": "tile_blobs_are_encrypted_at_rest"
+        },
+        {
+          "file": "haven/test/constants/tile_cache_policy_test.dart",
+          "name": "matches the day count named in privacyInferenceMapTiles"
+        },
+        {
+          "file": "haven/test/constants/tile_cache_policy_test.dart",
+          "name": "is 7 days"
+        },
+        {
+          "file": "haven/test/lints/tile_eviction_wiring_test.dart",
+          "name": "maxRetentionSecs is wired to kTileMaxRetention"
+        },
+        {
+          "file": "haven/test/services/tile_key_test.dart",
+          "name": "result never carries api_key in style"
+        },
+        {
+          "file": "haven/test/services/encrypted_tile_caching_provider_test.dart",
+          "name": "store is never called with anything containing api_key"
+        },
+        {
+          "file": "haven/test/services/nostr_identity_service_delete_test.dart",
+          "name": "wipes the encrypted map-tile cache"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_no_tile_cache_secrets.sh",
+        "scripts/ci/check_tile_provider.sh"
+      ]
+    },
+    {
+      "id": "INV-D-SCREENSHOTS-BLOCKED-ON-ANDROID",
+      "title": "FLAG_SECURE covers every Activity in the Android process",
+      "statement": "HavenApplication.onCreate registers an activity-lifecycle callback that SETS FLAG_SECURE in onActivityCreated, no Activity sets it per-Activity, and the manifest still names HavenApplication — so the block covers the photo-crop Activity and any future plugin Activity, not just MainActivity. This becomes false if any one of those four links is removed.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "privacyWhatOthersSeeScreenshots"
+      ],
+      "disclosure_arb_keys": [],
+      "symbols": [
+        {
+          "file": "haven/android/app/src/main/kotlin/com/oblivioustech/haven/HavenApplication.kt",
+          "symbol": "registerActivityLifecycleCallbacks"
+        }
+      ],
+      "tests": [],
+      "guards": [
+        "scripts/ci/check_flag_secure_app_wide.sh"
+      ]
+    },
+    {
+      "id": "INV-D-IOS-CANNOT-BLOCK-SCREENSHOTS",
+      "title": "On iOS only the app-switcher snapshot is blurred",
+      "statement": "iOS offers no FLAG_SECURE equivalent, so nothing prevents an in-app screenshot or screen recording by a circle member; the only protection is the app-switcher blur, installed on applicationWillResignActive (not didEnterBackground), covering the window itself, removed and re-armed only on applicationDidBecomeActive, with no UIApplicationSceneManifest that would stop UIKit calling those callbacks. This becomes false if any one of those links is removed.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyWhatOthersSeeScreenshots"
+      ],
+      "symbols": [
+        {
+          "file": "haven/ios/Runner/AppDelegate.swift",
+          "symbol": "privacyBlurView"
+        }
+      ],
+      "tests": [],
+      "guards": [
+        "scripts/ci/check_ios_privacy_blur.sh"
+      ]
+    },
+    {
+      "id": "INV-D-CAMERA-IS-QR-ONLY",
+      "title": "The camera is used only by the QR scanner",
+      "statement": "The only camera consumer is qr_scanner_page.dart via mobile_scanner in barcode-detection mode; no still capture, no video recording, no write to disk and no upload path exists. This becomes false if any capture or file-write API is added on that page.",
+      "status": "ratcheted",
+      "residual": "Nothing fails if a capture-to-disk or upload call is added to the QR page: the only citable proof is that the usage description still exists in Info.plist. The content claim 'No photos or video are taken or stored' has no test and no guard.",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [
+        {
+          "carrier": "ios_infoplist",
+          "id": "NSCameraUsageDescription",
+          "kind": "assertion"
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven/lib/src/pages/circles/qr_scanner_page.dart",
+          "symbol": "MobileScanner"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/lints/background_claim_accuracy_test.dart",
+          "name": "the parser actually found the usage descriptions (anti-vacuity)"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-D-PICKED-PHOTO-IS-PUBLISHED-PUBLICLY",
+      "title": "A photo picked from the library becomes a public profile picture",
+      "statement": "The only consumer of a library-picked image is the profile avatar pipeline, which uploads it to the public Blossom host and references it from a public kind-0 — there is no private or circles-only destination, and the iOS permission prompt says so at the moment consent is given.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "privacyPublicProfileMeansForYou"
+      ],
+      "non_arb_claims": [
+        {
+          "carrier": "ios_infoplist",
+          "id": "NSPhotoLibraryUsageDescription",
+          "kind": "disclosure"
+        }
+      ],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#public-nostr-profiles-kind-0--blossom"
+      ],
+      "event_kinds": [
+        {
+          "kind": 0,
+          "token": "EventBuilder::metadata",
+          "note": "The picture field of the published kind-0 carries the Blossom URL."
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/lints/background_claim_accuracy_test.dart",
+          "name": "the parser actually found the usage descriptions (anti-vacuity)"
+        },
+        {
+          "file": "haven-core/src/profile/publish.rs",
+          "name": "publish_metadata_publishes_without_any_consent_gate"
+        },
+        {
+          "file": "haven/test/pages/onboarding/create_identity_screen_test.dart",
+          "name": "without a picked photo, no avatar is published"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_profile_privacy_boundaries.sh"
+      ]
+    },
+    {
+      "id": "INV-O-NO-ACCOUNT-NO-PII",
+      "title": "Identity creation collects no personal identifier",
+      "statement": "Identity creation takes no email, phone number or password: the Identity model carries only pubkeyHex, npub and createdAt, and the secret bytes are never a field on it. This becomes false the moment a PII field is added to identity creation or to the identity model.",
+      "status": "ratcheted",
+      "residual": "No guard forbids adding an email/phone parameter to createIdentity or a PII field to Identity; the cited tests pin the model's current shape and the secret's absence from it, not the absence of a future field. The 'no sign-up' half rests on review.",
+      "assertion_arb_keys": [
+        "onboardingValueProp3Title",
+        "onboardingValueProp3Summary",
+        "onboardingWelcomeHeadline"
+      ],
+      "disclosure_arb_keys": [],
+      "symbols": [
+        {
+          "file": "haven/lib/src/services/identity_service.dart",
+          "symbol": "createIdentity"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven/test/services/identity_service_test.dart",
+          "name": "creates identity with required fields"
+        },
+        {
+          "file": "haven/test/services/nostr_identity_service_test.dart",
+          "name": "secret bytes are not exposed in Identity class"
+        },
+        {
+          "file": "haven/test/pages/onboarding/intro_screen_test.dart",
+          "name": "renders the hero, all three value props, and the CTA"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-O-ENCRYPTED-ON-DEVICE-BEFORE-IT-LEAVES",
+      "title": "Location is encrypted on the device, readable only by the circle",
+      "statement": "A location update is MLS-encrypted client-side before any network write and decrypts only under the originating circle's epoch keys; a member of another circle holding the same ciphertext cannot read it. This becomes false if any plaintext coordinate is written to a relay or if cross-group decryption starts succeeding.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "onboardingValueProp1Title",
+        "onboardingValueProp1Body",
+        "onboardingValueProp1Summary"
+      ],
+      "disclosure_arb_keys": [],
+      "event_kinds": [
+        {
+          "kind": 445,
+          "token": "out_of_tree:transport-nostr-peeler",
+          "note": "The only carrier of location on the wire; built by the rev-pinned peeler."
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "g2_location_encryption_roundtrip"
+        },
+        {
+          "file": "haven-core/tests/mls_e2e_security_tests.rs",
+          "name": "g3_cross_group_decryption_fails"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_no_exporter_label_override.sh"
+      ]
+    },
+    {
+      "id": "INV-O-NO-FIRST-PARTY-SERVER",
+      "title": "Haven runs no server of its own for circle traffic",
+      "statement": "Publishes target exactly the user's own relay list and the live-sync engine connects only to configured relays, never a gossip-discovered one — there is no Haven-operated endpoint in the location path. This becomes false if any publisher or engine client acquires a hardcoded first-party destination.",
+      "status": "ratcheted",
+      "residual": "The 'you choose which ones to use' half is NOT true of the whole app: the eight profile relays and six discovery relays are contacted unconditionally and cannot be removed (INV-P-P3), the Blossom host is hardcoded to blossom.primal.net, and the tile provider is hardcoded to Stadia. Nothing fails if that gap widens. See the report's copy-defect section — onboardingValueProp2Body directly contradicts privacyRelaysDetailIndexers.",
+      "assertion_arb_keys": [
+        "onboardingValueProp2Title",
+        "onboardingValueProp2Body",
+        "onboardingValueProp2Summary",
+        "relaySettingsBackendCaption",
+        "aboutHeroTagline"
+      ],
+      "disclosure_arb_keys": [],
+      "tests": [
+        {
+          "file": "haven-core/tests/relay_preferences_integration_test.rs",
+          "name": "publish_targets_are_exactly_the_user_list"
+        },
+        {
+          "file": "haven-core/tests/live_sync_privacy_config_e2e.rs",
+          "name": "engine_connects_only_to_configured_relays_never_gossip_discovered"
+        },
+        {
+          "file": "haven-core/tests/live_sync_privacy_config_e2e.rs",
+          "name": "engine_never_authenticates_to_an_auth_required_relay"
+        },
+        {
+          "file": "haven/test/pages/settings/relay_settings_page_test.dart",
+          "name": "shows a short caption linking to the Privacy topic"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_tile_provider.sh"
+      ]
+    },
+    {
+      "id": "INV-O-RELAY-URLS-MUST-BE-WSS",
+      "title": "A relay can only be added over wss://",
+      "statement": "The Rust storage boundary rejects a ws:// relay URL regardless of what the Dart validator did, so no plaintext WebSocket relay can be persisted; this becomes false if the storage-side scheme check is relaxed to trust the UI.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "addRelaySheetErrorInsecureScheme"
+      ],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [
+        {
+          "carrier": "dart_source",
+          "id": "nostr_relay_preferences_service.dart:_mapStorageError",
+          "kind": "assertion"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/relay_preferences_integration_test.rs",
+          "name": "ws_scheme_rejected_at_storage_boundary"
+        },
+        {
+          "file": "haven/test/utils/relay_url_validator_test.dart",
+          "name": "rejects ws:// (insecure) with specific code"
+        },
+        {
+          "file": "haven/test/pages/settings/add_relay_sheet_test.dart",
+          "name": "maps the insecure-scheme error to its localized message"
+        }
+      ],
+      "guards": []
+    },
+    {
+      "id": "INV-O-VPN-IS-A-THIRD-PARTY-MITIGATION",
+      "title": "The VPN recommendation is attributed, not a Haven guarantee",
+      "statement": "The VPN paragraph describes a third party's transport behaviour, not Haven code; it becomes false only through a Haven change — a raw socket that bypasses the OS tunnel, or an IP echoed inside an application payload. Haven itself provides no network-level unlinkability (see P6).",
+      "status": "ratcheted",
+      "residual": "There is no test or guard forbidding a network path that bypasses the OS tunnel, and no test asserting that no payload echoes the client IP. Unlike LocationDisclosureStrings.how, this paragraph carries NO recorded provenance read date in the tree — the date below is the commit that authored the privacy page, not a policy read.",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "attributed_arb_keys": [
+        "privacyInferenceVpnHelps"
+      ],
+      "attribution": {
+        "source": "Third-party VPN transport behaviour; Haven recommends Mullvad (haven/lib/src/constants/tiles.dart, kMullvadUrl). No vendor policy document is quoted.",
+        "url": "https://mullvad.net",
+        "read_on": "2026-07-29"
+      },
+      "doc_anchors": [
+        "haven-core/SECURITY.md#ip-level-linkage-is-out-of-scope-p6"
+      ],
+      "symbols": [
+        {
+          "file": "haven/lib/src/constants/tiles.dart",
+          "symbol": "kMullvadUrl"
+        }
+      ],
+      "tests": [],
+      "guards": [
+        "scripts/ci/check_internet_permission.sh"
+      ]
+    },
+    {
+      "id": "INV-O-LEGACY-KEY-ADVERTISEMENT-RETRACTION",
+      "title": "The one-time kind-10051 retraction is disclosed while it is pending",
+      "statement": "After the Dark Matter cutover Haven emits an empty replaceable kind-10051 to retract the retired KeyPackage relay-list advertisement, and the Relay settings page says so until the tick completes; this becomes false if the note is shown when nothing is pending, or hidden while it is.",
+      "status": "ratcheted",
+      "residual": "The two relay_settings_page_test.dart cases that exercise the note are named with concatenated Dart string literals, so no single-literal test name exists to cite under the checker's declaration rule; and no test pins that the retraction actually completes. The disclosure's timing rests on those uncitable widget tests.",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [
+        "relaySettingsLegacyRetractionPending"
+      ],
+      "event_kinds": [
+        {
+          "kind": 10051,
+          "token": "Kind::MlsKeyPackageRelays",
+          "note": "The only site building a kind-10051 EVENT is build_key_package_relay_list_retraction (empty replaceable retraction). The TOKEN Kind::MlsKeyPackageRelays also appears at rust_builder/src/api.rs:7735 as the target kind of a kind-5 coordinate deletion."
+        },
+        {
+          "kind": 443,
+          "token": "Kind::MlsKeyPackage",
+          "note": "RETIRED pre-Dark-Matter KeyPackage kind. Never minted by Haven; read, filtered and deleted only (relay/manager.rs:853)."
+        },
+        {
+          "kind": 443,
+          "token": "Kind::Custom(443)",
+          "note": "Same retired kind spelled as a literal at rust_builder/src/api.rs:7654, in the legacy-retraction fetch path."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/relay/maintenance/key_package.rs",
+          "symbol": "build_key_package_relay_list_retraction"
+        },
+        {
+          "file": "haven-core/src/circle/relay_prefs.rs",
+          "symbol": "MlsKeyPackageRelays"
+        }
+      ],
+      "tests": [],
+      "guards": []
+    },
+    {
+      "id": "INV-E-CONTROL-TRAFFIC-SINGLE-LAYER",
+      "title": "Roster and circle name rest on one confidentiality layer, not two",
+      "statement": "Group-control kind-445s (commits and proposals) are MLS PublicMessage under the engine's PURE_PLAINTEXT_WIRE_FORMAT_POLICY — signed and integrity-protected but NOT MLS-encrypted — so the roster, member credentials (each member's Nostr identity pubkey), their 0xF2F1 identity proofs and the circle name carried inside them are protected by the outer exporter-keyed ChaCha20-Poly1305 wrap ALONE. Application messages are double-sealed: OpenMLS encrypts them unconditionally regardless of the wire-format policy, so a location sits inside an MLS PrivateMessage inside that same outer wrap.",
+      "status": "ratcheted",
+      "residual": "Nothing in this tree fails if an MDK bump changes the wire-format policy or the exporter derivation; the only levers are pinned_dependencies.mdk_rev and the grep-based check_no_exporter_label_override.sh. Upstream itself marks the policy WIRE_FORMAT_POLICY_REVIEW_REQUIRED ('Revisit Before External Rollout'). So the half of privacyWhatOthersSeeRelaysCannot covering the circle's NAME and MEMBER LIST is single-layered while the location half is not — a future change could silently downgrade one and not the other.",
+      "disclosure_arb_keys": [
+        "privacyWhatOthersSeeRelaysCannot"
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/nostr/mls/manager.rs",
+          "symbol": "NostrMlsPeeler"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_no_exporter_label_override.sh"
+      ],
+      "event_kinds": [
+        {
+          "kind": 445,
+          "token": "out_of_tree:transport-nostr-peeler",
+          "note": "Commits/proposals ride the same kind as application messages but a different MLS wire format."
+        }
+      ]
+    }
+  ]
+}

@@ -31,6 +31,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'e2e/_lib/m7_worker_ci_oneoff.dart' show registerM7CiOneOffCatchup;
 import 'e2e/_lib/test_user.dart' show TestUser, aliceSeed;
+import 'e2e/_lib/throw_time_error_capture.dart';
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -40,6 +41,7 @@ void main() {
   testWidgets(
     'M7 disable: register a task then disable consent directly (gate-1 no-op)',
     (tester) async {
+      installThrowTimeErrorLogging();
       expect(
         backgroundCatchupEnabled,
         isTrue,

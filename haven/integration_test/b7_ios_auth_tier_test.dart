@@ -147,6 +147,7 @@ import 'e2e/_lib/scenario_harness.dart' show ScenarioHarness;
 import 'e2e/_lib/synthetic_user.dart' show SyntheticUser;
 import 'e2e/_lib/test_relay.dart' show defaultStrfryUrl;
 import 'e2e/_lib/test_user.dart' show TestUser, aliceSeed, bytesToHex;
+import 'e2e/_lib/throw_time_error_capture.dart';
 
 /// Verbatim marker prefix carrying the CoreLocation tier this run actually
 /// observed, e.g. `[b7] OBSERVED_TIER=whenInUse`.
@@ -259,6 +260,7 @@ void main() {
     'B7: observes the granted CoreLocation tier and renders honest copy '
     'for it',
     (tester) async {
+      installThrowTimeErrorLogging();
       if (!Platform.isIOS) {
         markTestSkipped(
           'b7_ios_auth_tier_test asserts CoreLocation authorization-tier '
@@ -403,6 +405,7 @@ void main() {
   testWidgets(
     'B7: keeps publishing across a REAL pause under the granted tier',
     (tester) async {
+      installThrowTimeErrorLogging();
       if (!Platform.isIOS) {
         markTestSkipped(
           'b7_ios_auth_tier_test asserts the iOS paused-publish branch; '

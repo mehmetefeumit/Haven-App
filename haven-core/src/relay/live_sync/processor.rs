@@ -223,6 +223,61 @@ impl EngineProcessor {
         self.anchors.forget(group_id_hex);
     }
 
+    /// Records a `kind:445` the receive path dropped BEFORE the engine saw it —
+    /// the Rule-12 intake queue ([`super::config::WORKER_QUEUE_CAP`]) was full —
+    /// holding `group_id_hex`'s generation at or below `created_at_secs`.
+    ///
+    /// This is what makes the intake cap a throttle instead of a discard.
+    /// Without it the dropped event leaves no trace, this generation's `EOSE`
+    /// advances the persisted cursor over it, and — because the catch-up sweep
+    /// derives its floor from that same cursor — nothing ever asks for it again.
+    /// Overflow happens precisely while a relay is replaying an offline backlog,
+    /// so that loss would be the one Rule 12 names.
+    ///
+    /// Cursor-safe in the same sense as every other hold-back: it can only lower
+    /// this generation's advance, never raise it, and the cursor write is
+    /// monotonic-max — so a flooder buys a re-fetch of a window we already hold,
+    /// never a skip (see [`super::anchor`]). Sustained, that re-fetch repeats:
+    /// for as long as a relay's stored replay can still overflow the queue, the
+    /// cursor does not advance past it. Deliberate, and the same trade the
+    /// catch-up sweep already makes on a window it could not drain — a stall
+    /// costs bandwidth, a skip costs the backlog.
+    pub fn note_dropped_before_ingest(&self, group_id_hex: &str, created_at_secs: i64) {
+        self.anchors.note_unapplied(group_id_hex, created_at_secs);
+    }
+
+    /// Records that the receive path's notification stream SKIPPED an unknown
+    /// set of deliveries, suppressing the pending advance of every subscription
+    /// generation open at that moment — group buckets and the inbox alike.
+    ///
+    /// The coarse counterpart to [`Self::note_dropped_before_ingest`], for the
+    /// loss that cannot be attributed: a skip is reported as a COUNT, so there
+    /// is no `created_at` to hold at and no `#h` to hold, and the open
+    /// generations' `EOSE`s would otherwise advance their cursors over events
+    /// this process never saw — the Rule-12 loss again, one layer above the
+    /// intake cap and just as permanent (the catch-up sweep re-derives its floor
+    /// from the same per-circle cursor).
+    ///
+    /// One notification stream carries both planes, so the ignorance spans both;
+    /// it also spans any generation opened between the skip and its observation,
+    /// which the receive loop cannot order against it. Being wider than
+    /// necessary here costs a re-fetch; being narrower costs the backlog.
+    ///
+    /// Writes no cursor at all, so it can only stall an advance, never lower
+    /// one, and each suppression is scoped to the generation it hits. A party
+    /// that could sustain a skip therefore buys a repeated re-fetch of a window
+    /// we already hold, never a skip and never a wedge.
+    ///
+    /// What it cannot do is un-ISSUE an advance: the cursor is monotonic by
+    /// design (lowering one on remotely-triggered input is the primitive P0-5
+    /// removed), so a skipped event backdated below a cursor that moved before
+    /// the skip is re-requested only by the next REQ's lookback — a minute on a
+    /// group bucket, seven days on the inbox.
+    pub fn note_delivery_gap(&self) {
+        self.anchors.suppress_open_generations();
+        self.inbox_anchor.suppress_open_generation();
+    }
+
     /// Opens a fresh INBOX cursor-anchor generation at `opened_at_secs` — a
     /// LOCAL wall-clock reading taken when the `kind:1059` REQ was (re-)issued.
     ///

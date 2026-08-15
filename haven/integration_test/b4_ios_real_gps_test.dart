@@ -155,6 +155,7 @@ import 'e2e/_lib/scenario_harness.dart' show ScenarioHarness;
 import 'e2e/_lib/synthetic_user.dart' show DecryptedCoords, SyntheticUser;
 import 'e2e/_lib/test_relay.dart' show TestRelay, defaultStrfryUrl;
 import 'e2e/_lib/test_user.dart' show TestUser, aliceSeed, bytesToHex;
+import 'e2e/_lib/throw_time_error_capture.dart';
 
 /// Verbatim marker printed once when this drive observes that location
 /// authorization was NOT granted before launch. Diagnostic: it attributes the
@@ -216,6 +217,7 @@ void main() {
     'B4: publish a REAL simulator GPS fix and prove a peer decrypts those '
     'exact coordinates',
     (tester) async {
+      installThrowTimeErrorLogging();
       // Deliberately NOT `markTestSkipped` on a non-iOS runtime. This target is
       // invoked by exactly one lane, which boots a simulator; anywhere else is
       // a harness misconfiguration, and A3b is the standing reminder that a

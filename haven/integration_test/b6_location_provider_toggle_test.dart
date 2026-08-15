@@ -144,6 +144,7 @@ import 'e2e/_lib/pump_helpers.dart' show pumpUntilFound, waitUntilAsync;
 import 'e2e/_lib/scenario_harness.dart' show ScenarioHarness;
 import 'e2e/_lib/test_relay.dart' show defaultStrfryUrl;
 import 'e2e/_lib/test_user.dart' show TestUser, aliceSeed;
+import 'e2e/_lib/throw_time_error_capture.dart';
 
 /// Printed once identity, circle and a first successful publish all exist —
 /// i.e. the session this lane is about to disturb is genuinely live.
@@ -263,6 +264,7 @@ void main() {
     'B6: switching the OS location provider off mid-session stops publishing '
     'and is surfaced to the user; switching it back on recovers',
     (tester) async {
+      installThrowTimeErrorLogging();
       // `cmd location set-location-enabled` is an Android shell command, and
       // the gate under test (`LocationManager.isLocationEnabled`) is the
       // Android one. iOS has its own scenario (backlog B7).

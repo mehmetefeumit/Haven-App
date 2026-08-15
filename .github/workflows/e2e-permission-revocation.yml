@@ -194,10 +194,21 @@ jobs:
       #   43m  this step's timeout-minutes = 34 + 1 (kill grace) + 7
       #        (emulator-boot-timeout) + margin, a belt over the deadline.
       # Sizing evidence: each act self-bounds at a 13-minute in-test Timeout
-      # (ACT 1: arming + a 150s baseline wait + a 120s revoke-observation wait
-      # + the 258s mid-session window; ACT 2: arming + a 75s probe + the 258s
-      # absence window), and the two run back to back. Revise against p95 once
-      # this lane has green history.
+      # (ACT 1: arming + a 150s baseline wait + the APP-OP window — a 60s arm,
+      # a 150s observation, a 75s probe and a 90s absence window — + a 120s
+      # revoke-observation wait + the 258s mid-session window; ACT 2: arming +
+      # a 75s probe + the 258s absence window), and the two run back to back.
+      # The app-op window moved ACT 1's TYPICAL cost from ~4m to ~8m, and it
+      # DID move the worst case: ACT 1's declared phase bounds now sum to ~825s
+      # (150+45 baseline, 60 arm, 150+75 observation, 75 probe, 90+60 window,
+      # 120 revoke wait) before any boot or circle-creation time, against the
+      # 780s in-test Timeout. So the in-test Timeout is the bound that reaps
+      # ACT 1 first — the 14m per-drive bound never applies to it. Reaching
+      # 825s needs every phase to overrun at once and each overrun is itself a
+      # failure, so this is a compounding-failure path, not a healthy-run risk;
+      # it is stated because a reader who trusts "the 14m bound caps it" will
+      # mis-diagnose a Timeout as a revoke fault.
+      # Revise against p95 once this lane has green history.
       #
       # -memory 6144 matches the sibling Android lanes: RustLib + SQLCipher
       # floods `mlock() -1 ENOMEM` under pressure.

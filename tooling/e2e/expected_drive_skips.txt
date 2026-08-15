@@ -1,0 +1,168 @@
+# Declared skip hatches — every `markTestSkipped()` under
+# haven/integration_test/, and the argument for why it cannot fire in the lane
+# that drives its target.
+#
+# Enforced by tooling/e2e/ci/drive-log-lib.sh, in two halves:
+#
+#   STATIC   `--check-manifest`, an enforcing step in repo-guards.yml.
+#            Reconciles this file against the source tree: every call site must
+#            be declared here, and every row must still name a live call site.
+#            This is what makes a NEW hatch impossible to land silently.
+#   RUNTIME  `drive_log_reports_test_failure()`, which every E2E lane already
+#            reaches on its drive log — directly in the runners that source the
+#            library, and through a delegate in the four that do not
+#            (run-integration-tests.sh and run-relay-customization.sh drive each
+#            target via run-single-avd-scenario.sh; run-b7-ios-auth-tier.sh via
+#            run-ios-sim-scenario.sh, which sources ios-flake-lib.sh). Between
+#            them those four carry 17 of the 23 rows below, so the indirection
+#            is the load-bearing half of this claim, not a footnote to it.
+#            It fails the lane when any reason below is
+#            seen in the reporter's output, or when the `~N` skipped column is
+#            non-zero. This is what makes a declared hatch impossible to FIRE
+#            silently.
+#
+# Read drive-log-lib.sh's header for why a skipped integration test is otherwise
+# invisible — `integrationDriver()` records it as a pass, and on the `flutter
+# drive` lanes even the `~N` column never moves for a runtime skip.
+#
+# Format, one entry per line, exactly two fields, no padding around the `|`:
+#
+#     <target>|<reason>
+#
+#   target   Path relative to `haven/`, e.g. `integration_test/app_test.dart`.
+#   reason   The argument to markTestSkipped() as it appears in the SOURCE,
+#            with adjacent Dart string literals joined and interpolations left
+#            as written (`${e.runtimeType}`, `$label`). The runtime scan turns
+#            each interpolation into a wildcard and matches the rest verbatim,
+#            because the reason is the gate: a gate that silently changes cause
+#            must not pass.
+#
+# Regenerate the raw rows with:
+#   bash tooling/e2e/ci/drive-log-lib.sh --list
+#
+# ===========================================================================
+# THE INVARIANT THIS FILE ASSERTS: NONE OF THESE CAN FIRE IN CI.
+#
+# There is no "expected to skip" row and no count column, because deriving the
+# set produced none — not because `~0` was assumed. Each hatch below was traced
+# from its guard condition to the lane that drives it, and every one is
+# unreachable there. That is what entitles the runtime half to treat ANY
+# observed skip as a lane failure.
+#
+# So a row here is not permission to skip. It is a recorded argument, and the
+# lanes hold it to account. If a hatch ever does fire, the argument in its block
+# is what broke — fix the lane first; only rewrite the argument if the proof
+# genuinely cannot run there, and then say where the invariant is proven
+# instead. A skip with no substitute proof is a deleted test in disguise.
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Android-only lane targets — guard `if (!Platform.isAndroid)`
+#
+# Each of these drives an Android-specific lever (`adb emu geo fix`,
+# `pm revoke`, `cmd location set-location-enabled`, `cmd connectivity
+# airplane-mode`, `adb shell date`, the foreground service) and each is driven
+# by exactly ONE workflow, which runs an Android emulator on ubuntu-latest:
+#
+#   b1_fgs_live_foreground_test.dart      .github/workflows/e2e-fgs-publish.yml
+#   b3_real_gps_test.dart                 .github/workflows/e2e-real-gps.yml
+#   b5_permission_revocation_test.dart    .github/workflows/e2e-permission-revocation.yml
+#   b6_location_provider_toggle_test.dart .github/workflows/e2e-location-provider-toggle.yml
+#   b9_network_reconnect_test.dart        .github/workflows/e2e-network-reconnect.yml
+#   kp_rotation_wire_test.dart            .github/workflows/e2e-kp-rotation.yml
+#
+# `Platform.isAndroid` is therefore true wherever CI runs them, and the hatch
+# exists only so a developer running the file against a desktop or an iOS device
+# gets an honest skip instead of a confusing failure. Should one of these ever
+# be added to an iOS lane, the guard fires and the runtime half reddens it —
+# which is the point: the mapping above is documentation, the assertion is not.
+integration_test/b1_fgs_live_foreground_test.dart|b1_fgs_live_foreground_test proves the Android foreground-service publish path; skipped on non-Android runtimes.
+integration_test/b3_real_gps_test.dart|b3_real_gps_test drives the Android emulator GPS + runtime permission path; skipped on non-Android runtimes.
+integration_test/b5_permission_revocation_test.dart|b5_permission_revocation_test drives the Android `pm revoke` runtime-permission model; skipped on non-Android runtimes.
+integration_test/b6_location_provider_toggle_test.dart|b6_location_provider_toggle_test drives the Android `cmd location set-location-enabled` toggle; skipped on non-Android runtimes.
+integration_test/b9_network_reconnect_test.dart|b9_network_reconnect_test drives the Android `cmd connectivity airplane-mode` toggle; skipped on non-Android runtimes.
+integration_test/kp_rotation_wire_test.dart|kp_rotation_wire_test drives the Android emulator wall clock to age a KeyPackage past its rotation threshold; skipped on non-Android runtimes.
+
+
+# ---------------------------------------------------------------------------
+# iOS-only lane targets — guard `if (!Platform.isIOS)`
+#
+#   b7_ios_auth_tier_test.dart  .github/workflows/e2e-ios-auth-tier.yml
+#   ios_bg_mirror_test.dart     .github/workflows/e2e-ios.yml (second step)
+#
+# Both workflows run on macos-latest and drive a booted iOS simulator through
+# `flutter test -d <udid>`, so `Platform.isIOS` holds. Note these two are the
+# lanes where the reporter's `~N` column DOES count a runtime skip (package:test
+# rather than flutter_test's on-device reporter), so they carry the counter
+# signal as well as the reason signal.
+#
+# b4_ios_real_gps_test.dart is the deliberate counter-example and correctly has
+# no row here: it hard-FAILS on a non-iOS runtime rather than skipping
+# (b4_ios_real_gps_test.dart:221 explains why; the assertion is at 227). Do not
+# "fix" it into a skip.
+integration_test/b7_ios_auth_tier_test.dart|b7_ios_auth_tier_test asserts CoreLocation authorization-tier behaviour; skipped on non-iOS runtimes.
+integration_test/b7_ios_auth_tier_test.dart|b7_ios_auth_tier_test asserts the iOS paused-publish branch; skipped on non-iOS runtimes.
+integration_test/ios_bg_mirror_test.dart|iOS-only wiring proof; skipped on non-iOS runtime.
+
+
+# ---------------------------------------------------------------------------
+# Keyring hatches — guard `try { await initKeyringStore(); } on Object catch`
+#
+# Every file below calls `TestUser.bootstrapProcess()` BEFORE reaching the
+# guard: in `setUpAll` for all of them except relay_customization_trigger_test
+# .dart, which calls it as the first statement of its single test body
+# (relay_customization_trigger_test.dart:158, under a comment at 141-156 stating
+# exactly this ordering requirement).
+#
+# bootstrapProcess installs the in-memory keyring backend
+# (haven/integration_test/e2e/_lib/test_user.dart:171 ->
+# `use_in_memory_keyring_for_test`). That function and `init_keyring_store`
+# share ONE process-global guard on a first-writer-wins basis
+# (haven/rust_builder/src/api.rs:641 `KEYRING_INIT`; api.rs:661-663 returns
+# `Ok(())` immediately once it is claimed). So `initKeyringStore()` cannot throw
+# after bootstrapProcess has run, and these hatches are unreachable — a fact two
+# of the files already state in their own source
+# (encryption_pipeline_test.dart:153-160,
+# circle_service_remove_member_test.dart:215-222).
+#
+# One residual path is NOT closed by that argument: api.rs:658-660 takes the
+# mutex before the claimed-guard check at 661, so a POISONED `KEYRING_INIT`
+# still returns `Err` and the hatch fires. Poisoning needs a panic while the
+# lock is held, i.e. inside platform_init_keyring / build_in_memory_store — a
+# hard FFI fault, not a runner condition. It is left as a real, narrow residual
+# rather than argued away, and it is exactly what the runtime half is for: if
+# it ever happens the lane reddens on the reason instead of reporting a pass.
+#
+# The one way this could change is a lane building RELEASE: the in-memory
+# backend is `#[cfg(debug_assertions)]` and its release stub always errors
+# (api.rs:716-719). That would not produce a skip — bootstrapProcess would throw
+# inside `setUpAll`, which is the exact failure shape drive-log-lib.sh was
+# written for. Every lane builds debug (`flutter drive` and `flutter test`
+# default to it; run-ios-sim-scenario.sh:22 says so explicitly).
+#
+#   encryption_pipeline_test.dart          .github/workflows/e2e-integration.yml
+#   circle_service_remove_member_test.dart .github/workflows/e2e-integration.yml
+#   relay_*_test.dart                      .github/workflows/e2e-relay-customization.yml
+#
+# Nothing is lost by these being unreachable: they are hatches, not proofs. What
+# CI does not exercise here is the PLATFORM keyring binding, which the on-device
+# Android/iOS E2E lanes cover for real — the same division recorded in
+# scripts/ci/expected_test_skips.txt for the host-side keyring twins.
+integration_test/circle_service_remove_member_test.dart|Keyring unavailable on this runner (${e.runtimeType}); skipping fail-closed guard test.
+integration_test/circle_service_remove_member_test.dart|Keyring unavailable on this runner (${e.runtimeType}); skipping real-removal forward-secrecy test.
+integration_test/encryption_pipeline_test.dart|Keyring unavailable on this runner (${e.runtimeType}); skipping encryption pipeline test.
+integration_test/encryption_pipeline_test.dart|Keyring unavailable on this runner (${e.runtimeType}); skipping round-trip decrypt test.
+integration_test/relay_customization_publish_test.dart|Keyring unavailable on this runner (${e.runtimeType}); skipping FFI-KP-1.
+integration_test/relay_customization_publish_test.dart|Keyring unavailable on this runner (${e.runtimeType}); skipping FFI-INBOX-1.
+integration_test/relay_customization_publish_test.dart|Keyring unavailable on this runner (${e.runtimeType}); skipping FFI-445-POS.
+integration_test/relay_customization_publish_test.dart|Keyring unavailable on this runner (${e.runtimeType}); skipping FFI-445-NEG.
+integration_test/relay_customization_publish_test.dart|Keyring unavailable on this runner (${e.runtimeType}); skipping FFI-445-SNAPSHOT.
+integration_test/relay_customization_trigger_test.dart|Keyring unavailable on this runner (${e.runtimeType}); skipping RLY-PROV-01.
+integration_test/relay_resync_convergence_test.dart|Keyring unavailable on this runner (${e.runtimeType}); skipping CONV-1.
+integration_test/relay_resync_convergence_test.dart|Keyring unavailable on this runner (${e.runtimeType}); skipping CONV-2.
+integration_test/relay_resync_convergence_test.dart|Keyring unavailable on this runner (${e.runtimeType}); skipping CONV-3.
+# Shared helper `runLeakProof`, reached from BOTH testWidgets bodies in the
+# file, so one call site covers two tests; `$label` is the category name each
+# passes in.
+integration_test/relay_two_plane_privacy_test.dart|Keyring unavailable on this runner (${e.runtimeType}); skipping $label.

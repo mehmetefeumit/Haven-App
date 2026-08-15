@@ -32,7 +32,9 @@
 //! Each time a circle's REQ is (re-)issued — session start, background resume,
 //! a delta subscribe, a bucket re-issue after a member leaves — a new
 //! *generation* opens with a fresh open time, a cleared EOSE flag, and no
-//! hold-backs. A generation advances the cursor at most once, on its first EOSE.
+//! hold-backs. A generation advances the cursor at most once, on its first EOSE
+//! — or not at all, if the deliveries it was meant to cover were skipped
+//! wholesale before it could see them ([`CursorAnchors::suppress_open_generations`]).
 //! Events delivered live afterwards do not advance it: they carry no
 //! completeness information, only the next generation's REQ does. They can still
 //! hold the NEXT generation back, which is the safe direction.
@@ -47,7 +49,8 @@ use crate::relay::cursor::cursor_ms_for_window;
 struct CircleAnchor {
     /// LOCAL wall-clock reading taken when this generation's REQ was issued.
     opened_at_secs: i64,
-    /// Whether this generation has already consumed its one EOSE advance.
+    /// Whether this generation's one EOSE advance is spent — issued, or burned
+    /// unissued by a delivery skip this generation cannot see past.
     eose_consumed: bool,
     /// Oldest `created_at` of an event this generation delivered but could not
     /// apply. The only remotely-written value here, and it can only lower the
@@ -144,6 +147,30 @@ impl CursorAnchors {
         }
     }
 
+    /// Burns the pending advance of EVERY open generation, issuing none: the
+    /// delivery stream skipped an unknown set of events, so no REQ open at that
+    /// moment can still claim its `EOSE` covered everything.
+    ///
+    /// The COARSE hold-back, for a loss reported as a bare count: with no
+    /// `created_at` there is nothing to hold at, and with no `#h` there is no
+    /// circle to attribute it to, so the ignorance is every circle with a REQ in
+    /// flight and the suppression is exactly that wide. Anything narrower would
+    /// advance some circle's cursor over events this process never saw.
+    ///
+    /// Writes no cursor, so it can only stall an advance, never lower one, and
+    /// it is generation-scoped: the next REQ re-arms, deriving its `since` from
+    /// the cursor this left alone, and so re-requests the skipped window.
+    pub fn suppress_open_generations(&self) {
+        for anchor in self
+            .inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values_mut()
+        {
+            anchor.eose_consumed = true;
+        }
+    }
+
     /// Consumes this generation's EOSE and returns the cursor value (ms) it
     /// justifies, or `None` when there is no open generation or the generation
     /// already advanced.
@@ -224,7 +251,8 @@ pub struct InboxAnchor {
 struct InboxGeneration {
     /// LOCAL wall-clock reading taken when this generation's REQ was issued.
     opened_at_secs: i64,
-    /// Whether this generation has already consumed its one EOSE advance.
+    /// Whether this generation's one EOSE advance is spent — issued, or burned
+    /// unissued by a delivery skip this generation cannot see past.
     eose_consumed: bool,
 }
 
@@ -280,6 +308,25 @@ impl InboxAnchor {
             .unwrap_or_else(PoisonError::into_inner)
             .as_mut()
             .and_then(|generation| generation.consume_eose(now_secs))
+    }
+
+    /// Burns the open generation's pending advance, issuing none — the same
+    /// rule as [`CursorAnchors::suppress_open_generations`], and the inbox sits
+    /// inside the same ignorance: ONE notification stream carries both planes,
+    /// so a skip on it can have swallowed a gift wrap as easily as a `kind:445`.
+    ///
+    /// Cheap here in particular: the inbox REQ already re-requests a 7-day
+    /// window, so a suppressed generation widens that window by the length of
+    /// one generation rather than adding a fetch.
+    pub fn suppress_open_generation(&self) {
+        if let Some(generation) = self
+            .inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_mut()
+        {
+            generation.eose_consumed = true;
+        }
     }
 
     /// Drops the generation (the inbox REQ was closed / the session stopped),
@@ -369,6 +416,20 @@ mod inbox_tests {
         let anchor = InboxAnchor::default();
         anchor.open(-5);
         assert_eq!(anchor.consume_eose(NOW), Some(0));
+    }
+
+    #[test]
+    fn a_delivery_skip_suppresses_the_open_generation_but_not_the_next() {
+        // ONE notification stream carries both planes, so a skip on it can have
+        // swallowed a gift wrap as easily as a group event: the open generation
+        // loses its advance. Only that generation — the next REQ re-arms, so an
+        // unattributable loss costs a wider window, never a wedged cursor.
+        let anchor = InboxAnchor::default();
+        anchor.open(OPENED);
+        anchor.suppress_open_generation();
+        assert_eq!(anchor.consume_eose(NOW), None);
+        anchor.open(OPENED + 500);
+        assert_eq!(anchor.consume_eose(NOW), Some((OPENED + 500) * 1000));
     }
 
     #[test]
@@ -484,6 +545,35 @@ mod tests {
         anchors.open_generation("bb11", OPENED);
         assert_eq!(anchors.note_eose("bb11", NOW), Some(OPENED * 1000));
         assert_eq!(anchors.note_eose("aa00", NOW), Some((OPENED - 10) * 1000));
+    }
+
+    #[test]
+    fn a_delivery_skip_suppresses_every_open_generation_but_not_the_next() {
+        // A skip arrives as a COUNT — no `created_at` to hold at, no `#h` to
+        // attribute it to — so it burns the advance of every circle with a REQ
+        // in flight. Anything narrower would advance one of them over an event
+        // this process never saw. And only those: the next REQ re-arms, so the
+        // loss costs a re-fetch rather than a wedged cursor.
+        let anchors = CursorAnchors::default();
+        anchors.open_generation("aa00", OPENED);
+        anchors.open_generation("bb11", OPENED);
+        anchors.suppress_open_generations();
+        assert_eq!(anchors.note_eose("aa00", NOW), None);
+        assert_eq!(anchors.note_eose("bb11", NOW), None);
+        anchors.open_generation("aa00", OPENED + 500);
+        assert_eq!(anchors.note_eose("aa00", NOW), Some((OPENED + 500) * 1000));
+    }
+
+    #[test]
+    fn a_delivery_skip_conjures_no_anchor_for_a_circle_that_has_none() {
+        // Same rule as `note_unapplied`: no REQ ⇒ no window to suppress. A latch
+        // left behind here would suppress a generation opened long after the
+        // skip, which is a stall nothing recovers from on its own.
+        let anchors = CursorAnchors::default();
+        anchors.suppress_open_generations();
+        assert_eq!(anchors.note_eose("aa00", NOW), None);
+        anchors.open_generation("aa00", OPENED);
+        assert_eq!(anchors.note_eose("aa00", NOW), Some(OPENED * 1000));
     }
 
     #[test]

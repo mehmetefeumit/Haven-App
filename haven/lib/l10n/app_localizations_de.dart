@@ -1359,7 +1359,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get circleDetailsRelaysNote =>
-      'Diese Relays stammen aus den veröffentlichten Listen der eingeladenen Mitglieder – hatten diese Mitglieder keine, aus deinen Posteingangs-Relays oder aus von Haven gewählten Relays. Sie lassen sich noch nicht ändern, und spätere Änderungen an deiner Relay-Liste wirken sich nicht auf sie aus.';
+      'Diese Relays stammen aus den veröffentlichten Listen der eingeladenen Mitglieder – bei fehlender Liste aus deinen Posteingangs-Relays oder Haven-Relays. Noch nicht änderbar; spätere Änderungen deiner Relay-Liste wirken sich nicht auf sie aus.';
 
   @override
   String get circleDetailsAddMember => 'Mitglied hinzufügen';

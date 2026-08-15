@@ -39,6 +39,7 @@ import 'package:integration_test/integration_test.dart';
 import 'e2e/_lib/synthetic_user.dart';
 import 'e2e/_lib/test_relay.dart';
 import 'e2e/_lib/test_user.dart';
+import 'e2e/_lib/throw_time_error_capture.dart';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -100,6 +101,7 @@ void main() {
   testWidgets('precondition: R2 is not a process-global default relay', (
     tester,
   ) async {
+    installThrowTimeErrorLogging();
     expect(
       defaultRelays(),
       isNot(contains(secondStrfryUrl)),
@@ -133,6 +135,7 @@ void main() {
   testWidgets(
     'FFI-KP-1: custom KeyPackage relay R2 receives kind 30443 and kind 10002',
     (tester) async {
+      installThrowTimeErrorLogging();
       // Skip honestly when the platform keyring is unavailable.
       try {
         await initKeyringStore();
@@ -400,6 +403,7 @@ void main() {
   testWidgets(
     'FFI-INBOX-1: custom Inbox relay R2 receives kind 10050',
     (tester) async {
+      installThrowTimeErrorLogging();
       try {
         await initKeyringStore();
       } on Object catch (e) {
@@ -532,6 +536,7 @@ void main() {
     'FFI-445-POS: kind 445 lands on both R1 and R2 when circle created '
     'with explicit relays [R1, R2]',
     (tester) async {
+      installThrowTimeErrorLogging();
       try {
         await initKeyringStore();
       } on Object catch (e) {
@@ -790,6 +795,7 @@ void main() {
     'FFI-445-NEG: kind 445 published to circle with relays [R1] only '
     'does NOT reach R2',
     (tester) async {
+      installThrowTimeErrorLogging();
       try {
         await initKeyringStore();
       } on Object catch (e) {
@@ -970,6 +976,7 @@ void main() {
     'FFI-445-SNAPSHOT: adding R2 to personal Inbox/KP lists does not '
     'reroute kind 445 for an existing circle whose relays are [R1]',
     (tester) async {
+      installThrowTimeErrorLogging();
       // NOTE: This test is RE-SCOPED per protocol-oracle audit.  It does NOT
       // assert "circle.relays is immutable by design".  Instead it asserts a
       // narrower, observable invariant: adding R2 to the user's personal

@@ -392,11 +392,13 @@ void main() {
             'alarm" exists to forbid, and it would train users to ignore the '
             'banner — costing them the real outages it does catch.\n'
             '\n'
-            'Closing this properly needs a signal Haven does not have: '
+            'TELLING the user still needs a signal Haven does not have: '
             '`AppOpsManager.unsafeCheckOpNoThrow`, which geolocator exposes no '
-            'channel for. Until then the exposure is bounded elsewhere (the '
-            'cached fix ages out of `kStreamPositionMaxAge`, and any stream '
-            'error or close clears it), not here.',
+            'channel for. The COORDINATE half is closed, just not here: '
+            '`GeolocatorLocationService._platformStillPermitsLocation` stops '
+            'serving the cached fix as soon as the platform stops answering '
+            '`getLastKnownPosition()`, which the app-op DOES gate. So this '
+            'state is silent to the user and produces nothing.',
       );
       expect(
         service.permissionChecks,

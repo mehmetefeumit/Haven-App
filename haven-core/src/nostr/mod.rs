@@ -6,43 +6,33 @@
 //! # Architecture
 //!
 //! ```text
-//! LocationMessage → UnsignedEvent (rumor with location JSON)
+//! LocationMessage → UnsignedEvent (inner kind-9 rumor with location JSON)
 //!                          ↓
-//!                   MDK encrypt_event (MLS + signing)
+//!            SessionManager::send_location (engine: MLS + signing)
 //!                          ↓
 //!                   Event (kind 445, ready for relay)
 //! ```
 //!
+//! The single send path is [`CircleManager::encrypt_location`] →
+//! [`mls::SessionManager::send_location`]: it stamps the inner `pubkey` with
+//! the session's own identity (W9) rather than accepting one from the caller,
+//! and the engine mints the ephemeral key for each kind 445 (Security Rule 2).
+//! A second builder that took a caller-supplied sender pubkey once lived in
+//! `location::nostr`; it reached no caller and was deleted rather than
+//! documented, because a parallel encrypt path is a trap even while unused.
+//!
 //! # Security
 //!
-//! - MDK handles MLS encryption and epoch management
-//! - Forward secrecy through MLS epoch rotation
+//! - The engine handles MLS encryption and epoch management
+//! - Forward secrecy bounded by MLS epoch rotation — and Haven rotates only on
+//!   MEMBERSHIP CHANGE, never periodically, so a quiescent circle sits in one
+//!   epoch indefinitely. Stated as a bound rather than a property because
+//!   `SECURITY.md` records that as an accepted deviation, and the unqualified
+//!   claim is the one the UI copy is forbidden to make.
 //! - Ephemeral keypairs ensure no correlation between events
 //! - NIP-40 expiration enables automatic relay cleanup
 //!
-//! # Example
-//!
-//! ```ignore
-//! use std::sync::Arc;
-//! use std::path::Path;
-//! use haven_core::location::LocationMessage;
-//! use haven_core::location::nostr::LocationEventBuilder;
-//! use haven_core::nostr::mls::{MdkManager, MlsGroupContext};
-//! use haven_core::nostr::mls::types::GroupId;
-//! use nostr::PublicKey;
-//!
-//! // Set up MDK storage
-//! let manager = Arc::new(MdkManager::new(Path::new("/tmp/mdk")).unwrap());
-//! let group_id = GroupId::from_slice(&[1, 2, 3]);
-//! let group = MlsGroupContext::new(manager, group_id, "nostr-group-id");
-//!
-//! let location = LocationMessage::new(37.7749, -122.4194);
-//! let builder = LocationEventBuilder::new();
-//! let my_pubkey = PublicKey::from_hex("...").unwrap();
-//!
-//! // Encrypt using MDK
-//! let event = builder.encrypt(&location, &group, &my_pubkey).unwrap();
-//! ```
+//! [`CircleManager::encrypt_location`]: crate::circle::CircleManager::encrypt_location
 
 mod error;
 mod event;

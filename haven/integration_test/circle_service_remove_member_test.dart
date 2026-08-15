@@ -52,6 +52,7 @@ import 'package:haven/src/services/relay_service.dart';
 import 'package:integration_test/integration_test.dart';
 
 import 'e2e/_lib/test_user.dart';
+import 'e2e/_lib/throw_time_error_capture.dart';
 
 /// Synthetic relay URL embedded in MIP-00 KeyPackage and MIP-04 Welcome
 /// events. Mirrors the constant used in `encryption_pipeline_test.dart`.
@@ -236,6 +237,7 @@ void main() {
       'throws CircleServiceException and does not fall back to DEFAULT_RELAYS '
       'when the circle has no relays available',
       (tester) async {
+        installThrowTimeErrorLogging();
         // ----------------------------------------------------------------
         // Skip if platform keyring is unavailable — honest skip via
         // markTestSkipped (FN-5), not a silent return.
@@ -354,6 +356,7 @@ void main() {
     // integrationDriver. See test/lints/integration_test_propagation_test.dart.
     testWidgets('member count drops by one and removed member cannot decrypt a '
         'post-removal message (forward secrecy)', (tester) async {
+      installThrowTimeErrorLogging();
       // ------------------------------------------------------------------
       // Skip honestly if keyring unavailable — same pattern (FN-5).
       // ------------------------------------------------------------------

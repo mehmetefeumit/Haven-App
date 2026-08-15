@@ -54,6 +54,7 @@ import 'package:integration_test/integration_test.dart';
 import 'e2e/_lib/synthetic_user.dart';
 import 'e2e/_lib/test_relay.dart';
 import 'e2e/_lib/test_user.dart';
+import 'e2e/_lib/throw_time_error_capture.dart';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -114,6 +115,7 @@ void main() {
   testWidgets('precondition: R2 is not a process-global default relay', (
     tester,
   ) async {
+    installThrowTimeErrorLogging();
     expect(
       defaultRelays(),
       isNot(contains(secondStrfryUrl)),
@@ -133,6 +135,7 @@ void main() {
     'CONV-1: relay-update commit published to union, Alice and Bob '
     'converge to [R1,R2], subsequent 445 routed to R2',
     (tester) async {
+      installThrowTimeErrorLogging();
       // Skip when the platform keyring is unavailable.
       try {
         await initKeyringStore();
@@ -519,6 +522,7 @@ void main() {
     'CONV-2: non-admin member calling updateCircleRelays throws; '
     'no commit reaches R1 or R2',
     (tester) async {
+      installThrowTimeErrorLogging();
       try {
         await initKeyringStore();
       } on Object catch (e) {
@@ -741,6 +745,7 @@ void main() {
     'union publish; Bob converges to [R2] only; subsequent 445 routes '
     'to R2 and does NOT newly arrive on R1',
     (tester) async {
+      installThrowTimeErrorLogging();
       try {
         await initKeyringStore();
       } on Object catch (e) {

@@ -37,6 +37,7 @@ import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/rust/frb_generated.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:integration_test/integration_test.dart';
+import 'e2e/_lib/throw_time_error_capture.dart';
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -103,6 +104,7 @@ void main() {
     testWidgets(
       'shows OnboardingShell (not MapShell) when onboarding is not completed',
       (tester) async {
+        installThrowTimeErrorLogging();
         await tester.pumpWidget(buildApp(completed: false));
         // One pump settles Riverpod's initial build; pumpAndSettle would
         // time out if any child starts an animation or async operation.
@@ -134,6 +136,7 @@ void main() {
     testWidgets(
       'shows MapShell (not OnboardingShell) when onboarding is completed',
       (tester) async {
+        installThrowTimeErrorLogging();
         await tester.pumpWidget(buildApp(completed: true));
         await tester.pump();
 

@@ -13,22 +13,30 @@
 /// event); a blocked producer would stall the whole receive path.
 pub const BUS_CAP: usize = 8192;
 
+/// The live plane's Security Rule 12 intake cap.
+///
 /// Capacity of the bounded receive→decrypt channel between the supervisor's
-/// notifications receiver and its decrypt worker.
+/// notifications receiver and its decrypt worker, built by
+/// [`super::supervisor::intake_queue`].
 ///
-/// Sized to absorb a burst while a slow `SQLCipher` decrypt runs; on overflow the
-/// receiver's `try_send` drops the event (never blocking the pool), and the
-/// dropped event is re-fetched by the next subscribe's lookback window.
+/// Sized to absorb a burst while a slow `SQLCipher` decrypt runs; on overflow
+/// the receiver's `try_send` drops the DELIVERY (never blocking the pool) and
+/// holds the dropped `kind:445`'s circle at its `created_at`, so the next REQ
+/// asks for it again.
 ///
-/// Note what carries that recovery, since it is NOT the cursor: a cursor
-/// advance is anchored on the subscription's own REQ open time, and a dropped
-/// event never reaches the worker, so it records no hold-back and the
-/// generation's `EOSE` advances over it. What re-requests it is the
-/// [`GROUP_RESUBSCRIBE_BUFFER_SECS`] lookback subtracted from the cursor on the
-/// next REQ, plus the catch-up sweep. So this capacity must stay far above any
-/// realistic burst: it is sized so the drop does not happen, rather than relied
-/// on to be free when it does. Kept independent of [`BUS_CAP`] so the decouple
-/// buffer can be tuned separately (M11).
+/// That hold-back is what makes the cap a THROTTLE rather than a discard, and
+/// it is not optional. A cursor advance is anchored on the subscription's own
+/// REQ open time, so a drop that left no trace would simply be covered by the
+/// generation's `EOSE` — and the catch-up sweep re-derives its floor from that
+/// SAME per-circle cursor, only [`GROUP_RESUBSCRIBE_BUFFER_SECS`] below it. An
+/// event dropped out of an older backlog replay — which is exactly what
+/// overflows this queue — would then be re-requested by no plane at all: the
+/// silent loss of legitimate offline backlog Rule 12 forbids.
+///
+/// The cap is still sized so the drop does not happen rather than relied on to
+/// be free when it does: a hold-back costs the whole window a re-fetch. Kept
+/// independent of [`BUS_CAP`] so the decouple buffer can be tuned separately
+/// (M11).
 ///
 /// [`GROUP_RESUBSCRIBE_BUFFER_SECS`]: crate::relay::cursor::GROUP_RESUBSCRIBE_BUFFER_SECS
 pub const WORKER_QUEUE_CAP: usize = 8192;

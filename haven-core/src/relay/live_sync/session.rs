@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use nostr::{Filter, PublicKey, SubscriptionId};
 use nostr_sdk::pool::monitor::Monitor;
 use nostr_sdk::{Client, ClientOptions, RelayPoolNotification, RelayPoolOptions, RelayStatus};
-use tokio::sync::{broadcast, mpsc, watch, Mutex as TokioMutex, RwLock};
+use tokio::sync::{broadcast, watch, Mutex as TokioMutex, RwLock};
 use tokio::task::JoinHandle;
 use zeroize::Zeroizing;
 
@@ -30,7 +30,7 @@ use crate::relay::cursor::{since_for_stream, SubscribePhase, STREAM_INBOX_1059};
 
 use super::config::{
     BUS_CAP, POOL_NOTIF_CAP, RELAY_LIFECYCLE_OP_TIMEOUT_SECS, SUBSCRIBE_CONNECT_WAIT_SECS,
-    SUBSCRIBE_MAX_ATTEMPTS, SUBSCRIBE_RETRY_WAIT_SECS, WORKER_QUEUE_CAP,
+    SUBSCRIBE_MAX_ATTEMPTS, SUBSCRIBE_RETRY_WAIT_SECS,
 };
 use super::error::{LiveSyncError, LiveSyncResult};
 use super::event::{LiveSyncEvent, SyncStatusReason};
@@ -46,7 +46,7 @@ use super::planes::{
 };
 use super::processor::{group_cursor_stream, EngineProcessor};
 use super::router::{Router, SubCtx};
-use super::supervisor::{run_receiver, run_worker};
+use super::supervisor::{intake_queue, run_receiver, run_worker};
 
 /// Cold-start cursor seed: on first subscription a circle's cursor is seeded to
 /// `now − SEED_LOOKBACK_SECS` so the engine backfills the recent past without
@@ -534,13 +534,14 @@ impl LiveSyncCore {
         // during the subscribe round-trip is missed (notifications() only yields
         // events seen after the receiver exists).
         let notifications: broadcast::Receiver<RelayPoolNotification> = self.client.notifications();
-        let (tx, rx) = mpsc::channel(WORKER_QUEUE_CAP);
+        let (tx, rx) = intake_queue();
         // The worker just drains events and feeds them to the engine (which owns
         // convergence + publish-before-apply internally); no per-circle gate /
         // settle buffer / converge task is needed anymore (plan §5.4).
         let receiver_task = tokio::spawn(run_receiver(
             notifications,
             tx,
+            Arc::clone(&self.processor),
             Arc::clone(&self.shutdown),
             self.cancel_tx.subscribe(),
         ));

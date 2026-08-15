@@ -154,6 +154,103 @@ void main() {
       });
     });
 
+    group('one permission prompt at a time', () {
+      // The platform behaviour these tests are written against: Android's
+      // `Activity.requestPermissions` refuses a second request while one is
+      // pending — it logs "Can request only one set of permissions at a
+      // time" and dispatches an EMPTY grant result, which geolocator drops
+      // without invoking any callback. The second call has already
+      // overwritten the plugin's single result-callback slot, so the real
+      // answer goes to whichever caller asked LAST and the other Dart
+      // future is never completed at all.
+      //
+      // Two callers racing is the normal case, not a corner: a publish tick
+      // and a map read both run the access gate, and onboarding calls the
+      // public `requestPermission()`.
+
+      /// Every gate call reaches the prompt: services on, permission gone.
+      void stubDeniedRead() {
+        when(
+          mockGeolocator.isLocationServiceEnabled(),
+        ).thenAnswer((_) async => true);
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.denied);
+      }
+
+      test('two concurrent gate calls raise one platform prompt', () async {
+        stubDeniedRead();
+        when(
+          mockGeolocator.requestPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.denied);
+
+        final first = service.getCurrentLocation();
+        final second = service.getCurrentLocation();
+
+        await expectLater(first, throwsA(isA<LocationServiceException>()));
+        await expectLater(second, throwsA(isA<LocationServiceException>()));
+
+        verify(mockGeolocator.requestPermission()).called(1);
+      });
+
+      test(
+        'the caller that did not get the answer is not left hanging',
+        () async {
+          stubDeniedRead();
+
+          // Faithful model of the plugin: one callback slot, so only the
+          // caller that registered LAST is ever answered.
+          final pending = <Completer<geo.LocationPermission>>[];
+          when(mockGeolocator.requestPermission()).thenAnswer((_) {
+            final completer = Completer<geo.LocationPermission>();
+            pending.add(completer);
+            return completer.future;
+          });
+
+          var gateSettled = false;
+          var promptSettled = false;
+          unawaited(
+            service.getCurrentLocation().then(
+              (_) => gateSettled = true,
+              onError: (Object _) => gateSettled = true,
+            ),
+          );
+          unawaited(
+            service.requestPermission().then(
+              (_) => promptSettled = true,
+              onError: (Object _) => promptSettled = true,
+            ),
+          );
+          await pumpEventQueue();
+
+          // The user-fixed denial the OS answers with, delivered to the
+          // last registrant exactly as the plugin delivers it.
+          pending.last.complete(geo.LocationPermission.denied);
+          await pumpEventQueue();
+
+          expect(
+            gateSettled,
+            isTrue,
+            reason: 'the access gate never finished — its prompt was '
+                'cancelled by the second request and its future can now '
+                'never complete, wedging whichever publish cycle or map '
+                'read is awaiting it',
+          );
+          expect(
+            promptSettled,
+            isTrue,
+            reason: 'the onboarding prompt never finished',
+          );
+          expect(
+            pending,
+            hasLength(1),
+            reason: 'a second simultaneous platform request is what strands '
+                'a caller — the two callers must share one request',
+          );
+        },
+      );
+    });
+
     group('isLocationServiceEnabled', () {
       test('returns true when location services are enabled', () async {
         when(
@@ -1925,6 +2022,152 @@ void main() {
             final result = await service.getCurrentLocation();
 
             expect(result.latitude, 10);
+          },
+        );
+      });
+
+      // ---------------------------------------------------------------
+      // The Android app-op: access withdrawn without touching the grant.
+      //
+      // `cmd appops set PKG android:fine_location deny` removes location
+      // access WITHOUT killing the process and WITHOUT changing anything
+      // the permission gate reads — `checkPermission()` and
+      // `getLocationAccuracy()` both go to `ContextCompat
+      // .checkSelfPermission`, which answers "granted, precise" either
+      // way. AOSP then drops deliveries silently, so the stream raises
+      // neither an error nor a close and nothing clears the cache.
+      //
+      // Modelled exactly that way here: the gate is stubbed HEALTHY in
+      // every test below, because that is what the platform reports. The
+      // only thing that changes is `getLastKnownPosition()`, which is the
+      // one Dart-reachable read the app-op does gate.
+      // ---------------------------------------------------------------
+      group('an Android app-op denial is invisible to the permission gate',
+          () {
+        test(
+          'a warm cached fix is not served once the platform stops '
+          'answering with a position',
+          () async {
+            final service = await serviceWithWarmCache(isIOS: false);
+            stubAccessGranted();
+            when(
+              mockGeolocator.getLastKnownPosition(),
+            ).thenAnswer((_) async => null);
+            when(
+              mockGeolocator.getCurrentPosition(
+                locationSettings: anyNamed('locationSettings'),
+              ),
+            ).thenThrow(Exception('platform delivers nothing under the op'));
+
+            await expectLater(
+              service.getCurrentLocation(),
+              throwsA(isA<LocationServiceException>()),
+              reason: 'the cached fix was published for up to '
+                  'kStreamPositionMaxAge after the user withdrew location '
+                  'access — the permission gate cannot see an app-op, so '
+                  'the cache read is the only place this is catchable',
+            );
+          },
+        );
+
+        test('the withheld fix is CLEARED, not merely withheld', () async {
+          final service = await serviceWithWarmCache(isIOS: false);
+          stubAccessGranted();
+          when(
+            mockGeolocator.getLastKnownPosition(),
+          ).thenAnswer((_) async => null);
+          when(
+            mockGeolocator.getCurrentPosition(
+              locationSettings: anyNamed('locationSettings'),
+            ),
+          ).thenThrow(Exception('platform delivers nothing under the op'));
+          await expectLater(
+            service.getCurrentLocation(),
+            throwsA(isA<LocationServiceException>()),
+          );
+
+          // The op is allowed again. A cache that was merely BYPASSED
+          // would resurrect the pre-denial coordinate here.
+          when(
+            mockGeolocator.getLastKnownPosition(),
+          ).thenAnswer((_) async => lastKnownFix);
+          stubOneShot(oneShotFix);
+
+          final result = await service.getCurrentLocation();
+
+          expect(
+            result.latitude,
+            10,
+            reason: 'restoring the app-op resurrected the fix cached before '
+                'the denial',
+          );
+        });
+
+        test(
+          'a platform that still answers serves the warm cache, with no '
+          'one-shot',
+          () async {
+            // The other direction, and the one that keeps this from being
+            // "fixed" by making the cache unusable: the cache exists so
+            // publish cycles survive without a GPS acquisition per tick.
+            final service = await serviceWithWarmCache(isIOS: false);
+            stubAccessGranted();
+            when(
+              mockGeolocator.getLastKnownPosition(),
+            ).thenAnswer((_) async => lastKnownFix);
+
+            final result = await service.getCurrentLocation();
+
+            expect(result.latitude, 51.5, reason: 'the CACHED fix, not the '
+                'last-known one the corroboration read returned');
+            verifyNever(
+              mockGeolocator.getCurrentPosition(
+                locationSettings: anyNamed('locationSettings'),
+              ),
+            );
+          },
+        );
+
+        test('iOS pays nothing for it — there is no app-op there', () async {
+          // `throwOnMissingStub` makes this an assertion, not a hope: an
+          // unconditional corroboration would call an unstubbed method.
+          final service = await serviceWithWarmCache();
+          stubAccessGranted();
+
+          final result = await service.getCurrentLocation();
+
+          expect(result.latitude, 51.5);
+          verifyNever(mockGeolocator.getLastKnownPosition());
+        });
+
+        test(
+          'a failing corroboration withholds the cache without clearing it',
+          () async {
+            // A broken platform channel is not an observation that the user
+            // withdrew anything, so the fix is kept — but it is not consent
+            // either, so it may not be served. Same rule the gate applies
+            // to `unableToDetermine`.
+            final service = await serviceWithWarmCache(isIOS: false);
+            stubAccessGranted();
+            when(mockGeolocator.getLastKnownPosition()).thenThrow(
+              Exception('platform channel failed'),
+            );
+            stubOneShot(oneShotFix);
+
+            expect((await service.getCurrentLocation()).latitude, 10);
+
+            when(
+              mockGeolocator.getLastKnownPosition(),
+            ).thenAnswer((_) async => lastKnownFix);
+
+            expect(
+              (await service.getCurrentLocation()).latitude,
+              51.5,
+              reason: 'a channel error destroyed the cached fix — that is a '
+                  'GPS acquisition per publish tick for the life of the '
+                  'fault, and on iOS a backgrounded publish that cannot be '
+                  'served at all',
+            );
           },
         );
       });

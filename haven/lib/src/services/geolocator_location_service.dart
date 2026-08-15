@@ -127,8 +127,10 @@ class DefaultGeolocatorWrapper implements GeolocatorWrapper {
 /// [_ensureAccessOrThrow] and is dropped by [_noteAccessLost] the moment
 /// any code path observes that the provider was switched off, the
 /// permission withdrawn, or the granted accuracy downgraded from precise
-/// to approximate — see both members for the rules and for the Android
-/// app-op case that remains outside their reach.
+/// to approximate. Android can withdraw access without touching any of
+/// those — an app-op denial leaves every permission read saying "granted"
+/// — so the cache read is additionally corroborated by
+/// [_platformStillPermitsLocation]. See all three members for the rules.
 ///
 /// ## The gate never prompts from the background
 ///
@@ -185,9 +187,12 @@ class GeolocatorLocationService implements LocationService {
   ///
   /// 1. **Gated read.** [getCurrentLocation] serves this field only after
   ///    [_ensureAccessOrThrow] has confirmed, on that same call, that the
-  ///    location provider is on and the permission is an affirmative grant.
-  ///    The gate runs BEFORE the cache read, before the iOS-backgrounded
-  ///    `getLastKnownPosition` branch, and before the one-shot.
+  ///    location provider is on and the permission is an affirmative grant,
+  ///    and — on Android, where a grant is not the whole answer — after
+  ///    [_platformStillPermitsLocation] has confirmed the platform still
+  ///    serves this app a position at all. The gate runs BEFORE the cache
+  ///    read, before the iOS-backgrounded `getLastKnownPosition` branch,
+  ///    and before the one-shot.
   /// 2. **Eager invalidation.** Every observation of lost access clears
   ///    this field immediately via [_noteAccessLost] instead of letting it
   ///    age out: the [getCurrentLocation]/[getCurrentLocationFresh] gate,
@@ -278,6 +283,42 @@ class GeolocatorLocationService implements LocationService {
   /// [_ensureAccessOrThrow].
   // ignore: avoid_setters_without_getters
   set foregroundActive(bool value) => _foregroundActive = value;
+
+  /// The platform permission request currently in flight, if any.
+  ///
+  /// Exactly one may exist at a time, because a SECOND simultaneous request
+  /// strands a caller forever. Android's `Activity.requestPermissions`
+  /// refuses one while another is pending — it logs "Can request only one
+  /// set of permissions at a time" and dispatches an EMPTY grant result,
+  /// which geolocator's `PermissionManager.onRequestPermissionsResult`
+  /// drops without invoking either callback. The second call has meanwhile
+  /// overwritten the single `resultCallback` slot the plugin keeps, so when
+  /// the real answer arrives it goes to the LAST caller and the first
+  /// caller's `FlutterResult` is never invoked: its Dart future never
+  /// completes. Observed in CI — a publish tick and a one-shot read raced
+  /// with the permission revoked, and the loser hung for the rest of the
+  /// process while the winner got its answer.
+  ///
+  /// Coalescing is also the only bound that stays honest with a REAL
+  /// prompt on screen: a user who has not answered yet must keep every
+  /// waiting caller waiting, which is why this is a shared future and not
+  /// a `.timeout()` (see the prompt discussion in [_ensureAccessOrThrow]).
+  Future<geo.LocationPermission>? _permissionRequestInFlight;
+
+  /// Asks the platform for the location permission, at most one request at
+  /// a time; concurrent callers await the same answer.
+  ///
+  /// The single entry point for both prompting paths — the gate's `denied`
+  /// branch and the public [requestPermission] onboarding calls — so a
+  /// prompt raised by one can never be cancelled by the other.
+  Future<geo.LocationPermission> _requestPermission() {
+    final inFlight = _permissionRequestInFlight;
+    if (inFlight != null) return inFlight;
+
+    final request = _geolocator.requestPermission();
+    _permissionRequestInFlight = request;
+    return request.whenComplete(() => _permissionRequestInFlight = null);
+  }
 
   /// Clears the cached stream position.
   ///
@@ -382,17 +423,15 @@ class GeolocatorLocationService implements LocationService {
   ///
   /// ## What this canNOT see
   ///
-  /// The Android app-op, and only that. `checkPermission()` reads the
-  /// permission GRANT via `ContextCompat.checkSelfPermission`; it does not
-  /// consult the app-op. A denial applied with
-  /// `cmd appops set PKG android:fine_location deny` therefore still reads
-  /// as granted here, and (unlike `pm revoke`) does not kill the process.
-  /// In that state the platform silently stops delivering stream fixes, so
-  /// the residual exposure is bounded by whichever comes first: the cached
-  /// fix ageing past [kStreamPositionMaxAge], or [getLocationStream]
-  /// reporting an error or close (both clear the cache). Closing that tail
-  /// properly needs an `AppOpsManager.unsafeCheckOpNoThrow` channel, which
-  /// geolocator does not expose.
+  /// The Android app-op, and only that. Every read this method makes goes
+  /// to the permission GRANT via `ContextCompat.checkSelfPermission` —
+  /// `checkPermission()` and `getLocationAccuracy()` alike — and none of
+  /// them consults the app-op, so a denial applied with
+  /// `cmd appops set PKG android:fine_location deny` still reads as
+  /// "granted, precise" here. It is caught one level up instead, at the
+  /// only place a stored coordinate can be produced without a live
+  /// platform read: [_platformStillPermitsLocation], which guards the
+  /// cache read in [getCurrentLocation].
   ///
   /// Precision downgrade — the other hole this doc once omitted, and the
   /// one that is a first-class Settings toggle rather than an adb trick —
@@ -413,7 +452,7 @@ class GeolocatorLocationService implements LocationService {
       // is sitting in the cache, so drop it before asking.
       _noteAccessLost('permission read denied');
       if (_foregroundActive) {
-        permission = await _geolocator.requestPermission();
+        permission = await _requestPermission();
       } else {
         // Backgrounded: never raise a prompt (see the doc above). Leave
         // `permission` denied so the switch throws — fail closed.
@@ -475,6 +514,74 @@ class GeolocatorLocationService implements LocationService {
       _noteAccessLost('precise location downgraded to approximate');
     }
     _lastAccuracyStatus = accuracy;
+  }
+
+  /// Whether the platform will still hand this app a position — the only
+  /// check that can see an Android app-op denial.
+  ///
+  /// Always `true` on iOS, which has no app-op: every withdrawal it offers
+  /// (an authorization change, Precise Location off) is already visible to
+  /// [_ensureAccessOrThrow], so the extra round trip would be pure cost on
+  /// the backgrounded publish path — the one path with no alternative
+  /// position source.
+  ///
+  /// On Android `cmd appops set PKG android:fine_location deny` leaves the
+  /// GRANT intact, so the gate above reads "granted, precise", and — unlike
+  /// `pm revoke` — it does not kill the process. AOSP then drops every
+  /// delivery silently: `LocationProviderManager.Registration
+  /// .acceptLocationChange` bails when `AppOpsHelper.noteOpNoThrow` returns
+  /// false, raising neither a stream error nor a close, so the handlers on
+  /// [getLocationStream] that would call [_noteAccessLost] never fire
+  /// either. Without this check the cached fix would go on being published
+  /// for the rest of [kStreamPositionMaxAge] after the user withdrew
+  /// access.
+  ///
+  /// `getLastKnownPosition()` is the one Dart-reachable read the app-op
+  /// DOES gate: `LocationProviderManager.getLastLocation` returns null on
+  /// the same `noteOpNoThrow` denial, and geolocator maps a null `Location`
+  /// to a null `Position` (`LocationMapper.toHashMap`). A null answer is
+  /// the platform saying this app may not hold a position right now, which
+  /// is exactly what the cache read needs to know. It cannot misfire on a
+  /// device that merely has no fix yet: reaching here means the stream
+  /// delivered one within [kStreamPositionMaxAge], so the provider's own
+  /// last-known is set.
+  ///
+  /// A failing platform channel returns `false` WITHOUT clearing the cache,
+  /// mirroring the gate's `unableToDetermine` rule: not evidence that
+  /// access ended, so the fix is kept, but not consent either, so it may
+  /// not be served.
+  ///
+  /// A provider toggle (off then back on) DOES clear that provider's
+  /// framework-level last-known cache, which could otherwise look like this
+  /// exact false positive. It cannot reach here stale, though: toggling the
+  /// provider [getLocationStream] is actively subscribed to fires
+  /// `onProviderDisabled` on the SAME event, which geolocator turns into a
+  /// stream error — clearing [_lastStreamPosition] via [_noteAccessLost]
+  /// before this method would ever be called with a now-stale cache to
+  /// corroborate. `getLastKnownPosition()` also polls every ENABLED
+  /// provider, not only the streamed one, for the same reason.
+  ///
+  /// ## Cost
+  ///
+  /// One extra platform-channel round trip on Android, on every call that
+  /// would otherwise be a pure in-memory cache hit — i.e. most publish
+  /// ticks, the case this cache exists to make cheap. Accepted for the same
+  /// reasons as [_ensureAccessOrThrow]'s cost analysis: the call rate is one
+  /// per circle's 72–168 s tick (plus a map recenter), and the platform side
+  /// is an in-memory `LocationManager.getLastKnownLocation` read per
+  /// provider, not a GPS acquisition.
+  Future<bool> _platformStillPermitsLocation() async {
+    if (_isIOS) return true;
+    geo.Position? lastKnown;
+    try {
+      lastKnown = await _geolocator.getLastKnownPosition();
+    } on Exception catch (e) {
+      debugPrint('[Location] last-known probe failed: ${e.runtimeType}');
+      return false;
+    }
+    if (lastKnown != null) return true;
+    _noteAccessLost('platform withheld the last known fix (Android app-op)');
+    return false;
   }
 
   /// Builds the [geo.LocationSettings] for a one-shot position read,
@@ -557,22 +664,15 @@ class GeolocatorLocationService implements LocationService {
       // clock. This is the ONLY publish-path GPS source that works while
       // backgrounded on iOS (see [_lastStreamPosition]).
       //
-      // RESIDUAL (Android app-ops ONLY): a `cmd appops set <pkg>
-      // android:fine_location deny` does not kill the process and is
-      // invisible to both `checkPermission()` and
-      // `getLocationAccuracy()` (the app-op is not the grant), so the
-      // gate above still reads "granted, precise" and this line can serve
-      // a fix captured before the denial. Delivery simply stops, so the
-      // exposure ends when the fix ages past [kStreamPositionMaxAge] or
-      // the stream reports an error/close — it is NOT closed by the gate.
-      //
-      // The precision-downgrade sibling of this residual — the one the
-      // user reaches from Settings rather than from adb — IS closed: the
-      // gate drops the cache on a precise → approximate transition.
+      // Freshness is not consent, and on Android the gate above cannot
+      // see an app-op denial, so serving is conditional on the platform
+      // still answering a live position read as well —
+      // [_platformStillPermitsLocation].
       final cached = _lastStreamPosition;
       if (cached != null &&
           DateTime.now().difference(cached.timestamp) <=
-              kStreamPositionMaxAge) {
+              kStreamPositionMaxAge &&
+          await _platformStillPermitsLocation()) {
         return cached;
       }
 
@@ -708,7 +808,7 @@ class GeolocatorLocationService implements LocationService {
 
   @override
   Future<bool> requestPermission() async {
-    final permission = await _geolocator.requestPermission();
+    final permission = await _requestPermission();
     final granted =
         permission == geo.LocationPermission.whileInUse ||
         permission == geo.LocationPermission.always;

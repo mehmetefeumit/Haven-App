@@ -189,10 +189,13 @@
 #     `CircleManagerFfi.newInstance` may appear in exactly three files — one per
 #     isolate that legitimately owns a session — the UI isolate's one must
 #     latch the pause-time handoff, or the foreground service can never take
-#     the session it was handed, and each of the three must release what it
-#     opened: only `dispose()` drops the Rust LIVE_SESSIONS claim, so one
+#     the session it was handed, and no opener file may release fewer handles
+#     than it opens: only `dispose()` drops the Rust LIVE_SESSIONS claim, so one
 #     missed release refuses every later open in EVERY isolate for the life of
-#     the process.
+#     the process. That count is a floor; the per-exit-path matching is the
+#     analyzer lint `haven/test/lints/mls_session_handle_release_test.dart`,
+#     which runs in the Flutter lane because it needs a toolchain this job
+#     deliberately has none of.
 #
 #   No key logging                    scripts/ci/check_no_key_logging.sh
 #     Security Rule 6 at the SOURCE. `scan-logs-for-secrets.sh` matches seven
@@ -264,12 +267,24 @@
 #
 #   Skip-manifest self-test           scripts/ci/check_no_undeclared_skips.sh
 #     The guard that fails a run when a test SKIPS without being declared in
-#     scripts/ci/expected_test_skips.txt. The gate itself must parse real test
+#     scripts/ci/expected_test_skips.txt. THIS gate must parse real test
 #     output, so it runs where the tests do — rust-check.yml for both cargo
 #     crates, coverage.yml for `flutter test`; only its hermetic --self-test
 #     belongs in this toolchain-free job. That self-test is what stops the
 #     parser rotting into a vacuous pass: an extractor matching nothing would
-#     otherwise report "0 skips, all declared" forever.
+#     otherwise report "0 skips, all declared" forever. Its integration-test
+#     counterpart below reads SOURCE, not output, so that one really enforces
+#     here.
+#
+#   Integration-test skip hatches     tooling/e2e/ci/drive-log-lib.sh
+#     Enforcing (--check-manifest), not a self-test: every markTestSkipped()
+#     under haven/integration_test/ must be declared in
+#     tooling/e2e/expected_drive_skips.txt, and every declaration must still
+#     match a call site. It exists because such a skip is INVISIBLE to the
+#     driver — Result.skipped satisfies isPassing, so the on-device reporter
+#     files it under `passed` and integrationDriver() exits 0. The runtime
+#     half (matching the reason text in a drive log) lives in the lane
+#     runners; this static half is what stops a hatch being added quietly.
 #
 #   Coverage-floors self-test         scripts/ci/check_coverage_floors.sh
 #     The guard that enforces a MINIMUM COVERAGE PER PATH, plus a ratchet that
@@ -850,6 +865,22 @@ jobs:
       - name: E2E harness self-test (drive-log failure predicate)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/drive-log-lib.sh --self-test
+
+      # The ENFORCING half of the same library, and the only one that can run
+      # without a device. A skipped integration test is invisible to
+      # `integrationDriver()` — it records a `markTestSkipped` body as a pass —
+      # and on the `flutter drive` lanes even the reporter's `~N` column never
+      # moves for it, so nothing downstream can notice a proof acquiring an
+      # escape route. This reconciles every markTestSkipped() under
+      # haven/integration_test/ against tooling/e2e/expected_drive_skips.txt,
+      # where each one carries the argument for why it cannot fire in the lane
+      # that drives it. Undeclared hatch, stale declaration and changed reason
+      # all fail here; the E2E lanes then fail on any declared reason that
+      # actually appears in a drive log, so neither adding one nor firing one
+      # can happen quietly.
+      - name: Integration-test skip hatches are declared
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/drive-log-lib.sh --check-manifest
 
       # Guards the B1 lane's publish-count PARSER. Its critical fixture is the
       # `Published to 0/1` line — P0-1's own signature, which a substring grep

@@ -46,7 +46,7 @@
 
 
 # ---------------------------------------------------------------------------
-# haven-core — 21 skips
+# haven-core — 20 skips
 # ---------------------------------------------------------------------------
 
 # Blossom round-trips against a REAL server (BUD-01/02 upload + download +
@@ -74,9 +74,13 @@ haven-core|tests/mls_integration_tests.rs::production_storage_tests::storage_enc
 
 # Doctests written as ```ignore — rustdoc neither compiles nor runs them, so
 # they are prose that merely LOOKS executable. They are listed individually (not
-# globbed) because that is the whole value of declaring them: 14 API examples
+# globbed) because that is the whole value of declaring them: 13 API examples
 # for the identity/keypair/storage/relay surface are currently unverified, and
 # the manifest is where that shows up instead of as a digit in a summary line.
+# The 14th was `src/nostr/mod.rs - nostr`, whose example encrypted a location
+# through `location::nostr::LocationEventBuilder` — an API with no caller,
+# deleted 2026-08-14. An ```ignore example is exactly where a deleted API
+# survives as instructions.
 # Reasons are empty because ```ignore carries no message.
 #
 # These are legitimate only in the weak sense that they were marked deliberately
@@ -95,7 +99,6 @@ haven-core|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>:
 haven-core|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::pubkey_hex|
 haven-core|doc::src/nostr/identity/mod.rs - nostr::identity::IdentityManager<S>::sign|
 haven-core|doc::src/nostr/identity/storage.rs - nostr::identity::storage::SecureKeyStorage|
-haven-core|doc::src/nostr/mod.rs - nostr|
 haven-core|doc::src/relay/manager.rs - relay::manager::RelayManager|
 
 

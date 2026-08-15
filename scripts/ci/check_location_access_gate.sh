@@ -45,6 +45,13 @@
 #      unfinished future raises no error, so `catchError` cannot see it and a
 #      single hung link stalls publishing for every circle until the provider
 #      is rebuilt.
+#   9. Exactly ONE call site reaches `_geolocator.requestPermission(`, inside a
+#      helper that returns the request already in flight instead of starting a
+#      second. Android refuses a concurrent permission request and answers it
+#      with an empty grant result the plugin drops — having already overwritten
+#      its single result callback — so the caller that asked first is never
+#      answered. Observed in CI: a publish tick and a one-shot read raced with
+#      the permission revoked, and the loser hung for the rest of the process.
 #
 # Usage:
 #   check_location_access_gate.sh              # check the checked-in sources
@@ -230,6 +237,40 @@ check_service() {
     fail "_ensureAccessOrThrow: requestPermission() is not guarded by \`if (_foregroundActive)\` — on iOS a backgrounded prompt is deferred by the OS and geolocator never resolves its FlutterResult, so this await never returns and wedges the publish chain for the whole process"
   fi
 
+  # -- one prompt in flight at a time ---------------------------------------
+  # A second SIMULTANEOUS platform request is not a duplicate, it is a
+  # cancellation. Android refuses it ("Can request only one set of permissions
+  # at a time") with an empty grant result geolocator drops, and the plugin
+  # keeps ONE result callback which the second caller has already overwritten
+  # — so the caller that asked FIRST is never answered at all. Both prompting
+  # paths (this gate and the public requestPermission) must share one
+  # in-flight request, which holds only while exactly one call site reaches
+  # the platform.
+  # A local of its own: `body` still has to hold the GATE for the checks
+  # below, and reusing it here silently pointed the accuracy check at this
+  # helper instead (caught by the self-test, which is why it has fixtures).
+  local direct helper
+  direct="$(grep -cE '_geolocator\.requestPermission\(' <<<"$(code_view "${service}")")"
+  if (( direct != 1 )); then
+    fail "${direct} call site(s) reach _geolocator.requestPermission( — there must be exactly ONE, inside the coalescing helper. Two callers prompting at once cancel each other on Android and the loser's future never completes, wedging whichever publish cycle or map read is awaiting it"
+  else
+    helper="$(fn_slice 'Future<geo.LocationPermission> _requestPermission()' "${service}")"
+    if [[ -z "${helper}" ]]; then
+      fail "_requestPermission() not found — the single platform call site is no longer behind a coalescing helper, so concurrent callers race"
+    else
+      # A store, not merely a mention: the helper clears the field to `null`
+      # when the request settles, and that clear alone would satisfy a bare
+      # "the field is assigned somewhere" grep while nothing is ever shared.
+      if ! grep -E '_permissionRequestInFlight *=' <<<"${helper}" |
+           grep -qvE '= *null'; then
+        fail "_requestPermission: never STORES the in-flight request (only clears it) — with nothing recorded, every concurrent caller starts its own platform request"
+      fi
+      require_order "_requestPermission" "${helper}" \
+        'return ' '_geolocator\.requestPermission\(' \
+        'The helper must be able to return the request already in flight WITHOUT asking the platform again; a helper that always asks has coalesced nothing.'
+    fi
+  fi
+
   # Precision downgrade is invisible to checkPermission(); the gate must read
   # the accuracy authorization to see it.
   if ! grep -qE 'getLocationAccuracy\(' <<<"${body}"; then
@@ -332,9 +373,18 @@ GOOD_SERVICE=$(cat <<'DART'
 class GeolocatorLocationService {
   Position? _lastStreamPosition;
   bool _foregroundActive = true;
+  Future<geo.LocationPermission>? _permissionRequestInFlight;
 
   void _noteAccessLost(String reason) {
     _lastStreamPosition = null;
+  }
+
+  Future<geo.LocationPermission> _requestPermission() {
+    final inFlight = _permissionRequestInFlight;
+    if (inFlight != null) return inFlight;
+    final request = _geolocator.requestPermission();
+    _permissionRequestInFlight = request;
+    return request.whenComplete(() => _permissionRequestInFlight = null);
   }
 
   Future<bool> _ensureAccessOrThrow() async {
@@ -347,7 +397,7 @@ class GeolocatorLocationService {
     if (permission == geo.LocationPermission.denied) {
       _noteAccessLost('permission read denied');
       if (_foregroundActive) {
-        permission = await _geolocator.requestPermission();
+        permission = await _requestPermission();
       }
     }
     switch (permission) {
@@ -536,7 +586,34 @@ self_test() {
   # The F4 regression: an unguarded prompt reachable from a background tick.
   _expect "unguarded requestPermission() in the gate must fail" check_service \
     "$(sed -e 's/^      if (_foregroundActive) {$//' \
-           -e 's/^        permission = await _geolocator.requestPermission();$/      permission = await _geolocator.requestPermission();/' \
+           -e 's/^        permission = await _requestPermission();$/      permission = await _requestPermission();/' \
+        <<<"${GOOD_SERVICE}")" 1
+
+  # --- one prompt in flight at a time --------------------------------------
+  # The CI regression: a publish tick and a one-shot read both prompted, the
+  # platform cancelled one, and the caller that asked first was never answered.
+
+  _expect "a second platform call site must fail" check_service \
+    "$(sed -e 's|^  Future<void> _noteAccuracyDowngrade() async {$|  Future<bool> requestPermission() async {\n    final p = await _geolocator.requestPermission();\n    return p == geo.LocationPermission.whileInUse;\n  }\n\n  Future<void> _noteAccuracyDowngrade() async {|' \
+        <<<"${GOOD_SERVICE}")" 1
+
+  # One call site, but nothing coalescing it: every caller reaches the
+  # platform, which is the same race with fewer lines.
+  _expect "the single call site outside a coalescing helper must fail" \
+    check_service \
+    "$(sed -e '/^  Future<geo.LocationPermission> _requestPermission() {$/,/^  }$/d' \
+           -e 's|^        permission = await _requestPermission();$|        permission = await _geolocator.requestPermission();|' \
+        <<<"${GOOD_SERVICE}")" 1
+
+  # A helper that asks unconditionally has coalesced nothing.
+  _expect "a helper that always asks the platform must fail" check_service \
+    "$(sed -e 's|^    if (inFlight != null) return inFlight;$||' \
+        <<<"${GOOD_SERVICE}")" 1
+
+  # The store is what later callers find; the `null` clear on completion must
+  # not stand in for it.
+  _expect "a helper that never stores the request must fail" check_service \
+    "$(sed -e 's|^    _permissionRequestInFlight = request;$||' \
         <<<"${GOOD_SERVICE}")" 1
 
   # The precision hole: whileInUse + approximate reads as full access.
@@ -630,7 +707,7 @@ main() {
       "${RED}" "${SCRIPT_NAME}" "${RESET}" >&2
     exit 1
   fi
-  printf '%sOK: the access gate precedes every coordinate-producing read; denials clear the cache; no background prompt; precision downgrade is seen; the publish chain is bounded.%s\n' \
+  printf '%sOK: the access gate precedes every coordinate-producing read; denials clear the cache; no background prompt; precision downgrade is seen; the publish chain is bounded; exactly one platform permission request is in flight at a time.%s\n' \
     "${GREEN}" "${RESET}"
 }
 

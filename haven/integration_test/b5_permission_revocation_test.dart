@@ -19,7 +19,7 @@
 /// process is TERMINATED as part of the revocation. So on Android the
 /// mid-session half of this scenario is enforced by the OS, and the app's
 /// OWN `denied` / `deniedForever` branches
-/// (`geolocator_location_service.dart:267-277` and `:316-326`) are reached
+/// (`geolocator_location_service.dart:471-473` and `:474-482`) are reached
 /// only on the NEXT launch. A single-drive lane could therefore only ever
 /// prove "a dead process publishes nothing", which is true of any app and
 /// says nothing about this one.
@@ -59,12 +59,33 @@
 /// makes the absence stronger, not weaker, and tightening it would only buy
 /// flakiness on a loaded CI emulator.
 ///
-/// One residual the fix does not close, so do not read a green run as
-/// proving more than it does: `checkPermission()` reads the permission grant
-/// via `ContextCompat.checkSelfPermission` and does not consult the app-op,
-/// so `cmd appops set <pkg> android:fine_location deny` still reads as
-/// granted. Under appops the platform simply stops delivering, and exposure
-/// is bounded by the 168 s freshness window rather than closed.
+/// ## The app-op phase (ACT 1) — the only arrangement that can see the cache
+///
+/// `pm revoke` MASKS the hazard above: the cache is process-local and dies
+/// with the kill, so a revoke can never observe it. `cmd appops set PKG
+/// android:fine_location deny` is the reachable variant. It withdraws
+/// location access WITHOUT killing the process and WITHOUT changing
+/// anything the permission gate reads — `checkPermission()` and
+/// `getLocationAccuracy()` both go to `ContextCompat.checkSelfPermission`,
+/// which does not consult the app-op — and AOSP then drops every delivery
+/// silently, raising neither a stream error nor a close. Until
+/// `GeolocatorLocationService._platformStillPermitsLocation` was added,
+/// that state kept publishing the user's last position for the rest of the
+/// 168 s window. So ACT 1 runs it, before the revoke, against a live
+/// session, and asserts the promise itself: no coordinate produced, none
+/// published.
+///
+/// Two things stop it passing vacuously, and neither is optional:
+///
+/// * the shell reads the app-op back with `cmd appops get` and fails loudly
+///   if it did not change — a `set` that silently no-ops satisfies every
+///   assertion here;
+/// * the app reports `streamAgeMs`, the age of the newest fix its position
+///   stream delivered, both when it arms and at the decisive read. A run
+///   whose cache had already gone stale on its own had nothing to leak, and
+///   that is a FINDING rather than a pass. It needs the emulator GPS to
+///   MOVE: re-issuing `adb emu geo fix` at one point is filtered out by the
+///   stream's 1 m distance filter, and the cache then ages out by itself.
 ///
 /// ## What ACT 2 proves that no unit test can
 ///
@@ -98,6 +119,8 @@ import 'package:haven/src/constants/location.dart'
 import 'package:haven/src/pages/map_shell.dart';
 import 'package:haven/src/providers/identity_provider.dart'
     show identityNotifierProvider, identityProvider;
+import 'package:haven/src/providers/location_provider.dart'
+    show locationStreamProvider;
 import 'package:haven/src/providers/location_publish_scheduler_provider.dart'
     show filterPublishEligibleCircles;
 import 'package:haven/src/providers/location_sharing_provider.dart'
@@ -125,6 +148,7 @@ import 'e2e/_lib/pump_helpers.dart' show pumpUntilFound, waitUntilAsync;
 import 'e2e/_lib/scenario_harness.dart' show ScenarioHarness;
 import 'e2e/_lib/test_relay.dart' show defaultStrfryUrl;
 import 'e2e/_lib/test_user.dart' show TestUser, aliceSeed;
+import 'e2e/_lib/throw_time_error_capture.dart';
 
 /// Printed once, first, with the act this process selected, the permission
 /// status that selected it, and the OS pid.
@@ -138,6 +162,44 @@ const String kPhaseMarker = '[b5] PHASE';
 /// while the permission was still held. PARSED by the shell, never grepped —
 /// `n=0` is the failing case and contains the marker substring.
 const String kBaselinePublishedMarker = '[b5] BASELINE_PUBLISHED';
+
+/// ACT 1: the shell's cue to deny the location APP-OP, carrying the two
+/// facts that keep the window after it from passing vacuously —
+/// `streamAgeMs=<ms>` (how old the newest stream fix is, i.e. how warm the
+/// cache being withheld actually is) and `eligible=<n>` (how many circles a
+/// still-working publisher would reach). Both PARSED.
+const String kAppOpsArmedMarker = '[b5] APPOPS_ARMED';
+
+/// ACT 1, with `after=<seconds>`: the app observed, from inside a LIVE
+/// session, that the platform had stopped serving location.
+///
+/// Its absence IS a defect here, unlike [kRevokeObservedMarker]: an app-op
+/// denial does not kill the process, so an app that never notices is an app
+/// the denial never reached.
+const String kAppOpsObservedMarker = '[b5] APPOPS_OBSERVED';
+
+/// ACT 1: location reads went on working for the whole observation window.
+/// The app-op `set` did not take, or took and Android ignored it.
+const String kAppOpsNotObservedMarker = '[b5] APPOPS_NOT_OBSERVED';
+
+/// ACT 1, with `type=<runtimeType> streamAgeMs=<ms>`: the production
+/// publish-path read refused while location access was withdrawn from the
+/// running process. `streamAgeMs` is PARSED and must be below
+/// `kStreamPositionMaxAge`, or the refusal proves nothing — a cache that had
+/// already aged out would have been refused anyway.
+const String kAppOpsGpsRefusedMarker = '[b5] APPOPS_GPS_REFUSED';
+
+/// ACT 1: `getCurrentLocation()` RETURNED a coordinate after access was
+/// withdrawn from the live process. The headline failure of this phase, and
+/// the one `pm revoke` structurally cannot reach.
+const String kAppOpsGpsLeakedMarker = '[b5] APPOPS_GPS_LEAKED';
+
+/// ACT 1, per-cycle inside the app-op window: `i=<index> n=<published>`.
+const String kAppOpsCycleMarker = '[b5] APPOPS_CYCLE';
+
+/// ACT 1, with `cycles=<count> max=<highest-n> wedged=<count>`: the app-op
+/// window closed. `max` is PARSED and must be 0; so is `wedged`.
+const String kAppOpsDoneMarker = '[b5] APPOPS_DONE';
 
 /// ACT 1: the shell's cue to run `pm revoke`. Everything after it is the
 /// mid-session half of the scenario.
@@ -189,6 +251,10 @@ const String kAct2CycleMarker = '[b5] ACT2_CYCLE';
 /// cycle that published to zero circles is this lane PASSING, and a cycle that
 /// wedged is a publish path that answered nothing at all. Collapsing the two
 /// would let a hung publisher read as proof that the app stopped publishing.
+///
+/// Emitted by BOTH absence windows (the app-op one in ACT 1 and ACT 2's) —
+/// the literal is deliberately not per-window, because attribution comes
+/// from the `wedged=` field each window reports on its own `*_DONE` line.
 const String kAct2WedgedMarker = '[b5] ACT2_WEDGED';
 
 /// ACT 2, with `cycles=<count> max=<highest-n> wedged=<count>`: the window
@@ -198,6 +264,47 @@ const String kAct2DoneMarker = '[b5] ACT2_DONE';
 /// Closes the capture in BOTH acts. Printed unconditionally, before the
 /// terminal assertion, so the shell's oracle always reads a complete window.
 const String kSequenceCompleteMarker = '[b5] SEQUENCE_COMPLETE';
+
+/// How fresh the newest stream fix must be before ACT 1 arms the app-op
+/// phase.
+///
+/// The cache is what the phase is about, so it has to be warm when access is
+/// withdrawn. This bounds its age at ARMING; [kAppOpsGpsRefusedMarker]
+/// carries the age at the decisive read, which is the one that has to be
+/// inside `kStreamPositionMaxAge`.
+const Duration _maxArmingStreamAge = Duration(seconds: 60);
+
+/// How long ACT 1 waits for a fix fresh enough to arm the app-op phase.
+const Duration _appOpsArmTimeout = Duration(seconds: 60);
+
+/// How long ACT 1 waits for the app-op denial to become visible to the app.
+const Duration _appOpsObservationTimeout = Duration(seconds: 150);
+
+/// Consecutive refused one-shot reads before ACT 1 calls the app-op denial
+/// observed.
+///
+/// One refusal could be a transient emulator GPS miss, and treating that as
+/// the denial would open the absence window while access was still granted —
+/// a false RED, since the app would legitimately publish. Confirmation is
+/// only counted after a read has demonstrably WORKED inside the same loop,
+/// so a path that was broken before the denial cannot satisfy it either.
+const int _appOpsRefusalConfirmations = 2;
+
+/// ACT 1's app-op absence window.
+///
+/// Deliberately shorter than [kStreamPositionMaxAge], unlike every other
+/// window in this file, because it is not the discriminator: the one-shot
+/// probe above is, and it runs while the cache is still WARM, where a
+/// regression fails on its FIRST call rather than after 168 s. What this
+/// window adds is repetition — several production publish cycles, all
+/// reaching zero circles. The claim that needs a full scheduler interval
+/// behind it (nothing publishes in the background either) is the relay-side
+/// one, and the shell holds the app-op denied for at least
+/// [kLocationPublishMaxInterval] to cover it.
+const Duration _appOpsAbsenceWindow = Duration(seconds: 90);
+
+/// Spacing between ACT 1's app-op publish attempts.
+const Duration _appOpsCycleSpacing = Duration(seconds: 15);
 
 /// How long ACT 1 waits for the shell's `pm revoke` to become visible to the
 /// app. Only ever consumed when the process survives the revoke; when the OS
@@ -279,6 +386,7 @@ void main() {
     'B5: revoking location permission mid-session stops the app publishing, '
     'and it stays stopped across the relaunch the revoke forces',
     (tester) async {
+      installThrowTimeErrorLogging();
       // `pm revoke` and the runtime-permission model under test are Android's.
       // iOS authorization tiers are backlog B7 (`b7_ios_auth_tier_test.dart`).
       if (!Platform.isAndroid) {
@@ -441,10 +549,24 @@ void main() {
         }
       }
 
+      /// The age of the newest fix the app's own position stream delivered.
+      ///
+      /// `getLocationStream()` tees every emission into the service's cache
+      /// and judges that cache by the same GPS fix time, so this IS the
+      /// cache's age — measurable from outside the service, which has no
+      /// accessor for it and must not grow one for a test.
+      Duration? newestStreamFixAge() {
+        final position = container.read(locationStreamProvider).valueOrNull;
+        if (position == null) return null;
+        return DateTime.now().difference(position.timestamp);
+      }
+
       if (isAct1) {
         // ===================================================================
-        // ACT 1 — the permission is held. Publish, then hand the shell its
-        // cue and see what the revoke does to a LIVE session.
+        // ACT 1 — the permission is held. Publish, then hand the shell two
+        // cues in turn: deny the APP-OP (access withdrawn, process alive —
+        // the only arrangement in which the stale-fix cache is observable),
+        // and then `pm revoke` (which ends the process).
         // ===================================================================
         var baseline = 0;
         try {
@@ -470,8 +592,200 @@ void main() {
 
         await releaseProbe();
 
-        // The shell revokes when it sees this. On stock Android the process
-        // does not survive the next few lines — see the class doc.
+        // -------------------------------------------------------------------
+        // THE APP-OP HALF — location access withdrawn from a LIVE process.
+        // See the class doc; this is the only arrangement that can observe
+        // the stale-fix cache, and `pm revoke` structurally cannot.
+        // -------------------------------------------------------------------
+        var armingStreamAgeMs = -1;
+        try {
+          await waitUntilAsync(
+            () async {
+              final age = newestStreamFixAge();
+              if (age == null || age > _maxArmingStreamAge) return false;
+              armingStreamAgeMs = age.inMilliseconds;
+              return true;
+            },
+            description: 'the position stream delivered a fix newer than '
+                '${_maxArmingStreamAge.inSeconds}s, so the cache the app-op '
+                'window is about is warm and has something to leak',
+            timeout: _appOpsArmTimeout,
+            pollInterval: const Duration(seconds: 3),
+          );
+        } on Object catch (e) {
+          failures.add(
+            'no stream fix newer than ${_maxArmingStreamAge.inSeconds}s '
+            'before the app-op window (${e.runtimeType}). The cache had '
+            'already aged out, so refusing to serve it proves nothing. The '
+            'emulator GPS has to MOVE: `adb emu geo fix` re-issued at one '
+            "point is filtered out by the stream's 1 m distance filter.",
+          );
+        }
+
+        final appOpsEligible = await eligibleCircleCount();
+        if (appOpsEligible < 1) {
+          failures.add(
+            'no publish-eligible circle exists for the app-op window, so '
+            '"the app published nothing" is vacuous there — it had nowhere '
+            'to publish regardless of the app-op',
+          );
+        }
+
+        // The shell denies the app-op when it sees this.
+        debugPrint(
+          '$kAppOpsArmedMarker streamAgeMs=$armingStreamAgeMs '
+          'eligible=$appOpsEligible',
+        );
+
+        /// One REAL one-shot read, bounded, reported as worked / did not.
+        ///
+        /// `getCurrentLocationFresh()` never consults the cache, so polling
+        /// it cannot itself produce the outcome the window below asserts —
+        /// which is the whole reason the app watches this rather than the
+        /// publish path.
+        Future<bool> freshReadWorks() async {
+          try {
+            await locationService
+                .getCurrentLocationFresh()
+                .timeout(_gpsProbeTimeout);
+            return true;
+          } on Object catch (_) {
+            return false;
+          }
+        }
+
+        // The app cannot READ the app-op — that is the entire premise — so
+        // it waits for the one consequence it can see.
+        final armedAt = DateTime.now();
+        var sawWorkingRead = false;
+        var consecutiveRefusals = 0;
+        var appOpsObserved = false;
+        try {
+          await waitUntilAsync(
+            () async {
+              if (await freshReadWorks()) {
+                sawWorkingRead = true;
+                consecutiveRefusals = 0;
+                return false;
+              }
+              consecutiveRefusals += 1;
+              return sawWorkingRead &&
+                  consecutiveRefusals >= _appOpsRefusalConfirmations;
+            },
+            description: 'real one-shot location reads stopped working after '
+                'the shell denied the location app-op',
+            timeout: _appOpsObservationTimeout,
+            pollInterval: const Duration(seconds: 3),
+          );
+          appOpsObserved = true;
+        } on Object catch (_) {
+          // Reported below. This is the discrimination gate, not an error.
+        }
+        if (appOpsObserved) {
+          debugPrint(
+            '$kAppOpsObservedMarker '
+            'after=${DateTime.now().difference(armedAt).inSeconds}',
+          );
+        } else {
+          debugPrint(kAppOpsNotObservedMarker);
+          failures.add(
+            'location reads still worked '
+            '${_appOpsObservationTimeout.inSeconds}s after the shell denied '
+            'the location app-op, so nothing below is an observation of an '
+            'app that lost access. The shell read-back separates the two '
+            'causes: an app-op that did not change at all, or one that '
+            'changed and had no effect',
+          );
+        }
+
+        // --- THE PROMISE, stated directly. With access withdrawn from a
+        // live process, the production publish-path read must produce
+        // NOTHING. It runs here, first, while the cache is still warm: a
+        // build without the corroboration in
+        // `GeolocatorLocationService._platformStillPermitsLocation` returns
+        // the cached coordinate on this very call.
+        final ageAtProbe = newestStreamFixAge();
+        final ageAtProbeMs = ageAtProbe?.inMilliseconds ?? -1;
+        Position? appOpsLeaked;
+        Object? appOpsRefusal;
+        try {
+          appOpsLeaked = await locationService
+              .getCurrentLocation()
+              .timeout(_gpsProbeTimeout);
+        } on Object catch (e) {
+          appOpsRefusal = e;
+        }
+        if (appOpsLeaked != null) {
+          debugPrint('$kAppOpsGpsLeakedMarker streamAgeMs=$ageAtProbeMs');
+          failures.add(
+            'getCurrentLocation() RETURNED A POSITION after location access '
+            'was withdrawn from the running process. The permission gate '
+            'cannot see an app-op, so this is the cached fix being served '
+            'past the consent that produced it',
+          );
+        } else {
+          // Type only, never the message (Security Rule 8).
+          debugPrint(
+            '$kAppOpsGpsRefusedMarker type=${appOpsRefusal.runtimeType} '
+            'streamAgeMs=$ageAtProbeMs',
+          );
+          if (ageAtProbe == null || ageAtProbe > kStreamPositionMaxAge) {
+            failures.add(
+              'the app-op probe refused, but the newest stream fix was '
+              '${ageAtProbeMs}ms old — outside kStreamPositionMaxAge '
+              '(${kStreamPositionMaxAge.inMilliseconds}ms), so the cache '
+              'would have been refused with the app-op untouched and this '
+              'refusal discriminates nothing',
+            );
+          }
+        }
+
+        // --- Repetition: production publish cycles, all reaching zero. The
+        // relay-side proof the shell runs covers the per-circle scheduler
+        // ticking in the background, which these explicit calls cannot see.
+        final appOpsDeadline = DateTime.now().add(_appOpsAbsenceWindow);
+        var appOpsCycles = 0;
+        var appOpsMax = 0;
+        final appOpsWedgedBefore = wedgedCycles;
+        while (DateTime.now().isBefore(appOpsDeadline)) {
+          final n = await publishNow();
+          appOpsCycles += 1;
+          if (n != null && n > appOpsMax) {
+            appOpsMax = n;
+          }
+          debugPrint('$kAppOpsCycleMarker i=$appOpsCycles n=${n ?? -1}');
+          await Future<void>.delayed(_appOpsCycleSpacing);
+        }
+        final appOpsWedged = wedgedCycles - appOpsWedgedBefore;
+        debugPrint(
+          '$kAppOpsDoneMarker cycles=$appOpsCycles max=$appOpsMax '
+          'wedged=$appOpsWedged',
+        );
+        if (appOpsCycles < 1) {
+          failures.add(
+            'the app-op absence window ran zero publish cycles — it proved '
+            'nothing about what the app does once access is withdrawn',
+          );
+        }
+        if (appOpsWedged > 0) {
+          failures.add(
+            '$appOpsWedged of $appOpsCycles app-op publish cycle(s) never '
+            'returned within ${_publishCycleTimeout.inSeconds}s. A publish '
+            'path that hangs is not one that declined to publish, and this '
+            'lane may not report the second when it observed the first',
+          );
+        }
+        if (appOpsMax > 0) {
+          failures.add(
+            'the app published location to $appOpsMax circle(s) after the '
+            'location app-op was denied — access was withdrawn and the app '
+            'went on broadcasting the position it already held',
+          );
+        }
+
+        // The shell restores the app-op when it sees the window close, and
+        // revokes the PERMISSION when it sees this. On stock Android the
+        // process does not survive the next few lines — see the class doc.
         debugPrint(kAwaitingRevokeMarker);
 
         var observedRevoked = false;
@@ -589,13 +903,14 @@ void main() {
           if (refusal is TimeoutException) {
             failures.add(
               'getCurrentLocation() did not return within '
-              '${_gpsProbeTimeout.inSeconds}s. The publish path calls '
-              '`requestPermission()` whenever it sees `denied` '
-              '(geolocator_location_service.dart:268), which raises the '
-              'SYSTEM permission dialog when the grant is not USER_FIXED — '
-              'so a background publish tick re-prompts the user. Check the '
-              "shell's `pm set-permission-flags ... user-fixed` read-back "
-              'before reading this as a product defect',
+              '${_gpsProbeTimeout.inSeconds}s. Two causes, and the shell '
+              'read-back separates them: if `pm set-permission-flags ... '
+              'user-fixed` did NOT take, the gate raised a real system '
+              'dialog nobody answers. If it did take, the prompt was '
+              'answered instantly and something CANCELLED this call — the '
+              'shape to look for is a second permission request racing this '
+              'one (logcat: "Can request only one set of permissions at a '
+              'time"), which strands whichever caller asked first',
             );
           } else if (refusal is! LocationServiceException) {
             failures.add(
@@ -644,11 +959,13 @@ void main() {
             'within ${_publishCycleTimeout.inSeconds}s. A publish path that '
             'hangs with the permission revoked is NOT the same as one that '
             'declines to publish, and this lane may not report the second '
-            'when it observed the first. Two known causes, in order of '
-            'likelihood: the system permission dialog was raised because the '
-            "grant is not USER_FIXED (check the shell's Phase 6 read-back), "
-            'or ACT 2 is running against ACT 1 state because `pm clear` did '
-            'not take',
+            'when it observed the first. Three known causes, in order of '
+            'likelihood: a second permission request raced this one and the '
+            'platform cancelled one of them (logcat: "Can request only one '
+            'set of permissions at a time"), the system permission dialog was '
+            "raised because the grant is not USER_FIXED (check the shell's "
+            'Phase 6 read-back), or ACT 2 is running against ACT 1 state '
+            'because `pm clear` did not take',
           );
         }
         if (maxPublished > 0) {

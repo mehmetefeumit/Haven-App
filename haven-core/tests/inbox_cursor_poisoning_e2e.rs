@@ -211,6 +211,7 @@ async fn a_future_dated_gift_wrap_never_pushes_the_inbox_cursor_past_the_local_c
         .start(&[], std::slice::from_ref(&url))
         .await
         .expect("start session");
+    let after_start = now_secs();
 
     // Anti-vacuity, the load-bearing one: the forged wrap must actually reach
     // the receive path. If the relay never served it (or the `#p` filter never
@@ -230,8 +231,19 @@ async fn a_future_dated_gift_wrap_never_pushes_the_inbox_cursor_past_the_local_c
     // welcome above surfaced, the EOSE may already have landed, so a read-back
     // "before" would sample the advanced value and the comparison would be
     // trivially false.
-    let cold_seed_ms = (opened_at - COLD_SEED_LOOKBACK_SECS) * 1000;
-    let advanced = wait_inbox_cursor_above(&circle, Some(cold_seed_ms), wait_budget(10))
+    //
+    // The seed value has to be bounded from ABOVE, though, and `opened_at` is a
+    // bound from below: `start` reads its OWN clock (`live_sync::session`,
+    // `SEED_LOOKBACK_SECS`) after this test read `opened_at`, so under load the
+    // two readings differ and the seed lands strictly above
+    // `(opened_at - 24h) * 1000` — whereupon the wait returns on the SEED and
+    // the anti-vacuity check passes on exactly the value it exists to exclude.
+    // (The gate below then fails on the seed, which is how this surfaced.) The
+    // clock read once `start` returned bounds the engine's reading from above,
+    // so no seed can exceed `max_cold_seed_ms` and the advance — anchored at the
+    // REQ's open time, itself at or after `opened_at` — clears it by a full 24h.
+    let max_cold_seed_ms = (after_start - COLD_SEED_LOOKBACK_SECS) * 1000;
+    let advanced = wait_inbox_cursor_above(&circle, Some(max_cold_seed_ms), wait_budget(10))
         .await
         .expect("start seeds the inbox cursor, so it always reads back");
 
@@ -239,10 +251,10 @@ async fn a_future_dated_gift_wrap_never_pushes_the_inbox_cursor_past_the_local_c
     // Without this the assertions below would pass just as well if the inbox
     // advance had been deleted outright.
     assert!(
-        advanced > cold_seed_ms,
+        advanced > max_cold_seed_ms,
         "the inbox subscription's EOSE must advance the cursor off its cold \
-         seed of {cold_seed_ms} ms (otherwise every assertion below holds \
-         vacuously); got {advanced} ms"
+         seed, which cannot exceed {max_cold_seed_ms} ms (otherwise every \
+         assertion below holds vacuously); got {advanced} ms"
     );
 
     // THE INVARIANT.
@@ -302,22 +314,24 @@ async fn a_live_gift_wrap_after_eose_moves_the_inbox_cursor_nowhere() {
     let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
     let own = Keys::generate().public_key();
 
-    let started_at = now_secs();
     let engine = LiveSyncCore::new_local(Arc::clone(&circle), own);
     engine
         .start(&[], std::slice::from_ref(&url))
         .await
         .expect("start session");
+    let after_start = now_secs();
 
-    // Against the cold-seed VALUE, not a read-back: a read-back taken after the
-    // EOSE has already landed would sample the advanced value and make the
-    // precondition trivially false. See the first test.
-    let cold_seed_ms = (started_at - COLD_SEED_LOOKBACK_SECS) * 1000;
-    let anchored = wait_inbox_cursor_above(&circle, Some(cold_seed_ms), wait_budget(10))
+    // Against an UPPER BOUND on the cold-seed value, not a read-back: a
+    // read-back taken after the EOSE has already landed would sample the
+    // advanced value and make the precondition trivially false, and a bound
+    // taken before `start` would be a LOWER one, letting the seed itself
+    // satisfy the wait. See the first test.
+    let max_cold_seed_ms = (after_start - COLD_SEED_LOOKBACK_SECS) * 1000;
+    let anchored = wait_inbox_cursor_above(&circle, Some(max_cold_seed_ms), wait_budget(10))
         .await
         .expect("cursor reads back");
     assert!(
-        anchored > cold_seed_ms,
+        anchored > max_cold_seed_ms,
         "precondition: the EOSE anchor must have been redeemed already"
     );
 
@@ -361,17 +375,21 @@ async fn the_anchored_inbox_cursor_survives_a_restart() {
 
     publish(&url, &routed_giftwrap_at(own, now_secs() + 365 * 86_400)).await;
 
-    let started_at = now_secs();
     let engine1 = LiveSyncCore::new_local(Arc::clone(&circle), own);
     engine1
         .start(&[], std::slice::from_ref(&url))
         .await
         .expect("start session 1");
-    let cold_seed_ms = (started_at - COLD_SEED_LOOKBACK_SECS) * 1000;
-    let advanced = wait_inbox_cursor_above(&circle, Some(cold_seed_ms), wait_budget(10))
+    // An UPPER bound on the cold seed, read once `start` returned — see the
+    // first test for why a reading taken before it is the wrong direction.
+    let max_cold_seed_ms = (now_secs() - COLD_SEED_LOOKBACK_SECS) * 1000;
+    let advanced = wait_inbox_cursor_above(&circle, Some(max_cold_seed_ms), wait_budget(10))
         .await
         .expect("cursor reads back");
-    assert!(advanced > cold_seed_ms, "precondition: the anchor redeemed");
+    assert!(
+        advanced > max_cold_seed_ms,
+        "precondition: the anchor redeemed"
+    );
 
     // Rule 14 (single live session per MLS DB): session 2 re-opens the SAME
     // store, so session 1's supervisor tasks must be joined first.

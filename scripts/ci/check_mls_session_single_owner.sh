@@ -27,8 +27,8 @@
 #      its reclaim correctly declines, and background publishing stays dead.
 #      That is the failure the `e2e-fgs-publish` lane reproduced.
 #
-#   3. EVERY OPEN IS RELEASED. Each opener file must release at least as many
-#      SESSION handles as it opens. An open is a CLAIM on the Rust
+#   3. NO OPENER FILE IS RELEASE-STARVED. Each opener file must release at
+#      least as many SESSION handles as it opens. An open is a CLAIM on the Rust
 #      `LIVE_SESSIONS` registry, and only `dispose()` drops it; a handle that
 #      falls out of scope undisposed holds the claim until the process dies, so
 #      every later open in EVERY isolate is refused with "an MLS session is
@@ -38,6 +38,15 @@
 #      file is the check and why it belongs beside (1) rather than in a guard of
 #      its own: a separate script would have to re-derive the sanctioned opener
 #      set, and two derivations of one set drift.
+#
+#      This is a COUNT, and a count is a floor, not a matching — see the note on
+#      `check_releases`. The matching is
+#      `haven/test/lints/mls_session_handle_release_test.dart`, an analyzer-AST
+#      lint that resolves each open to the name owning the handle and requires a
+#      release on every explicit exit path. This step is kept as the fast
+#      toolchain-free backstop: it is the only half that runs in this job, and a
+#      file that stops releasing altogether should not have to wait for the
+#      Flutter lane to say so.
 #
 # Pure-grep gate (no toolchain) so it runs in seconds alongside the other repo
 # guards. Behavioural coverage lives in
@@ -74,13 +83,19 @@ broken=0
 # of the MLS session, which is the one thing this check exists to see. A handle
 # named something else fails closed here rather than passing silently.
 #
-# The count is a FLOOR, not a matching, and the slack is real: the open is
-# written as `withFreshSecret((secret) => CircleManagerFfi.newInstance(...))`,
-# so the binding a static reader could follow is a closure result, and the UI
-# service legitimately releases its ONE handle on three exit paths (handoff,
-# wiped in-flight init, close) — two further undisposed opens THERE would still
-# pass. What a count does catch is an opener that releases on fewer paths than
-# it opens, and in the limit one that never releases at all.
+# The count is a FLOOR, not a matching, and the slack is real: the UI service
+# legitimately releases its ONE handle on three exit paths (handoff, wiped
+# in-flight init, close), so two further undisposed opens THERE still pass here
+# — mutation-confirmed, not theorised. Tracing the handle is out of a grep's
+# reach because the open is a closure result inside `withFreshSecret`, so the
+# matching lives where an AST is available:
+# `haven/test/lints/mls_session_handle_release_test.dart` follows that closure
+# (and the local `open()` fan-out) to the local or field that owns the handle
+# and walks every explicit exit path. It fails on both cases this count misses,
+# and on a release deleted from one path while another still holds the count up.
+# What the count still buys is speed and independence: it needs no toolchain,
+# and it catches the limit case — an opener file that releases nothing at all —
+# without depending on the lint being correct.
 check_releases() {
   local owner="$1" code opens frees
   code=$(sed 's|//.*||' "${owner}")
@@ -102,6 +117,9 @@ check_releases() {
     echo "Rule 14; docs/CI_HARDENING_BACKLOG.md workstream D)."
     echo "A release whose receiver is not named *manager does not count here;"
     echo "name the handle for what it is rather than widening this check."
+    echo "This count is only the floor — haven/test/lints/"
+    echo "mls_session_handle_release_test.dart is the per-path matching, and it"
+    echo "names the exit path that leaks rather than the file that is short."
     return 1
   fi
   return 0
@@ -226,7 +244,7 @@ elif ! grep -q '_handedOff' <<<"${init_body}"; then
   status=1
 fi
 
-# --- 3. Every open is matched by a release --------------------------------
+# --- 3. No opener file releases fewer handles than it opens -------------------
 for owner in "${UI_OWNER}" "${FGS_OWNER}" "${WORKER_OWNER}"; do
   rc=0
   check_releases "${owner}" || rc=$?
@@ -239,6 +257,6 @@ if (( broken )); then
   exit 2
 fi
 if (( status == 0 )); then
-  echo "MLS session single-owner guard: OK (3 sanctioned openers, each released, handoff latch intact)."
+  echo "MLS session single-owner guard: OK (3 sanctioned openers, none release-starved, handoff latch intact)."
 fi
 exit "${status}"

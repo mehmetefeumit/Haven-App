@@ -190,11 +190,20 @@ stack_rust() {
 
   info "${BOLD}▶ Rust coverage (haven-core) — threshold ${RUST_MIN}%, rustc ${COVERAGE_TOOLCHAIN}${RESET}"
 
-  # Exact flags from coverage.yml. This RUNS the suite: a test failure exits
-  # non-zero here, so a broken or flaky test is caught by the same command.
+  # Exact flags AND env from coverage.yml. This RUNS the suite: a test failure
+  # exits non-zero here, so a broken or flaky test is caught by the same command.
+  #
+  # HAVEN_TEST_WAIT_SCALE must match coverage.yml or this gate is not the CI
+  # superset this script claims to be: the e2e anti-vacuity waits are sized for
+  # an uninstrumented build, and under llvm-cov they expire on a loaded machine
+  # while the same test passes in `cargo test`. Omitting it here made the local
+  # gate STRICTER than CI on timing and looser on nothing — so a local red could
+  # be a phantom, and the habit that teaches (re-run until green) is the one
+  # that hides a real race.
   local rc=0
   ( cd "$ROOT/haven-core" \
-    && "${cargo_bin[@]}" llvm-cov --all-features \
+    && HAVEN_TEST_WAIT_SCALE="${HAVEN_TEST_WAIT_SCALE:-4}" \
+       "${cargo_bin[@]}" llvm-cov --all-features \
          --ignore-filename-regex 'frb_generated' --summary-only ) \
     >"$TMP/rust.out" 2>"$TMP/rust.err" || rc=$?
   if [ "$rc" -ne 0 ]; then

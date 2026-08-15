@@ -712,6 +712,96 @@ void main() {
             ]);
           },
         );
+
+        test(
+          'a publish that throws still rolls back exactly once, never '
+          'confirms',
+          () async {
+            // Rule 13: an exception mid-publish must not leak the pending
+            // ref — the staged commit is either confirmed (on ack) or
+            // rolled back (on anything short of one), never left dangling.
+            // Mirrors the shape a fully-unreachable relay set actually
+            // takes in production: `RelayManager::publish_event` returns
+            // `Err` once retries are exhausted, which the FFI surfaces to
+            // Dart as a thrown exception, not a `PublishResult`.
+            final mockRelay = MockRelayService(
+              groupMessages: [
+                '{"id":"evtSelfRemove","kind":445,"content":"selfremove"}',
+              ],
+            )..publishThrows = const RelayServiceException('unreachable');
+            final mockCircle = MockCircleService()
+              ..decryptLocationResults = [noDecryptResult]
+              ..decryptLocationAutoCommits[0] = [
+                PendingAutoCommit(
+                  commitEventJson: '{"id":"commitEvt3","kind":445}',
+                  pendingToken: PendingCommitToken(BigInt.from(13)),
+                ),
+              ];
+
+            final svc = LocationSharingService(
+              circleService: mockCircle,
+              relayService: mockRelay,
+            );
+
+            // Must not propagate: a throw mid-publish resolves to a
+            // rollback internally rather than aborting the surrounding
+            // fetch.
+            await svc.fetchMemberLocations(circle: testCircle);
+
+            expect(mockRelay.methodCalls, contains('publishEvent'));
+            expect(mockCircle.confirmPendingCommitCalls, isEmpty);
+            expect(mockCircle.failPendingCommitCalls, [
+              PendingCommitToken(BigInt.from(13)),
+            ]);
+          },
+        );
+
+        test(
+          'rolls back without ever publishing when no relays are available',
+          () async {
+            // The explicit no-relays branch: neither the freshly-read
+            // circle (getCircle returns null — the mock's default empty
+            // roster) nor the caller-held snapshot has a relay to publish
+            // to, so the commit is rolled back directly and `publishEvent`
+            // must never be reached.
+            final noRelaysCircle = TestCircleFactory.createCircle(
+              displayName: 'Test',
+              relays: const [],
+              members: [
+                TestCircleFactory.createMember(
+                  pubkey: 'sender1',
+                  displayName: 'Alice',
+                ),
+              ],
+            );
+            final mockRelay = MockRelayService(
+              groupMessages: [
+                '{"id":"evtSelfRemove","kind":445,"content":"selfremove"}',
+              ],
+            );
+            final mockCircle = MockCircleService()
+              ..decryptLocationResults = [noDecryptResult]
+              ..decryptLocationAutoCommits[0] = [
+                PendingAutoCommit(
+                  commitEventJson: '{"id":"commitEvt4","kind":445}',
+                  pendingToken: PendingCommitToken(BigInt.from(17)),
+                ),
+              ];
+
+            final svc = LocationSharingService(
+              circleService: mockCircle,
+              relayService: mockRelay,
+            );
+
+            await svc.fetchMemberLocations(circle: noRelaysCircle);
+
+            expect(mockRelay.methodCalls, isNot(contains('publishEvent')));
+            expect(mockCircle.confirmPendingCommitCalls, isEmpty);
+            expect(mockCircle.failPendingCommitCalls, [
+              PendingCommitToken(BigInt.from(17)),
+            ]);
+          },
+        );
       });
 
       test(

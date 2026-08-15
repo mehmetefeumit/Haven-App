@@ -66,6 +66,7 @@ import 'package:integration_test/integration_test.dart';
 
 import 'e2e/_lib/test_relay.dart';
 import 'e2e/_lib/test_user.dart';
+import 'e2e/_lib/throw_time_error_capture.dart';
 
 // ---------------------------------------------------------------------------
 // Minimal IdentityService backed by a pre-constructed TestUser.
@@ -135,6 +136,7 @@ void main() {
     'RLY-PROV-01: adding a KeyPackage relay triggers a republish of '
     'kind 30443 to the new relay via the production addRelay path',
     (tester) async {
+      installThrowTimeErrorLogging();
       // ------------------------------------------------------------------
       // Process-global bootstrap FIRST.
       //

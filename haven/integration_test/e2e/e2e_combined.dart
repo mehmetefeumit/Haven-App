@@ -201,6 +201,7 @@ import '_lib/test_relay.dart'
     show TestRelay, TestRelayEvent, wireRecorderDeclared;
 import '_lib/test_user.dart';
 import '_lib/wire_canaries.dart' show CanaryId, WireCanaryPlant;
+import '_lib/throw_time_error_capture.dart';
 
 // =============================================================================
 // Constants
@@ -465,6 +466,7 @@ void main() {
     'Alice UI + Bob/Carol FFI: 3-member invite → 3-way locations → '
     'admin leave (handoff) → non-admin leave',
     (tester) async {
+      installThrowTimeErrorLogging();
       // PRIVACY WATCH — start BEFORE anything is pumped or published so
       // we observe every event for the whole run. Public kind-0 profiles
       // are published BY DESIGN since the public-profile migration
@@ -2685,6 +2687,7 @@ void main() {
   testWidgets(
     'wire oracles: emit the journal sentinel and announce the canary manifest',
     (tester) async {
+      installThrowTimeErrorLogging();
       if (!didInitCtx) {
         fail(
           'setUpAll never produced a ScenarioContext, so no relay socket '
@@ -5650,13 +5653,24 @@ Future<int> _aliceEpochForTest(
 /// bounds each at 4 min — generous over each scenario's ≤90 s internal budget —
 /// so a stall fails as a clean, named test failure instead. On the poll build
 /// the M11 bodies self-skip in microseconds, so the bound is inert there.
+///
+/// Installs [installThrowTimeErrorLogging] here, once, rather than at each
+/// call site: every caller (the direct FE-2 use and, transitively, every
+/// `_m11ScenarioTestWidgets` scenario) reaches `testWidgets` only through
+/// this closure, so one installation covers all of them — see
+/// `test/lints/throw_time_error_logging_reachable_test.dart`, which treats a
+/// `testWidgets` call whose callback installs it on behalf of a forwarded
+/// wrapper as covered.
 void boundedTestWidgets(
   String description,
   Future<void> Function(WidgetTester tester) callback,
 ) {
   testWidgets(
     description,
-    callback,
+    (tester) async {
+      installThrowTimeErrorLogging();
+      await callback(tester);
+    },
     timeout: const Timeout(Duration(minutes: 4)),
   );
 }

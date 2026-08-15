@@ -139,6 +139,7 @@ import 'e2e/_lib/scenario_harness.dart' show ScenarioHarness;
 import 'e2e/_lib/synthetic_user.dart' show DecryptedCoords, SyntheticUser;
 import 'e2e/_lib/test_relay.dart' show defaultStrfryUrl;
 import 'e2e/_lib/test_user.dart' show TestUser, aliceSeed;
+import 'e2e/_lib/throw_time_error_capture.dart';
 
 /// Verbatim marker printed once the PRODUCTION location service has returned
 /// a fix matching the `adb emu geo fix` injection — the operating-system half
@@ -185,6 +186,7 @@ void main() {
   testWidgets(
     'B3: a REAL emulator GPS fix reaches a peer, decrypted, unchanged',
     (tester) async {
+      installThrowTimeErrorLogging();
       // `adb emu geo fix` is an Android-emulator console command and the
       // permission model under test is Android's. iOS real GPS is B4
       // (`simctl location set`), a separate lane.

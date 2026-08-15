@@ -100,6 +100,7 @@ import 'e2e/_lib/synthetic_user.dart' show SyntheticUser;
 import 'e2e/_lib/test_relay.dart'
     show TestRelay, TestRelayEvent, defaultStrfryUrl, secondStrfryUrl;
 import 'e2e/_lib/test_user.dart' show aliceSeed;
+import 'e2e/_lib/throw_time_error_capture.dart';
 
 // ===========================================================================
 // Markers — owned by THIS file. Every literal below is matched, verbatim and
@@ -297,6 +298,7 @@ void main() {
   testWidgets(
     'KPR: a rotated KeyPackage is fetchable, addable and usable by a peer',
     (_) async {
+      installThrowTimeErrorLogging();
       // The lane moves the ANDROID emulator wall clock through `adb shell
       // date` under `adb root`. A simulator has no equivalent that survives
       // `simctl`, so there is no iOS twin of this lane.

@@ -196,13 +196,19 @@ impl SignedLocationEvent {
     ///
     /// # Warning
     ///
-    /// This creates events WITHOUT MLS encryption. For relay transmission,
-    /// use `LocationEventBuilder::encrypt()` which delegates to MDK.
+    /// This creates events WITHOUT MLS encryption. Relay transmission goes
+    /// through `SessionManager::send_location`, which hands the rumor to the
+    /// engine; nothing on that path calls this.
     ///
     /// # Errors
     ///
     /// Returns an error if signing fails.
-    #[allow(dead_code)] // Used by tests; will be called by LocationEventBuilder::encrypt()
+    // Test-only, and no longer waiting on a caller: the builder this comment
+    // once promised (`LocationEventBuilder::encrypt`) never called it and has
+    // been deleted. It stays reachable from tests alone — and the `g`/`alt`
+    // tags it stamps below are exactly what the C5.4 wire oracle exists to
+    // catch should any of it ever reach a relay.
+    #[allow(dead_code)]
     pub(crate) fn new(
         nostr_group_id: &str,
         encrypted_content: String,

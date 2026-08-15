@@ -14,13 +14,15 @@
 /// Verifies that:
 /// 1. No overflow at 1.5x in the longest locales.
 /// 2. No overflow at 2.0x, and the Leave Circle CTA is still reachable.
-/// 3. At normal scale the sheet does not become gratuitously scrollable.
+/// 3. At normal scale, in EVERY supported locale, the sheet does not become
+///    gratuitously scrollable — so a drag on the body still dismisses it.
 library;
 
 import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/join_watcher_provider.dart';
@@ -44,6 +46,16 @@ const _otherPubkey =
 /// German and Turkish are the longest renderings of this sheet's strings;
 /// Russian is a close third and exercises Cyrillic metrics.
 const _longLocales = ['de', 'tr', 'ru'];
+
+/// Every shipped locale. 1.5x-overflow freedom in [_longLocales] says
+/// nothing about whether the sheet becomes scrollable at *normal* scale in a
+/// locale outside that hand-picked sample — and a scrollable sheet steals the
+/// drag from the modal's dismiss gesture (test 3 below). Sourced from
+/// [AppLocalizations] rather than duplicated here so the sweep can't drift
+/// from the actual ARB set as locales are added or removed.
+final List<String> _allLocaleCodes = AppLocalizations.supportedLocales
+    .map((locale) => locale.languageCode)
+    .toList();
 
 class _StubInboxRelays extends InboxRelaysNotifier {
   @override
@@ -168,77 +180,74 @@ void main() {
       expect(find.byKey(WidgetKeys.leaveCircleCta), findsOneWidget);
     });
 
-    testWidgets('3. at normal scale the sheet is not gratuitously scrollable', (
-      tester,
-    ) async {
-      final circle = _makeCircle();
-
-      await _openDetailsOnPhone(
-        tester,
-        circle: circle,
-        mockService: MockCircleService(circles: [circle]),
-        localeCode: 'en',
-      );
-
-      expect(tester.takeException(), isNull);
-
-      // `mainAxisSize.min` must still content-size the sheet: at 1.0x this
-      // content fits a 690px phone, so there should be nothing to scroll.
-      // Guards against the scroll view silently forcing a full-height sheet.
-      final scrollable = find.descendant(
-        of: find.byKey(WidgetKeys.leaveCircleCta),
-        matching: find.byType(Scrollable),
-      );
-      expect(scrollable, findsNothing);
-
-      final position = tester
-          .widget<Scrollable>(
-            find
-                .ancestor(
-                  of: find.byKey(WidgetKeys.leaveCircleCta),
-                  matching: find.byType(Scrollable),
-                )
-                .first,
-          )
-          .controller
-          ?.position;
-      expect(position?.maxScrollExtent ?? 0, 0);
-    });
-
     // -----------------------------------------------------------------------
-    // 4. The scroll parent must not swallow drag-to-dismiss.
+    // 3. Every locale: not gratuitously scrollable, so drag-to-dismiss works.
+    //
+    // Nesting a Scrollable inside a modal bottom sheet can hand the vertical
+    // drag to the inner scroll view and kill drag-to-dismiss. It does not
+    // here: `mainAxisSize.min` content-sizes the sheet, so at 1.0x this
+    // content fits a 690px phone, maxScrollExtent is 0, the scroll physics
+    // decline the drag, and it bubbles to the modal. A translation that is
+    // merely long enough to avoid the 1.5x overflow checked above can still
+    // be long enough to make the sheet scrollable at *normal* scale — this
+    // sweeps every shipped locale so that failure mode is caught here rather
+    // than silently shipping a broken dismiss gesture in one language.
     // -----------------------------------------------------------------------
-    testWidgets('4. dragging the sheet body still dismisses the modal', (
-      tester,
-    ) async {
-      final circle = _makeCircle();
+    for (final code in _allLocaleCodes) {
+      testWidgets(
+        '3. "$code" at normal scale the sheet is not gratuitously '
+        'scrollable, so dragging the body still dismisses it',
+        (tester) async {
+          final circle = _makeCircle();
 
-      await _openDetailsOnPhone(
-        tester,
-        circle: circle,
-        mockService: MockCircleService(circles: [circle]),
-        localeCode: 'en',
+          await _openDetailsOnPhone(
+            tester,
+            circle: circle,
+            mockService: MockCircleService(circles: [circle]),
+            localeCode: code,
+          );
+
+          expect(tester.takeException(), isNull);
+
+          // Diagnostic: pinpoints "the sheet became scrollable" as the exact
+          // defect when the behavioural drag assertion below fails.
+          final position = tester
+              .widget<Scrollable>(
+                find
+                    .ancestor(
+                      of: find.byKey(WidgetKeys.leaveCircleCta),
+                      matching: find.byType(Scrollable),
+                    )
+                    .first,
+              )
+              .controller
+              ?.position;
+          expect(
+            position?.maxScrollExtent ?? 0,
+            0,
+            reason:
+                '"$code" makes the sheet body scrollable at 1.0x scale — a '
+                'translation is too long for this sheet',
+          );
+
+          // The behaviour that actually matters, proven directly rather than
+          // inferred from the scroll-extent proxy above: a downward drag on
+          // the body must still dismiss the modal.
+          await tester.drag(
+            find.byKey(WidgetKeys.leaveCircleCta),
+            const Offset(0, 600),
+          );
+          await tester.pumpAndSettle();
+
+          expect(
+            find.byKey(WidgetKeys.leaveCircleCta),
+            findsNothing,
+            reason:
+                '"$code" leaves the sheet body scrollable at 1.0x, so the '
+                'drag scrolled instead of dismissing the modal',
+          );
+        },
       );
-
-      expect(find.byKey(WidgetKeys.leaveCircleCta), findsOneWidget);
-
-      // Nesting a Scrollable inside a modal bottom sheet can hand the vertical
-      // drag to the inner scroll view and kill drag-to-dismiss. It does not
-      // here: at normal scale the content fits, so maxScrollExtent is 0, the
-      // scroll physics decline the drag, and it bubbles to the sheet. This
-      // pins that — if the sheet is ever forced to full height (making it
-      // always scrollable), this breaks and tells us the gesture was stolen.
-      await tester.drag(
-        find.byKey(WidgetKeys.leaveCircleCta),
-        const Offset(0, 600),
-      );
-      await tester.pumpAndSettle();
-
-      expect(
-        find.byKey(WidgetKeys.leaveCircleCta),
-        findsNothing,
-        reason: 'a downward drag on the body must still dismiss the sheet',
-      );
-    });
+    }
   });
 }

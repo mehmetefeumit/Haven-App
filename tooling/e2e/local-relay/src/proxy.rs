@@ -241,7 +241,7 @@ impl Drop for Proxy {
 /// What the proxy did with one declared MLS group id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Declared {
-    /// Validated, not seen before, appended to the sidecar.
+    /// Validated, absent from the sidecar, appended to it.
     Recorded,
     /// Validated and already in the sidecar; nothing was written.
     Duplicate,
@@ -277,7 +277,8 @@ pub struct Declaration {
 /// Health of the sidecar, for the shutdown summary.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MlsGroupIdStats {
-    /// Distinct ids written.
+    /// Distinct ids the sidecar holds right now — read from the file, so this
+    /// is the needle set the lane will actually hand C5.8.
     pub distinct: usize,
     /// Declarations refused by the validator.
     pub refused: u64,
@@ -310,21 +311,41 @@ pub struct MlsGroupIdStats {
 /// Like the journal, an unwritable sidecar never stops traffic: it counts the
 /// loss, says so on stderr, and lets the fail-closed oracle downstream turn the
 /// missing ground truth into a red.
+///
+/// # Nothing caps how many ids it holds
+///
+/// Deliberately: the file IS the needle set C5.8 scans for, so a cap could only
+/// DROP a declaration, and a dropped declaration narrows the assertion while the
+/// run still reports clean — strictly worse than the growth it would prevent
+/// (the same reasoning as Security Rule 12's "never silently drop legitimate
+/// backlog"). What is bounded is each value
+/// ([`crate::frame::MLS_GROUP_ID_MAX_HEX`]) and who can write one: the
+/// shorthand every lane uses binds 127.0.0.1 (`config::resolve`), so the
+/// declarer is the app under test. A routing table naming a non-loopback listen
+/// address would widen that, and nothing in this crate or in
+/// `start-wire-proxy.sh` (whose hermeticity gate reads UPSTREAMS only) refuses
+/// it.
 pub struct MlsGroupIdSink {
     inner: Mutex<SidecarInner>,
 }
 
 struct SidecarInner {
     path: Option<PathBuf>,
-    seen: BTreeSet<String>,
     refused: u64,
     lost: u64,
+}
+
+impl SidecarInner {
+    /// The ids the sidecar holds right now; empty when no path is configured.
+    fn recorded(&self) -> BTreeSet<String> {
+        self.path.as_deref().map(sidecar_ids).unwrap_or_default()
+    }
 }
 
 impl MlsGroupIdSink {
     /// A sink appending to `path`, one lowercase hex id per line.
     ///
-    /// The file is opened per write rather than held open: writes are rare (a
+    /// The file is opened per access rather than held open: writes are rare (a
     /// handful per scenario, one per circle) and not holding an fd means a
     /// rotation between runs cannot strand this process on an unlinked inode —
     /// the hazard the journal needs its whole claim protocol to avoid.
@@ -343,7 +364,6 @@ impl MlsGroupIdSink {
         Self {
             inner: Mutex::new(SidecarInner {
                 path,
-                seen: BTreeSet::new(),
                 refused: 0,
                 lost: 0,
             }),
@@ -361,7 +381,7 @@ impl MlsGroupIdSink {
             Err(reason) => {
                 let mut inner = self.lock();
                 inner.refused = inner.refused.wrapping_add(1);
-                let distinct = inner.seen.len();
+                let distinct = inner.recorded().len();
                 drop(inner);
                 let outcome = Declared::Refused(reason);
                 eprintln!(
@@ -373,7 +393,9 @@ impl MlsGroupIdSink {
         };
 
         let mut inner = self.lock();
-        if inner.seen.contains(&normalized) {
+        let path = inner.path.clone();
+        let recorded = inner.recorded();
+        if recorded.contains(&normalized) {
             // Silent by design: a scenario re-declares the same circle on every
             // reconnect, and a line per repeat would bury the first sighting.
             return Declaration {
@@ -382,20 +404,16 @@ impl MlsGroupIdSink {
             };
         }
 
-        let outcome = inner.path.clone().map_or(Declared::Unconfigured, |path| {
+        let outcome = path.map_or(Declared::Unconfigured, |path| {
             append_line(&path, &normalized).map_or_else(
                 |err| Declared::Unwritable(err.kind()),
                 |()| Declared::Recorded,
             )
         });
-        if outcome == Declared::Recorded {
-            inner.seen.insert(normalized.clone());
-        } else if outcome.is_lost() {
-            // NOT remembered as seen: a retry must get another chance rather
-            // than be waved through as a duplicate of something never written.
+        if outcome.is_lost() {
             inner.lost = inner.lost.wrapping_add(1);
         }
-        let distinct = inner.seen.len();
+        let distinct = recorded.len() + usize::from(outcome == Declared::Recorded);
         drop(inner);
 
         eprintln!(
@@ -413,7 +431,7 @@ impl MlsGroupIdSink {
     pub fn stats(&self) -> MlsGroupIdStats {
         let inner = self.lock();
         MlsGroupIdStats {
-            distinct: inner.seen.len(),
+            distinct: inner.recorded().len(),
             refused: inner.refused,
             lost: inner.lost,
         }
@@ -430,6 +448,27 @@ impl Default for MlsGroupIdSink {
     fn default() -> Self {
         Self::disabled()
     }
+}
+
+/// The ids the sidecar holds, read fresh.
+///
+/// The FILE is the ground truth, never an in-memory mirror of it. A remembered
+/// set would keep acking `Duplicate` for an id that something rotated out from
+/// under this process (`start-wire-proxy.sh` rotates with `rm -f`, and the
+/// sidecar — unlike the journal — has no live-instance claim gate), and the
+/// drive treats an ack as proof the host holds the value: it would then move on,
+/// C5.8 would scan for fewer needles than the wire could carry, and the run
+/// would report clean. Re-reading makes an ack true at the moment it is issued.
+///
+/// An unreadable file reads as EMPTY, so the value is re-recorded rather than
+/// waved through — the same reason an unwritable sidecar is never remembered.
+fn sidecar_ids(path: &Path) -> BTreeSet<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Appends one line, creating the file if needed.
@@ -972,6 +1011,9 @@ mod tests {
         "ab".repeat(32)
     }
 
+    /// How a fixture takes the sidecar away from under a live sink.
+    type Rotate = fn(&Path) -> std::io::Result<()>;
+
     fn scratch(tag: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1039,6 +1081,77 @@ mod tests {
             "a duplicate must still be acked, or a reconnecting harness would hang"
         );
         assert_eq!(lines(&path), vec![an_id()], "no second line");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // THE PROMISE BEHIND AN ACK: the host holds this value NOW.
+    // `TestRelay.announceMlsGroupId` waits for the ack and then moves on, so a
+    // `Duplicate` decided from memory would keep acking an id that something
+    // rotated out of the file underneath this process — and C5.8 would scan for
+    // fewer needles than the wire could carry and still report clean.
+    #[test]
+    fn an_id_rotated_out_of_the_sidecar_is_re_recorded_rather_than_acked_as_a_duplicate() {
+        // What start-wire-proxy.sh does between runs, and what a second
+        // instance pointed at this path would do to a LIVE one.
+        let rotations: [(&str, Rotate); 2] = [
+            ("removed", |path| std::fs::remove_file(path)),
+            ("truncated", |path| std::fs::write(path, b"")),
+        ];
+        for (shape, rotate) in rotations {
+            let path = scratch(shape);
+            let sink = MlsGroupIdSink::new(path.clone());
+            assert_eq!(sink.declare("c0", &an_id()).outcome, Declared::Recorded);
+
+            rotate(&path).expect("the fixture must be able to rotate the sidecar");
+            let again = sink.declare("c1", &an_id());
+
+            assert_eq!(
+                again.outcome,
+                Declared::Recorded,
+                "a {shape} sidecar leaves the id absent, so re-declaring it must record it \
+                 again rather than report a duplicate of something that is no longer there"
+            );
+            assert_eq!(
+                again.ack.as_deref(),
+                Some(an_id().as_str()),
+                "an ack must mean the host holds the id"
+            );
+            assert_eq!(
+                lines(&path),
+                vec![an_id()],
+                "every ack must be backed by a line in the sidecar"
+            );
+            assert_eq!(sink.stats().distinct, 1);
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    // NO CAP, deliberately (see `MlsGroupIdSink`): a cap could only drop a
+    // declaration, and a dropped declaration narrows C5.8's needle set while the
+    // run stays green. Far past any plausible bound, every id must still land.
+    #[test]
+    fn distinct_declarations_are_never_dropped_at_any_count() {
+        // Past every round number a cap would plausibly be written as, and not
+        // equal to one: a cap of exactly N would let a test of exactly N pass.
+        const DECLARATIONS: usize = 1500;
+        let path = scratch("uncapped");
+        let sink = MlsGroupIdSink::new(path.clone());
+
+        for index in 0..DECLARATIONS {
+            // 64 hex chars, distinct per index — a 32-byte id, the size MDK
+            // mints.
+            let id = format!("{index:064x}");
+            let declaration = sink.declare("c0", &id);
+            assert_eq!(
+                declaration.outcome,
+                Declared::Recorded,
+                "declaration #{index} was not recorded"
+            );
+            assert_eq!(declaration.ack.as_deref(), Some(id.as_str()));
+        }
+
+        assert_eq!(lines(&path).len(), DECLARATIONS);
+        assert_eq!(sink.stats().distinct, DECLARATIONS);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1135,8 +1248,8 @@ mod tests {
         assert_eq!(sink.stats().distinct, 0);
     }
 
-    // An unwritable sidecar must not be remembered as "seen": a retry that got
-    // waved through as a duplicate would ack a value that was never recorded.
+    // An unwritable sidecar must leave the value retryable: a retry waved
+    // through as a duplicate would ack a value that was never recorded.
     #[test]
     fn an_unwritable_sidecar_is_counted_and_leaves_the_value_retryable() {
         let dir = scratch("unwritable");

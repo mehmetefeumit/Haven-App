@@ -285,6 +285,7 @@ import 'e2e/_lib/scenario_harness.dart' show ScenarioHarness;
 import 'e2e/_lib/synthetic_user.dart' show SyntheticUser;
 import 'e2e/_lib/test_relay.dart' show defaultStrfryUrl;
 import 'e2e/_lib/test_user.dart' show TestUser, aliceSeed, bytesToHex;
+import 'e2e/_lib/throw_time_error_capture.dart';
 
 /// Verbatim marker printed the instant this drive dispatches a REAL
 /// `AppLifecycleState.paused` to every `WidgetsBindingObserver` — i.e. the
@@ -328,6 +329,7 @@ void main() {
     'B1: hold a live foreground MLS session across a REAL pause and prove '
     'the FGS publishes with it',
     (tester) async {
+      installThrowTimeErrorLogging();
       // This lane proves the Android foreground-service publish path;
       // `backgroundServiceLifecycleProvider` is a deliberate no-op on every
       // other platform (platformIsAndroidProvider), so running this

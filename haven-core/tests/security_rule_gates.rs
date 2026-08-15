@@ -1,7 +1,6 @@
 //! Security-rule gates that observe the wire, not the type system (Workstream D).
 //!
-//! Three rules whose coverage was structural where it needed to be
-//! observational:
+//! Rules whose coverage was structural where it needed to be observational:
 //!
 //! * **Rule 11 — kind-445 nonce.** The label half of Rule 11 is a repo guard
 //!   (`check_no_exporter_label_override.sh`); the nonce half had nothing. Here
@@ -18,24 +17,45 @@
 //!   `mls_e2e_security_tests::p3b_old_epoch_ciphertext_is_undecryptable_after_retention_window`.
 //!   Here are the positive edge (it still decrypts at N+5) and the two constants
 //!   that place that edge, which until now lived only in comments.
+//! * **Rule 12 — the live plane's intake cap.** The catch-up sweep's half of
+//!   Rule 12 (the paged FETCH bound) is `catchup_sweep_e2e`. The LIVE plane's
+//!   half is the bounded receive→ingest queue, and it had nothing: not the cap's
+//!   existence, and — the direction the rule is written about — not what
+//!   overflowing it costs. The receive path can lose a delivery in one further
+//!   way, above that queue: the pool's notification broadcast can overrun, and
+//!   what it then reports is a bare count, with no event left to hold a cursor
+//!   at. Both losses are gated here, on the cursor.
 
 mod helpers;
 
 use std::collections::HashSet;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use haven_core::circle::CircleManager;
 use haven_core::location::LocationMessage;
 use haven_core::nostr::mls::types::{GroupId, LocationMessageResult, PublishWork};
 use haven_core::nostr::mls::{
     app_message_past_epoch_limit, SessionManager, DEFAULT_MAX_PAST_EPOCHS,
 };
+use haven_core::relay::live_sync::config::WORKER_QUEUE_CAP;
+use haven_core::relay::live_sync::supervisor::{intake_queue, run_receiver, RawSignal};
+use haven_core::relay::live_sync::{group_cursor_stream, EngineProcessor, EventBus};
 use nostr::nips::nip44;
-use nostr::{Event, JsonUtil as _, Kind, PublicKey};
+use nostr::{
+    Alphabet, Event, EventBuilder, JsonUtil as _, Keys, Kind, PublicKey, RelayUrl, SingleLetterTag,
+    SubscriptionId, Tag, TagKind, Timestamp,
+};
+use nostr_sdk::RelayPoolNotification;
 use serde_json::Value;
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{broadcast, mpsc, watch};
 
 use helpers::{
-    cleanup_dir, setup_two_party_group, setup_two_party_group_capturing_welcome, TwoPartyGroup,
+    cleanup_dir, setup_two_party_group, setup_two_party_group_capturing_welcome, unique_temp_dir,
+    TwoPartyGroup,
 };
 
 /// A kind-445 `content` is `base64(nonce || ciphertext)` with a 12-byte
@@ -401,4 +421,388 @@ async fn rule5_epoch_n_ciphertext_still_decrypts_at_the_window_edge() {
         "the recovered location must be the one sealed {window} epochs ago, byte for byte"
     );
     g.cleanup();
+}
+
+// ============================================================================
+// Rule 12 — the live plane's convergence-buffer intake cap
+// ============================================================================
+
+/// An event of `kind` carrying `#h = group_hex`, stamped at `created_at_secs`.
+///
+/// Never ingested by anything here: the receiver forwards or drops an event on
+/// its envelope alone, so opaque content is what an intake-cap gate needs.
+fn h_tagged(kind: Kind, group_hex: &str, created_at_secs: i64) -> Event {
+    EventBuilder::new(kind, "opaque-ciphertext")
+        .tags([Tag::custom(
+            TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
+            [group_hex.to_string()],
+        )])
+        .custom_created_at(Timestamp::from(
+            u64::try_from(created_at_secs).expect("a backlog timestamp is non-negative"),
+        ))
+        .sign_with_keys(&Keys::generate())
+        .expect("sign an h-tagged event")
+}
+
+/// One `kind:445` routed at `group_hex` — a circle's genuine backlog.
+fn backlog_445(group_hex: &str, created_at_secs: i64) -> Event {
+    h_tagged(Kind::Custom(445), group_hex, created_at_secs)
+}
+
+/// Delivers `events` to the REAL [`run_receiver`] over a `notif_cap`-slot
+/// notification broadcast and an intake queue of `queue_cap`, and returns how
+/// many reached the far side.
+///
+/// Every notification is published BEFORE the receiver task is spawned, which is
+/// what makes a `notif_cap` below `events.len()` a deterministic broadcast LAG
+/// rather than a race: tokio overwrites the oldest values and reports `Lagged`
+/// on the receiver's first `recv`. Completion is signalled by CLOSING the
+/// notification channel, not by a sleep: tokio hands a broadcast receiver every
+/// value still buffered before it reports `Closed`, so a joined receiver task
+/// has provably seen everything that survived. The far side is never drained
+/// while the receiver runs, which is what makes a `queue_cap` smaller than the
+/// surviving count overflow deterministically.
+async fn deliver_through_receiver(
+    processor: Arc<EngineProcessor>,
+    notif_cap: usize,
+    queue_cap: usize,
+    events: &[Event],
+) -> usize {
+    let (btx, brx) = broadcast::channel::<RelayPoolNotification>(notif_cap);
+    let (tx, mut rx) = mpsc::channel::<RawSignal>(queue_cap);
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+
+    for event in events {
+        btx.send(RelayPoolNotification::Event {
+            relay_url: RelayUrl::parse("wss://relay.example").expect("relay url"),
+            subscription_id: SubscriptionId::new("s_group_0"),
+            event: Box::new(event.clone()),
+        })
+        .expect("the receiver built above holds a live subscription");
+    }
+    let handle = tokio::spawn(run_receiver(
+        brx,
+        tx,
+        processor,
+        Arc::new(AtomicBool::new(false)),
+        cancel_rx,
+    ));
+    drop(btx);
+    handle.await.expect("the receiver task must join cleanly");
+
+    rx.close();
+    let mut delivered = 0;
+    while rx.recv().await.is_some() {
+        delivered += 1;
+    }
+    delivered
+}
+
+/// The widening/removing direction: the live plane's ingest must be BOUNDED.
+///
+/// Pins the cap both ways and then proves it is real rather than decorative — a
+/// queue built the way production builds it refuses the `cap + 1`-th signal with
+/// nothing draining it. Removing the bound is caught by construction instead:
+/// an unbounded channel cannot satisfy [`intake_queue`]'s signature, so this
+/// test stops compiling rather than passing.
+///
+/// The number itself is a resident-memory choice, not a protocol constant, so
+/// what each direction costs is worth stating: widening it holds more
+/// undecrypted events in RAM on a background wake, and narrowing it makes the
+/// throttle below engage on ordinary bursts, paying a whole window's re-fetch
+/// each time. A tuning pass (M11) must move this pin deliberately.
+#[test]
+fn rule12_live_intake_cap_is_pinned_and_really_bounds_the_queue() {
+    assert_eq!(
+        WORKER_QUEUE_CAP, 8192,
+        "the live plane's Rule-12 intake cap must stay pinned in BOTH directions"
+    );
+
+    let eose = || RawSignal::EndOfStoredEvents {
+        relay_url: RelayUrl::parse("wss://relay.example").expect("relay url"),
+        subscription_id: SubscriptionId::new("s_group_0"),
+    };
+    let (tx, _rx) = intake_queue();
+    for slot in 0..WORKER_QUEUE_CAP {
+        assert!(
+            tx.try_send(eose()).is_ok(),
+            "the intake queue must accept its full advertised capacity; slot {slot} was refused"
+        );
+    }
+    assert!(
+        matches!(tx.try_send(eose()), Err(TrySendError::Full(_))),
+        "the receive path's ingest MUST be bounded: an undrained queue accepted more than \
+         WORKER_QUEUE_CAP signals, so a relay could make one REQ's replay unbounded in memory"
+    );
+}
+
+/// The half Rule 12 cares most about: hitting the cap must THROTTLE, never
+/// discard.
+///
+/// A dropped delivery reaches no worker and therefore no engine, so nothing else
+/// in the pipeline records it. If it left no trace, this generation's `EOSE`
+/// would advance the persisted cursor to the REQ's own open time straight over
+/// it — and the catch-up sweep re-derives its floor from that SAME per-circle
+/// cursor, only `GROUP_RESUBSCRIBE_BUFFER_SECS` (60 s) below it. An event
+/// dropped out of a backlog replay, which is the only thing that overflows this
+/// queue, would then be re-requested by no plane at all: silently discarded
+/// offline backlog, permanently and across restarts.
+///
+/// So the assertion is on the cursor, not on a counter: the drop must pull the
+/// advance back onto the OLDEST dropped event. The control arm — a roomy queue,
+/// nothing dropped, cursor at the window's open time — is what stops this
+/// passing on a cursor that simply never moves.
+#[tokio::test]
+async fn rule12_an_intake_drop_holds_the_cursor_instead_of_discarding_backlog() {
+    let dir = unique_temp_dir("rule12_intake");
+    let circle = Arc::new(
+        CircleManager::new_unencrypted(&dir, &Keys::generate()).expect("open a circle manager"),
+    );
+    let processor = Arc::new(EngineProcessor::new(
+        Arc::clone(&circle),
+        EventBus::with_capacity(16),
+    ));
+    // A local reading in the recent past. `note_end_of_stored_events` caps its
+    // advance at the wall clock, so a window that opened BEFORE `now` keeps that
+    // cap inert however long the test takes — no timing race.
+    let opened_at = chrono::Utc::now().timestamp() - 10;
+
+    // ── Control: a queue with room drops nothing, so the EOSE advances to the
+    //    REQ's own open time.
+    let quiet = hex::encode([0x11u8; 32]);
+    processor.note_subscription_opened(&quiet, opened_at);
+    let delivered = deliver_through_receiver(
+        Arc::clone(&processor),
+        64,
+        8,
+        &[backlog_445(&quiet, opened_at - 100)],
+    )
+    .await;
+    assert_eq!(delivered, 1, "a queue with room must forward, not drop");
+    assert!(processor.note_end_of_stored_events(&quiet));
+    assert_eq!(
+        circle
+            .read_sync_cursor(&group_cursor_stream(&quiet))
+            .expect("read the quiet circle's cursor"),
+        Some(opened_at * 1000),
+        "with nothing dropped the advance is the window's own open time — the baseline the \
+         gate below has to differ from"
+    );
+
+    // ── The rule: overflow the cap with an hours-old backlog replay.
+    let flooded = hex::encode([0x22u8; 32]);
+    processor.note_subscription_opened(&flooded, opened_at);
+    let oldest = opened_at - 7_200;
+    let delivered = deliver_through_receiver(
+        Arc::clone(&processor),
+        64,
+        1,
+        &[
+            backlog_445(&flooded, opened_at - 100), // takes the single slot
+            backlog_445(&flooded, opened_at - 3_600), // dropped
+            // Dropped LAST and the oldest, so a hold-back that keeps whichever
+            // drop it saw FIRST fails here rather than passing by arrival order.
+            backlog_445(&flooded, oldest),
+        ],
+    )
+    .await;
+    assert_eq!(
+        delivered, 1,
+        "precondition: a cap-1 queue must have dropped two of the three deliveries, or the \
+         assertion below is about nothing"
+    );
+    assert!(processor.note_end_of_stored_events(&flooded));
+    assert_eq!(
+        circle
+            .read_sync_cursor(&group_cursor_stream(&flooded))
+            .expect("read the flooded circle's cursor"),
+        Some(oldest * 1000),
+        "an event the intake cap dropped MUST hold its circle's cursor at itself (Rule 12): \
+         advancing over it discards legitimate offline backlog that no plane ever re-requests"
+    );
+
+    cleanup_dir(&dir);
+}
+
+/// The other direction of the same hold-back: only an event this plane would
+/// actually have INGESTED may hold a cursor.
+///
+/// The drop is recorded before any routing, so the screen has to be made here or
+/// it does not exist. A `kind:1059` carrying a stray `#h` is the reachable case:
+/// the inbox REQ filters on kind and `#p` alone, so a fully conformant relay
+/// delivers a wrap addressed to this account whatever `#h` its author put on it,
+/// and a circle's `#h` is its PUBLIC `nostr_group_id`. Holding on that would let
+/// an event the worker discards unread stall a circle it names — the shape
+/// P0-5's `RejectedBeforeAuth` arm exists to refuse. A dropped wrap loses
+/// nothing: the inbox stream re-requests a 7-day window on every REQ.
+#[tokio::test]
+async fn rule12_an_intake_drop_of_a_foreign_kind_holds_no_circle() {
+    let dir = unique_temp_dir("rule12_stray_h");
+    let circle = Arc::new(
+        CircleManager::new_unencrypted(&dir, &Keys::generate()).expect("open a circle manager"),
+    );
+    let processor = Arc::new(EngineProcessor::new(
+        Arc::clone(&circle),
+        EventBus::with_capacity(16),
+    ));
+    let opened_at = chrono::Utc::now().timestamp() - 10;
+
+    let target = hex::encode([0x33u8; 32]);
+    processor.note_subscription_opened(&target, opened_at);
+    let delivered = deliver_through_receiver(
+        Arc::clone(&processor),
+        64,
+        1,
+        &[
+            h_tagged(Kind::GiftWrap, &target, opened_at - 100), // takes the single slot
+            h_tagged(Kind::GiftWrap, &target, opened_at - 7_200), // dropped
+        ],
+    )
+    .await;
+    assert_eq!(
+        delivered, 1,
+        "precondition: a cap-1 queue must have dropped the second delivery, or the assertion \
+         below is about nothing"
+    );
+    assert!(processor.note_end_of_stored_events(&target));
+    assert_eq!(
+        circle
+            .read_sync_cursor(&group_cursor_stream(&target))
+            .expect("read the target circle's cursor"),
+        Some(opened_at * 1000),
+        "a dropped event of a kind the group plane never ingests MUST NOT hold that circle's \
+         cursor: anyone who reads a circle's public `#h` could otherwise stall it with traffic \
+         the worker would have discarded unread"
+    );
+
+    cleanup_dir(&dir);
+}
+
+/// The COARSE half of the same rule: a loss the receive path cannot attribute to
+/// any event must still not cost the backlog.
+///
+/// The pool hands the receiver its notifications over a broadcast, and a
+/// broadcast that overruns reports a COUNT — no event, so no `created_at` to
+/// hold a cursor at and no `#h` to hold it for. The per-event hold-back above is
+/// unreachable here, and with nothing in its place every open generation's
+/// `EOSE` advances its circle's cursor straight over events this process never
+/// saw: the Rule-12 loss again, one layer up, and just as permanent (the
+/// catch-up sweep re-derives its floor from the same per-circle cursor).
+///
+/// So the receiver suppresses the pending advance of EVERY generation open at
+/// that moment, and the arms below are what "as wide as the ignorance" has to
+/// mean: the circle that WAS delivered to does not advance; a co-multiplexed
+/// circle
+/// that nothing was delivered on does not advance either (the skip is not
+/// attributable, so a rule narrowed to the circles named by surviving events
+/// would advance that one over a skipped commit); the inbox does not advance
+/// (one notification stream carries both planes). The control run — the same
+/// deliveries over a broadcast with room, nothing skipped — still advances all
+/// three, which is what stops this passing on cursors that simply never move.
+/// The final arm requires the NEXT REQ to advance again: the suppression is a
+/// stall scoped to the generations it hit, not a wedge someone can hold open.
+#[tokio::test]
+async fn rule12_a_delivery_gap_suppresses_every_open_generation() {
+    let dir = unique_temp_dir("rule12_delivery_gap");
+    let circle = Arc::new(
+        CircleManager::new_unencrypted(&dir, &Keys::generate()).expect("open a circle manager"),
+    );
+    let processor = Arc::new(EngineProcessor::new(
+        Arc::clone(&circle),
+        EventBus::with_capacity(16),
+    ));
+    // A local reading in the recent past, so the advance's clamp at the wall
+    // clock stays inert however long the test takes — no timing race.
+    let opened_at = chrono::Utc::now().timestamp() - 10;
+    let delivered_to = hex::encode([0x44u8; 32]);
+    let co_multiplexed = hex::encode([0x55u8; 32]);
+    let replay: Vec<Event> = (1..=6)
+        .map(|i| backlog_445(&delivered_to, opened_at - i * 600))
+        .collect();
+    let group_cursor = |circle_hex: &str| {
+        circle
+            .read_sync_cursor(&group_cursor_stream(circle_hex))
+            .expect("read a circle's cursor")
+    };
+    let inbox_cursor = || {
+        circle
+            .read_sync_cursor(haven_core::relay::cursor::STREAM_INBOX_1059)
+            .expect("read the inbox cursor")
+    };
+
+    // ── Control: the same replay over a broadcast with room for it. Nothing is
+    //    skipped, so every open generation redeems its EOSE.
+    processor.note_subscription_opened(&delivered_to, opened_at);
+    processor.note_subscription_opened(&co_multiplexed, opened_at);
+    processor.note_inbox_subscription_opened(opened_at);
+    let delivered = deliver_through_receiver(Arc::clone(&processor), 64, 64, &replay).await;
+    assert_eq!(
+        delivered,
+        replay.len(),
+        "precondition: a broadcast with room must skip nothing, or the control arm is not a \
+         control"
+    );
+    assert!(processor.note_end_of_stored_events(&delivered_to));
+    assert!(processor.note_end_of_stored_events(&co_multiplexed));
+    assert!(processor.note_inbox_end_of_stored_events());
+    assert_eq!(group_cursor(&delivered_to), Some(opened_at * 1000));
+    assert_eq!(group_cursor(&co_multiplexed), Some(opened_at * 1000));
+    assert_eq!(
+        inbox_cursor(),
+        Some(opened_at * 1000),
+        "with nothing skipped every generation advances to its REQ's own open time — the \
+         baseline the gate below has to differ from"
+    );
+
+    // ── The rule: the SAME replay over a 2-slot broadcast, published before the
+    //    receiver is polled, so four deliveries are skipped and all the receiver
+    //    ever learns is a count.
+    let resumed_at = opened_at + 5;
+    processor.note_subscription_opened(&delivered_to, resumed_at);
+    processor.note_subscription_opened(&co_multiplexed, resumed_at);
+    processor.note_inbox_subscription_opened(resumed_at);
+    let delivered = deliver_through_receiver(Arc::clone(&processor), 2, 64, &replay).await;
+    assert_eq!(
+        delivered, 2,
+        "precondition: a 2-slot broadcast must have skipped four of the six deliveries \
+         outright, or there is no unattributable loss to assert about"
+    );
+
+    assert!(
+        !processor.note_end_of_stored_events(&delivered_to),
+        "an EOSE whose generation was open across a delivery skip MUST NOT advance a cursor \
+         (Rule 12): the skipped events carry no timestamp anything can hold at, so advancing \
+         discards them from every future REQ"
+    );
+    assert!(
+        !processor.note_end_of_stored_events(&co_multiplexed),
+        "a skip is attributable to NO circle, so a co-multiplexed circle nothing was delivered \
+         on must be suppressed too — it is exactly the circle whose skipped commit nothing \
+         else would ever re-request"
+    );
+    assert!(
+        !processor.note_inbox_end_of_stored_events(),
+        "one notification stream carries both planes, so a skip on it can have swallowed a \
+         gift wrap: the inbox generation must be suppressed with the group ones"
+    );
+    assert_eq!(
+        group_cursor(&delivered_to),
+        Some(opened_at * 1000),
+        "a suppressed generation must leave the cursor exactly where the last honest advance \
+         put it — never forward over the skip, and never backward either"
+    );
+    assert_eq!(group_cursor(&co_multiplexed), Some(opened_at * 1000));
+    assert_eq!(inbox_cursor(), Some(opened_at * 1000));
+
+    // ── And the stall is bounded to those generations: the next REQ re-arms, so
+    //    a party that could sustain a skip buys a repeated re-fetch of a window
+    //    we already hold, never a cursor frozen for the session.
+    processor.note_subscription_opened(&delivered_to, resumed_at);
+    processor.note_inbox_subscription_opened(resumed_at);
+    assert!(processor.note_end_of_stored_events(&delivered_to));
+    assert!(processor.note_inbox_end_of_stored_events());
+    assert_eq!(group_cursor(&delivered_to), Some(resumed_at * 1000));
+    assert_eq!(inbox_cursor(), Some(resumed_at * 1000));
+
+    cleanup_dir(&dir);
 }

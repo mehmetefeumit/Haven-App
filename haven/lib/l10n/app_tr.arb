@@ -345,7 +345,7 @@
   "circleDetailsMembersWithEpoch": "{members} · epoch {epoch}",
   "circleDetailsRelaysHeading": "Bu çevre için aktarıcılar",
   "circleDetailsNoRelays": "(kayıtlı yok)",
-  "circleDetailsRelaysNote": "Bu aktarıcılar, davet edilen üyelerin yayımladığı listelerden, o üyeler liste yayımlamamışsa gelen kutusu aktarıcılarınızdan ya da Haven'ın seçtiği aktarıcılardan alınmıştır. Henüz değiştirilemez; aktarıcı listenizdeki sonraki değişiklikler de bunları etkilemez.",
+  "circleDetailsRelaysNote": "Bu aktarıcılar davetlilerin yayımladığı listelerden ya da (liste yoksa) gelen kutusu aktarıcılarınızdan veya Haven'ın seçtiği aktarıcılardan alınmıştır. Henüz değiştirilemez; listenizdeki sonraki değişiklikler bunları etkilemez.",
   "circleDetailsAddMember": "Üye ekle",
   "circleDetailsLeaveCircle": "Çevreden Ayrıl",
   "leaveCircleDialogTitle": "Çevreden Ayrıl",

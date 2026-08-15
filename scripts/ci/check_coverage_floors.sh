@@ -171,7 +171,10 @@ PIN_HEADROOM=2
 # Reported as a NOTICE rather than a failure: the row is still above its floor,
 # so failing here would punish a legal state, but staying silent is how
 # `src/location/nostr.rs` reached exactly 50.00% against a floor of 50 with
-# nothing anywhere saying so.
+# nothing anywhere saying so. The notice earned itself on that row: chasing it
+# found the uncovered half had no caller in the tree at all, and the file was
+# deleted (2026-08-14) rather than tested. A floor that will not move is a
+# reachability signal before it is a testing debt.
 LOW_HEADROOM_POINTS=1
 
 # The floor a freshly measured percentage pins to. Single definition, used by

@@ -1342,7 +1342,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get circleDetailsRelaysNote =>
-      'Bu aktarıcılar, davet edilen üyelerin yayımladığı listelerden, o üyeler liste yayımlamamışsa gelen kutusu aktarıcılarınızdan ya da Haven\'ın seçtiği aktarıcılardan alınmıştır. Henüz değiştirilemez; aktarıcı listenizdeki sonraki değişiklikler de bunları etkilemez.';
+      'Bu aktarıcılar davetlilerin yayımladığı listelerden ya da (liste yoksa) gelen kutusu aktarıcılarınızdan veya Haven\'ın seçtiği aktarıcılardan alınmıştır. Henüz değiştirilemez; listenizdeki sonraki değişiklikler bunları etkilemez.';
 
   @override
   String get circleDetailsAddMember => 'Üye ekle';

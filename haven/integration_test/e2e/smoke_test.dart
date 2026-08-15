@@ -40,6 +40,7 @@ import 'package:integration_test/integration_test.dart';
 
 import '_lib/scenario_harness.dart';
 import '_lib/test_user.dart';
+import '_lib/throw_time_error_capture.dart';
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -58,6 +59,7 @@ void main() {
     testWidgets(
       'in-memory keyring + relay override + deterministic identities work',
       (tester) async {
+        installThrowTimeErrorLogging();
         // ---- Assertion 1: relay override propagates through to Rust ----
         // `setDefaultRelaysForTest` was called by ScenarioHarness.bootstrap;
         // reading `defaultRelays()` now must return the override list, not

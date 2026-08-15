@@ -4,7 +4,7 @@
 # ## Why this exists
 #
 # A skipped test contributes nothing and the run still goes green. `cargo test`
-# prints `21 ignored` and exits 0; `flutter test` prints `~22` and exits 0.
+# prints `20 ignored` and exits 0; `flutter test` prints `~22` and exits 0.
 # Neither number is asserted anywhere, and neither reporter names the tests, so
 # a proof can stop running and the only trace is a digit nobody reads. That is
 # the same failure shape the backlog calls out six times over (code that looks
@@ -42,19 +42,21 @@
 #
 # ## What it deliberately does NOT cover
 #
-# `flutter drive` lanes. `integrationDriver()` reads
+# On-device E2E lanes. `integrationDriver()` reads
 # `IntegrationTestWidgetsFlutterBinding.results`, and a `testWidgets` body that
 # calls `markTestSkipped()` still completes normally, so the binding records
 # `_success` for it — a skipped integration test is INDISTINGUISHABLE from a
-# passing one on the driver side. The only signal is the `~N` column of the
-# device-side reporter forwarded into the drive log (which
-# `tooling/e2e/ci/drive-log-lib.sh` already tolerates but does not assert on).
-# 16 of the 37 `testWidgets` under `haven/integration_test/` carry a
-# `markTestSkipped` escape hatch, nearly all keyring-gated. Wiring an assertion
-# there needs a run on real emulator/simulator hardware to establish which of
-# them actually skip in CI, so it is left as follow-up rather than guessed at —
-# guessing would turn honestly-green lanes red, which is the precise inverse
-# mistake recorded in the A3b post-mortem.
+# passing one on the driver side, and none of it reaches a `--file-reporter`
+# JSON stream this script could parse.
+#
+# That half is covered instead by `tooling/e2e/ci/drive-log-lib.sh`, to the same
+# contract as this file: `--check-manifest` reconciles every `markTestSkipped()`
+# under `haven/integration_test/` against `tooling/e2e/expected_drive_skips.txt`
+# (undeclared hatch, stale row and changed reason all fail), and every E2E
+# runner's existing `drive_log_reports_test_failure` call fails its lane if a
+# declared reason ever appears in the reporter's output. Read that library's
+# header before assuming the `~N` column means there what it means here: a
+# runtime `markTestSkipped` does not move it on the `flutter drive` lanes.
 #
 # ## Usage
 #
