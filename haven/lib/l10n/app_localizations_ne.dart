@@ -1131,6 +1131,33 @@ class AppLocalizationsNe extends AppLocalizations {
   String get circleMemberRemoveTooltip => 'सर्कलबाट हटाउनुहोस्';
 
   @override
+  String circleMemberRemoveDialogTitle(String name) {
+    return '$name लाई हटाउने?';
+  }
+
+  @override
+  String get circleMemberRemoveDialogBody =>
+      'बाँकी सर्कल यो परिवर्तनसम्म आइपुगेपछि तिनले यो सर्कलको नयाँ कुनै पनि कुरा पढ्न सक्दैनन्; प्रायः यो केही मिनेटभित्रै हुन्छ, र त्यति बेला अफलाइन रहेको कसैका लागि यसमा बढी समय लाग्छ। तिनले पहिले नै पाइसकेको कुरा तिनकै फोनमा रहन्छ। यो पूर्ववत् गर्न तिनलाई फेरि निमन्त्रणा पठाउनुपर्छ।';
+
+  @override
+  String get circleMemberRemoveConfirm => 'हटाउनुहोस्';
+
+  @override
+  String circleMemberRemoveInProgress(String name) {
+    return '$name लाई हटाइँदै छ…';
+  }
+
+  @override
+  String circleMemberRemoveSuccess(String name) {
+    return '$name लाई सर्कलबाट हटाइयो';
+  }
+
+  @override
+  String circleMemberRemoveError(String name) {
+    return '$name लाई हटाउन सकिएन। केही परिवर्तन भएन — आफ्नो जडान जाँचेर फेरि प्रयास गर्नुहोस्।';
+  }
+
+  @override
   String get circleMemberAdmin => 'एडमिन';
 
   @override

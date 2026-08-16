@@ -1081,6 +1081,33 @@ class AppLocalizationsJa extends AppLocalizations {
   String get circleMemberRemoveTooltip => 'サークルから削除';
 
   @override
+  String circleMemberRemoveDialogTitle(String name) {
+    return '$name をサークルから削除しますか？';
+  }
+
+  @override
+  String get circleMemberRemoveDialogBody =>
+      'サークルの残りのメンバーが追いついた時点で、その人はこのサークルの新しいものを読めなくなります。通常は数分のうちですが、そのときオフラインだった人がいると、もっと時間がかかります。すでに受け取ったものは、相手の端末に残ります。元に戻すには、あらためて招待する必要があります。';
+
+  @override
+  String get circleMemberRemoveConfirm => '削除';
+
+  @override
+  String circleMemberRemoveInProgress(String name) {
+    return '$name を削除しています…';
+  }
+
+  @override
+  String circleMemberRemoveSuccess(String name) {
+    return '$name をサークルから削除しました';
+  }
+
+  @override
+  String circleMemberRemoveError(String name) {
+    return '$name を削除できませんでした。変更はありません。接続を確認して、もう一度お試しください。';
+  }
+
+  @override
   String get circleMemberAdmin => '管理者';
 
   @override

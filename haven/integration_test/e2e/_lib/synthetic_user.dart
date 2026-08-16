@@ -183,10 +183,30 @@ class SyntheticUser {
                   'process bootstrapped the SAME seed onto a relay that is '
                   'not reset between tests. Pass a distinct seedOffset so '
                   'each bootstrap owns its identity.',
+            // The "tracked slot served everywhere" reading needs an ALREADY
+            // tracked `d`, which a fresh data dir does not have — so on a
+            // fresh dir this outcome can only be the zero-responder branch.
+            // Reading the counts distinguishes the two instead of asserting
+            // the one that cannot apply: run 31868809387 lost an hour to the
+            // old hint, which named a reused dataDir for what was a dead
+            // network.
             KpMaintenanceActionFfi.alreadyHealthy =>
-              ' Hint: action=alreadyHealthy with zero heals means the probe '
-                  'saw a tracked slot served everywhere — unexpected for a '
-                  'fresh data dir; check for a reused dataDir.',
+              outcome.relaysTargeted == 0
+                  ? ' Hint: action=alreadyHealthy with relaysTargeted=0 means '
+                      'NO relay was configured for this account — the '
+                      'bootstrap did not install the hermetic relay.'
+                  : outcome.respondersProbed == 0
+                      ? ' Hint: action=alreadyHealthy with '
+                          'relaysTargeted=${outcome.relaysTargeted} but '
+                          'respondersProbed=0 means every relay was '
+                          'unreachable on this tick, so the maintenance tick '
+                          'correctly failed closed. Suspect the guest network '
+                          '(a default-network handover strands a freshly '
+                          'opened socket), not the KeyPackage code.'
+                      : ' Hint: action=alreadyHealthy with '
+                          '${outcome.respondersProbed} responder(s) means the '
+                          'probe saw a tracked slot already served — check '
+                          'for a reused dataDir.',
             _ => '',
           };
           throw StateError(

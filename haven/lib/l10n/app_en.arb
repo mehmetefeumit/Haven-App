@@ -1246,7 +1246,55 @@
   },
   "circleMemberRemoveTooltip": "Remove from circle",
   "@circleMemberRemoveTooltip": {
-    "description": "Tooltip on the admin button that removes a member from the circle. UNREACHABLE IN PRODUCTION, re-verified 2026-08-12: CircleMemberTile takes an optional onRemove, and its only production call site (circles_bottom_sheet.dart) never passes one, so the button never renders. The service beneath it is fully implemented and integration-tested — CircleService.removeMember (NOT RelayService, as an earlier version of this note said) has no caller anywhere in haven/lib, only in integration_test/ — so the gap is UI wiring alone, and no admin can currently evict anyone from a circle. Do NOT confuse this with the sibling pendingMemberRemoveTooltip, which IS live and removes an npub from the local pre-invite picker rather than a member from a circle. Kept because the string is correct for the capability and the widget branch still references it, but do NOT write user-facing copy that assumes members can be removed until the UI ships."
+    "description": "Tooltip on the admin button that removes a member from the circle. LIVE since 2026-08-15: rendered by CircleMemberTile for an admin viewer on another member's row in a circle that is not blocked, and wired from circles_bottom_sheet.dart to CircleService.removeMember through confirmAndRemoveMember. Do NOT confuse this with the sibling pendingMemberRemoveTooltip, which removes an npub from the local pre-invite picker rather than a member from a circle. The button is also rendered DISABLED (same tooltip) on every other row while one removal is in flight."
+  },
+  "circleMemberRemoveDialogTitle": "Remove {name}?",
+  "@circleMemberRemoveDialogTitle": {
+    "description": "Title of the confirmation dialog for the admin removing a member. Names the member so the admin can check they tapped the row they meant.",
+    "placeholders": {
+      "name": {
+        "type": "String",
+        "example": "Alice"
+      }
+    }
+  },
+  "circleMemberRemoveDialogBody": "They stop being able to read anything new from this circle once the rest of it has caught up, usually within a few minutes, longer for anyone who was offline at the time. Whatever they already received stays on their phone. To undo this you would have to invite them again.",
+  "@circleMemberRemoveDialogBody": {
+    "description": "Body of the remove-member confirmation dialog. States what removal does and does not do: the group re-keys so the removed member cannot read later location updates (INV-E-REMOVAL-ADVANCES-EPOCH), the convergence caveat is the same one leaving carries, already-received locations are beyond our reach, and there is no undo short of a fresh invitation. Do NOT add a claim that the removed person is notified, or that anything already delivered is deleted — neither is true."
+  },
+  "circleMemberRemoveConfirm": "Remove",
+  "@circleMemberRemoveConfirm": {
+    "description": "Destructive confirm button in the remove-member dialog."
+  },
+  "circleMemberRemoveInProgress": "Removing {name}…",
+  "@circleMemberRemoveInProgress": {
+    "description": "Label of the progress indicator that replaces the remove button on the row being removed, and the screen-reader announcement made once when the removal starts.",
+    "placeholders": {
+      "name": {
+        "type": "String",
+        "example": "Alice"
+      }
+    }
+  },
+  "circleMemberRemoveSuccess": "Removed {name} from the circle",
+  "@circleMemberRemoveSuccess": {
+    "description": "SnackBar and screen-reader announcement after a removal that was published and acknowledged by at least one relay. Past tense is accurate: the service only returns once the commit is confirmed (Security Rule 13).",
+    "placeholders": {
+      "name": {
+        "type": "String",
+        "example": "Alice"
+      }
+    }
+  },
+  "circleMemberRemoveError": "Couldn't remove {name}. Nothing changed — check your connection and try again.",
+  "@circleMemberRemoveError": {
+    "description": "SnackBar and screen-reader announcement after a failed removal. 'Nothing changed' is exact rather than reassuring: the service rolls its staged commit back when the publish is not acknowledged, so the member is still in the circle and the epoch did not move.",
+    "placeholders": {
+      "name": {
+        "type": "String",
+        "example": "Alice"
+      }
+    }
   },
   "circleMemberAdmin": "Admin",
   "@circleMemberAdmin": {

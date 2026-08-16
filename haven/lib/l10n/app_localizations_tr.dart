@@ -1130,7 +1130,34 @@ class AppLocalizationsTr extends AppLocalizations {
   String get circleMemberNoRecentLocation => 'Yakın zamanlı konum yok';
 
   @override
-  String get circleMemberRemoveTooltip => 'Çevreden kaldır';
+  String get circleMemberRemoveTooltip => 'Çevreden çıkar';
+
+  @override
+  String circleMemberRemoveDialogTitle(String name) {
+    return '$name çıkarılsın mı?';
+  }
+
+  @override
+  String get circleMemberRemoveDialogBody =>
+      'Çevrenin geri kalanı bu değişikliği aldığında o kişi artık bu çevredeki yeni hiçbir şeyi okuyamaz; bu genellikle birkaç dakika sürer, o sırada çevrimdışı olanlar için daha uzun. O kişinin daha önce aldığı her şey kendi telefonunda kalır. Bunu geri almak için kişiyi yeniden davet etmeniz gerekir.';
+
+  @override
+  String get circleMemberRemoveConfirm => 'Çıkar';
+
+  @override
+  String circleMemberRemoveInProgress(String name) {
+    return '$name çıkarılıyor…';
+  }
+
+  @override
+  String circleMemberRemoveSuccess(String name) {
+    return '$name çevreden çıkarıldı';
+  }
+
+  @override
+  String circleMemberRemoveError(String name) {
+    return '$name çıkarılamadı. Hiçbir şey değişmedi — bağlantınızı kontrol edip tekrar deneyin.';
+  }
 
   @override
   String get circleMemberAdmin => 'Yönetici';

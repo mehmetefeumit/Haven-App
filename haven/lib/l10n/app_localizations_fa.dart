@@ -1128,6 +1128,33 @@ class AppLocalizationsFa extends AppLocalizations {
   String get circleMemberRemoveTooltip => 'حذف از حلقه';
 
   @override
+  String circleMemberRemoveDialogTitle(String name) {
+    return '$name حذف شود؟';
+  }
+
+  @override
+  String get circleMemberRemoveDialogBody =>
+      'به‌محض اینکه بقیهٔ اعضای حلقه خود را با این تغییر هماهنگ کنند، او دیگر نمی‌تواند چیز تازه‌ای از این حلقه بخواند؛ این کار معمولاً چند دقیقه طول می‌کشد و برای کسی که آن موقع آفلاین بوده بیشتر. آنچه پیش‌تر گرفته روی گوشی‌اش می‌ماند. تنها راه برگرداندنش این است که دوباره دعوتش کنی.';
+
+  @override
+  String get circleMemberRemoveConfirm => 'حذف';
+
+  @override
+  String circleMemberRemoveInProgress(String name) {
+    return 'در حال حذف $name…';
+  }
+
+  @override
+  String circleMemberRemoveSuccess(String name) {
+    return '$name از حلقه حذف شد';
+  }
+
+  @override
+  String circleMemberRemoveError(String name) {
+    return 'نتوانستیم $name را حذف کنیم. چیزی تغییر نکرد؛ اتصالت را بررسی کن و دوباره تلاش کن.';
+  }
+
+  @override
   String get circleMemberAdmin => 'مدیر';
 
   @override

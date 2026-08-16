@@ -427,7 +427,7 @@ class GeolocatorLocationService implements LocationService {
   /// to the permission GRANT via `ContextCompat.checkSelfPermission` —
   /// `checkPermission()` and `getLocationAccuracy()` alike — and none of
   /// them consults the app-op, so a denial applied with
-  /// `cmd appops set PKG android:fine_location deny` still reads as
+  /// `cmd appops set --uid PKG android:fine_location deny` still reads as
   /// "granted, precise" here. It is caught one level up instead, at the
   /// only place a stored coordinate can be produced without a live
   /// platform read: [_platformStillPermitsLocation], which guards the
@@ -525,16 +525,23 @@ class GeolocatorLocationService implements LocationService {
   /// the backgrounded publish path — the one path with no alternative
   /// position source.
   ///
-  /// On Android `cmd appops set PKG android:fine_location deny` leaves the
-  /// GRANT intact, so the gate above reads "granted, precise", and — unlike
-  /// `pm revoke` — it does not kill the process. AOSP then drops every
-  /// delivery silently: `LocationProviderManager.Registration
-  /// .acceptLocationChange` bails when `AppOpsHelper.noteOpNoThrow` returns
-  /// false, raising neither a stream error nor a close, so the handlers on
-  /// [getLocationStream] that would call [_noteAccessLost] never fire
-  /// either. Without this check the cached fix would go on being published
-  /// for the rest of [kStreamPositionMaxAge] after the user withdrew
-  /// access.
+  /// On Android `cmd appops set --uid PKG android:fine_location deny` leaves
+  /// the GRANT intact, so the gate above reads "granted, precise", and —
+  /// unlike `pm revoke` — it does not kill the process. AOSP then drops
+  /// deliveries: `LocationProviderManager.Registration.acceptLocationChange`
+  /// bails when `AppOpsHelper.noteOpNoThrow` returns false, with no
+  /// guaranteed stream error or close, so the handlers on
+  /// [getLocationStream] that would call [_noteAccessLost] cannot be relied
+  /// on to fire. Without this check the cached fix would go on being
+  /// published for the rest of [kStreamPositionMaxAge] after the user
+  /// withdrew access.
+  ///
+  /// The scope matters: `AppOpsService` returns a non-default UID mode
+  /// without ever consulting the package mode, and a `whileInUse` grant
+  /// leaves the UID mode at `foreground`, so a package-scoped `deny` is a
+  /// no-op for a foregrounded app. That is a property of the tooling that
+  /// reproduces the state, not of this check — the check reads the platform,
+  /// not the app-op.
   ///
   /// `getLastKnownPosition()` is the one Dart-reachable read the app-op
   /// DOES gate: `LocationProviderManager.getLastLocation` returns null on

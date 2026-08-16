@@ -273,6 +273,16 @@ class MockCircleService implements CircleService {
   /// Whether [removeMember] should throw an exception.
   bool shouldThrowOnRemoveMember = false;
 
+  /// Runs inside [removeMember], after the call is recorded and before it
+  /// returns. Lets a test observe state DURING the removal (the in-flight
+  /// marker the member list renders progress from) or throw something other
+  /// than a [CircleServiceException] — the FFI boundary raises `Error`s too.
+  void Function()? onRemoveMember;
+
+  /// When non-null, [removeMember] awaits this before returning, so a test
+  /// can hold one removal open and prove what a second attempt does.
+  Future<void>? removeMemberGate;
+
   @override
   Future<void> removeMember({
     required List<int> mlsGroupId,
@@ -283,6 +293,9 @@ class MockCircleService implements CircleService {
       mlsGroupId: List<int>.of(mlsGroupId),
       memberPubkeyHex: memberPubkeyHex,
     ));
+    onRemoveMember?.call();
+    final gate = removeMemberGate;
+    if (gate != null) await gate;
     if (shouldThrowOnRemoveMember) {
       throw const CircleServiceException('Mock removeMember error');
     }
@@ -472,12 +485,28 @@ class MockCircleService implements CircleService {
     return const [];
   }
 
+  /// Calls to [removeLastKnownMember], in order.
+  final List<({List<int> nostrGroupId, String senderPubkey})>
+  removeLastKnownMemberCalls = [];
+
+  /// Whether [removeLastKnownMember] should throw — the post-removal
+  /// cleanup path, which must never turn a completed removal into a
+  /// reported failure.
+  bool shouldThrowOnRemoveLastKnownMember = false;
+
   @override
   Future<void> removeLastKnownMember({
     required List<int> nostrGroupId,
     required String senderPubkey,
   }) async {
     methodCalls.add('removeLastKnownMember');
+    removeLastKnownMemberCalls.add((
+      nostrGroupId: List<int>.of(nostrGroupId),
+      senderPubkey: senderPubkey,
+    ));
+    if (shouldThrowOnRemoveLastKnownMember) {
+      throw const CircleServiceException('Mock removeLastKnownMember error');
+    }
     lastKnownRows.removeWhere(
       (row) =>
           _listEquals(row['nostrGroupId']! as List<int>, nostrGroupId) &&

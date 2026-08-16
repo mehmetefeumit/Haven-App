@@ -50,18 +50,27 @@
 # The kill is also what makes `pm revoke` UNABLE to test the thing the
 # stale-cache trap describes: the cache is process-local, so it dies with the
 # app and a green revoke half is compatible with a cache that would have
-# leaked. `cmd appops set PKG android:fine_location deny` is the reachable
-# variant — it withdraws location access with the process still running and
-# with every permission read still answering "granted" — so ACT 1 runs THAT
-# first, in the same live session, and asserts the promise itself: after
-# access is withdrawn, no coordinate is produced and none is published.
+# leaked. `cmd appops set --uid PKG android:fine_location deny` is the
+# reachable variant — it withdraws location access with the process still
+# running and with every permission read still answering "granted" — so ACT 1
+# runs THAT first, in the same live session, and asserts the promise itself:
+# after access is withdrawn, no coordinate is produced and none is published.
+#
+# `--uid` is load-bearing, not a flourish. `AppOpsService` resolves a
+# non-default UID mode and returns it WITHOUT consulting the package mode, and
+# the runtime-permission → app-op sync leaves a `whileInUse` location grant at
+# UID mode `foreground` (allowed for a foregrounded app). The package-scoped
+# `set` this lane shipped with was therefore overridden and withdrew nothing:
+# CI run 31868809387 read the mode back as `deny` while the app went on
+# receiving fixes and published five of them.
 #
 # It is gated twice because either gate alone passes vacuously. `cmd appops
 # set` exits 0 whether or not it took and an app-op has no `dumpsys package`
-# line, so the mode is READ BACK (`cmd appops get`) and a mode that is not
-# `deny` is fatal on the spot. A mode that reads `deny` and changes nothing
-# is a different failure the read-back cannot see, so the drive target must
-# independently report that real location reads stopped working.
+# line, so the EFFECTIVE mode is READ BACK (`cmd appops get`, uid scope over
+# package scope — see b5_appops_mode) and a mode that is not `deny` is fatal
+# on the spot. A mode that reads `deny` and changes nothing is a different
+# failure the read-back cannot see, so the drive target must independently
+# report that real location reads stopped working.
 #
 # # The oracle
 #
@@ -125,10 +134,23 @@
 #   2b. AN APP-OP DENIAL IS INVISIBLE TO THE APP. `checkPermission()` and
 #      `getLocationAccuracy()` both read the permission GRANT via
 #      `ContextCompat.checkSelfPermission`, which does not consult the
-#      app-op, and AOSP drops deliveries with neither a stream error nor a
-#      close. So the drive target cannot tell when the denial landed by
-#      asking — it waits for a real one-shot read to stop working, which is
-#      also why the mode is read back HERE rather than trusted.
+#      app-op, and AOSP drops deliveries without a guaranteed stream error or
+#      close. (An app-op CHANGE does re-evaluate live registrations, and run
+#      31868809387 caught one surfacing as a transient
+#      `LocationServiceDisabledException` on the position stream — but that is
+#      an incidental consequence of the mode edit, not a contract, and a
+#      denial applied before the app subscribes raises nothing at all.) So the
+#      drive target cannot tell when the denial landed by asking — it waits
+#      for a real one-shot read to stop working, which is also why the mode is
+#      read back HERE rather than trusted.
+#   2c. AN APP-OP HAS TWO SCOPES AND THE UID ONE WINS. `AppOpsService`
+#      short-circuits on a non-default UID mode and never reads the package
+#      mode, and a `whileInUse` location grant leaves the UID mode at
+#      `foreground`. So `cmd appops set PKG <op> deny` — package scope — is a
+#      no-op for a foregrounded app, while `cmd appops get` still prints
+#      `deny` on the package line. Both the SET and the READ-BACK have to be
+#      uid-aware, or the phase asserts against an app that never lost access
+#      and reports its perfectly legitimate publishes as a leak.
 #   3. RE-PROMPTING. `getCurrentLocation()` calls `requestPermission()`
 #      whenever it sees `denied` (:268), which raises the SYSTEM permission
 #      dialog unless the grant is USER_FIXED — from a periodic publish tick,
@@ -378,8 +400,40 @@ b5_permission_user_fixed() {
   grep -aE "${perm}: granted=" "${dump}" 2>/dev/null | grep -q 'USER_FIXED'
 }
 
-# b5_appops_mode <appops-get-dump> <op> — echoes the mode `cmd appops get`
-# reported for <op>, or nothing when the dump has no entry for it.
+# b5_appops_scoped_mode <appops-get-dump> <op> <uid|package> — echoes the mode
+# `cmd appops get` reported for <op> AT THAT SCOPE, or nothing.
+#
+# `cmd appops get PKG OP` prints both scopes, the uid-scoped one on its own
+# `Uid mode:` line and the package-scoped one bare, so the scope is a line
+# filter:
+#
+#   Uid mode: FINE_LOCATION: foreground
+#   FINE_LOCATION: deny; time=+754ms ago
+#
+# Three per-line shapes have shipped across AOSP releases and all three are
+# accepted, because pinning one and reading an empty string on an image that
+# uses another would fail OPEN, in the one place this lane cannot afford it:
+#
+#   android:fine_location: deny; rejectTime=+1m2s
+#   FINE_LOCATION: deny
+#   android:fine_location: mode=deny
+b5_appops_scoped_mode() {
+  local dump="${1:-}" op="${2:-}" scope="${3:-}" short lines
+  [[ -f "${dump}" ]] || return 0
+  short="$(printf '%s' "${op#android:}" | tr '[:lower:]' '[:upper:]')"
+  if [[ "${scope}" == "uid" ]]; then
+    lines="$(grep -a 'Uid mode:' "${dump}" 2>/dev/null || true)"
+  else
+    lines="$(grep -av 'Uid mode:' "${dump}" 2>/dev/null || true)"
+  fi
+  [[ -n "${lines}" ]] || return 0
+  { printf '%s\n' "${lines}" \
+      | grep -aoE "(${op}|${short}):[[:space:]]*(mode=)?[a-z_]+" \
+      | grep -aoE '[a-z_]+$' | tail -1; } || true
+}
+
+# b5_appops_mode <appops-get-dump> <op> — echoes the EFFECTIVE mode for <op>,
+# or nothing when the dump has no entry for it at either scope.
 #
 # THE GATE THAT KEEPS THIS LANE FROM PROVING NOTHING. `cmd appops set` exits 0
 # whether or not it took, exactly like `pm revoke` (trap 1), and unlike the
@@ -388,25 +442,31 @@ b5_permission_user_fixed() {
 # app-side assertion in the app-op phase satisfied by an app that never lost
 # access.
 #
-# Three output shapes have shipped across AOSP releases and all three are
-# accepted, because pinning one and reading an empty string on an image that
-# uses another would fail OPEN, in the one place this lane cannot afford it:
-#
-#   android:fine_location: deny; rejectTime=+1m2s
-#   FINE_LOCATION: deny
-#   android:fine_location: mode=deny
+# EFFECTIVE, not package-scoped, and that distinction cost CI run 31868809387.
+# `AppOpsService` resolves a non-default UID mode and returns it WITHOUT ever
+# consulting the package mode, and the runtime-permission → app-op sync leaves
+# a `whileInUse` location grant at UID mode `foreground` — which evaluates to
+# ALLOWED for a foregrounded app. A package-scoped `deny` under it changes
+# nothing, so a reader that answered with the package mode reported the app-op
+# denied while the app went on receiving fixes and published five of them.
+# Reading the scope that actually governs is what turns that into a fast,
+# attributable failure instead of a window that asserts against an app which
+# never lost access.
 #
 # `cmd appops get` printing NOTHING is a real state (no entry recorded — see
 # the probe caveat in CI_HARDENING_BACKLOG.md, Workstream B), which is why
 # this echoes the empty string rather than guessing a default: the caller
 # decides, and both callers here treat "not the mode I asked for" as a
-# failure.
+# failure. An explicit `default` UID mode is the no-override state and defers
+# to the package mode for the same reason `AppOpsService` does.
 b5_appops_mode() {
-  local dump="${1:-}" op="${2:-}" short
-  [[ -f "${dump}" ]] || return 0
-  short="$(printf '%s' "${op#android:}" | tr '[:lower:]' '[:upper:]')"
-  { grep -aoE "(${op}|${short}):[[:space:]]*(mode=)?[a-z_]+" "${dump}" \
-      2>/dev/null | grep -aoE '[a-z_]+$' | tail -1; } || true
+  local dump="${1:-}" op="${2:-}" uid_mode
+  uid_mode="$(b5_appops_scoped_mode "${dump}" "${op}" uid)"
+  if [[ -n "${uid_mode}" && "${uid_mode}" != "default" ]]; then
+    printf '%s\n' "${uid_mode}"
+    return 0
+  fi
+  b5_appops_scoped_mode "${dump}" "${op}" package
 }
 
 # b5_expiring_445_ids <scanfile> — echoes the sorted, unique ids of every
@@ -1058,6 +1118,46 @@ type=LocationServiceException streamAgeMs=52000" \
   _eq_case "the fine op is not answered by a neighbouring coarse entry" \
     "" "$(b5_appops_mode "${tmp}/appops-coarse.log" "${APPOPS_FINE}")"
 
+  # THE SHAPE THAT ACTUALLY SHIPS ON AN AVD, verbatim from CI run
+  # 31868809387's own `appops.denied.b5.log`. Both scopes are printed and the
+  # UID one governs: reading the last line answered "deny" for a package whose
+  # app-op was still ALLOWED, so the phase ran against an app that had lost
+  # nothing and reported five published location events as a leak.
+  printf '%s\n' \
+    'Uid mode: FINE_LOCATION: foreground' \
+    'FINE_LOCATION: deny; time=+754ms ago' \
+    > "${tmp}/appops-uid-foreground.log"
+  _eq_case "a uid-scoped override outranks a denied package mode" \
+    "foreground" \
+    "$(b5_appops_mode "${tmp}/appops-uid-foreground.log" "${APPOPS_FINE}")"
+
+  # …and the direction the lane depends on: a uid-scoped deny is the denial,
+  # whatever the package mode says.
+  printf '%s\n' \
+    'Uid mode: FINE_LOCATION: deny' \
+    'FINE_LOCATION: allow; time=+2s ago' \
+    > "${tmp}/appops-uid-deny.log"
+  _eq_case "a uid-scoped deny outranks an allowed package mode" \
+    "deny" "$(b5_appops_mode "${tmp}/appops-uid-deny.log" "${APPOPS_FINE}")"
+
+  # `default` is the no-override state, so the package mode governs — the same
+  # rule AppOpsService applies, and the reason this is not simply "uid wins".
+  printf '%s\n' \
+    'Uid mode: FINE_LOCATION: default' \
+    'FINE_LOCATION: deny; time=+2s ago' \
+    > "${tmp}/appops-uid-default.log"
+  _eq_case "a default uid mode defers to the package mode" \
+    "deny" "$(b5_appops_mode "${tmp}/appops-uid-default.log" "${APPOPS_FINE}")"
+
+  # A uid line for a NEIGHBOURING op must not answer for this one, exactly as
+  # the package-scoped fixture above requires.
+  printf '%s\n' \
+    'Uid mode: COARSE_LOCATION: deny' \
+    'COARSE_LOCATION: deny' \
+    > "${tmp}/appops-uid-coarse.log"
+  _eq_case "the fine op is not answered by a neighbouring coarse uid entry" \
+    "" "$(b5_appops_mode "${tmp}/appops-uid-coarse.log" "${APPOPS_FINE}")"
+
   # --- shared libs are still wired ----------------------------------------
   # Their real behaviour is exercised elsewhere (drive-log-lib.sh's own
   # self-test; detect_strfry_bin needs docker). What is checkable here is that
@@ -1586,7 +1686,13 @@ cleanup() {
   # platform would have chosen for itself. Unconditional, because the lane can
   # die inside the denied window and a package left without location access
   # silently poisons every later job on this runner.
+  #
+  # BOTH SCOPES, because Phase 4 denies both. The uid one is the load-bearing
+  # half here: it OUTRANKS the package mode, so a uid `deny` left behind is a
+  # package with no location access no matter what the package mode says.
   for op in "${APPOPS_FINE}" "${APPOPS_COARSE}"; do
+    adb -s "${DEVICE}" shell cmd appops set --uid "${PKG}" "${op}" default \
+      >/dev/null 2>&1 || true
     adb -s "${DEVICE}" shell cmd appops set "${PKG}" "${op}" default \
       >/dev/null 2>&1 || true
   done
@@ -2034,7 +2140,15 @@ if wait_for_marker "${MARK_APPOPS_ARMED}" "${ARM_MARKER_TIMEOUT}"; then
   absorb_into_baseline
 
   echo "Phase 4/7 — denying the location app-op (the process stays alive)..."
+  # BOTH SCOPES, uid first. `AppOpsService` returns a non-default UID mode
+  # without ever consulting the package mode, and the runtime-permission →
+  # app-op sync leaves a `whileInUse` grant at UID mode `foreground`, which
+  # evaluates to ALLOWED for a foregrounded app — so the package-scoped `set`
+  # alone withdrew nothing (CI run 31868809387). The package scope is kept
+  # alongside it for an image whose UID mode is default.
   for op in "${APPOPS_FINE}" "${APPOPS_COARSE}"; do
+    adb -s "${DEVICE}" shell cmd appops set --uid "${PKG}" "${op}" deny 2>&1 \
+      | sed 's/^/    /' || true
     adb -s "${DEVICE}" shell cmd appops set "${PKG}" "${op}" deny 2>&1 \
       | sed 's/^/    /' || true
   done
@@ -2044,12 +2158,16 @@ if wait_for_marker "${MARK_APPOPS_ARMED}" "${ARM_MARKER_TIMEOUT}"; then
     "${APPOPS_VERIFY_TIMEOUT}" "${APPOPS_DENIED_DUMP}")"
   if [[ "${appops_denied_mode}" != "deny" ]]; then
     sed 's/^/    /' "${APPOPS_DENIED_DUMP}" >&2 || true
-    fail "\`cmd appops get ${PKG} ${APPOPS_FINE}\` reads" \
+    fail "\`cmd appops get ${PKG} ${APPOPS_FINE}\` reads an EFFECTIVE mode of" \
          "'${appops_denied_mode:-<nothing>}' after \`cmd appops set ... deny\`," \
          "not 'deny'. \`set\` exits 0 even when it refuses and an app-op has no" \
          "\`dumpsys package\` line, so this read-back is the ONLY thing that" \
          "knows the condition changed — and every app-side assertion in this" \
-         "window passes trivially against an app that never lost access."
+         "window passes trivially against an app that never lost access." \
+         "'foreground' here means the UID-scoped mode is still the one the" \
+         "permission sync left behind, i.e. the \`set --uid\` above did not" \
+         "take: check whether this image's \`cmd appops set\` accepts --uid" \
+         "(the dump printed above shows both scopes)."
   fi
   echo "  verified ${APPOPS_FINE}: ${appops_denied_mode}"
 
@@ -2078,7 +2196,13 @@ if wait_for_marker "${MARK_APPOPS_ARMED}" "${ARM_MARKER_TIMEOUT}"; then
        "full kLocationPublishMaxInterval)"
 
   echo "Phase 4/7 — restoring the location app-op..."
+  # The uid scope goes back to `default` — the no-override state the platform
+  # would have chosen — and the package scope to `allow`, which is what makes
+  # the restore VERIFIABLE (see the read-back below) and lets ACT 1 carry on.
+  # With the uid override cleared, `allow` is the effective mode again.
   for op in "${APPOPS_FINE}" "${APPOPS_COARSE}"; do
+    adb -s "${DEVICE}" shell cmd appops set --uid "${PKG}" "${op}" default \
+      2>&1 | sed 's/^/    /' || true
     adb -s "${DEVICE}" shell cmd appops set "${PKG}" "${op}" allow 2>&1 \
       | sed 's/^/    /' || true
   done

@@ -1124,6 +1124,33 @@ class AppLocalizationsEn extends AppLocalizations {
   String get circleMemberRemoveTooltip => 'Remove from circle';
 
   @override
+  String circleMemberRemoveDialogTitle(String name) {
+    return 'Remove $name?';
+  }
+
+  @override
+  String get circleMemberRemoveDialogBody =>
+      'They stop being able to read anything new from this circle once the rest of it has caught up, usually within a few minutes, longer for anyone who was offline at the time. Whatever they already received stays on their phone. To undo this you would have to invite them again.';
+
+  @override
+  String get circleMemberRemoveConfirm => 'Remove';
+
+  @override
+  String circleMemberRemoveInProgress(String name) {
+    return 'Removing $name…';
+  }
+
+  @override
+  String circleMemberRemoveSuccess(String name) {
+    return 'Removed $name from the circle';
+  }
+
+  @override
+  String circleMemberRemoveError(String name) {
+    return 'Couldn\'t remove $name. Nothing changed — check your connection and try again.';
+  }
+
+  @override
   String get circleMemberAdmin => 'Admin';
 
   @override

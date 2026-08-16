@@ -125,6 +125,17 @@ abstract final class WidgetKeys {
   /// Root [ListTile] of a [CircleMemberTile], keyed by the member's pubkey hex.
   static Key memberTile(String pubkeyHex) => ValueKey('member_tile_$pubkeyHex');
 
+  /// The admin "Remove from circle" button on a member's row, keyed by that
+  /// member's pubkey hex. Present only for an admin viewer, on someone
+  /// else's row, in a circle that is not blocked.
+  static Key memberRemoveButton(String pubkeyHex) =>
+      ValueKey('member_remove_$pubkeyHex');
+
+  /// The confirming "Remove" button in the remove-member dialog. Keyed for
+  /// the same reason as [leaveCircleConfirm]: the label is translatable and
+  /// collides with the title text under a text finder.
+  static const Key memberRemoveConfirm = Key('member_remove_confirm');
+
   /// The selected-circle name [Expanded] inside the circle selector's
   /// collapsed trigger row, keyed by the circle's nostrGroupId hex.
   ///

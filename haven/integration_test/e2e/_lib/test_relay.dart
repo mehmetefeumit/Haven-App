@@ -13,8 +13,10 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 
+import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 /// Default URL the strfry container exposes on the host. Android emulators
@@ -274,14 +276,46 @@ class TestRelayEvent {
 /// per `firstWhere` / `events` call. Closing via [dispose] cancels all in-
 /// flight subscriptions and the underlying socket.
 class TestRelay {
-  TestRelay._(this.url, this._channel);
+  TestRelay._(this.url, this._pingInterval, this._socket)
+      : _channel = IOWebSocketChannel(_socket);
+
+  /// Ping interval applied to every socket this relay opens.
+  ///
+  /// `dart:io` sends a ping every interval and closes the socket when no pong
+  /// comes back within the next one, so a stranded connection surfaces as an
+  /// ordinary close after at most twice this value. That is the only thing
+  /// that makes the reconnect path below reachable for the failure that
+  /// actually happens on these runners: an emulator can destroy its default
+  /// network mid-run (`networkDestroy(100)` in logcat, CI run 31868809387) and
+  /// every socket bound to it is then orphaned with NO close event at all —
+  /// `sink.add` keeps succeeding into a connection that can never deliver, and
+  /// both the journal sentinel and a publish's OK sit out their full budget and
+  /// then blame the recording proxy for frames that never left the device.
+  ///
+  /// The value sits between two bounds. Twice it, plus a reconnect, has to fit
+  /// inside the shortest budget that depends on detection — the sentinel's 15 s
+  /// — or the marker still fails on a socket nothing has noticed is dead. And
+  /// it has to exceed the longest plausible pause of the Dart event loop (an
+  /// emulator taking an MLS commit through the FFI boundary), or a healthy
+  /// socket gets closed for being slow.
+  ///
+  /// Ping and Pong are forwarded but never journalled by the recording proxy
+  /// (`tooling/e2e/local-relay/src/proxy.rs`), so this adds no lines to the
+  /// corpus the wire oracles read and moves no oracle's counts.
+  static const Duration socketPingInterval = Duration(seconds: 5);
 
   /// Opens a connection to [url] (default: [defaultStrfryUrl]).
-  static Future<TestRelay> connect({String? url}) async {
+  ///
+  /// [pingInterval] is overridable only so a test can drive the liveness check
+  /// faster than [socketPingInterval]; every lane takes the default.
+  static Future<TestRelay> connect({
+    String? url,
+    Duration pingInterval = socketPingInterval,
+  }) async {
     final target = Uri.parse(url ?? defaultStrfryUrl);
-    final channel = WebSocketChannel.connect(target);
-    await channel.ready;
-    return TestRelay._(target.toString(), channel)
+    final socket = await WebSocket.connect(target.toString());
+    socket.pingInterval = pingInterval;
+    return TestRelay._(target.toString(), pingInterval, socket)
       .._listen()
       .._declareHarnessSocket();
   }
@@ -289,14 +323,33 @@ class TestRelay {
   /// The relay URL this client is connected to.
   final String url;
 
+  /// Applied to every socket this relay opens, reconnects included.
+  final Duration _pingInterval;
+
+  /// The live `dart:io` socket behind [_channel].
+  ///
+  /// Held so [livenessPingInterval] can read the setting back off the socket
+  /// itself rather than off a copy of what was asked for. Swapped together
+  /// with [_channel] by `_attemptReconnect`.
+  WebSocket _socket;
+
   /// Mutable so the reconnect path can swap in a fresh socket on
   /// transient strfry disconnects (see `_attemptReconnect`).
   WebSocketChannel _channel;
+
   final Map<String, _Subscription> _subs = <String, _Subscription>{};
   final List<_PendingOk> _pendingOks = <_PendingOk>[];
   final List<_PendingSentinel> _pendingSentinels = <_PendingSentinel>[];
   final List<_PendingMlsGroupId> _pendingMlsGroupIds = <_PendingMlsGroupId>[];
   final Random _rng = Random.secure();
+
+  /// The ping interval the LIVE socket carries.
+  ///
+  /// Exposed so a test can prove the liveness check is configured rather than
+  /// merely intended: with it unset a stranded socket is indistinguishable
+  /// from an idle one, every wait below degrades to its full timeout, and the
+  /// reconnect machinery never runs.
+  Duration? get livenessPingInterval => _socket.pingInterval;
 
   /// `true` once [dispose] has been called or the bounded reconnect
   /// budget has been exhausted. No further operations are permitted.
@@ -322,6 +375,24 @@ class TestRelay {
   /// the artifact archive. Going higher would mostly extend test
   /// failure latency on truly broken environments.
   static const int _maxReconnectAttempts = 3;
+
+  /// How long one reconnect attempt may spend dialling before it counts as
+  /// failed and the next backoff starts.
+  static const Duration _connectTimeout = Duration(seconds: 5);
+
+  /// The longest [_scheduleReconnect] can take to either produce a writable
+  /// socket or give up: every backoff (1 s, 2 s, 4 s …) plus one
+  /// [_connectTimeout] each, plus a second of slack.
+  ///
+  /// Derived rather than written down, so raising [_maxReconnectAttempts]
+  /// cannot leave a waiter that abandons a reconnect still in progress.
+  static Duration get _reconnectBudget {
+    var total = const Duration(seconds: 1);
+    for (var attempt = 0; attempt < _maxReconnectAttempts; attempt++) {
+      total += Duration(seconds: 1 << attempt) + _connectTimeout;
+    }
+    return total;
+  }
 
   void _listen() {
     _channel.stream.listen(
@@ -430,18 +501,21 @@ class TestRelay {
     if (_closed) return;
     _writable = false;
 
-    // Pending OK awaits cannot be safely retried (a re-publish of
-    // the same signed event would either dedupe at the relay or
-    // produce a confusing second OK), so they fail immediately.
+    // Every in-flight exchange fails HERE, at the disconnect, rather than
+    // sitting out its own timeout: the answer it waits for can only arrive on
+    // the socket that just died. Each is failed with [_SocketDied], the type
+    // `_reissuingAcrossReconnect` reads to tell "the frame was never seen"
+    // from "the frame was seen and went unanswered". Only the first is
+    // re-issued, and only that method ever sees the type — callers still get
+    // the [StateError] they document.
+    //
     // The snapshot+clear pattern guards against re-entrancy if any
-    // error handler mutates _pendingOks while we iterate.
+    // error handler mutates the list while we iterate.
     final pendingOks = _pendingOks.toList(growable: false);
     _pendingOks.clear();
     for (final pending in pendingOks) {
       if (!pending.completer.isCompleted) {
-        pending.completer.completeError(
-          StateError('relay connection closed before OK arrived'),
-        );
+        pending.completer.completeError(_SocketDied('OK arrived'));
       }
     }
 
@@ -454,10 +528,7 @@ class TestRelay {
     for (final pending in pendingSentinels) {
       if (!pending.completer.isCompleted) {
         pending.completer.completeError(
-          StateError(
-            'relay connection closed before the wire-journal sentinel was '
-            'acked',
-          ),
+          _SocketDied('the wire-journal sentinel was acked'),
         );
       }
     }
@@ -472,10 +543,7 @@ class TestRelay {
     for (final pending in pendingIds) {
       if (!pending.completer.isCompleted) {
         pending.completer.completeError(
-          StateError(
-            'relay connection closed before the MLS group id announcement '
-            'was acked',
-          ),
+          _SocketDied('the MLS group id announcement was acked'),
         );
       }
     }
@@ -522,9 +590,10 @@ class TestRelay {
   Future<void> _attemptReconnect() async {
     if (_closed) return;
     try {
-      final channel = WebSocketChannel.connect(Uri.parse(url));
-      await channel.ready.timeout(const Duration(seconds: 5));
-      _channel = channel;
+      final socket = await WebSocket.connect(url).timeout(_connectTimeout);
+      socket.pingInterval = _pingInterval;
+      _socket = socket;
+      _channel = IOWebSocketChannel(socket);
       _writable = true;
       _reconnectAttempt = 0;
       _listen();
@@ -549,6 +618,56 @@ class TestRelay {
       // Reconnect failed; queue another attempt (or exhaust).
       _writable = false;
       _scheduleReconnect();
+    }
+  }
+
+  /// Waits for the reconnect to hand back a writable socket.
+  ///
+  /// Returns `false` when the socket is permanently gone (the reconnect budget
+  /// ran out) or when the wait outlasted anything that budget can take, so a
+  /// caller surfaces the loss instead of spinning.
+  Future<bool> _awaitWritable() async {
+    final deadline = DateTime.now().add(_reconnectBudget);
+    while (!_closed && !_writable && DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+    return !_closed && _writable;
+  }
+
+  /// Runs one request/response exchange, re-issuing it if the socket died with
+  /// the frame in flight.
+  ///
+  /// Three frames in this class have NO subscription behind them — the journal
+  /// sentinel, the MLS-group-id announcement, and a publish's OK — so none of
+  /// them is covered by the REQ re-issue in `_attemptReconnect`. Before this
+  /// existed they were simply lost when a socket died mid-flight, and the
+  /// caller saw a timeout whose message named the wrong culprit: the sentinel's
+  /// says the run was not proxied, when in fact the frame never left the phone.
+  ///
+  /// [attempt] is re-run ONLY on [_SocketDied] — the one failure that proves
+  /// the frame was never seen, because the transport that would have carried it
+  /// went away. A timeout is never re-run: a timeout means the frame WAS
+  /// delivered and went unanswered, which is exactly what an absent recorder
+  /// looks like, and retrying it would turn a fail-closed oracle into a slow
+  /// one. Each caller's budget is likewise untouched — a re-issue buys a fresh
+  /// socket, never a longer wait for an answer.
+  ///
+  /// Bounded at one re-issue per reconnect the transport is allowed to make: a
+  /// socket that dies again on every fresh connection is a broken environment,
+  /// not a blip, and the caller has to hear about it. The final attempt's
+  /// failure propagates, as the [StateError] each caller documents.
+  Future<T> _reissuingAcrossReconnect<T>(Future<T> Function() attempt) async {
+    for (var reissues = 0; reissues < _maxReconnectAttempts; reissues++) {
+      try {
+        return await attempt();
+      } on _SocketDied {
+        continue;
+      }
+    }
+    try {
+      return await attempt();
+    } on _SocketDied catch (died) {
+      throw StateError(died.message);
     }
   }
 
@@ -610,30 +729,41 @@ class TestRelay {
   /// Calling it more than once is fine: the oracle anchors on the highest
   /// matching `wire_seq`, so the snapshot extends to the last marker emitted.
   ///
+  /// A marker whose socket dies before the ack is RE-EMITTED on the fresh one
+  /// (`_reissuingAcrossReconnect`), because the frame is then known never to
+  /// have been seen and re-emitting is explicitly safe. A marker that is
+  /// delivered and goes unanswered is not retried and still fails at
+  /// [timeout] — that silence is the recorder's absence, and waiting longer
+  /// for it would only make a fail-closed oracle slow.
+  ///
   /// Throws [StateError] if the marker could not be written, or if no ack
   /// arrives within [timeout] — which is also what happens when the lane
   /// pointed the app straight at a relay instead of through the proxy.
   Future<WireJournalSentinel> emitWireJournalSentinel({
     String token = wireJournalSentinelToken,
     Duration timeout = const Duration(seconds: 15),
-  }) async {
+  }) =>
+      _reissuingAcrossReconnect(() => _emitWireJournalSentinelOnce(
+            token,
+            timeout,
+          ));
+
+  Future<WireJournalSentinel> _emitWireJournalSentinelOnce(
+    String token,
+    Duration timeout,
+  ) async {
     if (_closed) {
       throw StateError(
         'TestRelay is closed; the wire-journal sentinel was never emitted.',
       );
     }
     // Wait out a reconnect window rather than letting the write drop on the
-    // floor: this frame has no subscription behind it, so nothing would ever
-    // re-issue it.
-    final deadline = DateTime.now().add(timeout);
-    while (!_writable && DateTime.now().isBefore(deadline)) {
-      await Future<void>.delayed(const Duration(milliseconds: 100));
-    }
-    if (_closed || !_writable) {
+    // floor: this frame has no subscription behind it, so only the re-issue
+    // above would ever put it back on the wire.
+    if (!_writable && !await _awaitWritable()) {
       throw StateError(
-        'TestRelay was not writable within ${timeout.inSeconds}s; the '
-        'wire-journal sentinel was never emitted, so the host oracle cannot '
-        'anchor its snapshot.',
+        'TestRelay never became writable; the wire-journal sentinel was never '
+        'emitted, so the host oracle cannot anchor its snapshot.',
       );
     }
     final completer = Completer<WireJournalSentinel>();
@@ -761,10 +891,22 @@ class TestRelay {
   /// the frame could not be written or no ack arrives within [timeout] —
   /// which is also what happens when the lane pointed the app straight at a
   /// relay instead of through the proxy.
+  ///
+  /// Like the sentinel, an announcement whose socket dies before the ack is
+  /// re-issued on the fresh socket (`_reissuingAcrossReconnect`); one that is
+  /// delivered and goes unanswered still fails at [timeout].
   Future<void> announceMlsGroupId({
     required List<int> mlsGroupId,
     Duration timeout = const Duration(seconds: 15),
-  }) async {
+  }) =>
+      _reissuingAcrossReconnect(
+        () => _announceMlsGroupIdOnce(mlsGroupId, timeout),
+      );
+
+  Future<void> _announceMlsGroupIdOnce(
+    List<int> mlsGroupId,
+    Duration timeout,
+  ) async {
     // FIRST STATEMENT, before validation and before the writability poll.
     // `wireRecorderDeclared` is a compile-time constant, so there is nothing to
     // wait for — and the ack timeout further down cannot stand in for this
@@ -790,16 +932,12 @@ class TestRelay {
     }
     // Wait out a reconnect window rather than letting the write drop on the
     // floor: like the sentinel, this frame has no subscription behind it, so
-    // nothing would ever re-issue it.
-    final deadline = DateTime.now().add(timeout);
-    while (!_writable && DateTime.now().isBefore(deadline)) {
-      await Future<void>.delayed(const Duration(milliseconds: 100));
-    }
-    if (_closed || !_writable) {
+    // only the re-issue above would ever put it back on the wire.
+    if (!_writable && !await _awaitWritable()) {
       throw StateError(
-        'TestRelay was not writable within ${timeout.inSeconds}s; the MLS '
-        'group id was never announced, so the wire-correlation oracle would '
-        'scan for fewer ids than the wire could carry and still report clean.',
+        'TestRelay never became writable; the MLS group id was never '
+        'announced, so the wire-correlation oracle would scan for fewer ids '
+        'than the wire could carry and still report clean.',
       );
     }
     final pending = _PendingMlsGroupId(hex, Completer<void>());
@@ -860,20 +998,35 @@ class TestRelay {
   /// Returns `(accepted, message)` where `accepted` is the boolean from
   /// the `OK` frame and `message` is the relay's free-form note.
   ///
+  /// An event whose socket dies before its OK is RE-PUBLISHED on the fresh
+  /// socket (`_reissuingAcrossReconnect`). That is safe precisely because the
+  /// transport reported the loss: either the relay never saw the event, or it
+  /// saw it and the OK was dropped in transit — and strfry answers the second
+  /// case with `OK true "duplicate: …"`, which this method returns like any
+  /// other acceptance. A plain timeout is NOT re-published: nothing there says
+  /// the frame was lost, so a retry would be guesswork.
+  ///
   /// Throws on timeout or if the relay returns NOTICE/CLOSED before the
   /// OK for this event id.
   Future<(bool accepted, String message)> publishAndAwaitOk(
     String eventJson, {
     Duration timeout = const Duration(seconds: 5),
-  }) {
+  }) =>
+      _reissuingAcrossReconnect(
+        () => _publishAndAwaitOkOnce(eventJson, timeout),
+      );
+
+  Future<(bool accepted, String message)> _publishAndAwaitOkOnce(
+    String eventJson,
+    Duration timeout,
+  ) async {
     if (_closed) {
       throw StateError('TestRelay is closed');
     }
-    if (!_writable) {
+    if (!_writable && !await _awaitWritable()) {
       throw StateError(
-        'TestRelay is reconnecting; publishAndAwaitOk cannot be safely '
-        'retried transparently. Caller should retry after the reconnect '
-        'window.',
+        'TestRelay never became writable; the event was never published, so '
+        'no OK can arrive for it.',
       );
     }
     final decoded = jsonDecode(eventJson);
@@ -895,19 +1048,23 @@ class TestRelay {
     final completer = Completer<(bool, String)>();
     final pending = _PendingOk(eventId: eventId, completer: completer);
     _pendingOks.add(pending);
-    final timer = Timer(timeout, () {
-      if (completer.isCompleted) return;
-      _pendingOks.remove(pending);
-      completer.completeError(
-        TimeoutException(
-          'TestRelay.publishAndAwaitOk timed out after '
-          '${timeout.inSeconds}s for event $eventId',
-        ),
-      );
-    });
-    completer.future.whenComplete(timer.cancel);
     _channel.sink.add(jsonEncode(<dynamic>['EVENT', decoded]));
-    return completer.future;
+    // `timeout` on the awaited future, never a Timer that completes the
+    // completer: the old shape derived a second future from the completer to
+    // cancel that Timer, and nothing awaited THAT one. Every failure therefore
+    // surfaced twice — once to the caller, once to the zone as an unhandled
+    // error "thrown after the test had completed" — and a re-issue that
+    // afterwards succeeded would still have reddened the run.
+    try {
+      return await completer.future.timeout(timeout);
+    } on TimeoutException {
+      throw TimeoutException(
+        'TestRelay.publishAndAwaitOk timed out after ${timeout.inSeconds}s '
+        'for event $eventId',
+      );
+    } finally {
+      _pendingOks.remove(pending);
+    }
   }
 
   /// Subscribes to events matching [filter] and emits each as it arrives.
@@ -1137,6 +1294,24 @@ class _Subscription {
   final void Function(Object) onError;
 
   void completeWithError(Object error) => onError(error);
+}
+
+/// Fails an in-flight exchange whose socket went away before the answer.
+///
+/// Exists so `_reissuingAcrossReconnect` can tell the one failure that PROVES a
+/// frame was never seen from a timeout, which proves nothing of the sort — only
+/// the former is re-issued. It never escapes that method: the last attempt's
+/// loss is rethrown as the [StateError] every caller documents, carrying this
+/// same [message], so nothing outside this file has a new type to handle.
+class _SocketDied implements Exception {
+  _SocketDied(String what)
+      : message = 'relay connection closed before $what';
+
+  /// Reads exactly as the [StateError] it becomes at the boundary.
+  final String message;
+
+  @override
+  String toString() => message;
 }
 
 class _PendingOk {

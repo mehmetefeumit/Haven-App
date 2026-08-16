@@ -12,6 +12,7 @@ import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/member_profile_provider.dart';
 import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/member_display.dart';
 import 'package:haven/src/utils/npub_validator.dart';
@@ -19,10 +20,45 @@ import 'package:haven/src/widgets/circles/member_detail_sheet.dart';
 import 'package:haven/src/widgets/identity/avatar.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+/// Width beyond which the "Admin" chip ellipsizes instead of pushing the
+/// row wider.
+///
+/// Comfortably past the longest translation at normal text scale (Spanish
+/// "Administrador" measures ~94dp at the chip's 11pt label), so nothing is
+/// ever clipped at 1.0x; past that the label degrades and the row does not.
+const double _adminChipMaxExtent = 120;
+
+/// Side of the box the trailing remove affordance occupies in every state.
+///
+/// 40dp is what the compact [IconButton] already measured, so wrapping it
+/// costs no visual change; the box exists so the progress indicator that
+/// replaces it mid-removal does not resize the row.
+const double _removeAffordanceExtent = 40;
+
 // npub is 63 chars; show enough of the distinguishing prefix (after the
 // constant "npub1" HRP) and suffix to differentiate members at a glance.
 String _shortNpub(String npub) =>
     NpubValidator.truncate(npub, prefixLength: 12, suffixLength: 6);
+
+/// Rendering state of the admin remove action on a member row.
+///
+/// One enum rather than two booleans because only these three combinations
+/// are legal: the affordance is offered ([CircleMemberTile.onRemove] is
+/// non-null) and is either usable, held while a sibling removal runs, or
+/// showing this row's own removal in progress.
+enum MemberRemoveStatus {
+  /// Offered and usable.
+  ready,
+
+  /// Offered but not usable right now — another member's removal is in
+  /// flight, and two MLS commits must not be staged on one group at once.
+  /// Rendered disabled rather than hidden so the row does not reflow.
+  disabled,
+
+  /// This member's own removal is running: the button is replaced by a
+  /// progress indicator occupying the same footprint.
+  inProgress,
+}
 
 /// Displays a circle member with their status and actions.
 ///
@@ -52,6 +88,7 @@ class CircleMemberTile extends ConsumerWidget {
     this.trailing,
     this.hasLocation = true,
     this.onRemove,
+    this.removeStatus = MemberRemoveStatus.ready,
     super.key,
   });
 
@@ -80,6 +117,11 @@ class CircleMemberTile extends ConsumerWidget {
   ///
   /// Ignored when [trailing] is provided (explicit override wins).
   final VoidCallback? onRemove;
+
+  /// How that action renders. Ignored when [onRemove] is null — a viewer
+  /// who may not remove this member is offered nothing at all, which is a
+  /// different statement from an action that is momentarily unavailable.
+  final MemberRemoveStatus removeStatus;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -236,7 +278,7 @@ class CircleMemberTile extends ConsumerWidget {
           colorScheme,
           effectiveDisplayName,
         ),
-        trailing: trailing ?? _buildTrailing(l10n),
+        trailing: trailing ?? _buildTrailing(l10n, displayedName),
         onTap: isInteractive ? onTap : null,
         onLongPress: canCopy ? () => _copyNpub(context, l10n) : null,
       ),
@@ -321,29 +363,34 @@ class CircleMemberTile extends ConsumerWidget {
     return null;
   }
 
-  Widget? _buildTrailing(AppLocalizations l10n) {
-    final removeButton = onRemove == null
-        ? null
-        : IconButton(
-            icon: const Icon(
-              LucideIcons.userMinus,
-              size: 22,
-              color: HavenSecurityColors.warning,
-            ),
-            onPressed: onRemove,
-            tooltip: l10n.circleMemberRemoveTooltip,
-            visualDensity: VisualDensity.compact,
-          );
+  Widget? _buildTrailing(AppLocalizations l10n, String displayedName) {
+    final removeButton = _buildRemoveAffordance(l10n, displayedName);
 
     if (member.isAdmin) {
       return Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Chip(
-            label: Text(l10n.circleMemberAdmin),
-            labelStyle: const TextStyle(fontSize: 11),
-            padding: EdgeInsets.zero,
-            visualDensity: VisualDensity.compact,
+          // The chip yields, the button does not. A row that is both admin
+          // and removable carries the widest trailing this list can produce,
+          // and at a large text scale in a language that spells "Admin" long
+          // (Spanish overflowed by 21px at 2.0x) something has to give: the
+          // chip is a label that survives being clipped, while the action
+          // must keep its whole 40dp target. A cap rather than `Flexible`,
+          // because a Text with an ellipsis takes every pixel it is offered
+          // — inside a loose box that is the entire tile, which trips
+          // ListTile's own "trailing consumes the whole width" assertion.
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: _adminChipMaxExtent),
+            child: Chip(
+              label: Text(
+                l10n.circleMemberAdmin,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              labelStyle: const TextStyle(fontSize: 11),
+              padding: EdgeInsets.zero,
+              visualDensity: VisualDensity.compact,
+            ),
           ),
           if (removeButton != null) ...[
             const SizedBox(width: HavenSpacing.xs),
@@ -354,6 +401,60 @@ class CircleMemberTile extends ConsumerWidget {
     }
 
     return removeButton;
+  }
+
+  /// The trailing remove action in whichever of its three states applies,
+  /// or `null` when the viewer may not remove this member.
+  ///
+  /// Both states occupy the same [_removeAffordanceExtent] box: a progress
+  /// indicator sized to the icon alone would shrink the row's trailing edge
+  /// the moment a removal starts, moving every other row under the user's
+  /// finger while a modal-free async action runs.
+  Widget? _buildRemoveAffordance(AppLocalizations l10n, String displayedName) {
+    if (onRemove == null) return null;
+
+    if (removeStatus == MemberRemoveStatus.inProgress) {
+      return SizedBox.square(
+        dimension: _removeAffordanceExtent,
+        child: Center(
+          // Labelled but NOT a live region: the caller announces the start
+          // and the outcome exactly once each, whereas a live region here
+          // would re-announce on every rebuild of a sheet that rebuilds on
+          // every location tick.
+          child: Semantics(
+            label: l10n.circleMemberRemoveInProgress(displayedName),
+            child: const SizedBox.square(
+              dimension: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return SizedBox.square(
+      dimension: _removeAffordanceExtent,
+      child: IconButton(
+        key: WidgetKeys.memberRemoveButton(member.pubkey),
+        // Labelled as well as tooltipped: a tooltip becomes
+        // `SemanticsProperties.tooltip`, which TalkBack reads but VoiceOver
+        // treats as a hint — an icon-only button with no label announces as
+        // bare "button" on iOS, which is not a thing to say about the
+        // control that evicts someone.
+        icon: Icon(
+          LucideIcons.userMinus,
+          size: 22,
+          color: HavenSecurityColors.warning,
+          semanticLabel: l10n.circleMemberRemoveTooltip,
+        ),
+        // A disabled button keeps its tooltip and its place in the traversal
+        // order, so a screen-reader user still hears that removal exists
+        // here and is simply unavailable this instant.
+        onPressed: removeStatus == MemberRemoveStatus.ready ? onRemove : null,
+        tooltip: l10n.circleMemberRemoveTooltip,
+        visualDensity: VisualDensity.compact,
+      ),
+    );
   }
 
   String _semanticsHint(

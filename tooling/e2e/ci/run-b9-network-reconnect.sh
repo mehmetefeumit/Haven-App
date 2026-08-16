@@ -88,6 +88,27 @@
 # inside the container is the only one that survives, and `strfry import` is
 # that writer.
 #
+# ## The route held; its FRAMING was wrong (CI run 31868809387, resolved)
+#
+# The first real run failed at `stage=postscan` — the one outcome recorded in
+# advance as the load-bearing unknown, on the theory that an external writer's
+# LMDB commit might be invisible to the running daemon, which would have forced
+# the route to change to a WebSocket client inside the container's namespace.
+# It was not that. strfry's own log said so and was read: `Unable to parse JSON
+# on line 1`, `Processed 0 lines`, exit 0. `strfry import` reads NDJSON and
+# needs every event NEWLINE-TERMINATED; the staged file is
+# `serde_json::to_string` written by Dart's `writeAsString`, and neither
+# appends one.
+#
+# Verified against the pinned image rather than argued: the same bytes plus one
+# `\n` import cleanly, and a live `REQ` on the RUNNING daemon's websocket
+# serves the event an external `strfry import` process wrote. Multi-process
+# LMDB visibility is therefore not a problem this lane has, and the WS-client
+# replacement is NOT needed. `b9_ndjson_payload` supplies the framing and
+# `b9_import_counts` reads strfry's own accounting, so an import that writes
+# nothing now names WHICH way it failed instead of leaving the post-scan to
+# report only that it did.
+#
 # # The oracle
 #
 #   1. SEQUENCE_COMPLETE                the drive finished (checked FIRST, so
@@ -283,6 +304,54 @@ b9_event_id() {
   [[ -f "${f}" ]] || return 0
   { grep -aoE '"id"[[:space:]]*:[[:space:]]*"[0-9a-f]{64}"' "${f}" 2>/dev/null \
       | grep -aoE '[0-9a-f]{64}' | head -1; } || true
+}
+
+# b9_ndjson_payload <file> — echoes the ONE JSON line in <file>, or nothing
+# when <file> does not hold exactly one.
+#
+# THE DEFECT THIS EXISTS FOR (CI run 31868809387). `strfry import` reads NDJSON
+# and needs every event NEWLINE-TERMINATED. The drive stages the event with
+# Dart's `writeAsString` over `serde_json::to_string`, and neither appends one,
+# so the export was a single unterminated line: strfry logged `Unable to parse
+# JSON on line 1`, `Processed 0 lines`, and EXITED 0 — the silent no-op the
+# post-scan then caught with no way to say why. Reproduced against the pinned
+# image: identical bytes plus one `\n` import cleanly and are served over a
+# live REQ, so the route was sound and only its framing was wrong.
+#
+# `tr -d '\r'` cannot corrupt the event: serde_json escapes control characters,
+# so a raw CR byte is never part of a serialized event and can only come from a
+# transport that mangled it (`adb shell`'s LF->CRLF, which is why the export
+# uses `exec-out`). `$(…)` strips every trailing newline; the caller puts back
+# exactly one.
+#
+# An interior newline is REFUSED rather than joined or partially imported: a
+# pretty-printed or multi-event file is not the single event this lane's whole
+# claim is about, and importing its first line would put an unrelated — or
+# truncated — event on the relay under the backlog event's name.
+b9_ndjson_payload() {
+  local f="${1:-}" payload
+  [[ -f "${f}" ]] || return 0
+  payload="$(tr -d '\r' < "${f}")" || return 0
+  [[ -n "${payload}" ]] || return 0
+  [[ "${payload}" != *$'\n'* ]] || return 0
+  printf '%s' "${payload}"
+}
+
+# b9_import_counts <file> — echoes "<processed> <added> <rejected>" read off
+# `strfry import`'s own summary line in <file>, or nothing when it printed none.
+#
+# The exit status is NOT evidence that anything was written: strfry exits 0
+# after discarding a line it could not parse. Its accounting is, and it also
+# separates the two ways an import can write nothing — `processed=0` is a
+# malformed payload, `rejected>0` is strfry's ingest validation refusing the
+# event itself (a bad signature, an out-of-window `created_at`).
+b9_import_counts() {
+  local f="${1:-}" line
+  [[ -f "${f}" ]] || return 0
+  line="$(grep -aoE 'Done\. Processed [0-9]+ lines\. [0-9]+ added, [0-9]+ rejected' \
+          "${f}" 2>/dev/null | tail -1)" || true
+  [[ -n "${line}" ]] || return 0
+  grep -aoE '[0-9]+' <<<"${line}" | tr '\n' ' ' | sed 's/ $//'
 }
 
 # b9_prune_empty_export_stderr <path> — delete <path> when it is 0 bytes.
@@ -913,6 +982,114 @@ prescan=0 postscan=1}"
   : > "${tmp}/evt3.json"
   _eq_case "an empty export yields no id" "" "$(b9_event_id "${tmp}/evt3.json")"
 
+  # --- b9_ndjson_payload --------------------------------------------------
+  #
+  # THE RUN-31868809387 FIXTURES. `strfry import` reads NDJSON; the drive
+  # stages a `serde_json::to_string` line through `writeAsString`, so the
+  # export has NO terminating newline and strfry discarded it while exiting 0.
+  local one_line='{"id":"aa","kind":445,"sig":"ff"}'
+
+  # (22b) THE SHAPE THAT ACTUALLY SHIPS — and the one that was broken.
+  printf '%s' "${one_line}" > "${tmp}/nonl.json"
+  _eq_case "an export with NO trailing newline still yields its line" \
+    "${one_line}" "$(b9_ndjson_payload "${tmp}/nonl.json")"
+
+  # (22c) The already-terminated case must be idempotent, not double-spaced:
+  #      the caller appends exactly one newline to whatever comes back.
+  printf '%s\n' "${one_line}" > "${tmp}/nl.json"
+  _eq_case "an already-terminated export yields the same line" \
+    "${one_line}" "$(b9_ndjson_payload "${tmp}/nl.json")"
+
+  # (22d) CRLF is stripped, because that is precisely the corruption
+  #      `exec-out` exists to avoid and a silent one if it ever returns.
+  printf '%s\r\n' "${one_line}" > "${tmp}/crlf.json"
+  _eq_case "a CRLF export is normalised to one clean line" \
+    "${one_line}" "$(b9_ndjson_payload "${tmp}/crlf.json")"
+
+  # (22e) A pretty-printed export is REFUSED, never partially imported: its
+  #      first line is not an event, and importing it would put something
+  #      other than the backlog event on the relay under that event's name.
+  printf '{\n  "id": "aa"\n}\n' > "${tmp}/pretty.json"
+  _eq_case "a multi-line export is refused, not truncated to line 1" "" \
+    "$(b9_ndjson_payload "${tmp}/pretty.json")"
+
+  # (22f) Two events are not the one event this lane's claim is about.
+  printf '%s\n%s\n' "${one_line}" "${one_line}" > "${tmp}/two.json"
+  _eq_case "a two-event export is refused" "" \
+    "$(b9_ndjson_payload "${tmp}/two.json")"
+
+  # (22g) An empty export is nothing to import, and must not read as one.
+  : > "${tmp}/empty.json"
+  _eq_case "an empty export yields no payload" "" \
+    "$(b9_ndjson_payload "${tmp}/empty.json")"
+
+  # --- b9_import_counts ---------------------------------------------------
+  # (22h) THE VERBATIM NO-OP SUMMARY from run 31868809387. A zero exit over
+  #      this line is the false green the accounting gate exists to stop.
+  printf '%s\n' \
+    '2026-08-15 06:33:36.312 (0.052s) [main thread]WARN| Unable to parse JSON on line 1' \
+    '2026-08-15 06:33:36.312 (0.052s) [main thread]INFO| Done. Processed 0 lines. 0 added, 0 rejected, 0 dups' \
+    > "${tmp}/imp-noop.log"
+  _eq_case "the no-op import summary reads as 0 added" "0 0 0" \
+    "$(b9_import_counts "${tmp}/imp-noop.log")"
+
+  # (22i) The healthy summary, so the gate is not simply always-failing.
+  printf '%s\n' \
+    '2026-08-15 06:33:36.312 (0.050s) [main thread]INFO| Done. Processed 1 lines. 1 added, 0 rejected, 0 dups' \
+    > "${tmp}/imp-ok.log"
+  _eq_case "a successful import summary reads as 1 added" "1 1 0" \
+    "$(b9_import_counts "${tmp}/imp-ok.log")"
+
+  # (22j) strfry's ingest validation refusing the event is its OWN reading —
+  #      a bad signature must not be reported as a framing fault.
+  printf '%s\n' \
+    '2026-08-15 06:33:36.312 (0.050s) [main thread]INFO| Done. Processed 1 lines. 0 added, 1 rejected, 0 dups' \
+    > "${tmp}/imp-rej.log"
+  _eq_case "a rejected event is distinguishable from an unparsed one" \
+    "1 0 1" "$(b9_import_counts "${tmp}/imp-rej.log")"
+
+  # (22k) No summary at all is not "it worked": the exit status alone is
+  #      never evidence, so an absent line must yield nothing to read.
+  printf 'CONFIG: successfully installed\n' > "${tmp}/imp-none.log"
+  _eq_case "an import with no summary yields no counts" "" \
+    "$(b9_import_counts "${tmp}/imp-none.log")"
+
+  # (22l-n) THE CALL SITE, not just the helpers. Every fixture above is over a
+  #      PURE function, and a refactor can leave all of them perfect while
+  #      handing strfry the raw file again — the run-31868809387 defect
+  #      restored under a green self-test.
+  #
+  #      Scoped to `backlog_import`'s OWN body, never the whole file: a
+  #      whole-file scan matches the fixture's own grep pattern and passes
+  #      over a deleted call site, which is how the first draft of these three
+  #      survived their mutants. Comment lines are stripped for the same
+  #      reason at one remove — prose that merely mentions the call must not
+  #      satisfy it.
+  local import_body
+  import_body="$(awk '/^backlog_import\(\) \{/,/^\}/' "${BASH_SOURCE[0]}" \
+                 | grep -v '^[[:space:]]*#')"
+
+  _src_case() { # _src_case <label> <literal> <what-breaks>
+    local label="$1" needle="$2" broken="$3"
+    checks=$(( checks + 1 ))
+    if grep -qF -- "${needle}" <<<"${import_body}"; then
+      printf '  \033[1;32mPASS\033[0m %s\n' "${label}"
+    else
+      printf '  \033[1;31mFAIL\033[0m %s — %s\n' "${label}" "${broken}" >&2
+      fails=1
+    fi
+  }
+
+  _src_case "the export is framed before it is imported" \
+    'b9_ndjson_payload "${BACKLOG_FILE}"' \
+    'an unterminated or multi-line export would reach strfry unchecked'
+  _src_case "strfry is fed the newline-terminated payload" \
+    "printf '%s\\n' \"\${payload}\"" \
+    'strfry discards an unterminated line and still exits 0'
+  _src_case "strfry own accounting is read" \
+    'b9_import_counts "${HOST_LOG}"' \
+    'a no-op import is again reported only as an unexplained empty post-scan'
+
   # --- b9_marker_path -----------------------------------------------------
   printf '%s\n' \
     "I/flutter ( 40): ${MARK_BACKLOG_STAGED} offline=true path=${dev_path}" \
@@ -1414,7 +1591,8 @@ backlog_scan_count() {
 # backlog_import — export the staged event off the device and put it on the
 # relay, with the guest still partitioned. 0 on success.
 backlog_import() {
-  local device_path id air_before air_after prescan postscan
+  local device_path id payload air_before air_after prescan postscan
+  local processed='' added='' rejected=''
 
   # Read the toggle state FIRST. An import that ran outside the blackout
   # proves nothing, and finding that out afterwards would mean discovering it
@@ -1454,6 +1632,17 @@ requires a debuggable APK."
     return 1
   fi
 
+  # NDJSON framing, which `strfry import` requires and neither the drive's
+  # `writeAsString` nor `serde_json::to_string` provides (b9_ndjson_payload).
+  payload="$(b9_ndjson_payload "${BACKLOG_FILE}")"
+  if [[ -z "${payload}" ]]; then
+    backlog_host_fail ndjson "the exported file is not ONE JSON line \
+($(wc -l < "${BACKLOG_FILE}" 2>/dev/null || echo 0) newline(s) in \
+$(wc -c < "${BACKLOG_FILE}" 2>/dev/null || echo 0) bytes); \`strfry import\` \
+reads NDJSON and would discard it and still exit 0"
+    return 1
+  fi
+
   if ! detect_strfry_bin; then
     backlog_host_fail strfry "no \`strfry\` binary in the \
 '${STRFRY_CONTAINER}' container could answer a scan"
@@ -1477,23 +1666,49 @@ before the import (${prescan} hit(s)) — it got there from the device"
   # No `--no-verify`: the signature check is a feature here. It is the last
   # thing standing between "a genuine kind-445 crossed the gap" and "some
   # bytes were written into a database".
-  if ! docker exec -i "${STRFRY_CONTAINER}" "${STRFRY_BIN}" import \
-       < "${BACKLOG_FILE}" >> "${HOST_LOG}" 2>&1; then
+  if ! printf '%s\n' "${payload}" \
+       | docker exec -i "${STRFRY_CONTAINER}" "${STRFRY_BIN}" import \
+         >> "${HOST_LOG}" 2>&1; then
     backlog_host_fail import "\`${STRFRY_BIN} import\` returned non-zero; \
 see the lines above it in ${HOST_LOG}"
     return 1
   fi
 
-  # POST-SCAN — catches the silent no-op: an import that exits 0 having
-  # written nothing (a rejected event, a second LMDB env, a read-only mount).
+  # STRFRY'S OWN ACCOUNTING, read before the post-scan. A zero exit says
+  # nothing about what was written, and the post-scan alone can only report
+  # THAT nothing was — which is how run 31868809387 spent a lane pointing at
+  # LMDB visibility when the payload had simply never been parsed.
+  read -r processed added rejected <<<"$(b9_import_counts "${HOST_LOG}")"
+  if [[ -z "${added}" ]]; then
+    backlog_host_fail import "\`${STRFRY_BIN} import\` printed no \
+\`Done. Processed …\` summary, so there is no accounting to read and its exit \
+status is not evidence that anything was written"
+    return 1
+  fi
+  if [[ "${added}" != "1" ]]; then
+    backlog_host_fail import "\`${STRFRY_BIN} import\` exited 0 without \
+adding the event (processed=${processed} added=${added} \
+rejected=${rejected}). processed=0 means the payload was not one parseable \
+JSON line; rejected>0 means strfry's ingest validation refused the event \
+itself"
+    return 1
+  fi
+
+  # POST-SCAN — the store is read back rather than inferred from the summary.
+  # Now that the accounting gate above rules out "strfry never wrote it", this
+  # is narrowly the STORAGE question it was always meant to be: strfry counted
+  # an event it cannot find again means a second LMDB env or a read-only
+  # mount, NOT a payload it discarded.
   if ! postscan="$(backlog_scan_count "${id}")"; then
     backlog_host_fail postscan "\`${STRFRY_BIN} scan\` failed after the \
 import, so there is no evidence the store changed"
     return 1
   fi
   if [[ "${postscan}" == "0" ]]; then
-    backlog_host_fail postscan "\`${STRFRY_BIN} import\` reported success \
-but the relay does not hold the event — a SILENT NO-OP import"
+    backlog_host_fail postscan "\`${STRFRY_BIN} import\` counted the event as \
+added but the relay does not hold it — a SILENT NO-OP import. The payload \
+parsed, so look at the STORE: a second LMDB env or a read-only mount, not the \
+event"
     return 1
   fi
 

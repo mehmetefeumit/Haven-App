@@ -1128,6 +1128,33 @@ class AppLocalizationsUr extends AppLocalizations {
   String get circleMemberRemoveTooltip => 'حلقے سے ہٹائیں';
 
   @override
+  String circleMemberRemoveDialogTitle(String name) {
+    return '$name کو ہٹائیں؟';
+  }
+
+  @override
+  String get circleMemberRemoveDialogBody =>
+      'جیسے ہی حلقے کے باقی ارکان اس تبدیلی کے ساتھ ہم آہنگ ہو جاتے ہیں، وہ اس حلقے کی کوئی نئی چیز نہیں پڑھ سکتا؛ عام طور پر اس میں چند منٹ لگتے ہیں، اور جو اُس وقت آف لائن تھا اس کے لیے کچھ زیادہ۔ جو کچھ اسے پہلے مل چکا ہے وہ اس کے فون پر رہتا ہے۔ اسے واپس نہیں کیا جا سکتا: اسے دوبارہ دعوت دینا ہوگی۔';
+
+  @override
+  String get circleMemberRemoveConfirm => 'ہٹائیں';
+
+  @override
+  String circleMemberRemoveInProgress(String name) {
+    return '$name کو ہٹایا جا رہا ہے…';
+  }
+
+  @override
+  String circleMemberRemoveSuccess(String name) {
+    return '$name کو حلقے سے ہٹا دیا گیا';
+  }
+
+  @override
+  String circleMemberRemoveError(String name) {
+    return '$name کو نہیں ہٹایا جا سکا۔ کچھ تبدیل نہیں ہوا — اپنا کنکشن دیکھیں اور دوبارہ کوشش کریں۔';
+  }
+
+  @override
   String get circleMemberAdmin => 'منتظم';
 
   @override

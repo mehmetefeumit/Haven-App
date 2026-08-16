@@ -1153,6 +1153,33 @@ class AppLocalizationsFr extends AppLocalizations {
   String get circleMemberRemoveTooltip => 'Retirer du cercle';
 
   @override
+  String circleMemberRemoveDialogTitle(String name) {
+    return 'Retirer $name ?';
+  }
+
+  @override
+  String get circleMemberRemoveDialogBody =>
+      'Cette personne cesse de pouvoir lire quoi que ce soit de nouveau dans ce cercle dès que le reste du cercle a suivi. Cela prend en général quelques minutes, et davantage pour les personnes qui étaient hors ligne à ce moment-là. Ce qu\'elle a déjà reçu reste sur son téléphone. Pour annuler ce retrait, il vous faudrait l\'inviter à nouveau.';
+
+  @override
+  String get circleMemberRemoveConfirm => 'Retirer';
+
+  @override
+  String circleMemberRemoveInProgress(String name) {
+    return 'Retrait en cours : $name…';
+  }
+
+  @override
+  String circleMemberRemoveSuccess(String name) {
+    return '$name ne fait plus partie du cercle';
+  }
+
+  @override
+  String circleMemberRemoveError(String name) {
+    return 'Impossible de retirer $name. Rien n\'a changé : vérifiez votre connexion et réessayez.';
+  }
+
+  @override
   String get circleMemberAdmin => 'Admin';
 
   @override

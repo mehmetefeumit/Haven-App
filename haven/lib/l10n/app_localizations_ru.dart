@@ -1151,6 +1151,33 @@ class AppLocalizationsRu extends AppLocalizations {
   String get circleMemberRemoveTooltip => 'Удалить из круга';
 
   @override
+  String circleMemberRemoveDialogTitle(String name) {
+    return 'Удалить участника $name из круга?';
+  }
+
+  @override
+  String get circleMemberRemoveDialogBody =>
+      'Читать новое в этом круге этот человек перестанет, как только остальные участники получат обновление: обычно на это уходит несколько минут, а для тех, кто в этот момент был не в сети, дольше. То, что он уже получил, останется на его телефоне. Чтобы это отменить, придётся пригласить человека заново.';
+
+  @override
+  String get circleMemberRemoveConfirm => 'Удалить';
+
+  @override
+  String circleMemberRemoveInProgress(String name) {
+    return 'Удаляем участника $name…';
+  }
+
+  @override
+  String circleMemberRemoveSuccess(String name) {
+    return '$name больше не в круге';
+  }
+
+  @override
+  String circleMemberRemoveError(String name) {
+    return 'Не удалось удалить участника $name. Ничего не изменилось — проверьте соединение и попробуйте снова.';
+  }
+
+  @override
   String get circleMemberAdmin => 'Админ';
 
   @override

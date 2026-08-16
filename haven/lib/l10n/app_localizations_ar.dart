@@ -1152,6 +1152,33 @@ class AppLocalizationsAr extends AppLocalizations {
   String get circleMemberRemoveTooltip => 'إزالة من الدائرة';
 
   @override
+  String circleMemberRemoveDialogTitle(String name) {
+    return 'إزالة $name؟';
+  }
+
+  @override
+  String get circleMemberRemoveDialogBody =>
+      'لا يعود هذا الشخص قادرًا على قراءة أي شيء جديد في هذه الدائرة بمجرّد أن يلحق بقية أعضاء الدائرة بهذا التغيير، وهو ما يحدث عادةً في غضون دقائق قليلة، ويطول أكثر مع من كان غير متصل بالإنترنت حينها. ويبقى ما وصله من قبل على هاتفه. وللتراجع عن هذا، ستحتاج إلى دعوته من جديد.';
+
+  @override
+  String get circleMemberRemoveConfirm => 'إزالة';
+
+  @override
+  String circleMemberRemoveInProgress(String name) {
+    return 'جارٍ إزالة $name…';
+  }
+
+  @override
+  String circleMemberRemoveSuccess(String name) {
+    return 'تمت إزالة $name من الدائرة';
+  }
+
+  @override
+  String circleMemberRemoveError(String name) {
+    return 'تعذّرت إزالة $name. لم يتغيّر شيء — تحقّق من اتصالك وحاول مرة أخرى.';
+  }
+
+  @override
   String get circleMemberAdmin => 'مشرف';
 
   @override

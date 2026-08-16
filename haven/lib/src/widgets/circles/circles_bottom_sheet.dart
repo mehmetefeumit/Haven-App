@@ -17,6 +17,7 @@ import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/map_controller_provider.dart';
+import 'package:haven/src/providers/member_removal_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
@@ -26,6 +27,7 @@ import 'package:haven/src/utils/map_focus.dart';
 import 'package:haven/src/utils/member_display.dart';
 import 'package:haven/src/widgets/circles/circle_member_tile.dart';
 import 'package:haven/src/widgets/circles/circle_selector.dart';
+import 'package:haven/src/widgets/circles/remove_member_action.dart';
 import 'package:haven/src/widgets/common/empty_state.dart';
 import 'package:latlong2/latlong.dart' show LatLng;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -693,6 +695,22 @@ class _SheetContent extends ConsumerWidget {
         .read(circleServiceProvider)
         .isCircleBlocked(selectedCircle.mlsGroupId);
 
+    // Admin eviction. Offered only to an admin of THIS circle, and never on
+    // the viewer's own row: removing yourself is the MIP-03 SelfRemove path
+    // behind "Leave circle", and the engine refuses an admin's self-remove
+    // outright (`AdminCannotSelfRemove`). Withheld for a blocked circle for
+    // the same reason "Add member" is — the removal stages an MLS commit,
+    // and a circle the engine has flagged Unrecoverable must be offered no
+    // mutation at all (Security Rule 8).
+    final viewerIsAdmin =
+        selfPubkey != null &&
+        selectedCircle.members.any((m) => m.pubkey == selfPubkey && m.isAdmin);
+    final canRemoveMembers = viewerIsAdmin && !isBlocked;
+    // Non-null while a removal is running; every other row's action goes
+    // disabled rather than hidden so the list does not reflow under the
+    // user's finger mid-action.
+    final removingPubkey = ref.watch(memberRemovalProvider);
+
     // Circle selected - show header and members. The SliverIgnorePointer
     // + SliverAnimatedOpacity wrap dims and disables the whole group
     // while the dropdown is open. Sliver groups can't host a tappable
@@ -742,11 +760,27 @@ class _SheetContent extends ConsumerWidget {
                       ? selfLatLng != null
                       : memberLocation != null;
 
+                  final canRemoveThisMember = canRemoveMembers && !isSelf;
+
                   return Builder(
                     builder: (tileContext) => CircleMemberTile(
                       key: WidgetKeys.memberTile(member.pubkey),
                       member: member,
                       hasLocation: hasLocation,
+                      onRemove: canRemoveThisMember
+                          ? () => confirmAndRemoveMember(
+                              context: tileContext,
+                              ref: ref,
+                              circle: selectedCircle,
+                              member: member,
+                            )
+                          : null,
+                      removeStatus: switch (removingPubkey) {
+                        null => MemberRemoveStatus.ready,
+                        final p when p == member.pubkey =>
+                          MemberRemoveStatus.inProgress,
+                        _ => MemberRemoveStatus.disabled,
+                      },
                       onTap: hasLocation
                           ? () => _focusMember(
                               context: tileContext,

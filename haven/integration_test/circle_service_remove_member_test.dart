@@ -42,13 +42,24 @@ library;
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/location.dart';
+import 'package:haven/src/providers/circles_provider.dart';
+import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/location_sharing_provider.dart';
+import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/relay_service.dart';
+import 'package:haven/src/test_keys.dart';
+import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
 import 'package:integration_test/integration_test.dart';
 
 import 'e2e/_lib/test_user.dart';
@@ -108,6 +119,15 @@ class _RecordingRelayService implements RelayService {
     required List<int> identitySecretBytes,
   }) async => const LegacyRetractionResult.empty();
 
+  /// When true, [publishEvent] answers as a relay that ACCEPTED the event.
+  ///
+  /// Off by default so the fail-closed test still proves "no relay traffic
+  /// was attempted"; the UI-driven removal below turns it on, because
+  /// publish-before-apply (Rule 13) will not confirm a commit that no relay
+  /// acked, and a removal that never confirms proves nothing about the UI
+  /// that asked for it.
+  bool ackPublishes = false;
+
   final List<({String eventJson, List<String> relays})> publishEventCalls = [];
   final List<({String eventJson, List<String> relays})>
   publishFireAndForgetCalls = [];
@@ -119,11 +139,11 @@ class _RecordingRelayService implements RelayService {
     required List<String> relays,
   }) async {
     publishEventCalls.add((eventJson: eventJson, relays: List.of(relays)));
-    return const PublishResult(
+    return PublishResult(
       eventId: '',
-      acceptedBy: [],
-      rejectedBy: [],
-      failed: [],
+      acceptedBy: ackPublishes ? List.of(relays) : const [],
+      rejectedBy: const [],
+      failed: const [],
     );
   }
 
@@ -691,6 +711,196 @@ void main() {
           'memberCountAfter=$memberCountAfter, '
           'bobRecoveredLocation=false (confirmed null)',
         );
+      } finally {
+        for (final dir in [aliceDir, bobDir]) {
+          try {
+            await dir.delete(recursive: true);
+          } on Object catch (_) {
+            // Best-effort cleanup.
+          }
+        }
+      }
+    }, timeout: const Timeout(Duration(minutes: 2)));
+  });
+
+  // ==========================================================================
+  // The UI half. Everything above proves the engine and the service; this
+  // proves the thing between them and the user — that the member list an
+  // admin actually looks at reaches `removeMember` with the right group and
+  // the right pubkey, and that the roster it re-renders afterwards came back
+  // from the real MLS state rather than from a hopeful local edit.
+  //
+  // The widget suite (test/widgets/circles/remove_member_test.dart) covers
+  // the same flow against a mock; a mock cannot tell you that the admin gate
+  // reads the same `isAdmin` the engine writes, which is the one fact that
+  // decides whether this feature is offered at all.
+  // ==========================================================================
+  group('the member list drives a real removal', () {
+    testWidgets('an admin taps Remove and the member leaves the MLS roster', (
+      tester,
+    ) async {
+      installThrowTimeErrorLogging();
+
+      final aliceDir = await Directory.systemTemp.createTemp('haven_ui_alice_');
+      final bobDir = await Directory.systemTemp.createTemp('haven_ui_bob_');
+
+      try {
+        final aliceIdManager = await NostrIdentityManager.newInstance();
+        await aliceIdManager.createIdentity();
+        final aliceSecretBytes = await aliceIdManager.getSecretBytes();
+        final alicePubkeyHex = aliceIdManager.pubkeyHex();
+
+        final bobIdManager = await NostrIdentityManager.newInstance();
+        await bobIdManager.createIdentity();
+        final bobSecretBytes = await bobIdManager.getSecretBytes();
+        final bobPubkeyHex = bobIdManager.pubkeyHex();
+
+        // ONE session per MLS database (Security Rule 14): Alice's circle is
+        // created through the service's OWN handle, never a second
+        // CircleManagerFfi opened on the same directory.
+        final relayRecorder = _RecordingRelayService()..ackPublishes = true;
+        final service = NostrCircleService(
+          relayService: relayRecorder,
+          dataDirectoryProvider: _FixedDataDirectoryProvider(aliceDir.path),
+          identitySecretBytesProvider: () async => aliceSecretBytes,
+        );
+        await service.initialize();
+        final aliceManager = await service.getCircleManagerFfi();
+
+        final bobManager = await CircleManagerFfi.newInstance(
+          dataDir: bobDir.path,
+          identitySecretBytes: bobSecretBytes,
+        );
+        await bobManager.addUserRelay(
+          url: _testRelayUrl,
+          relayType: RelayTypeFfi.nip65,
+        );
+        final bobRelayManager = await RelayManagerFfi.newInstance();
+        await bobRelayManager.maintainKeyPackage(
+          circle: bobManager,
+          identitySecretBytes: bobSecretBytes,
+        );
+        final bobKpJson = await bobRelayManager.fetchKeypackage(
+          pubkey: bobPubkeyHex,
+        );
+        expect(bobKpJson, isNotNull);
+
+        final creation = await aliceManager.createCircle(
+          identitySecretBytes: aliceSecretBytes,
+          members: [
+            MemberKeyPackageFfi(
+              keyPackageJson: bobKpJson!,
+              inboxRelays: const [_testRelayUrl],
+              nip65Relays: const [_testRelayUrl],
+            ),
+          ],
+          name: 'UI Removal Circle',
+          circleType: 'location_sharing',
+          relays: const [_testRelayUrl],
+          creatorFallbackRelays: const [_testRelayUrl],
+        );
+        await aliceManager.confirmPublished(pending: creation.pending);
+
+        final circles = await service.getVisibleCircles();
+        expect(circles, hasLength(1));
+        final circle = circles.single;
+        expect(
+          circle.members.map((m) => m.pubkey.toLowerCase()),
+          contains(bobPubkeyHex.toLowerCase()),
+          reason: 'the roster the UI renders must start with Bob in it',
+        );
+        expect(
+          circle.members
+              .firstWhere(
+                (m) => m.pubkey.toLowerCase() == alicePubkeyHex.toLowerCase(),
+              )
+              .isAdmin,
+          isTrue,
+          reason: 'the admin gate the sheet applies reads this exact flag off '
+              'the engine — if the creator is not marked admin here, the '
+              'remove affordance is never offered to anyone',
+        );
+
+        final sheetController = DraggableScrollableController();
+        addTearDown(sheetController.dispose);
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              circleServiceProvider.overrideWithValue(service),
+              locationSharingServiceProvider.overrideWithValue(
+                LocationSharingService(
+                  circleService: service,
+                  relayService: relayRecorder,
+                ),
+              ),
+              selectedCircleProvider.overrideWith((ref) => circle),
+              memberLocationsProvider.overrideWith((_) async => const []),
+              identityProvider.overrideWith(
+                (_) async => Identity(
+                  pubkeyHex: alicePubkeyHex,
+                  npub: 'npub1alice',
+                  createdAt: DateTime(2025),
+                ),
+              ),
+              displayNameProvider.overrideWith((_) async => 'Alice'),
+            ],
+            child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: Scaffold(
+                body: Stack(
+                  children: [
+                    CirclesBottomSheet(
+                      onExpansionChanged: (_) {},
+                      controller: sheetController,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        sheetController.jumpTo(0.85);
+        await tester.pumpAndSettle();
+
+        final removeButton = find.byKey(
+          WidgetKeys.memberRemoveButton(bobPubkeyHex),
+        );
+        expect(
+          removeButton,
+          findsOneWidget,
+          reason: 'an admin looking at a co-member must be offered the '
+              'removal — this is the wiring that did not exist before',
+        );
+
+        await tester.tap(removeButton);
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(WidgetKeys.memberRemoveConfirm));
+        await tester.pumpAndSettle();
+
+        // The engine is the authority, not the widget tree: re-read the
+        // roster through the FFI rather than trusting the list to have
+        // re-rendered for the right reason.
+        final after = await aliceManager.getCircle(
+          mlsGroupId: Uint8List.fromList(circle.mlsGroupId),
+        );
+        expect(
+          after!.members.map((m) => m.pubkey.toLowerCase()),
+          isNot(contains(bobPubkeyHex.toLowerCase())),
+          reason: 'a tap on the row must have staged, published, acked and '
+              'applied a real Remove commit',
+        );
+        expect(
+          relayRecorder.publishEventCalls,
+          isNotEmpty,
+          reason: 'the commit must have gone to the relay before it was '
+              'applied (publish-before-apply, Rule 13)',
+        );
+
+        // And the list the admin is looking at agrees.
+        expect(find.byKey(WidgetKeys.memberTile(bobPubkeyHex)), findsNothing);
       } finally {
         for (final dir in [aliceDir, bobDir]) {
           try {

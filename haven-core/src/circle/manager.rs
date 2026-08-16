@@ -3957,6 +3957,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn encrypt_location_publishes_neither_coordinate_nor_geohash() {
+        // The WHOLE serialized 445 is searched — content and every tag — because
+        // the falsification this guards is a coordinate, or the geohash derived
+        // from one, reaching event content OR a tag. The geohash is the half a
+        // content-only check misses: it is a lossy coordinate, not a coordinate.
+        let tp = setup_two_party_circle().await;
+        let loc = crate::location::LocationMessage::new(37.7749, -122.4194);
+        let (event, _n, _r) = tp
+            .alice
+            .encrypt_location(&tp.mls_group_id, &tp.alice_keys.public_key(), &loc, 60)
+            .await
+            .expect("encrypt");
+
+        // Anti-vacuity: the needles are the ones the sealed plaintext really
+        // carries, so this cannot pass by searching for something absent.
+        let plaintext = loc.to_string().expect("serialize");
+        for needle in ["37.7749", "-122.4194", loc.geohash.as_str()] {
+            assert!(
+                plaintext.contains(needle),
+                "the plaintext this path seals must contain '{needle}'"
+            );
+        }
+
+        let json = event.as_json();
+        for needle in ["37.7749", "-122.4194", loc.geohash.as_str()] {
+            assert!(
+                !json.contains(needle),
+                "'{needle}' left the device in the clear: a 445 must carry the \
+                 coordinate only as MLS ciphertext, never in content or a tag"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn evolution_commit_carries_no_expiration_tag() {
         // Commits/proposals are group HISTORY — a NIP-40 relay would stop
         // serving an expired commit and strand late joiners, so the engine

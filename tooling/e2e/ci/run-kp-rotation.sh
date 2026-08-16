@@ -77,6 +77,29 @@
 # the rotation clock — exactly where it was. The host suite proves that
 # in-process; proving it across a real relay is stronger.
 #
+# # A ONE-NETWORK guest, and why this lane needs one more than any other
+#
+# The AVD boots two networks: Wi-Fi and the slirp NAT that Android presents as
+# cellular. Both reach `10.0.2.2`, so either will do — until the wall clock
+# moves. A discontinuity this large makes Android re-evaluate every connected
+# network at once, whichever revalidates first takes the default, and the loser
+# takes it back a moment later. Sockets already open survive the handover;
+# sockets OPENED inside it fail instantly, before any SYN leaves the guest.
+#
+# That is not a hypothetical. In CI run 31868809387 the sequence was:
+#
+#   [kpr] CLOCK_RESTORED                                          40.324
+#   ConnectivityService: Switching to new default network  (101 -> 100)  40.825
+#   Bob's first socket -> "one own relay did not respond"          41.003
+#   ConnectivityService: Switching to new default network  (100 -> 101)  41.387
+#
+# strfry logged no connection at all for that attempt. The maintenance tick
+# then did the only correct thing — zero responders means it cannot confirm a
+# drop, so it fails closed with `NoOp` — and the lane reported it as a
+# KeyPackage defect. So phase 2 deletes the second network BEFORE the backdate,
+# and fails closed if it cannot: a two-network guest re-arms a race whose red is
+# misattributed to the product every time.
+#
 # Usage:
 #   run-kp-rotation.sh [<apk> [<target.dart>]]
 #   run-kp-rotation.sh --self-test      # hermetic; no device, no relay
@@ -87,9 +110,10 @@
 #                     build-kp-rotation-apk.sh.
 #
 # Optional env:
-#   KPR_DRIVE_TIMEOUT      per-drive bound. Default 24m.
-#   KPR_BACKDATE_SECS      how far back the clock goes. Default 6048000 (70d).
-#   KPR_SERVO_POLL_SECS    servo logcat re-read period. Default 1.
+#   KPR_DRIVE_TIMEOUT          per-drive bound. Default 24m.
+#   KPR_BACKDATE_SECS          how far back the clock goes. Default 6048000 (70d).
+#   KPR_SERVO_POLL_SECS        servo logcat re-read period. Default 1.
+#   KPR_WIFI_OFF_TIMEOUT_SECS  read-back budget for the Wi-Fi disable. Default 20.
 
 set -Eeuo pipefail
 
@@ -246,6 +270,52 @@ kpr_jump_record() {
   local jumpfile="${1:-}" seq="${2:-}"
   [[ -f "${jumpfile}" ]] || return 0
   { grep -aE "^seq=${seq} " "${jumpfile}" 2>/dev/null | tail -1; } || true
+}
+
+# kpr_default_network_handovers <logcat> — how many times the guest switched
+# its DEFAULT NETWORK *after* the drive observed the clock restore.
+#
+# DIAGNOSTIC, never a verdict. A 70-day wall-clock discontinuity makes Android
+# re-evaluate every connected network at once. With two of them up — the AVD
+# boots Wi-Fi *and* the slirp NAT — whichever revalidates first takes the
+# default and the loser takes it back a moment later, and a socket OPENED
+# inside that window fails instantly while established sockets sail through it.
+# That surfaces as "the relay did not respond", which reads exactly like a
+# product defect (CI run 31868809387: two handovers, 178 ms before and 384 ms
+# after the first post-jump connect). Phase 2 removes the second network so
+# the window cannot exist; this counts handovers anyway, so a run where that
+# removal silently stopped working says so in its own failure output instead of
+# costing another triage.
+#
+# Counted only AFTER the restore marker: the guest legitimately settles its
+# default network while the app is still starting, and counting that would make
+# the diagnostic cry wolf on every healthy run. `LC_ALL=C` because logcat is
+# binary-tainted and awk must not choke on it.
+kpr_default_network_handovers() {
+  local logfile="${1:-}" n
+  if [[ ! -f "${logfile}" ]]; then
+    echo 0
+    return 0
+  fi
+  n="$(LC_ALL=C awk -v mark="${MARK_CLOCK_RESTORED}" '
+    index($0, mark) { seen = 1; next }
+    seen && index($0, "Switching to new default network") { n++ }
+    END { print n + 0 }
+  ' "${logfile}" 2>/dev/null)" || n=""
+  echo "${n:-0}"
+}
+
+# wifi_is_off <settings-output> — exit 0 iff the guest reports Wi-Fi OFF.
+#
+# Mirrors run-single-avd-scenario.sh's predicate because it guards the same
+# trap on the same AVD image: `settings get global wifi_on` answers `0` or `1`,
+# `null` when the key was never written, and adb noise ("device offline",
+# "error: closed") when the shell raced the device. ONLY a literal `0` is off.
+# `null` is "the platform has no opinion", which is not evidence the second
+# network is gone — reading it as off would report success for a disable that
+# never happened, in precisely the case that needs catching.
+wifi_is_off() {
+  [[ "$(printf '%s' "${1:-}" | tr -d '\r' | head -n 1)" == "0" ]]
 }
 
 # The `settings put` commands that UNDO the phase-2 clock pin, one per line.
@@ -984,11 +1054,64 @@ run_self_test() {
   rc=0; declare -F drive_log_reports_test_failure >/dev/null || rc=1
   _case "drive-log failure predicate is in scope" 0 "${rc}"
 
+  # --- the one-network guest -----------------------------------------------
+  # (37) THE WI-FI READ-BACK. `svc wifi disable` exits 0 whether or not it took
+  #      effect, so this predicate is the only thing between a real disable and
+  #      a silent no-op. `null` (the platform holds no opinion) and adb noise
+  #      must NEVER read as off: those are exactly the cases where the second
+  #      network is still up and the clock restore can still flip the default.
+  local wifi_pred_rc=0
+  wifi_is_off '0' || wifi_pred_rc=1
+  wifi_is_off "$(printf '0\r\n')" || wifi_pred_rc=1
+  ! wifi_is_off '1' || wifi_pred_rc=1
+  ! wifi_is_off 'null' || wifi_pred_rc=1
+  ! wifi_is_off '' || wifi_pred_rc=1
+  ! wifi_is_off 'adb: device offline' || wifi_pred_rc=1
+  _case "only an unambiguous 0 reads as Wi-Fi OFF" 0 "${wifi_pred_rc}"
+
+  # (38) THE WI-FI STATE-RESTORE FIXTURE, twin of (34). Phase 2 turns the radio
+  #      off; every Android lane here shares one AVD cache key, so the disable
+  #      needs a matching re-enable that cleanup() actually issues. Checked
+  #      against the script's own text because nothing else fails when one half
+  #      of the pair is deleted.
+  local wifi_rc=0
+  grep -qE '^adb -s .*shell svc wifi disable' "${self}" || wifi_rc=1
+  sed -n '/^restore_wifi_radio()/,/^}/p' "${self}" \
+    | grep -qE 'svc wifi enable' || wifi_rc=1
+  sed -n '/^cleanup()/,/^}/p' "${self}" \
+    | grep -qE '^[[:space:]]+restore_wifi_radio$' || wifi_rc=1
+  _case "the Wi-Fi radio is disabled AND restored by cleanup()" 0 "${wifi_rc}"
+
+  # (39) THE HANDOVER COUNTER. Counts default-network switches only AFTER the
+  #      restore marker: the guest legitimately settles its default while the
+  #      app is still starting, and counting that would make the diagnostic cry
+  #      wolf on every healthy run. A counter that silently returns 0 would let
+  #      the next occurrence of run 31868809387's failure be misread as a
+  #      KeyPackage defect all over again.
+  printf '%s\n' \
+    'D ConnectivityService: Switching to new default network for: uid 0' \
+    "I/flutter ( 40): ${MARK_CLOCK_RESTORED} jumpedSecs=6047999" \
+    'D ConnectivityService: Switching to new default network for: uid 1' \
+    'I netd    : networkSetDefault(100)' \
+    'D ConnectivityService: Switching to new default network for: uid 2' \
+    > "${tmp}/handover.log"
+  _eq_case "handovers counted only AFTER the clock restore" "2" \
+    "$(kpr_default_network_handovers "${tmp}/handover.log")"
+  printf '%s\n' \
+    'D ConnectivityService: Switching to new default network for: uid 0' \
+    > "${tmp}/handover-preonly.log"
+  _eq_case "a handover BEFORE the restore is not counted" "0" \
+    "$(kpr_default_network_handovers "${tmp}/handover-preonly.log")"
+  _eq_case "a missing capture reports no handovers" "0" \
+    "$(kpr_default_network_handovers "${tmp}/handover-absent.log")"
+  _eq_case "a healthy capture reports no handovers" "0" \
+    "$(kpr_default_network_handovers "${tmp}/ok.log")"
+
   if (( fails )); then
     echo "run-kp-rotation.sh --self-test: FAILURES (see above)" >&2
     return 1
   fi
-  echo "run-kp-rotation.sh --self-test: all 36 fixture groups passed"
+  echo "run-kp-rotation.sh --self-test: all 39 fixture groups passed"
   return 0
 }
 
@@ -1022,6 +1145,10 @@ readonly DRIVE_TIMEOUT="${KPR_DRIVE_TIMEOUT:-24m}"
 
 # How often the servo re-reads logcat for a new request.
 readonly SERVO_POLL_SECS="${KPR_SERVO_POLL_SECS:-1}"
+
+# How long phase 2 waits for `wifi_on` to READ BACK as 0. Generous because the
+# radio teardown is asynchronous and this runs once, before the drive.
+readonly WIFI_OFF_TIMEOUT_SECS="${KPR_WIFI_OFF_TIMEOUT_SECS:-20}"
 
 # Fail closed on an undeclared receive path. `liveSyncEnabled` is
 # `bool.fromEnvironment('HAVEN_LIVE_SYNC', defaultValue: true)`, so an omitted
@@ -1159,6 +1286,23 @@ restore_auto_time_pin() {
   done < <(auto_time_restore_cmds)
 }
 
+# The guest's current `wifi_on` setting, verbatim (for [`wifi_is_off`]).
+wifi_state() {
+  adb -s "${DEVICE}" shell settings get global wifi_on 2>/dev/null \
+    | tr -d '\r' | head -n 1
+}
+
+# Re-enables the Wi-Fi radio phase 2 turned off.
+#
+# Best-effort for the same reason `restore_auto_time_pin` is: it runs from the
+# EXIT trap, which is also reached when the device was never ready, and a
+# restore that killed the trap would skip the secret scan below it (Security
+# Rule 6). Idempotent, and every Android lane in this repo shares one AVD cache
+# key — a radio left off would be the next lane's mystery, not ours.
+restore_wifi_radio() {
+  adb -s "${DEVICE}" shell svc wifi enable >/dev/null 2>&1 || true
+}
+
 # Background servo: fulfils `REQ_CLOCK` requests as the drive emits them.
 #
 # Polls the growing logcat capture rather than consuming a pipe, so a servo
@@ -1213,6 +1357,7 @@ cleanup() {
   # …and un-pin the automatic sync. NOT gated on the servo: the pin is applied
   # in phase 2, long before the servo exists.
   restore_auto_time_pin
+  restore_wifi_radio
   if [[ -n "${LOGCAT_PID}" ]] && kill -0 "${LOGCAT_PID}" 2>/dev/null; then
     kill "${LOGCAT_PID}" 2>/dev/null || true
   fi
@@ -1249,6 +1394,17 @@ fail() {
     || echo "(none — the drive target reached no checkpoint at all)" >&2
   echo "---- clock servo records ----" >&2
   cat "${JUMP_LOG}" 2>/dev/null >&2 || echo "(no servo records)" >&2
+  echo "---- guest default-network handovers after the clock restore ----" >&2
+  local handovers
+  handovers="$(kpr_default_network_handovers "${LOGCAT_FILE}")"
+  echo "  ${handovers} recorded after '${MARK_CLOCK_RESTORED}'." >&2
+  if (( handovers > 0 )); then
+    echo "  The guest changed its DEFAULT NETWORK while the drive was running." \
+         "Phase 2 disables Wi-Fi precisely so this cannot happen, so a nonzero" \
+         "count means that disable did not take. Any socket the app OPENED in" \
+         "that window failed before a SYN left the guest — read every" \
+         "'relay did not respond' below as the handover, not as a defect." >&2
+  fi
   echo "---- device clock now ----" >&2
   adb -s "${DEVICE}" shell date -u 2>/dev/null >&2 || true
   exit 1
@@ -1302,6 +1458,35 @@ This lane needs a userdebug image (target: google_apis). Without a writable \
 clock the KeyPackage under test is seconds old, no rotation is due, and a \
 GREEN result would prove nothing."
 fi
+
+# Delete the SECOND network before the clock moves. See the header: with Wi-Fi
+# and the slirp NAT both up, the backdate's restore makes Android re-evaluate
+# both and hand the default back and forth, and every socket the app opens in
+# that window dies before it reaches the relay.
+#
+# READ BACK, NEVER ASSUMED: `svc wifi disable` exits 0 whether or not it took
+# effect. Unlike run-single-avd-scenario.sh — which only PREFERS one network and
+# therefore warns — this lane fails closed, because it is the lane that creates
+# the discontinuity, and a two-network guest here re-arms a race whose red is
+# attributed to the KeyPackage code every time.
+echo "Phase 2/4 — disabling guest Wi-Fi so the slirp NAT is the only network..."
+adb -s "${DEVICE}" shell svc wifi disable >/dev/null 2>&1 || true
+wifi_waited=0
+wifi_on="$(wifi_state)"
+while (( wifi_waited < WIFI_OFF_TIMEOUT_SECS )) && ! wifi_is_off "${wifi_on}"; do
+  sleep 2
+  wifi_waited=$(( wifi_waited + 2 ))
+  wifi_on="$(wifi_state)"
+done
+if ! wifi_is_off "${wifi_on}"; then
+  fail "guest Wi-Fi did not report off within ${WIFI_OFF_TIMEOUT_SECS}s \
+(wifi_on='${wifi_on:-<unreadable>}'). Two live networks turn this lane's own \
+70-day clock restore into a default-network handover, and the app sockets \
+opened inside it fail instantly — which this lane would report as a KeyPackage \
+rotation defect. Refusing to run rather than produce that verdict."
+fi
+echo "Phase 2/4 — Wi-Fi off after ${wifi_waited}s (wifi_on=${wifi_on})."
+
 # NITZ / NTP would silently undo the backdate. Turn both off BEFORE applying
 # it, and verify: `settings put` exits 0 whether or not it took effect.
 adb -s "${DEVICE}" shell settings put global auto_time 0 >/dev/null 2>&1 || true

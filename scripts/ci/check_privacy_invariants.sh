@@ -653,12 +653,24 @@ check_tests() { # check_tests <manifest> <root> <skip-manifest>
         body="$(sed -n "${start},${end}p" "${path}")"
         ;;
       *.dart)
+        # The scan is materialised BEFORE it is matched, never piped into the
+        # matcher: the matcher stops at the first hit, and on a runner where
+        # SIGPIPE is ignored (GitHub's, inherited from the .NET agent) that
+        # closed pipe turns every remaining `dart_scan` write into a reported
+        # EPIPE — hundreds of "printf: write error: Broken pipe" lines that bury
+        # the one real FAIL. Materialising also makes a genuinely broken scan
+        # reportable instead of being swallowed as "test not declared".
+        local scanned rec
+        if ! scanned="$(dart_scan "${path}")"; then
+          fail_msg "[rule 3] ${inv}: could not scan ${file} for test declarations."
+          fail=1
+          continue
+        fi
         # Compared against everything past the third tab, so a name that itself
         # contains a tab is matched whole rather than truncated to its head.
-        local rec
-        rec="$(dart_scan "${path}" | awk -F'\t' -v want="${name}" '
+        rec="$(awk -F'\t' -v want="${name}" '
           { nm = $0; sub(/^[0-9]+\t[0-9]+\t[01]\t/, "", nm)
-            if (nm == want) { printf "%s\t%s\t%s\n", $1, $2, $3; exit } }')"
+            if (nm == want) { printf "%s\t%s\t%s\n", $1, $2, $3; exit } }' <<< "${scanned}")"
         if [[ -z "${rec}" ]]; then
           fail_msg "[rule 3] ${inv}: no test named '${name}' is declared in ${file} \
 (names split across adjacent literals are joined and escapes resolved before matching, so \

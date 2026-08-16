@@ -62,18 +62,25 @@
 /// ## The app-op phase (ACT 1) — the only arrangement that can see the cache
 ///
 /// `pm revoke` MASKS the hazard above: the cache is process-local and dies
-/// with the kill, so a revoke can never observe it. `cmd appops set PKG
-/// android:fine_location deny` is the reachable variant. It withdraws
+/// with the kill, so a revoke can never observe it. `cmd appops set --uid
+/// PKG android:fine_location deny` is the reachable variant. It withdraws
 /// location access WITHOUT killing the process and WITHOUT changing
 /// anything the permission gate reads — `checkPermission()` and
 /// `getLocationAccuracy()` both go to `ContextCompat.checkSelfPermission`,
-/// which does not consult the app-op — and AOSP then drops every delivery
-/// silently, raising neither a stream error nor a close. Until
+/// which does not consult the app-op — and AOSP then drops deliveries with
+/// no guaranteed stream error or close. Until
 /// `GeolocatorLocationService._platformStillPermitsLocation` was added,
 /// that state kept publishing the user's last position for the rest of the
 /// 168 s window. So ACT 1 runs it, before the revoke, against a live
 /// session, and asserts the promise itself: no coordinate produced, none
 /// published.
+///
+/// `--uid` is not optional. `AppOpsService` resolves a non-default UID mode
+/// and returns it without ever reading the package mode, and a `whileInUse`
+/// grant leaves the UID mode at `foreground` — allowed for a foregrounded
+/// app. The package-scoped form this lane shipped with therefore withdrew
+/// nothing while `cmd appops get` still printed `deny` on the package line
+/// (CI run 31868809387), and the shell now gates on the EFFECTIVE mode.
 ///
 /// Two things stop it passing vacuously, and neither is optional:
 ///
@@ -552,9 +559,19 @@ void main() {
       /// The age of the newest fix the app's own position stream delivered.
       ///
       /// `getLocationStream()` tees every emission into the service's cache
-      /// and judges that cache by the same GPS fix time, so this IS the
-      /// cache's age — measurable from outside the service, which has no
-      /// accessor for it and must not grow one for a test.
+      /// and judges that cache by the same GPS fix time, so this bounds the
+      /// cache's age from ABOVE — measurable from outside the service, which
+      /// has no accessor for it and must not grow one for a test.
+      ///
+      /// An upper bound, not the age itself, and the gap is real: every
+      /// `_noteAccessLost` path CLEARS the cache while this provider keeps
+      /// its last value. Run 31868809387 caught exactly that — an app-op mode
+      /// edit re-evaluated the live registration, geolocator surfaced it as a
+      /// stream error, the service dropped the fix, and this still reported a
+      /// 129 s-old one. So a fresh reading proves the cache was not merely
+      /// STALE; it does not prove the cache was still populated, and the
+      /// refusal below is a claim about the promise ("no coordinate is
+      /// produced"), never about which door inside the service refused.
       Duration? newestStreamFixAge() {
         final position = container.read(locationStreamProvider).valueOrNull;
         if (position == null) return null;
