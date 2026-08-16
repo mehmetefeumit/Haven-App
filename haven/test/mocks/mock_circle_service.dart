@@ -299,6 +299,30 @@ class MockCircleService implements CircleService {
     if (shouldThrowOnRemoveMember) {
       throw const CircleServiceException('Mock removeMember error');
     }
+    // Mirrors the real service: a subsequent getVisibleCircles() is a fresh
+    // read of the (now-changed) engine state, not a cache of the pre-removal
+    // roster. Without this, a test pumping the real provider chain (rather
+    // than overriding selectedCircleProvider with a frozen snapshot) could
+    // never observe a successful removal.
+    final index = _circles.indexWhere(
+      (c) => _listEquals(c.mlsGroupId, mlsGroupId),
+    );
+    if (index != -1) {
+      final circle = _circles[index];
+      _circles[index] = Circle(
+        mlsGroupId: circle.mlsGroupId,
+        nostrGroupId: circle.nostrGroupId,
+        displayName: circle.displayName,
+        circleType: circle.circleType,
+        relays: circle.relays,
+        membershipStatus: circle.membershipStatus,
+        members: circle.members
+            .where((m) => m.pubkey != memberPubkeyHex)
+            .toList(),
+        createdAt: circle.createdAt,
+        updatedAt: circle.updatedAt,
+      );
+    }
   }
 
   /// Calls to [addMember], in order.

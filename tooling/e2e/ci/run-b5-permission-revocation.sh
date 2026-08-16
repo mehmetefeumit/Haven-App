@@ -64,13 +64,18 @@
 # CI run 31868809387 read the mode back as `deny` while the app went on
 # receiving fixes and published five of them.
 #
+# The mode the platform then STORES at UID scope is `ignore`, not the `deny`
+# that was asked for, and that is the denial WORKING rather than failing — see
+# b5_appops_mode_withholds, which is why the read-back below tests a set of
+# withholding modes and not one string.
+#
 # It is gated twice because either gate alone passes vacuously. `cmd appops
 # set` exits 0 whether or not it took and an app-op has no `dumpsys package`
 # line, so the EFFECTIVE mode is READ BACK (`cmd appops get`, uid scope over
-# package scope — see b5_appops_mode) and a mode that is not `deny` is fatal
-# on the spot. A mode that reads `deny` and changes nothing is a different
-# failure the read-back cannot see, so the drive target must independently
-# report that real location reads stopped working.
+# package scope — see b5_appops_mode) and a mode the platform still serves
+# location under is fatal on the spot. A mode that reads as withholding and
+# changes nothing is a different failure the read-back cannot see, so the drive
+# target must independently report that real location reads stopped working.
 #
 # # The oracle
 #
@@ -151,6 +156,14 @@
 #      `deny` on the package line. Both the SET and the READ-BACK have to be
 #      uid-aware, or the phase asserts against an app that never lost access
 #      and reports its perfectly legitimate publishes as a leak.
+#   2d. THE PLATFORM REWRITES THE MODE IT WAS ASKED FOR. `set --uid ... deny`
+#      lands as UID mode `ignore`, because `deny` (MODE_ERRORED) drives
+#      AppOpsService to flag the runtime permission REVOKED_COMPAT and the
+#      permission↔app-op sync answers that flag with MODE_IGNORED. So the
+#      read-back must accept the modes that WITHHOLD, not the string that was
+#      typed — and `ignore` is also the only one of the two compatible with
+#      this phase's premise, since MODE_ERRORED is defined to raise a fatal
+#      error rather than fail silently. See b5_appops_mode_withholds.
 #   3. RE-PROMPTING. `getCurrentLocation()` calls `requestPermission()`
 #      whenever it sees `denied` (:268), which raises the SYSTEM permission
 #      dialog unless the grant is USER_FIXED — from a periodic publish tick,
@@ -456,9 +469,10 @@ b5_appops_scoped_mode() {
 # `cmd appops get` printing NOTHING is a real state (no entry recorded — see
 # the probe caveat in CI_HARDENING_BACKLOG.md, Workstream B), which is why
 # this echoes the empty string rather than guessing a default: the caller
-# decides, and both callers here treat "not the mode I asked for" as a
-# failure. An explicit `default` UID mode is the no-override state and defers
-# to the package mode for the same reason `AppOpsService` does.
+# decides, and every caller here runs the answer through
+# b5_appops_mode_withholds. An explicit `default` UID mode is the no-override
+# state and defers to the package mode for the same reason `AppOpsService`
+# does.
 b5_appops_mode() {
   local dump="${1:-}" op="${2:-}" uid_mode
   uid_mode="$(b5_appops_scoped_mode "${dump}" "${op}" uid)"
@@ -467,6 +481,48 @@ b5_appops_mode() {
     return 0
   fi
   b5_appops_scoped_mode "${dump}" "${op}" package
+}
+
+# b5_appops_mode_withholds <mode> — 0 when the platform serves NO location
+# under <mode>, 1 for every mode it does serve location under, the empty read
+# included.
+#
+# WHY A SET AND NOT `[[ $mode == deny ]]`: `ignore` IS THE SUCCESSFUL DENIAL.
+# `cmd appops set --uid PKG android:fine_location deny` asks for MODE_ERRORED,
+# but `AppOpsService.setUidMode` runs `updatePermissionRevokedCompat` first,
+# which stamps FLAG_PERMISSION_REVOKED_COMPAT on ACCESS_FINE_LOCATION for any
+# mode that is neither `allow` nor `foreground`; `PermissionPolicyService`
+# watches that state and its `shouldGrantAppOp()` returns false on exactly that
+# flag, so its sync writes the UID mode back as MODE_IGNORED. `ignore` is the
+# platform's own word for this op being denied, and CI run 31956248635 read it
+# back on the first run of the `--uid` form.
+#
+# It is also the mode this phase NEEDS. MODE_IGNORED is specified as "silently
+# fail (it should not cause the app to crash)" and REVOKED_COMPAT as data
+# "protected by a no-op … instead of crashing the client", where MODE_ERRORED
+# is "a fatal error, typically a SecurityException". A live process that keeps
+# running while location is withheld is the only arrangement in which the
+# stale-fix cache is observable at all — kill the process and there is no cache
+# left to leak, which is precisely why `pm revoke` cannot reach this.
+#
+# `deny` stays accepted alongside it because it withholds too: the location
+# stack asks `mode == MODE_ALLOWED` and nothing finer
+# (`SystemAppOpsHelper.checkOpNoThrow` / `noteOpNoThrow` / `startOpNoThrow`),
+# so an image that stores what was asked for still withdraws access.
+#
+# NOTHING ELSE IS A NEAR MISS, and each rejected mode means something different:
+#   allow       access intact.
+#   foreground  what the sync leaves for a `whileInUse` grant, and ALLOWED for
+#               a foregrounded app — the vacuous pass of CI run 31868809387.
+#   default     no override at either scope, and OP_FINE_LOCATION's own default
+#               mode is MODE_ALLOWED.
+#   <empty>     nothing read back at all; the fail-open direction this gate
+#               exists to close.
+b5_appops_mode_withholds() {
+  case "${1:-}" in
+    ignore | deny) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # b5_expiring_445_ids <scanfile> — echoes the sorted, unique ids of every
@@ -593,19 +649,20 @@ event(s) — the absence oracle at (7) is proven able to see a publish."
   # (A1) DISCRIMINATION. Did the app-op actually change, and was it put back?
   #      `cmd appops set` exits 0 either way and there is no `dumpsys` line
   #      to fall back on, so without this a no-op `set` passes everything.
-  if [[ "${appops_denied}" != "deny" ]]; then
+  if ! b5_appops_mode_withholds "${appops_denied}"; then
     b5_finding "\`cmd appops get\` read '${appops_denied:-<nothing>}' for \
-${APPOPS_FINE} after the lane denied it, not 'deny'. The app-op never \
-changed, so nothing in this phase observed an app that lost location access \
-— and every assertion in it passes trivially."
-  elif [[ "${appops_restored}" == "deny" ]]; then
-    b5_finding "${APPOPS_FINE} was still denied after the lane restored it. \
-The runner is left with location access withheld from the package, which \
-poisons every later scenario on it."
+${APPOPS_FINE} after the lane denied it — a mode the platform still serves \
+location under (b5_appops_mode_withholds). The app-op never changed, so \
+nothing in this phase observed an app that lost location access — and every \
+assertion in it passes trivially."
+  elif b5_appops_mode_withholds "${appops_restored}"; then
+    b5_finding "${APPOPS_FINE} still read \
+'${appops_restored:-<nothing>}' after the lane restored it — location is \
+still withheld from the package, which poisons every later scenario on it."
   else
-    b5_note "the location app-op read 'deny' while the window ran and \
-'${appops_restored:-<default>}' after it — the condition this phase rests on \
-provably varied."
+    b5_note "the location app-op read '${appops_denied}' while the window ran \
+and '${appops_restored:-<default>}' after it — the condition this phase rests \
+on provably varied."
   fi
 
   # (A2) ANTI-VACUITY. A cold cache has nothing to leak, and a phase with no
@@ -1158,6 +1215,39 @@ type=LocationServiceException streamAgeMs=52000" \
   _eq_case "the fine op is not answered by a neighbouring coarse uid entry" \
     "" "$(b5_appops_mode "${tmp}/appops-uid-coarse.log" "${APPOPS_FINE}")"
 
+  # WHAT `set --uid ... deny` ACTUALLY LEAVES BEHIND, verbatim from CI run
+  # 31956248635 — the first run of the uid-scoped form. The platform stored
+  # `ignore`, not the `deny` that was asked for, because the requested
+  # MODE_ERRORED drove FLAG_PERMISSION_REVOKED_COMPAT onto the permission and
+  # the sync answered that flag with MODE_IGNORED. The uid scope still governs.
+  printf '%s\n' \
+    'Uid mode: FINE_LOCATION: ignore' \
+    'FINE_LOCATION: deny; time=+39s967ms ago' \
+    > "${tmp}/appops-uid-ignore.log"
+  _eq_case "the uid-scoped 'ignore' the platform stores is read back" \
+    "ignore" \
+    "$(b5_appops_mode "${tmp}/appops-uid-ignore.log" "${APPOPS_FINE}")"
+
+  # --- b5_appops_mode_withholds -------------------------------------------
+  #
+  # THE ACCEPT SET IS THE GATE. Widening it past the modes that provably
+  # withhold location would re-open exactly the vacuous window the read-back
+  # exists to close, so both directions are pinned mode by mode.
+  local mode
+  for mode in ignore deny; do
+    rc=0; b5_appops_mode_withholds "${mode}" || rc=1
+    _case "'${mode}' withholds location" 0 "${rc}"
+  done
+  # `foreground` is the 31868809387 vacuous pass, `default` is
+  # OP_FINE_LOCATION's own MODE_ALLOWED, and the empty read is the fail-open
+  # direction. None of them may ever read as a denial.
+  for mode in allow foreground default '' unknown; do
+    rc=0; b5_appops_mode_withholds "${mode}" || rc=1
+    _case "'${mode:-<nothing>}' does NOT withhold location" 1 "${rc}"
+  done
+  rc=0; b5_appops_mode_withholds || rc=1
+  _case "a missing argument does NOT withhold location" 1 "${rc}"
+
   # --- shared libs are still wired ----------------------------------------
   # Their real behaviour is exercised elsewhere (drive-log-lib.sh's own
   # self-test; detect_strfry_bin needs docker). What is checkable here is that
@@ -1454,6 +1544,51 @@ type=LocationServiceException streamAgeMs=52000" \
     >/dev/null || rc=$?
   _case "a missing app-op phase fails the oracle" 1 "${rc}"
 
+  # (45) THE READING A REAL DEVICE PRODUCES. `set --uid ... deny` is stored as
+  #      `ignore`, and that is the denial having taken — the run this pair was
+  #      written for (31956248635) aborted on a gate that demanded the literal
+  #      `deny`. The restored side lands on `foreground`, which is what the
+  #      permission sync writes back for a `whileInUse` grant once the
+  #      revoked-compat flag is cleared. Both halves must pass.
+  rc=0
+  b5_run_oracle "${tmp}/full.log" "${tmp}/oracle-baseline.ids" \
+    "${tmp}/oracle-new.ids" 1 "${tmp}/oracle-appops.ids" ignore foreground \
+    >/dev/null || rc=$?
+  _case "a uid 'ignore' denial restored to 'foreground' passes" 0 "${rc}"
+
+  # (46) …and the containment half of (35) for the mode the platform actually
+  #      leaves: a restore that reads `ignore` is location STILL WITHHELD, and
+  #      the gate that only knew the string `deny` could not see it. That is
+  #      the state a uid-scoped `default` restore produces, so this is a
+  #      reachable regression, not a hypothetical one.
+  rc=0
+  b5_run_oracle "${tmp}/full.log" "${tmp}/oracle-baseline.ids" \
+    "${tmp}/oracle-new.ids" 1 "${tmp}/oracle-appops.ids" ignore ignore \
+    >/dev/null || rc=$?
+  _case "an app-op left on 'ignore' fails the oracle" 1 "${rc}"
+
+  # (47) The remaining non-withholding modes, each fatal on the denied side for
+  #      its own reason: `allow` never lost access, `default` is
+  #      OP_FINE_LOCATION's own MODE_ALLOWED. (`foreground` is (33), the empty
+  #      read is (34).) Without these the accept set could be widened to
+  #      "anything but allow" and the self-test would not notice.
+  for mode in allow default; do
+    rc=0
+    b5_run_oracle "${tmp}/full.log" "${tmp}/oracle-baseline.ids" \
+      "${tmp}/oracle-new.ids" 1 "${tmp}/oracle-appops.ids" "${mode}" allow \
+      >/dev/null || rc=$?
+    _case "a denied-side read of '${mode}' fails the oracle" 1 "${rc}"
+  done
+
+  # (48) An EMPTY restored read is not a denial — nothing was recorded at
+  #      either scope, which for this op is MODE_ALLOWED. It must not be
+  #      swept into the containment failure above.
+  rc=0
+  b5_run_oracle "${tmp}/full.log" "${tmp}/oracle-baseline.ids" \
+    "${tmp}/oracle-new.ids" 1 "${tmp}/oracle-appops.ids" ignore '' \
+    >/dev/null || rc=$?
+  _case "an empty restored read passes the containment gate" 0 "${rc}"
+
   # --- the relay-poll capture must survive a PASSING run --------------------
   #
   # THE LANE-CANNOT-BE-GREEN FIXTURE. B5 passes when the relay sees NO new
@@ -1680,18 +1815,21 @@ cleanup() {
   fi
   # Restore BEFORE logcat is stopped so the restore itself is captured.
   #
-  # The app-ops go back to `default` rather than to the `allow` Phase 4 uses
-  # mid-lane: `allow` is what makes the mid-lane restore VERIFIABLE and lets
-  # ACT 1 carry on, while `default` is what leaves the runner in the state the
-  # platform would have chosen for itself. Unconditional, because the lane can
-  # die inside the denied window and a package left without location access
-  # silently poisons every later job on this runner.
-  #
   # BOTH SCOPES, because Phase 4 denies both. The uid one is the load-bearing
-  # half here: it OUTRANKS the package mode, so a uid `deny` left behind is a
+  # half here: it OUTRANKS the package mode, so a uid denial left behind is a
   # package with no location access no matter what the package mode says.
+  # Unconditional, because the lane can die inside the denied window and a
+  # package left without location access silently poisons every later job on
+  # this runner.
+  #
+  # The uid scope goes to `allow`, NOT to `default`, for the reason spelled out
+  # at the Phase 4 restore: `default` leaves FLAG_PERMISSION_REVOKED_COMPAT
+  # standing and the permission↔app-op sync answers it with `ignore`, so the
+  # tidy-looking teardown is the one that leaves location withheld. Only the
+  # uid `allow` clears the flag; the package scope can then go to `default`,
+  # which is the no-override state and never touches that flag.
   for op in "${APPOPS_FINE}" "${APPOPS_COARSE}"; do
-    adb -s "${DEVICE}" shell cmd appops set --uid "${PKG}" "${op}" default \
+    adb -s "${DEVICE}" shell cmd appops set --uid "${PKG}" "${op}" allow \
       >/dev/null 2>&1 || true
     adb -s "${DEVICE}" shell cmd appops set "${PKG}" "${op}" default \
       >/dev/null 2>&1 || true
@@ -1876,18 +2014,28 @@ read_appops_mode() {
   b5_appops_mode "${dump}" "${op}"
 }
 
-# wait_for_appops_mode <op> <want> <timeout-secs> <dumpfile> — poll the
-# read-back until it reports <want>, then echo it.
+# wait_for_appops_mode <op> <withheld|permitted> <timeout-secs> <dumpfile> —
+# poll the read-back until location is withheld / served, then echo the mode.
+#
+# Waits on the PROPERTY, not on a mode name: the platform rewrites the mode it
+# was asked for (b5_appops_mode_withholds), so waiting for a literal `deny`
+# burns the whole timeout on a denial that already took, and waiting for a
+# literal `allow` does the same on a restore the sync normalised to
+# `foreground`.
 #
 # Echoes whatever it LAST read on timeout rather than failing here, so the
 # caller reports the actual mode ("foreground", or nothing at all) instead of
 # a generic timeout — the difference between "the set was refused" and "this
 # image words its output differently".
 wait_for_appops_mode() {
-  local op="$1" want="$2" timeout_s="$3" dump="$4" waited=0 mode=""
+  local op="$1" want="$2" timeout_s="$3" dump="$4" waited=0 mode="" state
   while (( waited < timeout_s )); do
     mode="$(read_appops_mode "${op}" "${dump}")"
-    if [[ "${mode}" == "${want}" ]]; then
+    state=permitted
+    if b5_appops_mode_withholds "${mode}"; then
+      state=withheld
+    fi
+    if [[ "${state}" == "${want}" ]]; then
       break
     fi
     sleep 2
@@ -2121,11 +2269,13 @@ DRIVE_PID=$!
 #
 #   * `cmd appops set` exits 0 whether or not it took, and there is no
 #     `dumpsys package` line for an app-op — so the mode is READ BACK, and a
-#     mode that is not `deny` is fatal here rather than a finding 20 minutes
-#     later. (B7's discrimination gate, in this lane's terms.)
-#   * a mode that reads `deny` and changes nothing is a different failure and
-#     invisible to the read-back, so the DRIVE TARGET has to report that real
-#     location reads stopped working (`APPOPS_OBSERVED`).
+#     mode the platform still serves location under (b5_appops_mode_withholds
+#     — `ignore` is what this `deny` normalises to, and is a real denial) is
+#     fatal here rather than a finding 20 minutes later. (B7's discrimination
+#     gate, in this lane's terms.)
+#   * a mode that reads as withholding and changes nothing is a different
+#     failure and invisible to the read-back, so the DRIVE TARGET has to report
+#     that real location reads stopped working (`APPOPS_OBSERVED`).
 #
 # The denial is then held for at least APPOPS_MIN_DENY_SECS whatever the app
 # does, so the relay-side absence spans a full scheduler interval.
@@ -2154,20 +2304,23 @@ if wait_for_marker "${MARK_APPOPS_ARMED}" "${ARM_MARKER_TIMEOUT}"; then
   done
   appops_denied_at="$(date +%s)"
 
-  appops_denied_mode="$(wait_for_appops_mode "${APPOPS_FINE}" deny \
+  appops_denied_mode="$(wait_for_appops_mode "${APPOPS_FINE}" withheld \
     "${APPOPS_VERIFY_TIMEOUT}" "${APPOPS_DENIED_DUMP}")"
-  if [[ "${appops_denied_mode}" != "deny" ]]; then
+  if ! b5_appops_mode_withholds "${appops_denied_mode}"; then
     sed 's/^/    /' "${APPOPS_DENIED_DUMP}" >&2 || true
     fail "\`cmd appops get ${PKG} ${APPOPS_FINE}\` reads an EFFECTIVE mode of" \
          "'${appops_denied_mode:-<nothing>}' after \`cmd appops set ... deny\`," \
-         "not 'deny'. \`set\` exits 0 even when it refuses and an app-op has no" \
-         "\`dumpsys package\` line, so this read-back is the ONLY thing that" \
-         "knows the condition changed — and every app-side assertion in this" \
-         "window passes trivially against an app that never lost access." \
-         "'foreground' here means the UID-scoped mode is still the one the" \
-         "permission sync left behind, i.e. the \`set --uid\` above did not" \
-         "take: check whether this image's \`cmd appops set\` accepts --uid" \
-         "(the dump printed above shows both scopes)."
+         "and the platform still serves location under it. \`set\` exits 0 even" \
+         "when it refuses and an app-op has no \`dumpsys package\` line, so this" \
+         "read-back is the ONLY thing that knows the condition changed — and" \
+         "every app-side assertion in this window passes trivially against an" \
+         "app that never lost access. The withholding modes are 'ignore' (what" \
+         "the permission↔app-op sync normalises this \`deny\` to, and the" \
+         "expected reading) and 'deny'. 'foreground' means the UID-scoped mode" \
+         "is still the one the permission sync left behind, i.e. the \`set" \
+         "--uid\` above did not take: check whether this image's \`cmd appops" \
+         "set\` accepts --uid. 'allow' or 'default' mean nothing was withdrawn" \
+         "at either scope. The dump printed above shows both scopes."
   fi
   echo "  verified ${APPOPS_FINE}: ${appops_denied_mode}"
 
@@ -2196,21 +2349,27 @@ if wait_for_marker "${MARK_APPOPS_ARMED}" "${ARM_MARKER_TIMEOUT}"; then
        "full kLocationPublishMaxInterval)"
 
   echo "Phase 4/7 — restoring the location app-op..."
-  # The uid scope goes back to `default` — the no-override state the platform
-  # would have chosen — and the package scope to `allow`, which is what makes
-  # the restore VERIFIABLE (see the read-back below) and lets ACT 1 carry on.
-  # With the uid override cleared, `allow` is the effective mode again.
+  # `allow` AT BOTH SCOPES, and the uid one must NOT go back to `default`.
+  # Clearing the uid override looks like the tidier restore and is the one that
+  # cannot work: `default` is not `allow` or `foreground`, so
+  # `updatePermissionRevokedCompat` LEAVES FLAG_PERMISSION_REVOKED_COMPAT set on
+  # the permission, and the sync immediately writes the uid mode back to
+  # `ignore` — location still withheld, for the whole rest of the lane. Only a
+  # uid-scoped `allow` clears that flag; the sync then normalises the mode to
+  # the `foreground` a `whileInUse` grant implies, which is the no-override
+  # state the platform would have chosen anyway.
   for op in "${APPOPS_FINE}" "${APPOPS_COARSE}"; do
-    adb -s "${DEVICE}" shell cmd appops set --uid "${PKG}" "${op}" default \
+    adb -s "${DEVICE}" shell cmd appops set --uid "${PKG}" "${op}" allow \
       2>&1 | sed 's/^/    /' || true
     adb -s "${DEVICE}" shell cmd appops set "${PKG}" "${op}" allow 2>&1 \
       | sed 's/^/    /' || true
   done
-  appops_restored_mode="$(wait_for_appops_mode "${APPOPS_FINE}" allow \
+  appops_restored_mode="$(wait_for_appops_mode "${APPOPS_FINE}" permitted \
     "${APPOPS_VERIFY_TIMEOUT}" "${APPOPS_RESTORED_DUMP}")"
-  if [[ "${appops_restored_mode}" == "deny" ]]; then
+  if b5_appops_mode_withholds "${appops_restored_mode}"; then
     sed 's/^/    /' "${APPOPS_RESTORED_DUMP}" >&2 || true
-    fail "${APPOPS_FINE} still reads 'deny' after the restore. The revoke" \
+    fail "${APPOPS_FINE} still reads '${appops_restored_mode}' after the" \
+         "restore, a mode the platform withholds location under. The revoke" \
          "half below would then be measuring an app that had already lost" \
          "access for a second reason, and the runner would be left with" \
          "location withheld from ${PKG}."

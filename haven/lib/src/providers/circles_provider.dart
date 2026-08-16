@@ -82,9 +82,15 @@ final selectedCircleIdProvider = StateProvider<List<int>?>((ref) => null);
 /// Provider for the currently selected circle.
 ///
 /// Derives the full [Circle] from [circlesProvider] by matching
-/// [selectedCircleIdProvider]. This ensures the selected circle always
-/// has an up-to-date member list — even after MLS group state changes
+/// [selectedCircleIdProvider], so a read here always carries an
+/// up-to-date member list — even after MLS group state changes
 /// (e.g., a new member joining via commit).
+///
+/// Watching this alone does NOT rebuild on a roster change: [Circle]
+/// compares by `mlsGroupId` only, so Riverpod treats a same-circle,
+/// fewer-members recomputation as unchanged and notifies nobody. Widgets
+/// that render members must also watch [circlesProvider], whose fresh
+/// list always notifies — that is what propagates a removal to the tree.
 ///
 /// Returns `null` when no circle is selected or when the selected
 /// circle is no longer in the visible list (e.g., after leaving).

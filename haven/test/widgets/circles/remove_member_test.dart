@@ -265,6 +265,73 @@ void main() {
       expect(find.text('Removed Bob from the circle'), findsOneWidget);
     });
 
+    testWidgets('a success removes the tile from the list the admin is '
+        'looking at', (tester) async {
+      // Deliberately does NOT use pumpSheet's selectedCircleProvider
+      // override: that override freezes the roster at pump time, which
+      // would make this assertion pass or fail for a reason that has
+      // nothing to do with production wiring. Selecting via
+      // selectedCircleIdProvider instead exercises the SAME derivation
+      // (selectedCircleProvider -> circlesProvider) that
+      // member_removal_provider.dart's post-removal invalidate relies on.
+      final circle = _circle(selfIsAdmin: true);
+      final service = MockCircleService(circles: [circle]);
+      final sheetController = DraggableScrollableController();
+      addTearDown(sheetController.dispose);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            circleServiceProvider.overrideWithValue(service),
+            selectedCircleIdProvider.overrideWith(
+              (ref) => circle.mlsGroupId,
+            ),
+            memberLocationsProvider.overrideWith((_) async => const []),
+            identityProvider.overrideWith((_) async => _identity()),
+            displayNameProvider.overrideWith((_) async => 'Alice'),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: Stack(
+                children: [
+                  CirclesBottomSheet(
+                    onExpansionChanged: (_) {},
+                    controller: sheetController,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      sheetController.jumpTo(0.85);
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(WidgetKeys.memberTile(_otherPubkey)),
+        findsOneWidget,
+        reason: 'baseline: Bob starts in the list',
+      );
+
+      await tester.tap(find.byKey(WidgetKeys.memberRemoveButton(_otherPubkey)));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(WidgetKeys.memberRemoveConfirm));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(WidgetKeys.memberTile(_otherPubkey)),
+        findsNothing,
+        reason: 'the list the admin is looking at must reflect a successful '
+            'removal without navigating away — member_removal_provider.dart '
+            'invalidates circlesProvider on success, and '
+            'selectedCircleProvider must actually propagate that to the '
+            'widget tree',
+      );
+    });
+
     testWidgets('a failure says nothing changed, and the member stays',
         (tester) async {
       final circle = _circle(selfIsAdmin: true);

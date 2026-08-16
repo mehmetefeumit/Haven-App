@@ -834,7 +834,13 @@ void main() {
                   relayService: relayRecorder,
                 ),
               ),
-              selectedCircleProvider.overrideWith((ref) => circle),
+              // NOT selectedCircleProvider itself: that provider derives
+              // from circlesProvider, and a static override here would
+              // freeze the roster at its pre-removal snapshot regardless of
+              // what member_removal_provider.dart invalidates afterwards.
+              // Only the selection (which circle) is fixed; the roster
+              // must come from the same live derivation the real app uses.
+              selectedCircleIdProvider.overrideWith((ref) => circle.mlsGroupId),
               memberLocationsProvider.overrideWith((_) async => const []),
               identityProvider.overrideWith(
                 (_) async => Identity(

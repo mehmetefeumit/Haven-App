@@ -180,23 +180,18 @@
         {
           "kind": 445,
           "token": "out_of_tree:transport-nostr-peeler",
-          "note": "Built by the rev-pinned peeler (transport-nostr-peeler/src/peeler.rs); reached from location/nostr.rs and nostr/mls/manager.rs::send_location. No repo-local grep can see the kind."
-        },
-        {
-          "kind": 9,
-          "token": "Kind::Custom(KIND_LOCATION_DATA)",
-          "note": "Inner application rumor carrying the coordinate; never published as a relay event — it exists only as 445 plaintext before the engine seals it."
+          "note": "Built by the rev-pinned peeler (transport-nostr-peeler/src/peeler.rs); reached from nostr/mls/manager.rs::send_location, which is the ONLY send path (a second one in location/nostr.rs was deleted 2026-08-14, having never had a caller). No repo-local grep can see the kind."
         },
         {
           "kind": 9,
           "token": "Kind::Custom(9)",
-          "note": "The inner rumor built at nostr/mls/manager.rs:571, spelled as a literal rather than via KIND_LOCATION_DATA. Never leaves the device unencrypted; it becomes 445 ciphertext."
+          "note": "The inner application rumor carrying the coordinate, built at nostr/mls/manager.rs::send_location and spelled as a literal. Never published as a relay event — it exists only as 445 plaintext before the engine seals it."
         }
       ],
       "symbols": [
         {
-          "file": "haven-core/src/location/nostr.rs",
-          "symbol": "KIND_LOCATION_DATA"
+          "file": "haven-core/src/circle/manager.rs",
+          "symbol": "encrypt_location"
         },
         {
           "file": "haven-core/src/nostr/mls/manager.rs",
@@ -204,6 +199,10 @@
         }
       ],
       "tests": [
+        {
+          "file": "haven-core/src/circle/manager.rs",
+          "name": "encrypt_location_publishes_neither_coordinate_nor_geohash"
+        },
         {
           "file": "haven-core/tests/mls_e2e_security_tests.rs",
           "name": "g2_location_encryption_roundtrip"
@@ -240,8 +239,8 @@
       "event_kinds": [
         {
           "kind": 9,
-          "token": "Kind::Custom(KIND_LOCATION_DATA)",
-          "note": "The rumor whose JSON body this invariant constrains."
+          "token": "Kind::Custom(9)",
+          "note": "The rumor whose JSON body this invariant constrains, built at nostr/mls/manager.rs::send_location."
         }
       ],
       "symbols": [
@@ -269,7 +268,7 @@
     {
       "id": "INV-L-ACCESS-GATE-PRECEDES-FIX",
       "title": "No coordinate is produced after location access is withdrawn",
-      "statement": "getCurrentLocation and getCurrentLocationFresh call _ensureAccessOrThrow before they read the cached stream position, before getLastKnownPosition() and before getCurrentPosition(), and both stored-coordinate shortcuts sit inside the granted branch; reordering the gate below any of those reads — a one-line change that still compiles and still passes the unit tests — falsifies this.",
+      "statement": "getCurrentLocation and getCurrentLocationFresh call _ensureAccessOrThrow before they read the cached stream position, before getLastKnownPosition() and before getCurrentPosition(), and both stored-coordinate shortcuts sit inside the granted branch; reordering the gate below any of those reads — a one-line change that still compiles and still passes the unit tests — falsifies this. The gate reads the permission GRANT, which on Android cannot see an app-op denial (`cmd appops set --uid UID android:fine_location deny` withholds location while every read still answers 'granted, precise', and does not kill the process; the package-scoped form without --uid does NOT withhold it, because AppOpsService short-circuits on a non-default UID mode and the permission sync leaves that at 'foreground'), so the cache read is additionally corroborated by _platformStillPermitsLocation: serving a stored coordinate when the platform has stopped answering getLastKnownPosition() falsifies this too.",
       "status": "enforced",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
@@ -278,12 +277,24 @@
         {
           "file": "haven/lib/src/services/geolocator_location_service.dart",
           "symbol": "_ensureAccessOrThrow"
+        },
+        {
+          "file": "haven/lib/src/services/geolocator_location_service.dart",
+          "symbol": "_platformStillPermitsLocation"
         }
       ],
       "tests": [
         {
           "file": "haven/test/pages/map/map_page_location_access_test.dart",
           "name": "a fix held from BEFORE the outage is NOT drawn"
+        },
+        {
+          "file": "haven/test/services/geolocator_location_service_test.dart",
+          "name": "a warm cached fix is not served once the platform stops answering with a position"
+        },
+        {
+          "file": "haven/test/services/geolocator_location_service_test.dart",
+          "name": "the withheld fix is CLEARED, not merely withheld"
         }
       ],
       "guards": [
@@ -844,7 +855,9 @@
       "statement": "An ADMIN removal is a commit that advances the group epoch, and a member removed at epoch N cannot decrypt a location published at epoch N+1; the commit is applied only after at least one relay acked it, so a member is never treated as removed on a commit nobody received.",
       "status": "ratcheted",
       "assertion_arb_keys": [
-        "privacyEncryptionWhenSomeoneLeaves"
+        "privacyEncryptionWhenSomeoneLeaves",
+        "circleMemberRemoveDialogBody",
+        "circleMemberRemoveError"
       ],
       "disclosure_arb_keys": [],
       "non_arb_claims": [],
@@ -859,6 +872,14 @@
         {
           "file": "haven-core/src/circle/manager.rs",
           "symbol": "confirm_published"
+        },
+        {
+          "file": "haven/lib/src/widgets/circles/remove_member_action.dart",
+          "symbol": "confirmAndRemoveMember"
+        },
+        {
+          "file": "haven/lib/src/providers/member_removal_provider.dart",
+          "symbol": "MemberRemovalController"
         }
       ],
       "tests": [
@@ -869,10 +890,18 @@
         {
           "file": "haven-core/tests/publish_before_apply_send_e2e.rs",
           "name": "remove_members_confirms_only_on_an_ack"
+        },
+        {
+          "file": "haven/test/widgets/circles/remove_member_test.dart",
+          "name": "the dialog states the consequence before anything is staged"
+        },
+        {
+          "file": "haven/test/providers/member_removal_test.dart",
+          "name": "a failed removal leaves the roster and the caches alone"
         }
       ],
       "guards": [],
-      "residual": "Scoped to ADMIN removal — both cited tests exercise that path. The assertion key privacyEncryptionWhenSomeoneLeaves also covers the SELF-LEAVE path, which has an accepted unconverged case (deviation LEAVE-GHOST) where the ghost stays authorized until a manual admin removal. Nothing fails when that path breaks and no copy discloses it; filing LEAVE-GHOST as an accepted_deviation invariant would require inventing a disclosure that does not exist."
+      "residual": "Scoped to ADMIN removal — both Rust tests exercise that path. The assertion key privacyEncryptionWhenSomeoneLeaves also covers the SELF-LEAVE path, which has an accepted unconverged case (deviation LEAVE-GHOST) where the ghost stays authorized until a manual admin removal; that removal is now an affordance an admin actually has (the member row's remove button, shipped 2026-08-15), where before it existed only as a service with no caller. Nothing still fails when the self-leave path breaks and no copy discloses it, so LEAVE-GHOST remains undeclared for want of a disclosure to attach it to. circleMemberRemoveDialogBody makes the forward-secrecy claim in the admin's own words and circleMemberRemoveError makes the rollback one; both are backed by the tests above, but neither is reachable by the claim-language sweep, so this row is what keeps them proven."
     },
     {
       "id": "INV-E-JOINER-GETS-NO-HISTORY",
