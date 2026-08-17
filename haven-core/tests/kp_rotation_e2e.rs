@@ -945,3 +945,52 @@ async fn deleting_an_init_key_makes_welcomes_to_that_package_undecryptable() {
         "an MLS error must never echo raw KeyPackage bytes"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 9. The slot id a first publish mints is the shape the binding fixes.
+// ---------------------------------------------------------------------------
+
+/// The Nostr transport binding does not leave the `d` value free: it is "exactly
+/// one tag, exactly one 64-character lowercase hex value decoding to 32 bytes",
+/// generated "once from 32 random bytes". An event that misses that shape is
+/// malformed, and an inviter "MUST reject malformed or incompatible candidates"
+/// — so a mis-sized slot id costs the account exactly what an expired package
+/// does: invitations that never happen, with nothing to see on this device.
+///
+/// The assertions read the SIGNED event, because the `d` a peer resolves is the
+/// one on the wire, not the field the builder happens to return.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_first_publish_mints_a_binding_shaped_random_slot_id() {
+    let dev = Device::new("kprot_slot_id");
+    let own = vec!["wss://own.example.com".to_string()];
+
+    let first = build_kp_maintenance_events(&dev.session, &dev.keys, &own, None, None)
+        .await
+        .expect("first publish");
+    let d = kp_d_tag(&first.event);
+    assert_eq!(d, first.d_tag, "the wire `d` must be the recorded slot id");
+
+    assert_eq!(d.len(), 64, "slot id must be 64 characters: {d}");
+    assert!(
+        d.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "slot id must be LOWERCASE hex: {d}"
+    );
+    assert_eq!(
+        hex::decode(&d).expect("slot id must be hex").len(),
+        32,
+        "slot id must decode to 32 bytes: {d}"
+    );
+
+    // Same device, same account, same session: a second slot id that matched
+    // would mean the id is derived from identity or device material, which the
+    // binding forbids outright.
+    let second = build_kp_maintenance_events(&dev.session, &dev.keys, &own, None, None)
+        .await
+        .expect("second mint");
+    assert_ne!(
+        kp_d_tag(&second.event),
+        d,
+        "each fresh slot must be independently random, never derived"
+    );
+}

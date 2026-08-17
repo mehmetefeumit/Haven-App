@@ -1,0 +1,166 @@
+# Code owners — who must review a change to the files CI trusts.
+#
+# ## What this is for
+#
+# Every privacy and security guarantee in this repo is enforced by an artifact
+# that lives IN the repo: the privacy-invariant manifest, the repo guards and
+# their fixtures, the workflows that run them, the wire allow-list, the declared
+# skip manifests. That is what makes them checkable — and it is also the attack
+# surface. A change that edits the manifest, loosens a guard, or unwires a
+# workflow step makes CI agree with itself while the guarantee is gone. Nothing
+# in CI can catch that, because CI is the thing being edited. `docs/privacy/
+# README.md` records it as the limit of the gate ("what the gate cannot prove");
+# a human reviewer on those paths is the only mitigation there is.
+#
+# ## This file does NOTHING on its own
+#
+# CODEOWNERS only auto-requests review. It becomes a REQUIREMENT solely through
+# branch protection on `main` — see the OWNER ACTION block at the foot of this
+# file. Until that is switched on, treat these paths as unprotected.
+#
+# ## Syntax notes that matter here
+#
+#   * The LAST matching pattern wins, so the broad default comes first and the
+#     security-critical paths come after it. That ordering is the point: if a
+#     second maintainer is ever added to `*`, the specific rules below keep the
+#     enforcement surface reviewed by its owner rather than silently widening
+#     with the team.
+#   * A leading `/` anchors to the repo root; a trailing `/` matches everything
+#     beneath the directory.
+#   * An owner GitHub cannot resolve makes the rule inert, not red. If the
+#     handle below ever changes, this file must change with it — see OWNER
+#     ACTION step 6.
+
+# ---------------------------------------------------------------------------
+# Default. A solo repo today; stated explicitly so adding a maintainer is a
+# deliberate edit here rather than an implicit grant.
+# ---------------------------------------------------------------------------
+*                                       @mehmetefeumit
+
+# ---------------------------------------------------------------------------
+# The privacy manifest and its contract. The single highest-value target: the
+# join table from every user-facing privacy claim to the code and the proof.
+# Editing it can relabel an assertion as an accepted deviation, or drop a
+# disclosure, and the gate reading it would still be green.
+# ---------------------------------------------------------------------------
+/docs/privacy/                          @mehmetefeumit
+
+# ---------------------------------------------------------------------------
+# The guards themselves, their pinned expectation files, and the workflows that
+# wire them. `check_privacy_invariants.sh` verifies that every CITED guard is
+# still a step in repo-guards.yml — but only for guards the manifest cites, and
+# only while this workflow file is what CI runs.
+#
+# `/scripts/` rather than `/scripts/ci/`: `scripts/build_release.sh` sits beside
+# that directory and is the only thing that forces `--obfuscate
+# --split-debug-info` and runs the committed-secrets guard on a release build,
+# so it is enforcement machinery on the same footing as the guards it invokes.
+# ---------------------------------------------------------------------------
+/.github/workflows/                     @mehmetefeumit
+/.github/dependabot.yml                 @mehmetefeumit
+/scripts/                               @mehmetefeumit
+
+# This file. Without a rule for itself, one PR can remove every rule above it.
+/.github/CODEOWNERS                     @mehmetefeumit
+
+# ---------------------------------------------------------------------------
+# The E2E harness. The RUNTIME half of the guarantees the static guards only
+# half-cover: the drive-log predicate and the delegation that carries it, the
+# recorded wire allow-list, and the LANE-skip manifest that decides what a lane
+# is allowed not to prove. Its unit/doctest counterpart,
+# `scripts/ci/expected_test_skips.txt`, is a different manifest reconciled by a
+# different reporter, and is covered by the `/scripts/` rule above.
+# ---------------------------------------------------------------------------
+/tooling/e2e/ci/                        @mehmetefeumit
+/tooling/e2e/expected_drive_skips.txt   @mehmetefeumit
+/tooling/e2e/wire_allowlist.json        @mehmetefeumit
+
+# ---------------------------------------------------------------------------
+# The proofs. `docs/privacy/privacy_invariants.json` cites tests under both of
+# these as the evidence for its user-facing claims, so weakening an assertion is
+# indistinguishable from deleting the guarantee — and the gate that reads the
+# manifest stays green over it, because the citation still resolves.
+# `haven/test/lints/` is here doubly: those are guards in their own right —
+# Rule 8 interpolation, Rule 9 scrubbing, Rule 14 handle release,
+# announcement-key and throw-time reachability.
+# ---------------------------------------------------------------------------
+/haven-core/tests/                      @mehmetefeumit
+/haven/test/                            @mehmetefeumit
+
+# ---------------------------------------------------------------------------
+# Security-critical Rust: MLS and Nostr event handling, the profile plane, the
+# encrypted tile cache, key and keyring policy, the dependency pins the MDK
+# supply-chain guard reads, and the FFI boundary — which both mints the
+# `circles.db` and `tiles.db` SQLCipher keys (the third, for the MLS
+# `session.sqlite`, is minted under `haven-core/src/nostr/`) and carries
+# `HavenCore::update_location`, the entry point MapPage calls on every GPS fix.
+# ---------------------------------------------------------------------------
+/haven-core/src/nostr/                  @mehmetefeumit
+/haven-core/src/circle/                 @mehmetefeumit
+/haven-core/src/profile/                @mehmetefeumit
+/haven-core/src/relay/                  @mehmetefeumit
+/haven-core/src/location/               @mehmetefeumit
+/haven-core/src/avatar/                 @mehmetefeumit
+/haven-core/src/tiles/                  @mehmetefeumit
+/haven-core/src/keyring_policy.rs       @mehmetefeumit
+/haven-core/src/api.rs                  @mehmetefeumit
+/haven-core/Cargo.toml                  @mehmetefeumit
+/haven-core/Cargo.lock                  @mehmetefeumit
+/haven-core/SECURITY.md                 @mehmetefeumit
+/haven/rust_builder/src/                @mehmetefeumit
+/haven/rust_builder/Cargo.toml          @mehmetefeumit
+/haven/rust_builder/Cargo.lock          @mehmetefeumit
+
+# ---------------------------------------------------------------------------
+# Security-critical Dart. The service layer is where raw secret bytes live in a
+# language with no `zeroize` (Rule 9), and it holds all three sanctioned MLS
+# session openers — the ones `check_mls_session_single_owner.sh` pins by name
+# (Rule 14).
+# ---------------------------------------------------------------------------
+/haven/lib/src/services/                @mehmetefeumit
+
+# ---------------------------------------------------------------------------
+# Platform manifests (permissions, background modes, INTERNET) and the
+# user-facing copy the privacy manifest binds its claims to.
+# ---------------------------------------------------------------------------
+/haven/android/app/src/main/AndroidManifest.xml  @mehmetefeumit
+/haven/ios/Runner/Info.plist                     @mehmetefeumit
+/haven/lib/l10n/                                 @mehmetefeumit
+
+# The instruction file every agent working in this repo reads first.
+/CLAUDE.md                              @mehmetefeumit
+
+# ===========================================================================
+# OWNER ACTION — required, and not doable from a commit
+#
+# GitHub → repo Settings → Rules → Rulesets → New branch ruleset (or the
+# classic Settings → Branches → Add branch protection rule), targeting `main`:
+#
+#   1. Require a pull request before merging.
+#      Without this, a direct push to `main` bypasses CODEOWNERS entirely and
+#      every rule above is decoration.
+#   2. Under that rule, tick "Require review from Code Owners".
+#      This is the switch that makes this file mean anything.
+#   3. Required approvals: 1.
+#   4. Block force pushes, and block branch deletion.
+#   5. Do NOT leave a bypass list, and (classic UI) tick "Include
+#      administrators" / "Do not allow bypassing the above settings".
+#      An admin-exempt rule protects against everyone except the account a
+#      poisoning attempt would be using.
+#   6. Recommended alongside: "Require status checks to pass" with the ci.yml
+#      jobs selected, and "Require branches to be up to date before merging",
+#      so a guard cannot be edited on a stale base that never ran it.
+#
+# Honest limit for a solo repo: a code owner cannot approve their OWN pull
+# request, so with steps 1-3 and no bypass the owner cannot self-merge. Pick
+# one deliberately:
+#
+#   * add a second trusted maintainer as a reviewer (best — it is what the
+#     rule is for), or
+#   * keep the rules on and use the admin override for your own PRs, which at
+#     least makes each bypass an explicit, logged act rather than the default.
+#
+# Either way the protection that matters lands immediately: no pull request
+# from anyone else can change the manifest, a guard, a workflow, the wire
+# allow-list or the security-critical Rust without the owner's review.
+# ===========================================================================

@@ -6,9 +6,10 @@
 ///   [`CatchupService`]/[`MaintenanceService`], which take the same
 ///   `Future<CircleManagerFfi> Function()` factory shape for the same reason.
 /// - Resolves the caller's own pubkey/secret via the injected
-///   [IdentityService], re-fetching secret bytes per call and scrubbing
-///   them in a `finally` (Security Rule 9 — mirrors
-///   `MaintenanceService._withSecret`).
+///   [IdentityService], re-fetching per call through `withFreshSecret`, which
+///   owns the fetched buffer and scrubs it the instant the FFI call settles —
+///   before the returned profile is assembled, so the secret does not stay
+///   live across `_toProfile`'s cache and picture work (Security Rule 9).
 /// - Publishes unconditionally: `updateOwnProfile`/`setOwnAvatar` carry no
 ///   consent gate (public-by-default, owner-directed 2026-07-16, matching the
 ///   White Noise reference app) — see [ProfileService] class doc.
@@ -19,6 +20,7 @@ library;
 import 'package:flutter/foundation.dart';
 import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/rust/api.dart';
+import 'package:haven/src/services/fresh_secret.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/profile_service.dart';
 
@@ -109,37 +111,33 @@ class NostrProfileService implements ProfileService {
     required String displayName,
     String? about,
   }) async {
-    Uint8List? secretBuffer;
     try {
       final manager = await _circleManagerFactory();
-      secretBuffer = Uint8List.fromList(
-        await _identityService.getSecretBytes(),
-      );
-      final ffi = await manager.publishMyProfile(
-        identitySecretBytes: secretBuffer,
-        displayName: displayName,
-        about: about,
+      final ffi = await withFreshSecret(
+        _identityService.getSecretBytes,
+        (secret) => manager.publishMyProfile(
+          identitySecretBytes: secret,
+          displayName: displayName,
+          about: about,
+        ),
       );
       return await _toProfile(manager, ffi, fullResolution: true);
     } on Object catch (e) {
       debugPrint('[Profile] updateOwnProfile: ${e.runtimeType}');
       throw const ProfileServiceException('Failed to update profile');
-    } finally {
-      secretBuffer?.fillRange(0, secretBuffer.length, 0);
     }
   }
 
   @override
   Future<Profile> setOwnAvatar(Uint8List raw) async {
-    Uint8List? secretBuffer;
     try {
       final manager = await _circleManagerFactory();
-      secretBuffer = Uint8List.fromList(
-        await _identityService.getSecretBytes(),
-      );
-      final ref = await manager.uploadMyProfilePicture(
-        identitySecretBytes: secretBuffer,
-        raw: raw,
+      final ref = await withFreshSecret(
+        _identityService.getSecretBytes,
+        (secret) => manager.uploadMyProfilePicture(
+          identitySecretBytes: secret,
+          raw: raw,
+        ),
       );
       // `uploadMyProfilePicture` upserts both the picture bytes and the
       // merged kind-0 into the local cache before returning (Rust
@@ -170,29 +168,22 @@ class NostrProfileService implements ProfileService {
     } on Object catch (e) {
       debugPrint('[Profile] setOwnAvatar: ${e.runtimeType}');
       throw const ProfileServiceException('Failed to set profile picture');
-    } finally {
-      secretBuffer?.fillRange(0, secretBuffer.length, 0);
     }
   }
 
   @override
   Future<Profile> removeOwnAvatar() async {
     // Retraction is always allowed — see class doc.
-    Uint8List? secretBuffer;
     try {
       final manager = await _circleManagerFactory();
-      secretBuffer = Uint8List.fromList(
-        await _identityService.getSecretBytes(),
-      );
-      final ffi = await manager.removeMyProfilePicture(
-        identitySecretBytes: secretBuffer,
+      final ffi = await withFreshSecret(
+        _identityService.getSecretBytes,
+        (secret) => manager.removeMyProfilePicture(identitySecretBytes: secret),
       );
       return await _toProfile(manager, ffi, fullResolution: true);
     } on Object catch (e) {
       debugPrint('[Profile] removeOwnAvatar: ${e.runtimeType}');
       throw const ProfileServiceException('Failed to remove profile picture');
-    } finally {
-      secretBuffer?.fillRange(0, secretBuffer.length, 0);
     }
   }
 

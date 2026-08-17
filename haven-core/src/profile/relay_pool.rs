@@ -78,9 +78,13 @@ use crate::profile::error::{ProfileError, Result};
 /// # Vetting status
 ///
 /// Criteria 2 and 3 are behavioural and cannot be verified by reading code —
-/// they require probing each host. Entries here are CANDIDATES pending that
-/// probe; see the dependency-auditor task in the rollout plan. The disjointness
-/// tests below are meaningful regardless and gate every change to this list.
+/// they require probing each host, which is why no CI lane can settle them (it
+/// would be non-hermetic AND would announce Haven's build cadence to eight
+/// third parties). Entries here are CANDIDATES until that probe has been run:
+/// `haven-core/tests/profile_relay_vetting.rs` is the probe, opt-in and
+/// `#[ignore]`d, and `docs/PROFILE_RELAY_VETTING.md` is the procedure plus the
+/// dated findings — read it before changing this list, and before trusting it.
+/// Criteria 1 and 4 are test-pinned regardless and gate every change here.
 ///
 /// Runtime callers must use [`profile_relay_pool_default`], which honors the
 /// debug-only override installed via [`set_profile_relays_for_test`]. This

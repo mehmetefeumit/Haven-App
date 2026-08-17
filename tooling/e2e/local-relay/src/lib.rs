@@ -47,6 +47,7 @@
 pub mod config;
 pub mod frame;
 pub mod journal;
+pub mod loopback;
 pub mod proxy;
 pub mod selftest;
 pub mod summarize;

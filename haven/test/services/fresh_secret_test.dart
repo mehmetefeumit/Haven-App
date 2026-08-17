@@ -8,6 +8,34 @@ void main() {
   group('withFreshSecret', () {
     List<int> secret32([int fill = 7]) => List<int>.filled(32, fill);
 
+    /// Runs [withFreshSecret] over a provider yielding [source] and asserts,
+    /// WHILE `use` is running, Rule 9's actual invariant: **exactly ONE buffer
+    /// holds the secret, and any other buffer that ever held it is already
+    /// zeroed**.
+    ///
+    /// Stated as an invariant rather than `identical(secret, source)` so a
+    /// future always-copy-then-wipe-the-source implementation still passes,
+    /// while a copy that leaves the source live (two live secrets, only one of
+    /// them ever scrubbed) fails. Callers assert the post-condition — that the
+    /// last remaining buffer is zeroed too — themselves.
+    Future<void> assertOneLiveCopyDuringUse(List<int> source, int fill) =>
+        withFreshSecret(() async => source, (secret) async {
+          expect(
+            secret.every((b) => b == fill),
+            isTrue,
+            reason: 'use must see the real secret bytes',
+          );
+          if (!identical(secret, source)) {
+            expect(
+              source.every((b) => b == 0),
+              isTrue,
+              reason: 'a copy was minted, so the buffer it was copied FROM '
+                  'must already be zeroed — otherwise two buffers hold the '
+                  'secret and only one of them is ever scrubbed',
+            );
+          }
+        });
+
     test("invokes the provider once and returns use's result", () async {
       var calls = 0;
       late Uint8List seen;
@@ -26,7 +54,7 @@ void main() {
       expect(seen.length, 32);
     });
 
-    test('scrubs the copy the instant use completes (Rule 9)', () async {
+    test('scrubs the buffer the instant use completes (Rule 9)', () async {
       late Uint8List captured;
       await withFreshSecret(
         () async => secret32(0xAB),
@@ -47,7 +75,7 @@ void main() {
       );
     });
 
-    test('scrubs the copy even when use throws', () async {
+    test('scrubs the buffer even when use throws', () async {
       late Uint8List captured;
       await expectLater(
         withFreshSecret<void>(
@@ -78,17 +106,72 @@ void main() {
       expect(used, isFalse, reason: 'a bad-length secret never reaches use');
     });
 
-    test('copies the secret — never aliases the provider list', () async {
-      final backing = secret32(3);
-      await withFreshSecret(
-        () async => backing,
-        (secret) async {
-          secret[0] = 99;
-          return null;
-        },
+    test(
+      'exactly one buffer holds the secret — provider yields a Uint8List '
+      '(the production shape: the buffer the FFI just allocated)',
+      () async {
+        final source = Uint8List.fromList(secret32(3));
+        await assertOneLiveCopyDuringUse(source, 3);
+        expect(
+          source.every((b) => b == 0),
+          isTrue,
+          reason: 'nothing that ever held the secret survives the call',
+        );
+      },
+    );
+
+    test(
+      'exactly one buffer holds the secret — provider yields a plain List<int>',
+      () async {
+        final source = secret32(3);
+        await assertOneLiveCopyDuringUse(source, 3);
+        expect(
+          source.every((b) => b == 0),
+          isTrue,
+          reason: 'nothing that ever held the secret survives the call',
+        );
+      },
+    );
+  });
+
+  group('takeSecretOwnership', () {
+    test('hands back the very buffer it was given, minting no copy', () {
+      final raw = Uint8List.fromList(List<int>.filled(32, 0x7E));
+      final owned = takeSecretOwnership(raw);
+      expect(
+        identical(owned, raw),
+        isTrue,
+        reason: 'a copy here would be a second live secret that the '
+            "caller's single scrub can never reach",
       );
-      // Mutating and scrubbing the copy must not touch the provider's list.
-      expect(backing[0], 3, reason: 'withFreshSecret copies, never aliases');
+      expect(owned.every((b) => b == 0x7E), isTrue);
+    });
+
+    test('wipes a foreign source BEFORE returning the copy', () {
+      final source = List<int>.filled(32, 0x7E);
+      final owned = takeSecretOwnership(source);
+      expect(identical(owned, source), isFalse);
+      expect(
+        owned.every((b) => b == 0x7E),
+        isTrue,
+        reason: 'the caller still receives the real bytes',
+      );
+      expect(
+        source.every((b) => b == 0),
+        isTrue,
+        reason: 'the buffer the copy came from must not outlive the copy',
+      );
+    });
+
+    test('throws on a source it cannot wipe, rather than handing back a '
+        'copy while the original stays live', () {
+      // `const []` (and anything else mixing in `UnmodifiableListMixin`)
+      // throws from `fillRange` unconditionally. Eager, so it surfaces here
+      // instead of from a `finally` where it would mask the real exception.
+      expect(
+        () => takeSecretOwnership(const <int>[1, 2, 3]),
+        throwsUnsupportedError,
+      );
     });
   });
 }

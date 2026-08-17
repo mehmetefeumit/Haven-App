@@ -77,6 +77,9 @@
 #
 # Optional env:
 #   HAVEN_WIRE_PROXY_ROUTES        '<listen>=<upstream>,...' — wins over argv.
+#                                  <listen> is a bare port or an IP literal and
+#                                  port; a non-loopback one is a hard startup
+#                                  failure in the binary, with no override.
 #   HAVEN_WIRE_JOURNAL             Journal path (default per instance, below).
 #   HAVEN_WIRE_MLS_GROUP_ID_FILE   Sidecar path (default per instance, below).
 #   HAVEN_WIRE_PROXY_ALLOW_REMOTE  '1' to permit a non-loopback upstream.
@@ -328,12 +331,19 @@ readonly JOURNAL="${HAVEN_WIRE_JOURNAL:-${DEFAULT_JOURNAL}}"
 readonly MLS_GROUP_ID_FILE="${HAVEN_WIRE_MLS_GROUP_ID_FILE:-${DEFAULT_MLS_GROUP_ID_FILE}}"
 
 # ---------------------------------------------------------------------------
-# Hermeticity gate.
+# Hermeticity gate — UPSTREAMS ONLY, and that is now a complete statement.
 #
 # The journal maps traffic to NAMED ENDPOINTS. Against the hermetic loopback
 # relays that is lane configuration; against a real relay it would be a durable
 # metadata map of who talked to whom, sitting in /tmp of a CI runner. Refuse by
 # default, and make the override explicit and visible in the log.
+#
+# The other half — what the proxy LISTENS on — is deliberately not checked here.
+# `config::validate_listen` refuses a non-loopback listen address in the binary,
+# with no override, so a routing table naming `0.0.0.0` fails at startup whether
+# it arrives through this script or not. Re-checking it here would put the
+# stronger of the two guarantees behind the weaker path (this script is not the
+# only way to start the recorder) and leave both looking optional.
 # ---------------------------------------------------------------------------
 check_loopback() { # check_loopback <ws-url>
   local url="$1" host
@@ -358,6 +368,19 @@ if [[ -n "${HAVEN_WIRE_PROXY_ROUTES:-}" ]]; then
 else
   UPSTREAMS+=("${UPSTREAM}")
 fi
+
+# What this instance actually serves, for the human-facing lines below. With a
+# routing table the port/upstream argv is INERT — `config::resolve` gives the
+# table precedence over HAVEN_WIRE_PROXY_PORT/UPSTREAM — so naming
+# "127.0.0.1:${PORT}" there would print a port nothing is listening on. The
+# authoritative statement is the proxy's own "ws://<listen> -> <upstream>" line
+# per bound route, which the readiness branch cats out below.
+if [[ -n "${HAVEN_WIRE_PROXY_ROUTES:-}" ]]; then
+  ROUTES_DESC="routing table '${HAVEN_WIRE_PROXY_ROUTES}'"
+else
+  ROUTES_DESC="127.0.0.1:${PORT} -> ${UPSTREAM}"
+fi
+readonly ROUTES_DESC
 
 for _upstream in "${UPSTREAMS[@]}"; do
   if ! check_loopback "${_upstream}"; then
@@ -426,7 +449,7 @@ rm -f "${JOURNAL}"
 # fail, which is the one failure mode a privacy oracle must not have.
 rm -f "${MLS_GROUP_ID_FILE}"
 
-echo "Starting wire proxy instance '${INSTANCE}': ${PORT} -> ${UPSTREAM}"
+echo "Starting wire proxy instance '${INSTANCE}': ${ROUTES_DESC}"
 echo "  journal: ${JOURNAL}"
 # NEVER upload this file. It holds the REAL MLS group ids the device declares,
 # which Security Rule 4 says must never reach a relay; it exists so a host-side
@@ -462,7 +485,7 @@ printf '%s\n' "${MLS_GROUP_ID_FILE}" >"${CLAIM_FILE%.journalpath}.mlsgroupidpath
 # instrument is up, not merely that something is listening.
 for _ in $(seq 1 30); do
   if grep -q '^\[haven-wire-proxy\] journal:' "${LOG_FILE}" 2>/dev/null; then
-    echo "Wire proxy '${INSTANCE}' is up on 127.0.0.1:${PORT}."
+    echo "Wire proxy '${INSTANCE}' is up: ${ROUTES_DESC}."
     cat "${LOG_FILE}" 2>/dev/null || true
     # Say it loudly here too: a lane whose recorder came up already degraded
     # would otherwise only find out from a fail-closed oracle an hour later.
@@ -476,6 +499,6 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 
-echo "ERROR: wire proxy '${INSTANCE}' did not come up on port ${PORT} within 30s" >&2
+echo "ERROR: wire proxy '${INSTANCE}' (${ROUTES_DESC}) did not come up within 30s" >&2
 cat "${LOG_FILE}" >&2 2>/dev/null || true
 exit 1

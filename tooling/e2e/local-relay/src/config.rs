@@ -5,7 +5,8 @@
 //! * `HAVEN_WIRE_PROXY_ROUTES` — a comma-separated routing table,
 //!   `<listen>=<upstream>`, e.g.
 //!   `7788=ws://127.0.0.1:7777,7789=ws://127.0.0.1:7778`. `<listen>` may be a
-//!   bare port or a `host:port`.
+//!   bare port (bound on 127.0.0.1) or an `ip:port` — an IP LITERAL, never a
+//!   hostname — and must be loopback either way.
 //! * `HAVEN_WIRE_PROXY_PORT` + `HAVEN_WIRE_PROXY_UPSTREAM` — the single-relay
 //!   shorthand every current lane needs.
 //!
@@ -78,8 +79,16 @@ fn parse_table(table: &str) -> Result<ProxyConfig, String> {
         let (listen_raw, upstream_raw) = entry
             .split_once('=')
             .ok_or_else(|| format!("route '{entry}' is not '<listen>=<upstream>'"))?;
-        let listen = parse_listen(listen_raw.trim())
-            .ok_or_else(|| format!("route '{entry}' has an unparseable listen address"))?;
+        let listen = parse_listen(listen_raw.trim()).ok_or_else(|| {
+            format!(
+                "route '{entry}' has an unparseable listen address: expected a bare port \
+                 ('7788') or an IP literal with a port ('127.0.0.1:7788', '[::1]:7788'). A \
+                 HOSTNAME is not accepted — 'localhost:7788' lands here rather than in the \
+                 loopback check below, because that check must read a literal address and \
+                 never a name whose resolution could change what this binds to."
+            )
+        })?;
+        validate_listen(listen, entry)?;
         let upstream = upstream_raw.trim();
         validate_upstream(upstream)?;
         routes.push(Route {
@@ -105,11 +114,38 @@ fn parse_table(table: &str) -> Result<ProxyConfig, String> {
     Ok(ProxyConfig { routes })
 }
 
+/// A bare port, or an IP literal and port. Deliberately NOT a hostname: a
+/// resolver would decide what [`validate_listen`] is checking, and a name that
+/// resolves to loopback today can resolve elsewhere tomorrow.
 fn parse_listen(raw: &str) -> Option<SocketAddr> {
     if let Ok(port) = raw.parse::<u16>() {
         return Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port));
     }
     raw.parse::<SocketAddr>().ok()
+}
+
+/// Rejects a listen address that is not loopback.
+///
+/// Refused HERE, in the crate, and with no override: the shorthand builds
+/// 127.0.0.1 itself, so a routing table is the only way to name an address at
+/// all, and `start-wire-proxy.sh`'s hermeticity gate reads UPSTREAMS only. A
+/// recorder bound off-host is one that can be pointed at real traffic, and what
+/// it writes is a full transcript — ciphertext, event ids, and the identity
+/// pubkeys carried in REQ filters. `HAVEN_WIRE_PROXY_ALLOW_REMOTE` deliberately
+/// does NOT reach this: recording a remote upstream is a debugging choice the
+/// operator makes about their own journal, while accepting connections from
+/// off-host is a choice about everyone else's.
+fn validate_listen(listen: SocketAddr, entry: &str) -> Result<(), String> {
+    if listen.ip().is_loopback() {
+        Ok(())
+    } else {
+        Err(format!(
+            "route '{entry}' listens on {}, which is not loopback. This recorder \
+             writes a full traffic transcript and must never accept a connection \
+             from off-host; bind 127.0.0.1 (or omit the host, which does).",
+            listen.ip()
+        ))
+    }
 }
 
 /// Rejects an upstream that is not a WebSocket URL.
@@ -200,6 +236,71 @@ mod tests {
     fn a_malformed_route_is_rejected_by_name() {
         let err = resolve(Some("7788"), None, None).expect_err("missing '=' must fail");
         assert!(err.contains("7788"), "the error must name the entry: {err}");
+    }
+
+    // "Loopback only" must be a property of the CRATE, not of how a lane
+    // happens to be configured. A routing table is the only input that can name
+    // a listen address, `start-wire-proxy.sh`'s hermeticity gate reads upstreams
+    // only, and what binds here records ciphertext, event ids and the identity
+    // pubkeys in REQ filters — so an accepted `0.0.0.0` is a recorder that can
+    // be pointed at a real network with nothing refusing it.
+    #[test]
+    fn a_non_loopback_listen_address_is_rejected() {
+        for wildcard in [
+            "0.0.0.0:7788=ws://127.0.0.1:7777",
+            "192.168.1.10:7788=ws://127.0.0.1:7777",
+            "[::]:7788=ws://127.0.0.1:7777",
+        ] {
+            let err = resolve(Some(wildcard), None, None)
+                .expect_err("a non-loopback listen address must be refused");
+            assert!(
+                err.contains("not loopback"),
+                "the error must name the rule it broke: {err}"
+            );
+            assert!(
+                err.contains(wildcard),
+                "and the offending entry, so a lane can find it: {err}"
+            );
+        }
+    }
+
+    // ...and the loopback forms must still be ACCEPTED, in both families, or the
+    // refusal above would also be satisfied by a check that rejects every
+    // host-qualified route and breaks the multi-relay lane.
+    #[test]
+    fn every_loopback_listen_form_is_still_accepted() {
+        for ok in [
+            "127.0.0.1:7788=ws://127.0.0.1:7777",
+            "127.0.0.2:7788=ws://127.0.0.1:7777",
+            "[::1]:7788=ws://127.0.0.1:7777",
+        ] {
+            let config = resolve(Some(ok), None, None)
+                .unwrap_or_else(|e| panic!("'{ok}' must resolve, got: {e}"));
+            assert!(config.routes[0].listen.ip().is_loopback());
+        }
+    }
+
+    // A hostname is refused, and the refusal has to SAY that: 'localhost:7788'
+    // looks loopback to whoever typed it, so a bare "unparseable" would send a
+    // maintainer looking for a typo instead of telling them the check reads
+    // literal addresses only.
+    #[test]
+    fn a_hostname_listen_address_is_rejected_and_the_error_says_why() {
+        let err = resolve(Some("localhost:7788=ws://127.0.0.1:7777"), None, None)
+            .expect_err("a hostname must never be resolved into a bind address");
+        assert!(
+            err.contains("localhost:7788"),
+            "the error must name the entry: {err}"
+        );
+        let lowered = err.to_lowercase();
+        assert!(
+            lowered.contains("hostname"),
+            "and say that a hostname is the problem, not the syntax: {err}"
+        );
+        assert!(
+            lowered.contains("127.0.0.1:7788"),
+            "and show an accepted form: {err}"
+        );
     }
 
     #[test]

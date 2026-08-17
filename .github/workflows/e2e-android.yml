@@ -646,6 +646,26 @@ jobs:
           else
             echo "::notice::C5.8: ${mls_count} MLS group id(s) declared from the proxy sidecar (values withheld — Security Rule 4)."
           fi
+          # ...and a non-empty needle set is not a COMPLETE one. Nothing in the
+          # journal can tell a set that shrank from a run that made fewer
+          # circles, so a lost declaration leaves C5.8 looking exactly as busy
+          # over fewer values while every verdict stays green. The drive prints
+          # a running count as it announces each circle (`_announceMlsGroupId`),
+          # produced independently of the sidecar the ids themselves travel to —
+          # holding the two against each other is what catches a declaration
+          # that never landed, a sidecar rotated under the recorder, or a
+          # scenario that stopped announcing. Counts only; the ids stay off this
+          # log (Security Rule 4). `sort -n | tail -n 1` because the drive log
+          # ACCUMULATES retried attempts (run-single-avd-scenario.sh appends
+          # each), so the highest count is the attempt that got furthest.
+          announced="$(LC_ALL=C grep -aoE 'announced MLS group id #[0-9]+' /tmp/flutter-drive.log 2>/dev/null | sed -E 's/.*#//' | sort -n | tail -n 1 || true)"
+          expect=()
+          if [[ -n "${announced}" ]]; then
+            expect=(--expect-mls-group-ids "${announced}")
+          else
+            echo "::error::no '[e2e_combined] announced MLS group id #<n>' line is in /tmp/flutter-drive.log, so the number of circles this run announced is unknown and the sidecar's ${mls_count} id(s) cannot be checked for COMPLETENESS. A needle set that lost entries scans fewer circles than the run created and still reports clean, which is the one failure mode C5.8 must not have. Either the scenario stopped announcing or the drive's print of it changed shape; fix the channel rather than dropping the flag." >&2
+            verdict "C5.8 announced-count channel" 3
+          fi
           rc=0
           bash tooling/e2e/ci/check-wire-correlation.sh \
             --journal "${WIRE_JOURNAL}" \
@@ -658,7 +678,8 @@ jobs:
             --pool "10050=${WIRE_UPSTREAM}" \
             --pool "30443=${WIRE_UPSTREAM}" \
             ${excl[@]+"${excl[@]}"} \
-            ${mls_args[@]+"${mls_args[@]}"} || rc=$?
+            ${mls_args[@]+"${mls_args[@]}"} \
+            ${expect[@]+"${expect[@]}"} || rc=$?
           verdict "C5 correlation" "${rc}"
           fi
 

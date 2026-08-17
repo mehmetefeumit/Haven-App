@@ -43,14 +43,33 @@
 //     single file, so each is reported rather than passed over. Adding an open
 //     in a shape this lint does not model makes it red, not blind.
 //
+//   * EXCEPTION EDGES. A throw between the open and the release strands the
+//     claim exactly like a `return` does, so it is reported the same way. A
+//     statement counts as a throw site when evaluating it involves an `await`
+//     or an explicit `throw` — every FFI, platform and I/O call in this
+//     codebase is an await, while a field read and a plain assignment are not,
+//     which is what keeps the UI service's `_runInitialization` (whose window
+//     spans `_wiped`, `_handoffHolds` and two assignments) off the list.
+//     Closure BODIES are not descended into: they run when called, not here.
+//     A `catch` does not discharge the obligation, it MOVES it: the clause is
+//     entered in the state the raise left behind, so a handler that swallows
+//     without releasing leaks on that path and is reported. The state is
+//     probed, not read off the guarded body's end state — the body ENDS in the
+//     state of the path that did not throw, which is what let
+//     `try { await use(h); h.dispose(); } on Object catch (_) {}` read as
+//     released on every path. `dispose()` is not a raise site, so the
+//     best-effort `try { handle.dispose(); } on Object catch (_) {}` idiom is
+//     still credited: its clause is unreachable.
+//
 // # Residual
 //
 // Two things this deliberately does not claim.
 //
-//   * IMPLICIT EXCEPTION EDGES are not tracked. A throw between the open and
-//     the release leaks the handle, and only a `finally` closes that window.
-//     Modelling every statement as a potential throw site would flag the UI
-//     service's `_runInitialization`, whose window spans two field reads.
+//   * A RETHROW is read as an ordinary statement, not as an exit. A clause that
+//     rethrows while the handle is live therefore leaks along its own outward
+//     edge without being reported, unless the same clause also falls out of the
+//     function live. Modelling it needs the enclosing handler chain, which a
+//     single-region walk does not have.
 //   * FIELD LIFETIME across methods is existence, not per-path. That the field
 //     is disposed in its class does not prove the disposal runs before the
 //     object is dropped; proving that needs object-lifetime analysis no
@@ -344,6 +363,50 @@ class _InvocationFinder extends RecursiveAstVisitor<void> {
 // Local-owner matching
 // ---------------------------------------------------------------------------
 
+/// A program point that drops an outstanding release obligation.
+class _Leak {
+  const _Leak(this.offset, {required this.throwSite});
+
+  final int offset;
+
+  /// True for an implicit exception edge, false for an explicit `return`.
+  final bool throwSite;
+}
+
+/// Whether evaluating [node] can raise.
+///
+/// An `await` or an explicit `throw` counts; nothing else does. Every FFI,
+/// platform and I/O call in this codebase is an await, so this is where a throw
+/// realistically comes from — while a field read and a plain assignment are
+/// not throw sites, which is what keeps `_runInitialization`'s window off the
+/// list (see the header). Closure BODIES are skipped: they run when the closure
+/// is called, not where it is written.
+bool _throwsWhenEvaluated(AstNode? node) {
+  if (node == null) return false;
+  final finder = _ThrowSiteFinder();
+  node.accept(finder);
+  return finder.found;
+}
+
+class _ThrowSiteFinder extends RecursiveAstVisitor<void> {
+  bool found = false;
+
+  @override
+  void visitAwaitExpression(AwaitExpression node) {
+    found = true;
+    super.visitAwaitExpression(node);
+  }
+
+  @override
+  void visitThrowExpression(ThrowExpression node) {
+    found = true;
+    super.visitThrowExpression(node);
+  }
+
+  @override
+  void visitFunctionExpression(FunctionExpression node) {}
+}
+
 /// Whether an outstanding release obligation exists at a program point.
 enum _Flow {
   /// Nothing to release: the handle is unbound here, or already released.
@@ -430,28 +493,76 @@ class _ReleaseFinder extends RecursiveAstVisitor<void> {
 /// Walks [statements] from [state], reporting any exit that still owes a
 /// release. [reportExits] is false while probing a `finally` block, and while
 /// walking a region whose `finally` releases on every way out of it.
+/// [reportThrows] is additionally false inside a `try` that has a `catch`,
+/// which intercepts the exception edge (see the header's residual).
 _Flow _walk(
   List<Statement> statements,
   _Flow state,
   _Tracked tracked,
-  List<int> leaks, {
+  List<_Leak> leaks, {
   required bool reportExits,
+  required bool reportThrows,
 }) {
   var flow = state;
   for (final statement in statements) {
     if (flow == _Flow.gone) break;
-    flow = _walkOne(statement, flow, tracked, leaks, reportExits: reportExits);
+    flow = _walkOne(
+      statement,
+      flow,
+      tracked,
+      leaks,
+      reportExits: reportExits,
+      reportThrows: reportThrows,
+    );
   }
   return flow;
+}
+
+/// Whether an exception raised anywhere in [statements] could leave the handle
+/// live, starting from [state].
+///
+/// That is exactly what a reported throw-site leak means, so this walks the
+/// region asking for them and throws the report away — the caller wants the
+/// fact, not a second copy of the diagnostic. A nested `try` that intercepts,
+/// or a nested `finally` that releases, suppresses its own sites for the same
+/// reasons it does in the real walk.
+bool _raisesWhileLive(
+  List<Statement> statements,
+  _Flow state,
+  _Tracked tracked,
+) {
+  final probe = <_Leak>[];
+  _walk(
+    statements,
+    state,
+    tracked,
+    probe,
+    reportExits: false,
+    reportThrows: true,
+  );
+  return probe.any((leak) => leak.throwSite);
 }
 
 _Flow _walkOne(
   Statement statement,
   _Flow state,
   _Tracked tracked,
-  List<int> leaks, {
+  List<_Leak> leaks, {
   required bool reportExits,
+  required bool reportThrows,
 }) {
+  // An exception edge is an exit like any other: the handle is live, control
+  // leaves, and nothing released it. Reported against the state in which the
+  // expression is EVALUATED, so the binding statement — where the handle does
+  // not exist yet if the open itself throws — is not a leak.
+  void throwEdge(_Flow at, AstNode? evaluated) {
+    if (at == _Flow.live &&
+        reportThrows &&
+        _throwsWhenEvaluated(evaluated)) {
+      leaks.add(_Leak(evaluated!.offset, throwSite: true));
+    }
+  }
+
   switch (statement) {
     case Block():
       return _walk(
@@ -460,6 +571,7 @@ _Flow _walkOne(
         tracked,
         leaks,
         reportExits: reportExits,
+        reportThrows: reportThrows,
       );
 
     case LabeledStatement():
@@ -469,15 +581,20 @@ _Flow _walkOne(
         tracked,
         leaks,
         reportExits: reportExits,
+        reportThrows: reportThrows,
       );
 
     case IfStatement():
+      // `expression`, not `condition`: an `if` can carry a pattern
+      // (`if (x case P)`), so the analyzer names the tested value generically.
+      throwEdge(state, statement.expression);
       final taken = _walkOne(
         statement.thenStatement,
         state,
         tracked,
         leaks,
         reportExits: reportExits,
+        reportThrows: reportThrows,
       );
       final other = statement.elseStatement == null
           ? state
@@ -487,6 +604,7 @@ _Flow _walkOne(
               tracked,
               leaks,
               reportExits: reportExits,
+              reportThrows: reportThrows,
             );
       return _join(taken, other);
 
@@ -501,31 +619,48 @@ _Flow _walkOne(
             tracked,
             leaks,
             reportExits: false,
+            reportThrows: false,
           ) ==
               _Flow.clear;
       final inner = reportExits && !covered;
+      // A `catch` intercepts the throw, so the guarded body is not an
+      // UNPROTECTED window. The obligation is not discharged by that, only
+      // moved: it is carried into the clauses below, which are entered in the
+      // state the raise left behind.
+      final innerThrows =
+          reportThrows && !covered && statement.catchClauses.isEmpty;
       var out = _walk(
         statement.body.statements,
         state,
         tracked,
         leaks,
         reportExits: inner,
+        reportThrows: innerThrows,
       );
+      // Which state that is: probe the body for throw-site leaks, discarding
+      // them. A leak means some raise inside the body would find the handle
+      // live, so the clauses inherit `live` — an intercepted exception is only
+      // handled if the handler releases. Probed rather than read off `out`
+      // because the body's END state is the state of the path that did NOT
+      // throw: in `try { await use(h); h.dispose(); } on Object catch (_) {}`
+      // that is `clear`, while the throwing path strands the claim.
+      final raisedLive =
+          _raisesWhileLive(statement.body.statements, state, tracked);
       for (final clause in statement.catchClauses) {
-        // A catch clause is reached only along an exception edge, which this
-        // analysis does not model (see "residual" in the header). It therefore
-        // inherits no obligation from the guarded body — only what the clause
-        // itself binds or releases counts. Inheriting `state` instead would
-        // make the best-effort `try { handle.dispose(); } on Object catch (_)`
-        // idiom read as a path that never released.
+        // Apart from that, a clause inherits nothing from the guarded body —
+        // only what it itself binds or releases counts. Inheriting the ENTRY
+        // state instead would make the best-effort
+        // `try { handle.dispose(); } on Object catch (_)` idiom read as a path
+        // that never released, because `dispose()` is not a raise site.
         out = _join(
           out,
           _walk(
             clause.body.statements,
-            _Flow.clear,
+            raisedLive ? _Flow.live : _Flow.clear,
             tracked,
             leaks,
             reportExits: inner,
+            reportThrows: reportThrows && !covered,
           ),
         );
       }
@@ -536,12 +671,14 @@ _Flow _walkOne(
         tracked,
         leaks,
         reportExits: reportExits,
+        reportThrows: reportThrows,
       );
       return out == _Flow.gone ? _Flow.gone : after;
 
     case WhileStatement():
       // The body may run zero times, so its effect only ever joins with the
       // state that entered the loop.
+      throwEdge(state, statement.condition);
       return _join(
         state,
         _walkOne(
@@ -550,10 +687,12 @@ _Flow _walkOne(
           tracked,
           leaks,
           reportExits: reportExits,
+          reportThrows: reportThrows,
         ),
       );
 
     case ForStatement():
+      throwEdge(state, statement.forLoopParts);
       return _join(
         state,
         _walkOne(
@@ -562,19 +701,26 @@ _Flow _walkOne(
           tracked,
           leaks,
           reportExits: reportExits,
+          reportThrows: reportThrows,
         ),
       );
 
     case DoStatement():
-      return _walkOne(
+      final out = _walkOne(
         statement.body,
         state,
         tracked,
         leaks,
         reportExits: reportExits,
+        reportThrows: reportThrows,
       );
+      // The condition runs AFTER the body, so it is judged against what the
+      // body left behind, not against the entry state.
+      throwEdge(out, statement.condition);
+      return out;
 
     case SwitchStatement():
+      throwEdge(state, statement.expression);
       var out = state;
       for (final member in statement.members) {
         out = _join(
@@ -585,21 +731,28 @@ _Flow _walkOne(
             tracked,
             leaks,
             reportExits: reportExits,
+            reportThrows: reportThrows,
           ),
         );
       }
       return out;
 
     case ReturnStatement():
-      if (state == _Flow.live && reportExits) leaks.add(statement.offset);
+      throwEdge(state, statement.expression);
+      if (state == _Flow.live && reportExits) {
+        leaks.add(_Leak(statement.offset, throwSite: false));
+      }
       return _Flow.gone;
 
     case BreakStatement() || ContinueStatement():
       return _Flow.gone;
 
     default:
-      // A leaf. Binding wins over releasing: a statement that does both has
-      // re-armed the obligation by the time control leaves it.
+      // A leaf. Its whole subtree is evaluated here, so it is judged against
+      // the state on ENTRY — before the bind below can re-arm the obligation.
+      throwEdge(state, statement);
+      // Binding wins over releasing: a statement that does both has re-armed
+      // the obligation by the time control leaves it.
       final span = (statement.offset, statement.end);
       if (tracked.binds.any((o) => o >= span.$1 && o < span.$2)) {
         return _Flow.live;
@@ -710,21 +863,26 @@ SessionHandleScan analyzeSessionHandles(
               .map((o) => o.binding);
           if (!walked.add('$name@${body.offset}')) continue;
           final tracked = _track(name, body, bindings);
-          final leaks = <int>[];
+          final leaks = <_Leak>[];
           final end = _walk(
             body.block.statements,
             _Flow.clear,
             tracked,
             leaks,
             reportExits: true,
+            reportThrows: true,
           );
-          for (final offset in leaks) {
+          for (final leak in leaks) {
             violations.add(
               SessionHandleViolation(
                 path: path,
-                line: parsed.lineInfo.getLocation(offset).lineNumber,
-                reason: 'returns while `$name` still holds an undisposed MLS '
-                    'session handle',
+                line: parsed.lineInfo.getLocation(leak.offset).lineNumber,
+                reason: leak.throwSite
+                    ? 'an exception here would leak `$name` — nothing between '
+                        'the open and the disposal intercepts it; wrap the '
+                        'region in a try whose finally disposes'
+                    : 'returns while `$name` still holds an undisposed MLS '
+                        'session handle',
               ),
             );
           }
@@ -817,8 +975,17 @@ Future<void> task() async {
 }
 ''';
       final scan = analyzeSessionHandles(source);
-      expect(scan.violations, hasLength(1));
-      expect(scan.violations.single.reason, contains('still live'));
+      // Two distinct program points, not one defect counted twice: the handle
+      // is unreleased where the function ends, AND it is live across an
+      // unprotected await before that.
+      expect(scan.violations, hasLength(2));
+      expect(
+        scan.violations.map((v) => v.reason),
+        containsAll(<Matcher>[
+          contains('still live'),
+          contains('an exception here'),
+        ]),
+      );
     });
 
     test('flags an early return that skips the only disposal', () {
@@ -978,14 +1145,16 @@ class S {
 ''';
       final scan = analyzeSessionHandles(source);
       expect(scan.opens, 2);
-      expect(
-        scan.violations,
-        hasLength(1),
-        reason: 'a whole-file search for `manager.dispose()` would clear both',
-      );
       final unsafeLine =
           source.substring(0, source.indexOf('unsafe()')).split('\n').length;
-      expect(scan.violations.single.line, greaterThan(unsafeLine));
+      expect(
+        scan.violations.map((v) => v.line),
+        everyElement(greaterThan(unsafeLine)),
+        reason: 'a whole-file search for `manager.dispose()` would clear both, '
+            'and a whole-file search for the LEAK would report safe() too',
+      );
+      // Both of unsafe()'s program points, and neither of safe()'s.
+      expect(scan.violations, hasLength(2));
     });
 
     test(
@@ -1011,6 +1180,91 @@ Future<void> task() async {
         expect(scan.violations.single.reason, contains('discarded'));
       },
     );
+
+    test('an await between the open and the only disposal is a leak', () {
+      const source = '''
+Future<void> task() async {
+  final manager = await CircleManagerFfi.newInstance(dataDir: d);
+  await publish(manager);
+  manager.dispose();
+}
+''';
+      final scan = analyzeSessionHandles(source);
+      expect(scan.violations, hasLength(1));
+      expect(scan.violations.single.reason, contains('an exception here'));
+    });
+
+    test('the same await inside a try whose finally disposes is permitted', () {
+      const source = '''
+Future<void> task() async {
+  final manager = await CircleManagerFfi.newInstance(dataDir: d);
+  try {
+    await publish(manager);
+  } finally {
+    manager.dispose();
+  }
+}
+''';
+      expect(analyzeSessionHandles(source).violations, isEmpty);
+    });
+
+    test('a catch that swallows the throw without releasing is a leak, not a '
+        'credit', () {
+      // The idiom above with `finally` replaced by `catch`: the non-throwing
+      // path disposes, so the body ENDS clear, and reading the credit off that
+      // end state passed this. `publish` throwing skips the disposal and holds
+      // the Rule-14 claim for the life of the process, with the swallow making
+      // it silent as well.
+      const source = '''
+Future<void> task() async {
+  final manager = await CircleManagerFfi.newInstance(dataDir: d);
+  try {
+    await publish(manager);
+    manager.dispose();
+  } on Object catch (_) {}
+}
+''';
+      final scan = analyzeSessionHandles(source);
+      expect(scan.violations, hasLength(1));
+      expect(scan.violations.single.reason, contains('still live'));
+    });
+
+    test('a catch that does release on the exception path is credited', () {
+      const source = '''
+Future<void> task() async {
+  final manager = await CircleManagerFfi.newInstance(dataDir: d);
+  try {
+    await publish(manager);
+    manager.dispose();
+  } on Object catch (_) {
+    manager.dispose();
+  }
+}
+''';
+      expect(analyzeSessionHandles(source).violations, isEmpty);
+    });
+
+    test('field reads and plain assignments between open and transfer are not '
+        'throw sites', () {
+      const source = '''
+class S {
+  Future<void> run() async {
+    final manager = await CircleManagerFfi.newInstance(dataDir: d);
+    if (_wiped || _handoffHolds) {
+      manager.dispose();
+      return;
+    }
+    _handedOff = false;
+    _manager = manager;
+  }
+
+  Future<void> close() async {
+    _manager?.dispose();
+  }
+}
+''';
+      expect(analyzeSessionHandles(source).violations, isEmpty);
+    });
 
     test('a disposal inside a nested closure does not release the local', () {
       const source = '''

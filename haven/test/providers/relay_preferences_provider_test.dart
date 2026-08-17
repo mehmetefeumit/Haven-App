@@ -351,7 +351,11 @@ void main() {
       await c.read(profileRelaysProvider.notifier).restoreDefaults();
       final after = await c.read(profileRelaysProvider.future);
       expect(after, contains('wss://custom-profile.example.com'));
-      expect(after, contains('wss://default-a'));
+      // Profile-plane defaults are a distinct string family from the
+      // Inbox/KeyPackage ones the mock uses (see
+      // `MockRelayPreferencesService.restoreDefaults`) — the same
+      // plane-separation fixture convention as `seedDefaultsIfUnseeded`.
+      expect(after, contains('wss://profile-default-a'));
     });
 
     test('wipeAndReset removes user customizations', () async {

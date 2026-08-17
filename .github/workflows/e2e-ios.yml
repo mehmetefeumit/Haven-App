@@ -324,16 +324,23 @@ jobs:
             integration_test/e2e/e2e_combined.dart
             ${{ steps.sim.outputs.udid }}
 
-      # THE HARNESS'S OWN SOCKET, captured HERE and nowhere later, because the
-      # next step destroys the evidence: run-ios-sim-scenario.sh truncates
-      # (`: > "${log}"`) the single fixed /tmp/flutter-ios-test.log at the start
-      # of every invocation, so once the background-mirror scenario runs, the
-      # e2e_combined drive log — and the sentinel ack printed in it — is gone.
+      # EVERYTHING THE ORACLES TAKE FROM THE DRIVE LOG, captured HERE and nowhere
+      # later, because the next step destroys the evidence:
+      # run-ios-sim-scenario.sh truncates (`: > "${log}"`) the single fixed
+      # /tmp/flutter-ios-test.log at the start of every invocation, so once the
+      # background-mirror scenario runs, e2e_combined's log — the sentinel ack
+      # printed in it AND the running count of announced MLS group ids — is
+      # gone. e2e-android.yml reads both straight from the drive log at its
+      # oracle step because that lane runs ONE scenario into a log that is
+      # appended across attempts; this lane cannot, and anything added to the
+      # oracle step that greps this path reads the mirror check's log rather
+      # than the flow's — which is empty of both, on every run.
       #
-      # `TestRelay` reaches the same proxied relay the app does, so its probes
-      # are IN the journal and are NOT Haven's privacy surface. The proxy returns
-      # the emitting `conn_id` in the sentinel ack and the drive prints that ack;
-      # that print is the ONLY path by which the host can learn the id.
+      # (1) THE HARNESS'S OWN SOCKET. `TestRelay` reaches the same proxied relay
+      # the app does, so its probes are IN the journal and are NOT Haven's
+      # privacy surface. The proxy returns the emitting `conn_id` in the
+      # sentinel ack and the drive prints that ack; that print is the ONLY path
+      # by which the host can learn the id.
       #
       # The oracles no longer DEPEND on it for exclusion — every harness socket
       # declares itself in the journal (`TestRelay._declareHarnessSocket`) — but
@@ -341,13 +348,19 @@ jobs:
       # chain: no ack means the drive never reached the proxy, and a journal
       # that describes some other run must be reported, not inferred.
       #
-      # This step never fails the lane on its own. A missing id is a real
+      # (2) HOW MANY MLS GROUP IDS THE DRIVE ANNOUNCED. C5.8's needle set itself
+      # arrives by the proxy sidecar, which survives this step; this count is the
+      # INDEPENDENT second source that says whether that set is complete (see the
+      # oracle step). Counts only — a Rule-4 value never reaches this log.
+      #
+      # This step never fails the lane on its own. A missing capture is a real
       # problem, but it is REPORTED where the rest of the wire verdicts are
       # reported, under the same closed exit-code taxonomy — failing here would
       # skip the oracle step entirely and lose every other finding with it.
-      # `tail -n 1` because a retried attempt appends nothing to this file (it is
-      # truncated per attempt), so the last ack is always the surviving one.
-      - name: Capture the harness conn id
+      # `tail -n 1` and `sort -n | tail -n 1` because a retried attempt appends
+      # nothing to this file (it is truncated per attempt), so the last ack and
+      # the highest count are always the surviving ones.
+      - name: Capture the e2e_combined drive-log evidence
         run: |
           set -uo pipefail
           conn="$(LC_ALL=C grep -aoE 'wire-journal sentinel acked.*conn=[A-Za-z0-9_-]+' /tmp/flutter-ios-test.log 2>/dev/null | tail -n 1 | sed -E 's/.*conn=//' || true)"
@@ -356,6 +369,13 @@ jobs:
             echo "::notice::harness conn_id ${conn} captured; it is excluded from wire attribution below."
           else
             echo "no '[e2e_combined] wire-journal sentinel acked … conn=<id>' line in /tmp/flutter-ios-test.log; the wire oracle step will report this."
+          fi
+          announced="$(LC_ALL=C grep -aoE 'announced MLS group id #[0-9]+' /tmp/flutter-ios-test.log 2>/dev/null | sed -E 's/.*#//' | sort -n | tail -n 1 || true)"
+          echo "ANNOUNCED_MLS_GROUP_IDS=${announced}" >> "${GITHUB_ENV}"
+          if [[ -n "${announced}" ]]; then
+            echo "::notice::the drive announced ${announced} MLS group id(s); C5.8's needle set is held against that count below."
+          else
+            echo "no '[e2e_combined] announced MLS group id #<n>' line in /tmp/flutter-ios-test.log; the wire oracle step will report this."
           fi
 
       # Background-mirror check (docs/M7_BACKGROUND_SHARING.md D7): a SECOND,
@@ -487,9 +507,10 @@ jobs:
       # and run-ios-sim-scenario.sh truncates the single fixed
       # /tmp/flutter-ios-test.log on every invocation, so by the time this step
       # runs the background-mirror scenario has overwritten e2e_combined's log.
-      # Wiring C6 here needs a preserved copy of that log taken in the same slot
-      # as the conn-id capture above; that is a separate change, and stating the
-      # real obstacle is worth more than an out-of-date one.
+      # Wiring C6 here needs a preserved COPY of that log taken in the same slot
+      # as the drive-log capture step above (which extracts two values from it,
+      # not the whole file); that is a separate change, and stating the real
+      # obstacle is worth more than an out-of-date one.
       - name: Assert wire privacy invariants
         run: |
           set -uo pipefail
@@ -593,6 +614,30 @@ jobs:
           else
             echo "::notice::C5.8: ${mls_count} MLS group id(s) declared from the proxy sidecar (values withheld — Security Rule 4)."
           fi
+          # ...and a non-empty needle set is not a COMPLETE one. Nothing in the
+          # journal can tell a set that shrank from a run that made fewer
+          # circles, so a lost declaration leaves C5.8 looking exactly as busy
+          # over fewer values while every verdict stays green. The drive prints a
+          # running count as it announces each circle (`_announceMlsGroupId`),
+          # produced independently of the sidecar the ids themselves travel to —
+          # holding the two against each other is what catches a declaration
+          # that never landed, a sidecar rotated under the recorder, or a
+          # scenario that stopped announcing. Counts only; the ids stay off this
+          # log (Security Rule 4).
+          #
+          # READ FROM THE ENV THE CAPTURE STEP EXPORTED, NEVER BY GREPPING
+          # /tmp/flutter-ios-test.log HERE: that path holds the BACKGROUND-MIRROR
+          # scenario's log by now (run-ios-sim-scenario.sh truncates it per
+          # invocation), which announces no group id at all — so a grep at this
+          # point comes up empty on every run and fails the lane closed for a
+          # reason that has nothing to do with the app or the recorder.
+          expect=()
+          if [[ -n "${ANNOUNCED_MLS_GROUP_IDS:-}" ]]; then
+            expect=(--expect-mls-group-ids "${ANNOUNCED_MLS_GROUP_IDS}")
+          else
+            echo "::error::the count of MLS group ids this run announced was never captured, so the sidecar's ${mls_count} id(s) cannot be checked for COMPLETENESS. A needle set that lost entries scans fewer circles than the run created and still reports clean, which is the one failure mode C5.8 must not have. The count travels in \$GITHUB_ENV from the 'Capture the e2e_combined drive-log evidence' step, which reads the drive log while it is still e2e_combined's — so the break is in ONE of those two links: the scenario stopped announcing (or the drive's print changed shape), or that capture step no longer runs before the background-mirror scenario truncates /tmp/flutter-ios-test.log. Fix the channel rather than dropping the flag, and do not re-read the drive log here: by this point it belongs to the mirror check." >&2
+            verdict "C5.8 announced-count channel" 3
+          fi
           rc=0
           bash tooling/e2e/ci/check-wire-correlation.sh \
             --journal /tmp/haven-wire-journal.ndjson \
@@ -605,7 +650,8 @@ jobs:
             --pool "10050=${WIRE_UPSTREAM}" \
             --pool "30443=${WIRE_UPSTREAM}" \
             ${excl[@]+"${excl[@]}"} \
-            ${mls_args[@]+"${mls_args[@]}"} || rc=$?
+            ${mls_args[@]+"${mls_args[@]}"} \
+            ${expect[@]+"${expect[@]}"} || rc=$?
           verdict "C5 correlation" "${rc}"
           fi
 

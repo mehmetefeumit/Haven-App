@@ -143,7 +143,8 @@
 #        --sentinel <token> \
 #        --pool <kind>=<url>[,<url>...] [--pool ...] \
 #        [--discovery-relay <url>]... [--exclude-conn <conn_id>]... \
-#        [--identity-pubkey <hex64>]... [--mls-group-id <hex>]...
+#        [--identity-pubkey <hex64>]... [--mls-group-id <hex>]... \
+#        [--expect-mls-group-ids <n>]
 #   bash tooling/e2e/ci/check-wire-correlation.sh --self-test
 #
 # The E2E harness (`TestRelay`) reaches the same proxied relays as the app, so
@@ -184,7 +185,8 @@ Usage:
                             --pool <kind>=<url>[,<url>...] [--pool ...] \
                             [--discovery-relay <url>]... \
                             [--identity-pubkey <hex64>]... \
-                            [--mls-group-id <hex>]...
+                            [--mls-group-id <hex>]... \
+                            [--expect-mls-group-ids <n>]
   check-wire-correlation.sh --self-test
 
 --pool declares the publish targets a kind is ALLOWED to reach (C5.6). At least
@@ -216,6 +218,14 @@ absence from the wire is the very thing asserted — and it cannot live in
 wire_allowlist.json, which is static while the id is minted per run. Publishing
 kind-445s without declaring one is a META-FLOOR: the scan would have compared
 the wire against nothing.
+
+--expect-mls-group-ids is the lane's OWN count of how many ids the drive
+announced, held against how many arrived. Nothing in the journal can tell a
+needle set that shrank from a run that made fewer circles, so a set narrowed by
+a rotated sidecar or a broken declaration leaves C5.8 looking exactly as busy
+over fewer values. A mismatch either way is a META-FLOOR. Optional: without it
+the completeness of the needle set is simply not checked, and the summary line
+says so.
 EOF
 }
 
@@ -398,7 +408,7 @@ normalize() {
 # what the guard is allowed to say.
 evaluate() {
   local stream="$1" pools="$2" discovery="$3" exclude="$4" identity="$5" mlsids="$6"
-  local mls_not_asserted="${7:-}" prog
+  local mls_not_asserted="${7:-}" expect_mlsids="${8:-null}" prog
   prog="$(mktemp)"
   cat > "${prog}" <<'JQPROG'
 
@@ -607,6 +617,7 @@ evaluate() {
         | map(select(. != "")) | unique ) as $IDKEYS_SEND
 
     | ($mlsGroupIds | map(ascii_downcase) | unique) as $MLSIDS
+    | ($expectMlsGroupIds) as $EXPECTMLS
 
     # ======================================================================
     # C5.1 — created_at collision across distinct `h`, PER PUBLISHER
@@ -1002,7 +1013,24 @@ evaluate() {
     # encoding. C5.8 is the cheap, always-on half: it catches the leak that
     # actually happens, which is the id going out in a tag verbatim because a
     # builder reached for the wrong field.
-    | [ (if (($MLSIDS | length) == 0) and (($s445 | length) > 0)
+    #
+    # # A NON-EMPTY needle set is not the same as a COMPLETE one
+    #
+    # Everything above turns on `$MLSIDS` being non-empty, and nothing in the
+    # journal can say whether it is COMPLETE: an id the host never received is
+    # indistinguishable from a circle the run never created. A needle set that
+    # silently shrank — a sidecar rotated under the recorder, a declaration that
+    # never reached it, an announce call site deleted — leaves this scan looking
+    # exactly as busy as a full one, over fewer values, and the run reports
+    # clean. `--expect-mls-group-ids` is the lane's own count of what the drive
+    # announced, held against what arrived. It is the only ground truth for
+    # completeness that exists outside this file, and it is OPTIONAL: a lane
+    # that does not supply it gets no cross-check, and the summary line says so
+    # rather than implying one ran.
+    | [ (if ($EXPECTMLS != null) and ($EXPECTMLS != ($MLSIDS | length)) then
+          "C5.8 ground truth: the lane announced \($EXPECTMLS) MLS group id(s) but \($MLSIDS | length) reached this scan. C5.8 is a search for values it cannot derive, so its needle set IS its coverage: fewer needles than the run created means some circle's whole traffic went unscanned while every other verdict here still reported clean, and MORE means the set carries values this run never minted (a sidecar that was not rotated), which can never be found and cannot fail. Fix the channel — drive announcement -> proxy interception -> sidecar -> this flag — rather than the count; the two numbers are produced independently on purpose, and neither is worth trusting alone."
+         else empty end),
+        (if (($MLSIDS | length) == 0) and (($s445 | length) > 0)
              and ($mlsNotAsserted == "") then
           "C5.8 precondition: \($s445 | length) kind-445(s) were PUBLISHED below the sentinel but no --mls-group-id was declared, so the scan for a leaked MLS group id compared the wire against an empty set of values and could not have failed. The real group id cannot be derived from the journal — its absence there is the very thing being asserted — so it must be supplied by the lane that created the circle (CircleFfi.mlsGroupId, hex-encoded). Declare it or stop asserting Security Rule 4 here."
          else empty end),
@@ -1102,6 +1130,7 @@ evaluate() {
           sent_445_authors: ([ $s445[] | .pubkey ] | unique | map(select(. != "")) | length),
           identity_keys: ($IDKEYS | length),
           mls_ids: ($MLSIDS | length),
+          mls_ids_expected: $EXPECTMLS,
           in_445: ($in445 | length),
           publishing_conns: ($c51byConn | length),
           multi_circle_conns: ($c51multi | length),
@@ -1117,6 +1146,7 @@ JQPROG
     --argjson excludeConns "${exclude}" \
     --argjson identityPubkeys "${identity}" \
     --argjson mlsGroupIds "${mlsids}" \
+    --argjson expectMlsGroupIds "${expect_mlsids}" \
     --arg mlsNotAsserted "${mls_not_asserted}" \
     -f "${prog}" -- "${stream}"
   local rc=$?
@@ -1133,6 +1163,9 @@ main() {
   local -a journals=()
   local pool_lines="" disc_lines="" excl_lines="" idpk_lines="" mlsid_lines=""
   MLS_NOT_ASSERTED=""
+  # `null` until a lane declares one: an absent cross-check must read as absent,
+  # never as a comparison against zero.
+  EXPECT_MLS_IDS="null"
 
   if [[ $# -lt 1 ]]; then
     usage
@@ -1245,6 +1278,20 @@ main() {
           usage; exit "${RC_USAGE}"
         fi
         mlsid_lines+="$2"$'\n'; shift 2 ;;
+      --expect-mls-group-ids)
+        # The lane's own count of what the drive announced, held against what
+        # arrived. Independently produced (the drive prints a running count as
+        # it announces; the ids travel a separate control channel into a
+        # sidecar), which is the whole value: a needle set that silently shrank
+        # leaves C5.8 looking exactly as busy over fewer values.
+        [[ $# -ge 2 ]] || { echo "ERROR: --expect-mls-group-ids needs a value" >&2; usage; exit "${RC_USAGE}"; }
+        if [[ ! "$2" =~ ^[0-9]+$ ]]; then
+          echo "ERROR: --expect-mls-group-ids expects a non-negative integer, got: $2" >&2
+          echo "       An unparsed count (an empty grep, a stray word) must not become" >&2
+          echo "       a comparison that silently matches anything." >&2
+          usage; exit "${RC_USAGE}"
+        fi
+        EXPECT_MLS_IDS="$2"; shift 2 ;;
       *)
         echo "ERROR: unknown argument: $1" >&2; usage; exit "${RC_USAGE}" ;;
     esac
@@ -1364,7 +1411,8 @@ main() {
 
   local verdict
   verdict="$(evaluate "${stream}" "${pools_json}" "${disc_json}" "${excl_json}" \
-                      "${idpk_json}" "${mlsid_json}" "${MLS_NOT_ASSERTED}")"
+                      "${idpk_json}" "${mlsid_json}" "${MLS_NOT_ASSERTED}" \
+                      "${EXPECT_MLS_IDS}")"
 
   local n_meta n_viol n_events
   n_meta="$(printf '%s' "${verdict}" | jq '.meta | length')"
@@ -1378,7 +1426,11 @@ main() {
     "over \(.summary.app_groups) app-publishing group(s); 1059 \(.summary.k1059); " +
     "\(.summary.h_filters) #h filter(s); \(.summary.sent_pairs) (event,endpoint) publish pair(s); " +
     "sent 445 \(.summary.sent_445) under \(.summary.sent_445_authors) distinct author key(s); " +
-    "\(.summary.identity_keys) known identity key(s); \(.summary.mls_ids) declared MLS group id(s); " +
+    "\(.summary.identity_keys) known identity key(s); \(.summary.mls_ids) declared MLS group id(s)" +
+    # Named only when it RAN. A reader must never have to infer from a count
+    # alone whether anything held it against the number of circles the run made.
+    (if .summary.mls_ids_expected == null then " (completeness NOT cross-checked)"
+     else " (lane announced \(.summary.mls_ids_expected) — cross-checked)" end) + "; " +
     "\(.summary.publishing_conns) publishing connection(s) of which \(.summary.multi_circle_conns) served >1 group; " +
     "\(.summary.excluded_conns) connection(s) excluded (\(.summary.harness_conns) self-declared harness); " +
     "endpoints \(.summary.endpoints)"' >&2
@@ -2706,6 +2758,49 @@ self_test() {
     --journal "${healthy}" "${base_nomls[@]}" \
     --mls-group-id-not-asserted "   " || fail=1
 
+  # THE NEEDLE SET THAT SHRANK. Every fixture above turns on the set being
+  # NON-EMPTY, and no journal can say whether it is COMPLETE — an id the host
+  # never received looks exactly like a circle the run never made. The healthy
+  # fixture creates two circles, so declaring one of them is the whole defect:
+  # one circle's traffic goes unscanned while all nine verdicts still report
+  # clean. This is the case the lane's independent count exists to catch, and
+  # WITHOUT the cross-check it is proven here to be green.
+  expect_rc 0 "a HALVED needle set is green when nothing cross-checks it" \
+    --journal "${healthy}" "${base_nomls[@]}" --mls-group-id "${MLS1}" || fail=1
+  expect_rc 4 "...and a META-FLOOR the moment the lane declares what it announced" \
+    --journal "${healthy}" "${base_nomls[@]}" --mls-group-id "${MLS1}" \
+    --expect-mls-group-ids 2 || fail=1
+  expect_msg "the lane announced 2 MLS group id(s) but 1 reached this scan" \
+    "the mismatch names BOTH counts, so a reader can tell which half broke" \
+    --journal "${healthy}" "${base_nomls[@]}" --mls-group-id "${MLS1}" \
+    --expect-mls-group-ids 2 || fail=1
+  # The COMPLETE set must still pass, or the check above would also be
+  # satisfied by a flag that reds every run.
+  expect_rc 0 "a needle set matching the lane's count passes" \
+    --journal "${healthy}" "${base[@]}" --expect-mls-group-ids 2 || fail=1
+  # The OTHER direction is a finding too, and a different one: more ids than the
+  # run announced means the sidecar was never rotated, so C5.8 is scanning for a
+  # previous run's values — needles that cannot be found and cannot fail.
+  expect_rc 4 "MORE ids than the lane announced is a META-FLOOR, not a pass" \
+    --journal "${healthy}" "${base[@]}" --expect-mls-group-ids 1 || fail=1
+  expect_msg "values this run never minted" \
+    "the over-count names the stale-sidecar reading rather than reporting a shortfall" \
+    --journal "${healthy}" "${base[@]}" --expect-mls-group-ids 1 || fail=1
+  # A count that did not parse must never become a comparison that matches
+  # anything: an empty grep in a lane is exactly how that arrives.
+  expect_rc 2 "a non-numeric --expect-mls-group-ids is refused" \
+    --journal "${healthy}" "${base[@]}" --expect-mls-group-ids "" || fail=1
+  expect_rc 2 "a negative --expect-mls-group-ids is refused" \
+    --journal "${healthy}" "${base[@]}" --expect-mls-group-ids "-1" || fail=1
+  # A lane that supplies no count gets no cross-check — and the summary must SAY
+  # so rather than let a reader infer completeness from a bare number.
+  expect_msg "completeness NOT cross-checked" \
+    "an absent cross-check is stated, not left to be inferred from the count" \
+    --journal "${healthy}" "${base[@]}" || fail=1
+  expect_msg "(lane announced 2 — cross-checked)" \
+    "...and a cross-check that RAN is named in the same place" \
+    --journal "${healthy}" "${base[@]}" --expect-mls-group-ids 2 || fail=1
+
   # THE EMPTY SUBSET, second form: an id was declared but no group message was
   # ever published, so none of the events that could carry it are in the
   # sample and a clean verdict would describe the journal, not the app.
@@ -2919,7 +3014,7 @@ self_test() {
   # At 114-against-124 that room was ten cases, which is most of the C5.8
   # section. An exact pin means retiring a case is a two-line diff that has to
   # say why, which is the reviewable act the slack was quietly avoiding.
-  readonly MIN_CASES=147
+  readonly MIN_CASES=157
   if (( CASES_RUN < MIN_CASES )); then
     echo "SELF-TEST FAIL: only ${CASES_RUN} fixture(s) ran; at least ${MIN_CASES} expected." >&2
     echo "  Cases have been removed without lowering MIN_CASES — the self-test is" >&2
@@ -2947,7 +3042,9 @@ self_test() {
        "the journal-derived set AND from a declaration, one ephemeral key on two" \
        "messages is caught while the same event fanned out to two relays and echoed" \
        "twice is not, a leaked MLS group id is caught in an h tag, in a third tag" \
-       "token and embedded in a longer one; C5.7/C5.8/C5.9 are proven SILENT on" \
+       "token and embedded in a longer one, and a needle set that SHRANK to half" \
+       "the run's circles is proven green without the lane's own count and a" \
+       "META-FLOOR with it, in both directions; C5.7/C5.8/C5.9 are proven SILENT on" \
        "inbound frames rather than merely outvoted, and both new flags refuse every" \
        "input shape that would leave their check matching nothing; repeated event" \
        "ids, an in-pool fan-out, the accepted multiplexed #h shape and traffic above" \

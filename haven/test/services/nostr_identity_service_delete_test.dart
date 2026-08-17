@@ -198,4 +198,102 @@ void main() {
       );
     });
   });
+
+  group('deleteIdentity is self-contained about the keyring backend', () {
+    // `tileCacheWipe` removes the tiles.db keyring entry. If the platform
+    // keyring backend is not installed, that removal is a silent Rust-side
+    // no-op that still reports success — the same defect shape as the
+    // legacy-MLS-cutover bug (a destroy FFI called with no backend installed,
+    // so the done-marker latched while the SQLCipher key it was supposed to
+    // remove survived). In production, `IdentityNotifier.deleteIdentity`
+    // always installs the backend first via the MLS wipe calls that precede
+    // `NostrIdentityService.deleteIdentity` — so these tests construct the
+    // service in isolation, with NO such call preceding it, to prove the
+    // guarantee does not depend on that caller sequencing.
+    test(
+      'calls the keyring initializer, unprompted by any other caller',
+      () async {
+        SharedPreferences.setMockInitialValues(<String, Object>{});
+        var keyringInitialized = false;
+        final service = NostrIdentityService(
+          storage: _MemoryStorage(validSecret),
+          wipeTileCache: () async {},
+          keyringInitializer: () async {
+            keyringInitialized = true;
+          },
+          managerFactory: () async => _FakeIdentityManager(),
+        );
+
+        // No `NostrCircleService.wipeAllMlsState` / `destroyLegacyMlsState`
+        // ran first in this test — those are what install the backend for
+        // the real `IdentityNotifier.deleteIdentity` caller. If this
+        // service's own `deleteIdentity` relied on that ordering instead of
+        // installing the backend itself, `keyringInitialized` would stay
+        // false here.
+        await service.deleteIdentity();
+
+        expect(
+          keyringInitialized,
+          isTrue,
+          reason:
+              'the tile-cache wipe removes a keyring entry; deleteIdentity '
+              'must install the backend itself rather than assuming some '
+              'other caller already did',
+        );
+      },
+    );
+
+    test(
+      'installs the keyring backend BEFORE wiping the tile cache',
+      () async {
+        SharedPreferences.setMockInitialValues(<String, Object>{});
+        final callOrder = <String>[];
+        final service = NostrIdentityService(
+          storage: _MemoryStorage(validSecret),
+          wipeTileCache: () async {
+            callOrder.add('wipeTileCache');
+          },
+          keyringInitializer: () async {
+            callOrder.add('keyringInitializer');
+          },
+          managerFactory: () async => _FakeIdentityManager(),
+        );
+
+        await service.deleteIdentity();
+
+        expect(
+          callOrder,
+          ['keyringInitializer', 'wipeTileCache'],
+          reason:
+              'a keyring install that runs AFTER the wipe protects nothing — '
+              'the entry removal must observe an already-installed backend',
+        );
+      },
+    );
+
+    test(
+      'still wipes the tile cache when the keyring initializer fails',
+      () async {
+        // Best-effort, matching NostrCircleService.wipeAllMlsState's
+        // sibling pattern: a keyring-init failure must not block the wipe
+        // attempt, since the file deletion (the primary objective) does not
+        // depend on the keyring at all.
+        SharedPreferences.setMockInitialValues(<String, Object>{});
+        var tileCacheWiped = false;
+        final service = NostrIdentityService(
+          storage: _MemoryStorage(validSecret),
+          wipeTileCache: () async {
+            tileCacheWiped = true;
+          },
+          keyringInitializer: () async {
+            throw StateError('keyring backend unavailable');
+          },
+          managerFactory: () async => _FakeIdentityManager(),
+        );
+
+        await expectLater(service.deleteIdentity(), completes);
+        expect(tileCacheWiped, isTrue);
+      },
+    );
+  });
 }

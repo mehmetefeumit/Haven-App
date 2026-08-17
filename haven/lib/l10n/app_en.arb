@@ -343,7 +343,7 @@
   },
   "relaySettingsProfileUnderflowRestoreButton": "Restore default profile relays",
   "@relaySettingsProfileUnderflowRestoreButton": {
-    "description": "Button in the profile-pool-underflow warning banner; calls CircleManagerFfi.restoreDefaultProfileRelays() (non-destructive: adds back missing curated profile relays, keeps the user's own additions). Deliberately worded more specifically than relaySettingsRestoreDefaults (the label already used three times on this same page for each section's destructive wipe-and-reset-to-exactly-defaults action, behind a confirmation dialog): reusing the identical short label here would give a screen-reader user, or anyone scanning the page while this banner is visible, two differently-behaving controls with the same name. Keep this button's wording distinguishable from relaySettingsRestoreDefaults in every locale."
+    "description": "Button in the profile-pool-underflow warning banner; calls CircleManagerFfi.restoreDefaultProfileRelays() (non-destructive: adds back missing curated profile relays, keeps the user's own additions). Deliberately worded more specifically than relaySettingsRestoreDefaults (that label is used at two call sites on this same page: the section-level destructive wipe-and-reset-to-exactly-defaults action behind a confirmation dialog, and the non-destructive empty-category top-up action): reusing the identical short label here would give a screen-reader user, or anyone scanning the page while this banner is visible, differently-behaving controls with the same name. Keep this button's wording distinguishable from relaySettingsRestoreDefaults in every locale."
   },
   "relaySettingsLoadRelaysError": "Failed to load relays.",
   "@relaySettingsLoadRelaysError": {

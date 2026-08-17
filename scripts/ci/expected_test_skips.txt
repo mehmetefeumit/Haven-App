@@ -46,7 +46,7 @@
 
 
 # ---------------------------------------------------------------------------
-# haven-core — 20 skips
+# haven-core — 21 skips
 # ---------------------------------------------------------------------------
 
 # Blossom round-trips against a REAL server (BUD-01/02 upload + download +
@@ -71,6 +71,29 @@ haven-core|tests/profile_blossom_integration_test.rs::upload_then_download_byte_
 haven-core|tests/mls_integration_tests.rs::production_storage_tests::circle_manager_encrypted_creates_successfully|requires system keyring - run with --ignored flag
 haven-core|tests/mls_integration_tests.rs::production_storage_tests::session_manager_encrypted_creates_successfully|requires system keyring - run with --ignored flag
 haven-core|tests/mls_integration_tests.rs::production_storage_tests::storage_encrypted_opens_successfully|requires system keyring - run with --ignored flag
+
+# The curated profile-relay pool, probed for real. Two of the five selection
+# criteria on `PRODUCTION_PROFILE_RELAYS` are statements about how eight hosts
+# Haven does not operate BEHAVE — that they accept an unauthenticated kind-0
+# write, and that they serve reads without a NIP-42 AUTH challenge — and no
+# hermetic test can settle them. Running it per-push was considered and rejected
+# in docs/PROFILE_RELAY_VETTING.md: it would redden on a third party's outage,
+# and it would beacon Haven's build cadence to those eight operators from a
+# stable CI egress address indefinitely.
+# NOT a lost proof, in the part that is about Haven: three tests in the same
+# file that are NOT ignored — probe_passes_a_relay_that_serves_reads_and_keeps_
+# our_kind0, probe_fails_a_relay_that_refuses_our_kind0 and
+# probe_fails_a_relay_that_demands_nip42_auth_on_read — drive the same two probe
+# functions against in-process relays on every `cargo test`, pinning the verdict
+# logic (including that an OK-ack without a successful read-back is a FAIL, not
+# a pass). Criteria 1 and 4 are pinned by profile_plane_separation.rs and
+# pool_entries_are_wss_and_unique.
+# What IS lost is whether the eight hosts in the list today still behave that
+# way — a genuine capability gap, tracked as one: the findings table in
+# docs/PROFILE_RELAY_VETTING.md currently reads UNVERIFIED, and that file's
+# "Before you run it" section makes re-running it a maintainer decision before
+# any release that ships a pool change.
+haven-core|tests/profile_relay_vetting.rs::curated_profile_relays_accept_unauthenticated_kind0_and_serve_reads_without_auth|dials eight third-party relays (HAVEN_PROBE_PROFILE_RELAYS=1)
 
 # Doctests written as ```ignore — rustdoc neither compiles nor runs them, so
 # they are prose that merely LOOKS executable. They are listed individually (not

@@ -21,7 +21,7 @@
 //! ordered message provides the moment by which a forwarded declaration would
 //! already have come back.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -69,20 +69,10 @@ impl Drop for TempDir {
     }
 }
 
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
-        .expect("probe bind");
-    listener.local_addr().expect("probe addr").port()
-}
-
 async fn start_relay() -> (LocalRelay, String) {
-    let builder = RelayBuilder::default()
-        .addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
-        .port(free_port());
-    let relay = LocalRelay::new(builder);
-    relay.run().await.expect("relay starts");
-    let url = relay.url().await.to_string();
-    (relay, url)
+    haven_local_relay::loopback::start_local_relay()
+        .await
+        .expect("relay starts")
 }
 
 /// An upstream that answers every TEXT message with `["ECHO", <the message>]`.

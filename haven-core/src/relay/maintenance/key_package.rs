@@ -192,6 +192,11 @@ pub struct RelayKpSnapshot {
 /// responder's own min non-empty on-relay `d` — i.e. the global byte-min
 /// non-empty `d` across all responders. Fully stable regardless of relay
 /// iteration order OR intra-relay event order.
+///
+/// Non-emptiness is the ONLY filter, deliberately: an adopted slot is taken as
+/// found, including one narrower than the 64-hex width [`mint_d`] now mints.
+/// Rejecting a legacy slot would fork the address peers have already cached,
+/// which is the exact failure a stable `d` exists to prevent.
 fn pick_seed_d(snapshot: &RelayKpSnapshot) -> Option<String> {
     snapshot
         .responders
@@ -213,9 +218,11 @@ pub enum KpMaintenanceDecision {
     /// responded this tick) — nothing to do.
     NoOp,
     /// First-run seeding: no slot is tracked locally yet, but a responder serves
-    /// a canonical with a well-formed `d`. The FFI records the seed `d` into
-    /// `published_key_packages` BEFORE any future publish, so stability holds
-    /// from cycle 1. No new material is published this tick.
+    /// a canonical with a NON-EMPTY `d` — the only test applied; a slot narrower
+    /// than [`mint_d`]'s 64-hex width is adopted as found (see [`pick_seed_d`]).
+    /// The FFI records the seed `d` into `published_key_packages` BEFORE any
+    /// future publish, so stability holds from cycle 1. No new material is
+    /// published this tick.
     SeedD {
         /// The deterministic stable `d` adopted from the responders' 30443s.
         d: String,
@@ -275,7 +282,7 @@ pub enum KpMaintenanceDecision {
 ///      responder;
 ///    * 2b. otherwise heal the responders NOT serving the slot; if all serve
 ///      it, [`KpMaintenanceDecision::NoOp`].
-/// 3. **No slot tracked but a responder serves a well-formed `d`** ⇒
+/// 3. **No slot tracked but a responder serves a non-empty `d`** ⇒
 ///    [`KpMaintenanceDecision::SeedD`] (adopt it before publishing, so cycle 1
 ///    does not fork the address).
 /// 4. **No slot tracked and no adoptable `d`** ⇒
@@ -346,7 +353,7 @@ pub fn decide_kp_maintenance(
         };
     }
 
-    // Branch 3: first run — adopt an on-relay `d` if one is well-formed.
+    // Branch 3: first run — adopt an on-relay `d` if one is non-empty.
     if let Some(d) = pick_seed_d(snapshot) {
         return KpMaintenanceDecision::SeedD { d };
     }
@@ -395,9 +402,22 @@ impl std::fmt::Debug for KpMaintenanceEvents {
     }
 }
 
-/// Generates a fresh, well-formed stable `d` (hex of 16 `OsRng` bytes).
+/// Mints a fresh stable `d`: 32 `OsRng` bytes, lowercase-hex encoded.
+///
+/// The width is normative, not arbitrary. The Nostr transport binding pins the
+/// slot id to "exactly one 64-character lowercase hex value decoding to 32
+/// bytes" and a conformant inviter "MUST reject malformed or incompatible
+/// candidates", so a narrower `d` makes the account uninvitable to a strict peer
+/// — the same silent failure the rotation clock exists to prevent. It is random
+/// rather than derived because the binding also forbids deriving the slot id
+/// from an account key, MLS leaf key, `KeyPackageRef` or device label.
+///
+/// It governs FIRST publishes only — [`build_kp_maintenance_events`] calls this
+/// solely when no slot is tracked — so a slot minted by an older build keeps its
+/// narrower id forever, the binding's "replacement MUST reuse the same `d`"
+/// outranking the width rule for a coordinate peers have already cached.
 fn mint_d() -> String {
-    let mut bytes = [0u8; 16];
+    let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     hex::encode(bytes)
 }

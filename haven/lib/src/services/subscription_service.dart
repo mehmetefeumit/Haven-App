@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/fresh_secret.dart';
 
 /// Thrown by the live-sync subscription service for setup/teardown failures.
 ///
@@ -83,8 +84,9 @@ class LiveEventRouter {
   /// Snapshot of the user's joined circles (to resolve a `nostr_group_id`).
   final Future<List<Circle>> Function() circlesSnapshot;
 
-  /// Provides the identity secret bytes for invitation unwrapping (copied into
-  /// a `Uint8List` and zeroized after use by this router — Security Rule 9).
+  /// Provides the identity secret bytes for invitation unwrapping. Ownership
+  /// of each fetched buffer transfers to this router, which zeroizes it after
+  /// use rather than copying it (Security Rule 9 — see `takeSecretOwnership`).
   final Future<List<int>> Function() secretBytes;
 
   /// Parses an engine Location `content` + sender into a [DecryptedLocation],
@@ -244,7 +246,7 @@ class LiveEventRouter {
 
     Uint8List? secret;
     try {
-      secret = Uint8List.fromList(await secretBytes());
+      secret = takeSecretOwnership(await secretBytes());
       final invitation = await circleService.processGiftWrappedInvitation(
         identitySecretBytes: secret,
         giftWrapEventJson: giftWrapJson,

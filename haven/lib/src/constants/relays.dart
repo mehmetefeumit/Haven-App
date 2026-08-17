@@ -51,11 +51,14 @@ List<String> get defaultRelays {
 /// [`fallbackDefaultRelays`] — falling back to the account-relay list here
 /// on a transient seed failure would reproduce, in the fallback path alone,
 /// the exact cross-plane join the profile/location relay split exists to
-/// prevent. Used only by [`ProfileRelaysNotifier`] when the relay-preferences
-/// storage seed transiently fails and it needs a non-empty list to keep the
-/// UI usable instead of stranding it in `AsyncError`. There is no runtime
-/// FFI getter for this list (unlike [`defaultRelays`]) — the profile plane
-/// deliberately keeps no relay URL crossing the FFI boundary outside of
+/// prevent. Two consumers: [`ProfileRelaysNotifier`] falls back to it when the
+/// relay-preferences storage seed transiently fails and it needs a non-empty
+/// list to keep the UI usable instead of stranding it in `AsyncError`; and
+/// `relay_settings_page.dart` reads it to decide which Profile rows may offer a
+/// remove control, since a curated entry is re-admitted by
+/// `usable_profile_relays()` no matter what the stored list says. There is no
+/// runtime FFI getter for this list (unlike [`defaultRelays`]) — the profile
+/// plane deliberately keeps no relay URL crossing the FFI boundary outside of
 /// direct CRUD reads/writes, so this constant is the only source.
 const fallbackDefaultProfileRelays = <String>[
   'wss://purplepag.es',

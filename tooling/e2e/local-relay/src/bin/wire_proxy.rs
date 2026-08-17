@@ -210,15 +210,15 @@ async fn serve() -> ExitCode {
             .degraded
             .map_or(String::new(), |reason| format!(" — DEGRADED ({reason:?})")),
     );
-    // COUNTS ONLY, never the ids themselves (Security Rule 6). A lane whose
+    // COUNTS ONLY, never the ids themselves (Security Rule 4). A lane whose
     // declarations were refused or lost has no Rule-4 ground truth, and the
     // stop script tails these lines into the step log precisely so that is
     // visible to someone reading an otherwise green run.
     let mls_stats = mls_group_ids.stats();
     eprintln!(
         "[haven-wire-proxy] mls-group-id sidecar: {} distinct id(s) recorded, \
-         {} refused, {} lost",
-        mls_stats.distinct, mls_stats.refused, mls_stats.lost,
+         {} refused, {} lost, {} restored after an external rotation",
+        mls_stats.distinct, mls_stats.refused, mls_stats.lost, mls_stats.restored,
     );
     ExitCode::SUCCESS
 }

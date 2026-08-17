@@ -56,6 +56,22 @@
 # A NEW hatch cannot land undeclared, because `--check-manifest` reconciles that
 # file against the source tree in repo-guards.yml on every PR.
 #
+# ## The two halves are not symmetric, so both are checked
+#
+# The static half above covers the whole tree. The runtime half only reaches a
+# lane whose runner consults `drive_log_reports_test_failure`, and for most rows
+# in the manifest that consultation is one DELEGATION hop away:
+# run-integration-tests.sh, run-relay-customization.sh and run-flake-stress.sh
+# drive each target through run-single-avd-scenario.sh, while
+# run-b4-ios-real-gps.sh and run-b7-ios-auth-tier.sh go through
+# run-ios-sim-scenario.sh, which reaches the predicate through the
+# ios-flake-lib.sh it sources. A runner refactor that stopped delegating —
+# inlining its own `flutter drive`, say — would delete the runtime backstop for
+# every row those runners carry, and the static half would stay green over it.
+# `--check-wiring` is that missing assertion: every run-*.sh must still REACH
+# the predicate. It is run by `--check-manifest` too, so the one repo-guards
+# step covers both halves of the contract the manifest states.
+#
 # ## Usage
 #
 #   source "$(dirname "${BASH_SOURCE[0]}")/drive-log-lib.sh"
@@ -63,6 +79,8 @@
 #
 #   bash tooling/e2e/ci/drive-log-lib.sh --self-test        # hermetic, no device
 #   bash tooling/e2e/ci/drive-log-lib.sh --check-manifest   # source <-> manifest
+#                                                           # (+ --check-wiring)
+#   bash tooling/e2e/ci/drive-log-lib.sh --check-wiring     # runners <-> predicate
 #   bash tooling/e2e/ci/drive-log-lib.sh --scan <drive-log> # what did it skip?
 #
 # Deliberately does NOT `set` shell options at source time: a sourced library
@@ -487,11 +505,251 @@ EOF
        "declared in $(basename "${manifest}"), no stale declarations."
 }
 
+# ---------------------------------------------------------------------------
+# Runtime reachability — the DELEGATION, not just the manifest.
+#
+# `--check-manifest` proves every hatch is declared. What makes a declared hatch
+# fail a lane is drive_log_reports_test_failure(), and most manifest rows reach
+# it only through a delegate (see this file's header). This half asserts that
+# path still exists: every run-*.sh must reach the predicate directly, through a
+# library it sources, or through a sibling runner it invokes.
+#
+# Deliberately NOT phrased as "every runner that drives a device must reach it".
+# Recognising a drive means matching `flutter drive` / `flutter test` in command
+# position, and these runners print those words in ordinary echo prose — so the
+# detector would be the fragile part, and the failure mode of a fragile detector
+# here is a SILENT PASS. Requiring every runner to reach the predicate needs no
+# such detector: a runner that stops delegating fails whether or not the thing
+# it does instead is recognisable.
+# ---------------------------------------------------------------------------
+
+# Runners that legitimately reach nothing. Pinned by EQUALITY and required to
+# EXIST: a name here that names no file is a stale exemption, and it doubles as
+# this check's anti-vacuity anchor — if the run-*.sh glob ever went blind, the
+# exemption would stop resolving and the check fails instead of passing over an
+# empty set.
+readonly DRIVE_LOG_WIRING_EXEMPT=(
+  # A generic deadline wrapper: it runs whatever command line it is handed and
+  # drives nothing of its own, so the predicate belongs in the runner it wraps.
+  run-with-deadline.sh
+)
+
+# Everything a runner SAYS rather than does: full-line `#` comments, a ` # `
+# trailing comment, and heredoc BODIES. Deliberately not a general bash comment
+# stripper: `${var#word}` has no space after the `#`, so demanding whitespace on
+# both sides cannot eat a parameter expansion. Erring toward stripping too much
+# is safe here — every rule below is a POSITIVE requirement, so a swallowed line
+# makes this check fail, never pass.
+#
+# A heredoc body is data, and every runner in this tree carries a usage or
+# diagnostic block. Left in, `cat <<EOF … bash "${INNER}" … EOF` supplies both
+# halves of the edge rule below from a block that invokes nothing.
+#
+# The delimiter must survive the quote-strip as an identifier, which is what
+# keeps `<<<"${x}"` herestrings and `(a << 24)` arithmetic from opening one. A
+# terminator is matched at column 0 (leading TABs only for `<<-`), as bash does;
+# a heredoc that never terminates therefore blanks the rest of the file, which
+# again fails this check rather than passing it.
+_drive_log_strip_sh_prose() {
+  awk '
+    BEGIN { qcls = "[" sprintf("%c%c", 39, 34) "]" }
+    hd != "" {
+      t = $0
+      if (hdtabs) sub(/^\t+/, "", t)
+      if (t == hd) hd = ""
+      print ""
+      next
+    }
+    {
+      line = $0
+      sub(/^[[:space:]]*#.*$/, "", line)
+      sub(/[[:space:]]#[[:space:]].*$/, "", line)
+      if (match(line, /<<-?[[:space:]]*[^[:space:];&|<>]+/)) {
+        d = substr(line, RSTART, RLENGTH)
+        hdtabs = (substr(d, 3, 1) == "-")
+        sub(/^<<-?[[:space:]]*/, "", d)
+        gsub(qcls, "", d)
+        if (d ~ /^[A-Za-z_][A-Za-z0-9_]*$/) hd = d
+      }
+      print line
+    }
+  ' < "$1"
+}
+
+# The contents of every quoted word, leaving the quoting context itself intact
+# across lines so a string opened on one line and closed on the next is gone in
+# full. Applied ONLY to the predicate rule: a call names the function in command
+# position, outside quotes (`if drive_log_reports_test_failure "${LOG}"`), while
+# the edge rule below reads a path that legitimately lives INSIDE the quotes of
+# an assignment, so stripping there would delete every real delegation.
+_drive_log_strip_sh_strings() {
+  awk '
+    BEGIN { sq = sprintf("%c", 39); dq = sprintf("%c", 34) }
+    {
+      out = ""
+      n = length($0)
+      for (i = 1; i <= n; i++) {
+        c = substr($0, i, 1)
+        if (q == "") {
+          if (c == "\\") { i++; continue }
+          if (c == sq || c == dq) { q = c; continue }
+          out = out c
+        } else if (c == q) {
+          q = ""
+        } else if (q == dq && c == "\\") {
+          i++
+        }
+      }
+      print out
+    }
+  '
+}
+
+# `declare -F drive_log_reports_test_failure` is excluded on purpose: several
+# runners probe the symbol in their own --self-test. Proving the function is
+# DEFINED is not consulting it, and counting that would let a runner that never
+# asks the predicate anything read as wired.
+#
+# Prose and quoted words are stripped for the same reason, and it is sharper
+# here than elsewhere: the failure message this check prints TELLS authors to
+# document the delegation, so `echo "… drive_log_reports_test_failure …"` is the
+# remedy it recommends, and crediting it would make the guard endorse its own
+# evasion.
+_drive_log_calls_predicate() {
+  _drive_log_strip_sh_prose "$1" \
+    | _drive_log_strip_sh_strings \
+    | grep -F -- 'drive_log_reports_test_failure' \
+    | grep -qv -- 'declare -F'
+}
+
+# The sibling files one script reaches: the libraries it sources, and the
+# runners it invokes.
+#
+# Delegation is written the same way at every call site in this tree —
+# `readonly VAR="${dir}/run-x.sh"` and then `bash "${VAR}" …` — and BOTH halves
+# are required. Naming a script in an assignment is not running it: every
+# delegating runner also lists its delegate in a `for dep in …` existence check,
+# and accepting that would make a runner that only checks its delegate exists
+# look like one that uses it.
+_drive_log_wiring_edges() {
+  local code line var target
+  code="$(_drive_log_strip_sh_prose "$1")"
+
+  while IFS= read -r line; do
+    grep -oE -- '[A-Za-z0-9_.-]+\.sh' <<<"${line}" | tail -1
+  done < <(grep -E -- '^[[:space:]]*(source|\.)[[:space:]]' <<<"${code}" || true)
+
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    var="${line%%=*}"
+    var="${var##* }"
+    target="$(grep -oE -- '[A-Za-z0-9_.-]+\.sh' <<<"${line}" | tail -1)"
+    # The invocation must start its line (after indentation, optionally behind
+    # `bash`), which is what distinguishes it from `for dep in "${VAR}"` and
+    # `[[ -f "${VAR}" ]]`.
+    if grep -qE -- "^[[:space:]]*(bash[[:space:]]+)?\"?\\\$\{${var}\}\"?([[:space:]]|\$)" \
+        <<<"${code}"; then
+      printf '%s\n' "${target}"
+    fi
+  done < <(grep -E -- '^[[:space:]]*(readonly[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=.*[A-Za-z0-9_.-]+\.sh"?[[:space:]]*$' \
+    <<<"${code}" || true)
+}
+
+# Does <name> reach the predicate? <visited> breaks cycles, so two runners that
+# delegate to each other are unreached rather than an infinite descent.
+_drive_log_reaches_predicate() { # <dir> <basename> <visited>
+  local dir="$1" name="$2" visited="$3" edge
+  [[ -f "${dir}/${name}" ]] || return 1
+  case " ${visited} " in *" ${name} "*) return 1 ;; esac
+  visited="${visited} ${name}"
+  if _drive_log_calls_predicate "${dir}/${name}"; then return 0; fi
+  while IFS= read -r edge; do
+    [[ -n "${edge}" ]] || continue
+    if _drive_log_reaches_predicate "${dir}" "${edge}" "${visited}"; then
+      return 0
+    fi
+  done < <(_drive_log_wiring_edges "${dir}/${name}")
+  return 1
+}
+
+drive_log_check_wiring() {
+  local root="${1:-${_DRIVE_LOG_LIB_DIR}/../../..}" dir f name
+  root="$(cd "${root}" 2>/dev/null && pwd)" || {
+    echo "ERROR: repo root '${1:-}' is not a directory" >&2
+    return 2
+  }
+  dir="${root}/tooling/e2e/ci"
+  if [[ ! -d "${dir}" ]]; then
+    echo "ERROR: ${dir} does not exist — wrong repo root?" >&2
+    return 2
+  fi
+
+  local runners=()
+  while IFS= read -r f; do
+    runners+=("$(basename "${f}")")
+  done < <(find "${dir}" -maxdepth 1 -name 'run-*.sh' | sort)
+  if (( ${#runners[@]} < 2 )); then
+    echo "ERROR: found ${#runners[@]} run-*.sh under ${dir}; this check has" >&2
+    echo "gone blind rather than found a clean tree." >&2
+    return 2
+  fi
+
+  local missing=()
+  for name in "${DRIVE_LOG_WIRING_EXEMPT[@]}"; do
+    [[ -f "${dir}/${name}" ]] || missing+=("${name}")
+  done
+  if (( ${#missing[@]} > 0 )); then
+    echo "ERROR: DRIVE_LOG_WIRING_EXEMPT names ${#missing[@]} script(s) that no" >&2
+    echo "longer exist: ${missing[*]}" >&2
+    echo "A stale exemption is indistinguishable from a deleted backstop —" >&2
+    echo "drop the entry in the commit that drops the script." >&2
+    return 2
+  fi
+
+  local unreached=()
+  for name in "${runners[@]}"; do
+    case " ${DRIVE_LOG_WIRING_EXEMPT[*]} " in *" ${name} "*) continue ;; esac
+    _drive_log_reaches_predicate "${dir}" "${name}" "" || unreached+=("${name}")
+  done
+
+  if (( ${#unreached[@]} > 0 )); then
+    cat >&2 <<EOF
+
+  RUNNER NOT WIRED TO THE DRIVE-LOG PREDICATE:
+$(printf '    * %s\n' "${unreached[@]}")
+
+  Each of these runs an E2E lane but no longer reaches
+  drive_log_reports_test_failure — neither directly, nor through a library it
+  sources, nor through a sibling runner it invokes.
+
+  That predicate is the RUNTIME half of the contract
+  $(drive_log_skip_manifest_path)
+  states. Without it, a target driven by this runner can skip a declared hatch,
+  or fail outside a testWidgets body, and the lane still reports success:
+  integrationDriver() records a skip as a pass and exits 0 (see this file's
+  header). --check-manifest cannot see this — it reads the Dart source and the
+  manifest, never the runners — which is why the delegation is asserted here
+  instead of described in prose.
+
+  Fix by restoring the delegation, or by sourcing this library and asking the
+  predicate about the drive log directly, the way run-single-avd-scenario.sh
+  does. Do NOT add the runner to DRIVE_LOG_WIRING_EXEMPT unless it genuinely
+  drives nothing.
+EOF
+    return 1
+  fi
+
+  echo "drive-log-lib.sh --check-wiring: OK —" \
+       "${#runners[@]} run-*.sh under tooling/e2e/ci/," \
+       "${#DRIVE_LOG_WIRING_EXEMPT[@]} exempt, every other one still reaches" \
+       "drive_log_reports_test_failure."
+}
+
 # Number of assertions drive_log_lib_self_test must make. Pinned by EQUALITY,
 # not by a floor: a floor lets a fixture be deleted and the suite stay green,
 # which is the same "reports coverage it does not have" shape this whole library
 # exists to catch. Change it only in the commit that adds or removes a fixture.
-readonly DRIVE_LOG_SELF_TEST_FIXTURES=32
+readonly DRIVE_LOG_SELF_TEST_FIXTURES=42
 
 drive_log_lib_self_test() {
   local tmp fail=0 ran=0
@@ -547,6 +805,15 @@ EOF
       >/dev/null 2>&1 || got=$?
     if [[ "${got}" -ne "$2" ]]; then
       echo "SELF-TEST FAIL ($1): --check-manifest want rc=$2, got rc=${got}" >&2
+      fail=1
+    fi
+  }
+  _dl_expect_wiring_rc() { # <label> <want-rc> <repo-root>
+    local got=0
+    ran=$(( ran + 1 ))
+    drive_log_check_wiring "$3" >/dev/null 2>&1 || got=$?
+    if [[ "${got}" -ne "$2" ]]; then
+      echo "SELF-TEST FAIL ($1): --check-wiring want rc=$2, got rc=${got}" >&2
       fail=1
     fi
   }
@@ -880,7 +1147,152 @@ DART
   _dl_expect_manifest_rc 29 2 "${tmp}/manifest.ok" "${tmp}/repo"
   rm -f "${src}/rot3_test.dart"
 
-  unset -f _dl_expect_fail _dl_expect_clean _dl_expect_scan_rc _dl_expect_manifest_rc
+  # -------------------------------------------------------------------------
+  # Runtime-reachability half: the runners against the predicate.
+  #
+  # Two fixture trees, because the two ways to reach it fail differently. `_mk`
+  # writes one runner; every tree carries the exempt wrapper, whose presence is
+  # what the stale-exemption rule reads, so a tree that omits it is fixture 36's
+  # own case rather than an accident.
+  # -------------------------------------------------------------------------
+  local wtree
+  _dl_mk_runner() { # <tree> <name> <body>
+    mkdir -p "${1}/tooling/e2e/ci"
+    printf '#!/usr/bin/env bash\n%s\n' "$3" > "${1}/tooling/e2e/ci/${2}"
+  }
+  _dl_mk_tree_a() { # <tree> — one direct caller, one delegating runner
+    _dl_mk_runner "$1" run-with-deadline.sh 'exec "$@"'
+    _dl_mk_runner "$1" run-direct.sh '
+source "${SCRIPT_DIR}/drive-log-lib.sh"
+flutter drive --target="${TARGET}" > "${LOG}" 2>&1 || drc=$?
+if drive_log_reports_test_failure "${LOG}"; then exit 1; fi'
+    _dl_mk_runner "$1" run-delegating.sh '
+readonly INNER="${script_dir}/run-direct.sh"
+for dep in "${INNER}"; do [[ -x "${dep}" ]] || exit 2; done
+bash "${INNER}" "${target}" || rc=$?'
+  }
+
+  wtree="${tmp}/wiring-ok"
+  _dl_mk_tree_a "${wtree}"
+
+  # (30) The happy path: one runner asks the predicate itself, one reaches it
+  #      through the runner it delegates to, one is exempt.
+  _dl_expect_wiring_rc 30 0 "${wtree}"
+
+  # (31) THE CRITICAL FIXTURE for this half — the refactor the manifest's
+  #      RUNTIME claim rests on and nothing used to check. run-delegating.sh
+  #      stops delegating and inlines its own `flutter drive`; every hatch its
+  #      targets carry loses the backstop, and --check-manifest stays green
+  #      over it because it never reads a runner at all.
+  wtree="${tmp}/wiring-inlined"
+  _dl_mk_tree_a "${wtree}"
+  _dl_mk_runner "${wtree}" run-delegating.sh '
+readonly HAVEN_DIR="${script_dir}/../../../haven"
+( cd "${HAVEN_DIR}" && flutter drive --target="${target}" ) > "${LOG}" 2>&1 || rc=$?'
+  _dl_expect_wiring_rc 31 1 "${wtree}"
+
+  # (32) A runner that only PROBES the symbol (`declare -F`, the shape several
+  #      real runners use in their own --self-test) has not consulted it. Left
+  #      counting, this is the vacuous pass: the wiring reads as present in a
+  #      runner that never asks the predicate anything.
+  wtree="${tmp}/wiring-declare"
+  _dl_mk_tree_a "${wtree}"
+  _dl_mk_runner "${wtree}" run-direct.sh '
+source "${SCRIPT_DIR}/drive-log-lib.sh"
+rc=0; declare -F drive_log_reports_test_failure >/dev/null || rc=1
+flutter drive --target="${TARGET}" || exit $?'
+  _dl_expect_wiring_rc 32 1 "${wtree}"
+
+  # (33) The delegate named in an EXISTENCE check but never invoked. Every real
+  #      delegating runner has both lines, so an edge rule satisfied by the
+  #      assignment alone would keep passing a runner that only checks its
+  #      delegate is still on disk.
+  wtree="${tmp}/wiring-unused"
+  _dl_mk_tree_a "${wtree}"
+  _dl_mk_runner "${wtree}" run-delegating.sh '
+readonly INNER="${script_dir}/run-direct.sh"
+for dep in "${INNER}"; do [[ -x "${dep}" ]] || exit 2; done
+flutter drive --target="${target}" || rc=$?'
+  _dl_expect_wiring_rc 33 1 "${wtree}"
+
+  # (34) A runner that only DOCUMENTS the predicate. Every runner in this tree
+  #      carries a paragraph explaining why `flutter drive` cannot be trusted,
+  #      and most name drive_log_reports_test_failure and their delegate in it —
+  #      so read raw, the prose satisfies both halves of the reach graph and the
+  #      runner that deleted the call still looks wired. The first version of
+  #      this fixture commented out the delegation instead, which the invocation
+  #      anchor of fixture 33 already rejects on its own: it passed for a
+  #      neighbouring rule's reason and proved nothing about the stripped view.
+  wtree="${tmp}/wiring-comment"
+  _dl_mk_tree_a "${wtree}"
+  _dl_mk_runner "${wtree}" run-delegating.sh '
+# `flutter drive` can exit 0 on a failed suite, so this lane consults
+# drive_log_reports_test_failure via run-direct.sh before believing the code.
+flutter drive --target="${target}" || rc=$?'
+  _dl_expect_wiring_rc 34 1 "${wtree}"
+
+  # (35) The SOURCE hop, on its own: run-ios-sim-scenario.sh reaches the
+  #      predicate only through the ios-flake-lib.sh it sources, so the two
+  #      iOS-only manifest rows hang off this edge alone. Isolated in a tree
+  #      whose only non-exempt runner needs it, so nothing else can carry it.
+  wtree="${tmp}/wiring-source"
+  _dl_mk_runner "${wtree}" run-with-deadline.sh 'exec "$@"'
+  _dl_mk_runner "${wtree}" run-sourced.sh '
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/flake-lib.sh"
+flutter test "${SCENARIO}" -d "${UDID}" || rc=$?'
+  printf '#!/usr/bin/env bash\n%s\n' \
+    'if drive_log_reports_test_failure "${log}"; then return 1; fi' \
+    > "${wtree}/tooling/e2e/ci/flake-lib.sh"
+  _dl_expect_wiring_rc 35 0 "${wtree}"
+
+  # (36) A STALE EXEMPTION is a misconfiguration, not a lenient pass: the
+  #      exempted runner is gone, so the entry now excuses nothing — and it is
+  #      also the only thing anchoring the glob, which is why it is rc 2 and
+  #      not rc 1.
+  wtree="${tmp}/wiring-stale"
+  _dl_mk_tree_a "${wtree}"
+  rm -f "${wtree}/tooling/e2e/ci/run-with-deadline.sh"
+  _dl_expect_wiring_rc 36 2 "${wtree}"
+
+  # (37) GLOB ROT. A rename or a moved directory that leaves one runner (or
+  #      none) must report that it can no longer see the tree, never "every
+  #      runner is wired" over an empty set.
+  wtree="${tmp}/wiring-blind"
+  _dl_mk_runner "${wtree}" run-with-deadline.sh 'exec "$@"'
+  _dl_expect_wiring_rc 37 2 "${wtree}"
+
+  # (38) The predicate named inside a STRING. Fixture 34 covers the same evasion
+  #      behind a `#`; deleting the `#` is all it took, and this shape is the one
+  #      the failure message above actively invites — it tells authors to write
+  #      prose naming the predicate and its delegate. Nothing bash would EXECUTE
+  #      here consults anything.
+  wtree="${tmp}/wiring-echoed"
+  _dl_mk_tree_a "${wtree}"
+  _dl_mk_runner "${wtree}" run-delegating.sh '
+echo "this lane consults drive_log_reports_test_failure via run-direct.sh"
+flutter drive --target="${target}" || rc=$?'
+  _dl_expect_wiring_rc 38 1 "${wtree}"
+
+  # (39) The same, in a HEREDOC body — a usage/diagnostic block, which every real
+  #      runner has. Its body carries BOTH halves of the reach graph: the
+  #      predicate's name, and a delegation to run-direct.sh spelled exactly the
+  #      way the edge rule recognises one. So a fix that only stripped quoted
+  #      words would still pass this, and one that only stripped heredocs would
+  #      still pass 38.
+  wtree="${tmp}/wiring-heredoc"
+  _dl_mk_tree_a "${wtree}"
+  _dl_mk_runner "${wtree}" run-delegating.sh '
+cat >&2 <<EOF
+  This lane asks drive_log_reports_test_failure about the drive log, via
+    readonly INNER="${script_dir}/run-direct.sh"
+    bash "${INNER}" "${target}"
+EOF
+flutter drive --target="${target}" || rc=$?'
+  _dl_expect_wiring_rc 39 1 "${wtree}"
+
+  unset -f _dl_mk_runner _dl_mk_tree_a
+  unset -f _dl_expect_fail _dl_expect_clean _dl_expect_scan_rc \
+           _dl_expect_manifest_rc _dl_expect_wiring_rc
 
   if (( ran != DRIVE_LOG_SELF_TEST_FIXTURES )); then
     echo "SELF-TEST FAIL: ran ${ran} fixtures, expected ${DRIVE_LOG_SELF_TEST_FIXTURES}" >&2
@@ -903,7 +1315,19 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       exit $?
       ;;
     --check-manifest)
-      drive_log_check_manifest "${2:-}"
+      # Both halves of the manifest's contract, and BOTH run even when the
+      # first fails — one red step should report every violation it can see,
+      # which is repo-guards.yml's own discipline. The worse code wins, so a
+      # broken guard (2) is never reported as a mere violation (1).
+      rc=0
+      wrc=0
+      drive_log_check_manifest "${2:-}" || rc=$?
+      drive_log_check_wiring "${2:-}" || wrc=$?
+      if (( wrc > rc )); then rc="${wrc}"; fi
+      exit "${rc}"
+      ;;
+    --check-wiring)
+      drive_log_check_wiring "${2:-}"
       exit $?
       ;;
     # Authoring aid: print the rows the manifest is made of. Kept in the same
@@ -926,6 +1350,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       ;;
   esac
   echo "drive-log-lib.sh is a sourced library; pass --self-test, --check-manifest," \
-       "--list or --scan <log> to run it directly." >&2
+       "--check-wiring, --list or --scan <log> to run it directly." >&2
   exit 2
 fi

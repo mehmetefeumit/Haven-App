@@ -25,7 +25,11 @@ use super::types::{
 use crate::nostr::mls::redact_hex_sequences;
 
 /// Default timeout for relay operations.
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+///
+/// Visible to the rest of `relay` because [`crate::relay::catchup`] must reason
+/// about how long a fetch may legitimately take, and a copy of this number would
+/// be a copy that can drift.
+pub(super) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Process-static opt-in for plaintext `ws://` URLs targeting loopback /
 /// emulator-host aliases. Set once via [`allow_ws_loopback_for_test`] in

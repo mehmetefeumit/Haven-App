@@ -3,20 +3,31 @@
 /// Shows three independent relay categories — Inbox (kind 10050), KeyPackage
 /// (kind 10002), and Profile (kind-0, local-only policy — never published)
 /// — with add/remove/restore controls, plus a short caption linking to
-/// Privacy ▸ Relays for the full explanation. The Profile section also shows
-/// an advisory, non-blocking warning on any row whose relay already carries
-/// this account's location-plane traffic — circle, inbox, KeyPackage or
-/// discovery-plane lookups (see
+/// Privacy ▸ Relays for the full explanation.
+///
+/// The Profile section's remove control is deliberately absent on the curated
+/// pool entries — `usable_profile_relays()` unions
+/// `profile_relay_pool_default()` back in on every resolution (pinned by
+/// `haven-core/tests/profile_curated_pool_removal.rs`), so deleting one would
+/// shorten the list on screen without shortening what Haven actually dials.
+/// Privacy ▸ Relays already discloses this to the user.
+///
+/// The Profile section also shows an advisory, non-blocking warning on any row
+/// whose relay already carries this account's location-plane traffic — circle,
+/// inbox, KeyPackage or discovery-plane lookups (see
 /// `profileRelayContaminationProvider`), and — distinct from that per-row
-/// warning — a banner when the pool has underflowed entirely: too few
-/// usable Profile relays remain to look up anyone's profile, so member
-/// names/photos silently stop updating with no other visible signal (see
+/// warning — a banner when the pool has underflowed entirely: too few usable
+/// Profile relays remain to look up anyone's profile, so member names/photos
+/// silently stop updating with no other visible signal (see
 /// `_ProfilePoolUnderflowBanner`, `profilePoolStatusProvider`).
 library;
+
+import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/constants/relays.dart';
 import 'package:haven/src/pages/settings/add_relay_sheet.dart';
 import 'package:haven/src/pages/settings/privacy_content.dart';
 import 'package:haven/src/pages/settings/privacy_topic_page.dart';
@@ -46,7 +57,36 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       ref.read(relayStatusProvider.notifier).checkAllRelays();
+      unawaited(_topUpProfileRelays());
     });
+  }
+
+  /// Re-adds any curated profile relay missing from the stored Profile list.
+  ///
+  /// A build shipped before this page dropped the remove control let a curated
+  /// entry's deletion "succeed" cosmetically — `usable_profile_relays()`
+  /// re-admits it regardless — so an upgraded install can hold a Profile list
+  /// shorter than what Haven actually dials. This page's other two repairs, the
+  /// empty-category action and the underflow banner, are both conditional and
+  /// never fire for a merely-short list, so the top-up runs unconditionally on
+  /// every open. It is idempotent and, since `restoreDefaults` never re-adds a
+  /// relay the user removed themselves, cannot undo a legitimate removal.
+  ///
+  /// Routed through the notifier rather than
+  /// `RelayPreferencesService.restoreDefaultProfileRelays` so the visible list
+  /// is refreshed by the same call that writes.
+  Future<void> _topUpProfileRelays() async {
+    try {
+      // Wait for the notifier's own `build()` to settle before writing —
+      // otherwise a still-in-flight initial read can complete AFTER this
+      // call's write and overwrite the topped-up state with its stale one.
+      await ref.read(profileRelaysProvider.future);
+      await ref.read(profileRelaysProvider.notifier).restoreDefaults();
+    } on Object catch (e) {
+      // Non-fatal: the page is still usable and the relays are dialled either
+      // way. Rule 8 — type only, never the message.
+      debugPrint('Profile relay top-up failed: ${e.runtimeType}');
+    }
   }
 
   @override
@@ -166,6 +206,16 @@ class _LegacyRetractionPendingNote extends ConsumerWidget {
   }
 }
 
+/// Curated profile-pool URLs (normalized), computed once rather than on
+/// every rebuild of [_RelaySection]. Haven re-admits these regardless of the
+/// stored list (see the library doc), so a row for one never offers removal.
+/// Excludes the debug-only `set_profile_relays_for_test` override, which is
+/// unreachable in release and unused by any lane that renders this page.
+final Set<String> _unremovableProfileRelays = {
+  for (final url in fallbackDefaultProfileRelays)
+    normalizeRelayUrlForComparison(url),
+};
+
 class _RelaySection extends ConsumerWidget {
   const _RelaySection({
     required this.category,
@@ -188,6 +238,9 @@ class _RelaySection extends ConsumerWidget {
     // Inbox/KeyPackage sections neither pay for nor rebuild on it.
     final contaminated = category == RelayCategory.profile
         ? ref.watch(profileRelayContaminationProvider)
+        : const <String>{};
+    final unremovable = category == RelayCategory.profile
+        ? _unremovableProfileRelays
         : const <String>{};
 
     return Column(
@@ -225,7 +278,12 @@ class _RelaySection extends ConsumerWidget {
                         _EditableRelayRow(
                           url: urls[i],
                           status: _statusFor(status, urls[i]),
-                          onRemove: () => _removeRelay(context, ref, urls[i]),
+                          onRemove:
+                              unremovable.contains(
+                                normalizeRelayUrlForComparison(urls[i]),
+                              )
+                              ? null
+                              : () => _removeRelay(context, ref, urls[i]),
                           isContaminated: contaminated.contains(
                             normalizeRelayUrlForComparison(urls[i]),
                           ),
@@ -379,7 +437,11 @@ class _EditableRelayRow extends StatelessWidget {
 
   final String url;
   final RelayEventStatus? status;
-  final VoidCallback onRemove;
+
+  /// Removes this relay, or `null` to suppress the control — the curated
+  /// profile-pool rows, which Haven dials regardless of whether a remove
+  /// button exists for them (Privacy ▸ Relays states the rule).
+  final VoidCallback? onRemove;
 
   /// Advisory-only: `true` when this relay also carries the account's
   /// location-plane traffic — circle, inbox, KeyPackage or discovery-plane
@@ -393,6 +455,7 @@ class _EditableRelayRow extends StatelessWidget {
     final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
     final displayUrl = url.replaceFirst('wss://', '');
+    final remove = onRemove;
     return ListTile(
       leading: _StatusDot(status: status),
       title: Text(displayUrl, style: theme.textTheme.bodyMedium),
@@ -400,11 +463,12 @@ class _EditableRelayRow extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           if (isContaminated) _ContaminationWarningIcon(url: displayUrl),
-          IconButton(
-            tooltip: l10n.relaySettingsRemoveTooltip(displayUrl),
-            icon: const Icon(LucideIcons.trash2),
-            onPressed: onRemove,
-          ),
+          if (remove != null)
+            IconButton(
+              tooltip: l10n.relaySettingsRemoveTooltip(displayUrl),
+              icon: const Icon(LucideIcons.trash2),
+              onPressed: remove,
+            ),
         ],
       ),
     );

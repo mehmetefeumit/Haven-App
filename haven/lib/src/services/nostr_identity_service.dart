@@ -28,6 +28,7 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:haven/src/rust/api.dart';
+import 'package:haven/src/services/fresh_secret.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -56,15 +57,19 @@ class NostrIdentityService implements IdentityService {
   ///
   /// Optionally accepts a [FlutterSecureStorage] instance for testing, a
   /// [wipeTileCache] override so the logout tile-cache wipe can be faked in
-  /// tests (it defaults to the real [tileCacheWipe] FFI call), and a
-  /// [managerFactory] override so the storage-retry contract can be tested
-  /// without the Rust bridge.
+  /// tests (it defaults to the real [tileCacheWipe] FFI call), a
+  /// [keyringInitializer] override so [deleteIdentity]'s keyring-install step
+  /// can be faked in tests (defaults to the real [initKeyringStore] FFI
+  /// call), and a [managerFactory] override so the storage-retry contract can
+  /// be tested without the Rust bridge.
   NostrIdentityService({
     FlutterSecureStorage? storage,
     Future<void> Function()? wipeTileCache,
+    Future<void> Function()? keyringInitializer,
     @visibleForTesting Future<NostrIdentityManager> Function()? managerFactory,
   }) : _storage = storage ?? _createSecureStorage(),
        _wipeTileCache = wipeTileCache ?? tileCacheWipe,
+       _keyringInitializer = keyringInitializer ?? initKeyringStore,
        _managerFactory = managerFactory ?? NostrIdentityManager.newInstance;
 
   final FlutterSecureStorage _storage;
@@ -72,6 +77,13 @@ class NostrIdentityService implements IdentityService {
   /// Wipes the encrypted map-tile cache. Injectable for testing; defaults to
   /// the [tileCacheWipe] FFI function.
   final Future<void> Function() _wipeTileCache;
+
+  /// Installs the platform keyring backend. Injectable for testing; defaults
+  /// to the real [initKeyringStore] FFI function. [deleteIdentity] calls this
+  /// itself before [_wipeTileCache] rather than relying on a caller to have
+  /// installed the backend first — see the comment there for why that
+  /// self-containment matters.
+  final Future<void> Function() _keyringInitializer;
 
   /// Builds the Rust identity manager. Injectable so [_ensureInitialized]'s
   /// retry contract is unit-testable without the FFI bridge; defaults to the
@@ -180,9 +192,19 @@ class NostrIdentityService implements IdentityService {
       // Create identity in Rust
       final rustIdentity = await manager.createIdentity();
 
-      // Get secret bytes and persist to secure storage
-      final secretBytes = await manager.getSecretBytes();
-      await _storage.write(key: _storageKey, value: base64Encode(secretBytes));
+      // Persist secret bytes to secure storage. `withFreshSecret` owns the raw
+      // 32-byte buffer and scrubs THAT the instant the write settles, so it
+      // never outlives the call (Security Rule 9). It does NOT scrub the
+      // base64 `String`: `flutter_secure_storage.write` takes only a `String`,
+      // and Dart strings are immutable with no overwrite API, so that copy
+      // survives until the GC reclaims it. Encoding inside the callback keeps
+      // the raw buffer's life short; the String is an irreducible residual of
+      // the plugin's String-only API, not something this code can wipe.
+      await withFreshSecret(
+        manager.getSecretBytes,
+        (secret) =>
+            _storage.write(key: _storageKey, value: base64Encode(secret)),
+      );
       // A key is now resident: latch so `_ensureInitialized` stops re-reading
       // storage on every access (it deliberately does not latch a load that
       // produced nothing — see its doc).
@@ -207,9 +229,14 @@ class NostrIdentityService implements IdentityService {
       // Import identity in Rust
       final rustIdentity = await manager.importFromNsec(nsec: nsec);
 
-      // Get secret bytes and persist to secure storage
-      final secretBytes = await manager.getSecretBytes();
-      await _storage.write(key: _storageKey, value: base64Encode(secretBytes));
+      // Persist secret bytes to secure storage — see `createIdentity` for what
+      // `withFreshSecret` scrubs here, and for the base64 `String` that no
+      // amount of scrubbing can reach.
+      await withFreshSecret(
+        manager.getSecretBytes,
+        (secret) =>
+            _storage.write(key: _storageKey, value: base64Encode(secret)),
+      );
       // A key is now resident — see `createIdentity` for why this latches.
       _initialized = true;
 
@@ -324,6 +351,25 @@ class NostrIdentityService implements IdentityService {
         }
       }
 
+      // Ensure the keyring backend is installed before the tile-cache wipe:
+      // the wipe below removes the tiles.db keyring entry, and a MISSING
+      // store makes that removal a silent no-op that still reports success —
+      // the same shape as the legacy-MLS-cutover defect (a destroy FFI called
+      // with no backend installed, so the done-marker latched while the
+      // SQLCipher key it was supposed to remove survived). Today's only
+      // caller (`IdentityNotifier.deleteIdentity`) happens to install the
+      // backend first via the MLS wipe calls that precede this one, but that
+      // made correctness a property of caller ORDER, not of this method.
+      // `initKeyringStore` is idempotent (cached after first success), so
+      // calling it again here is free when a caller already did.
+      try {
+        await _keyringInitializer();
+      } on Object catch (e) {
+        debugPrint(
+          '[Identity] keyring init before tile cache wipe failed: '
+          '${e.runtimeType}',
+        );
+      }
       // Wipe the encrypted map-tile cache so a new identity never inherits the
       // prior identity's cached map areas (the cache is a record of everywhere
       // the circle has been). Best-effort and isolated in its own try/catch so a

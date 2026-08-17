@@ -560,7 +560,7 @@ class NostrCircleService implements CircleService {
           : memberRelays; // empty → Rust substitutes user Inbox → defaults
 
       final result = await manager.createCircle(
-        identitySecretBytes: Uint8List.fromList(identitySecretBytes),
+        identitySecretBytes: identitySecretBytes,
         members: members,
         name: name,
         description: description,
@@ -737,7 +737,7 @@ class NostrCircleService implements CircleService {
 
     try {
       final ffiInvitation = await manager.processGiftWrappedInvitation(
-        identitySecretBytes: Uint8List.fromList(identitySecretBytes),
+        identitySecretBytes: identitySecretBytes,
         giftWrapEventJson: giftWrapEventJson,
       );
       // `null` signals the Rust side detected a duplicate gift wrap (the
@@ -1569,7 +1569,7 @@ class NostrCircleService implements CircleService {
 
     try {
       return manager.signDeletionEvent(
-        identitySecretBytes: Uint8List.fromList(identitySecretBytes),
+        identitySecretBytes: identitySecretBytes,
         eventIds: eventIds,
       );
     } on Object catch (e) {

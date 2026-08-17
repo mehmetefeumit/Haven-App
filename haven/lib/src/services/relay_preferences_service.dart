@@ -294,11 +294,13 @@ abstract class RelayPreferencesService {
   /// missing curated entry; keeps the user's own additions).
   ///
   /// The recovery action for a pool that has underflowed — distinct from
-  /// [restoreDefaults], which is the generic per-category top-up used by
-  /// this page's section-level "Restore defaults" buttons. Both end up
-  /// calling the same Rust storage operation for
-  /// [RelayCategory.profile], but this method exists as its own named
-  /// entry point so the underflow-recovery call site does not have to
-  /// route through the category-generic API.
+  /// [restoreDefaults], the generic per-category top-up used by this page's
+  /// empty-category action and Profile-section page-open top-up (never by
+  /// the section-level "Restore defaults" buttons, which are destructive and
+  /// call [wipeAndResetDefaults] instead). Both this method and
+  /// [restoreDefaults] end up calling the same Rust storage operation for
+  /// [RelayCategory.profile], but this method exists as its own named entry
+  /// point so the underflow-recovery call site does not have to route
+  /// through the category-generic API.
   Future<void> restoreDefaultProfileRelays();
 }

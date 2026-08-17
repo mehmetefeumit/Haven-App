@@ -9,7 +9,7 @@
 //!   a journal that never opened) does not stop traffic.
 
 use std::io::{self, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,6 +17,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use haven_local_relay::frame::{SENTINEL_ACK_VERB, SENTINEL_VERB};
 use haven_local_relay::journal::{Degraded, WireJournal, TYPE_FRAME};
+use haven_local_relay::loopback::RefusedAddr;
 use haven_local_relay::proxy::{MlsGroupIdSink, Proxy, ProxyConfig, Route};
 use nostr_relay_builder::prelude::*;
 use serde_json::Value;
@@ -34,20 +35,10 @@ const APP_KINDS: [u16; 7] = [0, 445, 1059, 9, 10002, 10050, 30443];
 // Harness
 // ---------------------------------------------------------------------------
 
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
-        .expect("probe bind");
-    listener.local_addr().expect("probe addr").port()
-}
-
 async fn start_relay() -> (LocalRelay, String) {
-    let builder = RelayBuilder::default()
-        .addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
-        .port(free_port());
-    let relay = LocalRelay::new(builder);
-    relay.run().await.expect("relay starts");
-    let url = relay.url().await.to_string();
-    (relay, url)
+    haven_local_relay::loopback::start_local_relay()
+        .await
+        .expect("relay starts")
 }
 
 async fn start_proxy(upstream: String, journal: Arc<WireJournal>) -> Proxy {
@@ -395,7 +386,11 @@ async fn a_sentinel_bounds_a_snapshot_and_identifies_its_own_connection() {
 async fn a_connection_to_a_dead_upstream_still_records_its_endpoint() {
     let capture = Capture::default();
     let journal = Arc::new(WireJournal::with_sink(Box::new(capture.clone())));
-    let dead = format!("ws://127.0.0.1:{}", free_port());
+    // RESERVED, not merely probed: a released port can be taken by anything on
+    // the host, and an upstream that answers turns "the dial failed" — the only
+    // thing this test measures — into a 10-second hang.
+    let unreachable = RefusedAddr::reserve().expect("reserve an unreachable address");
+    let dead = format!("ws://{}", unreachable.addr());
     let proxy = start_proxy(dead.clone(), Arc::clone(&journal)).await;
 
     // The handshake with the PROXY succeeds; the proxy then fails to reach the
@@ -434,8 +429,12 @@ fn sigterm_yields_the_shutdown_summary() {
     let journal_path = dir.join("journal.ndjson");
     let log = std::fs::File::create(&log_path).expect("log file");
 
+    // Port 0: the child binds whatever the OS gives it, in one step. Handing it
+    // a port probed HERE would leave a window for anything on the host to take
+    // that port before the child binds, and the child would then exit before
+    // ever reaching the signal handling this test is about.
     let mut child = Command::new(env!("CARGO_BIN_EXE_haven-wire-proxy"))
-        .env("HAVEN_WIRE_PROXY_PORT", free_port().to_string())
+        .env("HAVEN_WIRE_PROXY_PORT", "0")
         .env("HAVEN_WIRE_PROXY_UPSTREAM", "ws://127.0.0.1:1")
         .env("HAVEN_WIRE_JOURNAL", &journal_path)
         .stdout(Stdio::null())

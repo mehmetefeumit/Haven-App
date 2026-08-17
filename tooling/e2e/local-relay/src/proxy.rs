@@ -97,7 +97,7 @@ const REASON_R2C_READ_FAILED: &str = "r2c read failed";
 /// One `listen -> upstream` mapping.
 #[derive(Debug, Clone)]
 pub struct Route {
-    /// Address to bind. Loopback only in every supported lane.
+    /// Address to bind. Loopback only, refused by [`Proxy::start`].
     pub listen: SocketAddr,
     /// Upstream relay URL, e.g. `ws://127.0.0.1:7777`.
     pub upstream: String,
@@ -133,7 +133,8 @@ impl Proxy {
     /// # Errors
     ///
     /// Returns the underlying [`std::io::Error`] when a listener cannot bind,
-    /// or an `InvalidInput` error when the routing table is empty.
+    /// or an `InvalidInput` error when the routing table is empty or names a
+    /// listen address that is not loopback.
     pub async fn start(
         config: &ProxyConfig,
         journal: Arc<WireJournal>,
@@ -143,6 +144,28 @@ impl Proxy {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "at least one route is required",
+            ));
+        }
+
+        // "Loopback only" belongs to whatever BINDS, not to the one input that
+        // happens to build a routing table: `config::validate_listen` refuses a
+        // non-loopback address with a lane-facing message naming the offending
+        // entry, and this refuses it for every other caller of the library. What
+        // binds here records ciphertext, event ids and the identity pubkeys
+        // carried in REQ filters, so a recorder reachable from off-host is one
+        // that can be pointed at real traffic.
+        if let Some(route) = config
+            .routes
+            .iter()
+            .find(|route| !route.listen.ip().is_loopback())
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "listen address {} is not loopback; this recorder writes a full \
+                     traffic transcript and must never accept a connection from off-host",
+                    route.listen
+                ),
             ));
         }
 
@@ -282,8 +305,16 @@ pub struct MlsGroupIdStats {
     pub distinct: usize,
     /// Declarations refused by the validator.
     pub refused: u64,
-    /// Valid declarations that could not be recorded.
-    pub lost: u64,
+    /// Ids the host will not see, counted ONCE each however often the sink
+    /// retried them: a declaration that could not be written (which is why it
+    /// was refused an ack), or an acked id that went missing and could not be
+    /// put back.
+    pub lost: usize,
+    /// Acked ids put back after something rotated them out from under this
+    /// process. Non-zero means SOMETHING rewrote the sidecar mid-run — a second
+    /// recorder sharing the path, a stray `rm -f`, a runner cleaning /tmp — a
+    /// misconfiguration the needle set survived, not one to leave unread.
+    pub restored: u64,
 }
 
 /// De-duplicating append-only sink for the REAL MLS group ids the device
@@ -312,6 +343,15 @@ pub struct MlsGroupIdStats {
 /// loss, says so on stderr, and lets the fail-closed oracle downstream turn the
 /// missing ground truth into a red.
 ///
+/// # Deleting the file does not end the ids' life on this host
+///
+/// Every read goes through [`SidecarInner::recorded`], which APPENDS what an
+/// ack promised and the file no longer holds — including the read [`Self::stats`]
+/// does at shutdown. A sidecar deleted mid-run is therefore RE-CREATED, with
+/// real MLS group ids in it, when the proxy is stopped. No lane deletes it
+/// today; a future "scrub before upload" step would have to run AFTER teardown,
+/// or it would silently be a no-op.
+///
 /// # Nothing caps how many ids it holds
 ///
 /// Deliberately: the file IS the needle set C5.8 scans for, so a cap could only
@@ -321,24 +361,100 @@ pub struct MlsGroupIdStats {
 /// backlog"). What is bounded is each value
 /// ([`crate::frame::MLS_GROUP_ID_MAX_HEX`]) and who can write one: the
 /// shorthand every lane uses binds 127.0.0.1 (`config::resolve`), so the
-/// declarer is the app under test. A routing table naming a non-loopback listen
-/// address would widen that, and nothing in this crate or in
-/// `start-wire-proxy.sh` (whose hermeticity gate reads UPSTREAMS only) refuses
-/// it.
+/// declarer is the app under test — and a routing table naming a non-loopback
+/// listen address, which would widen that, is refused by `config` and again by
+/// [`Proxy::start`] rather than left to lane configuration:
+/// `start-wire-proxy.sh`'s hermeticity gate reads UPSTREAMS only, so nothing
+/// else would have.
 pub struct MlsGroupIdSink {
     inner: Mutex<SidecarInner>,
 }
 
 struct SidecarInner {
     path: Option<PathBuf>,
+    /// Every id an ack has promised the host holds. See [`SidecarInner::recorded`].
+    acked: BTreeSet<String>,
     refused: u64,
-    lost: u64,
+    /// Ids that failed to reach the sidecar. A SET, not a tally: every acked id
+    /// missing from the file is re-tried on every declaration AND every
+    /// `stats()` read, so a permanently unwritable sidecar would otherwise
+    /// report one lost id as many times as the sink happened to look. Only ever
+    /// added to; [`MlsGroupIdSink::stats`] discounts any that a later write did
+    /// get in.
+    lost: BTreeSet<String>,
+    restored: u64,
 }
 
 impl SidecarInner {
-    /// The ids the sidecar holds right now; empty when no path is configured.
-    fn recorded(&self) -> BTreeSet<String> {
-        self.path.as_deref().map(sidecar_ids).unwrap_or_default()
+    /// The ids the sidecar holds, after putting back every id this sink has
+    /// ACKED and the file no longer has; empty when no path is configured.
+    ///
+    /// Re-reading the file per declaration makes an ack true at the moment it
+    /// is issued, but the drive announces each circle ONCE and moves on — so a
+    /// rotation under a live process drops every id that has no second
+    /// declaration coming, for good, and C5.8 then scans for fewer needles than
+    /// the wire could carry and still reports clean. An ack has to stay true
+    /// until the lane reads the file, which is what this restores.
+    ///
+    /// `declaring` is the value with a LIVE declaration, when there is one. It
+    /// is exempt: answering it from the file as found is the whole point of the
+    /// re-read, and healing it first would answer a live question from memory
+    /// again. Every other acked id has no live question to answer.
+    ///
+    /// Restoring can only ever ADD a needle, so it cannot manufacture a pass: a
+    /// value that is not on the wire is never found, and one that is, is a
+    /// Rule-4 violation whoever minted it.
+    fn recorded(&mut self, declaring: Option<&str>) -> BTreeSet<String> {
+        let Some(path) = self.path.clone() else {
+            return BTreeSet::new();
+        };
+        let mut held = sidecar_ids(&path);
+        let missing: Vec<String> = self
+            .acked
+            .iter()
+            .filter(|id| !held.contains(*id) && Some(id.as_str()) != declaring)
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            return held;
+        }
+
+        let mut failed: Option<std::io::ErrorKind> = None;
+        let mut restored = 0_u64;
+        let mut unheld = 0_u64;
+        for id in missing {
+            match append_line(&path, &id) {
+                Ok(()) => {
+                    restored += 1;
+                    held.insert(id);
+                }
+                Err(err) => {
+                    failed = Some(err.kind());
+                    unheld += 1;
+                    self.lost.insert(id);
+                }
+            }
+        }
+        // COUNTS ONLY (Security Rule 4 — the id is the value the whole sidecar
+        // exists to keep off every log), and one line per rotation rather than
+        // per id: the anomaly is that something rotated the file at all.
+        if restored > 0 {
+            self.restored = self.restored.wrapping_add(restored);
+            eprintln!(
+                "[haven-wire-proxy] restored {restored} acked MLS group id(s) the sidecar no \
+                 longer held — something rotated it under a live recorder. Without this the \
+                 host would have scanned for fewer ids than the wire could carry and reported \
+                 clean."
+            );
+        }
+        if let Some(kind) = failed {
+            eprintln!(
+                "[haven-wire-proxy] could not put {unheld} acked MLS group id(s) back into the \
+                 sidecar ({kind:?}); the host will not see them, so C5.8 has less ground truth \
+                 than the run acked."
+            );
+        }
+        held
     }
 }
 
@@ -364,8 +480,10 @@ impl MlsGroupIdSink {
         Self {
             inner: Mutex::new(SidecarInner {
                 path,
+                acked: BTreeSet::new(),
                 refused: 0,
-                lost: 0,
+                lost: BTreeSet::new(),
+                restored: 0,
             }),
         }
     }
@@ -381,7 +499,7 @@ impl MlsGroupIdSink {
             Err(reason) => {
                 let mut inner = self.lock();
                 inner.refused = inner.refused.wrapping_add(1);
-                let distinct = inner.recorded().len();
+                let distinct = inner.recorded(None).len();
                 drop(inner);
                 let outcome = Declared::Refused(reason);
                 eprintln!(
@@ -394,10 +512,11 @@ impl MlsGroupIdSink {
 
         let mut inner = self.lock();
         let path = inner.path.clone();
-        let recorded = inner.recorded();
+        let recorded = inner.recorded(Some(&normalized));
         if recorded.contains(&normalized) {
             // Silent by design: a scenario re-declares the same circle on every
             // reconnect, and a line per repeat would bury the first sighting.
+            inner.acked.insert(normalized.clone());
             return Declaration {
                 outcome: Declared::Duplicate,
                 ack: Some(normalized),
@@ -411,7 +530,10 @@ impl MlsGroupIdSink {
             )
         });
         if outcome.is_lost() {
-            inner.lost = inner.lost.wrapping_add(1);
+            inner.lost.insert(normalized.clone());
+        }
+        if outcome == Declared::Recorded {
+            inner.acked.insert(normalized.clone());
         }
         let distinct = recorded.len() + usize::from(outcome == Declared::Recorded);
         drop(inner);
@@ -427,13 +549,21 @@ impl MlsGroupIdSink {
     }
 
     /// Current health snapshot.
+    ///
+    /// Reads through [`SidecarInner::recorded`], so the shutdown summary is
+    /// also this sink's LAST chance to put back an id rotated away after the
+    /// final declaration — the lane reads the file after teardown. `lost` is
+    /// resolved against what that read found, so an id a later write did get in
+    /// stops being reported as one the host will not see.
     #[must_use]
     pub fn stats(&self) -> MlsGroupIdStats {
-        let inner = self.lock();
+        let mut inner = self.lock();
+        let held = inner.recorded(None);
         MlsGroupIdStats {
-            distinct: inner.recorded().len(),
+            distinct: held.len(),
             refused: inner.refused,
-            lost: inner.lost,
+            lost: inner.lost.iter().filter(|id| !held.contains(*id)).count(),
+            restored: inner.restored,
         }
     }
 
@@ -458,7 +588,9 @@ impl Default for MlsGroupIdSink {
 /// sidecar — unlike the journal — has no live-instance claim gate), and the
 /// drive treats an ack as proof the host holds the value: it would then move on,
 /// C5.8 would scan for fewer needles than the wire could carry, and the run
-/// would report clean. Re-reading makes an ack true at the moment it is issued.
+/// would report clean. Re-reading makes an ack true at the moment it is issued;
+/// [`SidecarInner::recorded`] is what keeps it true afterwards, for the ids that
+/// are never declared a second time.
 ///
 /// An unreadable file reads as EMPTY, so the value is re-recorded rather than
 /// waved through — the same reason an unwritable sidecar is never remembered.
@@ -481,9 +613,9 @@ fn append_line(path: &Path, line: &str) -> Result<(), std::io::Error> {
 
 /// Builds the stderr line for one declaration.
 ///
-/// SECURITY RULE 6: the id is key-adjacent material and is never interpolated
-/// here. The line carries a length, a count and a fixed label — enough to
-/// debug a refusal, and nothing a reader of the CI log could scan for.
+/// SECURITY RULE 4: the real MLS group id is never interpolated here. The line
+/// carries a length, a count and a fixed label — enough to debug a refusal, and
+/// nothing a reader of the CI log could scan for.
 fn declaration_notice(
     conn_id: &str,
     declared_len: usize,
@@ -1005,6 +1137,7 @@ const fn ws_error_label(err: &tokio_tungstenite::tungstenite::Error) -> &'static
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::journal::Degraded;
 
     /// A well-formed id: 32 bytes, the size MDK mints.
     fn an_id() -> String {
@@ -1126,6 +1259,130 @@ mod tests {
         }
     }
 
+    // ...and the OTHER half of that promise, which re-reading alone does not
+    // keep. The drive announces each circle ONCE and moves on, so an id with no
+    // second declaration coming is dropped for good by a rotation — and C5.8
+    // then scans for fewer needles than the wire could carry while the run
+    // still reports clean. An ack has to stay true until the lane reads the
+    // file, not only at the instant it is issued.
+    #[test]
+    fn ids_that_are_never_re_declared_survive_an_external_rotation() {
+        let rotations: [(&str, Rotate); 2] = [
+            ("removed", |path| std::fs::remove_file(path)),
+            ("truncated", |path| std::fs::write(path, b"")),
+        ];
+        for (shape, rotate) in rotations {
+            let path = scratch(&format!("survive-{shape}"));
+            let sink = MlsGroupIdSink::new(path.clone());
+            let first = an_id();
+            let second = "cd".repeat(32);
+            let third = "ef".repeat(32);
+            for id in [&first, &second] {
+                assert_eq!(sink.declare("c0", id).outcome, Declared::Recorded);
+            }
+
+            rotate(&path).expect("the fixture must be able to rotate the sidecar");
+            // The scenario's NEXT circle. Only this one has a live declaration;
+            // the two already acked have no second chance of their own.
+            assert_eq!(sink.declare("c1", &third).outcome, Declared::Recorded);
+
+            let held = lines(&path);
+            for (label, id) in [("first", &first), ("second", &second), ("third", &third)] {
+                assert!(
+                    held.contains(id),
+                    "the {label} acked id did not survive a {shape} sidecar: an ack the host \
+                     cannot honour narrows C5.8's needle set while the run reports clean"
+                );
+            }
+            assert_eq!(held.len(), 3, "and none of them is duplicated: {held:?}");
+            let stats = sink.stats();
+            assert_eq!(stats.distinct, 3);
+            assert_eq!(
+                stats.restored, 2,
+                "the rotation must be COUNTED, not silently repaired — something rewrote the \
+                 sidecar under a live recorder"
+            );
+            assert_eq!(stats.lost, 0);
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    // An ack this sink did not WRITE is still an ack this sink made. The
+    // sidecar has no live-instance claim gate, so two recorders sharing one
+    // path is the very misconfiguration `restored` exists to surface: the
+    // second one answers `Duplicate` off the first one's line, and if it then
+    // forgot the promise, the next rotation would drop that id with no writer
+    // left believing it owes anything.
+    #[test]
+    fn an_id_acked_as_a_duplicate_is_restored_like_one_this_sink_wrote() {
+        let path = scratch("duplicate-ack");
+        // Another writer's line, already there when this sink starts.
+        std::fs::write(&path, format!("{}\n", an_id())).expect("seed the sidecar");
+        let sink = MlsGroupIdSink::new(path.clone());
+
+        let declaration = sink.declare("c0", &an_id());
+        assert_eq!(declaration.outcome, Declared::Duplicate);
+        assert_eq!(declaration.ack.as_deref(), Some(an_id().as_str()));
+
+        std::fs::remove_file(&path).expect("rotate");
+        let stats = sink.stats();
+
+        assert_eq!(
+            lines(&path),
+            vec![an_id()],
+            "an id acked as a duplicate must be restored too, or an ack would mean less \
+             depending on which writer happened to put the line there"
+        );
+        assert_eq!(stats.restored, 1);
+        assert_eq!(stats.distinct, 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // The lane reads the sidecar AFTER teardown, so a rotation that lands after
+    // the last declaration has no declaration left to ride in on. The shutdown
+    // summary's own read is the last chance to repair it.
+    #[test]
+    fn a_rotation_after_the_last_declaration_is_repaired_by_the_shutdown_read() {
+        let path = scratch("repair-at-stats");
+        let sink = MlsGroupIdSink::new(path.clone());
+        assert_eq!(sink.declare("c0", &an_id()).outcome, Declared::Recorded);
+
+        std::fs::remove_file(&path).expect("rotate");
+        let stats = sink.stats();
+
+        assert_eq!(stats.distinct, 1);
+        assert_eq!(stats.restored, 1);
+        assert_eq!(
+            lines(&path),
+            vec![an_id()],
+            "the file the lane reads must hold the id, not merely the stats snapshot"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // A restore that CANNOT be written is the one case where the needle set
+    // really is short, and it must say so rather than report a healthy count.
+    #[test]
+    fn a_restore_that_cannot_be_written_is_counted_as_lost() {
+        let dir = scratch("restore-unwritable");
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let sink = MlsGroupIdSink::new(dir.join("ids.txt"));
+        assert_eq!(sink.declare("c0", &an_id()).outcome, Declared::Recorded);
+
+        // The whole directory goes, so the restoring append cannot succeed.
+        std::fs::remove_dir_all(&dir).expect("rotate the directory away");
+        let stats = sink.stats();
+
+        assert_eq!(stats.distinct, 0, "the id really is gone");
+        assert_eq!(stats.restored, 0);
+        assert_eq!(
+            stats.lost, 1,
+            "an acked id the host will never see must be reported as lost, or the summary \
+             would describe a needle set the lane does not have"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // NO CAP, deliberately (see `MlsGroupIdSink`): a cap could only drop a
     // declaration, and a dropped declaration narrows C5.8's needle set while the
     // run stays green. Far past any plausible bound, every id must still land.
@@ -1213,7 +1470,7 @@ mod tests {
         assert!(notice.contains("c7"), "and which connection declared it");
     }
 
-    // SECURITY RULE 6. Every line this sink emits must be safe to leave in a
+    // SECURITY RULE 4. Every line this sink emits must be safe to leave in a
     // CI log that outlives the runner, so none of them may carry the value.
     #[test]
     fn no_notice_ever_interpolates_the_id() {
@@ -1267,7 +1524,138 @@ mod tests {
             "a lost value must be retried, not reported as an already-recorded duplicate"
         );
         assert!(first.ack.is_none());
-        assert_eq!(sink.stats().lost, 2);
+        assert_eq!(
+            sink.stats().lost,
+            1,
+            "one id the host will not see, declared twice — `lost` counts ids, not attempts"
+        );
         assert_eq!(sink.stats().distinct, 0);
+    }
+
+    // `lost` is a count of IDS, which is the only reading that means anything
+    // to someone deciding how much Rule-4 ground truth a run kept. Every acked
+    // id missing from the file is re-tried on every declaration AND on every
+    // `stats()` read, so a per-attempt tally reports a small, fixed loss as an
+    // arbitrary multiple of itself — a number that grows with how often the
+    // sink was asked, not with what went wrong.
+    #[test]
+    fn a_permanently_unwritable_sidecar_counts_each_lost_id_once() {
+        let dir = scratch("lost-once");
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let sink = MlsGroupIdSink::new(dir.join("ids.txt"));
+        let first = an_id();
+        let second = "cd".repeat(32);
+        for id in [&first, &second] {
+            assert_eq!(sink.declare("c0", id).outcome, Declared::Recorded);
+        }
+
+        // The directory goes, so every restoring append from here on fails.
+        std::fs::remove_dir_all(&dir).expect("rotate the directory away");
+        for _ in 0..5 {
+            let repeated = sink.stats();
+            assert_eq!(
+                repeated.lost, 2,
+                "two acked ids are unreachable, however many times the sink looked"
+            );
+        }
+
+        // And a further declaration, which retries them again, does not either.
+        let third = "ef".repeat(32);
+        assert!(matches!(
+            sink.declare("c1", &third).outcome,
+            Declared::Unwritable(_)
+        ));
+        let stats = sink.stats();
+        assert_eq!(
+            stats.lost, 3,
+            "three ids lost, not three ids times the retries"
+        );
+        assert_eq!(stats.distinct, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ...and an id that a LATER write did get in is no longer lost. The count
+    // answers "how much ground truth does the lane hold", so an id sitting in
+    // the file the lane reads must not still be reported as missing from it.
+    #[test]
+    fn an_id_that_a_later_write_recovers_stops_being_counted_as_lost() {
+        let dir = scratch("lost-recovered");
+        let path = dir.join("ids.txt");
+        let sink = MlsGroupIdSink::new(path.clone());
+
+        // No directory yet: the first declaration cannot be written.
+        assert!(matches!(
+            sink.declare("c0", &an_id()).outcome,
+            Declared::Unwritable(_)
+        ));
+        assert_eq!(sink.stats().lost, 1);
+
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        assert_eq!(sink.declare("c1", &an_id()).outcome, Declared::Recorded);
+
+        let stats = sink.stats();
+        assert_eq!(stats.distinct, 1);
+        assert_eq!(
+            stats.lost, 0,
+            "the id is in the file the lane reads, so nothing about it is lost"
+        );
+        assert_eq!(lines(&path), vec![an_id()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The listen side of hermeticity is a property of the thing that BINDS.
+    // `config` refuses a non-loopback routing table, but it is not the only way
+    // to build one — and what binds here records ciphertext, event ids and the
+    // identity pubkeys carried in REQ filters, so a recorder that accepts a
+    // connection from off-host can be pointed at real traffic.
+    #[tokio::test]
+    async fn start_refuses_a_non_loopback_listen_address() {
+        // Recording is irrelevant to a bind decision, and a real journal would
+        // leave a file behind for a test that never writes a line.
+        let journal = Arc::new(WireJournal::degraded(Degraded::OpenFailed));
+        for listen in [
+            SocketAddr::from(([0, 0, 0, 0], 0)),
+            SocketAddr::from(([192, 168, 1, 10], 0)),
+        ] {
+            let err = Proxy::start(
+                &ProxyConfig {
+                    routes: vec![Route {
+                        listen,
+                        upstream: "ws://127.0.0.1:7777".to_owned(),
+                    }],
+                },
+                Arc::clone(&journal),
+                Arc::new(MlsGroupIdSink::disabled()),
+            )
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{listen} must be refused before it is bound"));
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(
+                err.to_string().contains("not loopback"),
+                "the error must name the rule it broke: {err}"
+            );
+        }
+    }
+
+    // ...and loopback must still bind, or the refusal above would also be
+    // satisfied by a check that breaks every lane.
+    #[tokio::test]
+    async fn start_binds_a_loopback_listen_address() {
+        let journal = Arc::new(WireJournal::degraded(Degraded::OpenFailed));
+        let proxy = Proxy::start(
+            &ProxyConfig {
+                routes: vec![Route {
+                    listen: SocketAddr::from(([127, 0, 0, 1], 0)),
+                    upstream: "ws://127.0.0.1:7777".to_owned(),
+                }],
+            },
+            journal,
+            Arc::new(MlsGroupIdSink::disabled()),
+        )
+        .await
+        .expect("a loopback route must bind");
+        assert!(proxy.local_addr().ip().is_loopback());
+        assert_ne!(proxy.local_addr().port(), 0, "port 0 resolves at the bind");
     }
 }

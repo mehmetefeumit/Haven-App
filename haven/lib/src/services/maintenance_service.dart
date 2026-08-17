@@ -10,15 +10,17 @@
 ///
 /// ## Secret lifetime (Security Rule 9)
 ///
-/// Each task **re-fetches** the identity secret per call, copies it into a
-/// [Uint8List] buffer this service owns, passes it to the FFI (which consumes
-/// and zeroizes it Rust-side), and scrubs the Dart-side buffer in a `finally`.
+/// Each task **re-fetches** the identity secret per call, takes ownership of
+/// the fetched buffer (without copying it — a copy would leave a second live
+/// secret nothing can reach), passes it to the FFI (which consumes and
+/// zeroizes it Rust-side), and scrubs the Dart-side buffer in a `finally`.
 /// The secret is never held across ticks.
 library;
 
 import 'package:flutter/foundation.dart';
 
 import 'package:haven/src/rust/api.dart';
+import 'package:haven/src/services/fresh_secret.dart';
 import 'package:haven/src/services/relay_service.dart';
 import 'package:meta/meta.dart' show useResult;
 
@@ -134,9 +136,12 @@ class MaintenanceService {
     required T Function(_MaintenancePhase phase) onFailure,
     required String label,
   }) async {
-    // Hold the secret-bytes copy in a typed buffer so we can `fillRange` it on
-    // exit, minimising the window the secret sits in Dart's managed heap after
-    // the FFI has consumed it. Mirrors `key_package_provider.dart`.
+    // Own the fetched buffer so we can `fillRange` it on exit, minimising the
+    // window the secret sits in Dart's managed heap after the FFI has consumed
+    // it. Ownership only — deliberately NOT `withFreshSecret`, whose 32-byte
+    // precondition this orchestrator has no business imposing: it forwards
+    // whatever secure storage yields and leaves the FFI as the authority on
+    // what is a valid signing key.
     Uint8List? secretBuffer;
     // Tracks how far we got, so the catch can attribute the throw. Assigned
     // immediately before entering each phase.
@@ -144,7 +149,7 @@ class MaintenanceService {
     try {
       final circle = await _circleManagerFactory();
       phase = _MaintenancePhase.identitySecret;
-      secretBuffer = Uint8List.fromList(await _identitySecretBytes());
+      secretBuffer = takeSecretOwnership(await _identitySecretBytes());
       phase = _MaintenancePhase.task;
       return await op(circle, secretBuffer);
     } on Object catch (e) {

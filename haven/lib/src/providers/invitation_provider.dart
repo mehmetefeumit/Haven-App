@@ -110,42 +110,52 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
     );
 
     // Fetch secret bytes once for the batch — each gift wrap creates
-    // an independent MLS group, so parallel processing is safe.
+    // an independent MLS group, so parallel processing is safe. Scrubbed in
+    // `finally` the instant the whole batch is done (Security Rule 9: Dart
+    // has no `zeroize`, so a shared fetch must not outlive its last use).
     final secretBytes = await identityNotifier.getSecretBytes();
 
-    // Process all gift wraps in parallel. Each result records only whether the
-    // wrap was newly accepted (for the count). Nothing a wrap carries is read
-    // beyond its own payload — in particular its outer `created_at` is not
-    // extracted at all, because the only thing it was ever used for was a
-    // cursor advance this path no longer performs.
-    final results = await Future.wait(
-      giftWraps.map((eventJson) async {
-        try {
-          final invitation = await circleService.processGiftWrappedInvitation(
-            identitySecretBytes: secretBytes,
-            giftWrapEventJson: eventJson,
-          );
-          // `null` → already-processed gift wrap (handled by Rust dedup).
-          // Silent no-op for the count, but still a handled wrap.
-          return invitation != null;
-        } on CircleServiceException catch (e) {
-          // Real failure from the service layer (malformed event, MDK
-          // error, storage failure). The underlying Rust error has already
-          // been logged with sanitized detail by `nostr_circle_service.dart`.
-          debugPrint('[InvitationPoller] skipped gift-wrap: ${e.runtimeType}');
-          return false;
-        } on Object catch (e) {
-          // FFI Error path. Log only the runtime type — error messages from
-          // non-Mls CircleError variants (NotFound, ContactNotFound, etc.)
-          // can embed pubkeys or group IDs in their Display output.
-          debugPrint(
-            '[InvitationPoller] skipped gift-wrap (processing error): '
-            '${e.runtimeType}',
-          );
-          return false;
-        }
-      }),
-    );
+    final List<bool> results;
+    try {
+      // Process all gift wraps in parallel. Each result records only whether
+      // the wrap was newly accepted (for the count). Nothing a wrap carries is
+      // read beyond its own payload — in particular its outer `created_at` is
+      // not extracted at all, because the only thing it was ever used for was
+      // a cursor advance this path no longer performs.
+      results = await Future.wait(
+        giftWraps.map((eventJson) async {
+          try {
+            final invitation = await circleService
+                .processGiftWrappedInvitation(
+                  identitySecretBytes: secretBytes,
+                  giftWrapEventJson: eventJson,
+                );
+            // `null` → already-processed gift wrap (handled by Rust dedup).
+            // Silent no-op for the count, but still a handled wrap.
+            return invitation != null;
+          } on CircleServiceException catch (e) {
+            // Real failure from the service layer (malformed event, MDK
+            // error, storage failure). The underlying Rust error has already
+            // been logged with sanitized detail by `nostr_circle_service.dart`.
+            debugPrint(
+              '[InvitationPoller] skipped gift-wrap: ${e.runtimeType}',
+            );
+            return false;
+          } on Object catch (e) {
+            // FFI Error path. Log only the runtime type — error messages from
+            // non-Mls CircleError variants (NotFound, ContactNotFound, etc.)
+            // can embed pubkeys or group IDs in their Display output.
+            debugPrint(
+              '[InvitationPoller] skipped gift-wrap (processing error): '
+              '${e.runtimeType}',
+            );
+            return false;
+          }
+        }),
+      );
+    } finally {
+      secretBytes.fillRange(0, secretBytes.length, 0);
+    }
     final newCount = results.where((isNew) => isNew).length;
 
     if (newCount > 0) {

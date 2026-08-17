@@ -44,14 +44,31 @@
 //!
 //! # Backward paging
 //!
-//! A truncated page is not the end of a window: the sweep re-issues the request
-//! bounded above by the oldest event it has been served ([`Pager`]) until every
-//! responding relay hands back a short page, so a saturated window can actually
-//! COMPLETE instead of freezing its circle's cursor forever. That next `until`
-//! is the one remotely-written number steering a request; [`summarize_round`]
-//! argues where it may come from and [`Pager::step`] argues how far it may be
-//! followed. Everything neither can establish from a local fact leaves the
-//! window marked `saturated` and the cursor held.
+//! A page is not the end of a window: the sweep re-issues the request bounded
+//! above by the oldest event it has been served ([`Pager`]) until a round brings
+//! back nothing new, so a saturated window can actually COMPLETE instead of
+//! freezing its circle's cursor forever. The chase is driven by what a page
+//! CONTRIBUTES, not by how big it is — a relay may clamp our `limit` down to its
+//! own (NIP-11 `limitation.max_limit`), and a page that can never reach the
+//! limit we asked for can never look truncated either. That next `until` is the
+//! one remotely-written number steering a request; [`summarize_round`] argues
+//! where it may come from and [`Pager::step`] argues how far it may be followed.
+//! Everything neither can establish from a local fact leaves the window marked
+//! `saturated` and the cursor held.
+//!
+//! Each page is INGESTED before the next is fetched. A wake budget is 20-25 s
+//! and a chase can outlast it, so a sweep that collected every page before
+//! applying any applied NOTHING whenever the deadline landed mid-chase — and,
+//! with the cursor rightly held, did the same on the next wake and the one after
+//! it. Paying per page costs the engine out-of-order delivery (pages descend)
+//! and buys forward progress on every wake.
+//!
+//! A boundary is followed only while it DESCENDS, and the first page's `until`
+//! is the window's own open second — so that second is the one the chase cannot
+//! step below. It is re-asked exactly once instead (see
+//! [`CircleSweep::fetch_and_ingest`]), which is what keeps a quiet circle
+//! publishing its only event in the second a sweep opened from losing that sweep
+//! to a boundary that could not descend.
 //!
 //! # What is deliberately NOT held back
 //!
@@ -138,13 +155,18 @@ pub struct CatchupOutcome {
     pub deadline_hit: bool,
     /// Relay fetches that returned no response / errored (tallied, never fatal).
     pub relay_errors: usize,
-    /// Circles whose fetch window could NOT be completed. Some relay truncated
-    /// a page (returned the full `CATCHUP_MAX_EVENTS_PER_PAGE`) and the backward
-    /// pager did not finish draining the tail below it — it ran out of pages,
-    /// of the per-circle event budget, of deadline, or of a relay willing to
-    /// answer. The cursor was deliberately NOT advanced for those circles, so
-    /// the remainder is re-fetched next sweep. Non-zero means "this circle still
-    /// has unretrieved backlog", not an error.
+    /// Circles whose fetch window could NOT be completed: the backward pager did
+    /// not reach a round that brought back nothing new. It ran out of pages, of
+    /// the per-circle event budget, of deadline, or of a trustworthy answer — a
+    /// relay mid-chase went quiet, a relay that had nothing to say suddenly had
+    /// something, a fetch ran out its own timeout and may have been cut off
+    /// part-way, or a page arrived that no `until` can page past (a full one
+    /// dated inside a single second). The cursor was deliberately NOT advanced
+    /// for those circles, so the remainder is re-fetched next sweep. Non-zero
+    /// means "this sweep could not establish that it drained this circle" —
+    /// weaker than "backlog remains", since a contradicted or cut-off read may
+    /// have been over a window that was in fact complete. Not an error either
+    /// way.
     pub windows_truncated: usize,
 }
 
@@ -166,23 +188,26 @@ pub struct CatchupOutcome {
 /// So a truncated page is not the end of the window: [`Pager`] chases the tail
 /// with further pages bounded above by the oldest event served so far, and the
 /// cursor is held still ([`cursor_advance_ms`]) for as long as that chase is
-/// unfinished. Ingest then runs over everything the chase fetched — once, over
-/// the sorted union, after the last page — so the engine still makes progress on
-/// a window that stayed incomplete.
+/// unfinished. Each page is ingested as it arrives, so the engine still makes
+/// progress on a window that stayed incomplete — and on one the deadline cut off
+/// mid-chase, which is the common way a big backlog ends.
 ///
-/// # This value MUST NOT exceed a relay's own `limit` cap
+/// # Why a relay's own `limit` cap no longer decides whether the chase runs
 ///
-/// Truncation is detected as "the relay returned as many events as we asked
-/// for". NIP-11 `limitation.max_limit` lets a relay CLAMP a larger `limit`
-/// instead of rejecting it, and strfry — which all three of Haven's default
-/// relays run, and which the E2E harness runs too — ships that cap at 500. Ask
-/// for more than a relay will serve and every page comes back one short of our
-/// own limit no matter how much backlog is left, so the signal never fires, the
-/// chase never starts, and the cursor advances straight over the tail: the exact
-/// silent loss above, arrived at through the request rather than the response.
-/// 500 is therefore not a round number, it is the ecosystem's de-facto cap; a
-/// relay capping BELOW it would still defeat the signal, which is the residual
-/// this constant cannot fix on its own.
+/// NIP-11 `limitation.max_limit` lets a relay CLAMP a larger `limit` instead of
+/// rejecting it, and strfry — which all three of Haven's default relays run, and
+/// which the E2E harness runs too — ships that cap at 500. A chase that started
+/// only on "the relay returned as many events as we asked for" would never start
+/// at all against a relay capping at or below this number: every page arrives
+/// short of our own limit however much backlog is left behind it, so the signal
+/// never fires and the cursor advances straight over the tail — the same silent
+/// loss as above, arrived at through the REQUEST rather than the response. The
+/// chase therefore runs on what a page CONTRIBUTES ([`summarize_round`]), which
+/// no cap can suppress, and this number is once more only what its name says.
+///
+/// A full page still keeps its relay in the chase unconditionally, and that half
+/// is not redundant: it is what catches a page of entirely ALREADY-SEEN events,
+/// the shape a relay serving one second's worth of pile-up produces forever.
 const CATCHUP_MAX_EVENTS_PER_PAGE: usize = 500;
 
 /// Max backward pages one circle's window may cost in a single sweep.
@@ -196,48 +221,84 @@ const CATCHUP_MAX_EVENTS_PER_PAGE: usize = 500;
 /// # What hitting it does NOT do, and the residual that leaves
 ///
 /// It does not schedule the remainder for later. Every sweep restarts the chase
-/// at the newest end of the same `since`, so a window that stays above
-/// `CATCHUP_MAX_PAGES_PER_CIRCLE × CATCHUP_MAX_EVENTS_PER_PAGE` events retrieves
-/// the same newest ~4000 forever and its oldest tail is fetched by no sweep at
-/// all. Nothing is DROPPED — the cursor never advances over it, so it stays
-/// reachable — but it is also never reached. Resuming the descent across sweeps
-/// needs a persisted per-circle backfill floor, which is a new piece of
-/// remotely-influenced state to make safe (the boundary it would store is a
-/// relay-chosen timestamp) and is deliberately a follow-up. In practice the
-/// residual is narrow: kind-445 APPLICATION messages carry a NIP-40 expiration
-/// of ~4 minutes so they age off relays long before they pile up, and the
-/// commits/proposals that do persist are rare.
+/// at the newest end of the same `since`, so a window bigger than one sweep can
+/// retrieve gets the same newest pages fetched over and over while its oldest
+/// tail is fetched by no sweep at all. Nothing is DROPPED — the cursor never
+/// advances over it, so it stays reachable — but it is also never reached.
+///
+/// Resuming the descent across sweeps means PERSISTING the boundary a chase
+/// halted at, and that number is a relay-chosen timestamp being asked to stand,
+/// in a later sweep, for "everything above me is already retrieved" — a
+/// materially stronger claim than the within-sweep chase ever makes with it.
+/// Two conditions would have to be persisted alongside it before it could be
+/// believed. It is only true of relays that answered EVERY round: a relay
+/// unreachable during this sweep holds events in that range that nobody fetched,
+/// and today's HELD cursor is precisely what lets the next sweep ask it for the
+/// whole window again. And it stops being true the moment the circle's relay
+/// list gains an entry. So the floor may only be stored together with the
+/// coverage it was derived from — new state in the storage layer, not a number
+/// this module can park in the sync cursor, whose write is monotonic-MAX and
+/// could not hold a descending floor in any case. Deliberately a follow-up. In
+/// practice the residual is narrow: kind-445 APPLICATION messages carry a NIP-40
+/// expiration of ~4 minutes so they age off relays long before they pile up, and
+/// the commits/proposals that do persist are rare.
 ///
 /// # And the wake-budget consequence, which is real
 ///
 /// A wake budget is 20–25 s while one page's fetch is bounded by the relay
 /// timeout, so the DEADLINE, not this constant, is what usually stops a long
-/// chase. One badly backlogged circle can now spend the whole wake where it
+/// chase. One badly backlogged circle can spend the whole wake where it
 /// previously cost a single round, after which `run_catchup_all_circles` breaks
 /// before the remaining circles are swept at all — they simply wait for the next
-/// wake, cursors untouched. Worse for that circle: the chase fetches every page
-/// BEFORE any ingest, so a deadline landing mid-chase applies nothing at all and
-/// classifies the whole union as deferred. Ingesting per page would trade that
-/// for a smaller fetch batch and is the obvious follow-up; it is not built here
-/// because it changes what a partially-swept window means to the engine.
+/// wake, cursors untouched. What it no longer costs is the ingest: pages are
+/// applied as they arrive, so a deadline landing mid-chase leaves everything
+/// fetched so far APPLIED. Deferring the whole union instead made the next wake
+/// re-fetch the same pages and apply nothing again, on every wake, for as long
+/// as the backlog outlasted the budget.
 const CATCHUP_MAX_PAGES_PER_CIRCLE: usize = 8;
 
-/// Max unique events one circle's paged window may accumulate in a single sweep.
+/// Max unique events one circle's paged window may take in a single sweep.
 ///
-/// The page bound alone does not bound memory: every page is put to EVERY relay
-/// in the circle's list, so a round costs `CATCHUP_MAX_EVENTS_PER_PAGE` × a
-/// user-configurable relay count. Deliberately equal to a full single-relay
+/// The page bound alone does not bound the sweep: every page is put to EVERY
+/// relay in the circle's list, so a round costs `CATCHUP_MAX_EVENTS_PER_PAGE` ×
+/// a user-configurable relay count. Deliberately equal to a full single-relay
 /// chase (pages × page size) so it only ever binds on a multi-relay circle.
 ///
-/// It is a ceiling on the ACCUMULATED union, checked once a whole round has been
-/// appended, so the true resident worst case is this plus one round —
-/// `CATCHUP_MAX_EVENTS_PER_CIRCLE + relays.len() × CATCHUP_MAX_EVENTS_PER_PAGE`.
-/// That extra round is not avoidable by checking earlier: the fetch fans out to
-/// every relay concurrently, so its events are already resident inside
+/// It is a ceiling on the ACCUMULATED count, checked once a whole round has been
+/// taken, so the true worst case is this plus one round. That extra round is not
+/// avoidable by checking earlier: the fetch fans out to every relay
+/// concurrently, so its events are already resident inside
 /// `fetch_events_per_relay`'s return value before this code can look at them.
-/// Same honesty rule as above: reaching the ceiling marks the window incomplete.
+/// Since each page is ingested and dropped, what stays resident is that one
+/// round plus an event id and a `(secs, outcome)` pair per unique event; the
+/// ceiling's real subject is the WORK one circle may ask of the engine on one
+/// wake, which is the Rule-12 surface that matters here. Same honesty rule as
+/// above: reaching the ceiling marks the window incomplete.
 const CATCHUP_MAX_EVENTS_PER_CIRCLE: usize =
     CATCHUP_MAX_PAGES_PER_CIRCLE * CATCHUP_MAX_EVENTS_PER_PAGE;
+
+/// The wall clock one fetch round must stay UNDER for its short pages to mean
+/// what they appear to mean: the fetch timeout inside
+/// [`RelayManager::fetch_events_per_relay`] itself, not a copy of it.
+///
+/// That primitive bounds each relay's one-shot fetch with this timeout and hands
+/// back whatever had arrived when it fired as an ordinary `Ok` page:
+/// `RelayPool::fetch_events_from` collects a merged stream and returns
+/// `Ok(collected)` however that stream ended, and its driver task logs and drops
+/// the per-relay errors. A delivery cut off part-way is therefore byte-for-byte
+/// a complete short page, and no flag derived from that call's `Result` can tell
+/// the two apart — the call returns `Ok`. What CAN tell them apart is the clock:
+/// a fetch that ran its timeout out took at least this long.
+///
+/// The converse does NOT hold, and the round is measured across the whole call —
+/// including a separate connection timeout and every relay in the circle's list
+/// — so a round that was complete can reach this duration too. That is the
+/// harmless direction: an unreliable read costs one re-fetch next sweep, while a
+/// cut-off round read as complete costs the backlog.
+/// `a_fetch_cut_off_by_its_own_timeout_is_not_read_as_a_complete_window` drives
+/// the real primitive against a stalled relay, so it fails if that timeout ever
+/// stops producing a round this test can recognise.
+const CATCHUP_CUT_OFF_ROUND: Duration = super::manager::DEFAULT_TIMEOUT;
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -305,8 +366,11 @@ struct Pager {
     /// The REQ floor shared by every page, derived from the persisted cursor
     /// before the first page went out.
     since_secs: i64,
-    /// Ceiling of the range still to retrieve. Starts at the window's own open
-    /// time and must strictly DESCEND with every page.
+    /// EXCLUSIVE ceiling of the range still to retrieve: a boundary is followed
+    /// only while it sits strictly below this, so the number descends with every
+    /// page. A REQ's `until` is INCLUSIVE, so this starts one second above the
+    /// window's own open time — see [`CircleSweep::fetch_and_ingest`], which
+    /// argues what that one second buys and why it cannot be spent twice.
     bound_secs: i64,
     /// Pages already issued for this circle in this sweep.
     pages: usize,
@@ -318,30 +382,33 @@ impl Pager {
     /// Decides the next move after one round of per-relay pages.
     ///
     /// `boundary_secs` is [`RoundSummary::boundary_secs`]: the oldest
-    /// `created_at` served by a relay that TRUNCATED, maximised across such
-    /// relays, or `None` when no responding relay truncated. `chase_lost` is
-    /// [`RoundSummary::chase_lost`]: a relay we were still draining produced
-    /// nothing this round.
+    /// `created_at` served by a relay that is still CONTRIBUTING, maximised
+    /// across such relays, or `None` when no responding relay contributed
+    /// anything. `read_incomplete` is [`RoundSummary::read_incomplete`]: an
+    /// answer went missing, contradicted an earlier one, or came through a fetch
+    /// that may have been cut off part-way.
     ///
     /// # The termination rule, and the attack it is written against
     ///
-    /// Exactly ONE exit reports a complete window: a round with no `chase_lost`
-    /// in which no responding relay truncated. "Truncated" is
-    /// `page.len() >= CATCHUP_MAX_EVENTS_PER_PAGE` — a LOCAL count of how many
-    /// events came back, a fact about the FETCH in the same sense
-    /// [`cursor_advance_ms`]'s two gates are, never a claim read out of an
-    /// event's contents. Every other path through this function returns
-    /// [`PageStep::Halt`], which leaves the window `saturated` and the cursor
-    /// held. (Being merely LATE is not one of them: `out_of_time` is read only
-    /// once a relay has actually truncated, because a deadline that expires over
-    /// a window nobody truncated has not made that window incomplete.)
+    /// Exactly ONE exit reports a complete window: a round we can trust in which
+    /// no responding relay contributed — nobody handed back a full page
+    /// (`page.len() >= CATCHUP_MAX_EVENTS_PER_PAGE`), and nothing anybody handed
+    /// back was an event we did not already hold. Both halves are LOCAL facts
+    /// about the FETCH — a count of what arrived, and a membership test against
+    /// ids we already have — in the same sense [`cursor_advance_ms`]'s two gates
+    /// are, never a claim read out of an event's contents. Every other path
+    /// through this function returns [`PageStep::Halt`], which leaves the window
+    /// `saturated` and the cursor held. (Being merely LATE is not one of them:
+    /// `out_of_time` is read only once a relay has actually contributed, because
+    /// a deadline that expires over a window nobody was still draining has not
+    /// made that window incomplete.)
     ///
     /// The next page's `until` is, unavoidably, a remote number: the oldest
-    /// `created_at` in a page the relay itself cut short. A relay that forges an
-    /// ANCIENT bottom gets the next page requested at that ancient `until`,
-    /// which then legitimately comes back short — so a bare "short page ⇒
-    /// complete" would let it declare a window complete while withholding
-    /// everything in between. Two properties contain that:
+    /// `created_at` in a page a relay is still contributing to. A relay that
+    /// forges an ANCIENT bottom gets the next page requested at that ancient
+    /// `until`, which then legitimately comes back with nothing new — so a bare
+    /// "nothing new ⇒ complete" would let it declare a window complete while
+    /// withholding everything in between. Two properties contain that:
     ///
     /// * **The boundary is the MAXIMUM across truncating relays**, so the chain
     ///   descends only as fast as the slowest-draining relay allows and one
@@ -349,41 +416,49 @@ impl Pager {
     ///   the others — see [`summarize_round`], which carries that argument.
     /// * **The remote number is CONFINED to a locally chosen band.** It is
     ///   obeyed only while `since_secs <= boundary < bound_secs`: floored at our
-    ///   own REQ floor, ceilinged at the window's own open time, and strictly
-    ///   descending — so a relay that repeats one page forever, or dates a full
-    ///   page inside a single second, terminates the loop instead of spinning
-    ///   it. A value outside the band is not followed; it halts the chase with
-    ///   the window incomplete.
+    ///   own REQ floor, ceilinged one second above the window's own open time
+    ///   (`bound_secs` is exclusive where a REQ's `until` is inclusive), and
+    ///   descending from there — so a relay that repeats one page forever, or
+    ///   dates a full page inside a single second, terminates the loop instead
+    ///   of spinning it. The opening second is the one value the band admits
+    ///   twice, and only because the second request is the FIRST one bounded by
+    ///   it; a value outside the band is not followed at all, and halts the
+    ///   chase with the window incomplete.
     ///
-    /// # What "short page" cannot tell us, and the two residuals that leaves
+    /// # What a page cannot tell us, and the residual that leaves
     ///
-    /// A short page is a local count, but it is a count of what ARRIVED, which
-    /// is not the same as what the relay chose to serve:
+    /// A page is a local count of what ARRIVED, which is not the same as what
+    /// the relay chose to serve. Three shapes live in that gap, and only the
+    /// last is still open:
     ///
-    /// * **A partial read reads as a short page.**
-    ///   `RelayPool::fetch_events_from` collects a merged stream and returns
-    ///   `Ok(collected)` however that stream ended, per-relay stream errors are
-    ///   logged and dropped inside its driver task, and the subscription's whole
-    ///   life is wrapped in `time::timeout` — so a fetch that times out
-    ///   mid-delivery is byte-for-byte a short page at this layer, and so is a
-    ///   post-handshake error (which [`RelayManager::fetch_events_per_relay`]
-    ///   turns into an empty page with `responded == true`). No flag derived
-    ///   from that call's `Result` could see it: the call returns `Ok`. What IS
-    ///   caught is the total-failure half — an empty page from a relay we were
+    /// * **A read that failed outright** — an empty page from a relay we were
     ///   still draining is proof of a failed read rather than of an empty range,
-    ///   because `until` is inclusive and the boundary is at or above that
+    ///   because `until` is inclusive and the boundary sits at or above that
     ///   relay's own bottom, so it still holds at least the event AT the
-    ///   boundary (see [`summarize_round`]). Closing the partial half means
-    ///   observing per-relay EOSE, i.e. driving `Relay::stream_events` instead
-    ///   of `fetch_events_from` — a change to the shared fetch primitive and
-    ///   every one of its callers, and a follow-up rather than part of this.
-    /// * **A relay lying about its own ordering** still ends its own chain
-    ///   early. That one is not a new exposure: the identical outcome is
-    ///   available to it by answering the FIRST page short while holding a
-    ///   backlog, i.e. plain withholding, which no receive-side rule can detect
-    ///   and which this design already treats as out of scope ("a relay that
-    ///   withholds events can already withhold them outright",
-    ///   [`cursor_advance_ms`]).
+    ///   boundary (see [`summarize_round`]).
+    ///   [`RelayManager::fetch_events_per_relay`] reports a post-handshake fetch
+    ///   error exactly like that: `responded == true`, no events.
+    /// * **A read the fetch timeout cut off part-way** — indistinguishable from
+    ///   a complete short page in its CONTENT, so it is caught by the clock
+    ///   instead: a round that reached [`CATCHUP_CUT_OFF_ROUND`] arrives as
+    ///   `read_incomplete` and the window holds.
+    /// * **A read cut off EARLY by a dropped socket** is still open. The
+    ///   per-relay stream error is logged and discarded inside
+    ///   `RelayPool::fetch_events_from`'s driver task, the collection returns
+    ///   `Ok` with whatever arrived, and it returns PROMPTLY — so neither the
+    ///   `Result` nor the clock can see it. Only observing per-relay EOSE
+    ///   closes it, i.e. driving `Relay::stream_events` in place of
+    ///   `fetch_events_from`: a change to the shared fetch primitive and every
+    ///   one of its callers, and a follow-up rather than part of this. Its
+    ///   effect is a relay serving less than it holds, which is the same
+    ///   exposure as the next item.
+    ///
+    /// **A relay lying about its own ordering** still ends its own chain early.
+    /// That one is not a new exposure: the identical outcome is available to it
+    /// by answering the FIRST page short while holding a backlog, i.e. plain
+    /// withholding, which no receive-side rule can detect and which this design
+    /// already treats as out of scope ("a relay that withholds events can
+    /// already withhold them outright", [`cursor_advance_ms`]).
     ///
     /// Everywhere completeness cannot be established the answer is `Halt`: a
     /// conservative hold costs one re-fetch, a wrong advance costs the backlog.
@@ -391,15 +466,14 @@ impl Pager {
     const fn step(
         self,
         boundary_secs: Option<i64>,
-        chase_lost: bool,
+        read_incomplete: bool,
         out_of_time: bool,
     ) -> PageStep {
-        // A relay we were still draining produced nothing. Its tail is KNOWN to
-        // exist and we did not get it, so no round can establish completeness
-        // this sweep; spending more of the deadline on the other relays' pages
-        // would only delay the remaining circles for a window that cannot be
-        // finished now anyway.
-        if chase_lost {
+        // An answer we cannot trust. Something we have local evidence for was
+        // not delivered, so no round can establish completeness this sweep;
+        // spending more of the deadline on further pages would only delay the
+        // remaining circles for a window that cannot be finished now anyway.
+        if read_incomplete {
             return PageStep::Halt;
         }
         let Some(boundary) = boundary_secs else {
@@ -431,67 +505,130 @@ struct RoundSummary {
     any_responded: bool,
     /// Relays that did not answer (tallied as relay errors, never fatal).
     unanswered: usize,
-    /// A relay that truncated the PREVIOUS page produced NOTHING this round —
-    /// it either did not answer, or answered with an empty page. Both are
-    /// failed reads (see below), and both mean this round cannot establish
-    /// completeness.
-    chase_lost: bool,
+    /// This round cannot establish completeness, whatever else it says: a relay
+    /// we were still draining produced nothing, a relay that had already
+    /// answered "nothing here" produced something, or the round took long enough
+    /// that a fetch may have been cut off part-way. See below for each.
+    read_incomplete: bool,
     /// The `until` for the next page: the oldest `created_at` served by a relay
-    /// that truncated, MAXIMISED across such relays. `None` means nobody
-    /// truncated.
+    /// that is still contributing, MAXIMISED across such relays. `None` means
+    /// nobody contributed, which is the one shape that completes a window.
     boundary_secs: Option<i64>,
-    /// The relays that truncated this round — the ones still being drained, so
-    /// one of them producing nothing next round is a hold rather than a "nobody
-    /// truncated, therefore complete".
+    /// The relays still being drained — those that handed back a full page or an
+    /// event we did not already hold. One of them producing nothing next round
+    /// is a hold rather than a "nobody contributed, therefore complete".
     chasing: HashSet<String>,
+    /// Every relay that ANSWERED some round of this chain with nothing. Each has
+    /// said "I hold nothing in this range" about a range that CONTAINS every
+    /// later one, so any of them speaking later contradicts that. A relay the
+    /// fetch could not reach is deliberately absent: it said nothing to
+    /// contradict.
+    silent: HashSet<String>,
 }
 
-/// Summarises one round's per-relay pages, given the relays that truncated the
-/// PREVIOUS round.
+/// Summarises one round's per-relay pages against what the rounds before it
+/// established.
 ///
-/// # Truncation is per relay, before dedup
+/// # What keeps the chase alive is CONTRIBUTION, not page size
 ///
-/// A relay returning exactly the limit is the signal that ITS page was cut at
-/// the bottom. Measuring the deduped union instead would mask two relays that
-/// each truncate but overlap enough to leave the union under the cap.
+/// A relay is still being drained if it handed back a full page (its own page
+/// was cut at the bottom) OR an event we did not already hold. The second half
+/// is what survives NIP-11 `limitation.max_limit`: a relay clamping our `limit`
+/// to a smaller one of its own can never return "as many events as we asked
+/// for", so a chase keyed on page size alone would never start against it and
+/// the cursor would advance over everything below its cap. Contribution is
+/// measured before dedup and per relay, so two relays that each hold a tail but
+/// overlap heavily still each keep their own chase alive.
 ///
-/// # Why the boundary is the MAXIMUM across truncating relays
+/// The complementary half is that a full page keeps the chase alive even when
+/// every event in it is one we already hold — a relay serving one second's worth
+/// of pile-up returns the same full page forever, and reading that as "nothing
+/// new, therefore drained" would advance the cursor over the events below it
+/// that no `until` can ever reach.
 ///
-/// It is the one remotely-written number that steers a request, so which
-/// truncating relay it comes from matters. Taking the maximum makes the chain
-/// descend only as fast as the SLOWEST-draining relay allows, so a relay that
-/// pads its full page with a forged ANCIENT event — proposing an `until` at
-/// which the next page legitimately comes back short — cannot curtail the
-/// paging of the honest relays beside it. That cross-relay curtailment is the
-/// only NEW power backward paging could have granted: forging the bottom of a
-/// page is otherwise available only to the relay serving it, and an honest
-/// relay's bottom is not attacker-writable at all, since `limit: n` returns ITS
-/// newest n by `created_at` and an injected event dated below the cut is simply
-/// not in the page.
+/// # Why the boundary is the MAXIMUM across contributing relays
+///
+/// It is the one remotely-written number that steers a request, so which relay
+/// it comes from matters. Taking the maximum makes the chain descend only as
+/// fast as the SLOWEST-draining relay allows, so a relay that pads its page with
+/// a forged ANCIENT event — proposing an `until` at which the next page
+/// legitimately comes back with nothing new — cannot curtail the paging of the
+/// honest relays beside it. That cross-relay curtailment is the only NEW power
+/// backward paging could have granted: forging the bottom of a page is otherwise
+/// available only to the relay serving it, and an honest relay's bottom is not
+/// attacker-writable at all, since `limit: n` returns ITS newest n by
+/// `created_at` and an injected event dated below the cut is simply not in the
+/// page.
 ///
 /// # Why an EMPTY page from a chased relay is a failed read, not an empty range
 ///
-/// A relay that truncated the previous page still holds the event AT its own
-/// bottom `b`, and this round's request covers it: `until` is inclusive and the
-/// boundary is the maximum across truncating relays, hence `>= b`, while
-/// `since` has not moved. So that relay MUST return at least one event. Nothing
-/// back means we failed to read it —
+/// A relay that contributed to the previous round still holds the event AT its
+/// own page bottom `b`, and this round's request covers it: `until` is inclusive
+/// and the boundary is the maximum across contributing relays, hence `>= b`,
+/// while `since` has not moved. So that relay MUST return at least one event.
+/// Nothing back means we failed to read it —
 /// [`RelayManager::fetch_events_per_relay`] reports a post-handshake fetch
 /// error as `responded == true` with no events — and reading that as "drained"
 /// would advance the cursor over a tail we have local proof exists. (A page
 /// emptied instead by a NIP-40 expiry landing between two rounds milliseconds
 /// apart resolves the same way: one conservative hold, re-fetched next sweep.)
+///
+/// # And why a page from a SILENT relay is one too
+///
+/// The mirror image, and the one that needs no attacker either. Every page after
+/// the first is bounded above by the previous boundary, so a relay that ANSWERED
+/// an earlier, WIDER request with nothing and then answers a narrower one was
+/// asked for nothing above that boundary by anybody. Its short answer says
+/// nothing about the part of the window it was never asked for, so it must not
+/// be able to help declare the window complete — one relay slow to answer the
+/// opening REQ would otherwise be enough to advance the cursor over whatever it
+/// holds up there.
+///
+/// A relay the fetch could not REACH is a different animal and must not join
+/// them, however identical its `RelayFetchOutcome` looks: it was asked nothing,
+/// so it has contradicted nothing, and the events it holds above the boundary
+/// are covered by the coverage assumption [`cursor_advance_ms`] already makes
+/// for a relay that is unreachable throughout (a strict superset of this range).
+/// Counting it would freeze a circle on the ordinary shape of a background wake
+/// rather than on any attack: `fetch_events_per_relay` reports a handshake that
+/// did not complete inside its connection timeout as exactly this outcome, every
+/// wake builds a fresh relay pool, and a relay whose first connect is reliably
+/// slower than the timeout would then be missing from page 1 and present on page
+/// 2 forever, on every wake — the self-inflicted outage that function refuses to
+/// cause for a relay that is dead for good.
 #[must_use]
-fn summarize_round(outcomes: &[RelayFetchOutcome], chasing: &HashSet<String>) -> RoundSummary {
-    let mut round = RoundSummary::default();
+fn summarize_round(
+    outcomes: &[RelayFetchOutcome],
+    elapsed: Duration,
+    state: &ChaseState,
+) -> RoundSummary {
+    let mut round = RoundSummary {
+        // A fetch that ran out its own timeout may have been cut off part-way
+        // through a relay's delivery, and the page it returns is
+        // indistinguishable from a complete short one.
+        read_incomplete: elapsed >= CATCHUP_CUT_OFF_ROUND,
+        silent: state.silent.clone(),
+        ..RoundSummary::default()
+    };
     for fo in outcomes {
         if fo.responded {
             round.any_responded = true;
         } else {
             round.unanswered += 1;
         }
-        round.chase_lost |= fo.events.is_empty() && chasing.contains(&fo.relay_url);
-        if fo.events.len() >= CATCHUP_MAX_EVENTS_PER_PAGE {
+        if fo.events.is_empty() {
+            round.read_incomplete |= state.chasing.contains(&fo.relay_url);
+            // Only a relay that ANSWERED has claimed to hold nothing here; one
+            // we never got a socket to has claimed nothing at all.
+            if fo.responded {
+                round.silent.insert(fo.relay_url.clone());
+            }
+            continue;
+        }
+        round.read_incomplete |= state.silent.contains(&fo.relay_url);
+        let contributed = fo.events.len() >= CATCHUP_MAX_EVENTS_PER_PAGE
+            || fo.events.iter().any(|ev| !state.seen.contains(&ev.id));
+        if contributed {
             round.boundary_secs = round
                 .boundary_secs
                 .max(fo.events.iter().map(created_secs).min());
@@ -499,6 +636,24 @@ fn summarize_round(outcomes: &[RelayFetchOutcome], chasing: &HashSet<String>) ->
         }
     }
     round
+}
+
+/// What the rounds so far have established about each relay in the circle's
+/// list, and about what we already hold.
+///
+/// Carries relay URLs, so — like [`RoundSummary`] — it derives no formatter at
+/// all rather than relying on having nothing sensitive to print.
+#[derive(Default)]
+struct ChaseState {
+    /// Relays still being drained: each is known to hold at least the event at
+    /// the boundary, so each MUST answer the next round.
+    chasing: HashSet<String>,
+    /// Relays that ANSWERED some earlier round with nothing, so each must stay
+    /// silent. A relay the fetch could not reach is not one of them.
+    silent: HashSet<String>,
+    /// Every event id this chain has already collected — what makes a page's
+    /// contribution NEW.
+    seen: HashSet<EventId>,
 }
 
 /// An event's `created_at` in the signed seconds the cursor layer speaks.
@@ -750,8 +905,17 @@ async fn sweep_one_circle(
     deadline: Instant,
     out: &mut CatchupOutcome,
 ) {
-    let hex = hex::encode(ngid);
-    let stream = group_cursor_stream(&hex);
+    let sweep = CircleSweep {
+        circle_mgr,
+        relay_mgr,
+        ngid,
+        ngid_hex: hex::encode(ngid),
+        relays,
+        own_hex,
+        deadline,
+    };
+    let hex = &sweep.ngid_hex;
+    let stream = group_cursor_stream(hex);
 
     // THE ADVANCE ANCHOR. Read from the LOCAL clock before the REQ goes out, so
     // it means "everything these relays held at this instant" — the only claim a
@@ -777,50 +941,11 @@ async fn sweep_one_circle(
         SubscribePhase::Resubscribe,
         window_opened_at_secs,
     );
-    let (window, mut events) = fetch_window_paged(
-        relay_mgr,
-        std::slice::from_ref(&hex),
-        relays,
-        since_secs,
-        window_opened_at_secs,
-        deadline,
-        out,
-    )
-    .await;
+    let (window, classified) = sweep
+        .fetch_and_ingest(since_secs, window_opened_at_secs, out)
+        .await;
     if window.saturated {
         out.windows_truncated += 1;
-    }
-    // Ascending (created_at, id): pages arrive newest-first and out of order
-    // relative to each other, and this sort is what makes an early deadline
-    // break leave the OLDEST un-ingested events for the hold-back below.
-    events.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
-
-    let mut classified: Vec<(i64, ReceiveOnlyOutcome)> = Vec::with_capacity(events.len());
-    for (idx, ev) in events.iter().enumerate() {
-        if Instant::now() >= deadline {
-            out.deadline_hit = true;
-            // Everything from here on was FETCHED but never ingested. The window
-            // is therefore not fully applied, and without this the window-open
-            // anchor would happily claim it: the advance would jump over an
-            // un-ingested tail that only a future sweep with a lower floor could
-            // ever recover. Classify the remainder as deferred so each one holds
-            // the cursor at or below itself.
-            classified.extend(
-                events[idx..]
-                    .iter()
-                    .map(|pending| (created_secs(pending), ReceiveOnlyOutcome::Deferred)),
-            );
-            out.events_deferred += events.len() - idx;
-            break;
-        }
-        let secs = created_secs(ev);
-        let outcome = ingest_one(circle_mgr, relay_mgr, ev, &ngid, own_hex).await;
-        match outcome {
-            ReceiveOnlyOutcome::Applied => out.events_applied += 1,
-            ReceiveOnlyOutcome::Deferred => out.events_deferred += 1,
-            ReceiveOnlyOutcome::NoEvidence => out.events_rejected_pre_auth += 1,
-        }
-        classified.push((secs, outcome));
     }
 
     // The clamp reads the clock AGAIN so a long sweep is measured against a
@@ -836,117 +961,215 @@ async fn sweep_one_circle(
     }
 }
 
-/// Fetches one circle's whole window, paging BACKWARDS past every truncated
-/// page until each responding relay hands back a short one.
+/// One circle's sweep: everything the paged fetch-and-ingest loop needs that
+/// does not change from page to page.
 ///
-/// Returns the deduped events — UNSORTED, because pages arrive newest-first and
-/// the caller sorts the union ascending before ingest — plus the two
-/// FETCH-level facts [`cursor_advance_ms`] gates the advance on.
-///
-/// # One anchor for the whole chain
-///
-/// Every page shares the caller's single `opened_at_secs` and the same locally
-/// derived `since`; the clock is deliberately NOT re-read per page. Later pages
-/// go out later in wall-clock time, which can only ADD events a relay did not
-/// hold at the anchor instant, never remove one it did — so "everything these
-/// relays held at the moment I asked", the claim the anchor encodes, stays true
-/// of the union the chain builds.
-///
-/// # Residual: a relay that joins the chain late
-///
-/// A relay unreachable for the FIRST page but answering a later one is only ever
-/// asked for `[since, boundary]`, so whatever it holds ABOVE that boundary was
-/// requested of nobody — yet its short page still counts toward completeness.
-/// That is the same coverage assumption [`cursor_advance_ms`] already documents
-/// for a circle carrying an unreachable relay ("a relay that withholds events
-/// can already withhold them outright"), reached inside one chain rather than
-/// across sweeps. Closing it means recording round one's responder set and
-/// requiring the completing round's responders to be a subset of it; left as a
-/// follow-up because the residual is pre-existing in kind, not new in kind.
-#[deny(clippy::wildcard_enum_match_arm)]
-async fn fetch_window_paged(
-    relay_mgr: &RelayManager,
-    group_ids_hex: &[String],
-    relays: &[String],
-    since_secs: i64,
-    opened_at_secs: i64,
+/// A struct rather than a nine-argument function, and — like [`RoundSummary`] —
+/// with no derived formatter, because it holds relay URLs and a group id.
+struct CircleSweep<'a> {
+    circle_mgr: &'a CircleManager,
+    relay_mgr: &'a RelayManager,
+    ngid: [u8; 32],
+    /// The same id in hex: the PUBLIC `nostr_group_id` every page filters `#h`
+    /// on (Security Rule 4 — never the MLS group id).
+    ngid_hex: String,
+    relays: &'a [String],
+    own_hex: &'a str,
     deadline: Instant,
-    out: &mut CatchupOutcome,
-) -> (FetchWindow, Vec<Event>) {
-    let mut window = FetchWindow {
-        opened_at_secs,
-        saturated: false,
-        any_relay_responded: false,
-    };
-    let mut pager = Pager {
-        since_secs,
-        bound_secs: opened_at_secs,
-        pages: 0,
-        collected: 0,
-    };
-    let mut seen: HashSet<EventId> = HashSet::new();
-    let mut events: Vec<Event> = Vec::new();
-    let mut chasing: HashSet<String> = HashSet::new();
-    // EVERY page is bounded above, the first one by the anchor itself, so the
-    // band requested is exactly the `[since, opened_at]` the anchor claims.
-    // Leave the first page unbounded and 500 future-dated `kind:445`s — which
-    // any observer of the circle's PUBLIC `#h` can mint — fill it, put the
-    // boundary at or above the band's ceiling, and halt the chase on arrival: a
-    // frozen cursor, bought for one publish and re-bought on every wake. A
-    // genuinely future-dated peer event is merely deferred to the next sweep,
-    // whose floor sits below it.
-    let mut until_secs = opened_at_secs;
+}
 
-    loop {
-        let filter = group_filter(group_ids_hex, since_secs)
-            .limit(CATCHUP_MAX_EVENTS_PER_PAGE)
-            // Widening, never narrowing, in the impossible case: a pre-1970
-            // local clock drops the ceiling rather than fabricating an empty
-            // page that would read as a completed window. (`Pager::step` floors
-            // every boundary at `since_secs`, itself floored at 0.)
-            .until(Timestamp::from(
-                u64::try_from(until_secs).unwrap_or(u64::MAX),
-            ));
-        let Ok(fetch_outcomes) = relay_mgr.fetch_events_per_relay(filter, relays).await else {
-            // The primitive documents that it never fails as a whole; should
-            // that ever change, an unanswered page is an unfinished chase, and
-            // an unfinished chase holds the cursor.
-            out.relay_errors += 1;
-            window.saturated = true;
-            return (window, events);
+impl CircleSweep<'_> {
+    /// Retrieves one circle's whole window, paging BACKWARDS until a round
+    /// brings back nothing new, and ingesting each page as it arrives.
+    ///
+    /// Returns what every ingested event said about the cursor, plus the two
+    /// FETCH-level facts [`cursor_advance_ms`] gates the advance on.
+    ///
+    /// # One anchor for the whole chain
+    ///
+    /// Every page shares the caller's single `opened_at_secs` and the same
+    /// locally derived `since`; the clock is deliberately NOT re-read per page.
+    /// Later pages go out later in wall-clock time, which can only ADD events a
+    /// relay did not hold at the anchor instant, never remove one it did — so
+    /// "everything these relays held at the moment I asked", the claim the
+    /// anchor encodes, stays true of the union the chain builds.
+    ///
+    /// # Why the ingest is per page and not per window
+    ///
+    /// The pages of one chase are fetched newest-first, so ingesting each on
+    /// arrival hands the engine a descending sequence rather than an ascending
+    /// one. A commit that arrives before its predecessor is not merely delayed:
+    /// a `kind:445`'s outer layer is keyed by the exporter of the epoch it was
+    /// SENT in, so it does not peel at all, the engine reports `Stale` and
+    /// retains it, and neither the predecessor landing a page later nor
+    /// `ingest_one`'s convergence re-tick re-drives it inside this sweep. The
+    /// pair converges on the NEXT sweep instead, whose floor sits below both —
+    /// so the descending order costs a re-fetch, never a loss
+    /// (`two_dependent_commits_split_across_pages_converge_on_the_next_sweep`
+    /// drives exactly that pair through a real chase).
+    /// The alternative costs more: a chase can outlast a 20–25 s wake, and
+    /// collecting every page before applying any means a deadline landing
+    /// mid-chase applies NOTHING — then does the same on the next wake, and the
+    /// one after, because the cursor is rightly held and the backlog is still
+    /// there. Buffering is recoverable; never applying anything is not.
+    #[deny(clippy::wildcard_enum_match_arm)]
+    async fn fetch_and_ingest(
+        &self,
+        since_secs: i64,
+        opened_at_secs: i64,
+        out: &mut CatchupOutcome,
+    ) -> (FetchWindow, Vec<(i64, ReceiveOnlyOutcome)>) {
+        let mut window = FetchWindow {
+            opened_at_secs,
+            saturated: false,
+            any_relay_responded: false,
         };
-        pager.pages += 1;
+        let mut pager = Pager {
+            since_secs,
+            // One second ABOVE the anchor: `bound_secs` is exclusive where a
+            // REQ's `until` is inclusive, and the two ranges differ by exactly
+            // the anchor's own second. Without the offset, a window whose whole
+            // content is dated in the second the sweep opened yields a boundary
+            // AT the ceiling, is refused as non-descending, and holds — a quiet
+            // circle loses a sweep, reported as backlog it does not have. With
+            // it that second is re-asked ONCE, and the answer decides: nothing
+            // new means drained, anything new means something was withheld or
+            // has since arrived and the window holds. Not a loop, because from
+            // round two `bound_secs` is the previous `until` and the descent is
+            // strict again.
+            bound_secs: opened_at_secs.saturating_add(1),
+            pages: 0,
+            collected: 0,
+        };
+        let mut state = ChaseState::default();
+        let mut classified: Vec<(i64, ReceiveOnlyOutcome)> = Vec::new();
+        // EVERY page is bounded above, the first one by the anchor itself, so
+        // the band requested is exactly the `[since, opened_at]` the anchor
+        // claims. Leave the first page unbounded and 500 future-dated
+        // `kind:445`s — which any observer of the circle's PUBLIC `#h` can mint
+        // — fill it, put the boundary at or above the band's ceiling, and halt
+        // the chase on arrival: a frozen cursor, bought for one publish and
+        // re-bought on every wake. A genuinely future-dated peer event is merely
+        // deferred to the next sweep, whose floor sits below it.
+        let mut until_secs = opened_at_secs;
 
-        let round = summarize_round(&fetch_outcomes, &chasing);
-        window.any_relay_responded |= round.any_responded;
-        out.relay_errors += round.unanswered;
-        chasing = round.chasing;
-        for fo in fetch_outcomes {
-            for ev in fo.events {
-                if seen.insert(ev.id) {
-                    events.push(ev);
+        loop {
+            let filter = group_filter(std::slice::from_ref(&self.ngid_hex), since_secs)
+                .limit(CATCHUP_MAX_EVENTS_PER_PAGE)
+                // Widening, never narrowing, in the impossible case: a pre-1970
+                // local clock drops the ceiling rather than fabricating an empty
+                // page that would read as a completed window. (`Pager::step`
+                // floors every boundary at `since_secs`, itself floored at 0.)
+                .until(Timestamp::from(
+                    u64::try_from(until_secs).unwrap_or(u64::MAX),
+                ));
+            let started = Instant::now();
+            let Ok(fetch_outcomes) = self
+                .relay_mgr
+                .fetch_events_per_relay(filter, self.relays)
+                .await
+            else {
+                // The primitive documents that it never fails as a whole; should
+                // that ever change, an unanswered page is an unfinished chase,
+                // and an unfinished chase holds the cursor.
+                out.relay_errors += 1;
+                window.saturated = true;
+                return (window, classified);
+            };
+            pager.pages += 1;
+
+            let round = summarize_round(&fetch_outcomes, started.elapsed(), &state);
+            window.any_relay_responded |= round.any_responded;
+            out.relay_errors += round.unanswered;
+            state.chasing = round.chasing;
+            state.silent = round.silent;
+
+            let mut page: Vec<Event> = Vec::new();
+            for fo in fetch_outcomes {
+                for ev in fo.events {
+                    if state.seen.insert(ev.id) {
+                        page.push(ev);
+                    }
+                }
+            }
+            pager.collected += page.len();
+            self.ingest_page(page, out, &mut classified).await;
+
+            // The deadline bounds the CHASE too, not just the ingest inside it:
+            // a circle whose relays keep answering in full must not eat the
+            // whole wake budget and starve the circles after it.
+            let out_of_time = Instant::now() >= self.deadline;
+            match pager.step(round.boundary_secs, round.read_incomplete, out_of_time) {
+                PageStep::Complete => return (window, classified),
+                PageStep::Halt => {
+                    if out_of_time {
+                        out.deadline_hit = true;
+                    }
+                    window.saturated = true;
+                    return (window, classified);
+                }
+                PageStep::Next(until) => {
+                    pager.bound_secs = until;
+                    until_secs = until;
                 }
             }
         }
-        pager.collected = events.len();
+    }
 
-        // The deadline bounds the CHASE too, not just the ingest below it: a
-        // circle whose relays keep answering in full must not eat the whole
-        // wake budget and starve the circles after it.
-        let out_of_time = Instant::now() >= deadline;
-        match pager.step(round.boundary_secs, round.chase_lost, out_of_time) {
-            PageStep::Complete => return (window, events),
-            PageStep::Halt => {
-                if out_of_time {
-                    out.deadline_hit = true;
-                }
-                window.saturated = true;
-                return (window, events);
+    /// Ingests ONE page, oldest event first, recording what each says about the
+    /// cursor.
+    ///
+    /// The sort is ascending `(created_at, id)`: a page arrives in no order this
+    /// code may rely on, and going oldest-first is what makes a deadline landing
+    /// mid-page leave the OLDEST un-ingested events for the hold-back below.
+    ///
+    /// A classification is captured HERE and never revised, so a hold-back
+    /// stands for the rest of the sweep even if something later resolves what
+    /// deferred it — a later page, or the publish work this same ingest went on
+    /// to confirm. Revising would mean re-classifying after every convergence
+    /// tick to save a re-fetch that costs one round; leaving a stale hold-back
+    /// in place costs one sweep of delay and can never advance the cursor over
+    /// something un-applied, which is the direction that matters.
+    #[deny(clippy::wildcard_enum_match_arm)]
+    async fn ingest_page(
+        &self,
+        mut page: Vec<Event>,
+        out: &mut CatchupOutcome,
+        classified: &mut Vec<(i64, ReceiveOnlyOutcome)>,
+    ) {
+        page.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        for (idx, ev) in page.iter().enumerate() {
+            if Instant::now() >= self.deadline {
+                out.deadline_hit = true;
+                // Everything from here on was FETCHED but never ingested. The
+                // window is therefore not fully applied, and without this the
+                // window-open anchor would happily claim it: the advance would
+                // jump over an un-ingested tail that only a future sweep with a
+                // lower floor could ever recover. Classify the remainder as
+                // deferred so each one holds the cursor at or below itself.
+                classified.extend(
+                    page[idx..]
+                        .iter()
+                        .map(|pending| (created_secs(pending), ReceiveOnlyOutcome::Deferred)),
+                );
+                out.events_deferred += page.len() - idx;
+                return;
             }
-            PageStep::Next(until) => {
-                pager.bound_secs = until;
-                until_secs = until;
+            let secs = created_secs(ev);
+            let outcome = ingest_one(
+                self.circle_mgr,
+                self.relay_mgr,
+                ev,
+                &self.ngid,
+                self.own_hex,
+            )
+            .await;
+            match outcome {
+                ReceiveOnlyOutcome::Applied => out.events_applied += 1,
+                ReceiveOnlyOutcome::Deferred => out.events_deferred += 1,
+                ReceiveOnlyOutcome::NoEvidence => out.events_rejected_pre_auth += 1,
             }
+            classified.push((secs, outcome));
         }
     }
 }
@@ -954,9 +1177,10 @@ async fn fetch_window_paged(
 #[cfg(test)]
 mod tests {
     use super::{
-        cursor_advance_ms, hold_backs, ingest_one, summarize_round, FetchWindow, HashSet, PageStep,
-        Pager, ReceiveOnlyOutcome, ReceiveOnlyOutcome as O, RelayFetchOutcome,
-        CATCHUP_MAX_EVENTS_PER_CIRCLE, CATCHUP_MAX_EVENTS_PER_PAGE, CATCHUP_MAX_PAGES_PER_CIRCLE,
+        cursor_advance_ms, hold_backs, ingest_one, summarize_round, ChaseState, Duration,
+        FetchWindow, HashSet, PageStep, Pager, ReceiveOnlyOutcome, ReceiveOnlyOutcome as O,
+        RelayFetchOutcome, CATCHUP_CUT_OFF_ROUND, CATCHUP_MAX_EVENTS_PER_CIRCLE,
+        CATCHUP_MAX_EVENTS_PER_PAGE, CATCHUP_MAX_PAGES_PER_CIRCLE,
     };
 
     /// A `now` far past every timestamp these batches use, so the clamp is
@@ -1173,14 +1397,15 @@ mod tests {
     }
 
     #[test]
-    fn a_round_where_nobody_truncated_completes_the_window() {
+    fn a_round_where_nobody_contributed_completes_the_window() {
         // The ONLY exit that may report a complete window, and it is decided by
-        // a local count of returned events — never by anything an event says.
+        // local facts about the fetch — a count of what arrived and a membership
+        // test against ids we already hold — never by anything an event says.
         assert_eq!(
             chasing_pager().step(None, false, false),
             PageStep::Complete,
-            "every responding relay handed back a short page, so there is \
-             nothing left below what we hold"
+            "no responding relay handed back a full page or an event we did not \
+             already have, so there is nothing left below what we hold"
         );
     }
 
@@ -1209,6 +1434,44 @@ mod tests {
                  ceiling and must not be followed",
             );
         }
+    }
+
+    #[test]
+    fn the_windows_own_opening_second_is_asked_again_rather_than_refused() {
+        // The rule above is reached WITHOUT an attacker by an ordinary quiet
+        // circle: the first page's `until` is the window's own open second, so a
+        // circle whose only new event is published in that second hands back a
+        // boundary AT it. Refusing that boundary would cost the sweep — no
+        // cursor advance, one circle reported as truncated backlog it does not
+        // have — for a shape nobody chose. `bound_secs` is therefore EXCLUSIVE
+        // and opens one second above the anchor, so the opening second is
+        // re-requested once instead.
+        let opening = Pager {
+            since_secs: OPENED - 3_600,
+            bound_secs: OPENED + 1,
+            pages: 1,
+            collected: 1,
+        };
+        assert_eq!(
+            opening.step(Some(OPENED), false, false),
+            PageStep::Next(OPENED),
+            "the identical request, once: its answer is what tells drained from \
+             still-hiding, and no other round can ask it"
+        );
+
+        // And the slack is spent: from the second round on, `bound_secs` is the
+        // previous `until` and the descent is strict again — so a relay that
+        // keeps answering inside that one second halts the chase instead of
+        // spinning it, with the window left incomplete.
+        let after_the_repeat = Pager {
+            bound_secs: OPENED,
+            pages: 2,
+            ..opening
+        };
+        assert_eq!(
+            after_the_repeat.step(Some(OPENED), false, false),
+            PageStep::Halt,
+        );
     }
 
     #[test]
@@ -1327,15 +1590,133 @@ mod tests {
         }
     }
 
+    /// The state a previous round would have left behind after `url` served
+    /// `page`: every id already seen, and `url` still being drained.
+    fn after_serving(url: &str, served: &[nostr::Event]) -> ChaseState {
+        ChaseState {
+            chasing: std::iter::once(url.to_string()).collect(),
+            silent: HashSet::new(),
+            seen: served.iter().map(|ev| ev.id).collect(),
+        }
+    }
+
     #[test]
-    fn only_a_truncated_page_contributes_a_boundary() {
-        // A relay that answered SHORT has handed over everything it holds down
-        // to `since`; its oldest event says nothing about where anyone else's
-        // tail begins, so it must not steer the next request.
-        let round = summarize_round(&[answered("wss://a", page(3, 10))], &HashSet::new());
-        assert_eq!(round.boundary_secs, None);
+    fn a_page_carrying_anything_new_keeps_the_chase_alive_however_small_it_is() {
+        // THE CLAMP DEFENCE. A relay serves fewer events than we asked for
+        // either because it holds no more or because NIP-11
+        // `limitation.max_limit` caps what it will serve, and the two are the
+        // same page. Chasing on page SIZE alone never chases the second at all —
+        // no page can reach a limit the relay has already clamped away — so the
+        // window reads as complete and the cursor advances over everything below
+        // the cap. A page that hands over an event we did not already hold is
+        // therefore still a relay being drained, whatever its size.
+        let round = summarize_round(
+            &[answered("wss://a", page(3, 10))],
+            Duration::ZERO,
+            &ChaseState::default(),
+        );
+        assert_eq!(round.boundary_secs, Some(10));
+        assert!(round.chasing.contains("wss://a"));
         assert!(round.any_responded);
+    }
+
+    #[test]
+    fn a_page_of_nothing_but_already_seen_events_ends_the_chase() {
+        // THE TERMINATION HALF of the same rule, and the reason a healthy circle
+        // costs one confirming round rather than an unbounded chain: a relay
+        // drained down to `since` answers the next, narrower page with events we
+        // already hold — the ONE shape that reports a complete window.
+        let served = page(3, 10);
+        let state = after_serving("wss://a", &served);
+        let round = summarize_round(&[answered("wss://a", served)], Duration::ZERO, &state);
+        assert_eq!(round.boundary_secs, None);
         assert!(round.chasing.is_empty());
+        assert_eq!(
+            chasing_pager().step(round.boundary_secs, round.read_incomplete, false),
+            PageStep::Complete,
+        );
+    }
+
+    #[test]
+    fn a_full_page_of_already_seen_events_still_keeps_the_chase_alive() {
+        // The complement that stops "nothing new ⇒ drained" from becoming the
+        // whole rule. A relay holding more than one page inside a SINGLE second
+        // answers the same full page forever: nothing in it is new, yet events
+        // below it exist and no `until` can reach them. Reading that as drained
+        // would advance the cursor straight over them.
+        let served = page(CATCHUP_MAX_EVENTS_PER_PAGE, 3_000);
+        let state = after_serving("wss://a", &served);
+        let round = summarize_round(&[answered("wss://a", served)], Duration::ZERO, &state);
+        assert_eq!(
+            round.boundary_secs,
+            Some(3_000),
+            "a page returned at our own limit was cut at the bottom, and that is \
+             true whether or not we have seen its contents before"
+        );
+    }
+
+    #[test]
+    fn a_relay_that_produced_nothing_and_then_speaks_blocks_completeness() {
+        // The mirror of `a_chase_that_produced_nothing_blocks_completeness`, and
+        // it needs no attacker: one relay slow to answer the OPENING page is
+        // enough. Every later page is bounded above by the previous boundary, so
+        // whatever that relay holds above it was requested of nobody — and its
+        // narrow answer must not be able to help call the window complete.
+        let state = ChaseState {
+            silent: std::iter::once("wss://late".to_string()).collect(),
+            ..ChaseState::default()
+        };
+        let round = summarize_round(
+            &[answered("wss://late", page(2, 3_000))],
+            Duration::ZERO,
+            &state,
+        );
+        assert!(round.read_incomplete);
+        assert_eq!(
+            chasing_pager().step(round.boundary_secs, round.read_incomplete, false),
+            PageStep::Halt,
+        );
+
+        // The complement, which is the difference between a conservative hold
+        // and a self-inflicted outage: a relay that is simply unreachable stays
+        // silent all the way through and must never freeze the circle.
+        let still_silent = summarize_round(
+            &[RelayFetchOutcome {
+                relay_url: "wss://late".to_string(),
+                responded: false,
+                events: Vec::new(),
+            }],
+            Duration::ZERO,
+            &state,
+        );
+        assert!(!still_silent.read_incomplete);
+    }
+
+    #[test]
+    fn a_round_that_ran_out_the_fetch_timeout_blocks_completeness() {
+        // A fetch cut off by its own timeout returns `Ok` with whatever had
+        // arrived, and the per-relay stream errors are logged and dropped inside
+        // the pool's driver task — so a partial delivery is byte-for-byte a
+        // complete short page and NOTHING in the response distinguishes them.
+        // The clock does: a fetch that ran its timeout out took at least that
+        // long, and one that finished on EOSE did not.
+        let short = [answered("wss://slow", page(3, 3_000))];
+        let prompt = summarize_round(&short, Duration::ZERO, &ChaseState::default());
+        assert!(
+            !prompt.read_incomplete,
+            "precondition: a round that answered promptly is trustworthy, or the \
+             rule below would just be 'never complete a window'"
+        );
+
+        let cut_off = summarize_round(&short, CATCHUP_CUT_OFF_ROUND, &ChaseState::default());
+        assert!(cut_off.read_incomplete);
+        assert_eq!(
+            chasing_pager().step(None, cut_off.read_incomplete, false),
+            PageStep::Halt,
+            "and it halts even with nothing to chase, which is the whole point: \
+             the page that may have been truncated in transit is exactly the one \
+             that looks like a complete short answer"
+        );
     }
 
     #[test]
@@ -1348,7 +1729,7 @@ mod tests {
         // still visibly holding. `summarize_round` carries the full argument.
         let poisoned = answered("wss://poisoned", page(CATCHUP_MAX_EVENTS_PER_PAGE, 1));
         let honest = answered("wss://honest", page(CATCHUP_MAX_EVENTS_PER_PAGE, 4_000));
-        let round = summarize_round(&[poisoned, honest], &HashSet::new());
+        let round = summarize_round(&[poisoned, honest], Duration::ZERO, &ChaseState::default());
         assert_eq!(
             round.boundary_secs,
             Some(4_000),
@@ -1369,31 +1750,58 @@ mod tests {
             responded: false,
             events: Vec::new(),
         };
-        let fresh = summarize_round(std::slice::from_ref(&dead), &HashSet::new());
+        let fresh = summarize_round(
+            std::slice::from_ref(&dead),
+            Duration::ZERO,
+            &ChaseState::default(),
+        );
         assert_eq!(fresh.unanswered, 1);
         assert!(
-            !fresh.chase_lost,
-            "a relay that never truncated a page is not being drained, so its \
+            !fresh.read_incomplete,
+            "a relay that never contributed a page is not being drained, so its \
              silence must not freeze the circle's cursor — that is the \
              permanently-dead-relay-URL outage `cursor_advance_ms` refuses to \
              cause"
         );
 
-        let mut chasing = HashSet::new();
-        chasing.insert("wss://dead".to_string());
+        let mid_chase = ChaseState {
+            chasing: std::iter::once("wss://dead".to_string()).collect(),
+            ..ChaseState::default()
+        };
         assert!(
-            summarize_round(std::slice::from_ref(&dead), &chasing).chase_lost,
+            summarize_round(std::slice::from_ref(&dead), Duration::ZERO, &mid_chase)
+                .read_incomplete,
             "but the relay we were mid-chase with going dark is a known-missing \
              tail"
+        );
+
+        // And it must not join the SILENT set either, so the round after it can
+        // still complete the window: a relay we never got a socket to has
+        // contradicted nothing by speaking later. Composed exactly as the loop
+        // composes it — this round's `silent` becomes the next round's state.
+        let after_the_miss = ChaseState {
+            silent: fresh.silent,
+            ..ChaseState::default()
+        };
+        assert!(
+            !summarize_round(
+                &[answered("wss://dead", page(2, 3_000))],
+                Duration::ZERO,
+                &after_the_miss
+            )
+            .read_incomplete,
+            "otherwise one cold connect on page 1 — the ordinary shape of a \
+             background wake, which builds a fresh relay pool every time —  \
+             would freeze this circle's cursor on every wake"
         );
     }
 
     #[test]
     fn an_empty_page_from_a_chased_relay_is_a_failed_read_not_an_empty_range() {
-        // A relay that truncated the previous page still holds the event AT its
-        // own bottom, and this round's `until` is inclusive and at or above it,
-        // so an empty page from it is impossible unless the READ failed —
-        // which is exactly what `fetch_events_per_relay` reports for a
+        // A relay that contributed to the previous round still holds the event
+        // AT its own bottom, and this round's `until` is inclusive and at or
+        // above it, so an empty page from it is impossible unless the READ
+        // failed — which is exactly what `fetch_events_per_relay` reports for a
         // post-handshake fetch error: `responded == true`, no events.
         //
         // Reading that as "drained" is the silent drop this whole module exists
@@ -1405,17 +1813,19 @@ mod tests {
             responded: true,
             events: Vec::new(),
         };
-        let mut chasing = HashSet::new();
-        chasing.insert("wss://stalled".to_string());
-        let round = summarize_round(std::slice::from_ref(&stalled), &chasing);
-        assert!(round.chase_lost);
+        let mid_chase = ChaseState {
+            chasing: std::iter::once("wss://stalled".to_string()).collect(),
+            ..ChaseState::default()
+        };
+        let round = summarize_round(std::slice::from_ref(&stalled), Duration::ZERO, &mid_chase);
+        assert!(round.read_incomplete);
         assert_eq!(
             round.boundary_secs, None,
-            "precondition: an empty page truncates nothing, so without the rule \
-             above this round would read as COMPLETE"
+            "precondition: an empty page contributes nothing, so without the \
+             rule above this round would read as COMPLETE"
         );
         assert_eq!(
-            chasing_pager().step(round.boundary_secs, round.chase_lost, false),
+            chasing_pager().step(round.boundary_secs, round.read_incomplete, false),
             PageStep::Halt,
             "and the pager must hold the window rather than call it complete"
         );
@@ -1428,7 +1838,14 @@ mod tests {
             responded: true,
             events: Vec::new(),
         };
-        assert!(!summarize_round(std::slice::from_ref(&quiet), &HashSet::new()).chase_lost);
+        assert!(
+            !summarize_round(
+                std::slice::from_ref(&quiet),
+                Duration::ZERO,
+                &ChaseState::default()
+            )
+            .read_incomplete
+        );
     }
 
     // ---- The clamp: no window may push the cursor past the local clock.

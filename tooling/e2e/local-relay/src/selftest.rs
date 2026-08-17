@@ -12,7 +12,7 @@
 //! repo keeps finding, so the runner also refuses to pass if it executed fewer
 //! cases than it declares.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -111,18 +111,13 @@ impl Drop for TempDir {
 }
 
 async fn start_relay() -> Result<(nostr_relay_builder::LocalRelay, String), String> {
-    use nostr_relay_builder::prelude::*;
-
-    let builder = RelayBuilder::default()
-        .addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
-        .port(free_port()?);
-    let relay = LocalRelay::new(builder);
-    relay
-        .run()
+    // The error is carried through rather than flattened: `loopback` already
+    // distinguishes "another process took the port" from "this bind can never
+    // work", and a self-test that printed only "relay failed to start" would
+    // send whoever reads it looking in the wrong place.
+    crate::loopback::start_local_relay()
         .await
-        .map_err(|_| "relay failed to start".to_owned())?;
-    let url = relay.url().await.to_string();
-    Ok((relay, url))
+        .map_err(|err| format!("relay failed to start: {err}"))
 }
 
 /// A properly SIGNED kind-445 event, shaped like the ones Haven publishes
@@ -184,19 +179,6 @@ async fn start_echo_upstream() -> Result<(String, tokio::task::JoinHandle<()>), 
         }
     });
     Ok((format!("ws://{addr}"), handle))
-}
-
-/// Asks the OS for a free port and immediately releases it. A short race
-/// window, acceptable for a loopback self-test and far simpler than threading
-/// a pre-bound listener through the relay builder.
-fn free_port() -> Result<u16, String> {
-    let listener = std::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
-        .map_err(|e| format!("bind probe: {:?}", e.kind()))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| format!("probe addr: {:?}", e.kind()))?
-        .port();
-    Ok(port)
 }
 
 async fn rig(tag: &str) -> Result<Rig, String> {

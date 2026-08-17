@@ -23,6 +23,7 @@ import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/services/fresh_secret.dart';
 import 'package:haven/src/services/relay_service.dart';
 
 /// NIP-59 gift wraps randomize `created_at` up to 2 days in the past, so the
@@ -266,9 +267,10 @@ class InvitationPollStatusNotifier extends Notifier<InvitationPollStatus> {
 
     if (uniqueEvents.isNotEmpty) {
       // Fetch secret bytes once for the batch and only when there is work,
-      // minimising secret exposure. Dart has no zeroize, so copy into a buffer
-      // we control and scrub it in `finally` (Rule #9).
-      final secretBytes = Uint8List.fromList(
+      // minimising secret exposure. Dart has no zeroize, so take ownership of
+      // the fetched buffer — copying it would leave a second live secret no
+      // `fillRange` can reach — and scrub it in `finally` (Rule #9).
+      final secretBytes = takeSecretOwnership(
         await identityNotifier.getSecretBytes(),
       );
       try {

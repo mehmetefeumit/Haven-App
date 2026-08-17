@@ -202,8 +202,13 @@ kamadak-exif = "0.5"
 # and processes real `kind:445` events over a real socket). Dev-only.
 nostr-relay-builder = "0.44"
 # `#[tokio::test]` (the lib's tokio omits `macros`) + a publisher `Client` for
-# the live-sync engine integration test. Dev-only.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+# the live-sync engine integration test. `net`/`io-util` are for the catch-up
+# tests' TCP front doors (`ColdFirstConnect`): both reach the test binary anyway
+# — `net` via feature unification with the lib, `io-util` transitively through
+# nostr-sdk — so they are declared here to say so, not to add anything. An
+# undeclared feature that arrives by unification disappears without warning the
+# day a dependency stops asking for it. Dev-only.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
 nostr-sdk = { version = "0.44", default-features = false, features = ["nip44", "nip59"] }
 # Enable test-utils feature for integration tests
 haven-core = { path = ".", features = ["test-utils"] }

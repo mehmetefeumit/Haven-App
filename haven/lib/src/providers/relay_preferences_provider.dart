@@ -28,6 +28,7 @@ import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/services/fresh_secret.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_relay_preferences_service.dart';
 import 'package:haven/src/services/relay_preferences_service.dart';
@@ -134,7 +135,9 @@ Future<void> _scrubDroppedRelay(
   try {
     final service = await ref.read(relayPreferencesServiceProvider.future);
     final identityNotifier = ref.read(identityNotifierProvider.notifier);
-    secretBuffer = Uint8List.fromList(await identityNotifier.getSecretBytes());
+    secretBuffer = takeSecretOwnership(
+      await identityNotifier.getSecretBytes(),
+    );
     final scrub = await service.buildRelayRemovalScrub(
       identitySecretBytes: secretBuffer,
       category: category,

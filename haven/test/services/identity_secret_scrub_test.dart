@@ -14,13 +14,20 @@
 /// leaving a single one.
 ///
 /// None of these call sites can be reached under `flutter test` (all need the
-/// Rust bridge), so these assert over the source. There is no repo-wide Rule 9
-/// guard, which is why the repeating paths are pinned here explicitly.
+/// Rust bridge), so the per-site checks assert over the source. The repo-wide
+/// AST guard (`test/lints/secret_bytes_scrub_test.dart`) cannot see them
+/// either: they hand `getSecretBytes` to `withFreshSecret` as a TEAR-OFF, so
+/// there is no invocation for it to inspect — which is why the repeating paths
+/// are pinned here explicitly. The helper those checks lean on is pinned at the
+/// bottom of this file behaviourally, not by pattern-matching its source.
 library;
 
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/fresh_secret.dart';
 
 /// Every `CircleManagerFfi.newInstance(` in a file, paired with the source that
 /// lexically precedes it, so each open can be checked for an enclosing scrub.
@@ -126,15 +133,68 @@ void main() {
     });
   });
 
-  test('withFreshSecret actually scrubs', () {
-    // Guards the assumption every assertion above rests on. If the helper ever
-    // stopped wiping, the checks would still pass while protecting nothing.
-    final helper = File('lib/src/services/fresh_secret.dart').readAsStringSync();
-    expect(helper.contains('finally'), isTrue);
-    expect(
-      RegExp(r'fillRange\(\s*0\s*,\s*\w+\.length\s*,\s*0\s*\)').hasMatch(helper),
-      isTrue,
-      reason: 'the helper must overwrite the buffer, not merely drop it',
+  group('withFreshSecret actually scrubs', () {
+    // Guards the assumption every assertion above rests on: the source checks
+    // only prove each open is WRAPPED, so if the helper stopped wiping they
+    // would still pass while protecting nothing.
+    //
+    // Asserted BEHAVIOURALLY, over the buffer the provider actually handed
+    // over. The previous version of this matched
+    // `fillRange(0, <identifier>.length, 0)` in the helper's source — `\w+`
+    // matches ANY name, so it said nothing about WHICH buffer was wiped. It
+    // passed for the whole time the helper wiped only its own copy and left
+    // the provider's buffer live, and it would pass on a decoy that wipes an
+    // unrelated array.
+    Uint8List provided(int fill) => Uint8List.fromList(List.filled(32, fill));
+
+    test("the provider's own buffer is zeroed once use returns", () async {
+      final source = provided(0xC3);
+      await withFreshSecret(() async => source, (secret) async => null);
+      expect(
+        source.every((b) => b == 0),
+        isTrue,
+        reason: 'the buffer the provider handed over — not merely some copy '
+            'of it — must be overwritten',
+      );
+    });
+
+    test("the provider's own buffer is zeroed when use throws", () async {
+      final source = provided(0xC3);
+      await expectLater(
+        withFreshSecret<void>(
+          () async => source,
+          (secret) async => throw StateError('FFI blew up'),
+        ),
+        throwsA(isA<StateError>()),
+      );
+      expect(
+        source.every((b) => b == 0),
+        isTrue,
+        reason: 'a failed manager open must not leave the nsec behind',
+      );
+    });
+
+    test(
+      "the provider's own buffer is zeroed when the length check rejects it",
+      () async {
+        final source = Uint8List.fromList(List.filled(31, 0xC3));
+        var used = false;
+        await expectLater(
+          withFreshSecret<void>(
+            () async => source,
+            (secret) async => used = true,
+          ),
+          throwsA(isA<CircleServiceException>()),
+        );
+        expect(used, isFalse, reason: 'a bad-length secret never reaches use');
+        expect(
+          source.every((b) => b == 0),
+          isTrue,
+          reason: 'a wrong-length secret is still a secret — the reject path '
+              'must scrub it, which it only does with the length check INSIDE '
+              'the try',
+        );
+      },
     );
   });
 }

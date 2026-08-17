@@ -5,6 +5,7 @@
 /// counts via `addCalls`, `removeCalls`, etc.
 library;
 
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:haven/src/services/relay_preferences_service.dart';
@@ -84,6 +85,16 @@ class MockRelayPreferencesService implements RelayPreferencesService {
   /// chains and test ordering.
   final List<String> log = [];
 
+  /// When set, the FIRST call to [listRelays] for [RelayCategory.profile]
+  /// snapshots its return value immediately (as a real read that has already
+  /// started would) but does not resolve until this completes. Lets a test
+  /// force a slow `build()` read to interleave with a concurrent write
+  /// instead of relying on this mock's otherwise-instant futures, which
+  /// resolve in a fixed microtask order that can hide a real race.
+  Completer<void>? profileListRelaysGate;
+
+  bool _profileListRelaysGateConsumed = false;
+
   /// Throws, matching the real `NostrRelayPreferencesService`/Rust
   /// fail-closed behavior: [`RelayCategory.profile`] has no publishable
   /// form, so none of the publish-oriented methods below
@@ -120,7 +131,15 @@ class MockRelayPreferencesService implements RelayPreferencesService {
   @override
   Future<List<String>> listRelays(RelayCategory category) async {
     log.add('list:${category.name}');
-    return List<String>.from(_relays[category] ?? const <String>[]);
+    final snapshot = List<String>.from(_relays[category] ?? const <String>[]);
+    final gate = profileListRelaysGate;
+    if (gate != null &&
+        category == RelayCategory.profile &&
+        !_profileListRelaysGateConsumed) {
+      _profileListRelaysGateConsumed = true;
+      await gate.future;
+    }
+    return snapshot;
   }
 
   @override
@@ -148,7 +167,14 @@ class MockRelayPreferencesService implements RelayPreferencesService {
   Future<void> restoreDefaults(RelayCategory category) async {
     log.add('restore:${category.name}');
     final list = _relays[category]!;
-    for (final url in const ['wss://default-a', 'wss://default-b']) {
+    // Profile-plane defaults are a distinct string family, same as
+    // `seedDefaultsIfUnseeded`/`restoreDefaultProfileRelays` below — so a
+    // top-up wired to the wrong category cannot pass a test asserting on
+    // these values by coincidence of shared fixture strings.
+    final defaults = category == RelayCategory.profile
+        ? const ['wss://profile-default-a', 'wss://profile-default-b']
+        : const ['wss://default-a', 'wss://default-b'];
+    for (final url in defaults) {
       if (!list.contains(url)) list.add(url);
     }
   }

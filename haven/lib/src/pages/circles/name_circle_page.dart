@@ -16,6 +16,7 @@ import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/fresh_secret.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
@@ -285,16 +286,19 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
       // pubkey to public relays.
       final creatorFallbackRelays = await _fetchCreatorFallbackRelays(ref);
 
-      // Create the circle using the CircleService.
-      // Pass identity secret bytes directly to minimize exposure window.
-      // The Rust layer handles secure memory (zeroize on drop).
-      final secretBytes = await identityNotifier.getSecretBytes();
-      final result = await circleService.createCircle(
-        identitySecretBytes: secretBytes,
-        memberKeyPackages: widget.memberKeyPackages,
-        name: _nameController.text.trim(),
-        circleType: CircleType.locationSharing,
-        creatorFallbackRelays: creatorFallbackRelays,
+      // Create the circle using the CircleService. `createCircle` takes raw
+      // bytes (not a `secretProvider`), so fetch fresh via `withFreshSecret`
+      // and let it scrub the copy the instant the call returns — Security
+      // Rule 9: minimize exposure rather than holding a long-lived local.
+      final result = await withFreshSecret(
+        identityNotifier.getSecretBytes,
+        (secret) => circleService.createCircle(
+          identitySecretBytes: secret,
+          memberKeyPackages: widget.memberKeyPackages,
+          name: _nameController.text.trim(),
+          circleType: CircleType.locationSharing,
+          creatorFallbackRelays: creatorFallbackRelays,
+        ),
       );
 
       // `CircleService.createCircle` already published the gift-wrapped

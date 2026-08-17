@@ -8,6 +8,8 @@
 /// Profile category) the advisory contamination warning.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -136,7 +138,14 @@ void main() {
       await tester.pumpAndSettle();
 
       final learnMore = find.text('Learn more');
+      // `scrollUntilVisible` only guarantees the widget is BUILT (inside the
+      // cache extent), not that it is on-screen and hit-testable — the same
+      // trap the tall-surface cases further down document. `ensureVisible`
+      // scrolls it fully into view, so the tap below cannot miss as the page
+      // grows.
       await tester.scrollUntilVisible(learnMore, 300);
+      await tester.ensureVisible(learnMore);
+      await tester.pumpAndSettle();
       await tester.tap(learnMore);
       await tester.pumpAndSettle();
 
@@ -220,6 +229,223 @@ void main() {
       expect(find.text('drop.example.com'), findsNothing);
       expect(find.text('keep.example.com'), findsOneWidget);
     });
+
+    // -------------------------------------------------------------------
+    // Profile section: the curated pool is not user-removable.
+    //
+    // `usable_profile_relays()` unions `profile_relay_pool_default()` back in
+    // on every resolution, so deleting a curated row shortened the list on
+    // screen without shortening the set Haven dials — proved in
+    // `haven-core/tests/profile_curated_pool_removal.rs`. The page therefore
+    // offers no remove control for those rows, and tops the stored list back
+    // up so an install upgraded from a build that DID offer one stops showing
+    // a short list.
+    // -------------------------------------------------------------------
+
+    /// Grows the test surface so all three sections plus their controls are
+    /// laid out. Same reason as the Add-relay and underflow-banner cases
+    /// below: at 800x600 a widget far down this page may never be inflated.
+    void useTallSurface(WidgetTester tester) {
+      final originalSize = tester.view.physicalSize;
+      final originalRatio = tester.view.devicePixelRatio;
+      tester.view.physicalSize = const Size(800, 2400);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(() {
+        tester.view.physicalSize = originalSize;
+        tester.view.devicePixelRatio = originalRatio;
+      });
+    }
+
+    testWidgets(
+      'offers no remove control for a curated Profile relay, but keeps one '
+      "for the user's own addition",
+      (tester) async {
+        useTallSurface(tester);
+        expect(
+          fallbackDefaultProfileRelays,
+          isNotEmpty,
+          reason: 'non-vacuity: an empty curated pool would make the '
+              'suppressed-control assertion below unreachable',
+        );
+        final curated = fallbackDefaultProfileRelays.first;
+        final mock = MockRelayPreferencesService(
+          initialRelays: {
+            RelayCategory.inbox: const ['wss://inbox.example.com'],
+            RelayCategory.keyPackage: const ['wss://kp.example.com'],
+            RelayCategory.profile: [curated, 'wss://mine.example.com'],
+          },
+        );
+        await tester.pumpWidget(buildApp(mock: mock));
+        await tester.pumpAndSettle();
+
+        // Both rows render...
+        final curatedHost = curated.replaceFirst('wss://', '');
+        expect(find.text(curatedHost), findsOneWidget);
+        expect(find.text('mine.example.com'), findsOneWidget);
+
+        // ...but only the user's own addition can be removed. Offering it on
+        // the curated row would be offering an action Haven ignores.
+        expect(find.byTooltip('Remove $curatedHost'), findsNothing);
+        expect(find.byTooltip('Remove mine.example.com'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'suppresses the curated Profile remove control across URL spelling '
+      'variants',
+      (tester) async {
+        useTallSurface(tester);
+        // The fail-open this guards: a stored row that differs from the
+        // curated constant only by case or a trailing slash would compare
+        // unequal, the trash icon would come back, and tapping it would once
+        // again shorten the list without shortening what Haven dials — the
+        // same normalization trap `exclusion_matches_across_url_normalization`
+        // exists for on the Rust side.
+        final curated = fallbackDefaultProfileRelays.first;
+        final host = curated.replaceFirst('wss://', '');
+        final variant = 'wss://${host.toUpperCase()}/';
+        // A companion user-owned row, same as the case above: pairing the
+        // negative assertion below with a positive on the SAME tooltip
+        // pattern (rather than asserting `findsNothing` alone) is what rules
+        // out the row never rendering, the section failing to inflate, or
+        // the tooltip's English having drifted out from under the finder.
+        final mock = MockRelayPreferencesService(
+          initialRelays: {
+            RelayCategory.inbox: const ['wss://inbox.example.com'],
+            RelayCategory.keyPackage: const ['wss://kp.example.com'],
+            RelayCategory.profile: [variant, 'wss://mine.example.com'],
+          },
+        );
+        await tester.pumpWidget(buildApp(mock: mock));
+        await tester.pumpAndSettle();
+
+        expect(find.text('${host.toUpperCase()}/'), findsOneWidget);
+        expect(find.text('mine.example.com'), findsOneWidget);
+
+        expect(
+          find.byTooltip('Remove ${host.toUpperCase()}/'),
+          findsNothing,
+          reason: 'a case/slash variant of a curated relay is still curated',
+        );
+        expect(find.byTooltip('Remove mine.example.com'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'still offers removal for the same URL in the Inbox category',
+      (tester) async {
+        useTallSurface(tester);
+        // The rule is about the profile plane's curated pool, not about the
+        // URL: the Inbox list is genuinely user-owned, and removal there
+        // really does take effect. Scoping the suppression to the Profile
+        // section is what keeps this true.
+        final curated = fallbackDefaultProfileRelays.first;
+        final curatedHost = curated.replaceFirst('wss://', '');
+        final mock = MockRelayPreferencesService(
+          initialRelays: {
+            RelayCategory.inbox: [curated, 'wss://second.example.com'],
+            RelayCategory.keyPackage: const ['wss://kp.example.com'],
+            RelayCategory.profile: const ['wss://mine.example.com'],
+          },
+        );
+        await tester.pumpWidget(buildApp(mock: mock));
+        await tester.pumpAndSettle();
+
+        expect(find.byTooltip('Remove $curatedHost'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'tops the Profile list back up on open, and only that category',
+      (tester) async {
+        useTallSurface(tester);
+        // An install upgraded from a build that offered the (inert) remove
+        // control can hold a Profile list shorter than the set Haven dials,
+        // and no other affordance on this page repairs it without also
+        // discarding the user's own additions.
+        final mock = MockRelayPreferencesService(
+          initialRelays: const {
+            RelayCategory.inbox: ['wss://inbox.example.com'],
+            RelayCategory.keyPackage: ['wss://kp.example.com'],
+            RelayCategory.profile: ['wss://mine.example.com'],
+          },
+        );
+        await tester.pumpWidget(buildApp(mock: mock));
+        await tester.pumpAndSettle();
+
+        // The user's own addition survives the top-up...
+        expect(find.text('mine.example.com'), findsOneWidget);
+        // ...and the missing default is back on screen. The mock's Profile
+        // defaults are a string family distinct from the Inbox/KeyPackage
+        // ones (mirrors `seedDefaultsIfUnseeded`/`restoreDefaultProfileRelays`
+        // below), so a top-up wired to the wrong category cannot satisfy this
+        // assertion by coincidence of shared fixture strings.
+        expect(
+          find.text('profile-default-a'),
+          findsOneWidget,
+          reason: 'the Profile list on screen must be the list Haven uses',
+        );
+        expect(
+          find.text('default-a'),
+          findsNothing,
+          reason: 'the generic (non-profile) default must never land in the '
+              'Profile pool — that is the plane-crossing this test exists '
+              'to catch',
+        );
+        // Exactly `profile`: the Inbox and KeyPackage lists are the user's
+        // to shorten, so a top-up must not touch them at all — not even as
+        // a no-op call. Two positive assertions above already prove nothing
+        // was dropped from those two lists; this proves nothing was ADDED
+        // to them either, which the mock returning the same defaults for
+        // every category would otherwise let slip through unnoticed.
+        expect(
+          mock.log.where((entry) => entry.startsWith('restore:')).toList(),
+          ['restore:profile'],
+        );
+      },
+    );
+
+    testWidgets(
+      "sequences the top-up after the Profile notifier's own build(), so a "
+      'slow initial read cannot silently undo it',
+      (tester) async {
+        useTallSurface(tester);
+        // This mock's async methods otherwise resolve in a fixed microtask
+        // order, which would let an unsequenced top-up pass by coincidence.
+        // Gating build()'s own first read forces the two chains to actually
+        // interleave, the way a real slow storage read could.
+        final mock = MockRelayPreferencesService(
+          initialRelays: const {
+            RelayCategory.inbox: ['wss://inbox.example.com'],
+            RelayCategory.keyPackage: ['wss://kp.example.com'],
+            RelayCategory.profile: ['wss://mine.example.com'],
+          },
+        );
+        final gate = Completer<void>();
+        mock.profileListRelaysGate = gate;
+
+        await tester.pumpWidget(buildApp(mock: mock));
+        // Let every chain that does not depend on the gated read run to
+        // completion — on unsequenced code, that includes the top-up's own
+        // write-then-read-then-state-assignment.
+        await tester.pump();
+        await tester.pump();
+
+        // Release the gated build() read. On unsequenced code this is where
+        // the bug bites: build()'s snapshot (captured before the top-up
+        // wrote) resolves last and overwrites the correct state.
+        gate.complete();
+        await tester.pumpAndSettle();
+
+        expect(find.text('mine.example.com'), findsOneWidget);
+        expect(
+          find.text('profile-default-a'),
+          findsOneWidget,
+          reason: "the top-up must win even when the notifier's own "
+              'initial read is slow to resolve',
+        );
+      },
+    );
 
     // -------------------------------------------------------------------
     // DM-4c: the legacy-retraction "pending" note (plan §6 F10b).

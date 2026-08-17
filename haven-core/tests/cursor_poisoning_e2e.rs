@@ -295,6 +295,22 @@ fn secs_of(event: &Event) -> i64 {
     i64::try_from(event.created_at.as_secs()).unwrap()
 }
 
+/// Blocks until the local wall clock has ticked strictly PAST `secs`, at the
+/// same whole-second precision every cursor here is compared at.
+///
+/// The two candidate advance values — the applied event's `created_at` and the
+/// window's own open time — are only DISTINGUISHABLE once a whole second lies
+/// between them, so a test that means to pin the advance's provenance has to put
+/// one there. Waiting for the tick rather than sleeping a fixed 1.5 s makes that
+/// separation a guarantee instead of a probability, and costs half a second on
+/// average. It is also the real shape of a catch-up: the backlog is older than
+/// the sweep that fetches it.
+async fn wait_until_after(secs: i64) {
+    while now_secs() <= secs {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 // ============================================================================
 // Live-sync plane (EngineProcessor)
 // ============================================================================
@@ -877,11 +893,7 @@ async fn catchup_a_completed_window_advances_to_its_own_open_time() {
         .await
         .expect("bob's location reaches the relay");
 
-    // Let the wall clock tick past the event's `created_at` second, so the two
-    // candidate advance values (the event vs the window) are distinguishable.
-    // This is also the real shape of a catch-up: the backlog is older than the
-    // sweep that fetches it.
-    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    wait_until_after(secs_of(&loc_event)).await;
 
     let before = now_secs();
     let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 20).await;
