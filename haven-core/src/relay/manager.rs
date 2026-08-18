@@ -7,14 +7,21 @@
 //!
 //! - **WSS Only**: Plaintext ws:// connections are rejected
 
+use std::borrow::Cow;
+use std::collections::HashSet;
 #[cfg(debug_assertions)]
 use std::sync::OnceLock;
 use std::time::Duration;
 
 #[cfg(debug_assertions)]
 use nostr::Url;
-use nostr::{Event, Filter, Kind, PublicKey, RelayUrl};
-use nostr_sdk::{Client, RelayPoolNotification};
+use nostr::{
+    ClientMessage, Event, EventId, Filter, Kind, PublicKey, RelayMessage, RelayUrl, SubscriptionId,
+};
+use nostr_sdk::pool::relay::{RelayNotification, ReqExitPolicy};
+use nostr_sdk::{
+    Client, Relay, RelayPoolNotification, SubscribeAutoCloseOptions, SubscribeOptions,
+};
 
 use super::clock_skew;
 use super::discovery::discovery_relays;
@@ -25,11 +32,17 @@ use super::types::{
 use crate::nostr::mls::redact_hex_sequences;
 
 /// Default timeout for relay operations.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Ceiling on how many events ONE per-relay REQ may take in from a filter that
+/// names no `limit` of its own.
 ///
-/// Visible to the rest of `relay` because [`crate::relay::catchup`] must reason
-/// about how long a fetch may legitimately take, and a copy of this number would
-/// be a copy that can drift.
-pub(super) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Rule 12: a relay must not be able to make a single fetch unbounded in memory.
+/// Every filter Haven builds carries a `limit`, and that limit is the cap
+/// whenever it is present; this is only the fail-safe for one that does not.
+/// Overflowing the cap stops the read WITHOUT an `EOSE`, so the page comes back
+/// `drained == false` and no caller may treat it as the relay's whole answer.
+const MAX_EVENTS_PER_UNLIMITED_REQ: usize = 1_000;
 
 /// Process-static opt-in for plaintext `ws://` URLs targeting loopback /
 /// emulator-host aliases. Set once via [`allow_ws_loopback_for_test`] in
@@ -936,21 +949,40 @@ impl RelayManager {
     }
 
     /// Fetches events matching `filter` from each relay independently,
-    /// reporting per-relay reachability.
+    /// reporting per-relay reachability AND whether each relay finished
+    /// answering.
     ///
     /// For every relay this attempts the WebSocket handshake (bounded by
-    /// [`CONNECTION_TIMEOUT`]); on success it runs a one-shot fetch (bounded by
-    /// [`DEFAULT_TIMEOUT`]) and records the events, marking the relay
-    /// `responded`. A relay whose handshake fails is marked not responded and
-    /// is not queried. Relays are processed concurrently.
+    /// [`CONNECTION_TIMEOUT`]); on success it issues one REQ and reads that
+    /// relay's own message stream (bounded by [`DEFAULT_TIMEOUT`]), marking the
+    /// relay `responded`. A relay whose handshake fails is marked not responded
+    /// and is not queried. Relays are processed concurrently.
     ///
     /// Unlike [`fetch_events`](Self::fetch_events), one unreachable relay never
     /// fails the whole call: each relay's outcome is independent. This is what
-    /// lets a caller report an accurate answered/unanswered tally (e.g. the
+    /// lets a caller report an accurate reached/unreached tally (e.g. the
     /// Invitations refresh feedback) instead of a single merged result that
     /// hides which relays were reached. A relay that answers with zero events
     /// is `responded == true` with an empty `events` list — distinct from an
     /// unreachable relay (`responded == false`).
+    ///
+    /// # Why this drives the REQ itself instead of calling `fetch_events_from`
+    ///
+    /// [`RelayFetchOutcome::drained`] cannot be derived from a pooled fetch.
+    /// `RelayPool::fetch_events_from` collects a merged stream and returns
+    /// `Ok(collected)` however that stream ended, and its driver task logs and
+    /// DROPS each per-relay stream error; `Relay::stream_events` is no better on
+    /// its own, because the timeout, an idle timeout and a mid-delivery
+    /// disconnect all end its stream with `None` — exactly as a clean `EOSE`
+    /// does. So a cut-off delivery is byte-for-byte a complete short page, and a
+    /// caller reading that page as "this relay is drained" advances over
+    /// whatever the relay had not sent yet.
+    ///
+    /// Reading the relay's own notification stream recovers the one signal that
+    /// distinguishes them: NIP-01 `EOSE`, the relay stating it has served
+    /// everything it stores for this REQ. Everything else the stream can end
+    /// with — the timeout, a `CLOSED`, a disconnect, a lagged broadcast, our own
+    /// intake cap — leaves `drained == false`.
     ///
     /// A **malformed / non-`wss://` URL is fault-isolated too**: it yields one
     /// `responded == false` outcome (structurally excluded from any
@@ -991,6 +1023,7 @@ impl RelayManager {
                     return RelayFetchOutcome {
                         relay_url: relay.clone(),
                         responded: false,
+                        drained: false,
                         events: Vec::new(),
                     };
                 };
@@ -1013,38 +1046,182 @@ impl RelayManager {
                     return RelayFetchOutcome {
                         relay_url,
                         responded: false,
+                        drained: false,
                         events: Vec::new(),
                     };
                 }
 
-                // Connected: one-shot fetch from just this relay. A fetch error
-                // after a successful handshake still counts as responded (the
-                // relay answered); we simply record no events for it.
-                let events = match client
-                    .fetch_events_from(std::iter::once(url.as_str()), filter, DEFAULT_TIMEOUT)
-                    .await
-                {
-                    Ok(evs) => evs.into_iter().collect(),
-                    Err(e) => {
-                        // Presence-only: no own-relay URL at debug (may be
-                        // sensitive), matching the not-responded branch above.
-                        log::debug!(
-                            "[RelayManager] per-relay fetch error (one own relay): {}",
-                            redact_hex_sequences(&e.to_string())
-                        );
-                        Vec::new()
-                    }
+                // Connected a moment ago, yet no handle in the pool: nothing was
+                // read, so nothing may be reported as this relay's whole answer.
+                let Ok(handle) = client.relay(url.as_str()).await else {
+                    log::debug!("[RelayManager] per-relay: one own relay left the pool");
+                    return RelayFetchOutcome {
+                        relay_url,
+                        responded: true,
+                        drained: false,
+                        events: Vec::new(),
+                    };
                 };
 
+                let (drained, events) = Self::read_one_relays_answer(&handle, filter).await;
                 RelayFetchOutcome {
                     relay_url,
                     responded: true,
+                    drained,
                     events,
                 }
             }
         });
 
         Ok(futures::future::join_all(fetch_futures).await)
+    }
+
+    /// Issues ONE REQ to ONE relay and reads that relay's own answer, reporting
+    /// whether the relay finished giving it (`EOSE`) alongside what arrived.
+    ///
+    /// # Why the notification stream and not the subscription's event stream
+    ///
+    /// `Relay::stream_events` hands back a stream that ends with `None` on a
+    /// clean `EOSE`, on the subscription timeout, on the idle timeout and on a
+    /// mid-delivery disconnect alike — the reason is dropped before it reaches
+    /// the caller. The relay's raw notification stream still carries it, and
+    /// `EOSE` is the only member of that set which says the page is whole.
+    ///
+    /// # Ordering, and the two races that are closed by construction
+    ///
+    /// The notification receiver is taken BEFORE the REQ goes out, because
+    /// `notifications()` yields nothing that arrived before the call and a relay
+    /// can answer inside the subscribe. And the relay's socket reader handles
+    /// messages strictly sequentially, so the `EOSE` notification cannot
+    /// overtake an `EVENT` the relay sent ahead of it — stopping at the `EOSE`
+    /// therefore cannot leave a delivered event unread.
+    ///
+    /// The subscription is auto-closing on `EOSE` (it registers its filter
+    /// BEFORE sending the REQ, so it is not exposed to the registration race
+    /// that bars `verify_subscriptions`), and its handler sends the NIP-01
+    /// `CLOSE` when it sees that `EOSE`.
+    ///
+    /// # Why an early exit sends its own `CLOSE`
+    ///
+    /// That handler is a separate task with its own receiver, so it learns
+    /// NOTHING from this loop giving up: on the intake cap, on a `CLOSED`, or on
+    /// a disconnect it goes on waiting for an `EOSE` that may never come, and
+    /// closes only when its own [`DEFAULT_TIMEOUT`] expires. The REQ stays open
+    /// for the rest of that timeout while the relay keeps streaming into a
+    /// bounded broadcast channel nobody is reading — the next page's read shares
+    /// that channel, so it can be pushed into `Lagged` and reported unfinished
+    /// itself. That is the same "a page nobody finished" evidence that holds a
+    /// circle's cursor, self-inflicted. `Relay::unsubscribe` cannot help (it is
+    /// a no-op for an auto-closing subscription), so the `CLOSE` is sent
+    /// directly. A duplicate reaching the relay when the handler later times out
+    /// is inert: NIP-01 closes an unknown subscription id by ignoring it.
+    ///
+    /// # The intake cap (Rule 12)
+    ///
+    /// A relay is free to ignore the REQ's `limit`, so the read is bounded by
+    /// that limit (or [`MAX_EVENTS_PER_UNLIMITED_REQ`] when the filter names
+    /// none), counted over what ARRIVES rather than what is kept — a relay that
+    /// repeats one event forever must be bounded in work, not only in memory.
+    /// Reaching the cap stops the read short of any `EOSE`, so the page is
+    /// reported NOT drained and the overflow is throttled without being silently
+    /// treated as the relay's whole answer.
+    ///
+    /// Repeats are dropped rather than collected, because the pooled collection
+    /// this replaced was a SET: callers counting a relay's events (the
+    /// `KeyPackage` and relay-list maintenance probes) would otherwise start
+    /// seeing a duplicate as a second on-relay event.
+    ///
+    /// # Why the page is sorted before it is returned
+    ///
+    /// Arrival order is the relay's to choose, and one caller resolves an
+    /// ambiguity positionally (the `KeyPackage` probe's first entry for a `d`
+    /// slot), so leaving it unsorted hands a relay a lever over which of two
+    /// events a maintenance decision reads. Newest-first by `created_at`, then
+    /// by id, is a total order this device computes, and it is the order the
+    /// pooled `Events` collection this replaced already had.
+    async fn read_one_relays_answer(relay: &Relay, filter: Filter) -> (bool, Vec<Event>) {
+        let intake_cap = filter.limit.unwrap_or(MAX_EVENTS_PER_UNLIMITED_REQ);
+        let id = SubscriptionId::generate();
+        let mut notifications = relay.notifications();
+
+        let opts = SubscribeOptions::default().close_on(Some(
+            SubscribeAutoCloseOptions::default()
+                .exit_policy(ReqExitPolicy::ExitOnEOSE)
+                .timeout(Some(DEFAULT_TIMEOUT)),
+        ));
+        if let Err(e) = relay.subscribe_with_id(id.clone(), filter, opts).await {
+            // Presence-only: no own-relay URL at debug (may be sensitive),
+            // matching the branches above.
+            log::debug!(
+                "[RelayManager] per-relay REQ failed (one own relay): {}",
+                redact_hex_sequences(&e.to_string())
+            );
+            return (false, Vec::new());
+        }
+
+        let mut events: Vec<Event> = Vec::new();
+        let mut seen: HashSet<EventId> = HashSet::new();
+        let mut arrivals: usize = 0;
+        let drained = tokio::time::timeout(DEFAULT_TIMEOUT, async {
+            loop {
+                match notifications.recv().await {
+                    Ok(RelayNotification::Message { message }) => match message {
+                        RelayMessage::Event {
+                            subscription_id,
+                            event,
+                        } if subscription_id.as_ref() == &id => {
+                            if arrivals >= intake_cap {
+                                return false;
+                            }
+                            arrivals += 1;
+                            if seen.insert(event.id) {
+                                events.push(event.into_owned());
+                            }
+                        }
+                        RelayMessage::EndOfStoredEvents(sub) if sub.as_ref() == &id => return true,
+                        // The relay ended this subscription itself (rate limit,
+                        // auth required, refusal). Whatever it had not sent, it
+                        // is not going to.
+                        RelayMessage::Closed {
+                            subscription_id, ..
+                        } if subscription_id.as_ref() == &id => return false,
+                        _ => {}
+                    },
+                    // The socket went away mid-delivery, the pool shut down, or a
+                    // lagged broadcast dropped deliveries we will never see —
+                    // after which an `EOSE` would vouch for a page we did not
+                    // receive whole. None of them is the relay saying it is
+                    // done, which is the only thing that ends this read as
+                    // drained.
+                    Ok(
+                        RelayNotification::RelayStatus {
+                            status:
+                                nostr_sdk::RelayStatus::Disconnected
+                                | nostr_sdk::RelayStatus::Terminated
+                                | nostr_sdk::RelayStatus::Banned,
+                        }
+                        | RelayNotification::Shutdown,
+                    )
+                    | Err(_) => return false,
+                    Ok(_) => {}
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+
+        if !drained {
+            // Nothing else closes this REQ until the auto-close handler spends
+            // its own timeout; see above for what the relay does in between.
+            let _ = relay.send_msg(ClientMessage::Close(Cow::Owned(id)));
+        }
+
+        events.sort_unstable_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+        (drained, events)
     }
 
     /// Validates relay URLs and ensures they use wss://.

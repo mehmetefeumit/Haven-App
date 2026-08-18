@@ -12,10 +12,25 @@
 @TestOn('vm')
 library;
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../../integration_test/e2e/_lib/throw_time_error_capture.dart';
+
+/// A real, deliberately-triggered `RenderFlex` overflow: a `Row` forced into
+/// less width than its one child needs. `Center` gives its child LOOSE
+/// constraints, which `SizedBox(width: 50)` narrows to a tight 50 — without
+/// `Center` here, the test surface's own tight root constraints would win
+/// and no overflow would occur at all.
+Widget _overflowingRow() => const Directionality(
+  textDirection: TextDirection.ltr,
+  child: Center(
+    child: SizedBox(
+      width: 50,
+      child: Row(children: [SizedBox(width: 200, height: 10)]),
+    ),
+  ),
+);
 
 /// An exception whose `toString()` reflects a field that can be mutated
 /// AFTER construction — standing in for the real defect this file guards
@@ -168,6 +183,108 @@ void main() {
           reason: 'installThrowTimeErrorLogging must swap in a new handler '
               'immediately, not defer installation',
         );
+      },
+    );
+  });
+
+  group('a real, deliberately-triggered RenderFlex overflow', () {
+    // The groups above prove the mechanism against `_MutableException`, a
+    // deliberate stand-in (see its doc comment) for the harder-to-drive real
+    // case: an `Element`'s OWN resolved diagnostics going missing once torn
+    // down. This group drives the real case directly, so the promise is
+    // proven against the actual defect, not only a proxy for it.
+    testWidgets(
+      'installChainedThrowTimeHandler logs the creator-chain detail (widget '
+      'type + file:line) for a genuine overflow, at throw time',
+      (tester) async {
+        final logged = <String>[];
+        final priorDebugPrint = debugPrint;
+        debugPrint = (String? message, {int? wrapWidth}) {
+          if (message != null) logged.add(message);
+        };
+        final restoreHandler = installChainedThrowTimeHandler();
+        // Restored synchronously here, NOT via addTearDown: `testWidgets`
+        // checks `debugPrint` is back to its expected value as part of the
+        // test body's own return (`_verifyInvariants`,
+        // `package:flutter_test/src/binding.dart`) — before any
+        // `addTearDown` callback runs — so an addTearDown-only restore trips
+        // that check the moment this test also calls `takeException()`
+        // below (which is exactly what unlocks the check: it is skipped
+        // outright while an exception is still pending).
+        try {
+          await tester.pumpWidget(_overflowingRow());
+
+          expect(
+            logged,
+            isNotEmpty,
+            reason: 'the overflow must actually have fired and been logged',
+          );
+          expect(
+            logged.single,
+            contains('The relevant error-causing widget was'),
+          );
+          expect(
+            logged.single,
+            matches(RegExp(r'\.dart:\d+:\d+')),
+            reason: 'must include a file:line, not just the widget name',
+          );
+        } finally {
+          restoreHandler();
+          debugPrint = priorDebugPrint;
+        }
+        // The overflow is a genuine `FlutterError` the SDK's own bookkeeping
+        // handler (chained to above) now tracks as pending — acknowledge it
+        // the normal way a real test would, rather than letting it surface
+        // as an unrelated "leaked exception" failure at teardown. Chaining
+        // through to that bookkeeping, not swallowing it, is the point.
+        expect(tester.takeException(), isNotNull);
+      },
+    );
+
+    testWidgets(
+      'MUTATION: without installChainedThrowTimeHandler — the previous, '
+      'un-patched behaviour — the same genuine overflow produces no '
+      'throw-time attribution at all; the fix is the one call site removed '
+      'here, and restoring it (test above) recovers the detail',
+      (tester) async {
+        final logged = <String>[];
+        final priorDebugPrint = debugPrint;
+        debugPrint = (String? message, {int? wrapWidth}) {
+          if (message != null) logged.add(message);
+        };
+
+        // Deliberately NOT calling installChainedThrowTimeHandler(): this IS
+        // the mutation. `FlutterError.onError` is left exactly as the
+        // ambient test binding installs it, so this measures the real
+        // un-patched SDK path, not a hand-rolled substitute for it.
+        //
+        // This does not go on to render the error *after* the Row's Element
+        // is torn down — unlike the `_MutableException` proxy above, doing
+        // that here, against a REAL Element, provokes
+        // `debugTransformDebugCreator`'s own recovery path (a try/catch
+        // around `Element.visitAncestorElements` that, on the resulting
+        // "deactivated widget" error, schedules a SECOND `FlutterError
+        // .reportError` via `scheduleMicrotask` — verified by observation,
+        // not just by reading the source) closely enough to destabilize
+        // `flutter_test`'s FakeAsync test zone (observed: a 10-minute CI
+        // hang). The doc comment atop this file cites the exact SDK
+        // mechanism for why that second render is lossy; this test proves
+        // the narrower, safe half — no attribution without the fix — and
+        // the `_MutableException` group above proves the same-object,
+        // two-render-times half without that hazard.
+        try {
+          await tester.pumpWidget(_overflowingRow());
+
+          expect(
+            logged,
+            isEmpty,
+            reason: 'with the fix removed, the overflow produces no '
+                'throw-time attribution',
+          );
+        } finally {
+          debugPrint = priorDebugPrint;
+        }
+        expect(tester.takeException(), isNotNull);
       },
     );
   });

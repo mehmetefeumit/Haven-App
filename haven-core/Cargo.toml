@@ -121,6 +121,12 @@ libsqlite3-sys = { version = "0.30", features = ["bundled-sqlcipher-vendored-ope
 # Async runtime (required by MDK)
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "net", "time"] }
 
+# `cgka_traits::peeler::TransportPeeler` is declared with `#[async_trait]`, so
+# Haven's own implementation of it (`nostr::mls::retention`) must desugar the
+# same way. Already resolved at 0.1.x through cgka-traits, so naming it here
+# unifies rather than widening the dependency graph (check_mdk_supply_chain.sh).
+async-trait = "0.1"
+
 # Nostr relay communication
 nostr-sdk = { version = "0.44", default-features = false, features = ["nip44", "nip59"] }
 

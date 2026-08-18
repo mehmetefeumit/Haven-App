@@ -1719,13 +1719,41 @@ impl CircleManager {
         self.storage.reset_sync_cursor(stream)
     }
 
-    /// Removes ALL sync-cursor rows (bulk reset) for the wipe-on-logout path.
+    /// Removes ALL sync-cursor rows — and the catch-up backfill floors derived
+    /// from them — for the wipe-on-logout path.
     ///
     /// # Errors
     ///
     /// Returns an error if the storage write fails.
     pub fn reset_all_sync_cursors(&self) -> Result<()> {
         self.storage.reset_all_sync_cursors()
+    }
+
+    /// Reads `stream`'s catch-up backfill floor (unix seconds), if any.
+    ///
+    /// # Errors
+    ///
+    /// Propagates storage errors.
+    pub fn read_backfill_floor(&self, stream: &str) -> Result<Option<i64>> {
+        self.storage.read_backfill_floor(stream)
+    }
+
+    /// Installs or lowers `stream`'s catch-up backfill floor (monotonic min).
+    ///
+    /// # Errors
+    ///
+    /// Propagates storage errors.
+    pub fn lower_backfill_floor(&self, stream: &str, secs: i64) -> Result<()> {
+        self.storage.lower_backfill_floor(stream, secs)
+    }
+
+    /// Clears `stream`'s catch-up backfill floor.
+    ///
+    /// # Errors
+    ///
+    /// Propagates storage errors.
+    pub fn clear_backfill_floor(&self, stream: &str) -> Result<()> {
+        self.storage.clear_backfill_floor(stream)
     }
 
     /// Prunes the `processed_gift_wraps` dedup cache. Returns the number removed.
@@ -4029,6 +4057,15 @@ mod tests {
             .encrypt_location(&tp.mls_group_id, &tp.bob_keys.public_key(), &loc, 60)
             .await
             .expect("bob encrypts");
+        // Precondition: the rewrite below only maps an Expiration tag that is
+        // already there, so without one it is a silent no-op and this test would
+        // fail somewhere far from its cause. Two independent things now supply
+        // the tag — the circle's 0x8005 component and the send-side bound — so
+        // this pins the rewrite's input rather than either supplier.
+        assert!(
+            expiration_of(&event).is_some(),
+            "the source location 445 must carry an expiration for the replay rewrite to bite"
+        );
         // Rebuild the event with its expiration forced into the past (beyond
         // the 60s grace), re-signed by a fresh throwaway key — the guard runs
         // before any signature/AAD validation, mirroring a replaying relay.
@@ -4089,6 +4126,284 @@ mod tests {
         assert!(
             results.is_empty(),
             "an expired kind-445 must be dropped before decryption"
+        );
+    }
+
+    // ── Joined circles whose creator declared a different retention ──────────
+    //
+    // The 0x8005 component is supplied at group CREATION, so a circle created by
+    // a client other than a current Haven build carries whatever ITS creator
+    // declared — including nothing at all, in which case the engine reports no
+    // retention and stamps no NIP-40 `expiration` on this device's own
+    // application 445s. Both halves of `privacyWhatOthersSeeDetailExpiry` invert
+    // at once there: the four-minute claim goes false, AND an unstamped location
+    // update reads as a membership change to any relay watching the circle's
+    // `#h`. The send-side bound (`nostr::mls::RetentionBoundPeeler`) is what
+    // keeps that off the wire; these tests drive it through the real join +
+    // publish path, in both the undeclared and the shorter-than-Haven case.
+
+    /// A circle created by a foreign party with a chosen `message-retention.v1`
+    /// policy, joined by this device.
+    ///
+    /// The creator is a bare [`SessionManager`], not a `CircleManager`: a
+    /// foreign client keeps no Haven circle rows, and everything the joiner
+    /// consumes is on the wire (the gift-wrapped 1059).
+    struct JoinedForeignCircle {
+        creator: SessionManager,
+        _creator_dir: TempDir,
+        joiner: CircleManager,
+        _joiner_dir: TempDir,
+        joiner_keys: Keys,
+        mls_group_id: GroupId,
+    }
+
+    async fn setup_joined_foreign_circle(retention_secs: Option<u64>) -> JoinedForeignCircle {
+        let relays = vec!["wss://relay.test.com".to_string()];
+
+        let creator_dir = TempDir::new().unwrap();
+        let creator_keys = Keys::generate();
+        let creator = SessionManager::new_unencrypted(creator_dir.path(), &creator_keys).unwrap();
+
+        let joiner_dir = TempDir::new().unwrap();
+        let joiner_keys = Keys::generate();
+        let joiner = CircleManager::new_unencrypted(joiner_dir.path(), &joiner_keys).unwrap();
+
+        let joiner_kp_event = make_kp_event(&joiner, &joiner_keys, &relays).await;
+        let key_package =
+            SessionManager::key_package_from_event(&joiner_kp_event).expect("parse key package");
+
+        let config = LocationGroupConfig::new("Foreign Circle")
+            .with_relays(relays.clone())
+            .with_admin(creator_keys.public_key().to_hex());
+        let creation = creator
+            .create_group_declaring_retention(vec![key_package], config, retention_secs)
+            .await
+            .expect("create a circle declaring the fixture's retention policy");
+        let mls_group_id = creation.group_id.clone();
+        let (welcomes, pending) = take_group_created(creation.effects).expect("group created");
+        creator.confirm_published(pending).await.expect("confirm");
+
+        let welcome_event =
+            SessionManager::transport_message_to_event(welcomes.first().expect("one welcome"))
+                .expect("welcome event");
+        joiner
+            .process_gift_wrapped_invitation(&joiner_keys, &welcome_event)
+            .await
+            .expect("joiner holds welcome");
+        joiner
+            .accept_invitation(&welcome_event.id)
+            .await
+            .expect("joiner accepts welcome");
+
+        JoinedForeignCircle {
+            creator,
+            _creator_dir: creator_dir,
+            joiner,
+            _joiner_dir: joiner_dir,
+            joiner_keys,
+            mls_group_id,
+        }
+    }
+
+    /// Every tag name on an event, sorted — for asserting a tag set exactly.
+    fn tag_names(event: &Event) -> Vec<String> {
+        let mut names: Vec<String> = event
+            .tags
+            .iter()
+            .filter_map(|t| t.as_slice().first().cloned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn expiration_of(event: &Event) -> Option<u64> {
+        event.tags.iter().find_map(|t| match t.as_standardized() {
+            Some(nostr::TagStandard::Expiration(ts)) => Some(ts.as_secs()),
+            _ => None,
+        })
+    }
+
+    /// The `h` routing value (the pseudonymous `nostr_group_id`, Rule 4).
+    fn h_tag_of(event: &Event) -> Option<String> {
+        event.tags.iter().find_map(|t| {
+            let parts = t.as_slice();
+            (parts.first().map(String::as_str) == Some("h"))
+                .then(|| parts.get(1).cloned())
+                .flatten()
+        })
+    }
+
+    #[tokio::test]
+    async fn a_locally_created_circle_declares_havens_retention_window_to_every_member() {
+        // The other direction of the read-back, and the reason the `None` in the
+        // joined-circle test below means something: a circle THIS device creates
+        // really does carry the 0x8005 component, and the member who joined it
+        // reads the same window back — so every member's client, not just this
+        // one, stamps location 445s at Haven's window.
+        let tp = setup_two_party_circle().await;
+        for (who, manager) in [("creator", &tp.alice), ("joiner", &tp.bob)] {
+            assert_eq!(
+                manager
+                    .session()
+                    .group_message_retention_secs(&tp.mls_group_id)
+                    .await
+                    .expect("read the group's retention policy back"),
+                Some(crate::location::ttl::LOCATION_MESSAGE_RETENTION_SECS),
+                "the {who}'s view of a Haven-created circle must declare the retention window"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn location_445_expires_even_in_a_circle_that_declares_no_retention() {
+        let joined = setup_joined_foreign_circle(None).await;
+
+        // Anti-vacuity, read from the very group state the send path consults:
+        // this circle declares NO retention window, so upstream hands the wrap
+        // boundary `None`, which means "stamp nothing". Without the send-side
+        // bound the assertion below could not pass.
+        assert_eq!(
+            joined
+                .joiner
+                .session()
+                .group_message_retention_secs(&joined.mls_group_id)
+                .await
+                .expect("read the joined group's retention policy back"),
+            None,
+            "fixture must model a circle created without the 0x8005 component"
+        );
+
+        let loc = crate::location::LocationMessage::new(51.5, -0.12);
+        let (event, _n, _r) = joined
+            .joiner
+            .encrypt_location(
+                &joined.mls_group_id,
+                &joined.joiner_keys.public_key(),
+                &loc,
+                60,
+            )
+            .await
+            .expect("encrypt");
+
+        let expiration = expiration_of(&event).expect(
+            "a location 445 published into a circle that declares no retention must STILL \
+             carry a NIP-40 expiration: without one a relay may keep the ciphertext forever, \
+             and the message reads as a membership change rather than a location update",
+        );
+        assert_eq!(
+            expiration,
+            event.created_at.as_secs() + crate::location::ttl::LOCATION_MESSAGE_RETENTION_SECS,
+            "the expiry Haven asks for is its own window, measured from the event's created_at"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shorter_group_policy_reaches_the_wire_as_declared() {
+        // The 0x8005 component is what governs every OTHER member's client, and
+        // since the send-side bound now supplies an expiration unconditionally,
+        // every tag-presence check — the wire journal's included — passes with
+        // the component gone. This is the one observation that separates the
+        // two: a window SHORTER than Haven's is honoured, so the number on the
+        // wire can only have come from the group's declaration. Drop the
+        // component from the send path and it reads 228 instead.
+        //
+        // Derived rather than literal so it stays shorter than Haven's window by
+        // construction — a literal could quietly stop being the shorter one and
+        // let the bound mask what this test exists to observe.
+        let foreign_retention_secs = crate::location::ttl::LOCATION_MESSAGE_RETENTION_SECS / 2;
+        let joined = setup_joined_foreign_circle(Some(foreign_retention_secs)).await;
+
+        assert_eq!(
+            joined
+                .joiner
+                .session()
+                .group_message_retention_secs(&joined.mls_group_id)
+                .await
+                .expect("read the joined group's retention policy back"),
+            Some(foreign_retention_secs),
+            "the joiner must read the foreign creator's declared window out of group state"
+        );
+
+        let loc = crate::location::LocationMessage::new(48.86, 2.35);
+        let (event, _n, _r) = joined
+            .joiner
+            .encrypt_location(
+                &joined.mls_group_id,
+                &joined.joiner_keys.public_key(),
+                &loc,
+                60,
+            )
+            .await
+            .expect("encrypt");
+
+        assert_eq!(
+            expiration_of(&event),
+            Some(event.created_at.as_secs() + foreign_retention_secs),
+            "a circle's own narrower window must reach the wire as declared: widening it \
+             would ask relays to hold this location longer than the circle asked, and \
+             stamping Haven's constant instead would mean the component drives nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn expiration_separates_location_from_control_and_no_other_tag_appears() {
+        // The discriminator itself, over one circle: an application message
+        // carries `h` + `expiration`, a control message carries `h` alone, and
+        // neither carries anything else. Asserted in the joined circle because
+        // that is where the application half was previously unstamped —
+        // collapsing the two classes into one.
+        let joined = setup_joined_foreign_circle(None).await;
+
+        let loc = crate::location::LocationMessage::new(1.0, 2.0);
+        let (app_event, _n, _r) = joined
+            .joiner
+            .encrypt_location(
+                &joined.mls_group_id,
+                &joined.joiner_keys.public_key(),
+                &loc,
+                60,
+            )
+            .await
+            .expect("encrypt");
+
+        // The creator is the circle's admin, so its commit is a control message
+        // over the SAME group state the application message was sealed under.
+        let effects = joined
+            .creator
+            .update_relays(
+                &joined.mls_group_id,
+                vec!["wss://relay2.test.com".to_string()],
+            )
+            .await
+            .expect("relay update");
+        let (commit_event, _welcomes, pending) =
+            take_group_evolution(effects).expect("group evolution");
+        joined
+            .creator
+            .confirm_published(pending)
+            .await
+            .expect("confirm");
+
+        assert_eq!(
+            tag_names(&app_event),
+            vec!["expiration".to_string(), "h".to_string()],
+            "an application 445 carries the routing tag and the expiry request — nothing else"
+        );
+        assert_eq!(
+            tag_names(&commit_event),
+            vec!["h".to_string()],
+            "a commit carries the routing tag alone: expiring group history would strand \
+             every late joiner"
+        );
+        assert!(
+            expiration_of(&commit_event).is_none(),
+            "a commit must never be stamped"
+        );
+        let routing = h_tag_of(&app_event).expect("application 445 carries an h tag");
+        assert_eq!(
+            Some(&routing),
+            h_tag_of(&commit_event).as_ref(),
+            "both events must route to the same circle, or they are not comparable classes"
         );
     }
 

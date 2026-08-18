@@ -87,7 +87,14 @@ void main() {
     late int releaseAt;
 
     setUp(() {
-      releaseAt = reclaimBody.indexOf('await forceReleaseLiveSession(');
+      // The destructive call is routed through `_forceReleaseLiveSession`
+      // (a thin wrapper that consults `overrideForceReleaseLiveSession` in
+      // tests, defaulting to the real FFI call), not the bare FFI name — see
+      // `background_location_task.dart`. The literal substring
+      // `forceReleaseLiveSession(` still appears (as a suffix of the wrapper
+      // name), which is what keeps the "one call site in lib/" check above
+      // honest without a separate update.
+      releaseAt = reclaimBody.indexOf('await _forceReleaseLiveSession(');
       expect(releaseAt, isNonNegative);
     });
 
@@ -153,8 +160,11 @@ void main() {
     test('the confirmation probe is spaced, not issued back-to-back', () {
       // Back-to-back probes observe one contiguous window, so a single
       // sustained stall satisfies both and the confirmation proves nothing.
+      // The delay reads `livenessProbeGap` (a field defaulting to the real
+      // `kLivenessProbeGap`, shortenable in tests — see
+      // `background_location_task.dart`), not the bare constant.
       final firstProbe = reclaimBody.indexOf('mainIsolateIsAlive(');
-      final gap = reclaimBody.indexOf('kLivenessProbeGap');
+      final gap = reclaimBody.indexOf('livenessProbeGap');
       final secondProbe = reclaimBody.indexOf(
         'mainIsolateIsAlive(',
         firstProbe + 1,
@@ -190,8 +200,22 @@ void main() {
 
     test('the guard is re-checked after probing', () {
       // The first query is seconds stale by the time the probes finish.
+      //
+      // Anchored on the literal `await _isSessionLive(` — not the bare
+      // `isSessionLive` token — because the `_isSessionLive` wrapper (the
+      // test-seam indirection over the real FFI call) sits textually between
+      // `_attemptSessionReclaim` and `_publishCycle`, inside this same
+      // `reclaimBody` slice, and donates three matches of the bare token on
+      // its own: its doc comment references `[isSessionLive]`, its own
+      // signature is `_isSessionLive(`, and its body makes a bare,
+      // non-`await`-prefixed call to `isSessionLive(`. None of those three is
+      // preceded by `await _isSessionLive(`, so counting that longer anchor
+      // — as `releaseAt` above does for `_forceReleaseLiveSession` — still
+      // finds exactly the two real call sites (the initial guard check and
+      // the post-probe re-check) and cannot be satisfied by the wrapper's own
+      // text.
       expect(
-        RegExp('isSessionLive').allMatches(reclaimBody).length,
+        'await _isSessionLive('.allMatches(reclaimBody).length,
         greaterThanOrEqualTo(2),
         reason: 'a guard released while probing means there is nothing to '
             'reclaim — open instead of tearing anything down',
@@ -218,7 +242,13 @@ void main() {
     });
 
     test('the cycle goes through _ensureSession, not straight to a reclaim', () {
-      final at = cycleBody.indexOf('_ensureSession()');
+      // Anchored on `await _ensureSession()` — not the bare `_ensureSession()`
+      // token — because `cycleBody` runs unbounded to the end of the file and
+      // so also contains `ensureSessionForTest` (the test-only seam near the
+      // bottom of the class), whose body makes a non-`await`-prefixed
+      // `return _ensureSession();` call. The bare token would find that seam
+      // just as happily as the real orchestration call.
+      final at = cycleBody.indexOf('await _ensureSession()');
       expect(at, isNonNegative);
       expect(
         cycleBody.contains('!await _attemptSessionReclaim()'),
@@ -272,8 +302,15 @@ void main() {
 
   group('the reclaim runs only where the foreground is known idle', () {
     test('it is invoked after the foreground-active gate', () {
+      // Anchored on `await _ensureSession()`, for the same reason as above:
+      // `cycleBody` is unbounded to the end of the file, and the bare token
+      // is also satisfied by `ensureSessionForTest`'s non-`await`-prefixed
+      // `return _ensureSession();` near the bottom of the class — which,
+      // being defined long after this gate, would make a DELETED real call
+      // still read as "correctly ordered after the gate" instead of
+      // "missing".
       final gateAt = cycleBody.indexOf('if (foregroundActive) {');
-      final reclaimAt = cycleBody.indexOf('_ensureSession()');
+      final reclaimAt = cycleBody.indexOf('await _ensureSession()');
       expect(gateAt, isNonNegative);
       expect(
         reclaimAt,
@@ -308,7 +345,10 @@ void main() {
       // Asserted structurally rather than as one exact statement: the previous
       // version matched a whole line verbatim, so a reformat or an equivalent
       // rewrite would have failed CI without any safety property changing.
-      final at = cycleBody.indexOf('_ensureSession()');
+      // Anchored on `await _ensureSession()` for the same reason as the two
+      // tests above — the bare token is also satisfied by the unrelated,
+      // non-`await`-prefixed call inside `ensureSessionForTest`.
+      final at = cycleBody.indexOf('await _ensureSession()');
       expect(at, isNonNegative);
       expect(
         cycleBody.substring(at, at + 60),

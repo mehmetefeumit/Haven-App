@@ -284,7 +284,10 @@
 #     driver — Result.skipped satisfies isPassing, so the on-device reporter
 #     files it under `passed` and integrationDriver() exits 0. The runtime
 #     half (matching the reason text in a drive log) lives in the lane
-#     runners; this static half is what stops a hatch being added quietly.
+#     runners; this static half is what stops a hatch being added quietly. It
+#     also rejects any static `skip:` there, because the ABSENCE of one is the
+#     premise that lets a lane read a non-zero `~N` column as a lost proof —
+#     asserted here rather than argued in prose.
 #
 #   Coverage-floors self-test         scripts/ci/check_coverage_floors.sh
 #     The guard that enforces a MINIMUM COVERAGE PER PATH, plus a ratchet that
@@ -867,17 +870,23 @@ jobs:
         run: bash tooling/e2e/ci/drive-log-lib.sh --self-test
 
       # The ENFORCING half of the same library, and the only one that can run
-      # without a device. A skipped integration test is invisible to
-      # `integrationDriver()` — it records a `markTestSkipped` body as a pass —
-      # and on the `flutter drive` lanes even the reporter's `~N` column never
-      # moves for it, so nothing downstream can notice a proof acquiring an
-      # escape route. This reconciles every markTestSkipped() under
-      # haven/integration_test/ against tooling/e2e/expected_drive_skips.txt,
-      # where each one carries the argument for why it cannot fire in the lane
-      # that drives it. Undeclared hatch, stale declaration and changed reason
-      # all fail here; the E2E lanes then fail on any declared reason that
-      # actually appears in a drive log, so neither adding one nor firing one
-      # can happen quietly.
+      # without a device. A RUNTIME skip (`markTestSkipped`) is invisible to
+      # `integrationDriver()` — it records that body as a pass — and on the
+      # `flutter drive` lanes even the reporter's `~N` column never moves for
+      # it, so nothing downstream can notice a proof acquiring an escape route.
+      # This reconciles every markTestSkipped() under haven/integration_test/
+      # against tooling/e2e/expected_drive_skips.txt, where each one carries the
+      # argument for why it cannot fire in the lane that drives it. Undeclared
+      # hatch, stale declaration and changed reason all fail here.
+      #
+      # A STATIC `skip:` is the other kind, and it moves `~N` on both reporters
+      # — which is exactly why it fails here too. No manifest row can describe
+      # one (a row states why a guard cannot fire, and a `skip:` has no guard),
+      # and its ABSENCE from the tree is the premise that entitles a lane to
+      # read any non-zero `~N` as a lost proof. That premise is asserted by this
+      # step, not assumed. The E2E lanes then fail on any declared reason that
+      # actually appears in a drive log, so neither adding a hatch nor firing
+      # one can happen quietly.
       - name: Integration-test skip hatches are declared
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/drive-log-lib.sh --check-manifest

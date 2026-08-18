@@ -43,6 +43,7 @@
 //! the cursor from ABOVE by the held event instead, which is the only direction
 //! a remote timestamp is allowed to appear in.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -83,6 +84,22 @@ impl TwoMemberCircle {
         self.alice
             .read_sync_cursor(&self.cursor_stream())
             .expect("cursor read")
+    }
+
+    /// Where Alice's catch-up chase has to resume, or `None` when no sweep has
+    /// run out of budget on this circle.
+    fn alice_floor(&self) -> Option<i64> {
+        self.alice
+            .read_backfill_floor(&self.cursor_stream())
+            .expect("floor read")
+    }
+
+    /// The peer locations Alice has actually decrypted and stored for this
+    /// circle — the only end-to-end evidence that a given event was REACHED.
+    fn alice_peer_locations(&self) -> Vec<haven_core::circle::LastKnownLocation> {
+        self.alice
+            .snapshot_last_known_for_circle(&self.nostr_group_id, chrono::Utc::now().timestamp())
+            .expect("snapshot")
     }
 }
 
@@ -245,10 +262,7 @@ async fn a_peer_location_is_applied_persisted_and_moves_the_cursor() {
     );
 
     // Persisted, and attributed to Bob rather than to whoever swept.
-    let rows = fx
-        .alice
-        .snapshot_last_known_for_circle(&fx.nostr_group_id, chrono::Utc::now().timestamp())
-        .expect("snapshot");
+    let rows = fx.alice_peer_locations();
     assert_eq!(rows.len(), 1, "exactly one peer row");
     assert_eq!(rows[0].sender_pubkey, fx.bob_keys.public_key().to_hex());
     assert!((rows[0].latitude - 52.370_216).abs() < 1e-9);
@@ -333,10 +347,7 @@ async fn an_own_echo_is_never_persisted_as_a_peer_row() {
     let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 20).await;
 
     assert_eq!(out.circles_swept, 1);
-    let rows = fx
-        .alice
-        .snapshot_last_known_for_circle(&fx.nostr_group_id, chrono::Utc::now().timestamp())
-        .expect("snapshot");
+    let rows = fx.alice_peer_locations();
     assert!(
         rows.is_empty(),
         "the sweeper's own echo must never become a last-known row"
@@ -689,14 +700,7 @@ struct ColdFirstConnect {
 
 impl ColdFirstConnect {
     async fn in_front_of(relay_url: &str) -> Self {
-        let target = relay_url
-            .trim_start_matches("ws://")
-            .trim_end_matches('/')
-            .to_string();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind the cold endpoint");
-        let url = format!("ws://{}", listener.local_addr().expect("local addr"));
+        let (url, listener, target) = proxy_endpoint(relay_url, "the cold endpoint").await;
         tokio::spawn(async move {
             if let Ok((first, _)) = listener.accept().await {
                 drop(first);
@@ -712,6 +716,347 @@ impl ColdFirstConnect {
         });
         Self { url }
     }
+}
+
+/// Binds a loopback endpoint in front of `relay_url`, returning the `ws://` URL
+/// to point a circle at, the listener to accept on, and the relay address to
+/// dial.
+///
+/// Shared by both proxy fixtures below, which differ only in what they do with
+/// the connections — not in how they stand in front of a relay.
+async fn proxy_endpoint(relay_url: &str, what: &str) -> (String, tokio::net::TcpListener, String) {
+    let target = relay_url
+        .trim_start_matches("ws://")
+        .trim_end_matches('/')
+        .to_string();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|e| panic!("bind {what}: {e}"));
+    let url = format!("ws://{}", listener.local_addr().expect("local addr"));
+    (url, listener, target)
+}
+
+/// What [`TamperedRelay`] does to the relay's side of the wire.
+#[derive(Clone, Copy)]
+enum Tamper {
+    /// Forward everything unchanged. What a one-shot tamper becomes once it has
+    /// fired.
+    Verbatim,
+    /// Forward this many of the relay's `EOSE`s, then drop the connection on the
+    /// next one instead of passing it on.
+    ///
+    /// `forward_first` picks WHICH round of a chase gets cut, and one sweep
+    /// spends one connection, so it is a per-connection count and needs no
+    /// timing. Cutting a CONFIRMING round (`CutAtEose(1)`) is the sharp case: a
+    /// confirming round is what licenses the cursor to advance, and its page is
+    /// one we have already seen — so nothing about its CONTENT distinguishes
+    /// "the relay confirmed there is nothing below" from "the relay died on the
+    /// way to saying so".
+    CutAtEose { forward_first: usize },
+    /// Send every `EVENT` twice, so the relay answers with more events than the
+    /// REQ's own `limit` permits — the NIP-01 violation the per-REQ intake cap
+    /// exists to bound (Security Rule 12).
+    DoubleEveryEvent,
+    /// Swallow every `EOSE` and leave the socket open, so the read ends on its
+    /// own fetch timeout with a page the relay never said was whole.
+    ///
+    /// The cut-off shape [`Tamper::CutAtEose`] cannot stage: there the socket
+    /// dies and the read ends on the disconnect. Here nothing breaks — the relay
+    /// simply never finishes — which is what a stalled upstream looks like.
+    SwallowEose,
+    /// Both of the above at once: more events than the REQ asked for, and no
+    /// `EOSE` ever. The read gives up on its own intake cap while the relay is
+    /// still mid-answer — the one shape where nothing else will close the REQ
+    /// until the subscription's own timeout expires.
+    FloodWithoutFinishing,
+    /// Announce an `EOSE` for a subscription nobody asked for, before the
+    /// relay's own answer.
+    ///
+    /// One pooled connection carries every REQ, so an `EOSE` for another
+    /// subscription is an ordinary sight — including a late one for a REQ this
+    /// device already gave up on.
+    EoseForAnotherSubscription,
+    /// Hold the relay's `EVENT`s back until its `EOSE` and then release them in
+    /// REVERSE, so the delivery order is the opposite of the relay's.
+    ///
+    /// Delivery order is the relay's to choose and NIP-01 fixes none, so this is
+    /// a conformant relay — one whose choice must not survive into what a caller
+    /// reads.
+    ReverseEveryPage,
+}
+
+/// A TCP endpoint in front of a running relay that forwards every WebSocket
+/// frame verbatim except where [`Tamper`] says otherwise.
+///
+/// This stages the shapes no other fixture here can, chiefly: a relay that hands
+/// over a real page and is then cut off mid-answer. The client receives every
+/// `EVENT` the relay sent — the page is byte-for-byte the page a healthy relay
+/// of the same size serves — and never receives the `EOSE` that would say the
+/// page was all of it. `a_short_page_is_only_drained_when_the_relay_said_so`
+/// runs the same relay both ways and asserts exactly that: same events,
+/// different verdict.
+///
+/// Frame-accurate rather than byte-accurate: every edit lands on a frame
+/// boundary chosen by CONTENT, so nothing here depends on how the kernel
+/// happened to segment the stream. Server→client frames are never masked
+/// (RFC 6455 §5.1), so the header is two bytes plus the extended length and
+/// needs no unmasking.
+struct TamperedRelay {
+    url: String,
+    /// NIP-01 `CLOSE`s this endpoint has seen the CLIENT send, over every
+    /// connection. Read by the test that asserts a read which gave up early
+    /// closes its own REQ.
+    closes: Arc<AtomicUsize>,
+}
+
+impl TamperedRelay {
+    async fn in_front_of(relay_url: &str, tamper: Tamper) -> Self {
+        let (url, listener, target) = proxy_endpoint(relay_url, "the tampering endpoint").await;
+        let closes = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&closes);
+        tokio::spawn(async move {
+            while let Ok((inbound, _)) = listener.accept().await {
+                let Ok(outbound) = tokio::net::TcpStream::connect(&target).await else {
+                    continue;
+                };
+                tokio::spawn(pipe_tampered(
+                    inbound,
+                    outbound,
+                    tamper,
+                    Arc::clone(&counter),
+                ));
+            }
+        });
+        Self { url, closes }
+    }
+
+    /// Blocks until the client has sent at least `n` `CLOSE`s, or fails.
+    ///
+    /// The bound is well under the SDK's own 10-second subscription timeout, so
+    /// a `CLOSE` seen inside it cannot be the auto-closing handler's: it is the
+    /// read's own.
+    async fn await_closes(&self, n: usize) -> usize {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while self.closes.load(Ordering::Relaxed) < n && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        self.closes.load(Ordering::Relaxed)
+    }
+}
+
+/// Pipes one client connection to `relay`, applying `tamper` to the relay's
+/// frames on the way back and counting the client's `CLOSE`s on the way out.
+async fn pipe_tampered(
+    client: tokio::net::TcpStream,
+    relay: tokio::net::TcpStream,
+    mut tamper: Tamper,
+    closes: Arc<AtomicUsize>,
+) {
+    use tokio::io::AsyncWriteExt;
+
+    let (from_client, mut to_client) = client.into_split();
+    let (mut from_relay, to_relay) = relay.into_split();
+    tokio::spawn(count_client_closes(from_client, to_relay, closes));
+
+    // The HTTP 101 upgrade is not framed, so it is forwarded verbatim; framing
+    // starts immediately after the blank line that ends it.
+    if forward_http_head(&mut from_relay, &mut to_client)
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let mut held: Vec<Vec<u8>> = Vec::new();
+    while let Ok((frame, payload_at)) = read_server_frame(&mut from_relay).await {
+        let payload = &frame[payload_at..];
+        match &mut tamper {
+            Tamper::CutAtEose { forward_first } if payload.starts_with(br#"["EOSE""#) => {
+                let Some(remaining) = forward_first.checked_sub(1) else {
+                    return;
+                };
+                *forward_first = remaining;
+            }
+            Tamper::DoubleEveryEvent | Tamper::FloodWithoutFinishing
+                if payload.starts_with(br#"["EVENT""#) =>
+            {
+                if to_client.write_all(&frame).await.is_err() {
+                    return;
+                }
+            }
+            Tamper::SwallowEose | Tamper::FloodWithoutFinishing
+                if payload.starts_with(br#"["EOSE""#) =>
+            {
+                continue
+            }
+            Tamper::EoseForAnotherSubscription => {
+                tamper = Tamper::Verbatim;
+                if to_client
+                    .write_all(&text_frame(br#"["EOSE","a-subscription-we-never-opened"]"#))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Tamper::ReverseEveryPage if payload.starts_with(br#"["EVENT""#) => {
+                held.push(frame);
+                continue;
+            }
+            Tamper::ReverseEveryPage if payload.starts_with(br#"["EOSE""#) => {
+                for buffered in std::mem::take(&mut held).into_iter().rev() {
+                    if to_client.write_all(&buffered).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            _ => {}
+        }
+        if to_client.write_all(&frame).await.is_err() {
+            return;
+        }
+    }
+}
+
+/// Forwards the client's frames verbatim, tallying every NIP-01 `CLOSE`.
+///
+/// Client→server frames ARE masked (RFC 6455 §5.1), so the payload is unmasked
+/// into a scratch copy to be read and the ORIGINAL bytes are what gets
+/// forwarded.
+async fn count_client_closes(
+    mut from_client: tokio::net::tcp::OwnedReadHalf,
+    mut to_relay: tokio::net::tcp::OwnedWriteHalf,
+    closes: Arc<AtomicUsize>,
+) {
+    use tokio::io::AsyncWriteExt;
+
+    // The client opens with an HTTP upgrade REQUEST, which is not framed either.
+    if forward_http_head(&mut from_client, &mut to_relay)
+        .await
+        .is_err()
+    {
+        return;
+    }
+    while let Ok((frame, payload_at, mask)) = read_client_frame(&mut from_client).await {
+        let payload: Vec<u8> = frame[payload_at..]
+            .iter()
+            .enumerate()
+            .map(|(i, byte)| byte ^ mask[i % 4])
+            .collect();
+        if payload.starts_with(br#"["CLOSE""#) {
+            closes.fetch_add(1, Ordering::Relaxed);
+        }
+        if to_relay.write_all(&frame).await.is_err() {
+            return;
+        }
+    }
+}
+
+/// One unmasked text frame carrying `payload`.
+fn text_frame(payload: &[u8]) -> Vec<u8> {
+    assert!(
+        payload.len() < 126,
+        "a longer payload needs an extended length header this helper does not \
+         write, and a silently malformed frame would prove nothing"
+    );
+    let mut frame = vec![0x81, u8::try_from(payload.len()).expect("payload fits")];
+    frame.extend_from_slice(payload);
+    frame
+}
+
+/// Copies one side's HTTP upgrade head through, up to and including the blank
+/// line that terminates its headers.
+///
+/// Read a byte at a time so the copy stops EXACTLY on the header terminator and
+/// the first WebSocket frame stays unread for the framing loop; written in one
+/// go, so the peer's handshake sees the head as it was sent rather than as 130
+/// one-byte arrivals.
+async fn forward_http_head(
+    from: &mut tokio::net::tcp::OwnedReadHalf,
+    to: &mut tokio::net::tcp::OwnedWriteHalf,
+) -> std::io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut head: Vec<u8> = Vec::new();
+    loop {
+        let mut byte = [0u8; 1];
+        from.read_exact(&mut byte).await?;
+        head.push(byte[0]);
+        if head.ends_with(b"\r\n\r\n") {
+            return to.write_all(&head).await;
+        }
+    }
+}
+
+/// Reads ONE masked client→server WebSocket frame, returning its bytes
+/// verbatim, the offset at which its payload begins, and the masking key needed
+/// to read that payload.
+async fn read_client_frame(
+    from_client: &mut tokio::net::tcp::OwnedReadHalf,
+) -> std::io::Result<(Vec<u8>, usize, [u8; 4])> {
+    use tokio::io::AsyncReadExt;
+
+    let (mut frame, len) = read_frame_head(from_client).await?;
+    assert_eq!(
+        frame[1] & 0x80,
+        0x80,
+        "a client→server frame must be masked, or this proxy is misreading the \
+         stream and every assertion behind it is meaningless"
+    );
+    let mut mask = [0u8; 4];
+    from_client.read_exact(&mut mask).await?;
+    frame.extend_from_slice(&mask);
+    let payload_at = frame.len();
+    frame.resize(payload_at + len, 0);
+    from_client.read_exact(&mut frame[payload_at..]).await?;
+    Ok((frame, payload_at, mask))
+}
+
+/// Reads ONE unmasked WebSocket frame, returning its bytes verbatim and the
+/// offset at which its payload begins.
+async fn read_server_frame(
+    from_relay: &mut tokio::net::tcp::OwnedReadHalf,
+) -> std::io::Result<(Vec<u8>, usize)> {
+    use tokio::io::AsyncReadExt;
+
+    let (mut frame, len) = read_frame_head(from_relay).await?;
+    assert_eq!(
+        frame[1] & 0x80,
+        0,
+        "a server→client frame must not be masked, or this proxy is misreading \
+         the stream and every assertion behind it is meaningless"
+    );
+    let payload_at = frame.len();
+    frame.resize(payload_at + len, 0);
+    from_relay.read_exact(&mut frame[payload_at..]).await?;
+    Ok((frame, payload_at))
+}
+
+/// Reads a frame's two-byte header plus any extended length, returning the
+/// bytes read verbatim and the payload length they announce.
+async fn read_frame_head(
+    from: &mut tokio::net::tcp::OwnedReadHalf,
+) -> std::io::Result<(Vec<u8>, usize)> {
+    use tokio::io::AsyncReadExt;
+
+    let mut head = [0u8; 2];
+    from.read_exact(&mut head).await?;
+    let mut frame = head.to_vec();
+    let len = match head[1] & 0x7F {
+        126 => {
+            let mut ext = [0u8; 2];
+            from.read_exact(&mut ext).await?;
+            frame.extend_from_slice(&ext);
+            usize::from(u16::from_be_bytes(ext))
+        }
+        127 => {
+            let mut ext = [0u8; 8];
+            from.read_exact(&mut ext).await?;
+            frame.extend_from_slice(&ext);
+            usize::try_from(u64::from_be_bytes(ext)).expect("frame length fits")
+        }
+        short => usize::from(short),
+    };
+    Ok((frame, len))
 }
 
 /// `count` `kind:445`s addressed to `h`, dated one second apart ending at
@@ -739,6 +1084,17 @@ fn unparseable_window(h: &str, count: usize, newest_secs: i64) -> Vec<Event> {
                 .sign_with_keys(&signer)
                 .unwrap()
         })
+        .collect()
+}
+
+/// `layers` copies of the same `span`-second window, so a band can be filled
+/// deeper than one event per second without spanning more wall-clock time.
+///
+/// Each layer is signed by its own throwaway key, so the ids differ and the
+/// relay stores every one of them.
+fn stacked_window(h: &str, span: usize, layers: usize, newest_secs: i64) -> Vec<Event> {
+    (0..layers)
+        .flat_map(|_| unparseable_window(h, span, newest_secs))
         .collect()
 }
 
@@ -1157,69 +1513,57 @@ async fn a_relay_that_caps_below_our_page_size_still_gets_fully_drained() {
     );
 }
 
-/// A fetch the SDK's own timeout cut off must not be read as "the relay had
+/// A delivery the fetch timeout cut off must not be read as "the relay had
 /// nothing more".
 ///
-/// `RelayPool::fetch_events_from` collects a merged stream and returns
-/// `Ok(collected)` however that stream ended — its per-relay errors are logged
-/// and dropped inside the driver task, and the whole subscription is wrapped in
-/// the fetch timeout. So a relay that accepts the REQ and then goes quiet
-/// produces a page byte-for-byte identical to a complete short answer, and the
-/// window it belongs to reads as complete: the cursor advances over a backlog
-/// the relay is still visibly holding, and the next sweep's floor sits above it
-/// for good.
+/// A relay that hands over part of a page and then goes quiet is reachable, and
+/// what arrives is a page — a shorter one, byte-for-byte indistinguishable from
+/// a complete short answer. Read as an ANSWER, it licenses the advance and the
+/// cursor sails over the rest of what that relay is still visibly holding, with
+/// the next sweep's floor sitting above it for good.
 ///
-/// A query policy that holds every REQ past the fetch timeout stages exactly
-/// that. It costs this test that timeout in wall-clock, which is the price of
-/// driving the real primitive rather than asserting against a mock of it — and
-/// it is what keeps the sweep's cut-off threshold honest now that the threshold
-/// IS the primitive's timeout rather than a copy of it: grow that timeout past
-/// what this policy stalls for and the relay answers in full, which fails the
-/// first precondition below rather than quietly weakening the rule.
+/// It is not an answer, because the relay never said it had finished: only its
+/// NIP-01 `EOSE` says that, and this one never sends one. A SECOND, healthy
+/// relay answers the same window in full, so "at least one relay finished" is
+/// satisfied and cannot be what holds the window — the hold is attributable to
+/// the cut-off delivery and to nothing else.
+///
+/// An endpoint that forwards every `EVENT` and swallows the `EOSE` stages
+/// exactly that, over a socket that never breaks. It costs this test the fetch
+/// timeout in wall-clock, which is the price of driving the real primitive
+/// rather than asserting against a mock of it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_fetch_cut_off_by_its_own_timeout_is_not_read_as_a_complete_window() {
-    /// Accepts every REQ but answers no sooner than `hold` — longer than the
-    /// fetch timeout, so the fetch is cut off mid-subscription with whatever it
-    /// has (here: nothing).
-    #[derive(Debug)]
-    struct StallEveryQuery {
-        hold: Duration,
-    }
-
-    impl QueryPolicy for StallEveryQuery {
-        fn admit_query<'a>(
-            &'a self,
-            _query: &'a nostr::Filter,
-            _addr: &'a std::net::SocketAddr,
-        ) -> BoxedFuture<'a, PolicyResult> {
-            Box::pin(async move {
-                tokio::time::sleep(self.hold).await;
-                PolicyResult::Accept
-            })
-        }
-    }
-
-    let relay = SeededRelay::from_builder(RelayBuilder::default().query_policy(StallEveryQuery {
-        hold: Duration::from_secs(30),
-    }))
-    .await;
+    let honest = SeededRelay::run().await;
+    let backing = SeededRelay::run().await;
+    let stalled = TamperedRelay::in_front_of(&backing.url, Tamper::SwallowEose).await;
     let relay_mgr = RelayManager::new();
-    let fx = build_two_member_circle(vec![relay.url.clone()]).await;
+    let fx = build_two_member_circle(vec![honest.url.clone(), stalled.url.clone()]).await;
+    let h = hex::encode(fx.nostr_group_id);
 
-    let backlog = 7;
-    let window = unparseable_window(
-        &hex::encode(fx.nostr_group_id),
-        backlog,
-        chrono::Utc::now().timestamp() - 60,
-    );
-    relay.seed(&window).await;
+    // Disjoint stores at the SAME timestamps: read in full, this window is
+    // complete, which is what makes the hold below the cut-off's doing.
+    let each = 3;
+    let newest_secs = chrono::Utc::now().timestamp() - 60;
+    honest
+        .seed(&unparseable_window(&h, each, newest_secs))
+        .await;
+    backing
+        .seed(&unparseable_window(&h, each, newest_secs))
+        .await;
 
     let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
 
     assert_eq!(
-        out.events_rejected_pre_auth, 0,
-        "precondition: the stalled fetch must really have delivered nothing, or \
-         this asserts nothing about a cut-off read"
+        out.events_rejected_pre_auth,
+        each * 2,
+        "precondition: BOTH relays handed over their whole store, so this is a \
+         cut-off DELIVERY and not a relay that answered nothing"
+    );
+    assert!(
+        out.relay_errors >= 1,
+        "a relay that never finished answering is a failed read, tallied like \
+         one — being reachable is not the same as having answered"
     );
     assert_eq!(
         out.windows_truncated, 1,
@@ -1230,8 +1574,508 @@ async fn a_fetch_cut_off_by_its_own_timeout_is_not_read_as_a_complete_window() {
     assert_eq!(
         fx.alice_cursor(),
         None,
-        "and the cursor must not move: the {backlog} events this relay is still \
-         holding are reachable only while `since` stays below them"
+        "and the cursor must not move: whatever that relay had not sent when the \
+         timeout expired is reachable only while `since` stays below it"
+    );
+}
+
+/// THE INVARIANT, at the primitive: a page is `drained` only when the relay
+/// itself said it had served everything it stores for that REQ.
+///
+/// One relay, one store, one filter, reached two ways — straight, and through an
+/// endpoint that ends the connection on the relay's `EOSE` frame instead of
+/// forwarding it. Every `EVENT` is delivered identically in both runs, so the
+/// two pages are the same page; the ONLY difference on the wire is whether the
+/// relay's "that was all of it" arrived. Anything that reads a page's CONTENT to
+/// decide whether the relay is drained cannot tell these two apart, which is
+/// exactly why the flag has to come from somewhere else.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_short_page_is_only_drained_when_the_relay_said_so() {
+    let relay = SeededRelay::run().await;
+    let cut = TamperedRelay::in_front_of(&relay.url, Tamper::CutAtEose { forward_first: 0 }).await;
+    let h = hex::encode([0x7Au8; 32]);
+    let window = unparseable_window(&h, 4, chrono::Utc::now().timestamp() - 60);
+    relay.seed(&window).await;
+
+    let filter = nostr::Filter::new()
+        .kind(Kind::Custom(445))
+        .custom_tag(nostr::SingleLetterTag::lowercase(nostr::Alphabet::H), h)
+        .limit(500);
+    let relay_mgr = RelayManager::new();
+
+    let straight = relay_mgr
+        .fetch_events_per_relay(filter.clone(), std::slice::from_ref(&relay.url))
+        .await
+        .expect("the per-relay fetch never fails as a whole");
+    let severed = relay_mgr
+        .fetch_events_per_relay(filter, std::slice::from_ref(&cut.url))
+        .await
+        .expect("the per-relay fetch never fails as a whole");
+
+    let ids = |outcomes: &[haven_core::relay::RelayFetchOutcome]| {
+        let mut ids: Vec<_> = outcomes
+            .iter()
+            .flat_map(|o| o.events.iter().map(|e| e.id))
+            .collect();
+        ids.sort_unstable();
+        ids
+    };
+    let mut expected: Vec<_> = window.iter().map(|e| e.id).collect();
+    expected.sort_unstable();
+    assert_eq!(
+        ids(&straight),
+        expected,
+        "precondition: the relay really does serve the whole window"
+    );
+    assert_eq!(
+        ids(&severed),
+        expected,
+        "precondition: cutting at the EOSE must not cost a single EVENT — if it \
+         did, the two pages would differ in CONTENT and the assertion below \
+         would be provable the easy way"
+    );
+
+    assert!(
+        straight[0].responded && severed[0].responded,
+        "both reachable"
+    );
+    assert!(
+        straight[0].drained,
+        "the relay signalled end-of-stored-events, which is the only thing that \
+         makes a page the whole of what a relay holds"
+    );
+    assert!(
+        !severed[0].drained,
+        "and it did not reach us here, so this identical page is a PREFIX of an \
+         unknown whole — the tail of which a cursor advance would step over \
+         permanently"
+    );
+}
+
+/// A relay that sends MORE than the REQ asked for is throttled at the REQ's own
+/// limit, and the throttled page is not mistaken for a finished one
+/// (Security Rule 12).
+///
+/// Reading a relay's own message stream is a place an unbounded intake could
+/// appear: NIP-01 says a relay must respect `limit`, and nothing but the client
+/// makes it. An endpoint that sends every `EVENT` twice stages a relay that does
+/// not, and the read must stop at the limit rather than growing with whatever a
+/// relay feels like sending to a device on a background wake.
+///
+/// Stopping is throttling and NOT a drop: the read ends short of the relay's
+/// `EOSE`, so the page is reported unfinished, the cursor holds, and the next
+/// sweep asks for the same window again. Rule 12's other half — never silently
+/// discard legitimate backlog — is what that buys.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_relay_that_overruns_the_req_limit_is_capped_and_not_called_finished() {
+    let relay = SeededRelay::run().await;
+    let doubled = TamperedRelay::in_front_of(&relay.url, Tamper::DoubleEveryEvent).await;
+    let h = hex::encode([0x6Cu8; 32]);
+    relay
+        .seed(&unparseable_window(
+            &h,
+            6,
+            chrono::Utc::now().timestamp() - 60,
+        ))
+        .await;
+
+    let asked_for = 4;
+    let filter = nostr::Filter::new()
+        .kind(Kind::Custom(445))
+        .custom_tag(nostr::SingleLetterTag::lowercase(nostr::Alphabet::H), h)
+        .limit(asked_for);
+    let relay_mgr = RelayManager::new();
+    let overrun = relay_mgr
+        .fetch_events_per_relay(filter.clone(), std::slice::from_ref(&doubled.url))
+        .await
+        .expect("the per-relay fetch never fails as a whole")
+        .remove(0);
+
+    // The cap counts ARRIVALS, not events kept, and this relay sends each event
+    // twice — so the exact boundary is half the limit, reached on the arrival
+    // that would have been the (limit + 1)th. Asserting the boundary and not
+    // merely "fewer than we asked for" is what makes an off-by-one in the cap
+    // visible: one extra admitted arrival is one more event here.
+    assert_eq!(
+        overrun.events.len(),
+        asked_for / 2,
+        "the read must stop on the arrival that spends the REQ's own limit, \
+         however much the relay keeps sending"
+    );
+    assert!(
+        !overrun.drained,
+        "and a page cut short by our own cap is not the relay's whole answer — \
+         calling it one would advance a cursor over the part we refused to take"
+    );
+
+    // The control: the same relay behaving, so the assertions above are about
+    // the overrun and not about the cap firing on every read.
+    let behaving = relay_mgr
+        .fetch_events_per_relay(filter, std::slice::from_ref(&relay.url))
+        .await
+        .expect("the per-relay fetch never fails as a whole")
+        .remove(0);
+    assert_eq!(behaving.events.len(), asked_for);
+    assert!(behaving.drained);
+}
+
+/// An `EOSE` for SOMEBODY ELSE'S subscription does not end this read.
+///
+/// One pooled connection carries every REQ this device issues, and its
+/// notification stream carries every relay message on it — including the `EOSE`
+/// for a REQ that ended early and whose auto-close handler is still running, so
+/// this needs no attacker and no exotic relay. Read as our own, it ends the read
+/// wherever it lands: the page comes back short and, worse, comes back DRAINED
+/// — the one flag that licenses a cursor to advance over whatever had not
+/// arrived yet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_eose_for_another_subscription_does_not_finish_this_read() {
+    let relay = SeededRelay::run().await;
+    let confusing =
+        TamperedRelay::in_front_of(&relay.url, Tamper::EoseForAnotherSubscription).await;
+    let h = hex::encode([0x4Eu8; 32]);
+    let window = unparseable_window(&h, 4, chrono::Utc::now().timestamp() - 60);
+    relay.seed(&window).await;
+
+    let filter = nostr::Filter::new()
+        .kind(Kind::Custom(445))
+        .custom_tag(nostr::SingleLetterTag::lowercase(nostr::Alphabet::H), h)
+        .limit(500);
+    let outcome = RelayManager::new()
+        .fetch_events_per_relay(filter, std::slice::from_ref(&confusing.url))
+        .await
+        .expect("the per-relay fetch never fails as a whole")
+        .remove(0);
+
+    assert_eq!(
+        outcome.events.len(),
+        window.len(),
+        "the read must keep going: the whole page arrived AFTER the stray \
+         end-of-stored-events, so a read that stopped at it would have thrown \
+         away every event this relay served"
+    );
+    assert!(
+        outcome.drained,
+        "and the relay's OWN end-of-stored-events is what finishes it, which \
+         arrived last"
+    );
+}
+
+/// A page comes back in an order this device chose, whatever order the relay
+/// served it in.
+///
+/// NIP-01 fixes no delivery order, so arrival order is the relay's to pick — and
+/// a caller that resolves an ambiguity positionally (the `KeyPackage` probe
+/// takes the FIRST entry for a `d` slot) would then be letting the relay pick
+/// which of two events a maintenance decision reads. One relay, one store, two
+/// deliveries: straight, and through an endpoint that releases the same page
+/// backwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_page_is_ordered_by_this_device_and_not_by_the_relay() {
+    let relay = SeededRelay::run().await;
+    let backwards = TamperedRelay::in_front_of(&relay.url, Tamper::ReverseEveryPage).await;
+    let h = hex::encode([0x5Du8; 32]);
+    relay
+        .seed(&unparseable_window(
+            &h,
+            5,
+            chrono::Utc::now().timestamp() - 60,
+        ))
+        .await;
+
+    let filter = nostr::Filter::new()
+        .kind(Kind::Custom(445))
+        .custom_tag(nostr::SingleLetterTag::lowercase(nostr::Alphabet::H), h)
+        .limit(500);
+    let relay_mgr = RelayManager::new();
+    let straight = relay_mgr
+        .fetch_events_per_relay(filter.clone(), std::slice::from_ref(&relay.url))
+        .await
+        .expect("the per-relay fetch never fails as a whole")
+        .remove(0);
+    let reversed = relay_mgr
+        .fetch_events_per_relay(filter, std::slice::from_ref(&backwards.url))
+        .await
+        .expect("the per-relay fetch never fails as a whole")
+        .remove(0);
+
+    let order = |o: &haven_core::relay::RelayFetchOutcome| {
+        o.events
+            .iter()
+            .map(|e| (e.created_at.as_secs(), e.id))
+            .collect::<Vec<_>>()
+    };
+    let mut newest_first = order(&straight);
+    assert!(
+        newest_first.len() > 1,
+        "precondition: a one-event page has no order to get wrong"
+    );
+    newest_first.sort_by(|a, b| b.cmp(a));
+    assert_eq!(
+        order(&straight),
+        newest_first,
+        "a page is handed back newest first, by created_at and then by id"
+    );
+    assert_eq!(
+        order(&reversed),
+        newest_first,
+        "...and the relay reversing its delivery changes nothing, because the \
+         order is not the relay's to choose"
+    );
+}
+
+/// A read that gives up before the relay finishes CLOSES its own REQ.
+///
+/// The auto-closing subscription's handler is a separate task with its own
+/// receiver: it learns nothing from this read stopping, and closes only when its
+/// own 10-second timeout expires. Until then the relay keeps streaming a REQ
+/// nobody is reading into a bounded broadcast channel the NEXT page's read
+/// shares — which is how that read gets pushed into `Lagged`, reported
+/// unfinished, and made to hold the very cursor it was fetching for. Paid in
+/// battery and data on a background wake, and self-inflicted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_read_that_gives_up_early_closes_its_own_req() {
+    let relay = SeededRelay::run().await;
+    let doubled = TamperedRelay::in_front_of(&relay.url, Tamper::FloodWithoutFinishing).await;
+    let h = hex::encode([0x3Fu8; 32]);
+    relay
+        .seed(&unparseable_window(
+            &h,
+            6,
+            chrono::Utc::now().timestamp() - 60,
+        ))
+        .await;
+
+    let filter = nostr::Filter::new()
+        .kind(Kind::Custom(445))
+        .custom_tag(nostr::SingleLetterTag::lowercase(nostr::Alphabet::H), h)
+        .limit(4);
+    // Bound to a variable on purpose: dropping the manager tears the pool down,
+    // and a `CLOSE` still queued on the writer would go with it.
+    let relay_mgr = RelayManager::new();
+    let capped = relay_mgr
+        .fetch_events_per_relay(filter, std::slice::from_ref(&doubled.url))
+        .await
+        .expect("the per-relay fetch never fails as a whole")
+        .remove(0);
+    assert!(
+        !capped.drained,
+        "precondition: this read really did give up before the relay finished"
+    );
+
+    assert!(
+        doubled.await_closes(1).await >= 1,
+        "a REQ this device stopped reading must be closed by this device: \
+         nothing else will until the subscription's own timeout, and the relay \
+         streams into a channel nobody is draining for as long as it is open"
+    );
+}
+
+/// The same cut, driven through the real sweep, on the round that DECIDES: a
+/// confirming page nobody said was finished must hold the circle's cursor, where
+/// the identical page WITH its `EOSE` advances it.
+///
+/// This is the loss the flag exists to prevent, stated end to end, and the
+/// confirming round is where it bites hardest. A chase ends when a round brings
+/// back nothing new — so the page that licenses the advance is, by construction,
+/// a page of events we ALREADY HOLD, and a relay that died on the way to saying
+/// "there is nothing below this" serves a byte-identical one. Every other guard
+/// in the sweep is looking at content and sees no difference. It needs no
+/// attacker either: a dropped radio, a relay restart, an overloaded upstream.
+///
+/// Both circles run against the SAME relay process holding the SAME events, and
+/// the cut lands on the SAME round of the SAME chase, so the only variable left
+/// is whether that round's `EOSE` arrived.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_confirming_page_cut_off_before_the_relay_finished_holds_the_cursor() {
+    let relay = SeededRelay::run().await;
+    // Round 1 (the page) is confirmed; round 2 (the confirmation) is cut.
+    let cut = TamperedRelay::in_front_of(&relay.url, Tamper::CutAtEose { forward_first: 1 }).await;
+    let relay_mgr = RelayManager::new();
+
+    let severed_fx = build_two_member_circle(vec![cut.url.clone()]).await;
+    let whole_fx = build_two_member_circle(vec![relay.url.clone()]).await;
+    let backlog = 4;
+    let newest = chrono::Utc::now().timestamp() - 60;
+    for ngid in [severed_fx.nostr_group_id, whole_fx.nostr_group_id] {
+        relay
+            .seed(&unparseable_window(&hex::encode(ngid), backlog, newest))
+            .await;
+    }
+
+    let severed = run_catchup_all_circles(
+        &severed_fx.alice,
+        &relay_mgr,
+        &severed_fx.alice_keys.public_key(),
+        60,
+    )
+    .await;
+    assert_eq!(
+        severed.events_rejected_pre_auth, backlog,
+        "precondition: the whole window really was retrieved, so the cut landed \
+         on the CONFIRMING round and the sweep held for that reason alone"
+    );
+    assert_eq!(
+        severed.windows_truncated, 1,
+        "the round that would have completed this window never finished, so the \
+         sweep must report that it could not establish it drained the circle"
+    );
+    assert_eq!(
+        severed_fx.alice_cursor(),
+        None,
+        "and the cursor must hold: whatever the relay had not sent when the \
+         connection died is reachable only while `since` stays below it"
+    );
+
+    // The control, without which the assertions above would pass just as well
+    // for an implementation that never advances anything.
+    let opened_at = chrono::Utc::now().timestamp();
+    let whole = run_catchup_all_circles(
+        &whole_fx.alice,
+        &relay_mgr,
+        &whole_fx.alice_keys.public_key(),
+        60,
+    )
+    .await;
+    let closed_at = chrono::Utc::now().timestamp();
+    assert_eq!(
+        whole.events_rejected_pre_auth, backlog,
+        "the same window, over an uncut connection"
+    );
+    assert_eq!(whole.windows_truncated, 0);
+    let advanced = whole_fx.alice_cursor().expect("the whole window advances");
+    assert!(
+        (opened_at * 1000..=closed_at * 1000).contains(&advanced),
+        "and it advances to the window's own open time, not to any event: got \
+         {advanced} ms outside [{opened_at}, {closed_at}] s",
+    );
+}
+
+/// A relay that DID finish answering cannot vouch for one that did not.
+///
+/// The gap between the sweep's two rules, which this is the only test to sit in.
+/// A healthy relay finishes every round here, so "at least one relay answered"
+/// is satisfied and cannot be what holds the window; only the OTHER relay's
+/// unfinished confirming page can. A circle's relay list is user-editable and
+/// most circles carry several, so "one good relay makes the round good" would
+/// let a single flaky entry silently cost the circle whatever only it held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_relay_that_finished_cannot_vouch_for_one_that_was_cut_off() {
+    let honest = SeededRelay::run().await;
+    let flaky = SeededRelay::run().await;
+    let cut = TamperedRelay::in_front_of(&flaky.url, Tamper::CutAtEose { forward_first: 1 }).await;
+    let relay_mgr = RelayManager::new();
+    let fx = build_two_member_circle(vec![honest.url.clone(), cut.url.clone()]).await;
+    let h = hex::encode(fx.nostr_group_id);
+
+    // Disjoint stores at the SAME timestamps, so both relays bottom out at the
+    // same second and the chase's confirming round asks both of them the same
+    // question. Read in full, that round completes the window; that is what
+    // makes the hold below attributable to the cut and to nothing else.
+    let newest = chrono::Utc::now().timestamp() - 60;
+    let each = 3;
+    honest.seed(&unparseable_window(&h, each, newest)).await;
+    flaky.seed(&unparseable_window(&h, each, newest)).await;
+
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+
+    assert_eq!(
+        out.events_rejected_pre_auth,
+        each * 2,
+        "precondition: BOTH relays handed over their whole store, so the window \
+         is held on the strength of one missing end-of-stored-events alone"
+    );
+    assert_eq!(out.windows_truncated, 1);
+    assert_eq!(
+        fx.alice_cursor(),
+        None,
+        "one relay finishing says nothing about what the other still had to send"
+    );
+}
+
+/// A relay whose delivery is cut off on EVERY sweep holds the cursor for the
+/// sweep it happened in — and must not hold it for ever.
+///
+/// The freeze needs neither an adversary nor an exotic relay: a page that never
+/// reaches its `EOSE` is what this device's own intake cap produces against a
+/// relay that overruns a REQ's `limit`, what a relay behind a lossy link
+/// produces, and what one entry in a user-editable relay list produces by
+/// omitting six bytes. The evidence then repeats on the next sweep, and the one
+/// after: the cursor never moves, the window only grows, and the circle is out
+/// of service permanently — strictly worse than the residual the hold was
+/// protecting, and free to cause.
+///
+/// So the hold is a delay: after enough consecutive sweeps held on nothing but
+/// that evidence, the offending relay is treated as UNREACHED, which is the
+/// treatment a relay that answered nothing at all already gets. Both halves are
+/// asserted here, because either alone is satisfied by a broken implementation
+/// — one by a sweep that never holds, the other by a sweep that never advances.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_relay_cut_off_on_every_sweep_holds_the_cursor_but_not_for_ever() {
+    let honest = SeededRelay::run().await;
+    let backing = SeededRelay::run().await;
+    // Sends every EVENT twice, so it answers with more than the REQ's own limit
+    // and trips THIS device's intake cap. The read then stops short of the
+    // relay's `EOSE` — a cut-off delivery with no adversary, no dropped socket,
+    // and nothing that varies between sweeps.
+    let broken = TamperedRelay::in_front_of(&backing.url, Tamper::DoubleEveryEvent).await;
+    let relay_mgr = RelayManager::new();
+    let fx = build_two_member_circle(vec![honest.url.clone(), broken.url.clone()]).await;
+    let h = hex::encode(fx.nostr_group_id);
+
+    // Dated inside the resubscribe buffer, so an advanced cursor still asks for
+    // them: the cut-off recurs on every sweep instead of ageing out of the
+    // window, which is what makes "not for ever" a property of the rule rather
+    // than of the calendar. Deep enough that DOUBLING the page overruns a
+    // 500-event REQ; if that page limit ever grows, the first assertion below
+    // fails loudly rather than quietly staging nothing.
+    let newest = chrono::Utc::now().timestamp() - 5;
+    honest.seed(&unparseable_window(&h, 3, newest)).await;
+    backing.seed(&stacked_window(&h, 5, 51, newest)).await;
+
+    // The wake budget a background catch-up actually gets: a tolerance that only
+    // works when a sweep may run for a minute would not work at all, because one
+    // relay that never answers costs a fetch timeout per round.
+    let mut advanced_on: Option<usize> = None;
+    let mut still_unfinished = false;
+    for sweep in 1..=6 {
+        let out =
+            run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 25).await;
+        if sweep == 1 {
+            assert_eq!(
+                fx.alice_cursor(),
+                None,
+                "a page nobody said was finished is a prefix of an unknown \
+                 whole, so the sweep it arrived in must hold: whatever that \
+                 relay had not sent is reachable only while `since` stays below \
+                 it"
+            );
+        }
+        if advanced_on.is_none() && fx.alice_cursor().is_some() {
+            advanced_on = Some(sweep);
+            // The relay is still being cut off on the sweep that advanced, so
+            // the advance is the tolerance running out and not the relay
+            // quietly healing.
+            still_unfinished = out.relay_errors >= 1;
+        }
+    }
+
+    let advanced_on = advanced_on.unwrap_or_else(|| {
+        panic!(
+            "six sweeps and the cursor never moved: one relay that omits its \
+             end-of-stored-events has frozen this circle, and every later sweep \
+             will re-fetch a window that only grows"
+        )
+    });
+    assert!(
+        advanced_on > 1,
+        "...but not on the first sweep either, or the hold is not real"
+    );
+    assert!(
+        still_unfinished,
+        "precondition: that relay had still not finished a read when the sweep \
+         advanced, so the advance is the bounded tolerance and not the fixture \
+         healing itself"
     );
 }
 
@@ -1717,10 +2561,7 @@ async fn a_genuine_location_in_a_later_page_is_still_applied_and_persisted() {
          nothing"
     );
 
-    let rows = fx
-        .alice
-        .snapshot_last_known_for_circle(&fx.nostr_group_id, chrono::Utc::now().timestamp())
-        .expect("snapshot");
+    let rows = fx.alice_peer_locations();
     assert_eq!(rows.len(), 1, "exactly one peer row");
     assert_eq!(rows[0].sender_pubkey, fx.bob_keys.public_key().to_hex());
     assert!((rows[0].latitude - 48.858_37).abs() < 1e-9);
@@ -1731,5 +2572,486 @@ async fn a_genuine_location_in_a_later_page_is_still_applied_and_persisted() {
             .is_some_and(|cursor| cursor > newest_junk * 1000),
         "and the completed window advances past everything it retrieved; got {:?}",
         fx.alice_cursor(),
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Resuming the descent across sweeps (Security Rule 12)
+//
+// The page budget bounds one sweep's chase, so a circle holding more backlog
+// than that budget can retrieve has an oldest tail that a sweep restarting at
+// the newest end would fetch on no wake at all. Nothing is dropped — the cursor
+// holds — but nothing reaches it either, and the circle quietly stops
+// converging. A halted chase therefore persists the `until` it stopped at, and
+// the next sweep spends a SECOND pass resuming there.
+//
+// These drive the real `run_catchup_all_circles` over successive sweeps: the
+// backlog is walked down to its oldest event, the same backlog with the floor
+// thrown away never is, and a relay serving forged timestamps cannot move the
+// floor out of the band this device asked in.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A sweep count no scenario below needs, so exhausting it is a failure rather
+/// than a shrug. The deepest descent here finishes in three.
+const MAX_SWEEPS: usize = 8;
+
+/// A backlog `span` seconds deep holding TWO events per second, all strictly
+/// newer than `oldest_secs` and none of them newer than `oldest_secs + span`.
+///
+/// Two per second rather than one because the chase descends by SECONDS, not by
+/// events: a backlog deep enough to outlast a sweep's page budget therefore
+/// costs a test the wall-clock seconds it spans, waiting for the sweep's own
+/// anchor to rise above it. Packing the events makes the same budget bind over
+/// half the span.
+fn packed_window(h: &str, span: usize, oldest_secs: i64) -> Vec<Event> {
+    stacked_window(
+        h,
+        span,
+        2,
+        oldest_secs + i64::try_from(span).expect("span fits i64"),
+    )
+}
+
+/// A circle whose relay holds a backlog deeper than one sweep's page budget,
+/// with the PEER'S LOCATION as its oldest event.
+///
+/// "Reached" is then not a counter: it is the peer's decrypted coordinates
+/// appearing in Alice's store, which can only happen once a sweep has paged all
+/// the way down to it. The relay clamps every `limit` to four, so the budget
+/// binds over a span a test can afford to wait out.
+struct BackloggedCircle {
+    _relay: SeededRelay,
+    relay_mgr: RelayManager,
+    fx: TwoMemberCircle,
+    /// The newest second the backlog occupies, already in the past.
+    newest_secs: i64,
+}
+
+impl BackloggedCircle {
+    async fn build() -> Self {
+        let relay = SeededRelay::with_cap(Some(4)).await;
+        let relay_mgr = RelayManager::new();
+        let fx = build_two_member_circle(vec![relay.url.clone()]).await;
+
+        let (loc_event, _, _) = fx
+            .bob
+            .encrypt_location(
+                &fx.mls_group_id,
+                &fx.bob_keys.public_key(),
+                &LocationMessage::new(-33.856_78, 151.215_28),
+                300,
+            )
+            .await
+            .expect("bob encrypts a location");
+        relay_mgr
+            .publish_event(&loc_event, std::slice::from_ref(&relay.url))
+            .await
+            .expect("bob's location reaches the relay");
+        let loc_secs = i64::try_from(loc_event.created_at.as_secs()).expect("created_at fits");
+
+        let span = 15;
+        let newest_secs = loc_secs + i64::try_from(span).expect("span fits i64");
+        relay
+            .seed(&packed_window(
+                &hex::encode(fx.nostr_group_id),
+                span,
+                loc_secs,
+            ))
+            .await;
+        wait_until_after(newest_secs).await;
+
+        Self {
+            _relay: relay,
+            relay_mgr,
+            fx,
+            newest_secs,
+        }
+    }
+}
+
+/// A window bigger than one sweep can retrieve is walked DOWN to its oldest
+/// event over successive sweeps.
+///
+/// The stall this closes: every sweep restarted the chase at the newest end of
+/// the same `since`, so the newest pages were fetched over and over while the
+/// oldest tail was fetched by nobody. The cursor correctly refused to advance
+/// over it, which is what kept it reachable — and also what kept the window from
+/// ever shrinking, so the circle stopped converging without a single error.
+///
+/// Bob's location is the OLDEST thing in the window, under a backlog deeper than
+/// one sweep's page budget. So "reached" is not a counter here: it is the peer's
+/// decrypted coordinates appearing in Alice's store, which can only happen once
+/// a sweep has actually paged all the way down to it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_backlog_bigger_than_one_sweep_is_walked_down_to_its_oldest_event() {
+    let backlogged = BackloggedCircle::build().await;
+    let (fx, relay_mgr, newest_secs) = (
+        &backlogged.fx,
+        &backlogged.relay_mgr,
+        backlogged.newest_secs,
+    );
+
+    let mut floors: Vec<i64> = Vec::new();
+    let mut reached_on: Option<usize> = None;
+    let mut finished_at: Option<i64> = None;
+    for sweep in 1..=MAX_SWEEPS {
+        let resumed_at = fx.alice_floor();
+        run_catchup_all_circles(&fx.alice, relay_mgr, &fx.alice_keys.public_key(), 60).await;
+        if reached_on.is_none() && !fx.alice_peer_locations().is_empty() {
+            reached_on = Some(sweep);
+        }
+        if let Some(floor) = fx.alice_floor() {
+            floors.push(floor);
+        } else {
+            // No floor left: this sweep's descent reached the bottom of the band
+            // it resumed into, which is the only thing that clears one.
+            finished_at = resumed_at;
+            break;
+        }
+    }
+
+    let reached_on = reached_on.unwrap_or_else(|| {
+        panic!(
+            "the oldest event must be reached: {MAX_SWEEPS} sweeps left it \
+             unfetched, which is the descent never resuming"
+        )
+    });
+    assert!(
+        reached_on > 1,
+        "precondition: one sweep's budget must NOT be enough for this backlog, \
+         or the resumption is doing no work and every assertion here is vacuous"
+    );
+    assert!(
+        floors.windows(2).all(|pair| pair[1] < pair[0]),
+        "each sweep must resume BELOW where the last one stopped — a floor that \
+         does not descend is a circle re-fetching the same band forever; got \
+         {floors:?}"
+    );
+
+    let rows = fx.alice_peer_locations();
+    assert_eq!(rows.len(), 1, "exactly one peer row");
+    assert_eq!(rows[0].sender_pubkey, fx.bob_keys.public_key().to_hex());
+    assert!((rows[0].latitude - -33.856_78).abs() < 1e-9);
+    assert!((rows[0].longitude - 151.215_28).abs() < 1e-9);
+
+    // And the sweep that finished a descent claimed ONLY the band it drained. A
+    // resumed pass covers `[since, floor]`, not the whole window, so the cursor
+    // may not land on the sweep's own open time: everything above the floor
+    // still has to be asked for again. Landing there instead would step over
+    // whatever the top-down pass ran out of budget before reaching.
+    let resumed_at = finished_at.expect("a descent that reached the bottom");
+    let cursor = fx
+        .alice_cursor()
+        .expect("a drained band advances the cursor");
+    assert!(
+        cursor <= resumed_at * 1000,
+        "the advance must not exceed the band the pass resumed into \
+         ({resumed_at} s); got {cursor} ms",
+    );
+    assert!(
+        resumed_at < newest_secs,
+        "precondition: that band really is a strict subset of the window, so \
+         the bound above is a restriction and not a tautology"
+    );
+
+    // ...AND THE CIRCLE THEN CATCHES UP. Reaching the oldest event is only half
+    // the promise: a sweep that keeps re-fetching the same window for ever has
+    // not caught the circle up, it has paid for it repeatedly.
+    //
+    // The completing descent above could claim no more than the band it resumed
+    // into, which sits inside the backlog — so `since` comes back below the
+    // whole of it, the next top-down pass runs out of budget in the same place,
+    // and a sweep counting only what ONE pass finished has nothing left to
+    // learn. That is a limit cycle, not convergence: byte-for-byte the same
+    // three sweeps, for ever, with the cursor pinned where it is now.
+    //
+    // What breaks it is composition — a sweep's own passes retrieving a
+    // contiguous band that comes down to meet the cursor covers the whole
+    // window between them, even though neither did alone. The cursor then rises
+    // ABOVE every event in the backlog, which no event's own timestamp could
+    // ever license and the cycle can never reach.
+    assert!(
+        cursor <= newest_secs * 1000,
+        "precondition: the descent has NOT caught the circle up yet, so the \
+         convergence below is this loop's doing and not already true"
+    );
+    let mut caught_up = false;
+    for _ in 1..=MAX_SWEEPS {
+        run_catchup_all_circles(&fx.alice, relay_mgr, &fx.alice_keys.public_key(), 60).await;
+        if fx.alice_cursor().is_some_and(|ms| ms > newest_secs * 1000) {
+            caught_up = true;
+            break;
+        }
+    }
+    assert!(
+        caught_up,
+        "the circle must converge, not cycle: {MAX_SWEEPS} further sweeps left \
+         the cursor at {:?} ms, at or below the backlog's newest event \
+         ({newest_secs} s), so every one of them re-fetched and re-ingested the \
+         whole window for nothing",
+        fx.alice_cursor()
+    );
+}
+
+/// The negative control: the SAME backlog, with the resume point thrown away
+/// between sweeps, is never reached however many sweeps run.
+///
+/// Without this, the test above would pass for an implementation that simply got
+/// lucky with budgets — it pins that the persisted resume point is what does the
+/// work, and it is the stall itself, stated as a failing behaviour.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_same_backlog_is_never_reached_when_the_resume_point_is_discarded() {
+    let backlogged = BackloggedCircle::build().await;
+    let (fx, relay_mgr) = (&backlogged.fx, &backlogged.relay_mgr);
+
+    for _ in 0..MAX_SWEEPS {
+        run_catchup_all_circles(&fx.alice, relay_mgr, &fx.alice_keys.public_key(), 60).await;
+        fx.alice
+            .clear_backfill_floor(&fx.cursor_stream())
+            .expect("discard the resume point");
+    }
+
+    assert!(
+        fx.alice_peer_locations().is_empty(),
+        "a sweep that always restarts at the newest end re-fetches the same top \
+         of the window forever: {MAX_SWEEPS} of them must leave the oldest event \
+         exactly where it was"
+    );
+    assert_eq!(
+        fx.alice_cursor(),
+        None,
+        "and the cursor must hold throughout — the tail is reachable only while \
+         `since` stays below it, which is what makes the stall a stall and not a \
+         loss"
+    );
+}
+
+/// A relay serving forged timestamps cannot move the persisted floor out of the
+/// band this device asked in.
+///
+/// The floor is the one piece of new state that survives a sweep, so the first
+/// question about it is what a remote party can do to its value. Two shapes are
+/// free to any observer of the circle's PUBLIC `#h`:
+///
+/// * a FUTURE-dated event, which as a resume point would sit above the window and
+///   strand everything under it; and
+/// * an ANCIENT one padding a page, which proposes a paging boundary far below
+///   where the honest relays' backlogs actually stop — and, taken as the resume
+///   point, would send the next sweep straight past them.
+///
+/// Neither reaches the floor. Every page is bounded above by the window's own
+/// open time, so the future event is never in an answer at all; and the paging
+/// boundary is the MAXIMUM across contributing relays, so the honest relay's
+/// bottom is what the chain descends by. The floor is then the `until` this
+/// device ISSUED — always inside `[since, window open]`, never a number a relay
+/// handed us.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_forged_timestamp_cannot_drag_the_backfill_floor_out_of_our_own_band() {
+    let poisoned = SeededRelay::with_cap(Some(2)).await;
+    let honest = SeededRelay::with_cap(Some(2)).await;
+    let relay_mgr = RelayManager::new();
+    let fx = build_two_member_circle(vec![poisoned.url.clone(), honest.url.clone()]).await;
+    let h = hex::encode(fx.nostr_group_id);
+
+    let now = chrono::Utc::now().timestamp();
+    let newest_secs = now - 60;
+    honest.seed(&unparseable_window(&h, 21, newest_secs)).await;
+
+    // One event an hour old — inside the window, an hour below where the honest
+    // relay's backlog stops — and one a day in the future.
+    let ancient_secs = now - 3600;
+    poisoned
+        .seed(&unparseable_window(&h, 1, ancient_secs))
+        .await;
+    poisoned
+        .seed(&unparseable_window(&h, 1, now + 86_400))
+        .await;
+
+    let first =
+        run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+
+    assert_eq!(
+        first.events_rejected_pre_auth, 10,
+        "precondition: exactly the honest relay's newest nine plus the ancient \
+         event may come back — the future-dated one is outside the band every \
+         page is bounded by, so it is never served, never ingested, and can \
+         never be anything's boundary"
+    );
+    let floor = fx
+        .alice_floor()
+        .expect("a halted chase leaves a resume point");
+    assert!(
+        floor > ancient_secs,
+        "the resume point must not be dragged to the forged bottom at \
+         {ancient_secs} s: a sweep resuming there would page straight past the \
+         honest relay's remaining backlog; got {floor} s"
+    );
+    assert!(
+        floor <= newest_secs,
+        "and it must sit inside the band we asked in, at or below the window's \
+         newest event ({newest_secs} s); got {floor} s"
+    );
+    assert_eq!(
+        fx.alice_cursor(),
+        None,
+        "precondition: this window is not finished, so nothing here is explained \
+         by an advance"
+    );
+
+    // The second sweep resumes, and the forged bottom is no more able to pull the
+    // floor down on a resumed pass than on the first one.
+    run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+    let resumed = fx
+        .alice_floor()
+        .expect("the descent is still unfinished, so it still has a resume point");
+    assert!(
+        resumed < floor,
+        "the descent must have progressed past {floor} s; got {resumed} s"
+    );
+    assert!(
+        resumed > ancient_secs,
+        "and it must still be walking the honest relay's backlog rather than \
+         having jumped to the forged bottom at {ancient_secs} s; got {resumed} s"
+    );
+}
+
+/// A resume point the cursor has since risen past is not resumed into — and is
+/// REPAIRED, so the backfill is not switched off for that circle for good.
+///
+/// Nothing exotic gets a floor into that state: live sync writes the same cursor
+/// stream this sweep reads, so a foreground session can raise the cursor above a
+/// floor a background wake left behind. What is left is a request ceiling BELOW
+/// the band anybody will ask about again.
+///
+/// Resuming there would be a claim about nothing: the pass would ask
+/// `[since, floor]` with the ceiling under the floor, be handed an empty answer,
+/// call the chase finished and report that it drained the circle. And leaving
+/// the value alone is no better — the storage write only ever LOWERS a floor, so
+/// every later sweep would refuse the same stale number and this circle would
+/// never resume a descent again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_resume_point_the_cursor_has_passed_is_refused_and_repaired() {
+    let relay = SeededRelay::with_cap(Some(4)).await;
+    let relay_mgr = RelayManager::new();
+    let fx = build_two_member_circle(vec![relay.url.clone()]).await;
+    let h = hex::encode(fx.nostr_group_id);
+    let stream = fx.cursor_stream();
+
+    // A backlog no single pass can drain, so the sweep below really does halt
+    // and really does have a resume point to record.
+    let span = 20;
+    let newest_secs = chrono::Utc::now().timestamp() - 5;
+    relay
+        .seed(&packed_window(
+            &h,
+            span,
+            newest_secs - i64::try_from(span).expect("span fits i64"),
+        ))
+        .await;
+
+    // A cursor well above the whole backlog's bottom, and a floor beneath the
+    // REQ floor that cursor derives — exactly what a foreground session leaves
+    // behind when it advances past a background wake's resume point.
+    let cursor_secs = newest_secs - 300;
+    let stale_floor = cursor_secs - 400;
+    fx.alice
+        .advance_sync_cursor(&stream, cursor_secs * 1000)
+        .expect("seed a cursor a live session could have written");
+    fx.alice
+        .lower_backfill_floor(&stream, stale_floor)
+        .expect("a resume point from an earlier, lower cursor");
+
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+
+    assert_eq!(
+        out.windows_truncated, 1,
+        "the sweep must not read a floor below its own REQ floor as a band it \
+         drained: the empty answer to a request whose ceiling sits under its \
+         floor says nothing about this circle at all"
+    );
+    let repaired = fx
+        .alice_floor()
+        .expect("a halted chase still leaves a resume point");
+    assert!(
+        repaired > stale_floor,
+        "and the spent floor must be replaced rather than kept: the write can \
+         only ever LOWER one, so a stale value left in place refuses every later \
+         resume and disables this circle's backfill permanently; got \
+         {repaired} s, still at or below the stale {stale_floor} s"
+    );
+
+    // The repair is what the next sweep needs: it resumes into the fresh point
+    // and drives the descent below it, which is the behaviour the stale floor
+    // had been blocking.
+    run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+    let descended = fx.alice_floor();
+    assert!(
+        descended.is_none_or(|f| f < repaired),
+        "the descent must have resumed at {repaired} s and gone below it (or \
+         reached the bottom and cleared it); got {descended:?}"
+    );
+}
+
+/// A relay that CLAMPS our `limit` and holds a one-second pile-up at the chase's
+/// boundary must not be able to hide everything beneath it.
+///
+/// The hiding place `drained` and the contribution rule between them still left
+/// open, and it needs no attacker. NIP-11 `limitation.max_limit` lets a relay
+/// clamp our `limit` to its own, and `limit: n` serves the NEWEST n — so a relay
+/// whose cap sits at or below the number of events sharing the boundary second
+/// answers the identical page every round. Every event in it is one we already
+/// hold, so nothing CONTRIBUTES; the page never reaches OUR limit, so nothing
+/// looks truncated either. Read as "the relays are drained", the sweep declared
+/// the window COMPLETE and advanced the cursor over the entire backlog
+/// underneath — the Rule-12 silent drop, with the next sweep's floor then
+/// sitting above everything it lost.
+///
+/// Two events share the boundary second against a relay capping at two, so the
+/// repeat is exact, and six more sit below where no page would ever have been
+/// issued.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_clamped_pile_up_at_the_boundary_cannot_hide_the_backlog_under_it() {
+    let relay = SeededRelay::with_cap(Some(2)).await;
+    let relay_mgr = RelayManager::new();
+    let fx = build_two_member_circle(vec![relay.url.clone()]).await;
+    let h = hex::encode(fx.nostr_group_id);
+
+    let boundary_secs = chrono::Utc::now().timestamp() - 60;
+    let beneath = 6;
+    // Exactly the relay's cap, sharing one second: the page it serves for
+    // `until = boundary` is the page it already served, to the byte.
+    relay.seed(&unparseable_window(&h, 1, boundary_secs)).await;
+    relay.seed(&unparseable_window(&h, 1, boundary_secs)).await;
+    relay
+        .seed(&unparseable_window(&h, beneath, boundary_secs - 1))
+        .await;
+
+    let out = run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+
+    assert_eq!(
+        out.events_rejected_pre_auth,
+        2 + beneath,
+        "every event beneath the pile-up must still be retrieved: a page of \
+         nothing but events we already hold is a relay that is drained OR one \
+         clamping at a pile-up, and the two are the same bytes — so the chase \
+         has to ASK one second lower rather than assume the first"
+    );
+    assert_eq!(
+        fx.alice_cursor(),
+        None,
+        "and until it has, nothing may claim the window: an advance here would \
+         put the next sweep's floor above the {beneath} events below the pile-up, \
+         permanently"
+    );
+
+    // The second sweep resumes below where this one ran out of budget and
+    // finishes the band, which is what turns the hold above into a delay rather
+    // than a stall.
+    let again =
+        run_catchup_all_circles(&fx.alice, &relay_mgr, &fx.alice_keys.public_key(), 60).await;
+    assert_eq!(again.windows_truncated, 0, "the resumed descent finished");
+    assert!(
+        fx.alice_cursor().is_some(),
+        "so the circle converges instead of holding forever"
     );
 }

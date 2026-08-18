@@ -257,6 +257,64 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   @visibleForTesting
   LocationSharingService? overrideLocationSharingService;
 
+  /// Test-only override for the Rule-14 liveness query (`isSessionLive`).
+  ///
+  /// Production leaves this `null` and calls the real FFI. Without this seam
+  /// the whole `_ensureSession`/`_attemptSessionReclaim` orchestration could
+  /// only be pinned by scanning the source text (see
+  /// `session_reclaim_gate_test.dart`), which proves a gate's token appears in
+  /// the right order but not that the gated code path actually runs and
+  /// produces the right outcome against a scripted sequence of answers.
+  @visibleForTesting
+  Future<bool> Function({required String dataDir})? overrideIsSessionLive;
+
+  /// Test-only override for [forceReleaseLiveSession]. See
+  /// [overrideIsSessionLive] for why this seam exists.
+  @visibleForTesting
+  Future<ForceReleaseOutcomeFfi> Function()? overrideForceReleaseLiveSession;
+
+  /// Test-only override for the liveness-probe confirmation timeout.
+  ///
+  /// Production uses the real [kLivenessProbeTimeout] (5 s, "generous relative
+  /// to a publish cycle" — see `foreground_liveness_probe_test.dart`). A
+  /// behavioural test of the full two-probe reclaim sequence would otherwise
+  /// cost 2 × 5 s plus the gap below for every "genuinely dead foreground"
+  /// case, so this is shortened in tests — never in production, where the
+  /// default is the unmodified real constant.
+  @visibleForTesting
+  Duration livenessProbeTimeout = kLivenessProbeTimeout;
+
+  /// Test-only override for the gap between the two confirmation probes
+  /// (production default: [kLivenessProbeGap], 3 s). See
+  /// [livenessProbeTimeout].
+  @visibleForTesting
+  Duration livenessProbeGap = kLivenessProbeGap;
+
+  /// Test-only override for whether the cross-isolate liveness channel is
+  /// ready (production default: [foregroundTaskChannelReady]).
+  ///
+  /// A "not ready" channel makes [ForegroundLivenessProbe.mainIsolateIsAlive]
+  /// return `true` (alive) immediately, without ever waiting or accepting a
+  /// simulated reply — the correct fail-closed production behaviour when no
+  /// port is registered, but it would make every reclaim test trivially
+  /// "alive" regardless of what the test scripts, since `flutter test` never
+  /// has a real cross-isolate port. Forcing this `true` in a test lets the
+  /// probe run its real ping/timeout/reply protocol instead.
+  @visibleForTesting
+  bool Function() livenessChannelReady = foregroundTaskChannelReady;
+
+  /// Test-only override for the `hasIdentity` gate input to
+  /// [evaluateSessionReclaimGates].
+  ///
+  /// Production leaves this `null` and reads the real
+  /// `_identityManager?.hasIdentity()`. [NostrIdentityManager] is an FFI
+  /// opaque handle with no fake construction available outside the Rust
+  /// bridge, so a host test that wants to exercise the gates AFTER the
+  /// identity check — the guard/backoff/probe machinery this file exists
+  /// for — has no other way to make that check pass.
+  @visibleForTesting
+  bool? overrideHasIdentity;
+
   /// Cached nominal publish interval as [BigInt] to avoid per-tick allocation.
   static final BigInt _nominalSecsBigInt = BigInt.from(
     kLocationUpdateInterval.inSeconds,
@@ -614,7 +672,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
 
     final bool guardHeld;
     try {
-      guardHeld = await isSessionLive(dataDir: dataDir);
+      guardHeld = await _isSessionLive(dataDir: dataDir);
     } on Object catch (e) {
       // Cannot tell: do not open blind and do not escalate.
       debugPrint('[BackgroundTask] session query failed: ${e.runtimeType}');
@@ -675,7 +733,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     bool guardHeld = false;
     if (dataDir != null) {
       try {
-        guardHeld = await isSessionLive(dataDir: dataDir);
+        guardHeld = await _isSessionLive(dataDir: dataDir);
       } on Object catch (e) {
         debugPrint(
           '[BackgroundTask] reclaim: liveness query failed (${e.runtimeType})',
@@ -687,7 +745,8 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     final decision = evaluateSessionReclaimGates(
       hasDataDir: dataDir != null,
-      hasIdentity: _identityManager?.hasIdentity() ?? false,
+      hasIdentity:
+          overrideHasIdentity ?? (_identityManager?.hasIdentity() ?? false),
       wipePending: prefs.getBool(kPendingMlsWipeKey) ?? false,
       guardHeld: guardHeld,
       lastAttemptMs: prefs.getInt(kBackgroundSessionReclaimAtMsKey),
@@ -730,7 +789,10 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     // separated by a fresh round trip, are far harder to produce by transient
     // jank. Both fail closed to "alive".
     _livenessProbe.resetRound();
-    if (await _livenessProbe.mainIsolateIsAlive()) {
+    if (await _livenessProbe.mainIsolateIsAlive(
+      timeout: livenessProbeTimeout,
+      channelReady: livenessChannelReady,
+    )) {
       debugPrint('[BackgroundTask] reclaim: declined, main isolate alive');
       return false;
     }
@@ -739,8 +801,11 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     // on a sync FFI call while this isolate holds the same SQLCipher locks —
     // satisfies both, which is precisely what a confirmation is supposed to
     // rule out. A gap makes them independent samples.
-    await Future<void>.delayed(kLivenessProbeGap);
-    if (await _livenessProbe.mainIsolateIsAlive()) {
+    await Future<void>.delayed(livenessProbeGap);
+    if (await _livenessProbe.mainIsolateIsAlive(
+      timeout: livenessProbeTimeout,
+      channelReady: livenessChannelReady,
+    )) {
       debugPrint('[BackgroundTask] reclaim: declined, main isolate answered '
           'on retry');
       return false;
@@ -758,7 +823,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     // there is nothing to reclaim — just open.
     if (dataDir != null) {
       try {
-        if (!await isSessionLive(dataDir: dataDir)) {
+        if (!await _isSessionLive(dataDir: dataDir)) {
           debugPrint('[BackgroundTask] reclaim: guard freed while probing');
           await _openCircleManager();
           if (_circleManager == null) return false;
@@ -775,7 +840,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
 
     final ForceReleaseOutcomeFfi outcome;
     try {
-      outcome = await forceReleaseLiveSession();
+      outcome = await _forceReleaseLiveSession();
     } on Object catch (e) {
       debugPrint(
         '[BackgroundTask] reclaim: release failed (${e.runtimeType})',
@@ -797,6 +862,24 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     if (_locationSharingService == null) return false;
     debugPrint('[BackgroundTask] reclaim: session recovered');
     return true;
+  }
+
+  /// The Rule-14 liveness query this handler uses: [overrideIsSessionLive] in
+  /// tests, the real FFI [isSessionLive] otherwise. See
+  /// [overrideIsSessionLive] for why this indirection exists.
+  Future<bool> _isSessionLive({required String dataDir}) {
+    final override = overrideIsSessionLive;
+    if (override != null) return override(dataDir: dataDir);
+    return isSessionLive(dataDir: dataDir);
+  }
+
+  /// The session-reclaim call this handler uses:
+  /// [overrideForceReleaseLiveSession] in tests, the real FFI
+  /// [forceReleaseLiveSession] otherwise.
+  Future<ForceReleaseOutcomeFfi> _forceReleaseLiveSession() {
+    final override = overrideForceReleaseLiveSession;
+    if (override != null) return override();
+    return forceReleaseLiveSession();
   }
 
   Future<void> _publishCycle(DateTime timestamp) async {
@@ -1172,6 +1255,20 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   /// becoming a teardown stall — so it is reachable on its own.
   @visibleForTesting
   Future<void> staggerWaitForTest(Duration d) => _sleepUnlessShuttingDown(d);
+
+  /// Test seam for [_ensureSession].
+  ///
+  /// `_ensureSession` and `_attemptSessionReclaim` are otherwise reachable
+  /// only through [onRepeatEvent], which is gated behind the FFI-bound
+  /// identity load in [onStart] — unreachable under `flutter test`. Setting
+  /// [_dataDir] here (never reachable from a test otherwise, since it is
+  /// private) is what lets the guard/backoff/probe machinery run against the
+  /// `override*` seams above without a device.
+  @visibleForTesting
+  Future<bool> ensureSessionForTest({required String dataDir}) {
+    _dataDir = dataDir;
+    return _ensureSession();
+  }
 
   /// Samples a jittered publish interval via the Rust CSPRNG.
   int _sampleJitteredInterval() {

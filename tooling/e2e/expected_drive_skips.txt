@@ -7,19 +7,27 @@
 #   STATIC   `--check-manifest`, an enforcing step in repo-guards.yml.
 #            Reconciles this file against the source tree: every call site must
 #            be declared here, and every row must still name a live call site.
-#            This is what makes a NEW hatch impossible to land silently.
+#            This is what makes a NEW hatch impossible to land silently. It also
+#            rejects any `skip:` under haven/integration_test/, which is a hatch
+#            this format cannot describe — see the invariant block below.
 #   RUNTIME  `drive_log_reports_test_failure()`, which every E2E lane already
-#            reaches on its drive log — directly in the runners that source the
-#            library, and through a delegate in the four that do not
-#            (run-integration-tests.sh and run-relay-customization.sh drive each
+#            reaches on its drive log — directly in most runners, and through a
+#            delegate in the four that carry the rows below:
+#            run-integration-tests.sh and run-relay-customization.sh drive each
 #            target via run-single-avd-scenario.sh; run-b7-ios-auth-tier.sh via
-#            run-ios-sim-scenario.sh, which sources ios-flake-lib.sh). Between
-#            them those four carry 17 of the 23 rows below, so the indirection
-#            is the load-bearing half of this claim, not a footnote to it.
-#            It fails the lane when any reason below is
+#            run-ios-sim-scenario.sh; and run-ios-sim-scenario.sh itself, which
+#            drives ios_bg_mirror_test.dart and reaches the predicate only
+#            through the ios-flake-lib.sh it sources. Between them those four
+#            carry 17 of the 23 rows below (4 + 10 + 2 + 1, in that order), so the indirection
+#            is the load-bearing half of this claim, not a footnote to it. Two
+#            further runners delegate without carrying a row of their own —
+#            run-flake-stress.sh and run-b4-ios-real-gps.sh — and
+#            drive-log-lib.sh's header lists all five run-*.sh from that side.
+#            The runtime half fails the lane when any reason below is
 #            seen in the reporter's output, or when the `~N` skipped column is
 #            non-zero. This is what makes a declared hatch impossible to FIRE
-#            silently.
+#            silently. `--check-wiring` (run by `--check-manifest`) is what
+#            keeps every one of those delegations from being refactored away.
 #
 # Read drive-log-lib.sh's header for why a skipped integration test is otherwise
 # invisible — `integrationDriver()` records it as a pass, and on the `flutter
@@ -48,6 +56,12 @@
 # from its guard condition to the lane that drives it, and every one is
 # unreachable there. That is what entitles the runtime half to treat ANY
 # observed skip as a lane failure.
+#
+# The derivation has a second half, and it is now asserted rather than argued: a
+# STATIC `skip:` is rejected outright. Such a test runs on no lane at all, so it
+# is not a hatch with a condition and there is no row shape here that could
+# describe one — a row states why a guard cannot fire, and a `skip:` has no
+# guard. Convert it to a guarded markTestSkipped() and declare it, or delete it.
 #
 # So a row here is not permission to skip. It is a recorded argument, and the
 # lanes hold it to account. If a hatch ever does fire, the argument in its block

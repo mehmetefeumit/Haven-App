@@ -58,6 +58,7 @@ use cgka_traits::types::{GroupId, MemberId, MessageId};
 use storage_sqlite::SqlCipherKey;
 use transport_nostr_peeler::{NostrMlsPeeler, NostrTransportEvent};
 
+use super::retention::RetentionBoundPeeler;
 use super::signer::HavenIdentityProofSigner;
 use super::storage::{LiveSessionGuard, StorageConfig};
 use super::types::{LocationGroupConfig, LocationMessageResult, PreAuthRejection, ScreenedIngest};
@@ -144,7 +145,13 @@ pub struct SessionManager {
     /// A standalone peeler used only to peel a gift wrap for a pre-accept
     /// preview WITHOUT ingesting it (`peel_welcome` is engine-independent). It
     /// shares the identity welcome signer with the engine's peeler.
-    preview_peeler: NostrMlsPeeler,
+    ///
+    /// Wrapped in [`RetentionBoundPeeler`] too, even though preview only ever
+    /// peels: a bare peeler here would expose an unbounded
+    /// `wrap_group_message_with_metadata` beside the one the bound exists to
+    /// intercept, and "nobody calls it" is a convention a future edit breaks
+    /// silently. Wrapping makes it a type-level property instead.
+    preview_peeler: RetentionBoundPeeler,
     /// Runtime Rule-14 enforcement: registers this session's `session.sqlite`
     /// path in a process-global set at open and releases it on drop, so a
     /// second `AccountDeviceSession::open` on the same DB file (e.g. a
@@ -208,7 +215,14 @@ impl SessionManager {
         // The engine's peeler owns NIP-59 welcome crypto; we keep an identical
         // clone (shared identity signer via Arc) for pre-accept preview peels.
         let peeler = NostrMlsPeeler::new().with_welcome_signer(keys.clone());
-        let preview_peeler = peeler.clone();
+        let preview_peeler = RetentionBoundPeeler::new(peeler.clone());
+        // Every outbound application 445 leaves through this wrapper, which
+        // supplies Haven's own retention window when the group declares none —
+        // otherwise a circle created by a client that never declared 0x8005
+        // would publish location updates with no NIP-40 expiration, which both
+        // lets a relay keep them forever AND makes them read as membership
+        // changes on the wire (see `retention`).
+        let peeler = RetentionBoundPeeler::new(peeler);
         let proof_signer: Arc<_> = HavenIdentityProofSigner::arc(keys);
 
         let config = SessionConfig::new(db_path, key, identity, Box::new(peeler))
@@ -328,6 +342,51 @@ impl SessionManager {
         member_key_packages: Vec<KeyPackage>,
         config: LocationGroupConfig,
     ) -> Result<CreateGroupEffects> {
+        self.create_group_with_retention(
+            member_key_packages,
+            config,
+            Some(crate::location::ttl::LOCATION_MESSAGE_RETENTION_SECS),
+        )
+        .await
+    }
+
+    /// Creates a group declaring an arbitrary `message-retention.v1` policy —
+    /// `None` for no component at all — modelling a circle created by a client
+    /// other than a current Haven build.
+    ///
+    /// Test-only: the production path always declares Haven's own window. Both
+    /// arms are states a JOINED circle really reaches, and they fail in opposite
+    /// directions. `None` is the older-Haven / foreign-client case, where the
+    /// engine reports no retention and would stamp no NIP-40 expiration on this
+    /// device's own application 445s — what
+    /// [`RetentionBoundPeeler`](super::RetentionBoundPeeler) exists to prevent.
+    /// A `Some` shorter than Haven's window is what the bound HONOURS, and is
+    /// the only way to observe the group component (rather than the bound)
+    /// driving the stamp that actually leaves.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::create_group`].
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn create_group_declaring_retention(
+        &self,
+        member_key_packages: Vec<KeyPackage>,
+        config: LocationGroupConfig,
+        retention_secs: Option<u64>,
+    ) -> Result<CreateGroupEffects> {
+        self.create_group_with_retention(member_key_packages, config, retention_secs)
+            .await
+    }
+
+    /// Shared group-creation path. `retention_secs` is the group's
+    /// `message-retention.v1` (0x8005) policy; `None` declares the component not
+    /// at all.
+    async fn create_group_with_retention(
+        &self,
+        member_key_packages: Vec<KeyPackage>,
+        config: LocationGroupConfig,
+        retention_secs: Option<u64>,
+    ) -> Result<CreateGroupEffects> {
         validate_group_relays(&config.relays)?;
 
         let mut nostr_group_id = [0u8; 32];
@@ -339,30 +398,33 @@ impl SessionManager {
 
         let initial_admins = parse_member_ids(&config.admins);
 
+        let mut app_components = vec![AppComponentData {
+            component_id: NOSTR_ROUTING_COMPONENT_ID,
+            data: routing_bytes,
+        }];
+        // `message-retention.v1`: the engine stamps every kind-445 APPLICATION
+        // message with a NIP-40 `expiration` of `inner_created_at + retention`
+        // (commits/proposals are never stamped — group history must outlive any
+        // TTL). Bounds relay-side residency of location ciphertext to roughly
+        // two publish cycles, replacing the pre-Dark-Matter per-send jittered
+        // TTL (DM-2 deviation #2 re-wired). A circle whose creator omits it is
+        // covered on the send side by
+        // [`RetentionBoundPeeler`](super::RetentionBoundPeeler), not
+        // here — this component governs the whole group and only its creator
+        // (or later, an admin) can set it.
+        if let Some(secs) = retention_secs {
+            app_components.push(AppComponentData {
+                component_id: GROUP_MESSAGE_RETENTION_COMPONENT_ID,
+                data: secs.to_be_bytes().to_vec(),
+            });
+        }
+
         let req = CreateGroupRequest {
             name: config.name,
             description: config.description,
             members: member_key_packages,
             required_features: Vec::new(),
-            app_components: vec![
-                AppComponentData {
-                    component_id: NOSTR_ROUTING_COMPONENT_ID,
-                    data: routing_bytes,
-                },
-                // `message-retention.v1`: the engine stamps every kind-445
-                // APPLICATION message with a NIP-40 `expiration` of
-                // `inner_created_at + retention` (commits/proposals are never
-                // stamped — group history must outlive any TTL). Bounds
-                // relay-side residency of location ciphertext to roughly two
-                // publish cycles, replacing the pre-Dark-Matter per-send
-                // jittered TTL (DM-2 deviation #2 re-wired).
-                AppComponentData {
-                    component_id: GROUP_MESSAGE_RETENTION_COMPONENT_ID,
-                    data: crate::location::ttl::LOCATION_MESSAGE_RETENTION_SECS
-                        .to_be_bytes()
-                        .to_vec(),
-                },
-            ],
+            app_components,
             initial_admins,
         };
 
@@ -975,6 +1037,42 @@ impl SessionManager {
     /// Returns an error if the group is unknown or has no routing component.
     pub async fn nostr_group_id_hex(&self, group_id: &GroupId) -> Result<String> {
         Ok(hex::encode(self.group_routing(group_id).await?.0))
+    }
+
+    /// The group's declared `marmot.group.message-retention.v1` (0x8005) window
+    /// in seconds, or `None` when the group declares none — or declares zero,
+    /// which upstream defines as expiration disabled.
+    ///
+    /// The zero fold below is load-bearing, unlike the identical-looking one in
+    /// `retention::bounded_retention_secs`: `app_component`
+    /// hands back the component's RAW bytes, so a peer declaring eight zero
+    /// bytes arrives here as `Some(0)` with nothing upstream having collapsed
+    /// it, and reporting that as a live window would invert the meaning.
+    ///
+    /// Absence is a real state of a joined circle, not a default: a circle
+    /// created by a client that never declared the component reports `None`
+    /// here, and upstream that means "stamp no NIP-40 expiration at all". What
+    /// actually leaves this device is bounded independently of this value by
+    /// [`RetentionBoundPeeler`](super::RetentionBoundPeeler); this
+    /// accessor reports what the GROUP declares, which is what governs every
+    /// other member's client.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the group is unknown, or if the component is present
+    /// but not the 8 big-endian bytes the format requires.
+    pub async fn group_message_retention_secs(&self, group_id: &GroupId) -> Result<Option<u64>> {
+        let raw = self
+            .session
+            .lock()
+            .await
+            .app_component(group_id, GROUP_MESSAGE_RETENTION_COMPONENT_ID)
+            .map_err(map_mls_err)?;
+        let Some(bytes) = raw else { return Ok(None) };
+        let encoded: [u8; 8] = bytes.as_slice().try_into().map_err(|_| {
+            NostrError::MdkError("message-retention component must be 8 bytes".to_string())
+        })?;
+        Ok(Some(u64::from_be_bytes(encoded)).filter(|secs| *secs > 0))
     }
 
     /// Whether the group-event exporter secret is currently derivable

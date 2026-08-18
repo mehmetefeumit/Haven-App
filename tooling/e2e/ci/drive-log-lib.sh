@@ -64,7 +64,8 @@
 # run-integration-tests.sh, run-relay-customization.sh and run-flake-stress.sh
 # drive each target through run-single-avd-scenario.sh, while
 # run-b4-ios-real-gps.sh and run-b7-ios-auth-tier.sh go through
-# run-ios-sim-scenario.sh, which reaches the predicate through the
+# run-ios-sim-scenario.sh, which is a sixth: it drives ios_bg_mirror_test.dart
+# for e2e-ios.yml directly and reaches the predicate only through the
 # ios-flake-lib.sh it sources. A runner refactor that stopped delegating —
 # inlining its own `flutter drive`, say — would delete the runtime backstop for
 # every row those runners carry, and the static half would stay green over it.
@@ -79,7 +80,8 @@
 #
 #   bash tooling/e2e/ci/drive-log-lib.sh --self-test        # hermetic, no device
 #   bash tooling/e2e/ci/drive-log-lib.sh --check-manifest   # source <-> manifest
-#                                                           # (+ --check-wiring)
+#                                                           # (+ no static skip,
+#                                                           #  + --check-wiring)
 #   bash tooling/e2e/ci/drive-log-lib.sh --check-wiring     # runners <-> predicate
 #   bash tooling/e2e/ci/drive-log-lib.sh --scan <drive-log> # what did it skip?
 #
@@ -117,12 +119,16 @@ _HAVEN_DRIVE_LOG_LIB_SOURCED=1
 #      that is the same class of lie this whole predicate exists to catch.
 #
 #   5. A NON-ZERO `~N` skipped column (`+9 ~2:`). Zero tests are expected to
-#      skip in any lane — derived per call site in
-#      tooling/e2e/expected_drive_skips.txt, not assumed — so a moved counter is
-#      a proof that stopped running. It catches every STATIC `skip:` on both
-#      reporters and, on the iOS `flutter test -d <udid>` lanes, runtime
-#      `markTestSkipped` too; the drive lanes' runtime skips never reach it and
-#      are caught by the declared-reason scan below instead.
+#      skip in any lane, which rests on two facts and assumes neither: every
+#      markTestSkipped() is derived unreachable per call site in
+#      tooling/e2e/expected_drive_skips.txt, and no test is skipped STATICALLY
+#      (asserted by drive_log_check_static_skips below — it was the half argued
+#      in prose and checked nowhere, and it is the half a one-word `skip:`
+#      falsifies). So a moved counter is a proof that stopped running. It
+#      catches every static `skip:` on both reporters and, on the iOS
+#      `flutter test -d <udid>` lanes, runtime `markTestSkipped` too; the drive
+#      lanes' runtime skips never reach it and are caught by the declared-reason
+#      scan below instead.
 #
 # The failure-counter rule tolerates an optional `~N` column (`+3 ~1 -2:`) and
 # accepts end-of-line as a terminator, because a drive killed mid-line — the
@@ -506,6 +512,108 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# The premise the `~N` rule rests on — that nothing is skipped STATICALLY.
+#
+# Signal 5 treats any non-zero `~N` as a lane failure, which is sound only while
+# two things hold: every markTestSkipped() is derived unreachable (the manifest,
+# checked above) and no test carries a `skip:`. Only the first was enforced, and
+# the second is the one a single word falsifies — `skip:` is the ordinary way to
+# disable a Dart test, and --check-manifest is blind to it because it greps for
+# markTestSkipped( alone.
+#
+# A static skip is already unusable here, so this changes no policy: flutter_test
+# routes it through _runSkippedTest, which files the test under `skipped` (so
+# `~N` moves and signal 5 reddens the lane) and logs its reason as
+# `Skip: <reason>` WITHOUT the two-space indent the declared-reason scan anchors
+# on. The manifest cannot describe one — its rows declare a runtime hatch and the
+# argument for why that hatch cannot fire, which a `skip:` does not have — and no
+# lane can tolerate one. What changes is only WHERE that is discovered: a
+# one-second repo guard naming the file and line, rather than a twenty-minute
+# E2E lane printing a bare counter and no diagnosis, because
+# drive_log_failure_evidence has no declared reason to explain it with.
+# ---------------------------------------------------------------------------
+
+# A `skip:` NAMED ARGUMENT, and Dart's `@Skip(...)` library annotation.
+# Deliberately not a bare `skip:`: this rule asserts an ABSENCE, so the "strip
+# generously, a swallowed line only fails harder" argument used elsewhere in
+# this file INVERTS — here over-matching reddens honest work. A bare `skip:`
+# hits exactly two real prose false positives in the tree today
+# (b7_ios_auth_tier_test.dart:67's `` `skip: true` `` inside a doc comment,
+# b9_network_reconnect_test.dart:543's "Not a skip: …" mid-sentence), which is
+# why the rule anchors on what PRECEDES the word rather than stripping comments
+# — a comment stripper is fooled by a `//` inside a string literal.
+#
+# The anchor accepts every position an argument can start from: its own line,
+# after the previous argument's comma, straight after the opening paren (a named
+# argument BEFORE the positionals is legal Dart and really does skip the test),
+# and after an interposed `/* … */` block comment. `dart format` preserves all
+# four, and it preserves `skip : true` too — spacing before the colon is
+# therefore tolerated rather than assumed away, because flutter-check.yml
+# deliberately does NOT gate `dart format`, so an unformatted file can land and
+# persist. Fixtures 41-42 and 41b-41e pin each branch; 40 pins the prose.
+readonly DRIVE_LOG_STATIC_SKIP_RE='(^[[:space:]]*|[,(][[:space:]]*|\*/[[:space:]]*)skip[[:space:]]*:|(^[[:space:]]*|[,(][[:space:]]*)@Skip[[:space:]]*\('
+
+drive_log_check_static_skips() {
+  local root="${1:-${_DRIVE_LOG_LIB_DIR}/../../..}" dir hits f
+  root="$(cd "${root}" 2>/dev/null && pwd)" || {
+    echo "ERROR: repo root '${1:-}' is not a directory" >&2
+    return 2
+  }
+  dir="${root}/haven/integration_test"
+  if [[ ! -d "${dir}" ]]; then
+    echo "ERROR: ${dir} does not exist — wrong repo root?" >&2
+    return 2
+  fi
+
+  local files=()
+  while IFS= read -r f; do files+=("${f}"); done < <(find "${dir}" -name '*.dart' | sort)
+  # The same anti-vacuity floor --check-wiring keeps: a scan over no files
+  # reports a clean tree, which is the shape this whole library exists to catch.
+  if (( ${#files[@]} == 0 )); then
+    echo "ERROR: no .dart files under ${dir}; this check has gone blind rather" >&2
+    echo "than found a clean tree." >&2
+    return 2
+  fi
+
+  # NOT `|| true`: grep exits 2 when it could not READ a file, and folding that
+  # into "no hits" turns an unread tree into a clean verdict — the anti-vacuity
+  # floor above counts files, it never confirms they were opened (fixture 43b).
+  local grc=0
+  hits="$(grep -nE -- "${DRIVE_LOG_STATIC_SKIP_RE}" "${files[@]}")" || grc=$?
+  if (( grc > 1 )); then
+    echo "ERROR: grep could not read one or more .dart files under ${dir}" >&2
+    echo "(exit ${grc}); this check has gone blind rather than found a clean" >&2
+    echo "tree." >&2
+    return 2
+  fi
+  if [[ -n "${hits}" ]]; then
+    cat >&2 <<EOF
+
+  STATIC \`skip:\` UNDER haven/integration_test/:
+$(sed 's|^|    * |' <<<"${hits}")
+
+  A statically skipped integration test never runs on ANY lane, and
+  $(drive_log_skip_manifest_path)
+  has no way to say so: a row there declares a runtime hatch and the argument for
+  why that hatch cannot fire, and a \`skip:\` has neither. It is also the premise
+  the \`~N\` rule rests on (see this file's header), so left unasserted a one-word
+  edit would falsify that derivation while every static guard stayed green.
+
+  Fix by deleting the skip and letting the test run, or — if it genuinely cannot
+  run on some runtime — by converting it to a guarded markTestSkipped() and
+  declaring it in that manifest with the argument for why the guard cannot fire
+  in the lane that drives its target. A skip with no substitute proof is a
+  deleted test wearing a disguise.
+EOF
+    return 1
+  fi
+
+  echo "drive-log-lib.sh --check-manifest: OK — no static \`skip:\` in" \
+       "${#files[@]} .dart file(s) under haven/integration_test/, so a non-zero" \
+       "\`~N\` in any drive log is a lost proof and not a declared one."
+}
+
+# ---------------------------------------------------------------------------
 # Runtime reachability — the DELEGATION, not just the manifest.
 #
 # `--check-manifest` proves every hatch is declared. What makes a declared hatch
@@ -545,11 +653,31 @@ readonly DRIVE_LOG_WIRING_EXEMPT=(
 # diagnostic block. Left in, `cat <<EOF … bash "${INNER}" … EOF` supplies both
 # halves of the edge rule below from a block that invokes nothing.
 #
-# The delimiter must survive the quote-strip as an identifier, which is what
-# keeps `<<<"${x}"` herestrings and `(a << 24)` arithmetic from opening one. A
-# terminator is matched at column 0 (leading TABs only for `<<-`), as bash does;
-# a heredoc that never terminates therefore blanks the rest of the file, which
-# again fails this check rather than passing it.
+# The delimiter is NOT required to be a bash identifier, because bash does not
+# require one: `<<END-OF-USAGE`, `<<2EOF` and `<<USAGE.TXT` all run, and an
+# identifier-only rule left every such body in the code view — fixture 39's
+# evasion one character apart, and the shape this check's own failure message
+# invites. What must not open a heredoc is excluded by three properties of the
+# scan instead, each with its own fixture:
+#
+#   * every candidate is ANCHORED at the `<<` that index() found, so a `<<<`
+#     herestring leaves a single `<` where the delimiter would start and matches
+#     nothing (39c). An unanchored search would find the herestring's word one
+#     character in and treat `<<<"1.2.3"` as a heredoc.
+#   * a delimiter is a word of `[A-Za-z0-9_.-]` after quote and backslash
+#     removal, so `(a << 24)` — whose word is `24)` — is not one (39d), and
+#     neither is a regex fragment written inside a quoted awk program.
+#   * a purely numeric word is arithmetic, not a delimiter: `$(( bits << 2 ))`
+#     is the same shift with a space before the paren (39d).
+#
+# The residue is `$(( a << NAMED ))`, which opens a heredoc that never
+# terminates and so blanks the rest of the file — loud, and the same direction
+# of error every other rule here takes. It is also what the identifier-only rule
+# did, so nothing regressed.
+#
+# A terminator is matched at column 0 (leading TABs only for `<<-`), as bash
+# does; a heredoc that never terminates therefore blanks the rest of the file,
+# which again fails this check rather than passing it.
 _drive_log_strip_sh_prose() {
   awk '
     BEGIN { qcls = "[" sprintf("%c%c", 39, 34) "]" }
@@ -564,12 +692,21 @@ _drive_log_strip_sh_prose() {
       line = $0
       sub(/^[[:space:]]*#.*$/, "", line)
       sub(/[[:space:]]#[[:space:]].*$/, "", line)
-      if (match(line, /<<-?[[:space:]]*[^[:space:];&|<>]+/)) {
-        d = substr(line, RSTART, RLENGTH)
-        hdtabs = (substr(d, 3, 1) == "-")
+      s = line
+      while ((p = index(s, "<<")) > 0) {
+        tail = substr(s, p)
+        s = substr(s, p + 2)
+        if (!match(tail, /^<<-?[[:space:]]*[^[:space:];&|<>]+/)) continue
+        d = substr(tail, 1, RLENGTH)
+        tabs = (substr(d, 3, 1) == "-")
         sub(/^<<-?[[:space:]]*/, "", d)
         gsub(qcls, "", d)
-        if (d ~ /^[A-Za-z_][A-Za-z0-9_]*$/) hd = d
+        gsub(/\\/, "", d)
+        if (d !~ /^[A-Za-z0-9_.-]+$/) continue
+        if (d ~ /^[0-9]+$/) continue
+        hd = d
+        hdtabs = tabs
+        break
       }
       print line
     }
@@ -745,79 +882,111 @@ EOF
        "drive_log_reports_test_failure."
 }
 
+# ---------------------------------------------------------------------------
+# Self-test: one driver, one suite per guard.
+#
+# The suites and the `_dl_expect_*` assertions read `tmp`, `src`, `ran`, `fail`
+# and the hermetic HAVEN_DRIVE_SKIP_MANIFEST out of drive_log_lib_self_test's
+# scope through bash's dynamic scoping, so they are not callable on their own.
+# They live at file scope (like every other `_drive_log_*`/`_dl_*` private here)
+# rather than nested, so each guard's fixtures can be read — and mutation-tested
+# — without paging past four other guards' fixtures.
+# ---------------------------------------------------------------------------
+
 # Number of assertions drive_log_lib_self_test must make. Pinned by EQUALITY,
 # not by a floor: a floor lets a fixture be deleted and the suite stay green,
 # which is the same "reports coverage it does not have" shape this whole library
 # exists to catch. Change it only in the commit that adds or removes a fixture.
-readonly DRIVE_LOG_SELF_TEST_FIXTURES=42
+readonly DRIVE_LOG_SELF_TEST_FIXTURES=77
 
-drive_log_lib_self_test() {
-  local tmp fail=0 ran=0
-  tmp="$(mktemp -d)"
-  # shellcheck disable=SC2064
-  trap "rm -rf '${tmp}'" RETURN
-
-  # Hermetic manifest for every fixture below. `local` (not `export`): the
-  # lookup reads it through dynamic scope, and binding it here means no fixture
-  # can accidentally reconcile against the REAL manifest — the same trap
-  # scripts/ci/check_no_undeclared_skips.sh documents for its own lookup.
-  local HAVEN_DRIVE_SKIP_MANIFEST="${tmp}/manifest.ok"
-  cat > "${tmp}/manifest.ok" <<'EOF'
-# comments and blank lines are ignored
-
-integration_test/alpha_test.dart|alpha needs an Android emulator; skipped on non-Android runtimes.
-integration_test/beta_test.dart|Keyring unavailable on this runner (${e.runtimeType}); skipping BETA-1.
-integration_test/beta_test.dart|Keyring unavailable on this runner (${e.runtimeType}); skipping $label.
-EOF
-
-  # `ran=$(( ran + 1 ))`, never `(( ran++ ))`: the latter returns 1 when ran is
-  # 0, which `set -e` on the direct-execution path would treat as a failure.
-  _dl_expect_fail() { # <label> <logfile>
-    ran=$(( ran + 1 ))
-    if ! drive_log_reports_test_failure "$2"; then
-      echo "SELF-TEST FAIL ($1): expected a lane failure, got silence" >&2
+# `ran=$(( ran + 1 ))`, never `(( ran++ ))`: the latter returns 1 when ran is
+# 0, which `set -e` on the direct-execution path would treat as a failure.
+_dl_expect_fail() { # <label> <logfile>
+  ran=$(( ran + 1 ))
+  if ! drive_log_reports_test_failure "$2"; then
+    echo "SELF-TEST FAIL ($1): expected a lane failure, got silence" >&2
+    fail=1
+  fi
+}
+_dl_expect_clean() { # <label> <logfile>
+  ran=$(( ran + 1 ))
+  if drive_log_reports_test_failure "$2"; then
+    echo "SELF-TEST FAIL ($1): an honest run was flagged as failing" >&2
+    fail=1
+  fi
+}
+_dl_expect_scan_rc() { # <label> <want-rc> <logfile> [<manifest>]
+  local got=0
+  ran=$(( ran + 1 ))
+  ( HAVEN_DRIVE_SKIP_MANIFEST="${4:-${HAVEN_DRIVE_SKIP_MANIFEST}}" \
+      drive_log_skip_scan "$3" ) >/dev/null 2>&1 || got=$?
+  if [[ "${got}" -ne "$2" ]]; then
+    echo "SELF-TEST FAIL ($1): skip scan want rc=$2, got rc=${got}" >&2
+    fail=1
+  fi
+}
+# <want-ere> empty means "must print NOTHING": drive_log_failure_evidence is the
+# only diagnosis a lane prints when the predicate fires, and a version that
+# prints nothing at all satisfies every rc-based fixture in this file.
+_dl_expect_evidence() { # <label> <logfile> <want-ere|"">
+  local got
+  ran=$(( ran + 1 ))
+  got="$(drive_log_failure_evidence "$2" 2>&1)"
+  if [[ -z "$3" ]]; then
+    if [[ -n "${got}" ]]; then
+      echo "SELF-TEST FAIL ($1): expected no evidence, got: ${got}" >&2
       fail=1
     fi
-  }
-  _dl_expect_clean() { # <label> <logfile>
-    ran=$(( ran + 1 ))
-    if drive_log_reports_test_failure "$2"; then
-      echo "SELF-TEST FAIL ($1): an honest run was flagged as failing" >&2
-      fail=1
-    fi
-  }
-  _dl_expect_scan_rc() { # <label> <want-rc> <logfile> [<manifest>]
-    local got=0
-    ran=$(( ran + 1 ))
-    ( HAVEN_DRIVE_SKIP_MANIFEST="${4:-${HAVEN_DRIVE_SKIP_MANIFEST}}" \
-        drive_log_skip_scan "$3" ) >/dev/null 2>&1 || got=$?
-    if [[ "${got}" -ne "$2" ]]; then
-      echo "SELF-TEST FAIL ($1): skip scan want rc=$2, got rc=${got}" >&2
-      fail=1
-    fi
-  }
-  _dl_expect_manifest_rc() { # <label> <want-rc> <manifest> <repo-root>
-    local got=0
-    ran=$(( ran + 1 ))
-    # SUBSHELL: a prefixed assignment on a FUNCTION call persists in bash, and
-    # drive_log_check_manifest returns rather than exits, so both need fencing.
-    ( HAVEN_DRIVE_SKIP_MANIFEST="$3" drive_log_check_manifest "$4" ) \
-      >/dev/null 2>&1 || got=$?
-    if [[ "${got}" -ne "$2" ]]; then
-      echo "SELF-TEST FAIL ($1): --check-manifest want rc=$2, got rc=${got}" >&2
-      fail=1
-    fi
-  }
-  _dl_expect_wiring_rc() { # <label> <want-rc> <repo-root>
-    local got=0
-    ran=$(( ran + 1 ))
-    drive_log_check_wiring "$3" >/dev/null 2>&1 || got=$?
-    if [[ "${got}" -ne "$2" ]]; then
-      echo "SELF-TEST FAIL ($1): --check-wiring want rc=$2, got rc=${got}" >&2
-      fail=1
-    fi
-  }
+  elif ! grep -qE -- "$3" <<<"${got}"; then
+    echo "SELF-TEST FAIL ($1): evidence did not carry /$3/; got: ${got}" >&2
+    fail=1
+  fi
+}
+_dl_expect_manifest_rc() { # <label> <want-rc> <manifest> <repo-root>
+  local got=0
+  ran=$(( ran + 1 ))
+  # SUBSHELL: a prefixed assignment on a FUNCTION call persists in bash, and
+  # drive_log_check_manifest returns rather than exits, so both need fencing.
+  ( HAVEN_DRIVE_SKIP_MANIFEST="$3" drive_log_check_manifest "$4" ) \
+    >/dev/null 2>&1 || got=$?
+  if [[ "${got}" -ne "$2" ]]; then
+    echo "SELF-TEST FAIL ($1): --check-manifest want rc=$2, got rc=${got}" >&2
+    fail=1
+  fi
+}
+_dl_expect_wiring_rc() { # <label> <want-rc> <repo-root>
+  local got=0
+  ran=$(( ran + 1 ))
+  drive_log_check_wiring "$3" >/dev/null 2>&1 || got=$?
+  if [[ "${got}" -ne "$2" ]]; then
+    echo "SELF-TEST FAIL ($1): --check-wiring want rc=$2, got rc=${got}" >&2
+    fail=1
+  fi
+}
+_dl_expect_static_rc() { # <label> <want-rc> <repo-root>
+  local got=0
+  ran=$(( ran + 1 ))
+  drive_log_check_static_skips "$3" >/dev/null 2>&1 || got=$?
+  if [[ "${got}" -ne "$2" ]]; then
+    echo "SELF-TEST FAIL ($1): --check-static-skips want rc=$2, got rc=${got}" >&2
+    fail=1
+  fi
+}
+_dl_expect_gate_rc() { # <label> <want-rc> <manifest> <repo-root>
+  local got=0
+  ran=$(( ran + 1 ))
+  HAVEN_DRIVE_SKIP_MANIFEST="$3" bash "${BASH_SOURCE[0]}" --check-manifest "$4" \
+    >/dev/null 2>&1 || got=$?
+  if [[ "${got}" -ne "$2" ]]; then
+    echo "SELF-TEST FAIL ($1): --check-manifest gate want rc=$2, got rc=${got}" >&2
+    fail=1
+  fi
+}
 
+# ---------------------------------------------------------------------------
+# Suite 1: the drive-log predicate and the declared-reason scan.
+# ---------------------------------------------------------------------------
+_dl_suite_predicate() {
   # (1) THE CRITICAL FIXTURE — verbatim from run 30753193231, including the
   #     driver's own contradicting "All tests passed." line. If this ever stops
   #     being detected, a setUpAll failure silently turns green again.
@@ -830,6 +999,18 @@ EOF
     'I/flutter ( 3849): 00:01 +1 -1: Some tests failed.' \
     > "${tmp}/setupall.log"
   _dl_expect_fail 1 "${tmp}/setupall.log"
+
+  # (1b) The summary line ALONE, with no counter line to corroborate it. The
+  #      header calls `Some tests failed.` an INDEPENDENT signal, and until this
+  #      fixture nothing held it to that: every other failing log here also
+  #      carries a `-N` counter, so deleting the summary rule outright left the
+  #      whole suite green. Realistic on Android, where logcat's ring buffer
+  #      drops intermediate lines under load and the summary is what survives.
+  printf '%s\n' \
+    'I/flutter ( 3849): 00:03 +1: scenario A' \
+    'I/flutter ( 3849): Some tests failed.' \
+    > "${tmp}/summary-only.log"
+  _dl_expect_fail 1b "${tmp}/summary-only.log"
 
   # (2) A clean run must NOT trip — including the driver's "All tests passed."
   #     and a passing counter with no failure component.
@@ -850,6 +1031,21 @@ EOF
     > "${tmp}/inbody.log"
   _dl_expect_fail 3 "${tmp}/inbody.log"
 
+  # (3b) tearDownAll, which the header names alongside setUpAll and which no
+  #      fixture held to it: fixture 1 covers setUpAll and every other failing
+  #      log here carries a counter or a summary, so narrowing the rule to
+  #      `(setUpAll)` alone left the suite green. The shape is real and it is
+  #      the harder one — `_onError` prints the progress line BEFORE filing the
+  #      failure, so that line carries no `-N`, and a timeout that then kills
+  #      the drive leaves no `_onDone` and therefore no summary either. What
+  #      remains on disk is the marker, and only the marker.
+  printf '%s\n' \
+    'I/flutter ( 3849): 00:13 +3: (tearDownAll) [E]' \
+    'I/flutter ( 3849):   relay teardown threw StateError' \
+    'All tests passed.' \
+    > "${tmp}/teardownall.log"
+  _dl_expect_fail 3b "${tmp}/teardownall.log"
+
   # (4) Counter-only failure, no summary line (a drive killed mid-run by a
   #     timeout never prints "Some tests failed.").
   printf '%s\n' \
@@ -862,7 +1058,11 @@ EOF
   _dl_expect_clean 5 "${tmp}/does-not-exist.log"
 
   # (6) A scenario NAME containing the digits pattern must not false-positive.
-  #     Guards the `-[1-9]` counter rule against ordinary prose.
+  #     Guards the `-[1-9]` counter rule against ordinary prose. The `[1-9]`
+  #     itself cannot be pinned against widening to `[0-9]`: neither reporter
+  #     ever emits `-0` or `~0` (both columns are built only when non-zero), so
+  #     no log distinguishes the two rules. Said here rather than left to read
+  #     as a guarded branch.
   printf '%s\n' \
     'I/flutter ( 3849): 00:03 +2: circle 1-2 members sync' \
     'I/flutter ( 3849): 00:04 +3: epoch 3-1 rotation' \
@@ -885,6 +1085,15 @@ EOF
   printf 'I/flutter ( 3849): 02:10 +7 -2' > "${tmp}/truncated.log"
   _dl_expect_fail 8 "${tmp}/truncated.log"
 
+  # (8b) The same truncation on the SKIPPED counter, which had no fixture: the
+  #      `~N` rule carries its own end-of-line terminator and fixture 8 only
+  #      pins the failure rule's. Deleting the `|$` from the `~N` alternative
+  #      left every other fixture green — including 11, whose line ends in a
+  #      colon. A timeout kills a drive at an arbitrary byte, so the counter it
+  #      truncates is whichever one was being written.
+  printf 'I/flutter ( 3849): 02:10 +7 ~2' > "${tmp}/truncated-skip.log"
+  _dl_expect_fail 8b "${tmp}/truncated-skip.log"
+
   # (9) VACUOUS SUITE — nothing ran. `integrationDriver` reports an EMPTY
   #     results map as all-passed and exits 0, so this is green in every drive
   #     lane without the signal. A suite that ran nothing proved nothing.
@@ -896,6 +1105,12 @@ EOF
 
   # (10) SKIPPED COLUMN present alongside a real failure (`+3 ~1 -2:`) — the
   #      counter rule must still fire with the `~N` column interposed.
+  #      Pins that OUTCOME, but not the failure rule's `( ~[0-9]+)?` tolerance
+  #      itself: the `~N` rule matches this same line, so deleting the tolerance
+  #      keeps this fixture green. Nothing can pin it, because the reporter emits
+  #      the column only when something skipped — a `+3 ~0 -2:` line does not
+  #      exist. Kept as redundancy against a reporter change, and said so here
+  #      rather than left to read as a guarded branch.
   printf '%s\n' \
     'I/flutter ( 3849): 00:50 +3 ~1 -2: scenario E' \
     > "${tmp}/skipcol.log"
@@ -907,9 +1122,10 @@ EOF
   #      runs. That argument is now settled the other way, and by derivation
   #      rather than by assumption: every markTestSkipped() under
   #      haven/integration_test/ was traced to the lane that drives it and none
-  #      can fire (tooling/e2e/expected_drive_skips.txt), and there is no static
-  #      `skip:` in the tree at all. So no honest run has a skipped column, and
-  #      a run that does has lost a proof.
+  #      can fire (tooling/e2e/expected_drive_skips.txt), and no static `skip:`
+  #      can be added to the tree (drive_log_check_static_skips, fixtures 40-43b).
+  #      So no honest run has a skipped column, and a run that does has lost a
+  #      proof.
   printf '%s\n' \
     'I/flutter ( 3849): 00:50 +9 ~2: scenario F' \
     'I/flutter ( 3849): 00:51 +9 ~2: All tests passed!' \
@@ -930,7 +1146,7 @@ EOF
 
   # (13) The declared reason carries a Dart interpolation; the runtime text has
   #      a concrete value in its place. If the wildcard substitution regressed,
-  #      16 of the 23 declared hatches would stop being recognised — and the
+  #      14 of the 23 declared hatches would stop being recognised — and the
   #      colourless, prefix-free fixtures would all still pass.
   printf '%s\n' \
     'I/flutter ( 3849): 00:03 +1: beta' \
@@ -965,7 +1181,7 @@ EOF
   # (15) The iOS lane shape: `flutter test -d <udid>` reports from the HOST, so
   #      there is no logcat prefix and the indent starts the line. Both signals
   #      are present here and that is faithful — on this reporter a runtime skip
-  #      DOES move `~N` — so the end-to-end assertion is checked first…
+  #      DOES move `~N` — so the end-to-end assertion is checked first...
   printf '%s\n' \
     '00:01 +0: probe group beta' \
     '  Keyring unavailable on this runner (StateError); skipping BETA-1.' \
@@ -973,9 +1189,9 @@ EOF
     > "${tmp}/hostskip.log"
   _dl_expect_fail 15 "${tmp}/hostskip.log"
 
-  # (15b) …and then the REASON half is pinned on its own, because fixture 15
+  # (15b) ...and then the REASON half is pinned on its own, because fixture 15
   #       cannot see it. `~1` on that log satisfies the counter rule by itself,
-  #       so 15 stays green even with the `(^|…)` start-of-line branch of the
+  #       so 15 stays green even with the `(^|...)` start-of-line branch of the
   #       anchor deleted — the one branch it is named for. Asserting the SCAN
   #       rather than the predicate removes the counter from the circuit: this
   #       is what fails if the host-shape anchor regresses, which would
@@ -1003,20 +1219,51 @@ EOF
     > "${tmp}/noreporter.log"
   _dl_expect_scan_rc 17 2 "${tmp}/noreporter.log"
 
-  # (18) …and rc 2 must NOT be a lane failure. That shape is exactly a launch
+  # (18) ...and rc 2 must NOT be a lane failure. That shape is exactly a launch
   #      stall, which ios-flake-lib.sh classifies as retryable by asking this
   #      predicate; folding rc 2 in would make every iOS retry impossible.
   _dl_expect_clean 18 "${tmp}/noreporter.log"
 
   # (19) A missing manifest is "cannot judge", never "clean". The build is
   #      turned red for that by --check-manifest, which is the right place: an
-  #      E2E lane must not be what discovers a deleted file in the repo.
+  #      E2E lane must not be what discovers a deleted file in the repo. The
+  #      neighbouring branch — a manifest that EXISTS but that awk cannot open —
+  #      cannot be pinned separately: awk's own failure leaves the alternation
+  #      empty, which the same `[[ -n "${re}" ]]` test already reports as rc 2.
+  #      There is one outcome, so there is one fixture.
   _dl_expect_scan_rc 19 2 "${tmp}/driveskip.log" "${tmp}/no-such-manifest.txt"
+}
 
-  # -------------------------------------------------------------------------
-  # Static half: the source tree against the manifest.
-  # -------------------------------------------------------------------------
-  local src="${tmp}/repo/haven/integration_test"
+# ---------------------------------------------------------------------------
+# Suite 2: the evidence dump, which nine runners print and nothing asserted.
+#
+# It is the ONLY diagnosis a lane emits when the predicate fires, and it is
+# invisible to every rc-based fixture above: "print nothing at all" and "drop
+# the skip-reason dump, keep the failure lines" both left the whole suite green
+# while leaving a red lane with a bare exit code and no cause.
+# ---------------------------------------------------------------------------
+_dl_suite_evidence() {
+  # (19b) The matched failure line is quoted back. Without it a lane says only
+  #       that the app reported a failure, never which line said so.
+  _dl_expect_evidence 19b "${tmp}/setupall.log" '\(setUpAll\) \[E\]'
+
+  # (19c) The SKIP branch, which is a separate dump behind its own rc test: the
+  #       reason line, and the reconciliation instructions naming the manifest.
+  #       A drive-lane skip has no counter and no summary, so this text is the
+  #       entire explanation of why the lane went red.
+  _dl_expect_evidence 19c "${tmp}/driveskip.log" \
+    'alpha needs an Android emulator'
+  _dl_expect_evidence 19c2 "${tmp}/driveskip.log" 'A TEST SKIPPED'
+
+  # (19d) An honest log produces NO evidence. A dump that printed unconditionally
+  #       would bury the real diagnosis in every passing lane's output.
+  _dl_expect_evidence 19d "${tmp}/clean.log" ''
+}
+
+# ---------------------------------------------------------------------------
+# Suite 3: the source tree against the manifest.
+# ---------------------------------------------------------------------------
+_dl_suite_manifest() {
   mkdir -p "${src}"
 
   # Multi-line adjacent literals — the shape 22 of the 23 real call sites use,
@@ -1062,7 +1309,9 @@ void main() {
 DART
 
   # (20) The happy path: every call site declared, every declaration live, both
-  #      call shapes parsed.
+  #      call shapes parsed. Also the only thing pinning the manifest parser's
+  #      comment/blank-line skip — manifest.ok opens with both, and without that
+  #      skip each would fail the two-field check and turn this rc 2.
   _dl_expect_manifest_rc 20 0 "${tmp}/manifest.ok" "${tmp}/repo"
 
   # (21) THE CRITICAL FIXTURE for this half — a new hatch nobody declared. This
@@ -1094,10 +1343,33 @@ DART
     "${tmp}/manifest.ok" > "${tmp}/manifest.reason"
   _dl_expect_manifest_rc 23 1 "${tmp}/manifest.reason" "${tmp}/repo"
 
-  # (24) A duplicate row is a manifest error, not a lenient allowance: two rows
+  # (24) A duplicate ROW is a manifest error, not a lenient allowance: two rows
   #      for one call site means one of them can never go stale.
   cat "${tmp}/manifest.ok" "${tmp}/manifest.ok" > "${tmp}/manifest.dup"
   _dl_expect_manifest_rc 24 2 "${tmp}/manifest.dup" "${tmp}/repo"
+
+  # (24b) A duplicate CALL SITE — the mirror image, and a different branch:
+  #       fixture 24 trips the manifest parser, this trips the count comparison
+  #       after the pairing. One declared row cannot hold two hatches to
+  #       account; delete the second one's guard and the row still matches, so
+  #       nothing else here notices. Deleting the DUPLICATE CALL SITE report
+  #       turned this rc 0 with every other fixture green.
+  cat > "${src}/dup_test.dart" <<'DART'
+void main() {
+  testWidgets('theta one', (tester) async {
+    markTestSkipped('theta is unavailable on this runtime.');
+  });
+  testWidgets('theta two', (tester) async {
+    markTestSkipped('theta is unavailable on this runtime.');
+  });
+}
+DART
+  cat "${tmp}/manifest.ok" > "${tmp}/manifest.dupcall"
+  printf '%s\n' \
+    'integration_test/dup_test.dart|theta is unavailable on this runtime.' \
+    >> "${tmp}/manifest.dupcall"
+  _dl_expect_manifest_rc 24b 1 "${tmp}/manifest.dupcall" "${tmp}/repo"
+  rm -f "${src}/dup_test.dart"
 
   # (25) A row with the wrong field count — an unescaped `|` inside a reason, a
   #      hand-added count column copied from the host manifest.
@@ -1147,32 +1419,77 @@ DART
   _dl_expect_manifest_rc 29 2 "${tmp}/manifest.ok" "${tmp}/repo"
   rm -f "${src}/rot3_test.dart"
 
-  # -------------------------------------------------------------------------
-  # Runtime-reachability half: the runners against the predicate.
-  #
-  # Two fixture trees, because the two ways to reach it fail differently. `_mk`
-  # writes one runner; every tree carries the exempt wrapper, whose presence is
-  # what the stale-exemption rule reads, so a tree that omits it is fixture 36's
-  # own case rather than an accident.
-  # -------------------------------------------------------------------------
-  local wtree
-  _dl_mk_runner() { # <tree> <name> <body>
-    mkdir -p "${1}/tooling/e2e/ci"
-    printf '#!/usr/bin/env bash\n%s\n' "$3" > "${1}/tooling/e2e/ci/${2}"
-  }
-  _dl_mk_tree_a() { # <tree> — one direct caller, one delegating runner
-    _dl_mk_runner "$1" run-with-deadline.sh 'exec "$@"'
-    _dl_mk_runner "$1" run-direct.sh '
+  # (29b) PARSER ROT, a `|` inside a reason. `|` is the manifest's field
+  #       separator, so such a row can never be written down truthfully — the
+  #       reconciler would read it as a three-field line. Without the alarm the
+  #       row is emitted anyway and reported as an UNDECLARED hatch (rc 1),
+  #       sending the author to the manifest to add a row that cannot parse.
+  cat > "${src}/pipe_test.dart" <<'DART'
+void main() {
+  markTestSkipped('iota is off | pending the relay fix.');
+}
+DART
+  _dl_expect_manifest_rc 29b 2 "${tmp}/manifest.ok" "${tmp}/repo"
+  rm -f "${src}/pipe_test.dart"
+
+  # (29c) GLOB ROT in the EXTRACTOR — the same anti-vacuity floor fixtures 37
+  #       and 43 keep for the other two globs, on the one glob that decides
+  #       whether any hatch is seen at all. A rename or a moved directory that
+  #       leaves no .dart files must report that it has gone blind; without the
+  #       floor awk is handed no file operands, reads stdin, sees nothing, and
+  #       every manifest row reads as a STALE DECLARATION (rc 1) rather than as
+  #       a broken extractor.
+  mkdir -p "${tmp}/blindrepo/haven/integration_test"
+  _dl_expect_manifest_rc 29c 2 "${tmp}/manifest.ok" "${tmp}/blindrepo"
+
+  # (29d) A COMMENTED-OUT hatch is not a hatch. Both halves of the extractor
+  #       skip comments — the awk joiner and the independent `seen` count — and
+  #       they must agree: drop the skip from either one and the two counts
+  #       disagree, which is reported as extractor rot (rc 2). Drop it from
+  #       BOTH and the commented line becomes an undeclared hatch (rc 1). Only
+  #       an unmutated pair leaves this rc 0. Covers the `//` and the block-
+  #       comment `*` continuation, which are separate alternatives.
+  cat > "${src}/commented_test.dart" <<'DART'
+void main() {
+  testWidgets('iota', (tester) async {
+    // markTestSkipped('iota was disabled while the relay was flaky.');
+    /*
+     * markTestSkipped('iota was disabled during the migration.');
+     */
+    expect(true, isTrue);
+  });
+}
+DART
+  _dl_expect_manifest_rc 29d 0 "${tmp}/manifest.ok" "${tmp}/repo"
+  rm -f "${src}/commented_test.dart"
+}
+
+# ---------------------------------------------------------------------------
+# Suite 4: the runners against the predicate.
+#
+# Two fixture trees, because the two ways to reach it fail differently. `_mk`
+# writes one runner; every tree carries the exempt wrapper, whose presence is
+# what the stale-exemption rule reads, so a tree that omits it is fixture 36's
+# own case rather than an accident.
+# ---------------------------------------------------------------------------
+_dl_mk_runner() { # <tree> <name> <body>
+  mkdir -p "${1}/tooling/e2e/ci"
+  printf '#!/usr/bin/env bash\n%s\n' "$3" > "${1}/tooling/e2e/ci/${2}"
+}
+_dl_mk_tree_a() { # <tree> — one direct caller, one delegating runner
+  _dl_mk_runner "$1" run-with-deadline.sh 'exec "$@"'
+  _dl_mk_runner "$1" run-direct.sh '
 source "${SCRIPT_DIR}/drive-log-lib.sh"
 flutter drive --target="${TARGET}" > "${LOG}" 2>&1 || drc=$?
 if drive_log_reports_test_failure "${LOG}"; then exit 1; fi'
-    _dl_mk_runner "$1" run-delegating.sh '
+  _dl_mk_runner "$1" run-delegating.sh '
 readonly INNER="${script_dir}/run-direct.sh"
 for dep in "${INNER}"; do [[ -x "${dep}" ]] || exit 2; done
 bash "${INNER}" "${target}" || rc=$?'
-  }
+}
 
-  wtree="${tmp}/wiring-ok"
+_dl_suite_wiring() {
+  local wtree="${tmp}/wiring-ok"
   _dl_mk_tree_a "${wtree}"
 
   # (30) The happy path: one runner asks the predicate itself, one reaches it
@@ -1232,7 +1549,7 @@ flutter drive --target="${target}" || rc=$?'
   _dl_expect_wiring_rc 34 1 "${wtree}"
 
   # (35) The SOURCE hop, on its own: run-ios-sim-scenario.sh reaches the
-  #      predicate only through the ios-flake-lib.sh it sources, so the two
+  #      predicate only through the ios-flake-lib.sh it sources, so the three
   #      iOS-only manifest rows hang off this edge alone. Isolated in a tree
   #      whose only non-exempt runner needs it, so nothing else can carry it.
   wtree="${tmp}/wiring-source"
@@ -1261,17 +1578,28 @@ flutter test "${SCENARIO}" -d "${UDID}" || rc=$?'
   _dl_mk_runner "${wtree}" run-with-deadline.sh 'exec "$@"'
   _dl_expect_wiring_rc 37 2 "${wtree}"
 
-  # (38) The predicate named inside a STRING. Fixture 34 covers the same evasion
-  #      behind a `#`; deleting the `#` is all it took, and this shape is the one
-  #      the failure message above actively invites — it tells authors to write
-  #      prose naming the predicate and its delegate. Nothing bash would EXECUTE
-  #      here consults anything.
+  # (38) The predicate named inside a DOUBLE-QUOTED string. Fixture 34 covers
+  #      the same evasion behind a `#`; deleting the `#` is all it took, and
+  #      this shape is the one the failure message above actively invites — it
+  #      tells authors to write prose naming the predicate and its delegate.
+  #      Nothing bash would EXECUTE here consults anything.
   wtree="${tmp}/wiring-echoed"
   _dl_mk_tree_a "${wtree}"
   _dl_mk_runner "${wtree}" run-delegating.sh '
 echo "this lane consults drive_log_reports_test_failure via run-direct.sh"
 flutter drive --target="${target}" || rc=$?'
   _dl_expect_wiring_rc 38 1 "${wtree}"
+
+  # (38b) The SINGLE-quoted branch of the same stripper, which had no fixture:
+  #       the two quote characters are separate cases in the scanner and 38
+  #       exercises only one. A stripper narrowed to `"` leaves this line whole
+  #       and the runner reads as wired.
+  wtree="${tmp}/wiring-echoed-sq"
+  _dl_mk_tree_a "${wtree}"
+  _dl_mk_runner "${wtree}" run-delegating.sh "
+echo 'this lane consults drive_log_reports_test_failure via run-direct.sh'
+flutter drive --target=\"\${target}\" || rc=\$?"
+  _dl_expect_wiring_rc 38b 1 "${wtree}"
 
   # (39) The same, in a HEREDOC body — a usage/diagnostic block, which every real
   #      runner has. Its body carries BOTH halves of the reach graph: the
@@ -1290,9 +1618,366 @@ EOF
 flutter drive --target="${target}" || rc=$?'
   _dl_expect_wiring_rc 39 1 "${wtree}"
 
-  unset -f _dl_mk_runner _dl_mk_tree_a
-  unset -f _dl_expect_fail _dl_expect_clean _dl_expect_scan_rc \
-           _dl_expect_manifest_rc _dl_expect_wiring_rc
+  # (39b) The same evasion with a delimiter that is not a bash IDENTIFIER.
+  #       `<<END-OF-USAGE` runs — bash asks for a word, not an identifier — and
+  #       an identifier-only rule left this body in the code view, so an
+  #       unwired runner read as wired on prose the guard's own failure message
+  #       tells authors to write. Fixture 39 one character apart. `<<2EOF` and
+  #       `<<USAGE.TXT` are the same branch.
+  wtree="${tmp}/wiring-heredoc-word"
+  _dl_mk_tree_a "${wtree}"
+  _dl_mk_runner "${wtree}" run-delegating.sh '
+cat >&2 <<END-OF-USAGE
+  This lane asks drive_log_reports_test_failure about the drive log, via
+    readonly INNER="${script_dir}/run-direct.sh"
+    bash "${INNER}" "${target}"
+END-OF-USAGE
+flutter drive --target="${target}" || rc=$?'
+  _dl_expect_wiring_rc 39b 1 "${wtree}"
+
+  # (39c) A `<<<` HERESTRING is a different operator and must not open a
+  #       heredoc. Widening the delimiter is what makes this sharp: `<<<"1.2.3"`
+  #       leaves a perfectly valid delimiter word behind the third `<`, so a
+  #       scan that searched the whole line instead of anchoring each candidate
+  #       at its own `<<` blanks the rest of this runner as a heredoc body and
+  #       reddens an honestly wired lane.
+  wtree="${tmp}/wiring-herestring"
+  _dl_mk_tree_a "${wtree}"
+  _dl_mk_runner "${wtree}" run-delegating.sh '
+readonly INNER="${script_dir}/run-direct.sh"
+IFS=. read -r major minor patch <<<"1.2.3"
+bash "${INNER}" "${target}" || rc=$?'
+  _dl_expect_wiring_rc 39c 0 "${wtree}"
+
+  # (39d) An arithmetic `<<` must not open one either. Verbatim the shape at
+  #       run-single-avd-scenario.sh:143-144 and setup-network-guard.sh:411,
+  #       including the CONTINUATION line — whose own text carries no `$((`, so
+  #       nothing on it says "arithmetic" except the operand itself. Two rules
+  #       share the work and both are pinned here: `24)` and `8)` are rejected
+  #       as words (a `)` is not part of a delimiter), while the space-separated
+  #       `<< 2` is rejected only for being purely numeric.
+  wtree="${tmp}/wiring-arith"
+  _dl_mk_tree_a "${wtree}"
+  _dl_mk_runner "${wtree}" run-delegating.sh '
+readonly INNER="${script_dir}/run-direct.sh"
+ip=$(( (a << 24) | (b << 16) \
+     | (c << 8)  | d ))
+shift=$(( bits << 2 ))
+bash "${INNER}" "${target}" "${ip}" || rc=$?'
+  _dl_expect_wiring_rc 39d 0 "${wtree}"
+
+  # (39e) A QUOTED delimiter. Bash strips the quotes before matching the
+  #       terminator, and so must this — ten of the real heredocs in this
+  #       directory are written with a single-quoted delimiter, which is the
+  #       same gsub. Without it the delimiter keeps its quotes, fails the word
+  #       test, and the body is credited as code.
+  wtree="${tmp}/wiring-heredoc-quoted"
+  _dl_mk_tree_a "${wtree}"
+  _dl_mk_runner "${wtree}" run-delegating.sh '
+cat >&2 <<"EOF"
+  This lane asks drive_log_reports_test_failure about the drive log, via
+    readonly INNER="${script_dir}/run-direct.sh"
+    bash "${INNER}" "${target}"
+EOF
+flutter drive --target="${target}" || rc=$?'
+  _dl_expect_wiring_rc 39e 1 "${wtree}"
+
+  # (39f) ...and the TERMINATOR must actually end the body, which every fixture
+  #       above is blind to: they all expect rc 1, and a heredoc that never
+  #       terminates blanks the rest of the file and yields rc 1 for the wrong
+  #       reason. Here the real wiring sits AFTER the usage block, so a
+  #       terminator rule that stopped matching swallows it and reddens an
+  #       honest runner.
+  wtree="${tmp}/wiring-heredoc-closed"
+  _dl_mk_tree_a "${wtree}"
+  _dl_mk_runner "${wtree}" run-delegating.sh '
+cat >&2 <<EOF
+  usage: run-delegating.sh <target>
+EOF
+readonly INNER="${script_dir}/run-direct.sh"
+bash "${INNER}" "${target}" || rc=$?'
+  _dl_expect_wiring_rc 39f 0 "${wtree}"
+
+  # (39g) A TRAILING ` # ` comment naming the predicate. Full-line comments are
+  #       fixture 34; this is the other sub, and deleting it credits a runner
+  #       whose only mention of the predicate is an annotation on a line that
+  #       calls something else.
+  wtree="${tmp}/wiring-trailing-comment"
+  _dl_mk_tree_a "${wtree}"
+  _dl_mk_runner "${wtree}" run-delegating.sh '
+flutter drive --target="${target}" || rc=$?  # asks drive_log_reports_test_failure via run-direct.sh'
+  _dl_expect_wiring_rc 39g 1 "${wtree}"
+
+  # (39h) ...and the reason that sub demands whitespace on BOTH sides of the
+  #       `#`: `${var#word}` is a parameter expansion, not a comment. A general
+  #       `#.*$` stripper truncates this assignment past the `.sh`, the edge
+  #       stops being recognised, and a delegating runner reddens.
+  wtree="${tmp}/wiring-param-expansion"
+  _dl_mk_tree_a "${wtree}"
+  _dl_mk_runner "${wtree}" run-delegating.sh '
+readonly INNER="${script_dir#./}/run-direct.sh"
+bash "${INNER}" "${target}" || rc=$?'
+  _dl_expect_wiring_rc 39h 0 "${wtree}"
+
+  # (39i) MUTUAL DELEGATION. Two runners that invoke each other and neither
+  #       asks the predicate are UNREACHED, not an infinite descent. Note the
+  #       mutation shape: removing the `visited` guard does not return a wrong
+  #       code, it HANGS — the fixture converts a silent recursion into a
+  #       timed-out job.
+  wtree="${tmp}/wiring-cycle"
+  _dl_mk_runner "${wtree}" run-with-deadline.sh 'exec "$@"'
+  _dl_mk_runner "${wtree}" run-ping.sh '
+readonly INNER="${script_dir}/run-pong.sh"
+bash "${INNER}" "${target}" || rc=$?'
+  _dl_mk_runner "${wtree}" run-pong.sh '
+readonly INNER="${script_dir}/run-ping.sh"
+bash "${INNER}" "${target}" || rc=$?'
+  _dl_expect_wiring_rc 39i 1 "${wtree}"
+}
+
+# ---------------------------------------------------------------------------
+# Suite 5: the static-skip half — the premise signal 5 rests on. Reuses
+# ${tmp}/repo, whose two targets carry markTestSkipped() and no `skip:`, so the
+# clean case is a real tree rather than an empty one.
+# ---------------------------------------------------------------------------
+_dl_suite_static() {
+  # (40) CLEAN, and clean for the right reason. The lookalikes are the exact
+  #      shapes already in the real tree — b7's `` `skip: true` `` inside a doc
+  #      comment, b9's "Not a skip: ..." mid-sentence — plus a `'skip':` map key.
+  #      A rule that dropped the anchor and matched a bare `skip:` would pass
+  #      every other fixture here and redden two honest targets in CI, which is
+  #      the inverse mistake and the worse one.
+  cat > "${src}/lookalike_test.dart" <<'DART'
+/// Without them a `skip: true`, a markTestSkipped or an early return would
+/// leave the lane green.
+void main() {
+  // Not a skip: the lane's workflow sets HAVEN_LIVE_SYNC=true.
+  final flags = <String, bool>{'skip': false};
+  testWidgets('lookalike', (tester) async {
+    expect(flags['skip'], isFalse);
+  });
+}
+DART
+  _dl_expect_static_rc 40 0 "${tmp}/repo"
+
+  # (41) THE CRITICAL FIXTURE for this half — `skip:` opening its own line, the
+  #      shape a formatter produces for a multi-line testWidgets call. This test
+  #      runs nowhere, on any lane, and --check-manifest is blind to it.
+  cat > "${src}/static_skip_test.dart" <<'DART'
+void main() {
+  testWidgets(
+    'delta',
+    (tester) async {},
+    skip: true,
+  );
+}
+DART
+  _dl_expect_static_rc 41 1 "${tmp}/repo"
+  rm -f "${src}/static_skip_test.dart"
+
+  # (41b) A named argument BEFORE the positionals. Legal Dart, really skips the
+  #       test, and `dart format` leaves it exactly where it is — so an anchor
+  #       accepting only line-start and post-comma positions misses a live
+  #       static skip that can land and persist.
+  cat > "${src}/static_skip_first_test.dart" <<'DART'
+void main() {
+  testWidgets(skip: true, 'delta first', (tester) async {});
+}
+DART
+  _dl_expect_static_rc 41b 1 "${tmp}/repo"
+  rm -f "${src}/static_skip_first_test.dart"
+
+  # (41c) A `/* ... */` block comment interposed between the comma and the
+  #       argument — again format-stable, and again invisible to a post-comma
+  #       anchor.
+  cat > "${src}/static_skip_blockcomment_test.dart" <<'DART'
+void main() {
+  testWidgets('delta blocked', (tester) async {}, /* flaky */ skip: true);
+}
+DART
+  _dl_expect_static_rc 41c 1 "${tmp}/repo"
+  rm -f "${src}/static_skip_blockcomment_test.dart"
+
+  # (41d) Whitespace before the colon. `dart format` would close it up, but
+  #       flutter-check.yml deliberately does NOT gate `dart format`, so an
+  #       unformatted file lands and stays — the rule cannot assume the
+  #       formatter ran.
+  cat > "${src}/static_skip_spaced_test.dart" <<'DART'
+void main() {
+  testWidgets('delta spaced', (tester) async {}, skip : true);
+}
+DART
+  _dl_expect_static_rc 41d 1 "${tmp}/repo"
+  rm -f "${src}/static_skip_spaced_test.dart"
+
+  # (41e) `@Skip(...)`, the LIBRARY-level annotation, which skips every test in
+  #       the file at once and shares no syntax with the named argument. The
+  #       biggest possible loss of proof through the smallest possible edit.
+  cat > "${src}/static_skip_annotation_test.dart" <<'DART'
+@Skip('waiting on the relay fix')
+library;
+
+void main() {
+  testWidgets('delta annotated', (tester) async {});
+}
+DART
+  _dl_expect_static_rc 41e 1 "${tmp}/repo"
+  rm -f "${src}/static_skip_annotation_test.dart"
+
+  # (42) The INLINE form, after the previous argument's comma — a separate
+  #      branch of the anchor, and the one both real static skips under
+  #      haven/test/ are written in. Without its own fixture, deleting that
+  #      branch would keep 41 green.
+  cat > "${src}/static_skip_inline_test.dart" <<'DART'
+void main() {
+  group('epsilon', skip: 'flaky on CI', () {
+    testWidgets('inner', (tester) async {});
+  });
+}
+DART
+  _dl_expect_static_rc 42 1 "${tmp}/repo"
+  rm -f "${src}/static_skip_inline_test.dart" "${src}/lookalike_test.dart"
+
+  # (43) GLOB ROT. An absence check over an empty file set reports a clean tree
+  #      — the vacuous pass this library exists to catch, and the same floor
+  #      fixture 37 keeps for the runner glob. rc 2, because no source edit
+  #      fixes it.
+  mkdir -p "${tmp}/blind/haven/integration_test"
+  _dl_expect_static_rc 43 2 "${tmp}/blind"
+
+  # (43b) ...and the floor counts FILES, it never confirms they were read. Here
+  #       the glob is full, one entry cannot be opened, and a real static skip
+  #       sits in the file next to it. `grep ... || true` folded grep's rc 2
+  #       into "no hits" and reported the tree CLEAN — a guard that passes
+  #       because it read nothing. The unreadable entry is a directory named
+  #       `*.dart`, which stands in for any unopenable path and needs no
+  #       permission bits to reproduce as any user.
+  local btree="${tmp}/unreadable/haven/integration_test"
+  mkdir -p "${btree}/opaque_test.dart"
+  cat > "${btree}/real_skip_test.dart" <<'DART'
+void main() {
+  testWidgets('zeta', (tester) async {}, skip: true);
+}
+DART
+  _dl_expect_static_rc 43b 2 "${tmp}/unreadable"
+}
+
+# ---------------------------------------------------------------------------
+# Suite 6: the DISPATCHER, not the functions. repo-guards.yml runs
+# `--check-manifest` and nothing else, so a half that is not composed into it is
+# a dead guard — and every fixture above calls its half directly, which is
+# exactly how a dropped composition stays green. Same defect class as
+# --check-wiring's: the check exists, and nothing asks it anything.
+#
+# HAVEN_DRIVE_SKIP_MANIFEST must be passed through the ENVIRONMENT here: the
+# self-test's binding is `local`, so a subprocess would otherwise reconcile
+# these fixture trees against the repo's real manifest.
+# ---------------------------------------------------------------------------
+_dl_suite_dispatcher() {
+  local gtree="${tmp}/gate"
+  _dl_mk_tree_a "${gtree}"
+  mkdir -p "${gtree}/haven/integration_test"
+  printf '# no hatches declared\n' > "${tmp}/manifest.gate"
+  cat > "${gtree}/haven/integration_test/delta_test.dart" <<'DART'
+void main() {
+  testWidgets('delta', (tester) async {});
+}
+DART
+
+  # (44) All three halves clean. Without this the three below would also pass a
+  #      gate that returned 1 unconditionally.
+  _dl_expect_gate_rc 44 0 "${tmp}/manifest.gate" "${gtree}"
+
+  # (45) The static-skip half reaches the gate.
+  cat > "${gtree}/haven/integration_test/eps_test.dart" <<'DART'
+void main() {
+  testWidgets('eps', (tester) async {}, skip: true);
+}
+DART
+  _dl_expect_gate_rc 45 1 "${tmp}/manifest.gate" "${gtree}"
+  rm -f "${gtree}/haven/integration_test/eps_test.dart"
+
+  # (46) ...and so does the manifest-reconciliation half.
+  cat > "${gtree}/haven/integration_test/zeta_test.dart" <<'DART'
+void main() {
+  testWidgets('zeta', (tester) async {
+    markTestSkipped('undeclared hatch.');
+  });
+}
+DART
+  _dl_expect_gate_rc 46 1 "${tmp}/manifest.gate" "${gtree}"
+  rm -f "${gtree}/haven/integration_test/zeta_test.dart"
+
+  # (47) ...and so does the wiring half.
+  _dl_mk_runner "${gtree}" run-delegating.sh '
+flutter drive --target="${target}" || rc=$?'
+  _dl_expect_gate_rc 47 1 "${tmp}/manifest.gate" "${gtree}"
+
+  # (47b) THE WORSE CODE WINS, when the worse one comes LAST. An undeclared
+  #       hatch (rc 1) and, after it in the loop, a broken guard (rc 2 — the
+  #       exempt wrapper is gone, so --check-wiring can no longer see its own
+  #       glob). No fixture used to expect rc 2 at all, so `break` on the first
+  #       failure, first-nonzero-wins and clamping to 0/1 were all indistinguish-
+  #       able from the shipped rule — and each of them reports a BROKEN guard
+  #       as a mere violation, which is the one distinction the loop exists for.
+  local wtree="${tmp}/gate-worse-last"
+  _dl_mk_tree_a "${wtree}"
+  rm -f "${wtree}/tooling/e2e/ci/run-with-deadline.sh"
+  mkdir -p "${wtree}/haven/integration_test"
+  cat > "${wtree}/haven/integration_test/eta_test.dart" <<'DART'
+void main() {
+  testWidgets('eta', (tester) async {
+    markTestSkipped('undeclared hatch.');
+  });
+}
+DART
+  _dl_expect_gate_rc 47b 2 "${tmp}/manifest.gate" "${wtree}"
+
+  # (47c) ...and when the worse one comes FIRST: an unparsable manifest (rc 2)
+  #       ahead of a static `skip:` (rc 1). Kills last-nonzero-wins, which 47b
+  #       cannot see.
+  local ftree="${tmp}/gate-worse-first"
+  _dl_mk_tree_a "${ftree}"
+  mkdir -p "${ftree}/haven/integration_test"
+  cat > "${ftree}/haven/integration_test/theta_test.dart" <<'DART'
+void main() {
+  testWidgets('theta', (tester) async {}, skip: true);
+}
+DART
+  printf '%s\n' 'integration_test/theta_test.dart|two|fields|too many' \
+    > "${tmp}/manifest.unparsable"
+  _dl_expect_gate_rc 47c 2 "${tmp}/manifest.unparsable" "${ftree}"
+}
+
+drive_log_lib_self_test() {
+  local tmp fail=0 ran=0
+  tmp="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '${tmp}'" RETURN
+
+  # Hermetic manifest for every fixture below. `local` (not `export`): the
+  # lookup reads it through dynamic scope, and binding it here means no fixture
+  # can accidentally reconcile against the REAL manifest — the same trap
+  # scripts/ci/check_no_undeclared_skips.sh documents for its own lookup.
+  local HAVEN_DRIVE_SKIP_MANIFEST="${tmp}/manifest.ok"
+  cat > "${tmp}/manifest.ok" <<'EOF'
+# comments and blank lines are ignored
+
+integration_test/alpha_test.dart|alpha needs an Android emulator; skipped on non-Android runtimes.
+integration_test/beta_test.dart|Keyring unavailable on this runner (${e.runtimeType}); skipping BETA-1.
+integration_test/beta_test.dart|Keyring unavailable on this runner (${e.runtimeType}); skipping $label.
+EOF
+
+  # The Dart fixture tree suite 3 builds and suite 5 reuses, so the static-skip
+  # clean case runs over real sources rather than an empty directory.
+  local src="${tmp}/repo/haven/integration_test"
+
+  _dl_suite_predicate
+  _dl_suite_evidence
+  _dl_suite_manifest
+  _dl_suite_wiring
+  _dl_suite_static
+  _dl_suite_dispatcher
 
   if (( ran != DRIVE_LOG_SELF_TEST_FIXTURES )); then
     echo "SELF-TEST FAIL: ran ${ran} fixtures, expected ${DRIVE_LOG_SELF_TEST_FIXTURES}" >&2
@@ -1315,15 +2000,18 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       exit $?
       ;;
     --check-manifest)
-      # Both halves of the manifest's contract, and BOTH run even when the
-      # first fails — one red step should report every violation it can see,
-      # which is repo-guards.yml's own discipline. The worse code wins, so a
-      # broken guard (2) is never reported as a mere violation (1).
+      # Every half of the manifest's contract, and ALL of them run even when an
+      # earlier one fails — one red step should report every violation it can
+      # see, which is repo-guards.yml's own discipline. The worse code wins, so
+      # a broken guard (2) is never reported as a mere violation (1).
       rc=0
-      wrc=0
-      drive_log_check_manifest "${2:-}" || rc=$?
-      drive_log_check_wiring "${2:-}" || wrc=$?
-      if (( wrc > rc )); then rc="${wrc}"; fi
+      for _check in drive_log_check_manifest \
+                    drive_log_check_static_skips \
+                    drive_log_check_wiring; do
+        crc=0
+        "${_check}" "${2:-}" || crc=$?
+        if (( crc > rc )); then rc="${crc}"; fi
+      done
       exit "${rc}"
       ;;
     --check-wiring)

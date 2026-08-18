@@ -7,6 +7,10 @@
 //!
 //! - [`SessionManager`]: the main interface for group and message operations,
 //!   wrapping one `AccountDeviceSession` behind a `tokio` mutex.
+//! - [`RetentionBoundPeeler`]: the installed transport peeler, which bounds the
+//!   NIP-40 expiration of every outbound kind-445 application message so a
+//!   circle created without the retention component cannot publish an unstamped
+//!   one.
 //! - [`HavenIdentityProofSigner`]: the hardened account-identity-proof signer
 //!   binding the MLS leaf to the Nostr identity (security F1).
 //! - [`PendingWelcomeStore`]: the hold-before-ingest pending-welcome store
@@ -28,6 +32,7 @@
 
 mod context;
 mod manager;
+mod retention;
 mod signer;
 pub mod storage;
 pub mod types;
@@ -38,6 +43,7 @@ pub use manager::redact_hex_sequences;
 pub use manager::{
     app_message_past_epoch_limit, SessionManager, DEFAULT_EXPORTER_LABEL, DEFAULT_MAX_PAST_EPOCHS,
 };
+pub use retention::RetentionBoundPeeler;
 pub use signer::HavenIdentityProofSigner;
 pub use storage::StorageConfig;
 pub use types::{

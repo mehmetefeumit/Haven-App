@@ -65,24 +65,42 @@ pub struct RelayEventCheck {
 /// Distinguishes a relay that answered our connection (`responded == true`,
 /// even when it returned zero events) from one we could not reach
 /// (`responded == false`). The WebSocket handshake is the definitive
-/// "answered" signal: a relay that completes the handshake within the
+/// "reachable" signal: a relay that completes the handshake within the
 /// connection timeout is counted as responded, regardless of how many
 /// events it then returns. This lets a caller report an accurate
-/// answered/unanswered tally instead of a single merged result that hides
-/// which relays were reached.
+/// reached/unreached tally instead of a single merged result that hides
+/// which relays were contacted.
 ///
 /// `responded` is a transport-level signal (reachable), not proof the relay
 /// answered the specific query: because connections are pooled across calls,
 /// a relay reachable on a prior call may report `responded` even if its
 /// socket has since gone half-open. This is the accepted, documented
-/// trade-off for a simple, truthful "reachable" count.
+/// trade-off for a simple, truthful "reachable" count. Whether the relay
+/// answered THIS query is a different fact, and it has its own field —
+/// [`drained`](Self::drained).
 #[derive(Debug, Clone)]
 pub struct RelayFetchOutcome {
     /// The relay URL that was queried.
     pub relay_url: String,
-    /// Whether the relay completed the WebSocket handshake (it answered).
+    /// Whether the relay completed the WebSocket handshake (it was reachable).
     pub responded: bool,
-    /// Events fetched from this relay (empty unless `responded`).
+    /// Whether this relay stated it had served everything it stores for this
+    /// filter: it sent NIP-01 `EOSE` for this REQ, and every event it sent
+    /// before that reached us.
+    ///
+    /// The ONLY evidence a page is whole. `events` alone cannot say: a
+    /// delivery cut off part-way — by the fetch timeout, a dropped socket, a
+    /// `CLOSED`, or our own intake cap — is byte-for-byte a complete short
+    /// answer. A caller that advances a cursor over a page must gate that
+    /// advance on this flag; a page without it may be a prefix of an unknown
+    /// whole, and treating it as the whole silently drops the remainder.
+    pub drained: bool,
+    /// Events fetched from this relay (empty unless `responded`), each at most
+    /// once and ordered NEWEST FIRST by `created_at`, ties broken by id.
+    ///
+    /// The order is this device's, not the relay's: a caller that resolves an
+    /// ambiguity positionally would otherwise be resolving it by whatever order
+    /// the relay chose to deliver in.
     pub events: Vec<Event>,
 }
 

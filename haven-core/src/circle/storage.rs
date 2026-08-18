@@ -568,6 +568,43 @@ impl CircleStorage {
                 last_synced_ms INTEGER NOT NULL
             );
 
+            -- Where the catch-up sweep's backward chase RAN OUT of budget, so
+            -- the next sweep can resume the descent instead of restarting it at
+            -- the newest end (see crate::relay::catchup). Keyed by the SAME
+            -- `group_445:{hex}` stream key as the cursor above, because a floor
+            -- is meaningless without the cursor whose window it subdivides —
+            -- both are dropped together whenever that cursor is dropped (leave,
+            -- per-stream reset, logout).
+            --
+            -- `floor_secs` is a REQ `until` in unix SECONDS that THIS device
+            -- issued, always inside the `[since, window open]` band the chase
+            -- confines every request to. It is pure derived state: discarding it
+            -- costs one sweep of re-fetching and can never skip an event,
+            -- because it licenses no cursor advance on its own — the sweep that
+            -- resumes at it must complete its own chase over `[since, floor]`
+            -- before anything is claimed. The ordinary write is monotonic MIN (a
+            -- floor only ever descends), the mirror of `sync_cursors`' monotonic
+            -- max; the sweep raises it only by clearing the row first, and only
+            -- where it has just established everything beneath it.
+            CREATE TABLE IF NOT EXISTS catchup_backfill_floors (
+                stream     TEXT PRIMARY KEY,
+                floor_secs INTEGER NOT NULL
+            );
+
+            -- How many catch-up sweeps IN A ROW have refused to advance this
+            -- circle's cursor while some relay's delivery was cut off before its
+            -- NIP-01 EOSE (see crate::relay::catchup). A cut-off page is a
+            -- prefix of an unknown whole, so it rightly holds the sweep it
+            -- happened in; without this counter it would hold EVERY sweep, for
+            -- as long as one relay in a user-editable list stayed broken — a
+            -- permanent, self-inflicted outage available to anyone who can drop
+            -- six bytes. Keyed by the same stream as the cursor, and dropped
+            -- with it.
+            CREATE TABLE IF NOT EXISTS catchup_cutoff_holds (
+                stream TEXT PRIMARY KEY,
+                sweeps INTEGER NOT NULL
+            );
+
             -- Dark Matter (DM-2b): identity-level tracking of the CURRENT
             -- KeyPackage this device has published, so the periodic
             -- KeyPackageMaintenance task can (a) republish the SAME cached
@@ -1167,8 +1204,9 @@ impl CircleStorage {
     /// Deletes a circle and every related row atomically: UI state,
     /// memberships, the per-group gift-wrap dedup rows (`processed_gift_wraps`,
     /// except the empty-blob failure sentinels — see below), the M7
-    /// staged-commit marker, the per-group sync cursor (`sync_cursors`), and
-    /// last-known locations.
+    /// staged-commit marker, the per-group sync cursor (`sync_cursors`) with
+    /// its catch-up sweep state (`catchup_backfill_floors`,
+    /// `catchup_cutoff_holds`), and last-known locations.
     ///
     /// Idempotent: deleting a circle that does not exist is not an error,
     /// it simply logs and returns `Ok(false)`.
@@ -1241,6 +1279,18 @@ impl CircleStorage {
             );
             tx.execute(
                 "DELETE FROM sync_cursors WHERE stream = ?1",
+                params![group_cursor_stream],
+            )?;
+            // ...and the catch-up sweep state keyed off the same stream: a floor
+            // without its cursor would resume a returning circle's chase inside
+            // a window that no longer exists, and a hold count without its
+            // cursor describes sweeps of a circle that is gone.
+            tx.execute(
+                "DELETE FROM catchup_backfill_floors WHERE stream = ?1",
+                params![group_cursor_stream],
+            )?;
+            tx.execute(
+                "DELETE FROM catchup_cutoff_holds WHERE stream = ?1",
                 params![group_cursor_stream],
             )?;
             tx.execute(
@@ -1945,10 +1995,16 @@ impl CircleStorage {
         Ok(changed > 0)
     }
 
-    /// Removes a stream's cursor row, resetting it to the unseeded state.
+    /// Removes a stream's cursor row — and the catch-up sweep state derived
+    /// from it — resetting the stream to the unseeded state.
     ///
     /// Idempotent: resetting an absent cursor is a no-op. Wired into the
     /// wipe-on-logout path so a returning identity re-seeds cleanly.
+    ///
+    /// The backfill floor and the cut-off-hold count go with it: both only ever
+    /// describe a subdivision of the window THIS cursor opens, so a floor left
+    /// behind would aim a returning stream's first descent inside a window that
+    /// no longer exists.
     ///
     /// # Errors
     ///
@@ -1963,10 +2019,19 @@ impl CircleStorage {
             "DELETE FROM sync_cursors WHERE stream = ?1",
             params![stream],
         )?;
+        conn.execute(
+            "DELETE FROM catchup_backfill_floors WHERE stream = ?1",
+            params![stream],
+        )?;
+        conn.execute(
+            "DELETE FROM catchup_cutoff_holds WHERE stream = ?1",
+            params![stream],
+        )?;
         Ok(())
     }
 
-    /// Removes ALL sync-cursor rows (bulk reset) for the wipe-on-logout path.
+    /// Removes ALL sync-cursor rows — and every catch-up sweep state derived
+    /// from one — for the wipe-on-logout path.
     ///
     /// Idempotent. Complements the per-stream [`reset_sync_cursor`] so a full
     /// account wipe leaves no stale cursor that would resume a returning (or a
@@ -1981,6 +2046,161 @@ impl CircleStorage {
             .lock()
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
         conn.execute("DELETE FROM sync_cursors", [])?;
+        // Both subdivide the window a cursor opens, so neither can outlive the
+        // cursor nor the identity that built it.
+        conn.execute("DELETE FROM catchup_backfill_floors", [])?;
+        conn.execute("DELETE FROM catchup_cutoff_holds", [])?;
+        Ok(())
+    }
+
+    // ==================== Catch-up Backfill Floors ====================
+
+    /// Reads the persisted catch-up backfill floor (unix **seconds**) for
+    /// `stream`, or `None` when this circle's chase has never run out of budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn read_backfill_floor(&self, stream: &str) -> Result<Option<i64>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        conn.query_row(
+            "SELECT floor_secs FROM catchup_backfill_floors WHERE stream = ?1",
+            params![stream],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Installs `secs` as `stream`'s backfill floor, or lowers an existing one
+    /// to it — never raises it (monotonic MIN).
+    ///
+    /// A single per-statement-atomic conditional UPSERT, the exact mirror of
+    /// [`Self::update_sync_cursor_max`] and serialized by the same in-process
+    /// `Mutex<Connection>`. The direction is the point: a floor records how far
+    /// DOWN a chase reached, so a later sweep that reached less far must not be
+    /// able to undo the progress of an earlier one, and the descent is what
+    /// bounds how many sweeps a backlog can take.
+    ///
+    /// # And why the caller still needs a way to RAISE one
+    ///
+    /// Monotonic-min alone has no repair path: a floor at or below a stream's
+    /// REQ floor is unreachable ground, every later sweep refuses to resume into
+    /// it, and no write in this direction can ever lift it — so the resume is
+    /// disabled for that stream permanently. The sweep therefore raises a floor
+    /// by [`clearing`](Self::clear_backfill_floor) it first, and only where it
+    /// has just established everything beneath the new value (see
+    /// `crate::relay::catchup::sweep_one_circle`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn lower_backfill_floor(&self, stream: &str, secs: i64) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        conn.execute(
+            "INSERT INTO catchup_backfill_floors (stream, floor_secs) VALUES (?1, ?2) \
+             ON CONFLICT(stream) DO UPDATE SET floor_secs = excluded.floor_secs \
+             WHERE excluded.floor_secs < catchup_backfill_floors.floor_secs",
+            params![stream, secs],
+        )?;
+        Ok(())
+    }
+
+    /// Removes `stream`'s backfill floor.
+    ///
+    /// Idempotent. Called when a sweep established the whole band the floor
+    /// described, so there is nothing left below it to resume into.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn clear_backfill_floor(&self, stream: &str) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        conn.execute(
+            "DELETE FROM catchup_backfill_floors WHERE stream = ?1",
+            params![stream],
+        )?;
+        Ok(())
+    }
+
+    // ============ Catch-up Cut-off Holds ============
+
+    /// How many catch-up sweeps in a row have held `stream`'s cursor while a
+    /// relay's delivery was cut off before its NIP-01 `EOSE`. `0` when no sweep
+    /// is currently held that way.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn read_cutoff_holds(&self, stream: &str) -> Result<i64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        Ok(conn
+            .query_row(
+                "SELECT sweeps FROM catchup_cutoff_holds WHERE stream = ?1",
+                params![stream],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0))
+    }
+
+    /// Records one more consecutive sweep held on a cut-off delivery.
+    ///
+    /// Saturating rather than wrapping: the count is only ever compared against
+    /// a small tolerance, so a stream held for `i64::MAX` sweeps must stay held
+    /// rather than roll over into "not held at all".
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn bump_cutoff_holds(&self, stream: &str) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        conn.execute(
+            "INSERT INTO catchup_cutoff_holds (stream, sweeps) VALUES (?1, 1) \
+             ON CONFLICT(stream) DO UPDATE SET sweeps = MIN(sweeps + 1, ?2)",
+            params![stream, i64::MAX],
+        )?;
+        Ok(())
+    }
+
+    /// Forgets `stream`'s run of cut-off holds — the sweep either advanced the
+    /// cursor or has just spent its tolerance.
+    ///
+    /// Idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn clear_cutoff_holds(&self, stream: &str) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        conn.execute(
+            "DELETE FROM catchup_cutoff_holds WHERE stream = ?1",
+            params![stream],
+        )?;
         Ok(())
     }
 
@@ -3242,6 +3462,11 @@ mod tests {
         storage
             .update_sync_cursor_max(&cursor_key, 1_700_000_000_000)
             .unwrap();
+        // ...and the catch-up sweep state keyed off the same stream.
+        storage
+            .lower_backfill_floor(&cursor_key, 1_699_000_000)
+            .unwrap();
+        storage.bump_cutoff_holds(&cursor_key).unwrap();
 
         storage.delete_circle(&circle.mls_group_id).unwrap();
 
@@ -3252,6 +3477,18 @@ mod tests {
         assert!(
             storage.read_sync_cursor(&cursor_key).unwrap().is_none(),
             "per-group sync cursor must be purged by delete_circle"
+        );
+        assert!(
+            storage.read_backfill_floor(&cursor_key).unwrap().is_none(),
+            "and so must the backfill floor: a circle rejoined under the same \
+             nostr_group_id would otherwise resume a descent inside a window \
+             that no longer exists"
+        );
+        assert_eq!(
+            storage.read_cutoff_holds(&cursor_key).unwrap(),
+            0,
+            "and the run of held sweeps, which counts sweeps of a circle that \
+             is gone"
         );
     }
 
@@ -3895,6 +4132,135 @@ mod tests {
         // Idempotent: a second bulk reset on the now-empty table is a no-op.
         storage.reset_all_sync_cursors().unwrap();
         assert_eq!(storage.read_sync_cursor("inbox_1059").unwrap(), None);
+    }
+
+    /// The backfill floor moves in ONE direction, and it is the opposite of the
+    /// cursor's.
+    ///
+    /// A floor records how far DOWN a catch-up chase reached, so a later sweep
+    /// that reached less far must not be able to undo an earlier one's progress
+    /// — otherwise a circle whose backlog needs several sweeps could be walked
+    /// back up to the top by one bad round and never reach its oldest event.
+    #[test]
+    fn backfill_floor_write_is_monotonic_min() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let stream = "group_445:aa00";
+
+        assert_eq!(
+            storage.read_backfill_floor(stream).unwrap(),
+            None,
+            "a circle whose chase never ran out of budget has no floor"
+        );
+
+        storage.lower_backfill_floor(stream, 5_000).unwrap();
+        assert_eq!(storage.read_backfill_floor(stream).unwrap(), Some(5_000));
+
+        storage.lower_backfill_floor(stream, 4_000).unwrap();
+        assert_eq!(
+            storage.read_backfill_floor(stream).unwrap(),
+            Some(4_000),
+            "a deeper descent lowers the floor"
+        );
+
+        storage.lower_backfill_floor(stream, 9_000).unwrap();
+        assert_eq!(
+            storage.read_backfill_floor(stream).unwrap(),
+            Some(4_000),
+            "and a shallower one leaves it exactly where it was"
+        );
+
+        storage.clear_backfill_floor(stream).unwrap();
+        assert_eq!(storage.read_backfill_floor(stream).unwrap(), None);
+        storage.clear_backfill_floor(stream).unwrap();
+        assert_eq!(
+            storage.read_backfill_floor(stream).unwrap(),
+            None,
+            "clearing an absent floor is a no-op, not an error"
+        );
+    }
+
+    /// A floor and a cut-off-hold count are derived state that must not outlive
+    /// the cursor whose window they subdivide: wipe-on-logout clears all three,
+    /// so a returning (or different) identity never resumes a descent inside a
+    /// window that no longer exists, nor inherits somebody else's patience.
+    #[test]
+    fn reset_all_sync_cursors_clears_the_catch_up_state_too() {
+        let storage = CircleStorage::in_memory().unwrap();
+        storage
+            .update_sync_cursor_max("group_445:aa00", 1_000)
+            .unwrap();
+        storage.lower_backfill_floor("group_445:aa00", 900).unwrap();
+        storage.lower_backfill_floor("group_445:bb11", 800).unwrap();
+        storage.bump_cutoff_holds("group_445:aa00").unwrap();
+
+        storage.reset_all_sync_cursors().unwrap();
+
+        assert_eq!(storage.read_backfill_floor("group_445:aa00").unwrap(), None);
+        assert_eq!(storage.read_backfill_floor("group_445:bb11").unwrap(), None);
+        assert_eq!(storage.read_cutoff_holds("group_445:aa00").unwrap(), 0);
+    }
+
+    /// ...and the PER-STREAM reset drops the same three, for the same reason.
+    ///
+    /// Without it a stream reset to the unseeded state keeps a floor pointing
+    /// inside a window that no longer exists — and, because the floor write only
+    /// ever LOWERS, no later sweep can lift it: the resume is refused from then
+    /// on and that circle never runs a backfill again.
+    #[test]
+    fn resetting_one_stream_clears_the_catch_up_state_derived_from_it() {
+        let storage = CircleStorage::in_memory().unwrap();
+        storage
+            .update_sync_cursor_max("group_445:aa00", 1_000)
+            .unwrap();
+        storage.lower_backfill_floor("group_445:aa00", 900).unwrap();
+        storage.bump_cutoff_holds("group_445:aa00").unwrap();
+        // A second stream, untouched: the reset is per stream, not a wipe.
+        storage.lower_backfill_floor("group_445:bb11", 800).unwrap();
+        storage.bump_cutoff_holds("group_445:bb11").unwrap();
+
+        storage.reset_sync_cursor("group_445:aa00").unwrap();
+
+        assert_eq!(storage.read_sync_cursor("group_445:aa00").unwrap(), None);
+        assert_eq!(storage.read_backfill_floor("group_445:aa00").unwrap(), None);
+        assert_eq!(storage.read_cutoff_holds("group_445:aa00").unwrap(), 0);
+        assert_eq!(
+            storage.read_backfill_floor("group_445:bb11").unwrap(),
+            Some(800),
+            "another stream's resume point is none of this reset's business"
+        );
+        assert_eq!(storage.read_cutoff_holds("group_445:bb11").unwrap(), 1);
+    }
+
+    /// The cut-off-hold count is what bounds a hold that would otherwise last
+    /// for ever, so it has to survive across sweeps, count consecutive ones, and
+    /// be forgettable in one call.
+    #[test]
+    fn cutoff_holds_count_up_and_are_forgotten_together() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let stream = "group_445:aa00";
+
+        assert_eq!(
+            storage.read_cutoff_holds(stream).unwrap(),
+            0,
+            "a circle no sweep has ever held reads as zero, not as absent"
+        );
+
+        storage.bump_cutoff_holds(stream).unwrap();
+        storage.bump_cutoff_holds(stream).unwrap();
+        assert_eq!(storage.read_cutoff_holds(stream).unwrap(), 2);
+
+        storage.clear_cutoff_holds(stream).unwrap();
+        assert_eq!(
+            storage.read_cutoff_holds(stream).unwrap(),
+            0,
+            "a sweep that advanced (or spent its tolerance) starts the run over"
+        );
+        storage.clear_cutoff_holds(stream).unwrap();
+        assert_eq!(
+            storage.read_cutoff_holds(stream).unwrap(),
+            0,
+            "clearing an absent count is a no-op, not an error"
+        );
     }
 
     /// The cursor must survive a database close + reopen — that persistence is

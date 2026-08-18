@@ -590,6 +590,51 @@ Receivers enforce the tag with a `RECEIVER_EXPIRATION_GRACE_SECS = 60` skew
 window, in `SessionManager::process_event` — the choke point every receive plane
 (poll drain, live-sync, background catch-up) funnels through.
 
+**The component governs the group, so a joined circle can lack it.** It is
+supplied at group CREATION, which means a circle created by anything other than
+a current Haven build — an older one, or another Marmot client — carries no
+retention policy, and upstream then reports `None` for the group and stamps **no
+expiration at all** on this device's own application 445s. Both halves of
+`privacyWhatOthersSeeDetailExpiry` invert together in that case, in opposite
+directions: the four-minute claim goes false, AND an unstamped location update
+is misclassified as a membership change by any relay watching the circle's `#h`
+(see the discriminator below). Haven closes that on the send side with
+`RetentionBoundPeeler` (`src/nostr/mls/retention.rs`), the transport peeler the
+session installs: it delegates every operation to the real Nostr peeler but
+bounds an APPLICATION message's retention on the way through — Haven's own
+window when the group declares none or zero, capped to that window when the
+group declares longer, honoured as-is when the group declares shorter. The
+session is constructed with exactly one peeler, and the engine's send path
+reaches the wire only through its `wrap_group_message_with_metadata` — inside
+which the real peeler mints the ephemeral key, builds the tag set and signs the
+kind-445 — so there is no second handle a send path could route around it by.
+Commits and proposals pass through untouched.
+
+Honouring a SHORTER declared window is a deliberate non-floor, and it is the one
+direction of this bound that can cost the user something. A circle whose creator
+declares, say, one second gets every Haven member's location dropped by a
+NIP-40-honouring relay almost immediately, with no diagnostic anywhere in the
+app. Haven does not floor it, because a floor would mean asking relays to hold
+location ciphertext LONGER than the circle declared — a privacy regression in
+Haven's code to compensate for a functional choice in a group it does not
+administer — and it would not restore what was lost: the same component governs
+every other member's client, so the members that stranger's window is hiding
+stay hidden either way. Shorter is also strictly more data-minimizing, which is
+the direction Rule 10 points. The no-gap invariant below is therefore scoped to
+circles Haven created, where Haven picks both the publish cadence and the
+window; in a joined circle the window is the group's, and a too-short one is a
+visibility cost the user is never shown. **Open owner decision:** surface it
+(a per-circle "this circle asks relays to forget updates after N seconds"
+signal) or accept the silence.
+
+This is deliberately NOT an `UpdateAppComponents` repair of the joined group.
+Writing the component is admin-gated upstream (`require_admin`) and a joiner is
+not an admin, so the repair cannot fire where the gap appears; and staging an
+epoch-advancing commit inside the join path would risk pinning the group in
+`PendingPublish`, which buffers every inbound message forever — a silent loss of
+the whole circle, strictly worse than the leak. The residue is stated under
+"What this does not provide" below.
+
 What this provides:
 
 - Bounds relay-side residency to roughly two publish cycles, so stale
@@ -597,6 +642,10 @@ What this provides:
 - Defense-in-depth against a relay replaying stale ciphertext.
 - A single group-level value, so the TTL cannot drift per call site — the
   per-send design had one Dart caller computing it, and nothing checked it.
+- A send-side bound under it, so the group-level value cannot fail OPEN: the
+  worst a circle's declared policy can do to Haven's own location data is
+  shorten its life. Not free — it costs a broadened fingerprint and, at the
+  short end, silent invisibility; both are under "does not provide" below.
 
 What this does **not** provide, including one property the retired design had:
 
@@ -605,11 +654,33 @@ What this does **not** provide, including one property the retired design had:
   among mixed MLS-over-Nostr traffic; a deterministic 228 s is exactly the
   fingerprint that was being avoided. Accepted: group-level retention is what
   the protocol now offers, and the alternative is no expiry at all.
+- **The send-side bound BROADENS that fingerprint, and this is the cost side of
+  it.** Before the bound, in a circle declaring no 0x8005, Haven emitted no
+  expiration — indistinguishable from every other client in that circle. It now
+  emits exactly 228 s there. So in a MIXED circle a relay can partition one
+  circle's `#h` stream into "the Haven member's location updates" (`expiration −
+  created_at == 228`) and everything else, which is a **per-member discriminator
+  inside a single circle** — sharper than the client-wide one above, because it
+  attributes traffic within a group whose membership the relay cannot otherwise
+  resolve. The same partition appears wherever the group's declared window
+  differs from 228, i.e. in every circle Haven did not create. Accepted as the
+  price of the two properties the bound buys (bounded residency, and location
+  traffic not masquerading as membership traffic), but it is a real widening and
+  is registered as `TTL-FINGERPRINT` rather than left to be inferred.
 - **Carrying the tag at all is a public discriminator.** Only application
   messages are stamped — commits and proposals are never stamped, because
   expiring group history would break late joiners — so a 445 *without* an
   expiration is visibly a membership change rather than a location update. This
   is disclosed to the user in `privacyWhatOthersSeeDetailExpiry`.
+- **It bounds only what this device authors.** In a circle created without the
+  component, another member's own location 445s still carry no expiration: they
+  may be retained indefinitely, and they read as membership changes to any relay
+  serving that circle. Haven cannot bound a message it does not send, and (see
+  above) will not mutate a group it does not administer to try. The user-facing
+  sentence sits under "what others see" and does not distinguish "the messages
+  Haven sends" from "the messages in this circle", so in a mixed circle it can
+  be read more widely than it holds — recorded as the open residual on
+  `INV-W-445-EXPIRATION-SCOPE`.
 - It does not hide publish cadence; that is the jittered scheduler's job, in
   the next section.
 - Expiry is a **request**. A relay is free to ignore NIP-40 and retain the
@@ -617,8 +688,14 @@ What this does **not** provide, including one property the retired design had:
   guarantee.
 
 The clock-skew leak the retired design carried is gone with it: `expiration −
-created_at` is now the constant 228 s and reveals nothing about the publisher's
-offset that the outer `created_at` did not already reveal.
+created_at` is no longer sampled, so it reveals nothing about the publisher's
+offset that the outer `created_at` did not already reveal. It is **not** a
+constant per circle, and describing it that way would hide the fingerprint
+above. Per SENDER it takes one of three values: 228 s in any circle Haven
+created; 228 s in a joined circle that declares nothing, zero, or a window
+longer than 228 s (the capped case — where every non-Haven member stamps the
+longer value, or none at all); and the group's own window where that is shorter
+than 228 s, which is the only case in which every member of a circle agrees.
 
 `compute_jittered_ttl_secs` is retained in `src/location/ttl.rs` (dead-code
 allowed, with its unit tests) as the reference helper should a per-send TTL path
@@ -696,6 +773,14 @@ What this does **not** provide:
 There is only ONE jitter now: the publish interval. The TTL is not sampled at
 all — it is the group's fixed `message-retention.v1` value.
 
+**Scope: a circle Haven created.** The arithmetic below holds where Haven picks
+both sides of it. In a joined circle the window is the creator's, and the
+send-side bound honours a shorter one as declared (see "Honouring a SHORTER
+declared window" above), so a foreign creator can set a window under `δ_max` and
+break gap-freeness for every member. That is not a Haven bug to fix by widening
+— see there for why — but it is the reason this invariant cannot be stated
+app-wide.
+
 A relay must always hold at least one non-expired event from every active
 publisher. For events `E_n` published at `T_n` with TTL `τ`, gap-freeness
 requires `δ_n ≤ τ` for every `n`, where `δ_n = T_{n+1} − T_n`; worst case
@@ -723,13 +808,22 @@ for the UX improvement (worst-case viewer staleness ~3.5 min for scheduled
 publishes, sub-minute via the motion-triggered path).
 
 The two-timestamp correlation residual this subsection used to file as a
-follow-up is **closed by construction**: `expiration − created_at` is now the
-same constant on every application 445, so there is no joint distribution left
-to observe. That closure depends on the engine binding the outer `created_at`
-to the inner one it derives the expiration from — currently pinned only
-incidentally, by `encrypt_location_attaches_group_retention_expiration`
-comparing against the OUTER `created_at` (`src/circle/manager.rs`). An engine
-change that decouples the two would re-open the leak, and would do so silently.
+follow-up is **narrowed, not closed**. `expiration − created_at` is no longer
+sampled, so the joint distribution the retired design leaked is gone. It is not
+"the same constant on every application 445": it is the same constant on every
+445 THIS device sends into a circle whose declared window is absent, zero or
+≥ 228 s, and the group's own value where that is shorter — which the retention
+section above enumerates, and which the bound made a supported case rather than
+an impossible one. A relay therefore still reads one bit per sender per circle:
+which of those the sender is in. That is the `TTL-FINGERPRINT` widening, filed
+there; what is genuinely closed is the *skew* leak, not the *correlation* one.
+
+Even the narrowed form depends on the engine binding the outer `created_at` to
+the inner one it derives the expiration from — pinned only incidentally, by
+`encrypt_location_attaches_group_retention_expiration` and
+`a_shorter_group_policy_reaches_the_wire_as_declared` comparing against the
+OUTER `created_at` (`src/circle/manager.rs`). An engine change that decouples
+the two would re-open the skew leak, and would do so silently.
 
 ### Relay-observable metadata and correlation (accepted)
 
