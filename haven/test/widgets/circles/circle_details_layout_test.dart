@@ -9,13 +9,21 @@
 /// This was invisible to the whole suite because every other circles test
 /// pumps an 800×5000 viewport (tall enough to expose the collapsed sheet's
 /// info button), which no real device has. These tests deliberately constrain
-/// the modal to a 360×690 phone instead.
+/// the modal to a 360×690 phone *with its system-bar insets*, because
+/// `useSafeArea: true` hands the modal the viewport minus the status bar —
+/// a test that leaves the insets at zero certifies ~24 px of height the
+/// device never gives, which is more than the margin these assertions defend.
 ///
-/// Verifies that:
-/// 1. No overflow at 1.5x in the longest locales.
+/// Every check sweeps EVERY shipped locale rather than a hand-picked "longest"
+/// sample: which translation is tallest is a property of wrapping at 360 px,
+/// not of character count, and a sample that has to be re-justified whenever
+/// the ARB changes will quietly stop containing the worst case.
+///
+/// Verifies, in every locale, that:
+/// 1. No overflow at 1.5x.
 /// 2. No overflow at 2.0x, and the Leave Circle CTA is still reachable.
-/// 3. At normal scale, in EVERY supported locale, the sheet does not become
-///    gratuitously scrollable — so a drag on the body still dismisses it.
+/// 3. At normal scale the sheet does not become gratuitously scrollable — so
+///    a drag on the body still dismisses it.
 library;
 
 import 'dart:math';
@@ -43,19 +51,23 @@ const _selfPubkey =
 const _otherPubkey =
     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 
-/// German and Turkish are the longest renderings of this sheet's strings;
-/// Russian is a close third and exercises Cyrillic metrics.
-const _longLocales = ['de', 'tr', 'ru'];
-
-/// Every shipped locale. 1.5x-overflow freedom in [_longLocales] says
-/// nothing about whether the sheet becomes scrollable at *normal* scale in a
-/// locale outside that hand-picked sample — and a scrollable sheet steals the
-/// drag from the modal's dismiss gesture (test 3 below). Sourced from
-/// [AppLocalizations] rather than duplicated here so the sweep can't drift
-/// from the actual ARB set as locales are added or removed.
+/// Every shipped locale, sourced from [AppLocalizations] rather than
+/// duplicated here so the sweeps cannot drift from the actual ARB set as
+/// locales are added or removed.
 final List<String> _allLocaleCodes = AppLocalizations.supportedLocales
     .map((locale) => locale.languageCode)
     .toList();
+
+/// A small phone, and the system-bar insets it reports.
+///
+/// `showModalBottomSheet(useSafeArea: true)` wraps the sheet in
+/// `SafeArea(bottom: false)`, so the status bar — and only the status bar —
+/// is taken off the height the modal gets to lay out in. The bottom inset is
+/// still declared, because that is what a device reports and because a future
+/// change that starts honouring it must be measured against the real value
+/// rather than against zero.
+const _phoneSize = Size(360, 690);
+const _phoneInsets = FakeViewPadding(top: 24, bottom: 48);
 
 class _StubInboxRelays extends InboxRelaysNotifier {
   @override
@@ -101,6 +113,8 @@ Future<void> _openDetailsOnPhone(
   tester.view.physicalSize = const Size(800, 5000);
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
+  addTearDown(tester.view.resetPadding);
+  addTearDown(tester.view.resetViewPadding);
 
   await pumpLocalized(
     tester,
@@ -121,14 +135,23 @@ Future<void> _openDetailsOnPhone(
       ),
       // Resolve the epoch so the subtitle is at its longest.
       circleEpochProvider(circle).overrideWith((_) async => 1408),
+      // ...and the expiry. What costs this line a second row at 360 px is the
+      // segment being present at all, not which unit it renders in: the
+      // seconds and minutes forms measure identically here in every shipped
+      // locale (they differ by at most one character, and neither fits). So
+      // the sweep pins the window every Haven-created circle actually shows
+      // rather than a hand-picked "widest" unit that buys nothing.
+      circleLocationExpiryProvider(circle).overrideWith((_) async => 228),
     ],
   );
 
   await tester.tap(find.byKey(WidgetKeys.circleDetailsButton));
   await tester.pumpAndSettle();
 
-  // Now squeeze the open modal onto a real phone surface.
-  tester.view.physicalSize = const Size(360, 690);
+  // Now squeeze the open modal onto a real phone surface, insets included.
+  tester.view.physicalSize = _phoneSize;
+  tester.view.padding = _phoneInsets;
+  tester.view.viewPadding = _phoneInsets;
   await tester.pumpAndSettle();
 }
 
@@ -136,7 +159,7 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('_CircleDetailsSheet — layout robustness', () {
-    for (final code in _longLocales) {
+    for (final code in _allLocaleCodes) {
       testWidgets('1. "$code" at 1.5x lays out without overflow', (
         tester,
       ) async {
@@ -154,31 +177,33 @@ void main() {
       });
     }
 
-    testWidgets('2. at 2.0x the Leave Circle CTA is still reachable', (
-      tester,
-    ) async {
-      final circle = _makeCircle();
-
-      await _openDetailsOnPhone(
+    for (final code in _allLocaleCodes) {
+      testWidgets('2. "$code" at 2.0x keeps the Leave Circle CTA reachable', (
         tester,
-        circle: circle,
-        mockService: MockCircleService(circles: [circle]),
-        localeCode: 'de',
-        textScaler: const TextScaler.linear(2),
-      );
+      ) async {
+        final circle = _makeCircle();
 
-      expect(tester.takeException(), isNull);
+        await _openDetailsOnPhone(
+          tester,
+          circle: circle,
+          mockService: MockCircleService(circles: [circle]),
+          localeCode: code,
+          textScaler: const TextScaler.linear(2),
+        );
 
-      // The regression guard. `ensureVisible` needs a Scrollable ancestor, so
-      // it fails outright if the sheet body ever loses its scroll parent — and
-      // it proves the destructive action can actually be brought on screen
-      // rather than being clipped off the bottom.
-      await tester.ensureVisible(find.byKey(WidgetKeys.leaveCircleCta));
-      await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
 
-      expect(tester.takeException(), isNull);
-      expect(find.byKey(WidgetKeys.leaveCircleCta), findsOneWidget);
-    });
+        // The regression guard. `ensureVisible` needs a Scrollable ancestor,
+        // so it fails outright if the sheet body ever loses its scroll parent
+        // — and it proves the destructive action can actually be brought on
+        // screen rather than being clipped off the bottom.
+        await tester.ensureVisible(find.byKey(WidgetKeys.leaveCircleCta));
+        await tester.pumpAndSettle();
+
+        expect(tester.takeException(), isNull);
+        expect(find.byKey(WidgetKeys.leaveCircleCta), findsOneWidget);
+      });
+    }
 
     // -----------------------------------------------------------------------
     // 3. Every locale: not gratuitously scrollable, so drag-to-dismiss works.

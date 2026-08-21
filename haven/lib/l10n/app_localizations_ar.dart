@@ -777,7 +777,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeDetailExpiry =>
-      'يطلب Haven من المُرحِّلات إسقاط رسائل الموقع بعد نحو أربع دقائق. وهذا الطلب استرشادي: فللمُرحِّل أن يحتفظ بها مدة أطول. ولا تحمل مدةَ الانتهاء هذه إلا تحديثاتُ الموقع، فيستطيع المُرحِّل أيضًا أن يميّز تغيّرًا في العضوية عن تحديث موقع بغياب هذه المدة. أما الدعوات فلا تحمل أي مدة انتهاء، وقد تبقى على مُرحِّل صندوق وارِدك إلى أجل غير مسمّى.';
+      'يطلب Haven من المُرحِّلات إسقاط رسائل الموقع بعد نحو أربع دقائق على الأكثر، وقد تقلّ هذه المدة إن كانت الدائرة من إنشاء تطبيق آخر طلب مدةً أقصر. وهذا الطلب استرشادي: فللمُرحِّل أن يحتفظ بها مدة أطول. ومن بين الرسائل التي يرسلها هاتفك أنت، لا تحمل مدةَ الانتهاء هذه إلا تحديثاتُ الموقع، فالرسالة الخالية من هذه المدة يتبيّن للمُرحِّل أنها تغيير في عضوية الدائرة أو إعداداتها، لا تحديث موقع. أما الدعوات فلا تحمل أي مدة انتهاء، وقد تبقى على مُرحِّل صندوق وارِدك إلى أجل غير مسمّى.';
 
   @override
   String get privacyWhatOthersSeeDetailOnDevice =>
@@ -1381,6 +1381,92 @@ class AppLocalizationsAr extends AppLocalizations {
     final String epochString = epochNumberFormat.format(epoch);
 
     return '$members · الحقبة $epochString';
+  }
+
+  @override
+  String circleDetailsMetaWithExpiry(String meta, String expiry) {
+    return '$meta · انتهاء $expiry';
+  }
+
+  @override
+  String circleDetailsExpiryMinutesShort(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$countString دقيقة',
+      many: '$countString دقيقة',
+      few: '$countString دقائق',
+      two: 'دقيقتين',
+      one: 'دقيقة واحدة',
+      zero: '$countString دقيقة',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpirySecondsShort(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$countString ثانية',
+      many: '$countString ثانية',
+      few: '$countString ثوانٍ',
+      two: 'ثانيتين',
+      one: 'ثانية واحدة',
+      zero: '$countString ثانية',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpiryMinutesLong(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'نحو $countString دقيقة',
+      many: 'نحو $countString دقيقة',
+      few: 'نحو $countString دقائق',
+      two: 'نحو دقيقتين',
+      one: 'نحو دقيقة واحدة',
+      zero: 'نحو $countString دقيقة',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpirySecondsLong(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$countString ثانية',
+      many: '$countString ثانية',
+      few: '$countString ثوانٍ',
+      two: 'ثانيتين',
+      one: 'ثانية واحدة',
+      zero: '$countString ثانية',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpirySemantics(String meta, String expiry) {
+    return '$meta. يطلب Haven من المُرحِّلات أن تُسقِط بعد $expiry تحديثات الموقع التي ترسلها أنت إلى هذه الدائرة.';
   }
 
   @override

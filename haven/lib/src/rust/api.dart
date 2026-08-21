@@ -6,8 +6,8 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_commit_to_publish`, `convert_location_result`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_legacy_mls_db_files`, `delete_mls_session_db_files`, `delete_tile_db_files`, `fetch_own_profile_across_pool`, `from_cached`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `kp_event_d_tag`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `maintenance_now_secs`, `nip65_relay_list_urls`, `now_ms`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `purge_key_package_past_not_after`, `redact_profile_err`, `reinstall_after_timed_out_stop`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `republish_key_package`, `run_blocking`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`, `usable_profile_pool`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`, `KpPublishPlan`, `ProfileStampLists`
+// These functions are ignored because they are not marked as `pub`: `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_commit_to_publish`, `convert_location_result`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_legacy_mls_db_files`, `delete_mls_session_db_files`, `delete_tile_db_files`, `fetch_own_profile_across_pool`, `from_cached`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `kp_event_d_tag`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `maintenance_now_secs`, `mark_kp_slot_retirement_done`, `nip65_relay_list_urls`, `now_ms`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `purge_key_package_past_not_after`, `record_retired_slot`, `redact_profile_err`, `reinstall_after_timed_out_stop`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `republish_key_package`, `retire_malformed_kp_slot`, `retract_kp_slots`, `run_blocking`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`, `usable_profile_pool`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`, `KpPublishPlan`, `KpRetirementInputs`, `KpRetirementTick`, `ProfileStampLists`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`, `default`
 
@@ -1165,6 +1165,26 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     dataDir: dataDir,
     identitySecretBytes: identitySecretBytes,
   );
+
+  /// The NIP-40 window Haven asks relays to keep the location messages THIS
+  /// device sends into a circle.
+  ///
+  /// The effective value, not the group's declaration: a circle created by
+  /// another Marmot client may declare a much shorter window (honoured, so
+  /// relays drop this device's location almost immediately), a longer one
+  /// (capped to Haven's own), or none at all (Haven's own). The
+  /// circle-details sheet renders it so the first case is visible instead of
+  /// reading as a bug, which makes this — like `group_epoch` above — a
+  /// release path rather than a test seam.
+  ///
+  /// Carries no key material and no group identifier, and its error surface
+  /// is redacted in core.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the circle has no live MLS group or the component
+  /// cannot be read; the caller hides the segment rather than surfacing it.
+  Future<BigInt> outgoingLocationExpirySecs({required List<int> mlsGroupId});
 
   /// Classifies the leave operation — see [`LeavePlanFfi`] for the
   /// Flutter-side state machine.
@@ -3011,6 +3031,17 @@ class KpMaintenanceOutcomeFfi {
   /// usable init key AND no published replacement.
   final bool expiredInitKeyPurged;
 
+  /// Whether this tick COMPLETED the one-time retirement of a malformed
+  /// (pre-width-fix) kind-30443 `d` slot: the account now publishes a
+  /// binding-shaped coordinate, the orphaned one's NIP-09 retraction was
+  /// acked, and the migration sentinel latched.
+  ///
+  /// Reports COMPLETION, not attempt — a tick that published the replacement
+  /// but could not get the retraction acked reports `false` and leaves the
+  /// sentinel unset, so the next tick finishes the job. Installs created after
+  /// the width fix never see this set: they have nothing to retire.
+  final bool retiredMalformedSlot;
+
   const KpMaintenanceOutcomeFfi({
     required this.action,
     required this.canonicalOnRelays,
@@ -3019,6 +3050,7 @@ class KpMaintenanceOutcomeFfi {
     required this.relaysHealed,
     required this.relayErrors,
     required this.expiredInitKeyPurged,
+    required this.retiredMalformedSlot,
   });
 
   @override
@@ -3029,7 +3061,8 @@ class KpMaintenanceOutcomeFfi {
       relaysTargeted.hashCode ^
       relaysHealed.hashCode ^
       relayErrors.hashCode ^
-      expiredInitKeyPurged.hashCode;
+      expiredInitKeyPurged.hashCode ^
+      retiredMalformedSlot.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -3042,7 +3075,8 @@ class KpMaintenanceOutcomeFfi {
           relaysTargeted == other.relaysTargeted &&
           relaysHealed == other.relaysHealed &&
           relayErrors == other.relayErrors &&
-          expiredInitKeyPurged == other.expiredInitKeyPurged;
+          expiredInitKeyPurged == other.expiredInitKeyPurged &&
+          retiredMalformedSlot == other.retiredMalformedSlot;
 }
 
 /// A persisted last-known location for a circle member (FFI-friendly).

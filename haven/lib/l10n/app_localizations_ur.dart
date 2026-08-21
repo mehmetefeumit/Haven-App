@@ -773,7 +773,7 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeDetailExpiry =>
-      'Haven ریلے سے کہتا ہے کہ مقام کے پیغامات تقریباً چار منٹ بعد گرا دیں۔ یہ درخواست صرف ایک مشورہ ہے: ریلے انہیں زیادہ دیر رکھنے میں آزاد ہے۔ یہ مدتِ انقضا صرف مقام کی اپ ڈیٹس پر لگتی ہے، چنانچہ ریلے اسی مدتِ انقضا کی غیر موجودگی سے رکنیت کی تبدیلی کو مقام کی اپ ڈیٹ سے الگ بھی پہچان سکتا ہے۔ دعوت ناموں پر کوئی مدتِ انقضا ہی نہیں ہوتی، اور وہ آپ کے اِن باکس ریلے پر غیر معینہ مدت تک پڑے رہ سکتے ہیں۔';
+      'Haven ریلے سے کہتا ہے کہ مقام کے پیغامات زیادہ سے زیادہ تقریباً چار منٹ بعد ہٹا دے، اور اگر حلقہ کسی ایسی دوسری ایپ نے بنایا ہو جس نے اس سے کم مدت مانگی ہو تو یہ مدت اور بھی کم ہوتی ہے۔ یہ درخواست صرف ایک مشورہ ہے: ریلے انہیں زیادہ دیر رکھنے میں آزاد ہے۔ آپ کا فون جو پیغامات بھیجتا ہے، اُن میں سے صرف مقام کی اپ ڈیٹس انقضا کی یہ درخواست ساتھ لے جاتی ہیں، چنانچہ ریلے اسی درخواست کی غیر موجودگی سے حلقے کی رکنیت یا ترتیبات میں تبدیلی کو مقام کی اپ ڈیٹ سے الگ پہچان سکتا ہے۔ دعوت ناموں پر کوئی مدتِ انقضا ہی نہیں ہوتی، اور وہ آپ کے اِن باکس ریلے پر غیر معینہ مدت تک پڑے رہ سکتے ہیں۔';
 
   @override
   String get privacyWhatOthersSeeDetailOnDevice =>
@@ -1356,6 +1356,76 @@ class AppLocalizationsUr extends AppLocalizations {
   }
 
   @override
+  String circleDetailsMetaWithExpiry(String meta, String expiry) {
+    return '$meta · انقضا $expiry';
+  }
+
+  @override
+  String circleDetailsExpiryMinutesShort(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$countString منٹ',
+      one: '$countString منٹ',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpirySecondsShort(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$countString سیکنڈ',
+      one: '$countString سیکنڈ',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpiryMinutesLong(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'تقریباً $countString منٹ',
+      one: 'تقریباً $countString منٹ',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpirySecondsLong(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$countString سیکنڈ',
+      one: '$countString سیکنڈ',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpirySemantics(String meta, String expiry) {
+    return '$meta۔ Haven ریلے سے کہتا ہے کہ آپ اس حلقے میں جو مقام کی اپ ڈیٹس بھیجتے ہیں، انہیں $expiry بعد ہٹا دے۔';
+  }
+
+  @override
   String get circleDetailsRelaysHeading => 'اس حلقے کے ریلے';
 
   @override
@@ -1436,7 +1506,7 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get relaySettingsLegacyRetractionPending =>
-      'Haven ابھی بھی ریلے سے کہہ رہا ہے کہ حالیہ سیکیورٹی اپ ڈیٹ کا کچھ پرانا ڈیٹا گرا دیں۔';
+      'Haven ابھی بھی ریلے سے کہہ رہا ہے کہ حالیہ سیکیورٹی اپ ڈیٹ کا کچھ پرانا ڈیٹا ہٹا دے۔';
 
   @override
   String get circlesPanelCollapsedAnnouncement => 'حلقوں کا پینل سمیٹا گیا';

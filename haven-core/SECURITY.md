@@ -610,22 +610,33 @@ which the real peeler mints the ephemeral key, builds the tag set and signs the
 kind-445 — so there is no second handle a send path could route around it by.
 Commits and proposals pass through untouched.
 
-Honouring a SHORTER declared window is a deliberate non-floor, and it is the one
-direction of this bound that can cost the user something. A circle whose creator
-declares, say, one second gets every Haven member's location dropped by a
-NIP-40-honouring relay almost immediately, with no diagnostic anywhere in the
-app. Haven does not floor it, because a floor would mean asking relays to hold
-location ciphertext LONGER than the circle declared — a privacy regression in
-Haven's code to compensate for a functional choice in a group it does not
-administer — and it would not restore what was lost: the same component governs
-every other member's client, so the members that stranger's window is hiding
-stay hidden either way. Shorter is also strictly more data-minimizing, which is
-the direction Rule 10 points. The no-gap invariant below is therefore scoped to
-circles Haven created, where Haven picks both the publish cadence and the
-window; in a joined circle the window is the group's, and a too-short one is a
-visibility cost the user is never shown. **Open owner decision:** surface it
-(a per-circle "this circle asks relays to forget updates after N seconds"
-signal) or accept the silence.
+Honouring a SHORTER declared window is a deliberate non-floor, and it is the
+one direction of this bound that can cost the user something. A circle whose
+creator declares, say, one second gets every Haven member's location dropped by
+a NIP-40-honouring relay almost immediately. Haven does not floor it, because a
+floor would mean asking relays to hold location ciphertext LONGER than the
+circle declared — a privacy regression in Haven's code to compensate for a
+functional choice in a group it does not administer — and it would not restore
+what was lost: the same component governs every other member's client, so the
+members that stranger's window is hiding stay hidden either way. Shorter is
+also strictly more data-minimizing, which is the direction Rule 10 points. The
+no-gap invariant below is therefore scoped to circles Haven created, where
+Haven picks both the publish cadence and the window; in a joined circle the
+window is the group's, and a too-short one is a visibility cost Haven cannot
+repair.
+
+It is no longer an unshown one. The circle-details sheet reports the EFFECTIVE
+window for the messages this device sends into that circle — the same
+`bounded_retention_secs` value the peeler stamps, never the raw declaration —
+on the subtitle line beside the member count ("3 members · epoch 14 · expiry
+30 sec"), exactly in seconds below a minute so a seconds-long foreign window
+reads as alarming instead of being rounded away, and spelled out for screen
+readers. A circle with no live MLS group shows no window at all rather than
+falling back to Haven's, which would report "about four minutes" for a circle
+that cannot send. What the sheet does not explain is WHY a window is short: it
+reports the number, not whose client chose it. Held by
+`INV-U-CIRCLE-EXPIRY-SHOWN-IS-EXPIRY-SENT` in
+`docs/privacy/privacy_invariants.json`.
 
 This is deliberately NOT an `UpdateAppComponents` repair of the joined group.
 Writing the component is admin-gated upstream (`require_admin`) and a joiner is
@@ -663,23 +674,34 @@ What this does **not** provide, including one property the retired design had:
   inside a single circle** — sharper than the client-wide one above, because it
   attributes traffic within a group whose membership the relay cannot otherwise
   resolve. The same partition appears wherever the group's declared window
-  differs from 228, i.e. in every circle Haven did not create. Accepted as the
-  price of the two properties the bound buys (bounded residency, and location
-  traffic not masquerading as membership traffic), but it is a real widening and
-  is registered as `TTL-FINGERPRINT` rather than left to be inferred.
+  differs from what Haven stamps — i.e. in a circle declaring nothing, zero, or
+  LONGER than 228 s. A circle declaring SHORTER is the one foreign case with no
+  per-member split: Haven honours that value and stamps it exactly as every
+  other client in the circle does. Accepted as the price of the two properties
+  the bound buys (bounded residency, and location traffic not masquerading as
+  membership traffic), but it is a real widening and is registered as
+  `TTL-FINGERPRINT` rather than left to be inferred.
 - **Carrying the tag at all is a public discriminator.** Only application
   messages are stamped — commits and proposals are never stamped, because
-  expiring group history would break late joiners — so a 445 *without* an
-  expiration is visibly a membership change rather than a location update. This
-  is disclosed to the user in `privacyWhatOthersSeeDetailExpiry`.
+  expiring group history would break late joiners — so among the 445s THIS
+  device sends, one *without* an expiration is visibly a group-control message
+  rather than a location update. That class is wider than membership: an admin
+  handoff and a change to the circle's relays are `UpdateAppComponents` commits
+  and are un-stamped too. This is disclosed to the user in
+  `privacyWhatOthersSeeDetailExpiry`, which states it as "a membership or
+  settings change" and scopes it to "the messages your phone sends" for the
+  reason in the next bullet.
 - **It bounds only what this device authors.** In a circle created without the
   component, another member's own location 445s still carry no expiration: they
   may be retained indefinitely, and they read as membership changes to any relay
   serving that circle. Haven cannot bound a message it does not send, and (see
   above) will not mutate a group it does not administer to try. The user-facing
-  sentence sits under "what others see" and does not distinguish "the messages
-  Haven sends" from "the messages in this circle", so in a mixed circle it can
-  be read more widely than it holds — recorded as the open residual on
+  sentence used to sit under "what others see" without distinguishing "the
+  messages Haven sends" from "the messages in this circle", which in a mixed
+  circle pointed a relay at the wrong conclusion about a real position report;
+  it is now scoped to the messages this device sends. What is left is the
+  residue itself, disclosed nowhere in the app: another member's location 445s
+  in such a circle. Recorded as the residual on
   `INV-W-445-EXPIRATION-SCOPE`.
 - It does not hide publish cadence; that is the jittered scheduler's job, in
   the next section.
@@ -953,11 +975,19 @@ threat model is honest:
 
 - **KeyPackage residue.** Since the Dark Matter cutover, KeyPackages are
   NIP-33-addressable kind-30443 events: a republish into the same stable `d`
-  slot supersedes the previous one in place, so current-format KeyPackages no
-  longer accumulate on relays (this closes the old Finding-A2 accumulation gap
-  for the new format). The pre-cutover residue — legacy non-addressable
-  kind-443 events and the retired kind-10051 relay list — is scrubbed by a
-  one-time, sentinel-gated retraction
+  slot supersedes the previous one in place, so routine maintenance does not
+  accumulate current-format KeyPackages on relays (this closes the old
+  Finding-A2 accumulation gap for the new format). Retirement is the one thing
+  that does add a coordinate: a pre-width-fix install's malformed slot is left
+  behind by the move onto a binding-shaped one, so such an account publishes TWO
+  live coordinates until a relay honours the advisory NIP-09 deletion of the
+  old one — supersession cannot reach it, because it is a different `d`. The
+  residue is therefore three classes, not two: (a) that retired 32-hex
+  coordinate, which discloses an era marker (which build of Haven first
+  published the account) and never key material — the `d` is CSPRNG-random and
+  derived from nothing; (b) legacy non-addressable kind-443 events; and (c) the
+  retired kind-10051 relay list. (b) and (c) are scrubbed by a one-time,
+  sentinel-gated retraction
   (`RelayManagerFfi::retract_legacy_key_material`): a kind-5 NIP-09 deletion of
   the user's own 443 by event id (self-authorship-guarded; deliberately no
   `a`-coordinate, since a `443:<pubkey>:` coordinate would over-delete) plus an

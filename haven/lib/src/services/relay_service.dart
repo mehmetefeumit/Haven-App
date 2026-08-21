@@ -152,6 +152,7 @@ sealed class KeyPackageMaintenanceOutcome {
   const KeyPackageMaintenanceOutcome({
     required this.relayErrors,
     required this.expiredInitKeyPurged,
+    this.retiredMalformedSlot = false,
   });
 
   /// Relay probes/publishes/record-writes that errored (tallied, never fatal).
@@ -170,6 +171,18 @@ sealed class KeyPackageMaintenanceOutcome {
   /// happens to produce. Dropping a counter on the way out of the FFI is the
   /// original defect; this is the same counter class as `relaysHealed`.
   final bool expiredInitKeyPurged;
+
+  /// Whether this tick COMPLETED the one-time retirement of a malformed
+  /// (pre-width-fix) kind-30443 `d` slot.
+  ///
+  /// Those installs published a slot id the Marmot transport binding treats as
+  /// a malformed event, which a conformant inviter must reject, so nobody
+  /// strict could invite them. When this is `true` the account has been moved
+  /// onto a binding-shaped coordinate and the orphaned one's deletion request
+  /// was acknowledged. Like [expiredInitKeyPurged] it is orthogonal to the
+  /// three-way verdict and lives on the base class so no variant can drop it.
+  /// An install created after the width fix never sets it.
+  final bool retiredMalformedSlot;
 }
 
 /// Nothing needed doing: the probe reached at least one of the user's own
@@ -184,6 +197,7 @@ final class KeyPackageMaintenanceHealthy extends KeyPackageMaintenanceOutcome {
     required this.respondersProbed,
     this.seededStableSlot = false,
     super.relayErrors = 0,
+    super.retiredMalformedSlot = false,
   }) : assert(
          respondersProbed > 0,
          'health requires a relay to have answered — an unprobed tick is a '
@@ -217,7 +231,7 @@ final class KeyPackageMaintenanceHealthy extends KeyPackageMaintenanceOutcome {
   String toString() =>
       'KeyPackageMaintenanceHealthy(canonical: $canonicalOnRelays, '
       'responders: $respondersProbed, seeded: $seededStableSlot, '
-      'relayErrors: $relayErrors)';
+      'relayErrors: $relayErrors, slotRetired: $retiredMalformedSlot)';
 }
 
 /// Work was done: a `KeyPackage` was (re)published and **acknowledged** by at
@@ -237,6 +251,7 @@ final class KeyPackageMaintenancePublished
     this.respondersProbed = 0,
     super.relayErrors = 0,
     super.expiredInitKeyPurged = false,
+    super.retiredMalformedSlot = false,
   }) : assert(
          relaysAcked > 0,
          'a publish no relay acked is a failure, not a publish',
@@ -256,7 +271,8 @@ final class KeyPackageMaintenancePublished
   String toString() =>
       'KeyPackageMaintenancePublished(acked: $relaysAcked, '
       'freshSlot: $mintedFreshSlot, responders: $respondersProbed, '
-      'relayErrors: $relayErrors, initKeyPurged: $expiredInitKeyPurged)';
+      'relayErrors: $relayErrors, initKeyPurged: $expiredInitKeyPurged, '
+      'slotRetired: $retiredMalformedSlot)';
 }
 
 /// Work was needed and did not land: after this tick the account may not be

@@ -60,6 +60,7 @@ KpMaintenanceOutcomeFfi _ffi({
   KpMaintenanceActionFfi action = KpMaintenanceActionFfi.alreadyHealthy,
   int relayErrors = 0,
   bool expiredInitKeyPurged = false,
+  bool retiredMalformedSlot = false,
 }) {
   return KpMaintenanceOutcomeFfi(
     action: action,
@@ -69,6 +70,7 @@ KpMaintenanceOutcomeFfi _ffi({
     relaysHealed: relaysHealed,
     relayErrors: relayErrors,
     expiredInitKeyPurged: expiredInitKeyPurged,
+    retiredMalformedSlot: retiredMalformedSlot,
   );
 }
 
@@ -548,6 +550,106 @@ void main() {
           reason: '$action with an ack is a publish',
         );
       }
+    });
+  });
+
+  group('classifyKeyPackageMaintenance — a retired malformed slot', () {
+    // Installs created before the `d`-width fix publish a slot id the Marmot
+    // transport binding treats as a MALFORMED event, which a conformant inviter
+    // must reject — so nobody strict can invite them until the Rust tick retires
+    // the slot. Dart's only view of that migration is this flag, and dropping it
+    // on the way out of the FFI is precisely the class of defect this file
+    // exists for (`relaysHealed` was dropped exactly that way).
+    test('a completed re-point survives classification as a publish', () {
+      final outcome = classifyKeyPackageMaintenance(
+        _ffi(
+          action: KpMaintenanceActionFfi.republishedFreshD,
+          canonicalOnRelays: 1,
+          relaysTargeted: 1,
+          respondersProbed: 1,
+          relaysHealed: 1,
+          retiredMalformedSlot: true,
+        ),
+      );
+
+      expect(outcome, isA<KeyPackageMaintenancePublished>());
+      expect(outcome.retiredMalformedSlot, isTrue);
+    });
+
+    test('a completed retraction-only tick survives as health', () {
+      // The account was already on a conformant slot and only the orphaned
+      // coordinate was left to scrub: no KeyPackage is published, so the tick
+      // is health — and it still completed the migration.
+      final outcome = classifyKeyPackageMaintenance(
+        _ffi(
+          canonicalOnRelays: 2,
+          relaysTargeted: 1,
+          respondersProbed: 1,
+          relaysHealed: 0,
+          retiredMalformedSlot: true,
+        ),
+      );
+
+      expect(outcome, isA<KeyPackageMaintenanceHealthy>());
+      expect(outcome.retiredMalformedSlot, isTrue);
+    });
+
+    test('an unacked re-point is a failure that claims no retirement', () {
+      // The destructive half never runs before the replacement is acked, so a
+      // tick that could not publish must not read as a completed migration.
+      final outcome = classifyKeyPackageMaintenance(
+        _ffi(
+          action: KpMaintenanceActionFfi.republishedFreshD,
+          canonicalOnRelays: 1,
+          relaysTargeted: 1,
+          respondersProbed: 1,
+          relaysHealed: 0,
+          relayErrors: 1,
+        ),
+      );
+
+      expect(outcome, isA<KeyPackageMaintenanceFailed>());
+      expect(outcome.retiredMalformedSlot, isFalse);
+    });
+
+    test('an ordinary tick never invents a retirement', () {
+      for (final action in _allActions) {
+        final outcome = classifyKeyPackageMaintenance(
+          _ffi(
+            action: action,
+            canonicalOnRelays: 1,
+            relaysTargeted: 1,
+            respondersProbed: 1,
+            relaysHealed: 1,
+          ),
+        );
+        expect(
+          outcome.retiredMalformedSlot,
+          isFalse,
+          reason: '$action reported no retirement, so none may be claimed',
+        );
+      }
+    });
+
+    test('a completed retirement is visible in what gets logged', () {
+      // The scheduler's only report of a tick is `debugPrint('$outcome')`, so a
+      // field the rendering drops is a field nobody can observe.
+      expect(
+        const KeyPackageMaintenancePublished(
+          relaysAcked: 1,
+          mintedFreshSlot: true,
+          retiredMalformedSlot: true,
+        ).toString(),
+        contains('slotRetired: true'),
+      );
+      expect(
+        const KeyPackageMaintenanceHealthy(
+          canonicalOnRelays: 1,
+          respondersProbed: 1,
+          retiredMalformedSlot: true,
+        ).toString(),
+        contains('slotRetired: true'),
+      );
     });
   });
 

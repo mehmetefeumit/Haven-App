@@ -199,6 +199,7 @@ readonly KNOWN_UNWIRED_LANES=(
   'e2e-real-gps.yml:e2e_real_gps'
   'e2e-ios-real-gps.yml:e2e_ios_real_gps'
   'e2e-ios-auth-tier.yml:e2e_ios_auth_tier'
+  'e2e-ios-background-publish.yml:e2e_ios_bg_publish'
   'e2e-permission-revocation.yml:e2e_permission_revocation'
   'e2e-location-provider-toggle.yml:e2e_location_provider_toggle'
   'e2e-clock-skew.yml:e2e_clock_skew'

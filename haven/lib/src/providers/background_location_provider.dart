@@ -17,6 +17,7 @@ import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/background_catchup_worker.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/background_location_task.dart';
+import 'package:haven/src/services/ios_background_session_service.dart';
 import 'package:haven/src/services/ios_location_auth_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -56,20 +57,25 @@ class BackgroundSharingNotifier extends StateNotifier<bool> {
   /// runners pass `true` to exercise the Android permission-gating branch.
   /// Production callers omit it and receive the real platform value.
   ///
-  /// The optional [iosLocationAuth] and [isIOS] parameters are test seams for
-  /// the iOS "Always" escalation: tests pass a fake [IosLocationAuthService]
-  /// and `isIOS: true` to exercise the iOS branch on a non-iOS runner.
-  /// Production callers omit them and receive the platform-appropriate service
-  /// from [createIosLocationAuthService] and the real [Platform.isIOS] value.
+  /// The optional [iosLocationAuth], [iosBackgroundSession] and [isIOS]
+  /// parameters are test seams for the iOS "Always" escalation and the
+  /// CoreLocation background-session arming: tests pass fakes and
+  /// `isIOS: true` to exercise the iOS branches on a non-iOS runner.
+  /// Production callers omit them and receive the platform-appropriate
+  /// services from the `create*` factories and the real [Platform.isIOS]
+  /// value.
   BackgroundSharingNotifier({
     EnsurePermissionsFn? ensurePermissions,
     bool? isAndroid,
     IosLocationAuthService? iosLocationAuth,
+    IosBackgroundSessionService? iosBackgroundSession,
     bool? isIOS,
   }) : _ensurePermissions =
            ensurePermissions ?? BackgroundLocationManager.ensurePermissions,
        _isAndroid = isAndroid ?? Platform.isAndroid,
        _iosLocationAuth = iosLocationAuth ?? createIosLocationAuthService(),
+       _iosBackgroundSession =
+           iosBackgroundSession ?? createIosBackgroundSessionService(),
        _isIOS = isIOS ?? Platform.isIOS,
        super(false) {
     _load();
@@ -86,6 +92,12 @@ class BackgroundSharingNotifier extends StateNotifier<bool> {
   ///
   /// Overridable in tests via the constructor parameter.
   final IosLocationAuthService _iosLocationAuth;
+
+  /// Bridge for the iOS CoreLocation background session objects
+  /// (`CLBackgroundActivitySession` / `CLServiceSession`).
+  ///
+  /// Overridable in tests via the constructor parameter.
+  final IosBackgroundSessionService _iosBackgroundSession;
 
   /// Whether the current platform is iOS.
   ///
@@ -125,7 +137,26 @@ class BackgroundSharingNotifier extends StateNotifier<bool> {
         );
         await prefs.setBool(kBackgroundSharingKey, false);
         state = false;
+        // The native launch-time arm ran BEFORE this isolate existed and read
+        // the stale `true` this reconcile just repudiated, so writing the
+        // pref alone would leave a live OS keep-alive (and armed SLC/BGTask
+        // schedulers) for a user whose background disclosure was never
+        // accepted. Actively release both — idempotent when nothing is held.
+        if (_isIOS) {
+          await _iosBackgroundSession.disarm();
+        }
+        unawaited(BackgroundLocationManager.disableBackgroundScheduling());
         return;
+      }
+
+      // The AppDelegate arms the CoreLocation background sessions at launch
+      // from the persisted UserDefaults mirror, but that read can race the
+      // first launch of a build (A3 lag). Re-arm here once the persisted
+      // consent is confirmed — idempotent with the native launch-time arm,
+      // and BEFORE the state flip so the session is held when the flip
+      // rebuilds the position stream (session-before-updates rule).
+      if (enabled && _isIOS) {
+        await _iosBackgroundSession.arm();
       }
 
       state = enabled;
@@ -160,6 +191,10 @@ class BackgroundSharingNotifier extends StateNotifier<bool> {
   /// `LocationSettingsPage`
   /// (lib/src/pages/settings/location_settings_page.dart); any new caller MUST
   /// do the same.
+  // NOT reentrancy-safe: concurrent calls can interleave their pref writes
+  // and native arm/disarm. Today's callers are serialized by the settings
+  // page's `_busy` latch (and onboarding calls it exactly once); a new caller
+  // must preserve that serialization.
   Future<EnsurePermissionsResult?> setEnabled({required bool enabled}) async {
     if (enabled && _isAndroid) {
       final result = await _ensurePermissions();
@@ -208,9 +243,23 @@ class BackgroundSharingNotifier extends StateNotifier<bool> {
           '[BackgroundSharing] iOS Always request failed: ${e.runtimeType}',
         );
       }
+      // Ordering is load-bearing: persist consent BEFORE arming (the native
+      // arm re-reads the persisted toggle and no-ops while it is off), and
+      // arm BEFORE the state flip — flipping state rebuilds the position
+      // stream, and the session objects must be held before updates
+      // (re)start (Apple's session-before-updates rule).
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setBool(kBackgroundSharingKey, true);
+      } on Object catch (e) {
+        debugPrint('[BackgroundSharing] write failed: ${e.runtimeType}');
+      }
+      await _iosBackgroundSession.arm();
+      state = true;
+      return null;
     }
 
-    // Disabling (or iOS): unconditional.
+    // Disabling (or non-iOS enabling): unconditional.
     state = enabled;
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -232,6 +281,11 @@ class BackgroundSharingNotifier extends StateNotifier<bool> {
     //      reflects the disable immediately without waiting for the teardown.
     if (!enabled) {
       unawaited(BackgroundLocationManager.disableBackgroundScheduling());
+      // Withdrawal of consent must deterministically release the CoreLocation
+      // background sessions (the OS keep-alive), mirroring the C1 teardown.
+      if (_isIOS) {
+        unawaited(_iosBackgroundSession.disarm());
+      }
     }
 
     return null;
@@ -243,10 +297,11 @@ class BackgroundSharingNotifier extends StateNotifier<bool> {
 /// Defaults to `false` (opt-in). The value is persisted across app restarts.
 final backgroundSharingProvider =
     StateNotifierProvider<BackgroundSharingNotifier, bool>((ref) {
-      // Wire the iOS auth bridge through the graph so overriding
-      // iosLocationAuthServiceProvider also affects this notifier.
+      // Wire the iOS bridges through the graph so overriding their service
+      // providers also affects this notifier.
       return BackgroundSharingNotifier(
         iosLocationAuth: ref.read(iosLocationAuthServiceProvider),
+        iosBackgroundSession: ref.read(iosBackgroundSessionServiceProvider),
       );
     });
 

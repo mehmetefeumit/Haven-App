@@ -260,6 +260,21 @@ jobs:
     needs: [rust]
     uses: ./.github/workflows/e2e-ios-auth-tier.yml
 
+  # A REAL OS-level background transition on iOS: mid-drive, the host launches
+  # another app over Haven, so iOS itself fires applicationDidEnterBackground —
+  # which no other lane produces (B7 and the Android B1 lane dispatch the
+  # paused lifecycle event in-process). Proves the native CoreLocation
+  # background-session handler arms on enable, that kind-445 publishes keep
+  # reaching the relay while OS-backgrounded, and that disabling background
+  # sharing while still backgrounded stops publishing (event-id diff) and
+  # disarms the session. The simulator still cannot reproduce real-device
+  # SUSPENSION — that stays on the physical-device checklist
+  # (docs/M7_BACKGROUND_SHARING.md §6).
+  e2e-ios-background-publish:
+    name: E2E iOS Background Publish
+    needs: [rust]
+    uses: ./.github/workflows/e2e-ios-background-publish.yml
+
   # Network loss and reconnect (backlog B9): device-wide airplane mode dropped
   # under a live session, then restored, asserting that a PEER location
   # published after the reconnect is DECRYPTED — not merely that a socket

@@ -72,6 +72,43 @@ final AutoDisposeFutureProviderFamily<int?, Circle> circleEpochProvider =
   }
 });
 
+/// How long, in seconds, Haven asks relays to keep the location messages **this
+/// device** sends to one circle — or `null` when that cannot be read.
+///
+/// The effective window, not the circle's declaration. A circle Haven created
+/// declares Haven's own window; a circle created by another Marmot client may
+/// declare a much shorter one (honoured as declared, so relays drop this
+/// phone's location almost immediately), a longer one (capped back to Haven's
+/// own), or none at all (Haven's own). Only the effective value answers the
+/// question the sheet is asked — "will my location still be there when my
+/// circle looks?" — so that is what the subtitle renders, and the copy names
+/// whose messages it describes.
+///
+/// Resolves to `null` — never to an error — when there is no live MLS group for
+/// the circle or the manager is unavailable, so the segment disappears instead
+/// of the sheet reporting a window for a circle that cannot send at all.
+/// Mirrors [circleEpochProvider] in keying, disposal and failure handling.
+final AutoDisposeFutureProviderFamily<int?, Circle>
+    circleLocationExpiryProvider =
+    FutureProvider.autoDispose.family<int?, Circle>((ref, circle) async {
+  final circleService = ref.read(circleServiceProvider);
+  if (circleService is! NostrCircleService) return null;
+  try {
+    final manager = await circleService.getCircleManagerFfi();
+    final secs = await manager.outgoingLocationExpirySecs(
+      mlsGroupId: circle.mlsGroupId,
+    );
+    return secs.toInt();
+  }
+  // FFI errors may not extend Exception, so a bare catch clause is required.
+  // A missing group is an expected outcome here, not an anomaly.
+  // ignore: avoid_catches_without_on_clauses
+  catch (e) {
+    debugPrint('Failed to read circle location expiry: ${e.runtimeType}');
+    return null;
+  }
+});
+
 /// Stores the MLS group ID of the currently selected circle.
 ///
 /// Write to this provider to change the selection. The full [Circle]

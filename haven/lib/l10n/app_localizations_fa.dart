@@ -777,7 +777,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeDetailExpiry =>
-      'Haven از رله‌ها می‌خواهد پیام‌های موقعیت مکانی را پس از حدود چهار دقیقه بیندازند. این درخواست فقط یک توصیه است: رله آزاد است آن‌ها را بیشتر نگه دارد. این زمان انقضا را فقط به‌روزرسانی‌های موقعیت مکانی با خود دارند، پس یک رله از نبودنِ همین زمان انقضا می‌تواند تغییر عضویت را هم از به‌روزرسانی موقعیت تشخیص بدهد. دعوت‌ها هیچ زمان انقضایی ندارند و می‌توانند تا هر وقت روی رلهٔ صندوق ورودی‌ات بمانند.';
+      'Haven از رله‌ها می‌خواهد پیام‌های موقعیت مکانی را حداکثر پس از حدود چهار دقیقه دور بیندازند؛ اگر حلقه را برنامهٔ دیگری ساخته باشد که زمان انقضای کوتاه‌تری خواسته است، این مدت کوتاه‌تر می‌شود. این درخواست فقط یک توصیه است: رله آزاد است آن‌ها را بیشتر نگه دارد. از میان پیام‌هایی که گوشیِ خودت می‌فرستد، این زمان انقضا را فقط به‌روزرسانی‌های موقعیت مکانی با خود دارند، پس یک رله از نبودنِ همین زمان انقضا می‌تواند تغییر در عضویت یا تنظیماتِ حلقه را از به‌روزرسانی موقعیت تشخیص بدهد. دعوت‌ها هیچ زمان انقضایی ندارند و می‌توانند تا هر وقت روی رلهٔ صندوق ورودی‌ات بمانند.';
 
   @override
   String get privacyWhatOthersSeeDetailOnDevice =>
@@ -1358,6 +1358,76 @@ class AppLocalizationsFa extends AppLocalizations {
   }
 
   @override
+  String circleDetailsMetaWithExpiry(String meta, String expiry) {
+    return '$meta · انقضا $expiry';
+  }
+
+  @override
+  String circleDetailsExpiryMinutesShort(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$countString دقیقه',
+      one: '$countString دقیقه',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpirySecondsShort(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$countString ثانیه',
+      one: '$countString ثانیه',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpiryMinutesLong(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'حدود $countString دقیقه',
+      one: 'حدود $countString دقیقه',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpirySecondsLong(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$countString ثانیه',
+      one: '$countString ثانیه',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpirySemantics(String meta, String expiry) {
+    return '$meta. Haven از رله‌ها می‌خواهد به‌روزرسانی‌های موقعیت مکانی‌ای را که به این حلقه می‌فرستی، پس از $expiry دور بیندازند.';
+  }
+
+  @override
   String get circleDetailsRelaysHeading => 'رله‌های این حلقه';
 
   @override
@@ -1438,7 +1508,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get relaySettingsLegacyRetractionPending =>
-      'Haven هنوز از رله‌ها می‌خواهد برخی داده‌های قدیمی به‌جامانده از به‌روزرسانی امنیتی اخیر را بیندازند.';
+      'Haven هنوز از رله‌ها می‌خواهد برخی داده‌های قدیمی به‌جامانده از به‌روزرسانی امنیتی اخیر را دور بیندازند.';
 
   @override
   String get circlesPanelCollapsedAnnouncement => 'پنل حلقه‌ها بسته شد';

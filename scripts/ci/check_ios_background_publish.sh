@@ -28,6 +28,9 @@ PROVIDER="${REPO_ROOT}/haven/lib/src/providers/location_provider.dart"
 MAP_SHELL="${REPO_ROOT}/haven/lib/src/pages/map_shell.dart"
 PLIST="${REPO_ROOT}/haven/ios/Runner/Info.plist"
 LIB_DIR="${REPO_ROOT}/haven/lib"
+SESSION_HANDLER="${REPO_ROOT}/haven/ios/Runner/HavenBackgroundSessionHandler.swift"
+APP_DELEGATE="${REPO_ROOT}/haven/ios/Runner/AppDelegate.swift"
+BG_PROVIDER="${REPO_ROOT}/haven/lib/src/providers/background_location_provider.dart"
 
 FAILED=0
 fail() {
@@ -35,7 +38,7 @@ fail() {
   FAILED=1
 }
 
-for f in "$SERVICE" "$PROVIDER" "$MAP_SHELL" "$PLIST"; do
+for f in "$SERVICE" "$PROVIDER" "$MAP_SHELL" "$PLIST" "$SESSION_HANDLER" "$APP_DELEGATE" "$BG_PROVIDER"; do
   [[ -f "$f" ]] || { echo "FAIL: expected file not found: $f" >&2; exit 1; }
 done
 command -v xmllint >/dev/null 2>&1 || { echo "FAIL: xmllint (libxml2-utils) is required by this guard" >&2; exit 1; }
@@ -163,7 +166,7 @@ fi
 #    may interpolate a coordinate or Position (Security Rule 6/8 extension to
 #    location data).
 # ---------------------------------------------------------------------------
-for f in "$SERVICE" "$MAP_SHELL"; do
+for f in "$SERVICE" "$MAP_SHELL" "$BG_PROVIDER" "${REPO_ROOT}/haven/lib/src/services/ios_background_session_service.dart"; do
   v="$(code_view "$f")"
   leaks="$(grep -nE 'debugPrint\(.*(latitude|longitude|\$position|\$\{position)' <<<"$v" || true)"
   if [[ -n "$leaks" ]]; then
@@ -171,8 +174,86 @@ for f in "$SERVICE" "$MAP_SHELL"; do
   fi
 done
 
+# ---------------------------------------------------------------------------
+# 8. Native CoreLocation session handler: arm() must be gated on the persisted
+#    background-sharing consent (fail-closed — an arm with the toggle off must
+#    DISARM), must create CLBackgroundActivitySession under an iOS 17
+#    availability guard, and must gate CLServiceSession on already-granted
+#    Always authorization (creating it earlier can drive an OS prompt).
+#    disarm() must invalidate AND nil both sessions — an invalidated session
+#    can never become active again, so silent reuse is a latent no-op.
+# ---------------------------------------------------------------------------
+arm_body="$(fn_slice 'func arm()' "$SESSION_HANDLER")"
+if [[ -z "$arm_body" ]]; then
+  fail "HavenBackgroundSessionHandler.arm() not found"
+else
+  grep -qF 'UserDefaults.standard.bool(forKey: Self.kBgSharingKey)' <<<"$arm_body" ||
+    fail "arm() no longer re-reads the persisted background-sharing consent (fail-closed gate)"
+  grep -qF 'UserDefaults.standard.bool(forKey: Self.kBgDisclosureKey)' <<<"$arm_body" ||
+    fail "arm() no longer requires the accepted background disclosure — the pre-2026-06-07 stale-true cohort would get a keep-alive with no disclosure"
+  grep -qF 'disarm()' <<<"$arm_body" ||
+    fail "arm() no longer disarms when the consent predicate is off — a stale session could outlive an opt-out (privacy Rule 10)"
+  grep -qF '.authorizedWhenInUse' <<<"$arm_body" ||
+    fail "arm() no longer gates session creation on granted authorization — creating CLBackgroundActivitySession while .notDetermined can drive a launch-time prompt the user did not initiate"
+  grep -qF '#available(iOS 17.0, *)' <<<"$arm_body" ||
+    fail "arm() lost the iOS 17 availability guard for CLBackgroundActivitySession"
+  grep -qF 'CLBackgroundActivitySession()' <<<"$arm_body" ||
+    fail "arm() no longer creates CLBackgroundActivitySession — When-In-Use background continuation loses its iOS 17+ session contract"
+  grep -qF '.authorizedAlways' <<<"$arm_body" ||
+    fail "arm() no longer gates CLServiceSession on already-granted Always authorization (an ungated .always session can drive an OS prompt)"
+fi
+sh_view="$(code_view "$SESSION_HANDLER")"
+if grep -qE 'NSLog\(|[^a-zA-Z]print\(' <<<"$sh_view"; then
+  fail "HavenBackgroundSessionHandler.swift logs — the handler has nothing safe to say (presence-only policy, and no DEBUG-gated logger is wired here)"
+fi
+disarm_body="$(fn_slice 'func disarm()' "$SESSION_HANDLER")"
+if [[ -z "$disarm_body" ]]; then
+  fail "HavenBackgroundSessionHandler.disarm() not found"
+else
+  grep -qF 'invalidate()' <<<"$disarm_body" ||
+    fail "disarm() no longer invalidates the held sessions"
+  grep -qF 'backgroundActivity = nil' <<<"$disarm_body" ||
+    fail "disarm() no longer nils backgroundActivity — an invalidated session can never reactivate, so reuse is a silent no-op"
+  grep -qF 'alwaysSession = nil' <<<"$disarm_body" ||
+    fail "disarm() no longer nils alwaysSession — an invalidated session can never reactivate, so reuse is a silent no-op"
+fi
+
+# ---------------------------------------------------------------------------
+# 9. AppDelegate: the session handler must be registered on the messenger and
+#    armed SYNCHRONOUSLY in didFinishLaunching (a session held at previous
+#    termination can only be retaken for a few seconds after a background
+#    relaunch) and re-armed on every foreground return (covers the
+#    Always-downgrade drop and a toggle-enable whose Dart arm call raced
+#    engine teardown).
+# ---------------------------------------------------------------------------
+code_has 'backgroundSessionHandler.register(with: messenger)' "$APP_DELEGATE" ||
+  fail "AppDelegate no longer registers the background-session channel"
+launch_body="$(fn_slice 'didFinishLaunchingWithOptions' "$APP_DELEGATE")"
+grep -qF 'backgroundSessionHandler.arm()' <<<"$launch_body" ||
+  fail "AppDelegate didFinishLaunching no longer arms the background sessions (the relaunch-retake window is only a few seconds)"
+foreground_body="$(fn_slice 'applicationWillEnterForeground' "$APP_DELEGATE")"
+grep -qF 'backgroundSessionHandler.arm()' <<<"$foreground_body" ||
+  fail "AppDelegate applicationWillEnterForeground no longer re-arms the background sessions"
+
+# ---------------------------------------------------------------------------
+# 10. BackgroundSharingNotifier: the Dart side must AWAIT arm() (the awaited
+#     call is what sequences the session before the state flip that rebuilds
+#     the position stream) and must disarm on disable so withdrawal of
+#     consent deterministically releases the OS keep-alive.
+# ---------------------------------------------------------------------------
+code_has 'await _iosBackgroundSession.arm()' "$BG_PROVIDER" ||
+  fail "BackgroundSharingNotifier no longer awaits the background-session arm before flipping state"
+code_has '_iosBackgroundSession.disarm()' "$BG_PROVIDER" ||
+  fail "BackgroundSharingNotifier no longer disarms the background sessions on disable (privacy Rule 10)"
+load_body="$(fn_slice 'Future<void> _load()' "$BG_PROVIDER")"
+grep -qF '_iosBackgroundSession.disarm()' <<<"$load_body" ||
+  fail "_load()'s fail-closed disclosure reconcile no longer disarms — the native launch-time arm read the stale true BEFORE Dart ran, so the reconcile must actively release the keep-alive"
+CATCHUP_SVC="${REPO_ROOT}/haven/lib/src/services/ios_background_catchup.dart"
+code_has 'MethodChannelIosBackgroundSessionService().disarm()' "$CATCHUP_SVC" ||
+  fail "cancelNativeSchedulers no longer disarms the background sessions — identity deletion (which keeps the toggle pref) would leave the OS keep-alive held and re-armed on every launch"
+
 if [[ "$FAILED" -ne 0 ]]; then
   echo "iOS background publish guard FAILED — see failures above." >&2
   exit 1
 fi
-echo "OK: iOS background publish invariants hold (plist mode, single stream, toggle-keyed AppleSettings, C4 watcher, presence-only logs)."
+echo "OK: iOS background publish invariants hold (plist mode, single stream, toggle-keyed AppleSettings, C4 watcher, presence-only logs, CoreLocation session arming)."

@@ -15,6 +15,7 @@ import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/ios_background_session_service.dart';
 import 'package:haven/src/services/ios_location_auth_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -127,6 +128,46 @@ class _FakeIosLocationAuth implements IosLocationAuthService {
     }
     return result;
   }
+}
+
+// =============================================================================
+// Fake iOS background session service for the session-arming tests
+// =============================================================================
+
+/// Records [arm]/[disarm] calls (in order, in [calls]) and exposes counts.
+///
+/// [onArm] is an optional synchronous hook invoked from inside [arm] before
+/// this fake's own bookkeeping runs. Tests use it to snapshot notifier state
+/// (or a pre-fetched [SharedPreferences] instance) at the exact moment arm()
+/// lands, proving call ordering that a plain call-count cannot.
+class _FakeIosBackgroundSessionService implements IosBackgroundSessionService {
+  _FakeIosBackgroundSessionService({this.onArm});
+
+  final void Function()? onArm;
+  int armCallCount = 0;
+  int disarmCallCount = 0;
+  final List<String> calls = [];
+
+  @override
+  Future<void> arm() async {
+    onArm?.call();
+    armCallCount++;
+    calls.add('arm');
+  }
+
+  @override
+  Future<void> disarm() async {
+    disarmCallCount++;
+    calls.add('disarm');
+  }
+
+  @override
+  Future<IosBackgroundSessionStatus> status() async =>
+      const IosBackgroundSessionStatus(
+        supported: true,
+        backgroundActivitySessionHeld: false,
+        serviceSessionHeld: false,
+      );
 }
 
 // =============================================================================
@@ -1010,5 +1051,221 @@ void main() {
       );
       expect(notifier.state, isTrue);
     });
+  });
+
+  // ---------------------------------------------------------------------------
+  // iOS background session arming: enabling background sharing on iOS must
+  // arm the CoreLocation background session bridge (CLBackgroundActivitySession
+  // / CLServiceSession) so the OS keeps delivering updates while backgrounded,
+  // and disabling must release it. Session-before-state-flip ordering matters
+  // because the state flip rebuilds the position stream (Apple's
+  // session-before-updates rule), so arm() must land first. Uses the
+  // iosBackgroundSession + isIOS constructor seams so the iOS branch runs on
+  // any test runner.
+  // ---------------------------------------------------------------------------
+
+  group('BackgroundSharingNotifier — iOS background session arming', () {
+    setUp(() {
+      SharedPreferences.setMockInitialValues({});
+    });
+
+    test(
+      'iOS (seam) + enable → arm called once, after the pref is persisted, '
+      'before the state flip',
+      () async {
+        final prefs = await SharedPreferences.getInstance();
+        late BackgroundSharingNotifier notifier;
+        bool? persistedAtArmTime;
+        bool? stateAtArmTime;
+        final session = _FakeIosBackgroundSessionService(
+          onArm: () {
+            persistedAtArmTime = prefs.getBool(kBackgroundSharingKey);
+            stateAtArmTime = notifier.state;
+          },
+        );
+        notifier = BackgroundSharingNotifier(
+          iosBackgroundSession: session,
+          isIOS: true,
+        );
+        await Future<void>.delayed(Duration.zero);
+
+        final result = await notifier.setEnabled(enabled: true);
+
+        expect(
+          session.calls,
+          ['arm'],
+          reason: 'enabling on iOS must arm the session exactly once and '
+              'must never disarm it',
+        );
+        expect(
+          persistedAtArmTime,
+          isTrue,
+          reason: 'the toggle must be persisted BEFORE arm is called — the '
+              'native arm re-reads the persisted consent and no-ops while '
+              'it is off',
+        );
+        expect(
+          stateAtArmTime,
+          isFalse,
+          reason: 'arm must be called BEFORE the state flip, so the position '
+              'stream rebuild sees a session already held',
+        );
+        expect(notifier.state, isTrue);
+        expect(result, isNull);
+
+        final finalPrefs = await SharedPreferences.getInstance();
+        expect(finalPrefs.getBool(kBackgroundSharingKey), isTrue);
+      },
+    );
+
+    test(
+      'iOS (seam) + enable + requestAlways throws → arm still called once, '
+      'toggle still ON (escalation is non-blocking)',
+      () async {
+        final auth = _FakeIosLocationAuth(throwOnRequest: true);
+        final session = _FakeIosBackgroundSessionService();
+        final notifier = BackgroundSharingNotifier(
+          iosLocationAuth: auth,
+          iosBackgroundSession: session,
+          isIOS: true,
+        );
+        await Future<void>.delayed(Duration.zero);
+
+        await notifier.setEnabled(enabled: true);
+
+        expect(
+          session.armCallCount,
+          1,
+          reason: 'session arming must proceed even when the Always request '
+              'throws — arming does not depend on the escalation succeeding',
+        );
+        expect(session.disarmCallCount, 0);
+        expect(notifier.state, isTrue);
+      },
+    );
+
+    test('iOS (seam) + disable → disarm called exactly once, arm never '
+        'called', () async {
+      final session = _FakeIosBackgroundSessionService();
+      final notifier = BackgroundSharingNotifier(
+        iosBackgroundSession: session,
+        isIOS: true,
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      await notifier.setEnabled(enabled: false);
+      // disarm() is fire-and-forget (unawaited) inside setEnabled — flush
+      // the microtask queue before asserting.
+      await Future<void>.delayed(Duration.zero);
+
+      expect(session.calls, ['disarm']);
+      expect(notifier.state, isFalse);
+    });
+
+    test(
+      'iOS (seam) + load resolves persisted true (background disclosure '
+      'accepted) → arm called once, before the state flip',
+      () async {
+        SharedPreferences.setMockInitialValues({
+          kBackgroundSharingKey: true,
+          kLocationDisclosureBackgroundAcceptedKey: true,
+        });
+
+        late BackgroundSharingNotifier notifier;
+        bool? stateAtArmTime;
+        final session = _FakeIosBackgroundSessionService(
+          onArm: () => stateAtArmTime = notifier.state,
+        );
+        notifier = BackgroundSharingNotifier(
+          iosBackgroundSession: session,
+          isIOS: true,
+        );
+        await Future<void>.delayed(Duration.zero); // let _load() complete
+
+        expect(
+          session.calls,
+          ['arm'],
+          reason: 'load must re-arm the session when the persisted toggle '
+              'resolves true on iOS (A3-lag re-arm)',
+        );
+        expect(
+          stateAtArmTime,
+          isFalse,
+          reason: 'load must arm the session BEFORE flipping state '
+              '(session-before-stream-rebuild ordering)',
+        );
+        expect(notifier.state, isTrue);
+      },
+    );
+
+    test(
+      'iOS (seam) + load resolves persisted true WITHOUT the background '
+      'disclosure (fail-closed reconcile) → disarm called, arm never',
+      () async {
+        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true});
+
+        final session = _FakeIosBackgroundSessionService();
+        final notifier = BackgroundSharingNotifier(
+          iosBackgroundSession: session,
+          isIOS: true,
+        );
+        await Future<void>.delayed(Duration.zero);
+
+        expect(
+          session.calls,
+          ['disarm'],
+          reason: 'the native launch-time arm read the stale persisted true '
+              'BEFORE this reconcile ran, so writing the pref alone would '
+              'leave an OS keep-alive held for a user whose background '
+              'disclosure was never accepted — the reconcile must actively '
+              'disarm (and must never arm)',
+        );
+        expect(notifier.state, isFalse);
+      },
+    );
+
+    test(
+      'iOS (seam) + load resolves persisted false → arm not called',
+      () async {
+        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: false});
+
+        final session = _FakeIosBackgroundSessionService();
+        final notifier = BackgroundSharingNotifier(
+          iosBackgroundSession: session,
+          isIOS: true,
+        );
+        await Future<void>.delayed(Duration.zero);
+
+        expect(session.calls, isEmpty);
+        expect(notifier.state, isFalse);
+      },
+    );
+
+    test(
+      'non-iOS (isIOS: false) + enable and disable → neither arm nor disarm '
+      'called',
+      () async {
+        final session = _FakeIosBackgroundSessionService();
+        final notifier = BackgroundSharingNotifier(
+          iosBackgroundSession: session,
+          isIOS: false,
+        );
+        await Future<void>.delayed(Duration.zero);
+
+        await notifier.setEnabled(enabled: true);
+        expect(notifier.state, isTrue);
+
+        await notifier.setEnabled(enabled: false);
+        await Future<void>.delayed(Duration.zero);
+        expect(notifier.state, isFalse);
+
+        expect(
+          session.calls,
+          isEmpty,
+          reason: 'the CoreLocation session bridge must be gated behind the '
+              '_isIOS seam on both enable and disable',
+        );
+      },
+    );
   });
 }

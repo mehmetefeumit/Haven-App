@@ -50,6 +50,16 @@ pub const KEY_PACKAGE_KIND: u16 = 30443;
 /// at most once (migration plan §6 step 5).
 pub const LEGACY_KP_RETRACTION_DONE_KEY: &str = "legacy_kp_retraction_done_v1";
 
+/// `user_settings` key recording that the one-time retirement of a malformed
+/// (pre-width-fix) kind-30443 `d` slot has COMPLETED — the account publishes a
+/// binding-shaped coordinate and the orphaned one's retraction was acked.
+///
+/// Written only by a migration that finished; a run that could not publish the
+/// replacement, could not get the retraction acked, or reached no relay leaves
+/// it unset so the next tick retries (see
+/// [`crate::relay::maintenance::decide_kp_slot_retirement`]).
+pub const KP_SLOT_RETIREMENT_DONE_KEY: &str = "kp_slot_retirement_done_v1";
+
 /// One row of the `published_key_packages` table: the current published KP.
 ///
 /// The `Debug` impl is hand-written to redact `key_package` — the MLS wire
@@ -159,6 +169,32 @@ impl CircleStorage {
         Ok(self.latest_published_key_package()?.map(|r| r.d_tag))
     }
 
+    /// Drops the tracking row for ONE slot — the retired coordinate, after the
+    /// slot retirement re-pointed tracking onto a conformant one.
+    ///
+    /// Only safe for a slot this device has stopped publishing: the row is what
+    /// makes the tracked package's `Lifetime.not_after` init-key purge reachable
+    /// ([`Self::latest_published_key_package`] reads the newest row only), so
+    /// dropping a row whose material is still tracked nowhere else would retain
+    /// that material past the spec's deletion bound. The retirement re-publishes
+    /// the SAME package bytes under the new slot before calling this, so the
+    /// material stays tracked by the surviving row.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on failure.
+    pub fn delete_published_key_package(&self, d_tag: &str) -> Result<()> {
+        let conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.execute(
+            "DELETE FROM published_key_packages WHERE d_tag = ?1",
+            params![d_tag],
+        )?;
+        Ok(())
+    }
+
     /// Clears all published-`KeyPackage` tracking (cutover / logout wipe).
     ///
     /// # Errors
@@ -210,6 +246,48 @@ impl CircleStorage {
         conn.execute(
             "INSERT OR REPLACE INTO user_settings (key, value) VALUES (?1, '1')",
             params![LEGACY_KP_RETRACTION_DONE_KEY],
+        )?;
+        Ok(())
+    }
+
+    /// Returns whether the one-time malformed-slot retirement has COMPLETED.
+    ///
+    /// Defaults to `false`, so an install that has never run it (including every
+    /// pre-width-fix install) migrates on its next maintenance tick. Never set
+    /// by a partial run: a done-marker that latches on a migration that did not
+    /// finish is how a broken migration becomes permanent.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on failure.
+    pub fn kp_slot_retirement_done(&self) -> Result<bool> {
+        let conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT value FROM user_settings WHERE key = ?1",
+                params![KP_SLOT_RETIREMENT_DONE_KEY],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(raw.as_deref() == Some("1"))
+    }
+
+    /// Marks the one-time malformed-slot retirement as complete.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on failure.
+    pub fn mark_kp_slot_retirement_done(&self) -> Result<()> {
+        let conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO user_settings (key, value) VALUES (?1, '1')",
+            params![KP_SLOT_RETIREMENT_DONE_KEY],
         )?;
         Ok(())
     }
@@ -312,6 +390,63 @@ mod tests {
             .expect("a");
         storage.wipe_published_key_packages().expect("wipe");
         assert_eq!(storage.count_published_key_packages().expect("count"), 0);
+    }
+
+    #[test]
+    fn delete_drops_only_the_named_slot() {
+        // The retirement drops the RETIRED coordinate's row after re-pointing
+        // tracking; the surviving row is what keeps the package's `not_after`
+        // purge reachable, so it must not be touched.
+        let storage = CircleStorage::in_memory().expect("in_memory");
+        storage
+            .record_published_key_package(&row("legacy", "d-legacy", &[1], 100))
+            .expect("legacy");
+        storage
+            .record_published_key_package(&row("fresh", "d-fresh", &[1], 200))
+            .expect("fresh");
+        storage
+            .delete_published_key_package("d-legacy")
+            .expect("delete");
+        assert_eq!(storage.count_published_key_packages().expect("count"), 1);
+        assert_eq!(
+            storage.latest_canonical_d_tag().expect("d"),
+            Some("d-fresh".to_string())
+        );
+    }
+
+    #[test]
+    fn delete_of_an_absent_slot_is_a_noop() {
+        // Crash-resume calls it again after the row is already gone.
+        let storage = CircleStorage::in_memory().expect("in_memory");
+        storage
+            .record_published_key_package(&row("fresh", "d-fresh", &[1], 200))
+            .expect("fresh");
+        storage
+            .delete_published_key_package("d-legacy")
+            .expect("delete absent");
+        assert_eq!(storage.count_published_key_packages().expect("count"), 1);
+    }
+
+    #[test]
+    fn slot_retirement_marker_defaults_false_then_sticks() {
+        let storage = CircleStorage::in_memory().expect("in_memory");
+        assert!(
+            !storage.kp_slot_retirement_done().expect("default"),
+            "an install that never ran the retirement must migrate, not latch"
+        );
+        storage.mark_kp_slot_retirement_done().expect("mark");
+        assert!(storage.kp_slot_retirement_done().expect("after mark"));
+    }
+
+    #[test]
+    fn slot_retirement_marker_is_independent_of_the_legacy_one() {
+        // Two one-time migrations, two sentinels: the Dark Matter 443/10051
+        // cutover completing must not skip the slot retirement.
+        let storage = CircleStorage::in_memory().expect("in_memory");
+        storage.mark_legacy_kp_retraction_done().expect("mark 443");
+        assert!(!storage.kp_slot_retirement_done().expect("slot marker"));
+        storage.mark_kp_slot_retirement_done().expect("mark slot");
+        assert!(storage.legacy_kp_retraction_done().expect("443 marker"));
     }
 
     #[test]

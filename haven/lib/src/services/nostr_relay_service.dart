@@ -73,6 +73,11 @@ export 'package:haven/src/services/data_directory_provider.dart'
 ///   independently of the action — including on ticks where no relay was even
 ///   contacted — and once it is set the account cannot be invited through that
 ///   package at all, whatever else the tick reports.
+/// - `retiredMalformedSlot` marks a tick that COMPLETED the one-time retirement
+///   of a pre-width-fix `d` slot. It rides on whichever verdict that tick's own
+///   relay work earned — a re-point is a publish and reports as one, an
+///   adoption or a retraction-only run is health — because completing the
+///   migration is not by itself evidence that a relay is serving anything.
 ///
 /// Reads only counters, booleans and a closed enum; carries nothing that could
 /// leak (Security Rule 4/6/8).
@@ -110,6 +115,7 @@ KeyPackageMaintenanceOutcome classifyKeyPackageMaintenance(
         respondersProbed: r.respondersProbed,
         relayErrors: r.relayErrors,
         expiredInitKeyPurged: r.expiredInitKeyPurged,
+        retiredMalformedSlot: r.retiredMalformedSlot,
       );
     case KpMaintenanceActionFfi.alreadyHealthy:
     case KpMaintenanceActionFfi.seededD:
@@ -152,6 +158,7 @@ KeyPackageMaintenanceOutcome classifyKeyPackageMaintenance(
         respondersProbed: r.respondersProbed,
         seededStableSlot: r.action == KpMaintenanceActionFfi.seededD,
         relayErrors: r.relayErrors,
+        retiredMalformedSlot: r.retiredMalformedSlot,
       );
   }
 }

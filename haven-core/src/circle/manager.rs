@@ -39,11 +39,11 @@ use super::types::{
     GiftWrappedWelcome, Invitation, MemberKeyPackage, MembershipStatus,
 };
 use crate::location::LocationMessage;
-use crate::nostr::mls::redact_hex_sequences;
 use crate::nostr::mls::types::{
     GroupEvent, GroupId, GroupIdExt, KeyPackage, LocationGroupConfig, LocationMessageResult,
     PendingStateRef, PublishWork, SessionEffects, TransportMessage,
 };
+use crate::nostr::mls::{bounded_retention_secs, redact_hex_sequences};
 use crate::nostr::mls::{PendingWelcome, PendingWelcomeStore, SessionManager};
 
 /// Formats the first 8 hex chars of an event ID for diagnostic logging.
@@ -210,6 +210,48 @@ impl CircleManager {
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
             .ok_or_else(|| CircleError::NotFound("Group not found: <redacted>".to_string()))?;
         Ok(group.epoch.0)
+    }
+
+    /// The NIP-40 window Haven asks relays to keep the location messages **this
+    /// device** sends into `mls_group_id`.
+    ///
+    /// This is the EFFECTIVE value — [`bounded_retention_secs`] applied to the
+    /// group's declared `0x8005` component — and not the declaration itself,
+    /// because it is the number that actually reaches the wire on this device's
+    /// own 445s, and the two differ in both directions: an undeclared or
+    /// over-long group policy collapses to Haven's own window, and a shorter one
+    /// is honoured as declared. It is never zero and never absent.
+    ///
+    /// The circle-details sheet surfaces it so a foreign creator's very short
+    /// window — which has relays dropping this device's location almost
+    /// immediately — is visible rather than indistinguishable from a bug.
+    ///
+    /// The group lookup is not redundant with the component read: a circle with
+    /// no live MLS group would otherwise report an undeclared policy, i.e.
+    /// Haven's own window, for a circle that cannot send at all.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CircleError::NotFound`] if the group does not exist, or
+    /// [`CircleError::Mls`] if the component cannot be read.
+    pub async fn outgoing_location_expiry_secs(&self, mls_group_id: &GroupId) -> Result<u64> {
+        if self
+            .session
+            .find_group(mls_group_id)
+            .await
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
+            .is_none()
+        {
+            return Err(CircleError::NotFound(
+                "Group not found: <redacted>".to_string(),
+            ));
+        }
+        let declared = self
+            .session
+            .group_message_retention_secs(mls_group_id)
+            .await
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+        Ok(bounded_retention_secs(declared))
     }
 
     /// Returns whether `pubkey_hex` is still present in the group's current
@@ -1957,6 +1999,33 @@ impl CircleManager {
     /// Propagates database errors.
     pub fn wipe_published_key_packages(&self) -> Result<()> {
         self.storage.wipe_published_key_packages()
+    }
+
+    /// See [`CircleStorage::delete_published_key_package`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn delete_published_key_package(&self, d_tag: &str) -> Result<()> {
+        self.storage.delete_published_key_package(d_tag)
+    }
+
+    /// See [`CircleStorage::kp_slot_retirement_done`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn kp_slot_retirement_done(&self) -> Result<bool> {
+        self.storage.kp_slot_retirement_done()
+    }
+
+    /// See [`CircleStorage::mark_kp_slot_retirement_done`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn mark_kp_slot_retirement_done(&self) -> Result<()> {
+        self.storage.mark_kp_slot_retirement_done()
     }
 
     /// See [`CircleStorage::legacy_kp_retraction_done`].
@@ -4342,6 +4411,83 @@ mod tests {
             "a circle's own narrower window must reach the wire as declared: widening it \
              would ask relays to hold this location longer than the circle asked, and \
              stamping Haven's constant instead would mean the component drives nothing"
+        );
+    }
+
+    /// The whole promise of the circle-details expiry segment, in one
+    /// assertion: the number the sheet shows is the number a relay reads off
+    /// this device's own location 445.
+    ///
+    /// Run over the three states that diverge — a much shorter foreign window,
+    /// no declaration at all, and a declaration longer than Haven's own — so a
+    /// change that made the accessor report the DECLARATION instead of the
+    /// effective value fails on two of the three.
+    #[tokio::test]
+    async fn the_expiry_the_sheet_shows_is_the_expiry_on_the_wire() {
+        let havens_own = crate::location::ttl::LOCATION_MESSAGE_RETENTION_SECS;
+        // Derived, not literal, so "much shorter" stays true by construction:
+        // this is the case the segment exists for, where a creator's window has
+        // relays dropping this device's location almost immediately.
+        let much_shorter = havens_own / 100;
+        assert!(much_shorter > 0 && much_shorter < havens_own);
+
+        for (declared, expected) in [
+            (Some(much_shorter), much_shorter),
+            (None, havens_own),
+            (Some(86_400), havens_own),
+        ] {
+            let joined = setup_joined_foreign_circle(declared).await;
+
+            let shown = joined
+                .joiner
+                .outgoing_location_expiry_secs(&joined.mls_group_id)
+                .await
+                .expect("the sheet's accessor must resolve for a joined circle");
+            assert_eq!(
+                shown, expected,
+                "the sheet must show the window this device actually asks for, \
+                 not the {declared:?} the group declares"
+            );
+
+            let loc = crate::location::LocationMessage::new(35.68, 139.69);
+            let (event, _n, _r) = joined
+                .joiner
+                .encrypt_location(
+                    &joined.mls_group_id,
+                    &joined.joiner_keys.public_key(),
+                    &loc,
+                    60,
+                )
+                .await
+                .expect("encrypt");
+
+            assert_eq!(
+                expiration_of(&event),
+                Some(event.created_at.as_secs() + shown),
+                "the sheet would be lying about {declared:?}: a relay reads a different \
+                 window off this device's own location message than the sheet displays"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_circle_with_no_live_mls_group_has_no_expiry_to_show() {
+        // The degradation the subtitle depends on. `bounded_retention_secs`
+        // answers "no declaration" with Haven's own window, so without the
+        // group-existence check a legacy/orphaned circle would render "about
+        // four minutes" for a circle that cannot send anything at all.
+        let dir = TempDir::new().unwrap();
+        let manager = CircleManager::new_unencrypted(dir.path(), &Keys::generate()).unwrap();
+
+        let err = manager
+            .outgoing_location_expiry_secs(&GroupId::from_slice(&[7u8; 32]))
+            .await
+            .expect_err("a circle with no live MLS group must not report a window");
+        assert!(
+            matches!(err, CircleError::NotFound(_)),
+            "the missing group must surface as NotFound, not as a component read \
+             failure: the caller hides the segment on either, but only one of them \
+             says the circle has no group at all"
         );
     }
 

@@ -1374,10 +1374,10 @@ abstract class AppLocalizations {
   /// **'This depends on your phone. On Android, Haven blocks screenshots and screen recording everywhere in the app. On iPhone it cannot: Haven blurs the app-switcher preview, but a member can still capture what is on screen.'**
   String get privacyWhatOthersSeeScreenshots;
 
-  /// Technical-detail paragraph (collapsed by default), Privacy → What members see and what relays see. 'Advisory' is essential — the expiry is a NIP-40 hint a relay may ignore, so never phrase this as a guarantee that messages are deleted. The third sentence discloses a public discriminator that was previously stated nowhere: Haven stamps the expiration on application messages only, while commits and proposals carry the routing tag alone, so its presence or absence separates membership-change traffic from location traffic to any observer. Phrase that sentence so the thing that is absent is unmistakably the EXPIRY REQUEST — an earlier version ended 'by its absence', where the nearest antecedent was 'a location update', and that misreading turns the sentence into a different and false claim.
+  /// Technical-detail paragraph (collapsed by default), Privacy → What members see and what relays see. 'At most' is load-bearing and must survive translation: the window Haven requests is the SMALLER of its own LOCATION_MESSAGE_RETENTION_SECS and whatever the circle's 0x8005 component declares, so a circle created by another Marmot client can be shorter — and the circle-details sheet now displays that shorter window (circleDetailsMetaWithExpiry), which is what made the un-qualified sentence contradict the app. The reason it can be shorter is another app's declaration, never a setting the user can change. Keep 'about four minutes' contiguous: relay_expiry_copy_states_the_retention_window (haven-core/tests/privacy_copy_ties.rs) matches the substring 'drop location messages after about four minutes' against the constant. 'Advisory' is essential — the expiry is a NIP-40 hint a relay may ignore, so never phrase this as a guarantee that messages are deleted. The third sentence discloses a public discriminator that was previously stated nowhere: Haven stamps the expiration on application messages only, while commits and proposals carry the routing tag alone, so its presence or absence separates group-control traffic from location traffic to any observer. Its opening scope clause ('Among the messages your phone sends') is load-bearing and must survive translation as a real restriction, never generalised to every message in the circle: Haven stamps its OWN application messages unconditionally, but it cannot stamp another member's, and in a circle created by a client that declared no retention policy another member's unstamped message may itself be a location update — the unscoped sentence pointed a relay at the wrong conclusion about a real position report. 'membership or settings change' is the whole un-stamped class, which is every group-control message: joins and removals, but also an admin handoff or a change to the circle's relays — do not narrow it back to membership. Phrase the sentence so the thing that is absent is unmistakably the EXPIRY REQUEST — an earlier version ended 'by its absence', where the nearest antecedent was 'a location update', and that misreading turns the sentence into a different and false claim.
   ///
   /// In en, this message translates to:
-  /// **'Haven asks relays to drop location messages after about four minutes. That request is advisory: a relay is free to keep them for longer. Only location updates carry that expiry request, so a message without one is visibly a membership change rather than a location update. Invitations carry no expiry at all, and may sit on your inbox relay indefinitely.'**
+  /// **'Haven asks relays to drop location messages after about four minutes at most — sooner, in a circle created by another app that asked for less. That request is advisory: a relay is free to keep them for longer. Among the messages your phone sends, only location updates carry that expiry request, so a message without one is visibly a membership or settings change rather than a location update. Invitations carry no expiry at all, and may sit on your inbox relay indefinitely.'**
   String get privacyWhatOthersSeeDetailExpiry;
 
   /// Technical-detail paragraph (collapsed by default), Privacy → What members see and what relays see. Discloses the on-device retention of other members' coordinates, which the app previously stated only in passing in leaveCircleDialogBody. 'a day' is the fixed 24-hour purge window (LOCATION_RETENTION_SECS, haven-core/src/location/types.rs); it is not configurable and does not follow any hint in the payload, so do not translate it as an approximation or a setting. The second sentence keeps the automatic purge from being read as a guarantee about what a member kept deliberately.
@@ -2153,6 +2153,42 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'{members} · epoch {epoch}'**
   String circleDetailsMembersWithEpoch(String members, int epoch);
+
+  /// Appends the relay-expiry window to the circle-details subtitle, e.g. '3 members · epoch 14 · expiry 4 min'. {meta} is the already-composed member count (with the epoch, when there is one) and must be inserted untouched; {expiry} is the compact duration (circleDetailsExpiryMinutesShort / circleDetailsExpirySecondsShort). Space is the whole point of this segment: for almost every circle it reads '4 min' forever, so it must stay a couple of words on the dimmest line, never a row or a label of its own. 'expiry' is the same term privacyWhatOthersSeeDetailExpiry uses ('that expiry request') — reuse whatever word that paragraph uses in your language. Do NOT translate it as a promise that messages are deleted, and do NOT make it read as though the CIRCLE expires; what expires is the location message. Reorder freely (a language that wants the duration first can write '{expiry} ... {meta}') and change the separator to whatever punctuation reads naturally, but keep it short enough to sit on one dim line.
+  ///
+  /// In en, this message translates to:
+  /// **'{meta} · expiry {expiry}'**
+  String circleDetailsMetaWithExpiry(String meta, String expiry);
+
+  /// Compact minutes duration for the circle-details expiry segment, e.g. '4 min'. Glanceable abbreviation, not prose: it shares one dim line with the member count and the epoch, so keep it to a number plus a short unit and never spell 'minutes' out here (circleDetailsExpiryMinutesLong is the spoken form). The plural branches exist because some languages inflect even the abbreviation; if yours does not, both branches are legitimately identical.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{{count} min} other{{count} min}}'**
+  String circleDetailsExpiryMinutesShort(int count);
+
+  /// Compact seconds duration for the circle-details expiry segment, e.g. '30 sec'. Only ever shown for a circle created by another Marmot client that declared a window under a minute — the case where relays drop this phone's location almost immediately — so it must read as alarmingly short next to the usual '4 min', not be rounded away. Same length constraint as circleDetailsExpiryMinutesShort.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{{count} sec} other{{count} sec}}'**
+  String circleDetailsExpirySecondsShort(int count);
+
+  /// Spelled-out minutes duration read by screen readers inside circleDetailsExpirySemantics, e.g. 'about 4 minutes'. Never displayed. 'about' is required and must survive translation: the number is rounded to the nearest minute (Haven's own window is 228 seconds, which is what makes the usual reading 'about 4 minutes', matching privacyWhatOthersSeeDetailExpiry). Spell the unit out in full — an abbreviation is what this key exists to avoid. These are consumed at exactly ONE call site, inside circleDetailsExpirySemantics, so a language whose carrier sentence governs the duration may fold the preposition or case into this string rather than leave it stranded (ru does: it carries 'через' and the accusative, and its semantics string has no preposition). Do not 'restore' the English shape there.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{about {count} minute} other{about {count} minutes}}'**
+  String circleDetailsExpiryMinutesLong(int count);
+
+  /// Spelled-out seconds duration read by screen readers inside circleDetailsExpirySemantics, e.g. '30 seconds'. Never displayed. Deliberately has no 'about' — unlike the minutes form this number is exact, and hedging an exact figure would be less accurate, not more. Spell the unit out in full. These are consumed at exactly ONE call site, inside circleDetailsExpirySemantics, so a language whose carrier sentence governs the duration may fold the preposition or case into this string rather than leave it stranded (ru does: it carries 'через' and the accusative, and its semantics string has no preposition). Do not 'restore' the English shape there.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{{count} second} other{{count} seconds}}'**
+  String circleDetailsExpirySecondsLong(int count);
+
+  /// The whole circle-details subtitle as a screen reader hears it, replacing the terse visible line. {meta} is the visible member count (with the epoch, when there is one), read as-is; {expiry} is the spelled-out duration (circleDetailsExpiryMinutesLong / circleDetailsExpirySecondsLong). Two things are load-bearing and must survive translation. First, 'asks relays to drop' — the expiry is an advisory NIP-40 hint a relay may ignore, so never phrase it as a guarantee that anything is deleted. Second, 'the location updates you send' — this window governs THIS phone's own messages; Haven cannot state what another member's client stamps, so never generalise it to 'this circle's messages' or 'everyone's location'. Third, the duration must unambiguously modify the DROPPING, not the sending. English fences it in preverbal position with commas because a trailing 'after about 4 minutes' otherwise attaches to 'you send' by Late Closure, and a listener gets one pass to recover from that. Do NOT clone the comma fence: independent per-language review found the same ambiguity real in es/fr/pt/ru/ar and structurally impossible in de/tr/hi/ur/ja/ne, where a prenominal relative clause or a comma-closed one already forecloses it — there, mirroring English word order REINTRODUCES the defect. Make the attachment unambiguous by whatever device the language actually uses. Keep it one spoken sentence after {meta}.
+  ///
+  /// In en, this message translates to:
+  /// **'{meta}. Haven asks relays to drop, after {expiry}, the location updates you send to this circle.'**
+  String circleDetailsExpirySemantics(String meta, String expiry);
 
   /// Heading above the list of relays in the circle-details sheet.
   ///

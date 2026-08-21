@@ -160,31 +160,15 @@ void main() {
     );
 
     // -----------------------------------------------------------------------
-    // Document the `_bgSharingPausedSub` timer-cancel path as an explicit
-    // design note test so the intent is machine-readable and visible in CI
-    // output, even though we cannot pump the full widget lifecycle on Linux.
+    // C4's driver-teardown side (`_bgSharingPausedSub` cancelling
+    // `_receiveTimer`/scheduler on a mid-pause disable) cannot be exercised
+    // here: `_MapShellState` is private and needs the Rust bridge. Its
+    // RUNTIME proof lives in the e2e-ios-background-publish lane
+    // (integration_test/ios_bg_publish_test.dart flips the toggle off while
+    // OS-backgrounded and asserts relay silence + session disarm); the C3
+    // chokepoint above remains the in-process backstop even if the timer
+    // fires before the cancel lands.
     // -----------------------------------------------------------------------
-    test('(design note) _startIosBackgroundReceiveTimer installs a '
-        'backgroundSharingProvider listener that cancels _receiveTimer '
-        'on disable — verified at the unit level via the C3 chokepoint above; '
-        'the timer-cancel side of C4 requires an iOS device test (see §F)', () {
-      // This test is intentionally a no-op assertion. Its purpose is to
-      // make the design contract visible in the test report and to serve
-      // as a placeholder that future device tests can reference.
-      //
-      // The privacy guarantee is:
-      //   - The `_bgSharingPausedSub` watcher (C4) cancels `_receiveTimer`
-      //     immediately when `backgroundSharingProvider` emits false while
-      //     the app is paused on iOS.
-      //   - Even if the timer fires before the cancel lands, the C3
-      //     chokepoint in `CatchupService.runCatchup(isBackgroundWake:true)`
-      //     hard-returns without any relay contact.
-      //
-      // C3 is fully unit-tested above. C4's timer-cancel side is
-      // device/platform-only and covered by the M7-A device validation
-      // matrix in `docs/M7_BACKGROUND_SHARING.md §F`.
-      expect(true, isTrue);
-    });
   });
 
   // -------------------------------------------------------------------------

@@ -13,10 +13,10 @@
 //! a member's phone keeps the last position it received from you
 //! (`privacyWhatOthersSeeDetailOnDevice`, `leaveCircleDialogBody`); that is
 //! [`LOCATION_RETENTION_SECS`]. The same section promises how long a location
-//! ciphertext may sit on a *relay* (`privacyWhatOthersSeeDetailExpiry`); that is
-//! [`LOCATION_MESSAGE_RETENTION_SECS`], which is additionally held to the
-//! derivation its own doc comment states, because that derivation is what makes
-//! the sentence honest in the other direction.
+//! ciphertext may sit on a *relay* (`privacyWhatOthersSeeDetailExpiry`); that
+//! is at most [`LOCATION_MESSAGE_RETENTION_SECS`], which is additionally held
+//! to the derivation its own doc comment states, because that derivation is
+//! what makes the sentence honest in the other direction.
 //!
 //! `src/profile/relay_pool.rs` and `src/relay/discovery.rs` each pin their own
 //! constant to an exact size, which catches a resize. These catch the other
@@ -28,6 +28,7 @@
 //! l10n review.
 
 use haven_core::location::{LOCATION_MESSAGE_RETENTION_SECS, LOCATION_RETENTION_SECS};
+use haven_core::nostr::mls::bounded_retention_secs;
 use haven_core::profile::{DEFAULT_BLOSSOM_SERVER, PRODUCTION_PROFILE_RELAYS};
 use haven_core::relay::PRODUCTION_DISCOVERY_RELAYS;
 
@@ -227,9 +228,10 @@ fn on_device_retention_copy_states_the_purge_window() {
 // every circle as the 0x8005 `message-retention.v1` component and the engine
 // derives each kind-445 application message's NIP-40 `expiration` from it, so
 // it is at once a sentence the user reads and the parameter the no-gap
-// invariant rides on. Three pins, because three things move independently:
+// invariant rides on. Four pins, because four things move independently:
 //
 //   * the sentence, alone      -> relay_expiry_copy_states_the_retention_window
+//   * the sentence's BOUND     -> relay_expiry_copy_states_the_window_as_a_ceiling
 //   * the constant, upward     -> widening_the_retention_...
 //   * the constant, downward   -> narrowing_the_retention_...
 //
@@ -319,6 +321,47 @@ fn narrowing_the_retention_would_strand_a_returning_member() {
          then finds no position at all, while the publisher is still told their \
          position goes out every couple of minutes. Either the retention was \
          narrowed, or the publish ceiling under it grew."
+    );
+}
+
+/// A CEILING, not a flat figure — the half of the sentence the constant alone
+/// cannot hold up. [`bounded_retention_secs`] honours a circle's OWN declared
+/// window when it is shorter than Haven's, so the number above is the largest
+/// residency Haven ever asks for and not the one every message carries. That
+/// case is neither hypothetical nor the user's to control: a circle created by
+/// any other Marmot client declares its own window, and Haven stamps it as
+/// declared.
+///
+/// Both halves are asserted here on purpose. A copy pin alone would still pass
+/// if the bound started flooring a shorter window (the sentence would go false
+/// with no test moving), and a behaviour pin alone would still pass if the
+/// qualifier were edited out of the sentence.
+#[test]
+fn relay_expiry_copy_states_the_window_as_a_ceiling() {
+    let declared = LOCATION_MESSAGE_RETENTION_SECS / 2;
+    assert_eq!(
+        bounded_retention_secs(Some(declared)),
+        declared,
+        "a circle declaring a SHORTER window must reach the wire as declared \
+         (src/nostr/mls/retention.rs). Flooring it would ask relays to hold \
+         location ciphertext longer than the circle asked, and would make \
+         LOCATION_MESSAGE_RETENTION_SECS the window every application 445 \
+         carries rather than the ceiling the copy states."
+    );
+
+    let copy = english_copy("privacyWhatOthersSeeDetailExpiry");
+    let claim = format!(
+        "{} at most",
+        spelled_about_minutes(LOCATION_MESSAGE_RETENTION_SECS)
+    );
+    assert!(
+        copy.contains(&claim),
+        "privacyWhatOthersSeeDetailExpiry no longer bounds its figure \
+         (\"{claim}\"), but Haven honours a shorter declared window as declared, \
+         so a flat figure is false in every circle another client created with a \
+         narrower one — and that is the circle whose window the user cannot \
+         change. Restore the qualifier, or stop honouring the shorter \
+         window.\nCopy was: {copy}"
     );
 }
 

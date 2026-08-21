@@ -1,0 +1,184 @@
+# Reusable workflow: iOS background-publish lane — a REAL OS-level
+# background transition.
+#
+# Runs ONE drive target (haven/integration_test/ios_bg_publish_test.dart) on a
+# booted simulator and, mid-drive, backgrounds the app FOR REAL: the wrapper
+# (tooling/e2e/ci/run-ios-bg-publish.sh) tails the drive log for a READY
+# marker, then launches com.apple.Preferences over Haven, so iOS itself fires
+# `applicationDidEnterBackground` — something NO other lane produces (B7 and
+# the Android B1 lane dispatch the paused lifecycle event in-process). The
+# drive keeps running because the simulator never suspends a backgrounded app.
+#
+# What the lane proves:
+#   P1  Enabling background sharing through the production setEnabled path
+#       arms the native HavenBackgroundSessionHandler: status reports
+#       supported==true && backgroundActivitySessionHeld==true (iOS 17+ sim),
+#       under a real When-In-Use grant (`simctl privacy grant location`).
+#   P2  With the app OS-backgrounded, kind-445 publishes CONTINUE to reach
+#       the relay: >= 2 events after the backgrounding instant, over a window
+#       sized to two full 72-168 s per-circle jitter intervals plus slack.
+#   P3  Flipping background sharing OFF while still OS-backgrounded stops
+#       publishing (an event-id DIFF over a bounded settle window, never a
+#       bare count) and the native session reports disarmed.
+#
+# The wrapper's completion gate requires all four terminal proof markers, so
+# a drive that exited 0 over a skipped or early-returning body fails the lane
+# (CI_HARDENING_BACKLOG.md A3b).
+#
+# # What this lane does NOT prove
+#
+# The simulator does NOT reproduce real-device background SUSPENSION: it
+# keeps the process alive and the integration_test VM-service attached, so a
+# "background execution stops" bug on hardware (jetsam, true suspension,
+# SLC/BGTask fire) will not surface here. And like B7, the drive fakes
+# `locationServiceProvider`, so the geolocator stream and its AppleSettings
+# are NOT exercised here (B4 owns the real-GPS path; the static guard pins
+# the settings source). This lane proves the native-session-arming and Dart
+# publish-pipeline CONTINUITY under a genuinely fired UIApplication
+# background transition — NOT the OS's suspension heuristics. The
+# physical-device checklist (docs/M7_BACKGROUND_SHARING.md §6, item 0)
+# remains the final proof.
+#
+# # Architecture mirrors e2e-ios-real-gps.yml / e2e-ios-auth-tier.yml
+#
+# Same build-before-boot discipline (the multi-GB Rust + Xcode peak must
+# never coincide with a resident simulator) and the same host-native relay:
+# macOS runners have no Linux Docker daemon, so the Android lane's strfry
+# container cannot run here. The grant-between-install-and-launch ordering is
+# why the wrapper (not the shared runner) owns install + grant, exactly as B4
+# does.
+
+name: E2E iOS Background Publish
+
+on:
+  workflow_call:
+
+jobs:
+  e2e_ios_bg_publish:
+    name: e2e_ios_bg_publish
+    runs-on: macos-latest # Apple Silicon; arm64 simulator (no Linux Docker).
+    # Envelope sized for a COLD first run: setup (~10-15m) + the boot step's
+    # 15m ceiling + the drive step's 95m ceiling. The drive step is the real
+    # bound; this is the outer backstop that must never fire first, because a
+    # job-cap SIGKILL skips every `if: always()` diagnostic — the worst red
+    # there is (scripts/ci/check_e2e_step_timeout_ordering.sh).
+    timeout-minutes: 115
+    env:
+      HAVEN_E2E_RELAY: ws://localhost:7777
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+      # Poll path, stated per JOB rather than inherited (S1 /
+      # CI_HARDENING_BACKLOG.md A7). This lane's subject is the PUBLISH side
+      # across a real background transition; the live-sync receive engine is
+      # an unrelated axis, and running it here would only add flake surface.
+      HAVEN_LIVE_SYNC: "false"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Simulator triple for Apple-Silicon runners (mirrors e2e-ios.yml).
+          targets: aarch64-apple-ios-sim
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            haven-core
+            tooling/e2e/local-relay
+          key: e2e-ios-bg-publish
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: flutter pub get
+
+      # Build + start the relay BEFORE booting the simulator, so the two
+      # multi-GB build peaks never coincide with a resident simulator (the
+      # same build-before-boot discipline every other iOS lane uses).
+      - name: Build and start host-native relay
+        run: bash tooling/e2e/ci/start-local-relay.sh 7777
+
+      - name: Boot iOS simulator
+        id: sim
+        # macos-* runners have no GNU `timeout`, so GitHub's step cap is the
+        # only available bound on a boot that never reaches Booted. Measured
+        # boots are 136-215 s; 15 min is ~4x the observed max.
+        timeout-minutes: 15
+        run: bash tooling/e2e/ci/boot-ios-sim.sh "iPhone 15"
+
+      # `nick-fields/retry` is the inner bound on macOS (no coreutils
+      # `timeout`), and it retries on ANY non-zero exit — it has no
+      # `retry_on` predicate. The NARROWING lives inside the command: the
+      # drive is delegated (via the wrapper) to run-ios-sim-scenario.sh,
+      # whose retry gate refuses a second attempt unless the previous one was
+      # classified as the single admitted infrastructure signature (a
+      # post-build, pre-first-test launch/attach stall). A genuine assertion
+      # failure, a refused `simctl` grant, a failed handshake, or a drive
+      # that exited 0 without printing all four proof markers all stop on
+      # attempt 1 with their own exit code.
+      #
+      # Timeout arithmetic, worst case per attempt:
+      #   cold Xcode+pods+aarch64-Rust build   ~15m  (once, by the wrapper)
+      #   incremental rebuild in `flutter test` ~3m
+      #   drive: in-test setup ~5m + P1 ~1m + background handshake <=3m
+      #          + P2 window 396s ~7m + P3 (grace + 200s settle + fetches +
+      #          disarm poll) ~6m + teardown ~2m                    ~24m
+      #   total                                                     ~42m
+      # -> 45 min/attempt (B7's cold-run envelope, same phases). The step cap
+      # (95) must exceed max_attempts x timeout_minutes (2 x 45 = 90) plus
+      # slack, or the step reaper fires mid-second-attempt and the retry buys
+      # nothing. 95 < 115 keeps the job cap the outer backstop.
+      #
+      # The relay is restarted first so a retried attempt runs against a
+      # CLEAN in-memory store (start-local-relay.sh stops any prior
+      # instance); the binary is already compiled by the build-before-boot
+      # step above. The `test -f` names the shared runner the wrapper
+      # delegates to: a real precondition, and the reference is also what
+      # lets scripts/ci/check_e2e_step_timeout_ordering.sh classify this step
+      # as a simulator drive (its classifier reads step bodies for the shared
+      # runner's name; the wrapper's own name is not in its marker list).
+      - name: Run the iOS background-publish lane
+        timeout-minutes: 95
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 45
+          max_attempts: 2
+          command: >-
+            test -f tooling/e2e/ci/run-ios-sim-scenario.sh &&
+            bash tooling/e2e/ci/start-local-relay.sh 7777 &&
+            bash tooling/e2e/ci/run-ios-bg-publish.sh
+            ${{ steps.sim.outputs.udid }}
+
+      - name: Collect simulator diagnostics
+        if: always()
+        run: |
+          xcrun simctl spawn booted log collect --output /tmp/sim.logarchive 2>/dev/null || true
+          cp /tmp/haven-local-relay.log /tmp/relay.log 2>/dev/null || true
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-ios-bg-publish-${{ github.run_id }}
+          path: |
+            /tmp/bg-publish-ios.log
+            /tmp/flutter-ios-test.log
+            /tmp/relay.log
+            /tmp/sim.logarchive
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # Relay teardown. Runs LAST and `if: always()` so the relay process is
+      # killed on every outcome. The script always exits 0, so teardown can
+      # never turn a green run red.
+      - name: Tear down host-native relay
+        if: always()
+        run: bash tooling/e2e/ci/stop-local-relay.sh

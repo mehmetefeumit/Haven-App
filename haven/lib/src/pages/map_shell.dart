@@ -316,12 +316,13 @@ class _MapShellState extends ConsumerState<MapShell>
   // (the defect that originally broke iOS background publishing). On
   // Android, the foreground service handles background publishing instead.
   //
-  // C4 (M7-A): installed on the iOS pause branch UNCONDITIONALLY (i.e. for
-  // both `liveSyncEnabled` states) so that toggling background sharing OFF
-  // while paused deterministically tears down every publish/receive driver
-  // (scheduler, motion trigger, receive timer, warm relay socket) instead of
-  // waiting for the OS to suspend the process. Closed on resume and on
-  // dispose.
+  // C4 (M7-A) + R1: installed on the iOS pause branch UNCONDITIONALLY (for
+  // both `liveSyncEnabled` states AND both toggle states at pause time).
+  // The true→false edge deterministically tears down every publish/receive
+  // driver (scheduler, motion trigger, receive timer, warm relay socket)
+  // instead of waiting for the OS to suspend the process; the false→true
+  // edge re-arms them when a pause raced the notifier's async load of the
+  // persisted consent (R1). Closed on resume and on dispose.
   ProviderSubscription<bool>? _bgSharingPausedSub;
 
   @override
@@ -1108,32 +1109,61 @@ class _MapShellState extends ConsumerState<MapShell>
           text: 'Haven is sending and receiving location information',
         ),
       );
-    } else if (MapShell.shouldKeepPublishingWhilePaused(
-      backgroundSharingEnabled: bgEnabled,
-      isIOS: Platform.isIOS,
-    )) {
-      // iOS + background sharing on: nothing to stop. The unified
-      // `locationStreamProvider` stream already carries background-capable
-      // AppleSettings (it watches `backgroundSharingProvider` directly), so
-      // the CLLocationManager session that keeps this process executing was
-      // established the moment the toggle turned on — necessarily while
-      // foregrounded, as iOS requires. The per-circle publish scheduler and
-      // `_motionSub` keep running exactly as in the foreground, giving
-      // background publishing both a periodic floor and movement-driven
-      // responsiveness.
+    } else if (Platform.isIOS) {
+      if (MapShell.shouldKeepPublishingWhilePaused(
+        backgroundSharingEnabled: bgEnabled,
+        isIOS: Platform.isIOS,
+      )) {
+        // iOS + background sharing on: nothing to stop. The unified
+        // `locationStreamProvider` stream already carries background-capable
+        // AppleSettings (it watches `backgroundSharingProvider` directly), so
+        // the CLLocationManager session that keeps this process executing was
+        // established the moment the toggle turned on — necessarily while
+        // foregrounded, as iOS requires — and the native
+        // `HavenBackgroundSessionHandler` holds the CoreLocation session
+        // objects that make that keep-alive effective on iOS 17+. The
+        // per-circle publish scheduler and `_motionSub` keep running exactly
+        // as in the foreground, giving background publishing both a periodic
+        // floor and movement-driven responsiveness.
+      } else {
+        // Toggle off — or its persisted value not yet loaded: the notifier
+        // constructs `false` and resolves the stored value asynchronously,
+        // so a pause racing a cold launch can read a stale `false` here.
+        // Stop the publish drivers as the generic branch would; the watcher
+        // below re-arms them if the load resolves `true` while paused (R1).
+        ref.read(locationPublishSchedulerProvider.notifier).stopScheduling();
+        _stopMotionTrigger();
+      }
+      // ONE watcher for BOTH consent edges while paused, installed
+      // regardless of the toggle's value at pause time:
       //
-      // C4: install the disable-while-paused watcher UNCONDITIONALLY here
-      // (not inside the `liveSyncEnabled`-gated receive-timer setup) so a
-      // mid-pause opt-out deterministically stops every publish/receive
-      // driver — the OS-suspension fallback alone would leave a
-      // non-deterministic seconds-to-minutes window of continued
-      // publishing after consent was withdrawn.
+      // C4 (true→false): install it UNCONDITIONALLY here (not inside the
+      // `liveSyncEnabled`-gated receive-timer setup) so a mid-pause opt-out
+      // deterministically stops every publish/receive driver — the
+      // OS-suspension fallback alone would leave a non-deterministic
+      // seconds-to-minutes window of continued publishing after consent was
+      // withdrawn.
+      //
+      // R1 (false→true): a pause that raced the notifier's async load read a
+      // stale `false` above; when the persisted consent resolves `true`, the
+      // drivers are re-armed. Restarting the stream from the background is
+      // viable because the persisted consent means the AppDelegate armed the
+      // CoreLocation session objects at launch. The consent itself can only
+      // be `true` via the disclosure-gated enable paths, so this edge never
+      // originates sharing the user did not opt into.
       _bgSharingPausedSub?.close();
       _bgSharingPausedSub = ref.listenManual<bool>(backgroundSharingProvider, (
         _,
         next,
       ) {
-        if (next) return;
+        if (next) {
+          // Idempotent replays of what the enabled pause branch keeps
+          // running; the relay reconnects lazily on the next publish.
+          ref.read(locationPublishSchedulerProvider.notifier).startScheduling();
+          _startMotionTrigger();
+          _startIosBackgroundReceiveTimer();
+          return;
+        }
         ref.read(locationPublishSchedulerProvider.notifier).stopScheduling();
         _stopMotionTrigger();
         _receiveTimer?.cancel();

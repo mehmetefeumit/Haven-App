@@ -50,6 +50,21 @@
 //!   [`SessionManager::delete_key_package`] so a retry loop against a failing
 //!   relay does not leak private material (mdk#160).
 //!
+//! # The one-time retirement of a malformed slot
+//!
+//! The binding fixes the slot id's SHAPE as well ("exactly one 64-character
+//! lowercase hex value decoding to 32 bytes"), and its cardinality rule makes an
+//! event whose singleton `d` carries anything else **malformed**, which
+//! `foundation/key-packages.md` requires an inviter to reject. Builds before the
+//! width fix minted 16 bytes, so those installs are uninvitable by a strict
+//! peer. [`decide_kp_slot_retirement`] moves them, once, onto a conformant
+//! coordinate: [`build_kp_slot_repoint_event`] re-publishes the SAME tracked
+//! package into a fresh binding-shaped slot (no new material, so an in-flight
+//! Welcome against the old event still decrypts), and only after a relay ACKs
+//! that does [`build_kp_slot_retraction`] scrub the orphaned coordinate. The
+//! sentinel that makes it once-only is the `user_settings` row
+//! `kp_slot_retirement_done_v1`, and it latches only on a completed migration.
+//!
 //! # Monotonic `created_at` (NIP-01 tie-break)
 //!
 //! NIP-01 breaks a `created_at` tie between two events in the same addressable
@@ -195,8 +210,10 @@ pub struct RelayKpSnapshot {
 ///
 /// Non-emptiness is the ONLY filter, deliberately: an adopted slot is taken as
 /// found, including one narrower than the 64-hex width [`mint_d`] now mints.
-/// Rejecting a legacy slot would fork the address peers have already cached,
-/// which is the exact failure a stable `d` exists to prevent.
+/// Adopting a malformed slot is not adopting it for good — the retirement pass
+/// ([`decide_kp_slot_retirement`]) runs ahead of the maintenance decision and
+/// re-points tracking onto a conformant coordinate before anything is published
+/// into the adopted one.
 fn pick_seed_d(snapshot: &RelayKpSnapshot) -> Option<String> {
     snapshot
         .responders
@@ -369,6 +386,196 @@ pub fn decide_kp_maintenance(
     }
 }
 
+/// What the ONE-TIME retirement of a malformed `KeyPackage` slot must do this
+/// tick (see [`decide_kp_slot_retirement`]).
+///
+/// [`Adopt`](Self::Adopt)/[`Repoint`](Self::Repoint)/[`Retract`](Self::Retract)
+/// carry own-relay `targets` and NIP-33 `d` values, so a decision MUST NOT be
+/// logged — only the presence-only outcome crosses the FFI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KpSlotRetirement {
+    /// Nothing can be concluded, or nothing may safely be done, this tick: no
+    /// relay responded, or the account has no live binding-shaped slot for the
+    /// destructive half to stand behind. The sentinel MUST NOT be set.
+    Defer,
+    /// Every coordinate this account publishes is binding-shaped: there is
+    /// nothing to retire and the sentinel may latch. An install created after
+    /// the width fix reaches this on its first tick, having published nothing.
+    Complete,
+    /// A binding-shaped slot on a responder ALREADY carries the tracked package
+    /// — the resume path for a crash between the replacement's relay ACK and
+    /// the local record. Re-point tracking to `d` (no `KeyPackage` publish),
+    /// then retract `orphans`.
+    Adopt {
+        /// The conformant slot to adopt as the tracked one.
+        d: String,
+        /// Malformed coordinates to retract once tracking is re-pointed.
+        orphans: Vec<String>,
+        /// Every responding own relay.
+        targets: Vec<String>,
+    },
+    /// The tracked slot is malformed: publish the tracked package into a FRESH
+    /// binding-shaped slot on `targets`, and only once a relay ACKs it, retract
+    /// `orphans`.
+    Repoint {
+        /// Malformed coordinates to retract AFTER the replacement is acked.
+        orphans: Vec<String>,
+        /// Every responding own relay.
+        targets: Vec<String>,
+    },
+    /// The tracked slot is already binding-shaped and live on a responder; only
+    /// orphaned malformed coordinates are left to scrub.
+    Retract {
+        /// Malformed coordinates to retract. Always non-empty.
+        orphans: Vec<String>,
+        /// Every responding own relay.
+        targets: Vec<String>,
+    },
+}
+
+/// Finds the binding-shaped slot that ALREADY carries `tracked_kp_bytes`.
+///
+/// This is the `adoptable_d` input to [`decide_kp_slot_retirement`], and the
+/// resume signal for a crash between the replacement's relay ACK and the local
+/// record of it.
+///
+/// Matching the exact package bytes, rather than merely "some conformant slot
+/// exists", is what makes adoption safe: `events` are the account's own signed
+/// kind-30443s, so a slot advertising the very package this device tracks is one
+/// this device published and whose private init material the engine still holds.
+/// Adopting anything else could point tracking at another device's package.
+///
+/// Empty `tracked_kp_bytes` (a seed row, or one blanked by the `not_after`
+/// purge) can match nothing and returns `None` — there is no package to
+/// recognise.
+#[must_use]
+pub fn find_adoptable_kp_slot<'a>(
+    events: impl IntoIterator<Item = &'a nostr::Event>,
+    tracked_kp_bytes: &[u8],
+) -> Option<String> {
+    if tracked_kp_bytes.is_empty() {
+        return None;
+    }
+    events
+        .into_iter()
+        .filter(|ev| {
+            BASE64
+                .decode(&ev.content)
+                .is_ok_and(|bytes| bytes == tracked_kp_bytes)
+        })
+        .filter_map(kp_event_d_tag)
+        .find(|d| is_conformant_slot_id(d))
+}
+
+/// Reads a kind-30443's NIP-33 `d` tag value — the addressable slot id.
+///
+/// Public because the FFI builds this tick's presence snapshot out of the same
+/// probed events ([`RelayKpSnapshot`]) and must read the slot exactly as the
+/// decisions below do. A `d` is a public Nostr identifier, but it is a
+/// per-account coordinate: never log one (Security Rule 4).
+#[must_use]
+pub fn kp_event_d_tag(event: &nostr::Event) -> Option<String> {
+    event.tags.iter().find_map(|t| {
+        let s = t.as_slice();
+        (s.len() >= 2 && s[0] == D_TAG).then(|| s[1].clone())
+    })
+}
+
+/// Decides the one-time malformed-slot retirement for this tick (PURE).
+///
+/// Pre-fix installs publish a 32-hex `d`, which the transport binding makes a
+/// MALFORMED event rather than a narrower legal one (see
+/// [`is_conformant_slot_id`]), so a strictly conformant inviter cannot invite
+/// them at all. This decides how to move such an account onto a conformant
+/// coordinate without ever leaving it with nothing invitable.
+///
+/// `tracked_d` is the caller's `latest_canonical_d_tag()`; `adoptable_d` is the
+/// conformant slot a responder is ALREADY serving with the tracked package's
+/// bytes verbatim, if any (the caller matches content, which the presence-only
+/// snapshot deliberately does not carry).
+///
+/// # The ordering, and why it is the only safe one
+///
+/// The dangerous state is an account with no usable published `KeyPackage`, so
+/// nothing destructive is decided until a conformant slot is *observed live on a
+/// responder* ([`Retract`](KpSlotRetirement::Retract)) or is being published
+/// this tick and will be acked first ([`Repoint`](KpSlotRetirement::Repoint) —
+/// the caller retracts only after the ACK). Retracting first, or on a tick where
+/// no relay answered, could strand the account uninvitable — strictly worse than
+/// the malformed slot it was fixing.
+///
+/// # Branches
+///
+/// 1. **No responders** ⇒ [`Defer`](KpSlotRetirement::Defer) (fail-closed: an
+///    unanswered probe proves nothing about what is published).
+/// 2. **Tracked slot malformed** ⇒ [`Adopt`](KpSlotRetirement::Adopt) when the
+///    replacement is already on a relay, else
+///    [`Repoint`](KpSlotRetirement::Repoint).
+/// 3. **Nothing malformed anywhere** ⇒ [`Complete`](KpSlotRetirement::Complete).
+/// 4. **Orphans, and the tracked conformant slot is served** ⇒
+///    [`Retract`](KpSlotRetirement::Retract); otherwise
+///    [`Defer`](KpSlotRetirement::Defer) — including the fresh-install case
+///    where a relay still serves a previous install's malformed slot and this
+///    device has published nothing yet, which the ordinary first publish fixes
+///    before the next tick can retract anything.
+#[must_use]
+pub fn decide_kp_slot_retirement(
+    snapshot: &RelayKpSnapshot,
+    tracked_d: Option<&str>,
+    adoptable_d: Option<&str>,
+) -> KpSlotRetirement {
+    if snapshot.responders.is_empty() {
+        return KpSlotRetirement::Defer;
+    }
+    let targets: Vec<String> = snapshot
+        .responders
+        .iter()
+        .map(|r| r.relay_url.clone())
+        .collect();
+
+    // An EMPTY `d` is never an orphan: `30443:<pubkey>:` is the coordinate of
+    // EVERY kind-30443 this account ever published, so retracting it would take
+    // the live slot with it (the same mis-scope the legacy-443 retraction
+    // refuses). A 30443 with no `d` tag surfaces here as an empty entry.
+    let mut orphans: Vec<String> = snapshot
+        .responders
+        .iter()
+        .flat_map(|r| r.canonical.iter())
+        .map(|e| e.d_tag.as_str())
+        .chain(tracked_d)
+        .filter(|d| !d.is_empty() && !is_conformant_slot_id(d))
+        .map(str::to_owned)
+        .collect();
+    orphans.sort_unstable();
+    orphans.dedup();
+
+    if tracked_d.is_some_and(|d| !is_conformant_slot_id(d)) {
+        // `adoptable_d` is re-checked rather than trusted: adopting a slot that
+        // is itself malformed would end the migration where it started.
+        return match adoptable_d.filter(|a| is_conformant_slot_id(a)) {
+            Some(d) => KpSlotRetirement::Adopt {
+                d: d.to_owned(),
+                orphans,
+                targets,
+            },
+            None => KpSlotRetirement::Repoint { orphans, targets },
+        };
+    }
+
+    if orphans.is_empty() {
+        return KpSlotRetirement::Complete;
+    }
+
+    // The destructive guard, read from THIS tick's probe rather than from local
+    // tracking: a row saying we published somewhere is not evidence a relay is
+    // serving it.
+    if tracked_d.is_some_and(|d| snapshot.responders.iter().any(|r| r.serves_slot(d))) {
+        KpSlotRetirement::Retract { orphans, targets }
+    } else {
+        KpSlotRetirement::Defer
+    }
+}
+
 /// A minted-or-reused `KeyPackage` publication for a [`KpMaintenanceDecision::Republish`].
 ///
 /// Carries the SIGNED kind-30443 event to publish, the engine [`KeyPackage`]
@@ -402,24 +609,40 @@ impl std::fmt::Debug for KpMaintenanceEvents {
     }
 }
 
+/// The slot id's normative width in bytes: "exactly one 64-character lowercase
+/// hex value decoding to 32 bytes" (`transports/nostr.md`).
+const KP_SLOT_ID_BYTES: usize = 32;
+
 /// Mints a fresh stable `d`: 32 `OsRng` bytes, lowercase-hex encoded.
 ///
-/// The width is normative, not arbitrary. The Nostr transport binding pins the
-/// slot id to "exactly one 64-character lowercase hex value decoding to 32
-/// bytes" and a conformant inviter "MUST reject malformed or incompatible
-/// candidates", so a narrower `d` makes the account uninvitable to a strict peer
-/// — the same silent failure the rotation clock exists to prevent. It is random
-/// rather than derived because the binding also forbids deriving the slot id
-/// from an account key, MLS leaf key, `KeyPackageRef` or device label.
+/// The width is normative, not arbitrary — see [`is_conformant_slot_id`]. It is
+/// random rather than derived because the binding also forbids deriving the slot
+/// id from an account key, MLS leaf key, `KeyPackageRef` or device label.
 ///
-/// It governs FIRST publishes only — [`build_kp_maintenance_events`] calls this
-/// solely when no slot is tracked — so a slot minted by an older build keeps its
-/// narrower id forever, the binding's "replacement MUST reuse the same `d`"
-/// outranking the width rule for a coordinate peers have already cached.
+/// It governs FIRST publishes ([`build_kp_maintenance_events`] calls this only
+/// when no slot is tracked) and the one-time retirement of a malformed slot
+/// ([`build_kp_slot_repoint_event`]). A routine replacement never mints: the
+/// binding's "a replacement MUST reuse the same `d`" governs there.
 fn mint_d() -> String {
-    let mut bytes = [0u8; 32];
+    let mut bytes = [0u8; KP_SLOT_ID_BYTES];
     OsRng.fill_bytes(&mut bytes);
     hex::encode(bytes)
+}
+
+/// Whether `d` is the slot id the Nostr transport binding fixes: "exactly one
+/// 64-character lowercase hex value decoding to 32 bytes".
+///
+/// The width is not cosmetic, and a narrow `d` is not a smaller legal slot. The
+/// binding's cardinality rule is explicit — "if a required singleton tag is
+/// missing, repeated, has no value, or has extra values beyond the one defined
+/// here, **the event is malformed**" — and `foundation/key-packages.md` requires
+/// an inviter to "reject malformed or incompatible candidates before selecting
+/// one". A build before the width fix minted 16 bytes (32 hex chars), so those
+/// accounts publish an event a strictly conformant peer MUST refuse: they cannot
+/// be invited at all. [`decide_kp_slot_retirement`] is what retires such a slot.
+#[must_use]
+pub fn is_conformant_slot_id(d: &str) -> bool {
+    d.len() == KP_SLOT_ID_BYTES * 2 && d.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Returns a strictly-monotonic `created_at` for the next canonical (kind
@@ -595,6 +818,110 @@ pub fn build_kp_maintenance_events_reusing(
     })
 }
 
+/// Re-publishes the tracked `KeyPackage` into a FRESH binding-shaped slot — the
+/// constructive half of the one-time slot retirement
+/// ([`KpSlotRetirement::Repoint`]).
+///
+/// It advertises the SAME `cached_kp_bytes` the malformed slot carries, which is
+/// what makes the migration free of the usual replacement hazards: no new init
+/// material is minted, none is consumed, and a peer that already fetched the old
+/// event holds a `KeyPackageRef` this device still owns — so an in-flight
+/// Welcome against the retired coordinate still decrypts. Only the address
+/// changes.
+///
+/// The new slot id is drawn fresh from `OsRng`. That is the case the binding
+/// contemplates — "a client generates a different random `d` only when it
+/// intentionally adds another concurrently discoverable `KeyPackage` slot" — and
+/// not the routine replacement whose slot id MUST be reused.
+///
+/// `created_at` is plain `now`: a fresh coordinate has no predecessor to lose a
+/// NIP-01 id tie-break against, which is what [`monotonic_kp_created_at`] exists
+/// to prevent for SAME-slot replacement.
+///
+/// # Errors
+///
+/// Returns [`PublisherError::Build`] if metadata derivation or signing fails.
+pub fn build_kp_slot_repoint_event(
+    keys: &Keys,
+    cached_kp_bytes: &[u8],
+    own_kp_relays: &[String],
+) -> PublisherResult<KpMaintenanceEvents> {
+    build_kp_maintenance_events_reusing(keys, cached_kp_bytes, own_kp_relays, &mint_d(), None)
+}
+
+/// Builds the self-authored NIP-09 (kind 5) retraction of ORPHANED kind-30443
+/// slots — the destructive half of the one-time slot retirement.
+///
+/// Kind 30443 is addressable, so the identifier NIP-09 defines for it is the
+/// `a` coordinate `30443:<pubkey>:<d>`, and "when an `a` tag is used, relays
+/// SHOULD delete all versions of the replaceable event up to the `created_at`
+/// timestamp of the deletion request" — which is exactly the scope wanted for a
+/// slot being abandoned. The event ids the probe observed are carried too (NIP-09
+/// takes "one or more `e` or `a` tags"), so a relay that only indexes deletions
+/// by id still drops the event that was actually seen, and the `k` tag is
+/// NIP-09's SHOULD for the kind being deleted. The coordinate is built from
+/// `keys` rather than from an argument, so a deletion of another account's slot
+/// is unrepresentable.
+///
+/// Two guards on the slot ids, because this is the only destructive publish in
+/// the `KeyPackage` plane:
+///
+/// * an EMPTY slot id is refused — `30443:<pubkey>:` addresses every kind-30443
+///   the account has, so it would delete the live slot along with the orphan;
+/// * a BINDING-SHAPED slot id is refused — a retirement only ever retires a
+///   malformed coordinate, and refusing conformant ones is what stops a later
+///   edit from aiming this at the slot the account is invited through.
+///
+/// # Deletion is advisory
+///
+/// NIP-09 says relays *SHOULD* delete; one that ignores the request keeps
+/// serving the orphan, and no client can force it. That is survivable only
+/// because [`build_kp_slot_repoint_event`] moves the SAME package to the new
+/// slot: a lenient peer that still selects the orphaned event gets a
+/// `KeyPackage` this device can still decrypt, until that package is next
+/// rotated or reaches `not_after`.
+///
+/// # Errors
+///
+/// Returns [`PublisherError::Build`] if no slot id is given, a slot id is empty
+/// or binding-shaped, or signing fails.
+pub fn build_kp_slot_retraction(
+    keys: &Keys,
+    orphan_slot_ids: &[String],
+    observed_event_ids: &[nostr::EventId],
+) -> PublisherResult<nostr::Event> {
+    if orphan_slot_ids.is_empty() {
+        return Err(PublisherError::Build(
+            "no orphaned key package slot to retract".to_owned(),
+        ));
+    }
+    let mut request =
+        nostr::nips::nip09::EventDeletionRequest::new().ids(observed_event_ids.iter().copied());
+    for d in orphan_slot_ids {
+        if d.is_empty() {
+            return Err(PublisherError::Build(
+                "refusing to retract an empty key package slot id".to_owned(),
+            ));
+        }
+        if is_conformant_slot_id(d) {
+            return Err(PublisherError::Build(
+                "refusing to retract a binding-shaped key package slot".to_owned(),
+            ));
+        }
+        request = request.coordinate(
+            nostr::nips::nip01::Coordinate::new(
+                Kind::Custom(KIND_MARMOT_KEY_PACKAGE),
+                keys.public_key(),
+            )
+            .identifier(d),
+        );
+    }
+    EventBuilder::delete(request)
+        .tags([parse_tag(&["k", &KIND_MARMOT_KEY_PACKAGE.to_string()])?])
+        .sign_with_keys(keys)
+        .map_err(|e| PublisherError::Build(format!("sign deletion: {e}")))
+}
+
 /// Builds a self-authored NIP-09 (kind 5) retraction for a LEGACY 443
 /// `KeyPackage` — the one-time cutover cleanup (migration plan §6 step 5,
 /// NON-OPTIONAL).
@@ -756,6 +1083,15 @@ pub struct KpMaintenanceOutcome {
     ///
     /// A boolean, not a key or an id, so the derived `Debug` stays leak-free.
     pub expired_init_key_purged: bool,
+    /// Whether this tick COMPLETED the one-time retirement of a malformed
+    /// (pre-width-fix) `d` slot: the account now publishes a binding-shaped
+    /// coordinate and the orphan's retraction was acked, so the migration
+    /// sentinel latched.
+    ///
+    /// A tick that only got part-way — replacement acked but retraction not, say
+    /// — reports `false` and leaves the sentinel unset, so this is "the account
+    /// is now conformant", never "the migration was attempted".
+    pub retired_malformed_slot: bool,
 }
 
 impl KpMaintenanceOutcome {
@@ -774,6 +1110,7 @@ impl KpMaintenanceOutcome {
             relays_healed: 0,
             relay_errors: 0,
             expired_init_key_purged: false,
+            retired_malformed_slot: false,
         }
     }
 }
@@ -1020,6 +1357,7 @@ mod tests {
             relays_healed: 2,
             relay_errors: 1,
             expired_init_key_purged: true,
+            retired_malformed_slot: true,
         };
         let dbg = format!("{o:?}");
         assert!(
@@ -1029,6 +1367,7 @@ mod tests {
         assert!(dbg.contains("responders_probed"));
         assert!(dbg.contains("relays_healed"));
         assert!(dbg.contains("expired_init_key_purged"));
+        assert!(dbg.contains("retired_malformed_slot"));
     }
 
     #[test]
@@ -1039,6 +1378,7 @@ mod tests {
         assert_eq!(o.relays_targeted, 2);
         assert_eq!(o.relays_healed, 0);
         assert!(!o.expired_init_key_purged);
+        assert!(!o.retired_malformed_slot);
     }
 
     #[test]
@@ -1079,6 +1419,7 @@ mod tests {
             relays_healed: 0,
             relay_errors: 1,
             expired_init_key_purged: true,
+            retired_malformed_slot: false,
         };
         assert_eq!(
             unacked_rotation.relays_healed, 0,
@@ -1474,6 +1815,405 @@ mod tests {
             !has_a,
             "deletion must NOT carry an 'a' coordinate: {:?}",
             deletion.tags
+        );
+    }
+
+    // ── Malformed-slot retirement ────────────────────────────────────────────
+
+    /// A binding-shaped slot id (64 lowercase hex chars → 32 bytes).
+    fn conformant_d(seed: u8) -> String {
+        hex::encode([seed; KP_SLOT_ID_BYTES])
+    }
+
+    /// The slot id a pre-width-fix build minted: 16 random bytes, 32 hex chars.
+    fn legacy_d(seed: u8) -> String {
+        hex::encode([seed; KP_SLOT_ID_BYTES / 2])
+    }
+
+    fn retire(
+        snap: &RelayKpSnapshot,
+        tracked: Option<&str>,
+        adoptable: Option<&str>,
+    ) -> KpSlotRetirement {
+        decide_kp_slot_retirement(snap, tracked, adoptable)
+    }
+
+    #[test]
+    fn slot_conformance_is_exactly_the_bindings_shape() {
+        assert!(is_conformant_slot_id(&conformant_d(0xab)));
+        // THE case this whole migration exists for: a pre-fix 16-byte slot is
+        // not a narrower legal slot, it is a malformed event.
+        assert!(!is_conformant_slot_id(&legacy_d(0xab)));
+        assert!(!is_conformant_slot_id(""));
+        // Uppercase hex decodes to 32 bytes but the binding says LOWERCASE, and
+        // slots are compared "as exact bytes" — so it is a different, malformed
+        // coordinate, not the same one spelled differently.
+        assert!(!is_conformant_slot_id(&conformant_d(0xab).to_uppercase()));
+        assert!(!is_conformant_slot_id(&"a".repeat(63)));
+        assert!(!is_conformant_slot_id(&"a".repeat(65)));
+        assert!(!is_conformant_slot_id(&"g".repeat(64)));
+    }
+
+    #[test]
+    fn every_minted_slot_id_is_conformant() {
+        for _ in 0..8 {
+            let d = mint_d();
+            assert!(is_conformant_slot_id(&d), "mint_d produced {d}");
+        }
+    }
+
+    #[test]
+    fn no_responders_defers_the_retirement_and_never_completes_it() {
+        // Fail-closed: an unanswered probe is not evidence that nothing is
+        // malformed, so the sentinel must not be reachable from here.
+        assert_eq!(
+            retire(&snapshot(vec![]), Some(&legacy_d(1)), None),
+            KpSlotRetirement::Defer
+        );
+        assert_eq!(
+            retire(&snapshot(vec![]), Some(&conformant_d(1)), None),
+            KpSlotRetirement::Defer
+        );
+    }
+
+    #[test]
+    fn a_conformant_install_is_untouched_and_completes() {
+        // The no-op proof: an install created after the width fix publishes
+        // nothing, retracts nothing, and latches the sentinel on its first tick.
+        let d = conformant_d(7);
+        let snap = snapshot(vec![per("wss://a.example.com", vec![entry(&d, "ev1")])]);
+        assert_eq!(retire(&snap, Some(&d), None), KpSlotRetirement::Complete);
+    }
+
+    #[test]
+    fn a_fresh_install_with_nothing_published_completes() {
+        let snap = snapshot(vec![per("wss://a.example.com", vec![])]);
+        assert_eq!(retire(&snap, None, None), KpSlotRetirement::Complete);
+    }
+
+    #[test]
+    fn a_pre_fix_install_repoints_and_names_its_orphan() {
+        let legacy = legacy_d(2);
+        let snap = snapshot(vec![
+            per("wss://a.example.com", vec![entry(&legacy, "ev1")]),
+            per("wss://b.example.com", vec![entry(&legacy, "ev2")]),
+        ]);
+        assert_eq!(
+            retire(&snap, Some(&legacy), None),
+            KpSlotRetirement::Repoint {
+                orphans: vec![legacy],
+                targets: vec![
+                    "wss://a.example.com".to_owned(),
+                    "wss://b.example.com".to_owned(),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn a_repoint_names_the_tracked_orphan_even_when_no_relay_serves_it() {
+        // The relay dropped the malformed event, or answered a truncated page.
+        // The coordinate is still ours and still addressable, so it is still
+        // retracted — a relay that holds it silently would otherwise keep it.
+        let legacy = legacy_d(3);
+        let snap = snapshot(vec![per("wss://a.example.com", vec![])]);
+        assert_eq!(
+            retire(&snap, Some(&legacy), None),
+            KpSlotRetirement::Repoint {
+                orphans: vec![legacy],
+                targets: vec!["wss://a.example.com".to_owned()],
+            }
+        );
+    }
+
+    #[test]
+    fn an_already_published_conformant_slot_is_adopted_not_republished() {
+        // Crash resume between the replacement's relay ACK and the local record:
+        // publishing a SECOND fresh slot would orphan the first, whose material
+        // the tracking row would then never age out.
+        let legacy = legacy_d(4);
+        let fresh = conformant_d(4);
+        let snap = snapshot(vec![per(
+            "wss://a.example.com",
+            vec![entry(&legacy, "ev1"), entry(&fresh, "ev2")],
+        )]);
+        assert_eq!(
+            retire(&snap, Some(&legacy), Some(&fresh)),
+            KpSlotRetirement::Adopt {
+                d: fresh,
+                orphans: vec![legacy],
+                targets: vec!["wss://a.example.com".to_owned()],
+            }
+        );
+    }
+
+    #[test]
+    fn an_adoptable_slot_that_is_itself_malformed_is_refused() {
+        // Adopting one malformed slot in place of another would end the
+        // migration exactly where it started.
+        let legacy = legacy_d(5);
+        let other_legacy = legacy_d(6);
+        let snap = snapshot(vec![per(
+            "wss://a.example.com",
+            vec![entry(&legacy, "ev1"), entry(&other_legacy, "ev2")],
+        )]);
+        let decision = retire(&snap, Some(&legacy), Some(&other_legacy));
+        assert!(
+            matches!(decision, KpSlotRetirement::Repoint { .. }),
+            "a malformed adoption candidate must not be adopted: {decision:?}"
+        );
+    }
+
+    #[test]
+    fn the_orphan_is_only_retracted_once_a_conformant_slot_is_served() {
+        // THE ordering invariant: the destructive half never runs while the
+        // account has nothing conformant on a relay. `unserved` is tracked and
+        // conformant, but no relay serves it — retracting the orphan there would
+        // leave the account with no fetchable KeyPackage at all.
+        let legacy = legacy_d(8);
+        let unserved = conformant_d(8);
+        let snap = snapshot(vec![per(
+            "wss://a.example.com",
+            vec![entry(&legacy, "ev1")],
+        )]);
+        assert_eq!(
+            retire(&snap, Some(&unserved), None),
+            KpSlotRetirement::Defer
+        );
+
+        // Once the same relay serves the conformant slot, the orphan goes.
+        let served = snapshot(vec![per(
+            "wss://a.example.com",
+            vec![entry(&legacy, "ev1"), entry(&unserved, "ev2")],
+        )]);
+        assert_eq!(
+            retire(&served, Some(&unserved), None),
+            KpSlotRetirement::Retract {
+                orphans: vec![legacy],
+                targets: vec!["wss://a.example.com".to_owned()],
+            }
+        );
+    }
+
+    #[test]
+    fn a_fresh_install_never_retracts_before_it_has_published() {
+        // A reinstall whose relay still serves the previous install's malformed
+        // slot: with nothing of ours published, retracting it would take the
+        // account's only fetchable KeyPackage. The ordinary first publish runs
+        // first; the retraction waits for the next tick.
+        let legacy = legacy_d(9);
+        let snap = snapshot(vec![per(
+            "wss://a.example.com",
+            vec![entry(&legacy, "ev1")],
+        )]);
+        assert_eq!(retire(&snap, None, None), KpSlotRetirement::Defer);
+    }
+
+    #[test]
+    fn an_empty_d_is_never_an_orphan() {
+        // `30443:<pubkey>:` addresses EVERY kind-30443 the account published, so
+        // treating a `d`-less event as an orphan would delete the live slot too.
+        let live = conformant_d(10);
+        let snap = snapshot(vec![per(
+            "wss://a.example.com",
+            vec![entry("", "ev-no-d"), entry(&live, "ev1")],
+        )]);
+        assert_eq!(retire(&snap, Some(&live), None), KpSlotRetirement::Complete);
+    }
+
+    #[test]
+    fn orphans_are_deduped_and_deterministically_ordered() {
+        // Two relays serving the same orphan must yield ONE coordinate, and the
+        // order must not depend on relay iteration order.
+        let a = legacy_d(0x11);
+        let b = legacy_d(0x22);
+        let live = conformant_d(0x33);
+        let snap = snapshot(vec![
+            per(
+                "wss://a.example.com",
+                vec![entry(&b, "ev1"), entry(&a, "ev2"), entry(&live, "ev3")],
+            ),
+            per("wss://b.example.com", vec![entry(&a, "ev4")]),
+        ]);
+        let KpSlotRetirement::Retract { orphans, .. } = retire(&snap, Some(&live), None) else {
+            panic!("expected Retract");
+        };
+        assert_eq!(orphans, vec![a, b]);
+    }
+
+    #[test]
+    fn repoint_moves_the_same_package_into_a_conformant_slot() {
+        let (keys, kp) = kp_bytes_from_session();
+        let own = vec!["wss://own.example.com".to_string()];
+        let events = build_kp_slot_repoint_event(&keys, &kp, &own).expect("repoint");
+
+        assert!(
+            is_conformant_slot_id(&events.d_tag),
+            "the replacement slot must be binding-shaped: {}",
+            events.d_tag
+        );
+        assert_eq!(
+            tag_value(&events.event, "d"),
+            Some(events.d_tag.as_str()),
+            "the wire `d` must be the slot that gets recorded"
+        );
+        // The load-bearing half: the SAME package moves, so no new init material
+        // is minted and a peer mid-Welcome against the old event is unaffected.
+        assert_eq!(events.key_package.bytes(), kp.as_slice());
+        assert_eq!(events.event.content, BASE64.encode(&kp));
+        assert_eq!(events.relays, own);
+    }
+
+    #[test]
+    fn two_repoints_never_land_on_the_same_slot() {
+        let (keys, kp) = kp_bytes_from_session();
+        let own = vec!["wss://own.example.com".to_string()];
+        let first = build_kp_slot_repoint_event(&keys, &kp, &own).expect("first");
+        let second = build_kp_slot_repoint_event(&keys, &kp, &own).expect("second");
+        assert_ne!(
+            first.d_tag, second.d_tag,
+            "the slot id must be random, never derived from the account or the package"
+        );
+    }
+
+    #[test]
+    fn the_adoptable_slot_is_the_one_carrying_our_own_package() {
+        let (keys, kp) = kp_bytes_from_session();
+        let fresh = conformant_d(0x77);
+        let ours = build_key_package_event(&keys, &kp, &fresh, nostr::Timestamp::from_secs(10))
+            .expect("ours");
+        // Same account, DIFFERENT package, also in a conformant slot: adopting
+        // it would point tracking at material this engine does not hold.
+        let (_, other_kp) = kp_bytes_from_session();
+        let other = build_key_package_event(
+            &keys,
+            &other_kp,
+            &conformant_d(0x78),
+            nostr::Timestamp::from_secs(11),
+        )
+        .expect("other");
+
+        assert_eq!(
+            find_adoptable_kp_slot([&other, &ours], &kp),
+            Some(fresh),
+            "only the slot advertising OUR tracked package may be adopted"
+        );
+        assert_eq!(
+            find_adoptable_kp_slot([&other], &kp),
+            None,
+            "a different package is not an adoption candidate"
+        );
+    }
+
+    #[test]
+    fn a_malformed_slot_carrying_our_package_is_not_adoptable() {
+        // The pre-fix event itself carries the tracked package; adopting it
+        // would "complete" the migration onto the malformed coordinate.
+        let (keys, kp) = kp_bytes_from_session();
+        let legacy =
+            build_key_package_event(&keys, &kp, &legacy_d(0x79), nostr::Timestamp::from_secs(10))
+                .expect("legacy");
+        assert_eq!(find_adoptable_kp_slot([&legacy], &kp), None);
+    }
+
+    #[test]
+    fn nothing_is_adoptable_for_an_untracked_package() {
+        // A seed row (or one blanked by the `not_after` purge) has no bytes, so
+        // no on-relay event can be recognised as ours.
+        let (keys, kp) = kp_bytes_from_session();
+        let ours = build_key_package_event(
+            &keys,
+            &kp,
+            &conformant_d(0x7a),
+            nostr::Timestamp::from_secs(1),
+        )
+        .expect("ours");
+        assert_eq!(find_adoptable_kp_slot([&ours], &[]), None);
+    }
+
+    #[test]
+    fn slot_retraction_addresses_the_orphan_coordinate_and_the_observed_event() {
+        let keys = Keys::generate();
+        let orphan = legacy_d(0x44);
+        let observed = EventBuilder::new(Kind::Custom(KIND_MARMOT_KEY_PACKAGE), "")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let deletion =
+            build_kp_slot_retraction(&keys, std::slice::from_ref(&orphan), &[observed.id])
+                .expect("retraction");
+
+        assert_eq!(deletion.kind, Kind::EventDeletion);
+        // The `a` coordinate is what deletes an ADDRESSABLE event: relays that
+        // honour it drop every version of that slot up to this `created_at`.
+        let want_a = format!("30443:{}:{orphan}", keys.public_key().to_hex());
+        assert!(
+            deletion
+                .tags
+                .iter()
+                .any(|t| t.as_slice() == ["a".to_owned(), want_a.clone()]),
+            "deletion must carry the orphan's coordinate: {:?}",
+            deletion.tags
+        );
+        // The observed id as well, for relays that index deletions by id only.
+        assert!(
+            deletion.tags.iter().any(|t| {
+                let s = t.as_slice();
+                s.len() >= 2 && s[0] == "e" && s[1] == observed.id.to_hex()
+            }),
+            "deletion must also reference the observed event id"
+        );
+        // NIP-09's SHOULD: name the kind being deleted.
+        assert_eq!(tag_value(&deletion, "k"), Some("30443"));
+    }
+
+    #[test]
+    fn slot_retraction_refuses_a_binding_shaped_slot() {
+        // The single worst bug available here is retracting the LIVE slot. The
+        // builder cannot express it.
+        let keys = Keys::generate();
+        let err = build_kp_slot_retraction(&keys, &[conformant_d(0x55)], &[])
+            .expect_err("a conformant slot must never be retractable");
+        assert_eq!(err.to_string(), "failed to build event");
+    }
+
+    #[test]
+    fn slot_retraction_refuses_an_empty_slot_id() {
+        // `30443:<pubkey>:` would tell a cooperating relay to delete every
+        // kind-30443 the account has — the live slot included.
+        let keys = Keys::generate();
+        let err = build_kp_slot_retraction(&keys, &[String::new()], &[])
+            .expect_err("an empty slot id must be refused");
+        assert_eq!(err.to_string(), "failed to build event");
+    }
+
+    #[test]
+    fn slot_retraction_refuses_an_empty_orphan_set() {
+        let keys = Keys::generate();
+        let err = build_kp_slot_retraction(&keys, &[], &[])
+            .expect_err("a deletion request addressing nothing must be refused");
+        assert_eq!(err.to_string(), "failed to build event");
+    }
+
+    #[test]
+    fn slot_retraction_without_an_observed_id_still_carries_the_coordinate() {
+        // The tracked orphan may not be on any responder this tick; NIP-09 takes
+        // "one or more `e` OR `a` tags", so the coordinate alone is a valid
+        // request — and it is the one that matters for an addressable event.
+        let keys = Keys::generate();
+        let orphan = legacy_d(0x66);
+        let deletion = build_kp_slot_retraction(&keys, std::slice::from_ref(&orphan), &[])
+            .expect("coordinate-only retraction");
+        let has_e = deletion
+            .tags
+            .iter()
+            .any(|t| t.as_slice().first().map(String::as_str) == Some("e"));
+        assert!(!has_e, "no event id was observed, so no `e` tag may appear");
+        assert!(
+            deletion
+                .tags
+                .iter()
+                .any(|t| t.as_slice().first().map(String::as_str) == Some("a")),
+            "the orphan's coordinate must still be addressed"
         );
     }
 

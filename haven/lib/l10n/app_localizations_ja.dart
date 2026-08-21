@@ -743,7 +743,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeDetailExpiry =>
-      'Haven はリレーに対し、位置情報のメッセージを約4分後に破棄するよう求めます。これはあくまで要望であり、リレーはそれより長く保持することもできます。この有効期限が付くのは位置情報の更新だけなので、有効期限が付いていないメッセージは、位置情報の更新ではなくメンバーの構成の変更だと一目で分かります。招待には有効期限が一切なく、受信トレイのリレーにいつまでも残る可能性があります。';
+      'Haven はリレーに対し、位置情報のメッセージを最長でも約4分後には破棄するよう求めますが、サークルを作成した別のアプリがより短い期限を指定している場合は、その短い方に合わせます。これはあくまで要望であり、リレーはそれより長く保持することもできます。あなたの端末が送るメッセージのうち、この有効期限が付くのは位置情報の更新だけなので、あなたの端末が送ったメッセージに有効期限が付いていなければ、それは位置情報の更新ではなく、メンバーの構成やサークルの設定の変更だと一目で分かります。招待には有効期限が一切なく、受信トレイのリレーにいつまでも残る可能性があります。';
 
   @override
   String get privacyWhatOthersSeeDetailOnDevice =>
@@ -1302,6 +1302,72 @@ class AppLocalizationsJa extends AppLocalizations {
     final String epochString = epochNumberFormat.format(epoch);
 
     return '$members・エポック$epochString';
+  }
+
+  @override
+  String circleDetailsMetaWithExpiry(String meta, String expiry) {
+    return '$meta・位置情報の有効期限$expiry';
+  }
+
+  @override
+  String circleDetailsExpiryMinutesShort(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$countString分',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpirySecondsShort(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$countString秒',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpiryMinutesLong(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '約$countString分',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpirySecondsLong(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$countString秒',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpirySemantics(String meta, String expiry) {
+    return '$meta。Haven はリレーに対し、あなたがこのサークルに送る位置情報の更新を$expiry後に破棄するよう求めます。';
   }
 
   @override

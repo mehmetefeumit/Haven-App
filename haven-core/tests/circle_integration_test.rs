@@ -164,26 +164,26 @@ mod circle_manager_lifecycle_tests {
     /// surface is a production path, not a test-only seam. A lookup miss must
     /// never echo the queried MLS group ID back to the caller, because that
     /// string crosses the FFI boundary as `Result<u64, String>`.
+    /// Independent detector for a contiguous hex run >= 16 chars (the shape of
+    /// an MLS group id). Written from scratch — NOT via the redactor — so it
+    /// cannot mask a redactor regression.
+    fn has_hex_run_ge16(s: &str) -> bool {
+        let mut run = 0usize;
+        for b in s.bytes() {
+            if b.is_ascii_hexdigit() {
+                run += 1;
+                if run >= 16 {
+                    return true;
+                }
+            } else {
+                run = 0;
+            }
+        }
+        false
+    }
+
     #[tokio::test]
     async fn group_epoch_error_never_leaks_the_queried_group_id() {
-        // Independent detector for a contiguous hex run >= 16 chars (the shape
-        // of an MLS group id). Written from scratch — NOT via the redactor —
-        // so it cannot mask a redactor regression.
-        fn has_hex_run_ge16(s: &str) -> bool {
-            let mut run = 0usize;
-            for b in s.bytes() {
-                if b.is_ascii_hexdigit() {
-                    run += 1;
-                    if run >= 16 {
-                        return true;
-                    }
-                } else {
-                    run = 0;
-                }
-            }
-            false
-        }
-
         let dir = unique_temp_dir("mgr_epoch_no_leak");
         let manager = CircleManager::new_unencrypted(&dir, &nostr::Keys::generate())
             .expect("should create manager");
@@ -209,6 +209,46 @@ mod circle_manager_lifecycle_tests {
         assert!(
             !has_hex_run_ge16(&surfaced),
             "group_epoch error must contain no >=16 hex run: {surfaced}"
+        );
+
+        cleanup_dir(&dir);
+    }
+
+    /// Rule 4, for the sibling accessor the same subtitle renders: a circle
+    /// with no live MLS group must FAIL rather than report a window, and the
+    /// failure crosses the FFI as `Result<u64, String>` exactly as the epoch's
+    /// does.
+    ///
+    /// Reporting a window here would be the worse bug of the two: the fallback
+    /// inside `bounded_retention_secs` is Haven's own 228 s, so a silent
+    /// success would tell the user "about four minutes" about a circle that
+    /// cannot send at all.
+    #[tokio::test]
+    async fn outgoing_location_expiry_error_never_leaks_the_queried_group_id() {
+        let dir = unique_temp_dir("mgr_expiry_no_leak");
+        let manager = CircleManager::new_unencrypted(&dir, &nostr::Keys::generate())
+            .expect("should create manager");
+
+        let unknown = [0xcd_u8; 32];
+        let unknown_hex = hex::encode(unknown);
+        assert!(
+            has_hex_run_ge16(&unknown_hex),
+            "detector sanity: a 32-byte group id is a >=16 hex run"
+        );
+
+        let err = manager
+            .outgoing_location_expiry_secs(&GroupId::from_slice(&unknown))
+            .await
+            .expect_err("an unknown group must not resolve to an expiry window");
+        let surfaced = err.to_string();
+
+        assert!(
+            !surfaced.contains(&unknown_hex),
+            "outgoing_location_expiry_secs must not echo the queried group id: {surfaced}"
+        );
+        assert!(
+            !has_hex_run_ge16(&surfaced),
+            "outgoing_location_expiry_secs error must contain no >=16 hex run: {surfaced}"
         );
 
         cleanup_dir(&dir);

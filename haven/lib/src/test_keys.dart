@@ -96,9 +96,11 @@ abstract final class WidgetKeys {
   static const Key circleDetailsButton = Key('circle_details_button');
 
   /// The member-count subtitle inside the circle-details bottom sheet, which
-  /// also carries the circle's MLS epoch suffix once it resolves. Keyed so
-  /// tests can assert the epoch appears (and that it degrades to a bare
-  /// member count when unavailable) without matching translated text.
+  /// also carries the circle's MLS epoch and then the relay-expiry window for
+  /// the location messages this device sends there — each appended only once
+  /// it resolves. Keyed so tests can assert both appear, and that each
+  /// degrades to the shorter line when unavailable, without matching
+  /// translated text.
   static const Key circleDetailsMembers = Key('circle_details_members');
 
   /// "Add member" CTA inside the circle-details bottom sheet (admin only).

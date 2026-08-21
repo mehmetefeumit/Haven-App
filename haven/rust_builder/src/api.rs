@@ -2568,17 +2568,6 @@ const _: fn() = || {
     assert_send_sync::<CoreCircleManager>();
 };
 
-/// Extracts the NIP-33 `d` tag value from a probed kind-30443 `KeyPackage`
-/// event, if present. Used by [`RelayManagerFfi::maintain_key_package`] to
-/// build the on-relay snapshot. Never logged.
-#[inline]
-fn kp_event_d_tag(event: &nostr::Event) -> Option<String> {
-    event.tags.iter().find_map(|t| {
-        let s = t.as_slice();
-        (s.len() >= 2 && s[0] == "d").then(|| s[1].clone())
-    })
-}
-
 /// Extracts the `["relay", <url>]` URLs from a probed kind-10050 (Inbox)
 /// relay-list event, for drift detection in
 /// [`RelayManagerFfi::maintain_relay_list_category`]. Never logged.
@@ -4480,6 +4469,35 @@ impl CircleManagerFfi {
         let group_id = GroupId::from_slice(&mls_group_id);
         self.inner
             .group_epoch(&group_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// The NIP-40 window Haven asks relays to keep the location messages THIS
+    /// device sends into a circle.
+    ///
+    /// The effective value, not the group's declaration: a circle created by
+    /// another Marmot client may declare a much shorter window (honoured, so
+    /// relays drop this device's location almost immediately), a longer one
+    /// (capped to Haven's own), or none at all (Haven's own). The
+    /// circle-details sheet renders it so the first case is visible instead of
+    /// reading as a bug, which makes this — like `group_epoch` above — a
+    /// release path rather than a test seam.
+    ///
+    /// Carries no key material and no group identifier, and its error surface
+    /// is redacted in core.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the circle has no live MLS group or the component
+    /// cannot be read; the caller hides the segment rather than surfacing it.
+    pub async fn outgoing_location_expiry_secs(
+        &self,
+        mls_group_id: Vec<u8>,
+    ) -> Result<u64, String> {
+        let group_id = GroupId::from_slice(&mls_group_id);
+        self.inner
+            .outgoing_location_expiry_secs(&group_id)
             .await
             .map_err(|e| e.to_string())
     }
@@ -6448,6 +6466,16 @@ pub struct KpMaintenanceOutcomeFfi {
     /// together with `relays_healed == 0` it is the worst reachable state: no
     /// usable init key AND no published replacement.
     pub expired_init_key_purged: bool,
+    /// Whether this tick COMPLETED the one-time retirement of a malformed
+    /// (pre-width-fix) kind-30443 `d` slot: the account now publishes a
+    /// binding-shaped coordinate, the orphaned one's NIP-09 retraction was
+    /// acked, and the migration sentinel latched.
+    ///
+    /// Reports COMPLETION, not attempt — a tick that published the replacement
+    /// but could not get the retraction acked reports `false` and leaves the
+    /// sentinel unset, so the next tick finishes the job. Installs created after
+    /// the width fix never see this set: they have nothing to retire.
+    pub retired_malformed_slot: bool,
 }
 
 impl From<haven_core::relay::maintenance::KpMaintenanceOutcome> for KpMaintenanceOutcomeFfi {
@@ -6461,6 +6489,7 @@ impl From<haven_core::relay::maintenance::KpMaintenanceOutcome> for KpMaintenanc
             relays_healed: c(o.relays_healed),
             relay_errors: c(o.relay_errors),
             expired_init_key_purged: o.expired_init_key_purged,
+            retired_malformed_slot: o.retired_malformed_slot,
         }
     }
 }
@@ -6511,6 +6540,38 @@ struct KpPublishPlan<'a> {
     /// Overrides the reported action (a rotation reports why it rotated instead
     /// of the generic `Republished*`). `None` keeps the pre-existing mapping.
     mint_action: Option<haven_core::relay::maintenance::KpMaintenanceAction>,
+}
+
+/// The resolved inputs for one malformed-slot retirement attempt — INTERNAL
+/// (carries relay urls, NIP-33 `d` values and MLS wire bytes).
+struct KpRetirementInputs<'a> {
+    /// This tick's presence snapshot (responding own relays only).
+    snapshot: &'a haven_core::relay::maintenance::RelayKpSnapshot,
+    /// The kind-30443 events the probe actually returned. Needed only to
+    /// recognise a replacement this device published but failed to record.
+    probed: &'a [nostr::Event],
+    /// The tracked row, read once with its lifetime so the `d`, the cached
+    /// bytes and the lifetime verdict all describe the same package.
+    tracked: Option<haven_core::circle::PublishedKeyPackageRow>,
+    /// That row's lifetime verdict, which decides whether the cached package can
+    /// be MOVED to the new slot or must be replaced by fresh material.
+    tracked_lifetime: haven_core::relay::maintenance::TrackedKpLifetime,
+    /// The tick clock, shared with the rotation threshold and the purge bound.
+    now_secs: u64,
+}
+
+/// What a malformed-slot retirement attempt did, when it did anything at all.
+struct KpRetirementTick {
+    /// The branch to report for the tick (`RepublishedFreshD` for a repoint,
+    /// `SeededD` for an adoption, `AlreadyHealthy` for a retraction-only run).
+    action: haven_core::relay::maintenance::KpMaintenanceAction,
+    /// Relays that ACKED the replacement `KeyPackage` publish (0 when the tick
+    /// published no `KeyPackage`, and 0 when nobody acked one).
+    relays_healed: usize,
+    /// Whether the migration COMPLETED — the account now publishes a
+    /// binding-shaped slot and the orphan's retraction was acked, so the
+    /// sentinel latched. Never set by a partial run.
+    completed: bool,
 }
 
 /// What an M8-1 relay-list maintenance tick did for one category (FFI mirror of
@@ -7123,7 +7184,7 @@ impl RelayManagerFfi {
         identity_secret_bytes: Vec<u8>,
     ) -> Result<KpMaintenanceOutcomeFfi, String> {
         use haven_core::relay::maintenance::{
-            decide_kp_maintenance, KpMaintenanceAction, KpMaintenanceDecision,
+            decide_kp_maintenance, kp_event_d_tag, KpMaintenanceAction, KpMaintenanceDecision,
             KpMaintenanceOutcome, RelayKpEntry, RelayKpPerRelay, RelayKpSnapshot,
         };
 
@@ -7215,6 +7276,55 @@ impl RelayManagerFfi {
         let responders_probed = responders.len();
         let canonical_on_relays: usize = responders.iter().map(|r| r.canonical.len()).sum();
         let snapshot = RelayKpSnapshot { responders };
+
+        // ── One-time malformed-slot retirement, BEFORE the maintenance decision ─
+        //
+        // A pre-width-fix install tracks a 32-hex `d`, which the transport
+        // binding makes a MALFORMED event: a strictly conformant inviter must
+        // reject it, so the account cannot be invited at all. This runs first so
+        // the tick that fixes the slot cannot first publish into the slot it is
+        // about to retire. It spends the whole tick only when it did something —
+        // a deferred retirement, an already-complete one, and one whose only
+        // remaining work (an advisory deletion) was refused all fall through to
+        // ordinary maintenance below.
+        if !run_blocking({
+            let mgr = circle_mgr.clone();
+            move || mgr.kp_slot_retirement_done().map_err(|e| e.to_string())
+        })
+        .await?
+        {
+            let probed: Vec<nostr::Event> = per_relay
+                .iter()
+                .filter(|o| o.responded)
+                .flat_map(|o| o.events.iter().cloned())
+                .collect();
+            let retirement = self
+                .retire_malformed_kp_slot(
+                    &circle_mgr,
+                    &keys,
+                    KpRetirementInputs {
+                        snapshot: &snapshot,
+                        probed: &probed,
+                        tracked: tracked.clone(),
+                        tracked_lifetime,
+                        now_secs: now,
+                    },
+                    &mut relay_errors,
+                )
+                .await;
+            if let Some(tick) = retirement {
+                return Ok(KpMaintenanceOutcomeFfi::from(KpMaintenanceOutcome {
+                    action: tick.action,
+                    canonical_on_relays,
+                    relays_targeted,
+                    responders_probed,
+                    relays_healed: tick.relays_healed,
+                    relay_errors,
+                    expired_init_key_purged,
+                    retired_malformed_slot: tick.completed,
+                }));
+            }
+        }
 
         // Decide. The stable slot and the tracked package's lifetime both come
         // from the SAME row read in step 4a, so the `d` and the lifetime can
@@ -7315,6 +7425,9 @@ impl RelayManagerFfi {
             relays_healed,
             relay_errors,
             expired_init_key_purged,
+            // Ordinary maintenance retires nothing: a tick that completed the
+            // one-time slot retirement returned above.
+            retired_malformed_slot: false,
         }))
     }
 
@@ -7538,26 +7651,12 @@ impl RelayManagerFfi {
                 *relay_errors += 1;
             }
 
-            // ROTATION cleanup — the spec's FIRST deletion bound ("confirmed
-            // publication of a replacement"), and mdk#160's leak fix. Ordering
-            // is the point: this runs only inside `published`, i.e. only after a
-            // relay OK-acked the replacement, so the account is never left with
-            // zero fetchable packages and no init key. (No-op for a heal/reuse, a
-            // first publish, or a row already blanked by the `not_after` purge.)
+            // ROTATION cleanup. Ordering is the point: this runs only inside
+            // `published`, i.e. only after a relay OK-acked the replacement, so
+            // the account is never left with zero fetchable packages and no
+            // init key.
             if minted_fresh {
-                if let Some(row) = &tracked {
-                    if !row.key_package.is_empty() && row.key_package != events.key_package.bytes()
-                    {
-                        let superseded =
-                            haven_core::nostr::mls::types::KeyPackage::new(row.key_package.clone());
-                        if let Err(e) = circle_mgr.delete_key_package(&superseded).await {
-                            log::debug!(
-                                "[maintain_key_package] superseded KP delete failed: {}",
-                                haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
-                            );
-                        }
-                    }
-                }
+                Self::delete_superseded_kp(circle_mgr, &tracked, events.key_package.bytes()).await;
             }
         } else if minted_fresh {
             // FAILED publish of freshly-minted material: delete it so a retry
@@ -7578,6 +7677,437 @@ impl RelayManagerFfi {
         // `relays_healed` = the target count only when the write succeeded.
         let healed = if published { targets.len() } else { 0 };
         Ok((action, healed))
+    }
+
+    /// Deletes the private init material of the `KeyPackage` a freshly minted
+    /// replacement has just superseded — `foundation/key-packages.md`'s FIRST
+    /// deletion bound ("confirmed publication of a replacement"), and mdk#160's
+    /// leak fix.
+    ///
+    /// The caller MUST hold an OK-acked replacement: deleting before the ack
+    /// leaves the account with a dead key AND nothing published. No-op when the
+    /// superseded row carried no bytes (a seed row, or one the `not_after`
+    /// purge already blanked) or when the "replacement" is that same package (a
+    /// heal re-advertises it verbatim). Fail-soft: a failed delete is logged,
+    /// redacted, never propagated.
+    async fn delete_superseded_kp(
+        circle_mgr: &Arc<CoreCircleManager>,
+        superseded: &Option<haven_core::circle::PublishedKeyPackageRow>,
+        replacement_bytes: &[u8],
+    ) {
+        let Some(row) = superseded else { return };
+        if row.key_package.is_empty() || row.key_package == replacement_bytes {
+            return;
+        }
+        let dead = haven_core::nostr::mls::types::KeyPackage::new(row.key_package.clone());
+        if let Err(e) = circle_mgr.delete_key_package(&dead).await {
+            log::debug!(
+                "[maintain_key_package] superseded KP delete failed: {}",
+                haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+            );
+        }
+    }
+
+    /// Runs the ONE-TIME retirement of a malformed (pre-width-fix) kind-30443
+    /// `d` slot for [`Self::maintain_key_package`], returning `Some` only when
+    /// the tick was actually spent on it.
+    ///
+    /// # Why the account needs this
+    ///
+    /// The transport binding fixes the slot id at "exactly one 64-character
+    /// lowercase hex value decoding to 32 bytes", and its cardinality rule makes
+    /// an event whose singleton `d` says otherwise **malformed** — which
+    /// `foundation/key-packages.md` requires an inviter to "reject … before
+    /// selecting one". Builds before the width fix minted 16 bytes, so those
+    /// accounts are uninvitable by a strictly conformant peer. Keeping the slot
+    /// is the cost; re-minting one is the fix.
+    ///
+    /// # The ordering, which is the whole safety argument
+    ///
+    /// 1. Publish the replacement FIRST, into a fresh binding-shaped slot, and
+    ///    treat it as landed only when a relay OK-ACKED it (`publish_event`
+    ///    returns `Ok` on nothing less — Rule 13's discipline applied to the
+    ///    reachability plane).
+    /// 2. Only then record it, drop the retired row, and publish the NIP-09
+    ///    retraction of the orphaned coordinate.
+    /// 3. Latch the sentinel only when both landed. Any earlier failure leaves
+    ///    it unset, so the next tick resumes instead of latching a migration
+    ///    that did not happen.
+    ///
+    /// Retracting first — or on a tick where no relay answered — could leave the
+    /// account with no fetchable `KeyPackage` at all, which is strictly worse
+    /// than the malformed slot being fixed.
+    ///
+    /// # Why no new init material is minted (when there is any to move)
+    ///
+    /// The replacement re-publishes the SAME tracked package
+    /// ([`build_kp_slot_repoint_event`]). A peer that already fetched the old
+    /// event therefore holds a `KeyPackageRef` this device still owns, so an
+    /// in-flight Welcome against the retired coordinate still decrypts, and a
+    /// lenient peer that keeps selecting the orphan (NIP-09 deletion is advisory
+    /// — a relay MAY ignore it) still gets a usable package. That window closes
+    /// when the package is next rotated or reaches `not_after`, whichever comes
+    /// first; both delete its init key, and both are the spec's own bounds.
+    ///
+    /// That holds only when the row carries material worth moving, which is the
+    /// `(Known, non-empty)` case and no other. The four the branch mints into
+    /// instead — no tracked row at all; a `Known` row with empty bytes (a seed
+    /// row, or one the `not_after` purge blanked); a `NotCurrent` row whose
+    /// bytes survived because that purge's engine delete failed; and an
+    /// `Unreadable` row, which [`kp_init_key_purge_due`] deliberately never
+    /// blanks — publish DIFFERENT material, so in the last two an in-flight
+    /// Welcome against the retired coordinate does NOT survive. That is the
+    /// correct trade there (the package is dead or unverifiable, so
+    /// re-advertising it would be worse), and it is why those two also hand the
+    /// superseded bytes to [`Self::delete_superseded_kp`]: the retired tracking
+    /// row is dropped on the way out, and material no row tracks can never
+    /// reach the `not_after` bound again.
+    ///
+    /// Fail-soft throughout: relay and storage failures are tallied into
+    /// `relay_errors` and reported, never propagated.
+    ///
+    /// [`build_kp_slot_repoint_event`]: haven_core::relay::maintenance::build_kp_slot_repoint_event
+    /// [`kp_init_key_purge_due`]: haven_core::relay::maintenance::kp_init_key_purge_due
+    async fn retire_malformed_kp_slot(
+        &self,
+        circle_mgr: &Arc<CoreCircleManager>,
+        keys: &nostr::Keys,
+        inputs: KpRetirementInputs<'_>,
+        relay_errors: &mut usize,
+    ) -> Option<KpRetirementTick> {
+        use haven_core::relay::maintenance::{
+            build_kp_maintenance_events, build_kp_slot_repoint_event, decide_kp_slot_retirement,
+            find_adoptable_kp_slot, KpMaintenanceAction, KpSlotRetirement, TrackedKpLifetime,
+        };
+
+        let KpRetirementInputs {
+            snapshot,
+            probed,
+            tracked,
+            tracked_lifetime,
+            now_secs,
+        } = inputs;
+        let tracked_bytes: &[u8] = tracked.as_ref().map_or(&[], |r| &r.key_package);
+        let adoptable = find_adoptable_kp_slot(probed, tracked_bytes);
+        let decision = decide_kp_slot_retirement(
+            snapshot,
+            tracked.as_ref().map(|r| r.d_tag.as_str()),
+            adoptable.as_deref(),
+        );
+
+        let (action, relays_healed, orphans, targets) = match decision {
+            // Nothing may be concluded or safely done this tick; ordinary
+            // maintenance runs instead, and the sentinel stays unset.
+            KpSlotRetirement::Defer => return None,
+            // Nothing to retire: latch, and let the tick do its ordinary work.
+            KpSlotRetirement::Complete => {
+                self.mark_kp_slot_retirement_done(circle_mgr, relay_errors)
+                    .await;
+                return None;
+            }
+            KpSlotRetirement::Adopt {
+                d,
+                orphans,
+                targets,
+            } => {
+                // RESUME: the replacement is already on a relay, carrying this
+                // device's tracked package verbatim. Re-point tracking to it
+                // rather than publishing a second fresh slot, which would orphan
+                // the first — and with it the material that row makes purgeable.
+                let event_id = snapshot
+                    .responders
+                    .iter()
+                    .flat_map(|r| r.canonical.iter())
+                    .find(|e| e.d_tag == d)
+                    .map(|e| e.event_id.clone())
+                    .unwrap_or_default();
+                let row = haven_core::circle::PublishedKeyPackageRow {
+                    event_id,
+                    d_tag: d,
+                    key_package: tracked_bytes.to_vec(),
+                    // The tick clock, not the event's own stamp: the next
+                    // same-slot replacement needs a floor at or above the
+                    // observed `created_at` (`monotonic_kp_created_at`), and a
+                    // tick that observes a publish runs after it.
+                    created_at: i64::try_from(now_secs).unwrap_or(i64::MAX),
+                };
+                if !self.record_retired_slot(circle_mgr, &row, &tracked).await {
+                    *relay_errors += 1;
+                    return Some(KpRetirementTick {
+                        action: KpMaintenanceAction::SeededD,
+                        relays_healed: 0,
+                        completed: false,
+                    });
+                }
+                (KpMaintenanceAction::SeededD, 0, orphans, targets)
+            }
+            KpSlotRetirement::Repoint { orphans, targets } => {
+                // Move the SAME package when there is one to move; mint only
+                // when the row carries no usable material.
+                let events = match (tracked_lifetime, tracked_bytes.is_empty()) {
+                    (TrackedKpLifetime::Known(_), false) => {
+                        build_kp_slot_repoint_event(keys, tracked_bytes, &targets)
+                    }
+                    _ => {
+                        build_kp_maintenance_events(
+                            circle_mgr.session(),
+                            keys,
+                            &targets,
+                            None,
+                            None,
+                        )
+                        .await
+                    }
+                };
+                let events = match events {
+                    Ok(e) => e,
+                    Err(e) => {
+                        *relay_errors += 1;
+                        log::debug!(
+                            "[maintain_key_package] slot repoint build failed: {}",
+                            haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+                        );
+                        return Some(KpRetirementTick {
+                            action: KpMaintenanceAction::RepublishedFreshD,
+                            relays_healed: 0,
+                            completed: false,
+                        });
+                    }
+                };
+                let minted_fresh = events.key_package.bytes() != tracked_bytes;
+
+                // PUBLISH-FIRST: nothing destructive happens until a relay acked.
+                if let Err(e) = self.inner.publish_event(&events.event, &targets).await {
+                    *relay_errors += 1;
+                    log::debug!(
+                        "[maintain_key_package] slot repoint publish failed: {}",
+                        haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+                    );
+                    if minted_fresh {
+                        // Freshly minted and unpublished: delete it so a retry
+                        // loop never leaks private init keys (mdk#160).
+                        if let Err(e) = circle_mgr.delete_key_package(&events.key_package).await {
+                            log::debug!(
+                                "[maintain_key_package] unpublished repoint KP delete failed: {}",
+                                haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+                            );
+                        }
+                    }
+                    return Some(KpRetirementTick {
+                        action: KpMaintenanceAction::RepublishedFreshD,
+                        relays_healed: 0,
+                        completed: false,
+                    });
+                }
+
+                let row = haven_core::circle::PublishedKeyPackageRow {
+                    event_id: events.event.id.to_hex(),
+                    d_tag: events.d_tag.clone(),
+                    key_package: events.key_package.bytes().to_vec(),
+                    created_at: i64::try_from(events.event.created_at.as_secs())
+                        .unwrap_or(i64::MAX),
+                };
+                if !self.record_retired_slot(circle_mgr, &row, &tracked).await {
+                    *relay_errors += 1;
+                    return Some(KpRetirementTick {
+                        action: KpMaintenanceAction::RepublishedFreshD,
+                        relays_healed: targets.len(),
+                        completed: false,
+                    });
+                }
+                if minted_fresh {
+                    // The replacement carries DIFFERENT material, and
+                    // `record_retired_slot` just dropped the row that tracked
+                    // the old package — so nothing would ever hand it to the
+                    // `not_after` purge again. Delete it here instead, under
+                    // the spec's FIRST bound ("confirmed publication of a
+                    // replacement"), which the acked publish above satisfies.
+                    // Same ordering as a rotation: record, then delete.
+                    Self::delete_superseded_kp(circle_mgr, &tracked, events.key_package.bytes())
+                        .await;
+                }
+                (
+                    KpMaintenanceAction::RepublishedFreshD,
+                    targets.len(),
+                    orphans,
+                    targets,
+                )
+            }
+            KpSlotRetirement::Retract { orphans, targets } => (
+                // A conformant slot of ours is live on a responder — the probe
+                // said so this tick — so only the orphan is left to scrub.
+                KpMaintenanceAction::AlreadyHealthy,
+                0,
+                orphans,
+                targets,
+            ),
+        };
+
+        let retracted = self
+            .retract_kp_slots(keys, snapshot, &orphans, &targets, relay_errors)
+            .await;
+        if retracted {
+            self.mark_kp_slot_retirement_done(circle_mgr, relay_errors)
+                .await;
+        } else if relays_healed == 0 {
+            // NOTHING landed this tick: the arms that reach here with no healed
+            // relay (`Retract`, and `Adopt`, which is local bookkeeping)
+            // published no `KeyPackage`, and the retraction was not acked. A
+            // relay that never acks a kind-5 would otherwise take EVERY
+            // subsequent tick with it — rotation-at-`not_after`,
+            // republish-if-missing and heal would all stop running behind an
+            // advisory deletion that may never land, and the account would go
+            // silently uninvitable at exactly the bound the rotation clock
+            // exists to defend. Falling through is safe precisely in these two
+            // arms and no others: both leave tracking on a conformant slot THIS
+            // tick's probe saw live, so ordinary maintenance cannot publish into
+            // the coordinate being retired. The failed retraction is still
+            // reported — `relay_errors` carries it, and the sentinel stays unset
+            // so the next tick retries it.
+            return None;
+        }
+        Some(KpRetirementTick {
+            action,
+            relays_healed,
+            completed: retracted,
+        })
+    }
+
+    /// Records the retirement's replacement row and drops the retired one.
+    ///
+    /// Two writes, in this order: the replacement row FIRST, so a crash between
+    /// them leaves the account tracking a published, binding-shaped slot rather
+    /// than nothing. Dropping the retired row is what makes material escapable
+    /// from the `Lifetime.not_after` purge, which reads the newest row — so the
+    /// caller must first have made the drop lossless: either the replacement
+    /// carries the same package bytes, or the retired row carried none, or its
+    /// bytes were handed to [`Self::delete_superseded_kp`] under the spec's
+    /// first bound.
+    ///
+    /// Returns whether the replacement was recorded.
+    async fn record_retired_slot(
+        &self,
+        circle_mgr: &Arc<CoreCircleManager>,
+        row: &haven_core::circle::PublishedKeyPackageRow,
+        retired: &Option<haven_core::circle::PublishedKeyPackageRow>,
+    ) -> bool {
+        let recorded = run_blocking({
+            let mgr = circle_mgr.clone();
+            let row = row.clone();
+            move || {
+                mgr.record_published_key_package(&row)
+                    .map_err(|e| e.to_string())
+            }
+        })
+        .await;
+        if let Err(e) = recorded {
+            log::debug!(
+                "[maintain_key_package] slot retirement record failed: {}",
+                haven_core::nostr::mls::redact_hex_sequences(&e)
+            );
+            return false;
+        }
+        if let Some(retired) = retired {
+            if retired.d_tag != row.d_tag {
+                let dropped = run_blocking({
+                    let mgr = circle_mgr.clone();
+                    let d = retired.d_tag.clone();
+                    move || {
+                        mgr.delete_published_key_package(&d)
+                            .map_err(|e| e.to_string())
+                    }
+                })
+                .await;
+                if let Err(e) = dropped {
+                    // Harmless if it fails: the replacement row is newer, so it
+                    // is the one every read resolves to.
+                    log::debug!(
+                        "[maintain_key_package] retired slot row drop failed: {}",
+                        haven_core::nostr::mls::redact_hex_sequences(&e)
+                    );
+                }
+            }
+        }
+        true
+    }
+
+    /// Publishes ONE NIP-09 (kind 5) deletion covering every orphaned slot, and
+    /// reports whether a relay acked it.
+    ///
+    /// One event rather than one per slot: NIP-09 takes a list of coordinates,
+    /// and a single write is one fewer publish for a relay to correlate. The
+    /// observed event ids come from this tick's probe, so a relay that indexes
+    /// deletions by id alone still drops what was actually seen.
+    ///
+    /// An empty orphan set is a successful no-op — there is nothing published to
+    /// scrub, which is the state the migration is trying to reach.
+    async fn retract_kp_slots(
+        &self,
+        keys: &nostr::Keys,
+        snapshot: &haven_core::relay::maintenance::RelayKpSnapshot,
+        orphans: &[String],
+        targets: &[String],
+        relay_errors: &mut usize,
+    ) -> bool {
+        if orphans.is_empty() {
+            return true;
+        }
+        let observed: Vec<nostr::EventId> = snapshot
+            .responders
+            .iter()
+            .flat_map(|r| r.canonical.iter())
+            .filter(|e| orphans.iter().any(|d| d == &e.d_tag))
+            .filter_map(|e| nostr::EventId::from_hex(&e.event_id).ok())
+            .collect();
+
+        let deletion = match haven_core::relay::maintenance::build_kp_slot_retraction(
+            keys, orphans, &observed,
+        ) {
+            Ok(ev) => ev,
+            Err(e) => {
+                *relay_errors += 1;
+                log::debug!(
+                    "[maintain_key_package] slot retraction build failed: {}",
+                    haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+                );
+                return false;
+            }
+        };
+        match self.inner.publish_event(&deletion, targets).await {
+            Ok(_) => true,
+            Err(e) => {
+                *relay_errors += 1;
+                log::debug!(
+                    "[maintain_key_package] slot retraction publish failed: {}",
+                    haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+                );
+                false
+            }
+        }
+    }
+
+    /// Latches the once-only slot-retirement sentinel. Fail-soft: a failed write
+    /// is tallied and the migration simply re-runs next tick (it is idempotent).
+    async fn mark_kp_slot_retirement_done(
+        &self,
+        circle_mgr: &Arc<CoreCircleManager>,
+        relay_errors: &mut usize,
+    ) {
+        let marked = run_blocking({
+            let mgr = circle_mgr.clone();
+            move || {
+                mgr.mark_kp_slot_retirement_done()
+                    .map_err(|e| e.to_string())
+            }
+        })
+        .await;
+        if let Err(e) = marked {
+            *relay_errors += 1;
+            log::debug!(
+                "[maintain_key_package] slot retirement sentinel write failed: {}",
+                haven_core::nostr::mls::redact_hex_sequences(&e)
+            );
+        }
     }
 
     /// Once-only legacy relay hygiene (Dark Matter §6 step 5 / F10a): retracts
@@ -10037,6 +10567,38 @@ mod maintenance_real_ffi_tests {
         keys.secret_key().to_secret_bytes().to_vec()
     }
 
+    /// Accepts writes until flipped, then rejects them — every kind, or only
+    /// `only_kind`. Reads are untouched, so the maintenance probe still sees a
+    /// live responder, which is what makes a *targeted publish failure*
+    /// reachable at all; refusing ONE kind is what makes "the destructive
+    /// publish never happened" tellable from "no write could have landed".
+    #[derive(Debug)]
+    struct RejectWritesWhenFlipped {
+        flipped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        only_kind: Option<Kind>,
+    }
+
+    impl nostr_relay_builder::builder::WritePolicy for RejectWritesWhenFlipped {
+        fn admit_event<'a>(
+            &'a self,
+            event: &'a nostr::Event,
+            _addr: &'a std::net::SocketAddr,
+        ) -> nostr_sdk::prelude::BoxedFuture<'a, nostr_relay_builder::builder::PolicyResult>
+        {
+            Box::pin(async move {
+                if self.flipped.load(Ordering::Relaxed)
+                    && self.only_kind.is_none_or(|k| k == event.kind)
+                {
+                    nostr_relay_builder::builder::PolicyResult::Reject(
+                        "write refused by test policy".to_string(),
+                    )
+                } else {
+                    nostr_relay_builder::builder::PolicyResult::Accept
+                }
+            })
+        }
+    }
+
     /// The NIP-33 `d` of a kind-30443 event (public tag; used only to assert the
     /// republished canonical reuses the stable slot). Never a secret.
     fn kp_d_tag(ev: &nostr::Event) -> Option<String> {
@@ -10754,39 +11316,19 @@ mod maintenance_real_ffi_tests {
     async fn tc6_superseded_init_key_survives_a_failed_rotation_and_dies_on_a_confirmed_one() {
         use haven_core::nostr::mls::types::{LocationGroupConfig, PublishWork};
         use haven_core::relay::maintenance::{read_kp_lifetime, TrackedKpLifetime};
-        use nostr_relay_builder::builder::{PolicyResult, WritePolicy};
         use nostr_relay_builder::{LocalRelay, RelayBuilder};
         use std::sync::atomic::AtomicBool;
-
-        /// Accepts writes until flipped, then rejects them. Reads are untouched,
-        /// so the maintenance probe still sees a live responder — which is what
-        /// makes a *targeted publish failure* reachable at all.
-        #[derive(Debug)]
-        struct RejectWritesWhenFlipped(std::sync::Arc<AtomicBool>);
-
-        impl WritePolicy for RejectWritesWhenFlipped {
-            fn admit_event<'a>(
-                &'a self,
-                _event: &'a nostr::Event,
-                _addr: &'a std::net::SocketAddr,
-            ) -> nostr_sdk::prelude::BoxedFuture<'a, PolicyResult> {
-                Box::pin(async move {
-                    if self.0.load(Ordering::Relaxed) {
-                        PolicyResult::Reject("write refused by test policy".to_string())
-                    } else {
-                        PolicyResult::Accept
-                    }
-                })
-            }
-        }
 
         let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
         install_test_seams();
 
         let reject = std::sync::Arc::new(AtomicBool::new(false));
-        let relay = LocalRelay::new(
-            RelayBuilder::default().write_policy(RejectWritesWhenFlipped(reject.clone())),
-        );
+        let relay = LocalRelay::new(RelayBuilder::default().write_policy(
+            RejectWritesWhenFlipped {
+                flipped: reject.clone(),
+                only_kind: None,
+            },
+        ));
         relay.run().await.expect("run relay");
         let url = relay.url().await.to_string();
 
@@ -10967,6 +11509,1111 @@ mod maintenance_real_ffi_tests {
             );
 
         super::MAINTENANCE_CLOCK_OVERRIDE_SECS.store(0, Ordering::Relaxed);
+        relay.shutdown();
+    }
+
+    // ========================================================================
+    // Malformed-slot retirement (kind-30443 `d` width) — REAL FFI, real relay.
+    //
+    // The transport binding fixes the slot id at "exactly one 64-character
+    // lowercase hex value decoding to 32 bytes", and its cardinality rule makes
+    // an event whose singleton `d` says otherwise MALFORMED — which
+    // `foundation/key-packages.md` requires an inviter to "reject … before
+    // selecting one". Builds before the width fix minted 16 bytes, so those
+    // accounts are uninvitable by a strictly conformant peer until the slot is
+    // retired. These drive `RelayManagerFfi::maintain_key_package` itself and
+    // assert against what the relay actually serves afterwards.
+    // ========================================================================
+
+    /// The slot id a pre-width-fix build minted: 16 random bytes, 32 hex chars.
+    fn legacy_slot_id() -> String {
+        hex::encode([0x5au8; 16])
+    }
+
+    /// Puts the account in the exact state a pre-width-fix install is in: a REAL
+    /// `KeyPackage` published under a malformed slot id, and a tracking row that
+    /// names it.
+    ///
+    /// Minted through the real session and published through the real relay
+    /// manager, so the bytes, the event and the row are the ones production
+    /// would have written — only the slot id is the old shape.
+    async fn seed_pre_fix_install(
+        relay_mgr: &RelayManagerFfi,
+        circle: &CircleManagerFfi,
+        keys: &Keys,
+        own: &[String],
+        d: &str,
+    ) -> (nostr::Event, Vec<u8>) {
+        let events = haven_core::relay::maintenance::build_kp_maintenance_events(
+            circle.inner.session(),
+            keys,
+            own,
+            Some(d),
+            None,
+        )
+        .await
+        .expect("mint a KeyPackage into the legacy slot");
+        relay_mgr
+            .inner
+            .publish_event(&events.event, own)
+            .await
+            .expect("seed the legacy KeyPackage onto the relay");
+        circle
+            .inner
+            .record_published_key_package(&haven_core::circle::PublishedKeyPackageRow {
+                event_id: events.event.id.to_hex(),
+                d_tag: d.to_owned(),
+                key_package: events.key_package.bytes().to_vec(),
+                created_at: i64::try_from(events.event.created_at.as_secs()).unwrap(),
+            })
+            .expect("track the legacy slot");
+        (events.event, events.key_package.bytes().to_vec())
+    }
+
+    /// Fetches until `want` holds, and fails loudly if it never does.
+    ///
+    /// Not a sleep: each attempt is a real connect → REQ → EOSE round trip, and
+    /// an OK-acked write is already stored, so the first attempt normally
+    /// suffices. The bound only covers a read racing the write's own connection.
+    async fn fetch_until(
+        author: nostr::PublicKey,
+        kind: Kind,
+        relay: &str,
+        what: &str,
+        want: impl Fn(&[nostr::Event]) -> bool,
+    ) -> Vec<nostr::Event> {
+        for _ in 0..25 {
+            let events = fetch_by_kind(author, kind, relay).await;
+            if want(&events) {
+                return events;
+            }
+        }
+        panic!("the relay never reached the expected state: {what}");
+    }
+
+    /// Whether a kind-5 deletion addresses the addressable coordinate of `d`.
+    fn deletes_slot(deletion: &nostr::Event, author: nostr::PublicKey, d: &str) -> bool {
+        let want = format!("30443:{}:{d}", author.to_hex());
+        deletion
+            .tags
+            .iter()
+            .any(|t| t.as_slice() == ["a".to_owned(), want.clone()])
+    }
+
+    /// TC-8 — THE migration: a pre-fix install converges to a conformant slot,
+    /// carrying the SAME package, and the orphaned coordinate is retracted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc8_a_pre_fix_install_is_retired_onto_a_conformant_slot_via_real_ffi() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let relay = MockRelay::run().await.expect("start MockRelay");
+        let url = relay.url().await.to_string();
+        let own = vec![url.clone()];
+
+        let keys = Keys::generate();
+        let author = keys.public_key();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("slot_retire");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        circle
+            .add_user_relay(url.clone(), RelayTypeFfi::Nip65)
+            .await
+            .expect("register own NIP-65 relay");
+
+        let legacy_d = legacy_slot_id();
+        let (legacy_event, legacy_bytes) =
+            seed_pre_fix_install(&relay_mgr, &circle, &keys, &own, &legacy_d).await;
+        assert!(
+            !haven_core::relay::maintenance::is_conformant_slot_id(&legacy_d),
+            "precondition: the seeded slot must be the malformed shape"
+        );
+        // Stamp the retired row AHEAD of the clock, as a device whose clock ran
+        // fast when it published would have. Tracking resolves to the NEWEST
+        // row, so a retirement that left the row behind would resolve straight
+        // back onto the malformed slot after the sentinel latched.
+        circle
+            .inner
+            .record_published_key_package(&haven_core::circle::PublishedKeyPackageRow {
+                event_id: legacy_event.id.to_hex(),
+                d_tag: legacy_d.clone(),
+                key_package: legacy_bytes.clone(),
+                created_at: i64::try_from(legacy_event.created_at.as_secs()).unwrap() + 3_600,
+            })
+            .expect("re-stamp the legacy row");
+
+        let outcome = circle_maintain(&relay_mgr, &circle, secret.clone()).await;
+        assert_eq!(
+            outcome.action,
+            KpMaintenanceActionFfi::RepublishedFreshD,
+            "a malformed slot must be re-pointed into a fresh, binding-shaped one"
+        );
+        assert_eq!(
+            outcome.relays_healed, 1,
+            "the replacement must have been ACKED before anything destructive ran"
+        );
+        assert!(
+            outcome.retired_malformed_slot,
+            "the migration completed, so the tick must report it"
+        );
+
+        // What the account now publishes: one binding-shaped slot, carrying the
+        // SAME package the malformed event advertised. Same package is what
+        // keeps an in-flight Welcome against the old coordinate decryptable.
+        let live = fetch_until(
+            author,
+            Kind::Custom(30443),
+            &url,
+            "a conformant slot",
+            |evs| {
+                evs.iter().any(|e| {
+                    kp_d_tag(e)
+                        .as_deref()
+                        .is_some_and(haven_core::relay::maintenance::is_conformant_slot_id)
+                })
+            },
+        )
+        .await;
+        let replacement = live
+            .iter()
+            .find(|e| {
+                kp_d_tag(e)
+                    .as_deref()
+                    .is_some_and(haven_core::relay::maintenance::is_conformant_slot_id)
+            })
+            .expect("a conformant slot is served");
+        assert_eq!(
+            replacement.content, legacy_event.content,
+            "the retirement must MOVE the tracked package, not mint a new one"
+        );
+
+        // The orphan's coordinate is retracted, by `a` (the identifier NIP-09
+        // defines for an addressable event), and the observed id is carried too.
+        let deletions = fetch_until(
+            author,
+            Kind::EventDeletion,
+            &url,
+            "a NIP-09 retraction of the orphaned slot",
+            |evs| !evs.is_empty(),
+        )
+        .await;
+        assert_eq!(
+            deletions.len(),
+            1,
+            "exactly one retraction, not one per tick"
+        );
+        let deletion = &deletions[0];
+        assert!(
+            deletes_slot(deletion, author, &legacy_d),
+            "the retraction must address the ORPHAN's coordinate: {:?}",
+            deletion.tags
+        );
+        assert!(
+            deletion.tags.iter().any(|t| {
+                let s = t.as_slice();
+                s.len() >= 2 && s[0] == "e" && s[1] == legacy_event.id.to_hex()
+            }),
+            "the observed orphan event id must be referenced too"
+        );
+        let live_d = kp_d_tag(replacement).expect("the replacement carries a `d`");
+        assert!(
+            !deletes_slot(deletion, author, &live_d),
+            "the retraction must NEVER address the live slot"
+        );
+
+        // What a peer fetching from a relay that HONOURS NIP-09 now sees: one
+        // candidate, and it is the binding-shaped one. (A relay that ignores the
+        // request keeps serving the orphan — deletion is advisory — which is
+        // survivable only because the orphan carries the same package.)
+        let candidates = fetch_until(
+            author,
+            Kind::Custom(30443),
+            &url,
+            "the orphan to stop being served",
+            |evs| {
+                evs.iter()
+                    .all(|e| kp_d_tag(e).as_deref() != Some(legacy_d.as_str()))
+            },
+        )
+        .await;
+        assert_eq!(
+            candidates.len(),
+            1,
+            "a cooperating relay must be left serving exactly the conformant slot"
+        );
+
+        // Local state: tracking moved to the conformant slot, and the retired
+        // row is gone rather than left behind to shadow it.
+        let tracked = circle
+            .inner
+            .latest_published_key_package()
+            .expect("read row")
+            .expect("row");
+        assert_eq!(tracked.d_tag, live_d);
+        assert_eq!(
+            tracked.key_package, legacy_bytes,
+            "the tracked bytes must still be the package the engine holds"
+        );
+        assert!(circle
+            .inner
+            .kp_slot_retirement_done()
+            .expect("sentinel readable"));
+
+        // ONCE-only: the next tick is ordinary maintenance again.
+        let second = circle_maintain(&relay_mgr, &circle, secret).await;
+        assert_eq!(second.action, KpMaintenanceActionFfi::AlreadyHealthy);
+        assert!(
+            !second.retired_malformed_slot,
+            "the migration must not be re-reported once it has completed"
+        );
+        let after = fetch_by_kind(author, Kind::EventDeletion, &url).await;
+        assert_eq!(
+            after.len(),
+            1,
+            "a completed retirement must not republish its retraction every tick"
+        );
+
+        relay.shutdown();
+    }
+
+    /// TC-9 — the no-op proof: an install created after the width fix is never
+    /// touched by the migration, and never publishes a deletion.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc9_a_conformant_install_is_never_retired_via_real_ffi() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let relay = MockRelay::run().await.expect("start MockRelay");
+        let url = relay.url().await.to_string();
+
+        let keys = Keys::generate();
+        let author = keys.public_key();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("slot_conformant");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        circle
+            .add_user_relay(url.clone(), RelayTypeFfi::Nip65)
+            .await
+            .expect("register own NIP-65 relay");
+
+        // Tick 1: first publish. The retirement finds nothing malformed, so it
+        // latches without publishing or retracting anything, and the ordinary
+        // first publish still happens in the same tick.
+        let first = circle_maintain(&relay_mgr, &circle, secret.clone()).await;
+        assert_eq!(first.action, KpMaintenanceActionFfi::RepublishedFreshD);
+        assert!(
+            !first.retired_malformed_slot,
+            "there was nothing to retire, so nothing may be reported as retired"
+        );
+        assert!(
+            circle
+                .inner
+                .kp_slot_retirement_done()
+                .expect("sentinel readable"),
+            "a conformant account must not re-run the migration every tick"
+        );
+
+        let published = fetch_until(
+            author,
+            Kind::Custom(30443),
+            &url,
+            "the first publish",
+            |evs| !evs.is_empty(),
+        )
+        .await;
+        assert_eq!(published.len(), 1);
+        let d = kp_d_tag(&published[0]).expect("`d`");
+        assert!(
+            haven_core::relay::maintenance::is_conformant_slot_id(&d),
+            "a first publish must mint a binding-shaped slot: {d}"
+        );
+
+        let second = circle_maintain(&relay_mgr, &circle, secret).await;
+        assert_eq!(second.action, KpMaintenanceActionFfi::AlreadyHealthy);
+        assert!(!second.retired_malformed_slot);
+        assert!(
+            fetch_by_kind(author, Kind::EventDeletion, &url)
+                .await
+                .is_empty(),
+            "a conformant install must NEVER author a deletion request"
+        );
+
+        relay.shutdown();
+    }
+
+    /// TC-10 — the ordering claim, and the crash-resume that follows it: with
+    /// writes refused, the replacement cannot land, so NOTHING destructive may
+    /// happen and the sentinel must not latch. Allowing writes again completes
+    /// the same migration.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc10_no_retraction_until_the_replacement_is_acked_via_real_ffi() {
+        use nostr_relay_builder::{LocalRelay, RelayBuilder};
+        use std::sync::atomic::AtomicBool;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+
+        // Refuse ONLY kind-30443, so a kind-5 deletion WOULD be accepted: "no
+        // retraction was published" then means the code never tried, not that
+        // the relay refused it.
+        let reject = std::sync::Arc::new(AtomicBool::new(false));
+        let relay = LocalRelay::new(RelayBuilder::default().write_policy(
+            RejectWritesWhenFlipped {
+                flipped: reject.clone(),
+                only_kind: Some(Kind::Custom(30443)),
+            },
+        ));
+        relay.run().await.expect("run relay");
+        let url = relay.url().await.to_string();
+        let own = vec![url.clone()];
+
+        let keys = Keys::generate();
+        let author = keys.public_key();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("slot_unacked");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        circle
+            .add_user_relay(url.clone(), RelayTypeFfi::Nip65)
+            .await
+            .expect("register own NIP-65 relay");
+
+        let legacy_d = legacy_slot_id();
+        let (legacy_event, _) =
+            seed_pre_fix_install(&relay_mgr, &circle, &keys, &own, &legacy_d).await;
+
+        // Reads still work, so the probe sees a live responder and the migration
+        // genuinely runs — it is only the WRITE that cannot land.
+        reject.store(true, Ordering::Relaxed);
+        let failed = circle_maintain(&relay_mgr, &circle, secret.clone()).await;
+        assert_eq!(
+            failed.action,
+            KpMaintenanceActionFfi::RepublishedFreshD,
+            "the tick must have taken the re-point branch"
+        );
+        assert_eq!(
+            failed.relays_healed, 0,
+            "no relay acked the replacement — 'sent' is not 'acked'"
+        );
+        assert!(
+            !failed.retired_malformed_slot,
+            "a migration that could not publish its replacement is not complete"
+        );
+        assert!(
+            !circle
+                .inner
+                .kp_slot_retirement_done()
+                .expect("sentinel readable"),
+            "the sentinel must NOT latch on a failed migration — a done-marker \
+             over a migration that did not happen makes it permanent"
+        );
+        assert!(
+            fetch_by_kind(author, Kind::EventDeletion, &url)
+                .await
+                .is_empty(),
+            "NOTHING destructive may be published before the replacement is acked"
+        );
+        assert_eq!(
+            circle
+                .inner
+                .latest_canonical_d_tag()
+                .expect("read tracked slot"),
+            Some(legacy_d.clone()),
+            "with no replacement acked, the account must keep the slot it has — \
+             an account with no usable KeyPackage is worse than a malformed one"
+        );
+        let still_served = fetch_by_kind(author, Kind::Custom(30443), &url).await;
+        assert_eq!(
+            still_served.len(),
+            1,
+            "the orphan must still be the account's published KeyPackage"
+        );
+        assert_eq!(still_served[0].id, legacy_event.id);
+
+        // RESUME: writes are allowed again, and the same migration completes.
+        reject.store(false, Ordering::Relaxed);
+        let done = circle_maintain(&relay_mgr, &circle, secret).await;
+        assert_eq!(done.action, KpMaintenanceActionFfi::RepublishedFreshD);
+        assert_eq!(done.relays_healed, 1);
+        assert!(
+            done.retired_malformed_slot,
+            "the retry must complete the migration the failed tick started"
+        );
+        let tracked_d = circle
+            .inner
+            .latest_canonical_d_tag()
+            .expect("read tracked slot")
+            .expect("a slot is tracked");
+        assert!(
+            haven_core::relay::maintenance::is_conformant_slot_id(&tracked_d),
+            "the account must end on a binding-shaped slot: {tracked_d}"
+        );
+        let deletions = fetch_until(
+            author,
+            Kind::EventDeletion,
+            &url,
+            "the retraction, once the replacement landed",
+            |evs| !evs.is_empty(),
+        )
+        .await;
+        assert!(deletes_slot(&deletions[0], author, &legacy_d));
+
+        relay.shutdown();
+    }
+
+    /// TC-13 — the interruption BETWEEN the replacement's ACK and the
+    /// retraction: the replacement lands, the deletion does not, and the
+    /// migration must stay open. A sentinel that latched here would leave the
+    /// orphan published forever with nothing left to notice it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc13_a_refused_retraction_leaves_the_migration_open_via_real_ffi() {
+        use nostr_relay_builder::{LocalRelay, RelayBuilder};
+        use std::sync::atomic::AtomicBool;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+
+        // Refuse ONLY the deletion, so the KeyPackage half of the migration
+        // succeeds and the destructive half is the only thing that fails.
+        let reject = std::sync::Arc::new(AtomicBool::new(false));
+        let relay = LocalRelay::new(RelayBuilder::default().write_policy(
+            RejectWritesWhenFlipped {
+                flipped: reject.clone(),
+                only_kind: Some(Kind::EventDeletion),
+            },
+        ));
+        relay.run().await.expect("run relay");
+        let url = relay.url().await.to_string();
+        let own = vec![url.clone()];
+
+        let keys = Keys::generate();
+        let author = keys.public_key();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("slot_halfway");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        circle
+            .add_user_relay(url.clone(), RelayTypeFfi::Nip65)
+            .await
+            .expect("register own NIP-65 relay");
+
+        let legacy_d = legacy_slot_id();
+        let (_, _) = seed_pre_fix_install(&relay_mgr, &circle, &keys, &own, &legacy_d).await;
+
+        reject.store(true, Ordering::Relaxed);
+        let halfway = circle_maintain(&relay_mgr, &circle, secret.clone()).await;
+        assert_eq!(halfway.action, KpMaintenanceActionFfi::RepublishedFreshD);
+        assert_eq!(
+            halfway.relays_healed, 1,
+            "the replacement itself was acked — only the retraction was refused"
+        );
+        assert!(
+            !halfway.retired_malformed_slot,
+            "an unretracted orphan is not a completed migration"
+        );
+        assert!(
+            !circle
+                .inner
+                .kp_slot_retirement_done()
+                .expect("sentinel readable"),
+            "the sentinel must NOT latch while the orphan is still published — \
+             latching here is how a half-done migration becomes permanent"
+        );
+        let tracked_d = circle
+            .inner
+            .latest_canonical_d_tag()
+            .expect("read tracked slot")
+            .expect("a slot is tracked");
+        assert!(
+            haven_core::relay::maintenance::is_conformant_slot_id(&tracked_d),
+            "the replacement DID land, so tracking must follow it: {tracked_d}"
+        );
+        let live_id = fetch_until(
+            author,
+            Kind::Custom(30443),
+            &url,
+            "the acked replacement",
+            |evs| {
+                evs.iter()
+                    .any(|e| kp_d_tag(e).as_deref() == Some(tracked_d.as_str()))
+            },
+        )
+        .await
+        .into_iter()
+        .find(|e| kp_d_tag(e).as_deref() == Some(tracked_d.as_str()))
+        .expect("the replacement is served")
+        .id;
+
+        // RESUME: the deletion is allowed through, and the tick that finishes
+        // the job must NOT publish another KeyPackage — the account is already
+        // conformant, only the orphan is left.
+        reject.store(false, Ordering::Relaxed);
+        let finished = circle_maintain(&relay_mgr, &circle, secret).await;
+        assert_eq!(
+            finished.action,
+            KpMaintenanceActionFfi::AlreadyHealthy,
+            "the resume has nothing to publish, only an orphan to scrub"
+        );
+        assert!(finished.retired_malformed_slot);
+        assert!(circle
+            .inner
+            .kp_slot_retirement_done()
+            .expect("sentinel readable"));
+        let deletions = fetch_until(
+            author,
+            Kind::EventDeletion,
+            &url,
+            "the retraction, once the relay accepted one",
+            |evs| !evs.is_empty(),
+        )
+        .await;
+        assert!(deletes_slot(&deletions[0], author, &legacy_d));
+        assert!(!deletes_slot(&deletions[0], author, &tracked_d));
+        assert!(
+            fetch_by_kind(author, Kind::Custom(30443), &url)
+                .await
+                .iter()
+                .any(|e| e.id == live_id),
+            "the resume must not have republished the KeyPackage that already landed"
+        );
+
+        relay.shutdown();
+    }
+
+    /// TC-14 — the retraction that NEVER lands, and the maintenance standing
+    /// behind it.
+    ///
+    /// A relay that answers reads and refuses every kind-5 pins the account in
+    /// the `Retract` state indefinitely: conformant slot live, orphan still
+    /// served, sentinel unset, so every tick decides `Retract` again. Spending
+    /// those ticks on the deletion would stop the ordinary decision from ever
+    /// running again — and that decision is what keeps the account invitable, so
+    /// the failure is not "the orphan lingers" (which NIP-09 makes advisory
+    /// anyway) but "the tracked package reaches `Lifetime.not_after` un-rotated
+    /// and every `Add` referencing it fails". This is reachable from a
+    /// conformant install with one leftover orphan, not only from a pre-fix one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc14_a_never_acked_retraction_does_not_starve_rotation_via_real_ffi() {
+        use haven_core::relay::maintenance::{read_kp_lifetime, TrackedKpLifetime};
+        use nostr_relay_builder::{LocalRelay, RelayBuilder};
+        use std::sync::atomic::AtomicBool;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+
+        // Refuse ONLY the deletion, from the first tick onwards: reads and
+        // KeyPackage writes land, so whatever this tick does not do is the
+        // code's choice and not the relay's.
+        let relay = LocalRelay::new(RelayBuilder::default().write_policy(
+            RejectWritesWhenFlipped {
+                flipped: std::sync::Arc::new(AtomicBool::new(true)),
+                only_kind: Some(Kind::EventDeletion),
+            },
+        ));
+        relay.run().await.expect("run relay");
+        let url = relay.url().await.to_string();
+        let own = vec![url.clone()];
+
+        let keys = Keys::generate();
+        let author = keys.public_key();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("slot_never_acked");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        circle
+            .add_user_relay(url.clone(), RelayTypeFfi::Nip65)
+            .await
+            .expect("register own NIP-65 relay");
+
+        // A conformant install: its slot published, served and tracked …
+        let live = haven_core::relay::maintenance::build_kp_maintenance_events(
+            circle.inner.session(),
+            &keys,
+            &own,
+            None,
+            None,
+        )
+        .await
+        .expect("mint the conformant slot");
+        relay_mgr
+            .inner
+            .publish_event(&live.event, &own)
+            .await
+            .expect("publish the conformant slot");
+        circle
+            .inner
+            .record_published_key_package(&haven_core::circle::PublishedKeyPackageRow {
+                event_id: live.event.id.to_hex(),
+                d_tag: live.d_tag.clone(),
+                key_package: live.key_package.bytes().to_vec(),
+                created_at: i64::try_from(live.event.created_at.as_secs()).unwrap(),
+            })
+            .expect("track the conformant slot");
+        let live_d = live.d_tag.clone();
+        let live_bytes = live.key_package.bytes().to_vec();
+        let live_id = live.event.id;
+
+        // … and one leftover orphan, which is all the migration has left to do.
+        let legacy_d = legacy_slot_id();
+        let orphan = haven_core::relay::maintenance::build_kp_maintenance_events(
+            circle.inner.session(),
+            &keys,
+            &own,
+            Some(&legacy_d),
+            None,
+        )
+        .await
+        .expect("mint into the legacy slot");
+        relay_mgr
+            .inner
+            .publish_event(&orphan.event, &own)
+            .await
+            .expect("seed the leftover orphan");
+
+        // The one thing that changes: the tracked package reaches the rotation
+        // point of its own MLS `Lifetime`.
+        let TrackedKpLifetime::Known(lifetime) = read_kp_lifetime(&live_bytes) else {
+            panic!("the tracked package must have a readable lifetime");
+        };
+        super::MAINTENANCE_CLOCK_OVERRIDE_SECS.store(lifetime.rotate_at(), Ordering::Relaxed);
+        let outcome = circle_maintain(&relay_mgr, &circle, secret).await;
+        super::MAINTENANCE_CLOCK_OVERRIDE_SECS.store(0, Ordering::Relaxed);
+
+        assert_eq!(
+            outcome.action,
+            KpMaintenanceActionFfi::RotatedExpiringMaterial,
+            "the tick MUST still reach the ordinary decision: a deletion this \
+             relay will never ack cannot be allowed to take the rotation with it"
+        );
+        assert_eq!(
+            outcome.relays_healed, 1,
+            "the rotation must have been ACKED, not merely attempted"
+        );
+        assert!(
+            outcome.relay_errors >= 1,
+            "the refused deletion must still be reported to the caller"
+        );
+        assert!(
+            !outcome.retired_malformed_slot,
+            "the orphan is still published, so nothing was retired"
+        );
+
+        // The rotation really happened: fresh material, same stable slot.
+        let rotated = circle
+            .inner
+            .latest_published_key_package()
+            .expect("read row")
+            .expect("row");
+        assert_eq!(
+            rotated.d_tag, live_d,
+            "a routine replacement MUST reuse the same `d`"
+        );
+        assert_ne!(
+            rotated.key_package, live_bytes,
+            "the aging package must have been replaced, not re-advertised"
+        );
+        let served = fetch_until(
+            author,
+            Kind::Custom(30443),
+            &url,
+            "the rotated package at the stable slot",
+            |evs| {
+                evs.iter()
+                    .any(|e| kp_d_tag(e).as_deref() == Some(live_d.as_str()) && e.id != live_id)
+            },
+        )
+        .await;
+
+        // And the migration is exactly where it was, so the next tick retries
+        // it: nothing destructive ran, and nothing latched.
+        assert!(
+            served
+                .iter()
+                .any(|e| kp_d_tag(e).as_deref() == Some(legacy_d.as_str())),
+            "the orphan must still be served — a refused deletion deletes nothing"
+        );
+        assert!(
+            !circle
+                .inner
+                .kp_slot_retirement_done()
+                .expect("sentinel readable"),
+            "an unacked retraction must not latch the sentinel"
+        );
+        assert!(
+            fetch_by_kind(author, Kind::EventDeletion, &url)
+                .await
+                .is_empty(),
+            "the relay refused every deletion, so it stores none — the tick's \
+             own report is the only place that failure is visible"
+        );
+
+        relay.shutdown();
+    }
+
+    /// TC-15 — the retirement of a row whose bytes cannot be vouched for: the
+    /// replacement must carry FRESH material, never the unreadable bytes.
+    ///
+    /// "Move the package rather than mint one" holds only where the row's
+    /// lifetime is `Known`. A corrupt row is non-empty and never blanked (the
+    /// `not_after` purge deliberately does not fire on an unreadable lifetime),
+    /// so it reaches the retirement with bytes present and nothing to vouch for
+    /// them — and those bytes cannot be re-advertised at all, because the
+    /// event's `i` tag is the `KeyPackageRef` derived from them and deriving it
+    /// validates the leaf. A retirement that tried to MOVE them would therefore
+    /// fail on every tick, and the account would never leave the malformed slot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc15_an_unreadable_row_is_retired_onto_fresh_material_via_real_ffi() {
+        use haven_core::relay::maintenance::{read_kp_lifetime, TrackedKpLifetime};
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let relay = MockRelay::run().await.expect("start MockRelay");
+        let url = relay.url().await.to_string();
+        let own = vec![url.clone()];
+
+        let keys = Keys::generate();
+        let author = keys.public_key();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("slot_unreadable");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        circle
+            .add_user_relay(url.clone(), RelayTypeFfi::Nip65)
+            .await
+            .expect("register own NIP-65 relay");
+
+        let legacy_d = legacy_slot_id();
+        let (legacy_event, _) =
+            seed_pre_fix_install(&relay_mgr, &circle, &keys, &own, &legacy_d).await;
+
+        // Corrupt the tracked BYTES only — slot and timestamps untouched, the
+        // state a truncated write or an unreadable wire format leaves behind.
+        let tracked = circle
+            .inner
+            .latest_published_key_package()
+            .expect("read row")
+            .expect("row");
+        circle
+            .inner
+            .record_published_key_package(&haven_core::circle::PublishedKeyPackageRow {
+                key_package: vec![0xDE, 0xAD, 0xBE, 0xEF],
+                ..tracked
+            })
+            .expect("write corrupted row");
+
+        let outcome = circle_maintain(&relay_mgr, &circle, secret).await;
+        assert_eq!(
+            outcome.action,
+            KpMaintenanceActionFfi::RepublishedFreshD,
+            "the malformed slot must still be retired"
+        );
+        assert_eq!(
+            outcome.relays_healed, 1,
+            "the replacement must be ACKED — a retirement that cannot publish \
+             one stalls here on every tick"
+        );
+        assert!(
+            outcome.retired_malformed_slot,
+            "with the replacement acked and the orphan retracted, the migration \
+             completed"
+        );
+
+        // What the account now publishes: a conformant slot carrying material a
+        // peer can actually validate — neither the corrupt bytes nor the
+        // package the malformed event advertised.
+        let tracked = circle
+            .inner
+            .latest_published_key_package()
+            .expect("read row")
+            .expect("row");
+        assert!(
+            haven_core::relay::maintenance::is_conformant_slot_id(&tracked.d_tag),
+            "tracking must end on a binding-shaped slot"
+        );
+        assert!(
+            matches!(
+                read_kp_lifetime(&tracked.key_package),
+                TrackedKpLifetime::Known(_)
+            ),
+            "an unreadable row must be replaced by FRESH material, not moved: \
+             the corrupt bytes cannot even be re-advertised (their \
+             KeyPackageRef does not derive), so moving them would stall the \
+             migration for good"
+        );
+        let served = fetch_until(
+            author,
+            Kind::Custom(30443),
+            &url,
+            "the replacement at a conformant slot",
+            |evs| {
+                evs.iter()
+                    .any(|e| kp_d_tag(e).as_deref() == Some(tracked.d_tag.as_str()))
+            },
+        )
+        .await;
+        let replacement = served
+            .iter()
+            .find(|e| kp_d_tag(e).as_deref() == Some(tracked.d_tag.as_str()))
+            .expect("the replacement is served");
+        assert_ne!(
+            replacement.content, legacy_event.content,
+            "the retired coordinate's package must NOT have been re-advertised \
+             here — the row that named it could not be read"
+        );
+
+        let deletions = fetch_until(
+            author,
+            Kind::EventDeletion,
+            &url,
+            "the orphan's retraction",
+            |evs| !evs.is_empty(),
+        )
+        .await;
+        assert!(deletes_slot(&deletions[0], author, &legacy_d));
+        assert!(!deletes_slot(&deletions[0], author, &tracked.d_tag));
+
+        relay.shutdown();
+    }
+
+    /// TC-11 — the crash between the replacement's relay ACK and the local
+    /// record: the next tick must ADOPT what is already published, not mint a
+    /// second slot (which would orphan the first, along with the material only
+    /// its tracking row can age out).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc11_an_already_published_replacement_is_adopted_via_real_ffi() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let relay = MockRelay::run().await.expect("start MockRelay");
+        let url = relay.url().await.to_string();
+        let own = vec![url.clone()];
+
+        let keys = Keys::generate();
+        let author = keys.public_key();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("slot_adopt");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        circle
+            .add_user_relay(url.clone(), RelayTypeFfi::Nip65)
+            .await
+            .expect("register own NIP-65 relay");
+
+        let legacy_d = legacy_slot_id();
+        let (legacy_event, tracked_bytes) =
+            seed_pre_fix_install(&relay_mgr, &circle, &keys, &own, &legacy_d).await;
+
+        // The state a crash right after the ACK leaves: the replacement is on
+        // the relay, carrying the tracked package, and nothing local knows.
+        let replacement = haven_core::relay::maintenance::build_kp_slot_repoint_event(
+            &keys,
+            &tracked_bytes,
+            &own,
+        )
+        .expect("build the replacement");
+        relay_mgr
+            .inner
+            .publish_event(&replacement.event, &own)
+            .await
+            .expect("seed the already-published replacement");
+
+        let outcome = circle_maintain(&relay_mgr, &circle, secret).await;
+        assert_eq!(
+            outcome.action,
+            KpMaintenanceActionFfi::SeededD,
+            "the published replacement must be ADOPTED, not republished"
+        );
+        assert_eq!(
+            outcome.relays_healed, 0,
+            "adoption is local bookkeeping — no KeyPackage is published"
+        );
+        assert!(outcome.retired_malformed_slot);
+        assert_eq!(
+            circle
+                .inner
+                .latest_canonical_d_tag()
+                .expect("read tracked slot"),
+            Some(replacement.d_tag.clone()),
+            "tracking must point at the slot that is already published"
+        );
+
+        let served = fetch_by_kind(author, Kind::Custom(30443), &url).await;
+        let conformant: Vec<_> = served
+            .iter()
+            .filter(|e| {
+                kp_d_tag(e)
+                    .as_deref()
+                    .is_some_and(haven_core::relay::maintenance::is_conformant_slot_id)
+            })
+            .collect();
+        assert_eq!(
+            conformant.len(),
+            1,
+            "adoption must not mint a SECOND conformant slot — the orphan it \
+             would leave is material no tracking row could ever purge"
+        );
+        assert_eq!(conformant[0].id, replacement.event.id);
+
+        let deletions = fetch_until(
+            author,
+            Kind::EventDeletion,
+            &url,
+            "the orphan's retraction after adoption",
+            |evs| !evs.is_empty(),
+        )
+        .await;
+        assert!(deletes_slot(&deletions[0], author, &legacy_d));
+        assert!(!deletes_slot(&deletions[0], author, &replacement.d_tag));
+        // The seeded legacy event is what the `e` tag names, so a relay that
+        // only indexes deletions by id still drops it.
+        assert!(deletions[0].tags.iter().any(|t| {
+            let s = t.as_slice();
+            s.len() >= 2 && s[0] == "e" && s[1] == legacy_event.id.to_hex()
+        }));
+
+        relay.shutdown();
+    }
+
+    /// TC-12 — the crash between the retraction and the sentinel (equally: a
+    /// relay that was unreachable while the migration ran, and came back still
+    /// serving the orphan). The account is already conformant, so the resume
+    /// must scrub the orphan WITHOUT publishing another KeyPackage.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc12_a_conformant_account_scrubs_a_leftover_orphan_via_real_ffi() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let relay = MockRelay::run().await.expect("start MockRelay");
+        let url = relay.url().await.to_string();
+        let own = vec![url.clone()];
+
+        let keys = Keys::generate();
+        let author = keys.public_key();
+        let secret = secret_bytes(&keys);
+        let dir = DataDir::new("slot_leftover");
+        let circle =
+            CircleManagerFfi::new(dir.as_str(), secret.clone()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        circle
+            .add_user_relay(url.clone(), RelayTypeFfi::Nip65)
+            .await
+            .expect("register own NIP-65 relay");
+
+        // The state an interrupted run leaves behind, assembled with production
+        // builders and NO tick: a conformant slot published and tracked …
+        let live = haven_core::relay::maintenance::build_kp_maintenance_events(
+            circle.inner.session(),
+            &keys,
+            &own,
+            None,
+            None,
+        )
+        .await
+        .expect("mint the conformant slot");
+        relay_mgr
+            .inner
+            .publish_event(&live.event, &own)
+            .await
+            .expect("publish the conformant slot");
+        circle
+            .inner
+            .record_published_key_package(&haven_core::circle::PublishedKeyPackageRow {
+                event_id: live.event.id.to_hex(),
+                d_tag: live.d_tag.clone(),
+                key_package: live.key_package.bytes().to_vec(),
+                created_at: i64::try_from(live.event.created_at.as_secs()).unwrap(),
+            })
+            .expect("track the conformant slot");
+        let live_d = live.d_tag.clone();
+        let live_id = live.event.id;
+
+        // … and an orphan the run never managed to scrub, with the sentinel
+        // still unwritten, which is precisely why it must not hide it.
+        let legacy_d = legacy_slot_id();
+        let orphan = haven_core::relay::maintenance::build_kp_maintenance_events(
+            circle.inner.session(),
+            &keys,
+            &own,
+            Some(&legacy_d),
+            None,
+        )
+        .await
+        .expect("mint into the legacy slot");
+        relay_mgr
+            .inner
+            .publish_event(&orphan.event, &own)
+            .await
+            .expect("seed the leftover orphan");
+        assert!(
+            !circle
+                .inner
+                .kp_slot_retirement_done()
+                .expect("sentinel readable"),
+            "precondition: the interrupted run never latched the sentinel"
+        );
+
+        let outcome = circle_maintain(&relay_mgr, &circle, secret).await;
+        assert_eq!(
+            outcome.action,
+            KpMaintenanceActionFfi::AlreadyHealthy,
+            "the account is already conformant — nothing needs publishing"
+        );
+        assert_eq!(outcome.relays_healed, 0);
+        assert!(
+            outcome.retired_malformed_slot,
+            "scrubbing the leftover orphan completes the migration"
+        );
+
+        let deletions = fetch_until(
+            author,
+            Kind::EventDeletion,
+            &url,
+            "the leftover orphan's retraction",
+            |evs| !evs.is_empty(),
+        )
+        .await;
+        assert!(deletes_slot(&deletions[0], author, &legacy_d));
+        assert!(
+            !deletes_slot(&deletions[0], author, &live_d),
+            "the live slot must never be addressed by a retraction"
+        );
+
+        // No KeyPackage was republished: the account's live event is untouched.
+        let served = fetch_by_kind(author, Kind::Custom(30443), &url).await;
+        assert!(
+            served.iter().any(|e| e.id == live_id),
+            "the live slot's event must be exactly the one already published"
+        );
+        assert_eq!(
+            circle
+                .inner
+                .latest_canonical_d_tag()
+                .expect("read tracked slot"),
+            Some(live_d),
+            "a retraction-only tick must not move the tracked slot"
+        );
+
         relay.shutdown();
     }
 

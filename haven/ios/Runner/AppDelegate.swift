@@ -28,6 +28,11 @@ import UIKit
   // during a background SLC relaunch.
   private lazy var slcHandler: HavenSLCHandler = HavenSLCHandler(bgTaskHandler: bgTaskHandler)
 
+  // CoreLocation background session objects (CLBackgroundActivitySession /
+  // CLServiceSession). Retained for the app's lifetime: DEALLOCATION
+  // INVALIDATES the held sessions, ending background location access.
+  private let backgroundSessionHandler = HavenBackgroundSessionHandler()
+
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
@@ -50,6 +55,9 @@ import UIKit
 
       // M7-D: Register the SLC catch-up channel (strong channel capture).
       slcHandler.register(with: messenger)
+
+      // Register the background-session arm/disarm/status channel.
+      backgroundSessionHandler.register(with: messenger)
     }
 
     let result = super.application(application, didFinishLaunchingWithOptions: launchOptions)
@@ -87,7 +95,24 @@ import UIKit
       bgTaskHandler.scheduleNextCatchup()
     }
 
+    // Arm the CoreLocation background sessions SYNCHRONOUSLY, on BOTH launch
+    // branches: a session held when the app was previously terminated can be
+    // retaken only for a few seconds after a background relaunch, and a
+    // normal-launch session simply stays inactive until foreground. The
+    // handler re-reads the background-sharing consent predicate and disarms
+    // when it is off.
+    backgroundSessionHandler.arm()
+
     return result
+  }
+
+  override func applicationWillEnterForeground(_ application: UIApplication) {
+    super.applicationWillEnterForeground(application)
+    // Re-arm on every foreground return: covers a toggle-enable whose Dart
+    // arm call raced engine teardown, and drops a held .always service
+    // session if authorization was downgraded in Settings while backgrounded
+    // (the handler checks both). Idempotent no-op otherwise.
+    backgroundSessionHandler.arm()
   }
 
   override func applicationDidEnterBackground(_ application: UIApplication) {

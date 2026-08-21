@@ -781,7 +781,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeDetailExpiry =>
-      'Haven, aktarıcılardan konum mesajlarını yaklaşık dört dakika sonra silmelerini ister. Bu istek yalnızca bir tavsiyedir: bir aktarıcı onları daha uzun süre tutabilir. Bu geçerlilik süresi yalnızca konum güncellemelerinde bulunur; dolayısıyla bir aktarıcı, sürenin bulunmayışına bakarak bir üyelik değişikliğini konum güncellemesinden ayırt edebilir. Davetlerin ise hiç geçerlilik süresi yoktur; gelen kutusu aktarıcınızda süresiz olarak kalabilirler.';
+      'Haven, aktarıcılardan konum mesajlarını en geç yaklaşık dört dakika sonra silmelerini ister; çevreyi oluşturan başka bir uygulama daha kısa bir süre belirlediyse bu süre kısalır. Bu istek yalnızca bir tavsiyedir: bir aktarıcı onları daha uzun süre tutabilir. Telefonunuzun gönderdiği mesajlar arasında bu geçerlilik süresi yalnızca konum güncellemelerinde bulunur; dolayısıyla bir aktarıcı, bu süreyi taşımayan bir mesajınızın konum güncellemesi değil, çevrenin üye listesinde ya da ayarlarında bir değişiklik olduğunu anlayabilir. Davetlerin ise hiç geçerlilik süresi yoktur; gelen kutusu aktarıcınızda süresiz olarak kalabilirler.';
 
   @override
   String get privacyWhatOthersSeeDetailOnDevice =>
@@ -1362,7 +1362,77 @@ class AppLocalizationsTr extends AppLocalizations {
   }
 
   @override
-  String get circleDetailsRelaysHeading => 'Bu çevre için aktarıcılar';
+  String circleDetailsMetaWithExpiry(String meta, String expiry) {
+    return '$meta · geçerlilik $expiry';
+  }
+
+  @override
+  String circleDetailsExpiryMinutesShort(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$countString dk',
+      one: '$countString dk',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpirySecondsShort(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$countString sn',
+      one: '$countString sn',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpiryMinutesLong(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'yaklaşık $countString dakika',
+      one: 'yaklaşık $countString dakika',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpirySecondsLong(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$countString saniye',
+      one: '$countString saniye',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpirySemantics(String meta, String expiry) {
+    return '$meta. Haven, bu çevreye gönderdiğiniz konum güncellemelerini aktarıcıların $expiry sonra silmesini ister.';
+  }
+
+  @override
+  String get circleDetailsRelaysHeading => 'Çevrenin aktarıcıları';
 
   @override
   String get circleDetailsNoRelays => '(kayıtlı yok)';

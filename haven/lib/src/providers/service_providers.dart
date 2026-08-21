@@ -25,6 +25,7 @@ import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/clock_skew_detector.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/ios_background_session_service.dart';
 import 'package:haven/src/services/ios_location_auth_service.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/location_settings_launcher.dart';
@@ -97,6 +98,15 @@ final locationSettingsLauncherProvider = Provider<LocationSettingsLauncher>((
 final iosLocationAuthServiceProvider = Provider<IosLocationAuthService>((ref) {
   return createIosLocationAuthService();
 });
+
+/// Provides the iOS CoreLocation background session bridge.
+///
+/// Real `MethodChannel`-backed implementation on iOS; a no-op on every other
+/// platform. Override in tests with a fake to assert the arm/disarm calls.
+final iosBackgroundSessionServiceProvider =
+    Provider<IosBackgroundSessionService>((ref) {
+      return createIosBackgroundSessionService();
+    });
 
 /// Exposes the current iOS location authorization status.
 ///

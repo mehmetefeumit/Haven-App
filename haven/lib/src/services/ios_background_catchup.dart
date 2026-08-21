@@ -86,6 +86,7 @@ import 'package:flutter/services.dart';
 
 import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/services/catchup_service.dart';
+import 'package:haven/src/services/ios_background_session_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // ---------------------------------------------------------------------------
@@ -247,4 +248,13 @@ Future<void> cancelNativeSchedulers() async {
   } on Object catch (e) {
     debugPrint('[iOSCatchup] cancelAllBGTasks failed: ${e.runtimeType}');
   }
+
+  // Release the CoreLocation background sessions
+  // (HavenBackgroundSessionHandler). Here — not only in
+  // BackgroundSharingNotifier.setEnabled — so EVERY teardown caller of
+  // disableBackgroundScheduling (identity deletion included, which keeps the
+  // toggle pref) releases the OS keep-alive; without this, deletion left the
+  // held session alive and every later launch re-armed it for an account
+  // that no longer exists. The service swallows and logs channel errors.
+  await const MethodChannelIosBackgroundSessionService().disarm();
 }

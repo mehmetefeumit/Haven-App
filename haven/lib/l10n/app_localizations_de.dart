@@ -790,7 +790,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeDetailExpiry =>
-      'Haven bittet die Relays, Standortnachrichten nach etwa vier Minuten zu verwerfen. Diese Bitte ist nur ein Hinweis: Ein Relay darf die Nachrichten auch länger behalten. Nur Standortnachrichten tragen dieses Verfallsdatum; fehlt es, kann ein Relay daran eine Mitgliederänderung von einer Standortnachricht unterscheiden. Einladungen haben überhaupt kein Verfallsdatum und können unbegrenzt auf deinem Posteingangs-Relay liegen bleiben.';
+      'Haven bittet die Relays, Standortnachrichten spätestens nach etwa vier Minuten zu verwerfen – oder früher, wenn der Kreis von einer anderen App erstellt wurde, die eine kürzere Verfallszeit vorgegeben hat. Diese Bitte ist nur ein Hinweis: Ein Relay darf die Nachrichten auch länger behalten. Von den Nachrichten, die dein Handy sendet, tragen nur Standortnachrichten dieses Verfallsdatum; fehlt es, erkennt ein Relay statt einer Standortnachricht eine Änderung an der Mitgliederliste oder den Einstellungen des Kreises. Einladungen haben überhaupt kein Verfallsdatum und können unbegrenzt auf deinem Posteingangs-Relay liegen bleiben.';
 
   @override
   String get privacyWhatOthersSeeDetailOnDevice =>
@@ -1376,6 +1376,76 @@ class AppLocalizationsDe extends AppLocalizations {
     final String epochString = epochNumberFormat.format(epoch);
 
     return '$members · Epoche $epochString';
+  }
+
+  @override
+  String circleDetailsMetaWithExpiry(String meta, String expiry) {
+    return '$meta · Verfall nach $expiry';
+  }
+
+  @override
+  String circleDetailsExpiryMinutesShort(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$countString Min.',
+      one: '$countString Min.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpirySecondsShort(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$countString Sek.',
+      one: '$countString Sek.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpiryMinutesLong(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'etwa $countString Minuten',
+      one: 'etwa $countString Minute',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpirySecondsLong(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$countString Sekunden',
+      one: '$countString Sekunde',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpirySemantics(String meta, String expiry) {
+    return '$meta. Haven bittet die Relays, die Standortnachrichten, die du an diesen Kreis sendest, nach $expiry zu verwerfen.';
   }
 
   @override

@@ -776,7 +776,7 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeDetailExpiry =>
-      'Haven रिले से कहता है कि स्थान संदेशों को करीब चार मिनट बाद हटा दें। यह कहना केवल एक अनुरोध है: कोई रिले उन्हें और देर तक रख सकता है। यह समय-सीमा सिर्फ़ स्थान अपडेट पर लगती है, इसलिए जिस संदेश पर यह समय-सीमा नहीं होती, उसे देखकर ही पता चल जाता है कि वह स्थान अपडेट नहीं, बल्कि सदस्यता में हुआ कोई बदलाव है। निमंत्रणों पर कोई समय-सीमा ही नहीं होती, और वे आपके इनबॉक्स रिले पर अनिश्चित काल तक पड़े रह सकते हैं।';
+      'Haven रिले से कहता है कि स्थान संदेशों को ज़्यादा से ज़्यादा करीब चार मिनट बाद हटा दें — और अगर सर्कल किसी ऐसे दूसरे ऐप ने बनाया है जिसने इससे कम समय माँगा है, तो उससे भी जल्दी। यह कहना केवल एक अनुरोध है: कोई रिले उन्हें और देर तक रख सकता है। आपका फ़ोन अपने भेजे संदेशों में यह समय-सीमा सिर्फ़ स्थान अपडेट पर लगाता है, इसलिए उसके जिस संदेश पर यह समय-सीमा नहीं होती, उसे देखकर ही पता चल जाता है कि वह स्थान अपडेट नहीं, बल्कि सर्कल की सदस्यता या सेटिंग में हुआ कोई बदलाव है। निमंत्रणों पर कोई समय-सीमा ही नहीं होती, और वे आपके इनबॉक्स रिले पर अनिश्चित काल तक पड़े रह सकते हैं।';
 
   @override
   String get privacyWhatOthersSeeDetailOnDevice =>
@@ -1356,6 +1356,76 @@ class AppLocalizationsHi extends AppLocalizations {
     final String epochString = epochNumberFormat.format(epoch);
 
     return '$members · एपोक $epochString';
+  }
+
+  @override
+  String circleDetailsMetaWithExpiry(String meta, String expiry) {
+    return '$meta · समय-सीमा $expiry';
+  }
+
+  @override
+  String circleDetailsExpiryMinutesShort(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$countString मिनट',
+      one: '$countString मिनट',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpirySecondsShort(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$countString सेकंड',
+      one: '$countString सेकंड',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpiryMinutesLong(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'करीब $countString मिनट',
+      one: 'करीब $countString मिनट',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpirySecondsLong(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$countString सेकंड',
+      one: '$countString सेकंड',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpirySemantics(String meta, String expiry) {
+    return '$meta। Haven रिले से कहता है कि आप इस सर्कल में जो स्थान अपडेट भेजते हैं, उन्हें $expiry बाद हटा दें।';
   }
 
   @override

@@ -1231,6 +1231,19 @@ class _DimmableBox extends StatelessWidget {
   }
 }
 
+/// Splits a relay-expiry window into the unit and count that both the visible
+/// segment and its spoken expansion render.
+///
+/// Under a minute is reported exactly, because the whole reason the segment
+/// exists is a foreign circle whose window is seconds long, and "under a
+/// minute" would hide how short. At or above a minute it rounds to the nearest
+/// minute, which is what makes Haven's own 228 s window read as the "about four
+/// minutes" the privacy copy states. The value is bounded by Haven's own
+/// window, so it never reaches hours.
+({bool minutes, int count}) _expiryUnit(int secs) => secs < 60
+    ? (minutes: false, count: secs)
+    : (minutes: true, count: (secs + 30) ~/ 60);
+
 /// Read-only details view for a circle, presented as a bottom sheet
 /// from the circle header's info button. Owns the destructive
 /// Leave Circle action: button sits below the relay list and closes
@@ -1375,6 +1388,34 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
     final membersLine = epoch == null
         ? memberCount
         : l10n.circleDetailsMembersWithEpoch(memberCount, epoch);
+    // Same dim line, same degradation, one more diagnostic: how long relays are
+    // asked to keep the location THIS device sends here. Almost always "4 min"
+    // and therefore noise — but a circle created by another Marmot client can
+    // declare a window of seconds, which Haven honours, and without this the
+    // user sees sharing that silently does not work.
+    // A blocked circle is skipped outright: it still has an MLS group, so the
+    // accessor answers with Haven's own window — "about four minutes" for a
+    // circle nothing can be sent to (Rule 8, same reason "Add member" is
+    // withheld above).
+    final expirySecs = isBlocked
+        ? null
+        : ref.watch(circleLocationExpiryProvider(circle)).valueOrNull;
+    final expiry = expirySecs == null ? null : _expiryUnit(expirySecs);
+    final metaLine = expiry == null
+        ? membersLine
+        : l10n.circleDetailsMetaWithExpiry(
+            membersLine,
+            expiry.minutes
+                ? l10n.circleDetailsExpiryMinutesShort(expiry.count)
+                : l10n.circleDetailsExpirySecondsShort(expiry.count),
+          );
+    final subtitle = Text(
+      metaLine,
+      key: WidgetKeys.circleDetailsMembers,
+      style: theme.textTheme.bodySmall?.copyWith(
+        color: scheme.onSurfaceVariant,
+      ),
+    );
     // Scrolls rather than clips. This column is the whole modal body, and it
     // grows with text scale, translation length and relay count — at 1.5x-2.0x
     // with a few relays it exceeds a short phone's usable height, which
@@ -1407,13 +1448,24 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
           ),
           Text(l10n.circleDetailsTitle, style: theme.textTheme.titleMedium),
           const SizedBox(height: HavenSpacing.sm),
-          Text(
-            membersLine,
-            key: WidgetKeys.circleDetailsMembers,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: scheme.onSurfaceVariant,
+          if (expiry == null)
+            subtitle
+          else
+            // "· 4 min" is meaningless spoken aloud, so the whole line is
+            // re-announced as one sentence naming what the number is and whose
+            // messages it governs. The visible text is excluded rather than
+            // merged: a reader hearing both would get the abbreviation twice.
+            Semantics(
+              container: true,
+              excludeSemantics: true,
+              label: l10n.circleDetailsExpirySemantics(
+                membersLine,
+                expiry.minutes
+                    ? l10n.circleDetailsExpiryMinutesLong(expiry.count)
+                    : l10n.circleDetailsExpirySecondsLong(expiry.count),
+              ),
+              child: subtitle,
             ),
-          ),
           const SizedBox(height: HavenSpacing.lg),
           Text(
             l10n.circleDetailsRelaysHeading,
@@ -1423,13 +1475,23 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
           if (circle.relays.isEmpty)
             Text(l10n.circleDetailsNoRelays, style: theme.textTheme.bodySmall)
           else
+            // Dense and flush on purpose, and load-bearing: these rows are
+            // read-only, so their default 56 dp interactive height and the
+            // card's 4 dp inset buy nothing, while the 32 dp they cost is
+            // more than the whole margin this sheet has on a 360x690 phone
+            // once the status bar is taken off it — at the default density
+            // the body outgrows the modal in six locales, the inner scroll
+            // view then swallows the drag, and the sheet stops being
+            // dismissable by dragging it (circle_details_layout_test.dart).
             Card(
+              margin: EdgeInsets.zero,
               child: Column(
                 children: [
                   for (var i = 0; i < circle.relays.length; i++)
                     Column(
                       children: [
                         ListTile(
+                          visualDensity: VisualDensity.compact,
                           leading: Icon(
                             LucideIcons.cloud,
                             color: scheme.onSurfaceVariant,

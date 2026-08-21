@@ -10,8 +10,9 @@
 //!
 //! * [`key_package`] — `KeyPackageMaintenance` (Dark Matter DM-2b): stable-`d`
 //!   reuse/rotation and republish-if-missing for the user's own kind-30443
-//!   `KeyPackage`, plus the one-time cutover retraction of a legacy 443 twin and
-//!   the abolished kind-10051 relay list. This module holds the pure,
+//!   `KeyPackage`, the one-time retirement of a pre-width-fix (malformed) `d`
+//!   slot, plus the one-time cutover retraction of a legacy 443 twin and the
+//!   abolished kind-10051 relay list. This module holds the pure,
 //!   unit-testable decision + event-building logic; the network probe / publish
 //!   orchestration is composed at the FFI boundary (which owns the identity
 //!   secret and the `RelayManager`).
@@ -35,10 +36,11 @@ pub use kp_lifetime::{
 
 pub use key_package::{
     build_key_package_relay_list_retraction, build_kp_maintenance_events,
-    build_kp_maintenance_events_reusing, build_legacy_key_package_retraction,
-    decide_kp_maintenance, monotonic_kp_created_at, KpMaintenanceAction, KpMaintenanceDecision,
-    KpMaintenanceEvents, KpMaintenanceOutcome, RelayKpEntry, RelayKpPerRelay, RelayKpSnapshot,
-    KIND_MARMOT_KEY_PACKAGE,
+    build_kp_maintenance_events_reusing, build_kp_slot_repoint_event, build_kp_slot_retraction,
+    build_legacy_key_package_retraction, decide_kp_maintenance, decide_kp_slot_retirement,
+    find_adoptable_kp_slot, is_conformant_slot_id, kp_event_d_tag, monotonic_kp_created_at,
+    KpMaintenanceAction, KpMaintenanceDecision, KpMaintenanceEvents, KpMaintenanceOutcome,
+    KpSlotRetirement, RelayKpEntry, RelayKpPerRelay, RelayKpSnapshot, KIND_MARMOT_KEY_PACKAGE,
 };
 pub use relay_list::{
     decide_relay_list, list_relay_healthy, RelayListAction, RelayListCategoryOutcome,

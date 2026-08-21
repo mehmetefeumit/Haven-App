@@ -784,7 +784,7 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get privacyWhatOthersSeeDetailExpiry =>
-      'Haven просит реле удалять сообщения с местоположением примерно через четыре минуты. Это только просьба: реле вправе хранить их дольше. Такой срок указывается только у обновлений местоположения, поэтому по его отсутствию реле может отличить изменение состава круга от обновления местоположения. У приглашений срока жизни нет вовсе, и они могут лежать на вашем входящем реле неограниченно долго.';
+      'Haven просит реле удалять сообщения с местоположением не позже чем примерно через четыре минуты — или раньше, если круг создан в другом приложении, которое запросило меньший срок. Это только просьба: реле вправе хранить их дольше. Среди сообщений, которые отправляет ваш телефон, такой срок указывается только у обновлений местоположения, поэтому по отсутствию этого срока реле может отличить изменение состава или настроек круга от обновления местоположения. У приглашений срока жизни нет вовсе, и они могут лежать на вашем входящем реле неограниченно долго.';
 
   @override
   String get privacyWhatOthersSeeDetailOnDevice =>
@@ -1379,6 +1379,84 @@ class AppLocalizationsRu extends AppLocalizations {
     final String epochString = epochNumberFormat.format(epoch);
 
     return '$members · эпоха $epochString';
+  }
+
+  @override
+  String circleDetailsMetaWithExpiry(String meta, String expiry) {
+    return '$meta · срок $expiry';
+  }
+
+  @override
+  String circleDetailsExpiryMinutesShort(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$countString мин',
+      many: '$countString мин',
+      few: '$countString мин',
+      one: '$countString мин',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpirySecondsShort(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '$countString сек',
+      many: '$countString сек',
+      few: '$countString сек',
+      one: '$countString сек',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpiryMinutesLong(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'примерно через $countString минуты',
+      many: 'примерно через $countString минут',
+      few: 'примерно через $countString минуты',
+      one: 'примерно через $countString минуту',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpirySecondsLong(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'через $countString секунды',
+      many: 'через $countString секунд',
+      few: 'через $countString секунды',
+      one: 'через $countString секунду',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String circleDetailsExpirySemantics(String meta, String expiry) {
+    return '$meta. Haven просит реле $expiry удалять обновления местоположения, которые вы отправляете в этот круг.';
   }
 
   @override
