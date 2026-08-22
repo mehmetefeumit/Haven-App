@@ -72,7 +72,7 @@ use rand::Rng;
 use super::assignment::{assigned_relay_for_attempt, ProfileRelaySalt};
 use super::config::{
     PROFILE_AUTHOR_FETCH_TIMEOUT, PROFILE_BATCH_DEADLINE, PROFILE_INTER_REQ_JITTER_MS,
-    PROFILE_MAX_INFLIGHT_RELAYS, PROFILE_PER_AUTHOR_LIMIT,
+    PROFILE_MAX_INFLIGHT_RELAYS, PROFILE_OWN_FETCH_BUDGET, PROFILE_PER_AUTHOR_LIMIT,
 };
 use super::error::Result;
 use super::parse::parse_newest_metadata;
@@ -132,6 +132,119 @@ pub async fn fetch_profiles_assigned(
         return Ok(AssignedFetch::default());
     }
     Ok(run_cycle(relay, requests, salt, pool, now, PROFILE_BATCH_DEADLINE).await)
+}
+
+/// Reads the local user's OWN newest kind-0 back from EVERY relay in `pool`,
+/// concurrently.
+///
+/// Returns the newest answer received and whether any relay actually completed
+/// a `REQ`. The second value is load-bearing: a caller may only stamp a miss
+/// when something was really asked, the same rule that keeps deadline-dropped
+/// authors unstamped in [`fetch_profiles_assigned`].
+///
+/// # Why the whole pool, not the salted assignment
+///
+/// The per-author assignment exists so no single relay learns a slice of the
+/// user's social graph. Neither half applies to our own profile: it is
+/// PUBLISHED to every pool relay (a peer's assignment salt is private to their
+/// install, so we cannot know which one they read us from), and every one of
+/// those relays therefore already holds it. Reading it back from one assigned
+/// relay would only risk merging onto a stale copy and silently dropping fields
+/// another client wrote.
+///
+/// Each relay is queried through the ordinary assigned-fetch entry point with a
+/// ONE-relay pool, which pins the target while keeping that path's guarantees:
+/// one author per `REQ`, a defensive per-author limit, and no signer (so a
+/// NIP-42 AUTH challenge can never be answered). The whole read is bounded by
+/// [`PROFILE_OWN_FETCH_BUDGET`]; whatever has not answered by then is simply not
+/// merged, and the newest `created_at` among the answers wins.
+///
+/// Fails closed on an empty pool: `(None, false)`, never a fallback relay.
+#[must_use]
+pub async fn fetch_own_profile(
+    relay: &RelayManager,
+    own_pk: PublicKey,
+    salt: &ProfileRelaySalt,
+    pool: &[String],
+    now: i64,
+) -> (Option<CachedProfile>, bool) {
+    if pool.is_empty() {
+        return (None, false);
+    }
+    let requests = [(own_pk, 0u8)];
+    // Materialized BEFORE the drivers are built: each driver borrows its own
+    // one-relay slice for the whole call, so the backing array has to outlive
+    // the stream rather than be a temporary inside the mapping.
+    let targets: Vec<[String; 1]> = pool.iter().map(|url| [url.clone()]).collect();
+
+    let read = Mutex::new(OwnRead::default());
+    {
+        // Built eagerly with `Iterator::map` for the same Send-generality
+        // reason as the per-relay drivers in `run_cycle` (see the comment
+        // there): a closure returning a borrowing future is `Send` only for
+        // *some* lifetime, which every `flutter_rust_bridge` async caller
+        // rejects at compile time.
+        let drivers: Vec<_> = targets
+            .iter()
+            .map(|one| read_own_from_relay(relay, &requests, salt, one, now, &read))
+            .collect();
+        let work = stream::iter(drivers)
+            .buffer_unordered(PROFILE_MAX_INFLIGHT_RELAYS)
+            .for_each(|()| std::future::ready(()));
+
+        if tokio::time::timeout(PROFILE_OWN_FETCH_BUDGET, work)
+            .await
+            .is_err()
+        {
+            log::debug!("[profile] own-profile read hit its budget; using what arrived");
+        }
+    }
+
+    let read = read.into_inner().unwrap_or_else(PoisonError::into_inner);
+    (read.newest, read.settled)
+}
+
+/// Newest-wins accumulator for one own-profile read across the pool.
+#[derive(Debug, Default)]
+struct OwnRead {
+    /// The freshest kind-0 any relay has answered with so far.
+    newest: Option<CachedProfile>,
+    /// Whether at least one relay completed its `REQ`, either way.
+    settled: bool,
+}
+
+/// Asks ONE relay for the own profile and folds its answer into `read`.
+///
+/// A relay that cannot be used at all (an `Err` from the fetch — pre-`REQ`
+/// conditions only) contributes nothing and, critically, does not deny the
+/// read: the other relays' answers still stand.
+async fn read_own_from_relay(
+    relay: &RelayManager,
+    requests: &[(PublicKey, u8)],
+    salt: &ProfileRelaySalt,
+    target: &[String],
+    now: i64,
+    read: &Mutex<OwnRead>,
+) {
+    let Ok(outcome) = fetch_profiles_assigned(relay, requests, salt, target, now).await else {
+        return;
+    };
+    // No flag says "this relay answered": a completed `REQ` is exactly one that
+    // produced a resolution or a miss.
+    let settled = !outcome.resolved.is_empty() || !outcome.missed.is_empty();
+    let candidate = outcome.resolved.into_iter().next();
+
+    let mut state = read.lock().unwrap_or_else(PoisonError::into_inner);
+    state.settled |= settled;
+    if let Some(candidate) = candidate {
+        let newer = state
+            .newest
+            .as_ref()
+            .is_none_or(|current| candidate.event_created_at > current.event_created_at);
+        if newer {
+            state.newest = Some(candidate);
+        }
+    }
 }
 
 /// One relay and the authors assigned to it for this cycle.
@@ -444,6 +557,55 @@ mod tests {
                 )
             })
         }
+    }
+
+    /// Admits every `REQ` and counts it, relay-side, at admission.
+    ///
+    /// Counting before the filter is evaluated is what lets a zero mean *never
+    /// asked*: a test that inspected returned events could not tell that from
+    /// "asked and had nothing".
+    #[derive(Debug)]
+    struct CountEveryQuery {
+        seen: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl nostr_relay_builder::prelude::QueryPolicy for CountEveryQuery {
+        fn admit_query<'a>(
+            &'a self,
+            _query: &'a Filter,
+            _addr: &'a std::net::SocketAddr,
+        ) -> nostr::util::BoxedFuture<'a, nostr_relay_builder::prelude::PolicyResult> {
+            self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { nostr_relay_builder::prelude::PolicyResult::Accept })
+        }
+    }
+
+    /// Starts an in-process relay counting the `REQ`s it is asked to serve.
+    /// The returned relay MUST be kept alive for the whole test.
+    async fn counting_relay() -> (
+        nostr_relay_builder::prelude::LocalRelay,
+        String,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let relay = nostr_relay_builder::prelude::LocalRelay::new(
+            nostr_relay_builder::prelude::RelayBuilder::default().query_policy(CountEveryQuery {
+                seen: std::sync::Arc::clone(&seen),
+            }),
+        );
+        relay.run().await.expect("local relay runs");
+        let url = relay.url().await.to_string();
+        (relay, url, seen)
+    }
+
+    /// A loopback URL that refuses every connection: reserve an ephemeral port,
+    /// then drop the listener. Refusal is instant and deterministic — no sleep,
+    /// no race.
+    fn dead_relay_url() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+        format!("ws://127.0.0.1:{port}")
     }
 
     fn filter_json(author: &PublicKey) -> serde_json::Value {
@@ -763,6 +925,155 @@ mod tests {
         assert!(
             distinct.len() > 1,
             "a constant delay is not jitter — the regular inter-arrival period is exactly what it must destroy",
+        );
+    }
+
+    // ----------------------------------------------------------------------
+    // fetch_own_profile — the whole-pool read of our OWN kind-0.
+    //
+    // Every relay here is in-process or a reserved-but-closed loopback port, so
+    // nothing waits on wall-clock luck and no assertion is about elapsed time.
+    // ----------------------------------------------------------------------
+
+    /// Publishes `event` to `url` through the ordinary publish transport.
+    async fn seed(relay: &RelayManager, event: &Event, url: &str) {
+        relay
+            .publish_event(event, &[url.to_string()])
+            .await
+            .expect("the local relay accepts the seeded kind-0");
+    }
+
+    #[tokio::test]
+    async fn own_read_fails_closed_on_an_empty_pool() {
+        let relay = RelayManager::new();
+        let out = fetch_own_profile(&relay, authors_n(1)[0], &salt(), &[], 100).await;
+        assert!(out.0.is_none());
+        assert!(
+            !out.1,
+            "nothing was asked, so nothing may be treated as settled",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn own_read_is_not_denied_by_a_dead_relay() {
+        // Our own profile lives on every pool relay, so one relay that has left
+        // the network must not be able to hide it: the read would fall back to
+        // a stale local base and republish over whatever another client wrote.
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let live = nostr_relay_builder::prelude::LocalRelay::new(
+            nostr_relay_builder::prelude::RelayBuilder::default(),
+        );
+        live.run().await.expect("local relay runs");
+        let live_url = live.url().await.to_string();
+
+        let ks = keys_n(1);
+        let own = ks[0].public_key();
+        let relay = RelayManager::new();
+        seed(
+            &relay,
+            &kind0(&ks[0], r#"{"name":"still here"}"#, 1_000),
+            &live_url,
+        )
+        .await;
+
+        let pool = vec![dead_relay_url(), live_url];
+        let (newest, settled) = fetch_own_profile(&relay, own, &salt(), &pool, 42).await;
+
+        let newest = newest.expect("the live relay's copy must survive the dead one");
+        assert_eq!(newest.metadata.name(), Some("still here"));
+        assert_eq!(newest.pubkey_hex, own.to_hex());
+        assert!(settled, "a relay completed its REQ");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn own_read_takes_the_newest_across_relays() {
+        // Relays hold independent copies of a replaceable event, and a stale one
+        // is a perfectly valid answer to the REQ. Merging onto it would revert
+        // whatever the newer copy carries, so newest-`created_at` must win
+        // regardless of which relay answers first.
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let (_stale_relay, stale_url, _) = counting_relay().await;
+        let (_fresh_relay, fresh_url, _) = counting_relay().await;
+
+        let ks = keys_n(1);
+        let own = ks[0].public_key();
+        let relay = RelayManager::new();
+        seed(
+            &relay,
+            &kind0(&ks[0], r#"{"name":"old"}"#, 1_000),
+            &stale_url,
+        )
+        .await;
+        seed(
+            &relay,
+            &kind0(&ks[0], r#"{"name":"new"}"#, 2_000),
+            &fresh_url,
+        )
+        .await;
+
+        let (newest, settled) =
+            fetch_own_profile(&relay, own, &salt(), &[stale_url, fresh_url], 7).await;
+
+        let newest = newest.expect("both relays answered");
+        assert_eq!(
+            newest.metadata.name(),
+            Some("new"),
+            "the newest created_at across the pool must win",
+        );
+        assert_eq!(newest.event_created_at, 2_000);
+        assert!(settled);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn own_read_asks_every_pool_relay() {
+        // Reading our own profile from a SUBSET would merge onto whatever that
+        // subset happened to hold — silently dropping a field another client
+        // wrote to a relay we skipped. Counted relay-side, because a fetch that
+        // never reached a socket would satisfy any event-based assertion
+        // vacuously.
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let (_a, url_a, seen_a) = counting_relay().await;
+        let (_b, url_b, seen_b) = counting_relay().await;
+        let (_c, url_c, seen_c) = counting_relay().await;
+
+        let (newest, settled) = fetch_own_profile(
+            &RelayManager::new(),
+            authors_n(1)[0],
+            &salt(),
+            &[url_a, url_b, url_c],
+            100,
+        )
+        .await;
+
+        assert!(newest.is_none(), "no relay holds this author's kind-0");
+        assert!(settled, "every relay completed its REQ and had nothing");
+        for (label, seen) in [("a", &seen_a), ("b", &seen_b), ("c", &seen_c)] {
+            assert!(
+                seen.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+                "pool relay {label} was never asked for the own profile",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn own_read_reports_unsettled_when_no_req_completed() {
+        // `settled` gates miss-stamping, so it must mean "a relay really
+        // answered" and nothing weaker. A structurally unusable relay is the
+        // deterministic instance of that: the fetch fails before any REQ is
+        // issued. (An unREACHABLE relay is deliberately NOT this case — it
+        // settles as a miss, which is what advances the retry ladder.)
+        let out = fetch_own_profile(
+            &RelayManager::new(),
+            authors_n(1)[0],
+            &salt(),
+            &["not-a-relay-url".to_string()],
+            100,
+        )
+        .await;
+        assert!(out.0.is_none());
+        assert!(
+            !out.1,
+            "no REQ was issued, so nothing may be stamped as attempted",
         );
     }
 

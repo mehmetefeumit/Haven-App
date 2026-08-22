@@ -661,11 +661,54 @@ impl CircleStorage {
             CREATE INDEX IF NOT EXISTS idx_profiles_fetched
                 ON profiles(fetched_at);
 
+            -- Durable outbox for the local user's OWN kind-0: what has been
+            -- saved locally but not yet published, and how far the last publish
+            -- actually got. Keyed by pubkey (hex) like every other profile
+            -- table, with NO circle/group column.
+            --
+            -- The row is NEVER deleted while an identity lives — the wipe and
+            -- the retraction cancel RESET it in place. Deleting it would restart
+            -- `local_version` at 0, so a save made after the delete would look
+            -- older than a publish recorded before it and the compare-and-set in
+            -- `commit_profile_sync` would clear a pending edit it never
+            -- published.
+            --
+            -- Two coverage counters, because published and readable-by-every-
+            -- peer are different facts: `published_version` is the newest
+            -- version at least ONE relay acknowledged, `synced_version` the
+            -- newest version EVERY attempted relay acknowledged. A peer's
+            -- relay-assignment salt is private to their install, so an edit that
+            -- landed on some relays is still the old name for anyone assigned
+            -- elsewhere. Hence: pending = `local_version > synced_version`;
+            -- partial = pending AND `published_version >= local_version`.
+            --
+            -- `edits_json` is the accumulated `PendingEdits` set (see
+            -- crate::profile::outbox), `picture_staged` marks sanitized bytes
+            -- cached with an empty `url` awaiting a Blossom upload, and
+            -- `sync_attempts` / `next_retry_at` carry the persisted retry ladder
+            -- (crate::profile::PROFILE_SYNC_BACKOFF_SECS) so an auto-retry
+            -- trigger cannot re-dial the whole pool on every foreground.
+            CREATE TABLE IF NOT EXISTS profile_sync_state (
+                pubkey            TEXT PRIMARY KEY,
+                local_version     INTEGER NOT NULL DEFAULT 0,
+                synced_version    INTEGER NOT NULL DEFAULT 0,
+                published_version INTEGER NOT NULL DEFAULT 0,
+                edits_json        TEXT    NOT NULL DEFAULT '{}',
+                picture_staged    INTEGER NOT NULL DEFAULT 0,
+                sync_attempts     INTEGER NOT NULL DEFAULT 0,
+                next_retry_at     INTEGER NOT NULL DEFAULT 0
+            );
+
             -- Cached, re-encoded profile pictures. Keyed by pubkey (hex), again
             -- with NO circle/group column. `url` never crosses the FFI (D2);
             -- `sha256` is the raw-download content-address commitment;
             -- `canonical` (512px) and `thumbnail` (96px) are the render tiers,
             -- encrypted at rest by SQLCipher like every other page.
+            --
+            -- A row with an EMPTY `url` is a STAGED own picture: sanitized bytes
+            -- saved locally whose public URL does not exist yet because the
+            -- Blossom upload has not succeeded. `commit_profile_sync` re-stamps
+            -- the row with the real URL once it does.
             CREATE TABLE IF NOT EXISTS profile_pictures (
                 pubkey     TEXT PRIMARY KEY,
                 url        TEXT NOT NULL,

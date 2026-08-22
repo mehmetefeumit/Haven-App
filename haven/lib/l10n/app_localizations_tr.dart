@@ -1834,6 +1834,24 @@ class AppLocalizationsTr extends AppLocalizations {
       'Kaydetme başarısız oldu, tekrar deneyin';
 
   @override
+  String get profileSyncStatusSyncing =>
+      'Herkese açık profilinize eşitleniyor…';
+
+  @override
+  String get profileSyncStatusPartial =>
+      'Yayımlandı — bazı aktarıcılarla hâlâ eşitleniyor';
+
+  @override
+  String get profileSyncStatusSynced => 'Herkese açık profiliniz güncel';
+
+  @override
+  String get profileSyncStatusFailed => 'Henüz eşitlenemedi.';
+
+  @override
+  String get profileSyncStatusRetrySemantics =>
+      'Profilinizi yayımlamayı yeniden dene';
+
+  @override
   String keyDisplayCopiedToClipboard(String label) {
     return '$label panoya kopyalandı';
   }
@@ -1937,7 +1955,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get avatarPickerPhotoUpdated =>
-      'Fotoğraf güncellendi. Herkese açık Nostr profilinize yayımlandı.';
+      'Fotoğraf güncellendi. Herkese açık Nostr profilinizde yayımlanacak.';
 
   @override
   String get avatarPickerPhotoRemoved => 'Fotoğraf kaldırıldı.';

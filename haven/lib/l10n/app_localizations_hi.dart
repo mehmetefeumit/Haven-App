@@ -1830,6 +1830,24 @@ class AppLocalizationsHi extends AppLocalizations {
       'सहेजना विफल, फिर कोशिश करें';
 
   @override
+  String get profileSyncStatusSyncing =>
+      'आपकी सार्वजनिक प्रोफ़ाइल पर सिंक हो रहा है…';
+
+  @override
+  String get profileSyncStatusPartial =>
+      'प्रकाशित — कुछ रिले पर अभी भी सिंक हो रहा है';
+
+  @override
+  String get profileSyncStatusSynced => 'सार्वजनिक प्रोफ़ाइल अपडेट है';
+
+  @override
+  String get profileSyncStatusFailed => 'अभी तक सिंक नहीं हो सका।';
+
+  @override
+  String get profileSyncStatusRetrySemantics =>
+      'अपनी प्रोफ़ाइल प्रकाशित करने के लिए फिर कोशिश करें';
+
+  @override
   String keyDisplayCopiedToClipboard(String label) {
     return '$label क्लिपबोर्ड पर कॉपी किया गया';
   }
@@ -1934,7 +1952,7 @@ class AppLocalizationsHi extends AppLocalizations {
 
   @override
   String get avatarPickerPhotoUpdated =>
-      'फ़ोटो अपडेट हुई। आपकी सार्वजनिक Nostr प्रोफ़ाइल पर प्रकाशित।';
+      'फ़ोटो अपडेट हुई। यह आपकी सार्वजनिक Nostr प्रोफ़ाइल पर प्रकाशित होगी।';
 
   @override
   String get avatarPickerPhotoRemoved => 'फ़ोटो हटाई गई।';

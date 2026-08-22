@@ -25,6 +25,7 @@ import 'package:haven/src/widgets/common/directional_arrow.dart';
 import 'package:haven/src/widgets/common/disclosure_chevron.dart';
 import 'package:haven/src/widgets/identity/display_name_card.dart';
 import 'package:haven/src/widgets/identity/identity_photo_header.dart';
+import 'package:haven/src/widgets/identity/profile_sync_status_line.dart';
 import 'package:haven/src/widgets/identity/public_profile_notice.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -179,6 +180,15 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
         // (owner-directed 2026-07-16) — this is the single, standing
         // disclosure of that fact, placed next to both editable fields below.
         const PublicProfileNotice(),
+
+        // The own-profile publish-status line renders exactly ONCE, here —
+        // never inside the photo header above or the display-name card
+        // below, which would announce and animate the same underlying fact
+        // twice (see [ProfileSyncStatusLine]'s class doc).
+        if (publicProfilesEnabled) ...[
+          const SizedBox(height: HavenSpacing.sm),
+          const ProfileSyncStatusLine(),
+        ],
 
         const SizedBox(height: HavenSpacing.base),
 

@@ -1860,6 +1860,24 @@ class AppLocalizationsRu extends AppLocalizations {
       'Сохранить не удалось, попробуйте снова';
 
   @override
+  String get profileSyncStatusSyncing =>
+      'Синхронизируем с вашим публичным профилем…';
+
+  @override
+  String get profileSyncStatusPartial =>
+      'Опубликовано — часть реле ещё синхронизируется';
+
+  @override
+  String get profileSyncStatusSynced => 'Публичный профиль актуален';
+
+  @override
+  String get profileSyncStatusFailed => 'Пока не удалось синхронизировать.';
+
+  @override
+  String get profileSyncStatusRetrySemantics =>
+      'Повторить публикацию вашего профиля';
+
+  @override
   String keyDisplayCopiedToClipboard(String label) {
     return '$label скопировано в буфер обмена';
   }
@@ -1964,7 +1982,7 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get avatarPickerPhotoUpdated =>
-      'Фото обновлено. Опубликовано в вашем публичном профиле Nostr.';
+      'Фото обновлено. Будет опубликовано в вашем публичном профиле Nostr.';
 
   @override
   String get avatarPickerPhotoRemoved => 'Фото удалено.';

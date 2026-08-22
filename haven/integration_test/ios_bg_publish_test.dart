@@ -87,7 +87,7 @@
 /// indistinguishable from a passing one (CI_HARDENING_BACKLOG.md A3b).
 library;
 
-import 'dart:io' show Platform;
+import 'dart:io' show Directory, File, FileMode, Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -154,6 +154,30 @@ const String kSessionArmedMarker = '[bg-publish] SESSION_ARMED';
 /// never stand in for a completion proof — the shell's completion gate
 /// deliberately does not accept it.
 const String kReadyForBackgroundMarker = '[bg-publish] READY_FOR_BACKGROUND';
+
+/// Name of the append-only file the drive writes into its OWN sandbox `tmp/`
+/// to signal the host, in `Directory.systemTemp` — `<data container>/tmp` on
+/// iOS, which the wrapper resolves with
+/// `xcrun simctl get_app_container <udid> <bundle> data`.
+///
+/// Carries the two markers the host must act on WHILE the drive is still
+/// running: [kReadyForBackgroundMarker] (background the app now) and
+/// [kSessionDisarmedMarker] (re-foreground it for teardown). The host greps
+/// this file for those literals, exactly as it used to grep the log.
+///
+/// The handshake CANNOT ride the log. The shared runner redirects
+/// `flutter test` to a file, and that stream is block-buffered on macOS: in
+/// CI run 32553078705 the drive's entire 119-line output — startup through
+/// this test's own failure — landed in the log within a single second, nine
+/// minutes after it was produced, i.e. only when the process exited. A marker
+/// the host can only read post-mortem cannot trigger a backgrounding the
+/// drive is still waiting for, so the lane could never pass. A file write
+/// reaches the filesystem immediately and is visible to the host at once.
+///
+/// The wrapper deletes this file before launching the drive, so a signal left
+/// by a previous attempt can never be mistaken for this one's. Change the
+/// name here AND in `run-ios-bg-publish.sh` together.
+const String kHandshakeSignalFileName = 'bg-publish-handshake';
 
 /// Verbatim marker prefix printed only after P2's last assertion: at least
 /// two kind-445 events for this circle reached the relay AFTER the real
@@ -535,6 +559,12 @@ void main() {
       WidgetsBinding.instance.addObserver(recorder);
       try {
         debugPrint(kReadyForBackgroundMarker);
+        // The signal the host actually reads — the printed marker above is
+        // for humans reading the preserved log. See kHandshakeSignalFileName
+        // for why a file and not the log.
+        final handshakeSignal = File(
+          '${Directory.systemTemp.path}/$kHandshakeSignalFileName',
+        )..writeAsStringSync(kReadyForBackgroundMarker, flush: true);
 
         bool pausedSeen() =>
             recorder.seen.contains(AppLifecycleState.paused) ||
@@ -550,14 +580,15 @@ void main() {
           isTrue,
           reason:
               'No REAL AppLifecycleState.paused arrived within '
-              '${_pausedTransitionWindow.inSeconds}s of printing '
-              '$kReadyForBackgroundMarker. The host step that should have '
-              'fired is the run-ios-bg-publish.sh background step ("xcrun '
-              'simctl launch <udid> com.apple.Preferences" after tailing '
-              'the log for the READY marker) — check the wrapper output '
-              'for a failed launch, a marker-wait timeout, or a renamed '
-              'marker (the literal lives in this file and in the wrapper; '
-              'change them together). Observed lifecycle states so far: '
+              '${_pausedTransitionWindow.inSeconds}s of writing the READY '
+              'handshake signal to ${handshakeSignal.path}. The host step that '
+              'should have fired is the run-ios-bg-publish.sh background '
+              'step ("xcrun simctl launch <udid> com.apple.Preferences" '
+              'once that file appears under the app data container) — check '
+              'the wrapper output for a failed launch, a signal-wait '
+              'timeout, or a container path it could not resolve. The file '
+              'name lives in this file and in the wrapper; change them '
+              'together. Observed lifecycle states so far: '
               '${recorder.seen}.',
         );
         debugPrint(
@@ -755,6 +786,13 @@ void main() {
               'both sessions).',
         );
         debugPrint(kSessionDisarmedMarker);
+        // Appended, not printed-only: the host re-foregrounds on this signal
+        // so the `finally` below pumps against a live native animator.
+        handshakeSignal.writeAsStringSync(
+          '\n$kSessionDisarmedMarker',
+          mode: FileMode.append,
+          flush: true,
+        );
       } finally {
         WidgetsBinding.instance.removeObserver(recorder);
         // Restore the lifecycle before returning. Not cosmetic: the REAL

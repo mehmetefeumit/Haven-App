@@ -1855,6 +1855,25 @@ class AppLocalizationsDe extends AppLocalizations {
       'Speichern fehlgeschlagen, versuche es erneut';
 
   @override
+  String get profileSyncStatusSyncing =>
+      'Wird mit deinem öffentlichen Profil synchronisiert …';
+
+  @override
+  String get profileSyncStatusPartial =>
+      'Veröffentlicht – wird noch mit einigen Relays synchronisiert';
+
+  @override
+  String get profileSyncStatusSynced => 'Öffentliches Profil ist aktuell';
+
+  @override
+  String get profileSyncStatusFailed =>
+      'Konnte noch nicht synchronisiert werden.';
+
+  @override
+  String get profileSyncStatusRetrySemantics =>
+      'Veröffentlichung deines Profils wiederholen';
+
+  @override
   String keyDisplayCopiedToClipboard(String label) {
     return '$label in die Zwischenablage kopiert';
   }
@@ -1962,7 +1981,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get avatarPickerPhotoUpdated =>
-      'Foto aktualisiert. In deinem öffentlichen Nostr-Profil veröffentlicht.';
+      'Foto aktualisiert. Es wird in deinem öffentlichen Nostr-Profil veröffentlicht.';
 
   @override
   String get avatarPickerPhotoRemoved => 'Foto entfernt.';

@@ -74,15 +74,19 @@
 ///    owner-directed 2026-07-16), so there is no consent step; simply never
 ///    having called `updateOwnProfile`/`setOwnAvatar` yet is what keeps the
 ///    relay clean.
-/// 2. **Set name + photo + publish.** A kind-0 with the display name AND a
-///    `picture` URL lands on strfry, and the blob is retrievable from
-///    Blossom.
+/// 2. **Set name + photo LOCALLY, then publish.** `updateOwnProfile` /
+///    `setOwnAvatar` are local-first (profile-latency migration) — 2a proves
+///    the local save alone reaches NO relay and is invisible to Bob; only
+///    the explicit `syncOwnProfile` call actually publishes the kind-0 (name
+///    + `picture` URL) to strfry, with the blob retrievable from Blossom.
 /// 3. **B resolves and displays.** Bob's `fetchMemberProfiles` sees Alice's
 ///    name; `downloadMemberPicture` + `getProfilePicture` return her photo
 ///    bytes.
-/// 4. **A edits ONLY the display name.** B's forced re-fetch shows the NEW name
-///    AND the SAME photo — the on-relay kind-0 still carries the original
-///    `picture` URL, proving the fetch-merge-publish did not clobber it.
+/// 4. **A edits ONLY the display name.** 4a proves the LOCAL edit alone is
+///    still invisible to Bob (he resolves the ORIGINAL name); after
+///    `syncOwnProfile`, B's forced re-fetch shows the NEW name AND the SAME
+///    photo — the on-relay kind-0 still carries the original `picture` URL,
+///    proving the fetch-merge-publish did not clobber it.
 /// 5. **A deletes the public profile.** B's forced re-fetch falls back to a
 ///    blank profile (no stale name), i.e. the member tile would render the
 ///    npub prefix + initials. No crash, no stale data.
@@ -90,10 +94,11 @@
 /// ## Acceptance hooks
 ///
 /// Reverting any of the following to a no-op turns this scenario red:
-/// - `upload_my_profile_picture` / `blossom_server()` — step 2's Blossom GET
-///   404s / connection-refuses.
-/// - `publish_my_profile` / `resolve_write_relays` — step 2/4's kind-0 relay
-///   waits time out.
+/// - `save_my_profile_picture_local` / `sync_my_profile` / `blossom_server()`
+///   — step 2's Blossom GET 404s / connection-refuses.
+/// - `sync_my_profile` / `publish_metadata` / `resolve_write_relays` — step
+///   2/4's kind-0 relay waits time out, or the STRENGTHENED pre-sync
+///   assertions (steps 2a/4a) see a publish that should not have happened.
 /// - `merge_edits` picture preservation — step 4's on-relay `picture`-field
 ///   assertion fails.
 /// - `fetch_profiles` / `download_profile_picture` — step 3's B-side name /
@@ -128,6 +133,8 @@ import 'package:haven/src/rust/api.dart'
         setDiscoveryRelaysForTest;
 import 'package:haven/src/services/nostr_circle_service.dart'
     show NostrCircleService;
+import 'package:haven/src/services/profile_service.dart'
+    show ProfileSyncOutcome;
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -811,8 +818,10 @@ void main() {
         );
 
         // -------------------------------------------------------------------
-        // STEP 2 — set name + photo, publish. No consent step: publishing is
-        // unconditional.
+        // STEP 2 — set name + photo LOCALLY, then publish. No consent step:
+        // saving is unconditional; publishing is a separate, explicit call
+        // (profile-latency migration: `updateOwnProfile`/`setOwnAvatar` are
+        // now local-first — see `docs/PUBLIC_PROFILE_MIGRATION_PLAN.md`).
         // -------------------------------------------------------------------
         await profileService.updateOwnProfile(displayName: _aliceName);
         final published = await profileService.setOwnAvatar(_testPng);
@@ -820,7 +829,52 @@ void main() {
         expect(
           pictureHash,
           isNotNull,
-          reason: 'setOwnAvatar must return the uploaded blob sha256.',
+          reason: "setOwnAvatar must return the sanitized bytes' sha256 "
+              'immediately — a LOCAL content hash, not a network response.',
+        );
+
+        // STRENGTHENED (profile-latency migration): the LOCAL save alone —
+        // before syncOwnProfile runs — must reach NO relay. Same zero-kind-0
+        // baseline as STEP 1, now proven to survive a save.
+        for (var i = 0; i < profilePool.length; i++) {
+          expect(
+            aliceKind0OnPool[i],
+            isEmpty,
+            reason: 'a LOCAL save (updateOwnProfile/setOwnAvatar) must '
+                'publish NOTHING — ${profilePool[i].url} must still see '
+                'zero kind-0 for Alice until syncOwnProfile runs.',
+          );
+        }
+        final beforeSync = await bob.user.circleManager.fetchMemberProfiles(
+          pubkeysHex: <String>[aliceHex],
+          maxAgeSecs: 0,
+        );
+        for (final p in beforeSync) {
+          if (p.pubkeyHex.toLowerCase() == aliceHex.toLowerCase()) {
+            fail(
+              '[e2e_profile] Bob resolved a kind-0 for Alice before '
+              'syncOwnProfile ran — a local save must not be observable by '
+              'another client.',
+            );
+          }
+        }
+        debugPrint(
+          '[e2e_profile] STEP 2a — local save observed by NO ONE yet',
+        );
+
+        // Now actually publish (the trigger a real UI fires right after a
+        // local save — see utils/profile_sync_trigger.dart).
+        final syncResult = await profileService.syncOwnProfile();
+        expect(
+          syncResult.outcome,
+          ProfileSyncOutcome.published,
+          reason: 'syncOwnProfile must publish the queued name + photo edit.',
+        );
+        expect(
+          syncResult.stillPending,
+          isFalse,
+          reason: 'the hermetic pool is fully reachable, so the sync must '
+              'fully acknowledge, not leave a partial edit behind.',
         );
 
         // (a) A kind-0 with the name AND a picture URL landed on EVERY relay in
@@ -915,6 +969,31 @@ void main() {
         // STEP 4 — Alice edits ONLY the display name; photo must survive.
         // -------------------------------------------------------------------
         await profileService.updateOwnProfile(displayName: _aliceEditedName);
+
+        // STRENGTHENED (profile-latency migration): Bob's forced re-fetch
+        // right after the LOCAL edit still resolves the ORIGINAL name — the
+        // relay has not seen the edit yet, only syncOwnProfile publishes it.
+        final beforeEditSync = await bob.user.circleManager
+            .fetchMemberProfiles(pubkeysHex: <String>[aliceHex], maxAgeSecs: 0);
+        final aliceBeforeEditSync = beforeEditSync.firstWhere(
+          (p) => p.pubkeyHex.toLowerCase() == aliceHex.toLowerCase(),
+          orElse: () => throw StateError(
+            '[e2e_profile] Bob lost Alice entirely before the edit synced.',
+          ),
+        );
+        expect(
+          aliceBeforeEditSync.displayName,
+          _aliceName,
+          reason: 'a LOCAL edit must not be observable by Bob until '
+              'syncOwnProfile publishes it — he must still see the '
+              'ORIGINAL (pre-edit) name.',
+        );
+        debugPrint(
+          '[e2e_profile] STEP 4a — local edit observed by NO ONE yet',
+        );
+
+        final editSyncResult = await profileService.syncOwnProfile();
+        expect(editSyncResult.outcome, ProfileSyncOutcome.published);
 
         // On-relay proof the fetch-merge-publish preserved `picture`: the
         // newest kind-0 carries the NEW name AND the ORIGINAL picture URL — on

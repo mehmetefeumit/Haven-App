@@ -21,6 +21,7 @@
 /// latch.** Retry on the next access; latch only once a key is resident.
 library;
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -45,6 +46,11 @@ class _FakeIdentityManager implements NostrIdentityManager {
 
   @override
   bool hasIdentity() => _identityLoaded;
+
+  @override
+  PublicIdentity? getIdentity() => _identityLoaded
+      ? PublicIdentity(pubkeyHex: 'ab' * 32, npub: 'npub1fake', createdAt: 0)
+      : null;
 
   @override
   Future<PublicIdentity> loadFromBytes({required List<int> secretBytes}) async {
@@ -85,6 +91,32 @@ class _ScriptedStorage extends FlutterSecureStorage {
     final index = readCalls < _results.length ? readCalls : _results.length - 1;
     readCalls++;
     return _results[index];
+  }
+}
+
+/// Secure storage whose `read` blocks on [gate] before returning a fixed
+/// result — lets a test hold several concurrent readers in flight at once,
+/// so the in-flight guard can be observed rather than assumed.
+class _GatedStorage extends FlutterSecureStorage {
+  _GatedStorage(this._result);
+
+  final String? _result;
+  final Completer<void> gate = Completer<void>();
+  int readCalls = 0;
+
+  @override
+  Future<String?> read({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    readCalls++;
+    await gate.future;
+    return _result;
   }
 }
 
@@ -209,4 +241,155 @@ void main() {
       );
     });
   });
+
+  group('NostrIdentityService — concurrent initialization is coalesced', () {
+    test(
+      'concurrent getIdentity() calls during startup construct exactly one '
+      'manager',
+      () async {
+        // The Identity page fires 4-6 near-simultaneous getIdentity() calls
+        // on open; without an in-flight guard each would race its own
+        // manager construction and its own secure-storage read.
+        final storage = _ScriptedStorage(<String?>[validSecret]);
+        final manager = _FakeIdentityManager();
+        final gate = Completer<void>();
+        var factoryCalls = 0;
+        final service = NostrIdentityService(
+          storage: storage,
+          wipeTileCache: () async {},
+          managerFactory: () async {
+            factoryCalls++;
+            await gate.future;
+            return manager;
+          },
+        );
+
+        // Fired while the factory is still blocked on the gate, so every
+        // call arrives before the first one could possibly have finished.
+        final futures = List.generate(6, (_) => service.getIdentity());
+
+        gate.complete();
+        final results = await Future.wait(futures);
+
+        expect(
+          factoryCalls,
+          1,
+          reason:
+              'only the leader call may construct a manager — every other '
+              'concurrent caller must join its in-flight attempt instead',
+        );
+        for (final identity in results) {
+          expect(identity, isNotNull);
+          expect(identity!.pubkeyHex, 'ab' * 32);
+        }
+      },
+    );
+
+    test(
+      'concurrent calls during startup issue exactly one secure-storage read',
+      () async {
+        final storage = _GatedStorage(validSecret);
+        final manager = _FakeIdentityManager();
+        final service = NostrIdentityService(
+          storage: storage,
+          wipeTileCache: () async {},
+          managerFactory: () async => manager,
+        );
+
+        // Fired while the read is still blocked on the gate, so every call
+        // arrives before the leader's read could possibly have settled.
+        final futures = List.generate(5, (_) => service.getIdentity());
+
+        storage.gate.complete();
+        final results = await Future.wait(futures);
+
+        expect(
+          storage.readCalls,
+          1,
+          reason:
+              'every concurrent caller must join the one in-flight read — '
+              'without the guard, each would issue its own Keychain read',
+        );
+        for (final identity in results) {
+          expect(identity, isNotNull);
+          expect(identity!.pubkeyHex, 'ab' * 32);
+        }
+      },
+    );
+  });
+
+  group(
+    'NostrIdentityService — a manager-factory failure during startup',
+    () {
+      test(
+        'propagates to every concurrent waiter (no hang), and a later '
+        'call retries construction',
+        () async {
+          // Only the FIRST attempt is gated; once the gate opens it THROWS
+          // rather than returning a manager, modelling `_managerFactory()`
+          // itself failing outright (as opposed to a later storage-read
+          // failure, already covered above). A later, non-concurrent retry
+          // must be free to succeed, so this returns the real manager from
+          // the second call on.
+          final storage = _ScriptedStorage(<String?>[validSecret]);
+          final manager = _FakeIdentityManager();
+          final gate = Completer<void>();
+          var factoryCalls = 0;
+          final service = NostrIdentityService(
+            storage: storage,
+            wipeTileCache: () async {},
+            managerFactory: () async {
+              factoryCalls++;
+              if (factoryCalls == 1) {
+                await gate.future;
+                throw StateError('manager construction failed');
+              }
+              return manager;
+            },
+          );
+
+          // Fired while the factory is still blocked on the gate, so every
+          // call arrives before the leader's attempt could possibly have
+          // settled — exactly the coalescing window `_initCompleter` exists
+          // for.
+          final futures = List.generate(5, (_) => service.getIdentity());
+
+          gate.complete();
+
+          // Every waiter — the leader AND the 4 that joined its in-flight
+          // attempt — must observe the failure. A hang here would mean a
+          // waiter's `await inFlight.future` never settles; a silent `null`
+          // would mean the failure was swallowed instead of surfaced.
+          for (final future in futures) {
+            await expectLater(
+              future,
+              throwsA(isA<StateError>()),
+              reason: 'a concurrent waiter must observe the SAME failure the '
+                  'leader constructing the manager hit, not hang or resolve',
+            );
+          }
+          expect(
+            factoryCalls,
+            1,
+            reason: 'only the leader call may construct a manager for this '
+                'attempt — the other 4 must have joined it, not started '
+                'their own',
+          );
+
+          // The in-flight completer is cleared in `finally` regardless of
+          // success or failure, so a LATER, non-concurrent call must retry
+          // rather than staying wedged on the failed attempt forever.
+          final retried = await service.getIdentity();
+          expect(
+            factoryCalls,
+            2,
+            reason: 'a later call must construct the manager again rather '
+                'than reusing the failed attempt',
+          );
+          expect(retried, isNotNull);
+          expect(retried!.pubkeyHex, 'ab' * 32);
+        },
+      );
+    },
+  );
 }

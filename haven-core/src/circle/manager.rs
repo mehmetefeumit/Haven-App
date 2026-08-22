@@ -80,6 +80,9 @@ pub struct CircleManager {
     /// In-memory: an unresolved create at process exit self-clears on restart
     /// (the engine also rolls the staged create back at hydrate).
     create_pending: Mutex<HashMap<PendingStateRef, GroupId>>,
+    /// Serializes everything that publishes or retracts the OWN public profile
+    /// — see [`Self::profile_sync_lock`].
+    profile_sync_lock: tokio::sync::Mutex<()>,
     pub(crate) storage: CircleStorage,
 }
 
@@ -123,6 +126,7 @@ impl CircleManager {
             session: Arc::new(session),
             pending_welcomes: PendingWelcomeStore::new(),
             create_pending: Mutex::new(HashMap::new()),
+            profile_sync_lock: tokio::sync::Mutex::new(()),
             storage,
         })
     }
@@ -205,6 +209,7 @@ impl CircleManager {
             session: Arc::new(session),
             pending_welcomes: PendingWelcomeStore::new(),
             create_pending: Mutex::new(HashMap::new()),
+            profile_sync_lock: tokio::sync::Mutex::new(()),
             storage,
         })
     }
@@ -2065,6 +2070,114 @@ impl CircleManager {
     }
 
     // ==================== Public-profile cache (storage) ====================
+
+    /// The lock every own-profile PUBLISH and RETRACTION must hold for its whole
+    /// body.
+    ///
+    /// [`Self::sync_own_profile`] takes it internally. The retraction paths live
+    /// in the FFI layer (they build the blank kind-0 and the NIP-09 deletion),
+    /// so they take it through this accessor — BEFORE their
+    /// `has_published_profile` gate read, or the gate would be evaluated against
+    /// state an in-flight sync is about to change.
+    ///
+    /// Skipping it re-opens the resurrection race: a sync that started before a
+    /// retraction would republish the deleted metadata with a NEWER
+    /// `created_at`, so relays would serve the profile the user just deleted
+    /// while every local check reported the delete had succeeded.
+    #[must_use]
+    pub const fn profile_sync_lock(&self) -> &tokio::sync::Mutex<()> {
+        &self.profile_sync_lock
+    }
+
+    /// See [`CircleStorage::stage_own_profile_edits`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn stage_own_profile_edits(
+        &self,
+        pubkey_hex: &str,
+        edits: &crate::profile::PendingEdits,
+        now: i64,
+    ) -> Result<crate::profile::CachedProfile> {
+        self.storage.stage_own_profile_edits(pubkey_hex, edits, now)
+    }
+
+    /// See [`CircleStorage::stage_own_profile_picture`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn stage_own_profile_picture(
+        &self,
+        pubkey_hex: &str,
+        picture: &crate::avatar::StagedPicture,
+        now: i64,
+    ) -> Result<()> {
+        self.storage
+            .stage_own_profile_picture(pubkey_hex, picture, now)
+    }
+
+    /// See [`CircleStorage::pending_profile_sync`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn pending_profile_sync(
+        &self,
+        pubkey_hex: &str,
+    ) -> Result<Option<crate::profile::PendingSnapshot>> {
+        self.storage.pending_profile_sync(pubkey_hex)
+    }
+
+    /// See [`CircleStorage::record_profile_sync_attempt`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn record_profile_sync_attempt(&self, pubkey_hex: &str, now: i64) -> Result<()> {
+        self.storage.record_profile_sync_attempt(pubkey_hex, now)
+    }
+
+    /// See [`CircleStorage::profile_pending_state`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn profile_pending_state(
+        &self,
+        pubkey_hex: &str,
+        now: i64,
+    ) -> Result<super::storage_profile_sync::ProfilePendingState> {
+        self.storage.profile_pending_state(pubkey_hex, now)
+    }
+
+    /// See [`CircleStorage::profile_picture_is_staged`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn profile_picture_is_staged(&self, pubkey_hex: &str) -> Result<bool> {
+        self.storage.profile_picture_is_staged(pubkey_hex)
+    }
+
+    /// See [`CircleStorage::cancel_staged_profile_picture`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn cancel_staged_profile_picture(&self, pubkey_hex: &str) -> Result<()> {
+        self.storage.cancel_staged_profile_picture(pubkey_hex)
+    }
+
+    /// See [`CircleStorage::clear_profile_sync_state`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn clear_profile_sync_state(&self, pubkey_hex: &str) -> Result<()> {
+        self.storage.clear_profile_sync_state(pubkey_hex)
+    }
 
     /// See [`CircleStorage::upsert_profile`].
     ///

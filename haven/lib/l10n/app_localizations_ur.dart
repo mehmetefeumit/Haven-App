@@ -1825,6 +1825,23 @@ class AppLocalizationsUr extends AppLocalizations {
       'محفوظ کرنا ناکام، دوبارہ کوشش کریں';
 
   @override
+  String get profileSyncStatusSyncing => 'آپ کا عوامی پروفائل سنک ہو رہا ہے…';
+
+  @override
+  String get profileSyncStatusPartial =>
+      'شائع ہو گیا — کچھ ریلے پر ابھی سنک ہو رہا ہے';
+
+  @override
+  String get profileSyncStatusSynced => 'عوامی پروفائل تازہ ترین ہے';
+
+  @override
+  String get profileSyncStatusFailed => 'ابھی سنک نہ ہو سکا۔';
+
+  @override
+  String get profileSyncStatusRetrySemantics =>
+      'اپنا پروفائل دوبارہ شائع کرنے کی کوشش کریں';
+
+  @override
   String keyDisplayCopiedToClipboard(String label) {
     return '$label کلپ بورڈ پر کاپی ہو گئی';
   }
@@ -1929,7 +1946,7 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get avatarPickerPhotoUpdated =>
-      'تصویر اپ ڈیٹ ہو گئی۔ آپ کے عوامی Nostr پروفائل پر شائع کر دی گئی۔';
+      'تصویر اپ ڈیٹ ہو گئی۔ یہ آپ کے عوامی Nostr پروفائل پر شائع کی جائے گی۔';
 
   @override
   String get avatarPickerPhotoRemoved => 'تصویر ہٹا دی گئی۔';

@@ -20,10 +20,21 @@
 ///
 /// * `published_kind0` — a kind-0 row exists in `published_events` for this
 ///   pubkey (Haven published a profile at some point);
-/// * `has_known_picture` — a non-empty picture is cached / was uploaded.
+/// * `has_known_picture` — a picture with a REAL public URL is cached. Bytes
+///   staged for an upload that has not happened yet do NOT count: nothing
+///   public exists for them, so retracting them would be the first public
+///   event;
+/// * `seen_kind0` — a resolved kind-0 is cached for this pubkey (an imported
+///   identity whose profile was published by another client). Without it, an
+///   imported account with a profile but no locally-recorded publish would
+///   treat "delete my public profile" as a no-op and leave the profile up.
 #[must_use]
-pub const fn has_published_profile(published_kind0: bool, has_known_picture: bool) -> bool {
-    published_kind0 || has_known_picture
+pub const fn has_published_profile(
+    published_kind0: bool,
+    has_known_picture: bool,
+    seen_kind0: bool,
+) -> bool {
+    published_kind0 || has_known_picture || seen_kind0
 }
 
 #[cfg(test)]
@@ -32,15 +43,20 @@ mod tests {
 
     #[test]
     fn remove_when_no_profile_is_noop() {
-        // Nothing published and no cached picture → retraction gate is false, so
-        // the caller performs no publish (no new public footprint).
-        assert!(!has_published_profile(false, false));
+        // Nothing published, no publicly-hosted picture and no kind-0 ever seen
+        // → retraction gate is false, so the caller performs no publish (no new
+        // public footprint).
+        assert!(!has_published_profile(false, false, false));
     }
 
     #[test]
-    fn has_published_profile_true_when_kind0_or_picture() {
-        assert!(has_published_profile(true, false));
-        assert!(has_published_profile(false, true));
-        assert!(has_published_profile(true, true));
+    fn has_published_profile_true_when_kind0_or_picture_or_seen() {
+        // Each arm arms the gate on its own — in particular the third, which is
+        // the only thing that arms it for an imported identity whose profile
+        // was published by another client.
+        assert!(has_published_profile(true, false, false));
+        assert!(has_published_profile(false, true, false));
+        assert!(has_published_profile(false, false, true));
+        assert!(has_published_profile(true, true, true));
     }
 }

@@ -22,6 +22,7 @@
 /// ```
 library;
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -93,6 +94,10 @@ class NostrIdentityService implements IdentityService {
   NostrIdentityManager? _manager;
   bool _initialized = false;
 
+  /// Guards [_ensureInitialized] against concurrent callers each starting
+  /// their own manager construction / storage read — see that method's doc.
+  Completer<NostrIdentityManager>? _initCompleter;
+
   /// Creates platform-optimized secure storage.
   static FlutterSecureStorage _createSecureStorage() {
     return const FlutterSecureStorage(
@@ -119,35 +124,72 @@ class NostrIdentityService implements IdentityService {
   /// null, and the session never recovered). Treating that as "no identity,
   /// forever" is the bug; retrying costs one extra read per call while
   /// genuinely logged out, and the flag latches the moment a key is resident.
+  ///
+  /// **Concurrent callers share one in-flight attempt.** Several UI paths
+  /// (the Identity page alone fires 4-6 on open) call this within the same
+  /// microtask window; without [_initCompleter] each would race its own
+  /// [_managerFactory] call and its own secure-storage read. The first caller
+  /// creates the completer and does the work; every caller that arrives while
+  /// it is set awaits the same [Completer.future] instead of starting a
+  /// second one. The completer is cleared (in `finally`) the moment that
+  /// attempt settles — success, a caught storage error, or a thrown one — so
+  /// the no-latch-on-a-miss contract above is unaffected: the *next*,
+  /// non-concurrent call still starts a fresh attempt and re-reads storage.
   Future<NostrIdentityManager> _ensureInitialized() async {
     final cached = _manager;
     if (cached != null && _initialized) {
       return cached;
     }
 
-    // Reuse the manager across retries — it owns the in-memory
-    // (`ZeroizeOnDrop`) keypair, so rebuilding it per attempt would churn Rust
-    // state and could drop an identity a previous attempt already loaded.
-    final manager = _manager ??= await _managerFactory();
-
-    try {
-      final storedBytes = await _storage.read(key: _storageKey);
-      if (storedBytes != null) {
-        await manager.loadFromBytes(secretBytes: base64Decode(storedBytes));
-      }
-    } on Object catch (e) {
-      // Security Rule 6/8: runtimeType only — never let key material or
-      // internal state reach a log. Leaving `_initialized` false is the point:
-      // a corrupt-or-unreadable read must be retried, not cached.
-      debugPrint(
-        'Warning: identity load failed (${e.runtimeType}); '
-        'retrying on next access',
-      );
-      return manager;
+    final inFlight = _initCompleter;
+    if (inFlight != null) {
+      return inFlight.future;
     }
 
-    _initialized = manager.hasIdentity();
-    return manager;
+    final completer = Completer<NostrIdentityManager>();
+    // When nothing raced this call there is no second awaiter, so the error
+    // completion below would reach the zone as an UNHANDLED async error even
+    // though `rethrow` already delivers it to the real caller. `ignore()`
+    // suppresses only that duplicate report — a concurrent waiter still gets
+    // the error from its own `await`. Without it every widget test that lets
+    // the real service reach an uninitialised FFI fails AFTER completing.
+    completer.future.ignore();
+    _initCompleter = completer;
+    try {
+      // Reuse the manager across retries — it owns the in-memory
+      // (`ZeroizeOnDrop`) keypair, so rebuilding it per attempt would churn
+      // Rust state and could drop an identity a previous attempt already
+      // loaded.
+      final manager = _manager ??= await _managerFactory();
+
+      try {
+        final storedBytes = await _storage.read(key: _storageKey);
+        if (storedBytes != null) {
+          await manager.loadFromBytes(secretBytes: base64Decode(storedBytes));
+        }
+      } on Object catch (e) {
+        // Security Rule 6/8: runtimeType only — never let key material or
+        // internal state reach a log. Leaving `_initialized` false is the
+        // point: a corrupt-or-unreadable read must be retried, not cached.
+        debugPrint(
+          'Warning: identity load failed (${e.runtimeType}); '
+          'retrying on next access',
+        );
+        completer.complete(manager);
+        return manager;
+      }
+
+      _initialized = manager.hasIdentity();
+      completer.complete(manager);
+      return manager;
+    } on Object catch (e, st) {
+      // _managerFactory() itself threw (outside the storage try/catch above):
+      // propagate to every waiter, not just this caller.
+      completer.completeError(e, st);
+      rethrow;
+    } finally {
+      _initCompleter = null;
+    }
   }
 
   /// Converts a Rust timestamp to DateTime.

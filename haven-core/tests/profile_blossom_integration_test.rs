@@ -14,6 +14,7 @@
 
 use std::io::Cursor;
 
+use haven_core::avatar::{process_own_avatar, StagedPicture};
 use haven_core::profile::{download_profile_picture, upload_profile_picture};
 use image::{codecs::jpeg::JpegEncoder, RgbImage};
 use nostr::Keys;
@@ -41,6 +42,12 @@ fn sample_jpeg(seed: u8) -> Vec<u8> {
     out
 }
 
+/// Seals raw bytes for upload the only way the type permits: through the
+/// sanitizer. Called per upload because a `StagedPicture` is consumed by one.
+fn staged(raw: &[u8]) -> StagedPicture {
+    StagedPicture::from_processed(&process_own_avatar(raw).expect("sanitize"))
+}
+
 #[tokio::test]
 #[ignore = "requires a live Blossom server (HAVEN_E2E_BLOSSOM)"]
 async fn upload_then_download_byte_identical_after_revalidation() {
@@ -54,7 +61,7 @@ async fn upload_then_download_byte_identical_after_revalidation() {
     let keys = Keys::generate();
     let raw = sample_jpeg(11);
 
-    let uploaded = upload_profile_picture(&keys, &server, &raw)
+    let uploaded = upload_profile_picture(&keys, &server, staged(&raw))
         .await
         .expect("upload to live Blossom");
     let downloaded = download_profile_picture(&uploaded.url)
@@ -85,12 +92,12 @@ async fn duplicate_upload_succeeds() {
     let keys = Keys::generate();
     let raw = sample_jpeg(22);
 
-    let first = upload_profile_picture(&keys, &server, &raw)
+    let first = upload_profile_picture(&keys, &server, staged(&raw))
         .await
         .expect("first upload");
     // A second upload of the same bytes (server returns the existing blob) must
     // also succeed and resolve to the same content address.
-    let second = upload_profile_picture(&keys, &server, &raw)
+    let second = upload_profile_picture(&keys, &server, staged(&raw))
         .await
         .expect("duplicate upload");
     assert_eq!(first.sha256_hex, second.sha256_hex);

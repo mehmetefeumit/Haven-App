@@ -2,10 +2,12 @@
 //!
 //! Two network operations live here:
 //!
-//! * [`upload_profile_picture`] — sanitize (EXIF/GPS strip + re-encode via the
-//!   avatar pipeline) → content-hash → hand-rolled BUD-02 `PUT /upload` carrying
-//!   a BUD-11 kind-24242 authorization signed by the identity key (60 s expiry)
-//!   → verify the returned descriptor's `sha256` equals our hash. The PUT is
+//! * [`upload_profile_picture`] — take an already-sanitized [`StagedPicture`]
+//!   (the sealed type whose only constructors run, or replay, the avatar
+//!   pipeline's EXIF/GPS strip + re-encode) → hand-rolled BUD-02 `PUT /upload`
+//!   carrying a BUD-11 kind-24242 authorization signed by the identity key
+//!   (60 s expiry) → verify the returned descriptor's `sha256` equals the
+//!   staged content hash. The PUT is
 //!   hand-rolled (not delegated to `nostr-blossom`) because that crate's
 //!   `upload_blob` accepts only HTTP 200 and rejects the `201 Created` a
 //!   spec-compliant server returns for a *new* blob (BUD-02); Haven accepts any
@@ -66,7 +68,7 @@ use super::config::{
 };
 use super::error::{ProfileError, Result};
 use super::types::ProfilePicture;
-use crate::avatar::image::{process_inbound_avatar, process_own_avatar, ProcessedAvatar};
+use crate::avatar::image::{process_inbound_avatar, StagedPicture};
 
 // ===========================================================================
 // URL scheme gate
@@ -351,16 +353,21 @@ fn build_upload_auth_header(keys: &Keys, sha256_hex: &str) -> Result<String> {
     Ok(format!("Nostr {encoded}"))
 }
 
-/// Uploads a sanitized profile picture to `server` and returns the resolved
-/// [`ProfilePicture`].
+/// Uploads an already-sanitized profile picture to `server` and returns the
+/// resolved [`ProfilePicture`].
 ///
-/// Pipeline: [`require_https`] → [`process_own_avatar`] (EXIF/GPS strip +
-/// re-encode) → content-hash → hand-rolled BUD-02 `PUT /upload` (identity-signed
-/// BUD-11 kind-24242 auth, 60 s expiry) over the shared SSRF-guarded client
-/// under [`BLOSSOM_TIMEOUT`] → re-check the returned descriptor URL is HTTPS →
-/// assert the descriptor's `sha256` equals our post-pipeline hash. The uploaded
-/// bytes are the canonical re-encode, so the hash commits to sanitized content
-/// (never the raw input).
+/// Pipeline: [`require_https`] → hand-rolled BUD-02 `PUT /upload`
+/// (identity-signed BUD-11 kind-24242 auth, 60 s expiry) over the shared
+/// SSRF-guarded client under [`BLOSSOM_TIMEOUT`] → re-check the returned
+/// descriptor URL is HTTPS → assert the descriptor's `sha256` equals the staged
+/// content hash.
+///
+/// Sanitization is not performed here and is not optional: [`StagedPicture`]
+/// can only be built from the avatar pipeline's output (or from bytes it
+/// previously produced, whose hash is then recomputed), so the bytes that reach
+/// the wire are EXIF/GPS-stripped and re-encoded by construction, and the hash
+/// always commits to exactly what is uploaded. Nothing here re-encodes, so the
+/// staged hash is the blob's Blossom content address.
 ///
 /// The upload is hand-rolled rather than delegated to `nostr-blossom` because
 /// that crate's `upload_blob` accepts only HTTP 200 and rejects the `201
@@ -371,19 +378,17 @@ fn build_upload_auth_header(keys: &Keys, sha256_hex: &str) -> Result<String> {
 ///
 /// * [`ProfileError::InsecureUrl`] if `server` (or the returned descriptor URL)
 ///   is not HTTPS.
-/// * [`ProfileError::Image`] if the image fails the sanitize pipeline.
 /// * [`ProfileError::Timeout`] / [`ProfileError::Blossom`] on upload failure.
 /// * [`ProfileError::HashMismatch`] if the server's descriptor hash disagrees.
 pub async fn upload_profile_picture(
     keys: &Keys,
     server: &url::Url,
-    raw: &[u8],
+    staged: StagedPicture,
 ) -> Result<ProfilePicture> {
     require_https(server)?;
-    let processed = process_own_avatar(raw)?;
     // The shared client re-filters at connect time (anti-SSRF, redirects off,
     // bounded timeouts) — the same hardened seam the download path uses.
-    upload_with_client(download_client()?, keys, server, processed).await
+    upload_with_client(download_client()?, keys, server, staged).await
 }
 
 /// The transport core shared by the public upload and its tests: builds the
@@ -399,11 +404,12 @@ async fn upload_with_client(
     client: &reqwest::Client,
     keys: &Keys,
     server: &url::Url,
-    processed: ProcessedAvatar,
+    staged: StagedPicture,
 ) -> Result<ProfilePicture> {
-    let expected_hex = hex::encode(processed.content_hash);
+    let expected_hex = hex::encode(staged.sha256());
     let upload_url = server.join("upload").map_err(|_| ProfileError::BadUrl)?;
     let auth_header = build_upload_auth_header(keys, &expected_hex)?;
+    let (canonical, thumbnail) = staged.into_render_bytes();
 
     let response = tokio::time::timeout(
         BLOSSOM_TIMEOUT,
@@ -411,7 +417,7 @@ async fn upload_with_client(
             .put(upload_url)
             .header(reqwest::header::AUTHORIZATION, auth_header)
             .header(reqwest::header::CONTENT_TYPE, AVATAR_MIME)
-            .body(processed.canonical.to_vec())
+            .body(canonical.to_vec())
             .send(),
     )
     .await
@@ -441,8 +447,8 @@ async fn upload_with_client(
     Ok(ProfilePicture {
         url: descriptor.url,
         sha256_hex: expected_hex,
-        canonical: processed.canonical,
-        thumbnail: processed.thumbnail,
+        canonical,
+        thumbnail,
     })
 }
 
@@ -586,6 +592,7 @@ mod tests {
     #![allow(clippy::significant_drop_tightening)]
 
     use super::*;
+    use crate::avatar::image::process_own_avatar;
     use base64::Engine;
     use image::{codecs::jpeg::JpegEncoder, RgbImage};
     use std::io::Cursor;
@@ -604,6 +611,12 @@ mod tests {
             .encode_image(&img)
             .expect("encode jpeg");
         out
+    }
+
+    /// Runs `raw` through the sanitizer and seals the result for upload — the
+    /// only way to obtain upload bytes, in tests as in production.
+    fn staged(raw: &[u8]) -> StagedPicture {
+        StagedPicture::from_processed(&process_own_avatar(raw).expect("pipeline"))
     }
 
     fn no_redirect_client() -> reqwest::Client {
@@ -800,9 +813,14 @@ mod tests {
 
         let keys = Keys::generate();
         let server_url = url::Url::parse(&server.url()).unwrap();
-        let pic = upload_with_client(&no_redirect_client(), &keys, &server_url, processed)
-            .await
-            .unwrap_or_else(|e| panic!("upload with status {status} must succeed: {e:?}"));
+        let pic = upload_with_client(
+            &no_redirect_client(),
+            &keys,
+            &server_url,
+            StagedPicture::from_processed(&processed),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("upload with status {status} must succeed: {e:?}"));
         assert_eq!(pic.sha256_hex, sha_hex);
         assert!(pic.url.ends_with(&sha_hex));
         assert!(!pic.canonical.is_empty());
@@ -845,13 +863,80 @@ mod tests {
 
         let keys = Keys::generate();
         let server_url = url::Url::parse(&server.url()).unwrap();
-        let pic = upload_with_client(&no_redirect_client(), &keys, &server_url, processed)
-            .await
-            .expect("upload");
+        let pic = upload_with_client(
+            &no_redirect_client(),
+            &keys,
+            &server_url,
+            StagedPicture::from_processed(&processed),
+        )
+        .await
+        .expect("upload");
         assert_eq!(
             pic.sha256_hex, sha_hex,
             "reported hash is the sanitized one"
         );
+    }
+
+    #[tokio::test]
+    async fn upload_sends_the_exact_staged_bytes() {
+        // The upload re-encodes NOTHING. That is what makes the cached content
+        // hash equal the blob's Blossom address: the hash in the BUD-11
+        // authorization, the hash the descriptor is checked against, and the
+        // hash of what the local cache holds are all the same number because
+        // they all commit to these exact bytes. Re-encoding here (however
+        // faithfully) would break that identity silently — the server would
+        // store a blob at a different address than the one we authorized.
+        let mut server = mockito::Server::new_async().await;
+        let processed = process_own_avatar(&tiny_jpeg()).expect("pipeline");
+        let sha_hex = hex::encode(processed.content_hash);
+        let expected_body = processed.canonical.to_vec();
+
+        let captured: Arc<std::sync::Mutex<Option<Vec<u8>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let cap = Arc::clone(&captured);
+        let _m = server
+            .mock("PUT", "/upload")
+            .match_request(move |req| {
+                if let Ok(body) = req.body() {
+                    *cap.lock().unwrap() = Some(body.clone());
+                }
+                true
+            })
+            .with_status(201)
+            .with_body(descriptor_json(
+                &server.url(),
+                &sha_hex,
+                processed.canonical.len(),
+            ))
+            .create_async()
+            .await;
+
+        let keys = Keys::generate();
+        let server_url = url::Url::parse(&server.url()).unwrap();
+        let pic = upload_with_client(
+            &no_redirect_client(),
+            &keys,
+            &server_url,
+            StagedPicture::from_processed(&processed),
+        )
+        .await
+        .expect("upload");
+
+        let sent = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the mock must have seen a request body");
+        assert_eq!(
+            sent, expected_body,
+            "the PUT body must be the staged canonical bytes, byte for byte",
+        );
+        assert_eq!(
+            hex::encode(Sha256::digest(&sent)),
+            sha_hex,
+            "so the address the server stores the blob at is the staged hash",
+        );
+        assert_eq!(&*pic.canonical, &expected_body[..]);
     }
 
     #[tokio::test]
@@ -884,9 +969,14 @@ mod tests {
 
         let keys = Keys::generate();
         let server_url = url::Url::parse(&server.url()).unwrap();
-        upload_with_client(&no_redirect_client(), &keys, &server_url, processed)
-            .await
-            .expect("upload");
+        upload_with_client(
+            &no_redirect_client(),
+            &keys,
+            &server_url,
+            StagedPicture::from_processed(&processed),
+        )
+        .await
+        .expect("upload");
 
         let header = captured
             .lock()
@@ -961,9 +1051,14 @@ mod tests {
         let keys = Keys::generate();
         let server_url = url::Url::parse(&server.url()).unwrap();
         let processed = process_own_avatar(&tiny_jpeg()).expect("pipeline");
-        let err = upload_with_client(&no_redirect_client(), &keys, &server_url, processed)
-            .await
-            .expect_err("500 is an error");
+        let err = upload_with_client(
+            &no_redirect_client(),
+            &keys,
+            &server_url,
+            StagedPicture::from_processed(&processed),
+        )
+        .await
+        .expect_err("500 is an error");
         assert!(matches!(err, ProfileError::Blossom(_)), "got {err:?}");
     }
 
@@ -980,9 +1075,14 @@ mod tests {
         let keys = Keys::generate();
         let server_url = url::Url::parse(&server.url()).unwrap();
         let processed = process_own_avatar(&tiny_jpeg()).expect("pipeline");
-        let err = upload_with_client(&no_redirect_client(), &keys, &server_url, processed)
-            .await
-            .expect_err("4xx is an error");
+        let err = upload_with_client(
+            &no_redirect_client(),
+            &keys,
+            &server_url,
+            StagedPicture::from_processed(&processed),
+        )
+        .await
+        .expect_err("4xx is an error");
         assert!(matches!(err, ProfileError::Blossom(_)), "got {err:?}");
     }
 
@@ -1000,9 +1100,14 @@ mod tests {
         let keys = Keys::generate();
         let server_url = url::Url::parse(&server.url()).unwrap();
         let processed = process_own_avatar(&tiny_jpeg()).expect("pipeline");
-        let err = upload_with_client(&no_redirect_client(), &keys, &server_url, processed)
-            .await
-            .expect_err("mismatched sha is rejected");
+        let err = upload_with_client(
+            &no_redirect_client(),
+            &keys,
+            &server_url,
+            StagedPicture::from_processed(&processed),
+        )
+        .await
+        .expect_err("mismatched sha is rejected");
         assert!(matches!(err, ProfileError::HashMismatch), "got {err:?}");
     }
 
@@ -1022,9 +1127,14 @@ mod tests {
             let keys = Keys::generate();
             let server_url = url::Url::parse(&server.url()).unwrap();
             let processed = process_own_avatar(&tiny_jpeg()).expect("pipeline");
-            let err = upload_with_client(&no_redirect_client(), &keys, &server_url, processed)
-                .await
-                .expect_err("malformed descriptor rejected");
+            let err = upload_with_client(
+                &no_redirect_client(),
+                &keys,
+                &server_url,
+                StagedPicture::from_processed(&processed),
+            )
+            .await
+            .expect_err("malformed descriptor rejected");
             assert!(
                 matches!(err, ProfileError::Blossom(_)),
                 "body {body:?} → {err:?}"
@@ -1038,7 +1148,7 @@ mod tests {
         // the public wrapper's `require_https` gate.
         let keys = Keys::generate();
         let server_url = url::Url::parse("http://blossom.example").unwrap();
-        let err = upload_profile_picture(&keys, &server_url, &tiny_jpeg())
+        let err = upload_profile_picture(&keys, &server_url, staged(&tiny_jpeg()))
             .await
             .expect_err("http server rejected");
         assert!(matches!(err, ProfileError::InsecureUrl), "got {err:?}");
@@ -1240,7 +1350,7 @@ mod tests {
         let server_url = url::Url::parse(&base).expect("valid base url");
         let jpeg = tiny_jpeg();
 
-        let pic = upload_profile_picture(&keys, &server_url, &jpeg)
+        let pic = upload_profile_picture(&keys, &server_url, staged(&jpeg))
             .await
             .expect("live upload succeeds (server returns 201 for a new blob)");
         assert_eq!(pic.sha256_hex.len(), 64, "sha256 hex present");

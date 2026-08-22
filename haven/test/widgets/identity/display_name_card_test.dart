@@ -4,9 +4,14 @@
 /// dirty-on-typing, whitespace-only edits, success transitions including
 /// the intermediate Saving state, failure surfacing, and the
 /// initial-load race where the user types before the async provider
-/// resolves. Also covers that saving ALWAYS publishes the public profile
-/// too — publishing is unconditional (public-by-default, owner-directed
+/// resolves. Also covers that saving ALWAYS saves the public profile too
+/// — saving is unconditional (public-by-default, owner-directed
 /// 2026-07-16), so there is no consent gate to test.
+///
+/// Profile-latency migration: `updateOwnProfile` is now a fast, local-only
+/// write; the card must re-enable on THAT alone, never waiting on the
+/// separately-triggered background publish (`syncOwnProfile`), and a local
+/// failure must never fire that publish trigger at all.
 library;
 
 import 'dart:async';
@@ -355,8 +360,161 @@ void main() {
           profileService.methodCalls.map((c) => c.method),
           contains('updateOwnProfile'),
           reason:
-              'Publishing is unconditional — saving must always '
-              'fetch-merge-publish the public kind-0 profile too.',
+              'Publishing is unconditional — saving must always stage the '
+              'public kind-0 profile for the background sync too.',
+        );
+      },
+    );
+  });
+
+  // ---------------------------------------------------------------------------
+  // Profile-latency migration: `updateOwnProfile` is now local-first (ms) and
+  // the background publish is a separate, coalesced trigger
+  // (`triggerProfileSync`) — these pin the three new promises that split
+  // introduces.
+  // ---------------------------------------------------------------------------
+
+  group('DisplayNameCard — local save is not gated on the background sync', () {
+    testWidgets(
+      'the button re-enables to saved as soon as the LOCAL save resolves, '
+      'even while the background sync is still unresolved',
+      (tester) async {
+        final identityService = _FakeIdentityService(
+          initialDisplayName: 'Alice',
+        );
+        final profileService = MockProfileService()
+          ..syncOwnProfileGate = Completer<void>();
+
+        await tester.pumpWidget(
+          buildHarness(
+            service: identityService,
+            profileService: profileService,
+            resolveIdentity: true,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.enterText(find.byType(TextField), 'Bob');
+        await tester.pump();
+        await tester.tap(_findSaveButtonFinder());
+        // Deliberately NOT pumpAndSettle — `syncOwnProfileGate` stays open
+        // for the rest of this test, and this card no longer mounts the
+        // sync status line itself (it moved to page scope; see
+        // `identity_page.dart`), so a bounded, explicit-duration pump lets
+        // the (now local-only, unGated) identity + profile-service saves
+        // resolve AND the button's 200ms AnimatedSwitcher cross-fade finish,
+        // without ever waiting on the still-open sync gate.
+        await tester.pump(const Duration(milliseconds: 250));
+
+        expect(
+          find.descendant(
+            of: _findSaveButtonFinder(),
+            matching: find.byIcon(LucideIcons.check),
+          ),
+          findsOneWidget,
+          reason: 'the card must not wait on the background publish to '
+              're-enable — only the local save gates the button',
+        );
+        expect(
+          profileService.methodCalls.map((c) => c.method),
+          contains('syncOwnProfile'),
+          reason: 'the background sync must still have been TRIGGERED, '
+              'just not awaited by the card',
+        );
+
+        // Clean up: release the gate so nothing is left pending.
+        profileService.syncOwnProfileGate!.complete();
+        await tester.pumpAndSettle();
+      },
+    );
+
+    testWidgets(
+      'an edit made while the local save is still in flight is not '
+      'silently marked saved — the newest text stays editable',
+      (tester) async {
+        final identityService = _FakeIdentityService(
+          initialDisplayName: 'Alice',
+        );
+        final gate = Completer<void>();
+        final profileService = MockProfileService()
+          ..updateOwnProfileGate = gate;
+
+        await tester.pumpWidget(
+          buildHarness(
+            service: identityService,
+            profileService: profileService,
+            resolveIdentity: true,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.enterText(find.byType(TextField), 'Bob');
+        await tester.pump();
+        await tester.tap(_findSaveButtonFinder());
+        await tester.pump(); // Saving begins; updateOwnProfile is now gated.
+
+        // The user keeps typing while the save is in flight — the field
+        // stays enabled during Saving (only the button disables).
+        await tester.enterText(find.byType(TextField), 'Bob Charlie');
+        await tester.pump();
+
+        gate.complete();
+        await tester.pumpAndSettle();
+
+        // The newest text survives — it is not clobbered by the completed
+        // save, and the button re-opens so the newer edit can be saved.
+        expect(find.text('Bob Charlie'), findsOneWidget);
+        expect(
+          find.descendant(
+            of: _findSaveButtonFinder(),
+            matching: find.byIcon(LucideIcons.arrowUp),
+          ),
+          findsOneWidget,
+          reason: 'the newer edit must still be marked unsaved',
+        );
+      },
+    );
+
+    testWidgets(
+      'a local save failure never triggers the background sync, and Retry '
+      'is available',
+      (tester) async {
+        final identityService = _FakeIdentityService(
+          initialDisplayName: 'Alice',
+        );
+        final profileService = MockProfileService()
+          ..shouldThrowOnUpdateOwnProfile = true;
+
+        await tester.pumpWidget(
+          buildHarness(
+            service: identityService,
+            profileService: profileService,
+            resolveIdentity: true,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.enterText(find.byType(TextField), 'Bob');
+        await tester.pump();
+        await tester.tap(_findSaveButtonFinder());
+        await tester.pumpAndSettle();
+
+        expect(
+          find.descendant(
+            of: _findSaveButtonFinder(),
+            matching: find.byIcon(LucideIcons.rotateCcw),
+          ),
+          findsOneWidget,
+          reason: 'failed state shows a retry icon',
+        );
+        expect(
+          profileService.methodCalls.map((c) => c.method),
+          contains('updateOwnProfile'),
+        );
+        expect(
+          profileService.methodCalls.map((c) => c.method),
+          isNot(contains('syncOwnProfile')),
+          reason: 'a failed local save must never trigger a network publish',
         );
       },
     );

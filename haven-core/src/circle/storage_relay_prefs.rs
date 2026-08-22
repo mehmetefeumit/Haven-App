@@ -35,7 +35,7 @@
 
 use chrono::Utc;
 use nostr::{EventId, PublicKey, RelayUrl};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::error::{CircleError, Result};
 use super::relay_prefs::RelayType;
@@ -613,6 +613,25 @@ impl CircleStorage {
             .conn()
             .lock()
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        Self::write_published_event_row(&conn, kind, d_tag, event_id, pubkey, published_at)?;
+        Ok(())
+    }
+
+    /// Records a published replaceable event on an ALREADY-LOCKED connection.
+    ///
+    /// Split out of [`Self::record_published_event`] so a caller that is already
+    /// inside a transaction (the own-profile sync commit) can record the
+    /// publication without re-entering the connection mutex — which is a plain
+    /// `std::sync::Mutex` and would deadlock, not block. The out-of-order guard
+    /// therefore stays in exactly ONE place.
+    pub(super) fn write_published_event_row(
+        conn: &Connection,
+        kind: u16,
+        d_tag: &str,
+        event_id: &EventId,
+        pubkey: &PublicKey,
+        published_at: i64,
+    ) -> rusqlite::Result<()> {
         // Bind bytes explicitly so they live for the params! lifetime.
         let event_id_bytes: &[u8] = event_id.as_bytes();
         let pubkey_bytes = pubkey.to_bytes();

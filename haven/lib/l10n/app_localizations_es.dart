@@ -1870,6 +1870,22 @@ class AppLocalizationsEs extends AppLocalizations {
       'Error al guardar, inténtalo de nuevo';
 
   @override
+  String get profileSyncStatusSyncing => 'Sincronizando con tu perfil público…';
+
+  @override
+  String get profileSyncStatusPartial =>
+      'Publicado: aún sincronizando con algunos relés';
+
+  @override
+  String get profileSyncStatusSynced => 'Perfil público actualizado';
+
+  @override
+  String get profileSyncStatusFailed => 'Aún no se pudo sincronizar.';
+
+  @override
+  String get profileSyncStatusRetrySemantics => 'Reintentar publicar tu perfil';
+
+  @override
   String keyDisplayCopiedToClipboard(String label) {
     return '$label copiado al portapapeles';
   }
@@ -1974,7 +1990,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get avatarPickerPhotoUpdated =>
-      'Foto actualizada. Publicada en tu perfil público de Nostr.';
+      'Foto actualizada. Se publicará en tu perfil público de Nostr.';
 
   @override
   String get avatarPickerPhotoRemoved => 'Foto quitada.';

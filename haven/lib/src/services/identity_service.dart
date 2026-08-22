@@ -136,6 +136,23 @@ abstract class IdentityService {
   /// Returns 32 bytes of the secret key for operations requiring
   /// the identity (e.g., gift-wrapping welcome events).
   ///
+  /// **Ownership transfers to the caller, so every call MUST return a FRESH,
+  /// WRITABLE buffer.** Callers hand the result to `takeSecretOwnership`,
+  /// which does not copy a `Uint8List` and whose caller then wipes it in a
+  /// `finally` (Security Rule 9 — Dart has no `zeroize`, so the one buffer
+  /// holding the secret is the one that gets scrubbed). Two consequences bind
+  /// every implementation, the real one and every test double:
+  ///
+  /// * Returning a retained buffer hands out something the first caller
+  ///   zeroes; the second call then yields 32 zero bytes, which the FFI
+  ///   rejects as `Invalid secret key: malformed or out-of-range secret key`.
+  /// * Returning an unmodifiable list (`List.unmodifiable`, `const [...]`) is
+  ///   a secret nothing can wipe, so `takeSecretOwnership` throws
+  ///   `UnsupportedError` rather than let it live unscrubbed.
+  ///
+  /// `NostrIdentityService` satisfies both for free — it forwards the
+  /// `Uint8List` `flutter_rust_bridge` allocates per FFI call.
+  ///
   /// **Security Warning**: Handle these bytes carefully. They should only be
   /// passed to FFI operations and never logged or stored unencrypted.
   ///

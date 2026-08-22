@@ -2038,6 +2038,27 @@
     "description": "Assertive screen-reader announcement when saving the display name fails."
   },
 
+  "profileSyncStatusSyncing": "Syncing to your public profile…",
+  "@profileSyncStatusSyncing": {
+    "description": "Own-profile sync status line: a publish of the local name/photo edit is currently in flight to the relay pool."
+  },
+  "profileSyncStatusPartial": "Published — still syncing to some relays",
+  "@profileSyncStatusPartial": {
+    "description": "Own-profile sync status line: at least one relay acknowledged the publish, but not the whole pool yet (or a newer edit is queued); a persisted backoff will retry automatically."
+  },
+  "profileSyncStatusSynced": "Public profile up to date",
+  "@profileSyncStatusSynced": {
+    "description": "Own-profile sync status line: every relay in the pool has acknowledged the current name/photo."
+  },
+  "profileSyncStatusFailed": "Couldn't sync yet.",
+  "@profileSyncStatusFailed": {
+    "description": "Own-profile sync status line: the last publish attempt could not reach any relay; shown beside a Retry action (commonRetry)."
+  },
+  "profileSyncStatusRetrySemantics": "Retry publishing your profile",
+  "@profileSyncStatusRetrySemantics": {
+    "description": "Accessibility label for the Retry button on the own-profile sync status line, more descriptive than its short visible \"Retry\" caption (commonRetry)."
+  },
+
   "keyDisplayCopiedToClipboard": "{label} copied to clipboard",
   "@keyDisplayCopiedToClipboard": {
     "description": "Snackbar confirming a labelled key (e.g. 'Public Key') was copied to the clipboard from the KeyDisplay widget.",
@@ -2176,9 +2197,9 @@
     "description": "Accessibility label for the camera badge that opens the photo picker."
   },
 
-  "avatarPickerPhotoUpdated": "Photo updated. Published to your public Nostr profile.",
+  "avatarPickerPhotoUpdated": "Photo updated. It will be published to your public Nostr profile.",
   "@avatarPickerPhotoUpdated": {
-    "description": "Snackbar confirming the new profile photo was saved and shared. The em dash separates the two clauses. Updated for the public-profile migration: the photo is now published publicly (Blossom-hosted), not end-to-end encrypted within circles (docs/PUBLIC_PROFILE_MIGRATION_PLAN.md §6.5)."
+    "description": "Snackbar confirming the new profile photo was saved locally. FUTURE TENSE deliberately (profile-latency migration): the photo is saved instantly but the publish to the public Nostr profile (Blossom-hosted) now happens in the background, so past-tense \"Published to\" would be a claim this snackbar cannot back up. The Identity page's sync status line reports when it actually lands."
   },
   "avatarPickerPhotoRemoved": "Photo removed.",
   "@avatarPickerPhotoRemoved": {

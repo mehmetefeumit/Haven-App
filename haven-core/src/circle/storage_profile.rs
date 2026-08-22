@@ -34,9 +34,9 @@ use zeroize::Zeroizing;
 
 use super::error::{CircleError, Result};
 use super::storage::CircleStorage;
-use crate::profile::picture_is_current;
 use crate::profile::types::{CachedProfile, ProfileMetadata, ProfileState};
 use crate::profile::ProfileRelaySalt;
+use crate::profile::{merge_edits, picture_is_current};
 
 /// `user_settings` key holding the per-install profile-relay salt as 64
 /// lowercase hex characters.
@@ -115,6 +115,15 @@ impl CircleStorage {
     /// from downgrading a newer cached profile, and a forced refetch from
     /// reverting a just-published optimistic edit (bug MEDIUM-3).
     ///
+    /// # Pending own-profile edits survive the write
+    ///
+    /// When the pubkey has unpublished local edits (only ever the local user's
+    /// own — a member has no outbox row), they are re-applied on top of the
+    /// fetched object before it is stored. Without this, any refresh that pulled
+    /// a genuinely newer kind-0 while an edit was still queued would erase the
+    /// edit from the UI while leaving it pending, so the user would watch their
+    /// new name revert and then reappear when the sync eventually landed.
+    ///
     /// # Errors
     ///
     /// As [`Self::upsert_profile`].
@@ -138,7 +147,21 @@ impl CircleStorage {
             }
         };
         if should_write {
-            Self::write_profile_row(&conn, cached)?;
+            // Read under the SAME lock (the connection mutex is not reentrant,
+            // so the public reader would deadlock here).
+            match Self::read_pending_edits(&conn, &cached.pubkey_hex)? {
+                None => Self::write_profile_row(&conn, cached)?,
+                Some(pending) => {
+                    let merged = merge_edits(&cached.metadata, &pending.to_edits(None));
+                    Self::write_profile_row(
+                        &conn,
+                        &CachedProfile {
+                            metadata: merged,
+                            ..cached.clone()
+                        },
+                    )?;
+                }
+            }
         }
         Ok(should_write)
     }
@@ -524,16 +547,8 @@ impl CircleStorage {
             .conn()
             .lock()
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
-        conn.execute(
-            "INSERT INTO profile_pictures (pubkey, url, sha256, canonical, thumbnail, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(pubkey) DO UPDATE SET
-                url        = excluded.url,
-                sha256     = excluded.sha256,
-                canonical  = excluded.canonical,
-                thumbnail  = excluded.thumbnail,
-                updated_at = excluded.updated_at",
-            params![pubkey_hex, url, sha256, canonical, thumbnail, updated_at],
+        Self::write_profile_picture_row(
+            &conn, pubkey_hex, url, sha256, canonical, thumbnail, updated_at,
         )?;
         Ok(())
     }
@@ -620,11 +635,20 @@ impl CircleStorage {
     /// cleared `picture` URL (or absent bytes) makes cached bytes stale, so this
     /// returns `false` and the Dart gate re-downloads/clears (bug HIGH-2).
     ///
+    /// A STAGED own picture — sanitized bytes cached with an empty `url` because
+    /// the Blossom upload has not landed yet — is reported as CURRENT. It is the
+    /// picture the user just chose, and comparing its (nonexistent) URL against
+    /// the still-old kind-0 `picture` would report it stale and blank the avatar
+    /// the save was supposed to show.
+    ///
     /// # Errors
     ///
     /// As [`Self::upsert_profile`].
     pub fn has_current_picture(&self, pubkey_hex: &str, current_url: Option<&str>) -> Result<bool> {
         let cached_url = self.get_profile_picture_url(pubkey_hex)?;
+        if cached_url.as_deref() == Some("") {
+            return self.profile_picture_is_staged(pubkey_hex);
+        }
         Ok(picture_is_current(current_url, cached_url.as_deref()))
     }
 
@@ -657,10 +681,23 @@ impl CircleStorage {
     /// Whether this pubkey has an existing public footprint worth retracting —
     /// the no-op gate for the ungated "delete/remove" actions.
     ///
-    /// `true` iff a kind-0 row exists in `published_events` for this pubkey **or**
-    /// a picture is cached in `profile_pictures`. Retraction callers become a
-    /// no-op when this is `false`, so they can never mint a first public event
-    /// for a pubkey that never published (Security review F2).
+    /// `true` iff any of the following holds: a kind-0 row exists in
+    /// `published_events` for this pubkey; a picture with a REAL (non-empty)
+    /// URL is cached; or a resolved kind-0 (`state = Known` with a non-zero
+    /// `event_created_at`) is cached. Retraction callers become a no-op when
+    /// this is `false`, so they can never mint a first public event for a
+    /// pubkey that never published (Security review F2).
+    ///
+    /// # Why the picture arm excludes an empty URL, and why the third arm exists
+    ///
+    /// A locally STAGED picture is bytes cached with an empty `url` — nothing
+    /// public exists for it yet — so it must not arm the gate. But requiring a
+    /// non-empty URL on its own would also DISARM an imported-nsec account whose
+    /// real cached picture row is overwritten by the staging marker. The third
+    /// arm covers that (and the pre-existing hole of an imported account with a
+    /// published kind-0 but no picture): a kind-0 this device actually saw or
+    /// published always carries `event_created_at > 0`, while staging
+    /// deliberately leaves it at 0.
     ///
     /// # Errors
     ///
@@ -668,24 +705,36 @@ impl CircleStorage {
     pub fn has_published_profile(&self, pubkey: &PublicKey) -> Result<bool> {
         // kind-0 is a plain replaceable event: empty `d` tag.
         let published_kind0 = self.last_published_event(0, "", pubkey)?.is_some();
-        let has_known_picture = {
+        let (has_known_picture, seen_kind0) = {
             let pubkey_hex = pubkey.to_hex();
             let conn = self.conn().lock().map_err(|e| {
                 CircleError::Storage(format!("Failed to acquire database lock: {e}"))
             })?;
-            conn.query_row(
-                "SELECT 1 FROM profile_pictures WHERE pubkey = ?1",
-                params![pubkey_hex],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some()
+            let has_known_picture = conn
+                .query_row(
+                    "SELECT 1 FROM profile_pictures WHERE pubkey = ?1 AND url <> ''",
+                    params![pubkey_hex],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            let seen_kind0 = conn
+                .query_row(
+                    "SELECT 1 FROM profiles
+                     WHERE pubkey = ?1 AND state = ?2 AND event_created_at > 0",
+                    params![pubkey_hex, ProfileState::Known.as_db_value()],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            (has_known_picture, seen_kind0)
         };
         // Delegates to the pure gate in `crate::profile::consent` so the module
         // that owns the invariant defines it.
         Ok(crate::profile::consent::has_published_profile(
             published_kind0,
             has_known_picture,
+            seen_kind0,
         ))
     }
 
@@ -714,6 +763,15 @@ impl CircleStorage {
     /// [`Self::delete_salt_row`] statement, so it cannot drift from the salt
     /// key the reader/minter uses.
     ///
+    /// # Why the outbox is reset, never deleted
+    ///
+    /// `profile_sync_state` is the one table here whose rows survive: they are
+    /// RESET in place (nothing pending, coverage counters level with
+    /// `local_version`). Deleting them would restart `local_version` at 0, so a
+    /// save made after the wipe would look older than a publish recorded before
+    /// it and the sync commit's compare-and-set would clear a pending edit it
+    /// never published.
+    ///
     /// # Errors
     ///
     /// As [`Self::upsert_profile`].
@@ -725,6 +783,7 @@ impl CircleStorage {
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM profiles", [])?;
         tx.execute("DELETE FROM profile_pictures", [])?;
+        Self::reset_profile_sync_rows(&tx, None)?;
         Self::delete_salt_row(&tx)?;
         tx.commit()?;
         Ok(())
@@ -792,12 +851,44 @@ impl CircleStorage {
         u8::try_from(miss_count.max(0)).unwrap_or(u8::MAX)
     }
 
+    /// Writes (insert-or-replace) a picture row on an ALREADY-LOCKED connection.
+    ///
+    /// Split out of [`Self::upsert_profile_picture`] so the own-profile sync
+    /// commit can re-stamp a staged row with its real Blossom URL from inside
+    /// its transaction. The connection mutex is a plain `std::sync::Mutex` and
+    /// is not reentrant, so calling the public method there would deadlock
+    /// rather than block — and duplicating the statement would give the picture
+    /// row two writers that could drift apart.
+    pub(super) fn write_profile_picture_row(
+        conn: &Connection,
+        pubkey_hex: &str,
+        url: &str,
+        sha256: &[u8],
+        canonical: &[u8],
+        thumbnail: &[u8],
+        updated_at: i64,
+    ) -> rusqlite::Result<()> {
+        conn.execute(
+            "INSERT INTO profile_pictures (pubkey, url, sha256, canonical, thumbnail, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(pubkey) DO UPDATE SET
+                url        = excluded.url,
+                sha256     = excluded.sha256,
+                canonical  = excluded.canonical,
+                thumbnail  = excluded.thumbnail,
+                updated_at = excluded.updated_at",
+            params![pubkey_hex, url, sha256, canonical, thumbnail, updated_at],
+        )?;
+        Ok(())
+    }
+
     /// Writes (insert-or-replace) a profile row on an already-locked connection.
     ///
-    /// Shared by [`Self::upsert_profile`] (unconditional) and
+    /// Shared by [`Self::upsert_profile`] (unconditional),
     /// [`Self::upsert_profile_if_newer`] (which first reads the existing row
-    /// under the same lock), keeping the `INSERT … ON CONFLICT` SQL in one place.
-    fn write_profile_row(
+    /// under the same lock) and the own-profile sync's staging / commit
+    /// transactions, keeping the `INSERT … ON CONFLICT` SQL in one place.
+    pub(super) fn write_profile_row(
         conn: &rusqlite::Connection,
         cached: &CachedProfile,
     ) -> rusqlite::Result<()> {
@@ -822,7 +913,7 @@ impl CircleStorage {
     }
 
     /// Maps a `profiles` row to a [`CachedProfile`].
-    fn map_profile_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CachedProfile> {
+    pub(super) fn map_profile_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CachedProfile> {
         let pubkey_hex: String = row.get(0)?;
         let metadata_json: String = row.get(1)?;
         let state: i64 = row.get(2)?;
@@ -1077,7 +1168,7 @@ mod tests {
         // PRAGMA table_info structural assertion: the cache MUST NOT carry any
         // circle / group identifier (Rule 4 / Security review).
         let storage = CircleStorage::in_memory().unwrap();
-        for table in ["profiles", "profile_pictures"] {
+        for table in ["profiles", "profile_pictures", "profile_sync_state"] {
             let conn = storage.conn().lock().unwrap();
             let mut stmt = conn
                 .prepare(&format!("PRAGMA table_info({table})"))
@@ -1401,7 +1492,7 @@ mod tests {
 
     #[test]
     fn forced_refresh_after_publish_keeps_optimistic_edit() {
-        // publish_my_profile optimistically caches the just-built edit at
+        // A committed own-profile sync caches the just-published edit at
         // created_at = now. A forced refresh that pulls a PRE-edit external copy
         // (older created_at) must not revert the saved edit.
         let storage = CircleStorage::in_memory().unwrap();

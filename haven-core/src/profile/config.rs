@@ -42,15 +42,6 @@ pub use crate::avatar::AVATAR_MIME;
 // `docs/PUBLIC_PROFILE_MIGRATION_PLAN.md` §1.6/D3), so freshness here comes
 // from tiered polling instead.
 
-/// Bounded timeout for a one-shot profile (kind-0) relay fetch.
-///
-/// Used by the PUBLISH path (own-profile merge base / read-back), which talks
-/// to the user's own write relays rather than to an assigned pool relay. The
-/// per-author fetch path uses the tighter
-/// [`PROFILE_AUTHOR_FETCH_TIMEOUT`] instead, because it issues many more
-/// requests and must fit them inside [`PROFILE_BATCH_DEADLINE`].
-pub const PROFILE_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// Kind-0 revisions requested for ONE author in ONE `REQ`.
 ///
 /// A well-behaved relay prunes replaceable events and returns exactly one, but
@@ -64,12 +55,12 @@ pub const PROFILE_PER_AUTHOR_LIMIT: usize = 4;
 
 /// Bounded timeout for ONE author's kind-0 `REQ` against ONE assigned relay.
 ///
-/// Deliberately much tighter than [`PROFILE_FETCH_TIMEOUT`]: requests to a
-/// single relay run SERIALLY (that serialization is what removes the burst
-/// signature a relay could otherwise use to fingerprint a roster refresh), so
-/// this value multiplies by the number of authors assigned to that relay. Four
-/// seconds is comfortably above a healthy relay's round-trip while keeping an
-/// unresponsive one from consuming the whole cycle budget.
+/// Deliberately tight: requests to a single relay run SERIALLY (that
+/// serialization is what removes the burst signature a relay could otherwise
+/// use to fingerprint a roster refresh), so this value multiplies by the number
+/// of authors assigned to that relay. Four seconds is comfortably above a
+/// healthy relay's round-trip while keeping an unresponsive one from consuming
+/// the whole cycle budget.
 pub const PROFILE_AUTHOR_FETCH_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// Wall-clock budget for one complete assigned-fetch cycle.
@@ -91,6 +82,42 @@ pub const PROFILE_BATCH_DEADLINE: Duration = Duration::from_secs(20);
 /// still sees only its own slice), but it does make the whole cycle more
 /// conspicuous as a simultaneous burst to a network observer.
 pub const PROFILE_MAX_INFLIGHT_RELAYS: usize = 4;
+
+/// Wall-clock budget for reading the local user's OWN newest kind-0 back from
+/// every pool relay concurrently ([`crate::profile::fetch::fetch_own_profile`]).
+///
+/// Per relay the worst case is a 5 s WebSocket handshake plus a
+/// [`PROFILE_AUTHOR_FETCH_TIMEOUT`] `REQ` — 9 s — and the relays are queried
+/// concurrently, so this is a fail-safe with real headroom rather than the time
+/// a healthy read costs. It also makes the [`PROFILE_BATCH_DEADLINE`] carried by
+/// each one-relay cycle dead code on this path: 20 s can never be reached under
+/// a 12 s outer budget.
+///
+/// # Why fanning out here is not the disclosure the in-flight cap guards
+///
+/// [`PROFILE_MAX_INFLIGHT_RELAYS`] exists because a ROSTER refresh that hit
+/// every relay at once would be legible as one burst, and its arrival order
+/// would leak roster ordering. Our own profile has neither property: it is ONE
+/// author, and it was already published to every pool relay (a peer's
+/// assignment salt is private to their install, so we cannot know which relay
+/// they read us from). The write is already an N-way burst; reading it back
+/// shows each relay nothing it does not already store.
+pub const PROFILE_OWN_FETCH_BUDGET: Duration = Duration::from_secs(12);
+
+/// Retry ladder (seconds) for an own-profile sync that did not fully land:
+/// `30s → 2min → 8min → 30min → 6h`, then 6h forever.
+///
+/// Indexed by the number of attempts already recorded, saturating on the last
+/// rung, so the first failure schedules the first entry. Deliberately the same
+/// shape as the per-author miss ladder: a failed sync is retried by triggers
+/// the user is already causing (foreground, resume), and without a persisted
+/// ladder every one of those triggers would re-dial the whole pool — a publish
+/// burst a relay could use to count how often this install foregrounds.
+///
+/// A fresh user edit RESETS the ladder: a save is an explicit user action, and
+/// making it wait out a backoff earned by an earlier failure would be the app
+/// silently refusing to do what it was just told.
+pub const PROFILE_SYNC_BACKOFF_SECS: &[i64] = &[30, 120, 480, 1_800, 21_600];
 
 /// Inclusive millisecond range for the delay between two consecutive `REQ`s
 /// sent to the SAME relay.
@@ -142,8 +169,9 @@ pub fn blossom_server() -> String {
 /// Overrides the Blossom upload server for hermetic e2e tests (**debug only**).
 ///
 /// Intended to be called once from a scenario's `setUpAll` (alongside
-/// `set_discovery_relays_for_test` and `allow_private_blossom_for_test`) so
-/// `upload_my_profile_picture` targets the local Blossom container/binary.
+/// `set_discovery_relays_for_test` and `allow_private_blossom_for_test`) so the
+/// own-profile sync's picture upload targets the local Blossom
+/// container/binary.
 ///
 /// # Errors
 ///
@@ -246,5 +274,46 @@ mod tests {
     fn inflight_relay_bound_is_positive() {
         // Zero would deadlock the fan-out (no relay ever scheduled).
         assert!(PROFILE_MAX_INFLIGHT_RELAYS > 0);
+    }
+
+    #[test]
+    fn own_fetch_budget_clears_one_relays_worst_case_and_kills_the_inner_deadline() {
+        // Read through `let` so the assertions are not compile-time constants
+        // (clippy::assertions_on_constants) and a mutation fails readably.
+        let budget = PROFILE_OWN_FETCH_BUDGET;
+        let req = PROFILE_AUTHOR_FETCH_TIMEOUT;
+        let batch = PROFILE_BATCH_DEADLINE;
+        // The 5 s WebSocket handshake bound the relay layer applies before any
+        // REQ (`relay::manager::CONNECTION_TIMEOUT`, not importable from here).
+        let connect = Duration::from_secs(5);
+
+        assert!(
+            budget > connect + req,
+            "a budget below one relay's own worst case would cut off a slow but \
+             perfectly healthy relay before it could answer",
+        );
+        assert!(
+            budget < batch,
+            "the per-cycle batch deadline must stay unreachable under this \
+             budget, or two deadlines would race and the documented one would \
+             not be the one that fires",
+        );
+    }
+
+    #[test]
+    fn sync_backoff_ladder_is_non_empty_and_strictly_grows() {
+        // An empty ladder would index nothing and leave a failed sync retrying
+        // on every trigger; a non-increasing one would never back off at all.
+        assert!(!PROFILE_SYNC_BACKOFF_SECS.is_empty());
+        assert!(
+            PROFILE_SYNC_BACKOFF_SECS[0] > 0,
+            "a zero first rung is not a backoff",
+        );
+        for pair in PROFILE_SYNC_BACKOFF_SECS.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "the ladder must grow monotonically: {pair:?}",
+            );
+        }
     }
 }

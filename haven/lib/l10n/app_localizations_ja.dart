@@ -1755,6 +1755,21 @@ class AppLocalizationsJa extends AppLocalizations {
   String get displayNameCardSaveFailedAnnouncement => '保存に失敗しました。もう一度お試しください';
 
   @override
+  String get profileSyncStatusSyncing => '公開プロフィールに同期しています…';
+
+  @override
+  String get profileSyncStatusPartial => '公開済み。一部のリレーはまだ同期中です';
+
+  @override
+  String get profileSyncStatusSynced => '公開プロフィールは最新の状態です';
+
+  @override
+  String get profileSyncStatusFailed => 'まだ同期できていません。';
+
+  @override
+  String get profileSyncStatusRetrySemantics => 'プロフィールの公開を再試行';
+
+  @override
   String keyDisplayCopiedToClipboard(String label) {
     return '$labelをクリップボードにコピーしました';
   }
@@ -1858,7 +1873,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get avatarPickerPhotoUpdated =>
-      '写真を更新しました。あなたの公開 Nostr プロフィールに公開されました。';
+      '写真を更新しました。あなたの Nostr の公開プロフィールに公開されます。';
 
   @override
   String get avatarPickerPhotoRemoved => '写真を削除しました。';

@@ -9,6 +9,7 @@
 /// (owner-directed 2026-07-16) — there is no Public Profile toggle to test.
 library;
 
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -16,12 +17,15 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/identity_page.dart';
+import 'package:haven/src/providers/profile_sync_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/identity/display_name_card.dart';
 import 'package:haven/src/widgets/identity/identity_photo_header.dart';
 import 'package:haven/src/widgets/identity/npub_qr_code.dart';
+import 'package:haven/src/widgets/identity/profile_sync_status_line.dart';
 import 'package:haven/src/widgets/identity/public_profile_notice.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -95,7 +99,10 @@ void main() {
   });
 
   group('IdentityPage structure', () {
-    Widget build({MockProfileService? profileService}) => ProviderScope(
+    Widget build({
+      MockProfileService? profileService,
+      List<Override> extraOverrides = const [],
+    }) => ProviderScope(
       overrides: [
         identityServiceProvider.overrideWithValue(_FakeIdentityService()),
         // No profile/avatar set — the header shows initials and hides
@@ -103,6 +110,7 @@ void main() {
         profileServiceProvider.overrideWithValue(
           profileService ?? MockProfileService(),
         ),
+        ...extraOverrides,
       ],
       child: const MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -164,5 +172,141 @@ void main() {
 
       expect(find.byKey(WidgetKeys.identityRefreshButton), findsOneWidget);
     });
+
+    testWidgets(
+      'renders the profile sync status line exactly once, at page scope '
+      '(M1) — never duplicated inside the photo header or the '
+      'display-name card',
+      (tester) async {
+        await tester.pumpWidget(build());
+        await tester.pumpAndSettle();
+
+        expect(find.byType(ProfileSyncStatusLine), findsOneWidget);
+        // A clean MockProfileService has nothing pending, so the controller
+        // settles to `synced` without needing an explicit trigger.
+        expect(find.text('Public profile up to date'), findsOneWidget);
+      },
+    );
   });
+
+  // ---------------------------------------------------------------------------
+  // Now that the photo header and the sync status line are SIBLINGS (rather
+  // than the line living inside the header), their independence is only
+  // observable here, at page scope — see `identity_photo_header_test.dart`'s
+  // top doc comment.
+  // ---------------------------------------------------------------------------
+
+  group('IdentityPage — photo header / sync status line independence', () {
+    Widget build({
+      required MockProfileService profileService,
+      required OwnProfileSyncController Function() syncController,
+    }) => ProviderScope(
+      overrides: [
+        identityServiceProvider.overrideWithValue(_FakeIdentityService()),
+        profileServiceProvider.overrideWithValue(profileService),
+        ownProfileSyncProvider.overrideWith(syncController),
+      ],
+      child: const MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: IdentityPage(),
+      ),
+    );
+
+    testWidgets(
+      'an in-flight background sync (e.g. from a name edit) does not '
+      'disable the photo header actions',
+      (tester) async {
+        await tester.pumpWidget(
+          build(
+            profileService: MockProfileService(),
+            syncController: () => _FixedSyncController(
+              ProfileSyncStatus.syncing,
+            ),
+          ),
+        );
+        // Deliberately NOT pumpAndSettle: the status line's `syncing` state
+        // renders an indeterminate `CircularProgressIndicator`, which
+        // schedules a new frame forever and would hang it.
+        await tester.pump();
+
+        expect(
+          tester
+              .widget<TextButton>(
+                find.widgetWithText(TextButton, 'Edit Photo'),
+              )
+              .onPressed,
+          isNotNull,
+          reason: 'a background publish must never block picking a new '
+              'photo — `_busy` is local to the photo header, not driven '
+              'by ownProfileSyncProvider',
+        );
+      },
+    );
+
+    testWidgets(
+      'the photo header being busy (removing) does not change the '
+      'independently-driven sync status line',
+      (tester) async {
+        final jpegHeader = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0]);
+        final gate = Completer<void>();
+        final svc = MockProfileService(
+          ownProfile: Profile(
+            pubkeyHex: _FakeIdentityService._identity.pubkeyHex,
+            pictureBytes: jpegHeader,
+            pictureHash: 'mock-hash',
+          ),
+        )..removeOwnAvatarGate = gate;
+
+        await tester.pumpWidget(
+          build(
+            profileService: svc,
+            syncController: () =>
+                _FixedSyncController(ProfileSyncStatus.synced),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.widgetWithText(TextButton, 'Remove'));
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.descendant(
+            of: find.byType(AlertDialog),
+            matching: find.widgetWithText(TextButton, 'Remove'),
+          ),
+        );
+        await tester.pump();
+
+        // Removal is in flight (gated) — the photo header is busy...
+        expect(
+          tester
+              .widget<TextButton>(
+                find.widgetWithText(TextButton, 'Edit Photo'),
+              )
+              .onPressed,
+          isNull,
+          reason: '_busy must disable the picker actions while removing',
+        );
+        // ...but the sync status line, driven independently, is unchanged.
+        expect(find.text('Public profile up to date'), findsOneWidget);
+
+        gate.complete();
+        await tester.pumpAndSettle();
+      },
+    );
+  });
+}
+
+/// A fixed-status fake [OwnProfileSyncController] for tests that need to
+/// drive [ownProfileSyncProvider] to a known state WITHOUT touching
+/// [ProfileService.syncOwnProfile] / [ProfileService.pendingSyncState] at
+/// all — build() overrides the base class entirely (never calls
+/// `super.build()`), so no network/local read happens on mount.
+class _FixedSyncController extends OwnProfileSyncController {
+  _FixedSyncController(this._fixed);
+
+  final ProfileSyncStatus _fixed;
+
+  @override
+  ProfileSyncStatus build() => _fixed;
 }

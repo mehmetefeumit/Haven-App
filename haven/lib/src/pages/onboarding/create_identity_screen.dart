@@ -1,8 +1,6 @@
 /// Identity-creation screen — the second and final onboarding step.
 library;
 
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -13,7 +11,6 @@ import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/location_disclosure_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
-import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
@@ -21,6 +18,7 @@ import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/anonymous_name_generator.dart';
+import 'package:haven/src/utils/profile_sync_trigger.dart';
 import 'package:haven/src/widgets/identity/avatar.dart';
 import 'package:haven/src/widgets/identity/avatar_initials.dart';
 import 'package:haven/src/widgets/identity/avatar_picker.dart';
@@ -42,22 +40,26 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 ///    is never overwritten. (The Rust core also fails closed on a duplicate
 ///    create, as a backstop.)
 /// 2. Fire-and-forget the KeyPackage publish (kind 30443/443 + relay lists).
-/// 3. Save the display name locally.
-/// 4. Publish the display name — and the optional photo, if one was chosen —
-///    as the user's public kind-0 profile (public-by-default, unconditional —
-///    owner-directed, matching White Noise; disclosed by [PublicProfileNotice]
-///    above the field).
+/// 3. Save the display name locally (a fast SQLCipher write; no relay yet).
+/// 4. Save the optional photo, if one was chosen, LOCALLY too — chained
+///    *after* the name save so the local merge always carries the name —
+///    then trigger the background publish of the public kind-0 profile
+///    (public-by-default, unconditional — owner-directed, matching White
+///    Noise; disclosed by [PublicProfileNotice] above the field). Name and
+///    photo publish together in ONE kind-0 event once the trigger's sync
+///    pass runs.
 /// 5. Seed default relays.
 /// 6. Run the background-location prominent disclosure → permission → enable
 ///    sequence (the sole Google Play "disclose before collection" point).
 /// 7. Mark onboarding complete; `AppRouter` swaps in the map shell.
 ///
-/// There is no "Skip": the name (pre-filled or edited) is always published.
-/// Adding a profile photo is optional — an avatar circle above the field opens
-/// the same gallery picker + square crop editor as the Identity settings page
-/// ([pickAndCropAvatar]). A chosen photo is held locally and, once the identity
-/// exists, published to Blossom + kind-0 chained *after* the name publish
-/// (never concurrently, so the two kind-0 writes can't race).
+/// There is no "Skip": the name (pre-filled or edited) is always saved and
+/// published. Adding a profile photo is optional — an avatar circle above
+/// the field opens the same gallery picker + square crop editor as the
+/// Identity settings page ([pickAndCropAvatar]). A chosen photo is held
+/// locally and, once the identity exists, saved and queued for publish
+/// *after* the name (never concurrently, so the local merge can't land the
+/// two edits out of order).
 class CreateIdentityScreen extends ConsumerStatefulWidget {
   /// Creates an identity-creation screen.
   const CreateIdentityScreen({super.key, this.pickPhoto = pickAndCropAvatar});
@@ -190,38 +192,36 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
     final name = await _resolveName();
     if (!mounted) return;
 
-    // (3)(4) Persist locally and publish the public kind-0 profile. Publishing
-    // is unconditional (public-by-default, owner-directed). The publish itself
-    // is fire-and-forget so a slow/unreachable relay can never stall entry into
-    // the app; failures are stored in the controller's own state.
+    // (3)(4) Persist locally, then trigger the public kind-0 publish.
+    // Publishing is unconditional (public-by-default, owner-directed). The
+    // publish itself is fire-and-forget (`triggerProfileSync`) so a
+    // slow/unreachable relay can never stall entry into the app; its
+    // progress is what `ProfileSyncStatusLine` reports later, on the
+    // Identity page.
     try {
       await ref.read(identityServiceProvider).setDisplayName(name);
       if (!mounted) return;
       ref.invalidate(displayNameProvider);
-      // Publish the public kind-0 profile: the display name always, and the
-      // optional photo only if one was picked. With a photo, publish via the
-      // service directly and in series (name → photo) so (a) the two kind-0
-      // writes can't race and (b) the photo is gated on the name publish
-      // SUCCEEDING — the controller would swallow a name-publish failure
-      // (AsyncValue.guard) and let a photo-only kind-0 publish without the
-      // name. Fire-and-forget so a slow Blossom upload or unreachable relay
-      // never stalls entry into the app; the photo appears once it lands.
+      // Save the public kind-0 profile LOCALLY: the display name always,
+      // and the optional photo only if one was picked, in series (name ->
+      // photo) so (a) the two edits can't land out of order in the local
+      // merge and (b) the photo is gated on the name save SUCCEEDING — a
+      // picture-only kind-0 must never publish without the intended name.
+      // Both are now fast, local-only SQLCipher writes (no relay/Blossom
+      // I/O), so they are awaited directly rather than fired-and-forgotten;
+      // a genuine local failure is logged and swallowed so it can never
+      // block onboarding completion.
       final photo = _pickedPhoto;
-      if (photo != null) {
-        unawaited(
-          _publishOnboardingProfileWithPhoto(
-            ref.read(profileServiceProvider),
-            name,
-            photo,
-          ),
-        );
-      } else {
-        unawaited(
-          ref
-              .read(ownProfileControllerProvider.notifier)
-              .saveDisplayName(displayName: name),
-        );
-      }
+      await _saveOnboardingProfileLocally(
+        ref.read(profileServiceProvider),
+        name,
+        photo,
+      );
+      if (!mounted) return;
+      // The actual publish is what can be slow/unreachable — fire-and-forget
+      // via the shared sync controller so it never stalls entry into the
+      // app; the name/photo appear on other clients once it lands.
+      triggerProfileSync(ref);
     } on IdentityServiceException {
       if (!mounted) return;
       setState(() => _busy = false);
@@ -379,28 +379,32 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
   }
 }
 
-/// Publishes the onboarding public kind-0 profile — display name then photo —
-/// gated so the photo publishes only if the name publish SUCCEEDED.
+/// Saves the onboarding public kind-0 profile LOCALLY — display name then,
+/// if one was picked, the photo — gated so the photo save only runs if the
+/// name save SUCCEEDED.
 ///
-/// Fire-and-forget: invoked without a live widget behind it, so it takes plain
-/// values (no `ref`/`context`). It calls the [ProfileService] directly rather
-/// than [OwnProfileController], whose `AsyncValue.guard` swallows a publish
-/// failure — which would let the avatar's kind-0 merge build on a base that
-/// never received the name. On any failure the name is still saved locally (by
-/// the caller) and republishes on the next profile edit. Errors are logged by
-/// runtime type only, never surfaced raw (Security Rule 8).
-Future<void> _publishOnboardingProfileWithPhoto(
+/// Both are now fast, local-only writes (`ProfileService.updateOwnProfile` /
+/// `ProfileService.setOwnAvatar` no longer touch a relay or Blossom), so this
+/// takes plain values (no `ref`/`context`) purely to stay testable in
+/// isolation — unlike before this migration, it no longer needs to survive a
+/// possibly-disposed widget, since [triggerProfileSync] (called by the
+/// caller once this returns) is what runs in the background. On any local
+/// failure the name is still saved by the caller
+/// ([IdentityService.setDisplayName]) and republishes on the next profile
+/// edit. Errors are logged by runtime type only, never surfaced raw
+/// (Security Rule 8).
+Future<void> _saveOnboardingProfileLocally(
   ProfileService service,
   String name,
-  Uint8List photo,
+  Uint8List? photo,
 ) async {
   try {
     await service.updateOwnProfile(displayName: name);
-    await service.setOwnAvatar(photo);
+    if (photo != null) {
+      await service.setOwnAvatar(photo);
+    }
   } on Object catch (e) {
-    debugPrint(
-      'Onboarding profile publish with photo failed: ${e.runtimeType}',
-    );
+    debugPrint('Onboarding profile local save failed: ${e.runtimeType}');
   }
 }
 

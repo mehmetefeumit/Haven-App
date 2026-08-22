@@ -1,8 +1,9 @@
 /// Profile-photo header for the Identity page.
 ///
 /// Shows the user's avatar (tap to view full screen when set, or to add one
-/// when not), an "Edit Photo" action, a "Remove" action (only when a photo is
-/// set, behind a confirmation), and a short end-to-end-encryption note.
+/// when not), an "Edit Photo" action, and a "Remove" action (only when a
+/// photo is set, behind a confirmation). The own-profile sync status line
+/// lives once, at page scope (`identity_page.dart`) — not here.
 library;
 
 import 'dart:typed_data';
@@ -20,12 +21,33 @@ import 'package:haven/src/widgets/identity/avatar_picker.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Identity-page header for viewing and changing the user's profile photo.
-class IdentityPhotoHeader extends ConsumerWidget {
+///
+/// `_busy` is LOCAL, purely-widget state — it gates only the pick/remove
+/// affordances in THIS header, and is deliberately independent of the
+/// page-scoped `ProfileSyncStatusLine`'s `ownProfileSyncProvider`-driven
+/// state: an in-flight background publish (e.g. from a name edit elsewhere
+/// on the page) must never disable picking a new photo, and picking a new
+/// photo must never appear to change the sync status of a prior, unrelated
+/// publish still in flight.
+class IdentityPhotoHeader extends ConsumerStatefulWidget {
   /// Creates the identity photo header.
   const IdentityPhotoHeader({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<IdentityPhotoHeader> createState() =>
+      _IdentityPhotoHeaderState();
+}
+
+class _IdentityPhotoHeaderState extends ConsumerState<IdentityPhotoHeader> {
+  bool _busy = false;
+
+  /// Whether a removal is in flight specifically — a subset of [_busy]
+  /// (which also spans the native picker) that gates ONLY the Remove
+  /// button's own spinner, so picking a new photo never shows it.
+  bool _removing = false;
+
+  @override
+  Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final l10n = AppLocalizations.of(context);
 
@@ -35,7 +57,7 @@ class IdentityPhotoHeader extends ConsumerWidget {
     );
     final displayNameAsync = ref.watch(displayNameProvider);
     final identityAsync = ref.watch(identityProvider);
-    final isLoading = ref.watch(ownProfileControllerProvider).isLoading;
+    final isLoading = _busy;
 
     final bytes = avatarAsync.valueOrNull;
     final hasAvatar = bytes != null && bytes.isNotEmpty;
@@ -56,11 +78,9 @@ class IdentityPhotoHeader extends ConsumerWidget {
                 ? null
                 : hasAvatar
                 ? () => showAvatarFullscreen(context, bytes)
-                : () => pickAndSetOwnAvatar(context, ref),
+                : () => _pick(context),
             // The badge is always the "change photo" affordance.
-            onBadgeTap: isLoading
-                ? null
-                : () => pickAndSetOwnAvatar(context, ref),
+            onBadgeTap: isLoading ? null : () => _pick(context),
           ),
         ),
         const SizedBox(height: HavenSpacing.md),
@@ -68,9 +88,7 @@ class IdentityPhotoHeader extends ConsumerWidget {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             TextButton.icon(
-              onPressed: isLoading
-                  ? null
-                  : () => pickAndSetOwnAvatar(context, ref),
+              onPressed: isLoading ? null : () => _pick(context),
               icon: const Icon(LucideIcons.imagePlus, size: 18),
               label: Text(l10n.photoHeaderEditPhoto),
             ),
@@ -79,9 +97,19 @@ class IdentityPhotoHeader extends ConsumerWidget {
               TextButton.icon(
                 onPressed: isLoading
                     ? null
-                    : () => _confirmAndRemove(context, ref),
+                    : () => _confirmAndRemove(context),
                 icon: const Icon(LucideIcons.trash2, size: 18),
-                label: Text(l10n.photoHeaderRemove),
+                // The synchronous retraction call has no other visible
+                // feedback while it is in flight — show a spinner in place
+                // of the label rather than leaving only the greyed-out
+                // button (`circles_bottom_sheet.dart`'s leave/remove idiom).
+                label: _removing
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : Text(l10n.photoHeaderRemove),
                 style: TextButton.styleFrom(
                   foregroundColor: colorScheme.error,
                 ),
@@ -93,10 +121,21 @@ class IdentityPhotoHeader extends ConsumerWidget {
     );
   }
 
+  /// Runs the pick → crop → local-save flow, tracking [_busy] for its
+  /// duration (try/finally so a thrown or cancelled pick always releases it).
+  Future<void> _pick(BuildContext context) async {
+    setState(() => _busy = true);
+    try {
+      await pickAndSetOwnAvatar(context, ref);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   /// Confirms with the user, then removes the avatar (broadcasting a tombstone
   /// to every circle). Mirrors the destructive-confirm pattern used for
   /// identity deletion.
-  Future<void> _confirmAndRemove(BuildContext context, WidgetRef ref) async {
+  Future<void> _confirmAndRemove(BuildContext context) async {
     final colorScheme = Theme.of(context).colorScheme;
     final l10n = AppLocalizations.of(context);
     final confirmed = await showDialog<bool>(
@@ -119,7 +158,20 @@ class IdentityPhotoHeader extends ConsumerWidget {
     );
     if (confirmed != true) return;
     if (!context.mounted) return;
-    await removeOwnAvatar(context, ref);
+    setState(() {
+      _busy = true;
+      _removing = true;
+    });
+    try {
+      await removeOwnAvatar(context, ref);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _removing = false;
+        });
+      }
+    }
   }
 }
 

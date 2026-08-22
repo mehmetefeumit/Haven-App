@@ -51,6 +51,7 @@ import 'package:haven/src/services/pending_leave_service.dart';
 import 'package:haven/src/services/subscription_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/profile_refresh_trigger.dart';
+import 'package:haven/src/utils/profile_sync_trigger.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
 import 'package:haven/src/widgets/common/dim_overlay.dart';
 import 'package:haven/src/widgets/common/invitations_button.dart';
@@ -467,6 +468,9 @@ class _MapShellState extends ConsumerState<MapShell>
         maxAge: profileInteractiveMaxAge,
         circles: ref.read(circlesProvider).valueOrNull,
       );
+      // Resume any own-profile publish a prior session left queued — honours
+      // the persisted backoff, never dials a relay unconditionally.
+      triggerProfileSyncRetry(ref);
     });
   }
 
@@ -1437,6 +1441,8 @@ class _MapShellState extends ConsumerState<MapShell>
       maxAge: profileInteractiveMaxAge,
       circles: ref.read(circlesProvider).valueOrNull,
     );
+    // Resume any own-profile publish left queued while backgrounded.
+    triggerProfileSyncRetry(ref);
     if (liveSyncEnabled) {
       // Re-anchor the engine's subscriptions (lossless offline-gap backfill);
       // the engine kept its connection, so this is a fast resubscribe.

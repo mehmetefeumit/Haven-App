@@ -24,6 +24,22 @@
 ///   the only part of that method genuinely testable without the bridge,
 ///   since [ProfileMetadataFfi] is a plain (non-opaque) data class that can
 ///   be constructed directly.
+/// - [toProfileSyncResult] / [toProfilePendingState], the pure FFI->Dart
+///   mapping functions [NostrProfileService.syncOwnProfile] /
+///   [NostrProfileService.pendingSyncState] use — like
+///   [membersNeedingPictureDownload], these take a plain (non-opaque) FFI
+///   data class directly, so every outcome variant is exercised here without
+///   the bridge.
+/// - [NostrProfileService.pendingSyncState] fails closed (never rethrows) on
+///   a manager-factory failure — the one method here provably reachable to
+///   completion (not just "reaches the factory") without the bridge, since
+///   its own contract is to swallow every failure itself.
+/// - Two source-guard checks (`updateOwnProfile`/`setOwnAvatar` call only the
+///   LOCAL save, never the network sync; `syncOwnProfile` fetches its secret
+///   via `withFreshSecret`) pin structure the manager-factory-throws
+///   technique above cannot reach, mirroring
+///   `test/lints/publish_decorrelation_wiring_test.dart`'s bounded-span
+///   technique.
 ///
 /// Full read/write behavior against a real manager is covered by
 /// `integration_test/`, same as `NostrCircleService` today. Behavior
@@ -33,6 +49,7 @@
 /// `MockProfileService`.
 library;
 
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -341,6 +358,173 @@ void main() {
       ];
 
       expect(membersNeedingPictureDownload(ffiList), ['aa', 'bb']);
+    });
+  });
+
+  group('NostrProfileService — sync/pending reach the manager factory', () {
+    test(
+      'syncOwnProfile always reaches the manager factory — no Dart-side '
+      'gate to short-circuit it',
+      () async {
+        var managerFactoryCalls = 0;
+
+        final service = NostrProfileService(
+          identityService: _FakeIdentityService(identity: _testIdentity),
+          circleManagerFactory: () async {
+            managerFactoryCalls++;
+            throw Exception('manager unavailable: $_fakeHexSecret');
+          },
+        );
+
+        await expectLater(
+          service.syncOwnProfile(),
+          throwsA(isA<ProfileServiceException>()),
+        );
+
+        expect(managerFactoryCalls, 1);
+      },
+    );
+
+    test('syncOwnProfile never leaks the underlying error message', () async {
+      final service = NostrProfileService(
+        identityService: _FakeIdentityService(identity: _testIdentity),
+        circleManagerFactory: () async =>
+            throw Exception('manager open failed: $_fakeHexSecret'),
+      );
+
+      await expectLater(
+        service.syncOwnProfile(),
+        throwsA(
+          isA<ProfileServiceException>()
+              .having((e) => e.message, 'message', 'Failed to sync profile')
+              .having(
+                (e) => e.message.contains(_fakeHexSecret),
+                'does not contain the fake secret',
+                isFalse,
+              ),
+        ),
+      );
+    });
+  });
+
+  group('NostrProfileService — pendingSyncState fails closed', () {
+    test(
+      'returns pending on a manager-factory failure, without rethrowing',
+      () async {
+        var managerFactoryCalls = 0;
+
+        final service = NostrProfileService(
+          identityService: _FakeIdentityService(identity: _testIdentity),
+          circleManagerFactory: () async {
+            managerFactoryCalls++;
+            throw Exception('manager unavailable: $_fakeHexSecret');
+          },
+        );
+
+        final result = await service.pendingSyncState();
+
+        expect(managerFactoryCalls, 1);
+        expect(result.pending, isTrue);
+        expect(
+          result.retryDue,
+          isFalse,
+          reason: 'a persistent local fault must not force an automatic '
+              'network retry loop; the UI still shows a truthful "failed" '
+              'state with a manual Retry',
+        );
+        expect(result.partial, isFalse);
+      },
+    );
+  });
+
+  group('toProfileSyncResult (pure FFI mapping)', () {
+    test('maps every ProfileSyncOutcomeFfi variant to its Dart counterpart',
+        () {
+      const expected = {
+        ProfileSyncOutcomeFfi.nothingPending: ProfileSyncOutcome.nothingPending,
+        ProfileSyncOutcomeFfi.published: ProfileSyncOutcome.published,
+        ProfileSyncOutcomeFfi.uploadFailed: ProfileSyncOutcome.uploadFailed,
+        ProfileSyncOutcomeFfi.publishFailed: ProfileSyncOutcome.publishFailed,
+        ProfileSyncOutcomeFfi.poolUnderflow: ProfileSyncOutcome.poolUnderflow,
+      };
+      // Exhaustive by construction: fails loudly if a new FFI variant is
+      // added without a corresponding entry above.
+      expect(expected.keys.toSet(), ProfileSyncOutcomeFfi.values.toSet());
+
+      for (final MapEntry(:key, :value) in expected.entries) {
+        final ffi = ProfileSyncResultFfi(
+          outcome: key,
+          relaysAcked: 2,
+          relaysAttempted: 3,
+          stillPending: true,
+        );
+        final result = toProfileSyncResult(ffi);
+        expect(result.outcome, value);
+        expect(result.relaysAcked, 2);
+        expect(result.relaysAttempted, 3);
+        expect(result.stillPending, isTrue);
+      }
+    });
+  });
+
+  group('toProfilePendingState (pure FFI mapping)', () {
+    test('maps every field 1:1', () {
+      const ffi = ProfilePendingStateFfi(
+        pending: true,
+        partial: true,
+        retryDue: false,
+      );
+      final result = toProfilePendingState(ffi);
+      expect(result.pending, isTrue);
+      expect(result.partial, isTrue);
+      expect(result.retryDue, isFalse);
+    });
+  });
+
+  group('NostrProfileService — local methods stay local (source guard)', () {
+    String readSource() =>
+        File('lib/src/services/nostr_profile_service.dart').readAsStringSync();
+
+    /// Slices the named method's body out of the source, bounded by the
+    /// NEXT `@override` (mirrors
+    /// `test/lints/publish_decorrelation_wiring_test.dart`'s span
+    /// technique), so the assertion cannot be satisfied by an unrelated
+    /// method elsewhere in this ~380-line file.
+    String methodBody(String source, String signature) {
+      final start = source.indexOf(signature);
+      expect(
+        start,
+        isNonNegative,
+        reason: '$signature not found — has it been renamed? update this '
+            'guard rather than deleting it',
+      );
+      final end = source.indexOf('\n  @override', start + 1);
+      expect(end, greaterThan(start));
+      return source.substring(start, end);
+    }
+
+    test('updateOwnProfile calls the LOCAL save, never the network sync', () {
+      final body = methodBody(
+        readSource(),
+        'Future<Profile> updateOwnProfile(',
+      );
+      expect(body, contains('saveMyProfileLocal('));
+      expect(body, isNot(contains('syncMyProfile(')));
+    });
+
+    test('setOwnAvatar calls the LOCAL save, never the network sync', () {
+      final body = methodBody(readSource(), 'Future<Profile> setOwnAvatar(');
+      expect(body, contains('saveMyProfilePictureLocal('));
+      expect(body, isNot(contains('syncMyProfile(')));
+    });
+
+    test('syncOwnProfile fetches the secret via withFreshSecret (Rule 9)', () {
+      final body = methodBody(
+        readSource(),
+        'Future<ProfileSyncResult> syncOwnProfile(',
+      );
+      expect(body, contains('withFreshSecret('));
+      expect(body, contains('syncMyProfile('));
     });
   });
 }

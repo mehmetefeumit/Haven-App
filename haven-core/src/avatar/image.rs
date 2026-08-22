@@ -69,6 +69,100 @@ impl std::fmt::Debug for ProcessedAvatar {
     }
 }
 
+/// Sanitized picture bytes cleared for a public upload.
+///
+/// This type is the structural proof that everything Haven uploads went through
+/// the sanitizer. Its fields are PRIVATE and it has exactly two constructors —
+/// [`from_processed`](Self::from_processed), which takes the sanitizer's own
+/// output, and [`from_sanitized_cache`](Self::from_sanitized_cache), which is
+/// `pub(crate)` and takes bytes the sanitizer previously wrote to the local
+/// cache, RECOMPUTING their hash. So outside this crate the only way to obtain
+/// one is to run the sanitizer, and no hash can be attached that does not
+/// commit to the bytes travelling with it. The one constructor that does accept
+/// loose bytes is confined in-crate to the outbox rehydration path by check 15
+/// of `scripts/ci/check_profile_privacy_boundaries.sh`.
+///
+/// It is not [`ProcessedAvatar`] because a staged picture may come from a cache
+/// row, and the row does not carry the decoded width/height that struct
+/// promises. Reconstructing them would mean re-decoding the image just to fill
+/// two fields the upload never uses.
+pub struct StagedPicture {
+    /// SHA-256 of `canonical` — always recomputed here, never accepted.
+    sha256: [u8; 32],
+    /// Canonical (full-res) JPEG render bytes: exactly what is uploaded.
+    canonical: Zeroizing<Vec<u8>>,
+    /// Thumbnail JPEG render bytes, cached alongside for local rendering.
+    thumbnail: Zeroizing<Vec<u8>>,
+}
+
+impl StagedPicture {
+    /// Stages the sanitizer's output directly.
+    #[must_use]
+    pub fn from_processed(processed: &ProcessedAvatar) -> Self {
+        Self {
+            sha256: processed.content_hash,
+            canonical: processed.canonical.clone(),
+            thumbnail: processed.thumbnail.clone(),
+        }
+    }
+
+    /// Stages bytes the sanitizer wrote to the local cache earlier, recomputing
+    /// the content hash from the canonical bytes.
+    ///
+    /// The hash is deliberately NOT a parameter: a stored hash and stored bytes
+    /// can disagree (a partial write, a hand-edited row), and the upload's
+    /// Blossom authorization commits to the hash while the PUT body carries the
+    /// bytes. Deriving one from the other makes that disagreement unrepresentable.
+    ///
+    /// Crate-private because the bytes ARE arbitrary as far as the type system
+    /// is concerned: only the own-profile outbox may rehydrate its own cache
+    /// rows, and nothing outside `haven-core` may hand this type raw bytes.
+    #[must_use]
+    pub(crate) fn from_sanitized_cache(canonical: Vec<u8>, thumbnail: Vec<u8>) -> Self {
+        Self {
+            sha256: content_hash(&canonical),
+            canonical: Zeroizing::new(canonical),
+            thumbnail: Zeroizing::new(thumbnail),
+        }
+    }
+
+    /// SHA-256 of the canonical bytes (Blossom's content address).
+    #[must_use]
+    pub const fn sha256(&self) -> &[u8; 32] {
+        &self.sha256
+    }
+
+    /// The canonical (full-res) bytes — what an upload puts on the wire.
+    #[must_use]
+    pub fn canonical(&self) -> &[u8] {
+        &self.canonical
+    }
+
+    /// The thumbnail render bytes.
+    #[must_use]
+    pub fn thumbnail(&self) -> &[u8] {
+        &self.thumbnail
+    }
+
+    /// Consumes the staged picture, yielding `(canonical, thumbnail)` so an
+    /// upload can hand the render bytes on without copying them again.
+    #[must_use]
+    pub fn into_render_bytes(self) -> (Zeroizing<Vec<u8>>, Zeroizing<Vec<u8>>) {
+        (self.canonical, self.thumbnail)
+    }
+}
+
+impl std::fmt::Debug for StagedPicture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print bytes or the content hash (Security Rule 6/8).
+        f.debug_struct("StagedPicture")
+            .field("sha256", &"<redacted>")
+            .field("canonical", &"<redacted>")
+            .field("thumbnail", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Sniffs the leading bytes of `data` and returns `true` only if they match
 /// the JPEG/PNG/WebP magic-byte allowlist.
 ///
@@ -1010,5 +1104,104 @@ mod tests {
             rendered.contains(&AVATAR_TIER_EDGE_PX.to_string()),
             "dimensions must still render: {rendered}"
         );
+    }
+
+    // ---- StagedPicture: the sealed upload boundary --------------------------
+
+    #[test]
+    fn staged_from_processed_carries_the_sanitizer_output_verbatim() {
+        let processed = process_own_avatar(&plain_jpeg(320, 240)).expect("pipeline");
+        let staged = StagedPicture::from_processed(&processed);
+        assert_eq!(staged.canonical(), &*processed.canonical);
+        assert_eq!(staged.thumbnail(), &*processed.thumbnail);
+        assert_eq!(staged.sha256(), &processed.content_hash);
+    }
+
+    #[test]
+    fn staged_from_sanitized_cache_recomputes_the_hash_from_the_bytes() {
+        // The cache row's stored hash is never trusted: the hash the upload's
+        // Blossom authorization commits to is derived HERE, from the exact
+        // bytes that will travel in the PUT body. A row whose stored hash had
+        // drifted from its bytes cannot produce a mismatched staged picture,
+        // because there is no way to supply a hash at all.
+        let processed = process_own_avatar(&plain_jpeg(320, 240)).expect("pipeline");
+        let staged = StagedPicture::from_sanitized_cache(
+            processed.canonical.to_vec(),
+            processed.thumbnail.to_vec(),
+        );
+        assert_eq!(
+            staged.sha256(),
+            &processed.content_hash,
+            "the recomputed hash must equal the sanitizer's own",
+        );
+        assert_eq!(
+            staged.sha256(),
+            &content_hash(staged.canonical()),
+            "and it must commit to the bytes the staged picture carries",
+        );
+    }
+
+    #[test]
+    fn staged_bytes_from_a_gps_tagged_photo_carry_no_exif() {
+        // The end-to-end promise of the sealed type: whatever reaches an upload
+        // came out of the sanitizer, so a camera photo carrying home
+        // coordinates cannot become a public blob with those coordinates in it.
+        let with_gps = inject_exif_app1(&plain_jpeg(640, 480), &exif_payload_with_gps());
+
+        // Positive control: the input really does carry a GPS-context field, or
+        // the assertion below would hold vacuously.
+        let input_exif = exif::Reader::new()
+            .read_from_container(&mut Cursor::new(&with_gps))
+            .expect("crafted input must parse as EXIF");
+        assert!(
+            input_exif
+                .fields()
+                .any(|fld| matches!(fld.tag, exif::Tag(exif::Context::Gps, _))),
+            "positive control: crafted input must contain a GPS-context field",
+        );
+
+        let staged =
+            StagedPicture::from_processed(&process_own_avatar(&with_gps).expect("pipeline"));
+
+        assert!(
+            !staged.canonical().windows(2).any(|w| w == [0xFF, 0xE1]),
+            "staged upload bytes must contain no APP1 Exif marker",
+        );
+        match exif::Reader::new().read_from_container(&mut Cursor::new(staged.canonical())) {
+            Err(_) => { /* no EXIF at all — ideal */ }
+            Ok(exif_data) => assert_eq!(
+                exif_data.fields().count(),
+                0,
+                "staged upload bytes must contain zero EXIF fields",
+            ),
+        }
+    }
+
+    #[test]
+    fn staged_picture_debug_redacts_bytes_and_hash() {
+        let staged = StagedPicture::from_sanitized_cache(vec![0xAB, 0xCD], vec![0x12, 0x34]);
+        let rendered = format!("{staged:?}");
+        assert!(
+            !rendered.contains("171") && !rendered.contains("205"),
+            "canonical bytes rendered as decimal: {rendered}"
+        );
+        assert!(
+            !rendered.contains("18") && !rendered.contains("52"),
+            "thumbnail bytes rendered as decimal: {rendered}"
+        );
+        assert_eq!(
+            rendered.matches("<redacted>").count(),
+            3,
+            "every sensitive field must be present-but-withheld: {rendered}"
+        );
+    }
+
+    #[test]
+    fn staged_into_render_bytes_yields_what_the_accessors_showed() {
+        let processed = process_own_avatar(&plain_jpeg(320, 240)).expect("pipeline");
+        let staged = StagedPicture::from_processed(&processed);
+        let (canonical, thumbnail) = staged.into_render_bytes();
+        assert_eq!(&*canonical, &*processed.canonical);
+        assert_eq!(&*thumbnail, &*processed.thumbnail);
     }
 }

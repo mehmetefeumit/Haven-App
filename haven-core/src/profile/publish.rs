@@ -33,7 +33,7 @@ use nostr::{Event, EventBuilder, Keys, Metadata, Timestamp};
 use super::error::{ProfileError, Result};
 use super::merge::enforce_name_rule;
 use super::types::ProfileMetadata;
-use crate::relay::RelayManager;
+use crate::relay::{PublishResult, RelayManager};
 
 // Re-exported for callers so the retraction path has a single import surface
 // for the NIP-09 deletion builder (kind 5). It is a pure builder living in the
@@ -118,18 +118,26 @@ pub fn build_blank_metadata_event(keys: &Keys, previous_created_at: Option<u64>)
         .map_err(ProfileError::build)
 }
 
-/// Publishes an already-built profile event to the user's write relays.
+/// Publishes an already-built profile event to the user's write relays,
+/// returning WHICH relays took it.
 ///
 /// This is the **shared transport** used by both the ordinary publish path and
 /// the retraction path. Publishing is unconditional (public-by-default); the
 /// public-profile disclosure is a UI concern surfaced in onboarding and the
 /// Identity settings page, not a check performed here.
 ///
-/// Fails closed on an empty relay set ([`ProfileError::NoRelays`]). A relay
+/// Fails closed on an empty relay set ([`ProfileError::NoRelays`]). A publish
 /// that reaches none-accepted (every relay rejected / did not acknowledge)
-/// surfaces from [`RelayManager::publish_event`] as an error, which maps to a
-/// generic [`ProfileError::Relay`] — the specific per-relay `OK=false` reason
-/// is intentionally **not** surfaced (no leak of relay internals to the UI).
+/// surfaces from [`RelayManager::publish_profile_event`] as an error, which maps
+/// to a generic [`ProfileError::Relay`] — the specific per-relay `OK=false`
+/// reason is intentionally **not** surfaced (no leak of relay internals to the
+/// UI).
+///
+/// The returned [`PublishResult`] is what lets a caller distinguish a FULL
+/// publish (every relay accepted) from a partial one. That distinction is not
+/// cosmetic: a profile edit accepted by two of eight relays is still the old
+/// name for every peer whose private assignment salt points them elsewhere, so
+/// the caller must keep such an edit pending rather than report it synced.
 ///
 /// # Errors
 ///
@@ -139,24 +147,24 @@ pub async fn publish_metadata(
     relay: &RelayManager,
     event: &Event,
     write_relays: &[String],
-) -> Result<()> {
+) -> Result<PublishResult> {
     if write_relays.is_empty() {
         return Err(ProfileError::NoRelays);
     }
-    // `publish_event` reports a fully-unacknowledged / all-rejected publish as
-    // an `Err` after its bounded retries — `AllRelaysFailed`, or
-    // `DeviceClockRejected` when the relays blamed this device's timestamp —
-    // and only returns `Ok` when at least one relay accepted. Both are mapped
-    // the same way here (a kind-0 publish has no clock-specific remedy to
-    // offer), so the mapped error already covers the `OK=false` case; the
-    // explicit `is_success` guard below is defense in depth against a future
-    // change to that contract.
+    // `publish_profile_event` reports a fully-unacknowledged / all-rejected
+    // publish as an `Err` after its bounded retries — `AllRelaysFailed`, a
+    // timeout when some relay never answered, or `DeviceClockRejected` when the
+    // relays blamed this device's timestamp — and only returns `Ok` when at
+    // least one relay accepted. All are mapped the same way here (a kind-0
+    // publish has no clock-specific remedy to offer), so the mapped error
+    // already covers the `OK=false` case; the explicit `is_success` guard below
+    // is defense in depth against a future change to that contract.
     let result = relay
-        .publish_event(event, write_relays)
+        .publish_profile_event(event, write_relays)
         .await
         .map_err(ProfileError::relay)?;
     if result.is_success() {
-        Ok(())
+        Ok(result)
     } else {
         Err(ProfileError::Relay(
             "no relay accepted the event".to_string(),

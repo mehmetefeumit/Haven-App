@@ -26,9 +26,17 @@
 #
 # # The host<->test handshake
 #
-#   1. The drive prints `[bg-publish] READY_FOR_BACKGROUND` once P1 passed.
-#   2. This script tails the shared runner's log for that marker in a bounded
-#      loop, then backgrounds the app:
+#   1. Once P1 passed, the drive writes `[bg-publish] READY_FOR_BACKGROUND`
+#      into a file in its OWN sandbox tmp/ (and prints the same marker for a
+#      human reading the log). The FILE is the signal: the shared runner
+#      redirects `flutter test` to a log that macOS block-buffers, so nothing
+#      the drive prints is readable until it exits — in run 32553078705 the
+#      whole 119-line drive log landed in one second, nine minutes after it
+#      was produced. Tailing that log for a live handshake can only ever
+#      background the app AFTER the drive's own paused-wait has expired,
+#      which is why this lane could not pass.
+#   2. This script deletes that file, then polls the app data container for it
+#      in a bounded loop, then backgrounds the app:
 #          xcrun simctl terminate <udid> com.apple.Preferences || true
 #          xcrun simctl launch    <udid> com.apple.Preferences
 #      The drive keeps running — the simulator never suspends a backgrounded
@@ -141,9 +149,18 @@ readonly SILENCE_MARKER='[bg-publish] NEGATIVE_SILENCE_OK'
 readonly DISARMED_MARKER='[bg-publish] SESSION_DISARMED'
 
 # The shared runner's fixed log path (run-ios-sim-scenario.sh's LOG_FILE).
-# This script tails it for the handshake, so the coupling is deliberate and
-# named here.
+# Read ONLY after the drive exits — for the completion gate and the artifact —
+# never for the live handshake: macOS block-buffers this redirect, so its
+# contents are a post-mortem, not a stream.
 readonly SHARED_LOG="/tmp/flutter-ios-test.log"
+
+# The handshake signal. The drive APPENDS the two markers this script must act
+# on while the drive is still running (READY_MARKER, then DISARMED_MARKER) to a
+# file of this name in its own sandbox tmp/ (`Directory.systemTemp` ==
+# `<data container>/tmp`). A file write reaches the filesystem immediately, so
+# unlike the log it is readable mid-run. Duplicated from the Dart const
+# `kHandshakeSignalFileName` for the same reason the markers are — change both.
+readonly SIGNAL_NAME='bg-publish-handshake'
 
 # Where the run's log is preserved for the artifact upload.
 readonly BG_LOG="/tmp/bg-publish-ios.log"
@@ -224,8 +241,12 @@ bgp_missing_proofs() {
   return 0
 }
 
-# bgp_wait_for_marker <log> <marker> <pid> <deadline-secs> <poll-secs> —
-# bounded wait for a marker to appear in a log a live process is writing.
+# bgp_wait_for_marker <file> <marker> <pid> <deadline-secs> <poll-secs> —
+# bounded wait for a marker to appear in a file a live process is writing.
+#
+# Used ONLY against the handshake signal file. It must never be pointed at
+# SHARED_LOG: that redirect is block-buffered, so a marker in it is not
+# observable until the drive exits.
 #
 # Returns:
 #   0  the marker appeared
@@ -233,8 +254,8 @@ bgp_missing_proofs() {
 #      printed on the way out is re-checked before this verdict)
 #   3  the deadline elapsed with the process still running
 #
-# A not-yet-created log is tolerated (the delegated runner truncates it only
-# once the drive starts): it simply reads as "marker absent".
+# A not-yet-created file is tolerated — the handshake signal does not exist
+# until the drive writes it: it simply reads as "marker absent".
 bgp_wait_for_marker() {
   local log="$1" marker="$2" pid="$3" deadline="$4" poll="$5" waited=0
   while :; do
@@ -472,11 +493,48 @@ Usage: simctl location <device> <action> [<arguments>]
   grep -qF 'HAVEN_E2E_IOS_SKIP_UNINSTALL=1' <<<"${body}" || rc=1
   _check "H3 the delegate skips its own uninstall" 0 "${rc}"
 
+  # --- (H4) STRUCTURAL: the live handshake must never be pointed back at
+  #     SHARED_LOG. That redirect is block-buffered on macOS — in CI run
+  #     32553078705 the drive's whole log materialised in one second, nine
+  #     minutes after it was produced — so a marker in it is a post-mortem,
+  #     not a stream, and a handshake reading it backgrounds the app only
+  #     after the drive's own paused-wait has already failed. Nothing else
+  #     here can see that regression: every marker fixture above passes
+  #     against a file written promptly, which is precisely what SHARED_LOG
+  #     is not.
+  #     Scoped to the real run's handshake section so this fixture's own
+  #     needle cannot satisfy it.
+  #     Scoped to the real run's handshake section, and narrowed to the WAIT
+  #     CALLS in it, so neither this fixture's own needle nor the legitimate
+  #     post-mortem `cp` of SHARED_LOG can decide the verdict.
+  body="$(sed -n '/^# --- The handshake\./,/^# --- The completion gate/p' \
+            "${BASH_SOURCE[0]}" | grep -v '^[[:space:]]*#' \
+            | grep -F 'bgp_wait_for_marker ')"
+  rc=0
+  # Non-vacuity: an empty body would pass the two checks below for free.
+  [[ -n "${body}" ]] || rc=1
+  grep -qF 'SHARED_LOG' <<<"${body}" && rc=1
+  grep -q  'bgp_wait_for_marker "[$]{SIGNAL_FILE}"' <<<"${body}" || rc=1
+  _check "H4 no handshake wait reads the block-buffered shared log" 0 "${rc}"
+
+  # --- (H5) STRUCTURAL: the signal file is cleared BEFORE the drive starts.
+  #     The retry re-runs this script against the same device and the data
+  #     container survives, so a READY left by the previous attempt is
+  #     matched on the first poll — observed in run 32553078705 attempt 2,
+  #     63 ms after the seed step and before the drive had launched. The
+  #     marker fixtures cannot see this: to them a present marker is a
+  #     success.
+  body="$(sed -n '/^echo "bg-publish — seeded an initial simulator fix"/,/^DRIVE_PID=/p' \
+            "${BASH_SOURCE[0]}" | grep -v '^[[:space:]]*#')"
+  rc=0
+  grep -qF 'rm -f "${SIGNAL_FILE}"' <<<"${body}" || rc=1
+  _check "H5 a previous attempt's signal is cleared before the drive" 0 "${rc}"
+
   if (( fail != 0 )); then
     echo "run-ios-bg-publish.sh --self-test: FAILED" >&2
     return 1
   fi
-  echo "run-ios-bg-publish.sh --self-test: all 24 fixtures passed (the" \
+  echo "run-ios-bg-publish.sh --self-test: all 26 fixtures passed (the" \
        "simctl probes report supported/unsupported/unparseable distinctly;" \
        "the marker parser is literal, prefix-tolerant and fails closed on" \
        "missing logs; the completion gate demands all four terminal proofs" \
@@ -655,6 +713,34 @@ if ! xcrun simctl location "${SIM_UDID}" set "47.606209,-122.332069"; then
 fi
 echo "bg-publish — seeded an initial simulator fix"
 
+# --- The handshake signal path. ----------------------------------------------
+# Resolved from the INSTALLED app (the install and grant above already proved
+# the bundle id resolves), because the sandbox container name is a per-device
+# UUID. FATAL if it cannot be resolved: a script that fell back to polling a
+# path the drive never writes would wait out READY_WAIT_SECS and never
+# background the app — a vacuous handshake, which is exactly the failure mode
+# this lane keeps out of its guards.
+if ! APP_DATA_CONTAINER="$(xcrun simctl get_app_container \
+      "${SIM_UDID}" "${BUNDLE_ID}" data 2>/dev/null)" \
+   || [[ -z "${APP_DATA_CONTAINER}" ]]; then
+  echo "ERROR: 'xcrun simctl get_app_container ${SIM_UDID} ${BUNDLE_ID} data'" >&2
+  echo "       returned nothing, so the host cannot find the file the drive" >&2
+  echo "       writes to hand over the READY signal. Without it there is no" >&2
+  echo "       handshake and the app would never be backgrounded." >&2
+  exit 2
+fi
+readonly APP_DATA_CONTAINER
+readonly SIGNAL_FILE="${APP_DATA_CONTAINER}/tmp/${SIGNAL_NAME}"
+
+# A signal left by a PREVIOUS attempt must never be read as this one's: the
+# retry re-runs this script against the same device, the data container
+# survives (the runner's uninstall is suppressed), and matching a stale READY
+# would background the app before the drive had even launched. Observed in CI
+# run 32553078705 attempt 2, where the host "observed" READY 63 ms after the
+# seed step.
+rm -f "${SIGNAL_FILE}"
+echo "bg-publish — handshake signal: ${SIGNAL_FILE} (cleared)"
+
 # bgp_background_app — the REAL background transition: launch Preferences
 # over Haven so iOS fires applicationDidEnterBackground. The prior terminate
 # is best-effort hygiene (a leftover Preferences from an earlier attempt
@@ -688,14 +774,14 @@ readonly DRIVE_PID
 
 # --- The handshake. ----------------------------------------------------------
 set +e
-bgp_wait_for_marker "${SHARED_LOG}" "${READY_MARKER}" "${DRIVE_PID}" \
+bgp_wait_for_marker "${SIGNAL_FILE}" "${READY_MARKER}" "${DRIVE_PID}" \
   "${READY_WAIT_SECS}" "${MARKER_POLL_SECS}"
 READY_RC=$?
 set -e
 
 case "${READY_RC}" in
   0)
-    echo "bg-publish — READY marker observed; backgrounding the app by" \
+    echo "bg-publish — READY signal observed; backgrounding the app by" \
          "launching ${OVERLAY_BUNDLE_ID} over it."
     if ! bgp_background_app; then
       # Loud, but NOT a kill: the drive's own paused-wait fails in <=180s
@@ -713,17 +799,17 @@ case "${READY_RC}" in
     # (test timeout, attempt timeout) still govern. On (2) the drive already
     # exited and there is nothing to aid.
     set +e
-    bgp_wait_for_marker "${SHARED_LOG}" "${DISARMED_MARKER}" "${DRIVE_PID}" \
+    bgp_wait_for_marker "${SIGNAL_FILE}" "${DISARMED_MARKER}" "${DRIVE_PID}" \
       "${DISARM_WAIT_SECS}" "${MARKER_POLL_SECS}"
     DISARM_RC=$?
     set -e
     case "${DISARM_RC}" in
       0)
-        echo "bg-publish — final marker observed; re-foregrounding ${BUNDLE_ID} for teardown."
+        echo "bg-publish — final signal observed; re-foregrounding ${BUNDLE_ID} for teardown."
         bgp_foreground_app
         ;;
       3)
-        echo "WARN: the drive printed no ${DISARMED_MARKER} within ${DISARM_WAIT_SECS}s;" >&2
+        echo "WARN: the drive signalled no ${DISARMED_MARKER} within ${DISARM_WAIT_SECS}s;" >&2
         echo "      re-foregrounding ${BUNDLE_ID} anyway to un-wedge a" >&2
         echo "      frame-bound teardown, then waiting for the drive's own" >&2
         echo "      bounds to report." >&2
@@ -735,14 +821,34 @@ case "${READY_RC}" in
     esac
     ;;
   2)
-    echo "bg-publish — the drive exited before printing ${READY_MARKER};" \
+    echo "bg-publish — the drive exited before signalling ${READY_MARKER};" \
          "collecting its exit code."
     ;;
   3)
-    echo "ERROR: the drive printed no ${READY_MARKER} within ${READY_WAIT_SECS}s." >&2
-    echo "       Not backgrounding. If the drive is healthy but slow, its own" >&2
-    echo "       paused-wait will fail attributably; if it is wedged pre-test," >&2
-    echo "       the shared runner's first-test watchdog owns it." >&2
+    echo "ERROR: the drive wrote no ${READY_MARKER} to ${SIGNAL_FILE}" >&2
+    echo "       within ${READY_WAIT_SECS}s. Not backgrounding. If the drive is" >&2
+    echo "       healthy but slow, its own paused-wait will fail attributably;" >&2
+    echo "       if it is wedged pre-test, the shared runner's first-test" >&2
+    echo "       watchdog owns it. If the drive's log DOES carry the marker," >&2
+    echo "       the two halves disagree about the signal path or its name" >&2
+    echo "       (Dart: kHandshakeSignalFileName; here: SIGNAL_NAME)." >&2
+    # Name the disagreement instead of leaving it to be re-diagnosed: the Dart
+    # side writes to `Directory.systemTemp`, which is `<data container>/tmp` on
+    # iOS. If the runtime resolves it elsewhere in the sandbox, say so here.
+    # `|| true`: under `set -e` a `find` that hits one unreadable directory
+    # would abort the script mid-diagnostic, losing the message it exists to
+    # print.
+    FOUND_SIGNAL="$(find "${APP_DATA_CONTAINER}" -maxdepth 3 \
+                      -name "${SIGNAL_NAME}" 2>/dev/null | head -n 1 || true)"
+    if [[ -n "${FOUND_SIGNAL}" ]]; then
+      echo "       The drive DID write the signal, at ${FOUND_SIGNAL}, which is" >&2
+      echo "       not the ${SIGNAL_FILE} this script polled. Point SIGNAL_FILE" >&2
+      echo "       at the directory Dart's systemTemp actually resolves to." >&2
+    else
+      echo "       No ${SIGNAL_NAME} exists anywhere under" >&2
+      echo "       ${APP_DATA_CONTAINER}, so the drive never reached the" >&2
+      echo "       handshake — look at its own output, not at this step." >&2
+    fi
     ;;
 esac
 

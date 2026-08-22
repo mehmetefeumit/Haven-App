@@ -17,9 +17,16 @@ import 'package:haven/src/services/profile_service.dart';
 /// Allows tests to control:
 /// - What the user's own profile and each member's profile look like
 /// - Whether individual operations succeed or fail
+/// - The local-outbox state [syncOwnProfile]/[pendingSyncState] report,
+///   including holding either in flight via a `Completer` gate — the same
+///   shape as [refreshGate] — so provider/widget tests can observe an
+///   in-flight sync deterministically, with no sleeps or timing races.
 ///
-/// Publishing is unconditional (no consent gate) — [updateOwnProfile] and
-/// [setOwnAvatar] always run.
+/// Saving is unconditional (no consent gate) — [updateOwnProfile] and
+/// [setOwnAvatar] always run. [pendingSyncState] defaults to "clean"
+/// (`pending: false`) so a test that never touches sync state does not
+/// accidentally drive [syncOwnProfile] via `OwnProfileSyncController`'s
+/// own build()-time `retryIfPending()`.
 class MockProfileService implements ProfileService {
   /// Creates a mock profile service.
   ///
@@ -82,6 +89,53 @@ class MockProfileService implements ProfileService {
   /// cannot flake under parallel load.
   Completer<void>? refreshGate;
 
+  /// When set, [updateOwnProfile] blocks on this until it completes.
+  Completer<void>? updateOwnProfileGate;
+
+  /// When set, [setOwnAvatar] blocks on this until it completes.
+  Completer<void>? setOwnAvatarGate;
+
+  /// When set, [removeOwnAvatar] blocks on this until it completes.
+  Completer<void>? removeOwnAvatarGate;
+
+  /// When set, [syncOwnProfile] blocks on this until it completes.
+  Completer<void>? syncOwnProfileGate;
+
+  /// Set to make [syncOwnProfile] throw.
+  bool shouldThrowOnSyncOwnProfile = false;
+
+  /// Set to make [pendingSyncState] throw (in production this can never
+  /// actually happen — `NostrProfileService.pendingSyncState` fails closed
+  /// internally — but the mock still models a non-conforming call site).
+  bool shouldThrowOnPendingSyncState = false;
+
+  /// The result [syncOwnProfile] returns. Defaults to
+  /// [ProfileSyncOutcome.nothingPending] (nothing queued, no network
+  /// touched) so a test that never configures this does not need to.
+  ///
+  /// Ignored while [syncResultQueue] is non-empty.
+  ProfileSyncResult nextSyncResult = const ProfileSyncResult(
+    outcome: ProfileSyncOutcome.nothingPending,
+    relaysAcked: 0,
+    relaysAttempted: 0,
+    stillPending: false,
+  );
+
+  /// When non-empty, each [syncOwnProfile] call consumes (removes) the
+  /// FIRST entry instead of returning [nextSyncResult] — lets a test give
+  /// consecutive calls (e.g. an initial pass and the follow-up it queues)
+  /// different, deterministic answers without racing a field mutation
+  /// against exactly when each call reads it.
+  final List<ProfileSyncResult> syncResultQueue = [];
+
+  /// The state [pendingSyncState] returns. Defaults to "clean" (nothing
+  /// pending) — see the class doc for why that default matters.
+  ProfilePendingState nextPendingState = const ProfilePendingState(
+    pending: false,
+    partial: false,
+    retryDue: false,
+  );
+
   /// Every `shouldThrowOn*` flag throws this exact exception, matching
   /// the real implementation's convention of never leaking a raw `$e` /
   /// internal detail to callers.
@@ -106,6 +160,8 @@ class MockProfileService implements ProfileService {
       method: 'updateOwnProfile',
       args: {'displayName': displayName, 'about': about},
     ));
+    final gate = updateOwnProfileGate;
+    if (gate != null && !gate.isCompleted) await gate.future;
     if (shouldThrowOnUpdateOwnProfile) throw _genericError;
     final updated = (ownProfile ?? Profile(pubkeyHex: ownPubkeyHex)).copyWith(
       displayName: displayName,
@@ -118,6 +174,8 @@ class MockProfileService implements ProfileService {
   @override
   Future<Profile> setOwnAvatar(Uint8List raw) async {
     methodCalls.add((method: 'setOwnAvatar', args: {'raw': raw}));
+    final gate = setOwnAvatarGate;
+    if (gate != null && !gate.isCompleted) await gate.future;
     if (shouldThrowOnSetOwnAvatar) throw _genericError;
     final updated = (ownProfile ?? Profile(pubkeyHex: ownPubkeyHex)).copyWith(
       pictureBytes: raw,
@@ -130,6 +188,8 @@ class MockProfileService implements ProfileService {
   @override
   Future<Profile> removeOwnAvatar() async {
     methodCalls.add((method: 'removeOwnAvatar', args: const {}));
+    final gate = removeOwnAvatarGate;
+    if (gate != null && !gate.isCompleted) await gate.future;
     if (shouldThrowOnRemoveOwnAvatar) throw _genericError;
     final current = ownProfile ?? Profile(pubkeyHex: ownPubkeyHex);
     final cleared = Profile(
@@ -141,6 +201,24 @@ class MockProfileService implements ProfileService {
     );
     ownProfile = cleared;
     return cleared;
+  }
+
+  @override
+  Future<ProfileSyncResult> syncOwnProfile() async {
+    methodCalls.add((method: 'syncOwnProfile', args: const {}));
+    final gate = syncOwnProfileGate;
+    if (gate != null && !gate.isCompleted) await gate.future;
+    if (shouldThrowOnSyncOwnProfile) throw _genericError;
+    return syncResultQueue.isNotEmpty
+        ? syncResultQueue.removeAt(0)
+        : nextSyncResult;
+  }
+
+  @override
+  Future<ProfilePendingState> pendingSyncState() async {
+    methodCalls.add((method: 'pendingSyncState', args: const {}));
+    if (shouldThrowOnPendingSyncState) throw _genericError;
+    return nextPendingState;
   }
 
   @override

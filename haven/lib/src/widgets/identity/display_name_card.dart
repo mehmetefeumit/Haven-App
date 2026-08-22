@@ -15,10 +15,10 @@ import 'package:haven/src/constants/feature_flags.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
-import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/profile_sync_trigger.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Possible UI states for the display-name editor.
@@ -131,15 +131,18 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
           .setDisplayName(text.isEmpty ? null : text);
       if (!mounted) return;
       ref.invalidate(displayNameProvider);
-      // ALWAYS also fetch-merge-publish the public kind-0 profile — publishing
-      // is unconditional (public-by-default, owner-directed 2026-07-16,
-      // matching White Noise), no consent gate. `OwnProfileController.
-      // saveDisplayName` never rethrows (it stores failures in its own
-      // AsyncValue state) — so this local save always succeeds regardless of
-      // the public-profile outcome.
+      // ALWAYS also merge the edit onto the LOCAL public-profile cache —
+      // saving is unconditional (public-by-default, owner-directed
+      // 2026-07-16, matching White Noise), no consent gate. This is now a
+      // fast, local-only write (`ProfileService.updateOwnProfile` no longer
+      // touches a relay); `triggerProfileSync` below is what actually
+      // publishes, in the background.
       await ref
-          .read(ownProfileControllerProvider.notifier)
-          .saveDisplayName(displayName: text);
+          .read(profileServiceProvider)
+          .updateOwnProfile(displayName: text);
+      if (!mounted) return;
+      ref.invalidate(ownProfileProvider);
+      triggerProfileSync(ref);
       if (!mounted) return;
       unawaited(
         SemanticsService.sendAnnouncement(
@@ -150,11 +153,19 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
       );
       setState(() {
         _savedName = text;
-        _status = DisplayNameStatus.saved;
+        // If the field was edited again while this save was in flight, the
+        // NEWEST text is what still needs saving — mark it unsaved (re-opens
+        // Save) rather than silently reporting the older, already-persisted
+        // text as current. Marking it `saved` here would also re-open the
+        // reseed gate (`_mayReseed`) and let a stale fetched value clobber
+        // the newer, not-yet-saved keystrokes.
+        _status = _controller.text.trim() == text
+            ? DisplayNameStatus.saved
+            : DisplayNameStatus.unsaved;
       });
-    } on IdentityServiceException catch (_) {
+    } on Object catch (e) {
       // Detail is logged in debug; surface a generic state to the user.
-      debugPrint('[Identity] Display name save failed');
+      debugPrint('[Identity] Display name save failed: ${e.runtimeType}');
       if (!mounted) return;
       // Assertive so the failure interrupts speech and is not missed.
       unawaited(

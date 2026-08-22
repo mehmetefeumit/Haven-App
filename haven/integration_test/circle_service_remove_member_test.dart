@@ -282,13 +282,17 @@ void main() {
           // service a real (throwaway) identity to open with.
           final idManager = await NostrIdentityManager.newInstance();
           await idManager.createIdentity();
-          final secretBytes = await idManager.getSecretBytes();
 
           final relayRecorder = _RecordingRelayService();
           final service = NostrCircleService(
             relayService: relayRecorder,
             dataDirectoryProvider: _FixedDataDirectoryProvider(dataDir.path),
-            identitySecretBytesProvider: () async => secretBytes,
+            // The FFI getter itself, NOT a closure over one fetched buffer:
+            // the service opens the manager through `withFreshSecret`, which
+            // takes ownership of what the provider returns and scrubs it. A
+            // closure handing back the SAME buffer every call yields 32 zero
+            // bytes from the second call on.
+            identitySecretBytesProvider: idManager.getSecretBytes,
           );
 
           await service.initialize();
@@ -762,7 +766,10 @@ void main() {
         final service = NostrCircleService(
           relayService: relayRecorder,
           dataDirectoryProvider: _FixedDataDirectoryProvider(aliceDir.path),
-          identitySecretBytesProvider: () async => aliceSecretBytes,
+          // The FFI getter, not a closure over `aliceSecretBytes`: the service
+          // scrubs the buffer the provider hands it, and this test reuses
+          // `aliceSecretBytes` for `createCircle` below.
+          identitySecretBytesProvider: aliceIdManager.getSecretBytes,
         );
         await service.initialize();
         final aliceManager = await service.getCircleManagerFfi();

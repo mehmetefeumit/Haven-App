@@ -32,11 +32,13 @@ pub mod contamination;
 mod error;
 mod leave;
 mod manager;
+pub mod profile_sync;
 pub mod relay_prefs;
 mod storage;
 mod storage_contamination;
 mod storage_key_packages;
 mod storage_profile;
+mod storage_profile_sync;
 pub(crate) mod storage_relay_prefs;
 pub mod types;
 
@@ -46,9 +48,11 @@ pub use leave::LeavePlan;
 pub use manager::{
     AddMembersResult, CircleCreationResult, CircleManager, CommitToPublish, DecryptedIngest,
 };
+pub use profile_sync::{ProfileSyncOutcome, ProfileSyncReport};
 pub use relay_prefs::RelayType;
 pub use storage::CircleStorage;
 pub use storage_key_packages::{PublishedKeyPackageRow, KEY_PACKAGE_KIND};
+pub use storage_profile_sync::{ProfilePendingState, ProfileSyncCommit};
 pub use storage_relay_prefs::{PublishedEventRecord, UserRelayRow};
 pub use types::{
     default_relays, set_default_relays_for_test, Circle, CircleConfig, CircleMember,

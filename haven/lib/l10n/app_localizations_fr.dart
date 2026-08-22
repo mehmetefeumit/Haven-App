@@ -1869,6 +1869,25 @@ class AppLocalizationsFr extends AppLocalizations {
       'Échec de l\'enregistrement, réessayez';
 
   @override
+  String get profileSyncStatusSyncing =>
+      'Synchronisation de votre profil public…';
+
+  @override
+  String get profileSyncStatusPartial =>
+      'Publié — synchronisation en cours avec certains relais';
+
+  @override
+  String get profileSyncStatusSynced => 'Profil public à jour';
+
+  @override
+  String get profileSyncStatusFailed =>
+      'Synchronisation impossible pour le moment.';
+
+  @override
+  String get profileSyncStatusRetrySemantics =>
+      'Réessayer de publier votre profil';
+
+  @override
   String keyDisplayCopiedToClipboard(String label) {
     return '$label copié dans le presse-papiers';
   }
@@ -1973,7 +1992,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get avatarPickerPhotoUpdated =>
-      'Photo mise à jour. Publiée sur votre profil Nostr public.';
+      'Photo mise à jour. Elle sera publiée sur votre profil Nostr public.';
 
   @override
   String get avatarPickerPhotoRemoved => 'Photo supprimée.';

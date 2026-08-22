@@ -38,7 +38,16 @@
 #      review F2). Non-allowlisted publishers are NOT checked here (they publish
 #      unconditionally by design). Unit tests (#[cfg(test)] modules) are skipped
 #      (brace-walked out). A retraction fn that drops its has_published_profile()
-#      gate fails this check.
+#      gate fails this check. Its second half (6b) pins the ORDER the two FFI
+#      retractions read that gate in: profile_sync_lock() must be taken BEFORE
+#      the gate read, or the gate decides on state an in-flight sync is about to
+#      change.
+#   7+ further structural checks; the last one (15) confines the sanitized-upload
+#      types (ProcessedAvatar / StagedPicture) — their construction to
+#      haven-core/src/avatar, the cache constructor and the staging entry point
+#      to their named callers — and requires the FFI photo save to run
+#      process_own_avatar in its own body, so nothing reaches a public Blossom
+#      upload without the EXIF/GPS-stripping re-encode.
 #
 # This is a pure grep/awk gate (no Flutter/Rust toolchain) so it runs fast and
 # independently of the build/test lanes. It replaced
@@ -113,9 +122,10 @@ KIND0_PATTERN="Kind::Metadata|Kind\.metadata|EventBuilder::metadata|Kind(${KIND0
 # content (blank kind-0 or kind-5 deletion only). Names per plan §4.1/§5.
 # ---------------------------------------------------------------------------
 readonly -a CONSENT_GATE_EXEMPT_FNS=(
-  delete_public_profile      # core publish.rs: blank kind-0 + kind-5 (plan D10). NOT a Blossom
+  delete_public_profile      # historical core name (plan D10); no such fn exists today — kept so
+                             # the allowlist stays a superset if it is reintroduced.
+  delete_my_public_profile   # FFI: blank kind-0 + kind-5 retraction (plan §5). NOT a Blossom
                              # DELETE — none exists in the profile module; the blob survives.
-  delete_my_public_profile   # FFI wrapper of the above (plan §5)
   remove_my_profile_picture  # FFI: clears the picture field via retraction republish (plan §5)
 )
 
@@ -494,9 +504,9 @@ code_view() {
 # to one of the publish/upload primitives that create a public footprint:
 # publish_metadata / publish_event (relay publish), or upload_profile_picture
 # (Blossom upload). Anchored on a non-identifier boundary AND a following `(` so
-# that (a) a longer identifier that merely ENDS in a token — e.g. the FFI fn
-# upload_my_profile_picture — never matches, and (b) only actual call sites,
-# never a bare fn reference, are caught.
+# that (a) a longer identifier that merely ENDS in a token — e.g. a wrapper
+# named `retry_publish_metadata` — never matches, and (b) only actual call
+# sites, never a bare fn reference, are caught.
 FOOTPRINT_TOKENS_AWK='(^|[^A-Za-z0-9_])(publish_metadata|publish_event|upload_profile_picture)[[:space:]]*[(]'
 
 check_consent_gate() {
@@ -589,6 +599,96 @@ fi
 if [[ -n "${gate_violations}" ]]; then
   printf '%s' "${gate_violations}" >&2
   fail "retraction footprint without its has_published_profile() no-op gate — an allowlisted retraction builder must be structurally bound to has_published_profile() so it never CREATES a first public event"
+fi
+
+# ---------------------------------------------------------------------------
+# Check 6b: the retraction lock is taken BEFORE the no-op gate is read.
+#
+# The FFI retractions hold CircleManager::profile_sync_lock() for their whole
+# body, and must take it BEFORE reading has_published_profile(). A sync commits
+# exactly the row that gate reads, so a gate evaluated outside the lock decides
+# on state an in-flight sync is about to change: the retraction then runs
+# against a snapshot that no longer holds, and the sync republishes the
+# just-retracted metadata with a NEWER created_at while every local check
+# reports success. Check 6 pins that the gate EXISTS; nothing pinned WHEN it is
+# read.
+#
+# Same fn-body-span walk as check 6, scoped to the api.rs profile block: the
+# lock lives in the FFI layer (`CircleManager::profile_sync_lock` exists
+# because the retraction bodies do), so only the allowlisted names PRESENT
+# there are checked — and if none of them is, the check fails rather than
+# passing vacuously.
+# ---------------------------------------------------------------------------
+log "Checking the retraction lock is taken before the no-op gate is read ..."
+
+check_lock_before_gate() {
+  # $1 = file, $2 = first line to consider, $3 = last line to consider.
+  # Emits one "file:line: ..." violation per offending fn; empty output = OK.
+  local file="$1" minline="$2" maxline="$3"
+  code_view "${file}" | awk \
+    -v file="${file}" -v minline="${minline}" -v maxline="${maxline}" \
+    -v lock='profile_sync_lock' \
+    -v retract_gate='has_published_profile' \
+    -v allow="${CONSENT_GATE_EXEMPT_FNS[*]}" '
+    { lines[NR] = $0 }
+    END {
+      nallow = split(allow, aw, " ")
+      for (k = 1; k <= nallow; k++) allowset[aw[k]] = 1
+      n = NR
+
+      # Pass 1: mark `#[cfg(test)]` mod bodies (brace-walked), as check 6 does.
+      depth = 0; intest = 0; pending = 0; testdepth = 0
+      for (j = 1; j <= n; j++) {
+        t = lines[j]
+        if (!intest && t ~ /#\[[[:space:]]*cfg\(test\)/) pending = 1
+        tmp = t; o = gsub(/[{]/, "", tmp)
+        tmp = t; c = gsub(/[}]/, "", tmp)
+        if (!intest && pending && o > 0 && t ~ /(^|[^A-Za-z0-9_])mod([^A-Za-z0-9_]|$)/) {
+          intest = 1; testdepth = depth; pending = 0
+        }
+        if (intest) in_test[j] = 1
+        depth += o - c
+        if (intest && depth <= testdepth) intest = 0
+      }
+
+      # Pass 2: per production fn on the retraction allowlist that reads the
+      # gate, require the lock strictly EARLIER in the same body.
+      checked = 0
+      for (i = 1; i <= n; i++) {
+        if (i < minline || i > maxline) continue
+        if (in_test[i]) continue
+        if (!match(lines[i], /(^|[^A-Za-z0-9_])fn[[:space:]]+[A-Za-z0-9_]+/)) continue
+        frag = substr(lines[i], RSTART, RLENGTH)
+        sub(/^.*fn[[:space:]]+/, "", frag)
+        name = frag
+        if (!(name in allowset)) continue
+        depth = 0; seen = 0; bodyless = 0
+        gateline = 0; lockline = 0
+        for (j = i; j <= n; j++) {
+          t = lines[j]
+          if (!gateline && index(t, retract_gate) > 0) gateline = j
+          if (!lockline && index(t, lock) > 0) lockline = j
+          tmp = t; o = gsub(/[{]/, "", tmp)
+          tmp = t; c = gsub(/[}]/, "", tmp)
+          depth += o - c
+          if (o > 0) seen = 1
+          if (seen && depth <= 0) break
+          if (!seen && index(t, ";") > 0) { bodyless = 1; break }
+        }
+        if (bodyless || gateline == 0) continue
+        checked++
+        if (lockline == 0 || lockline >= gateline)
+          printf "%s:%d: fn %s (retraction allowlist) reads its has_published_profile() gate without having taken profile_sync_lock() on an EARLIER line of the same body\n", file, gateline, name
+      }
+      if (checked == 0)
+        printf "%s:%d: no allowlisted retraction fn reads has_published_profile() in the profile FFI block — the ordering check would pass vacuously\n", file, minline
+    }'
+}
+
+lock_violations="$(check_lock_before_gate "${API_FILE}" "${api_begin_line}" "${api_end_line}")"
+if [[ -n "${lock_violations}" ]]; then
+  printf '%s' "${lock_violations}" >&2
+  fail "an FFI retraction reads its has_published_profile() no-op gate outside the own-profile sync lock — take CircleManager::profile_sync_lock() BEFORE the gate read and hold it for the whole body, or an in-flight sync republishes the metadata the retraction is removing with a NEWER created_at while every local check reports success"
 fi
 
 # ---------------------------------------------------------------------------
@@ -764,7 +864,7 @@ readonly -a REQUIRED_PROFILE_TESTS=(
   # install-once and no LIB test may install it; see Check 12.
   installed_override_shadows_only_the_effective_pool_and_stays_subject_to_exclusion
   # circle/storage_profile.rs — logout destroys the assignment salt by deleting
-  # circles.db, NOT via wipe_all_profiles (which only `delete_public_profile`
+  # circles.db, NOT via wipe_all_profiles (which only `delete_my_public_profile`
   # reaches). Nothing else pins that, so this test does: the salt must live in
   # that file and nowhere else.
   profile_relay_salt_does_not_outlive_the_circles_db_file
@@ -977,4 +1077,242 @@ if [[ -n "${retired_entries}" ]]; then
   done <<< "${retired_entries}"
 fi
 
-log "OK: public-profile privacy boundaries hold — no Image.network, no circle/group tokens, import boundary intact (incl. no discovery plane), kind-0 confined to the profile module, HTTPS-only Blossom, retraction no-op gate bound at every retraction call site, union-only kind-0 fetch entry points, one author per kind-0 REQ, CSPRNG-only randomness, no profile-plane NIP-65, every named plane-separation test present, no lib-test install of the profile-pool override, the Dart fallback relay lists still mirror their Rust constants, and every pool relay ships with a recorded pass/pass vetting row (retirees stay out)."
+# ---------------------------------------------------------------------------
+# Check 15: EVERYTHING UPLOADED WENT THROUGH THE SANITIZER.
+#
+# A public profile picture leaves the device as raw bytes to a third-party
+# Blossom host. The only thing standing between the user's camera roll and that
+# host is `process_own_avatar` — decode under limits, center-crop, RE-ENCODE
+# (which is what structurally drops EXIF/GPS), hash. Two things must hold, and
+# neither is expressible as a type check from outside `avatar/`:
+#
+#   (a) `ProcessedAvatar` and `StagedPicture` are CONSTRUCTED (struct literal)
+#       only inside haven-core/src/avatar/. Both types are the "these bytes are
+#       cleared for upload" token; anywhere else, a literal would mean hand-made
+#       bytes wearing the sanitizer's badge. Type MENTIONS are unrestricted (the
+#       upload signature, the outbox, the FFI all name them) — the scan is
+#       anchored on the literal's `{`, which only a construction has.
+#   (b) The FFI photo-save path actually calls the sanitizer: the local save
+#       (`save_my_profile_picture_local`) is where raw picker bytes enter, and
+#       it stages what it produces, so `process_own_avatar` must appear inside
+#       THAT fn's body. Same fn-body-span walk as check 6, so a call in a
+#       neighbouring fn (or in a dead comment) cannot satisfy it.
+#   (c) The two entry points onto the staged-upload row stay confined to their
+#       named callers, and keep the shape that makes (a) worth anything:
+#       `StagedPicture::from_sanitized_cache` (which takes `Vec<u8>` and is the
+#       one way to mint the upload token from bytes the type never saw
+#       sanitized) is `pub(crate)` and called only by the outbox rehydration
+#       path; `stage_own_profile_picture` (whose row a later sync PUTs to a
+#       public Blossom host) takes the sealed `&StagedPicture` and is called
+#       only by the FFI photo save. `#[cfg(test)]` bodies are brace-walked out —
+#       a unit test may construct either from fixture bytes without publishing
+#       anything.
+#
+# CLAUDE.md claims this boundary is CI-enforced; before this check it was not.
+# ---------------------------------------------------------------------------
+log "Checking sanitized-upload construction is confined to haven-core/src/avatar ..."
+CORE_AVATAR_DIR="${REPO_ROOT}/haven-core/src/avatar"
+[[ -d "${CORE_AVATAR_DIR}" ]] || { echo "ERROR: ${CORE_AVATAR_DIR} not found" >&2; exit 2; }
+
+STAGED_LITERAL='(^|[^A-Za-z0-9_])(ProcessedAvatar|StagedPicture)[[:space:]]*\{'
+# A DECLARATION (`struct T {`, `impl T {`, `impl Trait for T {`) and a RETURN
+# TYPE (`-> T {`) both put a brace after the name without constructing anything.
+# Only the benign token is erased — a real literal sharing the line still trips
+# the gate (same discipline as scan_profile_paths' strip argument).
+STAGED_DECL='(->[[:space:]]*|(impl|struct|for|enum|trait)[[:space:]]+)([A-Za-z0-9_]+::)*(ProcessedAvatar|StagedPicture)'
+staged_literals="$(grep -rnE --include='*.rs' "${STAGED_LITERAL}" \
+  "${CORE_SRC_DIR}" "${API_FILE}" 2>/dev/null \
+  | grep -vF "${CORE_AVATAR_DIR}/" | grep -vE "${COMMENT_HIT}" \
+  | sed -E "s#${STAGED_DECL}##g" | grep -E "${STAGED_LITERAL}" || true)"
+if [[ -n "${staged_literals}" ]]; then
+  printf '%s\n' "${staged_literals}" >&2
+  fail "a ProcessedAvatar / StagedPicture struct literal was built OUTSIDE haven-core/src/avatar — those types are the proof that bytes went through process_own_avatar (EXIF/GPS stripped by re-encode) before a public Blossom upload. Construct them via StagedPicture::from_processed / ::from_sanitized_cache instead"
+fi
+
+# Non-vacuity: both types must still be DECLARED in avatar/, or the confinement
+# above would pass simply because they were renamed out from under it.
+for t in ProcessedAvatar StagedPicture; do
+  grep -rqE --include='*.rs' "struct[[:space:]]+${t}\b" "${CORE_AVATAR_DIR}" 2>/dev/null && continue
+  echo "ERROR: struct ${t} is no longer declared under ${CORE_AVATAR_DIR}" >&2
+  echo "       — the sanitized-upload token type was renamed or moved; update check 15" >&2
+  echo "       so the confinement keeps covering the upload boundary." >&2
+  exit 2
+done
+
+log "Checking the FFI photo save runs the sanitizer in its own body ..."
+sanitizer_call="$(code_view "${API_FILE}" | awk \
+  -v minline="${api_begin_line}" -v maxline="${api_end_line}" \
+  -v target='save_my_profile_picture_local' \
+  -v gate='process_own_avatar' '
+  { lines[NR] = $0 }
+  END {
+    n = NR; found_fn = 0
+    for (i = 1; i <= n; i++) {
+      if (i < minline || i > maxline) continue
+      if (!match(lines[i], /(^|[^A-Za-z0-9_])fn[[:space:]]+[A-Za-z0-9_]+/)) continue
+      frag = substr(lines[i], RSTART, RLENGTH)
+      sub(/^.*fn[[:space:]]+/, "", frag)
+      if (frag != target) continue
+      found_fn = 1
+      # Walk the fn body by brace depth from the signature line (check-6
+      # technique), and look for the sanitizer call inside it.
+      depth = 0; seen = 0; gateline = 0
+      for (j = i; j <= n; j++) {
+        t = lines[j]
+        if (!gateline && t ~ ("(^|[^A-Za-z0-9_])" gate "[[:space:]]*[(]")) gateline = j
+        tmp = t; o = gsub(/[{]/, "", tmp)
+        tmp = t; c = gsub(/[}]/, "", tmp)
+        depth += o - c
+        if (o > 0) seen = 1
+        if (seen && depth <= 0) break
+        if (!seen && index(t, ";") > 0) break
+      }
+      print (gateline > 0) ? "OK" : "UNGATED"
+    }
+    if (!found_fn) print "MISSING"
+  }')"
+if [[ "${sanitizer_call}" != "OK" ]]; then
+  printf '%s\n' "${sanitizer_call}" >&2
+  fail "the FFI own-picture save must call process_own_avatar inside save_my_profile_picture_local's own body (found: '${sanitizer_call:-nothing}') — raw picker bytes enter there and are staged for a public Blossom upload, so the EXIF/GPS-stripping re-encode has to happen on that exact path"
+fi
+
+# Emits "<lineno>:<code>" for a file's PRODUCTION Rust only: comments stripped
+# (code_view, so a token in a doc comment is not a call) and `#[cfg(test)]`
+# module bodies blanked (strip_test_modules, so fixtures are free to construct
+# and stage whatever they like). Line numbers are preserved either way.
+production_code() {
+  code_view "$1" | grep -nE '.*' | strip_test_modules
+}
+
+# Fails unless every PRODUCTION call of a token lives in one of the allowed
+# files. $1 = identifier, $2 = failure message, $3.. = allowed file paths.
+#
+# Anchored on a non-identifier boundary AND a following `(` so a longer
+# identifier that merely ENDS in the token never matches, and a bare fn
+# reference is not mistaken for a call. Definition lines are not special-cased:
+# every definition already lives in an allowed file.
+confine_calls() {
+  local token="$1" desc="$2"
+  shift 2
+  local -a allowed=("$@")
+  local -a candidates=()
+  local f a is_allowed hits found=""
+  mapfile -t candidates < <(grep -rlE --include='*.rs' \
+    "(^|[^A-Za-z0-9_])${token}[[:space:]]*\(" "${CORE_SRC_DIR}" "${API_FILE}" 2>/dev/null | sort)
+  for f in "${candidates[@]}"; do
+    is_allowed=""
+    for a in "${allowed[@]}"; do
+      if [[ "${f}" == "${a}" ]]; then is_allowed="yes"; break; fi
+    done
+    if [[ -n "${is_allowed}" ]]; then continue; fi
+    hits="$(production_code "${f}" \
+      | grep -E "(^|[^A-Za-z0-9_])${token}[[:space:]]*\(" || true)"
+    if [[ -n "${hits}" ]]; then
+      found+="$(printf '%s\n' "${hits}" | sed "s#^#${f}:#")"$'\n'
+    fi
+  done
+  if [[ -n "${found}" ]]; then
+    printf '%s' "${found}" >&2
+    fail "${desc}"
+  fi
+}
+
+# Fails unless every PRODUCTION call of a token inside ONE file sits within one
+# named fn's body (check-6 fn-body-span walk). $1 = file, $2 = identifier,
+# $3 = fn name, $4 = failure message.
+confine_calls_to_fn() {
+  local file="$1" token="$2" target="$3" desc="$4" hits
+  hits="$(code_view "${file}" | awk -v file="${file}" -v target="${target}" \
+    -v tokre="(^|[^A-Za-z0-9_])${token}[[:space:]]*[(]" '
+    { lines[NR] = $0 }
+    END {
+      n = NR
+      # Pass 1: mark `#[cfg(test)]` mod bodies (brace-walked), as check 6 does.
+      depth = 0; intest = 0; pending = 0; testdepth = 0
+      for (j = 1; j <= n; j++) {
+        t = lines[j]
+        if (!intest && t ~ /#\[[[:space:]]*cfg\(test\)/) pending = 1
+        tmp = t; o = gsub(/[{]/, "", tmp)
+        tmp = t; c = gsub(/[}]/, "", tmp)
+        if (!intest && pending && o > 0 && t ~ /(^|[^A-Za-z0-9_])mod([^A-Za-z0-9_]|$)/) {
+          intest = 1; testdepth = depth; pending = 0
+        }
+        if (intest) in_test[j] = 1
+        depth += o - c
+        if (intest && depth <= testdepth) intest = 0
+      }
+      # Pass 2: the target fn body span.
+      lo = 0; hi = 0
+      for (i = 1; i <= n && !lo; i++) {
+        if (in_test[i]) continue
+        if (!match(lines[i], /(^|[^A-Za-z0-9_])fn[[:space:]]+[A-Za-z0-9_]+/)) continue
+        frag = substr(lines[i], RSTART, RLENGTH)
+        sub(/^.*fn[[:space:]]+/, "", frag)
+        if (frag != target) continue
+        depth = 0; seen = 0
+        for (j = i; j <= n; j++) {
+          t = lines[j]
+          tmp = t; o = gsub(/[{]/, "", tmp)
+          tmp = t; c = gsub(/[}]/, "", tmp)
+          depth += o - c
+          if (o > 0) seen = 1
+          if (seen && depth <= 0) { lo = i; hi = j; break }
+          if (!seen && index(t, ";") > 0) break
+        }
+      }
+      # Pass 3: report every production call outside that span. With no span at
+      # all (fn renamed or gone) EVERY call is outside it, which is the correct
+      # answer: the confinement no longer describes anything.
+      for (i = 1; i <= n; i++) {
+        if (in_test[i]) continue
+        if (lines[i] !~ tokre) continue
+        if (lo && i >= lo && i <= hi) continue
+        printf "%s:%d: outside fn %s\n", file, i, target
+      }
+    }')"
+  if [[ -n "${hits}" ]]; then
+    printf '%s\n' "${hits}" >&2
+    fail "${desc}"
+  fi
+}
+
+log "Checking the sanitized-cache constructor and the staging entry point stay confined ..."
+confine_calls 'from_sanitized_cache' \
+  "StagedPicture::from_sanitized_cache() called outside haven-core/src/avatar/image.rs and the own-profile outbox (haven-core/src/circle/profile_sync.rs) — it is the ONE constructor that mints the upload token from loose bytes, so its callers are the callers that decide what a public Blossom PUT may carry. Rehydrate through the outbox, or run process_own_avatar and use StagedPicture::from_processed" \
+  "${CORE_AVATAR_DIR}/image.rs" \
+  "${REPO_ROOT}/haven-core/src/circle/profile_sync.rs"
+
+confine_calls 'stage_own_profile_picture' \
+  "stage_own_profile_picture() called outside its definition (haven-core/src/circle/storage_profile_sync.rs), the CircleManager pass-through (manager.rs) and the FFI photo save (api.rs) — the row it writes is what a later sync PUTs to a public Blossom host, so nothing else may queue one" \
+  "${REPO_ROOT}/haven-core/src/circle/storage_profile_sync.rs" \
+  "${REPO_ROOT}/haven-core/src/circle/manager.rs" \
+  "${API_FILE}"
+
+confine_calls_to_fn "${API_FILE}" 'stage_own_profile_picture' 'save_my_profile_picture_local' \
+  "the FFI stages an own-profile picture outside save_my_profile_picture_local — that fn is the one place raw picker bytes are sanitized (check 15b), so staging anywhere else in api.rs would queue a public Blossom upload of bytes no sanitizer ran on"
+
+# Non-vacuity, and the SHAPE both rules depend on: a rename would leave the
+# confinements above describing nothing, and a signature widened back to loose
+# byte slices (or a `pub` cache constructor) would leave them confining a
+# boundary that no longer exists.
+if ! grep -qE 'pub\(crate\)[[:space:]]+fn[[:space:]]+from_sanitized_cache[[:space:]]*\(' \
+    "${CORE_AVATAR_DIR}/image.rs"; then
+  echo "ERROR: StagedPicture::from_sanitized_cache is not declared 'pub(crate) fn' in ${CORE_AVATAR_DIR}/image.rs" >&2
+  echo "       — it takes loose bytes, so a wider visibility would let code outside" >&2
+  echo "       haven-core mint the upload token without the sanitizer. Restore the" >&2
+  echo "       visibility, or update check 15 in the SAME commit so the change is" >&2
+  echo "       reviewable." >&2
+  exit 2
+fi
+if ! grep -A6 -E 'pub[[:space:]]+fn[[:space:]]+stage_own_profile_picture[[:space:]]*\(' \
+    "${REPO_ROOT}/haven-core/src/circle/storage_profile_sync.rs" \
+    | grep -qE '&StagedPicture'; then
+  echo "ERROR: stage_own_profile_picture no longer takes a &StagedPicture in" >&2
+  echo "       haven-core/src/circle/storage_profile_sync.rs — the sealed type IS the" >&2
+  echo "       proof that what gets queued for a public Blossom PUT came out of the" >&2
+  echo "       sanitizer. Loose byte slices reopen that hole; update check 15 in the" >&2
+  echo "       SAME commit if the boundary genuinely moved." >&2
+  exit 2
+fi
+
+log "OK: public-profile privacy boundaries hold — no Image.network, no circle/group tokens, import boundary intact (incl. no discovery plane), kind-0 confined to the profile module, HTTPS-only Blossom, retraction no-op gate bound at every retraction call site, union-only kind-0 fetch entry points, one author per kind-0 REQ, CSPRNG-only randomness, no profile-plane NIP-65, every named plane-separation test present, no lib-test install of the profile-pool override, the Dart fallback relay lists still mirror their Rust constants, every pool relay ships with a recorded pass/pass vetting row (retirees stay out), every uploadable picture is constructed by the sanitizer alone, the cache constructor and the staging entry point stay confined to their named callers, and both FFI retractions read their no-op gate under the sync lock."

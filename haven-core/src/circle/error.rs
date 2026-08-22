@@ -103,6 +103,16 @@ impl From<crate::nostr::NostrError> for CircleError {
     }
 }
 
+impl From<crate::profile::ProfileError> for CircleError {
+    fn from(err: crate::profile::ProfileError) -> Self {
+        // Every `ProfileError` variant is already content-free or redacted at
+        // construction; passing the rendered message through the canonical
+        // redactor once more is the floor, not the mechanism, and it costs
+        // nothing on a message that carries no hex.
+        Self::InvalidData(crate::util::redact_hex_sequences(&err.to_string()))
+    }
+}
+
 impl From<crate::avatar::AvatarError> for CircleError {
     fn from(err: crate::avatar::AvatarError) -> Self {
         use crate::avatar::AvatarError as A;

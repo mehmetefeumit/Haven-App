@@ -111,6 +111,40 @@ const MAX_PUBLISH_ATTEMPTS: u32 = 3;
 /// before the next attempt sends into it.
 const PUBLISH_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 
+/// Maximum attempts (initial try + one retry) for
+/// [`RelayManager::publish_profile_event`].
+///
+/// Half the location ladder, because the two paths fail differently. A dropped
+/// location is gone: the next tick publishes a *different* position, so the
+/// retry budget is what buys back that sample. A profile publish is idempotent
+/// and durable — the edit stays in the local outbox and is re-published by the
+/// ordinary foreground/resume triggers — so a long in-call ladder buys nothing
+/// except a user watching a spinner. One retry still covers the case the ladder
+/// exists for (a cold socket losing the race against the first ack).
+const PROFILE_PUBLISH_MAX_ATTEMPTS: u32 = 2;
+
+/// Backoff between [`RelayManager::publish_profile_event`] attempts.
+///
+/// A second is enough for a handshake that was already in flight to complete,
+/// and it is a second the user spends in front of a "syncing" line.
+const PROFILE_PUBLISH_RETRY_BACKOFF: Duration = Duration::from_secs(1);
+
+/// Per-relay bound on waiting for ONE relay's `OK` acknowledgement.
+///
+/// Strictly tighter than the 10 s `WAIT_FOR_OK_TIMEOUT` that `nostr-relay-pool`
+/// applies inside `Relay::send_event`, so this is the deadline that fires and
+/// the per-relay cost stays a number this module chose. Worst case for one
+/// attempt is therefore `CONNECTION_TIMEOUT` (5 s) + this (6 s) = 11 s, and the
+/// full ladder is `2 × 11 + PROFILE_PUBLISH_RETRY_BACKOFF` ≈ 23 s — roughly half
+/// the location path's ~49 s.
+///
+/// The one upstream path that could exceed the pool's own bound is the NIP-42
+/// re-send: on `auth-required` it waits for authentication and sends AGAIN,
+/// doubling the wait. It cannot trigger here — the client is built with no
+/// signer, so `has_signer()` is false and the branch is skipped — but this
+/// timeout bounds it regardless of that fact.
+const PROFILE_PUBLISH_ACK_TIMEOUT: Duration = Duration::from_secs(6);
+
 /// Runs an idempotent publish `attempt` up to `max_attempts` times,
 /// returning the first result for which [`PublishResult::is_success`] holds.
 ///
@@ -184,6 +218,49 @@ where
         }
     }
     Err(last_err)
+}
+
+/// What ONE relay did with a profile publish, before it is folded into a
+/// [`PublishResult`].
+///
+/// The third case is the one the pooled send cannot express and the retry loop
+/// needs: a relay that neither accepted nor refused, because it never answered.
+enum AckOutcome {
+    /// The relay returned `OK true`.
+    Accepted,
+    /// The relay returned `OK false`, or the send failed against it. The
+    /// relay-controlled reason is carried for
+    /// [`clock_skew::classify_publish_outcome`] and never rendered.
+    Refused(String),
+    /// No answer inside the ack bound (or the relay was not in the pool).
+    Unanswered,
+}
+
+/// Interprets ONE harvested profile-publish attempt for [`publish_with_retry`].
+///
+/// A harvest is a verdict only when every relay answered. `failed` holds the
+/// relays that did not — an ack timeout, or a handle missing from the pool —
+/// and about those this attempt learned nothing whatsoever.
+///
+/// That distinction is load-bearing because of how the retry loop gives up
+/// early: [`clock_skew::publish_retry_is_hopeless`] reads `rejected_by` alone,
+/// so an attempt whose ONLY answers came from clock-blaming relays reads as
+/// provably hopeless even when another relay simply never spoke. It is not: the
+/// silent relay may accept on the next attempt, and no relay ever judged this
+/// event's timestamp on its behalf. Reporting that shape as an error keeps the
+/// retry alive and keeps the clock verdict for the case where every relay
+/// really did answer.
+///
+/// The location path cannot reach this: its harvest leaves `failed` empty by
+/// construction, so its early-exit behaviour is untouched.
+fn profile_attempt_outcome(result: PublishResult) -> RelayResult<PublishResult> {
+    if result.is_success() || result.failed.is_empty() {
+        return Ok(result);
+    }
+    Err(RelayError::Timeout(format!(
+        "{} relay(s) did not answer the publish",
+        result.failed.len()
+    )))
 }
 
 /// Manager for Nostr relay connections.
@@ -379,6 +456,146 @@ impl RelayManager {
             rejected_by,
             failed: Vec::new(),
         })
+    }
+
+    /// Publishes a public-profile event, harvesting EVERY relay's answer.
+    ///
+    /// The sibling of [`publish_event`](Self::publish_event) for the profile
+    /// plane. It differs in the two ways that plane needs:
+    ///
+    /// * **Every relay's outcome is reported.** The returned [`PublishResult`]
+    ///   partitions the relay set into accepted / refused / unanswered, so a
+    ///   caller can tell a full publish from a partial one and keep the edit
+    ///   pending until it is fully covered. A location publish only needs to
+    ///   know that it landed somewhere; a profile edit that landed on two of
+    ///   eight relays is still invisible to most peers reading it.
+    /// * **A shorter, tighter ladder.** Each relay's ack is bounded by
+    ///   [`PROFILE_PUBLISH_ACK_TIMEOUT`] and the ladder by
+    ///   [`PROFILE_PUBLISH_MAX_ATTEMPTS`], because a user is waiting on this and
+    ///   the edit is durable if it fails.
+    ///
+    /// Retries re-send the SAME signed event, which relays dedupe by id, and can
+    /// never re-send to a relay that already accepted: any acceptance ends the
+    /// ladder ([`publish_with_retry`] returns on the first successful result).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no relay accepted after the full ladder: the
+    /// per-relay reasons where every relay answered (including
+    /// [`RelayError::DeviceClockRejected`]), or a timeout when one or more
+    /// relays never answered.
+    pub async fn publish_profile_event(
+        &self,
+        event: &Event,
+        relays: &[String],
+    ) -> RelayResult<PublishResult> {
+        let relay_urls = Self::validate_relay_urls(relays)?;
+
+        log::debug!(
+            "[RelayManager] publish_profile_event: sending kind {} to {} relays",
+            event.kind.as_u16(),
+            relay_urls.len()
+        );
+
+        let client = self.client.clone();
+        publish_with_retry(
+            PROFILE_PUBLISH_MAX_ATTEMPTS,
+            PROFILE_PUBLISH_RETRY_BACKOFF,
+            move |attempt| {
+                let client = client.clone();
+                let relay_urls = relay_urls.clone();
+                let event = event.clone();
+                async move {
+                    if attempt > 0 {
+                        log::debug!(
+                            "[RelayManager] publish_profile_event: retry attempt {attempt}"
+                        );
+                    }
+                    let harvested = Self::try_publish_once_harvesting(
+                        &client,
+                        &relay_urls,
+                        &event,
+                        PROFILE_PUBLISH_ACK_TIMEOUT,
+                    )
+                    .await;
+                    profile_attempt_outcome(harvested)
+                }
+            },
+        )
+        .await
+    }
+
+    /// Performs a single connect-and-publish attempt that waits for EVERY
+    /// relay's acknowledgement, each bounded independently by `ack_timeout`.
+    ///
+    /// Never returns an error: a relay's failure is that relay's outcome, and
+    /// folding it into the result rather than propagating it is the whole point
+    /// — one unreachable relay must not discard the acks the others gave.
+    /// `client.relay()` in particular is NOT propagated with `?`, because
+    /// [`add_relays_and_connect`](Self::add_relays_and_connect) logs and
+    /// swallows an `add_relay` failure, so a URL can legitimately be missing
+    /// from the pool here.
+    ///
+    /// `ack_timeout` is a parameter rather than the constant so a test can
+    /// prove the harvest against a hung relay without spending the production
+    /// bound in wall-clock time.
+    ///
+    /// # Why not `Client::send_event_to`
+    ///
+    /// The pooled send returns one merged `Output` and applies its own internal
+    /// ack wait, which is looser than this one; it also saves the event into the
+    /// pool's in-memory database on the way through. Haven has no reader for
+    /// that database — nothing queries the pool's local store — so bypassing it
+    /// loses nothing and keeps one fewer copy of a published event in memory.
+    async fn try_publish_once_harvesting(
+        client: &Client,
+        relay_urls: &[RelayUrl],
+        event: &Event,
+        ack_timeout: Duration,
+    ) -> PublishResult {
+        // Add relays, connect, and wait for WebSocket handshakes.
+        Self::add_relays_and_connect(client, relay_urls).await;
+
+        let sends = relay_urls.iter().map(|url| async move {
+            let Ok(relay) = client.relay(url.as_str()).await else {
+                return (url.to_string(), AckOutcome::Unanswered);
+            };
+            match tokio::time::timeout(ack_timeout, relay.send_event(event)).await {
+                Ok(Ok(_)) => (url.to_string(), AckOutcome::Accepted),
+                // `OK false` and a transport-level send failure arrive as the
+                // same `Err`, exactly as they do in the pooled path's `failed`
+                // list; both are answers from a relay that spoke to us.
+                Ok(Err(e)) => (url.to_string(), AckOutcome::Refused(e.to_string())),
+                Err(_) => (url.to_string(), AckOutcome::Unanswered),
+            }
+        });
+
+        let mut accepted_by = Vec::new();
+        let mut rejected_by = Vec::new();
+        let mut failed = Vec::new();
+        for (url, outcome) in futures::future::join_all(sends).await {
+            match outcome {
+                AckOutcome::Accepted => accepted_by.push(url),
+                AckOutcome::Refused(reason) => rejected_by.push((url, reason)),
+                AckOutcome::Unanswered => failed.push(url),
+            }
+        }
+
+        // Counts only: the profile plane's relay set is itself sensitive, so no
+        // URL is logged here (matching the per-relay fetch probe).
+        log::debug!(
+            "[RelayManager] publish_profile_event: accepted={}, refused={}, silent={}",
+            accepted_by.len(),
+            rejected_by.len(),
+            failed.len()
+        );
+
+        PublishResult {
+            event_id: event.id,
+            accepted_by,
+            rejected_by,
+            failed,
+        }
     }
 
     /// Publishes an event in the background without waiting for relay acknowledgment.
@@ -1944,6 +2161,237 @@ mod tests {
         })
         .await;
         assert_eq!(calls.get(), 1, "zero attempts clamps to a single try");
+    }
+
+    // ----------------------------------------------------------------------
+    // Profile-plane publish: a shorter ladder that harvests every ack.
+    //
+    // The transport is kind-agnostic, and these tests deliberately publish a
+    // kind-1: a kind-0 may only be constructed inside `haven-core/src/profile`
+    // (CI-enforced by check_profile_privacy_boundaries.sh check 4), and nothing
+    // under test here depends on the kind.
+    // ----------------------------------------------------------------------
+
+    /// One relay's clock complaint, plus optionally one relay that said nothing.
+    fn clock_rejection_harvest(with_a_silent_relay: bool) -> PublishResult {
+        PublishResult {
+            event_id: nostr::EventId::from_slice(&[0u8; 32]).expect("32-byte id"),
+            accepted_by: vec![],
+            rejected_by: vec![(
+                "wss://answered.example.com".to_string(),
+                "invalid: created_at is in the future".to_string(),
+            )],
+            failed: if with_a_silent_relay {
+                vec!["wss://silent.example.com".to_string()]
+            } else {
+                vec![]
+            },
+        }
+    }
+
+    #[test]
+    fn profile_publish_ladder_is_strictly_shorter_than_the_location_ladder() {
+        // Worst case for a ladder: every attempt pays a full handshake plus a
+        // full per-relay wait, with a backoff between attempts.
+        let worst = |attempts: u32, wait: Duration, backoff: Duration| {
+            CONNECTION_TIMEOUT.saturating_mul(attempts)
+                + wait.saturating_mul(attempts)
+                + backoff.saturating_mul(attempts.saturating_sub(1))
+        };
+        let profile = worst(
+            PROFILE_PUBLISH_MAX_ATTEMPTS,
+            PROFILE_PUBLISH_ACK_TIMEOUT,
+            PROFILE_PUBLISH_RETRY_BACKOFF,
+        );
+        let location = worst(MAX_PUBLISH_ATTEMPTS, DEFAULT_TIMEOUT, PUBLISH_RETRY_BACKOFF);
+
+        assert_eq!(
+            profile,
+            Duration::from_secs(23),
+            "the documented profile worst case moved",
+        );
+        assert!(
+            profile < location,
+            "a user is waiting on the profile publish and the edit survives a \
+             failure in the outbox; a location sample does not, so the profile \
+             ladder must stay the shorter of the two: {profile:?} vs {location:?}",
+        );
+        assert!(
+            PROFILE_PUBLISH_ACK_TIMEOUT < DEFAULT_TIMEOUT,
+            "the per-relay ack bound must be strictly tighter than the pooled \
+             send's own wait, or it is not the deadline that fires",
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_publish_succeeds_on_a_partial_ack_and_still_reports_the_rest() {
+        // One acceptance is enough to succeed — but the relays that refused and
+        // the relay that never answered must survive into the result, because
+        // that is how the caller learns the edit is only partially covered and
+        // must stay pending.
+        let harvest = PublishResult {
+            event_id: nostr::EventId::from_slice(&[0u8; 32]).expect("32-byte id"),
+            accepted_by: vec!["wss://took-it.example.com".to_string()],
+            rejected_by: vec![(
+                "wss://refused.example.com".to_string(),
+                "rate-limited: slow down".to_string(),
+            )],
+            failed: vec!["wss://silent.example.com".to_string()],
+        };
+        let result = publish_with_retry(PROFILE_PUBLISH_MAX_ATTEMPTS, Duration::ZERO, |_| {
+            let harvest = harvest.clone();
+            async move { profile_attempt_outcome(harvest) }
+        })
+        .await
+        .expect("one acceptance is a successful publish");
+
+        assert!(result.is_success());
+        assert_eq!(result.accepted_by.len(), 1);
+        assert_eq!(result.rejected_by.len(), 1);
+        assert_eq!(
+            result.failed.len(),
+            1,
+            "an unanswered relay must be reported, not swallowed by the success",
+        );
+        assert_eq!(result.total_attempted(), 3, "every relay is accounted for");
+    }
+
+    #[tokio::test]
+    async fn profile_publish_fails_when_no_relay_accepted() {
+        let harvest = PublishResult {
+            event_id: nostr::EventId::from_slice(&[0u8; 32]).expect("32-byte id"),
+            accepted_by: vec![],
+            rejected_by: vec![(
+                "wss://refused.example.com".to_string(),
+                "rate-limited: slow down".to_string(),
+            )],
+            failed: vec![],
+        };
+        let result = publish_with_retry(PROFILE_PUBLISH_MAX_ATTEMPTS, Duration::ZERO, |_| {
+            let harvest = harvest.clone();
+            async move { profile_attempt_outcome(harvest) }
+        })
+        .await;
+        assert!(matches!(result, Err(RelayError::AllRelaysFailed)));
+    }
+
+    #[tokio::test]
+    async fn a_silent_relay_keeps_profile_retries_alive_past_a_clock_verdict() {
+        // THE trap this pins: `publish_retry_is_hopeless` reads `rejected_by`
+        // alone, so a harvest whose only ANSWER blamed the device clock looks
+        // provably hopeless — even when another relay never spoke at all and
+        // has, by definition, no opinion about our timestamp. Abandoning the
+        // publish after one attempt on that basis would strand the edit.
+        let calls = std::cell::Cell::new(0u32);
+        let result = publish_with_retry(PROFILE_PUBLISH_MAX_ATTEMPTS, Duration::ZERO, |_| {
+            calls.set(calls.get() + 1);
+            async { profile_attempt_outcome(clock_rejection_harvest(true)) }
+        })
+        .await;
+
+        assert!(result.is_err(), "nothing was accepted");
+        assert_eq!(
+            calls.get(),
+            PROFILE_PUBLISH_MAX_ATTEMPTS,
+            "the silent relay must still get its second chance",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fully_answered_clock_rejection_still_stops_the_profile_ladder() {
+        // The negative control for the test above: with every relay answering,
+        // the clock verdict IS the whole truth about this event, and re-offering
+        // the same `created_at` cannot succeed. The early exit must survive.
+        let calls = std::cell::Cell::new(0u32);
+        let result = publish_with_retry(PROFILE_PUBLISH_MAX_ATTEMPTS, Duration::ZERO, |_| {
+            calls.set(calls.get() + 1);
+            async { profile_attempt_outcome(clock_rejection_harvest(false)) }
+        })
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(RelayError::DeviceClockRejected {
+                complaint: clock_skew::DeviceClockComplaint::Ahead
+            })
+        ));
+        assert_eq!(calls.get(), 1, "a unanimous clock verdict is not retried");
+    }
+
+    /// A TCP listener that completes the connection and then says nothing.
+    ///
+    /// This is the wedged-relay shape, distinct from a departed one (which
+    /// refuses the connection and fails fast): the WebSocket handshake can only
+    /// end at the connection timeout, and any send into it can only end at the
+    /// ack bound. Accepted sockets are held so the peer never sees EOF.
+    async fn hung_relay_url() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                tokio::spawn(hold_socket_open_in_silence(socket));
+            }
+        });
+        format!("ws://127.0.0.1:{port}")
+    }
+
+    /// Owns an accepted socket for the rest of the test without ever writing to
+    /// it. Dropping it instead would close the connection, and the peer would
+    /// fail fast rather than wait — which is the opposite of "hung".
+    async fn hold_socket_open_in_silence(_socket: tokio::net::TcpStream) {
+        std::future::pending::<()>().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn profile_publish_harvests_every_ack_despite_a_hung_relay() {
+        // The reason this path exists: one relay that never answers must not
+        // cost the acks the others gave. The ack bound is injected (rather than
+        // the production 6 s) so the test spends only the connection timeout the
+        // wedged socket forces, and no wall-clock assertion depends on either.
+        let _ = allow_ws_loopback_for_test();
+        let alpha = nostr_relay_builder::prelude::LocalRelay::new(
+            nostr_relay_builder::prelude::RelayBuilder::default(),
+        );
+        alpha.run().await.expect("local relay alpha runs");
+        let beta = nostr_relay_builder::prelude::LocalRelay::new(
+            nostr_relay_builder::prelude::RelayBuilder::default(),
+        );
+        beta.run().await.expect("local relay beta runs");
+
+        let urls = RelayManager::validate_relay_urls(&[
+            alpha.url().await.to_string(),
+            beta.url().await.to_string(),
+            hung_relay_url().await,
+        ])
+        .expect("ws:// loopback urls validate with the opt-in installed");
+
+        let event = nostr::EventBuilder::new(Kind::TextNote, "harvest me")
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign");
+
+        let manager = RelayManager::new();
+        let result = RelayManager::try_publish_once_harvesting(
+            &manager.client,
+            &urls,
+            &event,
+            Duration::from_millis(500),
+        )
+        .await;
+
+        assert_eq!(
+            result.accepted_by.len(),
+            2,
+            "both live relays acknowledged; a wedged third relay must not \
+             discard their acks: {result:?}",
+        );
+        assert!(result.is_success());
+        assert_eq!(
+            result.total_attempted(),
+            3,
+            "every relay lands in exactly one bucket: {result:?}",
+        );
     }
 
     // ------------------------------------------------------------------

@@ -30,4 +30,6 @@ pub use config::{
     AVATAR_MIME, AVATAR_THUMB_EDGE_PX, AVATAR_THUMB_JPEG_QUALITY, AVATAR_TIER_EDGE_PX,
 };
 pub use error::{AvatarError, Result};
-pub use image::{content_hash, process_inbound_avatar, process_own_avatar, ProcessedAvatar};
+pub use image::{
+    content_hash, process_inbound_avatar, process_own_avatar, ProcessedAvatar, StagedPicture,
+};

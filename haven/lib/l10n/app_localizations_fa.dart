@@ -1821,6 +1821,24 @@ class AppLocalizationsFa extends AppLocalizations {
       'ذخیره ناموفق بود، دوباره تلاش کن';
 
   @override
+  String get profileSyncStatusSyncing =>
+      'در حال همگام‌سازی با نمایهٔ عمومی‌ات…';
+
+  @override
+  String get profileSyncStatusPartial =>
+      'منتشر شد — هنوز با برخی رله‌ها همگام‌سازی می‌شود';
+
+  @override
+  String get profileSyncStatusSynced => 'نمایهٔ عمومی‌ات به‌روز است';
+
+  @override
+  String get profileSyncStatusFailed => 'هنوز نتوانستیم همگام‌سازی کنیم.';
+
+  @override
+  String get profileSyncStatusRetrySemantics =>
+      'تلاش دوباره برای انتشار نمایه‌ات';
+
+  @override
   String keyDisplayCopiedToClipboard(String label) {
     return '$label در کلیپ‌بورد کپی شد';
   }
@@ -1924,7 +1942,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get avatarPickerPhotoUpdated =>
-      'عکس به‌روزرسانی شد. در نمایهٔ عمومی‌ات در Nostr منتشر شد.';
+      'عکس به‌روزرسانی شد. در نمایهٔ عمومی‌ات روی Nostr منتشر خواهد شد.';
 
   @override
   String get avatarPickerPhotoRemoved => 'عکس حذف شد.';

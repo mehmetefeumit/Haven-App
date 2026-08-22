@@ -161,8 +161,8 @@ rust|src/location/ttl.rs|94                  # measured 96.90% (125/129)
 # statically guarded by check_profile_privacy_boundaries.sh; these floors keep
 # the RUNTIME proofs of that boundary executing. avatar/image.rs is the EXIF/GPS
 # strip performed before upload.
-rust|src/profile/|92                         # measured 94.84% (2095/2209)
-rust|src/profile/blossom.rs|89               # measured 91.48% (719/786)
+rust|src/profile/|94                         # measured 96.51% (2599/2693)
+rust|src/profile/blossom.rs|91               # measured 93.14% (815/875)
 rust|src/profile/fetch.rs|97                 # measured 99.51% (410/412)
 rust|src/avatar/image.rs|96                  # measured 98.63% (504/511)
 
@@ -197,9 +197,9 @@ rust|src/relay/live_sync/|95                 # measured 97.24% (2921/3004)
 rust|src/relay/live_sync/session.rs|94       # measured 96.19% (1491/1550)
 rust|src/relay/publishers.rs|88              # measured 90.28% (260/288)
 rust|src/relay/maintenance/|96               # measured 98.46% (640/650)
-rust|src/relay/manager.rs|74                 # measured 76.18% (838/1100)
+rust|src/relay/manager.rs|78                 # measured 80.14% (1122/1400)
 rust|src/relay/auto_commit.rs|100            # measured 100.00% (59/59)
-rust|src/relay/catchup.rs|95                 # measured 97.14%; was 92 (94.61%) before the
+rust|src/relay/catchup.rs|96                 # measured 98.71% (996/1009); was 92 (94.61%) before the
                                              # fetch-window cursor anchor brought its own tests
 
 # --- Encrypted tile cache ---------------------------------------------------
@@ -221,7 +221,7 @@ rust|src/tiles/|94                           # measured 96.11% (642/668)
 # percentage point is 28 lines, so a single new uncovered file still moves this
 # row several points. That is exactly what the two points of headroom are for,
 # and why this row must never be pinned tight.
-flutter|lib/src/services/|57                 # measured 59.68% (1813/3038); was 46 (48.96%) before the
+flutter|lib/src/services/|58                 # measured 60.06% (1830/3047); was 46 (48.96%) before the
                                              # location-access gate, clock-skew detector and
                                              # session/cursor work brought their own tests
 
@@ -240,7 +240,7 @@ flutter|lib/src/services/foreground_liveness_probe.dart|58  # measured 60.98% (2
 flutter|lib/src/services/location_sharing_service.dart|86   # measured 88.04% (346/393)
 flutter|lib/src/services/geolocator_location_service.dart|85 # measured 87.86% (123/140)
 flutter|lib/src/services/live_sync_resubscriber.dart|100    # measured 100.00% (117/117)
-flutter|lib/src/services/subscription_service.dart|96       # measured 98.28% (57/58)
+flutter|lib/src/services/subscription_service.dart|100      # measured 100.00% (58/58)
 
 # --- Background publishing and catch-up -------------------------------------
 # background_location_task.dart is the foreground-service isolate — the file
@@ -259,7 +259,7 @@ flutter|lib/src/services/background_catchup_worker.dart|26  # measured 28.40% (2
 # lines, not one of them executed by any test, entirely invisible to the 50%
 # gate.
 flutter|lib/src/services/nostr_circle_service.dart|10       # measured 12.55% (65/518)
-flutter|lib/src/services/nostr_identity_service.dart|42     # measured 44.66% (46/103)
+flutter|lib/src/services/nostr_identity_service.dart|52     # measured 54.62% (65/119)
 flutter|lib/src/services/nostr_profile_service.dart|22      # measured 24.14% (21/87)
 flutter|lib/src/services/nostr_relay_service.dart|16        # measured 18.09% (34/188); was 0 (0.63%, 1/158)
                                                             # before classifyKeyPackageMaintenance was lifted

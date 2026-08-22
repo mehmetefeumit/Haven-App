@@ -2,14 +2,18 @@
 ///
 /// Covers avatar rendering (Image.memory only, never network), the Edit
 /// Photo / Remove affordances (Remove gated on an existing avatar and behind
-/// a confirmation), the full-screen-on-tap behaviour, and that both Edit and
-/// Remove are unconditional (publishing is public-by-default, owner-directed
-/// 2026-07-16 — there is no consent gate on either). The pick-and-set happy
-/// path is driven via the controller because the real photo picker needs a
-/// platform channel unavailable in widget tests — the full picker glue is
-/// covered in `avatar_picker_test.dart`.
+/// a confirmation), the full-screen-on-tap behaviour, that both Edit and
+/// Remove are unconditional (saving is public-by-default, owner-directed
+/// 2026-07-16 — there is no consent gate on either), and the Remove button's
+/// own in-flight spinner. The full pick/set happy path (real picker + crop
+/// glue) is covered in `avatar_picker_test.dart`, which also mounts this
+/// widget. The header's local `_busy` state's independence from the
+/// page-scoped `ProfileSyncStatusLine` (which this header no longer renders
+/// — see [IdentityPhotoHeader]'s class doc) is covered where the two are
+/// actually siblings, in `test/pages/identity_page_test.dart`.
 library;
 
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -17,7 +21,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/identity_provider.dart';
-import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/profile_service.dart';
@@ -260,32 +263,85 @@ void main() {
       expect(find.byType(InteractiveViewer), findsOneWidget);
     });
 
+  });
+
+  group('IdentityPhotoHeader — remove-in-flight spinner (S7)', () {
     testWidgets(
-      'pickAndSet via the controller calls setOwnAvatar with bytes',
+      'shows a spinner in place of the Remove label while the retraction '
+      'is in flight, and disables the picker actions until it resolves',
       (tester) async {
-        // The real photo picker needs a platform channel, so the pick happy
-        // path is driven directly through the controller (the same route
-        // the Edit Photo button delegates to once the picker returns
-        // bytes). The full picker glue — including that tapping Edit Photo
-        // goes straight to the picker with no consent dialog in front of it
-        // — is covered end-to-end in avatar_picker_test.dart.
-        final svc = MockProfileService();
-        await tester.pumpWidget(_buildHeader(profileService: svc));
+        final jpegHeader = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0]);
+        final gate = Completer<void>();
+        final svc = MockProfileService(
+          ownProfile: Profile(
+            pubkeyHex: _fakeIdentity.pubkeyHex,
+            pictureBytes: jpegHeader,
+            pictureHash: 'mock-hash',
+          ),
+        )..removeOwnAvatarGate = gate;
+
+        await tester.pumpWidget(
+          _buildHeader(thumbnailBytes: jpegHeader, profileService: svc),
+        );
         await tester.pumpAndSettle();
 
-        final container = ProviderScope.containerOf(
-          tester.element(find.byType(IdentityPhotoHeader)),
+        await tester.tap(find.widgetWithText(TextButton, 'Remove'));
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.descendant(
+            of: find.byType(AlertDialog),
+            matching: find.widgetWithText(TextButton, 'Remove'),
+          ),
         );
-        final bytes = Uint8List.fromList([0x01, 0x02, 0x03, 0x04]);
-        await container
-            .read(ownProfileControllerProvider.notifier)
-            .setAvatar(bytes);
-        await tester.pump(Duration.zero);
+        await tester.pump();
+        // Lets the dialog's own 150ms dismiss transition finish so its
+        // "Remove" button text is gone before asserting on the header's —
+        // NOT pumpAndSettle: the header's own removal spinner (asserted
+        // below) is indeterminate and would hang it.
+        await tester.pump(const Duration(milliseconds: 200));
 
+        // Removal is in flight (gated): the Remove label is replaced by a
+        // spinner...
+        final removeButton = find.ancestor(
+          of: find.byIcon(LucideIcons.trash2),
+          matching: find.byType(TextButton),
+        );
+        expect(find.text('Remove'), findsNothing);
+        expect(
+          find.descendant(
+            of: removeButton,
+            matching: find.byType(CircularProgressIndicator),
+          ),
+          findsOneWidget,
+        );
+        // ...both photo actions are disabled while `_busy`...
+        expect(
+          tester.widget<TextButton>(removeButton).onPressed,
+          isNull,
+          reason: '_busy must disable Remove itself while removing',
+        );
+        expect(
+          tester
+              .widget<TextButton>(
+                find.widgetWithText(TextButton, 'Edit Photo'),
+              )
+              .onPressed,
+          isNull,
+          reason: '_busy must disable Edit Photo while removing',
+        );
+
+        gate.complete();
+        await tester.pumpAndSettle();
+
+        // The retraction resolved and cleared the avatar, so the whole
+        // Remove control (spinner included) disappears — nothing is left
+        // spinning forever.
         expect(
           svc.methodCalls.map((c) => c.method),
-          contains('setOwnAvatar'),
+          contains('removeOwnAvatar'),
         );
+        expect(find.text('Remove'), findsNothing);
+        expect(find.byType(CircularProgressIndicator), findsNothing);
       },
     );
   });

@@ -232,4 +232,38 @@ void main() {
       );
     });
   });
+
+  group('SubscriptionServiceException', () {
+    // The type's own Rule-8 promise: its string form carries the generic
+    // message it was GIVEN and nothing else. `nostr_subscription_service_test`
+    // proves the two production throw sites pass a generic string; this proves
+    // the type cannot append anything to it — a later `cause`/`detail` field
+    // folded into `toString()` would be exactly the raw-FFI leak the doc
+    // forbids, and would fail here.
+    //
+    // Constructed non-const on purpose: a `const` invocation is canonicalised
+    // at compile time, which leaves the constructor unexecuted on some hosts
+    // and makes this file's coverage differ between machines.
+    test('toString carries only the message it was constructed with', () {
+      // ignore: prefer_const_constructors
+      final e = SubscriptionServiceException('no active live session');
+      expect(e.message, 'no active live session');
+      expect(
+        e.toString(),
+        'SubscriptionServiceException: no active live session',
+      );
+    });
+
+    test('never decorates the message with state the caller did not pass', () {
+      // A message that LOOKS like leaked internals must still come back
+      // verbatim and alone — the type neither redacts nor augments.
+      // ignore: prefer_const_constructors
+      final e = SubscriptionServiceException('generic failure');
+      expect(e.toString(), isNot(contains('deadbeef')));
+      expect(
+        e.toString().replaceFirst('SubscriptionServiceException: ', ''),
+        'generic failure',
+      );
+    });
+  });
 }

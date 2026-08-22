@@ -6,9 +6,9 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_commit_to_publish`, `convert_location_result`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_legacy_mls_db_files`, `delete_mls_session_db_files`, `delete_tile_db_files`, `fetch_own_profile_across_pool`, `from_cached`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `kp_event_d_tag`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `maintenance_now_secs`, `mark_kp_slot_retirement_done`, `nip65_relay_list_urls`, `now_ms`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `purge_key_package_past_not_after`, `record_retired_slot`, `redact_profile_err`, `reinstall_after_timed_out_stop`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `republish_key_package`, `retire_malformed_kp_slot`, `retract_kp_slots`, `run_blocking`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`, `usable_profile_pool`
+// These functions are ignored because they are not marked as `pub`: `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_commit_to_publish`, `convert_location_result`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_legacy_mls_db_files`, `delete_mls_session_db_files`, `delete_superseded_kp`, `delete_tile_db_files`, `from_cached`, `from_report`, `from_state`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `maintenance_now_secs`, `mark_kp_slot_retirement_done`, `nip65_relay_list_urls`, `now_ms`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `profile_view`, `purge_key_package_past_not_after`, `record_retired_slot`, `redact_profile_err`, `reinstall_after_timed_out_stop`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `republish_key_package`, `retire_malformed_kp_slot`, `retract_kp_slots`, `run_blocking`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`, `usable_profile_pool`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`, `KpPublishPlan`, `KpRetirementInputs`, `KpRetirementTick`, `ProfileStampLists`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`, `default`
 
 /// Initializes the platform-specific keyring credential store.
@@ -433,8 +433,8 @@ void allowPrivateBlossomForTest() =>
 /// Overrides the Blossom upload server for hermetic public-profile E2E tests.
 ///
 /// Forwards to [`haven_core::profile::set_blossom_server_for_test`] (debug
-/// builds) or returns an error in release builds. `upload_my_profile_picture`
-/// reads the effective server via `haven_core::profile::blossom_server`, so
+/// builds) or returns an error in release builds. The own-profile sync reads
+/// the effective server via `haven_core::profile::blossom_server`, so
 /// installing this override before the first upload points A's picture at the
 /// hermetic Blossom instead of the production default. Intended to be called
 /// once from a scenario's `setUpAll` with the `HAVEN_E2E_BLOSSOM_URL`
@@ -842,6 +842,11 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// blob DELETE is deferred (no delete helper in the profile module;
   /// documented best-effort).
   ///
+  /// Either way the own-profile outbox is emptied: anything still queued was
+  /// going to publish the profile the user is deleting. Nothing else about
+  /// the no-op branch changes — a pubkey that never published keeps its local
+  /// rows.
+  ///
   /// # Errors
   ///
   /// Returns a redacted error string on relay or database failure.
@@ -1022,7 +1027,7 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// result rather than an error (offline-tolerant, plan D7).
   ///
   /// Reads from the WHOLE profile pool rather than one salted-assignment
-  /// relay — see [`fetch_own_profile_across_pool`].
+  /// relay, concurrently — see [`fetch_own_profile`].
   ///
   /// # Errors
   ///
@@ -1047,13 +1052,14 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
 
   /// Returns the locally cached profile for a pubkey, or `None`.
   ///
-  /// Pure cache read (no network) — the synchronous hot path for member
-  /// markers/tiles.
+  /// Pure cache read (no network) — the hot path for member markers/tiles.
+  /// Async rather than `#[frb(sync)]`: the read is three SQLCipher queries,
+  /// and a sync FFI call runs them on the UI isolate.
   ///
   /// # Errors
   ///
   /// Returns a redacted error string on database failure.
-  ProfileMetadataFfi? getCachedProfile({required String pubkeyHex});
+  Future<ProfileMetadataFfi?> getCachedProfile({required String pubkeyHex});
 
   /// Gets a circle by its MLS group ID.
   ///
@@ -1220,6 +1226,18 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required String giftWrapEventJson,
   });
 
+  /// Whether the own profile has unpublished work, how far it got, and
+  /// whether the persisted backoff permits another attempt.
+  ///
+  /// The read a resume trigger consults before calling
+  /// [`Self::sync_my_profile`], so a clean install never dials a relay just
+  /// to discover it had nothing to say.
+  ///
+  /// # Errors
+  ///
+  /// Returns a redacted error string on database failure.
+  Future<ProfilePendingStateFfi> profilePendingState();
+
   /// Health of the profile-plane relay pool, as counts only.
   ///
   /// Lets Flutter show "profile lookups are paused" instead of a silently
@@ -1282,25 +1300,6 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// The publish-failure counterpart to [`confirm_published`](Self::confirm_published);
   /// pass the same `pending` token.
   Future<void> publishFailed({required PendingStateRefFfi pending});
-
-  /// Publishes the local user's OWN public profile (fetch → merge → publish).
-  ///
-  /// Publishing is **unconditional** (public-by-default, owner-directed
-  /// 2026-07-16): saving a profile publishes a public kind-0 immediately, with
-  /// no consent gate — that this is public is disclosed to the user in
-  /// onboarding and the Identity settings page (a UI concern). The latest
-  /// kind-0 is fetched first so unknown fields written by other clients survive
-  /// the edit; `display_name`/`about` follow `ProfileEdits` semantics (`None` =
-  /// untouched, `Some("")` = clear).
-  ///
-  /// # Errors
-  ///
-  /// Returns a redacted error string on relay or database failure.
-  Future<ProfileMetadataFfi> publishMyProfile({
-    required List<int> identitySecretBytes,
-    String? displayName,
-    String? about,
-  });
 
   /// Records a successful publication so the unpublish path can issue a
   /// NIP-09 deletion later. Pass the `event_id_hex`, `kind`, and
@@ -1369,6 +1368,10 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// published. Otherwise it clears the `picture` field on the freshest kind-0
   /// and republishes.
   ///
+  /// Either way, a photo still QUEUED for upload is cancelled: it was going
+  /// to publish the picture the user is removing. A queued NAME edit is left
+  /// alone — it has nothing to do with the photo.
+  ///
   /// # Errors
   ///
   /// Returns a redacted error string on relay or database failure.
@@ -1407,6 +1410,47 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// user-added custom relays are preserved. Use
   /// [`Self::wipe_and_reset_defaults_for`] for the destructive variant.
   Future<void> restoreDefaultsFor({required RelayTypeFfi relayType});
+
+  /// Saves a display-name / bio edit LOCALLY and queues it for publication.
+  ///
+  /// Returns immediately with the row the UI should render: no relay is
+  /// dialed and no signing key is needed, because nothing is published here.
+  /// [`Self::sync_my_profile`] is what makes the network agree, and
+  /// [`Self::profile_pending_state`] is what says whether it has.
+  ///
+  /// `display_name`/`about` follow `ProfileEdits` semantics (`None` =
+  /// untouched, `Some("")` = clear) and ACCUMULATE across saves, so renaming
+  /// and then editing the bio publishes both.
+  ///
+  /// The profile is the LOCAL USER's — the pubkey comes from the manager's
+  /// construction keys, never from the caller.
+  ///
+  /// # Errors
+  ///
+  /// Returns a redacted error string on database failure.
+  Future<ProfileMetadataFfi> saveMyProfileLocal({
+    String? displayName,
+    String? about,
+  });
+
+  /// Sanitizes the chosen photo and saves it LOCALLY, queued for upload.
+  ///
+  /// The whole sanitizer runs here — EXIF/GPS stripped, re-encoded, resized
+  /// (`process_own_avatar`) — so what is staged is already what may be
+  /// uploaded, and the raw camera bytes never outlive this call. Nothing
+  /// touches Blossom or a relay: [`Self::sync_my_profile`] uploads the staged
+  /// bytes and publishes the URL.
+  ///
+  /// The returned hash is the sanitized bytes' content hash, which is also
+  /// the Blossom address the eventual upload resolves to.
+  ///
+  /// # Errors
+  ///
+  /// Returns a redacted error string if the image cannot be decoded within
+  /// the avatar limits, or on database failure.
+  Future<ProfilePictureRefFfi> saveMyProfilePictureLocal({
+    required List<int> raw,
+  });
 
   /// Seeds the user's relay lists with the default relay list returned by
   /// [`haven_core::circle::default_relays`] on first launch.
@@ -1485,6 +1529,22 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required String pubkeyHex,
   });
 
+  /// Publishes whatever the own-profile outbox is holding.
+  ///
+  /// Idempotent and safe to call from any resume/foreground trigger: with
+  /// nothing pending it returns [`ProfileSyncOutcomeFfi::NothingPending`]
+  /// without touching the network. Network failure is an OUTCOME, not an
+  /// error — the save stays queued with its retry ladder advanced, and only a
+  /// local fault produces `Err`.
+  ///
+  /// # Errors
+  ///
+  /// Returns a redacted error string on a malformed secret or a local
+  /// database/signing fault.
+  Future<ProfileSyncResultFfi> syncMyProfile({
+    required List<int> identitySecretBytes,
+  });
+
   /// Admin: replace this circle's group relay list (MIP-01) via an
   /// `UpdateAppComponents(nostr-routing.v1)` commit.
   ///
@@ -1499,23 +1559,6 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   Future<CommitToPublishFfi> updateCircleRelays({
     required List<int> mlsGroupId,
     required List<String> newRelays,
-  });
-
-  /// Uploads the local user's OWN profile picture and publishes it.
-  ///
-  /// Publishing is **unconditional** (public-by-default, owner-directed
-  /// 2026-07-16): the upload and kind-0 publish happen on save with no consent
-  /// gate — disclosed to the user in onboarding and the Identity settings page
-  /// (a UI concern). The picture is sanitized (EXIF/GPS stripped, re-encoded)
-  /// inside `upload_profile_picture` BEFORE any public upload; the resulting
-  /// URL is merged into the freshest kind-0 and published.
-  ///
-  /// # Errors
-  ///
-  /// Returns a redacted error string on upload, relay, or database failure.
-  Future<ProfilePictureRefFfi> uploadMyProfilePicture({
-    required List<int> identitySecretBytes,
-    required List<int> raw,
   });
 
   /// Persists a last-known location row.
@@ -3483,16 +3526,53 @@ class ProfileMetadataFfi {
           pictureSha256Hex == other.pictureSha256Hex;
 }
 
-/// A reference to a stored profile picture (no bytes) returned after upload.
+/// What the UI may honestly say about the own profile right now (FFI mirror of
+/// [`ProfilePendingState`]).
+///
+/// Three independent facts rather than one enum: how they render is a UI
+/// concern, and collapsing them here would decide it in Rust.
+class ProfilePendingStateFfi {
+  /// A save has not been fully acknowledged yet.
+  final bool pending;
+
+  /// Pending, but already accepted by at least one relay for this version.
+  final bool partial;
+
+  /// The persisted retry ladder permits another attempt now.
+  final bool retryDue;
+
+  const ProfilePendingStateFfi({
+    required this.pending,
+    required this.partial,
+    required this.retryDue,
+  });
+
+  @override
+  int get hashCode => pending.hashCode ^ partial.hashCode ^ retryDue.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ProfilePendingStateFfi &&
+          runtimeType == other.runtimeType &&
+          pending == other.pending &&
+          partial == other.partial &&
+          retryDue == other.retryDue;
+}
+
+/// A reference to a stored profile picture (no bytes).
 ///
 /// Flutter uses `pubkey_hex` to fetch the cached bytes and `sha256_hex` as a
-/// decode-cache key; the picture URL never crosses the FFI (plan D2).
+/// decode-cache key; the picture URL never crosses the FFI (plan D2) — and at
+/// the moment a picture is SAVED there is no URL yet anyway: the bytes are
+/// staged locally and uploaded by the next sync.
 class ProfilePictureRefFfi {
   /// Owner's Nostr public key (hex).
   final String pubkeyHex;
 
-  /// Hex SHA-256 of the uploaded (post-sanitization) bytes — the Blossom
-  /// content address.
+  /// Hex SHA-256 of the post-sanitization bytes. Blossom is
+  /// content-addressed, so this is also the address the eventual upload
+  /// resolves to.
   final String sha256Hex;
 
   const ProfilePictureRefFfi({
@@ -3560,6 +3640,73 @@ class ProfilePoolStatusFfi {
           excluded == other.excluded &&
           usable == other.usable &&
           isUnderflow == other.isUnderflow;
+}
+
+/// What one own-profile sync pass did (FFI mirror of [`ProfileSyncOutcome`]).
+///
+/// No catch-all variant, deliberately: a new core outcome must force Dart to
+/// decide what it means rather than folding into "something went wrong".
+enum ProfileSyncOutcomeFfi {
+  /// Everything saved is already fully acknowledged; no network was touched.
+  nothingPending,
+
+  /// A kind-0 was published and at least one relay acknowledged it.
+  published,
+
+  /// The staged picture could not be uploaded; nothing was published.
+  uploadFailed,
+
+  /// The kind-0 was built but no relay accepted it.
+  publishFailed,
+
+  /// Too few uncontaminated profile relays remain to publish at all.
+  poolUnderflow,
+}
+
+/// The result of one own-profile sync pass (FFI mirror of
+/// [`ProfileSyncReport`]).
+///
+/// Scalar-only, so the derived `Debug` is safe to log: the moment a URL or an
+/// identifier lands in this struct it needs a redacting impl like its siblings
+/// above.
+class ProfileSyncResultFfi {
+  /// What the pass did.
+  final ProfileSyncOutcomeFfi outcome;
+
+  /// How many relays acknowledged the published event.
+  final int relaysAcked;
+
+  /// How many relays the publish was attempted against.
+  final int relaysAttempted;
+
+  /// Whether a save is STILL unpublished after this pass — the honest answer
+  /// even for [`ProfileSyncOutcomeFfi::Published`], because a partial
+  /// acknowledgement (or an edit saved mid-flight) leaves work behind.
+  final bool stillPending;
+
+  const ProfileSyncResultFfi({
+    required this.outcome,
+    required this.relaysAcked,
+    required this.relaysAttempted,
+    required this.stillPending,
+  });
+
+  @override
+  int get hashCode =>
+      outcome.hashCode ^
+      relaysAcked.hashCode ^
+      relaysAttempted.hashCode ^
+      stillPending.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ProfileSyncResultFfi &&
+          runtimeType == other.runtimeType &&
+          outcome == other.outcome &&
+          relaysAcked == other.relaysAcked &&
+          relaysAttempted == other.relaysAttempted &&
+          stillPending == other.stillPending;
 }
 
 /// Public identity information (FFI-friendly).

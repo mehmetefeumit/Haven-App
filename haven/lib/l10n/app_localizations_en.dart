@@ -1817,6 +1817,22 @@ class AppLocalizationsEn extends AppLocalizations {
   String get displayNameCardSaveFailedAnnouncement => 'Save failed, try again';
 
   @override
+  String get profileSyncStatusSyncing => 'Syncing to your public profile…';
+
+  @override
+  String get profileSyncStatusPartial =>
+      'Published — still syncing to some relays';
+
+  @override
+  String get profileSyncStatusSynced => 'Public profile up to date';
+
+  @override
+  String get profileSyncStatusFailed => 'Couldn\'t sync yet.';
+
+  @override
+  String get profileSyncStatusRetrySemantics => 'Retry publishing your profile';
+
+  @override
   String keyDisplayCopiedToClipboard(String label) {
     return '$label copied to clipboard';
   }
@@ -1920,7 +1936,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get avatarPickerPhotoUpdated =>
-      'Photo updated. Published to your public Nostr profile.';
+      'Photo updated. It will be published to your public Nostr profile.';
 
   @override
   String get avatarPickerPhotoRemoved => 'Photo removed.';

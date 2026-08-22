@@ -50,6 +50,7 @@
 library;
 
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -109,8 +110,13 @@ class _TestIdentityService implements IdentityService {
   Future<String> getPubkeyHex() async => pubkeyHex;
 
   @override
-  Future<List<int>> getSecretBytes() async =>
-      List<int>.unmodifiable(_secretBytes);
+  // A FRESH, writable buffer per call, which is what production returns: the
+  // `Uint8List` flutter_rust_bridge just allocated, whose ownership passes to
+  // the caller (`takeSecretOwnership`) and which the caller scrubs on the way
+  // out. An unmodifiable list is not merely a stricter double — it is a secret
+  // nothing can wipe, so `takeSecretOwnership` throws `UnsupportedError` on it
+  // by design, and every maintenance tick then reports `identityUnavailable`.
+  Future<List<int>> getSecretBytes() async => Uint8List.fromList(_secretBytes);
 
   @override
   Future<void> deleteIdentity() => throw UnimplementedError();

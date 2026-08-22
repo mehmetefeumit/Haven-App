@@ -2558,6 +2558,14 @@ use haven_core::validation::{normalize_pubkey_hex, parse_nostr_group_id, validat
 #[frb(opaque)]
 pub struct CircleManagerFfi {
     inner: Arc<CoreCircleManager>,
+    /// The local user's identity pubkey in canonical hex, captured from the
+    /// construction keys.
+    ///
+    /// Every own-profile write keys on THIS, never on a pubkey handed in from
+    /// Dart: staging writes a cached kind-0 row AND queues it for publication
+    /// under this identity's signature, so a wrong key would publish one
+    /// account's edit as another's.
+    own_pubkey_hex: String,
 }
 
 // Compile-time assertion: the refactor above is only sound if the core
@@ -2677,9 +2685,11 @@ impl CircleManagerFfi {
         init_keyring_store()?;
         let circle_db_key = get_or_create_circle_db_key()?;
         let path = Path::new(&data_dir);
+        let own_pubkey_hex = keys.public_key().to_hex();
         CoreCircleManager::new(path, &keys, Some(&circle_db_key))
             .map(|inner| Self {
                 inner: Arc::new(inner),
+                own_pubkey_hex,
             })
             .map_err(|e| e.to_string())
     }
@@ -4534,11 +4544,12 @@ impl CircleManagerFfi {
 // region (its own top-level `impl CircleManagerFfi`) so the privacy CI guard
 // (scripts/ci/check_profile_privacy_boundaries.sh) can scope its scan exactly.
 
+use haven_core::circle::{ProfilePendingState, ProfileSyncOutcome, ProfileSyncReport};
 use haven_core::profile::{
-    blossom_server, build_blank_metadata_event, build_metadata_event, build_nip09_deletion,
-    download_profile_picture, fetch_profiles_assigned, merge_edits, picture_sync_action,
-    publish_metadata, upload_profile_picture, AssignedFetch, CachedProfile, PictureSyncAction,
-    ProfileEdits, ProfileError, ProfileMetadata, ProfileRelaySalt, ProfileState,
+    build_blank_metadata_event, build_metadata_event, build_nip09_deletion,
+    download_profile_picture, fetch_own_profile, fetch_profiles_assigned, merge_edits,
+    picture_sync_action, publish_metadata, AssignedFetch, CachedProfile, PendingEdits,
+    PictureSyncAction, ProfileEdits, ProfileError, ProfileMetadata, ProfileState,
     PROFILE_INTER_REQ_JITTER_MS,
 };
 
@@ -4551,19 +4562,17 @@ fn redact_profile_err(e: impl std::fmt::Display) -> String {
     haven_core::util::redact_hex_sequences(&e.to_string())
 }
 
+/// Rejection for a secret that is not this manager's own identity.
+///
+/// A constant, never a formatted message: the two pubkeys involved are exactly
+/// the identifiers Security Rule #8 forbids surfacing, and "which key did you
+/// mean" is not a question the UI may answer for a caller that got it wrong.
+const PROFILE_IDENTITY_MISMATCH: &str = "Secret does not match this identity";
+
 /// Returns the current Unix time in whole seconds, saturating (never negative).
 fn profile_now_secs() -> i64 {
     i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(i64::MAX)
 }
-
-/// Wall-clock budget for reading the local user's OWN kind-0 back from the
-/// whole relay pool.
-///
-/// Unlike a member fetch (one author, one assigned relay) this walks every pool
-/// entry serially, so an unresponsive relay must not be able to hold the
-/// Identity page hostage. Whatever has not answered when this elapses is simply
-/// not merged — the newest of the answers received still wins.
-const PROFILE_OWN_FETCH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(25);
 
 /// Wall-clock budget for one paced batch of member profile-picture downloads.
 ///
@@ -4656,71 +4665,99 @@ fn profile_stamp_lists(outcome: &AssignedFetch) -> ProfileStampLists {
     }
 }
 
-/// Reads the local user's OWN newest kind-0 back from EVERY relay in `pool`.
+/// What one own-profile sync pass did (FFI mirror of [`ProfileSyncOutcome`]).
 ///
-/// # Why the whole pool, not the salted assignment
-///
-/// The per-author assignment exists to stop any single relay from learning a
-/// slice of the user's social graph. Neither half of that applies to our own
-/// profile: it is PUBLISHED to every pool relay (a peer's assignment salt is
-/// private to their install, so we cannot know which one they will read us
-/// from), and every one of those relays therefore already holds it. Reading it
-/// back from one assigned relay would only risk merging onto a stale copy and
-/// silently dropping fields another client wrote.
-///
-/// Each relay is queried through the ordinary assigned-fetch entry point with a
-/// ONE-relay pool, which pins the target while keeping that path's guarantees:
-/// one author per `REQ`, a defensive per-author limit, and no signer (so a
-/// NIP-42 AUTH challenge can never be answered). Serial, bounded by
-/// [`PROFILE_OWN_FETCH_DEADLINE`]; the newest `created_at` wins.
-///
-/// Returns the newest answer and whether any relay actually completed a `REQ`.
-/// The second value is load-bearing: a caller may only stamp a miss when
-/// something was really asked (same rule that keeps deadline-dropped authors
-/// unstamped).
-async fn fetch_own_profile_across_pool(
-    relay: &haven_core::relay::RelayManager,
-    own_pk: nostr::PublicKey,
-    salt: &ProfileRelaySalt,
-    pool: &[String],
-    now: i64,
-) -> (Option<CachedProfile>, bool) {
-    let requests = [(own_pk, 0u8)];
-    let deadline = tokio::time::Instant::now() + PROFILE_OWN_FETCH_DEADLINE;
-    let mut newest: Option<CachedProfile> = None;
-    let mut settled = false;
+/// No catch-all variant, deliberately: a new core outcome must force Dart to
+/// decide what it means rather than folding into "something went wrong".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileSyncOutcomeFfi {
+    /// Everything saved is already fully acknowledged; no network was touched.
+    NothingPending,
+    /// A kind-0 was published and at least one relay acknowledged it.
+    Published,
+    /// The staged picture could not be uploaded; nothing was published.
+    UploadFailed,
+    /// The kind-0 was built but no relay accepted it.
+    PublishFailed,
+    /// Too few uncontaminated profile relays remain to publish at all.
+    PoolUnderflow,
+}
 
-    for url in pool {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            log::debug!("[profile] own-profile read hit its deadline; using what arrived");
-            break;
-        }
-        let one = [url.clone()];
-        let attempt = tokio::time::timeout(
-            remaining,
-            fetch_profiles_assigned(relay, &requests, salt, &one, now),
-        )
-        .await;
-        match attempt {
-            Ok(Ok(outcome)) => {
-                settled |= !outcome.resolved.is_empty() || !outcome.missed.is_empty();
-                if let Some(candidate) = outcome.resolved.into_iter().next() {
-                    let newer = match &newest {
-                        Some(current) => candidate.event_created_at > current.event_created_at,
-                        None => true,
-                    };
-                    if newer {
-                        newest = Some(candidate);
-                    }
-                }
-            }
-            // One unusable relay must not deny the rest of the pool.
-            Ok(Err(_)) => {}
-            Err(_) => break,
+/// The result of one own-profile sync pass (FFI mirror of
+/// [`ProfileSyncReport`]).
+///
+/// Scalar-only, so the derived `Debug` is safe to log: the moment a URL or an
+/// identifier lands in this struct it needs a redacting impl like its siblings
+/// above.
+#[derive(Debug, Clone, Copy)]
+pub struct ProfileSyncResultFfi {
+    /// What the pass did.
+    pub outcome: ProfileSyncOutcomeFfi,
+    /// How many relays acknowledged the published event.
+    pub relays_acked: u32,
+    /// How many relays the publish was attempted against.
+    pub relays_attempted: u32,
+    /// Whether a save is STILL unpublished after this pass — the honest answer
+    /// even for [`ProfileSyncOutcomeFfi::Published`], because a partial
+    /// acknowledgement (or an edit saved mid-flight) leaves work behind.
+    pub still_pending: bool,
+}
+
+impl ProfileSyncResultFfi {
+    /// A pass that never reached the network, at a known pending state.
+    ///
+    /// Mirrors `ProfileSyncReport::no_network`: the FFI short-circuits are the
+    /// same two answers the core gives, so they must report the same counts.
+    const fn no_network(outcome: ProfileSyncOutcomeFfi, still_pending: bool) -> Self {
+        Self {
+            outcome,
+            relays_acked: 0,
+            relays_attempted: 0,
+            still_pending,
         }
     }
-    (newest, settled)
+
+    /// Maps the core report, variant by variant.
+    fn from_report(report: &ProfileSyncReport) -> Self {
+        Self {
+            outcome: match report.outcome {
+                ProfileSyncOutcome::NothingPending => ProfileSyncOutcomeFfi::NothingPending,
+                ProfileSyncOutcome::Published => ProfileSyncOutcomeFfi::Published,
+                ProfileSyncOutcome::UploadFailed => ProfileSyncOutcomeFfi::UploadFailed,
+                ProfileSyncOutcome::PublishFailed => ProfileSyncOutcomeFfi::PublishFailed,
+                ProfileSyncOutcome::PoolUnderflow => ProfileSyncOutcomeFfi::PoolUnderflow,
+            },
+            relays_acked: report.relays_acked,
+            relays_attempted: report.relays_attempted,
+            still_pending: report.still_pending,
+        }
+    }
+}
+
+/// What the UI may honestly say about the own profile right now (FFI mirror of
+/// [`ProfilePendingState`]).
+///
+/// Three independent facts rather than one enum: how they render is a UI
+/// concern, and collapsing them here would decide it in Rust.
+#[derive(Debug, Clone, Copy)]
+pub struct ProfilePendingStateFfi {
+    /// A save has not been fully acknowledged yet.
+    pub pending: bool,
+    /// Pending, but already accepted by at least one relay for this version.
+    pub partial: bool,
+    /// The persisted retry ladder permits another attempt now.
+    pub retry_due: bool,
+}
+
+impl ProfilePendingStateFfi {
+    /// Maps the core state.
+    const fn from_state(state: ProfilePendingState) -> Self {
+        Self {
+            pending: state.pending,
+            partial: state.partial,
+            retry_due: state.retry_due,
+        }
+    }
 }
 
 /// A member's public Nostr profile (kind-0 metadata), FFI-friendly.
@@ -4832,16 +4869,19 @@ impl ProfileMetadataFfi {
     }
 }
 
-/// A reference to a stored profile picture (no bytes) returned after upload.
+/// A reference to a stored profile picture (no bytes).
 ///
 /// Flutter uses `pubkey_hex` to fetch the cached bytes and `sha256_hex` as a
-/// decode-cache key; the picture URL never crosses the FFI (plan D2).
+/// decode-cache key; the picture URL never crosses the FFI (plan D2) — and at
+/// the moment a picture is SAVED there is no URL yet anyway: the bytes are
+/// staged locally and uploaded by the next sync.
 #[derive(Clone)]
 pub struct ProfilePictureRefFfi {
     /// Owner's Nostr public key (hex).
     pub pubkey_hex: String,
-    /// Hex SHA-256 of the uploaded (post-sanitization) bytes — the Blossom
-    /// content address.
+    /// Hex SHA-256 of the post-sanitization bytes. Blossom is
+    /// content-addressed, so this is also the address the eventual upload
+    /// resolves to.
     pub sha256_hex: String,
 }
 
@@ -4860,6 +4900,29 @@ impl std::fmt::Debug for ProfilePictureRefFfi {
             )
             .finish()
     }
+}
+
+/// Builds the FFI view of a cached row, resolving the picture facts from
+/// storage.
+///
+/// A free function rather than a method so the `run_blocking` closures (which
+/// own a cloned `Arc`, never `&self`) can share the one place that pairs
+/// `has_picture` with its hash.
+fn profile_view(
+    inner: &CoreCircleManager,
+    cached: &CachedProfile,
+) -> Result<ProfileMetadataFfi, String> {
+    let has_picture = inner
+        .has_current_picture(&cached.pubkey_hex, cached.metadata.picture())
+        .map_err(redact_profile_err)?;
+    let hash = if has_picture {
+        inner
+            .get_profile_picture_sha256_hex(&cached.pubkey_hex)
+            .map_err(redact_profile_err)?
+    } else {
+        None
+    };
+    Ok(ProfileMetadataFfi::from_cached(cached, has_picture, hash))
 }
 
 impl CircleManagerFfi {
@@ -5034,6 +5097,20 @@ impl CircleManagerFfi {
         }
     }
 
+    /// Fails closed unless `keys` is this manager's OWN identity.
+    ///
+    /// Every own-profile write keys on `own_pubkey_hex` while the event is
+    /// signed by the secret Dart hands in. Nothing else re-derives one from the
+    /// other, so a wrong secret would sign one account's staged edit — or its
+    /// retraction — with another account's key.
+    fn ensure_own_identity(&self, keys: &nostr::Keys) -> Result<(), String> {
+        if keys.public_key().to_hex() == self.own_pubkey_hex {
+            Ok(())
+        } else {
+            Err(PROFILE_IDENTITY_MISMATCH.to_string())
+        }
+    }
+
     /// Health of the profile-plane relay pool, as counts only.
     ///
     /// Lets Flutter show "profile lookups are paused" instead of a silently
@@ -5174,6 +5251,17 @@ impl CircleManagerFfi {
     ///
     /// Returns a redacted error string on download or database failure.
     pub async fn download_member_picture(&self, pubkey_hex: String) -> Result<(), String> {
+        // The local user's own pubkey rides the member union, and their picture
+        // may be STAGED: sanitized bytes cached with an empty URL while the
+        // cached kind-0 still names the PREVIOUS one. Reconciling that would
+        // download the old photo over the one the user just chose.
+        if self
+            .inner
+            .profile_picture_is_staged(&pubkey_hex)
+            .map_err(redact_profile_err)?
+        {
+            return Ok(());
+        }
         let Some(cached) = self
             .inner
             .get_profile(&pubkey_hex)
@@ -5305,34 +5393,206 @@ impl CircleManagerFfi {
 
     /// Returns the locally cached profile for a pubkey, or `None`.
     ///
-    /// Pure cache read (no network) — the synchronous hot path for member
-    /// markers/tiles.
+    /// Pure cache read (no network) — the hot path for member markers/tiles.
+    /// Async rather than `#[frb(sync)]`: the read is three SQLCipher queries,
+    /// and a sync FFI call runs them on the UI isolate.
     ///
     /// # Errors
     ///
     /// Returns a redacted error string on database failure.
-    #[frb(sync)]
-    pub fn get_cached_profile(
+    pub async fn get_cached_profile(
         &self,
         pubkey_hex: String,
     ) -> Result<Option<ProfileMetadataFfi>, String> {
-        let Some(cached) = self
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            let Some(cached) = inner.get_profile(&pubkey_hex).map_err(redact_profile_err)? else {
+                return Ok(None);
+            };
+            profile_view(&inner, &cached).map(Some)
+        })
+        .await
+    }
+
+    /// Saves a display-name / bio edit LOCALLY and queues it for publication.
+    ///
+    /// Returns immediately with the row the UI should render: no relay is
+    /// dialed and no signing key is needed, because nothing is published here.
+    /// [`Self::sync_my_profile`] is what makes the network agree, and
+    /// [`Self::profile_pending_state`] is what says whether it has.
+    ///
+    /// `display_name`/`about` follow `ProfileEdits` semantics (`None` =
+    /// untouched, `Some("")` = clear) and ACCUMULATE across saves, so renaming
+    /// and then editing the bio publishes both.
+    ///
+    /// The profile is the LOCAL USER's — the pubkey comes from the manager's
+    /// construction keys, never from the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error string on database failure.
+    pub async fn save_my_profile_local(
+        &self,
+        display_name: Option<String>,
+        about: Option<String>,
+    ) -> Result<ProfileMetadataFfi, String> {
+        let inner = self.inner.clone();
+        let own_hex = self.own_pubkey_hex.clone();
+        let now = profile_now_secs();
+        run_blocking(move || {
+            let edits = PendingEdits {
+                display_name,
+                about,
+            };
+            let cached = inner
+                .stage_own_profile_edits(&own_hex, &edits, now)
+                .map_err(redact_profile_err)?;
+            profile_view(&inner, &cached)
+        })
+        .await
+    }
+
+    /// Sanitizes the chosen photo and saves it LOCALLY, queued for upload.
+    ///
+    /// The whole sanitizer runs here — EXIF/GPS stripped, re-encoded, resized
+    /// (`process_own_avatar`) — so what is staged is already what may be
+    /// uploaded, and the raw camera bytes never outlive this call. Nothing
+    /// touches Blossom or a relay: [`Self::sync_my_profile`] uploads the staged
+    /// bytes and publishes the URL.
+    ///
+    /// The returned hash is the sanitized bytes' content hash, which is also
+    /// the Blossom address the eventual upload resolves to.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error string if the image cannot be decoded within
+    /// the avatar limits, or on database failure.
+    pub async fn save_my_profile_picture_local(
+        &self,
+        raw: Vec<u8>,
+    ) -> Result<ProfilePictureRefFfi, String> {
+        // Minimize the cleartext image lifetime on the FFI side: wipe on drop.
+        let raw = zeroize::Zeroizing::new(raw);
+        let inner = self.inner.clone();
+        let own_hex = self.own_pubkey_hex.clone();
+        let now = profile_now_secs();
+        run_blocking(move || {
+            // Decode + re-encode is CPU-bound; it belongs on the blocking pool
+            // alongside the SQLCipher write it feeds.
+            let processed =
+                haven_core::avatar::process_own_avatar(&raw).map_err(redact_profile_err)?;
+            let staged = haven_core::avatar::StagedPicture::from_processed(&processed);
+            inner
+                .stage_own_profile_picture(&own_hex, &staged, now)
+                .map_err(redact_profile_err)?;
+            Ok(ProfilePictureRefFfi {
+                sha256_hex: hex::encode(staged.sha256()),
+                pubkey_hex: own_hex,
+            })
+        })
+        .await
+    }
+
+    /// Publishes whatever the own-profile outbox is holding.
+    ///
+    /// Idempotent and safe to call from any resume/foreground trigger: with
+    /// nothing pending it returns [`ProfileSyncOutcomeFfi::NothingPending`],
+    /// and with an unusable relay pool [`ProfileSyncOutcomeFfi::PoolUnderflow`],
+    /// in both cases without touching the network OR the supplied secret.
+    /// Network failure is an OUTCOME, not an error — the save stays queued with
+    /// its retry ladder advanced, and only a local fault produces `Err`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error string on a malformed secret, a secret that is
+    /// not this account's identity, or a local database/signing fault.
+    pub async fn sync_my_profile(
+        &self,
+        identity_secret_bytes: Vec<u8>,
+    ) -> Result<ProfileSyncResultFfi, String> {
+        // Wrapped before the pending pre-check so the common early return does
+        // not leave the secret unwiped (Security Rule 7/9).
+        let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
+        let now = profile_now_secs();
+        let inner = self.inner.clone();
+        let own_hex = self.own_pubkey_hex.clone();
+        // The core's own no-op and pool checks happen AFTER its lock; asking
+        // the two cheap local questions here keeps the resume path from
+        // constructing a signing key at all when there is nothing to publish,
+        // or nowhere left to publish it (Rule 9: the shortest possible key
+        // lifetime). Both answers are the core's own, so a pass that DOES reach
+        // the core cannot disagree with this one.
+        let short_circuit = run_blocking(move || {
+            let state = inner
+                .profile_pending_state(&own_hex, now)
+                .map_err(redact_profile_err)?;
+            if !state.pending {
+                return Ok(Some(ProfileSyncResultFfi::no_network(
+                    ProfileSyncOutcomeFfi::NothingPending,
+                    false,
+                )));
+            }
+            match inner.usable_profile_relays() {
+                Ok(_) => Ok(None),
+                Err(ProfileError::PoolUnderflow { .. }) => {
+                    // Counts are deliberately NOT logged: on a small pool they
+                    // are close to an enumeration of which relays this install
+                    // treats as contaminated.
+                    log::debug!("[profile] own-profile sync: relay pool underflow (fail-closed)");
+                    // Advance the persisted ladder exactly as the core's own
+                    // underflow branch does. Without it `retry_due` stays true
+                    // and every resume re-reads the identity secret out of the
+                    // platform keystore to reach this same terminal answer.
+                    inner
+                        .record_profile_sync_attempt(&own_hex, now)
+                        .map_err(redact_profile_err)?;
+                    Ok(Some(ProfileSyncResultFfi::no_network(
+                        ProfileSyncOutcomeFfi::PoolUnderflow,
+                        true,
+                    )))
+                }
+                Err(e) => Err(redact_profile_err(e)),
+            }
+        })
+        .await?;
+        if let Some(report) = short_circuit {
+            return Ok(report);
+        }
+
+        let keys = keys_from_secret_bytes(identity_secret_bytes.to_vec())?;
+        // The outbox row, the cached kind-0 and the retraction gate are all
+        // keyed on THIS manager's pubkey; signing them with a different key
+        // would publish one account's saved edit under another's identity.
+        self.ensure_own_identity(&keys)?;
+        let report = self
             .inner
-            .get_profile(&pubkey_hex)
-            .map_err(redact_profile_err)?
-        else {
-            return Ok(None);
-        };
-        let has_picture = self
-            .inner
-            .has_current_picture(&pubkey_hex, cached.metadata.picture())
+            .sync_own_profile(&keys, now)
+            .await
             .map_err(redact_profile_err)?;
-        let hash = self.current_picture_hash(&pubkey_hex, has_picture)?;
-        Ok(Some(ProfileMetadataFfi::from_cached(
-            &cached,
-            has_picture,
-            hash,
-        )))
+        Ok(ProfileSyncResultFfi::from_report(&report))
+    }
+
+    /// Whether the own profile has unpublished work, how far it got, and
+    /// whether the persisted backoff permits another attempt.
+    ///
+    /// The read a resume trigger consults before calling
+    /// [`Self::sync_my_profile`], so a clean install never dials a relay just
+    /// to discover it had nothing to say.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error string on database failure.
+    pub async fn profile_pending_state(&self) -> Result<ProfilePendingStateFfi, String> {
+        let inner = self.inner.clone();
+        let own_hex = self.own_pubkey_hex.clone();
+        let now = profile_now_secs();
+        run_blocking(move || {
+            inner
+                .profile_pending_state(&own_hex, now)
+                .map(ProfilePendingStateFfi::from_state)
+                .map_err(redact_profile_err)
+        })
+        .await
     }
 
     /// Returns a member's cached profile-picture thumbnail bytes, or `None`.
@@ -5377,7 +5637,7 @@ impl CircleManagerFfi {
     /// result rather than an error (offline-tolerant, plan D7).
     ///
     /// Reads from the WHOLE profile pool rather than one salted-assignment
-    /// relay — see [`fetch_own_profile_across_pool`].
+    /// relay, concurrently — see [`fetch_own_profile`].
     ///
     /// # Errors
     ///
@@ -5397,7 +5657,7 @@ impl CircleManagerFfi {
                     .profile_relay_salt()
                     .map_err(redact_profile_err)?;
                 let relay = haven_core::relay::RelayManager::new();
-                fetch_own_profile_across_pool(&relay, own_pk, &salt, &pool, now).await
+                fetch_own_profile(&relay, own_pk, &salt, &pool, now).await
             }
             // Pool underflow: nothing was asked, so nothing may be stamped.
             None => (None, false),
@@ -5449,215 +5709,6 @@ impl CircleManagerFfi {
         }
     }
 
-    /// Publishes the local user's OWN public profile (fetch → merge → publish).
-    ///
-    /// Publishing is **unconditional** (public-by-default, owner-directed
-    /// 2026-07-16): saving a profile publishes a public kind-0 immediately, with
-    /// no consent gate — that this is public is disclosed to the user in
-    /// onboarding and the Identity settings page (a UI concern). The latest
-    /// kind-0 is fetched first so unknown fields written by other clients survive
-    /// the edit; `display_name`/`about` follow `ProfileEdits` semantics (`None` =
-    /// untouched, `Some("")` = clear).
-    ///
-    /// # Errors
-    ///
-    /// Returns a redacted error string on relay or database failure.
-    pub async fn publish_my_profile(
-        &self,
-        identity_secret_bytes: Vec<u8>,
-        display_name: Option<String>,
-        about: Option<String>,
-    ) -> Result<ProfileMetadataFfi, String> {
-        // Zeroize immediately so early-return paths don't leak secret bytes.
-        let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
-        if identity_secret_bytes.len() != 32 {
-            return Err("Invalid secret bytes length".to_string());
-        }
-        let keys = nostr::Keys::new(
-            nostr::SecretKey::from_slice(&identity_secret_bytes)
-                .map_err(|e| format!("Invalid secret key: {e}"))?,
-        );
-        let own_pk = keys.public_key();
-        let own_hex = own_pk.to_hex();
-        let now = profile_now_secs();
-
-        let relay = haven_core::relay::RelayManager::new();
-        // Publish to the WHOLE usable pool, and use that same whole pool as the
-        // merge base. A peer's relay-assignment salt is private to their
-        // install, so we cannot know WHICH pool relay they will read us from:
-        // publishing to a subset would silently make us invisible to every peer
-        // assigned elsewhere, and merging onto a subset would drop fields
-        // another client wrote to a relay we skipped. Underflow propagates as an
-        // error — the user asked to publish, so failing to is never silent.
-        let write_relays = self
-            .inner
-            .usable_profile_relays()
-            .map_err(redact_profile_err)?;
-        let salt = self
-            .inner
-            .profile_relay_salt()
-            .map_err(redact_profile_err)?;
-        // Fetch-latest so we merge onto the freshest object (never clobber fields
-        // set by another client).
-        let base_cp = fetch_own_profile_across_pool(&relay, own_pk, &salt, &write_relays, now)
-            .await
-            .0;
-        // Floor the republished kind-0's `created_at` above the freshest one we
-        // merged onto, so a same-second edit still deterministically supersedes
-        // it under NIP-01 replaceable-event semantics (otherwise a peer's forced
-        // re-fetch resolves the stale profile — the relay keeps the old event on
-        // a `created_at` tie).
-        let prev_created_at = base_cp
-            .as_ref()
-            .and_then(|cp| u64::try_from(cp.event_created_at).ok());
-        let base = base_cp.map_or_else(ProfileMetadata::default, |cp| cp.metadata);
-        let merged = merge_edits(
-            &base,
-            &ProfileEdits {
-                display_name,
-                about,
-                picture: None,
-            },
-        );
-        let event =
-            build_metadata_event(&keys, &merged, prev_created_at).map_err(redact_profile_err)?;
-        // Unconditional publish (public-by-default). `publish_metadata` is the
-        // shared transport; the only precondition is a non-empty write-relay set.
-        publish_metadata(&relay, &event, &write_relays)
-            .await
-            .map_err(redact_profile_err)?;
-
-        // Optimistic cache + published-events record (enables NIP-09 + the
-        // retraction gate `has_published_profile`).
-        let cached = CachedProfile {
-            pubkey_hex: own_hex,
-            metadata: merged,
-            state: ProfileState::Known,
-            event_created_at: i64::try_from(event.created_at.as_secs()).unwrap_or(i64::MAX),
-            fetched_at: now,
-        };
-        self.inner
-            .upsert_profile(&cached)
-            .map_err(redact_profile_err)?;
-        self.inner
-            .record_published_event(0, "", &event.id, &own_pk, now)
-            .map_err(redact_profile_err)?;
-        let has_picture = self
-            .inner
-            .has_current_picture(&cached.pubkey_hex, cached.metadata.picture())
-            .map_err(redact_profile_err)?;
-        let hash = self.current_picture_hash(&cached.pubkey_hex, has_picture)?;
-        Ok(ProfileMetadataFfi::from_cached(&cached, has_picture, hash))
-    }
-
-    /// Uploads the local user's OWN profile picture and publishes it.
-    ///
-    /// Publishing is **unconditional** (public-by-default, owner-directed
-    /// 2026-07-16): the upload and kind-0 publish happen on save with no consent
-    /// gate — disclosed to the user in onboarding and the Identity settings page
-    /// (a UI concern). The picture is sanitized (EXIF/GPS stripped, re-encoded)
-    /// inside `upload_profile_picture` BEFORE any public upload; the resulting
-    /// URL is merged into the freshest kind-0 and published.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redacted error string on upload, relay, or database failure.
-    pub async fn upload_my_profile_picture(
-        &self,
-        identity_secret_bytes: Vec<u8>,
-        raw: Vec<u8>,
-    ) -> Result<ProfilePictureRefFfi, String> {
-        let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
-        if identity_secret_bytes.len() != 32 {
-            return Err("Invalid secret bytes length".to_string());
-        }
-        // Minimize the cleartext image lifetime on the FFI side: wipe on drop.
-        let raw = zeroize::Zeroizing::new(raw);
-        let keys = nostr::Keys::new(
-            nostr::SecretKey::from_slice(&identity_secret_bytes)
-                .map_err(|e| format!("Invalid secret key: {e}"))?,
-        );
-        let own_pk = keys.public_key();
-        let own_hex = own_pk.to_hex();
-        let now = profile_now_secs();
-
-        let server = blossom_server()
-            .parse::<url::Url>()
-            .map_err(|e| format!("Invalid Blossom server URL: {e}"))?;
-        let picture = upload_profile_picture(&keys, &server, &raw)
-            .await
-            .map_err(redact_profile_err)?;
-
-        // Merge the resulting URL into the freshest kind-0 and publish, both
-        // against the WHOLE usable pool: a peer's assignment salt is private to
-        // their install, so any subset we picked could be exactly the one they
-        // do not read us from (and could omit the relay holding the freshest
-        // copy another client wrote).
-        let relay = haven_core::relay::RelayManager::new();
-        let write_relays = self
-            .inner
-            .usable_profile_relays()
-            .map_err(redact_profile_err)?;
-        let salt = self
-            .inner
-            .profile_relay_salt()
-            .map_err(redact_profile_err)?;
-        let base_cp = fetch_own_profile_across_pool(&relay, own_pk, &salt, &write_relays, now)
-            .await
-            .0;
-        // Floor the republished kind-0's `created_at` above the freshest one we
-        // merged onto, so a same-second edit still deterministically supersedes
-        // it under NIP-01 replaceable-event semantics (otherwise a peer's forced
-        // re-fetch resolves the stale profile — the relay keeps the old event on
-        // a `created_at` tie).
-        let prev_created_at = base_cp
-            .as_ref()
-            .and_then(|cp| u64::try_from(cp.event_created_at).ok());
-        let base = base_cp.map_or_else(ProfileMetadata::default, |cp| cp.metadata);
-        let merged = merge_edits(
-            &base,
-            &ProfileEdits {
-                picture: Some(picture.url.clone()),
-                ..ProfileEdits::default()
-            },
-        );
-        let event =
-            build_metadata_event(&keys, &merged, prev_created_at).map_err(redact_profile_err)?;
-        publish_metadata(&relay, &event, &write_relays)
-            .await
-            .map_err(redact_profile_err)?;
-
-        // Cache the picture bytes + updated profile; record the publish.
-        let sha = hex::decode(&picture.sha256_hex).map_err(redact_profile_err)?;
-        self.inner
-            .upsert_profile_picture(
-                &own_hex,
-                &picture.url,
-                &sha,
-                picture.canonical.as_slice(),
-                picture.thumbnail.as_slice(),
-                now,
-            )
-            .map_err(redact_profile_err)?;
-        let cached = CachedProfile {
-            pubkey_hex: own_hex.clone(),
-            metadata: merged,
-            state: ProfileState::Known,
-            event_created_at: i64::try_from(event.created_at.as_secs()).unwrap_or(i64::MAX),
-            fetched_at: now,
-        };
-        self.inner
-            .upsert_profile(&cached)
-            .map_err(redact_profile_err)?;
-        self.inner
-            .record_published_event(0, "", &event.id, &own_pk, now)
-            .map_err(redact_profile_err)?;
-        Ok(ProfilePictureRefFfi {
-            pubkey_hex: own_hex,
-            sha256_hex: picture.sha256_hex,
-        })
-    }
-
     /// Removes the local user's OWN profile picture (retraction republish).
     ///
     /// A **no-op unless a profile was published** (`has_published_profile`) — a
@@ -5665,32 +5716,41 @@ impl CircleManagerFfi {
     /// published. Otherwise it clears the `picture` field on the freshest kind-0
     /// and republishes.
     ///
+    /// Either way, a photo still QUEUED for upload is cancelled: it was going
+    /// to publish the picture the user is removing. A queued NAME edit is left
+    /// alone — it has nothing to do with the photo.
+    ///
     /// # Errors
     ///
-    /// Returns a redacted error string on relay or database failure.
+    /// Returns a redacted error string on a secret that is not this account's
+    /// identity, or on relay or database failure.
     pub async fn remove_my_profile_picture(
         &self,
         identity_secret_bytes: Vec<u8>,
     ) -> Result<ProfileMetadataFfi, String> {
-        let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
-        if identity_secret_bytes.len() != 32 {
-            return Err("Invalid secret bytes length".to_string());
-        }
-        let keys = nostr::Keys::new(
-            nostr::SecretKey::from_slice(&identity_secret_bytes)
-                .map_err(|e| format!("Invalid secret key: {e}"))?,
-        );
+        let keys = keys_from_secret_bytes(identity_secret_bytes)?;
+        // Before the lock: a secret that is not ours must not cancel this
+        // account's staged upload, and must never sign a retraction republish
+        // for someone else's pubkey.
+        self.ensure_own_identity(&keys)?;
+        // Taken BEFORE the gate read and held for the whole body: an in-flight
+        // sync would otherwise republish the picture this call is removing,
+        // with a NEWER `created_at`, while every local check reported success.
+        let _sync_guard = self.inner.profile_sync_lock().lock().await;
         let own_pk = keys.public_key();
         let own_hex = own_pk.to_hex();
         let now = profile_now_secs();
 
         // Retraction no-op gate: never mint a first public event for a pubkey
         // that never published a profile.
-        if !self
+        let published = self
             .inner
             .has_published_profile(&own_pk)
-            .map_err(redact_profile_err)?
-        {
+            .map_err(redact_profile_err)?;
+        self.inner
+            .cancel_staged_profile_picture(&own_hex)
+            .map_err(redact_profile_err)?;
+        if !published {
             return Ok(self
                 .inner
                 .get_profile(&own_hex)
@@ -5715,7 +5775,7 @@ impl CircleManagerFfi {
             .inner
             .profile_relay_salt()
             .map_err(redact_profile_err)?;
-        let base_cp = fetch_own_profile_across_pool(&relay, own_pk, &salt, &write_relays, now)
+        let base_cp = fetch_own_profile(&relay, own_pk, &salt, &write_relays, now)
             .await
             .0;
         // Floor the republished kind-0's `created_at` above the freshest one we
@@ -5770,31 +5830,42 @@ impl CircleManagerFfi {
     /// blob DELETE is deferred (no delete helper in the profile module;
     /// documented best-effort).
     ///
+    /// Either way the own-profile outbox is emptied: anything still queued was
+    /// going to publish the profile the user is deleting. Nothing else about
+    /// the no-op branch changes — a pubkey that never published keeps its local
+    /// rows.
+    ///
     /// # Errors
     ///
-    /// Returns a redacted error string on relay or database failure.
+    /// Returns a redacted error string on a secret that is not this account's
+    /// identity, or on relay or database failure.
     pub async fn delete_my_public_profile(
         &self,
         identity_secret_bytes: Vec<u8>,
     ) -> Result<(), String> {
-        let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
-        if identity_secret_bytes.len() != 32 {
-            return Err("Invalid secret bytes length".to_string());
-        }
-        let keys = nostr::Keys::new(
-            nostr::SecretKey::from_slice(&identity_secret_bytes)
-                .map_err(|e| format!("Invalid secret key: {e}"))?,
-        );
+        let keys = keys_from_secret_bytes(identity_secret_bytes)?;
+        // Before the lock: a secret that is not ours must not empty this
+        // account's outbox, and must never sign a blank kind-0 or a kind-5 for
+        // someone else's pubkey.
+        self.ensure_own_identity(&keys)?;
+        // Taken BEFORE the gate read and held for the whole body: an in-flight
+        // sync would otherwise republish the deleted metadata with a NEWER
+        // `created_at` — the relays would serve the profile the user just
+        // deleted while every local check reported the delete had succeeded.
+        let _sync_guard = self.inner.profile_sync_lock().lock().await;
         let own_pk = keys.public_key();
         let now = profile_now_secs();
 
         // Retraction no-op gate: never publish a blank kind-0 / kind-5 for a
         // pubkey that never published a profile (no new public footprint).
-        if !self
+        let published = self
             .inner
             .has_published_profile(&own_pk)
-            .map_err(redact_profile_err)?
-        {
+            .map_err(redact_profile_err)?;
+        self.inner
+            .clear_profile_sync_state(&own_pk.to_hex())
+            .map_err(redact_profile_err)?;
+        if !published {
             return Ok(());
         }
 
@@ -5818,7 +5889,7 @@ impl CircleManagerFfi {
         // edit and even when the delete lands in the same second as the last
         // edit (replaceable-event determinism — otherwise the blank could tie and
         // the relay keep the old profile, so peers never see the deletion).
-        let fetched_prev = fetch_own_profile_across_pool(&relay, own_pk, &salt, &write_relays, now)
+        let fetched_prev = fetch_own_profile(&relay, own_pk, &salt, &write_relays, now)
             .await
             .0
             .and_then(|cp| u64::try_from(cp.event_created_at).ok());
@@ -6161,8 +6232,8 @@ pub fn allow_private_blossom_for_test() -> Result<(), String> {
 /// Overrides the Blossom upload server for hermetic public-profile E2E tests.
 ///
 /// Forwards to [`haven_core::profile::set_blossom_server_for_test`] (debug
-/// builds) or returns an error in release builds. `upload_my_profile_picture`
-/// reads the effective server via `haven_core::profile::blossom_server`, so
+/// builds) or returns an error in release builds. The own-profile sync reads
+/// the effective server via `haven_core::profile::blossom_server`, so
 /// installing this override before the first upload points A's picture at the
 /// hermetic Blossom instead of the production default. Intended to be called
 /// once from a scenario's `setUpAll` with the `HAVEN_E2E_BLOSSOM_URL`
@@ -9670,6 +9741,116 @@ mod tests {
         assert_eq!(status.configured - status.excluded, status.usable);
     }
 
+    // ---- ProfileSyncResultFfi::from_report / ProfilePendingStateFfi::from_state ----
+    //
+    // The ONLY translation of the core `ProfileSyncOutcome` enum and
+    // `ProfilePendingState` struct across the FFI boundary. Dart's own mapping
+    // (`toProfileSyncResult`/`toProfilePendingState` in
+    // `nostr_profile_service.dart`) is exhaustively tested against every FFI
+    // enum variant, and the core `ProfileSyncOutcome`/`ProfilePendingState`
+    // themselves are pinned by haven-core's own tests — but nothing outside
+    // this file exercised the conversion IN BETWEEN. A transposed match arm
+    // here (e.g. `UploadFailed` reported as `Published`) would tell the UI a
+    // failed publish had succeeded, and no other test would catch it.
+
+    #[test]
+    fn profile_sync_result_ffi_from_report_maps_every_outcome_variant() {
+        let cases = [
+            (
+                ProfileSyncOutcome::NothingPending,
+                ProfileSyncOutcomeFfi::NothingPending,
+            ),
+            (
+                ProfileSyncOutcome::Published,
+                ProfileSyncOutcomeFfi::Published,
+            ),
+            (
+                ProfileSyncOutcome::UploadFailed,
+                ProfileSyncOutcomeFfi::UploadFailed,
+            ),
+            (
+                ProfileSyncOutcome::PublishFailed,
+                ProfileSyncOutcomeFfi::PublishFailed,
+            ),
+            (
+                ProfileSyncOutcome::PoolUnderflow,
+                ProfileSyncOutcomeFfi::PoolUnderflow,
+            ),
+        ];
+        // Exhaustive by construction: fails loudly the moment a new
+        // `ProfileSyncOutcome` variant exists without a corresponding case
+        // above, via the `match` inside `from_report` itself refusing to
+        // compile without a `_ =>` arm this table would then be silently
+        // incomplete against.
+        for (core_outcome, expected_ffi) in cases {
+            let report = ProfileSyncReport {
+                outcome: core_outcome,
+                relays_acked: 2,
+                relays_attempted: 5,
+                still_pending: true,
+            };
+            let ffi = ProfileSyncResultFfi::from_report(&report);
+            assert_eq!(
+                ffi.outcome, expected_ffi,
+                "core outcome {core_outcome:?} must map to {expected_ffi:?}, not                  something else — a swapped arm here would misreport a failed                  publish as a success (or vice versa) to the UI",
+            );
+            assert_eq!(ffi.relays_acked, 2, "counts must pass through untouched");
+            assert_eq!(ffi.relays_attempted, 5);
+            assert!(ffi.still_pending);
+        }
+    }
+
+    #[test]
+    fn profile_sync_result_ffi_from_report_carries_a_clean_report_faithfully() {
+        // The negative control for the case above: a fully-synced report's
+        // counts and `still_pending: false` must also survive verbatim.
+        let report = ProfileSyncReport {
+            outcome: ProfileSyncOutcome::Published,
+            relays_acked: 3,
+            relays_attempted: 3,
+            still_pending: false,
+        };
+        let ffi = ProfileSyncResultFfi::from_report(&report);
+        assert_eq!(ffi.outcome, ProfileSyncOutcomeFfi::Published);
+        assert_eq!(ffi.relays_acked, 3);
+        assert_eq!(ffi.relays_attempted, 3);
+        assert!(!ffi.still_pending);
+    }
+
+    #[test]
+    fn profile_pending_state_ffi_from_state_maps_every_field_independently() {
+        // The three flags are independent facts (see `ProfilePendingState`'s
+        // own doc) — this proves `from_state` cannot mix them up (e.g.
+        // `partial` accidentally read from `retry_due`) by varying each
+        // combination rather than only the all-true/all-false corners.
+        for (pending, partial, retry_due) in [
+            (false, false, true),
+            (true, false, false),
+            (true, true, false),
+            (true, true, true),
+            (true, false, true),
+        ] {
+            let state = ProfilePendingState {
+                pending,
+                partial,
+                retry_due,
+            };
+            let ffi = ProfilePendingStateFfi::from_state(state);
+            assert_eq!(
+                ffi.pending, pending,
+                "pending must pass through for {state:?}"
+            );
+            assert_eq!(
+                ffi.partial, partial,
+                "partial must pass through for {state:?}"
+            );
+            assert_eq!(
+                ffi.retry_due, retry_due,
+                "retry_due must pass through for {state:?}",
+            );
+        }
+    }
+
     // REMOVED with the cursor advances it fed: the seconds→milliseconds
     // conversion for a cursor value crossing this boundary. There is no such
     // value any more — a cursor advance is earned by a completed observation
@@ -10518,8 +10699,9 @@ mod live_sync_ffi_tests {
 mod maintenance_real_ffi_tests {
     use super::{
         allow_ws_loopback_for_test, use_in_memory_keyring_for_test, CircleManagerFfi,
-        KpMaintenanceActionFfi, RelayManagerFfi, RelayTypeFfi,
+        KpMaintenanceActionFfi, ProfileSyncOutcomeFfi, RelayManagerFfi, RelayTypeFfi,
     };
+    use haven_core::circle::RelayType;
     use nostr::{Keys, Kind};
     use nostr_relay_builder::MockRelay;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -10565,6 +10747,43 @@ mod maintenance_real_ffi_tests {
     /// the keys never touch a real network beyond the local MockRelay.
     fn secret_bytes(keys: &Keys) -> Vec<u8> {
         keys.secret_key().to_secret_bytes().to_vec()
+    }
+
+    /// A loopback URL that refuses every connection: bind an ephemeral port to
+    /// reserve it, then drop the listener before returning.
+    fn dead_loopback_relay() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+        format!("ws://127.0.0.1:{port}")
+    }
+
+    /// Points one account's profile plane at three DEAD loopback relays.
+    ///
+    /// The curated pool is eight real public hosts, so a test that must stay
+    /// reachable PAST the pool pre-check would dial them the moment the code
+    /// under test regressed. Contaminating the curated entries (the ledger is
+    /// append-only) and seeding three unreachable loopback relays keeps the
+    /// pool usable — the pre-check passes, so what follows it is what is under
+    /// test — while guaranteeing no packet can leave the machine.
+    fn isolate_profile_plane(circle: &CircleManagerFfi) {
+        for url in haven_core::profile::profile_relay_pool_default() {
+            circle
+                .inner
+                .add_user_relay(&url, RelayType::Inbox)
+                .expect("contaminate a curated pool relay");
+        }
+        for _ in 0..3 {
+            circle
+                .inner
+                .add_user_relay(&dead_loopback_relay(), RelayType::Profile)
+                .expect("seed a dead profile relay");
+        }
+        assert!(
+            circle.inner.usable_profile_relays().is_ok(),
+            "the isolated plane must still satisfy the pool minimum, or the \
+             pre-check would answer instead of the code under test",
+        );
     }
 
     /// Accepts writes until flipped, then rejects them — every kind, or only
@@ -12859,6 +13078,446 @@ mod maintenance_real_ffi_tests {
         assert!(
             after.excluded > status.excluded && after.usable < status.usable,
             "a relay added to the location plane must be excluded from the profile pool",
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // Retraction vs. the local-first outbox.
+    //
+    // Both retractions are no-ops for a pubkey that never published, so neither
+    // test dials a relay (nothing is staged past the local database) — but a
+    // no-op must still CANCEL the queued work that would have published exactly
+    // what the user is removing, or the next sync silently resurrects it.
+    // ------------------------------------------------------------------------
+
+    /// A 2×2 PNG. The sanitizer upscales it to the canonical avatar edge, so
+    /// the smallest valid input is enough to exercise the real pipeline.
+    fn tiny_png() -> Vec<u8> {
+        hex::decode(
+            "89504e470d0a1a0a0000000d4948445200000002000000020802000000fdd49a73000000144944\
+             415478da63f8cfc0c000c20cffffff6700001eef04fc731c53cc0000000049454e44ae426082",
+        )
+        .expect("static PNG fixture")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delete_cancels_a_pending_unsynced_edit_even_when_it_no_ops() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+
+        let keys = Keys::generate();
+        let own_hex = keys.public_key().to_hex();
+        let dir = DataDir::new("profile_delete_cancel");
+        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+
+        let saved = circle
+            .save_my_profile_local(Some("Never Published".to_string()), None)
+            .await
+            .expect("save locally");
+        assert_eq!(saved.display_name.as_deref(), Some("Never Published"));
+        assert!(
+            circle
+                .profile_pending_state()
+                .await
+                .expect("pending state")
+                .pending,
+            "a local save is queued for publication",
+        );
+
+        circle
+            .delete_my_public_profile(secret_bytes(&keys))
+            .await
+            .expect("delete");
+
+        assert!(
+            !circle
+                .inner
+                .has_published_profile(&keys.public_key())
+                .expect("gate read"),
+            "the no-op branch must not mint a first public event",
+        );
+        assert!(
+            !circle
+                .profile_pending_state()
+                .await
+                .expect("pending state after delete")
+                .pending,
+            "the queued edit must be cancelled — a later sync would publish the \
+             profile the user just deleted",
+        );
+        assert_eq!(
+            circle
+                .get_cached_profile(own_hex)
+                .await
+                .expect("cached read")
+                .and_then(|p| p.display_name),
+            Some("Never Published".to_string()),
+            "and the no-op branch still leaves the local rows alone",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn remove_picture_cancels_a_staged_upload_without_publishing() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+
+        let keys = Keys::generate();
+        let own_hex = keys.public_key().to_hex();
+        let dir = DataDir::new("profile_remove_staged");
+        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+
+        circle
+            .save_my_profile_local(Some("Keep My Name".to_string()), None)
+            .await
+            .expect("save name locally");
+        let staged = circle
+            .save_my_profile_picture_local(tiny_png())
+            .await
+            .expect("save picture locally");
+        assert_eq!(staged.pubkey_hex, own_hex, "staging keys on the OWN pubkey");
+        assert!(
+            circle
+                .inner
+                .profile_picture_is_staged(&own_hex)
+                .expect("staged read"),
+            "the sanitized bytes are queued for upload",
+        );
+
+        let after = circle
+            .remove_my_profile_picture(secret_bytes(&keys))
+            .await
+            .expect("remove picture");
+
+        assert!(!after.has_picture);
+        assert!(
+            !circle
+                .inner
+                .profile_picture_is_staged(&own_hex)
+                .expect("staged read after remove"),
+            "the queued upload is cancelled, not left to publish the removed photo",
+        );
+        assert!(
+            circle
+                .inner
+                .get_profile_picture(&own_hex)
+                .expect("picture read")
+                .is_none(),
+            "and its bytes go with it",
+        );
+        assert!(
+            !circle
+                .inner
+                .has_published_profile(&keys.public_key())
+                .expect("gate read"),
+            "removing a never-published picture must not mint a first public event",
+        );
+
+        let snapshot = circle
+            .inner
+            .pending_profile_sync(&own_hex)
+            .expect("outbox read")
+            .expect("the rename is still queued");
+        assert_eq!(
+            snapshot.edits.display_name.as_deref(),
+            Some("Keep My Name"),
+            "a queued NAME edit has nothing to do with the photo and must survive",
+        );
+        assert_eq!(
+            circle
+                .get_cached_profile(own_hex)
+                .await
+                .expect("cached read")
+                .and_then(|p| p.display_name),
+            Some("Keep My Name".to_string()),
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // sync_my_profile: the pending pre-check must run BEFORE any signing key
+    // is built from the caller's secret (Security Rule 9 — the resume/
+    // foreground trigger should not have to construct one just to discover
+    // there is nothing to publish). No relay is contacted by this test: a
+    // clean outbox resolves `NothingPending` locally.
+    // ------------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sync_with_nothing_pending_never_touches_the_identity_secret() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+
+        let keys = Keys::generate();
+        let dir = DataDir::new("profile_sync_nothing_pending");
+        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+
+        // Never staged anything, so the outbox is empty for this account.
+        assert!(
+            !circle
+                .profile_pending_state()
+                .await
+                .expect("pending state")
+                .pending,
+            "a fresh account has nothing queued",
+        );
+
+        // Structurally invalid: `keys_from_secret_bytes` rejects anything that
+        // is not exactly 32 bytes with "Invalid secret bytes length". If
+        // `sync_my_profile` tried to build a signing key from this BEFORE
+        // consulting the pending state, the call would fail with that error
+        // instead of succeeding.
+        let malformed_secret = vec![0u8; 4];
+        let report = circle.sync_my_profile(malformed_secret).await.expect(
+            "a clean outbox must short-circuit to NothingPending before the \
+                 malformed secret is ever used to build a signing key",
+        );
+
+        assert_eq!(report.outcome, ProfileSyncOutcomeFfi::NothingPending);
+        assert_eq!(report.relays_acked, 0);
+        assert_eq!(report.relays_attempted, 0);
+        assert!(!report.still_pending);
+    }
+
+    // ------------------------------------------------------------------------
+    // sync_my_profile: an unusable relay pool is answered from LOCAL state too,
+    // before any signing key exists. The plane is fail-closed and terminal
+    // until the user repairs it, so this pass must also advance the persisted
+    // ladder — otherwise every resume trigger re-reads the identity secret out
+    // of the platform keystore just to be told the same thing again.
+    // ------------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sync_with_an_unusable_pool_never_touches_the_identity_secret() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+
+        let keys = Keys::generate();
+        let own_hex = keys.public_key().to_hex();
+        let dir = DataDir::new("profile_sync_pool_underflow");
+        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+
+        circle
+            .save_my_profile_local(Some("Queued Offline".to_string()), None)
+            .await
+            .expect("save locally");
+
+        // Eat the whole pool: every curated profile relay is now also a
+        // location-plane relay for this account. `add_user_relay` is a local
+        // write — no socket is opened to arrange this.
+        for url in haven_core::profile::profile_relay_pool_default() {
+            circle
+                .inner
+                .add_user_relay(&url, RelayType::Inbox)
+                .expect("contaminate a curated pool relay");
+        }
+        assert!(
+            circle.inner.usable_profile_relays().is_err(),
+            "the pool must really be unusable, or this test proves nothing",
+        );
+
+        // Structurally invalid, exactly as in the test above: if the pool
+        // question were asked AFTER the key was built, this call would fail
+        // with "Invalid secret bytes length" instead of reporting the pool.
+        let report = circle.sync_my_profile(vec![0u8; 4]).await.expect(
+            "an unusable pool must short-circuit before the malformed secret \
+                 is ever used to build a signing key",
+        );
+        assert_eq!(report.outcome, ProfileSyncOutcomeFfi::PoolUnderflow);
+        assert_eq!(report.relays_acked, 0);
+        assert_eq!(report.relays_attempted, 0);
+        assert!(report.still_pending, "the save is queued, never discarded");
+
+        let state = circle.profile_pending_state().await.expect("pending state");
+        assert!(state.pending);
+        // The first backoff rung is 30s (pinned by the core's ladder test), so
+        // this reads the same on any machine that can run two local DB calls.
+        assert!(
+            !state.retry_due,
+            "the short-circuit must advance the persisted ladder, or every \
+             resume trigger keeps re-materializing the identity secret to \
+             reach this same terminal answer",
+        );
+        assert_eq!(
+            circle
+                .inner
+                .pending_profile_sync(&own_hex)
+                .expect("outbox read")
+                .expect("still pending")
+                .edits
+                .display_name
+                .as_deref(),
+            Some("Queued Offline"),
+            "a pass that never reached the network must not consume the edit",
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // Identity binding. Dart hands the signing secret in on every own-profile
+    // path that signs, while the rows those paths read and clear are keyed on
+    // the manager's OWN pubkey. A secret from another account must therefore
+    // fail closed: signing this account's saved edit — or its retraction —
+    // under someone else's key is a cross-identity publish, and doing it while
+    // clearing the local rows would report success for a profile that never
+    // moved.
+    //
+    // The error text is asserted only for what it must NOT contain: neither
+    // pubkey may appear (Security Rule #8).
+    // ------------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sync_rejects_a_secret_that_is_not_this_managers_identity() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+
+        let keys = Keys::generate();
+        let own_hex = keys.public_key().to_hex();
+        let stranger = Keys::generate();
+        let dir = DataDir::new("profile_sync_foreign_secret");
+        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+
+        circle
+            .save_my_profile_local(Some("Mine Alone".to_string()), None)
+            .await
+            .expect("save locally");
+        isolate_profile_plane(&circle);
+
+        let err = circle
+            .sync_my_profile(secret_bytes(&stranger))
+            .await
+            .expect_err("a foreign secret must not sign this account's edit");
+        assert!(
+            !err.contains(&own_hex) && !err.contains(&stranger.public_key().to_hex()),
+            "the rejection must name neither identity",
+        );
+
+        assert!(
+            !circle
+                .inner
+                .has_published_profile(&keys.public_key())
+                .expect("gate read"),
+            "the rejected call must not have published anything",
+        );
+        assert!(
+            !circle
+                .inner
+                .has_published_profile(&stranger.public_key())
+                .expect("gate read"),
+            "and least of all under the stranger's identity",
+        );
+        assert_eq!(
+            circle
+                .inner
+                .pending_profile_sync(&own_hex)
+                .expect("outbox read")
+                .expect("still pending")
+                .edits
+                .display_name
+                .as_deref(),
+            Some("Mine Alone"),
+            "the save must survive: a rejected sync published nothing",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn remove_picture_rejects_a_secret_that_is_not_this_managers_identity() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+
+        let keys = Keys::generate();
+        let own_hex = keys.public_key().to_hex();
+        let stranger = Keys::generate();
+        let dir = DataDir::new("profile_remove_foreign_secret");
+        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+
+        circle
+            .save_my_profile_picture_local(tiny_png())
+            .await
+            .expect("save picture locally");
+
+        let err = circle
+            .remove_my_profile_picture(secret_bytes(&stranger))
+            .await
+            .expect_err("a foreign secret must not retract this account's photo");
+        assert!(
+            !err.contains(&own_hex) && !err.contains(&stranger.public_key().to_hex()),
+            "the rejection must name neither identity",
+        );
+
+        assert!(
+            circle
+                .inner
+                .profile_picture_is_staged(&own_hex)
+                .expect("staged read"),
+            "the queued upload must survive a rejected retraction",
+        );
+        assert!(
+            circle
+                .inner
+                .get_profile_picture(&own_hex)
+                .expect("picture read")
+                .is_some(),
+            "and so must its bytes",
+        );
+        assert!(
+            !circle
+                .inner
+                .has_published_profile(&keys.public_key())
+                .expect("gate read"),
+            "nothing was published",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delete_profile_rejects_a_secret_that_is_not_this_managers_identity() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+
+        let keys = Keys::generate();
+        let own_hex = keys.public_key().to_hex();
+        let stranger = Keys::generate();
+        let dir = DataDir::new("profile_delete_foreign_secret");
+        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+
+        circle
+            .save_my_profile_local(Some("Still Here".to_string()), None)
+            .await
+            .expect("save locally");
+
+        let err = circle
+            .delete_my_public_profile(secret_bytes(&stranger))
+            .await
+            .expect_err("a foreign secret must not delete this account's profile");
+        assert!(
+            !err.contains(&own_hex) && !err.contains(&stranger.public_key().to_hex()),
+            "the rejection must name neither identity",
+        );
+
+        assert!(
+            circle
+                .profile_pending_state()
+                .await
+                .expect("pending state")
+                .pending,
+            "the outbox must survive a rejected delete — emptying it would \
+             discard a save nobody asked to discard",
+        );
+        assert_eq!(
+            circle
+                .get_cached_profile(own_hex)
+                .await
+                .expect("cached read")
+                .and_then(|p| p.display_name),
+            Some("Still Here".to_string()),
+            "and so must the local row",
+        );
+        assert!(
+            !circle
+                .inner
+                .has_published_profile(&keys.public_key())
+                .expect("gate read"),
+            "nothing was published",
         );
     }
 }

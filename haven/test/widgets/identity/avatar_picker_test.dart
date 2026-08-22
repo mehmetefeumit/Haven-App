@@ -201,13 +201,28 @@ void main() {
         expect(cropper.lastAspectRatio?.ratioX, 1);
         expect(cropper.lastAspectRatio?.ratioY, 1);
 
-        // The cropped bytes reached the controller -> profile service.
+        // The cropped bytes reached the LOCAL profile-service save.
         final setAvatarCall = svc.methodCalls.firstWhere(
           (c) => c.method == 'setOwnAvatar',
         );
         expect(setAvatarCall.args['raw'], equals(_bytes));
+        // The local save also triggers the background publish.
+        expect(
+          svc.methodCalls.map((c) => c.method),
+          contains('syncOwnProfile'),
+        );
 
         expect(find.textContaining('Photo updated'), findsOneWidget);
+        // Profile-latency migration: the photo is saved LOCALLY and
+        // published in the background — the SnackBar must stay future
+        // tense ("will be published"), never claim the past-tense
+        // "Published to" it can no longer honestly make at this point.
+        expect(
+          find.textContaining('Published to'),
+          findsNothing,
+          reason: 'saving no longer implies the publish has already '
+              'happened — see avatarPickerPhotoUpdated in app_en.arb',
+        );
 
         // Both temp files are cleaned up after the bytes are read (privacy).
         expect(pickedFile.existsSync(), isFalse);

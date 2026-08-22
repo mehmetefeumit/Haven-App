@@ -142,19 +142,127 @@ class Profile {
       'hasPicture: ${pictureBytes != null})';
 }
 
+/// What one own-profile sync pass did (mirrors the Rust
+/// `ProfileSyncOutcome`/FFI `ProfileSyncOutcomeFfi`).
+///
+/// No catch-all variant, deliberately: a new outcome must force every
+/// `switch` over this enum to decide what it means rather than silently
+/// folding into "something went wrong".
+enum ProfileSyncOutcome {
+  /// Everything saved is already fully acknowledged; no network was touched.
+  nothingPending,
+
+  /// A kind-0 was published and at least one relay acknowledged it.
+  published,
+
+  /// The staged picture could not be uploaded; nothing was published.
+  uploadFailed,
+
+  /// The kind-0 was built but no relay accepted it.
+  publishFailed,
+
+  /// Too few uncontaminated profile relays remain to publish at all.
+  poolUnderflow,
+}
+
+/// The result of one own-profile sync pass ([ProfileService.syncOwnProfile]).
+///
+/// Mirrors the FFI `ProfileSyncResultFfi` — kept as a distinct Dart type so no
+/// FFI class ever leaks above the service layer.
+@immutable
+class ProfileSyncResult {
+  /// Creates a [ProfileSyncResult].
+  const ProfileSyncResult({
+    required this.outcome,
+    required this.relaysAcked,
+    required this.relaysAttempted,
+    required this.stillPending,
+  });
+
+  /// What the pass did.
+  final ProfileSyncOutcome outcome;
+
+  /// How many relays acknowledged the published event.
+  final int relaysAcked;
+
+  /// How many relays the publish was attempted against.
+  final int relaysAttempted;
+
+  /// Whether a save is STILL unpublished after this pass — the honest answer
+  /// even for [ProfileSyncOutcome.published], because a partial
+  /// acknowledgement (or an edit saved mid-flight) leaves work behind.
+  final bool stillPending;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ProfileSyncResult &&
+          runtimeType == other.runtimeType &&
+          outcome == other.outcome &&
+          relaysAcked == other.relaysAcked &&
+          relaysAttempted == other.relaysAttempted &&
+          stillPending == other.stillPending;
+
+  @override
+  int get hashCode =>
+      Object.hash(outcome, relaysAcked, relaysAttempted, stillPending);
+}
+
+/// What the UI may honestly say about the own profile right now
+/// ([ProfileService.pendingSyncState]; mirrors the FFI
+/// `ProfilePendingStateFfi`).
+///
+/// Three independent facts rather than one enum: how they render is a UI
+/// concern, and collapsing them here would decide it in the service layer.
+@immutable
+class ProfilePendingState {
+  /// Creates a [ProfilePendingState].
+  const ProfilePendingState({
+    required this.pending,
+    required this.partial,
+    required this.retryDue,
+  });
+
+  /// A save has not been fully acknowledged yet.
+  final bool pending;
+
+  /// Pending, but already accepted by at least one relay for this version.
+  final bool partial;
+
+  /// The persisted retry ladder permits another attempt now.
+  final bool retryDue;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ProfilePendingState &&
+          runtimeType == other.runtimeType &&
+          pending == other.pending &&
+          partial == other.partial &&
+          retryDue == other.retryDue;
+
+  @override
+  int get hashCode => Object.hash(pending, partial, retryDue);
+}
+
 /// Abstract interface for public Nostr profile services.
 ///
 /// Manages the user's own public profile (kind-0 name/about/photo) and
 /// resolves other circle members' public profiles by pubkey.
 ///
-/// **Publishing is unconditional**: [updateOwnProfile] and [setOwnAvatar] are
-/// the methods that author a NEW public event, and neither is gated — there
-/// is no consent flag to check (public-by-default, owner-directed
-/// 2026-07-16). Every method's allow-status:
+/// **Local-first, honest-status publishing**: [updateOwnProfile] and
+/// [setOwnAvatar] merge the edit onto the LOCAL cache and queue it — they no
+/// longer touch a relay or Blossom, and return in milliseconds. Publishing is
+/// still unconditional — there is no consent flag (public-by-default,
+/// owner-directed 2026-07-16) — but it now happens on [syncOwnProfile], which
+/// callers should trigger right after a local save (see
+/// `utils/profile_sync_trigger.dart`) and which the UI can also honestly
+/// report the progress of via [pendingSyncState]. Every method's allow-status:
 /// - Reads ([getOwnProfile], [getMemberProfile], [refreshMemberProfiles])
 ///   are always allowed — another client's already-published data is
 ///   public regardless of anything Haven does.
-/// - Writes ([updateOwnProfile], [setOwnAvatar]) always publish.
+/// - Local writes ([updateOwnProfile], [setOwnAvatar]) always save and queue.
+/// - [syncOwnProfile] always attempts to publish whatever is queued.
 /// - Retraction ([removeOwnAvatar]) is always allowed, but is a no-op
 ///   unless something was actually published; it must never create a
 ///   public footprint for a pubkey that never published.
@@ -173,36 +281,80 @@ abstract class ProfileService {
   /// Throws [ProfileServiceException] on a genuine failure.
   Future<Profile?> getOwnProfile({bool forceRefresh = false});
 
-  /// Fetch-merge-publishes the user's own display name and about text.
+  /// Merges [displayName] and [about] onto the LOCAL cache and queues them
+  /// for publication — this no longer touches a relay.
   ///
-  /// Fetches the freshest known kind-0 metadata, mutates only
-  /// [displayName] and [about] — leaving every other field (including any
-  /// `custom` NIP-24 field set by another client, e.g. `lud16`) untouched
-  /// — and republishes the full object under the identity key. Pass
-  /// `about: null` to leave the existing about text unchanged, or
-  /// `about: ''` to clear it.
+  /// Mutates only [displayName] and [about] — leaving every other field
+  /// (including any `custom` NIP-24 field set by another client, e.g.
+  /// `lud16`) untouched — and ACCUMULATES with any edit already queued from
+  /// an earlier, still-unsynced call. Pass `about: null` to leave the
+  /// existing about text unchanged, or `about: ''` to clear it.
   ///
-  /// Always publishes — there is no consent gate (see class doc).
+  /// Returns in milliseconds: no relay is dialed and no signing key is
+  /// needed, because nothing is published here. [syncOwnProfile] is what
+  /// makes the network agree. There is no consent gate (see class doc) — the
+  /// edit is queued unconditionally.
   ///
-  /// Throws [ProfileServiceException] if the fetch/merge/publish pipeline
-  /// fails, or the relay rejects the event (`OK=false`).
+  /// Throws [ProfileServiceException] on a genuine local (database) failure.
+  /// Unlike before this migration, this can no longer throw because a relay
+  /// rejected the event — that outcome now lives in [syncOwnProfile]'s
+  /// result.
   Future<Profile> updateOwnProfile({
     required String displayName,
     String? about,
   });
 
-  /// Sanitizes, uploads (to Blossom), and publishes [raw] as the user's
-  /// own profile picture.
+  /// Sanitizes [raw] and saves it LOCALLY as the user's own profile picture,
+  /// queued for upload — this no longer touches Blossom or a relay.
   ///
-  /// EXIF/GPS/XMP metadata is stripped and the image re-encoded before
-  /// upload. The returned [Profile.pictureBytes] are the re-encoded,
-  /// locally cached bytes — never the raw input bytes.
+  /// EXIF/GPS/XMP metadata is stripped and the image re-encoded before it is
+  /// cached; the raw input bytes never outlive this call. The returned
+  /// [Profile.pictureBytes] are the re-encoded, locally cached bytes. Returns
+  /// in milliseconds — [syncOwnProfile] is what uploads the staged bytes and
+  /// publishes the resulting URL.
   ///
-  /// Always publishes — there is no consent gate (see class doc).
+  /// There is no consent gate (see class doc) — the picture is queued
+  /// unconditionally.
   ///
-  /// Throws [ProfileServiceException] if sanitization fails, the Blossom
-  /// upload fails, or the kind-0 republish fails.
+  /// Throws [ProfileServiceException] if sanitization fails or the local
+  /// database write fails. Unlike before this migration, this can no longer
+  /// throw because the Blossom upload or the kind-0 republish failed — those
+  /// outcomes now live in [syncOwnProfile]'s result.
   Future<Profile> setOwnAvatar(Uint8List raw);
+
+  /// Publishes whatever the local own-profile outbox is holding.
+  ///
+  /// Idempotent and safe to call from any resume/foreground trigger: with
+  /// nothing queued it resolves to [ProfileSyncOutcome.nothingPending]
+  /// without touching the network. A network/relay failure is an OUTCOME
+  /// in the returned [ProfileSyncResult], not a thrown exception — the save
+  /// stays queued with its retry backoff advanced, and only a genuine local
+  /// fault (malformed secret, database error) throws.
+  ///
+  /// Prefer triggering this via `utils/profile_sync_trigger.dart` rather
+  /// than calling it directly from widget code, so overlapping calls
+  /// coalesce through one shared controller instead of each opening its own
+  /// relay connections for the same publish.
+  ///
+  /// Throws [ProfileServiceException] on a genuine local failure.
+  Future<ProfileSyncResult> syncOwnProfile();
+
+  /// Whether the own profile has unpublished work, how far it got, and
+  /// whether the persisted backoff permits another sync attempt now.
+  ///
+  /// A pure local read — never touches the network. Callers use this before
+  /// [syncOwnProfile] to decide whether a network attempt is warranted at
+  /// all (e.g. a resume trigger that should not dial a relay just to
+  /// discover it had nothing to say).
+  ///
+  /// **Fails closed**: on any read failure this returns
+  /// `ProfilePendingState(pending: true, partial: false, retryDue: false)`
+  /// — deliberately. An unreadable local state must never be reported as
+  /// "up to date" (which could hide a save that never actually published),
+  /// but it also must not force an automatic network retry loop on a
+  /// persistent local fault — `retryDue: false` leaves that to an explicit,
+  /// user-initiated retry. This method itself never throws.
+  Future<ProfilePendingState> pendingSyncState();
 
   /// Removes the user's own published profile picture.
   ///

@@ -230,6 +230,10 @@ abstract final class WidgetKeys {
   /// the user's own public profile).
   static const Key identityRefreshButton = Key('identity_refresh_button');
 
+  /// Retry [TextButton] on the own-profile sync status line
+  /// (`profile_sync_status_line.dart`), shown only in the `failed` state.
+  static const Key profileSyncRetryButton = Key('profile_sync_retry_button');
+
   // ---------------------------------------------------------------------------
   // Member detail sheet
   // ---------------------------------------------------------------------------

@@ -6,6 +6,8 @@
 /// - This tests the fix: `on CircleServiceException` → `on Object` in inner loop
 library;
 
+import 'dart:typed_data';
+
 import 'package:flutter/foundation.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -166,7 +168,11 @@ class _MockIdentityService implements IdentityService {
   }
 
   @override
-  Future<List<int>> getSecretBytes() async => _testSecretBytes;
+  // A fresh copy per call: the contract on `IdentityService` is that
+  // ownership transfers, and a caller that scrubs what it is handed would
+  // zero this STATIC for every later test in the file.
+  Future<List<int>> getSecretBytes() async =>
+      Uint8List.fromList(_testSecretBytes);
 
   @override
   Future<bool> hasIdentity() async => identityExists;

@@ -503,10 +503,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ProfileMetadataFfi dco_decode_profile_metadata_ffi(dynamic raw);
 
   @protected
+  ProfilePendingStateFfi dco_decode_profile_pending_state_ffi(dynamic raw);
+
+  @protected
   ProfilePictureRefFfi dco_decode_profile_picture_ref_ffi(dynamic raw);
 
   @protected
   ProfilePoolStatusFfi dco_decode_profile_pool_status_ffi(dynamic raw);
+
+  @protected
+  ProfileSyncOutcomeFfi dco_decode_profile_sync_outcome_ffi(dynamic raw);
+
+  @protected
+  ProfileSyncResultFfi dco_decode_profile_sync_result_ffi(dynamic raw);
 
   @protected
   PublicIdentity dco_decode_public_identity(dynamic raw);
@@ -1102,12 +1111,27 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  ProfilePendingStateFfi sse_decode_profile_pending_state_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ProfilePictureRefFfi sse_decode_profile_picture_ref_ffi(
     SseDeserializer deserializer,
   );
 
   @protected
   ProfilePoolStatusFfi sse_decode_profile_pool_status_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ProfileSyncOutcomeFfi sse_decode_profile_sync_outcome_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ProfileSyncResultFfi sse_decode_profile_sync_result_ffi(
     SseDeserializer deserializer,
   );
 
@@ -1836,6 +1860,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_profile_pending_state_ffi(
+    ProfilePendingStateFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_profile_picture_ref_ffi(
     ProfilePictureRefFfi self,
     SseSerializer serializer,
@@ -1844,6 +1874,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_profile_pool_status_ffi(
     ProfilePoolStatusFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_profile_sync_outcome_ffi(
+    ProfileSyncOutcomeFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_profile_sync_result_ffi(
+    ProfileSyncResultFfi self,
     SseSerializer serializer,
   );
 

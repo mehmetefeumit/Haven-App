@@ -10,9 +10,15 @@
 ///   owns the fetched buffer and scrubs it the instant the FFI call settles —
 ///   before the returned profile is assembled, so the secret does not stay
 ///   live across `_toProfile`'s cache and picture work (Security Rule 9).
-/// - Publishes unconditionally: `updateOwnProfile`/`setOwnAvatar` carry no
+/// - Saves unconditionally: `updateOwnProfile`/`setOwnAvatar` carry no
 ///   consent gate (public-by-default, owner-directed 2026-07-16, matching the
-///   White Noise reference app) — see [ProfileService] class doc.
+///   White Noise reference app) — see [ProfileService] class doc. They are
+///   now LOCAL-FIRST: they merge onto the cache and queue the edit, without
+///   touching a relay or Blossom. `syncOwnProfile` is what actually
+///   publishes, and re-fetches the secret fresh via `withFreshSecret` for
+///   that one FFI call (Security Rule 9) — the local-only methods need no
+///   secret at all, since the pubkey comes from the manager's own
+///   construction keys, never from Dart.
 ///
 /// See `docs/PUBLIC_PROFILE_MIGRATION_PLAN.md` (§6.1) for the full design.
 library;
@@ -43,6 +49,39 @@ List<String> membersNeedingPictureDownload(List<ProfileMetadataFfi> ffiList) {
     for (final ffi in ffiList)
       if (!ffi.hasPicture) ffi.pubkeyHex,
   ];
+}
+
+/// Converts [ffi] to the Dart-layer [ProfileSyncResult] — a pure, exhaustive
+/// mapping so no [ProfileSyncOutcomeFfi] value ever leaks above this file.
+///
+/// `@visibleForTesting`: [ProfileSyncResultFfi] is a plain (non-opaque) data
+/// class, so this is the one piece of [NostrProfileService.syncOwnProfile]
+/// testable without the Rust bridge.
+@visibleForTesting
+ProfileSyncResult toProfileSyncResult(ProfileSyncResultFfi ffi) {
+  return ProfileSyncResult(
+    outcome: switch (ffi.outcome) {
+      ProfileSyncOutcomeFfi.nothingPending => ProfileSyncOutcome.nothingPending,
+      ProfileSyncOutcomeFfi.published => ProfileSyncOutcome.published,
+      ProfileSyncOutcomeFfi.uploadFailed => ProfileSyncOutcome.uploadFailed,
+      ProfileSyncOutcomeFfi.publishFailed => ProfileSyncOutcome.publishFailed,
+      ProfileSyncOutcomeFfi.poolUnderflow => ProfileSyncOutcome.poolUnderflow,
+    },
+    relaysAcked: ffi.relaysAcked,
+    relaysAttempted: ffi.relaysAttempted,
+    stillPending: ffi.stillPending,
+  );
+}
+
+/// Converts [ffi] to the Dart-layer [ProfilePendingState] — see
+/// [toProfileSyncResult] for why this is pulled out and testable.
+@visibleForTesting
+ProfilePendingState toProfilePendingState(ProfilePendingStateFfi ffi) {
+  return ProfilePendingState(
+    pending: ffi.pending,
+    partial: ffi.partial,
+    retryDue: ffi.retryDue,
+  );
 }
 
 /// Production implementation of [ProfileService].
@@ -93,10 +132,10 @@ class NostrProfileService implements ProfileService {
             '[Profile] getOwnProfile: refresh failed, falling back to '
             'cache: ${e.runtimeType}',
           );
-          ffi = manager.getCachedProfile(pubkeyHex: identity.pubkeyHex);
+          ffi = await manager.getCachedProfile(pubkeyHex: identity.pubkeyHex);
         }
       } else {
-        ffi = manager.getCachedProfile(pubkeyHex: identity.pubkeyHex);
+        ffi = await manager.getCachedProfile(pubkeyHex: identity.pubkeyHex);
       }
       if (ffi == null || !ffi.isKnown) return null;
       return await _toProfile(manager, ffi, fullResolution: true);
@@ -113,13 +152,9 @@ class NostrProfileService implements ProfileService {
   }) async {
     try {
       final manager = await _circleManagerFactory();
-      final ffi = await withFreshSecret(
-        _identityService.getSecretBytes,
-        (secret) => manager.publishMyProfile(
-          identitySecretBytes: secret,
-          displayName: displayName,
-          about: about,
-        ),
+      final ffi = await manager.saveMyProfileLocal(
+        displayName: displayName,
+        about: about,
       );
       return await _toProfile(manager, ffi, fullResolution: true);
     } on Object catch (e) {
@@ -132,18 +167,11 @@ class NostrProfileService implements ProfileService {
   Future<Profile> setOwnAvatar(Uint8List raw) async {
     try {
       final manager = await _circleManagerFactory();
-      final ref = await withFreshSecret(
-        _identityService.getSecretBytes,
-        (secret) => manager.uploadMyProfilePicture(
-          identitySecretBytes: secret,
-          raw: raw,
-        ),
-      );
-      // `uploadMyProfilePicture` upserts both the picture bytes and the
-      // merged kind-0 into the local cache before returning (Rust
-      // `upload_my_profile_picture`), so a synchronous cache read already
-      // reflects the new state — no extra network round trip needed.
-      final cached = manager.getCachedProfile(pubkeyHex: ref.pubkeyHex);
+      final ref = await manager.saveMyProfilePictureLocal(raw: raw);
+      // `saveMyProfilePictureLocal` upserts both the picture bytes and the
+      // merged kind-0 into the local cache before returning, so a fresh
+      // cache read already reflects the new state — no network round trip.
+      final cached = await manager.getCachedProfile(pubkeyHex: ref.pubkeyHex);
       final pictureBytes = await manager.getProfilePicture(
         pubkeyHex: ref.pubkeyHex,
       );
@@ -153,7 +181,7 @@ class NostrProfileService implements ProfileService {
         displayName: cached?.displayName,
         about: cached?.about,
         pictureBytes: pictureBytes,
-        // Taken from the upload response rather than the cache read purely
+        // Taken from the save response rather than the cache read purely
         // because it is already in hand here. Every read path now also
         // exposes it (`ProfileMetadataFfi.pictureSha256Hex`), so this is no
         // longer the only source — the two agree, both being the sha256 of
@@ -168,6 +196,40 @@ class NostrProfileService implements ProfileService {
     } on Object catch (e) {
       debugPrint('[Profile] setOwnAvatar: ${e.runtimeType}');
       throw const ProfileServiceException('Failed to set profile picture');
+    }
+  }
+
+  @override
+  Future<ProfileSyncResult> syncOwnProfile() async {
+    try {
+      final manager = await _circleManagerFactory();
+      final ffi = await withFreshSecret(
+        _identityService.getSecretBytes,
+        (secret) => manager.syncMyProfile(identitySecretBytes: secret),
+      );
+      return toProfileSyncResult(ffi);
+    } on Object catch (e) {
+      debugPrint('[Profile] syncOwnProfile: ${e.runtimeType}');
+      throw const ProfileServiceException('Failed to sync profile');
+    }
+  }
+
+  @override
+  Future<ProfilePendingState> pendingSyncState() async {
+    try {
+      final manager = await _circleManagerFactory();
+      final ffi = await manager.profilePendingState();
+      return toProfilePendingState(ffi);
+    } on Object catch (e) {
+      debugPrint('[Profile] pendingSyncState: ${e.runtimeType}');
+      // Fails closed (see ProfileService.pendingSyncState doc): never report
+      // "clean" on a read failure, but never force an automatic retry loop
+      // on a persistent local fault either.
+      return const ProfilePendingState(
+        pending: true,
+        partial: false,
+        retryDue: false,
+      );
     }
   }
 
@@ -202,7 +264,7 @@ class NostrProfileService implements ProfileService {
         );
         ffi = fetched.isEmpty ? null : fetched.first;
       } else {
-        ffi = manager.getCachedProfile(pubkeyHex: pubkeyHex);
+        ffi = await manager.getCachedProfile(pubkeyHex: pubkeyHex);
       }
       if (ffi == null || !ffi.isKnown) return null;
       // Thumbnail-only: this is the lightweight single-pubkey read path

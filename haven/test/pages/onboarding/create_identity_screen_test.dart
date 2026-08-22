@@ -172,6 +172,11 @@ void main() {
         profile.methodCalls.map((c) => c.method),
         contains('updateOwnProfile'),
       );
+      // The local save must also trigger the background publish.
+      expect(
+        profile.methodCalls.map((c) => c.method),
+        contains('syncOwnProfile'),
+      );
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getBool(kOnboardingCompletedKey), isTrue);
       expect(prefs.getBool(kBackgroundSharingKey), isTrue);
@@ -498,39 +503,44 @@ void main() {
     expect(find.text('Remove'), findsNothing);
   });
 
-  testWidgets('if the name publish fails, the picked photo is NOT published', (
-    tester,
-  ) async {
-    final service = _RecordingIdentityService();
-    final profile = MockProfileService()..shouldThrowOnUpdateOwnProfile = true;
-    final photoBytes = Uint8List.fromList([4, 2]);
+  testWidgets(
+    'if the name LOCAL SAVE fails, the picked photo is NOT saved either',
+    (tester) async {
+      final service = _RecordingIdentityService();
+      final profile = MockProfileService()
+        ..shouldThrowOnUpdateOwnProfile = true;
+      final photoBytes = Uint8List.fromList([4, 2]);
 
-    await pumpLocalized(
-      tester,
-      CreateIdentityScreen(pickPhoto: (_) async => photoBytes),
-      overrides: buildOverrides(service: service, profileService: profile),
-      settle: false,
-    );
-    await tester.pump();
+      await pumpLocalized(
+        tester,
+        CreateIdentityScreen(pickPhoto: (_) async => photoBytes),
+        overrides: buildOverrides(service: service, profileService: profile),
+        settle: false,
+      );
+      await tester.pump();
 
-    await tester.tap(find.byType(HavenAvatar));
-    await tester.pump();
-    await tester.pump();
+      await tester.tap(find.byType(HavenAvatar));
+      await tester.pump();
+      await tester.pump();
 
-    await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
-    await pumpFrames(tester);
-    await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
-    await pumpFrames(tester);
+      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+      await pumpFrames(tester);
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await pumpFrames(tester);
 
-    // The name publish threw, so the avatar upload is gated off — no
-    // picture-only kind-0 is published without the intended name.
-    final methods = profile.methodCalls.map((c) => c.method);
-    expect(methods, contains('updateOwnProfile'));
-    expect(methods, isNot(contains('setOwnAvatar')));
-    // Onboarding still completes (the profile publish is fire-and-forget).
-    final prefs = await SharedPreferences.getInstance();
-    expect(prefs.getBool(kOnboardingCompletedKey), isTrue);
-  });
+      // The name local save threw, so the avatar's local save is gated off
+      // — no picture-only local edit is queued without the intended name.
+      final methods = profile.methodCalls.map((c) => c.method);
+      expect(methods, contains('updateOwnProfile'));
+      expect(methods, isNot(contains('setOwnAvatar')));
+      // Onboarding still completes: the local-save failure is logged and
+      // swallowed by `_saveOnboardingProfileLocally`, and the background
+      // publish trigger is unconditional (there is nothing to publish, but
+      // triggering it is harmless — see `ProfileSyncOutcome.nothingPending`).
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool(kOnboardingCompletedKey), isTrue);
+    },
+  );
 
   testWidgets('does not scroll on a common phone viewport (390x844)', (
     tester,
