@@ -142,6 +142,65 @@ mod circle_manager_lifecycle_tests {
         cleanup_dir(&dir);
     }
 
+    #[test]
+    fn manager_startup_prunes_retired_profile_relays() {
+        // The upgrade path of the 2026-08 profile-pool retirement: an install
+        // whose Profile rows still contain a relay that was retired from
+        // `PRODUCTION_PROFILE_RELAYS` keeps DIALLING it, because
+        // `usable_profile_relays()` unions stored rows back in. The prune that
+        // fixes this lives in the manager CONSTRUCTOR — this test pins that
+        // wiring, not the storage method (which has its own unit tests): if
+        // the constructor call is ever dropped, the storage tests stay green
+        // while upgraded installs regress.
+        let dir = unique_temp_dir("mgr_prunes_retired");
+        let retired = haven_core::profile::retired_profile_relays()
+            .into_iter()
+            .next()
+            .expect("something is retired");
+
+        // Launch 1 creates the database; between launches, a stale row exists
+        // (as an old seeder left it). Handles are dropped before the next open
+        // so the database is never held twice.
+        {
+            let _manager = CircleManager::new_unencrypted(&dir, &nostr::Keys::generate())
+                .expect("first launch");
+        }
+        {
+            let storage =
+                CircleStorage::new(&dir.join("circles.db"), None).expect("reopen storage");
+            storage
+                .add_user_relay(&retired, haven_core::circle::RelayType::Profile)
+                .expect("plant the stale row");
+            assert!(
+                storage
+                    .usable_profile_relays()
+                    .expect("pool resolves")
+                    .contains(&retired),
+                "precondition: the stale row reaches the dialled set",
+            );
+        }
+
+        // Launch 2 must prune it during construction.
+        let manager =
+            CircleManager::new_unencrypted(&dir, &nostr::Keys::generate()).expect("second launch");
+        assert!(
+            !manager
+                .list_user_relays(haven_core::circle::RelayType::Profile)
+                .expect("list")
+                .contains(&retired),
+            "the stale Profile row must be gone after startup",
+        );
+        assert!(
+            !manager
+                .usable_profile_relays()
+                .expect("pool resolves")
+                .contains(&retired),
+            "the resolver must no longer dial the retired relay",
+        );
+
+        cleanup_dir(&dir);
+    }
+
     // DELETED-WITH-SUBJECT: `manager_multiple_instances_same_directory` — Rule 14
     // forbids two live `AccountDeviceSession`s on one DB file (divergent hydrated
     // epoch state = forward-secrecy erosion). Opening two `CircleManager`s on the

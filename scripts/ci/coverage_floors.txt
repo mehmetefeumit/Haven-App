@@ -221,7 +221,7 @@ rust|src/tiles/|94                           # measured 96.11% (642/668)
 # percentage point is 28 lines, so a single new uncovered file still moves this
 # row several points. That is exactly what the two points of headroom are for,
 # and why this row must never be pinned tight.
-flutter|lib/src/services/|52                 # measured 54.20% (1612/2974); was 46 (48.96%) before the
+flutter|lib/src/services/|57                 # measured 59.68% (1813/3038); was 46 (48.96%) before the
                                              # location-access gate, clock-skew detector and
                                              # session/cursor work brought their own tests
 
@@ -237,10 +237,10 @@ flutter|lib/src/services/mls_session_handover.dart|91       # measured 93.75% (1
 flutter|lib/src/services/foreground_liveness_probe.dart|58  # measured 60.98% (25/41)
 
 # --- Location send/receive pipeline -----------------------------------------
-flutter|lib/src/services/location_sharing_service.dart|85   # measured 87.02% (342/393)
-flutter|lib/src/services/geolocator_location_service.dart|84 # measured 86.72% (111/128)
+flutter|lib/src/services/location_sharing_service.dart|86   # measured 88.04% (346/393)
+flutter|lib/src/services/geolocator_location_service.dart|85 # measured 87.86% (123/140)
 flutter|lib/src/services/live_sync_resubscriber.dart|100    # measured 100.00% (117/117)
-flutter|lib/src/services/subscription_service.dart|87       # measured 89.66% (52/58)
+flutter|lib/src/services/subscription_service.dart|96       # measured 98.28% (57/58)
 
 # --- Background publishing and catch-up -------------------------------------
 # background_location_task.dart is the foreground-service isolate — the file
@@ -248,7 +248,7 @@ flutter|lib/src/services/subscription_service.dart|87       # measured 89.66% (5
 # the row makes a near-zero VISIBLE in a reviewed file instead of leaving it
 # hidden inside a green aggregate, and the ratchet fires the moment anyone
 # covers 5% of it, forcing the number to be written down.
-flutter|lib/src/services/background_location_task.dart|9    # measured 11.63% (30/258)
+flutter|lib/src/services/background_location_task.dart|27   # measured 29.30% (80/273)
 flutter|lib/src/services/background_location_manager.dart|52 # measured 54.08% (53/98)
 flutter|lib/src/services/background_catchup_worker.dart|26  # measured 28.40% (23/81)
 
@@ -260,8 +260,8 @@ flutter|lib/src/services/background_catchup_worker.dart|26  # measured 28.40% (2
 # gate.
 flutter|lib/src/services/nostr_circle_service.dart|10       # measured 12.55% (65/518)
 flutter|lib/src/services/nostr_identity_service.dart|42     # measured 44.66% (46/103)
-flutter|lib/src/services/nostr_profile_service.dart|21      # measured 23.33% (21/90)
-flutter|lib/src/services/nostr_relay_service.dart|15        # measured 17.20% (32/186); was 0 (0.63%, 1/158)
+flutter|lib/src/services/nostr_profile_service.dart|22      # measured 24.14% (21/87)
+flutter|lib/src/services/nostr_relay_service.dart|16        # measured 18.09% (34/188); was 0 (0.63%, 1/158)
                                                             # before classifyKeyPackageMaintenance was lifted
                                                             # out of the class. It decides whether a KeyPackage
                                                             # tick counts as reachable, and every branch of it is
@@ -269,7 +269,7 @@ flutter|lib/src/services/nostr_relay_service.dart|15        # measured 17.20% (3
                                                             # KpMaintenanceOutcomeFfi is a plain value type. The
                                                             # rest of this file is FFI call-forwarding that needs
                                                             # the bridge.
-flutter|lib/src/services/nostr_relay_preferences_service.dart|0 # measured 0.00% (0/88)
+flutter|lib/src/services/nostr_relay_preferences_service.dart|100 # measured 100.00% (88/88)
 
 # --- Leave / wipe paths -----------------------------------------------------
 # The proofs that leaving a circle and logging out actually destroy state.

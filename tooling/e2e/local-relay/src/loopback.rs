@@ -33,7 +33,13 @@
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 
-use nostr_relay_builder::prelude::*;
+// Named imports, not `prelude::*`: the prelude glob-re-exports both
+// `nostr::prelude::*` and `crate::*`, and each carries a DIFFERENT `Error`.
+// Under a glob the two are ambiguous (a hard error since the
+// `ambiguous_glob_imports` future-incompat lint became deny-by-default), and
+// the one that wins is not the relay-builder error this matches on.
+use nostr_relay_builder::error::Error as RelayBuilderError;
+use nostr_relay_builder::{LocalRelay, RelayBuilder};
 use tokio::net::TcpSocket;
 
 /// How many ports [`start_local_relay`] will take before giving up.
@@ -74,10 +80,10 @@ where
                 let url = relay.url().await.to_string();
                 return Ok((relay, url));
             }
-            Err(Error::IO(err)) if err.kind() == io::ErrorKind::AddrInUse => {
+            Err(RelayBuilderError::IO(err)) if err.kind() == io::ErrorKind::AddrInUse => {
                 taken.push(addr.port());
             }
-            Err(Error::IO(err)) => return Err(err),
+            Err(RelayBuilderError::IO(err)) => return Err(err),
             Err(other) => return Err(io::Error::other(format!("local relay: {other}"))),
         }
     }

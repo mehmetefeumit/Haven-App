@@ -328,6 +328,60 @@ impl CircleStorage {
         Ok(true)
     }
 
+    /// Removes retired curated relays from the Profile category (startup
+    /// migration; see [`crate::profile::RETIRED_PROFILE_RELAYS`]).
+    ///
+    /// The seeded Profile rows OUTLIVE the curated constant:
+    /// [`Self::usable_profile_relays`] unions the stored rows with the current
+    /// pool on every call, so on an upgraded install a relay retired from
+    /// `PRODUCTION_PROFILE_RELAYS` would keep its rendezvous-hash slot and
+    /// every author assigned to it would stay unresolvable — the exact field
+    /// failure the retirement was made to fix. Deleting the rows moves ONLY
+    /// the authors that were assigned to them (the HRW no-churn property).
+    ///
+    /// Scoped to [`RelayType::Profile`]: the same URL in another category is a
+    /// different plane's concern and is left alone. Runs on every launch and is
+    /// naturally idempotent (each row exists at most once). The deliberate
+    /// consequence is that a retired relay cannot be re-added even by hand —
+    /// an entry leaves the retired list only by re-passing vetting, the same
+    /// bar the pool itself is held to.
+    ///
+    /// When rows were actually pruned, the unknown-profile retry backoff is
+    /// reset in the same transaction: those authors earned their backoff (up
+    /// to 6 h) against relays that just left the ranking, so holding them to
+    /// it would delay their re-resolution for no reason.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CircleError::Storage`] if the lock cannot be acquired and
+    /// [`CircleError::Database`] for `SQLite` errors.
+    pub fn prune_retired_profile_relays(&self) -> Result<usize> {
+        let retired = crate::profile::retired_profile_relays();
+        if retired.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        let tx = conn.transaction()?;
+        let mut removed = 0usize;
+        for url in &retired {
+            removed += tx.execute(
+                "DELETE FROM user_relays WHERE url = ?1 AND relay_type = ?2",
+                params![url, RelayType::Profile.as_str()],
+            )?;
+        }
+        if removed > 0 {
+            tx.execute(
+                "UPDATE profiles SET miss_count = 0, next_retry_at = 0 WHERE state = ?1",
+                params![crate::profile::ProfileState::Unknown.as_db_value()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(removed)
+    }
+
     /// Returns the user's relays for one category, ordered by insertion time.
     ///
     /// # Errors
@@ -828,6 +882,153 @@ mod tests {
         // ...and the profile category from its own, separate pool.
         let profile = storage.list_user_relays(RelayType::Profile).unwrap();
         assert_eq!(profile, profile_pool());
+    }
+
+    /// Inserts a Profile-category row directly, bypassing `add_user_relay`,
+    /// the way an OLD seeder's rows already sit in an upgraded install's
+    /// database (the retired URLs are no longer in the pool, so the current
+    /// seeder can never produce them).
+    fn insert_profile_row(storage: &CircleStorage, url: &str) {
+        let conn = storage.conn().lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO user_relays (url, relay_type, created_at) VALUES (?1, ?2, 1)",
+            params![url, RelayType::Profile.as_str()],
+        )
+        .unwrap();
+    }
+
+    /// Reads `(miss_count, next_retry_at)` for one profile row.
+    fn miss_state(storage: &CircleStorage, pubkey_hex: &str) -> (i64, i64) {
+        let conn = storage.conn().lock().unwrap();
+        conn.query_row(
+            "SELECT miss_count, next_retry_at FROM profiles WHERE pubkey = ?1",
+            params![pubkey_hex],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn prune_removes_retired_profile_rows_but_not_other_categories() {
+        // THE upgrade bug this method exists for: an install seeded before the
+        // retirement still holds the retired relays as Profile rows, and
+        // `usable_profile_relays` unions stored rows back in — so without the
+        // prune, a dead relay keeps its rendezvous slot and every author
+        // assigned to it stays unresolvable forever.
+        let storage = make_storage();
+        storage.seed_defaults_if_unseeded().unwrap();
+        let retired = crate::profile::retired_profile_relays();
+        assert!(!retired.is_empty(), "non-vacuity: something is retired");
+        for url in &retired {
+            insert_profile_row(&storage, url);
+        }
+
+        // Non-vacuity for the fix itself: before the prune, the resolver
+        // really would dial the retired relays.
+        let before = storage.usable_profile_relays().unwrap();
+        for url in &retired {
+            assert!(
+                before.contains(url),
+                "precondition: stale row {url} reaches the dialled set"
+            );
+        }
+
+        // The same URL in a location-plane category is a different plane's
+        // concern; the prune must be scoped to Profile. (Added AFTER the
+        // precondition read: an Inbox add also contaminates the URL, which
+        // would exclude it from the dialled set on its own.)
+        storage
+            .add_user_relay(&retired[0], RelayType::Inbox)
+            .unwrap();
+
+        assert_eq!(
+            storage.prune_retired_profile_relays().unwrap(),
+            retired.len()
+        );
+
+        let profile_rows = storage.list_user_relays(RelayType::Profile).unwrap();
+        let usable = storage.usable_profile_relays().unwrap();
+        for url in &retired {
+            assert!(!profile_rows.contains(url), "row survived the prune: {url}");
+            assert!(!usable.contains(url), "resolver still dials {url}");
+        }
+        assert!(usable.len() >= crate::profile::PROFILE_POOL_MIN);
+        assert!(
+            storage
+                .list_user_relays(RelayType::Inbox)
+                .unwrap()
+                .contains(&retired[0]),
+            "the prune must not reach into other categories"
+        );
+    }
+
+    #[test]
+    fn prune_spares_current_pool_and_user_added_rows_and_is_idempotent() {
+        let storage = make_storage();
+        storage.seed_defaults_if_unseeded().unwrap();
+        storage
+            .add_user_relay("wss://my-own.example", RelayType::Profile)
+            .unwrap();
+
+        // A current install has nothing to prune.
+        assert_eq!(storage.prune_retired_profile_relays().unwrap(), 0);
+        let rows = storage.list_user_relays(RelayType::Profile).unwrap();
+        for entry in profile_pool() {
+            assert!(rows.contains(&entry), "curated entry {entry} was pruned");
+        }
+        assert!(rows.contains(&"wss://my-own.example".to_string()));
+
+        // An upgraded install has exactly one round of rows to prune.
+        let retired = crate::profile::retired_profile_relays();
+        insert_profile_row(&storage, &retired[0]);
+        assert_eq!(storage.prune_retired_profile_relays().unwrap(), 1);
+        assert_eq!(storage.prune_retired_profile_relays().unwrap(), 0);
+    }
+
+    #[test]
+    fn prune_resets_unknown_backoff_only_when_rows_were_pruned() {
+        use crate::profile::{CachedProfile, ProfileMetadata, ProfileState};
+
+        let storage = make_storage();
+        storage.seed_defaults_if_unseeded().unwrap();
+
+        // An author stuck Unknown behind a miss backoff, and a Known author
+        // whose (stale-refetch) miss state must survive: the reset exists for
+        // authors whose ASSIGNMENT just moved, and only Unknown rows gate
+        // their next fetch on `next_retry_at`.
+        storage
+            .record_profile_misses(&["aa".into()], 1_000)
+            .unwrap();
+        storage
+            .record_profile_misses(&["aa".into()], 2_000)
+            .unwrap();
+        storage
+            .upsert_profile(&CachedProfile {
+                pubkey_hex: "bb".into(),
+                metadata: ProfileMetadata::default(),
+                state: ProfileState::Known,
+                event_created_at: 500,
+                fetched_at: 500,
+            })
+            .unwrap();
+        storage
+            .record_profile_misses(&["bb".into()], 2_000)
+            .unwrap();
+        let unknown_before = miss_state(&storage, "aa");
+        let known_before = miss_state(&storage, "bb");
+        assert!(unknown_before.0 > 0, "non-vacuity: a backoff exists");
+
+        // Nothing pruned ⇒ nothing reset: the backoff was earned against the
+        // live pool and must hold.
+        assert_eq!(storage.prune_retired_profile_relays().unwrap(), 0);
+        assert_eq!(miss_state(&storage, "aa"), unknown_before);
+
+        // Rows pruned ⇒ the Unknown author's backoff is void (its relay may
+        // just have left the ranking), the Known author's untouched.
+        insert_profile_row(&storage, &crate::profile::retired_profile_relays()[0]);
+        assert_eq!(storage.prune_retired_profile_relays().unwrap(), 1);
+        assert_eq!(miss_state(&storage, "aa"), (0, 0));
+        assert_eq!(miss_state(&storage, "bb"), known_before);
     }
 
     #[test]

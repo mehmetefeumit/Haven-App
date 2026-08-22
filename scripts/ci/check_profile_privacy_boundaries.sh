@@ -920,4 +920,61 @@ check_relay_mirror \
   "${REPO_ROOT}/haven-core/src/circle/types.rs" \
   'pub const PRODUCTION_DEFAULT_RELAYS'
 
-log "OK: public-profile privacy boundaries hold — no Image.network, no circle/group tokens, import boundary intact (incl. no discovery plane), kind-0 confined to the profile module, HTTPS-only Blossom, retraction no-op gate bound at every retraction call site, union-only kind-0 fetch entry points, one author per kind-0 REQ, CSPRNG-only randomness, no profile-plane NIP-65, every named plane-separation test present, no lib-test install of the profile-pool override, and the Dart fallback relay lists still mirror their Rust constants."
+# ---------------------------------------------------------------------------
+# Check 14: the pool may only ship VETTED, and retired relays stay retired.
+#
+# The profile plane reads each author from only the top-2 relays their
+# rendezvous salt pins them to, so a single pool entry that is dead or
+# write-rejecting silently makes users invisible to the peers assigned there —
+# and no hermetic CI lane can notice, because every lane overrides the pool to
+# a local relay. That is not hypothetical: the original pool shipped with its
+# vetting doc reading "the probe has never been run", half of it rotted, and
+# the gap surfaced as a field incident (members' names/photos never resolving
+# while location sharing worked).
+#
+# CI still must not dial the eight hosts (docs/PROFILE_RELAY_VETTING.md, "Why
+# this is not a CI job"), so this check holds the RECORD and the CONSTANT
+# together instead:
+#   * every PRODUCTION_PROFILE_RELAYS entry must have a `pass`/`pass` row in
+#     the findings table of docs/PROFILE_RELAY_VETTING.md;
+#   * the findings Status line must not read UNVERIFIED;
+#   * no RETIRED_PROFILE_RELAYS entry may reappear in the pool (a retired
+#     relay failed vetting; re-listing it re-creates the incident).
+# Editing the pool without re-running the probe and recording it is therefore
+# a red CI, not a silent regression.
+# ---------------------------------------------------------------------------
+log "Checking the pool constant against the vetting record (pass rows, status, retirements) ..."
+VETTING_DOC="${REPO_ROOT}/docs/PROFILE_RELAY_VETTING.md"
+[[ -f "${VETTING_DOC}" ]] || { echo "ERROR: ${VETTING_DOC} not found" >&2; exit 2; }
+
+if ! pool_entries="$(extract_list_entries "${CORE_PROFILE_DIR}/relay_pool.rs" \
+    'pub const PRODUCTION_PROFILE_RELAYS')" || [[ -z "${pool_entries}" ]]; then
+  echo "ERROR: could not extract PRODUCTION_PROFILE_RELAYS — the vetting check would pass vacuously" >&2
+  exit 2
+fi
+if ! retired_entries="$(extract_list_entries "${CORE_PROFILE_DIR}/relay_pool.rs" \
+    'pub const RETIRED_PROFILE_RELAYS')"; then
+  echo "ERROR: could not locate RETIRED_PROFILE_RELAYS in relay_pool.rs" >&2
+  exit 2
+fi
+
+status_line="$(grep -E '^\*\*Status:' "${VETTING_DOC}" | head -n1 || true)"
+[[ -n "${status_line}" ]] || fail "docs/PROFILE_RELAY_VETTING.md has no '**Status:' line — the vetting record is unreadable"
+if grep -qi 'UNVERIFIED' <<< "${status_line}"; then
+  fail "the vetting record reads UNVERIFIED — run the probe (docs/PROFILE_RELAY_VETTING.md) before shipping a pool"
+fi
+
+while IFS= read -r url; do
+  grep -qF "| \`${url}\` | pass | pass |" "${VETTING_DOC}" \
+    || fail "pool relay ${url} has no pass/pass row in docs/PROFILE_RELAY_VETTING.md — probe it and record the findings before shipping it"
+done <<< "${pool_entries}"
+
+if [[ -n "${retired_entries}" ]]; then
+  while IFS= read -r url; do
+    if grep -qFx "${url}" <<< "${pool_entries}"; then
+      fail "retired relay ${url} is back in PRODUCTION_PROFILE_RELAYS — it failed vetting and must re-pass (and leave RETIRED_PROFILE_RELAYS) before it may serve profile traffic again"
+    fi
+  done <<< "${retired_entries}"
+fi
+
+log "OK: public-profile privacy boundaries hold — no Image.network, no circle/group tokens, import boundary intact (incl. no discovery plane), kind-0 confined to the profile module, HTTPS-only Blossom, retraction no-op gate bound at every retraction call site, union-only kind-0 fetch entry points, one author per kind-0 REQ, CSPRNG-only randomness, no profile-plane NIP-65, every named plane-separation test present, no lib-test install of the profile-pool override, the Dart fallback relay lists still mirror their Rust constants, and every pool relay ships with a recorded pass/pass vetting row (retirees stay out)."

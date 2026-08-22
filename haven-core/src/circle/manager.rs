@@ -117,6 +117,7 @@ impl CircleManager {
         let db_path = data_dir.join("circles.db");
         let storage = CircleStorage::new(&db_path, circle_db_hex_key)?;
         Self::backfill_contamination_ledger(&storage);
+        Self::prune_retired_profile_pool(&storage);
 
         Ok(Self {
             session: Arc::new(session),
@@ -154,6 +155,29 @@ impl CircleManager {
         }
     }
 
+    /// Runs the startup retired-relay prune, best-effort.
+    ///
+    /// Removes relays retired from the curated profile pool
+    /// ([`crate::profile::RETIRED_PROFILE_RELAYS`]) from the stored Profile
+    /// category, so an upgraded install stops assigning authors to relays that
+    /// vetting proved dead or write-rejecting. See
+    /// [`CircleStorage::prune_retired_profile_relays`].
+    ///
+    /// Failure is logged rather than propagated for the same reason the
+    /// contamination fold's is: the prune is idempotent and retries next
+    /// launch, and a manager that refuses to open over it would take location
+    /// sharing down with a profile-plane repair.
+    fn prune_retired_profile_pool(storage: &CircleStorage) {
+        match storage.prune_retired_profile_relays() {
+            Ok(0) => {}
+            Ok(n) => log::info!("profile pool: pruned {n} retired relay row(s) at startup"),
+            Err(e) => log::warn!(
+                "retired profile-relay prune failed (retries next launch): {}",
+                redact_hex_sequences(&e.to_string())
+            ),
+        }
+    }
+
     /// Creates a new circle manager with a fixed-key (test) MLS session.
     ///
     /// # Warning
@@ -175,6 +199,7 @@ impl CircleManager {
         let db_path = data_dir.join("circles.db");
         let storage = CircleStorage::new(&db_path, None)?;
         Self::backfill_contamination_ledger(&storage);
+        Self::prune_retired_profile_pool(&storage);
 
         Ok(Self {
             session: Arc::new(session),
@@ -436,16 +461,14 @@ impl CircleManager {
         // fails AFTER the group + rows are staged, roll the pending back — which
         // also deletes the just-saved rows via the create-pending map — so
         // neither a PendingStateRef nor a ghost circle row leaks.
-        let welcome_events = match self
-            .route_welcomes_with_cascade(members, welcomes, creator_fallback_relays)
-            .await
-        {
-            Ok(events) => events,
-            Err(e) => {
-                let _ = self.publish_failed(pending).await;
-                return Err(e);
-            }
-        };
+        let welcome_events =
+            match self.route_welcomes_with_cascade(members, welcomes, creator_fallback_relays) {
+                Ok(events) => events,
+                Err(e) => {
+                    let _ = self.publish_failed(pending).await;
+                    return Err(e);
+                }
+            };
 
         Ok(CircleCreationResult {
             circle,
@@ -518,11 +541,7 @@ impl CircleManager {
     /// welcomes returned to the caller for publication. An error aborts before
     /// any welcome is dispatched, so nothing is recorded for a fan-out that
     /// never happened.
-    // `async` is part of the welcome fan-out contract DM-4 wires to real relay
-    // publishing; the body has no `await` yet (the gift wraps are assembled
-    // synchronously), so the lint is suppressed rather than flip the signature.
-    #[allow(clippy::unused_async)]
-    async fn route_welcomes_with_cascade(
+    fn route_welcomes_with_cascade(
         &self,
         members: &[MemberKeyPackage],
         welcomes: Vec<TransportMessage>,
@@ -1049,9 +1068,8 @@ impl CircleManager {
 
         let effects = self.add_members(mls_group_id, &key_package_events).await?;
         let (commit_event, welcomes, pending) = take_group_evolution(effects)?;
-        let welcome_events = self
-            .route_welcomes_with_cascade(&members, welcomes, creator_fallback_relays)
-            .await?;
+        let welcome_events =
+            self.route_welcomes_with_cascade(&members, welcomes, creator_fallback_relays)?;
 
         Ok(AddMembersResult {
             commit_event,

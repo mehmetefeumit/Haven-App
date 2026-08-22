@@ -69,6 +69,7 @@ pub use publish::{
 };
 pub use relay_pool::{
     production_profile_relays, profile_relay_pool_default, resolve_profile_pool,
-    set_profile_relays_for_test, PRODUCTION_PROFILE_RELAYS, PROFILE_POOL_MIN,
+    retired_profile_relays, set_profile_relays_for_test, PRODUCTION_PROFILE_RELAYS,
+    PROFILE_POOL_MIN, RETIRED_PROFILE_RELAYS,
 };
 pub use types::{CachedProfile, ProfileEdits, ProfileMetadata, ProfilePicture, ProfileState};

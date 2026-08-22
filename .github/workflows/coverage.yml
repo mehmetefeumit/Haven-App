@@ -127,12 +127,18 @@ jobs:
         if: ${{ !cancelled() }}
         run: bash ../scripts/ci/check_coverage_floors.sh rust coverage.lcov
 
+      # `!cancelled()`, not the default success(): a RATCHET violation tells you
+      # to re-pin the floors, and re-pinning needs the lcov the run measured.
+      # Uploading only on success discarded it in exactly the run where it was
+      # wanted, leaving a re-pin to be reconstructed on a matching toolchain.
       - name: Generate HTML report
+        if: ${{ !cancelled() }}
         run: |
           cargo llvm-cov --all-features --html \
             --ignore-filename-regex 'frb_generated'
 
       - name: Upload coverage reports
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v6
         with:
           name: rust-coverage-report
@@ -259,13 +265,17 @@ jobs:
         if: ${{ !cancelled() }}
         run: bash ../scripts/ci/check_coverage_floors.sh flutter coverage/lcov_filtered.info
 
+      # Same reason as the haven-core upload above: the lcov has to outlive a
+      # floors failure, because the floors failure is what asks for it.
       - name: Generate HTML report
+        if: ${{ !cancelled() }}
         run: |
           sudo apt-get update
           sudo apt-get install -y lcov
           genhtml coverage/lcov_filtered.info -o coverage/html
 
       - name: Upload coverage reports
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v6
         with:
           name: flutter-coverage-report

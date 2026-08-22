@@ -80,10 +80,16 @@ use crate::profile::error::{ProfileError, Result};
 /// Criteria 2 and 3 are behavioural and cannot be verified by reading code —
 /// they require probing each host, which is why no CI lane can settle them (it
 /// would be non-hermetic AND would announce Haven's build cadence to eight
-/// third parties). Entries here are CANDIDATES until that probe has been run:
+/// third parties). Every entry here passed both probes on 2026-08-21:
 /// `haven-core/tests/profile_relay_vetting.rs` is the probe, opt-in and
 /// `#[ignore]`d, and `docs/PROFILE_RELAY_VETTING.md` is the procedure plus the
-/// dated findings — read it before changing this list, and before trusting it.
+/// dated findings — read it before changing this list, and re-run it before
+/// trusting it across releases. A pool entry may only ship with a `pass`/`pass`
+/// row in that file's findings table (CI-enforced by
+/// `check_profile_privacy_boundaries.sh` Check 14), because an unvetted entry
+/// already caused a field incident: half the original pool had died or gone
+/// members-only, and every author whose salted top-2 landed there was
+/// unresolvable — a member tile that never gets a name or photo.
 /// Criteria 1 and 4 are test-pinned regardless and gate every change here.
 ///
 /// Runtime callers must use [`profile_relay_pool_default`], which honors the
@@ -92,14 +98,47 @@ use crate::profile::error::{ProfileError, Result};
 /// plane-separation proofs are stated over them.
 pub const PRODUCTION_PROFILE_RELAYS: &[&str] = &[
     "wss://purplepag.es",
-    "wss://relay.nostr.band",
     "wss://nostr.mom",
     "wss://offchain.pub",
-    "wss://relay.nostr.bg",
     "wss://nostr.oxtr.dev",
+    "wss://nostr.bitcoiner.social",
+    "wss://yabu.me",
+    "wss://soloco.nl",
+    "wss://nostr.data.haus",
+];
+
+/// Pool entries retired after failing behavioural vetting (2026-08-21).
+///
+/// `relay.nostr.band` and `relay.nostr.bg` are gone from the network (the
+/// latter no longer resolves in DNS), `relay.nostrplebs.com` and
+/// `eden.nostr.land` are members-only relays that reject unauthenticated
+/// kind-0 writes. Details in `docs/PROFILE_RELAY_VETTING.md`.
+///
+/// The list exists because the seeded Profile rows OUTLIVE the constant:
+/// `usable_profile_relays` unions the stored rows with the curated pool, so on
+/// an upgraded install a retired relay would keep its rendezvous-hash slot and
+/// every author assigned there would stay unresolvable. The startup prune
+/// (`CircleStorage::prune_retired_profile_relays`) deletes these rows, and
+/// rendezvous hashing guarantees the removal moves ONLY the authors that were
+/// assigned to them.
+///
+/// Append-only in spirit: an entry leaves this list only if it demonstrably
+/// recovers AND re-passes vetting — while listed here it cannot be re-added
+/// even by hand, since the prune runs every launch.
+pub const RETIRED_PROFILE_RELAYS: &[&str] = &[
+    "wss://relay.nostr.band",
+    "wss://relay.nostr.bg",
     "wss://relay.nostrplebs.com",
     "wss://eden.nostr.land",
 ];
+
+/// Returns the retired entries as owned, normalized strings (storage compares
+/// canonical URLs, so the prune must subtract in the same form the rows and
+/// the exclusion filter use).
+#[must_use]
+pub fn retired_profile_relays() -> Vec<String> {
+    normalize_all(RETIRED_PROFILE_RELAYS.iter().copied())
+}
 
 /// Minimum usable relays required to operate the profile plane.
 ///
@@ -302,6 +341,32 @@ mod tests {
         // just a config change; `tests/privacy_copy_ties.rs` holds the
         // constant and the English copy together.
         assert_eq!(PRODUCTION_PROFILE_RELAYS.len(), 8);
+    }
+
+    #[test]
+    fn retired_relays_never_reappear_in_the_pool() {
+        // A relay is retired because vetting proved it dead or write-rejecting;
+        // re-listing it in the pool would hand it a rendezvous slot again and
+        // silently re-create the field failure (authors assigned to it become
+        // unresolvable). The two constants must stay disjoint.
+        let pool = production_profile_relays();
+        for retired in retired_profile_relays() {
+            assert!(
+                !pool.contains(&retired),
+                "retired relay {retired} is back in PRODUCTION_PROFILE_RELAYS",
+            );
+        }
+    }
+
+    #[test]
+    fn retired_relays_all_normalize() {
+        // The startup prune subtracts these in canonical form; an entry that
+        // fails normalization would silently never be pruned.
+        assert_eq!(
+            retired_profile_relays().len(),
+            RETIRED_PROFILE_RELAYS.len(),
+            "a retired entry failed URL normalization and would never be pruned",
+        );
     }
 
     #[test]
