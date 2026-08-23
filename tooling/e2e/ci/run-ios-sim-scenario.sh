@@ -91,6 +91,14 @@ source "${SCRIPT_DIR}/ios-flake-lib.sh"
 # launch. It must also stay well UNDER the caller's per-attempt
 # `timeout_minutes` (20-45 min), because a stall that the OUTER timeout kills
 # first is never classified and therefore — by design — never retried.
+#
+# Those numbers describe "until the suite STARTS", and they only hold because
+# spawn_ios_test pins `--reporter expanded`. Under the reporter flutter_tools
+# picks by default in CI (`github`), the first reporter line does not appear
+# until the first test ENDS, and this deadline silently becomes a cap on TEST
+# RUNTIME — which is not a property this watchdog is allowed to have, and is
+# how CI run 32622119290 killed a healthy 400-second lane twice. Read the two
+# together: the deadline is safe because the signal is a start signal.
 readonly FIRST_TEST_WATCHDOG_SECS="${HAVEN_IOS_FIRST_TEST_WATCHDOG_SECS:-300}"
 readonly WATCHDOG_POLL_SECS="${HAVEN_IOS_WATCHDOG_POLL_SECS:-5}"
 # Validate as positive integers (mirrors run-single-avd-scenario.sh). A garbage
@@ -135,8 +143,32 @@ spawn_ios_test() {
   # runner default): it expands to the quoted elements when set and to nothing
   # when the array is empty, so a lane that did not set HAVEN_E2E_BLOSSOM_URL
   # adds no arg.
+  #
+  # `--reporter expanded` is LOAD-BEARING, not a formatting preference.
+  # Fixture (W8) in run_self_test below fails if it is removed.
+  #
+  # Left to itself `flutter test` picks the `github` reporter whenever
+  # GITHUB_ACTIONS is set, and that reporter emits NOTHING for a test until the
+  # test FINISHES — it buffers the test's own output and then flushes it inside
+  # a `::group::✅ <name>` block. The watchdog below therefore stopped measuring
+  # "how long until the suite launched" and started measuring "how long until
+  # the FIRST TEST COMPLETED", which for a lane whose single test legitimately
+  # waits ~400 s (ios_bg_publish_test.dart: two jittered 72-168 s publish ticks)
+  # is a deadline it can never meet. CI run 32622119290 is that: a healthy suite
+  # that had already armed the session, been backgrounded by the OS and started
+  # its publish wait was killed at 300 s, misfiled as a launch/attach stall, and
+  # retried into the identical kill.
+  #
+  # `expanded` writes a line per event, starting with `00:00 +0: <name>` the
+  # moment a test STARTS — which is exactly the event the watchdog needs and is
+  # already the second alternative in IOS_TEST_ACTIVITY_RE. `flutter test
+  # --help` describes it as preferred "when logging to a file or in continuous
+  # integration", which is both of the things this is. The cost is GitHub's
+  # collapsible groups; the gain is that the log streams live through the
+  # `tail -f` follower instead of arriving in one lump at the end.
   flutter test "${SCENARIO_FILE}" \
     -d "${SIM_UDID}" \
+    --reporter expanded \
     --dart-define=HAVEN_E2E_RELAY="${RELAY_URL}" \
     --dart-define=HAVEN_LIVE_SYNC="${LIVE_SYNC}" \
     --dart-define=HAVEN_E2E_NO_BACKGROUND="${E2E_NO_BACKGROUND}" \
@@ -269,6 +301,12 @@ run_self_test() {
   trap "rm -rf '${tmp}'" RETURN
   log="${tmp}/ios-test.log"
 
+  # Every fixture below replaces `spawn_ios_test` with a synthetic process, so
+  # the SHIPPED one has to be captured before the first override or W8 would
+  # inspect a stub instead of the real invocation.
+  local real_spawn
+  real_spawn="$(declare -f spawn_ios_test)"
+
   # (W1) THE ADMITTED FLAKE — build completes, then the suite never speaks.
   #      The watchdog MUST fire, mark the log, and kill the run, and the REAL
   #      classifier MUST accept the result as retryable.
@@ -295,15 +333,24 @@ run_self_test() {
     fail=1
   fi
 
-  # (W2) A HEALTHY, SLOW SUITE — it speaks, then keeps working well past the
+  # (W2) A HEALTHY, SLOW SUITE — it STARTS, then keeps working well past the
   #      watchdog deadline. The watchdog MUST stand down: killing a running
-  #      suite at a fixed deadline would be a self-inflicted flake.
+  #      suite at a fixed deadline would be a self-inflicted flake, and it is
+  #      the one this lane actually suffered (run 32622119290, a 400-second
+  #      ios_bg_publish test killed at 300 s and retried into the same kill).
+  #
+  #      The shape is the EXPANDED reporter's start line and nothing else until
+  #      long after the deadline: a test that has begun and not yet finished.
+  #      Deliberately not a COMPLETED test — a fixture that emits `✅ <name>`
+  #      before sleeping proves only "a finished test stands the watchdog
+  #      down", which is the weaker property and the one that held while this
+  #      lane was dying.
   spawn_ios_test() {
     {
       echo 'Xcode build done.                                           400.0s'
-      echo '::group::✅ (setUpAll)'
+      echo '00:00 +0: iOS bg-publish: publishes continue across a backgrounding'
       sleep 6
-      echo '🎉 12 tests passed.'
+      echo '00:06 +1: All tests passed!'
     } > "$1" 2>&1 &
   }
   run_ios_test_with_watchdog "${log}" >/dev/null 2>&1
@@ -470,16 +517,56 @@ run_self_test() {
     fail=1
   fi
 
+  # (W8) THE REPORTER IS PINNED. Everything above is about how the watchdog
+  #      reacts to a log; this is about which log `flutter test` produces at
+  #      all. Left to itself flutter_tools picks the `github` reporter in CI,
+  #      which emits nothing for a test until that test FINISHES — turning the
+  #      deadline above from "time to launch" into "time to finish", which no
+  #      long-running scenario can satisfy. No fixture over a stubbed process
+  #      can see that, because the stub decides its own output; the only place
+  #      it is observable is the argv the real function builds.
+  #
+  #      So restore the shipped `spawn_ios_test` and run it against a `flutter`
+  #      that records its arguments instead of launching anything.
+  eval "${real_spawn}"
+  local argv="${tmp}/flutter-argv"
+  flutter() { printf '%s\n' "$@" > "${argv}"; }
+  local SCENARIO_FILE="integration_test/selftest.dart"
+  local SIM_UDID="selftest-simulator-udid"
+  local RELAY_URL="ws://localhost:7777"
+  local LIVE_SYNC="false"
+  local E2E_NO_BACKGROUND="1"
+  local EXTRA_DART_DEFINES=()
+  spawn_ios_test "${tmp}/spawn.log"
+  wait "$!" 2>/dev/null || true
+  unset -f flutter
+  if ! grep -qxF -- '--reporter' "${argv}" 2>/dev/null \
+     || ! grep -qxF -- 'expanded' "${argv}" 2>/dev/null; then
+    echo "SELF-TEST FAIL (W8): spawn_ios_test does not pass '--reporter" \
+         "expanded', so CI falls back to the github reporter, which emits" \
+         "nothing until a test ENDS — the first-test watchdog then bounds test" \
+         "RUNTIME instead of launch time and kills healthy long scenarios" >&2
+    fail=1
+  fi
+  # …and the recorded argv must really be this invocation, not an empty file a
+  # never-called stub left behind.
+  if ! grep -qxF -- "${SCENARIO_FILE}" "${argv}" 2>/dev/null; then
+    echo "SELF-TEST FAIL (W8): the flutter stub recorded no scenario file —" \
+         "spawn_ios_test was not exercised, so the check above proved nothing" >&2
+    fail=1
+  fi
+
   if (( fail != 0 )); then
     echo "run-ios-sim-scenario.sh --self-test: FAILED" >&2
     return 1
   fi
-  echo "run-ios-sim-scenario.sh --self-test: all 7 watchdog fixtures passed" \
+  echo "run-ios-sim-scenario.sh --self-test: all 8 watchdog fixtures passed" \
        "(a post-build stall is caught, marked and accepted by the classifier," \
        "and stays retryable even when the process we kill overwrites the marker" \
        "on its way out; a running suite, a genuine failure, a slow build, a kill" \
        "this watchdog did not perform, and a previous attempt's stale verdict" \
-       "are all correctly NOT retried)."
+       "are all correctly NOT retried; and the streaming reporter the whole" \
+       "deadline rests on is still passed to flutter test)."
   return 0
 }
 

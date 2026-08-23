@@ -287,7 +287,7 @@ v0.9.4 `transport-nostr-adapter` tag set; **signed by the identity key**; conten
   "pubkey": "<identity pubkey>",
   "content": "<base64 KeyPackage bytes>",
   "tags": [
-    ["d", "<stable slot id>"],
+    ["d", "<stable slot id: 64 lowercase hex chars>"],
     ["mls_protocol_version", "1.0"],
     ["i", "<KeyPackage ref, 64-char hex>"],
     ["mls_ciphersuite", "0x0001"],
@@ -314,6 +314,118 @@ v0.9.4 `transport-nostr-adapter` tag set; **signed by the identity key**; conten
   `has_live_key_material` gate are both dissolved by this. Heal republishes the cached bytes
   verbatim into the same `d` slot (`published_key_packages` tracking:
   `(event_id, d_tag, key_package BLOB, created_at)`, one row per slot).
+
+#### The `d` slot id is shape-normative
+
+The binding does not leave the slot id free: **exactly one `d` tag, whose value is exactly 64
+lowercase hex characters decoding to 32 bytes**, generated once from 32 random bytes. It MUST NOT
+be derived from an account key, an MLS leaf key, a `KeyPackageRef` or a device label, and a
+conformant inviter **MUST reject malformed or incompatible candidates** — so a mis-sized slot id
+costs the account exactly what an expired package does: invitations that silently never happen,
+with nothing to see on this device. Haven mints it in `mint_d`
+(`haven-core/src/relay/maintenance/key_package.rs`) and pins the shape in
+`a_first_publish_mints_a_binding_shaped_random_slot_id`
+(`haven-core/tests/kp_rotation_e2e.rs`).
+
+**Pre-fix installs published a MALFORMED slot; Haven now RETIRES it, once, per install.** Builds
+before the widening minted 16 bytes (32 hex chars). By the binding's own cardinality rule — "if a
+required singleton tag is missing, repeated, has no value, or has extra values beyond the one
+defined here, the event is malformed" — a 32-hex `d` is not a narrower legal slot, it is a
+malformed event, and `foundation/key-packages.md` requires an inviter to "reject malformed or
+incompatible candidates before selecting one". A strictly conformant peer therefore could not
+invite those accounts at all: keeping the legacy slot is what cost them their invitability.
+
+The "a replacement MUST reuse the same `d`" rule does not forbid the fix: it is scoped to
+*replacing the KeyPackage in a slot* ("a routine replacement MUST NOT generate a fresh slot id"),
+and the same paragraph contemplates a client generating a different random `d` when it adds
+another slot. Retiring a malformed slot for a conformant one is not a routine replacement. Nor
+does anything in this tree cache a peer's `d`: the invite path issues
+`Filter::kinds([30443, 443]).author(pk).limit(10)` and takes `max_by_key(created_at)` across ALL
+slots (`relay/manager.rs`), never filtering on `d` and never storing one. White Noise is no
+stricter: `validate_marmot_key_package_strict` checks only that a `d` is PRESENT, and the
+fetched-member path (`validate_marmot_key_package_baseline`) does not read it at all.
+
+**The retirement** (`decide_kp_slot_retirement`, run by `maintain_key_package` *ahead of* the
+ordinary maintenance decision so nothing is ever published into the slot being retired; sentinel
+`kp_slot_retirement_done_v1` in `user_settings`):
+
+1. **Re-point** — `build_kp_slot_repoint_event` re-publishes the **same tracked package** into a
+   freshly minted 64-hex slot. Moving the package instead of minting one is what makes the
+   migration cheap and safe: no new init material, none consumed, and a peer that already fetched
+   the old event holds a `KeyPackageRef` this device still owns, so an **in-flight Welcome against
+   the retired coordinate still decrypts**. That is the `(Known, non-empty)` row and no other:
+   fresh material is minted whenever the row carries nothing that can be vouched for — no row at
+   all; an empty one (a `SeedD` row, or one the `not_after` purge blanked); a `NotCurrent` one
+   whose bytes outlived a FAILED purge delete; and an `Unreadable` one, which
+   `kp_init_key_purge_due` deliberately never blanks, so a corrupt row arrives here with bytes
+   present. In those last two the retired coordinate's package is **not** carried forward and an
+   in-flight Welcome against it does not survive — nor could it be, since the event's `i` tag is
+   the `KeyPackageRef` derived from those bytes and deriving it validates the leaf. The superseded
+   bytes are handed to the engine's `delete_key_package` once the replacement is acked, because
+   the retired tracking row is dropped with it and material no row tracks can never reach the
+   `not_after` bound again.
+2. **Then retract** — and only after at least one relay **OK-ACKED** that publish (Rule 13's
+   discipline: sent is not acked): tracking moves to the new slot, the retired row is dropped, and
+   `build_kp_slot_retraction` publishes ONE NIP-09 kind-5 deletion naming the orphan by the
+   identifier NIP-09 defines for an addressable event — `["a", "30443:<pubkey>:<old d>"]`, under
+   which "relays SHOULD delete all versions of the replaceable event up to the `created_at` of the
+   deletion request" — plus the observed event id as an `e` tag (NIP-09 takes "one or more `e` or
+   `a` tags", and an id lets a relay that indexes deletions by id alone drop what was seen) and
+   `["k", "30443"]` (NIP-09's SHOULD). The builder **refuses an empty slot id** (`30443:<pubkey>:`
+   addresses every kind-30443 the account has, so it would delete the live slot too) and **refuses
+   a binding-shaped one**, which makes retracting the live coordinate unrepresentable.
+3. **Sentinel** — latched only when both landed. A failed publish, an unacked retraction, a
+   storage-write failure or a tick where no relay answered leaves it unset and the next tick
+   resumes. An unacked retraction additionally does **not consume the tick**: nothing was
+   published, and the account's own slot is conformant and was observed live by this very tick's
+   probe, so the retirement hands the tick back to ordinary maintenance instead. Spending it would
+   make a relay that never acks a kind-5 (or refuses the kind outright) stop rotation,
+   republish-if-missing and heal from ever running again — an advisory deletion starving the
+   clock that keeps the account invitable, while every tick reported `AlreadyHealthy`. A crash between the relay's ACK and the local record is resumed by **adopting** the
+   already-published slot — recognised by its content being the tracked package's bytes verbatim —
+   rather than minting a second one, which would orphan the first along with the material only a
+   tracking row can age out at `not_after`.
+
+   **That resume covers the move path only.** `find_adoptable_kp_slot` recognises the slot by
+   CONTENT, so it returns `None` when the row has no bytes to recognise — which is exactly the
+   mint path above. A crash in the same window there therefore produces the outcome adoption
+   exists to avoid: the next tick mints a second package into a second fresh slot, and the first
+   is left published, untracked, and outside every retraction (those only ever name MALFORMED
+   coordinates, and this one is conformant). Not closable in this tree: distinguishing "a
+   conformant slot this device published" from "another device's, on the same identity" without
+   tracked bytes needs an engine-side "do I hold this package?" query, and the pinned MDK exposes
+   none — `fresh_key_package` and `delete_key_package` are the whole surface. The window is one
+   relay ACK to one row insert, on the mint variant of a once-per-install migration.
+
+Retracting first, or on a tick that could not publish, would risk an account with **no usable
+published KeyPackage**, which is strictly worse than a malformed one; the ordering above is what
+forbids it. Deletion itself is **advisory**: NIP-09 says relays *SHOULD* delete, and one that
+ignores the request keeps serving the orphan. Where the retirement MOVED the package that is
+survivable precisely because the orphan carries the same one — a lenient peer selecting it still
+gets a `KeyPackage` this device can decrypt — until that package is next rotated or reaches
+`not_after`, which are the spec's own deletion bounds. Where it had to MINT (the dead or unreadable
+row above), the orphan advertises material the account no longer tracks and whose init key the
+acked replacement authorises deleting, so a lenient peer that keeps selecting it can fail to invite
+the account — the same outcome that row was already heading for. A relay that was unreachable
+during the migration and comes back still serving the orphan is healed by ordinary maintenance on
+the next tick (it does not serve the tracked slot, so it is a republish target) and a conformant
+candidate joins the malformed one there.
+
+The seed-adoption path (`KpMaintenanceDecision::SeedD`) still adopts whatever non-empty `d` a
+relay is already serving with **no width or hex validation**, and that is now self-correcting
+rather than terminal: the retirement runs ahead of the maintenance decision, so an adopted
+malformed slot is re-pointed before anything is published into it.
+
+Proofs: the pure decision, the two builders and their guards in
+`haven-core/src/relay/maintenance/key_package.rs`; the migration end-to-end over an in-process
+relay in `haven/rust_builder/src/api.rs` (`tc8_a_pre_fix_install_is_retired_onto_a_conformant_slot_via_real_ffi`,
+`tc9_a_conformant_install_is_never_retired_via_real_ffi`,
+`tc10_no_retraction_until_the_replacement_is_acked_via_real_ffi`,
+`tc11_an_already_published_replacement_is_adopted_via_real_ffi`,
+`tc12_a_conformant_account_scrubs_a_leftover_orphan_via_real_ffi`,
+`tc13_a_refused_retraction_leaves_the_migration_open_via_real_ffi`,
+`tc14_a_never_acked_retraction_does_not_starve_rotation_via_real_ffi`,
+`tc15_an_unreadable_row_is_retired_onto_fresh_material_via_real_ffi`).
 
 **Legacy 443 residue**: Haven no longer builds 443 twins. A one-time, sentinel-gated cutover
 retraction (`LEGACY_KP_RETRACTION_DONE_KEY`) probes the user's own relays for their old 443 and
@@ -350,7 +462,8 @@ preserves its accept/decline UX.
   "pubkey": "<fresh ephemeral pubkey — new per message, never reused>",
   "content": "<base64( 12-byte-nonce ‖ ChaCha20-Poly1305 ciphertext )>",
   "tags": [
-    ["h", "<nostr_group_id, lowercase hex>"]
+    ["h", "<nostr_group_id, lowercase hex>"],
+    ["expiration", "<application messages ONLY — absent on commits/proposals>"]
   ]
 }
 ```
@@ -366,8 +479,10 @@ preserves its accept/decline UX.
   downgrade the 445 exporter derivation (Security Rule 11, CI-guarded).
 - **Tags**: **exactly one `h` tag is enforced on ingest; all other tags are silently dropped**
   (`transport-nostr-peeler/src/event.rs` — enforcement is exactly-one-`h`; the spec's "MUST NOT
-  carry other tags" is an emit-side rule). Haven emits only the `h` tag. `causal_deps` is no
-  longer parsed; the old `["encoding","base64"]` tag is no longer emitted.
+  carry other tags" is an emit-side rule). Haven emits `h` alone on commits and proposals, and
+  `h` + NIP-40 `expiration` on application messages — nothing else, ever (see **Expiration**
+  below). `causal_deps` is no longer parsed; the old `["encoding","base64"]` tag is no longer
+  emitted.
 - **`created_at` binding**: the outer event's `created_at` is bound to the inner app event's
   `created_at` for application messages (upstream #630) — a receiver cross-checks them.
 - **Expiration**: NIP-40 `expiration` is driven by the **group-level**
@@ -376,9 +491,21 @@ preserves its accept/decline UX.
   every circle (`src/nostr/mls/manager.rs`, constant in `src/location/ttl.rs`), and the peeler
   stamps `["expiration", inner_created_at + 228]` on every **application** 445. Commits and
   proposals carry **no** expiration tag.
+  - **A JOINED circle may declare no component at all** (its creator was an older Haven build or
+    another Marmot client). The engine then reports `None` for the group and stamps **nothing** —
+    which both un-bounds relay residency AND makes the location update read as a membership
+    change. Haven bounds this on the send side: `RetentionBoundPeeler`
+    (`src/nostr/mls/retention.rs`) is the `TransportPeeler` the session installs, and it supplies
+    228 s when the group declares none or zero, caps a longer group policy to 228 s, and honours a
+    shorter one. So **every application 445 leaving this device is stamped, in every circle**;
+    what the component still decides is what every OTHER member's client does.
   - Consequence for a relay observer: `expiration` presence is a free
     application-vs-control discriminator, and `expiration - created_at == 228` **exactly** is a
-    Haven build fingerprint. Both are accepted, but they are wire-visible.
+    Haven build fingerprint — now also a PER-MEMBER one inside a circle whose declared window is
+    absent, zero, or LONGER than 228 s, where Haven's 228 s no longer matches what that circle's
+    other clients stamp (or do not). A circle declaring SHORTER is the one foreign case with no
+    per-member split: Haven honours that value and stamps it exactly as every other client does.
+    All accepted, all wire-visible; see "Metadata Considerations" below.
   - Consequence for tests: an application 445 is evicted by any NIP-40-honouring relay 228 s after
     publication, so an oracle that re-queries them late sees only commits. Capture at publish
     time, not by a late `REQ`.
@@ -444,7 +571,7 @@ components** (`crates/traits/src/app_components/mod.rs`); changes go on-wire as
 | 0x8002 | `marmot.group.blossom.image.v1` | Group image via Blossom | not used |
 | 0x8003 | `marmot.group.admin-policy.v1` | Admin set / policy | ✅ (admin gating) |
 | 0x8004 | `marmot.transport.nostr.routing.v1` | **`NostrRoutingV1 { nostr_group_id: [u8;32], relays }` — THE source of the 445 `h`-tag id + group relay set** | ✅ (minted at create with a random 32-byte id) |
-| 0x8005 | `marmot.group.message-retention.v1` | NIP-40 expiration policy | ✅ (minted at create with `LOCATION_MESSAGE_RETENTION_SECS` = 228 s; application 445s only) |
+| 0x8005 | `marmot.group.message-retention.v1` | NIP-40 expiration policy | ✅ (minted at create with `LOCATION_MESSAGE_RETENTION_SECS` = 228 s; application 445s only; read back via `SessionManager::group_message_retention_secs`, and bounded on send by `RetentionBoundPeeler` for circles that declare none) |
 | 0x8006 | `marmot.group.agent-text-stream.quic.v1` | Agent QUIC streams | not used |
 | 0x8007 | `marmot.group.avatar-url.v1` | Group avatar URL | not used |
 | 0x8008 | encrypted media | MIP-04 successor (Blossom, per-file keys) | not used |
@@ -453,8 +580,8 @@ components** (`crates/traits/src/app_components/mod.rs`); changes go on-wire as
   published; `NostrRoutingV1.nostr_group_id` is the pseudonymous transport id
   (`session.app_component(gid, NOSTR_ROUTING_COMPONENT_ID)` →
   `SessionManager::group_routing/nostr_group_id_hex`).
-- Haven configures `supported_app_components([0x8001, 0x8003, 0x8004])` at session open so its
-  KeyPackages advertise support and self-invite/create pass capability validation.
+- Haven configures `supported_app_components([0x8001, 0x8003, 0x8004, 0x8005])` at session open so
+  its KeyPackages advertise support and self-invite/create pass capability validation.
 - Per-user profiles are **not** app components (group-scoped only) — user profiles are plain
   Nostr kind-0 (see the spec-restructure section).
 
@@ -491,9 +618,12 @@ every mutating call takes `&mut self` and is `async`. Haven wraps it in
 
 ```rust
 SessionConfig::new(db_path, SqlCipherKey::new(passphrase)?, identity /*32B x-only pk*/,
-                   Box::new(NostrMlsPeeler::new().with_welcome_signer(keys)))
+                   // RetentionBoundPeeler wraps the real peeler so every application
+                   // 445 is stamped even in a circle that declares no 0x8005.
+                   Box::new(RetentionBoundPeeler::new(
+                       NostrMlsPeeler::new().with_welcome_signer(keys))))
     .account_identity_proof_signer(signer)      // REQUIRED — open() errors without it
-    .supported_app_components([0x8001, 0x8003, 0x8004])
+    .supported_app_components([0x8001, 0x8003, 0x8004, 0x8005])
     .convergence_policy(CanonicalizationPolicy { settlement_quiescence_ms: 0, ..default() })
     .feature_registry(self_remove_feature_registry());
 let session = AccountDeviceSession::open(config)?;   // sync; hydrates
@@ -885,9 +1015,16 @@ Even with E2E encryption, consider:
   constraint, documented as an accepted leak
 - **Retention**: `message-retention.v1` (0x8005) IS wired — application 445s carry a NIP-40
   `expiration` of `created_at + 228 s`, so a cooperating relay drops location ciphertext after
-  ~3.8 min. Two residual leaks remain: commits/proposals carry **no** expiration (so
-  membership-change traffic persists at relay policy), and the exact 228 s delta is itself a
-  Haven fingerprint
+  ~3.8 min, and `RetentionBoundPeeler` keeps that true even in a circle whose creator declared no
+  component. Four residual leaks remain: commits/proposals carry **no** expiration (so
+  membership-change traffic persists at relay policy), the exact 228 s delta is itself a
+  Haven fingerprint, in a circle that declares no component another member's own location
+  445s are still unstamped — Haven bounds only what it sends — and the bound WIDENS the
+  fingerprint it inherits: where Haven previously emitted nothing in such a circle it now emits
+  exactly 228 s, so in a mixed circle a relay can split one `#h` stream into the Haven member's
+  location updates and everyone else's, a **per-member** discriminator inside a single group
+  rather than a client-wide one. Accepted, and registered as `TTL-FINGERPRINT` in
+  `docs/privacy/privacy_invariants.json`
 
 ### Implementation Tips
 

@@ -327,7 +327,7 @@ Usage: simctl privacy <device> <action> <service> [<bundle identifier>]
     echo '00:12 +0: B7: observes the granted CoreLocation tier ...'
     echo '[b7] COPY_OK'
     echo '[b7] BACKGROUND_PUBLISH_OK tier=always'
-    echo '🎉 2 tests passed.'
+    echo 'All tests passed!'
   } > "${log}"
   local got
   got="$(b7_observed_tier "${log}")"
@@ -405,7 +405,7 @@ Usage: simctl privacy <device> <action> <service> [<bundle identifier>]
       echo '[b7] OBSERVED_TIER=always'
       local m
       for m in "$@"; do echo "${m}"; done
-      echo '🎉 2 tests passed.'
+      echo 'All tests passed!'
     } > "${path}"
   }
 

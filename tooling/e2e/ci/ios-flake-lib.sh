@@ -176,16 +176,21 @@ ios_clear_stall_evidence() {
 # signals, because the two reporters `flutter test` can pick emit nothing in
 # common:
 #
-#   1. The GitHub reporter (what CI gets — flutter_tools selects it when
-#      GITHUB_ACTIONS is set). test_core's github.dart writes `✅ <name>` for a
-#      test with no output and `::group::✅ <name>` for one with output, `❌`
-#      for failed, `❎` for skipped, `🎉 N tests passed.` on success and
-#      `::error::N tests passed, M failed.` on failure. Anchoring to line-start
-#      or to `::group::` keeps this matching the REPORTER rather than any app
-#      chatter that happens to contain an emoji.
-#   2. The compact reporter (what a local `bash run-ios-sim-scenario.sh` gets):
-#      `MM:SS +N` progress lines and the `All tests passed!` / `Some tests
-#      failed.` summaries.
+#   1. The GitHub reporter — what flutter_tools selects on its own when
+#      GITHUB_ACTIONS is set. run-ios-sim-scenario.sh no longer lets it (see
+#      the `--reporter expanded` note in spawn_ios_test), but the shapes stay
+#      matched: this predicate also reads logs from older attempts and from
+#      lanes that invoke `flutter test` themselves. test_core's github.dart
+#      writes `✅ <name>` for a test with no output and `::group::✅ <name>` for
+#      one with output, `❌` for failed, `❎` for skipped, `🎉 N tests passed.`
+#      on success and `::error::N tests passed, M failed.` on failure.
+#      Anchoring to line-start or to `::group::` keeps this matching the
+#      REPORTER rather than any app chatter that happens to contain an emoji.
+#   2. The compact and expanded reporters — expanded is what CI now pins and
+#      what a local `bash run-ios-sim-scenario.sh` gets: `MM:SS +N` progress
+#      lines, emitted when a test STARTS rather than when it ends, and the
+#      `All tests passed!` / `Some tests failed.` summaries. This is the
+#      alternative the watchdog actually rides on.
 #   3. `All tests skipped.` / `No tests ran.` — a suite that ran nothing has
 #      proven nothing, and must fail rather than be retried into a green.
 #

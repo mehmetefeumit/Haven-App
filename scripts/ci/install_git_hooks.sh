@@ -17,7 +17,14 @@
 #                   publish chain that lost its bound. The list is DERIVED
 #                   from the workflow, so it never drifts.
 #
-#   pre-push    scripts/ci/check_coverage.sh                 (~6-11 min)
+#   pre-push    scripts/ci/check_privacy_invariants.sh       (~11 s)
+#               Run inside a throwaway worktree of the COMMIT being pushed,
+#               not the working tree — the manifest gate is a citation
+#               resolver, and staging a citation without the file it cites
+#               passes every working-tree check while the pushed commit is
+#               broken (CI run 32622119290).
+#
+#               scripts/ci/check_coverage.sh                 (~6-11 min)
 #               The full superset of CI's Coverage job: both suites with
 #               coverage, both aggregates, the per-path floors, the
 #               undeclared-skip check and the rollback-path flag-off run.

@@ -28,12 +28,17 @@
 #
 #   1. Once P1 passed, the drive writes `[bg-publish] READY_FOR_BACKGROUND`
 #      into a file in its OWN sandbox tmp/ (and prints the same marker for a
-#      human reading the log). The FILE is the signal: the shared runner
-#      redirects `flutter test` to a log that macOS block-buffers, so nothing
-#      the drive prints is readable until it exits — in run 32553078705 the
-#      whole 119-line drive log landed in one second, nine minutes after it
-#      was produced. Tailing that log for a live handshake can only ever
-#      background the app AFTER the drive's own paused-wait has expired,
+#      human reading the log). The FILE is the signal, because the log is not
+#      a stream this script may depend on: in run 32553078705 the whole
+#      119-line drive log landed in one second, nine minutes after it was
+#      produced. The cause was the `github` test reporter, which buffers a
+#      test's entire output and flushes it as a `::group::` only when that test
+#      ENDS (run-ios-sim-scenario.sh now pins `--reporter expanded` so the
+#      watchdog is not fooled by the same silence). A handshake that read the
+#      log would have to be re-proven against every future reporter and flush
+#      decision; a file the drive writes itself has neither dependency. Tailing
+#      the log can also only ever background the app AFTER the drive's own
+#      paused-wait has expired if anything ever buffers again,
 #      which is why this lane could not pass.
 #   2. This script deletes that file, then polls the app data container for it
 #      in a bounded loop, then backgrounds the app:
@@ -150,8 +155,9 @@ readonly DISARMED_MARKER='[bg-publish] SESSION_DISARMED'
 
 # The shared runner's fixed log path (run-ios-sim-scenario.sh's LOG_FILE).
 # Read ONLY after the drive exits — for the completion gate and the artifact —
-# never for the live handshake: macOS block-buffers this redirect, so its
-# contents are a post-mortem, not a stream.
+# never for the live handshake: what reaches it, and when, is the test
+# reporter's decision rather than this script's, so it is treated as a
+# post-mortem and not as a stream.
 readonly SHARED_LOG="/tmp/flutter-ios-test.log"
 
 # The handshake signal. The drive APPENDS the two markers this script must act
@@ -299,8 +305,10 @@ bgp_marker_present_under() {
 # bgp_wait_until <pid> <deadline-secs> <poll-secs> -- <cmd> [args…] — bounded
 # wait for a predicate command to succeed while a process is still alive.
 #
-# The predicate must read the handshake SIGNAL, never SHARED_LOG: that redirect
-# is block-buffered, so a marker in it is not observable until the drive exits.
+# The predicate must read the handshake SIGNAL, never SHARED_LOG: when a
+# marker reaches that log is the test reporter's decision, and under the one
+# flutter_tools picks by default in CI it is not observable until the drive
+# exits.
 #
 # Returns:
 #   0  the predicate succeeded
@@ -419,7 +427,7 @@ Usage: simctl location <device> <action> [<arguments>]
       echo "${READY_MARKER}"
       local m
       for m in "$@"; do echo "${m}"; done
-      echo '🎉 1 test passed.'
+      echo 'All tests passed!'
     } > "${path}"
   }
 
@@ -654,11 +662,13 @@ Usage: simctl location <device> <action> [<arguments>]
   _check "H3 the delegate skips its own uninstall" 0 "${rc}"
 
   # --- (H4) STRUCTURAL: the live handshake must never be pointed back at
-  #     SHARED_LOG. That redirect is block-buffered on macOS — in CI run
-  #     32553078705 the drive's whole log materialised in one second, nine
-  #     minutes after it was produced — so a marker in it is a post-mortem,
-  #     not a stream, and a handshake reading it backgrounds the app only
-  #     after the drive's own paused-wait has already failed. Nothing else
+  #     SHARED_LOG. When a marker reaches that log is the test reporter's
+  #     decision, not this script's — in CI run 32553078705 the drive's whole
+  #     log materialised in one second, nine minutes after it was produced,
+  #     because the `github` reporter holds a test's output until the test ends
+  #     — so a marker in it is a post-mortem, not a stream, and a handshake
+  #     reading it backgrounds the app only after the drive's own paused-wait
+  #     has already failed. Nothing else
   #     here can see that regression: every marker fixture above passes
   #     against a file written promptly, which is precisely what SHARED_LOG
   #     is not.

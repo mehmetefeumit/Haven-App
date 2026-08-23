@@ -173,14 +173,19 @@ const String kReadyForBackgroundMarker = '[bg-publish] READY_FOR_BACKGROUND';
 /// [kSessionDisarmedMarker] (re-foreground it for teardown). The host greps
 /// this file for those literals, exactly as it used to grep the log.
 ///
-/// The handshake CANNOT ride the log. The shared runner redirects
-/// `flutter test` to a file, and that stream is block-buffered on macOS: in
-/// CI run 32553078705 the drive's entire 119-line output — startup through
-/// this test's own failure — landed in the log within a single second, nine
-/// minutes after it was produced, i.e. only when the process exited. A marker
-/// the host can only read post-mortem cannot trigger a backgrounding the
-/// drive is still waiting for, so the lane could never pass. A file write
-/// reaches the filesystem immediately and is visible to the host at once.
+/// The handshake CANNOT ride the log. When a printed marker reaches that log
+/// is the test REPORTER's decision, not this test's: under the `github`
+/// reporter flutter_tools picks by default in CI, a test's whole output is
+/// held and flushed as one `::group::` when the test ENDS. In CI run
+/// 32553078705 the drive's entire 119-line output — startup through this
+/// test's own failure — landed in the log within a single second, nine minutes
+/// after it was produced. A marker the host can only read post-mortem cannot
+/// trigger a backgrounding the drive is still waiting for, so the lane could
+/// never pass. (`run-ios-sim-scenario.sh` now pins `--reporter expanded`, for
+/// the watchdog's sake, which happens to make prints stream — but a handshake
+/// resting on that would have to be re-proven against every future reporter
+/// and flush decision.) A file write reaches the filesystem immediately and is
+/// visible to the host at once, whatever the reporter does.
 ///
 /// The wrapper deletes every copy of this file before launching the drive, so
 /// a signal left by a previous attempt can never be mistaken for this one's —

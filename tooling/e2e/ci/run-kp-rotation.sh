@@ -113,6 +113,7 @@
 #   KPR_DRIVE_TIMEOUT          per-drive bound. Default 24m.
 #   KPR_BACKDATE_SECS          how far back the clock goes. Default 6048000 (70d).
 #   KPR_SERVO_POLL_SECS        servo logcat re-read period. Default 1.
+#   KPR_SERVO_MAX_ATTEMPTS     per-request servo retries. Default 3.
 #   KPR_WIFI_OFF_TIMEOUT_SECS  read-back budget for the Wi-Fi disable. Default 20.
 
 set -Eeuo pipefail
@@ -272,6 +273,26 @@ kpr_jump_record() {
   { grep -aE "^seq=${seq} " "${jumpfile}" 2>/dev/null | tail -1; } || true
 }
 
+# kpr_jump_attempts <servo-log> <seq> — how many attempts were RECORDED for
+# one seq, whatever their status. The servo's retry bound reads this rather
+# than an in-memory counter so the ledger and the bound cannot drift apart.
+kpr_jump_attempts() {
+  local jumpfile="${1:-}" seq="${2:-}" n
+  [[ -f "${jumpfile}" ]] || { printf '0'; return 0; }
+  n="$(grep -acE "^seq=${seq} " "${jumpfile}" 2>/dev/null || true)"
+  printf '%s' "${n:-0}"
+}
+
+# kpr_servo_died <servo-log> — 0 (true) when the servo left an EPITAPH, i.e. it
+# stopped before it was asked to. Distinguishes "the device refused the clock"
+# from "nothing was left running to ask it" — the two look identical in a
+# missing record, and only one of them is a device problem.
+kpr_servo_died() {
+  local jumpfile="${1:-}"
+  [[ -f "${jumpfile}" ]] || return 1
+  grep -aqE '^servo=died ' "${jumpfile}" 2>/dev/null
+}
+
 # kpr_default_network_handovers <logcat> — how many times the guest switched
 # its DEFAULT NETWORK *after* the drive observed the clock restore.
 #
@@ -391,6 +412,19 @@ is vacuous, not green."
 did not record it as applied: '$(kpr_jump_record "${servo}" "${seq}")'."
     fi
   done < <(kpr_req_clock_seqs "${log}")
+
+  # (3b) …and WHY, when the answer is "there was no servo left to ask". An
+  #      unserved request and a dead servo are the same silence in the record,
+  #      and only one of them is a device fault. The epitaph is written by the
+  #      servo's own EXIT trap, so its presence is positive evidence rather
+  #      than an inference from absence.
+  if kpr_servo_died "${servo}"; then
+    kpr_finding "the clock servo DIED before it was asked to stop \
+('$(grep -aE '^servo=died ' "${servo}" 2>/dev/null | tail -1)'). Any clock \
+change requested after that point was never served, and any change it had \
+already made to the device went unrecorded — read every clock finding above as \
+a HARNESS failure, not as a device that refused the clock."
+  fi
 
   # (4) The app-visible clock really moved. The drive measures the
   #     discontinuity itself against a monotonic stopwatch.
@@ -608,6 +642,146 @@ later — the event timestamp advanced, the Lifetime did not."
 
   (( ${#KPR_FINDINGS[@]} == 0 ))
 }
+
+# ---------------------------------------------------------------------------
+# Clock control.
+#
+# Defined ABOVE run_self_test() rather than beside the phase that uses them,
+# because the self-test EXERCISES them: the servo is the one part of this
+# harness that can silently stop doing its job, and a shape-scan would not
+# have caught run 32622119290 (a read-back that aborted the servo between
+# changing the device clock and recording that it had). They read DEVICE,
+# JUMP_LOG, SERVO_STOP and the servo tunables at CALL time, so their position
+# in the file is free.
+# ---------------------------------------------------------------------------
+
+# Sets the device wall clock to `host_now + <offset seconds>` and records what
+# the device reported back.
+#
+# The read-back is the whole point. `date` on Android exits 0 in situations
+# where it changed nothing (no root, a re-enabled auto_time, a read-only
+# clock), and this repo has been bitten before by trusting an exit code over an
+# authoritative read (`pm grant`). So the servo records `expected`, `device`
+# and `drift`, and the oracle keys on `status=ok`, which only an in-tolerance
+# read-back produces.
+apply_clock_offset() {
+  local seq="$1" offset="$2"
+  local host_now expected stamp device drift status read_rc
+
+  host_now="$(date -u +%s)"
+  expected=$(( host_now + offset ))
+  # toybox `date` takes the SET value positionally as MMDDhhmm[[CC]YY][.ss];
+  # it has no coreutils `-s`. Rendered on the host so the format is produced by
+  # a parser this script can reason about.
+  stamp="$(date -u -d "@${expected}" +%m%d%H%M%Y.%S)"
+
+  status="ok"
+  if ! adb -s "${DEVICE}" shell "date -u ${stamp}" >/dev/null 2>&1; then
+    status="error"
+  fi
+  # Tell the framework the wall clock moved. Harmless if nothing listens; a few
+  # services cache "now" and would otherwise keep the old value.
+  adb -s "${DEVICE}" shell "am broadcast -a android.intent.action.TIME_SET" \
+    >/dev/null 2>&1 || true
+
+  # The read-back must not be able to ABORT this function. Under
+  # `set -Eeuo pipefail` a plain `device="$(adb … | tr …)"` assignment inherits
+  # the pipeline's status, so one transient adb failure kills the caller —
+  # which, in the background servo, means the whole servo — *after* the clock
+  # was already changed and *before* any of it was recorded. CI run
+  # 32622119290 is exactly that: the guest clock jumped the full 6048000s (the
+  # app printed CLOCK_RESTORED and Android broadcast TIME_SET), the servo
+  # produced no seq=1 record and no step-log line, and the oracle correctly but
+  # unhelpfully reported "the servo did not record it as applied: ''". A
+  # command whose failure this function already handles (`status=error`, three
+  # lines below) must not be able to skip that handling, so the substitution is
+  # made failure-tolerant and the status captured instead.
+  device=""
+  read_rc=0
+  device="$(adb -s "${DEVICE}" shell date -u +%s 2>/dev/null | tr -dc '0-9')" \
+    || read_rc=$?
+  if [[ -z "${device}" ]] || (( read_rc != 0 )); then
+    device=0
+    status="error"
+  fi
+  # Recompute `expected` against a FRESH host reading: the adb round trips
+  # above take real time, and comparing against the pre-command host clock
+  # would charge that latency to the drift budget.
+  expected=$(( $(date -u +%s) + offset ))
+  drift=$(( device - expected ))
+  # `if`, not `(( … )) && …`: under `set -e` a false arithmetic test is a
+  # non-zero status, and this function also runs inside the background servo —
+  # the short-circuit form would silently kill the servo on every healthy jump.
+  if (( drift < 0 )); then
+    drift=$(( -drift ))
+  fi
+  if [[ "${status}" == "ok" ]] && (( drift > JUMP_DRIFT_TOLERANCE_SECS )); then
+    status="drift"
+  fi
+
+  echo "seq=${seq} offset=${offset} expected=${expected} device=${device}" \
+       "drift=${drift} status=${status}" >> "${JUMP_LOG}"
+  echo "  [servo] seq=${seq} offset=${offset}s -> status=${status} (drift ${drift}s)"
+}
+
+# Records that the servo stopped without being asked to. Runs from the servo
+# subshell's own EXIT trap, so it fires whether the loop returned, errexit
+# tripped, or a signal landed. Silent on the ORDERED stop (`${SERVO_STOP}`
+# present) — that is the healthy path and a line there would be noise on every
+# green run.
+servo_epitaph() {
+  local rc=$?
+  if [[ -f "${SERVO_STOP}" ]]; then
+    return 0
+  fi
+  echo "servo=died rc=${rc} — the clock servo stopped before it was asked to;" \
+       "any REQ_CLOCK after this point went unserved." >> "${JUMP_LOG}"
+  echo "  [servo] DIED rc=${rc} (no stop was requested)" >&2
+  return 0
+}
+
+# Background servo: fulfils `REQ_CLOCK` requests as the drive emits them.
+#
+# Polls the growing logcat capture rather than consuming a pipe, so a servo
+# restart or a slow reader can never lose a request, and the same file the
+# oracle later reads is the one the servo acted on.
+clock_servo() {
+  local handled=" " seq
+  local -a pending
+  while [[ ! -f "${SERVO_STOP}" ]]; do
+    # Snapshot into an ARRAY rather than iterating a `read` loop fed by a
+    # process substitution. `apply_clock_offset` shells out to `adb shell`,
+    # which reads stdin — inside a read loop it would swallow the rest of the
+    # request list and the servo would silently fulfil only the first request.
+    pending=()
+    mapfile -t pending < <(kpr_req_clock_seqs "${LOGCAT_FILE}")
+    for seq in "${pending[@]}"; do
+      [[ -z "${seq}" ]] && continue
+      [[ "${handled}" == *" ${seq} "* ]] && continue
+      # The drive only ever asks for offset 0 — "put the clock back to host
+      # time" — so the offset is NOT read out of the log. A request that could
+      # name an arbitrary offset would let a corrupted logcat line move the
+      # device clock anywhere.
+      apply_clock_offset "${seq}" 0 </dev/null
+      # Retire the request only once the servo's OWN read-back vouched for it,
+      # using the same predicate the oracle reads. A `status=error` or
+      # `status=drift` attempt is a transient adb hiccup far more often than a
+      # device that refuses the clock, and marking it handled on the first try
+      # turned one hiccup into a lane failure with the clock already moved.
+      # Bounded, because a device that genuinely cannot be set must still reach
+      # the oracle as a recorded failure rather than spin here forever.
+      # The attempt LEDGER is the record file itself, not an in-memory
+      # counter: the two can never disagree about how many times this seq was
+      # tried, and the bound stays correct across a servo that was restarted.
+      if [[ " $(kpr_jump_ok_seqs "${JUMP_LOG}" | tr '\n' ' ') " == *" ${seq} "* ]] \
+         || (( $(kpr_jump_attempts "${JUMP_LOG}" "${seq}") >= SERVO_MAX_ATTEMPTS )); then
+        handled+="${seq} "
+      fi
+    done
+    sleep "${SERVO_POLL_SECS}"
+  done
+}
+
 
 # ---------------------------------------------------------------------------
 # Self-test — hermetic fixtures, no device, no relay.
@@ -1107,11 +1281,226 @@ run_self_test() {
   _eq_case "a healthy capture reports no handovers" "0" \
     "$(kpr_default_network_handovers "${tmp}/ok.log")"
 
+  # --- THE CLOCK SERVO ITSELF ----------------------------------------------
+  #
+  # CI run 32622119290 is why these exist. The servo set the guest clock (the
+  # app printed CLOCK_RESTORED, Android broadcast TIME_SET), then its adb
+  # READ-BACK failed; under `set -Eeuo pipefail` that killed the servo subshell
+  # between the change and the record, and the lane died reporting an empty
+  # servo record for a jump that had actually happened. Every fixture below
+  # fails on the pre-fix code.
+
+  # (40) A failed read-back is RECORDED as `status=error`, not fatal. The whole
+  #      point: `apply_clock_offset` already has a branch for an unreadable
+  #      device clock, and nothing may skip it.
+  local jump="${tmp}/servo-unit.log"
+  local DEVICE='emulator-selftest'
+  local JUMP_LOG="${jump}"
+  local SERVO_MAX_ATTEMPTS=3
+  local SERVO_POLL_SECS=0
+  # Stub for the three `adb` calls the function makes, keyed on the last
+  # argument so the SET, the broadcast and the READ-BACK can differ. Shadows
+  # the binary by name; the self-test exits before any real device work.
+  #
+  # The three shapes are distinguishable BY ARGUMENT and the catch-all fails
+  # loudly, so a future edit that changes how one of them is invoked cannot
+  # quietly route through the wrong branch and leave these fixtures passing
+  # for a reason that is not the one written on them.
+  local stub_readback_rc=0 stub_readback_out='' stub_set_rc=0
+  adb() {
+    local last="${*: -1}"
+    case "${last}" in
+      '+%s')      printf '%s\n' "${stub_readback_out}"; return "${stub_readback_rc}" ;;
+      *TIME_SET*) return 0 ;;
+      'date -u '*) return "${stub_set_rc}" ;;
+      *)          echo "self-test adb stub: unrecognised call 'adb $*'" >&2; return 127 ;;
+    esac
+  }
+
+  # Invoked exactly as the SERVO invokes it: a background job, waited on.
+  # That detail is the fixture, not decoration. Bash suppresses errexit for the
+  # whole body of a function called in an exempt context (`f || rc=$?`,
+  # `if ! f`), so a fixture written that way cannot observe an abort AT ALL and
+  # would pass against the very code that broke this lane. A background job is
+  # not an exempt context, and the servo is a background job.
+  local _apply_rc=0
+  _apply_bg() { # _apply_bg <seq>
+    ( apply_clock_offset "$1" 0 ) >/dev/null &
+    local pid=$!
+    _apply_rc=0
+    wait "${pid}" || _apply_rc=$?
+  }
+
+  : > "${jump}"
+  stub_readback_rc=1; stub_readback_out=''; stub_set_rc=0
+  _apply_bg 7
+  _case "a failed read-back does NOT abort apply_clock_offset" 0 "${_apply_rc}"
+  _eq_case "…and the attempt is recorded as status=error" "1" \
+    "$(grep -acE '^seq=7 .*status=error' "${jump}" || true)"
+
+  # (41) A read-back that succeeds but returns nothing is the same case. `adb`
+  #      exiting 0 with empty output is what a half-open transport looks like.
+  : > "${jump}"
+  stub_readback_rc=0; stub_readback_out=''
+  _apply_bg 8
+  _case "an EMPTY read-back does not abort either" 0 "${_apply_rc}"
+  _eq_case "…and is recorded as status=error" "1" \
+    "$(grep -acE '^seq=8 .*status=error' "${jump}" || true)"
+
+  # (42) The healthy path still produces exactly the record the oracle keys on.
+  #      Without this the two above could be satisfied by a function that
+  #      always writes `status=error`.
+  : > "${jump}"
+  stub_readback_rc=0; stub_readback_out="$(date -u +%s)"
+  _apply_bg 9
+  _case "a healthy read-back returns cleanly" 0 "${_apply_rc}"
+  _eq_case "…and records status=ok" " 9 " \
+    " $(kpr_jump_ok_seqs "${jump}" | tr '\n' ' ')"
+
+  # (43) A `date` SET that the device refuses is recorded too — the pre-existing
+  #      promise, re-pinned because the read-back rework touches the same
+  #      status variable.
+  : > "${jump}"
+  stub_set_rc=1; stub_readback_rc=0; stub_readback_out="$(date -u +%s)"
+  _apply_bg 10
+  _case 'a refused date-set does not abort' 0 "${_apply_rc}"
+  _eq_case "…and is recorded as status=error" "1" \
+    "$(grep -acE '^seq=10 .*status=error' "${jump}" || true)"
+  stub_set_rc=0
+  unset -f adb
+
+  # (44) The attempt LEDGER the retry bound reads.
+  printf '%s\n' \
+    'seq=4 offset=0 expected=1 device=0 drift=1 status=error' \
+    'seq=4 offset=0 expected=1 device=1 drift=0 status=ok' \
+    'seq=5 offset=0 expected=1 device=1 drift=0 status=ok' \
+    > "${tmp}/ledger.log"
+  _eq_case "attempts are counted per seq" "2" \
+    "$(kpr_jump_attempts "${tmp}/ledger.log" 4)"
+  _eq_case "a seq with one attempt counts 1" "1" \
+    "$(kpr_jump_attempts "${tmp}/ledger.log" 5)"
+  _eq_case "an unseen seq counts 0" "0" \
+    "$(kpr_jump_attempts "${tmp}/ledger.log" 6)"
+  _eq_case "a missing ledger counts 0" "0" \
+    "$(kpr_jump_attempts "${tmp}/ledger-absent.log" 4)"
+
+  # (45) THE RETRY. A first attempt that failed is tried AGAIN, and the servo
+  #      stops asking as soon as one attempt is vouched for. On the pre-fix
+  #      code the request was retired on the first attempt, so this reads 1.
+  #
+  #      Driven entirely by stubs in a SUBSHELL: `kpr_req_clock_seqs` decides
+  #      how many polls the loop gets and then stops it, so the fixture has no
+  #      sleep, no wall-clock dependence and no way to hang.
+  _servo_fixture() { # _servo_fixture <name> <outcome> <poll-budget> -> calls
+    local name="$1" outcome="$2" budget="$3"
+    local dir="${tmp}/servo-${name}"
+    mkdir -p "${dir}"
+    (
+      SERVO_STOP="${dir}/.stop"
+      JUMP_LOG="${dir}/jumps.log"
+      LOGCAT_FILE="${dir}/logcat.log"
+      SERVO_POLL_SECS=0
+      SERVO_MAX_ATTEMPTS=3
+      : > "${JUMP_LOG}"
+      : > "${dir}/polls"
+      : > "${dir}/calls"
+      # The poll counter is FILE-backed on purpose: `clock_servo` reads this
+      # through `mapfile < <(…)`, i.e. inside a process substitution, so a
+      # shell variable incremented here would be discarded in the child and
+      # the fixture would loop forever.
+      kpr_req_clock_seqs() {
+        echo p >> "${dir}/polls"
+        if (( $(wc -l < "${dir}/polls") > budget )); then
+          touch "${SERVO_STOP}"
+          return 0
+        fi
+        echo 1
+      }
+      apply_clock_offset() {
+        local n
+        n="$(kpr_jump_attempts "${JUMP_LOG}" "$1")"
+        echo c >> "${dir}/calls"
+        # `ok` on the attempt the caller named; `error` on every other.
+        if [[ "${outcome}" == "ok-on-$(( n + 1 ))" ]]; then
+          echo "seq=$1 offset=0 expected=1 device=1 drift=0 status=ok" >> "${JUMP_LOG}"
+        else
+          echo "seq=$1 offset=0 expected=1 device=0 drift=9 status=error" >> "${JUMP_LOG}"
+        fi
+      }
+      clock_servo
+    )
+    wc -l < "${dir}/calls" | tr -d ' '
+  }
+
+  _eq_case "a failed attempt is RETRIED and stops once one is ok" "2" \
+    "$(_servo_fixture retry ok-on-2 10)"
+
+  # (46) …and the retry is BOUNDED. Ten polls, every attempt failing: the servo
+  #      must give up at SERVO_MAX_ATTEMPTS and let the recorded failure reach
+  #      the oracle, rather than reset the device clock ten times.
+  _eq_case "retries stop at SERVO_MAX_ATTEMPTS" "3" \
+    "$(_servo_fixture bounded never 10)"
+
+  # (47) A servo that stops WITHOUT being asked leaves an epitaph, and one that
+  #      was asked leaves none. Without the first, a dead servo is indis-
+  #      tinguishable from a device that refused the clock — which is exactly
+  #      how run 32622119290 read.
+  local epi="${tmp}/epitaph"
+  mkdir -p "${epi}"
+  (
+    SERVO_STOP="${epi}/.stop"
+    JUMP_LOG="${epi}/jumps.log"
+    : > "${JUMP_LOG}"
+    servo_epitaph
+  ) 2>/dev/null
+  rc=0; kpr_servo_died "${epi}/jumps.log" || rc=1
+  _case "an unrequested servo stop leaves an epitaph" 0 "${rc}"
+  (
+    SERVO_STOP="${epi}/.stop"
+    JUMP_LOG="${epi}/ordered.log"
+    : > "${JUMP_LOG}"
+    touch "${SERVO_STOP}"
+    servo_epitaph
+  ) 2>/dev/null
+  rc=0; kpr_servo_died "${epi}/ordered.log" || rc=1
+  _case "an ORDERED servo stop leaves none" 1 "${rc}"
+
+  # (48) THE WIRING, twin of (34)/(38). Nothing above fails if the servo is
+  #      launched WITHOUT its epitaph trap — `servo_epitaph` would simply never
+  #      run, and the lane would be back to the silence run 32622119290 died
+  #      on. Checked against the script's own text, comments excluded, because
+  #      the launch happens once in the real run and never in a fixture.
+  local epitaph_rc=0
+  grep -vE '^[[:space:]]*#' "${self}" \
+    | grep -qE "^\( *trap - EXIT; *trap 'servo_epitaph' EXIT; *clock_servo *\) *&\$" \
+    || epitaph_rc=1
+  _case "the servo is launched under its epitaph trap" 0 "${epitaph_rc}"
+
+  # (49) The epitaph is INERT to both servo-log parsers: it must add no applied
+  #      seq and answer no `kpr_jump_record` query, or it would silently
+  #      satisfy the very checks it exists to explain.
+  _fixture_servo "${tmp}/withepitaph.servo"
+  cat "${epi}/jumps.log" >> "${tmp}/withepitaph.servo"
+  _eq_case "an epitaph adds no applied seq" \
+    "$(kpr_jump_ok_seqs "${tmp}/ok.servo" | tr '\n' ' ')" \
+    "$(kpr_jump_ok_seqs "${tmp}/withepitaph.servo" | tr '\n' ' ')"
+
+  # (50) …and the ORACLE names it, so the next occurrence reads as a harness
+  #      failure instead of a device that refused the clock.
+  _fixture_servo "${tmp}/died.servo" "/^seq=1 /d"
+  cat "${epi}/jumps.log" >> "${tmp}/died.servo"
+  rc=0; kpr_run_oracle "${tmp}/ok.log" "${tmp}/died.servo" >/dev/null || rc=1
+  _case "a dead servo fails the lane" 1 "${rc}"
+  _names_case "dead-servo finding says HARNESS" "HARNESS"
+  # …and does NOT cry wolf on a healthy run.
+  rc=0; kpr_run_oracle "${tmp}/ok.log" "${tmp}/ok.servo" >/dev/null || rc=1
+  _case "a healthy run reports no dead servo" 0 "${rc}"
+
   if (( fails )); then
     echo "run-kp-rotation.sh --self-test: FAILURES (see above)" >&2
     return 1
   fi
-  echo "run-kp-rotation.sh --self-test: all 39 fixture groups passed"
+  echo "run-kp-rotation.sh --self-test: all 50 fixture groups passed"
   return 0
 }
 
@@ -1145,6 +1534,21 @@ readonly DRIVE_TIMEOUT="${KPR_DRIVE_TIMEOUT:-24m}"
 
 # How often the servo re-reads logcat for a new request.
 readonly SERVO_POLL_SECS="${KPR_SERVO_POLL_SECS:-1}"
+
+# How many times the servo will re-attempt ONE request before giving up and
+# letting the recorded failure reach the oracle. The clock set is idempotent
+# (always "host time + offset"), so a retry cannot compound; what it buys is
+# survival of a transient `adb` failure across a 70-day wall-clock
+# discontinuity, which is when adb is least healthy.
+#
+# Sized against the two windows it sits between. One attempt costs three adb
+# round trips plus SERVO_POLL_SECS, so eight of them is ~15-30 s — comfortably
+# longer than the transient observed in CI run 32622119290 (the read-back that
+# failed at 06:29:07 was healthy again by 06:29:22) and roughly six times
+# inside the drive's own 180 s clock rendezvous, which is the deadline that
+# actually matters: exhausting these attempts must still leave the drive time
+# to fail with its own attributable message.
+readonly SERVO_MAX_ATTEMPTS="${KPR_SERVO_MAX_ATTEMPTS:-8}"
 
 # How long phase 2 waits for `wifi_on` to READ BACK as 0. Generous because the
 # radio teardown is asynchronous and this runs once, before the drive.
@@ -1214,62 +1618,8 @@ readonly JUMP_LOG="${LOG_DIR}/clock-jumps.log"
 readonly SERVO_STOP="${LOG_DIR}/.servo-stop"
 
 # ---------------------------------------------------------------------------
-# Clock control
+# Device restore (the clock servo itself lives above run_self_test()).
 # ---------------------------------------------------------------------------
-
-# Sets the device wall clock to `host_now + <offset seconds>` and records what
-# the device reported back.
-#
-# The read-back is the whole point. `date` on Android exits 0 in situations
-# where it changed nothing (no root, a re-enabled auto_time, a read-only
-# clock), and this repo has been bitten before by trusting an exit code over an
-# authoritative read (`pm grant`). So the servo records `expected`, `device`
-# and `drift`, and the oracle keys on `status=ok`, which only an in-tolerance
-# read-back produces.
-apply_clock_offset() {
-  local seq="$1" offset="$2"
-  local host_now expected stamp device drift status
-
-  host_now="$(date -u +%s)"
-  expected=$(( host_now + offset ))
-  # toybox `date` takes the SET value positionally as MMDDhhmm[[CC]YY][.ss];
-  # it has no coreutils `-s`. Rendered on the host so the format is produced by
-  # a parser this script can reason about.
-  stamp="$(date -u -d "@${expected}" +%m%d%H%M%Y.%S)"
-
-  status="ok"
-  if ! adb -s "${DEVICE}" shell "date -u ${stamp}" >/dev/null 2>&1; then
-    status="error"
-  fi
-  # Tell the framework the wall clock moved. Harmless if nothing listens; a few
-  # services cache "now" and would otherwise keep the old value.
-  adb -s "${DEVICE}" shell "am broadcast -a android.intent.action.TIME_SET" \
-    >/dev/null 2>&1 || true
-
-  device="$(adb -s "${DEVICE}" shell date -u +%s 2>/dev/null | tr -dc '0-9')"
-  if [[ -z "${device}" ]]; then
-    device=0
-    status="error"
-  fi
-  # Recompute `expected` against a FRESH host reading: the adb round trips
-  # above take real time, and comparing against the pre-command host clock
-  # would charge that latency to the drift budget.
-  expected=$(( $(date -u +%s) + offset ))
-  drift=$(( device - expected ))
-  # `if`, not `(( … )) && …`: under `set -e` a false arithmetic test is a
-  # non-zero status, and this function also runs inside the background servo —
-  # the short-circuit form would silently kill the servo on every healthy jump.
-  if (( drift < 0 )); then
-    drift=$(( -drift ))
-  fi
-  if [[ "${status}" == "ok" ]] && (( drift > JUMP_DRIFT_TOLERANCE_SECS )); then
-    status="drift"
-  fi
-
-  echo "seq=${seq} offset=${offset} expected=${expected} device=${device}" \
-       "drift=${drift} status=${status}" >> "${JUMP_LOG}"
-  echo "  [servo] seq=${seq} offset=${offset}s -> status=${status} (drift ${drift}s)"
-}
 
 # Re-enables the automatic time sync phase 2 pinned off.
 #
@@ -1301,35 +1651,6 @@ wifi_state() {
 # key — a radio left off would be the next lane's mystery, not ours.
 restore_wifi_radio() {
   adb -s "${DEVICE}" shell svc wifi enable >/dev/null 2>&1 || true
-}
-
-# Background servo: fulfils `REQ_CLOCK` requests as the drive emits them.
-#
-# Polls the growing logcat capture rather than consuming a pipe, so a servo
-# restart or a slow reader can never lose a request, and the same file the
-# oracle later reads is the one the servo acted on.
-clock_servo() {
-  local handled=" " seq
-  local -a pending
-  while [[ ! -f "${SERVO_STOP}" ]]; do
-    # Snapshot into an ARRAY rather than iterating a `read` loop fed by a
-    # process substitution. `apply_clock_offset` shells out to `adb shell`,
-    # which reads stdin — inside a read loop it would swallow the rest of the
-    # request list and the servo would silently fulfil only the first request.
-    pending=()
-    mapfile -t pending < <(kpr_req_clock_seqs "${LOGCAT_FILE}")
-    for seq in "${pending[@]}"; do
-      [[ -z "${seq}" ]] && continue
-      [[ "${handled}" == *" ${seq} "* ]] && continue
-      handled+="${seq} "
-      # The drive only ever asks for offset 0 — "put the clock back to host
-      # time" — so the offset is NOT read out of the log. A request that could
-      # name an arbitrary offset would let a corrupted logcat line move the
-      # device clock anywhere.
-      apply_clock_offset "${seq}" 0 </dev/null
-    done
-    sleep "${SERVO_POLL_SECS}"
-  done
 }
 
 # ---------------------------------------------------------------------------
@@ -1527,7 +1848,16 @@ rm -f "${SERVO_STOP}"
 # and this one exits normally when the drive finishes. Without the disarm the
 # servo's own exit would run `cleanup` — tearing down the relays and the clock
 # underneath a live drive.
-( trap - EXIT; clock_servo ) &
+#
+# It then installs its OWN exit trap so that a servo which dies for any other
+# reason leaves an EPITAPH instead of silence. Under `set -Eeuo pipefail` a
+# background subshell that trips errexit vanishes without a word, and the only
+# downstream evidence is a record the oracle expected and did not find — which
+# reads as "the device refused the clock" when the truth was "the servo is no
+# longer running". The epitaph is inert to both servo-log parsers (neither
+# `seq=<n> …status=ok` nor `^seq=<n> ` matches it) and is turned into a named
+# finding by the oracle.
+( trap - EXIT; trap 'servo_epitaph' EXIT; clock_servo ) &
 SERVO_PID=$!
 
 echo "Phase 3/4 — driving ${TARGET}..."

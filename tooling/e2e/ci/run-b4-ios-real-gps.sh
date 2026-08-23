@@ -311,7 +311,7 @@ Usage: simctl privacy <device> <action> <service> [<bundle identifier>]
     echo '[b4] LOCATION_AUTH_OK status=LocationPermissionStatus.whileInUse'
     echo '[b4] PUBLISHED n=1'
     echo '[b4] PEER_DECRYPT_MATCH dLat=0.0 dLon=0.0 tol=1e-5'
-    echo '🎉 1 test passed.'
+    echo 'All tests passed!'
   } > "${log}"
   rc=0; b4_proof_marker_present "${log}" || rc=$?
   _check "M1 a completed proof is detected" 0 "${rc}"
@@ -323,7 +323,7 @@ Usage: simctl privacy <device> <action> <service> [<bundle identifier>]
   {
     echo 'Xcode build done.                                           400.0s'
     echo '[b4] LOCATION_AUTH_OK status=LocationPermissionStatus.whileInUse'
-    echo '🎉 1 test passed.'
+    echo 'All tests passed!'
   } > "${log}"
   rc=0; b4_proof_marker_present "${log}" || rc=$?
   _check "M2 a suite that passed WITHOUT the proof is refused" 1 "${rc}"

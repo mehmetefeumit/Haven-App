@@ -415,6 +415,34 @@ BOTH peers **and** equal epochs), re-snapshotting the shared inbox each round;
 polling each peer to its own state and then sampling epoch equality once can
 observe a mid-convergence instant and fail spuriously.
 
+## Failure mode 10 — the job dies with "the hosted runner lost communication with the server"
+
+Not a Haven failure, and there is nothing in this tree to fix. GitHub reports it
+as a job-level ANNOTATION rather than a step failure; the job's steps stay
+`in_progress`/`pending` forever and the whole log blob is usually absent from
+the API (`BlobNotFound`), because the agent that would have uploaded it is what
+died.
+
+**How to tell it apart from a real red**, in order:
+
+1. `gh api repos/<owner>/<repo>/actions/jobs/<id> --jq '.steps[] | select(.conclusion==null) | .name'`
+   — a genuine failure has exactly one non-null `conclusion: failure`; this has a
+   step stuck `in_progress` and every later step `pending`.
+2. The job outlives its own step `timeout-minutes` without being killed. The step
+   deadline is enforced BY the runner agent, so an agent that is gone cannot
+   enforce it. In run 32622119290 the `e2e_location_provider_toggle` build step
+   started at 06:16:42 under a 30-minute cap and the job was only declared failed
+   at 07:00:54 — 44 minutes later. That overshoot is the signature.
+3. No artifact was uploaded, including the `if: always()` diagnostics.
+
+**Do not read it as a lane defect, and do not tune the lane for it.** In run
+32622119290 the lane that died builds ONE APK; `e2e_integration`, which builds
+SEVEN through the same `build-integration-apks.sh` on the same runner image,
+passed in the same run — so the build profile is not the differentiator. Re-run
+the lane. If it recurs on the same lane across runs, the resource peak is the
+first thing to measure (see failure mode 2's `free -h` / `df -h` diagnostics and
+the build-before-boot discipline every Android lane already follows).
+
 ## What these lanes do NOT cover
 
 The iOS simulator keeps the app alive and the VM-service attached, so it does

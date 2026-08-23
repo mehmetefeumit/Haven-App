@@ -4,8 +4,9 @@
 # Runs ONE drive target (haven/integration_test/ios_bg_publish_test.dart) on a
 # booted simulator and, mid-drive, backgrounds the app FOR REAL: the wrapper
 # (tooling/e2e/ci/run-ios-bg-publish.sh) polls the app's sandbox for a READY
-# signal FILE the drive writes — not the drive log, which macOS block-buffers
-# until the process exits, far too late to act on — then launches
+# signal FILE the drive writes — not the drive log, whose contents arrive when
+# the test reporter decides rather than when the drive prints them, far too
+# late to act on — then launches
 # com.apple.Preferences over Haven, so iOS itself fires
 # `applicationDidEnterBackground` — something NO other lane produces (B7 and
 # the Android B1 lane dispatch the paused lifecycle event in-process). The
