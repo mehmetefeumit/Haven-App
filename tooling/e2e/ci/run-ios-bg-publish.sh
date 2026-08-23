@@ -16,13 +16,23 @@
 #   P1  After enabling background sharing through the production
 #       `BackgroundSharingNotifier.setEnabled` path, the native
 #       `HavenBackgroundSessionHandler` reports supported==true and
-#       backgroundActivitySessionHeld==true (iOS 17+ runtime).
-#   P2  With the app OS-backgrounded, kind-445 publishes CONTINUE to reach
-#       the relay: >= 2 events created after the backgrounding instant,
-#       observed over a window sized to two full 72-168 s jitter intervals.
-#   P3  Flipping background sharing OFF while STILL backgrounded stops
-#       publishing (an event-id DIFF over a bounded settle window — never a
-#       bare count) and the native session reports disarmed.
+#       backgroundActivitySessionHeld==true (iOS 17+ runtime), AND the
+#       position stream that flip REBUILDS — the one carrying
+#       `allowBackgroundLocationUpdates: true` — delivers a fresh fix while
+#       the app is still foregrounded. iOS only lets a background-capable
+#       location session start while the app is in use, so that is the only
+#       moment it can be proven.
+#   P2a With the app OS-backgrounded, a per-circle publish tick driven
+#       through the production scheduler reaches the relay — the pipeline
+#       works from a backgrounded process, answerable within seconds.
+#   P2b With the app OS-backgrounded, the scheduler's OWN jittered timers
+#       keep publishing: >= 2 further events, over a window sized to two
+#       full 72-168 s jitter intervals. P2a passing and P2b failing means
+#       the OS stopped scheduling the process, not that publishing broke.
+#   P3  Flipping background sharing OFF while STILL backgrounded deactivates
+#       the per-circle scheduler in-process and stops publishing on the wire
+#       (an event-id DIFF over a bounded settle window — never a bare count),
+#       and the native session reports disarmed.
 #
 # # The host<->test handshake
 #
@@ -48,10 +58,16 @@
 #      claim: `UIBackgroundModes: location` plus the live CLLocationManager
 #      updates session the production GeolocatorLocationService creates with
 #      `allowsBackgroundLocationUpdates`. The simulator suspends a
-#      backgrounded app just like a device — CI run 32646436116 caught it
-#      doing so ~30 s in, back when the drive faked its location service away
-#      — and a suspended drive's `flutter test` isolate stops executing until
-#      the app is re-foregrounded.
+#      backgrounded app that lacks one, and did so in both prior runs of this
+#      lane: 32646436116 (~30 s in, the drive had faked its location service
+#      away) and 32661622879 (~36 s in — that run's sim.logarchive shows the
+#      background-capable subscription starting 0.43 s AFTER SpringBoard set
+#      `visiblity is no`, locationd answering `#Warning Denying process
+#      assertion`, and runningboardd `Suspending task` once the app's own
+#      FinishTask grace expired). The drive now establishes that session
+#      before signalling READY, and P1 fails if it did not. A suspended
+#      drive's `flutter test` isolate stops executing until the app is
+#      re-foregrounded.
 #   3. The drive bounded-polls its own lifecycle state for the REAL paused
 #      transition; its failure message names this script's background step,
 #      so a broken handshake is attributed from both sides.
@@ -90,6 +106,18 @@
 # survives a genuinely fired UIApplication background transition and keeps
 # kind-445 events reaching the relay. The physical-device checklist
 # (docs/M7_BACKGROUND_SHARING.md §6, item 0) remains the final proof.
+#
+# One boundary is not yet settled, and P2a/P2b exist to settle it. Apple
+# documents "the UIBackgroundModes key" as one of the features "not available
+# in Simulator" ("Testing in Simulator versus testing on hardware devices"),
+# and DTS advises against testing background execution there at all — while
+# run 32661622879's own sim.logarchive shows this simulator's locationd
+# creating a CLBackgroundActivitySession, holding a RunningBoard "Location
+# subscription" assertion for the app and delivering fixes on a 10 s cadence
+# throughout. Both prior failures are explained by the app's late session,
+# which is now fixed. If P2a passes and P2b still reports a suspension, the
+# policy is genuinely absent here and the continuity claim must move out of
+# CI to §6 item 0 — an OWNER decision, never a widened window.
 #
 # # Why the app is installed and granted BEFORE the drive
 #
@@ -190,9 +218,10 @@ readonly BG_LOG="/tmp/bg-publish-ios.log"
 # ~10 min worst case measured against B7's phases, so 20 min is ~2x.
 #
 # DISABLED starts at the backgrounding and is the sum of the drive phases
-# between the two: the paused-transition poll (<=180 s), P2's window (396 s),
-# its heartbeat drain (<=20 s) and the P3 baseline fetch (15 s) = 611 s.
-# 900 s is that plus half again.
+# between the two: the paused-transition poll (<=180 s), P2a's window (24 s)
+# and its heartbeat drain (<=20 s), P2b's window (396 s) and its heartbeat
+# drain (<=20 s), and the P3 baseline fetch (15 s) = 655 s. 900 s clears that
+# by ~37%.
 #
 # DISARM is NOT a "something went wrong" backstop — it is the timer that ends
 # P3, and every second of it comes from a constant. From DISABLED the app has
@@ -219,12 +248,16 @@ readonly MARKER_POLL_SECS="${HAVEN_BGP_MARKER_POLL_SECS:-5}"
 # The simulated-location drip: two fixes ~5 m apart (4.5e-5 deg of latitude),
 # alternated every DRIP_SECS for the whole run.
 #
-# CoreLocation does not keep a backgrounded app executing when it has nothing
-# to deliver to it — Apple states exactly that for the whole session family
-# (WWDC24 "What's new in location authorization": "Core Location does not
-# take measures to keep apps running continuously when it has nothing to
-# deliver to them"). A single `simctl location ... set` is ONE fix, so a
-# device that never moves again is a device with nothing to deliver.
+# Two jobs, both load-bearing. (1) The drive's P1 requires a FRESH fix from
+# the position stream the background-sharing flip rebuilds — that delivery is
+# the proof the background-capable CLLocationManager session is live, and a
+# `simctl location ... set` is a ONE-SHOT static fix, so without a moving
+# drip the rebuilt session may have nothing new to deliver and P1 times out
+# on a healthy app. (2) CoreLocation does not keep a backgrounded app
+# executing when it has nothing to deliver to it — Apple states exactly that
+# for the whole session family (WWDC24 "What's new in location
+# authorization": "Core Location does not take measures to keep apps running
+# continuously when it has nothing to deliver to them").
 #
 # 5 m is chosen from both ends: comfortably above the stream's 1 m
 # `distanceFilter` (so every step is a genuine delivery) and, because the two

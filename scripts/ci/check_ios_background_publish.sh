@@ -272,8 +272,48 @@ for sym in 'locationServiceProvider.override' 'FakeLocationService'; do
   fi
 done
 
+# ---------------------------------------------------------------------------
+# 12. The bg-publish drive must PUMP after enabling background sharing and
+#     require a fresh fix from the rebuilt locationStreamProvider, BEFORE it
+#     signals the host to background the app.
+#
+#     Enabling the toggle only tears the foreground CLLocationManager session
+#     down synchronously (Riverpod runs the provider's onDispose inside
+#     `invalidateSelf`); the rebuild that re-creates it with
+#     `allowBackgroundLocationUpdates: true` is deferred to `markNeedsBuild`,
+#     and IntegrationTestWidgetsFlutterBinding's inherited `fadePointers`
+#     frame policy draws no frame until the test pumps. In CI run
+#     32661622879 that rebuild therefore landed 0.43 s AFTER SpringBoard set
+#     `visiblity is no`; locationd answered `#Warning Denying process
+#     assertion`, dropped its "Location subscription" assertion 2 s later,
+#     and runningboardd suspended the app — while every static check here
+#     still passed. A background-capable session may only be established
+#     while the app is in use, so this ordering is the invariant, and only a
+#     pump-then-assert before the READY marker establishes it.
+# ---------------------------------------------------------------------------
+drive_view="$(code_view "$BG_PUBLISH_DRIVE")"
+enable_line="$(grep -n 'setEnabled(enabled: true)' <<<"$drive_view" | head -n1 | cut -d: -f1)"
+ready_line="$(grep -n 'debugPrint(kReadyForBackgroundMarker)' <<<"$drive_view" | head -n1 | cut -d: -f1)"
+if [[ -z "$enable_line" || -z "$ready_line" ]]; then
+  fail "ios_bg_publish_test.dart lost its setEnabled(enabled: true) call or its kReadyForBackgroundMarker print — P1 and the host handshake are the lane's spine"
+elif (( enable_line >= ready_line )); then
+  fail "ios_bg_publish_test.dart signals READY before enabling background sharing (enable line ${enable_line}, READY line ${ready_line}) — the app would be backgrounded with the toggle still off"
+else
+  # Only the window between the enable and the READY signal counts: a pump
+  # before the enable predates the rebuild, and one after READY may run
+  # against a paused app, where frame production is off and the pump
+  # deadlocks. Both must therefore live strictly inside this slice.
+  arming_slice="$(sed -n "$((enable_line + 1)),$((ready_line - 1))p" <<<"$drive_view")"
+  grep -qF 'await tester.pump()' <<<"$arming_slice" ||
+    fail "ios_bg_publish_test.dart no longer pumps between enabling background sharing and signalling READY — the locationStreamProvider rebuild that creates the background-capable CLLocationManager session is deferred to markNeedsBuild, and this binding's fadePointers frame policy runs no build without a pump (CI run 32661622879: the session started 0.43 s after the app lost visibility, locationd denied the process assertion, runningboardd suspended the app)"
+  grep -qE 'pumpUntilCondition\(' <<<"$arming_slice" ||
+    fail "ios_bg_publish_test.dart no longer WAITS between enabling background sharing and signalling READY — a bare pump schedules the rebuild but proves nothing about the session it creates"
+  grep -qF 'locationStreamProvider' <<<"$arming_slice" ||
+    fail "ios_bg_publish_test.dart no longer asserts on locationStreamProvider between enabling background sharing and signalling READY — a fresh fix from the REBUILT stream is the only in-process proof that the background-capable session is live, and iOS only lets such a session start while the app is in use"
+fi
+
 if [[ "$FAILED" -ne 0 ]]; then
   echo "iOS background publish guard FAILED — see failures above." >&2
   exit 1
 fi
-echo "OK: iOS background publish invariants hold (plist mode, single stream, toggle-keyed AppleSettings, C4 watcher, presence-only logs, CoreLocation session arming, unfaked bg-publish drive)."
+echo "OK: iOS background publish invariants hold (plist mode, single stream, toggle-keyed AppleSettings, C4 watcher, presence-only logs, CoreLocation session arming, unfaked bg-publish drive, background-capable stream established before the drive backgrounds the app)."

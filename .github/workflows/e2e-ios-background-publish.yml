@@ -17,20 +17,31 @@
 #
 # What the lane proves:
 #   P1  Enabling background sharing through the production setEnabled path
-#       arms the native HavenBackgroundSessionHandler: status reports
-#       supported==true && backgroundActivitySessionHeld==true (iOS 17+ sim),
-#       under a real When-In-Use grant (`simctl privacy grant location`).
-#   P2  With the app OS-backgrounded, kind-445 publishes CONTINUE to reach
-#       the relay: >= 2 events after the backgrounding instant, over a window
-#       sized to two full 72-168 s per-circle jitter intervals plus slack.
-#   P3  Flipping background sharing OFF while still OS-backgrounded stops
-#       publishing (an event-id DIFF over a bounded settle window, never a
-#       bare count) and the native session reports disarmed. The disable
-#       withdraws the app's background-execution claim, so iOS may suspend
-#       it for that window: the drive signals the disable and the wrapper
-#       times the window out and re-foregrounds Haven itself, early enough
-#       that a real leak has not yet aged past its 228 s kind-445
-#       expiration.
+#       arms the native HavenBackgroundSessionHandler (status reports
+#       supported==true && backgroundActivitySessionHeld==true on an iOS 17+
+#       sim, under a real When-In-Use grant from `simctl privacy grant
+#       location`) AND the position stream that flip rebuilds — the one
+#       carrying allowBackgroundLocationUpdates: true — delivers a fresh fix
+#       while the app is still foregrounded, which is the only moment iOS
+#       lets such a session be established.
+#   P2a With the app OS-backgrounded, a per-circle tick driven through the
+#       production scheduler reaches the relay: the publish pipeline works
+#       from a backgrounded process, answered within seconds.
+#   P2b With the app OS-backgrounded, the scheduler's own jittered timers
+#       keep publishing: >= 2 further kind-445 events over a window sized to
+#       two full 72-168 s per-circle intervals plus slack. P2a green with
+#       P2b red means the OS stopped scheduling the process — not that
+#       publishing broke.
+#   P3  Flipping background sharing OFF while still OS-backgrounded
+#       deactivates the per-circle scheduler in-process AND stops publishing
+#       on the wire (an event-id DIFF over a bounded settle window, never a
+#       bare count), and the native session reports disarmed. The in-process
+#       half is load-bearing: the disable withdraws the app's
+#       background-execution claim, so iOS may suspend it for the whole
+#       settle window, and a suspended app is silent whether or not the
+#       disable worked. The drive signals the disable and the wrapper times
+#       the window out and re-foregrounds Haven itself, early enough that a
+#       real leak has not yet aged past its 228 s kind-445 expiration.
 #
 # The wrapper's completion gate requires all four terminal proof markers, so
 # a drive that exited 0 over a skipped or early-returning body fails the lane
@@ -46,6 +57,19 @@
 # UIApplication background transition. B4 still owns coordinate fidelity;
 # this lane reads no coordinates. The physical-device checklist
 # (docs/M7_BACKGROUND_SHARING.md §6, item 0) remains the final proof.
+#
+# One boundary is still open and P2a/P2b exist to close it. Apple lists "the
+# UIBackgroundModes key" among the features "not available in Simulator"
+# ("Testing in Simulator versus testing on hardware devices"), which would
+# make P2b unprovable here — yet run 32661622879's own sim.logarchive shows
+# this simulator's locationd creating a CLBackgroundActivitySession, holding a
+# RunningBoard "Location subscription" assertion for the app and delivering
+# fixes throughout, and both prior failures are fully explained by the app
+# establishing its background-capable session 0.43 s too late (now fixed and
+# pinned by check_ios_background_publish.sh check 12). If P2a passes and P2b
+# still reports a suspension, the policy really is absent here and the
+# continuity claim has to move out of CI to §6 item 0 — an OWNER decision.
+# Never a widened window.
 #
 # # Architecture mirrors e2e-ios-real-gps.yml / e2e-ios-auth-tier.yml
 #

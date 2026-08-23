@@ -93,12 +93,47 @@
 ///   that is a FINDING rather than a pass. It needs the emulator GPS to
 ///   MOVE: re-issuing `adb emu geo fix` at one point is filtered out by the
 ///   stream's 1 m distance filter, and the cache then ages out by itself;
-/// * the app proves a real one-shot read ANSWERS before it prints the arming
-///   cue, so the refusals it then counts are attributable to the denial and
-///   not to a read path that was already broken. That proof belongs before
-///   the cue and nowhere else — the shell denies the app-op within a second
-///   of reading it, so a loop that waits for a working read AFTER the cue
-///   can only ever be satisfied by winning a race against the shell.
+/// * the app proves that `getCurrentLocation()` — the SAME call that must
+///   refuse once access is withdrawn — ANSWERS from that warm fix before it
+///   prints the arming cue (`readMs`). Same call, same cache state, opposite
+///   outcomes: that is what makes the refusal attributable to the denial
+///   rather than to a read path that was already broken.
+///
+/// ## The discriminator is the STREAM, never a fresh read
+///
+/// `getCurrentLocationFresh()` skips the cache by contract, so it can only
+/// ever exercise the one-shot `getCurrentPosition` — and on the CI emulator
+/// that path refuses in BOTH states, which makes it no oracle at all. CI run
+/// 32661622879 armed with the permission GRANTED, the app-op untouched and
+/// the harness moving the emulator GPS every 5 s, and its arming wait expired
+/// having logged "Failed to get fresh location: TimeoutException" twice and
+/// answered never. Refusals that happen with access intact discriminate
+/// nothing once access is withdrawn, so that run's `APPOPS_OBSERVED` counted
+/// refusals which would have happened anyway.
+///
+/// What DOES vary is the position stream. CI run 32646436116 armed at
+/// `streamAgeMs=129` — a fix 129 ms old, with the harness dripping — and
+/// reported `streamAgeMs=165228` at its decisive read: its last fix landed
+/// 29.2 s after the shell's read-back and nothing followed for the remaining
+/// 165 s, with the emulator point still moving. AOSP explains it,
+/// which is why it is a contract and not a coincidence:
+/// `LocationProviderManager.Registration.acceptLocationChange` bails on
+/// `noteOpNoThrow`, so a denied app-op stops deliveries to a live
+/// registration. This phase therefore watches for that silence — the one
+/// observation it can make WITHOUT calling the platform at all, so unlike a
+/// one-shot probe (which registers a second location request on the same
+/// provider) it cannot change what it is measuring.
+///
+/// One asymmetry to know before reading a red arming wait as a product
+/// defect: geolocator's `LocationManagerClient.onLocationChanged` forwards a
+/// fix only when `isBetterLocation` says so, which for equal accuracy means
+/// `Location.getTime()` must strictly increase. A one-shot's client starts
+/// with no best location and therefore always takes its first fix, while the
+/// stream's client keeps one for the life of the subscription — so an
+/// emulator whose injected fixes stop advancing their timestamp starves the
+/// stream while one-shots still answer. That direction fails the arming wait
+/// (a named finding: nothing was warm, so there was nothing to withhold),
+/// never the assertions after it.
 ///
 /// ## What ACT 2 proves that no unit test can
 ///
@@ -179,24 +214,31 @@ const String kPhaseMarker = '[b5] PHASE';
 /// `n=0` is the failing case and contains the marker substring.
 const String kBaselinePublishedMarker = '[b5] BASELINE_PUBLISHED';
 
-/// ACT 1: the shell's cue to deny the location APP-OP, carrying the two
+/// ACT 1: the shell's cue to deny the location APP-OP, carrying the three
 /// facts that keep the window after it from passing vacuously —
 /// `streamAgeMs=<ms>` (how old the newest stream fix is, i.e. how warm the
-/// cache being withheld actually is) and `eligible=<n>` (how many circles a
-/// still-working publisher would reach). Both PARSED.
+/// cache being withheld actually is), `eligible=<n>` (how many circles a
+/// still-working publisher would reach) and `readMs=<ms>` (how long
+/// `getCurrentLocation()` took to ANSWER from that fix, with access intact —
+/// which the shell also holds under `APPOPS_MAX_ARMING_READ_MS`, because a
+/// read that waited a whole GPS drip was served by the one-shot rather than
+/// by the cache this phase is about). All three PARSED; each is `-1` when the
+/// arming wait never established it.
 const String kAppOpsArmedMarker = '[b5] APPOPS_ARMED';
 
-/// ACT 1, with `after=<seconds>`: the app observed, from inside a LIVE
-/// session, that the platform had stopped serving location.
+/// ACT 1, with `after=<seconds> silenceMs=<ms>`: the app observed, from
+/// inside a LIVE session, that the platform had stopped serving it location
+/// — its position stream delivered nothing for `silenceMs`, which is PARSED
+/// and must reach [_appOpsStreamSilence].
 ///
 /// Its absence IS a defect here, unlike [kRevokeObservedMarker]: an app-op
 /// denial does not kill the process, so an app that never notices is an app
 /// the denial never reached.
 const String kAppOpsObservedMarker = '[b5] APPOPS_OBSERVED';
 
-/// ACT 1: real location reads never refused twice in a row for the whole
-/// observation window, having answered at arming. The app-op `set` did not
-/// take, or took and Android ignored it.
+/// ACT 1: the position stream never went [_appOpsStreamSilence] without a
+/// fix for the whole observation window, having been delivering at arming.
+/// The app-op `set` did not take, or took and Android ignored it.
 const String kAppOpsNotObservedMarker = '[b5] APPOPS_NOT_OBSERVED';
 
 /// ACT 1, with `type=<runtimeType> streamAgeMs=<ms>`: the production
@@ -288,68 +330,101 @@ const String kSequenceCompleteMarker = '[b5] SEQUENCE_COMPLETE';
 /// The cache is what the phase is about, so it has to be warm when access is
 /// withdrawn. This bounds its age at ARMING; [kAppOpsGpsRefusedMarker]
 /// carries the age at the decisive read, which is the one that has to be
-/// inside `kStreamPositionMaxAge`.
-const Duration _maxArmingStreamAge = Duration(seconds: 60);
+/// inside [kStreamPositionMaxAge].
+///
+/// MUST STAY BELOW [_appOpsStreamSilence], and that is the whole reason it
+/// is 10 s rather than the 60 s it shipped as. The observation asserts
+/// [_appOpsStreamSilence] of silence lying after the cue — but a stream that
+/// had ALREADY stopped delivering before the cue satisfies that on its own,
+/// so the observation is only evidence of a withdrawal if arming established
+/// that the stream was still DELIVERING. At 60 s against a 30 s silence it
+/// did not: a run armed at `streamAgeMs=45000` reached `silenceMs=75000`
+/// thirty seconds later with the app-op having changed nothing. Two
+/// `B5_GEO_REISSUE_SECS` drips (5 s each, one of them missed) is what a
+/// delivering stream can actually show, and being under the silence
+/// threshold is what makes the two gates mean different things.
+///
+/// It also bounds emulator fix-timestamp skew, which is a second route to
+/// the same false positive: the age compares a GPS fix time to
+/// `DateTime.now()`, so a constant skew larger than this would satisfy
+/// arming and read as instant "silence" while the stream ran normally. At
+/// 10 s such a run fails ARMING instead, which is a finding, not a pass.
+///
+/// COUPLED to [_appOpsObservationTimeout] in the other direction: the
+/// decisive read happens at most that long plus one [_appOpsPollInterval]
+/// after the cue and the age carries straight through, so
+/// `this + _appOpsObservationTimeout + _appOpsPollInterval` (10 + 93 + 3)
+/// must stay under [kStreamPositionMaxAge] (168 s) or a healthy run trips
+/// the probe's own vacuity gate.
+const Duration _maxArmingStreamAge = Duration(seconds: 10);
 
-/// Spacing between ACT 1's app-op fresh-read probes, on both sides of the
-/// arming cue. Named because both bounds below are derived from it.
+/// Spacing between ACT 1's app-op polls, on both sides of the arming cue.
+/// Named because both bounds below are derived from it.
 const Duration _appOpsPollInterval = Duration(seconds: 3);
 
-/// Consecutive refused one-shot reads before ACT 1 calls the app-op denial
-/// observed.
+/// How long the position stream must deliver NOTHING before ACT 1 calls the
+/// app-op denial observed.
 ///
-/// One refusal could be a transient emulator GPS miss, and treating that as
-/// the denial would open the absence window while access was still granted —
-/// a false RED, since the app would legitimately publish. The other half of
-/// that discrimination — that this read path ANSWERS when access is intact —
-/// is established before the cue rather than inside this loop; see the
-/// arming wait for why it cannot be established after it.
-const int _appOpsRefusalConfirmations = 2;
+/// THE DISCRIMINATOR, and the only signal that provably varies with the
+/// app-op on this emulator — see the class doc for the two CI runs that
+/// settled it. The harness moves the emulator point every
+/// `B5_GEO_REISSUE_SECS` (5 s) by ~3.3 m, above the stream's 1 m distance
+/// filter, and the stream's own `intervalDuration` is 1 s, so a PERMITTED
+/// stream cannot be quiet across six of those moves.
+/// [kOneShotLocationTimeout] is the app's own bound on "the platform has not
+/// answered", which is exactly the claim being made here; anything shorter
+/// would read CI scheduling jitter as a withdrawal.
+const Duration _appOpsStreamSilence = kOneShotLocationTimeout;
 
-/// Bound on ONE fresh-read probe in ACT 1's app-op phase.
+/// Bound on ONE arming read in ACT 1's app-op phase.
 ///
 /// Deliberately not [_gpsProbeTimeout]: that bounds ACT 2's probe against a
 /// system permission dialog, a hazard this phase does not have — the
 /// permission is GRANTED throughout, so `_ensureAccessOrThrow` never
-/// prompts. Here the only thing that can delay a probe is the platform
-/// delivering nothing under the denied app-op, which geolocator ends at its
-/// own `timeLimit` ([kOneShotLocationTimeout]); the slack covers the three
-/// in-memory platform-channel reads the access gate makes around it.
+/// prompts. The arming read is issued only once the position stream is warm,
+/// so it is a cache hit and returns at once; the budget covers the case
+/// where the service dropped its own copy of a fix `locationStreamProvider`
+/// still holds, which sends the same call down the one-shot path
+/// ([kOneShotLocationTimeout]), plus the three in-memory platform-channel
+/// reads the access gate makes around it.
 final Duration _appOpsProbeTimeout =
     kOneShotLocationTimeout + const Duration(seconds: 5);
 
 /// How long ACT 1 waits for the two facts the app-op phase rests on: a warm
-/// cache to withhold, and a fresh-read path that demonstrably answers.
+/// stream fix to withhold, and a production publish-path read that
+/// demonstrably answers from it.
 ///
-/// Sized to survive one transient emulator GPS miss, which costs a whole
-/// [_appOpsProbeTimeout]. A wait that still expires is a read path that was
-/// broken BEFORE anything was withdrawn, which is a finding rather than a
-/// flake — and this bounds the granted state, so its width can never mask a
-/// defect the way an absence window's could.
+/// Sized to survive one transient miss, which costs a whole
+/// [_appOpsProbeTimeout]. A wait that still expires is a finding rather than
+/// a flake — either the emulator GPS never reached the app, so there was
+/// nothing to withhold, or the read was broken BEFORE anything was withdrawn
+/// — and this bounds the GRANTED state, so its width can never mask a defect
+/// the way an absence window's could.
 final Duration _appOpsArmTimeout =
     (_appOpsProbeTimeout + _appOpsPollInterval) * 2;
 
 /// How long ACT 1 waits for the app-op denial to become visible to the app.
 ///
 /// DERIVED, never chosen — the previous hand-picked 150 s is what cost CI
-/// run 32646436116, because nothing tied it to what a refusal actually
-/// costs. A denied app-op raises no error: AOSP's
-/// `LocationProviderManager.Registration.acceptLocationChange` bails on
-/// `noteOpNoThrow` and simply stops delivering, so every refused probe runs
-/// out the full [_appOpsProbeTimeout] instead of returning promptly. The
-/// bound therefore has to hold [_appOpsRefusalConfirmations] of them plus
-/// the one probe that may still be in flight — and still succeed — when the
-/// denial lands, with the poll interval between each.
+/// run 32646436116, because nothing tied it to what the observation actually
+/// costs. Two [_appOpsStreamSilence] terms are unavoidable: the platform does
+/// not stop delivering the instant the mode is written (run 32646436116
+/// delivered its last fix 29.2 s after the shell's read-back, which is that
+/// bound to within a second), and then the silence itself has to accrue. The
+/// third is the same "survive one transient miss" slack [_appOpsArmTimeout]
+/// carries, since 29.2 s is a single sample and nothing pins the latency from
+/// above. [_appOpsPollInterval] is the granularity on top.
 final Duration _appOpsObservationTimeout =
-    (_appOpsProbeTimeout + _appOpsPollInterval) *
-        (_appOpsRefusalConfirmations + 1);
+    _appOpsStreamSilence * 3 + _appOpsPollInterval;
 
 /// ACT 1's app-op absence window.
 ///
 /// Deliberately shorter than [kStreamPositionMaxAge], unlike every other
-/// window in this file, because it is not the discriminator: the one-shot
-/// probe above is, and it runs while the cache is still WARM, where a
-/// regression fails on its FIRST call rather than after 168 s. What this
+/// window in this file, because it is not what discriminates: the decisive
+/// `getCurrentLocation()` above is, and it runs while the cache is still
+/// WARM, where a regression fails on its FIRST call rather than after 168 s.
+/// (What discriminates the DENIAL, one step earlier, is
+/// [_appOpsStreamSilence].) What this
 /// window adds is repetition — several production publish cycles, all
 /// reaching zero circles. The claim that needs a full scheduler interval
 /// behind it (nothing publishes in the background either) is the relay-side
@@ -607,6 +682,11 @@ void main() {
 
       /// The age of the newest fix the app's own position stream delivered.
       ///
+      /// The phase's discriminator (class doc) as well as its anti-vacuity
+      /// reading: with the harness moving the emulator point every 5 s this
+      /// stays small while access is granted and grows without bound once the
+      /// app-op is denied, and reading it costs no platform call at all.
+      ///
       /// `getLocationStream()` tees every emission into the service's cache
       /// and judges that cache by the same GPS fix time, so this bounds the
       /// cache's age from ABOVE — measurable from outside the service, which
@@ -663,27 +743,11 @@ void main() {
         // See the class doc; this is the only arrangement that can observe
         // the stale-fix cache, and `pm revoke` structurally cannot.
         // -------------------------------------------------------------------
-        /// One REAL one-shot read, bounded, reported as worked / did not.
-        ///
-        /// `getCurrentLocationFresh()` never consults the cache, so polling
-        /// it cannot itself produce the outcome the window below asserts —
-        /// which is the whole reason the app watches this rather than the
-        /// publish path.
-        Future<bool> freshReadWorks() async {
-          try {
-            await locationService
-                .getCurrentLocationFresh()
-                .timeout(_appOpsProbeTimeout);
-            return true;
-          } on Object catch (_) {
-            return false;
-          }
-        }
-
         // ARMING. The phase rests on two facts, and BOTH are facts about the
-        // GRANTED state, so both are established before the cue: a stream fix
-        // warm enough that there is something to withhold, and a fresh-read
-        // path that demonstrably ANSWERS, so a refusal after the denial is
+        // GRANTED state, so both are established before the cue: the position
+        // stream is DELIVERING (there is a warm fix to withhold, and a signal
+        // whose silence afterwards means something), and the production
+        // publish-path read ANSWERS from it, so a refusal after the denial is
         // attributable to the denial rather than to a path that was already
         // broken.
         //
@@ -694,37 +758,77 @@ void main() {
         // (`run-b5-permission-revocation.sh` Phase 4a), so the loop's very
         // first probe already refused, the flag never became true, and the
         // lane reported `APPOPS_NOT_OBSERVED` — the exact inverse of what had
-        // happened — against an app that had refused all five of its reads.
-        // Ordered read-then-age so the age printed below is measured after
-        // the probe, not up to a probe's duration before it.
+        // happened.
+        //
+        // Ordered age-then-read, and the order is load-bearing: a
+        // `getCurrentLocation()` issued while the stream is COLD goes down
+        // the one-shot path, which refuses on this emulator whether or not
+        // access was withdrawn (class doc). Gating the read on a warm stream
+        // — and its COST on `APPOPS_MAX_ARMING_READ_MS` in the shell — keeps
+        // the arming proof and the post-denial refusal on the SAME door: the
+        // cache read behind `_platformStillPermitsLocation`, the only one an
+        // app-op can move.
         var armingStreamAgeMs = -1;
+        var armingReadMs = -1;
         try {
           await waitUntilAsync(
             () async {
-              if (!await freshReadWorks()) return false;
+              final ageBefore = newestStreamFixAge();
+              if (ageBefore == null || ageBefore > _maxArmingStreamAge) {
+                return false;
+              }
+              final readAt = DateTime.now();
+              var answered = true;
+              try {
+                await locationService
+                    .getCurrentLocation()
+                    .timeout(_appOpsProbeTimeout);
+              } on Object catch (_) {
+                answered = false;
+              }
+              // Re-sampled AFTER the read, because the cue below is printed
+              // from HERE: reporting the age from before it would understate
+              // it by however long the read took, and the probe-age budget
+              // downstream is computed against the age AT THE CUE.
+              //
+              // It does NOT screen out an empty service cache: the harness
+              // keeps dripping throughout, so this reads ~one drip old
+              // whether the read cost 8 ms or a whole one-shot. Two other
+              // things do. `answered` rejects the one-shot that TIMES OUT,
+              // which is this emulator's usual behaviour; and `readMs` below
+              // is gated by the shell against
+              // `APPOPS_MAX_ARMING_READ_MS`, because a read that waited a
+              // whole GPS drip went to the one-shot, and it goes there only
+              // when the cached fix was empty. Recorded either way, so a warm
+              // stream whose read refused prints `streamAgeMs=<n> readMs=-1`,
+              // a different diagnosis from a stream that never delivered.
               final age = newestStreamFixAge();
-              if (age == null || age > _maxArmingStreamAge) return false;
-              armingStreamAgeMs = age.inMilliseconds;
+              armingStreamAgeMs = (age ?? ageBefore).inMilliseconds;
+              if (!answered || age == null || age > _maxArmingStreamAge) {
+                return false;
+              }
+              armingReadMs = DateTime.now().difference(readAt).inMilliseconds;
               return true;
             },
-            description: 'a real one-shot read answered and the position '
-                'stream held a fix newer than '
-                '${_maxArmingStreamAge.inSeconds}s, so the read path this '
-                'phase watches works and the cache it is about is warm',
+            description: 'the position stream held a fix newer than '
+                '${_maxArmingStreamAge.inSeconds}s and getCurrentLocation() '
+                'answered from it, so the cache this phase is about is warm '
+                'and the read that must refuse after the denial works before '
+                'it',
             timeout: _appOpsArmTimeout,
             pollInterval: _appOpsPollInterval,
           );
         } on Object catch (e) {
           failures.add(
             'the app-op phase could not be armed within '
-            '${_appOpsArmTimeout.inSeconds}s (${e.runtimeType}): either real '
-            'one-shot reads were already failing with the permission '
-            'GRANTED — in which case a refusal after the denial proves '
-            'nothing — or no stream fix newer than '
-            '${_maxArmingStreamAge.inSeconds}s existed, so the cache had '
-            'already aged out and refusing to serve it proves nothing '
-            'either. The emulator GPS has to MOVE: `adb emu geo fix` '
-            "re-issued at one point is filtered out by the stream's 1 m "
+            '${_appOpsArmTimeout.inSeconds}s (${e.runtimeType}): either no '
+            'stream fix newer than ${_maxArmingStreamAge.inSeconds}s ever '
+            'reached the app — so the cache had already aged out and '
+            'refusing to serve it proves nothing — or getCurrentLocation() '
+            'would not answer from one with the permission GRANTED, in which '
+            'case a refusal after the denial proves nothing either. The '
+            'emulator GPS has to reach the app AND to MOVE: `adb emu geo '
+            "fix` re-issued at one point is filtered out by the stream's 1 m "
             'distance filter.',
           );
         }
@@ -741,48 +845,61 @@ void main() {
         // The shell denies the app-op when it sees this.
         debugPrint(
           '$kAppOpsArmedMarker streamAgeMs=$armingStreamAgeMs '
-          'eligible=$appOpsEligible',
+          'eligible=$appOpsEligible readMs=$armingReadMs',
         );
 
-        // The app cannot READ the app-op — that is the entire premise — so
-        // it waits for the one consequence it can see. A single refusal could
-        // still be a transient emulator GPS miss, hence the run of
-        // [_appOpsRefusalConfirmations]; the "reads work when access is
-        // intact" half of that discrimination was settled at arming.
+        // The app cannot READ the app-op — that is the entire premise — so it
+        // waits for the one consequence it can see WITHOUT calling the
+        // platform: its position stream stops delivering. The harness keeps
+        // moving the emulator point throughout, so a permitted stream cannot
+        // be quiet for [_appOpsStreamSilence]. Reading an in-memory
+        // AsyncValue is also a PASSIVE observation, where a one-shot probe is
+        // not: geolocator's `LocationManagerClient.startPositionUpdates`
+        // registers a second location request on the same provider, so a loop
+        // built on one changes the thing it is measuring.
         final armedAt = DateTime.now();
-        var consecutiveRefusals = 0;
-        var appOpsObserved = false;
+        var observedSilenceMs = -1;
         try {
           await waitUntilAsync(
             () async {
-              if (await freshReadWorks()) {
-                consecutiveRefusals = 0;
+              final age = newestStreamFixAge();
+              if (age == null || age < _appOpsStreamSilence) return false;
+              // The silent window must lie ENTIRELY after the cue, and `age`
+              // alone does not say that: arming admits a fix up to
+              // [_maxArmingStreamAge] old, so a stream that had already gone
+              // quiet BEFORE the denial would otherwise satisfy the line
+              // above within seconds of arming and attribute pre-existing
+              // staleness to the app-op. With both, [now - silence, now]
+              // holds no fix and starts at or after `armedAt`.
+              if (DateTime.now().difference(armedAt) < _appOpsStreamSilence) {
                 return false;
               }
-              consecutiveRefusals += 1;
-              return consecutiveRefusals >= _appOpsRefusalConfirmations;
+              observedSilenceMs = age.inMilliseconds;
+              return true;
             },
-            description: 'real one-shot location reads stopped working after '
-                'the shell denied the location app-op',
+            description: 'the position stream delivered no fix for a full '
+                '${_appOpsStreamSilence.inSeconds}s lying after the shell '
+                'denied the location app-op',
             timeout: _appOpsObservationTimeout,
             pollInterval: _appOpsPollInterval,
           );
-          appOpsObserved = true;
         } on Object catch (_) {
           // Reported below. This is the discrimination gate, not an error.
         }
-        if (appOpsObserved) {
+        if (observedSilenceMs >= 0) {
           debugPrint(
             '$kAppOpsObservedMarker '
-            'after=${DateTime.now().difference(armedAt).inSeconds}',
+            'after=${DateTime.now().difference(armedAt).inSeconds} '
+            'silenceMs=$observedSilenceMs',
           );
         } else {
           debugPrint(kAppOpsNotObservedMarker);
           failures.add(
-            'real location reads never refused $_appOpsRefusalConfirmations '
-            'times in a row in the ${_appOpsObservationTimeout.inSeconds}s '
-            'after the shell denied the location app-op — and they answered '
-            'at arming, so the path was not already broken. Nothing below is '
+            'the position stream never went '
+            '${_appOpsStreamSilence.inSeconds}s without a fix in the '
+            '${_appOpsObservationTimeout.inSeconds}s after the shell denied '
+            'the location app-op — and it was delivering at arming, so the '
+            'signal exists and was simply never withdrawn. Nothing below is '
             'an observation of an app that lost access. The shell read-back '
             'separates the two causes: an app-op that did not change at all, '
             'or one that changed and had no effect',

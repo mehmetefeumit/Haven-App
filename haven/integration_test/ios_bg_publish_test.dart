@@ -1,9 +1,16 @@
 /// iOS background-publish drive target — proves, under a REAL OS-level
 /// background transition, that (P1) the native CoreLocation background
-/// session handler arms when background sharing is enabled, (P2) kind-445
-/// publishes keep reaching the relay while the app is OS-backgrounded, and
-/// (P3) flipping background sharing OFF while still backgrounded stops
-/// publishing and disarms the session.
+/// session handler arms AND the background-capable position stream goes live
+/// while still foregrounded, (P2a) the production publish pipeline still
+/// reaches the relay from a process iOS has genuinely backgrounded, (P2b)
+/// the per-circle scheduler's own timers keep kind-445 publishes reaching the
+/// relay while backgrounded, and (P3) flipping background sharing OFF while
+/// still backgrounded stops publishing and disarms the session.
+///
+/// P2a and P2b are separate on purpose: they used to be one assertion, and a
+/// process frozen by the OS is indistinguishable from a broken pipeline when
+/// only the second is measured (CI runs 32646436116 and 32661622879 both
+/// reported "the app stopped publishing" for a process that was not running).
 ///
 /// ## What "REAL" means here — and why this lane exists at all
 ///
@@ -20,39 +27,66 @@
 /// `UIApplicationDidEnterBackground` and the engine dispatches the paused
 /// state through the same channel a production backgrounding uses.
 ///
-/// ## What keeps this drive EXECUTING while backgrounded — never the simulator
+/// ## What keeps this drive EXECUTING while backgrounded — and the defect
+/// that stopped it twice
 ///
-/// The simulator suspends a backgrounded app just as a device does. CI run
-/// 32646436116 proved it: the drive's Dart clock advanced 20 s while 25
-/// minutes of wall clock passed, and every overdue timer fired in one burst
-/// the moment the host re-foregrounded the app. The oracle below runs INSIDE
-/// the app it measures, so a suspension reads as "zero publishes" from a
-/// frozen isolate — indistinguishable, without [_suspensionSlack], from the
-/// regression P2 exists to catch.
-///
-/// What keeps the process executing is the app's own production background
-/// claim: `UIBackgroundModes: location` plus a LIVE CLLocationManager updates
+/// The simulator suspends a backgrounded app just as a device does. What
+/// keeps the process executing is the app's own production background claim:
+/// `UIBackgroundModes: location` plus a LIVE CLLocationManager updates
 /// session created with `allowsBackgroundLocationUpdates` — the contract
 /// `HavenBackgroundSessionHandler.swift`'s "Purpose" names, and which the
 /// armed `CLBackgroundActivitySession` supplements rather than replaces (that
 /// session extends AUTHORIZATION, it is not an execution assertion). This
 /// target therefore overrides NOTHING about location and runs the production
-/// `GeolocatorLocationService`: a `locationServiceProvider` override would
-/// fake away the very mechanism P2 measures, leaving iOS free to suspend the
-/// app ~30 s into the background — which is exactly what run 32646436116 did.
-/// `scripts/ci/check_ios_background_publish.sh` pins the absence of that
-/// override.
+/// `GeolocatorLocationService`;
+/// `scripts/ci/check_ios_background_publish.sh` check 11 pins the absence of
+/// a `locationServiceProvider` override.
+///
+/// Both CI runs of this lane were suspended ~30 s in, and the simulator's own
+/// unified log (run 32661622879's `sim.logarchive`) says why — the app had no
+/// properly established background session at the transition:
+///
+///   * `20:03:28.804` the toggle flip tears the FOREGROUND subscription down
+///     (`LocationSubcription #pwrlog client unsubscribing`) — Riverpod runs
+///     `locationStreamProvider`'s onDispose synchronously inside
+///     `invalidateSelf`, and defers the REBUILD to `markNeedsBuild`.
+///   * eight seconds of NO location subscription at all, because under this
+///     binding's frame policy that rebuild waits for a pump nobody made.
+///   * `20:03:36.433` SpringBoard: `visiblity is no`.
+///   * `20:03:36.860` — 0.43 s LATE — `setAllowsBackgroundLocationUpdates:
+///     allows:1`, and the replacement subscription starts.
+///   * `20:03:36.687`-`.862` locationd: `#Warning Denying process assertion`
+///     ×10, and `20:03:38.812` it invalidates the `"Location subscription"`
+///     RunningBoard assertion it had been holding on this app.
+///   * `20:04:12.273` runningboardd: `Suspending task`, once the app's own
+///     `FinishTask` grace expired.
+///
+/// A background-capable session may only be established while the app is in
+/// use; this one was established 0.43 s after it stopped being in use. P1
+/// below now pumps and then requires a fresh fix from the REBUILT stream, so
+/// the session is live and delivering well before the READY marker, and a
+/// deferral like that fails P1 loudly instead of being discovered from a
+/// system log.
 ///
 /// ## Honest ceiling — what this does NOT prove
 ///
 /// A simulator has no jetsam, no Significant-Location-Change relaunch and no
 /// `BGTaskScheduler`, so a background-execution bug that only those surface
-/// cannot show up here. What this lane proves is that the production
-/// background stack — plist mode, `AppleSettings`, the native session
-/// handler, the Dart publish pipeline — survives a genuinely fired
-/// `applicationDidEnterBackground` and keeps kind-445 events reaching the
-/// relay. The physical-device checklist (`docs/M7_BACKGROUND_SHARING.md` §6,
-/// item 0) remains the final proof.
+/// cannot show up here. Apple additionally documents the `UIBackgroundModes`
+/// key as "not available in Simulator" ("Testing in Simulator versus testing
+/// on hardware devices"), and DTS advises against testing background
+/// execution there at all — yet that same log shows this simulator's
+/// locationd creating a `CLBackgroundActivitySession`, holding a RunningBoard
+/// assertion for a location client, and delivering fixes on a 10 s cadence
+/// for the whole 1109 s suspension, so the machinery is plainly present. If
+/// P2 still reports a suspension after the P1 fix above, that is the
+/// evidence that the policy is NOT implemented here and the continuity claim
+/// has to move out of CI entirely — do not respond by widening P2's window.
+/// What this lane proves is that the production background stack — plist
+/// mode, `AppleSettings`, the native session handler, the Dart publish
+/// pipeline — survives a genuinely fired `applicationDidEnterBackground` and
+/// keeps kind-445 events reaching the relay. The physical-device checklist
+/// (`docs/M7_BACKGROUND_SHARING.md` §6, item 0) remains the final proof.
 ///
 /// ## The host↔test handshake
 ///
@@ -92,15 +126,27 @@
 /// Change either side of any marker and the lane stops finding it — which
 /// fails the lane rather than passing it silently.
 ///
-/// ## Never pump while backgrounded
+/// ## Pump BEFORE the READY marker; never after it
 ///
-/// From the instant the paused transition lands, frame production is
+/// Both halves are load-bearing.
+///
+/// BEFORE: `IntegrationTestWidgetsFlutterBinding` inherits
+/// `LiveTestWidgetsFlutterBindingFramePolicy.fadePointers`, under which
+/// `handleBeginFrame` skips the frame unless a `pump()` is in flight — the
+/// app's own `scheduleFrame` does not qualify. flutter_riverpod defers every
+/// dependent-provider REBUILD to `markNeedsBuild` on the scope element, so a
+/// provider that only a widget build can refresh never refreshes without a
+/// pump. `locationStreamProvider` is exactly that provider, and the toggle
+/// flip is exactly that dependency change (P1 below).
+///
+/// AFTER: from the instant the paused transition lands, frame production is
 /// disabled (`SchedulerBinding._setFramesEnabledState(false)`), so a
 /// `tester.pump()` awaits a frame that can never arrive — a deadlock,
 /// observed for real on the Android B1 lane. Everything after
 /// [kReadyForBackgroundMarker] therefore uses plain `Future.delayed` loops:
-/// real timers, platform-channel replies and relay callbacks all keep
-/// running regardless of frame production.
+/// real timers, platform-channel replies, provider LISTENERS (which fire
+/// synchronously, unlike rebuilds) and relay callbacks all keep running
+/// regardless of frame production.
 ///
 /// Hard-FAILS (never skips) on a non-iOS runtime, following
 /// `b4_ios_real_gps_test.dart`'s precedent: this target is invoked by exactly
@@ -124,6 +170,8 @@ import 'package:haven/src/providers/circles_provider.dart'
     show circlesProvider;
 import 'package:haven/src/providers/identity_provider.dart'
     show identityNotifierProvider, identityProvider;
+import 'package:haven/src/providers/location_provider.dart'
+    show locationStreamProvider;
 import 'package:haven/src/providers/location_publish_scheduler_provider.dart'
     show locationPublishSchedulerProvider;
 import 'package:haven/src/providers/onboarding_provider.dart'
@@ -148,6 +196,8 @@ import 'package:haven/src/services/location_service.dart'
     show LocationPermissionStatus;
 import 'package:haven/src/services/nostr_circle_service.dart'
     show NostrCircleService;
+import 'package:haven/src/services/publish_stagger.dart'
+    show kPublishStaggerMaxGap;
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -161,8 +211,10 @@ import 'e2e/_lib/test_user.dart' show TestUser, aliceSeed, bytesToHex;
 import 'e2e/_lib/throw_time_error_capture.dart';
 
 /// Verbatim marker printed only after P1's LAST assertion has passed: the
-/// native handler reported `supported && backgroundActivitySessionHeld` after
-/// background sharing was enabled through the production `setEnabled` path.
+/// native handler reported `supported && backgroundActivitySessionHeld`, AND
+/// the position stream rebuilt by the toggle flip delivered a fresh fix — the
+/// two halves of the app's background-location configuration, both
+/// established while still foregrounded, as iOS requires.
 ///
 /// One of the four terminal proofs `run-ios-bg-publish.sh`'s completion gate
 /// requires — change it here AND there together.
@@ -233,9 +285,10 @@ const String kDisabledMarker = '[bg-publish] BACKGROUND_SHARING_DISABLED';
 const String kHandshakeSignalFileName = 'bg-publish-handshake';
 
 /// Verbatim marker prefix printed only after P2's last assertion: at least
-/// two kind-445 events for this circle reached the relay AFTER the real
-/// backgrounding instant. Carries a trailing ` count=<n>`; the shell matches
-/// the PREFIX, so the suffix is free to change.
+/// two kind-445 events for this circle, from the per-circle scheduler's OWN
+/// jittered timers, reached the relay AFTER the real backgrounding instant.
+/// Carries a trailing ` count=<n>`; the shell matches the PREFIX, so the
+/// suffix is free to change.
 const String kBackgroundPublishMarker = '[bg-publish] BACKGROUND_PUBLISH_OK';
 
 /// Verbatim marker printed only after P3's silence assertion: over a bounded
@@ -257,7 +310,29 @@ const String kSessionDisarmedMarker = '[bg-publish] SESSION_DISARMED';
 /// runner scheduling both the poll and the app switch.
 const Duration _pausedTransitionWindow = Duration(seconds: 180);
 
-/// How long P2 waits for two post-backgrounding kind-445 publishes.
+/// How long P1 waits for the REBUILT position stream to deliver a fresh fix.
+///
+/// The wrapper drips a new simulated fix every 10 s and a freshly started
+/// CLLocationManager session normally delivers the current one at once, so
+/// the healthy case is sub-second; 60 s is six drip intervals.
+const Duration _streamFreshnessWindow = Duration(seconds: 60);
+
+/// How long P2a waits for the kind-445 from the tick it DRIVES immediately
+/// after the backgrounding.
+///
+/// Bounded from both ends, which is why it is small. Below: the only
+/// scheduled delay inside a tick is one decorrelation gap (at most
+/// [kPublishStaggerMaxGap], 9 s), and everything after it — the warm-fix
+/// read, the MLS encrypt and one localhost relay round trip — took ~0.2 s in
+/// CI run 32661622879, so 15 s of slack is ~75x the measured cost. Above:
+/// P2a exists to answer "does the pipeline work here at all" BEFORE P2b's
+/// long window, so it must land inside the ~30 s of background execution the
+/// app gets even with no location keep-alive at all. Widening it would only
+/// blur the two answers back together.
+final Duration _drivenPublishWindow =
+    kPublishStaggerMaxGap + const Duration(seconds: 15);
+
+/// How long P2b waits for two scheduler-timed post-backgrounding publishes.
 ///
 /// The per-circle scheduler is jittered over `kLocationPublishMinInterval`..
 /// [kLocationPublishMaxInterval] (72–168 s), so two consecutive ticks can
@@ -285,12 +360,15 @@ final Duration _negativeSettleWindow =
 /// discrimination stays sharp.
 const int _inFlightGraceSecs = 10;
 
-/// How long each relay snapshot fetch listens before returning what it has.
+/// How long P3's post-settle relay snapshot listens before returning what it
+/// has.
 ///
 /// `TestRelay.collectN` resolves with the PARTIAL set on timeout (a relay
 /// error surfaces as a thrown exception instead), so for a snapshot the
 /// timeout IS the completion mechanism, and "collected nothing new" is
-/// distinguishable from "the fetch broke".
+/// distinguishable from "the fetch broke". It runs after the host has
+/// re-foregrounded the app, so unlike everything between the backgrounding
+/// and the disable it is under no execution-window pressure.
 const Duration _snapshotFetchWindow = Duration(seconds: 15);
 
 /// How long the P3 disarm-status poll waits for the native handler to report
@@ -318,7 +396,7 @@ const Duration _heartbeatInterval = Duration(seconds: 20);
 /// statement "this isolate did not run for two minutes". Nothing a loaded
 /// runner does produces that — a Dart timer fires late by the work queued
 /// ahead of it, and this isolate has none while it waits. In CI run
-/// 32646436116 P2's 396 s wait returned after ~1550 s, because iOS had
+/// 32646436116 P2's then-396 s wait returned after ~1550 s, because iOS had
 /// suspended the app ~30 s into the background and every timer resumed
 /// together when the host re-foregrounded it: an overrun 10x this bound.
 final Duration _suspensionSlack = _heartbeatInterval * 6;
@@ -334,15 +412,20 @@ void _failIfSuspended(Duration wall, Duration budget, String phase) {
   fail(
     'iOS SUSPENDED the app during $phase: a ${budget.inSeconds}s wait took '
     '${wall.inSeconds}s of wall clock, so this process was not executing '
-    'for ~${(wall - budget).inSeconds}s of it. Publishing cannot continue '
-    'in a frozen process, and the in-process oracle cannot measure one. The '
-    "app's claim to execute while backgrounded is `UIBackgroundModes: "
-    'location` plus a LIVE CLLocationManager updates session created with '
-    '`allowsBackgroundLocationUpdates` — check that this target still runs '
-    'the production `GeolocatorLocationService` (no `locationServiceProvider` '
-    'override), that `backgroundSharingProvider` was true when '
-    '`locationStreamProvider` last rebuilt, and that '
-    'HavenBackgroundSessionHandler armed. See the library doc.',
+    'for ~${(wall - budget).inSeconds}s of it. Nothing measured across that '
+    'window says anything about the publish pipeline, and the in-process '
+    'oracle cannot measure a frozen process. The keep-alive that should have '
+    'prevented this is `UIBackgroundModes: location` plus a LIVE '
+    'CLLocationManager updates session created with '
+    '`allowsBackgroundLocationUpdates` — so check, in this order: that P1 '
+    'above passed (it now requires a fresh fix from the REBUILT stream, '
+    'which is what proves that session was established while the app was '
+    'still in use), that HavenBackgroundSessionHandler armed, and that this '
+    'target still runs the production `GeolocatorLocationService`. If all '
+    'three hold and the process was suspended anyway, the simulator does not '
+    'implement the policy and the continuity claim has to leave CI — see the '
+    'library doc. Do NOT lengthen the window; it only trades this '
+    'attribution for a silent suspension.',
   );
 }
 
@@ -633,6 +716,14 @@ void main() {
       // arm-before-state-flip is the session-before-updates rule this
       // asserts against.
       final bgNotifier = container.read(backgroundSharingProvider.notifier);
+      // The fix the FOREGROUND-only stream last delivered, so the wait below
+      // can require a genuinely NEW one. A rebuilt `StreamProvider` carries
+      // its predecessor's value through `AsyncLoading`, so `hasValue` alone
+      // would be satisfied by the stream this flip is about to tear down.
+      final preEnableFixAt = container
+          .read(locationStreamProvider)
+          .valueOrNull
+          ?.timestamp;
       await bgNotifier.setEnabled(enabled: true);
       expect(
         container.read(backgroundSharingProvider),
@@ -676,6 +767,42 @@ void main() {
         '[bg-publish] status after arm: '
         'serviceSessionHeld=${armedStatus.serviceSessionHeld}',
       );
+
+      // The armed session is only HALF the configuration. The other half —
+      // the CLLocationManager updates session carrying
+      // `allowBackgroundLocationUpdates: true` — is created by a rebuild of
+      // `locationStreamProvider`, and the flip above only did the
+      // synchronous half of that: Riverpod's `invalidateSelf` ran the
+      // provider's onDispose at once (cancelling the FOREGROUND session)
+      // and deferred the rebuild to `markNeedsBuild`. Under this binding's
+      // frame policy that rebuild waits for a pump (library doc), so
+      // without the pump below the app enters the background having just
+      // torn its only location session down and never replaced it — the
+      // exact state CI runs 32646436116 and 32661622879 were both measuring
+      // without knowing it. Legal here and only here: the REAL pause has
+      // not been requested yet.
+      await tester.pump();
+      await pumpUntilCondition(
+        tester,
+        () {
+          final at = container
+              .read(locationStreamProvider)
+              .valueOrNull
+              ?.timestamp;
+          return at != null && at != preEnableFixAt;
+        },
+        description:
+            'the position stream rebuilt by the background-sharing flip '
+            'delivered a fresh fix while the app was still foregrounded '
+            '(proof the background-capable CLLocationManager session is '
+            'live — iOS only lets such a session start in the foreground, '
+            'so there is no later chance to establish it). A timeout here '
+            'means either the rebuild never happened or the simulated '
+            'location drip stopped: check the wrapper for its '
+            '"simulated-location drip" line and for simctl errors.',
+        timeout: _streamFreshnessWindow,
+      );
+
       debugPrint(kSessionArmedMarker);
 
       // ===================================================================
@@ -701,10 +828,15 @@ void main() {
             recorder.seen.contains(AppLifecycleState.paused) ||
             WidgetsBinding.instance.lifecycleState == AppLifecycleState.paused;
 
+        // 250 ms, not a second: P2a below has to run while the process is
+        // still executing, and on a run where the background keep-alive does
+        // NOT hold that budget is the ordinary ~30 s finish-task grace. A
+        // coarse poll spends it before the phase it feeds even begins.
+        const pausePollInterval = Duration(milliseconds: 250);
         var waited = Duration.zero;
         while (!pausedSeen() && waited < _pausedTransitionWindow) {
-          await Future<void>.delayed(const Duration(seconds: 1));
-          waited += const Duration(seconds: 1);
+          await Future<void>.delayed(pausePollInterval);
+          waited += pausePollInterval;
         }
         expect(
           pausedSeen(),
@@ -761,9 +893,80 @@ void main() {
         );
 
         // =================================================================
-        // P2 — publishes CONTINUE while OS-backgrounded: ≥2 kind-445 events
-        // for this circle, created after the backgrounding instant.
+        // P2a — the publish PIPELINE works from a process iOS has genuinely
+        // backgrounded, established within seconds rather than inferred from
+        // a 396 s silence.
+        //
+        // `triggerTickForTest` enqueues onto the production chain exactly as
+        // the jittered timer does — same `_onCircleTick`, same `_active`
+        // gate, same warm-fix read, same `publishLocation` — and resolves
+        // when that link has run; only the timer is bypassed, and
+        // `JitteredScheduler` owns the re-arm, so P2b's independent timers
+        // are untouched. It separates the two questions P2 used to conflate:
+        // "can this process still publish at all" (here, answerable inside
+        // any background grace) from "does iOS keep it running long enough
+        // to publish twice" (P2b, answerable only if the keep-alive works).
         // =================================================================
+        final circleKey = container
+            .read(locationPublishSchedulerProvider.notifier)
+            .trackedCircleKeysForTest
+            .single;
+
+        var driving = true;
+        final drivenStartedAt = DateTime.now();
+        final drivenFuture = relay
+            .collectN(
+              count: 1,
+              filter: <String, dynamic>{
+                'kinds': <int>[445],
+                '#h': <String>[groupIdHex],
+                'since': sinceSecs,
+              },
+              timeout: _drivenPublishWindow,
+            )
+            .whenComplete(() => driving = false);
+        final drivenHeartbeat = _heartbeatWhile(
+          () => driving,
+          _drivenPublishWindow,
+          'the kind-445 from the per-circle tick driven while backgrounded',
+        );
+        await container
+            .read(locationPublishSchedulerProvider.notifier)
+            .triggerTickForTest(circleKey);
+        final drivenEvents = await drivenFuture;
+        final drivenWall = DateTime.now().difference(drivenStartedAt);
+        await drivenHeartbeat;
+
+        _failIfSuspended(
+          drivenWall,
+          _drivenPublishWindow,
+          'P2a (the driven backgrounded publish)',
+        );
+        expect(
+          drivenEvents,
+          isNotEmpty,
+          reason:
+              'A per-circle publish tick driven through the production '
+              'scheduler from an OS-backgrounded process put no kind-445 for '
+              'this circle on the relay within '
+              '${_drivenPublishWindow.inSeconds}s. The tick itself resolved, '
+              'so the break is inside the pipeline, not in how long iOS let '
+              'this process run: the warm stream fix was dropped, the MLS '
+              'encrypt failed, or the relay socket did not survive the '
+              'backgrounding. P2b below is the separate question of whether '
+              'the scheduler keeps FIRING.',
+        );
+
+        // =================================================================
+        // P2b — publishes CONTINUE while OS-backgrounded: ≥2 kind-445 events
+        // for this circle from the scheduler's OWN jittered timers.
+        //
+        // `since` anchors after P2a's driven event so that event cannot
+        // count toward the two: the claim is about timers firing, not about
+        // this test's ability to call a method.
+        // =================================================================
+        final timedSinceSecs =
+            DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000 + 1;
         var collecting = true;
         final collectStartedAt = DateTime.now();
         final collectFuture = relay
@@ -772,7 +975,7 @@ void main() {
               filter: <String, dynamic>{
                 'kinds': <int>[445],
                 '#h': <String>[groupIdHex],
-                'since': sinceSecs,
+                'since': timedSinceSecs,
               },
               timeout: _postBackgroundPublishWindow,
             )
@@ -789,21 +992,24 @@ void main() {
         await heartbeat;
 
         // Before the count: a frozen isolate collects nothing for reasons
-        // that have nothing to do with the publish pipeline.
+        // that have nothing to do with the publish pipeline — and P2a having
+        // just passed makes that reading the only one left.
         _failIfSuspended(
           collectWall,
           _postBackgroundPublishWindow,
-          'P2 (the post-backgrounding publish window)',
+          'P2b (the post-backgrounding publish window)',
         );
         expect(
           events.length,
           greaterThanOrEqualTo(2),
           reason:
-              'Only ${events.length} kind-445 event(s) for this circle '
-              'reached the relay in the '
+              'Only ${events.length} scheduler-timed kind-445 event(s) for '
+              'this circle reached the relay in the '
               '${_postBackgroundPublishWindow.inSeconds}s after the REAL '
               'OS backgrounding (window = 2 full 72-168s jitter intervals '
-              '+ slack, so two ticks MUST fit). The app stopped publishing '
+              '+ slack, so two ticks MUST fit). P2a proved the pipeline '
+              'itself still works from this backgrounded process, so the '
+              'per-circle timers stopped firing: the app stopped publishing '
               'when iOS backgrounded it — the regression this lane exists '
               'to catch.',
         );
@@ -840,6 +1046,29 @@ void main() {
               'setEnabled(enabled: false) — the mid-pause disable path '
               '(_bgSharingPausedSub) never saw a state change, so nothing '
               'below could prove it stops publishing.',
+        );
+        // The DIRECT half of the negative proof, asserted from the still-
+        // backgrounded process the instant consent is withdrawn: MapShell's
+        // mid-pause watcher tore the publish driver down. The settle-window
+        // diff below is the wire-level half, and it needs this one: if iOS
+        // suspends this process for the whole window (which it is entitled
+        // to do the moment the keep-alive is released — the very behaviour
+        // being proven), silence on the wire is what a suspended app
+        // produces whether or not the disable worked. This assertion cannot
+        // pass vacuously: `_active` is a fact about the app's own state,
+        // and it is only false because the C4 watcher ran.
+        expect(
+          container
+              .read(locationPublishSchedulerProvider.notifier)
+              .isActiveForTest,
+          isFalse,
+          reason:
+              'The per-circle publish scheduler was still ACTIVE after '
+              'background sharing was disabled while OS-backgrounded. '
+              "MapShell._onPaused()'s _bgSharingPausedSub watcher is what "
+              'must stop it on the true→false consent edge (C4); with it '
+              'broken, publishing outlives the withdrawal of consent for as '
+              'long as the OS keeps this process alive (privacy Rule 10).',
         );
         // Hand the host the disable instant. From here the app has NO claim
         // to execute in the background — that is the guarantee being proven —

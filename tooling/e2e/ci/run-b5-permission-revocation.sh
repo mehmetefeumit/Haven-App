@@ -86,10 +86,11 @@
 #   A. the APP-OP window (see below)       access withdrawn from a LIVE
 #                                          process: the app-op read back as
 #                                          `deny` and back out again, the app
-#                                          SAW reads stop, no coordinate was
-#                                          produced (APPOPS_GPS_REFUSED, not
-#                                          _LEAKED), APPOPS_DONE max=0, and
-#                                          the relay saw nothing new
+#                                          SAW its position stream fall
+#                                          silent, no coordinate was produced
+#                                          (APPOPS_GPS_REFUSED, not _LEAKED),
+#                                          APPOPS_DONE max=0, and the relay
+#                                          saw nothing new
 #   2. the RELAY independently holds >= 1  the same claim, off the wire, and
 #      location event                      the self-validation of the
 #                                          absence proof in (7): a scanner
@@ -145,9 +146,8 @@
 #      `LocationServiceDisabledException` on the position stream — but that is
 #      an incidental consequence of the mode edit, not a contract, and a
 #      denial applied before the app subscribes raises nothing at all.) So the
-#      drive target cannot tell when the denial landed by asking — it waits
-#      for a real one-shot read to stop working, which is also why the mode is
-#      read back HERE rather than trusted.
+#      drive target cannot tell when the denial landed by asking, which is
+#      also why the mode is read back HERE rather than trusted.
 #   2c. AN APP-OP HAS TWO SCOPES AND THE UID ONE WINS. `AppOpsService`
 #      short-circuits on a non-default UID mode and never reads the package
 #      mode, and a `whileInUse` location grant leaves the UID mode at
@@ -164,6 +164,19 @@
 #      typed — and `ignore` is also the only one of the two compatible with
 #      this phase's premise, since MODE_ERRORED is defined to raise a fatal
 #      error rather than fail silently. See b5_appops_mode_withholds.
+#   2e. A FRESH ONE-SHOT READ IS NOT THE SIGNAL, and treating it as one cost
+#      two CI runs. `getCurrentLocationFresh()` skips the cache by contract,
+#      so it can only exercise `getCurrentPosition`, and on this emulator that
+#      path runs out its full `kOneShotLocationTimeout` with the permission
+#      GRANTED and the app-op untouched: run 32661622879 logged "Failed to get
+#      fresh location: TimeoutException" twice while arming, in exactly the
+#      granted state its refusals were supposed to be measured against. What
+#      DOES vary is delivery to the app's position STREAM —
+#      `LocationProviderManager.Registration.acceptLocationChange` bails on
+#      `noteOpNoThrow` — and run 32646436116 measured both ends of it on one
+#      run: `streamAgeMs=129` at arming, `streamAgeMs=165228` at the decisive
+#      read 165 s after the denial. So the drive target waits for that
+#      silence, and reports its length as `silenceMs`.
 #   3. RE-PROMPTING. `getCurrentLocation()` calls `requestPermission()`
 #      whenever it sees `denied` (:268), which raises the SYSTEM permission
 #      dialog unless the grant is USER_FIXED — from a periodic publish tick,
@@ -267,12 +280,53 @@ readonly APPOPS_COARSE='android:coarse_location'
 # Mirrors `_maxArmingStreamAge` in b5_permission_revocation_test.dart. The
 # app-op window is about a WARM cache, so an arming fix older than this means
 # there was nothing left to leak.
-readonly APPOPS_MAX_ARMING_STREAM_AGE_MS=60000
+#
+# It MUST also stay strictly below APPOPS_MIN_STREAM_SILENCE_MS, which is why
+# it is 10 s and not the 60 s it shipped as. The observation asserts a stretch
+# of stream silence lying after the cue — something a stream that had ALREADY
+# stopped delivering satisfies by itself — so it is evidence of a WITHDRAWAL
+# only if arming established the stream was still delivering. At 60 s against
+# a 30 s silence it did not: a run armed at streamAgeMs=45000 reaches
+# silenceMs=75000 thirty seconds later with the app-op having changed nothing,
+# and every gate below then passes. Pinned by the ordering check in the
+# self-test.
+readonly APPOPS_MAX_ARMING_STREAM_AGE_MS=10000
 
 # Mirrors `kStreamPositionMaxAge` (haven/lib/src/constants/location.dart). A
 # refusal recorded with a stream fix older than this discriminates nothing:
 # the cache would have been refused with the app-op untouched.
 readonly APPOPS_MAX_PROBE_STREAM_AGE_MS=168000
+
+# Mirrors `_appOpsStreamSilence` in b5_permission_revocation_test.dart
+# (= `kOneShotLocationTimeout`, 30 s). The drive target calls the denial
+# observed when its position stream has delivered NOTHING for this long, and
+# that reading only means "the platform stopped serving this app" if a
+# PERMITTED stream could not have been that quiet — which is what the `geo
+# fix` re-issue loop guarantees (Phase 3 checks the two against each other).
+# A silence reported BELOW this floor is the drive target's threshold having
+# been lowered into the range CI scheduling jitter can reach, i.e. the oracle
+# inverted; it is a finding here rather than a silent pass.
+readonly APPOPS_MIN_STREAM_SILENCE_MS=30000
+
+# Ceiling on the `readMs` the drive target reports at arming — the cost of the
+# `getCurrentLocation()` it makes with access still INTACT.
+#
+# What it discriminates: a read served from the warm stream cache is four
+# in-memory platform-channel reads (isLocationServiceEnabled, checkPermission,
+# getLocationAccuracy, then getLastKnownPosition inside
+# `_platformStillPermitsLocation`) and costs tens of milliseconds. A read that
+# instead waited a whole `B5_GEO_REISSUE_SECS` GPS drip (5 s) went to the
+# ONE-SHOT, and it only goes there when `_lastStreamPosition` was EMPTY — which
+# means arming exercised a door the app-op cannot move, and the refusal it is
+# supposed to be the "before" half of is not the same event.
+#
+# ONE-DIRECTIONAL on purpose, and the limit is worth stating: over the ceiling
+# proves a one-shot, under it does not prove a cache hit, because a drip
+# landing during the call can answer a one-shot in well under a second.
+# Nothing in reach separates those two, so this is a gate against the case
+# that actually occurs, not a proof of the converse. It cannot false-fail a
+# cache hit either — that is two orders of magnitude below the ceiling.
+readonly APPOPS_MAX_ARMING_READ_MS=5000
 
 # The AOSP kill reason posted by `revokeRuntimePermissionInternal`. Recorded
 # as EVIDENCE, never asserted: a platform that stops killing on revoke would
@@ -665,19 +719,25 @@ and '${appops_restored:-<default>}' after it — the condition this phase rests 
 on provably varied."
   fi
 
-  # (A2) ANTI-VACUITY. A cold cache has nothing to leak, and a phase with no
-  #      eligible circle has nowhere to leak it to.
-  local appops_stream_age appops_eligible
+  # (A2) ANTI-VACUITY. A cold cache has nothing to leak, a phase with no
+  #      eligible circle has nowhere to leak it to, and a phase whose
+  #      publish-path read never answered with access INTACT cannot attribute
+  #      the refusal it records once access is withdrawn.
+  local appops_stream_age appops_eligible appops_arm_read
   appops_stream_age="$(b5_marker_number "${log}" "${MARK_APPOPS_ARMED}" \
     'streamAgeMs')"
   appops_eligible="$(b5_marker_number "${log}" "${MARK_APPOPS_ARMED}" \
     'eligible')"
-  if [[ -z "${appops_stream_age}" || -z "${appops_eligible}" ]]; then
-    b5_finding "no '${MARK_APPOPS_ARMED} streamAgeMs=<ms> eligible=<n>' \
-line — the app-op phase never armed, so the one scenario that can observe \
-the stale-fix cache did not run. (The drive target prints streamAgeMs=-1 \
-when it never saw a fresh stream fix, which reads as missing here on \
-purpose.)"
+  appops_arm_read="$(b5_marker_number "${log}" "${MARK_APPOPS_ARMED}" \
+    'readMs')"
+  if [[ -z "${appops_stream_age}" || -z "${appops_eligible}" \
+        || -z "${appops_arm_read}" ]]; then
+    b5_finding "no '${MARK_APPOPS_ARMED} streamAgeMs=<ms> eligible=<n> \
+readMs=<ms>' line — the app-op phase never armed, so the one scenario that \
+can observe the stale-fix cache did not run. (The drive target prints -1 for \
+whichever fact it could not establish — no stream fix reached it, or \
+getCurrentLocation() would not answer from one with the permission GRANTED — \
+and -1 reads as missing here on purpose.)"
   else
     if (( appops_stream_age > APPOPS_MAX_ARMING_STREAM_AGE_MS )); then
       b5_finding "the app-op phase armed with its newest stream fix \
@@ -690,21 +750,50 @@ the stream's 1 m distance filter."
       b5_finding "the app-op window ran with ${appops_eligible} \
 publish-eligible circles, so 'the app published nothing' is vacuous there."
     fi
+    if (( appops_arm_read > APPOPS_MAX_ARMING_READ_MS )); then
+      b5_finding "the arming getCurrentLocation() took ${appops_arm_read}ms, \
+over ${APPOPS_MAX_ARMING_READ_MS}ms. A read served from the warm stream cache \
+is a handful of in-memory platform-channel calls; one that waited a whole GPS \
+drip went to the ONE-SHOT, which it only does when the service's cached fix \
+was EMPTY. Arming then proved a door the app-op cannot move, so it is not the \
+'before' half of the refusal recorded once access was withdrawn."
+    fi
   fi
 
   # (A3) The denial has to be OBSERVABLE to the app. Unlike the revoke, it
   #      does not kill the process, so an app that never notices is an app
   #      the denial never reached — the second half of (A1)'s question, and
   #      the half a read-back cannot answer.
+  #
+  #      The observation is the position stream going SILENT, which is the
+  #      only consequence that provably varies with the app-op on this
+  #      emulator: a fresh one-shot read refuses with the permission granted
+  #      too (CI run 32661622879), so counting its refusals proved nothing.
   if b5_has_marker "${log}" "${MARK_APPOPS_NOT_OBSERVED}"; then
-    b5_finding "real location reads never refused twice in a row for the \
-whole app-op observation window ('${MARK_APPOPS_NOT_OBSERVED}'), having \
-answered at arming. The app-op read back as denied but had no effect on this \
-app."
+    b5_finding "the app's position stream went on delivering fixes for the \
+whole app-op observation window ('${MARK_APPOPS_NOT_OBSERVED}'), having been \
+delivering at arming. The app-op read back as denied but had no effect on \
+this app."
   elif ! b5_has_marker "${log}" "${MARK_APPOPS_OBSERVED}"; then
     b5_finding "neither '${MARK_APPOPS_OBSERVED}' nor \
 '${MARK_APPOPS_NOT_OBSERVED}' was recorded — the app-op phase never reached \
 the point where it checks whether the denial took effect."
+  else
+    local appops_silence
+    appops_silence="$(b5_marker_number "${log}" "${MARK_APPOPS_OBSERVED}" \
+      'silenceMs')"
+    if [[ -z "${appops_silence}" ]]; then
+      b5_finding "'${MARK_APPOPS_OBSERVED}' carries no silenceMs, so there \
+is no evidence of HOW LONG the stream stopped delivering and the observation \
+cannot be attributed to the app-op."
+    elif (( appops_silence < APPOPS_MIN_STREAM_SILENCE_MS )); then
+      b5_finding "the app called the denial observed after only \
+${appops_silence}ms of stream silence, under \
+${APPOPS_MIN_STREAM_SILENCE_MS}ms. The \`geo fix\` re-issue loop moves the \
+emulator point several times inside that floor, so a gap that short is \
+reachable with the app-op untouched — the drive target's threshold has been \
+lowered into the range CI scheduling jitter reaches."
+    fi
   fi
 
   # (A4) THE PROMISE: no coordinate is produced from a live process whose
@@ -985,8 +1074,9 @@ not apply — expected %s\n' "${n}" "${want}" >&2
     printf '%s\n' \
       "I/flutter ( 40): ${MARK_PHASE} act=1 perm=whileInUse pid=40" \
       "I/flutter ( 40): ${MARK_BASELINE} n=1" \
-      "I/flutter ( 40): ${MARK_APPOPS_ARMED} streamAgeMs=4200 eligible=1" \
-      "I/flutter ( 40): ${MARK_APPOPS_OBSERVED} after=41" \
+      "I/flutter ( 40): ${MARK_APPOPS_ARMED} streamAgeMs=4200 eligible=1 \
+readMs=180" \
+      "I/flutter ( 40): ${MARK_APPOPS_OBSERVED} after=41 silenceMs=31500" \
       "I/flutter ( 40): ${MARK_APPOPS_REFUSED} \
 type=LocationServiceException streamAgeMs=52000" \
       "I/flutter ( 40): [b5] APPOPS_CYCLE i=1 n=0" \
@@ -1590,6 +1680,103 @@ type=LocationServiceException streamAgeMs=52000" \
     >/dev/null || rc=$?
   _case "an empty restored read passes the containment gate" 0 "${rc}"
 
+  # (49) VACUITY — the arming READ never answered. The stream was warm and
+  #      there was somewhere to publish, but `getCurrentLocation()` would not
+  #      produce a coordinate with the permission GRANTED, so the refusal the
+  #      phase records afterwards is not attributable to the denial. This is
+  #      the shape CI run 32661622879 shipped (its fresh probes timed out in
+  #      the granted state) and the one a two-field arming line could not see.
+  sed 's/eligible=1 readMs=180/eligible=1 readMs=-1/' "${tmp}/full.log" \
+    > "${tmp}/armnoread.log"
+  _assert_mutated 49 "${tmp}/armnoread.log" 'eligible=1 readMs=-1'
+  rc=0
+  b5_run_oracle "${tmp}/armnoread.log" "${tmp}/oracle-baseline.ids" \
+    "${tmp}/oracle-new.ids" 1 "${tmp}/oracle-appops.ids" deny allow \
+    >/dev/null || rc=$?
+  _case "an arming read that never answered fails the oracle" 1 "${rc}"
+
+  # (50) The observation carries no silenceMs — an older drive target, or one
+  #      that went back to counting refusals. Either way there is no evidence
+  #      of how long the platform stopped serving the app, so the observation
+  #      cannot be attributed to the app-op.
+  #
+  #      The MESSAGE is pinned, not just the rc, and here that is not
+  #      belt-and-braces: an unset `appops_silence` evaluates to 0 inside
+  #      `(( ))`, so deleting this branch leaves the FLOOR branch below to
+  #      fail the fixture with the wrong diagnosis and an rc-only assertion
+  #      would stay green over a missing detector.
+  sed 's/ after=41 silenceMs=31500/ after=41/' "${tmp}/full.log" \
+    > "${tmp}/nosilence.log"
+  # The setup guard asserts what the mutation REMOVED. `_assert_mutated` only
+  # checks presence, and "APPOPS_OBSERVED after=41" is a substring of the
+  # UNMUTATED line too — so it would bless a sed that stopped matching.
+  if grep -qF -- 'silenceMs' "${tmp}/nosilence.log"; then
+    printf '  \033[1;31mFAIL\033[0m self-test setup (50): silenceMs survived\n' >&2
+    fails=1
+  fi
+  rc=0
+  b5_run_oracle "${tmp}/nosilence.log" "${tmp}/oracle-baseline.ids" \
+    "${tmp}/oracle-new.ids" 1 "${tmp}/oracle-appops.ids" deny allow \
+    >/dev/null || rc=$?
+  _case "an observation with no silenceMs fails the oracle" 1 "${rc}"
+  if [[ "${B5_FINDINGS[*]}" != *"carries no silenceMs"* ]]; then
+    printf '  \033[1;31mFAIL\033[0m a missing silenceMs is not named\n' >&2
+    fails=1
+  fi
+
+  # (51) THE ORACLE-INVERSION FIXTURE — a silence SHORT enough that a
+  #      permitted stream reaches it on its own. The `geo fix` loop re-issues
+  #      every 5 s, so 6 s of quiet is CI scheduling, not a withdrawal;
+  #      without this gate the drive target's threshold could be lowered to
+  #      anything and every assertion below would still pass.
+  sed 's/silenceMs=31500/silenceMs=6000/' "${tmp}/full.log" \
+    > "${tmp}/shortsilence.log"
+  _assert_mutated 51 "${tmp}/shortsilence.log" 'silenceMs=6000'
+  rc=0
+  b5_run_oracle "${tmp}/shortsilence.log" "${tmp}/oracle-baseline.ids" \
+    "${tmp}/oracle-new.ids" 1 "${tmp}/oracle-appops.ids" deny allow \
+    >/dev/null || rc=$?
+  _case "a stream silence under the floor fails the oracle" 1 "${rc}"
+
+  # (53) VACUITY — the arming read ANSWERED, but took a whole GPS drip to do
+  #      it, which means it went to the one-shot because the service's cached
+  #      fix was empty. The stream was warm and there was somewhere to publish,
+  #      so every other arming field looks right; only the cost of the read
+  #      says the "before" half exercised a different door from the "after"
+  #      half. Without this gate `readMs` is a diagnostic that no oracle reads.
+  sed 's/readMs=180/readMs=17000/' "${tmp}/full.log" > "${tmp}/slowarm.log"
+  _assert_mutated 53 "${tmp}/slowarm.log" 'readMs=17000'
+  rc=0
+  b5_run_oracle "${tmp}/slowarm.log" "${tmp}/oracle-baseline.ids" \
+    "${tmp}/oracle-new.ids" 1 "${tmp}/oracle-appops.ids" deny allow \
+    >/dev/null || rc=$?
+  _case "an arming read that cost a one-shot fails the oracle" 1 "${rc}"
+
+  # (52) THE THREE STREAM-AGE CONSTANTS MUST STAY ORDERED. Neither relation
+  #      is cosmetic and neither is visible in any single run's output.
+  #
+  #      arming cap < silence floor: the observation asserts a stretch of
+  #      silence lying after the cue, which a stream that had ALREADY stopped
+  #      delivering satisfies on its own. It is evidence of a withdrawal only
+  #      because arming proved the stream was still delivering — and at the
+  #      60000 this shipped as, against a 30000 floor, it did not: arm at
+  #      streamAgeMs=45000 and silenceMs=75000 arrives 30 s later with the
+  #      app-op having changed nothing, passing every gate below. That is a
+  #      whole-lane FALSE PASS, so this ordering is the gate that closes it.
+  #
+  #      silence floor < warm-cache cap: the decisive read follows the
+  #      observation and carries a stream age at least the floor, which (A4)
+  #      requires to be UNDER APPOPS_MAX_PROBE_STREAM_AGE_MS. Raise the floor
+  #      to the cap and the phase becomes structurally unpassable, with two
+  #      findings that each look like a product defect. Not hypothetical: run
+  #      32646436116 recorded streamAgeMs=165228 against a 168000 cap.
+  _case "the arming cap stays below the silence floor" 0 \
+    "$(( APPOPS_MAX_ARMING_STREAM_AGE_MS < APPOPS_MIN_STREAM_SILENCE_MS \
+         ? 0 : 1 ))"
+  _case "the silence floor stays below the warm-cache cap" 0 \
+    "$(( APPOPS_MIN_STREAM_SILENCE_MS < APPOPS_MAX_PROBE_STREAM_AGE_MS \
+         ? 0 : 1 ))"
+
   # --- the relay-poll capture must survive a PASSING run --------------------
   #
   # THE LANE-CANNOT-BE-GREEN FIXTURE. B5 passes when the relay sees NO new
@@ -1731,8 +1918,13 @@ readonly APPOPS_WINDOW_TIMEOUT="${B5_APPOPS_WINDOW_TIMEOUT:-480}"
 # target's `AWAITING_REVOKE`, and the target only waits
 # `_revokeObservationTimeout` (120 s) for the revoke to become visible. The
 # slack is `_revokeObservationTimeout - (this - the target's minimum app-op
-# window)`; with `_appOpsAbsenceWindow` at 90 s the earliest APPOPS_DONE is
-# ~100 s after the denial, so the revoke lands ~73 s into a 120 s wait. Raise
+# window)`. That minimum is `_appOpsStreamSilence` (30 s, the earliest the
+# stream can be seen to have stopped) + the decisive probe (~30 s, the
+# one-shot's own `kOneShotLocationTimeout`) + `_appOpsAbsenceWindow` (90 s,
+# which overruns by up to one `_appOpsCycleSpacing`) = ~155 s. The revoke then
+# lands after this hold expires PLUS the restore, its `wait_for_appops_mode`
+# read-back (up to APPOPS_VERIFY_TIMEOUT) and an `absorb_into_baseline` scan —
+# so budget ~70 s of the target's 120 s wait, not ~20. Raise
 # this much above ~215, or shrink `_appOpsAbsenceWindow`, and ACT 1's
 # mid-session half silently stops running WHEREVER THE PROCESS SURVIVES THE
 # REVOKE — on stock Android the OS kill makes that half unreachable anyway,
@@ -2216,6 +2408,35 @@ done
 # ---------------------------------------------------------------------------
 echo "Phase 3/7 — seeding emulator GPS (lon=${GEO_LON} lat=${GEO_LAT}," \
      "alternating with lat=${GEO_LAT_B})..."
+# THE RELATION THAT MAKES THE APP-OP OBSERVATION MEAN ANYTHING, in both
+# directions. The drive target arms only on a fix newer than
+# APPOPS_MAX_ARMING_STREAM_AGE_MS (proof the stream is DELIVERING) and then
+# calls the denial observed once the stream has been quiet for
+# APPOPS_MIN_STREAM_SILENCE_MS. This loop is what makes both readings mean
+# what they say: two moves have to fit inside the arming cap, so a delivering
+# stream can always satisfy it, and three inside the silence floor, so one slow
+# `adb emu` round trip on a loaded runner cannot read as a withdrawal.
+if (( GEO_REISSUE_SECS * 2 > APPOPS_MAX_ARMING_STREAM_AGE_MS / 1000 )); then
+  fail "B5_GEO_REISSUE_SECS=${GEO_REISSUE_SECS} re-issues the emulator fix" \
+       "too slowly for the drive target's ${APPOPS_MAX_ARMING_STREAM_AGE_MS}ms" \
+       "arming freshness cap: a stream that IS being served would show a fix" \
+       "older than the cap between drips, so the app-op phase could never arm" \
+       "and the lane would report a product defect for a harness setting." \
+       "This bounds the CONFIGURED period, not the effective one (\`sleep N\`" \
+       "plus the \`adb emu geo fix\` round trip), so the arithmetic ceiling of" \
+       "$(( APPOPS_MAX_ARMING_STREAM_AGE_MS / 2000 ))s is not a safe setting:" \
+       "5s is the tested default and ~7s the practical limit."
+fi
+if (( GEO_REISSUE_SECS * 3 > APPOPS_MIN_STREAM_SILENCE_MS / 1000 )); then
+  fail "B5_GEO_REISSUE_SECS=${GEO_REISSUE_SECS} re-issues the emulator fix" \
+       "too slowly for the drive target's ${APPOPS_MIN_STREAM_SILENCE_MS}ms" \
+       "stream-silence threshold: a permitted stream could be quiet that" \
+       "long on its own, and the app-op observation would report CI" \
+       "scheduling as a withdrawal. Keep it at or below" \
+       "$(( APPOPS_MIN_STREAM_SILENCE_MS / 3000 ))s, or raise" \
+       "\`_appOpsStreamSilence\` in b5_permission_revocation_test.dart and" \
+       "APPOPS_MIN_STREAM_SILENCE_MS here together."
+fi
 adb -s "${DEVICE}" emu geo fix "${GEO_LON}" "${GEO_LAT}" \
   || fail "\`adb emu geo fix\` was rejected by the emulator console — no" \
           "position can be injected, so this lane cannot establish a" \
@@ -2276,7 +2497,9 @@ DRIVE_PID=$!
 #     gate, in this lane's terms.)
 #   * a mode that reads as withholding and changes nothing is a different
 #     failure and invisible to the read-back, so the DRIVE TARGET has to report
-#     that real location reads stopped working (`APPOPS_OBSERVED`).
+#     that the platform stopped serving it — its position stream falling
+#     silent for `APPOPS_MIN_STREAM_SILENCE_MS` (`APPOPS_OBSERVED`), the one
+#     consequence that provably varies with the app-op here (trap 2e).
 #
 # The denial is then held for at least APPOPS_MIN_DENY_SECS whatever the app
 # does, so the relay-side absence spans a full scheduler interval.
