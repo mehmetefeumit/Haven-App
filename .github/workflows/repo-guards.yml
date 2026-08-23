@@ -1063,6 +1063,26 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/run-b4-ios-real-gps.sh --self-test
 
+      # The iOS background-publish lane's host/drive HANDSHAKE — the only lane
+      # whose proof depends on a second process acting mid-test. The handshake
+      # rides a file the drive writes into its own sandbox, and the fixtures
+      # that earn their keep are the ones no behavioural check can see: a
+      # signal found in a ROTATED data container (the drive's own install
+      # rotates the leaf UUID out from under any path resolved before it — CI
+      # run 32618134993); a stale READY from the previous attempt cleared out
+      # of EVERY container (run 32553078705 attempt 2 matched one 63 ms in);
+      # each wait sweeping the root for its OWN marker, because a disarm-wait
+      # that reads READY re-foregrounds the app seconds after backgrounding it
+      # and the lane then measures background publishing against a foreground
+      # app, green and worthless; and the app-data root being derived AND
+      # validated, since skipping either silently restores the pinned-container
+      # bug. Structural fixtures pin the background step, its invocation, the
+      # fail-closed privacy grant, the uninstall skip, and that the signal name
+      # still matches the Dart drive's.
+      - name: E2E harness self-test (iOS background-publish handshake)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-ios-bg-publish.sh --self-test
+
       # The CLOSED-WORLD wire oracle (Workstream C, C2/C3/C4). Every assertion
       # it makes is a set operation, and every set operation passes over an
       # empty input — so its fixtures are almost entirely anti-vacuity ones: an

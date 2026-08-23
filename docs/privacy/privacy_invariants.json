@@ -79,14 +79,20 @@
     {
       "id": "TTL-FINGERPRINT",
       "source": "haven-core/SECURITY.md#outer-kind445-metadata-group-governed-nip-40-expiration",
-      "summary": "kind-445 application messages carry a DETERMINISTIC NIP-40 expiration (a constant 228 s, client-wide and fixed at group creation). The retired per-send design sampled it precisely to avoid a constant-TTL fingerprint identifying Haven clients among mixed MLS-over-Nostr traffic; group-level retention is what the protocol now offers, so the fingerprint is accepted.",
-      "forbidden_claim": "Copy must not present the expiry as making Haven traffic less distinguishable. It does the opposite: the constant is a client-wide discriminator visible to any relay or member, and cannot be changed for circles that already exist."
+      "summary": "kind-445 application messages carry a DETERMINISTIC NIP-40 expiration. The retired per-send design sampled it precisely to avoid a constant-TTL fingerprint identifying Haven clients among mixed MLS-over-Nostr traffic; group-level retention is what the protocol now offers, so the fingerprint is accepted. The send-side bound (RetentionBoundPeeler) BROADENED it, and that widening is accepted here too: the delta is no longer fixed at group creation, it is decided at SEND time, and Haven now stamps 228 s in circles it did not create — where it previously stamped nothing. So the discriminator is no longer only client-wide. In a circle whose declared message-retention.v1 window is absent, zero, or longer than 228 s, `expiration - created_at == 228` separates the Haven member's location updates from every other member's traffic on the same #h: a PER-MEMBER discriminator inside one group, sharper than the client-wide one because it attributes traffic within a group whose membership a relay cannot otherwise resolve. Accepted as the price of the two properties the bound buys — bounded relay residency, and location traffic not masquerading as membership traffic. A circle Haven created is unaffected: there every member stamps the same 228 s.",
+      "forbidden_claim": "Copy must not present the expiry as making Haven traffic less distinguishable. It does the opposite, in two ways: the constant is a client-wide discriminator visible to any relay or member, and inside a circle whose declared window is absent, zero, or longer than 228 s it is additionally a per-member one, because Haven's 228 s then differs from what that circle's other clients stamp (or from their stamping nothing); a circle declaring SHORTER is the one foreign case with no per-member split, since Haven stamps that declared value like every other client. Copy must also not imply the expiry follows the circle's own policy — Haven applies its own window whether or not the circle asked for one — and the value cannot be changed for circles that already exist."
     },
     {
       "id": "LEAVE-GHOST",
       "source": "haven-core/SECURITY.md#bounded-leave-removal-window-under-live-sync-rev-1",
       "summary": "The corroboration gate deliberately keeps NO admin-side record of a departing member's intent, so there is no automatic admin-side backstop. In the conjunction of: the leaver crashes mid-leave, AND its SelfRemove was deferred or lost the order race, AND it never re-opens the app — no removal commit is ever produced and a stale roster ghost stays authorized until an admin manually removes it. SECURITY.md labels this 'Precisely-bounded residual (accepted)'.",
       "forbidden_claim": "Copy must not state that leaving always re-keys the circle within a bounded time. The automatically-unconverged case needs a manual admin removal and there is no admin-visible signal one is owed. NOTE: no user-facing string discloses this, and privacyEncryptionWhenSomeoneLeaves currently ASSERTS the bounded form ('usually within a few minutes') — an owner decision."
+    },
+    {
+      "id": "KP-SLOT-WIDTH",
+      "source": "MARMOT_PROTOCOL_KNOWLEDGE.md#the-d-slot-id-is-shape-normative",
+      "summary": "The kind-30443 `d` slot id is a public, per-account coordinate every relay serving that account's KeyPackages can read. mint_d draws 32 bytes (64 hex chars), the width the Nostr transport binding fixes; builds before that fix drew 16 (32 hex chars), and THE BINDING MAKES THAT MALFORMED, NOT MERELY NARROW: `d` is 'exactly one tag, exactly one 64-character lowercase hex value decoding to 32 bytes', and 'if a required singleton tag is missing, repeated, has no value, or has extra values beyond the one defined here, the event is malformed' (transports/nostr.md), while foundation/key-packages.md requires an inviter to 'reject malformed or incompatible candidates before selecting one'. THE INVITABILITY COST IS NOW CLOSED, NOT ACCEPTED: a one-time, crash-safe retirement (decide_kp_slot_retirement, run by maintain_key_package ahead of the ordinary decision; sentinel kp_slot_retirement_done_v1) re-publishes the SAME tracked package into a freshly minted conformant slot and, only after a relay OK-ACKS it, publishes one NIP-09 kind-5 deletion of the orphaned coordinate ('a' = 30443:<pubkey>:<old d>, plus the observed id as 'e' and k=30443). Moving the same package rather than minting one keeps an in-flight Welcome against the retired coordinate decryptable, which holds for a tracked row whose lifetime is readable and non-empty; a dead or unreadable row is replaced by fresh material instead, and its superseded bytes are deleted once the replacement is acked. The sentinel latches only on a completed migration, so a failed publish, an unacked retraction or an unanswered probe resumes instead of latching — and an unacked retraction does not consume the tick either, so a relay that never acks a kind-5 cannot starve rotation, republish-if-missing and heal behind it. WHAT REMAINS ACCEPTED is the historical residue: NIP-09 deletion is advisory ('relays SHOULD delete'), so a relay that ignores the request — or that was unreachable while the migration ran and comes back serving the old event — can keep the 32-hex coordinate publicly readable, and no client can force its removal. That residue is an era marker (which build of Haven first published the account), not key material: the value is CSPRNG-random and non-derived (never from an account key, MLS leaf key, KeyPackageRef or device label). A lenient peer that still selects the orphan is not stranded where the package was MOVED — it carries the same one this device holds — until that package is next rotated or reaches Lifetime.not_after, the spec's own deletion bounds; where it had to be minted, the orphan advertises material the account no longer tracks, so such a peer can fail to invite it. Proofs: haven/rust_builder/src/api.rs tc8_a_pre_fix_install_is_retired_onto_a_conformant_slot_via_real_ffi, tc9_a_conformant_install_is_never_retired_via_real_ffi, tc10_no_retraction_until_the_replacement_is_acked_via_real_ffi, tc11_an_already_published_replacement_is_adopted_via_real_ffi, tc12_a_conformant_account_scrubs_a_leftover_orphan_via_real_ffi, tc13_a_refused_retraction_leaves_the_migration_open_via_real_ffi, tc14_a_never_acked_retraction_does_not_starve_rotation_via_real_ffi, tc15_an_unreadable_row_is_retired_onto_fresh_material_via_real_ffi; slot shape pinned by haven-core/tests/kp_rotation_e2e.rs::a_first_publish_mints_a_binding_shaped_random_slot_id.",
+      "forbidden_claim": "Copy must not present the slot id as carrying nothing a relay can use, and must not claim that retiring the old slot ERASES it: NIP-09 deletion is a request relays SHOULD honour, so an old 32-hex coordinate can stay publicly readable on a relay that ignores it, identifying which era of Haven first published the account. Copy must equally not claim that every Haven account is invitable by any Marmot client the moment it is installed — the retirement needs one tick with a reachable KeyPackage relay to complete, and an account with no reachable relay is unreachable for ordinary reasons anyway. The id is random and reveals no key material."
     }
   ],
   "non_claim_arb_keys": {
@@ -1034,8 +1040,8 @@
     },
     {
       "id": "INV-W-445-EXPIRATION-SCOPE",
-      "title": "The NIP-40 expiry is advisory, 228 s, and stamped on application messages only",
-      "statement": "For every circle THIS device created, the engine stamps application kind-445s with a NIP-40 expiration of inner_created_at + LOCATION_MESSAGE_RETENTION_SECS (228 s), derived from the group's message-retention.v1 component (0x8005) supplied at CreateGroupRequest; commits and proposals are never stamped, so a 445 without an expiration is visibly a membership change.",
+      "title": "Every kind-445 application message this device publishes carries a NIP-40 expiry of at most 228 s; control messages carry none",
+      "statement": "Every kind-445 APPLICATION message THIS DEVICE publishes carries a NIP-40 `expiration` of inner_created_at + at most LOCATION_MESSAGE_RETENTION_SECS (228 s), in EVERY circle — including one created by a client that declared no message-retention.v1 component (0x8005), where the engine would stamp nothing: the installed peeler (RetentionBoundPeeler) supplies Haven's own window when the group declares none or zero, caps a longer group policy to it, and honours a shorter one as declared. This device never stamps a commit or proposal, so among the 445s THIS device sends, the absence of an expiration identifies a group-control message. That inference does NOT extend to the circle's whole #h stream: in a circle declaring no component, another member's unstamped 445 may be a location update (see residual). The tag set on this device's 445s is exactly `h` for control and `h` + `expiration` for application messages — nothing else.",
       "status": "ratcheted",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [
@@ -1069,6 +1075,18 @@
         {
           "file": "haven-core/src/nostr/mls/manager.rs",
           "symbol": "GROUP_MESSAGE_RETENTION_COMPONENT_ID"
+        },
+        {
+          "file": "haven-core/src/nostr/mls/manager.rs",
+          "symbol": "group_message_retention_secs"
+        },
+        {
+          "file": "haven-core/src/nostr/mls/retention.rs",
+          "symbol": "RetentionBoundPeeler"
+        },
+        {
+          "file": "haven-core/src/nostr/mls/retention.rs",
+          "symbol": "bounded_retention_secs"
         }
       ],
       "tests": [
@@ -1083,12 +1101,82 @@
         {
           "file": "haven-core/src/circle/manager.rs",
           "name": "decrypt_location_drops_expired_event"
+        },
+        {
+          "file": "haven-core/src/circle/manager.rs",
+          "name": "a_locally_created_circle_declares_havens_retention_window_to_every_member"
+        },
+        {
+          "file": "haven-core/src/circle/manager.rs",
+          "name": "location_445_expires_even_in_a_circle_that_declares_no_retention"
+        },
+        {
+          "file": "haven-core/src/circle/manager.rs",
+          "name": "expiration_separates_location_from_control_and_no_other_tag_appears"
+        },
+        {
+          "file": "haven-core/src/nostr/mls/retention.rs",
+          "name": "an_unstamped_application_message_becomes_stamped"
+        },
+        {
+          "file": "haven-core/src/nostr/mls/retention.rs",
+          "name": "a_longer_policy_is_capped_to_havens_own_window"
+        },
+        {
+          "file": "haven-core/src/nostr/mls/retention.rs",
+          "name": "control_messages_are_never_given_a_retention"
+        },
+        {
+          "file": "haven-core/src/circle/manager.rs",
+          "name": "a_shorter_group_policy_reaches_the_wire_as_declared"
         }
       ],
       "guards": [
         "tooling/e2e/ci/check-wire-journal.sh#workflow=e2e-android.yml"
       ],
-      "residual": "Scoped to locally-created circles. The 0x8005 component is supplied at exactly one site (nostr/mls/manager.rs, CreateGroupRequest.app_components) and there is NO read-back, no validation on accept_welcome, and no UpdateAppComponents path that adds it to a group lacking it. For a circle created by a client that did not declare the component (an older Haven build, another Marmot client), this device's own application 445s carry no expiration — and then BOTH halves of privacyWhatOthersSeeDetailExpiry invert: the four-minute claim is false for that circle, and a location update reads as a membership change. The cited test exercises a locally-created two-party circle only, so nothing fails when the joined-group case breaks."
+      "residual": "Bounded to the traffic THIS device authors, which is all it can bound. In a circle created by a client that declared no 0x8005 component, another member's own location 445s still carry no expiration: they may be retained indefinitely AND, to any relay watching the circle's public #h, they are indistinguishable from membership changes — so in such a mixed circle the un-stamped class contains another member's LOCATION UPDATES, not only control messages, and `privacyWhatOthersSeeDetailExpiry`'s discriminator sentence used to read more widely than it holds. That is now closed in the copy: the sentence is scoped to the messages this device sends (\"Among the messages your phone sends, only location updates carry that expiry request, so a message without one is visibly a membership or settings change rather than a location update\"), and it names the whole un-stamped class rather than membership alone — an admin handoff and a relay-set change are UpdateAppComponents commits and are un-stamped too, which is what `expiration_separates_location_from_control_and_no_other_tag_appears` actually publishes. Haven still cannot repair the group itself: writing the component is admin-gated upstream (require_admin on the UpdateAppComponents path) and a joiner is not an admin, and doing it inside the join path would stage an epoch-advancing commit whose non-publication pins the group in PendingPublish and buffers every inbound message forever, which is a worse loss than the leak. What remains is that the residue is disclosed nowhere: nothing in the app tells the user that in such a circle another member's location 445s may sit on a relay indefinitely and read as group control. Owner decision: disclose that residue too, or accept that the scoped sentence is where the disclosure stops. SECOND: the bound MASKS the group-level declaration, and it masks it in three pre-existing proofs, not one. `encrypt_location_attaches_group_retention_expiration` and `decrypt_location_drops_expired_event` (src/circle/manager.rs) and the E2E wire oracle (tooling/e2e/wire_allowlist.json, kind 445 `required: [h, expiration]`) all now pass with create_group's 0x8005 declaration removed, because the bound supplies the tag they look for; `live_sync_cursor_replay_e2e.rs`'s expiration precondition is masked the same way. NOTHING AT THE WIRE LEVEL still proves Haven declares 0x8005 to its peers, and the component is the only thing governing every OTHER member's client. Held at host level instead, by `a_locally_created_circle_declares_havens_retention_window_to_every_member` (both parties read the window back out of group state) and `a_shorter_group_policy_reaches_the_wire_as_declared` (a foreign circle's narrower window reaches the wire as declared, which the bound could not fake). Closing it on the wire needs an allow-list entry that asserts the delta VALUE against the circle's declared window rather than the tag's presence — owned by the E2E lane, not by this crate. THIRD: the bound honours an arbitrarily short declared window, so a circle whose creator declares e.g. 1 s has every Haven member's location dropped by a NIP-40-honouring relay almost immediately. Deliberately not floored — a floor would ask relays to hold location ciphertext LONGER than the circle declared, and would not restore visibility, since the same component governs every other member's client. SECURITY.md's no-gap invariant is scoped to circles Haven created for exactly this reason. That window is no longer undisclosed: the circle-details subtitle reports the EFFECTIVE window for the messages this device sends into that circle — in seconds when it is under a minute, so a narrow foreign window reads as alarming rather than being rounded away — held by INV-U-CIRCLE-EXPIRY-SHOWN-IS-EXPIRY-SENT. What the sheet does not say is WHY it is short: it reports the number, not that another client chose it."
+    },
+    {
+      "id": "INV-W-445-EXPIRATION-WINDOW",
+      "title": "The relay-residency window Haven asks for is the CEILING the copy states, and the smallest the no-gap floor allows",
+      "statement": "LOCATION_MESSAGE_RETENTION_SECS is the CEILING on the NIP-40 window Haven requests, not the window every message carries: an application kind-445 gets it whenever the group declares no message-retention.v1 (0x8005) window, declares zero, or declares a LONGER one, while a SHORTER declared window is honoured as declared (bounded_retention_secs — see INV-W-445-EXPIRATION-SCOPE for the per-message rule and INV-U-CIRCLE-EXPIRY-SHOWN-IS-EXPIRY-SENT for what the user is shown). The constant equals kLocationPublishMaxInterval + 2 * kTtlNetworkBufferSeconds read out of haven/lib/src/constants/location.dart. Four things therefore move together: the prose figure in privacyWhatOthersSeeDetailExpiry ('about four minutes'), the qualifier that makes it a bound rather than a flat promise ('at most', with the shorter-window case named — a flat figure is false in every circle another client created with a narrower window, which is the circle whose window the user cannot change), the no-widening bound (a larger window leaves every published location on relays longer than the design commits to), and the no-narrowing bound (a smaller one leaves a member returning from offline with nothing unexpired left to fetch, while the copy still promises their position goes out every couple of minutes). Editing the constant, the Dart publish ceiling, the sentence, or the honouring of a shorter declared window without the others fails.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "privacyWhatOthersSeeDetailExpiry"
+      ],
+      "disclosure_arb_keys": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#the-no-gap-invariant"
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/location/ttl.rs",
+          "symbol": "LOCATION_MESSAGE_RETENTION_SECS"
+        },
+        {
+          "file": "haven-core/src/nostr/mls/retention.rs",
+          "symbol": "bounded_retention_secs"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/tests/privacy_copy_ties.rs",
+          "name": "relay_expiry_copy_states_the_retention_window"
+        },
+        {
+          "file": "haven-core/tests/privacy_copy_ties.rs",
+          "name": "relay_expiry_copy_states_the_window_as_a_ceiling"
+        },
+        {
+          "file": "haven-core/tests/privacy_copy_ties.rs",
+          "name": "widening_the_retention_would_outlive_the_disclosed_expiry"
+        },
+        {
+          "file": "haven-core/tests/privacy_copy_ties.rs",
+          "name": "narrowing_the_retention_would_strand_a_returning_member"
+        }
+      ],
+      "guards": []
     },
     {
       "id": "INV-W-GROUP-TAG-PSEUDONYMOUS-AND-STABLE",
@@ -1205,6 +1293,62 @@
       "guards": [
         "tooling/e2e/ci/check-wire-journal.sh#workflow=e2e-android.yml"
       ]
+    },
+    {
+      "id": "INV-U-CIRCLE-EXPIRY-SHOWN-IS-EXPIRY-SENT",
+      "title": "The expiry a circle's details sheet shows is the expiry this device stamps on its own location messages",
+      "statement": "The circle-details subtitle reports the EFFECTIVE relay-retention window for the location messages THIS device sends into that circle — bounded_retention_secs applied to the group's declared 0x8005 component — and never the raw declaration. The two diverge in exactly the cases that matter: a circle that declares nothing, and one that declares longer than Haven's own window, both collapse to LOCATION_MESSAGE_RETENTION_SECS, while a SHORTER foreign declaration is honoured and is therefore shown as declared. A circle with no live MLS group shows no window at all rather than falling back to Haven's, because the fallback would report 'about four minutes' for a circle that cannot send. The copy states whose messages the number governs ('the location updates you send') and keeps the window a request to relays rather than a promise of deletion, matching privacyWhatOthersSeeDetailExpiry.",
+      "status": "enforced",
+      "assertion_arb_keys": [
+        "circleDetailsMetaWithExpiry",
+        "circleDetailsExpirySemantics",
+        "circleDetailsExpiryMinutesShort",
+        "circleDetailsExpirySecondsShort",
+        "circleDetailsExpiryMinutesLong",
+        "circleDetailsExpirySecondsLong"
+      ],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#the-no-gap-invariant"
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/circle/manager.rs",
+          "symbol": "outgoing_location_expiry_secs"
+        },
+        {
+          "file": "haven-core/src/nostr/mls/retention.rs",
+          "symbol": "bounded_retention_secs"
+        },
+        {
+          "file": "haven/lib/src/providers/circles_provider.dart",
+          "symbol": "circleLocationExpiryProvider"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/circle/manager.rs",
+          "name": "the_expiry_the_sheet_shows_is_the_expiry_on_the_wire"
+        },
+        {
+          "file": "haven-core/src/circle/manager.rs",
+          "name": "a_circle_with_no_live_mls_group_has_no_expiry_to_show"
+        },
+        {
+          "file": "haven/test/widgets/circles/circle_details_expiry_test.dart",
+          "name": "3. a seconds-long foreign window is shown, not rounded away"
+        },
+        {
+          "file": "haven/test/widgets/circles/circle_details_expiry_test.dart",
+          "name": "11. a screen reader hears what the number means and whose messages it governs"
+        },
+        {
+          "file": "haven/test/widgets/circles/circle_details_expiry_test.dart",
+          "name": "6. an unreadable window leaves no segment and no separator"
+        }
+      ],
+      "guards": []
     },
     {
       "id": "INV-W-RELAY-LISTS-PUBLISHED-KINDS",
@@ -1664,7 +1808,7 @@
     {
       "id": "INV-R-DISCOVERY-POOL-DISJOINT-AND-NOT-USER-CHOSEN",
       "title": "The eight profile relays and six discovery relays never overlap, and the user cannot remove them",
-      "statement": "PRODUCTION_PROFILE_RELAYS (8) and PRODUCTION_DISCOVERY_RELAYS (6) are disjoint by construction and disjoint from the account seed defaults, and both are contacted unconditionally even when every relay the user chose is private; removals of the curated eight do not take effect because usable_profile_relays() unions the defaults back in on every resolution, so the copy must keep saying \"that you do not choose\". Resizing either pool without updating the paragraph that spells both counts fails the copy tie.",
+      "statement": "PRODUCTION_PROFILE_RELAYS (8) and PRODUCTION_DISCOVERY_RELAYS (6) are disjoint by construction and disjoint from the account seed defaults, and both are contacted unconditionally even when every relay the user chose is private; the curated eight cannot be taken out of the profile group at EITHER layer — Settings offers no remove control on a curated Profile row (matched across URL spelling variants, so a case or trailing-slash difference cannot bring the control back), and usable_profile_relays() unions the defaults back in on every resolution, so a row deleted by any other route still leaves the relay dialled. The copy must therefore keep saying \"that you do not choose\". Resizing either pool without updating the paragraph that spells both counts fails the copy tie.",
       "status": "enforced",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [
@@ -1689,6 +1833,10 @@
         {
           "file": "haven-core/src/relay/discovery.rs",
           "symbol": "PRODUCTION_DISCOVERY_RELAYS"
+        },
+        {
+          "file": "haven/lib/src/pages/settings/relay_settings_page.dart",
+          "symbol": "unremovable"
         }
       ],
       "tests": [
@@ -1703,6 +1851,22 @@
         {
           "file": "haven-core/tests/privacy_copy_ties.rs",
           "name": "indexer_paragraph_spells_both_pool_sizes"
+        },
+        {
+          "file": "haven-core/tests/profile_curated_pool_removal.rs",
+          "name": "removing_a_curated_profile_relay_shortens_the_list_but_not_the_dialled_set"
+        },
+        {
+          "file": "haven/test/pages/settings/relay_settings_page_test.dart",
+          "name": "offers no remove control for a curated Profile relay, but keeps one for the user's own addition"
+        },
+        {
+          "file": "haven/test/pages/settings/relay_settings_page_test.dart",
+          "name": "suppresses the curated Profile remove control across URL spelling variants"
+        },
+        {
+          "file": "haven/test/pages/settings/relay_settings_page_test.dart",
+          "name": "still offers removal for the same URL in the Inbox category"
         }
       ],
       "guards": [
@@ -1872,7 +2036,7 @@
         },
         {
           "file": "haven/test/services/identity_secret_scrub_test.dart",
-          "name": "withFreshSecret actually scrubs"
+          "name": "the provider's own buffer is zeroed once use returns"
         },
         {
           "file": "haven/test/services/nostr_identity_service_test.dart",
@@ -1891,7 +2055,7 @@
     {
       "id": "INV-K-SECRET-MATERIAL-ZEROIZED",
       "title": "Secret-bearing values are zeroized after use",
-      "statement": "Every Rust struct field holding key material is either Zeroizing<T> or lives in a ZeroizeOnDrop type, and every Dart capture of getSecretBytes() is scrubbed on completion and on throw; this becomes false when a raw [u8; 32] field is added without the derive, or a Dart secret list is bound to a local that no finally clears.",
+      "statement": "Every Rust struct field holding key material is either Zeroizing<T> or lives in a ZeroizeOnDrop type, and on the Dart side every fetched secret-bytes buffer is taken over rather than copied — so exactly one buffer ever holds the secret — and that one buffer is overwritten on every exit: normal completion, a throw out of the FFI call, and rejection of a wrong-length secret. This becomes false when a raw [u8; 32] field is added without the derive, when a Dart secret is bound to a local that no finally clears, or when a secret is passed through Uint8List.fromList, which copies and leaves the source buffer live under no name any fillRange can reach.",
       "status": "enforced",
       "assertion_arb_keys": [
         "privacyYourKeysDetailFormats"
@@ -1917,11 +2081,27 @@
         },
         {
           "file": "haven/test/services/fresh_secret_test.dart",
-          "name": "scrubs the copy the instant use completes (Rule 9)"
+          "name": "exactly one buffer holds the secret — provider yields a Uint8List (the production shape: the buffer the FFI just allocated)"
         },
         {
           "file": "haven/test/services/fresh_secret_test.dart",
-          "name": "scrubs the copy even when use throws"
+          "name": "wipes a foreign source BEFORE returning the copy"
+        },
+        {
+          "file": "haven/test/services/identity_secret_scrub_test.dart",
+          "name": "the provider's own buffer is zeroed once use returns"
+        },
+        {
+          "file": "haven/test/services/identity_secret_scrub_test.dart",
+          "name": "the provider's own buffer is zeroed when use throws"
+        },
+        {
+          "file": "haven/test/services/identity_secret_scrub_test.dart",
+          "name": "the provider's own buffer is zeroed when the length check rejects it"
+        },
+        {
+          "file": "haven/test/lints/secret_bytes_scrub_test.dart",
+          "name": "every secret-bytes capture is scrubbed and no copy is minted, except the individually-named known-open set"
         }
       ],
       "guards": [
@@ -2168,7 +2348,7 @@
     {
       "id": "INV-P-PROFILE-PUBLISH-IS-UNCONDITIONAL",
       "title": "A saved name or photo is published publicly, with no gate",
-      "statement": "Saving a display name or avatar reaches publish_metadata for a kind-0 signed by the identity key with no consent flag, no toggle and no Dart-side short-circuit; this becomes false only by adding a gate, which the copy would then be wrong about.",
+      "statement": "Saving a display name or avatar stages the edit in the durable profile outbox and unconditionally triggers a sync that reaches publish_metadata for a kind-0 signed by the identity key — no consent flag, no toggle and no Dart-side short-circuit; the only thing between a save and the publish is transport availability (the outbox retries on cold start and resume until the pool acks). This becomes false only by adding a gate, which the copy would then be wrong about.",
       "status": "accepted_deviation",
       "accepted_deviation_id": "R10",
       "assertion_arb_keys": [],
@@ -2220,6 +2400,18 @@
         {
           "file": "haven/test/pages/onboarding/create_identity_screen_test.dart",
           "name": "an edited name is what gets saved and published"
+        },
+        {
+          "file": "haven/test/widgets/identity/display_name_card_test.dart",
+          "name": "the button re-enables to saved as soon as the LOCAL save resolves, even while the background sync is still unresolved"
+        },
+        {
+          "file": "haven/test/widgets/identity/avatar_picker_test.dart",
+          "name": "picked + cropped image flows to setOwnAvatar with a square lock, shows success, and deletes both temp files"
+        },
+        {
+          "file": "haven/test/providers/profile_sync_provider_test.dart",
+          "name": "resumes a save a prior session left pending (retryDue)"
         }
       ],
       "guards": [

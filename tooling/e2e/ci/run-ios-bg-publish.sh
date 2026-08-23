@@ -241,28 +241,81 @@ bgp_missing_proofs() {
   return 0
 }
 
-# bgp_wait_for_marker <file> <marker> <pid> <deadline-secs> <poll-secs> —
-# bounded wait for a marker to appear in a file a live process is writing.
+# bgp_signal_paths <app-data-root> <name> — every handshake-signal candidate
+# under an app-data root, one path per line.
 #
-# Used ONLY against the handshake signal file. It must never be pointed at
-# SHARED_LOG: that redirect is block-buffered, so a marker in it is not
-# observable until the drive exits.
+# A SWEEP over containers rather than one pinned path, because the drive's own
+# install ROTATES the app's data container. This script installs the app first
+# (it has to: `simctl privacy grant` resolves the bundle id against INSTALLED
+# apps), then the delegated `flutter drive` installs its freshly built bundle
+# over the top and iOS hands the app a NEW
+# `Containers/Data/Application/<UUID>` directory. Any path resolved before the
+# drive runs therefore names a container nobody writes to afterwards: in CI run
+# 32618134993 the host polled …/29407E44…/tmp while the drive wrote to
+# …/7ECBFB3C…/tmp, so READY was never observed, the app was never backgrounded,
+# and the drive failed its own paused-wait 180 s later. Only the leaf UUID
+# rotates — the root below is stable — so sweeping the root is what survives it.
+#
+# `|| true`: a `find` that meets one unreadable directory exits non-zero having
+# still printed every other match. The answer is the OUTPUT, so this reports
+# "these are the candidates" rather than handing callers a status they would
+# have to distinguish from "none" — and it cannot trip `set -e` in a caller
+# that reads it with `$( … )`.
+bgp_signal_paths() {
+  local root="${1:-}" name="$2"
+  find "${root}" -maxdepth 3 -type f -name "${name}" 2>/dev/null || true
+}
+
+# bgp_app_data_root <container-path> — the app-data ROOT to sweep, or non-zero
+# if the container is not laid out the way this script understands.
+#
+# Both halves matter and neither is redundant. Skipping the `dirname` leaves the
+# sweep pointed at ONE container — which still finds that container's own signal
+# at depth 2 and so looks perfectly healthy, right up until the drive's install
+# rotates the leaf and the lane fails exactly as it did in CI run 32618134993.
+# Skipping the suffix check lets a changed simulator layout silently redirect
+# the sweep at whatever `dirname` happened to return.
+bgp_app_data_root() {
+  local container="${1:-}" root
+  root="$(dirname "${container}")"
+  [[ "${root}" == */Containers/Data/Application ]] || return 1
+  printf '%s\n' "${root}"
+}
+
+# bgp_marker_present_under <app-data-root> <name> <marker> — is the marker in
+# ANY handshake signal under this root?
+#
+# A missing root, a missing file and an empty file all read as "absent", the
+# same fail-closed reading `bgp_marker_present` gives a single file.
+bgp_marker_present_under() {
+  local root="${1:-}" name="$2" marker="$3" path
+  while IFS= read -r path; do
+    [[ -n "${path}" ]] || continue
+    if bgp_marker_present "${path}" "${marker}"; then return 0; fi
+  done < <(bgp_signal_paths "${root}" "${name}")
+  return 1
+}
+
+# bgp_wait_until <pid> <deadline-secs> <poll-secs> -- <cmd> [args…] — bounded
+# wait for a predicate command to succeed while a process is still alive.
+#
+# The predicate must read the handshake SIGNAL, never SHARED_LOG: that redirect
+# is block-buffered, so a marker in it is not observable until the drive exits.
 #
 # Returns:
-#   0  the marker appeared
-#   2  the process exited first (the marker is still absent — a marker
-#      printed on the way out is re-checked before this verdict)
+#   0  the predicate succeeded
+#   2  the process exited first (the predicate is re-evaluated before this
+#      verdict, so a signal written as the drive's last act still counts)
 #   3  the deadline elapsed with the process still running
-#
-# A not-yet-created file is tolerated — the handshake signal does not exist
-# until the drive writes it: it simply reads as "marker absent".
-bgp_wait_for_marker() {
-  local log="$1" marker="$2" pid="$3" deadline="$4" poll="$5" waited=0
+bgp_wait_until() {
+  local pid="$1" deadline="$2" poll="$3" waited=0
+  shift 3
+  [[ "${1:-}" == '--' ]] && shift
   while :; do
-    if bgp_marker_present "${log}" "${marker}"; then return 0; fi
+    if "$@"; then return 0; fi
     if ! kill -0 "${pid}" 2>/dev/null; then
-      # The process may have printed the marker in its final write.
-      if bgp_marker_present "${log}" "${marker}"; then return 0; fi
+      # The process may have written the signal in its final act.
+      if "$@"; then return 0; fi
       return 2
     fi
     if (( waited >= deadline )); then return 3; fi
@@ -419,7 +472,8 @@ Usage: simctl location <device> <action> [<arguments>]
   local wlog="${tmp}/w.log"
   printf '%s\n' "${READY_MARKER}" > "${wlog}"
   ( sleep 30 ) & local wpid=$!
-  rc=0; bgp_wait_for_marker "${wlog}" "${READY_MARKER}" "${wpid}" 10 1 || rc=$?
+  rc=0; bgp_wait_until "${wpid}" 10 1 \
+    -- bgp_marker_present "${wlog}" "${READY_MARKER}" || rc=$?
   kill "${wpid}" 2>/dev/null || true; wait "${wpid}" 2>/dev/null || true
   _check "W1 an already-present marker returns 0" 0 "${rc}"
 
@@ -429,7 +483,8 @@ Usage: simctl location <device> <action> [<arguments>]
   : > "${wlog}"
   ( sleep 1; printf '%s\n' "${READY_MARKER}" >> "${wlog}"; sleep 30 ) &
   wpid=$!
-  rc=0; bgp_wait_for_marker "${wlog}" "${READY_MARKER}" "${wpid}" 10 1 || rc=$?
+  rc=0; bgp_wait_until "${wpid}" 10 1 \
+    -- bgp_marker_present "${wlog}" "${READY_MARKER}" || rc=$?
   kill "${wpid}" 2>/dev/null || true; wait "${wpid}" 2>/dev/null || true
   _check "W2 a marker appearing mid-wait returns 0" 0 "${rc}"
 
@@ -439,25 +494,122 @@ Usage: simctl location <device> <action> [<arguments>]
   : > "${wlog}"
   ( exit 0 ) & wpid=$!
   wait "${wpid}" 2>/dev/null || true
-  rc=0; bgp_wait_for_marker "${wlog}" "${READY_MARKER}" "${wpid}" 10 1 || rc=$?
+  rc=0; bgp_wait_until "${wpid}" 10 1 \
+    -- bgp_marker_present "${wlog}" "${READY_MARKER}" || rc=$?
   _check "W3 a dead process without the marker returns 2" 2 "${rc}"
 
-  # --- (W3b) A process that prints the marker AS ITS LAST ACT and exits is
-  #     still a found marker: the death re-check exists so a fast drive
-  #     cannot be misread as a failed one.
-  printf '%s\n' "${READY_MARKER}" > "${wlog}"
+  # --- (W3b) The post-death RE-CHECK, and ONLY it: the predicate is false on
+  #     its first evaluation and true on its second, against an ALREADY-DEAD
+  #     pid, so a 0 here can come from nowhere else. Writing the signal up
+  #     front (the obvious way to write this fixture) is answered by the
+  #     top-of-loop read instead and leaves the re-check unexercised —
+  #     deleting the re-check outright then passes. The case it guards is a
+  #     drive that writes its signal as its last act before exiting.
+  local wonce="${tmp}/w.once"
+  rm -f "${wonce}"
+  _bgp_true_on_second_call() {
+    [[ -e "${wonce}" ]] && return 0
+    : > "${wonce}"
+    return 1
+  }
   ( exit 0 ) & wpid=$!
   wait "${wpid}" 2>/dev/null || true
-  rc=0; bgp_wait_for_marker "${wlog}" "${READY_MARKER}" "${wpid}" 10 1 || rc=$?
-  _check "W3b a marker printed just before exit returns 0" 0 "${rc}"
+  rc=0; bgp_wait_until "${wpid}" 10 1 -- _bgp_true_on_second_call || rc=$?
+  _check "W3b the post-death re-check is what returns 0" 0 "${rc}"
 
   # --- (W4) A live, silent process runs into the DEADLINE (3): the loop is
   #     provably bounded, so a lost handshake can never hang the lane.
   : > "${wlog}"
   ( sleep 30 ) & wpid=$!
-  rc=0; bgp_wait_for_marker "${wlog}" "${READY_MARKER}" "${wpid}" 2 1 || rc=$?
+  rc=0; bgp_wait_until "${wpid}" 2 1 \
+    -- bgp_marker_present "${wlog}" "${READY_MARKER}" || rc=$?
   kill "${wpid}" 2>/dev/null || true; wait "${wpid}" 2>/dev/null || true
   _check "W4 a silent live process hits the deadline (3)" 3 "${rc}"
+
+  # --- (S1) REGRESSION (CI run 32618134993): the drive's own install ROTATES
+  #     the app's data container, so the container that exists when this
+  #     script resolves one is not the container the drive ends up writing
+  #     into. The handshake must therefore find the signal in ANY container
+  #     under the app-data root. Nothing above can see this — every W fixture
+  #     hands the wait the very file its writer used, which is precisely the
+  #     assumption the rotation breaks.
+  local sroot="${tmp}/Containers/Data/Application"
+  mkdir -p "${sroot}/AAAA/tmp" "${sroot}/BBBB/tmp"
+  printf '%s\n' "${READY_MARKER}" > "${sroot}/BBBB/tmp/${SIGNAL_NAME}"
+  rc=0
+  bgp_marker_present_under "${sroot}" "${SIGNAL_NAME}" "${READY_MARKER}" || rc=$?
+  _check "S1 a signal in a ROTATED container is still found" 0 "${rc}"
+
+  # --- (S1b) Non-vacuity for S1: sweeping many containers must not turn into
+  #     "any signal satisfies any marker". A marker the drive has not written
+  #     is still absent, so the DISARMED wait cannot be satisfied by the READY
+  #     the same file already carries.
+  rc=0
+  bgp_marker_present_under "${sroot}" "${SIGNAL_NAME}" "${DISARMED_MARKER}" \
+    || rc=$?
+  _check "S1b an unwritten marker stays absent across containers" 1 "${rc}"
+
+  # --- (S3) The stale-signal clear must sweep EVERY container. A retry's
+  #     drive can be handed a container an EARLIER attempt's drive already
+  #     wrote its READY into, and a leftover READY is matched on the first
+  #     poll — backgrounding the app before the drive has even launched (run
+  #     32553078705 attempt 2). Clearing only the container resolvable at
+  #     clear time is not enough once rotation is in play.
+  printf '%s\n' "${READY_MARKER}" > "${sroot}/AAAA/tmp/${SIGNAL_NAME}"
+  printf '%s\n' "${READY_MARKER}" > "${sroot}/BBBB/tmp/${SIGNAL_NAME}"
+  local stale
+  while IFS= read -r stale; do
+    [[ -n "${stale}" ]] || continue
+    rm -f "${stale}"
+  done < <(bgp_signal_paths "${sroot}" "${SIGNAL_NAME}")
+  rc=0
+  bgp_marker_present_under "${sroot}" "${SIGNAL_NAME}" "${READY_MARKER}" || rc=$?
+  _check "S3 the stale-signal sweep clears EVERY container" 1 "${rc}"
+
+  # --- (R1) The app-data root of a well-formed container is its parent.
+  got="$(bgp_app_data_root \
+    '/d/8E85/data/Containers/Data/Application/29407E44')"
+  _check "R1 a well-formed container yields its Application root" \
+    "/d/8E85/data/Containers/Data/Application" "${got}"
+
+  # --- (R2) A container that is NOT directly under an Application root is
+  #     REFUSED. This is the shape a dropped `dirname` produces, and it is the
+  #     silent half of the CI-run-32618134993 bug: sweeping the container
+  #     itself still finds that container's own signal (at depth 2 of 3), so
+  #     every behavioural fixture stays green until the drive's install
+  #     rotates the leaf out from under it.
+  rc=0
+  bgp_app_data_root \
+    '/d/8E85/data/Containers/Data/Application/29407E44/tmp' >/dev/null || rc=$?
+  _check "R2 a container off the Application root is REFUSED" 1 "${rc}"
+
+  # --- (R3) STRUCTURAL: the real run derives its root through that helper,
+  #     rather than assigning the container to APP_DATA_ROOT directly — the
+  #     mutation R1/R2 cannot see, because it never calls the helper at all.
+  body="$(sed -n '/^# --- The handshake signal path\./,/^# --- Drive/p' \
+            "${BASH_SOURCE[0]}" | grep -v '^[[:space:]]*#')"
+  rc=0
+  [[ -n "${body}" ]] || rc=1
+  grep -qF 'APP_DATA_ROOT="$(bgp_app_data_root "${APP_DATA_CONTAINER}")"' \
+    <<<"${body}" || rc=1
+  _check "R3 the real run derives its root through bgp_app_data_root" 0 "${rc}"
+
+  # --- (N1) The signal's NAME is one literal shared with the Dart drive. The
+  #     two halves cannot agree by construction — Dart writes the file, this
+  #     script finds it — so a rename on one side costs a full READY_WAIT_SECS
+  #     wait and a misleading diagnostic. Unlike the four proof markers, which
+  #     the completion gate would catch, nothing else compares these.
+  #     Fails CLOSED on an unreadable drive file (empty answer, mismatch
+  #     reported) rather than letting `set -e` kill the run from inside the
+  #     assignment — a fixture that aborts the suite is a fixture that never
+  #     reports, and every fixture after it goes unrun.
+  local dart_const
+  dart_const="$(sed -n \
+    's/^const String kHandshakeSignalFileName = .\(.*\).;$/\1/p' \
+    "${SCRIPT_DIR}/../../../haven/integration_test/ios_bg_publish_test.dart" \
+    2>/dev/null || true)"
+  _check "N1 the Dart signal name matches SIGNAL_NAME" \
+    "${SIGNAL_NAME}" "${dart_const}"
 
   # --- (H1) STRUCTURAL: the real run must background the app by launching
   #     the overlay bundle. Every gate above reads a LOG, so none can see a
@@ -472,7 +624,15 @@ Usage: simctl location <device> <action> [<arguments>]
   rc=0
   grep -qF 'simctl launch "${SIM_UDID}" "${OVERLAY_BUNDLE_ID}"' <<<"${body}" \
     || rc=1
-  _check "H1 the background step launches the overlay app" 0 "${rc}"
+  # …and that the READY branch actually CALLS it. Pinning only the body leaves
+  # `if ! bgp_background_app` one indirection away from being stubbed out while
+  # this fixture still reports the background step present.
+  local handshake
+  handshake="$(sed -n '/^# --- The handshake\./,/^# --- The completion gate/p' \
+                 "${BASH_SOURCE[0]}" | grep -v '^[[:space:]]*#')"
+  grep -qF 'if ! bgp_background_app; then' <<<"${handshake}" || rc=1
+  _check "H1 the background step launches the overlay app, and is called" \
+    0 "${rc}"
 
   # --- (H2) The privacy grant is fail-closed. `|| true` on it would be this
   #     repo's recurring "guard passes vacuously" failure: an ungranted app
@@ -502,46 +662,83 @@ Usage: simctl location <device> <action> [<arguments>]
   #     here can see that regression: every marker fixture above passes
   #     against a file written promptly, which is precisely what SHARED_LOG
   #     is not.
-  #     Scoped to the real run's handshake section so this fixture's own
-  #     needle cannot satisfy it.
   #     Scoped to the real run's handshake section, and narrowed to the WAIT
   #     CALLS in it, so neither this fixture's own needle nor the legitimate
   #     post-mortem `cp` of SHARED_LOG can decide the verdict.
+  #
+  #     It also pins WHAT the waits read: one `bgp_marker_present_under` per
+  #     `bgp_wait_until`, each swept over the app-data ROOT. A wait repointed
+  #     at a single pinned container is the CI-run-32618134993 regression (see
+  #     `bgp_signal_paths`), and it looks perfectly healthy to every fixture
+  #     above.
+  #     Line continuations are JOINED first, so each wait is one line carrying
+  #     its predicate AND its marker. Without that the marker checks below
+  #     could not see a marker that sits on a continuation line, and the
+  #     copy-paste this fixture exists to catch lives exactly there.
   body="$(sed -n '/^# --- The handshake\./,/^# --- The completion gate/p' \
             "${BASH_SOURCE[0]}" | grep -v '^[[:space:]]*#' \
-            | grep -F 'bgp_wait_for_marker ')"
+            | sed -e ':a' -e '/\\$/{N; s/\\\n[[:space:]]*/ /; ta}' \
+            | grep -F 'bgp_wait_until ' || true)"
   rc=0
-  # Non-vacuity: an empty body would pass the two checks below for free.
+  # Non-vacuity: an empty body would pass the checks below for free.
   [[ -n "${body}" ]] || rc=1
   grep -qF 'SHARED_LOG' <<<"${body}" && rc=1
-  grep -q  'bgp_wait_for_marker "[$]{SIGNAL_FILE}"' <<<"${body}" || rc=1
-  _check "H4 no handshake wait reads the block-buffered shared log" 0 "${rc}"
+  # A single-file read is the pinned-container regression, whatever it reads.
+  grep -qF 'bgp_marker_present "' <<<"${body}" && rc=1
+  # `|| true` on the counts: `grep -c` exits 1 on zero matches, and under
+  # `set -e` that aborts the self-test MID-RUN — this fixture and H5 would
+  # never report, leaving a deleted handshake to red the lane anonymously.
+  local waits swept ready disarmed
+  waits="$(grep -cF 'bgp_wait_until ' <<<"${body}" || true)"
+  swept="$(grep -cF 'bgp_marker_present_under "${APP_DATA_ROOT}"' <<<"${body}" \
+             || true)"
+  (( waits >= 1 )) || rc=1
+  (( waits == swept )) || rc=1
+  # ONE wait per marker, and the two markers are different. A DISARM wait that
+  # reads READY_MARKER is the worst mutation this lane admits: READY is already
+  # in the signal from the handshake, so the wait returns on its first poll and
+  # the host re-foregrounds the app seconds after backgrounding it — P2 then
+  # measures "publishes continue while backgrounded" against a FOREGROUND app,
+  # every terminal proof still prints, and the lane goes green having proved
+  # nothing. No behavioural fixture can see it; only this can.
+  ready="$(grep -cF '"${READY_MARKER}"' <<<"${body}" || true)"
+  disarmed="$(grep -cF '"${DISARMED_MARKER}"' <<<"${body}" || true)"
+  (( ready == 1 )) || rc=1
+  (( disarmed == 1 )) || rc=1
+  _check "H4 each handshake wait sweeps the root for its OWN marker" 0 "${rc}"
 
-  # --- (H5) STRUCTURAL: the signal file is cleared BEFORE the drive starts.
-  #     The retry re-runs this script against the same device and the data
-  #     container survives, so a READY left by the previous attempt is
-  #     matched on the first poll — observed in run 32553078705 attempt 2,
-  #     63 ms after the seed step and before the drive had launched. The
-  #     marker fixtures cannot see this: to them a present marker is a
-  #     success.
+  # --- (H5) STRUCTURAL: stale signals are cleared BEFORE the drive starts,
+  #     and across EVERY container. The retry re-runs this script against the
+  #     same device, so a READY left by the previous attempt is matched on the
+  #     first poll — observed in run 32553078705 attempt 2, 63 ms after the
+  #     seed step and before the drive had launched. The marker fixtures
+  #     cannot see this: to them a present marker is a success. S3 proves the
+  #     sweep clears every container; this proves the real run performs it,
+  #     and performs it before the drive is launched.
   body="$(sed -n '/^echo "bg-publish — seeded an initial simulator fix"/,/^DRIVE_PID=/p' \
             "${BASH_SOURCE[0]}" | grep -v '^[[:space:]]*#')"
   rc=0
-  grep -qF 'rm -f "${SIGNAL_FILE}"' <<<"${body}" || rc=1
-  _check "H5 a previous attempt's signal is cleared before the drive" 0 "${rc}"
+  grep -qF 'bgp_signal_paths "${APP_DATA_ROOT}" "${SIGNAL_NAME}"' <<<"${body}" \
+    || rc=1
+  grep -qF 'rm -f "${stale_signal}"' <<<"${body}" || rc=1
+  _check "H5 every container's stale signal is cleared before the drive" 0 "${rc}"
 
   if (( fail != 0 )); then
     echo "run-ios-bg-publish.sh --self-test: FAILED" >&2
     return 1
   fi
-  echo "run-ios-bg-publish.sh --self-test: all 26 fixtures passed (the" \
+  echo "run-ios-bg-publish.sh --self-test: all 33 fixtures passed (the" \
        "simctl probes report supported/unsupported/unparseable distinctly;" \
        "the marker parser is literal, prefix-tolerant and fails closed on" \
        "missing logs; the completion gate demands all four terminal proofs" \
        "and never accepts READY in their place; the marker wait is bounded" \
-       "and distinguishes a dead drive from a slow one; and the background" \
-       "step, the fail-closed grant and the uninstall skip are structurally" \
-       "pinned)."
+       "and distinguishes a dead drive from a slow one, the re-check after" \
+       "it included; the signal sweep survives the container rotation the" \
+       "drive's own install causes, stays marker-specific and clears every" \
+       "container; the app-data root is derived AND validated; the signal" \
+       "name still matches the Dart drive's; and the background step and its" \
+       "call, the per-wait markers, the fail-closed grant and the uninstall" \
+       "skip are structurally pinned)."
   return 0
 }
 
@@ -714,12 +911,15 @@ fi
 echo "bg-publish — seeded an initial simulator fix"
 
 # --- The handshake signal path. ----------------------------------------------
-# Resolved from the INSTALLED app (the install and grant above already proved
-# the bundle id resolves), because the sandbox container name is a per-device
-# UUID. FATAL if it cannot be resolved: a script that fell back to polling a
-# path the drive never writes would wait out READY_WAIT_SECS and never
-# background the app — a vacuous handshake, which is exactly the failure mode
-# this lane keeps out of its guards.
+# The host watches the app-data ROOT, not one container: the drive's own
+# install rotates the leaf `<UUID>` (see `bgp_signal_paths`), so a path pinned
+# here would name a directory nobody writes to. Resolving the container is
+# still how the root is found, and is still FATAL on failure — the install and
+# grant above already proved the bundle id resolves, so a failure here means
+# the layout is not what this script understands, and a script that fell back
+# to sweeping some other path would wait out READY_WAIT_SECS and never
+# background the app: a vacuous handshake, exactly the failure mode this
+# lane's guards exist to keep out.
 if ! APP_DATA_CONTAINER="$(xcrun simctl get_app_container \
       "${SIM_UDID}" "${BUNDLE_ID}" data 2>/dev/null)" \
    || [[ -z "${APP_DATA_CONTAINER}" ]]; then
@@ -730,16 +930,28 @@ if ! APP_DATA_CONTAINER="$(xcrun simctl get_app_container \
   exit 2
 fi
 readonly APP_DATA_CONTAINER
-readonly SIGNAL_FILE="${APP_DATA_CONTAINER}/tmp/${SIGNAL_NAME}"
+if ! APP_DATA_ROOT="$(bgp_app_data_root "${APP_DATA_CONTAINER}")"; then
+  echo "ERROR: the app data container resolved to a path whose parent is not" >&2
+  echo "       an .../Containers/Data/Application root, so this script cannot" >&2
+  echo "       tell which directories the drive's rotated container may land" >&2
+  echo "       in. Update bgp_app_data_root for the new simulator layout." >&2
+  exit 2
+fi
+readonly APP_DATA_ROOT
 
 # A signal left by a PREVIOUS attempt must never be read as this one's: the
-# retry re-runs this script against the same device, the data container
-# survives (the runner's uninstall is suppressed), and matching a stale READY
+# retry re-runs this script against the same device and matching a stale READY
 # would background the app before the drive had even launched. Observed in CI
 # run 32553078705 attempt 2, where the host "observed" READY 63 ms after the
-# seed step.
-rm -f "${SIGNAL_FILE}"
-echo "bg-publish — handshake signal: ${SIGNAL_FILE} (cleared)"
+# seed step. Swept across EVERY container, not just the one resolved above,
+# because the rotation can hand this attempt's drive a container an earlier
+# attempt's drive already wrote its READY into.
+while IFS= read -r stale_signal; do
+  [[ -n "${stale_signal}" ]] || continue
+  rm -f "${stale_signal}"
+done < <(bgp_signal_paths "${APP_DATA_ROOT}" "${SIGNAL_NAME}")
+echo "bg-publish — handshake signal: ${SIGNAL_NAME} under ${APP_DATA_ROOT}" \
+     "(any container; stale copies cleared)"
 
 # bgp_background_app — the REAL background transition: launch Preferences
 # over Haven so iOS fires applicationDidEnterBackground. The prior terminate
@@ -774,8 +986,8 @@ readonly DRIVE_PID
 
 # --- The handshake. ----------------------------------------------------------
 set +e
-bgp_wait_for_marker "${SIGNAL_FILE}" "${READY_MARKER}" "${DRIVE_PID}" \
-  "${READY_WAIT_SECS}" "${MARKER_POLL_SECS}"
+bgp_wait_until "${DRIVE_PID}" "${READY_WAIT_SECS}" "${MARKER_POLL_SECS}" \
+  -- bgp_marker_present_under "${APP_DATA_ROOT}" "${SIGNAL_NAME}" "${READY_MARKER}"
 READY_RC=$?
 set -e
 
@@ -799,8 +1011,9 @@ case "${READY_RC}" in
     # (test timeout, attempt timeout) still govern. On (2) the drive already
     # exited and there is nothing to aid.
     set +e
-    bgp_wait_for_marker "${SIGNAL_FILE}" "${DISARMED_MARKER}" "${DRIVE_PID}" \
-      "${DISARM_WAIT_SECS}" "${MARKER_POLL_SECS}"
+    bgp_wait_until "${DRIVE_PID}" "${DISARM_WAIT_SECS}" "${MARKER_POLL_SECS}" \
+      -- bgp_marker_present_under "${APP_DATA_ROOT}" "${SIGNAL_NAME}" \
+         "${DISARMED_MARKER}"
     DISARM_RC=$?
     set -e
     case "${DISARM_RC}" in
@@ -825,29 +1038,41 @@ case "${READY_RC}" in
          "collecting its exit code."
     ;;
   3)
-    echo "ERROR: the drive wrote no ${READY_MARKER} to ${SIGNAL_FILE}" >&2
-    echo "       within ${READY_WAIT_SECS}s. Not backgrounding. If the drive is" >&2
-    echo "       healthy but slow, its own paused-wait will fail attributably;" >&2
-    echo "       if it is wedged pre-test, the shared runner's first-test" >&2
-    echo "       watchdog owns it. If the drive's log DOES carry the marker," >&2
-    echo "       the two halves disagree about the signal path or its name" >&2
-    echo "       (Dart: kHandshakeSignalFileName; here: SIGNAL_NAME)." >&2
+    echo "ERROR: the drive wrote no ${READY_MARKER} to any ${SIGNAL_NAME}" >&2
+    echo "       under ${APP_DATA_ROOT} within ${READY_WAIT_SECS}s. Not" >&2
+    echo "       backgrounding. If the drive is healthy but slow, its own" >&2
+    echo "       paused-wait will fail attributably; if it is wedged pre-test," >&2
+    echo "       the shared runner's first-test watchdog owns it. If the" >&2
+    echo "       drive's log DOES carry the marker, the two halves disagree" >&2
+    echo "       about the signal's name or the tree it lands in (Dart:" >&2
+    echo "       kHandshakeSignalFileName; here: SIGNAL_NAME)." >&2
     # Name the disagreement instead of leaving it to be re-diagnosed: the Dart
     # side writes to `Directory.systemTemp`, which is `<data container>/tmp` on
-    # iOS. If the runtime resolves it elsewhere in the sandbox, say so here.
+    # iOS. If the runtime resolves it elsewhere in the sandbox, the sweep above
+    # cannot see it — so widen to the whole device data tree and say where.
     # `|| true`: under `set -e` a `find` that hits one unreadable directory
     # would abort the script mid-diagnostic, losing the message it exists to
     # print.
-    FOUND_SIGNAL="$(find "${APP_DATA_CONTAINER}" -maxdepth 3 \
-                      -name "${SIGNAL_NAME}" 2>/dev/null | head -n 1 || true)"
-    if [[ -n "${FOUND_SIGNAL}" ]]; then
-      echo "       The drive DID write the signal, at ${FOUND_SIGNAL}, which is" >&2
-      echo "       not the ${SIGNAL_FILE} this script polled. Point SIGNAL_FILE" >&2
-      echo "       at the directory Dart's systemTemp actually resolves to." >&2
+    FOUND_SIGNAL="$(find "${APP_DATA_ROOT%/Containers/Data/Application}" \
+                      -maxdepth 8 -name "${SIGNAL_NAME}" 2>/dev/null \
+                      | head -n 1 || true)"
+    if [[ -n "${FOUND_SIGNAL}" && "${FOUND_SIGNAL}" == "${APP_DATA_ROOT}"/* ]]; then
+      # INSIDE the swept tree: the sweep saw this file and rejected it, so the
+      # disagreement is about CONTENT, not location. Saying "fix the path"
+      # here would send the next maintainer after a bug that does not exist.
+      echo "       The drive DID write ${FOUND_SIGNAL}, which this script" >&2
+      echo "       swept and read — so the file exists but carries no" >&2
+      echo "       ${READY_MARKER}: an empty, truncated or unflushed write," >&2
+      echo "       or a drive that died between creating it and writing it." >&2
+    elif [[ -n "${FOUND_SIGNAL}" ]]; then
+      echo "       The drive DID write the signal, at ${FOUND_SIGNAL}, which" >&2
+      echo "       is outside the app-data root this script sweeps. Teach" >&2
+      echo "       bgp_app_data_root the tree Dart's systemTemp actually" >&2
+      echo "       resolves into." >&2
     else
-      echo "       No ${SIGNAL_NAME} exists anywhere under" >&2
-      echo "       ${APP_DATA_CONTAINER}, so the drive never reached the" >&2
-      echo "       handshake — look at its own output, not at this step." >&2
+      echo "       No ${SIGNAL_NAME} exists anywhere on the device, so the" >&2
+      echo "       drive never reached the handshake — look at its own" >&2
+      echo "       output, not at this step." >&2
     fi
     ;;
 esac

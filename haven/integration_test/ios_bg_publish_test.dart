@@ -157,8 +157,16 @@ const String kReadyForBackgroundMarker = '[bg-publish] READY_FOR_BACKGROUND';
 
 /// Name of the append-only file the drive writes into its OWN sandbox `tmp/`
 /// to signal the host, in `Directory.systemTemp` — `<data container>/tmp` on
-/// iOS, which the wrapper resolves with
-/// `xcrun simctl get_app_container <udid> <bundle> data`.
+/// iOS.
+///
+/// The host matches on this NAME across every container under the device's
+/// `Containers/Data/Application` root, and must keep doing so: it installs the
+/// app (to grant it location) before the drive runs, and the drive's own
+/// install then rotates the container's leaf UUID. A host that resolved one
+/// container up front would watch a directory this file never lands in — CI
+/// run 32618134993, where the drive wrote `…/7ECBFB3C…/tmp` while the host
+/// polled `…/29407E44…/tmp`, so the app was never backgrounded and the wait
+/// below timed out blaming the handshake.
 ///
 /// Carries the two markers the host must act on WHILE the drive is still
 /// running: [kReadyForBackgroundMarker] (background the app now) and
@@ -174,9 +182,10 @@ const String kReadyForBackgroundMarker = '[bg-publish] READY_FOR_BACKGROUND';
 /// drive is still waiting for, so the lane could never pass. A file write
 /// reaches the filesystem immediately and is visible to the host at once.
 ///
-/// The wrapper deletes this file before launching the drive, so a signal left
-/// by a previous attempt can never be mistaken for this one's. Change the
-/// name here AND in `run-ios-bg-publish.sh` together.
+/// The wrapper deletes every copy of this file before launching the drive, so
+/// a signal left by a previous attempt can never be mistaken for this one's —
+/// including one in a container the rotation later hands back. Change the name
+/// here AND in `run-ios-bg-publish.sh` together.
 const String kHandshakeSignalFileName = 'bg-publish-handshake';
 
 /// Verbatim marker prefix printed only after P2's last assertion: at least
@@ -584,11 +593,12 @@ void main() {
               'handshake signal to ${handshakeSignal.path}. The host step that '
               'should have fired is the run-ios-bg-publish.sh background '
               'step ("xcrun simctl launch <udid> com.apple.Preferences" '
-              'once that file appears under the app data container) — check '
-              'the wrapper output for a failed launch, a signal-wait '
-              'timeout, or a container path it could not resolve. The file '
-              'name lives in this file and in the wrapper; change them '
-              'together. Observed lifecycle states so far: '
+              "once a file of that name appears under the device's "
+              'Containers/Data/Application root) — check the wrapper output '
+              'for a failed launch, a signal-wait timeout, or an app-data '
+              'root it could not resolve. The file name lives in this file '
+              'and in the wrapper; change them together. Observed lifecycle '
+              'states so far: '
               '${recorder.seen}.',
         );
         debugPrint(

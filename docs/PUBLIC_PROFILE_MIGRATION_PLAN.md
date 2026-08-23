@@ -1,6 +1,16 @@
 # Public Nostr Profiles Migration Plan (kind-0 + Blossom)
 
-**Status: FINAL DRAFT — reviewed, pending owner approval.**
+**Status: HISTORICAL — shipped 2026-07-16; kept as the design record of the migration.**
+
+> **Superseded detail (2026-08-22):** the own-profile *write* path described below
+> (blocking `publish_my_profile` / `upload_my_profile_picture`, fetch-merge-publish on
+> the save call, sync `get_cached_profile`) was replaced by a local-first outbox:
+> `save_my_profile_local` / `save_my_profile_picture_local` stage edits durably in
+> milliseconds, and an idempotent `sync_my_profile` performs the Blossom upload,
+> concurrent whole-pool merge-base read, and kind-0 publish (all relay acks harvested;
+> the pending marker fully clears only on full-pool ack). `get_cached_profile` is now
+> async. The read paths, privacy boundaries, and retraction gates below still describe
+> the shipped behaviour; constants named in §file-layout sketches may have drifted.
 
 Haven migrates from MLS-encrypted in-group profile sharing (display names piggybacked in
 location JSON, avatars as padded kind-445 chunk messages) to standard public Nostr

@@ -260,7 +260,7 @@ flutter|lib/src/services/background_catchup_worker.dart|26  # measured 28.40% (2
 # gate.
 flutter|lib/src/services/nostr_circle_service.dart|10       # measured 12.55% (65/518)
 flutter|lib/src/services/nostr_identity_service.dart|52     # measured 54.62% (65/119)
-flutter|lib/src/services/nostr_profile_service.dart|22      # measured 24.14% (21/87)
+flutter|lib/src/services/nostr_profile_service.dart|36      # measured 38.74% (43/111)
 flutter|lib/src/services/nostr_relay_service.dart|16        # measured 18.09% (34/188); was 0 (0.63%, 1/158)
                                                             # before classifyKeyPackageMaintenance was lifted
                                                             # out of the class. It decides whether a KeyPackage

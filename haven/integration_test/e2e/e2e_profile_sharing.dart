@@ -95,7 +95,8 @@
 ///
 /// Reverting any of the following to a no-op turns this scenario red:
 /// - `save_my_profile_picture_local` / `sync_my_profile` / `blossom_server()`
-///   — step 2's Blossom GET 404s / connection-refuses.
+///   — step 2's Blossom GET 404s / connection-refuses; conversely, a local
+///   save that uploads EAGERLY makes step 2a's inverse GET find a blob.
 /// - `sync_my_profile` / `publish_metadata` / `resolve_write_relays` — step
 ///   2/4's kind-0 relay waits time out, or the STRENGTHENED pre-sync
 ///   assertions (steps 2a/4a) see a publish that should not have happened.
@@ -834,8 +835,18 @@ void main() {
         );
 
         // STRENGTHENED (profile-latency migration): the LOCAL save alone —
-        // before syncOwnProfile runs — must reach NO relay. Same zero-kind-0
-        // baseline as STEP 1, now proven to survive a save.
+        // before syncOwnProfile runs — must reach NO relay and NO blob store.
+        //
+        // Bob's fetch goes FIRST because it is the only real network barrier
+        // available here: it is a live REQ/EOSE against a pool relay, whereas
+        // the `aliceKind0OnPool` buffers below are fed by subscriptions and,
+        // checked straight after a purely local save, would only prove
+        // "nothing has arrived YET". Running them behind a completed
+        // round-trip is what turns them into evidence.
+        final beforeSync = await bob.user.circleManager.fetchMemberProfiles(
+          pubkeysHex: <String>[aliceHex],
+          maxAgeSecs: 0,
+        );
         for (var i = 0; i < profilePool.length; i++) {
           expect(
             aliceKind0OnPool[i],
@@ -845,19 +856,55 @@ void main() {
                 'zero kind-0 for Alice until syncOwnProfile runs.',
           );
         }
-        final beforeSync = await bob.user.circleManager.fetchMemberProfiles(
-          pubkeysHex: <String>[aliceHex],
-          maxAgeSecs: 0,
+        // A ROW for Alice is expected here and is not a leak: a fetch that
+        // resolved nothing still writes the negative-cache row that drives the
+        // per-author retry ladder (`record_profile_misses`), and that row comes
+        // back `Unknown` with blank metadata. What must never come back is a
+        // RESOLVED kind-0 — that, and only that, would mean the local save had
+        // reached a relay. Asserting on ABSENCE instead would test the shape of
+        // the cache rather than the promise.
+        final aliceBeforeSync = beforeSync
+            .where(
+              (row) =>
+                  row.pubkeyHex.toLowerCase() == aliceHex.toLowerCase(),
+            )
+            .toList();
+        expect(
+          aliceBeforeSync,
+          hasLength(1),
+          reason: 'Bob must actually have LOOKED. A pubkey the cycle never '
+              'reached is stamped in neither list and seeds no row, so an '
+              'empty result here would let the assertions below pass by '
+              'proving nothing — on a hermetic pool whose relays setUpAll '
+              'already probed, that is a failure, not a shrug.',
         );
-        for (final p in beforeSync) {
-          if (p.pubkeyHex.toLowerCase() == aliceHex.toLowerCase()) {
-            fail(
-              '[e2e_profile] Bob resolved a kind-0 for Alice before '
+        final p = aliceBeforeSync.single;
+        expect(
+          p.isKnown,
+          isFalse,
+          reason: '[e2e_profile] Bob resolved a kind-0 for Alice before '
               'syncOwnProfile ran — a local save must not be observable by '
               'another client.',
-            );
-          }
-        }
+        );
+        expect(
+          p.displayName,
+          isNull,
+          reason: "[e2e_profile] Alice's locally-saved display name reached "
+              'Bob before syncOwnProfile ran.',
+        );
+        expect(
+          p.name,
+          isNull,
+          reason: "[e2e_profile] Alice's locally-saved name reached Bob "
+              'before syncOwnProfile ran.',
+        );
+        // The PHOTO half of the same promise, asserted where an upload would
+        // actually show. `hasPicture` cannot serve here: it reports whether
+        // BOB has cached bytes, and he downloads none until STEP 3, so it
+        // reads false whatever Alice's save did. Blossom is content-addressed,
+        // so the hash `setOwnAvatar` just returned locally is the exact URL a
+        // premature upload would occupy.
+        await _assertBlobAbsent(_blossomUrl, pictureHash!);
         debugPrint(
           '[e2e_profile] STEP 2a — local save observed by NO ONE yet',
         );
@@ -881,8 +928,11 @@ void main() {
         // the profile pool — not just the first one to ack. `publish_metadata`
         // returns as soon as one relay accepts, so waiting on the whole pool is
         // the fan-out proof AND what makes the two downstream steps
-        // deterministic: step 3 reads from whichever member Bob's private salt
-        // assigns him, and step 4's fetch-merge-publish rebuilds the kind-0
+        // deterministic: step 3 reads from Bob's RANK-1 member — 2a's fetch
+        // resolved nothing and was stamped a miss, and a forced refetch
+        // resumes the ladder at `miss_count` rather than re-asking the relay
+        // that already answered "no" — and step 4's fetch-merge-publish
+        // rebuilds the kind-0
         // from the freshest copy it finds across the pool — a member still
         // holding the pre-picture event could be merged onto, dropping
         // `picture`.
@@ -909,7 +959,7 @@ void main() {
         expect(originalPictureUrl, isNotEmpty);
 
         // (b) The blob is retrievable from Blossom (BUD-02 GET /<sha256>).
-        await _assertBlobRetrievable(_blossomUrl, pictureHash!);
+        await _assertBlobRetrievable(_blossomUrl, pictureHash);
         debugPrint(
           '[e2e_profile] STEP 2 — kind-0 on relay + blob on Blossom OK',
         );
@@ -1131,6 +1181,39 @@ Map<String, dynamic> _contentJson(TestRelayEvent event) {
   if (content is! String || content.isEmpty) return const <String, dynamic>{};
   final decoded = jsonDecode(content);
   return decoded is Map<String, dynamic> ? decoded : const <String, dynamic>{};
+}
+
+/// Asserts the blob at `<blossomBase>/<sha256Hex>` is NOT served — the
+/// inverse of [_assertBlobRetrievable], and the photo half of the local-first
+/// promise: `setOwnAvatar` sanitizes and stores bytes on the device and hands
+/// back their sha256, but must upload nothing until `syncOwnProfile` runs.
+///
+/// Asserts "not 200" rather than exactly 404 because the two lanes run two
+/// different Blossom implementations (a container on Android, the host-native
+/// stub on iOS); what the promise is about is whether the bytes are SERVED,
+/// not which flavour of miss the server reports.
+Future<void> _assertBlobAbsent(
+  String blossomBase,
+  String sha256Hex,
+) async {
+  final base = blossomBase.endsWith('/')
+      ? blossomBase.substring(0, blossomBase.length - 1)
+      : blossomBase;
+  final uri = Uri.parse('$base/$sha256Hex');
+  final client = HttpClient()..connectionTimeout = _blossomHttpTimeout;
+  try {
+    final request = await client.getUrl(uri).timeout(_blossomHttpTimeout);
+    final response = await request.close().timeout(_blossomHttpTimeout);
+    await response.drain<void>();
+    expect(
+      response.statusCode,
+      isNot(200),
+      reason: 'Blossom GET $uri must NOT serve a blob before syncOwnProfile — '
+          'a LOCAL photo save must upload nothing.',
+    );
+  } finally {
+    client.close(force: true);
+  }
 }
 
 /// Asserts the blob at `<blossomBase>/<sha256Hex>` is retrievable (HTTP 200,
