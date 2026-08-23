@@ -860,6 +860,38 @@ void main() {
       });
 
       test(
+        'both platforms take the one-shot timeLimit from '
+        'kOneShotLocationTimeout',
+        () async {
+          // NOT a restatement of the two 30 s literals above. Those pass just
+          // as well against a private constant re-added to this service,
+          // which is how this timeout used to be written — and
+          // `b5_permission_revocation_test.dart` derives its app-op
+          // observation windows from kOneShotLocationTimeout, because an
+          // Android app-op denial raises no error and a refused one-shot
+          // surfaces only when this timeLimit expires. A window sized from a
+          // value the service no longer uses cannot see the refusal it is
+          // waiting for.
+          stubReadyForOneShot();
+
+          await serviceFor(isIOS: true).getCurrentLocation();
+          await serviceFor(isIOS: false).getCurrentLocation();
+
+          final captured = verify(
+            mockGeolocator.getCurrentPosition(
+              locationSettings: captureAnyNamed('locationSettings'),
+            ),
+          ).captured.cast<geo.LocationSettings>();
+
+          expect(captured, hasLength(2));
+          expect(
+            captured.map((s) => s.timeLimit),
+            everyElement(kOneShotLocationTimeout),
+          );
+        },
+      );
+
+      test(
         'getLocationStream(backgroundSharingEnabled: true) sets '
         'background-capable AppleSettings on iOS',
         () {

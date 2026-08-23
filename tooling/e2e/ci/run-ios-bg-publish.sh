@@ -44,13 +44,25 @@
 #      in a bounded loop, then backgrounds the app:
 #          xcrun simctl terminate <udid> com.apple.Preferences || true
 #          xcrun simctl launch    <udid> com.apple.Preferences
-#      The drive keeps running — the simulator never suspends a backgrounded
-#      app (documented in .github/workflows/e2e-ios.yml), so `flutter test`'s
-#      VM-service connection survives the transition.
+#      The drive keeps running only because the APP has a background-execution
+#      claim: `UIBackgroundModes: location` plus the live CLLocationManager
+#      updates session the production GeolocatorLocationService creates with
+#      `allowsBackgroundLocationUpdates`. The simulator suspends a
+#      backgrounded app just like a device — CI run 32646436116 caught it
+#      doing so ~30 s in, back when the drive faked its location service away
+#      — and a suspended drive's `flutter test` isolate stops executing until
+#      the app is re-foregrounded.
 #   3. The drive bounded-polls its own lifecycle state for the REAL paused
 #      transition; its failure message names this script's background step,
 #      so a broken handshake is attributed from both sides.
-#   4. After the drive's LAST marker (`[bg-publish] SESSION_DISARMED`) this
+#   4. When the drive disables background sharing it appends
+#      `[bg-publish] BACKGROUND_SHARING_DISABLED`. That is the instant the
+#      app loses its right to run in the background, so this script times
+#      P3's settle window from there and re-foregrounds Haven itself once it
+#      has elapsed: a suspended drive cannot re-fetch the relay, and the
+#      re-fetch has to happen before the window's own kind-445s age past
+#      their 228 s NIP-40 expiration (see DISARM_WAIT_SECS).
+#   5. After the drive's LAST marker (`[bg-publish] SESSION_DISARMED`) this
 #      script re-foregrounds Haven (`simctl launch` on the running bundle
 #      activates it) so flutter_test's post-suite teardown gets real engine
 #      frames again — an in-process resumed dispatch cannot restart the
@@ -71,12 +83,12 @@
 #
 # # Scope boundary (stated so nobody over-reads a green)
 #
-# The simulator does NOT reproduce real-device background SUSPENSION: the
-# process stays alive and the VM-service stays attached, so jetsam, true
-# suspension and SLC/BGTask behaviour cannot surface here. This lane proves
-# plist/plugin-flag/native-session-arming/Dart-pipeline continuity under a
-# genuinely fired UIApplication background transition — NOT the OS's
-# suspension heuristics. The physical-device checklist
+# A simulator has no jetsam, no Significant-Location-Change relaunch and no
+# BGTaskScheduler, so a background-execution bug only those surface cannot
+# show up here. This lane proves that the production background stack — plist
+# mode, AppleSettings, the native session handler, the Dart publish pipeline —
+# survives a genuinely fired UIApplication background transition and keeps
+# kind-445 events reaching the relay. The physical-device checklist
 # (docs/M7_BACKGROUND_SHARING.md §6, item 0) remains the final proof.
 #
 # # Why the app is installed and granted BEFORE the drive
@@ -87,11 +99,11 @@
 # builds once, uninstalls, installs, grants When-In-Use (`location` — this
 # lane proves the production When-In-Use path; Always is B7's axis), seeds a
 # `simctl location` fix, and asks the shared runner to skip its own uninstall
-# via HAVEN_E2E_IOS_SKIP_UNINSTALL=1. The drive fakes its location SOURCE
-# (B7 precedent — GPS acquisition is the B4 lane's subject), so the grant and
-# the fix are CoreLocation hygiene: no prompt can wedge the run and locationd
-# holds a real fix while the armed CLBackgroundActivitySession is live. No
-# `simctl location start` route is needed for the same reason.
+# via HAVEN_E2E_IOS_SKIP_UNINSTALL=1. Both are load-bearing, not hygiene: the
+# drive overrides NOTHING about location (B4's stance, not B7's), because the
+# production CLLocationManager session is the app's only claim to execute
+# while backgrounded. Without the grant the app sits on an unanswerable
+# prompt; without the fix locationd has nothing to deliver.
 #
 # Everything else — the first-test watchdog, the narrowed retry gate, the
 # secret-leak scan — is inherited by delegating the drive to
@@ -142,12 +154,13 @@ readonly OVERLAY_BUNDLE_ID="com.apple.Preferences"
 # below feeds the real parser fixtures built from these literals, so a drift
 # shows up as a failing self-test rather than as a silently unparseable log.
 #
-# READY_MARKER feeds the HANDSHAKE only and is printed before P2/P3 run, so
-# it can never stand in for a completion proof. The other four are the
-# terminal proofs: each is printed only after the last assertion of its own
-# phase. PUBLISH_MARKER is matched as a PREFIX (the drive appends
-# ` count=<n>`).
+# READY_MARKER and DISABLED_MARKER feed the HANDSHAKE only and are printed
+# before the assertions that follow them, so neither can stand in for a
+# completion proof. The other four are the terminal proofs: each is printed
+# only after the last assertion of its own phase. PUBLISH_MARKER is matched as
+# a PREFIX (the drive appends ` count=<n>`).
 readonly READY_MARKER='[bg-publish] READY_FOR_BACKGROUND'
+readonly DISABLED_MARKER='[bg-publish] BACKGROUND_SHARING_DISABLED'
 readonly ARMED_MARKER='[bg-publish] SESSION_ARMED'
 readonly PUBLISH_MARKER='[bg-publish] BACKGROUND_PUBLISH_OK'
 readonly SILENCE_MARKER='[bg-publish] NEGATIVE_SILENCE_OK'
@@ -174,16 +187,58 @@ readonly BG_LOG="/tmp/bg-publish-ios.log"
 # Handshake bounds. READY must appear after the delegated `flutter test`'s
 # incremental build (~2-4 min; the cold build happens in THIS script, before
 # the drive) plus install/launch/attach plus the in-test setup and P1 —
-# ~10 min worst case measured against B7's phases, so 20 min is ~2x. The
-# DISARMED wait starts after the backgrounding and must cover P2 (396 s) +
-# P3 (~5.5 min) + slack — 25 min is ~2x. Both loops also exit the moment the
-# drive process itself exits, so neither can outlive a failed drive.
+# ~10 min worst case measured against B7's phases, so 20 min is ~2x.
+#
+# DISABLED starts at the backgrounding and is the sum of the drive phases
+# between the two: the paused-transition poll (<=180 s), P2's window (396 s),
+# its heartbeat drain (<=20 s) and the P3 baseline fetch (15 s) = 611 s.
+# 900 s is that plus half again.
+#
+# DISARM is NOT a "something went wrong" backstop — it is the timer that ends
+# P3, and every second of it comes from a constant. From DISABLED the app has
+# no right to run in the background, so iOS may suspend it and the wrapper
+# owns the wake-up. It is bounded on both sides:
+#   lower — it must exceed the drive's settle window (200 s =
+#           kLocationPublishMaxInterval + 32 s), or the app this script
+#           re-foregrounds publishes INSIDE the window the drive is
+#           measuring and a correct app fails P3;
+#   upper — the drive re-fetches the relay when it wakes, and the earliest
+#           event that can count as a leak is created at the disable cutoff
+#           plus the 10 s in-flight grace, so it is evicted at cutoff + 10 +
+#           228 s (the kind-445 NIP-40 expiration) = 238 s. A later wake-up
+#           re-fetches silence whether or not the disable worked.
+# 200 + 10 = 210 s clears the window by the in-flight grace and leaves the
+# re-fetch (210 + one <=5 s poll + the drive's own resume) ~20 s inside the
+# eviction bound. A run where the app was NOT suspended signals DISARMED
+# first and never reaches the deadline.
 readonly READY_WAIT_SECS="${HAVEN_BGP_READY_WAIT_SECS:-1200}"
-readonly DISARM_WAIT_SECS="${HAVEN_BGP_DISARM_WAIT_SECS:-1500}"
+readonly DISABLE_WAIT_SECS="${HAVEN_BGP_DISABLE_WAIT_SECS:-900}"
+readonly DISARM_WAIT_SECS="${HAVEN_BGP_DISARM_WAIT_SECS:-210}"
 readonly MARKER_POLL_SECS="${HAVEN_BGP_MARKER_POLL_SECS:-5}"
+
+# The simulated-location drip: two fixes ~5 m apart (4.5e-5 deg of latitude),
+# alternated every DRIP_SECS for the whole run.
+#
+# CoreLocation does not keep a backgrounded app executing when it has nothing
+# to deliver to it — Apple states exactly that for the whole session family
+# (WWDC24 "What's new in location authorization": "Core Location does not
+# take measures to keep apps running continuously when it has nothing to
+# deliver to them"). A single `simctl location ... set` is ONE fix, so a
+# device that never moves again is a device with nothing to deliver.
+#
+# 5 m is chosen from both ends: comfortably above the stream's 1 m
+# `distanceFilter` (so every step is a genuine delivery) and, because the two
+# points ALTERNATE rather than advance, total displacement never approaches
+# `kMotionTriggerDistanceMeters` (100 m). The drip therefore never becomes a
+# second publish driver, and P2 keeps measuring the per-circle scheduler.
+readonly DRIP_SECS="${HAVEN_BGP_DRIP_SECS:-10}"
+readonly DRIP_POINT_A='47.606209,-122.332069'
+readonly DRIP_POINT_B='47.606254,-122.332069'
 if ! [[ "${READY_WAIT_SECS}" =~ ^[1-9][0-9]*$ ]] \
+   || ! [[ "${DISABLE_WAIT_SECS}" =~ ^[1-9][0-9]*$ ]] \
    || ! [[ "${DISARM_WAIT_SECS}" =~ ^[1-9][0-9]*$ ]] \
-   || ! [[ "${MARKER_POLL_SECS}" =~ ^[1-9][0-9]*$ ]]; then
+   || ! [[ "${MARKER_POLL_SECS}" =~ ^[1-9][0-9]*$ ]] \
+   || ! [[ "${DRIP_SECS}" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: HAVEN_BGP_*_SECS overrides must be positive integers." >&2
   exit 2
 fi
@@ -619,6 +674,22 @@ Usage: simctl location <device> <action> [<arguments>]
   _check "N1 the Dart signal name matches SIGNAL_NAME" \
     "${SIGNAL_NAME}" "${dart_const}"
 
+  # --- (N2) The DISABLED marker literal is shared with the Dart drive, and
+  #     nothing else compares them. The four proof markers are cross-checked
+  #     by the completion gate; this one is not, and a drift is SILENT and
+  #     dangerous rather than merely slow: the host would stop timing P3's
+  #     settle window from the disable and re-foreground only on the DISABLE
+  #     deadline, minutes late — by which time a real leak has aged past the
+  #     228 s kind-445 expiration and been evicted, so the drive re-fetches
+  #     silence and P3 passes having proved nothing.
+  local dart_disabled
+  dart_disabled="$(sed -n \
+    's/^const String kDisabledMarker = .\(.*\).;$/\1/p' \
+    "${SCRIPT_DIR}/../../../haven/integration_test/ios_bg_publish_test.dart" \
+    2>/dev/null || true)"
+  _check "N2 the Dart disable marker matches DISABLED_MARKER" \
+    "${DISABLED_MARKER}" "${dart_disabled}"
+
   # --- (H1) STRUCTURAL: the real run must background the app by launching
   #     the overlay bundle. Every gate above reads a LOG, so none can see a
   #     lane whose background step was deleted — the drive would then fail
@@ -698,22 +769,25 @@ Usage: simctl location <device> <action> [<arguments>]
   # `|| true` on the counts: `grep -c` exits 1 on zero matches, and under
   # `set -e` that aborts the self-test MID-RUN — this fixture and H5 would
   # never report, leaving a deleted handshake to red the lane anonymously.
-  local waits swept ready disarmed
+  local waits swept ready disabled disarmed
   waits="$(grep -cF 'bgp_wait_until ' <<<"${body}" || true)"
   swept="$(grep -cF 'bgp_marker_present_under "${APP_DATA_ROOT}"' <<<"${body}" \
              || true)"
-  (( waits >= 1 )) || rc=1
+  (( waits == 3 )) || rc=1
   (( waits == swept )) || rc=1
-  # ONE wait per marker, and the two markers are different. A DISARM wait that
-  # reads READY_MARKER is the worst mutation this lane admits: READY is already
-  # in the signal from the handshake, so the wait returns on its first poll and
-  # the host re-foregrounds the app seconds after backgrounding it — P2 then
-  # measures "publishes continue while backgrounded" against a FOREGROUND app,
-  # every terminal proof still prints, and the lane goes green having proved
-  # nothing. No behavioural fixture can see it; only this can.
+  # ONE wait per marker, and the three markers are all different. A DISARM
+  # wait that reads READY_MARKER is the worst mutation this lane admits: READY
+  # is already in the signal from the handshake, so the wait returns on its
+  # first poll and the host re-foregrounds the app seconds after backgrounding
+  # it — P2 then measures "publishes continue while backgrounded" against a
+  # FOREGROUND app, every terminal proof still prints, and the lane goes green
+  # having proved nothing. A DISARM wait keyed off DISABLED is the same shape
+  # one phase later. No behavioural fixture can see either; only this can.
   ready="$(grep -cF '"${READY_MARKER}"' <<<"${body}" || true)"
+  disabled="$(grep -cF '"${DISABLED_MARKER}"' <<<"${body}" || true)"
   disarmed="$(grep -cF '"${DISARMED_MARKER}"' <<<"${body}" || true)"
   (( ready == 1 )) || rc=1
+  (( disabled == 1 )) || rc=1
   (( disarmed == 1 )) || rc=1
   _check "H4 each handshake wait sweeps the root for its OWN marker" 0 "${rc}"
 
@@ -733,11 +807,38 @@ Usage: simctl location <device> <action> [<arguments>]
   grep -qF 'rm -f "${stale_signal}"' <<<"${body}" || rc=1
   _check "H5 every container's stale signal is cleared before the drive" 0 "${rc}"
 
+  # --- (H6) STRUCTURAL: the simulated-location drip exists, MOVES, is started
+  #     before the drive and is stopped on exit. CoreLocation suspends a
+  #     backgrounded app it has nothing to deliver to (CI run 32646436116),
+  #     and a suspended app publishes nothing — so a drip that was deleted,
+  #     never started, or left re-setting ONE coordinate (which the 1 m
+  #     `distanceFilter` swallows, delivering nothing) reds the lane from the
+  #     app's side, blaming the publish pipeline. Only the value comparison
+  #     below can see the identical-points mutation.
+  body="$(sed -n '/^bgp_location_drip() {/,/^}/p' "${BASH_SOURCE[0]}" \
+            | grep -v '^[[:space:]]*#')"
+  rc=0
+  grep -qF 'xcrun simctl location "${SIM_UDID}" set "${next}"' <<<"${body}" \
+    || rc=1
+  grep -qF 'next="${DRIP_POINT_A}"' <<<"${body}" || rc=1
+  grep -qF 'next="${DRIP_POINT_B}"' <<<"${body}" || rc=1
+  [[ "${DRIP_POINT_A}" != "${DRIP_POINT_B}" ]] || rc=1
+  body="$(sed -n '/^echo "bg-publish — seeded an initial simulator fix"/,/^DRIVE_PID=/p' \
+            "${BASH_SOURCE[0]}" | grep -v '^[[:space:]]*#')"
+  grep -qF 'bgp_location_drip &' <<<"${body}" || rc=1
+  # Scoped to the real run: this fixture's own needles live above it, and a
+  # whole-file grep would match them and pass over a deleted trap.
+  body="$(sed -n '/^# Real run$/,$p' "${BASH_SOURCE[0]}" \
+            | grep -v '^[[:space:]]*#')"
+  grep -qF 'trap bgp_stop_drip EXIT' <<<"${body}" || rc=1
+  _check "H6 the location drip moves, starts before the drive and is reaped" \
+    0 "${rc}"
+
   if (( fail != 0 )); then
     echo "run-ios-bg-publish.sh --self-test: FAILED" >&2
     return 1
   fi
-  echo "run-ios-bg-publish.sh --self-test: all 33 fixtures passed (the" \
+  echo "run-ios-bg-publish.sh --self-test: all 35 fixtures passed (the" \
        "simctl probes report supported/unsupported/unparseable distinctly;" \
        "the marker parser is literal, prefix-tolerant and fails closed on" \
        "missing logs; the completion gate demands all four terminal proofs" \
@@ -746,9 +847,10 @@ Usage: simctl location <device> <action> [<arguments>]
        "it included; the signal sweep survives the container rotation the" \
        "drive's own install causes, stays marker-specific and clears every" \
        "container; the app-data root is derived AND validated; the signal" \
-       "name still matches the Dart drive's; and the background step and its" \
-       "call, the per-wait markers, the fail-closed grant and the uninstall" \
-       "skip are structurally pinned)."
+       "name and the disable marker still match the Dart drive's; and the" \
+       "background step and its call, the per-wait markers, the fail-closed" \
+       "grant, the uninstall" \
+       "skip and the moving location drip are structurally pinned)."
   return 0
 }
 
@@ -907,11 +1009,11 @@ if ! xcrun simctl privacy "${SIM_UDID}" grant location "${BUNDLE_ID}"; then
 fi
 echo "bg-publish — granted When-In-Use location to ${BUNDLE_ID}"
 
-# An initial fix so locationd is not fixless while the armed
-# CLBackgroundActivitySession is live. Device state: it persists until
-# `clear`/shutdown and survives the drive's own install. The VALUE is never
-# asserted — the drive fakes its location source (B7 precedent), so these
-# coordinates are CoreLocation hygiene, not a test input, and echoing them is
+# The fix the app will actually publish: the drive runs the production
+# location service, so a fixless locationd means no publishes and a red P2.
+# Device state — it persists until `clear`/shutdown and survives the drive's
+# own install. The VALUE is never asserted (P2/P3 count events, they do not
+# read coordinates; B4 owns the coordinate-fidelity proof), so echoing it is
 # harmless.
 if ! xcrun simctl location "${SIM_UDID}" set "47.606209,-122.332069"; then
   echo "ERROR: 'xcrun simctl location ${SIM_UDID} set <lat>,<lon>' failed, so" >&2
@@ -982,6 +1084,39 @@ bgp_foreground_app() {
   xcrun simctl launch "${SIM_UDID}" "${BUNDLE_ID}" >/dev/null 2>&1 || true
 }
 
+# bgp_location_drip — alternate the simulated fix between the two DRIP_POINTs
+# forever, so CoreLocation always has a delivery to make (see DRIP_SECS).
+# Failures are swallowed per iteration: a transient simctl hiccup must not end
+# the drip, and the app's own suspension detector is what reports a drip that
+# stopped mattering.
+bgp_location_drip() {
+  local next="${DRIP_POINT_B}"
+  while true; do
+    sleep "${DRIP_SECS}"
+    xcrun simctl location "${SIM_UDID}" set "${next}" >/dev/null 2>&1 || true
+    if [[ "${next}" == "${DRIP_POINT_B}" ]]; then
+      next="${DRIP_POINT_A}"
+    else
+      next="${DRIP_POINT_B}"
+    fi
+  done
+}
+
+DRIP_PID=""
+bgp_stop_drip() {
+  [[ -n "${DRIP_PID}" ]] && kill "${DRIP_PID}" >/dev/null 2>&1
+  return 0
+}
+trap bgp_stop_drip EXIT
+
+# Start the drip BEFORE the drive: the app's position stream must already be
+# receiving deliveries when it is backgrounded, not start receiving them
+# afterwards.
+bgp_location_drip &
+DRIP_PID=$!
+echo "bg-publish — simulated-location drip every ${DRIP_SECS}s (two fixes ~5m" \
+     "apart; CoreLocation suspends an app it has nothing to deliver to)"
+
 # --- Drive (backgrounded so this script can run the handshake). --------------
 # Delegated so the first-test watchdog, the narrowed retry gate (A6) and the
 # secret-leak scan are inherited rather than reimplemented.
@@ -1013,13 +1148,41 @@ case "${READY_RC}" in
       echo "       failed — the app was never backgrounded. The drive's" >&2
       echo "       paused-wait will now fail and name this step." >&2
     fi
-    # Wait for the drive's LAST marker, then re-foreground Haven so the
-    # flutter_test teardown gets real frames. On the deadline (3) the app is
-    # re-foregrounded ANYWAY — if the drive is wedged post-assertions, an
-    # activated engine un-wedges a frame-bound teardown; if it is wedged
-    # earlier, foregrounding changes nothing and the drive's own bounds
-    # (test timeout, attempt timeout) still govern. On (2) the drive already
-    # exited and there is nothing to aid.
+    # P2 runs here. The next thing this script must see is the drive
+    # disabling background sharing — the instant the app loses its right to
+    # execute in the background, and therefore the instant from which the
+    # DISARM timer below has to be measured. Nothing to DO on it: the value
+    # is when it arrives.
+    set +e
+    bgp_wait_until "${DRIVE_PID}" "${DISABLE_WAIT_SECS}" "${MARKER_POLL_SECS}" \
+      -- bgp_marker_present_under "${APP_DATA_ROOT}" "${SIGNAL_NAME}" \
+         "${DISABLED_MARKER}"
+    DISABLE_RC=$?
+    set -e
+    case "${DISABLE_RC}" in
+      0)
+        echo "bg-publish — disable signal observed; P3's settle window is" \
+             "running. Re-foregrounding in at most ${DISARM_WAIT_SECS}s."
+        ;;
+      3)
+        echo "WARN: the drive signalled no ${DISABLED_MARKER} within" >&2
+        echo "      ${DISABLE_WAIT_SECS}s, so P2 never finished. The DISARM" >&2
+        echo "      wait below still runs; the drive's own P2 assertion is" >&2
+        echo "      what reports the failure." >&2
+        ;;
+      *)
+        : # 2 — the drive exited on its own; its rc is collected below.
+        ;;
+    esac
+
+    # Wait for the drive's LAST marker, then re-foreground Haven. On the
+    # deadline (3) the app is re-foregrounded ANYWAY, and here that is the
+    # EXPECTED path rather than a rescue: the disable withdrew the app's
+    # background keep-alive, so iOS is entitled to suspend it for the whole
+    # settle window, and a suspended drive cannot re-fetch the relay. The
+    # deadline is sized to land just after that window and well inside the
+    # 228 s kind-445 expiration (see DISARM_WAIT_SECS). It also still un-wedges
+    # a frame-bound teardown. On (2) the drive already exited.
     set +e
     bgp_wait_until "${DRIVE_PID}" "${DISARM_WAIT_SECS}" "${MARKER_POLL_SECS}" \
       -- bgp_marker_present_under "${APP_DATA_ROOT}" "${SIGNAL_NAME}" \
@@ -1032,10 +1195,9 @@ case "${READY_RC}" in
         bgp_foreground_app
         ;;
       3)
-        echo "WARN: the drive signalled no ${DISARMED_MARKER} within ${DISARM_WAIT_SECS}s;" >&2
-        echo "      re-foregrounding ${BUNDLE_ID} anyway to un-wedge a" >&2
-        echo "      frame-bound teardown, then waiting for the drive's own" >&2
-        echo "      bounds to report." >&2
+        echo "bg-publish — no ${DISARMED_MARKER} within ${DISARM_WAIT_SECS}s of" \
+             "the disable; re-foregrounding ${BUNDLE_ID} so the suspended" \
+             "drive can re-fetch the relay and finish P3."
         bgp_foreground_app
         ;;
       *)

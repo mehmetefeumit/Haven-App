@@ -18,24 +18,41 @@
 /// (`tooling/e2e/ci/run-ios-bg-publish.sh`) launches ANOTHER app
 /// (com.apple.Preferences) over Haven mid-drive, so iOS itself delivers
 /// `UIApplicationDidEnterBackground` and the engine dispatches the paused
-/// state through the same channel a production backgrounding uses. The test
-/// isolate keeps running because the simulator never suspends a backgrounded
-/// app — a documented property this whole harness relies on
-/// (`.github/workflows/e2e-ios.yml`).
+/// state through the same channel a production backgrounding uses.
+///
+/// ## What keeps this drive EXECUTING while backgrounded — never the simulator
+///
+/// The simulator suspends a backgrounded app just as a device does. CI run
+/// 32646436116 proved it: the drive's Dart clock advanced 20 s while 25
+/// minutes of wall clock passed, and every overdue timer fired in one burst
+/// the moment the host re-foregrounded the app. The oracle below runs INSIDE
+/// the app it measures, so a suspension reads as "zero publishes" from a
+/// frozen isolate — indistinguishable, without [_suspensionSlack], from the
+/// regression P2 exists to catch.
+///
+/// What keeps the process executing is the app's own production background
+/// claim: `UIBackgroundModes: location` plus a LIVE CLLocationManager updates
+/// session created with `allowsBackgroundLocationUpdates` — the contract
+/// `HavenBackgroundSessionHandler.swift`'s "Purpose" names, and which the
+/// armed `CLBackgroundActivitySession` supplements rather than replaces (that
+/// session extends AUTHORIZATION, it is not an execution assertion). This
+/// target therefore overrides NOTHING about location and runs the production
+/// `GeolocatorLocationService`: a `locationServiceProvider` override would
+/// fake away the very mechanism P2 measures, leaving iOS free to suspend the
+/// app ~30 s into the background — which is exactly what run 32646436116 did.
+/// `scripts/ci/check_ios_background_publish.sh` pins the absence of that
+/// override.
 ///
 /// ## Honest ceiling — what this does NOT prove
 ///
-/// The simulator does NOT reproduce real-device background SUSPENSION: it
-/// keeps the process alive and the integration_test VM-service attached, so
-/// a "background execution stops" bug on hardware (jetsam, true suspension,
-/// SLC/BGTask behaviour) cannot surface here. And like B7, this lane fakes
-/// `locationServiceProvider`, so the geolocator stream and its AppleSettings
-/// are NOT exercised here either — B4 owns the real-GPS path, and the static
-/// guard pins the settings source. What this lane proves is the
-/// native-session-arming and Dart publish-pipeline CONTINUITY under a
-/// genuinely fired `applicationDidEnterBackground` — not the OS's suspension
-/// heuristics. The physical-device checklist
-/// (`docs/M7_BACKGROUND_SHARING.md` §6, item 0) remains the final proof.
+/// A simulator has no jetsam, no Significant-Location-Change relaunch and no
+/// `BGTaskScheduler`, so a background-execution bug that only those surface
+/// cannot show up here. What this lane proves is that the production
+/// background stack — plist mode, `AppleSettings`, the native session
+/// handler, the Dart publish pipeline — survives a genuinely fired
+/// `applicationDidEnterBackground` and keeps kind-445 events reaching the
+/// relay. The physical-device checklist (`docs/M7_BACKGROUND_SHARING.md` §6,
+/// item 0) remains the final proof.
 ///
 /// ## The host↔test handshake
 ///
@@ -48,17 +65,22 @@
 /// 3. This test bounded-polls `WidgetsBinding.instance.lifecycleState` (plus
 ///    a [WidgetsBindingObserver], in case the state passes through paused
 ///    transiently) until the REAL paused transition lands, then runs P2/P3.
-/// 4. After the final marker, the wrapper re-foregrounds Haven so the
-///    flutter_test post-suite teardown gets real frames again.
+/// 4. On disabling background sharing it prints [kDisabledMarker]; the
+///    wrapper waits P3's settle window out from there and re-foregrounds
+///    Haven, because from the disable onward iOS is entitled to suspend this
+///    process and only the host can wake it in time for the re-fetch.
+/// 5. After the final marker the wrapper re-foregrounds Haven again (a no-op
+///    if step 4 already did) so the flutter_test post-suite teardown gets
+///    real frames.
 ///
 /// ## Markers — and which shell gate each one feeds
 ///
-/// All five are grepped verbatim by `tooling/e2e/ci/run-ios-bg-publish.sh`,
+/// All six are grepped verbatim by `tooling/e2e/ci/run-ios-bg-publish.sh`,
 /// and they are NOT interchangeable:
 ///
-///   * [kReadyForBackgroundMarker] feeds the HANDSHAKE only. It is printed
-///     before P2/P3 have run, so it must never be treated as a completion
-///     signal.
+///   * [kReadyForBackgroundMarker] and [kDisabledMarker] feed the HANDSHAKE
+///     only. Both are printed before the assertions that follow them, so
+///     neither may ever be treated as a completion signal.
 ///   * [kSessionArmedMarker], [kBackgroundPublishMarker],
 ///     [kNegativeSilenceMarker] and [kSessionDisarmedMarker] feed the
 ///     terminal COMPLETION gate. Each is printed only after the last
@@ -112,10 +134,7 @@ import 'package:haven/src/providers/onboarding_provider.dart'
         kOnboardingIntroSeenKey,
         onboardingControllerProvider;
 import 'package:haven/src/providers/service_providers.dart'
-    show
-        circleServiceProvider,
-        iosBackgroundSessionServiceProvider,
-        locationServiceProvider;
+    show circleServiceProvider, iosBackgroundSessionServiceProvider;
 import 'package:haven/src/rust/api.dart'
     show
         CircleCreationResultFfi,
@@ -123,6 +142,10 @@ import 'package:haven/src/rust/api.dart'
         MemberKeyPackageFfi,
         RelayManagerFfi;
 import 'package:haven/src/services/fresh_secret.dart' show withFreshSecret;
+import 'package:haven/src/services/geolocator_location_service.dart'
+    show GeolocatorLocationService;
+import 'package:haven/src/services/location_service.dart'
+    show LocationPermissionStatus;
 import 'package:haven/src/services/nostr_circle_service.dart'
     show NostrCircleService;
 import 'package:integration_test/integration_test.dart';
@@ -130,8 +153,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'e2e/_lib/circle_creation.dart' show createCircleConfirmed;
 import 'e2e/_lib/coordination.dart' show waitForKeyPackage;
-import 'e2e/_lib/fake_location_service.dart'
-    show FakeLocationService, aliceFakeLatitude, aliceFakeLongitude;
 import 'e2e/_lib/pump_helpers.dart' show pumpUntilCondition, pumpUntilFound;
 import 'e2e/_lib/scenario_harness.dart' show ScenarioHarness;
 import 'e2e/_lib/synthetic_user.dart' show SyntheticUser;
@@ -155,6 +176,23 @@ const String kSessionArmedMarker = '[bg-publish] SESSION_ARMED';
 /// deliberately does not accept it.
 const String kReadyForBackgroundMarker = '[bg-publish] READY_FOR_BACKGROUND';
 
+/// Verbatim marker that tells the HOST wrapper background sharing has just
+/// been switched OFF, so it can time the re-foregrounding.
+///
+/// The second HANDSHAKE-only marker, and it exists because the disable
+/// removes the app's right to run in the background: from that instant iOS
+/// may suspend this process, and a suspended process cannot re-fetch the
+/// relay when P3's settle window ends. It has to be fetched then — kind-445
+/// application messages carry a 228 s NIP-40 `expiration`, so a leak
+/// published early in the window is EVICTED from the relay barely half a
+/// minute after the window closes, and a late re-fetch would find silence
+/// whether or not the disable worked. The host therefore waits the window
+/// out from this marker and re-foregrounds the app itself.
+///
+/// Like [kReadyForBackgroundMarker] it is printed BEFORE the assertions it
+/// precedes, so the completion gate deliberately does not accept it.
+const String kDisabledMarker = '[bg-publish] BACKGROUND_SHARING_DISABLED';
+
 /// Name of the append-only file the drive writes into its OWN sandbox `tmp/`
 /// to signal the host, in `Directory.systemTemp` — `<data container>/tmp` on
 /// iOS.
@@ -168,8 +206,9 @@ const String kReadyForBackgroundMarker = '[bg-publish] READY_FOR_BACKGROUND';
 /// polled `…/29407E44…/tmp`, so the app was never backgrounded and the wait
 /// below timed out blaming the handshake.
 ///
-/// Carries the two markers the host must act on WHILE the drive is still
-/// running: [kReadyForBackgroundMarker] (background the app now) and
+/// Carries the three markers the host must act on WHILE the drive is still
+/// running: [kReadyForBackgroundMarker] (background the app now),
+/// [kDisabledMarker] (start timing P3's settle window) and
 /// [kSessionDisarmedMarker] (re-foreground it for teardown). The host greps
 /// this file for those literals, exactly as it used to grep the log.
 ///
@@ -258,9 +297,85 @@ const Duration _snapshotFetchWindow = Duration(seconds: 15);
 /// the session released (`setEnabled(false)` disarms fire-and-forget).
 const Duration _disarmStatusWindow = Duration(seconds: 60);
 
+/// How long the pre-mount permission gate waits for authorization.
+///
+/// The wrapper grants When-In-Use before the app's first launch, so the
+/// healthy case is the first read; 90 s (B4's budget) absorbs
+/// CLLocationManager's own start-up latency without burning the attempt on a
+/// grant that never applied.
+const Duration _authWaitBudget = Duration(seconds: 90);
+
 /// Cadence of the "still waiting" heartbeat printed during the long waits,
 /// so a wedged run leaves evidence in CI instead of minutes of silence.
 const Duration _heartbeatInterval = Duration(seconds: 20);
+
+/// How far past its own duration a bounded wait may overrun before the
+/// overrun can only mean the OS stopped scheduling this process.
+///
+/// Derived from [_heartbeatInterval], the coarsest interval at which this
+/// isolate is KNOWN to be executing: while a wait runs, a heartbeat fires
+/// every 20 s off the same event loop, so six consecutive misses is the
+/// statement "this isolate did not run for two minutes". Nothing a loaded
+/// runner does produces that — a Dart timer fires late by the work queued
+/// ahead of it, and this isolate has none while it waits. In CI run
+/// 32646436116 P2's 396 s wait returned after ~1550 s, because iOS had
+/// suspended the app ~30 s into the background and every timer resumed
+/// together when the host re-foregrounded it: an overrun 10x this bound.
+final Duration _suspensionSlack = _heartbeatInterval * 6;
+
+/// Fails with a suspension attribution when [wall] overran [budget] by more
+/// than [_suspensionSlack] — the process was frozen, so nothing measured
+/// across that window says anything about the app's publishing.
+///
+/// Called before the empirical assertion it protects, so a suspended run
+/// never reports itself as "the app stopped publishing".
+void _failIfSuspended(Duration wall, Duration budget, String phase) {
+  if (wall <= budget + _suspensionSlack) return;
+  fail(
+    'iOS SUSPENDED the app during $phase: a ${budget.inSeconds}s wait took '
+    '${wall.inSeconds}s of wall clock, so this process was not executing '
+    'for ~${(wall - budget).inSeconds}s of it. Publishing cannot continue '
+    'in a frozen process, and the in-process oracle cannot measure one. The '
+    "app's claim to execute while backgrounded is `UIBackgroundModes: "
+    'location` plus a LIVE CLLocationManager updates session created with '
+    '`allowsBackgroundLocationUpdates` — check that this target still runs '
+    'the production `GeolocatorLocationService` (no `locationServiceProvider` '
+    'override), that `backgroundSharingProvider` was true when '
+    '`locationStreamProvider` last rebuilt, and that '
+    'HavenBackgroundSessionHandler armed. See the library doc.',
+  );
+}
+
+/// Polls the production location service until CoreLocation reports
+/// `whileInUse` or `always`, or [_authWaitBudget] expires.
+///
+/// NEVER calls `requestPermission()`: on a headless simulator the system
+/// prompt has no one to answer it, which is a hang rather than a failure.
+Future<void> _awaitLocationAuthorization() async {
+  final service = GeolocatorLocationService();
+  final deadline = DateTime.now().add(_authWaitBudget);
+  var last = LocationPermissionStatus.notDetermined;
+
+  while (DateTime.now().isBefore(deadline)) {
+    last = await service.checkPermission();
+    if (last == LocationPermissionStatus.whileInUse ||
+        last == LocationPermissionStatus.always) {
+      debugPrint('[bg-publish] CoreLocation authorization: $last');
+      return;
+    }
+    await Future<void>.delayed(const Duration(seconds: 2));
+  }
+
+  throw StateError(
+    '[bg-publish] CoreLocation authorization never reached '
+    'whileInUse/always within ${_authWaitBudget.inSeconds}s (last status: '
+    '$last). The wrapper grants it BEFORE the app is first launched '
+    '(`simctl privacy grant location` resolves the bundle id against '
+    'INSTALLED apps, and the grant does not survive an uninstall) — so this '
+    'is the install/grant/uninstall ordering in run-ios-bg-publish.sh, not a '
+    'wait that needs lengthening.',
+  );
+}
 
 /// Prints a heartbeat every [_heartbeatInterval] while [stillWaiting] holds.
 ///
@@ -339,13 +454,21 @@ void main() {
       final introSeen = prefs.getBool(kOnboardingIntroSeenKey) ?? false;
       final completed = prefs.getBool(kOnboardingCompletedKey) ?? false;
 
-      // `locationServiceProvider` is faked here ON PURPOSE (B7 precedent):
-      // this lane's subject is the native session arming and the Dart publish
-      // pipeline's continuity across a real backgrounding, not GPS
-      // acquisition — that is the B4 lane, deliberately NOT coupled to this
-      // one, so a B4 regression cannot redden this lane and vice versa. The
-      // wrapper still grants When-In-Use and seeds a `simctl location` fix so
-      // no CoreLocation prompt or fixless locationd can wedge the run.
+      // Real CoreLocation authorization, checked BEFORE `HavenApp` mounts: a
+      // mounted MapShell reaches `getCurrentLocation()`, which prompts on a
+      // `denied` read — and a system prompt nobody can answer is a hang, not
+      // a failure. B4's precedent, and load-bearing here for the same reason
+      // it is there: this target runs the PRODUCTION location service.
+      await _awaitLocationAuthorization();
+
+      // `locationServiceProvider` is deliberately NOT overridden — see the
+      // library doc. The production `GeolocatorLocationService` is what
+      // creates the CLLocationManager session carrying
+      // `allowBackgroundLocationUpdates`, and that session is the app's only
+      // claim to EXECUTE while backgrounded; faking it makes P2 measure a
+      // suspended process. The wrapper grants When-In-Use and seeds a
+      // `simctl location` fix, so the fix this app publishes comes from the
+      // simulator's own location stack.
       //
       // `onboardingControllerProvider` must be overridden explicitly: its
       // default factory yields `OnboardingFlags.none`, and production only
@@ -357,12 +480,6 @@ void main() {
             onboardingControllerProvider.overrideWith(
               (ref) => OnboardingController(
                 OnboardingFlags(introSeen: introSeen, completed: completed),
-              ),
-            ),
-            locationServiceProvider.overrideWithValue(
-              FakeLocationService(
-                latitude: aliceFakeLatitude,
-                longitude: aliceFakeLongitude,
               ),
             ),
           ],
@@ -648,6 +765,7 @@ void main() {
         // for this circle, created after the backgrounding instant.
         // =================================================================
         var collecting = true;
+        final collectStartedAt = DateTime.now();
         final collectFuture = relay
             .collectN(
               count: 2,
@@ -667,8 +785,16 @@ void main() {
           '${kLocationPublishMaxInterval.inSeconds}s per tick)',
         );
         final events = await collectFuture;
+        final collectWall = DateTime.now().difference(collectStartedAt);
         await heartbeat;
 
+        // Before the count: a frozen isolate collects nothing for reasons
+        // that have nothing to do with the publish pipeline.
+        _failIfSuspended(
+          collectWall,
+          _postBackgroundPublishWindow,
+          'P2 (the post-backgrounding publish window)',
+        );
         expect(
           events.length,
           greaterThanOrEqualTo(2),
@@ -715,9 +841,25 @@ void main() {
               '(_bgSharingPausedSub) never saw a state change, so nothing '
               'below could prove it stops publishing.',
         );
+        // Hand the host the disable instant. From here the app has NO claim
+        // to execute in the background — that is the guarantee being proven —
+        // so iOS may suspend it for the whole settle window, and only the
+        // host can wake it in time for the re-fetch below to happen inside
+        // the events' 228 s NIP-40 TTL. See [kDisabledMarker].
+        debugPrint(kDisabledMarker);
+        handshakeSignal.writeAsStringSync(
+          '\n$kDisabledMarker',
+          mode: FileMode.append,
+          flush: true,
+        );
 
         // The settle window: one full max-jitter interval plus slack, so a
-        // scheduler that survived the disable MUST tick inside it.
+        // scheduler that survived the disable MUST tick inside it. Wall
+        // clock, not execution time: it elapses whether iOS suspended this
+        // process or not, and a suspended app publishing nothing is the
+        // guarantee holding, never a vacuous pass — a disable that did NOT
+        // work leaves the keep-alive armed, the app running and the
+        // scheduler ticking, which is exactly what the diff below sees.
         var settling = true;
         final settleFuture = Future<void>.delayed(
           _negativeSettleWindow,
@@ -741,11 +883,24 @@ void main() {
         );
         // The diff, id by id. Events created at/before the cutoff (plus a
         // small in-flight grace) are ticks that had already begun when the
-        // disable landed — tolerated and logged. Anything created later
-        // means the scheduler outlived the user's withdrawal of consent.
+        // disable landed — tolerated and logged. Anything created later,
+        // WITHIN the settle window, means the scheduler outlived the user's
+        // withdrawal of consent.
+        //
+        // The upper bound is the window, not "for ever": the host
+        // re-foregrounds this app once the window has elapsed (see
+        // [kDisabledMarker]), and a foregrounded Haven publishes by
+        // design — background consent is not what gates that. Counting a
+        // post-window foreground publish as a leak would fail this lane for
+        // the app behaving correctly. It costs no discrimination: a
+        // scheduler that survived the disable ticks every 72-168 s, and the
+        // window is a full max-jitter interval, so it lands INSIDE it.
+        final leakWindowEnd =
+            disableCutoffSecs + _negativeSettleWindow.inSeconds;
         final leaked = after
             .where((e) => !baselineIds.contains(e.id))
             .where((e) => e.createdAt > disableCutoffSecs + _inFlightGraceSecs)
+            .where((e) => e.createdAt <= leakWindowEnd)
             .toList(growable: false);
         final straggled = after
             .where((e) => !baselineIds.contains(e.id))

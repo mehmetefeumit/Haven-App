@@ -147,6 +147,19 @@ const String kForegroundActiveAtMsKey = 'haven.foreground_active_at_ms';
 /// of publishing after a revoked permission or a switched-off provider.
 const Duration kStreamPositionMaxAge = kLocationPublishMaxInterval;
 
+/// `timeLimit` on every one-shot `getCurrentPosition` the app issues —
+/// balanced for a cold GPS fix against the UX of a stalled read.
+///
+/// Also the cost of a REFUSAL that the platform declines to signal. An
+/// Android app-op denial silently stops delivering rather than raising an
+/// error (`LocationProviderManager.Registration.acceptLocationChange` bails
+/// on `noteOpNoThrow`), so a one-shot under one ends here and nowhere
+/// earlier — which is why this lives beside the cadence constants rather
+/// than inside the service: `b5_permission_revocation_test.dart` sizes its
+/// observation windows off it, and a window sized independently of it
+/// cannot see the refusal it is waiting for.
+const Duration kOneShotLocationTimeout = Duration(seconds: 30);
+
 // ---------------------------------------------------------------------------
 // Prominent disclosure (Google Play "Prominent Disclosure & Consent")
 // ---------------------------------------------------------------------------

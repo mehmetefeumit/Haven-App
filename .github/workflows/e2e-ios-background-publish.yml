@@ -10,7 +10,10 @@
 # com.apple.Preferences over Haven, so iOS itself fires
 # `applicationDidEnterBackground` — something NO other lane produces (B7 and
 # the Android B1 lane dispatch the paused lifecycle event in-process). The
-# drive keeps running because the simulator never suspends a backgrounded app.
+# drive keeps running only because the app holds a real background-execution
+# claim (`UIBackgroundModes: location` + a live CLLocationManager updates
+# session): the simulator suspends a backgrounded app just like a device, as
+# CI run 32646436116 proved when the drive still faked its location service.
 #
 # What the lane proves:
 #   P1  Enabling background sharing through the production setEnabled path
@@ -22,7 +25,12 @@
 #       sized to two full 72-168 s per-circle jitter intervals plus slack.
 #   P3  Flipping background sharing OFF while still OS-backgrounded stops
 #       publishing (an event-id DIFF over a bounded settle window, never a
-#       bare count) and the native session reports disarmed.
+#       bare count) and the native session reports disarmed. The disable
+#       withdraws the app's background-execution claim, so iOS may suspend
+#       it for that window: the drive signals the disable and the wrapper
+#       times the window out and re-foregrounds Haven itself, early enough
+#       that a real leak has not yet aged past its 228 s kind-445
+#       expiration.
 #
 # The wrapper's completion gate requires all four terminal proof markers, so
 # a drive that exited 0 over a skipped or early-returning body fails the lane
@@ -30,17 +38,14 @@
 #
 # # What this lane does NOT prove
 #
-# The simulator does NOT reproduce real-device background SUSPENSION: it
-# keeps the process alive and the integration_test VM-service attached, so a
-# "background execution stops" bug on hardware (jetsam, true suspension,
-# SLC/BGTask fire) will not surface here. And like B7, the drive fakes
-# `locationServiceProvider`, so the geolocator stream and its AppleSettings
-# are NOT exercised here (B4 owns the real-GPS path; the static guard pins
-# the settings source). This lane proves the native-session-arming and Dart
-# publish-pipeline CONTINUITY under a genuinely fired UIApplication
-# background transition — NOT the OS's suspension heuristics. The
-# physical-device checklist (docs/M7_BACKGROUND_SHARING.md §6, item 0)
-# remains the final proof.
+# A simulator has no jetsam, no Significant-Location-Change relaunch and no
+# BGTaskScheduler, so a background-execution bug only those surface will not
+# show up here. What the lane does prove is that the production background
+# stack — plist mode, the geolocator stream's AppleSettings, the native
+# session handler and the Dart publish pipeline — survives a genuinely fired
+# UIApplication background transition. B4 still owns coordinate fidelity;
+# this lane reads no coordinates. The physical-device checklist
+# (docs/M7_BACKGROUND_SHARING.md §6, item 0) remains the final proof.
 #
 # # Architecture mirrors e2e-ios-real-gps.yml / e2e-ios-auth-tier.yml
 #

@@ -16,9 +16,12 @@
 # Pure source checks (comment-aware grep + xmllint), mirroring the
 # conventions of check_m7_native_wake_guards.sh. Runtime behavior is covered
 # by `flutter test` (geolocator_location_service_test.dart,
-# location_provider_test.dart, map_shell_test.dart); real-device background
-# continuity is a physical-iPhone owner check (docs/M7_BACKGROUND_SHARING.md
-# §6) because neither CI nor the Simulator can truly suspend an app.
+# location_provider_test.dart, map_shell_test.dart) and, across a REAL OS
+# background transition, by the e2e-ios-background-publish lane — the
+# Simulator does suspend a backgrounded app that has no live location session
+# (CI run 32646436116), which is why check 11 exists. Jetsam, the SLC
+# relaunch and BGTaskScheduler remain physical-iPhone owner checks
+# (docs/M7_BACKGROUND_SHARING.md §6).
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -31,6 +34,7 @@ LIB_DIR="${REPO_ROOT}/haven/lib"
 SESSION_HANDLER="${REPO_ROOT}/haven/ios/Runner/HavenBackgroundSessionHandler.swift"
 APP_DELEGATE="${REPO_ROOT}/haven/ios/Runner/AppDelegate.swift"
 BG_PROVIDER="${REPO_ROOT}/haven/lib/src/providers/background_location_provider.dart"
+BG_PUBLISH_DRIVE="${REPO_ROOT}/haven/integration_test/ios_bg_publish_test.dart"
 
 FAILED=0
 fail() {
@@ -38,7 +42,7 @@ fail() {
   FAILED=1
 }
 
-for f in "$SERVICE" "$PROVIDER" "$MAP_SHELL" "$PLIST" "$SESSION_HANDLER" "$APP_DELEGATE" "$BG_PROVIDER"; do
+for f in "$SERVICE" "$PROVIDER" "$MAP_SHELL" "$PLIST" "$SESSION_HANDLER" "$APP_DELEGATE" "$BG_PROVIDER" "$BG_PUBLISH_DRIVE"; do
   [[ -f "$f" ]] || { echo "FAIL: expected file not found: $f" >&2; exit 1; }
 done
 command -v xmllint >/dev/null 2>&1 || { echo "FAIL: xmllint (libxml2-utils) is required by this guard" >&2; exit 1; }
@@ -252,8 +256,24 @@ CATCHUP_SVC="${REPO_ROOT}/haven/lib/src/services/ios_background_catchup.dart"
 code_has 'MethodChannelIosBackgroundSessionService().disarm()' "$CATCHUP_SVC" ||
   fail "cancelNativeSchedulers no longer disarms the background sessions — identity deletion (which keeps the toggle pref) would leave the OS keep-alive held and re-armed on every launch"
 
+# ---------------------------------------------------------------------------
+# 11. The e2e-ios-background-publish drive target must never override
+#     locationServiceProvider. Its P2 measures publishing from INSIDE the app
+#     it backgrounds, and the app's only claim to keep EXECUTING there is the
+#     live CLLocationManager session the production service creates (checks
+#     1/4 above). A fake removes that claim: iOS suspends the process ~30 s
+#     into the background, the frozen in-process oracle counts zero, and the
+#     lane reds blaming the publish pipeline — CI run 32646436116. Nothing
+#     behavioural can see the difference, which is why it is pinned here.
+# ---------------------------------------------------------------------------
+for sym in 'locationServiceProvider.override' 'FakeLocationService'; do
+  if code_has "$sym" "$BG_PUBLISH_DRIVE"; then
+    fail "ios_bg_publish_test.dart injects a fake location service ('$sym') — a faked service starts no CLLocationManager, so iOS suspends the backgrounded app and the lane can only measure a frozen process (CI run 32646436116). This target must run the production GeolocatorLocationService."
+  fi
+done
+
 if [[ "$FAILED" -ne 0 ]]; then
   echo "iOS background publish guard FAILED — see failures above." >&2
   exit 1
 fi
-echo "OK: iOS background publish invariants hold (plist mode, single stream, toggle-keyed AppleSettings, C4 watcher, presence-only logs, CoreLocation session arming)."
+echo "OK: iOS background publish invariants hold (plist mode, single stream, toggle-keyed AppleSettings, C4 watcher, presence-only logs, CoreLocation session arming, unfaked bg-publish drive)."

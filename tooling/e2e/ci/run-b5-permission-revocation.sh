@@ -697,9 +697,10 @@ publish-eligible circles, so 'the app published nothing' is vacuous there."
   #      the denial never reached — the second half of (A1)'s question, and
   #      the half a read-back cannot answer.
   if b5_has_marker "${log}" "${MARK_APPOPS_NOT_OBSERVED}"; then
-    b5_finding "real location reads went on working for the whole app-op \
-observation window ('${MARK_APPOPS_NOT_OBSERVED}'). The app-op read back as \
-denied but had no effect on this app."
+    b5_finding "real location reads never refused twice in a row for the \
+whole app-op observation window ('${MARK_APPOPS_NOT_OBSERVED}'), having \
+answered at arming. The app-op read back as denied but had no effect on this \
+app."
   elif ! b5_has_marker "${log}" "${MARK_APPOPS_OBSERVED}"; then
     b5_finding "neither '${MARK_APPOPS_OBSERVED}' nor \
 '${MARK_APPOPS_NOT_OBSERVED}' was recorded — the app-op phase never reached \

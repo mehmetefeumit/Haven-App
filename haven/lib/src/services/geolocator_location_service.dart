@@ -166,9 +166,6 @@ class GeolocatorLocationService implements LocationService {
   /// publisher depends on.
   final bool _isIOS;
 
-  /// Timeout for location requests - balanced for accuracy and UX.
-  static const Duration _locationTimeout = Duration(seconds: 30);
-
   /// Latest position delivered by the unified stream ([getLocationStream]).
   ///
   /// Served by [getCurrentLocation] while fresher than
@@ -176,7 +173,7 @@ class GeolocatorLocationService implements LocationService {
   /// `getCurrentPosition` path while the app is backgrounded on iOS — the
   /// plugin's one-time CLLocationManager hard-codes
   /// `allowsBackgroundLocationUpdates = NO`, so a backgrounded one-shot can
-  /// only stall for [_locationTimeout] and fall back anyway.
+  /// only stall for [kOneShotLocationTimeout] and fall back anyway.
   ///
   /// ## The cache must never outlive the user's access
   ///
@@ -594,15 +591,16 @@ class GeolocatorLocationService implements LocationService {
   /// Builds the [geo.LocationSettings] for a one-shot position read,
   /// platform-correct: [geo.AppleSettings] on iOS, [geo.AndroidSettings]
   /// (forcing the platform LocationManager to bypass Google Play Services)
-  /// elsewhere. Both use best accuracy and the cold-fix [_locationTimeout].
+  /// elsewhere. Both use best accuracy and the cold-fix
+  /// [kOneShotLocationTimeout].
   geo.LocationSettings _currentPositionSettings() {
     if (_isIOS) {
       // Accuracy defaults to LocationAccuracy.best.
-      return geo.AppleSettings(timeLimit: _locationTimeout);
+      return geo.AppleSettings(timeLimit: kOneShotLocationTimeout);
     }
     return geo.AndroidSettings(
       forceLocationManager: true, // Bypass Google Play Services
-      timeLimit: _locationTimeout,
+      timeLimit: kOneShotLocationTimeout,
     );
   }
 

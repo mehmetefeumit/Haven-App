@@ -82,7 +82,7 @@
 /// nothing while `cmd appops get` still printed `deny` on the package line
 /// (CI run 31868809387), and the shell now gates on the EFFECTIVE mode.
 ///
-/// Two things stop it passing vacuously, and neither is optional:
+/// Three things stop it passing vacuously, and none is optional:
 ///
 /// * the shell reads the app-op back with `cmd appops get` and fails loudly
 ///   if it did not change — a `set` that silently no-ops satisfies every
@@ -92,7 +92,13 @@
 ///   whose cache had already gone stale on its own had nothing to leak, and
 ///   that is a FINDING rather than a pass. It needs the emulator GPS to
 ///   MOVE: re-issuing `adb emu geo fix` at one point is filtered out by the
-///   stream's 1 m distance filter, and the cache then ages out by itself.
+///   stream's 1 m distance filter, and the cache then ages out by itself;
+/// * the app proves a real one-shot read ANSWERS before it prints the arming
+///   cue, so the refusals it then counts are attributable to the denial and
+///   not to a read path that was already broken. That proof belongs before
+///   the cue and nowhere else — the shell denies the app-op within a second
+///   of reading it, so a loop that waits for a working read AFTER the cue
+///   can only ever be satisfied by winning a race against the shell.
 ///
 /// ## What ACT 2 proves that no unit test can
 ///
@@ -122,7 +128,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/main.dart';
 import 'package:haven/src/constants/location.dart'
-    show kLocationPublishMaxInterval, kStreamPositionMaxAge;
+    show
+        kLocationPublishMaxInterval,
+        kOneShotLocationTimeout,
+        kStreamPositionMaxAge;
 import 'package:haven/src/pages/map_shell.dart';
 import 'package:haven/src/providers/identity_provider.dart'
     show identityNotifierProvider, identityProvider;
@@ -185,8 +194,9 @@ const String kAppOpsArmedMarker = '[b5] APPOPS_ARMED';
 /// the denial never reached.
 const String kAppOpsObservedMarker = '[b5] APPOPS_OBSERVED';
 
-/// ACT 1: location reads went on working for the whole observation window.
-/// The app-op `set` did not take, or took and Android ignored it.
+/// ACT 1: real location reads never refused twice in a row for the whole
+/// observation window, having answered at arming. The app-op `set` did not
+/// take, or took and Android ignored it.
 const String kAppOpsNotObservedMarker = '[b5] APPOPS_NOT_OBSERVED';
 
 /// ACT 1, with `type=<runtimeType> streamAgeMs=<ms>`: the production
@@ -281,21 +291,58 @@ const String kSequenceCompleteMarker = '[b5] SEQUENCE_COMPLETE';
 /// inside `kStreamPositionMaxAge`.
 const Duration _maxArmingStreamAge = Duration(seconds: 60);
 
-/// How long ACT 1 waits for a fix fresh enough to arm the app-op phase.
-const Duration _appOpsArmTimeout = Duration(seconds: 60);
-
-/// How long ACT 1 waits for the app-op denial to become visible to the app.
-const Duration _appOpsObservationTimeout = Duration(seconds: 150);
+/// Spacing between ACT 1's app-op fresh-read probes, on both sides of the
+/// arming cue. Named because both bounds below are derived from it.
+const Duration _appOpsPollInterval = Duration(seconds: 3);
 
 /// Consecutive refused one-shot reads before ACT 1 calls the app-op denial
 /// observed.
 ///
 /// One refusal could be a transient emulator GPS miss, and treating that as
 /// the denial would open the absence window while access was still granted —
-/// a false RED, since the app would legitimately publish. Confirmation is
-/// only counted after a read has demonstrably WORKED inside the same loop,
-/// so a path that was broken before the denial cannot satisfy it either.
+/// a false RED, since the app would legitimately publish. The other half of
+/// that discrimination — that this read path ANSWERS when access is intact —
+/// is established before the cue rather than inside this loop; see the
+/// arming wait for why it cannot be established after it.
 const int _appOpsRefusalConfirmations = 2;
+
+/// Bound on ONE fresh-read probe in ACT 1's app-op phase.
+///
+/// Deliberately not [_gpsProbeTimeout]: that bounds ACT 2's probe against a
+/// system permission dialog, a hazard this phase does not have — the
+/// permission is GRANTED throughout, so `_ensureAccessOrThrow` never
+/// prompts. Here the only thing that can delay a probe is the platform
+/// delivering nothing under the denied app-op, which geolocator ends at its
+/// own `timeLimit` ([kOneShotLocationTimeout]); the slack covers the three
+/// in-memory platform-channel reads the access gate makes around it.
+final Duration _appOpsProbeTimeout =
+    kOneShotLocationTimeout + const Duration(seconds: 5);
+
+/// How long ACT 1 waits for the two facts the app-op phase rests on: a warm
+/// cache to withhold, and a fresh-read path that demonstrably answers.
+///
+/// Sized to survive one transient emulator GPS miss, which costs a whole
+/// [_appOpsProbeTimeout]. A wait that still expires is a read path that was
+/// broken BEFORE anything was withdrawn, which is a finding rather than a
+/// flake — and this bounds the granted state, so its width can never mask a
+/// defect the way an absence window's could.
+final Duration _appOpsArmTimeout =
+    (_appOpsProbeTimeout + _appOpsPollInterval) * 2;
+
+/// How long ACT 1 waits for the app-op denial to become visible to the app.
+///
+/// DERIVED, never chosen — the previous hand-picked 150 s is what cost CI
+/// run 32646436116, because nothing tied it to what a refusal actually
+/// costs. A denied app-op raises no error: AOSP's
+/// `LocationProviderManager.Registration.acceptLocationChange` bails on
+/// `noteOpNoThrow` and simply stops delivering, so every refused probe runs
+/// out the full [_appOpsProbeTimeout] instead of returning promptly. The
+/// bound therefore has to hold [_appOpsRefusalConfirmations] of them plus
+/// the one probe that may still be in flight — and still succeed — when the
+/// denial lands, with the poll interval between each.
+final Duration _appOpsObservationTimeout =
+    (_appOpsProbeTimeout + _appOpsPollInterval) *
+        (_appOpsRefusalConfirmations + 1);
 
 /// ACT 1's app-op absence window.
 ///
@@ -354,7 +401,9 @@ final Duration _act2AbsenceWindow =
 /// Spacing between ACT 2's publish attempts inside [_act2AbsenceWindow].
 const Duration _act2CycleSpacing = Duration(seconds: 30);
 
-/// Bound on the ACT 2 one-shot location probe.
+/// Bound on each act's DECISIVE one-shot probe — the single
+/// `getCurrentLocation()` read that is this lane's headline assertion. Sized
+/// for ACT 2's hazard, which is the wider of the two.
 ///
 /// A revoked-but-not-`USER_FIXED` permission makes geolocator's
 /// `requestPermission()` raise the SYSTEM permission dialog, which nothing
@@ -614,28 +663,69 @@ void main() {
         // See the class doc; this is the only arrangement that can observe
         // the stale-fix cache, and `pm revoke` structurally cannot.
         // -------------------------------------------------------------------
+        /// One REAL one-shot read, bounded, reported as worked / did not.
+        ///
+        /// `getCurrentLocationFresh()` never consults the cache, so polling
+        /// it cannot itself produce the outcome the window below asserts —
+        /// which is the whole reason the app watches this rather than the
+        /// publish path.
+        Future<bool> freshReadWorks() async {
+          try {
+            await locationService
+                .getCurrentLocationFresh()
+                .timeout(_appOpsProbeTimeout);
+            return true;
+          } on Object catch (_) {
+            return false;
+          }
+        }
+
+        // ARMING. The phase rests on two facts, and BOTH are facts about the
+        // GRANTED state, so both are established before the cue: a stream fix
+        // warm enough that there is something to withhold, and a fresh-read
+        // path that demonstrably ANSWERS, so a refusal after the denial is
+        // attributable to the denial rather than to a path that was already
+        // broken.
+        //
+        // Proving the second one AFTER the cue — the shape this lane shipped
+        // with, a `sawWorkingRead` flag inside the observation loop — is
+        // unsatisfiable by construction, and cost CI run 32646436116 in full:
+        // the shell denies the app-op within a second of reading this marker
+        // (`run-b5-permission-revocation.sh` Phase 4a), so the loop's very
+        // first probe already refused, the flag never became true, and the
+        // lane reported `APPOPS_NOT_OBSERVED` — the exact inverse of what had
+        // happened — against an app that had refused all five of its reads.
+        // Ordered read-then-age so the age printed below is measured after
+        // the probe, not up to a probe's duration before it.
         var armingStreamAgeMs = -1;
         try {
           await waitUntilAsync(
             () async {
+              if (!await freshReadWorks()) return false;
               final age = newestStreamFixAge();
               if (age == null || age > _maxArmingStreamAge) return false;
               armingStreamAgeMs = age.inMilliseconds;
               return true;
             },
-            description: 'the position stream delivered a fix newer than '
-                '${_maxArmingStreamAge.inSeconds}s, so the cache the app-op '
-                'window is about is warm and has something to leak',
+            description: 'a real one-shot read answered and the position '
+                'stream held a fix newer than '
+                '${_maxArmingStreamAge.inSeconds}s, so the read path this '
+                'phase watches works and the cache it is about is warm',
             timeout: _appOpsArmTimeout,
-            pollInterval: const Duration(seconds: 3),
+            pollInterval: _appOpsPollInterval,
           );
         } on Object catch (e) {
           failures.add(
-            'no stream fix newer than ${_maxArmingStreamAge.inSeconds}s '
-            'before the app-op window (${e.runtimeType}). The cache had '
-            'already aged out, so refusing to serve it proves nothing. The '
-            'emulator GPS has to MOVE: `adb emu geo fix` re-issued at one '
-            "point is filtered out by the stream's 1 m distance filter.",
+            'the app-op phase could not be armed within '
+            '${_appOpsArmTimeout.inSeconds}s (${e.runtimeType}): either real '
+            'one-shot reads were already failing with the permission '
+            'GRANTED — in which case a refusal after the denial proves '
+            'nothing — or no stream fix newer than '
+            '${_maxArmingStreamAge.inSeconds}s existed, so the cache had '
+            'already aged out and refusing to serve it proves nothing '
+            'either. The emulator GPS has to MOVE: `adb emu geo fix` '
+            "re-issued at one point is filtered out by the stream's 1 m "
+            'distance filter.',
           );
         }
 
@@ -654,45 +744,28 @@ void main() {
           'eligible=$appOpsEligible',
         );
 
-        /// One REAL one-shot read, bounded, reported as worked / did not.
-        ///
-        /// `getCurrentLocationFresh()` never consults the cache, so polling
-        /// it cannot itself produce the outcome the window below asserts —
-        /// which is the whole reason the app watches this rather than the
-        /// publish path.
-        Future<bool> freshReadWorks() async {
-          try {
-            await locationService
-                .getCurrentLocationFresh()
-                .timeout(_gpsProbeTimeout);
-            return true;
-          } on Object catch (_) {
-            return false;
-          }
-        }
-
         // The app cannot READ the app-op — that is the entire premise — so
-        // it waits for the one consequence it can see.
+        // it waits for the one consequence it can see. A single refusal could
+        // still be a transient emulator GPS miss, hence the run of
+        // [_appOpsRefusalConfirmations]; the "reads work when access is
+        // intact" half of that discrimination was settled at arming.
         final armedAt = DateTime.now();
-        var sawWorkingRead = false;
         var consecutiveRefusals = 0;
         var appOpsObserved = false;
         try {
           await waitUntilAsync(
             () async {
               if (await freshReadWorks()) {
-                sawWorkingRead = true;
                 consecutiveRefusals = 0;
                 return false;
               }
               consecutiveRefusals += 1;
-              return sawWorkingRead &&
-                  consecutiveRefusals >= _appOpsRefusalConfirmations;
+              return consecutiveRefusals >= _appOpsRefusalConfirmations;
             },
             description: 'real one-shot location reads stopped working after '
                 'the shell denied the location app-op',
             timeout: _appOpsObservationTimeout,
-            pollInterval: const Duration(seconds: 3),
+            pollInterval: _appOpsPollInterval,
           );
           appOpsObserved = true;
         } on Object catch (_) {
@@ -706,12 +779,13 @@ void main() {
         } else {
           debugPrint(kAppOpsNotObservedMarker);
           failures.add(
-            'location reads still worked '
-            '${_appOpsObservationTimeout.inSeconds}s after the shell denied '
-            'the location app-op, so nothing below is an observation of an '
-            'app that lost access. The shell read-back separates the two '
-            'causes: an app-op that did not change at all, or one that '
-            'changed and had no effect',
+            'real location reads never refused $_appOpsRefusalConfirmations '
+            'times in a row in the ${_appOpsObservationTimeout.inSeconds}s '
+            'after the shell denied the location app-op — and they answered '
+            'at arming, so the path was not already broken. Nothing below is '
+            'an observation of an app that lost access. The shell read-back '
+            'separates the two causes: an app-op that did not change at all, '
+            'or one that changed and had no effect',
           );
         }
 
