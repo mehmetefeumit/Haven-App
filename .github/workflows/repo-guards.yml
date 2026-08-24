@@ -231,6 +231,17 @@
 #     kind-445 buffers forever and the scenario fails on the receive path with
 #     nothing pointing back at the create.
 #
+#   Handoff convergence sees a fork   scripts/ci/check_e2e_handoff_convergence_oracle.sh
+#     When the admin leaves a 3-member circle both remaining peers auto-commit
+#     her SelfRemove, so a fork leaves them on the SAME epoch number with the
+#     SAME member set — the two things e2e_combined's handoff gate used to
+#     check. DM-4b invalidated that reasoning without touching the code, and
+#     the lane stayed green only because a try/catch-swallowed "non-gating"
+#     probe happened to converge the loser as a side effect; when a dropped
+#     relay socket ate that probe the fork reached Phase 6 and the leave
+#     timed out (run 32688074045). The guard pins the current-epoch
+#     cross-decrypt that actually distinguishes one branch from two.
+#
 #   Background delivery is asserted   scripts/ci/check_m7_background_delivery_assertion.sh
 #     The e2e-background-catchup lane must prove a background wake RECEIVED a
 #     peer location, not merely that it booted. Its `M7_REQUIRE_DECRYPT`
@@ -741,6 +752,24 @@ jobs:
       - name: E2E publish-before-apply (staged creates resolved)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_e2e_publish_before_apply.sh
+
+      # Equal epoch NUMBERS are not one branch: both remaining peers commit
+      # the departing admin's SelfRemove, so a fork advances both by one and
+      # removes Alice on both. The gate that read those two facts as
+      # "converged" was sound only under the single-committer election DM-4b
+      # deleted, and a lost relay socket turned the gap into a 60s Phase 6
+      # timeout (run 32688074045).
+      - name: Handoff convergence oracle can see a fork
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_e2e_handoff_convergence_oracle.sh
+
+      # Fixtures pin all four terms in both directions, including the two
+      # failure shapes that actually occurred: a predicate that falls back to
+      # epoch equality, and a decrypt-PRESENCE check that the engine's epoch
+      # lookback satisfies across branches.
+      - name: Handoff convergence guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_e2e_handoff_convergence_oracle.sh --self-test
 
       # A switch that exists, reads plausibly, and is set nowhere is the
       # quietest way for a lane to stop proving what it is named for:

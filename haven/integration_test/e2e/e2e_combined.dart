@@ -4487,23 +4487,47 @@ class _ArrivalOrderedInbox {
 ///      the winner's branch with NO competing commit ever published
 ///      and so NO cache-poisoning fork.
 ///
-/// Because only one finalized SelfRemove commit ever exists, there is
-/// nothing to reconcile. Convergence is verified two ways: a residual
-/// member-set check on BOTH peers, AND a direct MLS-epoch equality
-/// check read from each peer's own MDK state (`currentEpoch`) — the
-/// load-bearing signal, since a matching member set alone cannot
-/// distinguish a reconciled group from a fork (both branches remove
-/// Alice; only a fork could leave the two peers on different epochs
-/// with the same member set). A fresh post-handoff location publish +
-/// decrypt is kept only as a NON-GATING sanity step: MDK's
-/// `DEFAULT_EPOCH_LOOKBACK` (5 past epochs) means a location encrypted
-/// at the winner's epoch can still decrypt correctly on the loser
-/// several epochs later even WITHOUT convergence, so a positive decrypt
-/// alone is not proof of a shared branch (this previously produced a
-/// false positive that let a winner/loser inversion through — the
-/// residual member-count check was the only assertion that caught it).
-/// Entirely inside the integration test — zero production surface,
-/// zero secret exposure.
+/// ## Why neither the member set NOR the epoch NUMBER proves convergence
+///
+/// Both checks this helper used to gate on are satisfiable by a fork,
+/// so together they still proved nothing:
+///   - the residual member SET matches on both branches (both remove
+///     Alice), and
+///   - so does the epoch NUMBER. Under the pre-migration single-committer
+///     election only ONE SelfRemove commit ever existed, so equal epochs
+///     did imply one branch. DM-4b deleted that election: Bob and Carol
+///     each auto-commit Alice's `SelfRemove` at epoch N and each applies
+///     its OWN commit, so BOTH land on epoch N+1 — two different branches,
+///     one number. The gate passed on its first probe round while the
+///     group was still forked, and the run only survived because the
+///     *ignored* post-handoff location probe below happened to drain the
+///     winner's commit into the loser. When that probe's publish was lost
+///     to a dropped relay socket the fork reached Phase 6 intact, Carol's
+///     `SelfRemove` was minted on an orphan branch Bob could never apply,
+///     and the leave observation timed out 60s later (CI run 32688074045).
+///
+/// ## What does prove it: a current-epoch cross-decrypt
+///
+/// Two branches at the same epoch number derive DIFFERENT epoch secrets
+/// (each commit mixes its own confirmed transcript hash and path
+/// secrets), hence different `marmot/group-event` exporter secrets. So
+/// "Carol decrypts a location Bob minted at his CURRENT epoch" is exactly
+/// "Carol holds Bob's current-epoch exporter secret" — i.e. she is on his
+/// branch. One direction suffices: Bob's branch is by definition Bob's,
+/// so Carol being on it plus equal epochs is a single shared branch.
+///
+/// The probe must be minted fresh INSIDE the poll round, and it is
+/// matched by round-unique coordinates rather than by "some decrypt
+/// succeeded". That is what closes the historical false positive: MDK's
+/// epoch lookback (5 past epochs) lets a location minted at a SHARED
+/// PAST epoch decrypt on either branch, so only a payload that provably
+/// post-dates the fork discriminates. A probe that cannot be published
+/// (relay socket loss) is reported as "not proven this round" and retried
+/// with a fresh event next round — never swallowed, and never re-published
+/// under its old event id.
+///
+/// Entirely inside the integration test — zero production surface, zero
+/// secret exposure.
 Future<({CircleWithMembersFfi bob, CircleWithMembersFfi carol})>
 _reconcileHandoff({
   required SyntheticUser bob,
@@ -4553,17 +4577,18 @@ _reconcileHandoff({
   // engine resolves it (deterministic `CommitOrderingKey` branch
   // selection; the loser rolls back and adopts the winner), but resolution
   // needs BOTH peers to keep ingesting the growing buffer after the
-  // loser's commit lands. Polling each peer to its own "Alice is gone"
-  // state and then sampling epoch equality once can therefore observe a
-  // mid-convergence instant and fail spuriously. So this polls straight to
-  // the real convergence predicate — Alice gone from both AND equal epochs
-  // — re-snapshotting the inbox each round so each peer sees whatever the
-  // other just published. The assertion is unchanged; only the moment it
-  // is sampled is now gated on the work being finished.
+  // loser's commit lands. So this polls straight to the real convergence
+  // predicate — Alice gone from both, equal epochs, AND Carol decrypting a
+  // location Bob minted at his current epoch (see the doc above for why
+  // the first two alone cannot see a fork) — re-snapshotting the inbox
+  // each round so each peer sees whatever the other just published.
+  var probeRound = 0;
   final converged = await _pollUntil<_HandoffConvergence>(
     describe: "${bob.label} + ${carol.label} converging on Alice's "
         'handoff burst (both peers auto-commit the SelfRemove; the engine '
-        'must resolve the resulting fork onto ONE branch)',
+        'must resolve the resulting fork onto ONE branch, proven by '
+        '${carol.label} decrypting a location ${bob.label} minted at his '
+        'current epoch)',
     probe: () async {
       // Re-snapshot per peer: Bob's publish inside his own drain must be
       // visible to Carol on the very next line, not a round later.
@@ -4571,45 +4596,47 @@ _reconcileHandoff({
       await carol.applyArrivalOrdered(inbox.snapshot(), relay: relay);
       final bobCircleNow = await bob.getCircle(mlsGroupId);
       final carolCircleNow = await carol.getCircle(mlsGroupId);
+      final bobHasAlice = bobCircleNow == null || circleHasAlice(bobCircleNow);
+      final carolHasAlice =
+          carolCircleNow == null || circleHasAlice(carolCircleNow);
+      final bobEpoch = await bob.currentEpoch(mlsGroupId);
+      final carolEpoch = await carol.currentEpoch(mlsGroupId);
+      // Only mint the cross-decrypt probe once the cheap preconditions
+      // hold — otherwise every round of a still-settling burst would put
+      // another kind-445 on the wire for nothing. `!bobHasAlice` already
+      // promotes `bobCircleNow` to non-null (it is false only when the
+      // handle exists), so no second null check is needed.
+      final crossDecrypted = !bobHasAlice &&
+          !carolHasAlice &&
+          bobEpoch == carolEpoch &&
+          await _bobLocationReadableByCarol(
+            bob: bob,
+            carol: carol,
+            bobCircle: bobCircleNow,
+            carolReadCircle: bobCircle,
+            relay: relay,
+            round: probeRound++,
+          );
       return (
-        bobHasAlice: bobCircleNow == null || circleHasAlice(bobCircleNow),
-        carolHasAlice:
-            carolCircleNow == null || circleHasAlice(carolCircleNow),
-        bobEpoch: await bob.currentEpoch(mlsGroupId),
-        carolEpoch: await carol.currentEpoch(mlsGroupId),
+        bobHasAlice: bobHasAlice,
+        carolHasAlice: carolHasAlice,
+        bobEpoch: bobEpoch,
+        carolEpoch: carolEpoch,
+        crossDecrypted: crossDecrypted,
       );
     },
     satisfied: (s) =>
-        !s.bobHasAlice && !s.carolHasAlice && s.bobEpoch == s.carolEpoch,
+        !s.bobHasAlice &&
+        !s.carolHasAlice &&
+        s.bobEpoch == s.carolEpoch &&
+        s.crossDecrypted,
   );
   debugPrint(
     '[e2e_combined] handoff convergence poll satisfied — '
-    'bobEpoch=${converged.bobEpoch} carolEpoch=${converged.carolEpoch}',
+    'bobEpoch=${converged.bobEpoch} carolEpoch=${converged.carolEpoch}, '
+    '${carol.label} read a location ${bob.label} minted at that epoch '
+    '(one shared branch, not two branches at one epoch number)',
   );
-
-  // Non-gating sanity check only — NOT the convergence signal (see the
-  // class doc above for why a positive decrypt alone cannot prove
-  // convergence, given the engine's epoch retention). Bob publishes a
-  // fresh location and Carol attempts to decrypt it; any failure here is
-  // logged and ignored. The actual pass/fail gate is the
-  // residual-member-set + epoch-equality check below.
-  try {
-    final bobCircleForProbe = await bob.getCircle(mlsGroupId);
-    if (bobCircleForProbe != null) {
-      await bob.publishLocation(
-        circle: bobCircleForProbe,
-        latitude: bobFakeLatitude,
-        longitude: bobFakeLongitude,
-        relay: relay,
-      );
-      await carol.drainPendingCommits(relay: relay, circle: bobCircle);
-    }
-  } on Object catch (e) {
-    debugPrint(
-      '[e2e_combined] non-gating post-handoff location sanity check '
-      'failed (ignored — not the convergence signal): ${e.runtimeType}',
-    );
-  }
 
   final bobFinal = await bob.getCircle(mlsGroupId);
   final carolFinal = await carol.getCircle(mlsGroupId);
@@ -4620,11 +4647,10 @@ _reconcileHandoff({
     );
   }
 
-  // The residual member SET matching on both peers is necessary but
-  // NOT sufficient — a fork also removes Alice on both branches — so
-  // the load-bearing convergence signal is a direct MLS-epoch equality
-  // read from each peer's own MDK state: only a single-committer
-  // election (never a fork) can leave both peers on the SAME epoch.
+  // Re-read the residual shape from each peer's own MDK. The member SET
+  // and the epoch NUMBER are both necessary but neither is sufficient —
+  // a fork satisfies both (see this helper's doc) — so the branch-level
+  // proof is the cross-decrypt the poll above gated on.
   final bobEpoch = await bob.currentEpoch(mlsGroupId);
   final carolEpoch = await carol.currentEpoch(mlsGroupId);
   if (!_residualMembersOk(bobFinal, aliceHex) ||
@@ -4640,14 +4666,82 @@ _reconcileHandoff({
   }
   debugPrint(
     '[e2e_combined] handoff converged — both peers independently applied '
-    'the arrival-ordered buffer and landed on the same epoch '
-    '(epoch=$bobEpoch on both peers).',
+    'the arrival-ordered buffer and landed on ONE branch at epoch '
+    '$bobEpoch (proven by the cross-decrypt, not by the epoch number).',
   );
   return (bob: bobFinal, carol: carolFinal);
 }
 
+/// Publishes a location from [bob] at his CURRENT epoch and reports
+/// whether [carol] decrypts exactly those coordinates.
+///
+/// This is `_reconcileHandoff`'s branch-level convergence oracle: two
+/// concurrent-commit branches at the same epoch number derive different
+/// `marmot/group-event` exporter secrets, so a successful decrypt means
+/// Carol holds Bob's current-epoch secret — she is on his branch.
+///
+/// [round] makes the coordinates unique per poll round, which is what
+/// makes the oracle immune to the engine's epoch lookback: a location
+/// minted at a shared PAST epoch decrypts on either branch, so matching
+/// on "some decrypt succeeded" would pass while forked. Only a payload
+/// carrying THIS round's offset can have been minted after the fork. The
+/// offset is an order of magnitude wider than [_coordEpsilon] so two
+/// rounds can never compare equal; the values stay inside the sentinel
+/// coordinate neighbourhood and are never logged, same as every other
+/// coordinate in this suite.
+///
+/// A relay that loses the probe (socket death mid-publish) makes this
+/// return `false`, so the caller's poll retries with a FRESH event id
+/// next round rather than treating an unproven round as proof.
+Future<bool> _bobLocationReadableByCarol({
+  required SyntheticUser bob,
+  required SyntheticUser carol,
+  required CircleWithMembersFfi bobCircle,
+  required CircleWithMembersFfi carolReadCircle,
+  required TestRelay relay,
+  required int round,
+}) async {
+  // `round + 1`, never `round`: a zero offset would put round 0 on Bob's
+  // plain sentinel coordinates — the ones his Phase 4 location already
+  // carries — so an undrained Phase 4 event could satisfy the oracle
+  // without proving anything about the post-handoff epoch.
+  const perRoundOffset = _coordEpsilon * 10;
+  final latitude = bobFakeLatitude + (round + 1) * perRoundOffset;
+  final longitude = bobFakeLongitude + (round + 1) * perRoundOffset;
+  try {
+    await bob.publishLocation(
+      circle: bobCircle,
+      latitude: latitude,
+      longitude: longitude,
+      relay: relay,
+    );
+  } on Object catch (e) {
+    // Publish failures are a property of the relay socket, not of MLS
+    // convergence. Report the round unproven and let the poll re-mint.
+    debugPrint(
+      '[e2e_combined] cross-decrypt probe round $round not published '
+      '(${e.runtimeType}); retrying with a fresh event next round.',
+    );
+    return false;
+  }
+  final summary = await carol.drainPendingCommits(
+    relay: relay,
+    circle: carolReadCircle,
+  );
+  // A drain records only the FIRST decrypt per sender, so an as-yet-
+  // undrained older Bob location would shadow this round's probe. That
+  // costs one extra round (the shadowing event is deduped away by the
+  // FFI's seen-event set, and the NEXT probe records cleanly) and can
+  // never produce a false pass, which is why there is no pre-flush here.
+  final coords = summary.decryptedLocations[bob.pubkeyHex.toLowerCase()];
+  return coords != null &&
+      (coords.latitude - latitude).abs() < _coordEpsilon &&
+      (coords.longitude - longitude).abs() < _coordEpsilon;
+}
+
 /// One convergence sample of both remaining peers during the admin
-/// handoff: whether each still sees Alice, and each one's MLS epoch.
+/// handoff: whether each still sees Alice, each one's MLS epoch, and
+/// whether Carol read a location Bob minted at his current epoch.
 /// Primitive fields only, so `_pollUntil`'s timeout message renders the
 /// actual state rather than an opaque instance.
 typedef _HandoffConvergence = ({
@@ -4655,6 +4749,7 @@ typedef _HandoffConvergence = ({
   bool carolHasAlice,
   int bobEpoch,
   int carolEpoch,
+  bool crossDecrypted,
 });
 
 /// True when [circle] shows the expected post-handoff residual: Alice
