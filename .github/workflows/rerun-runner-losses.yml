@@ -1,0 +1,53 @@
+# Re-run the jobs a hosted-runner loss killed — and nothing else.
+#
+# This file is the trigger and nothing more. Every decision — which signature is
+# admitted, that each failed job is judged on its own, that an unreadable log is
+# never re-run, that only a first attempt is ever considered — lives in
+# scripts/ci/rerun_runner_losses.sh, whose `--self-test` runs in repo-guards.yml
+# and whose fixtures are the proof. A gate restated here would be a gate that
+# can disagree with itself, so nothing here restates one; not even the signature
+# string, which the script writes into the run summary itself.
+#
+# Scope is deliberately the CI orchestrator alone. Widening it to a nightly or
+# release workflow is a one-line addition to `workflows:` below and needs no
+# change to the classifier — but it should be a decision someone takes, not a
+# default that crept in.
+
+name: Re-run Runner Losses
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  rerun:
+    name: Re-run runner losses
+    # Pure cost control, NOT a safety gate: for a run with no failed jobs the
+    # script is already a no-op, because it re-derives every candidate itself.
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # The scope the re-run endpoint requires; write subsumes the read used to
+      # list the run's jobs and download their logs.
+      actions: write
+      # For actions/checkout, and for nothing else.
+      contents: read
+    steps:
+      # No `ref:` on purpose. A workflow_run job carries a write token even when
+      # the run that triggered it did not, so it must execute the DEFAULT
+      # branch's script and never a version proposed by that run. For this event
+      # GITHUB_SHA is "last commit on default branch", so omitting `ref` is what
+      # makes that true.
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Classify failed jobs and re-run only runner losses
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HAVEN_RERUN_RUN_ID: ${{ github.event.workflow_run.id }}
+          HAVEN_RERUN_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: bash scripts/ci/rerun_runner_losses.sh

@@ -471,6 +471,19 @@
 #     opens no PR. Same shape as above — fixtures are the only proof, and the
 #     one that matters is an untracked scratch file, which `git diff` cannot
 #     see.
+#
+#   Runner-loss re-run gate           scripts/ci/rerun_runner_losses.sh
+#     rerun-runner-losses.yml re-runs a failed job when its log carries the
+#     line the RUNNER writes as it is being taken down (CI run 32672237999).
+#     Nothing about that is enforceable from the tree — the subject is another
+#     workflow's behaviour — so the fixtures are the whole proof, and they are
+#     adversarial by design: a genuine test failure, a job-level timeout, a
+#     step-level timeout, a concurrency cancellation, an unreadable log and the
+#     signature merely QUOTED in a step's output must each stay red, the
+#     signature must exist in exactly one file, and driving the orchestrator
+#     with stubbed `gh`/`curl` must re-run one job out of a mixed run and not
+#     the other. Widening any of that turns a bounded re-run into the blanket
+#     retry tooling/e2e/ci/ios-flake-lib.sh exists to refuse.
 
 name: Repo Guards
 
@@ -1315,3 +1328,13 @@ jobs:
       - name: Privacy-invariants guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_privacy_invariants.sh --self-test
+
+      # The one guard in this job whose subject is a workflow, not the tree, so
+      # its fixtures are the only thing that can catch a widened re-run rule.
+      # They are hermetic: `gh` and `curl` are stubbed, nothing leaves the
+      # runner. One fixture DOES read the tree — the signature must appear in
+      # exactly one file — and it reads untracked files too, so a second copy
+      # is caught in the commit that introduces it rather than the one after.
+      - name: Runner-loss re-run gate self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/rerun_runner_losses.sh --self-test
