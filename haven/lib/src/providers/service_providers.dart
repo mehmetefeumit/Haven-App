@@ -221,6 +221,45 @@ void _safeInvalidate(void Function() invalidate, String label) {
   }
 }
 
+/// Parses one engine-delivered location `content` into a [DecryptedLocation],
+/// or null when the payload is not one of ours.
+///
+/// Reuses the Rust serde schema (no Dart duplication). Null is a routine
+/// answer, not a failure to retry, and covers two inbound shapes: an inner
+/// event of a kind Haven does not own — the Rust receive gate folds those to
+/// an EMPTY content, which every circle with a co-member on another Marmot
+/// client produces — and a legacy `haven-avatar-*` chunk from a pre-migration
+/// client (plan D8 / protocol review 4.3). The engine already advanced past
+/// the event at the Rust layer regardless of this outcome, so the caller drops
+/// it silently. The FFI error never leaves this function (Security Rule 8).
+///
+/// Named rather than inlined into [subscriptionServiceProvider] so the
+/// production pairing with the Rust parser is what tests exercise.
+Future<DecryptedLocation?> parseStreamedLocation(
+  String content,
+  String senderPubkey,
+) async {
+  try {
+    final ffi = await parseEngineLocation(
+      contentJson: content,
+      senderPubkey: senderPubkey,
+    );
+    return DecryptedLocation(
+      senderPubkey: ffi.senderPubkey,
+      latitude: ffi.latitude,
+      longitude: ffi.longitude,
+      geohash: ffi.geohash,
+      timestamp: DateTime.fromMillisecondsSinceEpoch(ffi.timestamp * 1000),
+      expiresAt: DateTime.fromMillisecondsSinceEpoch(ffi.expiresAt * 1000),
+    );
+  } on Object catch (e) {
+    debugPrint(
+      '[ServiceProvider] parseEngineLocation skipped: ${e.runtimeType}',
+    );
+    return null;
+  }
+}
+
 /// Provides the live-sync subscription service (M6-3).
 ///
 /// Builds a [LiveSyncFfi] engine (via the single authoritative MLS manager +
@@ -233,33 +272,7 @@ final subscriptionServiceProvider = Provider<SubscriptionService>((ref) {
     circlesSnapshot: () => ref.read(circlesProvider.future),
     secretBytes: () =>
         ref.read(identityNotifierProvider.notifier).getSecretBytes(),
-    parseLocation: (content, sender) async {
-      // Reuse the Rust serde schema (no Dart duplication); null = not a
-      // parseable LocationMessage — e.g. a legacy `haven-avatar-*` chunk
-      // from a pre-migration client (plan D8 / protocol review 4.3). The
-      // engine already advanced past the event at the Rust layer regardless
-      // of this parse outcome, so returning null here is a silent skip, not
-      // a retriable failure.
-      try {
-        final ffi = await parseEngineLocation(
-          contentJson: content,
-          senderPubkey: sender,
-        );
-        return DecryptedLocation(
-          senderPubkey: ffi.senderPubkey,
-          latitude: ffi.latitude,
-          longitude: ffi.longitude,
-          geohash: ffi.geohash,
-          timestamp: DateTime.fromMillisecondsSinceEpoch(ffi.timestamp * 1000),
-          expiresAt: DateTime.fromMillisecondsSinceEpoch(ffi.expiresAt * 1000),
-        );
-      } on Object catch (e) {
-        debugPrint(
-          '[ServiceProvider] parseEngineLocation skipped: ${e.runtimeType}',
-        );
-        return null;
-      }
-    },
+    parseLocation: parseStreamedLocation,
     ingestLocation: (circle, decrypted) => ref
         .read(locationSharingServiceProvider)
         .ingestStreamedLocation(circle: circle, decrypted: decrypted),

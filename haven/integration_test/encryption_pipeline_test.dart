@@ -17,6 +17,9 @@
 ///   sentinel lat/lon (catches silent no-op or precision-truncation bugs)
 /// - Wrong-recipient isolation: a third party NOT in the group cannot
 ///   decrypt Alice's message (cross-group privacy)
+/// - Receive-side kind gate: the empty content Rust folds an inner event of a
+///   kind Haven does not own into is refused by the parser and dropped by the
+///   live-sync router, never turned into a zeroed (0, 0) member marker
 ///
 /// The test creates a minimal two-party MLS group entirely in-process using
 /// real Rust cryptography via the FFI bridge, then encrypts a location with
@@ -49,7 +52,10 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart';
+import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart';
+import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/subscription_service.dart';
 import 'package:integration_test/integration_test.dart';
 
 import 'e2e/_lib/test_user.dart';
@@ -854,7 +860,7 @@ void main() {
 
         // ---- Sender pubkey round-trip ----
         // The decrypted sender pubkey must equal Alice's identity pubkey
-        // (the Rust layer embeds it in the inner kind-9 payload).
+        // (the Rust layer embeds it in the inner kind-25442 payload).
         expect(
           loc.senderPubkey.toLowerCase(),
           equals(alicePubkeyHex.toLowerCase()),
@@ -927,4 +933,173 @@ void main() {
       }
     });
   });
+
+  // ------------------------------------------------------------------
+  // Receive-side kind gate: what the live-sync path does with an inner
+  // event Haven does not own.
+  //
+  // Rust folds an inner event of a foreign kind (a co-member's chat
+  // message from another Marmot client) to a location result whose
+  // content is the EMPTY STRING, so empty content is a routine input on
+  // this path, not a corruption. The Dart half of that contract —
+  // `parseStreamedLocation` returning null, and the router dropping the
+  // event — is unit-tested in test/providers/streamed_location_parse_
+  // test.dart. What only a live bridge can prove, and what this group
+  // owns, is the Rust verdict underneath it: that an empty payload is
+  // REFUSED rather than parsed into a zeroed location, which would plant
+  // a member marker at (0, 0).
+  //
+  // Pure parse + pure router: no keyring, no MLS state, no relay, so
+  // there is no skip path here.
+  // ------------------------------------------------------------------
+  group('Engine-delivered location content (FFI parse)', () {
+    /// A `LocationMessage` in the Rust serde schema, at the sentinel coords.
+    const validContent =
+        '{"latitude":$_sentinelLat,"longitude":$_sentinelLon,'
+        '"geohash":"s0000000","timestamp":"2026-08-24T12:00:00Z",'
+        '"expires_at":"2026-08-24T12:15:00Z"}';
+    const senderPubkey =
+        'aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899';
+
+    testWidgets('empty content is refused, not parsed into a zeroed location', (
+      tester,
+    ) async {
+      installThrowTimeErrorLogging();
+
+      // Anchor first: a real payload must parse. Without it a dead bridge
+      // would refuse the empty content too, and this test would pass for a
+      // reason that has nothing to do with the receive gate.
+      final anchor = await parseEngineLocation(
+        contentJson: validContent,
+        senderPubkey: senderPubkey,
+      );
+      expect(anchor.latitude, closeTo(_sentinelLat, _coordTolerance));
+
+      var parsed = false;
+      DecryptedLocationFfi? location;
+      try {
+        location = await parseEngineLocation(
+          contentJson: '',
+          senderPubkey: senderPubkey,
+        );
+        parsed = true;
+      } on Object catch (e) {
+        debugPrint(
+          '[encryption_pipeline_test] empty content refused: ${e.runtimeType}',
+        );
+      }
+
+      expect(
+        parsed,
+        isFalse,
+        reason:
+            'An empty content is what the Rust receive gate hands Dart for an '
+            'inner event of a kind Haven does not own. Parsing it would yield '
+            'a location whose coordinates nobody sent — '
+            'lat=${location?.latitude} lon=${location?.longitude} — and every '
+            'member of the circle would see that peer pinned there.',
+      );
+    });
+
+    testWidgets('the production parse maps refusals to a silent null', (
+      tester,
+    ) async {
+      installThrowTimeErrorLogging();
+
+      expect(
+        await parseStreamedLocation('', senderPubkey),
+        isNull,
+        reason: 'the foreign-kind sentinel must be skipped, not surfaced',
+      );
+      expect(
+        await parseStreamedLocation('haven-avatar-1/3:AAAA', senderPubkey),
+        isNull,
+        reason: 'a legacy avatar chunk from a pre-migration client is not ours',
+      );
+
+      // Non-vacuity: the null above is a verdict on the payload, not a parser
+      // that refuses everything.
+      final good = await parseStreamedLocation(validContent, senderPubkey);
+      expect(good, isNotNull);
+      expect(good!.latitude, closeTo(_sentinelLat, _coordTolerance));
+      expect(good.longitude, closeTo(_sentinelLon, _coordTolerance));
+      expect(good.senderPubkey.toLowerCase(), equals(senderPubkey));
+    });
+
+    testWidgets('the router drops a foreign-kind event and keeps the real '
+        'one', (tester) async {
+      installThrowTimeErrorLogging();
+
+      final circle = Circle(
+        mlsGroupId: const [7, 7, 7],
+        nostrGroupId: const [1, 2, 3, 4],
+        displayName: 'Test',
+        circleType: CircleType.locationSharing,
+        relays: const [_testRelayUrl],
+        membershipStatus: MembershipStatus.accepted,
+        members: const [],
+        createdAt: DateTime(2026),
+        updatedAt: DateTime(2026),
+      );
+      final ingested = <DecryptedLocation>[];
+      final statuses = <FfiSyncStatusReason>[];
+      var locationsChanged = 0;
+
+      // The production parse, wired exactly as subscriptionServiceProvider
+      // wires it — the pairing under test is closure + Rust parser.
+      final router = LiveEventRouter(
+        circleService: _UnusedCircleService(),
+        circlesSnapshot: () async => <Circle>[circle],
+        secretBytes: () async => const <int>[],
+        parseLocation: parseStreamedLocation,
+        ingestLocation: (c, decrypted) async => ingested.add(decrypted),
+        reconcileRoster: (c) async {},
+        onLocationsChanged: () => locationsChanged++,
+        onGroupUpdated: (_) {},
+        onInvitationReceived: () {},
+        onStatus: statuses.add,
+      );
+
+      FfiRelayEvent event(String content) => FfiRelayEvent(
+        kind: FfiRelayEventKind.location,
+        nostrGroupId: Uint8List.fromList(circle.nostrGroupId),
+        senderPubkey: senderPubkey,
+        content: content,
+      );
+
+      await expectLater(router.handleEvent(event('')), completes);
+      expect(
+        ingested,
+        isEmpty,
+        reason: 'a foreign-kind event must reach neither cache nor map',
+      );
+      expect(locationsChanged, 0);
+      expect(
+        statuses,
+        isEmpty,
+        reason:
+            'a co-member sending a kind Haven does not own is not a sync '
+            'problem — a status reason would raise the sync banner at the user',
+      );
+
+      await router.handleEvent(event(validContent));
+      expect(
+        ingested,
+        hasLength(1),
+        reason: 'the same router must still deliver a real location',
+      );
+      expect(ingested.single.latitude, closeTo(_sentinelLat, _coordTolerance));
+      expect(locationsChanged, 1);
+      expect(statuses, isEmpty);
+    });
+  });
+}
+
+/// No case in the receive-gate group fires a Welcome, so an unexpected
+/// [CircleService] call is a loud failure rather than a silently-defaulted
+/// mock.
+class _UnusedCircleService implements CircleService {
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw UnimplementedError('unexpected call: ${invocation.memberName}');
 }

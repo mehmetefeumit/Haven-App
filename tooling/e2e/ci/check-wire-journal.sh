@@ -1788,8 +1788,8 @@ self_test() {
   # explicit forbid-list entry. This is the difference the whole workstream
   # exists for: kind 24242 (Blossom authorization) is an HTTP header that must
   # never reach a relay, and the forbid-list this oracle replaces — {3, 443,
-  # 10051} — could not see it. Nor could it see a kind-9 rumor, a bare 444, a
-  # kind-450 identity proof, or anything MDK adds next.
+  # 10051} — could not see it. Nor could it see a kind-25442 location rumor, a
+  # bare 444, a kind-450 identity proof, or anything MDK adds next.
   local omitted="${tmp}/omitted.ndjson"
   fx_begin "${omitted}"
   jline c2r c1 "[\"EVENT\",$(ev 24242 "eBLOSSOM" "${PK_A}" '[["t","upload"],["x","deadbeef"],["expiration","1785886204"]]')]"

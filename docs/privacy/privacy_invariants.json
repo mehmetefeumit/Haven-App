@@ -189,9 +189,9 @@
           "note": "Built by the rev-pinned peeler (transport-nostr-peeler/src/peeler.rs); reached from nostr/mls/manager.rs::send_location, which is the ONLY send path (a second one in location/nostr.rs was deleted 2026-08-14, having never had a caller). No repo-local grep can see the kind."
         },
         {
-          "kind": 9,
-          "token": "Kind::Custom(9)",
-          "note": "The inner application rumor carrying the coordinate, built at nostr/mls/manager.rs::send_location and spelled as a literal. Never published as a relay event — it exists only as 445 plaintext before the engine seals it."
+          "kind": 25442,
+          "token": "Kind::Custom(KIND_LOCATION_UPDATE)",
+          "note": "The inner application rumor carrying the coordinate, built at nostr/mls/manager.rs::location_rumor (the private helper nostr/mls/manager.rs::send_location delegates to). Never published as a relay event — it exists only as 445 plaintext before the engine seals it. It was kind 9 (the Marmot/White Noise CHAT kind) until 2026-08-24, which rendered Haven's location JSON as chat bubbles in any Marmot client sharing the circle; 25442 is drawn from the ephemeral band and is unallocated in the kind registry, the NIPs README, MDK and Haven. The token names a CONSTANT (KIND_LOCATION_UPDATE, haven-core/src/nostr/event.rs), so rule 13 can no longer see the number: the VALUE is pinned by scripts/ci/check_inner_location_kind.sh."
         }
       ],
       "symbols": [
@@ -223,7 +223,8 @@
         }
       ],
       "guards": [
-        "tooling/e2e/ci/check-wire-journal.sh#workflow=e2e-android.yml"
+        "tooling/e2e/ci/check-wire-journal.sh#workflow=e2e-android.yml",
+        "scripts/ci/check_inner_location_kind.sh"
       ]
     },
     {
@@ -244,9 +245,9 @@
       ],
       "event_kinds": [
         {
-          "kind": 9,
-          "token": "Kind::Custom(9)",
-          "note": "The rumor whose JSON body this invariant constrains, built at nostr/mls/manager.rs::send_location."
+          "kind": 25442,
+          "token": "Kind::Custom(KIND_LOCATION_UPDATE)",
+          "note": "The rumor whose JSON body this invariant constrains, built at nostr/mls/manager.rs::location_rumor, reached from ::send_location. The token names a CONSTANT, so rule 13 cannot see the number; scripts/ci/check_inner_location_kind.sh pins the value."
         }
       ],
       "symbols": [
@@ -270,6 +271,57 @@
         }
       ],
       "guards": []
+    },
+    {
+      "id": "INV-L-FOREIGN-KIND-NEVER-A-MARKER",
+      "title": "A co-member's non-location app event never becomes a map marker",
+      "statement": "Haven's location updates travel under inner kind 25442 and never under the chat kind, and an inbound inner application event of any kind Haven does not own carries no content out of the receive gate — so it cannot place, move or attribute a member marker. The legacy chat kind is admitted only when paired with a [\"t\",\"location\"] tag, the shape every Haven build through v0.1.12 emitted; dropping either half of that pairing, or gating on the tag alone, falsifies this.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "event_kinds": [
+        {
+          "kind": 25442,
+          "token": "Kind::Custom(KIND_LOCATION_UPDATE)",
+          "note": "The only inner kind Haven emits, built at nostr/mls/manager.rs::location_rumor. The receive gate (::is_location_rumor) admits it plus the legacy chat kind paired with a [\"t\",\"location\"] tag. The token names a CONSTANT, so rule 13 cannot see the number; scripts/ci/check_inner_location_kind.sh pins the value and retires the legacy arm when the MDK pin moves."
+        }
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/nostr/mls/manager.rs",
+          "symbol": "is_location_rumor"
+        },
+        {
+          "file": "haven-core/src/nostr/mls/manager.rs",
+          "symbol": "inner_location_content"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/nostr/mls/manager.rs",
+          "name": "a_foreign_kind_carrying_the_location_hashtag_is_not_a_location"
+        },
+        {
+          "file": "haven-core/src/nostr/mls/manager.rs",
+          "name": "the_location_hashtag_must_be_a_t_tag"
+        },
+        {
+          "file": "haven-core/src/nostr/mls/manager.rs",
+          "name": "foreign_inner_events_never_carry_content_out_of_the_gate"
+        },
+        {
+          "file": "haven-core/src/nostr/mls/manager.rs",
+          "name": "a_location_shaped_payload_under_a_foreign_kind_never_becomes_a_marker"
+        },
+        {
+          "file": "haven-core/src/nostr/mls/manager.rs",
+          "name": "the_location_rumor_carries_no_tags"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_inner_location_kind.sh"
+      ]
     },
     {
       "id": "INV-L-ACCESS-GATE-PRECEDES-FIX",

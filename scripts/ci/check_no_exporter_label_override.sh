@@ -11,7 +11,7 @@
 # layer for group traffic"). Corrected, per MARMOT_PROTOCOL_KNOWLEDGE.md
 # "PURE_PLAINTEXT wire format: the confidentiality caveat":
 #
-#   * APPLICATION messages (the kind-9 location rumors) are PrivateMessage
+#   * APPLICATION messages (the kind-25442 location rumors) are PrivateMessage
 #     ALWAYS. OpenMLS's `create_message` encrypts unconditionally, and the
 #     pure-plaintext policy is enforced only against `is_handshake_message()`.
 #     A location is therefore double-sealed: AES-128-GCM under the epoch

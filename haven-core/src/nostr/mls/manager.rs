@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
-use nostr::{Event, JsonUtil, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
+use nostr::{Event, JsonUtil, Keys, Kind, PublicKey, Timestamp, UnsignedEvent};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use tokio::sync::Mutex;
@@ -64,6 +64,7 @@ use super::storage::{LiveSessionGuard, StorageConfig};
 use super::types::{LocationGroupConfig, LocationMessageResult, PreAuthRejection, ScreenedIngest};
 use super::welcome::WelcomePreview;
 use crate::nostr::error::{NostrError, Result};
+use crate::nostr::event::{KIND_LOCATION_UPDATE, LEGACY_KIND_LOCATION_UPDATE};
 
 // `redact_hex_sequences` lives in the neutral `crate::util` module. Re-exported
 // here so every `crate::nostr::mls::redact_hex_sequences` caller (circle/error,
@@ -616,11 +617,11 @@ impl SessionManager {
         .await
     }
 
-    /// Builds an unsigned location rumor (inner kind-9 Marmot app event) for the
-    /// local sender and sends it.
+    /// Builds an unsigned location rumor (inner [`KIND_LOCATION_UPDATE`] Marmot
+    /// app event) for the local sender and sends it.
     ///
     /// Convenience over [`Self::create_message`]: constructs the canonical inner
-    /// event with `pubkey` == the local identity and a `["t","location"]` tag.
+    /// event with `pubkey` == the local identity.
     ///
     /// # Errors
     ///
@@ -630,10 +631,8 @@ impl SessionManager {
         group_id: &GroupId,
         content: String,
     ) -> Result<SessionEffects> {
-        let rumor = nostr::EventBuilder::new(Kind::Custom(9), content)
-            .tags([Tag::hashtag("location")])
-            .build(self.identity_pubkey);
-        self.create_message(group_id, rumor).await
+        self.create_message(group_id, location_rumor(self.identity_pubkey, content))
+            .await
     }
 
     /// Ingests a raw transport message into the engine (inbound processing).
@@ -1100,8 +1099,10 @@ impl SessionManager {
     /// [`LocationMessageResult`], or `None` for events with no location-visible
     /// meaning (group-created, fork-recovery bookkeeping, hydration events).
     ///
-    /// - `MessageReceived` → `Location` (inner content extracted from the
-    ///   `MarmotAppEvent` payload).
+    /// - `MessageReceived` → `Location`, carrying the inner content only when the
+    ///   inner event's kind is a location update (see `inner_location_content`);
+    ///   a foreign inner kind yields the variant with empty content, never a
+    ///   parseable payload and never an error.
     /// - `GroupJoined` → `Joined`.
     /// - `GroupStateChanged` / `EpochChanged` → `GroupUpdate`.
     /// - `AppMessageInvalidated` / `GroupStateInvalidated` → `Invalidated`.
@@ -1116,7 +1117,7 @@ impl SessionManager {
                 payload,
             } => Some(LocationMessageResult::Location {
                 sender_pubkey: hex::encode(sender.as_slice()),
-                content: inner_app_content(payload),
+                content: inner_location_content(payload),
                 group_id: group_id.clone(),
                 epoch: epoch.0,
             }),
@@ -1265,21 +1266,74 @@ fn encode_admin_policy_v1(admins: &[[u8; 32]]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Extracts the inner `content` field from a `MarmotAppEvent` JSON payload,
-/// best-effort. Returns an empty string if the payload is not the expected
-/// unsigned-event JSON shape (the engine already validated it as a Marmot app
-/// event before emitting `MessageReceived`, so this is defensive).
-fn inner_app_content(payload: &[u8]) -> String {
-    serde_json::from_slice::<serde_json::Value>(payload)
-        .ok()
-        .and_then(|v| v.get("content").and_then(|c| c.as_str().map(String::from)))
+/// Builds the canonical inner location rumor for `sender`.
+///
+/// Split out of [`SessionManager::send_location`] so the one guarantee that
+/// cannot be observed downstream — the KIND on the wire, which is sealed inside
+/// the 445 before anything else can look at it — is directly assertable.
+///
+/// No tags: the kind is the discriminator now, and the `["t","location"]`
+/// hashtag the pre-cutover rumor carried is read by no receiver anywhere — not
+/// MDK, not White Noise, not Haven's own gate on a current-kind rumor.
+fn location_rumor(sender: PublicKey, content: String) -> UnsignedEvent {
+    nostr::EventBuilder::new(Kind::Custom(KIND_LOCATION_UPDATE), content).build(sender)
+}
+
+/// Extracts the inner `content` of a `MarmotAppEvent` JSON payload **only when
+/// the inner event's kind says it is a location update**; otherwise the empty
+/// string. [`LEGACY_KIND_LOCATION_UPDATE`] counts only paired with a
+/// `["t","location"]` hashtag — see that constant for what the pair does and
+/// does not buy.
+///
+/// The empty string, rather than `None` or an `Err`, is what keeps a gated
+/// message honest: the fold still reports `LocationMessageResult::Location`, so
+/// the caller advances past an authenticated message it cannot use. `None` is
+/// how every plane spells "no message arrived", and an error would put a peer's
+/// choice of message kind in front of the user.
+fn inner_location_content(payload: &[u8]) -> String {
+    let Ok(inner) = serde_json::from_slice::<serde_json::Value>(payload) else {
+        return String::new();
+    };
+    if !is_location_rumor(&inner) {
+        return String::new();
+    }
+    inner
+        .get("content")
+        .and_then(|c| c.as_str().map(String::from))
         .unwrap_or_default()
+}
+
+/// Whether an inner unsigned-event JSON value carries a Haven location update.
+fn is_location_rumor(inner: &serde_json::Value) -> bool {
+    let Some(kind) = inner.get("kind").and_then(serde_json::Value::as_u64) else {
+        return false;
+    };
+    if kind == u64::from(KIND_LOCATION_UPDATE) {
+        return true;
+    }
+    kind == u64::from(LEGACY_KIND_LOCATION_UPDATE) && has_location_hashtag(inner)
+}
+
+/// Whether an inner unsigned-event JSON value carries `["t","location"]`.
+fn has_location_hashtag(inner: &serde_json::Value) -> bool {
+    inner
+        .get("tags")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|tags| {
+            tags.iter().any(|tag| {
+                tag.as_array().is_some_and(|parts| {
+                    parts.first().and_then(serde_json::Value::as_str) == Some("t")
+                        && parts.get(1).and_then(serde_json::Value::as_str) == Some("location")
+                })
+            })
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use cgka_traits::types::EpochId;
+    use nostr::Tag;
     use std::env;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1435,7 +1489,7 @@ mod tests {
         let (manager, dir) = open_manager();
         // A rumor whose pubkey is NOT the local identity must be refused (W9).
         let other = Keys::generate();
-        let rumor = nostr::EventBuilder::new(Kind::Custom(9), "{}").build(other.public_key());
+        let rumor = location_rumor(other.public_key(), "{}".to_string());
         let gid = GroupId::new(vec![9, 9, 9]);
         let result = manager.create_message(&gid, rumor).await;
         assert!(matches!(result, Err(NostrError::InvalidEvent(_))));
@@ -1462,10 +1516,13 @@ mod tests {
         assert!(kp.source.is_some());
     }
 
+    /// Content passes the gate VERBATIM, whether or not it parses as a
+    /// `LocationMessage`: a peer on a newer content schema must still surface as
+    /// a `Location` the caller advances past, not be re-classified by shape.
     #[test]
     fn location_result_from_message_received_extracts_inner_content() {
         let sender = MemberId::new(vec![0xAB; 32]);
-        let inner = nostr::EventBuilder::new(Kind::Custom(9), r#"{"lat":1.5}"#)
+        let inner = nostr::EventBuilder::new(Kind::Custom(KIND_LOCATION_UPDATE), r#"{"lat":1.5}"#)
             .build(Keys::generate().public_key());
         let payload = inner.as_json().into_bytes();
         let event = GroupEvent::MessageReceived {
@@ -1552,10 +1609,265 @@ mod tests {
         );
     }
 
+    // ── The inner-event kind: the send side ─────────────────────────────────
+
     #[test]
-    fn inner_app_content_is_empty_for_garbage() {
-        assert_eq!(inner_app_content(b"not json"), "");
-        assert_eq!(inner_app_content(br#"{"no_content":1}"#), "");
+    fn the_location_rumor_is_minted_at_the_location_kind_and_never_the_chat_kind() {
+        let rumor = location_rumor(Keys::generate().public_key(), "{}".to_string());
+        assert_eq!(rumor.kind, Kind::Custom(KIND_LOCATION_UPDATE));
+        assert_ne!(
+            rumor.kind,
+            Kind::Custom(LEGACY_KIND_LOCATION_UPDATE),
+            "kind 9 is MARMOT_APP_EVENT_KIND_CHAT: a co-member's White Noise \
+             would draw the coordinate as a chat bubble and push-notify it"
+        );
+    }
+
+    #[test]
+    fn the_location_rumor_carries_no_tags() {
+        let rumor = location_rumor(Keys::generate().public_key(), "{}".to_string());
+        assert!(rumor.tags.is_empty(), "unexpected tags: {:?}", rumor.tags);
+    }
+
+    #[test]
+    fn the_location_rumor_is_stamped_with_the_senders_own_pubkey() {
+        let sender = Keys::generate().public_key();
+        assert_eq!(location_rumor(sender, "{}".to_string()).pubkey, sender);
+    }
+
+    // ── The inner-event kind: the receive gate ──────────────────────────────
+    //
+    // `location_result_from_event` folds every authenticated inner app message
+    // into `Location`. What varies — and what these pin — is whether the inner
+    // CONTENT is carried through, because content is what becomes a marker on
+    // the map. A foreign kind must yield the variant with EMPTY content: the
+    // caller still learns a message arrived at this position (so it advances
+    // past it), gets no error to show a user, and gets nothing that can parse.
+
+    /// The `MessageReceived` an engine emits once it has authenticated an inner
+    /// rumor, carrying that rumor's JSON verbatim as the payload.
+    fn message_received(rumor: &UnsignedEvent) -> GroupEvent {
+        GroupEvent::MessageReceived {
+            group_id: GroupId::new(vec![7, 7, 7]),
+            sender: MemberId::new(vec![0xAB; 32]),
+            epoch: EpochId(4),
+            payload: rumor.as_json().into_bytes(),
+        }
+    }
+
+    /// The folded `Location` content, asserting the variant on the way through.
+    /// Every caller here also proves the fold produced a `Location` at all —
+    /// a foreign kind must not collapse to `None`, which is how the planes
+    /// spell "no message".
+    fn folded_location_content(rumor: &UnsignedEvent) -> String {
+        match SessionManager::location_result_from_event(&message_received(rumor)) {
+            Some(LocationMessageResult::Location {
+                sender_pubkey,
+                content,
+                group_id,
+                epoch,
+            }) => {
+                // The caller's bookkeeping must survive the gate intact, or a
+                // gated message would damage cursor/roster state on its way past.
+                assert_eq!(sender_pubkey, hex::encode([0xABu8; 32]));
+                assert_eq!(group_id, GroupId::new(vec![7, 7, 7]));
+                assert_eq!(epoch, 4);
+                content
+            }
+            other => panic!("expected a Location result, got {other:?}"),
+        }
+    }
+
+    /// A real serialized `LocationMessage` — the exact shape that renders a
+    /// member marker.
+    fn location_payload() -> String {
+        crate::location::LocationMessage::new(52.370_216, 4.895_168)
+            .to_string()
+            .expect("serialize location")
+    }
+
+    fn parses_as_a_marker(content: &str) -> bool {
+        serde_json::from_str::<crate::location::LocationMessage>(content).is_ok()
+    }
+
+    #[test]
+    fn a_location_update_rumor_is_folded_as_a_location() {
+        let payload = location_payload();
+        let rumor = location_rumor(Keys::generate().public_key(), payload.clone());
+        let content = folded_location_content(&rumor);
+        assert_eq!(content, payload);
+        assert!(
+            parses_as_a_marker(&content),
+            "the whole point of the kind: this one must reach the map"
+        );
+    }
+
+    #[test]
+    fn a_pre_cutover_haven_rumor_is_still_folded_as_a_location() {
+        // Exactly what v0.1.11 / v0.1.12 put in the tunnel: kind 9 WITH the
+        // `["t","location"]` hashtag. Rejecting it would silently drop a
+        // not-yet-updated circle member off every updated member's map.
+        let payload = location_payload();
+        let rumor =
+            nostr::EventBuilder::new(Kind::Custom(LEGACY_KIND_LOCATION_UPDATE), payload.clone())
+                .tags([Tag::hashtag("location")])
+                .build(Keys::generate().public_key());
+        let content = folded_location_content(&rumor);
+        assert_eq!(content, payload);
+        assert!(parses_as_a_marker(&content));
+    }
+
+    #[test]
+    fn foreign_inner_events_never_carry_content_out_of_the_gate() {
+        // Realistic co-member traffic in a shared Marmot group. The kind-9 row
+        // is a White Noise chat message: same kind Haven used to send, no
+        // hashtag, and its plaintext must not reach the caller either.
+        let sender = Keys::generate().public_key();
+        let cases = [
+            (
+                "White Noise chat message",
+                nostr::EventBuilder::new(Kind::Custom(9), "hey").build(sender),
+            ),
+            (
+                "reaction",
+                nostr::EventBuilder::new(Kind::Custom(7), "+").build(sender),
+            ),
+            (
+                "group system row",
+                nostr::EventBuilder::new(Kind::Custom(1210), "{}").build(sender),
+            ),
+            (
+                "a kind-9 chat message wearing an unrelated hashtag",
+                nostr::EventBuilder::new(Kind::Custom(9), "hey")
+                    .tags([Tag::hashtag("nostr")])
+                    .build(sender),
+            ),
+        ];
+        for (label, rumor) in cases {
+            let content = folded_location_content(&rumor);
+            assert!(
+                content.is_empty(),
+                "`{label}` must carry no content out of the gate, got {content:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_location_shaped_payload_under_a_foreign_kind_never_becomes_a_marker() {
+        // THE regression the missing gate allowed. `LocationMessage` carries no
+        // `deny_unknown_fields` (deliberately, for wire compatibility), so
+        // before the gate ANY inner event whose content happened to deserialize
+        // rendered as a member marker on the map.
+        let payload = location_payload();
+        assert!(
+            parses_as_a_marker(&payload),
+            "precondition: this payload really would render, or the assertions \
+             below prove nothing"
+        );
+        let sender = Keys::generate().public_key();
+        for kind in [7u16, 1210, 1, 25443] {
+            let rumor = nostr::EventBuilder::new(Kind::Custom(kind), payload.clone()).build(sender);
+            let content = folded_location_content(&rumor);
+            assert!(
+                content.is_empty() && !parses_as_a_marker(&content),
+                "a location-shaped payload at kind {kind} must not reach the map"
+            );
+        }
+        // Including under the legacy kind when the hashtag pairing is absent:
+        // that combination is a White Noise chat message, not a Haven rumor.
+        let untagged_legacy =
+            nostr::EventBuilder::new(Kind::Custom(LEGACY_KIND_LOCATION_UPDATE), payload)
+                .build(sender);
+        assert!(folded_location_content(&untagged_legacy).is_empty());
+    }
+
+    #[test]
+    fn a_foreign_kind_carrying_the_location_hashtag_is_not_a_location() {
+        // The hashtag qualifies NOTHING on its own — it is only ever read in
+        // conjunction with `LEGACY_KIND_LOCATION_UPDATE`. Read alone it would
+        // restore the exact hole the kind gate closes: one sender-chosen tag
+        // admitting any authenticated inner event to the map.
+        let payload = location_payload();
+        let sender = Keys::generate().public_key();
+        for kind in [7u16, 1210, 25443] {
+            let rumor = nostr::EventBuilder::new(Kind::Custom(kind), payload.clone())
+                .tags([Tag::hashtag("location")])
+                .build(sender);
+            let content = folded_location_content(&rumor);
+            assert!(
+                content.is_empty() && !parses_as_a_marker(&content),
+                "kind {kind} wearing `[\"t\",\"location\"]` must carry no content \
+                 out of the gate, got {content:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_location_hashtag_must_be_a_t_tag() {
+        // The pairing is the TAG `["t","location"]`, not the string "location"
+        // in any tag's value slot. `e`/`p`/`r` values are references a sender
+        // picks freely, so matching on the value alone would let a plain chat
+        // message name itself through the gate.
+        let payload = location_payload();
+        let sender = Keys::generate().public_key();
+        for name in ["e", "p", "r", "hashtag"] {
+            let rumor = nostr::EventBuilder::new(
+                Kind::Custom(LEGACY_KIND_LOCATION_UPDATE),
+                payload.clone(),
+            )
+            .tags([Tag::parse([name, "location"]).expect("build tag")])
+            .build(sender);
+            let content = folded_location_content(&rumor);
+            assert!(
+                content.is_empty() && !parses_as_a_marker(&content),
+                "`[\"{name}\",\"location\"]` is not the location hashtag, yet it \
+                 carried content out of the gate: {content:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_chat_message_hashtagged_location_dies_at_the_location_message_parse() {
+        // The legacy pair is forgeable: a Marmot client that lifts `#hashtags`
+        // out of message content into `t` tags emits kind 9 + `["t","location"]`
+        // for anyone who types "#location", and at the gate that is
+        // indistinguishable from a pre-cutover Haven rumor. The kind gate is
+        // therefore defense in depth on top of the `LocationMessage` parse, and
+        // this pins the layer that actually stops prose.
+        let rumor = nostr::EventBuilder::new(
+            Kind::Custom(LEGACY_KIND_LOCATION_UPDATE),
+            "on my way — will drop my #location when I get there",
+        )
+        .tags([Tag::hashtag("location")])
+        .build(Keys::generate().public_key());
+        let content = folded_location_content(&rumor);
+        assert!(
+            !content.is_empty(),
+            "precondition: this pair really does pass the kind gate, or the \
+             assertion below proves nothing about the second layer"
+        );
+        assert!(
+            !parses_as_a_marker(&content),
+            "a co-member's chat prose must never render as a marker: {content:?}"
+        );
+    }
+
+    #[test]
+    fn inner_location_content_is_empty_for_garbage() {
+        assert_eq!(inner_location_content(b"not json"), "");
+        assert_eq!(inner_location_content(br#"{"no_content":1}"#), "");
+        // Well-formed JSON, no kind field at all: the gate must fail closed
+        // rather than default the kind in.
+        assert_eq!(inner_location_content(br#"{"content":"x"}"#), "");
+        // A kind that is not a number, and a tags field that is not an array.
+        assert_eq!(
+            inner_location_content(br#"{"kind":"25442","content":"x"}"#),
+            ""
+        );
+        assert_eq!(
+            inner_location_content(br#"{"kind":9,"tags":"location","content":"x"}"#),
+            ""
+        );
     }
 
     // ── The pre-engine parse screen (`PreAuthRejection::Malformed`) ──────────
@@ -1636,11 +1948,14 @@ mod tests {
                 signed_445(vec![h_tag(&"z".repeat(64))], "b3BhcXVl"),
             ),
             (
+                // The INNER location kind, worn as an OUTER event kind: the
+                // transport carries 445 (and the gift wrap), nothing else, so a
+                // rumor kind escaping onto a relay is screened before the engine.
                 "a kind the transport does not carry",
-                nostr::EventBuilder::new(Kind::Custom(9), "hi")
+                nostr::EventBuilder::new(Kind::Custom(KIND_LOCATION_UPDATE), "hi")
                     .tags(vec![h_tag(&good_h)])
                     .sign_with_keys(&Keys::generate())
-                    .expect("sign kind 9"),
+                    .expect("sign the inner kind as an outer event"),
             ),
         ];
         for (label, ev) in cases {

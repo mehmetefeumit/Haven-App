@@ -9,8 +9,9 @@
 #
 # It builds the SAME e2e_combined.dart with `--dart-define=HAVEN_LIVE_SYNC=true`
 # so the live-sync scenarios run against the persistent engine (they
-# self-skip on the poll-path lanes, which ci.yml still runs separately for the
-# HAVEN_LIVE_SYNC-off production default).
+# self-skip on the poll-path lanes, which ci.yml still runs separately to keep
+# the HAVEN_LIVE_SYNC-off rollback path proven — it is no longer the production
+# default, which has been live-sync ON since M11 Phase B).
 #
 # It reuses the SAME reusable lanes ci.yml calls (e2e-android.yml /
 # e2e-ios.yml, via their `live_sync` input), so there is exactly one definition

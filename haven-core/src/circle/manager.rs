@@ -1415,10 +1415,11 @@ impl CircleManager {
 
     /// Encrypts a location for a circle, producing a kind 445 event.
     ///
-    /// Builds the inner Marmot app event (kind 9, `["t","location"]`, `pubkey`
-    /// == the local identity per W9) and sends it via the engine, returning the
-    /// transport event plus the circle's `nostr_group_id` and relays for the
-    /// relay layer to publish.
+    /// Builds the inner Marmot app event (kind
+    /// [`KIND_LOCATION_UPDATE`](crate::nostr::KIND_LOCATION_UPDATE), untagged,
+    /// `pubkey` == the local identity per W9) and sends it via the engine,
+    /// returning the transport event plus the circle's `nostr_group_id` and
+    /// relays for the relay layer to publish.
     ///
     /// The per-send NIP-40 expiration is dropped (retention is now a group-level
     /// `message-retention.v1` component, not a per-message tag — `dm2_report` #2);

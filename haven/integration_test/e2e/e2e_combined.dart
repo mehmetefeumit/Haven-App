@@ -308,7 +308,7 @@ const Duration _staggeredBurstReadTimeout = Duration(seconds: 45);
 /// Tolerance when comparing a decrypted coordinate to its sentinel.
 ///
 /// The sentinel coords are plain f64 constants round-tripped through
-/// kind-9 JSON → Rust → Dart; the loss is sub-ULP. 1e-5 (~1 m of
+/// kind-25442 JSON → Rust → Dart; the loss is sub-ULP. 1e-5 (~1 m of
 /// latitude) is far wider than any round-trip noise yet orders of
 /// magnitude tighter than any real corruption, so it detects a
 /// decrypt-but-corrupt bug without risking float-precision flake.
@@ -4119,7 +4119,7 @@ Future<void> _publishAndObserveThreeWayLocations({
 
   // Assert coordinates on the synthetic-peer side. A decrypt that
   // returns the wrong lat/lon (e.g. due to a serialisation bug in the
-  // kind-9 content encoding) would pass the presence check above but
+  // kind-25442 content encoding) would pass the presence check above but
   // fail here, providing an unambiguous regression signal.
   //
   // Alice's expected pair is the CANARY coordinate — the same value her

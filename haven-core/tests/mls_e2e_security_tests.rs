@@ -36,7 +36,7 @@ fn block_on<F: std::future::Future>(fut: F) -> F::Output {
         .block_on(fut)
 }
 
-/// Encrypts an inner kind-9 location `content` from `sender` and returns the
+/// Encrypts an inner location `content` from `sender` and returns the
 /// publishable kind-445 transport event.
 async fn send_445(sender: &SessionManager, gid: &GroupId, content: &str) -> Event {
     let effects = sender

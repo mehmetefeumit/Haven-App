@@ -29,8 +29,8 @@
 /// signed event — readable from an archive by someone who never saw the
 /// socket. Co-timing is therefore transferable evidence, not a weak hint.
 /// A burst that overlaps a per-circle tick can publish the same circle twice
-/// within a short window; that is benign — a kind-9 application message never
-/// advances the MLS epoch, and every publish is serialized through the
+/// within a short window; that is benign — a kind-25442 application message
+/// never advances the MLS epoch, and every publish is serialized through the
 /// engine's session mutex. The per-circle gate/serialization here plus that
 /// mutex uphold Rule 14 (single writer).
 ///

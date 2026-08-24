@@ -1,15 +1,13 @@
-//! Nostr event types for location sharing.
+//! Nostr event types and kind numbers for location sharing.
 //!
-//! This module defines the event structures for encrypted location messages:
-//! - `UnsignedLocationEvent`: Inner event (kind 9) containing location data
-//! - `SignedLocationEvent`: Outer event (kind 445) ready for relay transmission
+//! - [`KIND_LOCATION_UPDATE`]: the inner (MLS-tunnelled) location rumor's kind
+//! - [`SignedLocationEvent`]: Outer event (kind 445) ready for relay transmission
 
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
-use crate::location::LocationMessage;
 use crate::nostr::error::{NostrError, Result};
 use crate::nostr::keys::{EphemeralKeypair, SECP};
 use crate::nostr::tags::TagBuilder;
@@ -17,107 +15,42 @@ use crate::nostr::tags::TagBuilder;
 /// Event kind for Marmot group messages (outer event).
 pub const KIND_GROUP_MESSAGE: u16 = 445;
 
-/// Event kind for application messages (inner event).
+/// Event kind of the inner, MLS-tunnelled rumor carrying a location update.
 ///
-/// Kind 9 is used per MIP-03 for application content inside MLS group messages.
-/// A `["t", "location"]` tag distinguishes location messages from chat messages.
-pub const KIND_LOCATION_DATA: u16 = 9;
-
-/// An unsigned Nostr event containing location data.
+/// The kind — not a tag — is what marks a payload as a location update, on both
+/// the send and the receive side.
 ///
-/// This is the inner event that gets encrypted before being wrapped
-/// in a kind 445 group message. It uses kind 9 per MIP-03 for application
-/// messages with a `["t", "location"]` tag.
+/// Drawn from the ephemeral band (20000–29999) and unallocated in
+/// `nostr-protocol/registry-of-kinds`, the NIPs kind table, MDK and Haven, so no
+/// Marmot client renders it. Haven previously sent kind 9
+/// (`MARMOT_APP_EVENT_KIND_CHAT`), which every Marmot client draws as a chat
+/// bubble and feeds to conversation previews, unread badges and push
+/// notifications — a coordinate published to a shared group surfaced as chatter
+/// in a co-member's White Noise. An unrecognised kind is safe by spec:
+/// `marmot/foundation/application-messages.md` requires that protocol processing
+/// not reject an otherwise-valid app payload merely because its kind is unknown,
+/// and MDK's timeline projection drops unrecognised kinds.
 ///
-/// # Note
+/// The number is pinned by `location_update_kind_number_is_pinned`, because the
+/// repo guard keys on the token `Kind::Custom(KIND_LOCATION_UPDATE)` and cannot
+/// see what the constant holds.
+pub const KIND_LOCATION_UPDATE: u16 = 25442;
+
+/// The kind Haven sent location rumors as before [`KIND_LOCATION_UPDATE`].
 ///
-/// Inner events are not signed because they are encrypted within the outer
-/// event (kind 445), which itself is signed. The outer signature provides
-/// authentication for the entire encrypted payload.
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct UnsignedLocationEvent {
-    /// Event kind (9 for application messages per MIP-03).
-    pub kind: u16,
-
-    /// JSON-serialized location data
-    pub content: String,
-
-    /// Event tags (typically empty for inner events)
-    pub tags: Vec<Vec<String>>,
-
-    /// Unix timestamp when the event was created
-    pub created_at: i64,
-}
-
-impl std::fmt::Debug for UnsignedLocationEvent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("UnsignedLocationEvent")
-            .field("kind", &self.kind)
-            .field("content", &"<redacted>")
-            .field("tag_count", &self.tags.len())
-            .field("created_at", &self.created_at)
-            .finish()
-    }
-}
-
-impl UnsignedLocationEvent {
-    /// Creates a new unsigned location event from a `LocationMessage`.
-    ///
-    /// # Arguments
-    ///
-    /// * `location` - The location data to include
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the location cannot be serialized to JSON.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use haven_core::location::LocationMessage;
-    /// use haven_core::nostr::UnsignedLocationEvent;
-    ///
-    /// let location = LocationMessage::new(37.7749, -122.4194);
-    /// let event = UnsignedLocationEvent::from_location(&location).unwrap();
-    /// assert_eq!(event.kind, 9);
-    /// ```
-    pub fn from_location(location: &LocationMessage) -> Result<Self> {
-        let content = location.to_string()?;
-        Ok(Self {
-            kind: KIND_LOCATION_DATA,
-            content,
-            tags: vec![],
-            created_at: Utc::now().timestamp(),
-        })
-    }
-
-    /// Extracts the `LocationMessage` from this event's content.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the content is not valid location JSON.
-    pub fn to_location(&self) -> Result<LocationMessage> {
-        LocationMessage::from_string(&self.content).map_err(NostrError::from)
-    }
-
-    /// Serializes this event to JSON for encryption.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if serialization fails.
-    pub fn to_json(&self) -> Result<String> {
-        serde_json::to_string(self).map_err(NostrError::from)
-    }
-
-    /// Deserializes an unsigned event from JSON.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the JSON is invalid.
-    pub fn from_json(json: &str) -> Result<Self> {
-        serde_json::from_str(json).map_err(NostrError::from)
-    }
-}
+/// **Receive-only, and only in combination with a `["t","location"]` tag** — see
+/// `inner_location_content` in [`crate::nostr::mls`], the single site that reads
+/// it. Nothing constructs a rumor at this kind any more.
+///
+/// The pairing narrows the transitional window: every Haven build that can still
+/// share an MLS group with this one (v0.1.11 and v0.1.12 — earlier builds are
+/// pre-Dark-Matter and cannot decrypt a current kind 445 at all) stamps that
+/// hashtag on its kind-9 rumor, while a White Noise chat message is a bare kind
+/// 9. It does not close the window — a client that lifts `#hashtags` out of
+/// message content into `t` tags emits the same pair for anyone who types
+/// "#location" — so this gate is defense in depth ON TOP OF the
+/// `LocationMessage` parse, never a replacement for it.
+pub const LEGACY_KIND_LOCATION_UPDATE: u16 = 9;
 
 /// A signed Nostr event ready for relay transmission.
 ///
@@ -393,46 +326,72 @@ impl SignedLocationEvent {
 mod tests {
     use super::*;
 
-    #[test]
-    fn unsigned_event_from_location() {
-        let location = LocationMessage::new(37.7749, -122.4194);
-        let event = UnsignedLocationEvent::from_location(&location).unwrap();
+    // ---- The inner location kind ------------------------------------------
 
-        assert_eq!(event.kind, KIND_LOCATION_DATA);
-        assert!(event.content.contains("latitude"));
-        assert!(event.content.contains("longitude"));
-        assert!(event.tags.is_empty());
+    /// The number itself, spelled out. The repo's kind guard keys on the TOKEN
+    /// `Kind::Custom(KIND_LOCATION_UPDATE)` at the send site, so it stays green
+    /// no matter what the constant holds; without this assertion the value could
+    /// be edited to anything — including back to 9 — with every other test and
+    /// every guard still passing.
+    #[test]
+    fn location_update_kind_number_is_pinned() {
+        assert_eq!(KIND_LOCATION_UPDATE, 25442);
     }
 
+    /// The number must stay out of every kind another client would act on. Kind
+    /// 9 is the one that caused the move (Marmot's chat kind); the rest are what
+    /// a future re-draw could collide with. Listed explicitly rather than as a
+    /// range so that adding a colliding constant is a compile-time visible edit
+    /// to this list.
     #[test]
-    fn unsigned_event_roundtrip_location() {
-        let original = LocationMessage::new(37.7749, -122.4194);
-        let event = UnsignedLocationEvent::from_location(&original).unwrap();
-        let recovered = event.to_location().unwrap();
-
+    fn location_update_kind_collides_with_no_allocated_kind() {
+        // NIP-01 short text note / repost, NIP-09 deletion, NIP-25 reaction,
+        // Marmot chat and welcome, and the Marmot/MDK group-system and media
+        // kinds. 1209 is NOT an allocation — it appears in no Marmot registry
+        // and no MDK rev — and is reserved here deliberately, as margin next to
+        // 1210.
+        for allocated in [
+            1u16,
+            2,
+            5,
+            7,
+            9,
+            444,
+            446,
+            447,
+            448,
+            449,
+            450,
+            451,
+            452,
+            1009,
+            1200,
+            1201,
+            1202,
+            1209,
+            1210,
+            KIND_GROUP_MESSAGE,
+        ] {
+            assert_ne!(
+                KIND_LOCATION_UPDATE, allocated,
+                "the inner location kind must not collide with allocated kind {allocated}"
+            );
+        }
         assert!(
-            (original.latitude - recovered.latitude).abs() < f64::EPSILON,
-            "latitude mismatch: {} vs {}",
-            original.latitude,
-            recovered.latitude
+            (20_000..=29_999).contains(&KIND_LOCATION_UPDATE),
+            "the band is not about relay storage — the rumor is sealed inside \
+             the 445 and never reaches a relay. It is where an application draws \
+             a kind nothing else renders: got {KIND_LOCATION_UPDATE}"
         );
-        assert!(
-            (original.longitude - recovered.longitude).abs() < f64::EPSILON,
-            "longitude mismatch: {} vs {}",
-            original.longitude,
-            recovered.longitude
-        );
-        assert_eq!(original.geohash, recovered.geohash);
     }
 
+    /// The legacy kind is the chat kind, and it is the reason the tag pairing in
+    /// the receive gate is load-bearing: on its own, this number cannot tell a
+    /// pre-cutover Haven rumor from a White Noise chat message.
     #[test]
-    fn unsigned_event_json_roundtrip() {
-        let location = LocationMessage::new(37.7749, -122.4194);
-        let original = UnsignedLocationEvent::from_location(&location).unwrap();
-        let json = original.to_json().unwrap();
-        let recovered = UnsignedLocationEvent::from_json(&json).unwrap();
-
-        assert_eq!(original, recovered);
+    fn legacy_location_kind_is_the_marmot_chat_kind() {
+        assert_eq!(LEGACY_KIND_LOCATION_UPDATE, 9);
+        assert_ne!(LEGACY_KIND_LOCATION_UPDATE, KIND_LOCATION_UPDATE);
     }
 
     #[test]
@@ -689,12 +648,6 @@ mod tests {
         }
 
         assert_eq!(event.expires_at(), None);
-    }
-
-    #[test]
-    fn unsigned_event_from_json_rejects_invalid_json() {
-        let result = UnsignedLocationEvent::from_json("not valid json{");
-        assert!(result.is_err());
     }
 
     #[test]
@@ -964,56 +917,19 @@ mod tests {
         );
     }
 
-    // ---- Security Rules 4/6/8: the redacting `Debug` impls -----------------
+    // ---- Security Rules 4/6/8: the redacting `Debug` impl ------------------
     //
-    // Both event types carry material that must never reach a log: the inner
-    // event's `content` is the plaintext location JSON, and the outer event's
-    // `id` / `pubkey` / `sig` identify the ephemeral sender key minted per
-    // message (Rule 2). Neither type derives `Debug` — each hand-writes one
-    // that substitutes `<redacted>`. A `#[derive(Debug)]` would compile, pass
-    // every other test, and silently start printing coordinates into logcat,
-    // a bug report, or an OEM log collector.
+    // The outer event's `id` / `pubkey` / `sig` identify the ephemeral sender
+    // key minted per message (Rule 2), and its `h` tag IS the nostr_group_id.
+    // The type does not derive `Debug` — it hand-writes one that substitutes
+    // `<redacted>`. A `#[derive(Debug)]` would compile, pass every other test,
+    // and silently start printing that material into logcat, a bug report, or
+    // an OEM log collector.
     //
-    // These assert on the RENDERED string, which is what actually reaches a
-    // log, rather than on the impl's existence.
-
-    #[test]
-    fn unsigned_event_debug_redacts_the_location_content() {
-        let event = UnsignedLocationEvent {
-            kind: 9,
-            // Distinctive values so a leak cannot hide behind a coincidence.
-            content: r#"{"latitude":52.370216,"longitude":4.895168}"#.to_string(),
-            tags: vec![vec!["t".to_string(), "location".to_string()]],
-            created_at: 1_700_000_000,
-        };
-
-        let rendered = format!("{event:?}");
-
-        assert!(
-            !rendered.contains("52.370216") && !rendered.contains("4.895168"),
-            "the inner event's plaintext coordinates must never render: {rendered}"
-        );
-        assert!(
-            !rendered.contains("latitude"),
-            "not even the content's shape may render — it is the payload the \
-             whole app exists to protect: {rendered}"
-        );
-        assert!(
-            rendered.contains("<redacted>"),
-            "the content field must be present but redacted, so a reader can \
-             see it was withheld rather than absent: {rendered}"
-        );
-        // The non-sensitive fields stay, or the type is useless for debugging.
-        assert!(rendered.contains("kind: 9"), "kind is safe: {rendered}");
-        assert!(
-            rendered.contains("tag_count: 1"),
-            "tags render as a COUNT — a tag value can carry a group id: {rendered}"
-        );
-        assert!(
-            rendered.contains("1700000000"),
-            "created_at is safe: {rendered}"
-        );
-    }
+    // This asserts on the RENDERED string, which is what actually reaches a
+    // log, rather than on the impl's existence. The matching guarantee for the
+    // decrypted inner payload lives on the types that still carry it:
+    // `LocationMessageResult::Location` (mls::types) and `LocationMessage`.
 
     #[test]
     fn signed_event_debug_redacts_every_identifying_field() {

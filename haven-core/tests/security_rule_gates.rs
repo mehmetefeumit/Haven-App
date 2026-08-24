@@ -74,7 +74,7 @@ const NONCE_SAMPLE: u8 = 32;
 // crate, so its private items cannot be shared, and `helpers` is compiled into
 // every test binary in the directory, none of which need these.
 
-/// Encrypts an inner kind-9 location `content` and returns the publishable 445.
+/// Encrypts an inner location `content` and returns the publishable 445.
 async fn send_445(sender: &SessionManager, gid: &GroupId, content: &str) -> Event {
     let effects = sender
         .send_location(gid, content.to_string())

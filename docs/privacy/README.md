@@ -50,15 +50,22 @@ no longer wired fails.
 You may not promise what you have accepted deviating from, and you may not
 record a deviation the user was never told about.
 
-Thirteen deviations are declared, each mirroring a section of
-`haven-core/SECURITY.md`: P1–P7 (profile-plane relay separation), M5
-(self-update disabled), RC1 (relay-session correlation), R10 (the owner-directed
-public-profile reversal), and the ones added after review found them
-unregistered — `IOS-KEYCHAIN`, `CONV-BUFFER`, `TTL-FINGERPRINT` and
-`LEAVE-GHOST`. No count is written down: this list grows every time somebody
-reads `SECURITY.md` against the manifest, which is the point of it.
-`jq -r '.accepted_deviations[].id' docs/privacy/privacy_invariants.json` is the
-answer that cannot go stale.
+Each declared deviation mirrors a section of some document in this repository,
+and rule 15 checks that the citation resolves — but **not that the document is
+`SECURITY.md`**, and two of them are not. Thirteen are: P1–P7 (profile-plane
+relay separation), M5 (self-update disabled), RC1 (relay-session correlation),
+and the ones added after review found them unregistered — `IOS-KEYCHAIN`,
+`CONV-BUFFER`, `TTL-FINGERPRINT` and `LEAVE-GHOST`. `R10` (the owner-directed
+public-profile reversal) sources to `CLAUDE.md#privacy-model`, because the
+direction came from the owner rather than from a threat-model argument, and
+`KP-SLOT-WIDTH` sources to `MARMOT_PROTOCOL_KNOWLEDGE.md`, because what it
+deviates from is a transport binding rather than a Haven decision. Do not read
+"declared deviation" as "argued in `SECURITY.md`" — check the `source`. Both the
+membership and the 13/2 split above are a snapshot, not a fact to maintain: this
+register grows every time somebody reads a design document against the manifest,
+which is the point of it.
+`jq -r '.accepted_deviations[] | "\(.id) -> \(.source)"' docs/privacy/privacy_invariants.json`
+is the answer that cannot go stale.
 
 **Several of them carry no invariant, and that is a finding, not an omission.**
 An `accepted_deviation` invariant requires a disclosure, so a deviation the user
@@ -70,11 +77,26 @@ the user something and none of them is disclosed anywhere:
   relays.
 * `IOS-KEYCHAIN` — a still-powered-on iPhone unlocked once since boot can have
   the OS surrender the SQLCipher key *while locked*.
-* `TTL-FINGERPRINT` — the constant 228 s kind-445 expiration is, in its own
-  record's words, "a client-wide discriminator visible to any relay or member",
-  and cannot be changed for circles that already exist.
+* `TTL-FINGERPRINT` — the constant 228 s kind-445 expiration is a discriminator
+  visible to any relay or member, and the send-side bound widened it: Haven now
+  stamps 228 s in circles it did not create, where it used to stamp nothing, so
+  inside such a circle the constant separates the Haven member's location
+  updates from everyone else's traffic on the same `#h`. It cannot be changed
+  for circles that already exist.
 * `CONV-BUFFER` — a circle member can grow the engine's convergence buffer
   without a bound Haven can impose.
+* `KP-SLOT-WIDTH` — **the invitability half is now CLOSED**: a one-time,
+  crash-safe retirement moves a pre-fix install off its 32-hex (malformed)
+  kind-30443 slot onto a binding-shaped one, publishing the replacement first
+  and retracting the orphaned coordinate only once a relay has acked it. What
+  the record still accepts is the historical residue: a NIP-09 deletion is a
+  request relays *SHOULD* honour, so a relay that ignores it — or that was
+  unreachable while the migration ran — can keep the old coordinate publicly
+  readable, and no client can force its removal. That residue is an era marker
+  (which build of Haven first published the account), never key material. It
+  stays in this list rather than under an invariant because it discloses nothing
+  to the user: after the migration the slot width is the same on every install,
+  so there is no user-visible consequence left to warn about.
 * `LEAVE-GHOST` — **the sharpest of them, because the copy asserts the opposite
   of the residual.** In the conjunction of a leaver crashing mid-leave, its
   `SelfRemove` being deferred or losing the order race, and it never re-opening
@@ -95,8 +117,9 @@ jq -r '(.accepted_deviations | map(.id))
 ```
 
 `P4`, `IOS-KEYCHAIN` and `LEAVE-GHOST` are open owner decisions, listed under
-"Known gaps" below; the rest are recorded as accepted in `SECURITY.md`, where
-the acceptance is argued. Note that the gate cannot detect an *unregistered*
+"Known gaps" below; the rest are recorded as accepted in
+the document their `source` names, where the acceptance is argued. Note that the
+gate cannot detect an *unregistered*
 deviation: rule 9 checks only that cited ids resolve. Keeping this register
 complete is a human duty.
 
@@ -326,19 +349,53 @@ Recorded here rather than papered over:
   because filing it would require inventing a disclosure. Owner decision: add
   the residual to the copy (a 13-locale round), or re-scope the sentence to the
   converged case.
-* **`INV-W-445-EXPIRATION-SCOPE` holds only for circles this device created.**
-  The 0x8005 retention component is supplied at exactly one site
-  (`CreateGroupRequest`), with no read-back, no validation on `accept_welcome`,
-  and no `UpdateAppComponents` path that adds it to a group lacking it. In a
-  circle created by a client that did not declare it, this device's own
-  application 445s carry no expiration — and then both halves of
-  `privacyWhatOthersSeeDetailExpiry` invert.
-* **`privacyWhatOthersSeeDetailExpiry` under-describes the un-stamped class.**
-  It says a 445 without an expiration "is visibly a membership change". The
-  un-stamped class is every group-control message: membership, circle rename,
-  admin handoff, relay-set changes, retention changes. Not false, but narrower
-  than reality. Correcting it is a 13-locale round, so it is recorded rather
-  than done.
+* **`KP-SLOT-WIDTH` was a spec violation and is now fixed — RESOLVED.** A
+  pre-fix install published a 32-hex kind-30443 `d`; the Nostr transport binding
+  requires exactly one 64-character lowercase hex value decoding to 32 bytes and
+  states that a required singleton tag with a wrong value makes the event
+  malformed, and `foundation/key-packages.md` requires an inviter to reject
+  malformed candidates before selecting one — so a conformant peer could not
+  invite those accounts. Slot retirement now ships: the tracked package is
+  re-published into a fresh binding-shaped slot, and only after a relay acks it
+  are tracking moved and the orphaned coordinate retracted by a NIP-09 kind-5
+  naming `30443:<pubkey>:<old d>`; a sentinel makes it once-only and latches
+  only on completion. Moving the SAME package (rather than minting a new one)
+  is what keeps a lenient peer that still selects the orphan from being
+  stranded, and an in-flight Welcome against the old coordinate decryptable.
+  The record survives only for the residue nothing can remove: a relay that
+  ignores the deletion request can keep serving the old coordinate. See
+  `MARMOT_PROTOCOL_KNOWLEDGE.md#the-d-slot-id-is-shape-normative`.
+* **`INV-W-445-EXPIRATION-SCOPE` now holds for every circle, and what is left is
+  other members' traffic.** The 0x8005 retention component is still supplied at
+  exactly one site (`CreateGroupRequest`), with no validation on
+  `accept_welcome` and no `UpdateAppComponents` path that adds it to a group
+  lacking it — but this device's own application 445s are stamped regardless,
+  by the installed `RetentionBoundPeeler`, and the group's declaration IS read
+  back (`SessionManager::group_message_retention_secs`, which the invariant
+  cites as a symbol). The residue is that in a circle created by a client that
+  declared nothing, *other* members' location 445s carry no expiration, so the
+  circle's `#h` stream is mixed. What is genuinely unproven is the other
+  direction: the bound supplies the tag every presence-check looks for, so
+  nothing on the wire still fails when `create_group` stops declaring 0x8005 —
+  and that component is what governs every other member's client. Two host
+  tests hold it instead; the invariant's residual names them and names the
+  wire-level check that would close it.
+* **`privacyWhatOthersSeeDetailExpiry`'s discriminator sentence is now scoped,
+  and what is left is that the residue is disclosed nowhere.** The sentence used
+  to say, of any 445, that one without an expiration "is visibly a membership
+  change". That was wrong in a mixed circle rather than merely narrow: in a
+  circle created without 0x8005 the un-stamped class also contains **another
+  member's location updates**, so the sentence pointed a relay at the wrong
+  conclusion about a real position report. It now reads "Among the messages your
+  phone sends … a membership or settings change", which fixes both halves — the
+  scope, and the class, which is every group-control message (joins and
+  removals, but also an admin handoff or a change to the circle's relays; the
+  discriminator's own proof, `expiration_separates_location_from_control_…`,
+  publishes a relay-set commit, not a membership one). The 13-locale round
+  landed with it. Still open: nothing in the app tells the user that in such a
+  circle another member's location updates may sit on a relay indefinitely and
+  read as group control. Owner decision: disclose that residue too, or accept
+  that the scoped sentence is where the disclosure stops.
 * **`onboardingValueProp2Title` / `…Body` overclaim.** "No one can shut it down"
   / "No single company or government can switch the network off" is backable on
   the location plane and false app-wide: the map has exactly one provider by CI

@@ -90,13 +90,14 @@ jobs:
   # ---------------------------------------------------------------------------
 
   # The consolidated three-user core flow (onboarding, circle creation,
-  # invitation, location sharing, leave) on Android. This lane runs the POLL
-  # receive path — the production default while the live-sync flag is off —
-  # so the retained poller keeps per-commit coverage. The live-sync scenarios
-  # self-skip here and run flag-on in the dedicated lane below (both call the
-  # SAME reusable lane, so the two paths cannot drift). Keep BOTH: replacing
-  # this with `live_sync: true` would drop poll-path coverage before the flag
-  # flips.
+  # invitation, location sharing, leave) on Android. This lane forces the POLL
+  # receive path. That is no longer the production default — `liveSyncEnabled`
+  # defaults to true since M11 Phase B — it is the documented ROLLBACK path, so
+  # it keeps per-commit coverage for as long as the retained poller stays in the
+  # tree. The live-sync scenarios self-skip here and run flag-on in the
+  # dedicated lane below (both call the SAME reusable lane, so the two paths
+  # cannot drift). Keep BOTH: replacing this with `live_sync: true` would leave
+  # the rollback path unproven.
   e2e-android:
     name: E2E Core Flow (Android)
     needs: [rust]

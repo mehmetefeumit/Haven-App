@@ -585,9 +585,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void dco_decode_unit(dynamic raw);
 
   @protected
-  UnsignedLocationEventFfi dco_decode_unsigned_location_event_ffi(dynamic raw);
-
-  @protected
   BigInt dco_decode_usize(dynamic raw);
 
   @protected
@@ -1215,11 +1212,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_decode_unit(SseDeserializer deserializer);
-
-  @protected
-  UnsignedLocationEventFfi sse_decode_unsigned_location_event_ffi(
-    SseDeserializer deserializer,
-  );
 
   @protected
   BigInt sse_decode_usize(SseDeserializer deserializer);
@@ -1986,12 +1978,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_unit(void self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_unsigned_location_event_ffi(
-    UnsignedLocationEventFfi self,
-    SseSerializer serializer,
-  );
 
   @protected
   void sse_encode_usize(BigInt self, SseSerializer serializer);

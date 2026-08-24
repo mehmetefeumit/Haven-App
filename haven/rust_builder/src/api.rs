@@ -473,44 +473,6 @@ impl std::fmt::Debug for NostrIdentityManager {
 // Encrypted Event Types (FFI wrappers for Nostr event generation)
 // ============================================================================
 
-/// Unsigned location event (FFI wrapper for inner event kind 9).
-///
-/// This is the inner event containing location data before encryption.
-/// It is wrapped in a kind 445 group message for transmission.
-#[derive(Clone)]
-pub struct UnsignedLocationEventFfi {
-    /// Event kind (9 for location data per MIP-03).
-    pub kind: u16,
-    /// JSON-serialized location data.
-    pub content: String,
-    /// Event tags (typically empty for inner events).
-    pub tags: Vec<Vec<String>>,
-    /// Unix timestamp when the event was created.
-    pub created_at: i64,
-}
-
-impl std::fmt::Debug for UnsignedLocationEventFfi {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("UnsignedLocationEventFfi")
-            .field("kind", &self.kind)
-            .field("content", &"<redacted>")
-            .field("tag_count", &self.tags.len())
-            .field("created_at", &self.created_at)
-            .finish()
-    }
-}
-
-impl From<haven_core::nostr::UnsignedLocationEvent> for UnsignedLocationEventFfi {
-    fn from(e: haven_core::nostr::UnsignedLocationEvent) -> Self {
-        Self {
-            kind: e.kind,
-            content: e.content,
-            tags: e.tags,
-            created_at: e.created_at,
-        }
-    }
-}
-
 /// Signed location event (FFI wrapper for outer event kind 445).
 ///
 /// This is the outer event ready for relay transmission.
@@ -569,20 +531,6 @@ impl LocationEventService {
     #[must_use]
     pub fn new() -> Self {
         Self { _private: () }
-    }
-
-    /// Creates an unsigned location event (kind 9 per MIP-03).
-    ///
-    /// This is the inner event that gets encrypted before being wrapped
-    /// in a kind 445 group message.
-    #[frb(sync)]
-    pub fn create_unsigned_event(
-        &self,
-        location: &LocationMessage,
-    ) -> Result<UnsignedLocationEventFfi, String> {
-        haven_core::nostr::UnsignedLocationEvent::from_location(&location.inner)
-            .map(Into::into)
-            .map_err(|e| e.to_string())
     }
 
     /// Verifies the signature of a signed event.
@@ -9402,12 +9350,9 @@ mod tests {
     /// `kind: Location, location: None` — decrypt succeeded at the MLS layer, so
     /// the caller advances past it exactly like a `GroupUpdate` (it must never
     /// treat a successfully-decrypted event as a retriable decrypt failure that
-    /// gets reprocessed forever). Companion to
-    /// `haven_avatar_inner_kind9_from_old_client_ignored_without_state_damage`
-    /// in `haven-core/src/circle/manager.rs`, which pins the core-level
-    /// `decrypt_location` half of this contract. (Under the new taxonomy the fold
-    /// is infallible — it returns `LocationMessageResultFfi` directly, not a
-    /// `Result` — so "never an Err on parse failure" is now structural.)
+    /// gets reprocessed forever). (Under the new taxonomy the fold is infallible
+    /// — it returns `LocationMessageResultFfi` directly, not a `Result` — so
+    /// "never an Err on parse failure" is now structural.)
     #[test]
     fn convert_location_with_unparseable_content_is_seen_not_dropped() {
         let result = haven_core::nostr::mls::types::LocationMessageResult::Location {

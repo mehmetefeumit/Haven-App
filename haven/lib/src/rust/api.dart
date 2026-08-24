@@ -6,9 +6,9 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_commit_to_publish`, `convert_location_result`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_legacy_mls_db_files`, `delete_mls_session_db_files`, `delete_superseded_kp`, `delete_tile_db_files`, `from_cached`, `from_report`, `from_state`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `maintenance_now_secs`, `mark_kp_slot_retirement_done`, `nip65_relay_list_urls`, `now_ms`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `profile_view`, `purge_key_package_past_not_after`, `record_retired_slot`, `redact_profile_err`, `reinstall_after_timed_out_stop`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `republish_key_package`, `retire_malformed_kp_slot`, `retract_kp_slots`, `run_blocking`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`, `usable_profile_pool`
+// These functions are ignored because they are not marked as `pub`: `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_commit_to_publish`, `convert_location_result`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_legacy_mls_db_files`, `delete_mls_session_db_files`, `delete_superseded_kp`, `delete_tile_db_files`, `ensure_own_identity`, `from_cached`, `from_report`, `from_state`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `maintenance_now_secs`, `mark_kp_slot_retirement_done`, `nip65_relay_list_urls`, `no_network`, `now_ms`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `profile_view`, `purge_key_package_past_not_after`, `record_retired_slot`, `redact_profile_err`, `reinstall_after_timed_out_stop`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `republish_key_package`, `retire_malformed_kp_slot`, `retract_kp_slots`, `run_blocking`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`, `usable_profile_pool`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`, `KpPublishPlan`, `KpRetirementInputs`, `KpRetirementTick`, `ProfileStampLists`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`, `default`
 
 /// Initializes the platform-specific keyring credential store.
@@ -849,7 +849,8 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   ///
   /// # Errors
   ///
-  /// Returns a redacted error string on relay or database failure.
+  /// Returns a redacted error string on a secret that is not this account's
+  /// identity, or on relay or database failure.
   Future<void> deleteMyPublicProfile({required List<int> identitySecretBytes});
 
   /// Reconciles a member's cached profile-picture bytes with their current
@@ -1374,7 +1375,8 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   ///
   /// # Errors
   ///
-  /// Returns a redacted error string on relay or database failure.
+  /// Returns a redacted error string on a secret that is not this account's
+  /// identity, or on relay or database failure.
   Future<ProfileMetadataFfi> removeMyProfilePicture({
     required List<int> identitySecretBytes,
   });
@@ -1532,15 +1534,16 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Publishes whatever the own-profile outbox is holding.
   ///
   /// Idempotent and safe to call from any resume/foreground trigger: with
-  /// nothing pending it returns [`ProfileSyncOutcomeFfi::NothingPending`]
-  /// without touching the network. Network failure is an OUTCOME, not an
-  /// error — the save stays queued with its retry ladder advanced, and only a
-  /// local fault produces `Err`.
+  /// nothing pending it returns [`ProfileSyncOutcomeFfi::NothingPending`],
+  /// and with an unusable relay pool [`ProfileSyncOutcomeFfi::PoolUnderflow`],
+  /// in both cases without touching the network OR the supplied secret.
+  /// Network failure is an OUTCOME, not an error — the save stays queued with
+  /// its retry ladder advanced, and only a local fault produces `Err`.
   ///
   /// # Errors
   ///
-  /// Returns a redacted error string on a malformed secret or a local
-  /// database/signing fault.
+  /// Returns a redacted error string on a malformed secret, a secret that is
+  /// not this account's identity, or a local database/signing fault.
   Future<ProfileSyncResultFfi> syncMyProfile({
     required List<int> identitySecretBytes,
   });
@@ -1699,14 +1702,6 @@ abstract class LiveSyncFfi implements RustOpaqueInterface {
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationEventService>>
 abstract class LocationEventService implements RustOpaqueInterface {
-  /// Creates an unsigned location event (kind 9 per MIP-03).
-  ///
-  /// This is the inner event that gets encrypted before being wrapped
-  /// in a kind 445 group message.
-  UnsignedLocationEventFfi createUnsignedEvent({
-    required LocationMessage location,
-  });
-
   static Future<LocationEventService> default_() =>
       RustLib.instance.api.crateApiLocationEventServiceDefault();
 
@@ -4193,43 +4188,4 @@ class TileCacheEntryFfi {
           staleAtMs == other.staleAtMs &&
           lastModifiedMs == other.lastModifiedMs &&
           etag == other.etag;
-}
-
-/// Unsigned location event (FFI wrapper for inner event kind 9).
-///
-/// This is the inner event containing location data before encryption.
-/// It is wrapped in a kind 445 group message for transmission.
-class UnsignedLocationEventFfi {
-  /// Event kind (9 for location data per MIP-03).
-  final int kind;
-
-  /// JSON-serialized location data.
-  final String content;
-
-  /// Event tags (typically empty for inner events).
-  final List<List<String>> tags;
-
-  /// Unix timestamp when the event was created.
-  final PlatformInt64 createdAt;
-
-  const UnsignedLocationEventFfi({
-    required this.kind,
-    required this.content,
-    required this.tags,
-    required this.createdAt,
-  });
-
-  @override
-  int get hashCode =>
-      kind.hashCode ^ content.hashCode ^ tags.hashCode ^ createdAt.hashCode;
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is UnsignedLocationEventFfi &&
-          runtimeType == other.runtimeType &&
-          kind == other.kind &&
-          content == other.content &&
-          tags == other.tags &&
-          createdAt == other.createdAt;
 }

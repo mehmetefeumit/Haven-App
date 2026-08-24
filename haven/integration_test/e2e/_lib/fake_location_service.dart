@@ -73,7 +73,7 @@ const double bobFakeLongitude = 89.876543;
 /// Sentinel coordinates used by the Carol role.
 ///
 /// Same recognizable pattern as Alice + Bob, chosen so a hex dump of a
-/// decoded `kind 9` content can be matched against a single role at a
+/// decoded `kind 25442` content can be matched against a single role at a
 /// glance. Far from any populated area; hermetic relay only.
 const double carolFakeLatitude = 14.567890;
 const double carolFakeLongitude = 91.098765;

@@ -145,6 +145,15 @@
 #     lever that can downgrade the kind-445 exporter derivation away from
 #     "marmot/group-event"; Haven's Rust source must never name it.
 #
+#   Inner location kind is pinned     scripts/ci/check_inner_location_kind.sh
+#     The inner MLS-tunnelled location rumor's kind is the dispatch token every
+#     other Marmot client in the circle renders on. At kind 9 — MDK's chat
+#     message — Haven's coordinates arrived in co-members' chat clients as chat
+#     bubbles. Pins the constant at 25442, requires the send path to name it
+#     rather than a literal, and bans building any Marmot/MDK/NIP-01-allocated
+#     kind from a bare number. The privacy manifest's rule 13 declares the
+#     TOKEN and cannot see the constant's value; this is the other half.
+#
 #   No event-timestamp cursor advance scripts/ci/check_no_event_timestamp_cursor_advance.sh
 #     A sync cursor may never be advanced from an inbound event's `created_at`
 #     (unauthenticated, remotely chosen, and poisoning it strands every event
@@ -642,6 +651,18 @@ jobs:
       - name: No exporter-label override
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_no_exporter_label_override.sh
+
+      - name: Inner location kind is pinned
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_inner_location_kind.sh
+
+      # Fixtures for each violation class: the constant re-pointed at 9/1210/the
+      # 446-452 band, a bare literal or computed kind at the rumor build, a
+      # reserved kind reached through a constant — plus the false-positive
+      # directions (the receive-only legacy constant, decoys in #[cfg(test)]).
+      - name: Inner location kind guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_inner_location_kind.sh --self-test
 
       - name: No cursor advance from an event timestamp
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

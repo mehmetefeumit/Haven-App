@@ -6,7 +6,7 @@
 //! # Architecture
 //!
 //! ```text
-//! LocationMessage → UnsignedEvent (inner kind-9 rumor with location JSON)
+//! LocationMessage → UnsignedEvent (inner KIND_LOCATION_UPDATE rumor, location JSON)
 //!                          ↓
 //!            SessionManager::send_location (engine: MLS + signing)
 //!                          ↓
@@ -46,7 +46,7 @@ pub mod mls;
 
 pub use error::{NostrError, Result};
 pub use event::{
-    SignedLocationEvent, UnsignedLocationEvent, KIND_GROUP_MESSAGE, KIND_LOCATION_DATA,
+    SignedLocationEvent, KIND_GROUP_MESSAGE, KIND_LOCATION_UPDATE, LEGACY_KIND_LOCATION_UPDATE,
 };
 pub use identity::{
     IdentityError, IdentityKeypair, IdentityManager, PublicIdentity, SecureKeyStorage,
