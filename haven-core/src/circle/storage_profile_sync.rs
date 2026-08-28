@@ -159,7 +159,9 @@ impl CircleStorage {
             event_created_at: existing.as_ref().map_or(0, |row| row.event_created_at),
             fetched_at: existing.as_ref().map_or(now, |row| row.fetched_at),
         };
-        Self::write_profile_row(&tx, &row)?;
+        // The row the UI renders is the row that was STORED, sanitizer and all
+        // — not the one assembled above.
+        let row = Self::write_profile_row(&tx, &row)?;
 
         // Accumulate rather than replace: renaming and then editing the bio must
         // publish BOTH. A replace would drop the rename with no error anywhere.
@@ -678,6 +680,25 @@ mod tests {
     }
 
     // ---- staging -----------------------------------------------------------
+
+    #[test]
+    fn stage_own_profile_edits_returns_the_row_it_stored() {
+        // The returned row is what the UI renders immediately after a save. If
+        // it were the row as ASSEMBLED rather than the row as WRITTEN, a save
+        // would render exactly the text the sanitizer had just rejected, and
+        // the screen would silently correct itself on the next read.
+        let storage = storage();
+        let row = storage
+            .stage_own_profile_edits(&hex(), &name_edit("Ada\u{202E}  Lovelace"), 100)
+            .unwrap();
+
+        assert_eq!(row.metadata.display_name(), Some("Ada Lovelace"));
+        assert_eq!(
+            storage.get_profile(&hex()).unwrap().unwrap().metadata,
+            row.metadata,
+            "returned row must equal the stored row"
+        );
+    }
 
     #[test]
     fn a_local_save_is_pending_and_renders_immediately() {

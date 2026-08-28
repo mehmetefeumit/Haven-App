@@ -126,6 +126,38 @@ void main() {
       },
     );
 
+    testWidgets('opts the display-name field out of IME personalized learning', (
+      tester,
+    ) async {
+      final service = _FakeIdentityService(initialDisplayName: 'Alice');
+
+      await tester.pumpWidget(buildHarness(service: service));
+      await tester.pumpAndSettle();
+
+      // Publishing this name to relays is the user's deliberate choice; the
+      // keyboard's learned-word dictionary is a different recipient — an
+      // OS-side store Haven cannot wipe on logout and that rides the device
+      // backup and any third-party keyboard.
+      final field = tester.widget<TextField>(find.byType(TextField));
+      expect(field.enableIMEPersonalizedLearning, isFalse);
+    });
+
+    testWidgets(
+      'offers the display-name field to no platform autofill service',
+      (tester) async {
+        final service = _FakeIdentityService(initialDisplayName: 'Alice');
+
+        await tester.pumpWidget(buildHarness(service: service));
+        await tester.pumpAndSettle();
+
+        // This name is a generated pseudonym, not the user's legal name — an
+        // autofill service has nothing to supply, yet the framework's default
+        // empty hint list would still hand it the current editing value.
+        final field = tester.widget<TextField>(find.byType(TextField));
+        expect(field.autofillHints, isNull);
+      },
+    );
+
     testWidgets('typing flips status to Unsaved changes and enables Save', (
       tester,
     ) async {

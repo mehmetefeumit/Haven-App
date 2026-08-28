@@ -11,6 +11,8 @@ use nostr::Metadata;
 use serde_json::Value;
 use zeroize::Zeroizing;
 
+use crate::directory::sanitize_display_name;
+
 /// A thin, read-oriented wrapper over the Nostr kind-0 [`Metadata`] object.
 ///
 /// Wrapping (rather than aliasing) lets the profile module expose a small,
@@ -86,6 +88,38 @@ impl ProfileMetadata {
     /// Reads a non-empty string value from the `custom` map.
     fn custom_str(&self, key: &str) -> Option<&str> {
         non_empty(self.inner.custom.get(key).and_then(Value::as_str))
+    }
+
+    /// Returns a copy whose renderable name fields have been passed through
+    /// [`sanitize_display_name`].
+    ///
+    /// Covers exactly the four fields
+    /// [`resolve_display_name`](Self::resolve_display_name) can return — a
+    /// sanitizer that stopped at `display_name` and `name` would be bypassed by
+    /// a kind-0 that carries its payload in the deprecated keys instead.
+    ///
+    /// A deprecated key whose value sanitizes to nothing is emptied rather than
+    /// removed: `custom` is what makes an edit-republish preserve fields
+    /// written by other clients, so this must not become a path that deletes
+    /// one. An empty string is already skipped by the precedence chain.
+    ///
+    /// `about` is deliberately untouched — it is never rendered (member-picker
+    /// plan §7.2) — as are `website`, `nip05` and the lightning fields, which
+    /// are identifiers rather than prose.
+    #[must_use]
+    pub fn sanitized(&self) -> Self {
+        let mut inner = self.inner.clone();
+        inner.display_name = sanitize_display_name(inner.display_name.take());
+        inner.name = sanitize_display_name(inner.name.take());
+        for key in ["displayName", "username"] {
+            let Some(value) = inner.custom.get_mut(key) else {
+                continue;
+            };
+            let Some(raw) = value.as_str() else { continue };
+            let cleaned = sanitize_display_name(Some(raw.to_string())).unwrap_or_default();
+            *value = Value::String(cleaned);
+        }
+        Self { inner }
     }
 }
 
@@ -214,6 +248,60 @@ mod tests {
         assert_eq!(md.display_name(), Some("Alice"));
         assert_eq!(md.about(), Some("hi"));
         assert_eq!(md.picture(), Some("https://x/y.jpg"));
+    }
+
+    #[test]
+    fn sanitized_cleans_every_field_the_name_precedence_can_return() {
+        let md = md_from(
+            r#"{"display_name":"Ali\u202Ece","name":"bo\u200Bb",
+                "displayName":"ca\u2066rol","username":"da\uFEFFve",
+                "about":"bio\u202E","website":"https://example.test/x"}"#,
+        );
+        let clean = md.sanitized();
+
+        assert_eq!(clean.display_name(), Some("Alice"));
+        assert_eq!(clean.name(), Some("bob"));
+        assert_eq!(clean.custom_str("displayName"), Some("carol"));
+        assert_eq!(clean.custom_str("username"), Some("dave"));
+
+        // Deliberately untouched: `about` is never rendered, and `website` is
+        // an identifier rather than prose.
+        assert_eq!(clean.about(), Some("bio\u{202E}"));
+        assert_eq!(
+            clean.as_metadata().website.as_deref(),
+            Some("https://example.test/x")
+        );
+    }
+
+    #[test]
+    fn sanitized_empties_an_unrenderable_deprecated_key_without_deleting_it() {
+        let md = md_from(r#"{"displayName":"\u202E","username":42,"canary":"keep"}"#);
+        let clean = md.sanitized();
+
+        assert!(
+            clean.as_metadata().custom.contains_key("displayName"),
+            "the key must survive so a republish does not drop another client's field"
+        );
+        assert_eq!(clean.resolve_display_name(), None);
+        // A non-string value is left exactly as it arrived — there is no name
+        // in it to sanitize.
+        assert_eq!(
+            clean
+                .as_metadata()
+                .custom
+                .get("username")
+                .and_then(Value::as_i64),
+            Some(42)
+        );
+        assert_eq!(clean.custom_str("canary"), Some("keep"));
+    }
+
+    #[test]
+    fn sanitized_is_idempotent() {
+        let md = md_from(r#"{"display_name":"  Ada\u202E\nLovelace  ","name":"ada"}"#);
+        let once = md.sanitized();
+        assert_eq!(once.display_name(), Some("Ada Lovelace"));
+        assert_eq!(once.sanitized(), once);
     }
 
     #[test]

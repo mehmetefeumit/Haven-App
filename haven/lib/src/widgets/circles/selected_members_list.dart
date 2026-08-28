@@ -1,4 +1,4 @@
-/// List of selected members shown as removable chips.
+/// Compact summary of the members staged for a new circle.
 library;
 
 import 'package:flutter/material.dart';
@@ -6,74 +6,6 @@ import 'package:flutter/material.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/npub_validator.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
-
-/// Displays selected members as removable chips.
-class SelectedMembersList extends StatelessWidget {
-  /// Creates a [SelectedMembersList].
-  const SelectedMembersList({
-    required this.members,
-    required this.onRemove,
-    super.key,
-  });
-
-  /// List of selected member npubs.
-  final List<String> members;
-
-  /// Callback when a member is removed.
-  final void Function(String npub) onRemove;
-
-  @override
-  Widget build(BuildContext context) {
-    if (members.isEmpty) {
-      return const SizedBox.shrink();
-    }
-
-    return Wrap(
-      spacing: HavenSpacing.sm,
-      runSpacing: HavenSpacing.sm,
-      children: members.map((npub) {
-        return _MemberChip(npub: npub, onDelete: () => onRemove(npub));
-      }).toList(),
-    );
-  }
-}
-
-class _MemberChip extends StatelessWidget {
-  const _MemberChip({required this.npub, required this.onDelete});
-
-  final String npub;
-  final VoidCallback onDelete;
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    // Desaturated HSL hue derived from the pubkey gives each member a stable
-    // tint without the brand-blue/red collisions of Material's primary palette.
-    final hue = (npub.hashCode.abs() % 360).toDouble();
-    final tint = HSLColor.fromAHSL(1, hue, 0.30, 0.55).toColor();
-
-    return InputChip(
-      avatar: CircleAvatar(
-        backgroundColor: tint.withValues(alpha: 0.18),
-        child: Text(
-          npub[5].toUpperCase(),
-          style: TextStyle(
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-            color: colorScheme.onSurface,
-          ),
-        ),
-      ),
-      label: Text(
-        NpubValidator.truncate(npub, prefixLength: 8, suffixLength: 4),
-        style: HavenTypography.mono.copyWith(fontSize: 12),
-      ),
-      onDeleted: onDelete,
-      deleteIcon: const Icon(LucideIcons.x, size: 18),
-    );
-  }
-}
 
 /// Displays a compact summary of selected members.
 ///
@@ -86,7 +18,14 @@ class SelectedMembersSummary extends StatelessWidget {
     super.key,
   });
 
-  /// List of member npubs.
+  /// Identifiers of the staged members, each shortened by
+  /// [NpubValidator.shortenForDisplay].
+  ///
+  /// The only caller (`name_circle_page.dart`) passes KeyPackage **hex**
+  /// pubkeys rather than npubs, so what a user reads here is a hex fragment:
+  /// enough to tell two staged members apart, but not something they can
+  /// cross-check against the npub they were handed
+  /// (docs/MEMBER_PICKER_PLAN.md §7.1).
   final List<String> members;
 
   /// Maximum number of chips to show before "+N more".
@@ -106,7 +45,9 @@ class SelectedMembersSummary extends StatelessWidget {
       runSpacing: HavenSpacing.xs,
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
-        ...visibleMembers.map((npub) => _CompactMemberChip(npub: npub)),
+        ...visibleMembers.map(
+          (member) => _CompactMemberChip(identifier: member),
+        ),
         if (remainingCount > 0)
           Text(
             AppLocalizations.of(context).selectedMembersMore(remainingCount),
@@ -120,9 +61,9 @@ class SelectedMembersSummary extends StatelessWidget {
 }
 
 class _CompactMemberChip extends StatelessWidget {
-  const _CompactMemberChip({required this.npub});
+  const _CompactMemberChip({required this.identifier});
 
-  final String npub;
+  final String identifier;
 
   @override
   Widget build(BuildContext context) {
@@ -137,8 +78,11 @@ class _CompactMemberChip extends StatelessWidget {
         color: colorScheme.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(HavenSpacing.xs),
       ),
+      // No `maxLines`/`overflow`: the identifier wraps rather than clipping,
+      // because the trailing characters are what distinguish two staged
+      // members from one another.
       child: Text(
-        NpubValidator.truncate(npub, prefixLength: 6, suffixLength: 3),
+        NpubValidator.shortenForDisplay(identifier),
         style: HavenTypography.monoSmall,
       ),
     );

@@ -121,31 +121,19 @@
   },
   "onboardingValueProp1Title": "Only your circles can see you",
   "@onboardingValueProp1Title": {
-    "description": "Headline of the first onboarding value-prop card (also reused on the About page)."
-  },
-  "onboardingValueProp1Body": "Your location is encrypted on your device before it leaves, so only the circles you choose can read it, never Haven or anyone else. Because Haven is open source, anyone can verify that.",
-  "@onboardingValueProp1Body": {
-    "description": "Body of the first onboarding value-prop card (also reused on the About page)."
+    "description": "Headline of the first onboarding value-prop card."
   },
   "onboardingValueProp2Title": "No one can shut it down",
   "@onboardingValueProp2Title": {
-    "description": "Headline of the second onboarding value-prop card (also reused on the About page)."
-  },
-  "onboardingValueProp2Body": "Haven has no central server. Your encrypted messages travel through independent servers called relays, and you choose which ones to use. No single company or government can switch the network off.",
-  "@onboardingValueProp2Body": {
-    "description": "Body of the second onboarding value-prop card (also reused on the About page)."
+    "description": "Headline of the second onboarding value-prop card."
   },
   "onboardingValueProp3Title": "No account needed",
   "@onboardingValueProp3Title": {
-    "description": "Headline of the third onboarding value-prop card (also reused on the About page)."
-  },
-  "onboardingValueProp3Body": "No email, no phone number, no sign-up. Haven creates an identity whose secret key never leaves your phone, so there is no account for anyone to hand over.",
-  "@onboardingValueProp3Body": {
-    "description": "Body of the third onboarding value-prop card (also reused on the About page)."
+    "description": "Headline of the third onboarding value-prop card."
   },
   "onboardingValueProp1Summary": "Encrypted on your device, so only the circles you choose can read it.",
   "@onboardingValueProp1Summary": {
-    "description": "Short one-line summary of the first value prop, shown under its title on the onboarding intro screen. The longer onboardingValueProp1Body is shown on the About page instead. Keep it to roughly one short sentence so the intro screen fits without scrolling."
+    "description": "Short one-line summary of the first value prop, shown under its title on the onboarding intro screen. Keep it to roughly one short sentence so the intro screen fits without scrolling."
   },
   "onboardingValueProp2Summary": "No central server . It runs on a relay network you choose.",
   "@onboardingValueProp2Summary": {
@@ -153,7 +141,7 @@
   },
   "onboardingValueProp3Summary": "No email, phone, or sign-up. Your secret key never leaves your phone.",
   "@onboardingValueProp3Summary": {
-    "description": "Short one-line summary of the third value prop, shown under its title on the onboarding intro screen. Keep it to roughly one short sentence so the intro screen fits without scrolling. Must stay consistent with onboardingValueProp3Body, which it summarises: an earlier version claimed 'nothing links it to you', which over-claimed (the user's network address is visible to every relay, and the same key carries a renameable public profile). Keep the claim narrowed to key custody."
+    "description": "Short one-line summary of the third value prop, shown under its title on the onboarding intro screen. Keep it to roughly one short sentence so the intro screen fits without scrolling. An earlier version claimed 'nothing links it to you', which over-claimed (the user's network address is visible to every relay, and the same key carries a renameable public profile). Keep the claim narrowed to key custody."
   },
 
   "onboardingCreateIdentityTitle": "Create your identity",
@@ -248,33 +236,17 @@
   "@settingsIdentityTitle": {
     "description": "Title of the Identity tile on the Settings hub, opening the identity/profile/keys page."
   },
-  "settingsIdentitySubtitle": "Profile, keys, and photo sharing",
-  "@settingsIdentitySubtitle": {
-    "description": "Subtitle under the Identity tile on the Settings hub."
-  },
   "settingsRelaysTitle": "Relays",
   "@settingsRelaysTitle": {
     "description": "Title of the Relays tile on the Settings hub, opening the relay settings page."
-  },
-  "settingsRelaysSubtitle": "Where invitations reach you",
-  "@settingsRelaysSubtitle": {
-    "description": "Subtitle under the Relays tile on the Settings hub."
   },
   "settingsLocationTitle": "Location",
   "@settingsLocationTitle": {
     "description": "Title of the Location tile on the Settings hub, opening the location settings page."
   },
-  "settingsLocationSubtitle": "Background sharing and permissions",
-  "@settingsLocationSubtitle": {
-    "description": "Subtitle under the Location tile on the Settings hub."
-  },
   "settingsMapStyleTitle": "Map style",
   "@settingsMapStyleTitle": {
     "description": "Title of the Map style tile on the Settings hub, opening the map-style picker."
-  },
-  "settingsAppearanceSubtitle": "Theme and language",
-  "@settingsAppearanceSubtitle": {
-    "description": "Subtitle under the Appearance tile on the Settings hub. The Appearance tile title reuses appearanceTitle."
   },
   "settingsAboutTitle": "About",
   "@settingsAboutTitle": {
@@ -611,10 +583,6 @@
   "privacyTitle": "Privacy",
   "@privacyTitle": {
     "description": "Title of the Privacy section: both the Settings row (directly above About) and the Privacy hub page's app bar."
-  },
-  "privacySubtitle": "How Haven works and what others can see",
-  "@privacySubtitle": {
-    "description": "Subtitle of the Privacy row in the Settings menu. Sets the expectation that this section explains the technology as well as the privacy consequences."
   },
   "privacyHubSummary": "Haven shares your location only with the small groups you choose, called circles, and encrypts it on your phone before it leaves. There is no sign-up and no Haven server. The display name and photo you set are public, along with the keys and relay lists that others need in order to invite you. The pages below explain that, and everything else, in plain language.",
   "@privacyHubSummary": {
@@ -1057,10 +1025,6 @@
   "@createCircleNoValidMembers": {
     "description": "Error shown when the user tries to continue with no valid members selected."
   },
-  "createCircleMemberAlreadyAdded": "Member already added",
-  "@createCircleMemberAlreadyAdded": {
-    "description": "Snackbar shown when a scanned member is already in the selected list."
-  },
   "createCircleNoIdInQr": "No valid ID found in QR code",
   "@createCircleNoIdInQr": {
     "description": "Snackbar shown when a scanned QR code contains no recognizable member ID."
@@ -1236,10 +1200,6 @@
     "description": "Status text shown below the QR scanner instruction while scanning."
   },
 
-  "circleMemberInvitationPending": "Invitation Pending",
-  "@circleMemberInvitationPending": {
-    "description": "Subtitle/badge shown for a member whose circle invitation has not yet been accepted."
-  },
   "circleMemberNoRecentLocation": "No recent location",
   "@circleMemberNoRecentLocation": {
     "description": "Subtitle shown for an accepted member with no cached location."
@@ -1299,10 +1259,6 @@
   "circleMemberAdmin": "Admin",
   "@circleMemberAdmin": {
     "description": "Chip label marking a circle member as an administrator."
-  },
-  "circleMemberHintPending": "invitation pending",
-  "@circleMemberHintPending": {
-    "description": "Accessibility hint appended to a member's name when their invitation is pending."
   },
   "circleMemberHintNoLocation": "no location available",
   "@circleMemberHintNoLocation": {
@@ -1378,6 +1334,65 @@
   "@memberSearchAlreadyAdded": {
     "description": "Inline error shown when the entered member ID is already in the selected list."
   },
+  "memberPickerSectionRoster": "Members of your circles",
+  "@memberPickerSectionRoster": {
+    "description": "Heading above the list of people offered as picks when inviting someone to a circle. It states ONLY that each pubkey is on the member list of a circle stored on this device. Haven cannot observe whether any of them ever accepted an invitation \u2014 processing an MLS Welcome puts nothing on the wire \u2014 so this heading must never say or imply joined, accepted, confirmed, verified, active, connected, or sharing with you."
+  },
+  "memberPickerTierRoster": "Member of your circles",
+  "@memberPickerTierRoster": {
+    "description": "Spoken by screen readers as part of every picker row's label, because a reader swiping row by row never hears the heading above them. Same claim, and the same restrictions, as memberPickerSectionRoster, phrased for one person."
+  },
+  "memberPickerNoMatches": "No matches in your circles",
+  "@memberPickerNoMatches": {
+    "description": "Shown, and announced once, when what was typed matches nobody in the user's circles. The person can still be invited by pasting their full ID, so this must not read as a dead end."
+  },
+  "memberPickerLoading": "Loading people from your circles",
+  "@memberPickerLoading": {
+    "description": "Screen-reader label for the progress indicator shown while the on-device list of co-members is read. No relay is contacted; do not imply a download."
+  },
+  "memberPickerDirectoryUnavailable": "Couldn't load who's in your circles right now",
+  "@memberPickerDirectoryUnavailable": {
+    "description": "Shown in place of the picker's list when the on-device directory of co-members could not be read at all (a storage or lookup fault) — distinct from memberPickerNoMatches, which means the read SUCCEEDED and simply matched nobody, and distinct from the silent empty state on a fresh install, which means the read succeeded and truthfully found no co-members yet. This string must never be read as either of those: it says the answer is unknown, not that it is empty or negative. The person can still be invited by pasting or scanning their full ID, so this must not read as a dead end, and must not display any raw error text (Security Rule 8 — never surface exception detail to the UI)."
+  },
+  "memberPickerMatchesAnnouncement": "Matches: {count}",
+  "@memberPickerMatchesAnnouncement": {
+    "description": "Announced to screen readers once a search has settled, giving how many people match what was typed. Deliberately a label-and-number construction rather than a sentence, so that no language needs a plural form for it.",
+    "placeholders": {
+      "count": { "type": "int", "format": "decimalPattern" }
+    }
+  },
+  "memberPickerReasonSelf": "This is your own ID",
+  "@memberPickerReasonSelf": {
+    "description": "Why someone cannot be added: the entered ID, or the row, is the user's own identity. Shown under the search field when the user enters their own ID, and as the reason on a disabled picker row. Must stay distinct from 'Already in this circle' \u2014 being unable to invite yourself is a different fact from already being a member."
+  },
+  "memberPickerReadPublicKey": "Read public key aloud",
+  "@memberPickerReadPublicKey": {
+    "description": "Screen-reader custom action on a picker row that SPEAKS the person's public key aloud — it does not display or open it. The word 'aloud' is load-bearing: without it, four of the first five translators rendered 'read' in the read-with-your-eyes sense, which many languages distinguish with a different verb entirely (German vorlesen vs lesen). Translate the speaking sense. This label is also a fixed string and must never contain the key itself: Flutter interns custom-action labels in a process-wide map with no prune path, so a per-person label would hold identifier text for the life of the process."
+  },
+  "memberPickerSectionRecent": "Recently in your circles",
+  "@memberPickerSectionRecent": {
+    "description": "Heading above the SECOND section of the invite picker (below memberPickerSectionRoster): people who shared a circle with the user within the last few days but are no longer on any current circle's member list (P3, plan §7.2). States ONLY roster provenance, exactly like memberPickerSectionRoster — Haven cannot observe whether any of them ever accepted an invitation or is still reachable, so this heading must never say or imply joined, accepted, confirmed, verified, active, connected, or sharing with you."
+  },
+  "memberPickerTierRecent": "Recently in your circles",
+  "@memberPickerTierRecent": {
+    "description": "Spoken by screen readers as part of every tier-1 (recent) picker row's label, because a reader swiping row by row never hears the heading above them. Same claim, and the same restrictions, as memberPickerSectionRecent, phrased so it also reads naturally appended to one person's name."
+  },
+  "memberPickerNicknameNote": "Your nickname for them, not their public name",
+  "@memberPickerNicknameNote": {
+    "description": "Tooltip shown on long-press on the small mark beside a picker row's name when the name shown is the local nickname the user saved for that person, rather than their public Nostr name. On THIS surface the mark carries no semantics label of its own — its enclosing Semantics node drops every descendant, so a screen reader hears this string only as ONE CLAUSE inside the row's own joined label, spoken together with the person's name and tier, never as its own announcement the way a standalone icon label would be. Translate it so it reads naturally appended after a name in a list of short clauses, not as a self-contained sentence. States where the name came from and nothing more — it is NOT a verification, trust, safety or identity-confirmation claim, and must not be translated as one. Same string and purpose as invitationCardNicknameNote on the invitation card, where the mark DOES carry its own semantics label as a separate node — the wording is shared between the two screens, but only invitationCardNicknameNote is spoken that way."
+  },
+  "memberPickerCollisionCircleLabel": "Circle: {circleName}",
+  "@memberPickerCollisionCircleLabel": {
+    "description": "Shown on an invite-picker row, and included in its screen-reader label, ONLY when another row in the FIRST section (memberPickerSectionRoster, tier-0) resolves to the exact same displayed name as this one. It can never appear in the recent section: a tier-1 person is no longer a co-member of anything, so no current circle could be the reason their name collides. {circleName} is chosen to be UNIQUE to this row among every row it collides with — the alphabetically first of THIS row's own circles that is NOT also a circle any OTHER colliding row's person shares with the user, so the two colliding rows normally name DIFFERENT circles. When no such circle exists (every one of this row's circles is also shared by a rival), this note is omitted for that row entirely rather than repeating a name a colliding row already shows. It is emphatically NOT a circle the two colliding people share with each other (such a circle could not tell them apart); never translate it as a shared, common or mutual circle. Translate as a label-and-value construction, exactly like memberPickerMatchesAnnouncement: the circle noun in its plain citation form, a colon, then the name. NEVER render it as a prepositional or locative phrase — on real circle names 'In {circleName}' collides with ordinary locative idiom ('In Family', 'In Brooklyn', and the per-locale equivalents of the very names nameCircleNameHint itself suggests), which in a location-sharing app announces a place the person is not. The label-value shape also avoids case government and possessive re-readings, and it needs no quotation marks, which screen readers do not speak at default verbosity. This is the ONE exception to the rule that Haven never names a circle on this screen (plan §7.2); do not reuse this copy, or invent similar copy, anywhere else the picker shows a person. {circleName} is a name the user (or someone in the circle) chose locally.",
+    "placeholders": {
+      "circleName": { "type": "String" }
+    }
+  },
+
+  "memberPickerStrangerLookupNote": "Haven asked a relay to look up this person's published name. That relay can see this device asked about this key just now — but the request carries no signature, so it isn't tied to your Haven identity. No photo is downloaded yet.",
+  "@memberPickerStrangerLookupNote": {
+    "description": "Shown on the ONE row that appears when the user types or pastes a complete, valid npub for someone not already in the local directory (plan §10 D2), and spoken as the screen-reader label on that row's loading spinner while the lookup is in flight. Appears whether or not anything resolves. Discloses exactly four things and no more: (1) Haven asked ONE public relay (never more — see docs/MEMBER_PICKER_PLAN.md, the design deliberately adds no fan-out of its own — it never pads with decoys, and it issues one request per attempt through the existing per-author relay assignment, whose own ladder is bounded by PROFILE_MAX_RELAY_RANK); (2) that relay can see THIS DEVICE asked about THAT KEY at THAT MOMENT — do not soften this into 'may be able to see' or omit it, it is a real, unavoidable disclosure; (3) the request is NOT tied to the user's Haven identity, because it carries no cryptographic signature and therefore cannot answer a relay's NIP-42 AUTH challenge — translate 'signature' in the cryptographic sense (the same sense as privacyYourKeysDetailFormats' 'Signing happens inside the app'), not a handwritten or email signature; (4) no photo is downloaded at this stage (only the published name, if any, is looked up). Do NOT use a word meaning 'anonymous' or 'anonymously' anywhere in this string — it overclaims: the network address and timing of the request are still visible to the relay, which is exactly what point (2) discloses. Do not add or imply a duration, a retry count, or which relay was asked."
+  },
 
   "selectedMembersMore": "+{count} more",
   "@selectedMembersMore": {
@@ -1387,55 +1402,34 @@
     }
   },
 
-  "invitationStatusPending": "Invitation Pending",
-  "@invitationStatusPending": {
-    "description": "Status badge label for a member with a pending circle invitation."
+  "invitationCardHeading": "Circle invitation",
+  "@invitationCardHeading": {
+    "description": "Heading of a pending circle invitation card, and the largest text on it. Deliberately NOT the circle's name: pre-join the name is still inside the encrypted Welcome, so the card can only say what the item IS. Must not name, number or otherwise imply a specific circle."
   },
-  "invitationStatusActive": "Active",
-  "@invitationStatusActive": {
-    "description": "Status badge label for an active (accepted) member."
-  },
-  "invitationStatusDeclined": "Declined",
-  "@invitationStatusDeclined": {
-    "description": "Status badge label for a member who declined the invitation."
-  },
-  "invitationStatusSemantics": "Invitation status: {label}",
-  "@invitationStatusSemantics": {
-    "description": "Accessibility label announcing a member's invitation status. {label} is one of the status labels.",
-    "placeholders": {
-      "label": { "type": "String" }
-    }
-  },
-
-  "invitationCardSemantics": "Invitation to join {circleName}, invited by {inviter}, {count} members",
+  "invitationCardSemantics": "Invitation to join a circle, sent by {inviter}",
   "@invitationCardSemantics": {
-    "description": "Accessibility label summarizing an invitation card. {circleName} is the circle name, {inviter} is a truncated public key, {count} is the member count (always shown with the plural noun 'members', matching the original copy).",
+    "description": "Accessibility label summarizing an invitation card. {inviter} is the inviter's local nickname if the user saved one, else their resolved public name, else their shortened npub. 'a circle' is indefinite on purpose — see invitationCardHeading; do not reintroduce a circle name or a member count, neither of which Haven knows before the invitation is accepted. 'sent by', NOT 'invited by': the participle in 'invited by' agrees with the READER, whose gender Haven never asks for — five translators independently hit this and each replaced it with a send-verb attached to the invitation. Keep {inviter} LAST: it usually resolves to a ~21-character npub, and a screen-reader listener needs the gist before the key.",
     "placeholders": {
-      "circleName": { "type": "String" },
-      "inviter": { "type": "String" },
-      "count": { "type": "int", "format": "decimalPattern" }
+      "inviter": { "type": "String" }
     }
   },
   "invitationCardInvitedBySemantics": "Invited by cryptographic identifier {inviter}",
   "@invitationCardInvitedBySemantics": {
-    "description": "Accessibility label for the inviter row of an invitation card. {inviter} is a truncated public key.",
+    "description": "Accessibility label for the inviter row of an invitation card. {inviter} is the inviter's shortened npub.",
     "placeholders": {
       "inviter": { "type": "String" }
     }
   },
   "invitationCardInvitedBy": "Invited by: {inviter}",
   "@invitationCardInvitedBy": {
-    "description": "Visible inviter line on an invitation card. {inviter} is a truncated public key.",
+    "description": "Visible inviter line on an invitation card. {inviter} is the nickname the user saved for the inviter when there is one, else the inviter's resolved public name, else their shortened npub; the npub is then shown on its own line beneath.",
     "placeholders": {
       "inviter": { "type": "String" }
     }
   },
-  "invitationCardMemberCount": "{count, plural, =1{1 member} other{{count} members}}",
-  "@invitationCardMemberCount": {
-    "description": "Member-count line on an invitation card.",
-    "placeholders": {
-      "count": { "type": "int", "format": "decimalPattern" }
-    }
+  "invitationCardNicknameNote": "Your nickname for them, not their public name",
+  "@invitationCardNicknameNote": {
+    "description": "Tooltip and screen-reader label on the small mark beside the inviter line when the name shown is the nickname the user saved on this device rather than the inviter's public Nostr name. States where the name came from and nothing more: it is NOT a verification, trust, safety or identity-confirmation claim, and must not be translated as one."
   },
   "invitationCardJustNow": "Just now",
   "@invitationCardJustNow": {
@@ -2057,50 +2051,6 @@
   "profileSyncStatusRetrySemantics": "Retry publishing your profile",
   "@profileSyncStatusRetrySemantics": {
     "description": "Accessibility label for the Retry button on the own-profile sync status line, more descriptive than its short visible \"Retry\" caption (commonRetry)."
-  },
-
-  "keyDisplayCopiedToClipboard": "{label} copied to clipboard",
-  "@keyDisplayCopiedToClipboard": {
-    "description": "Snackbar confirming a labelled key (e.g. 'Public Key') was copied to the clipboard from the KeyDisplay widget.",
-    "placeholders": {
-      "label": { "type": "String" }
-    }
-  },
-  "keyDisplaySemantics": "{label}: {state}",
-  "@keyDisplaySemantics": {
-    "description": "Accessibility label for the KeyDisplay container, naming the key and whether it is revealed or hidden.",
-    "placeholders": {
-      "label": { "type": "String" },
-      "state": { "type": "String" }
-    }
-  },
-  "keyDisplayStateRevealed": "revealed",
-  "@keyDisplayStateRevealed": {
-    "description": "Accessibility state word used in the KeyDisplay semantics label when the key is fully shown."
-  },
-  "keyDisplayStateHidden": "hidden",
-  "@keyDisplayStateHidden": {
-    "description": "Accessibility state word used in the KeyDisplay semantics label when the key is truncated."
-  },
-  "keyDisplayHideTooltip": "Hide",
-  "@keyDisplayHideTooltip": {
-    "description": "Tooltip on the KeyDisplay button that re-truncates a revealed key."
-  },
-  "keyDisplayRevealTooltip": "Reveal",
-  "@keyDisplayRevealTooltip": {
-    "description": "Tooltip on the KeyDisplay button that reveals the full key."
-  },
-  "keyDisplayCopyTooltip": "Copy",
-  "@keyDisplayCopyTooltip": {
-    "description": "Tooltip on the KeyDisplay button that copies the key to the clipboard."
-  },
-  "keyDisplayCompactCopied": "Key copied to clipboard",
-  "@keyDisplayCompactCopied": {
-    "description": "Snackbar confirming a key was copied from the CompactKeyDisplay widget."
-  },
-  "keyDisplayCompactTapToCopy": "Tap to copy",
-  "@keyDisplayCompactTapToCopy": {
-    "description": "Tooltip on the CompactKeyDisplay row inviting the user to tap and copy the key."
   },
 
   "npubQrCopiedSnack": "Public key copied to clipboard",

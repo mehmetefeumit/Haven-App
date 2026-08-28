@@ -111,22 +111,10 @@ class AppLocalizationsPt extends AppLocalizations {
   String get onboardingValueProp1Title => 'Só os seus círculos podem ver você';
 
   @override
-  String get onboardingValueProp1Body =>
-      'Sua localização é criptografada no seu dispositivo antes de sair dele, então só os círculos que você escolher podem lê-la, nunca o Haven nem ninguém mais. Como o Haven é de código aberto, qualquer pessoa pode verificar isso.';
-
-  @override
   String get onboardingValueProp2Title => 'Ninguém pode desligá-lo';
 
   @override
-  String get onboardingValueProp2Body =>
-      'O Haven não tem servidor central. Suas mensagens criptografadas trafegam por servidores independentes chamados relays, e você escolhe quais usar. Nenhuma empresa ou governo sozinho consegue desligar a rede.';
-
-  @override
   String get onboardingValueProp3Title => 'Não precisa de conta';
-
-  @override
-  String get onboardingValueProp3Body =>
-      'Sem e-mail, sem telefone, sem cadastro. O Haven cria uma identidade cuja chave secreta nunca sai do seu celular, então não existe nenhuma conta que alguém possa entregar.';
 
   @override
   String get onboardingValueProp1Summary =>
@@ -214,27 +202,13 @@ class AppLocalizationsPt extends AppLocalizations {
   String get settingsIdentityTitle => 'Identidade';
 
   @override
-  String get settingsIdentitySubtitle =>
-      'Perfil, chaves e compartilhamento de foto';
-
-  @override
   String get settingsRelaysTitle => 'Relays';
-
-  @override
-  String get settingsRelaysSubtitle => 'Onde os convites chegam até você';
 
   @override
   String get settingsLocationTitle => 'Localização';
 
   @override
-  String get settingsLocationSubtitle =>
-      'Compartilhamento em segundo plano e permissões';
-
-  @override
   String get settingsMapStyleTitle => 'Estilo do mapa';
-
-  @override
-  String get settingsAppearanceSubtitle => 'Tema e idioma';
 
   @override
   String get settingsAboutTitle => 'Sobre';
@@ -524,10 +498,6 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get privacyTitle => 'Privacidade';
-
-  @override
-  String get privacySubtitle =>
-      'Como o Haven funciona e o que os outros podem ver';
 
   @override
   String get privacyHubSummary =>
@@ -946,9 +916,6 @@ class AppLocalizationsPt extends AppLocalizations {
   String get createCircleNoValidMembers => 'Nenhum membro válido para convidar';
 
   @override
-  String get createCircleMemberAlreadyAdded => 'Membro já adicionado';
-
-  @override
   String get createCircleNoIdInQr => 'Nenhum ID válido encontrado no QR code';
 
   @override
@@ -1141,9 +1108,6 @@ class AppLocalizationsPt extends AppLocalizations {
   String get qrScannerScanning => 'Escaneando...';
 
   @override
-  String get circleMemberInvitationPending => 'Convite pendente';
-
-  @override
   String get circleMemberNoRecentLocation => 'Sem localização recente';
 
   @override
@@ -1178,9 +1142,6 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get circleMemberAdmin => 'Admin';
-
-  @override
-  String get circleMemberHintPending => 'convite pendente';
 
   @override
   String get circleMemberHintNoLocation => 'nenhuma localização disponível';
@@ -1240,6 +1201,57 @@ class AppLocalizationsPt extends AppLocalizations {
   String get memberSearchAlreadyAdded => 'Membro já adicionado';
 
   @override
+  String get memberPickerSectionRoster => 'Membros dos seus círculos';
+
+  @override
+  String get memberPickerTierRoster => 'Membro dos seus círculos';
+
+  @override
+  String get memberPickerNoMatches => 'Nenhum resultado nos seus círculos';
+
+  @override
+  String get memberPickerLoading =>
+      'Carregando a lista de pessoas dos seus círculos';
+
+  @override
+  String get memberPickerDirectoryUnavailable =>
+      'No momento, não foi possível carregar a lista de pessoas dos seus círculos';
+
+  @override
+  String memberPickerMatchesAnnouncement(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return 'Resultados: $countString';
+  }
+
+  @override
+  String get memberPickerReasonSelf => 'Este é o seu próprio ID';
+
+  @override
+  String get memberPickerReadPublicKey => 'Ler chave pública em voz alta';
+
+  @override
+  String get memberPickerSectionRecent => 'Recentemente nos seus círculos';
+
+  @override
+  String get memberPickerTierRecent => 'Recentemente nos seus círculos';
+
+  @override
+  String get memberPickerNicknameNote =>
+      'Seu apelido para esta pessoa, não o nome público dela';
+
+  @override
+  String memberPickerCollisionCircleLabel(String circleName) {
+    return 'Círculo: $circleName';
+  }
+
+  @override
+  String get memberPickerStrangerLookupNote =>
+      'O Haven pediu a um relay o nome publicado desta pessoa. Esse relay consegue ver que este dispositivo acabou de perguntar sobre esta chave, mas a consulta não é assinada, então não fica ligada à sua identidade do Haven. Nenhuma foto foi baixada ainda.';
+
+  @override
   String selectedMembersMore(int count) {
     final intl.NumberFormat countNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
@@ -1249,53 +1261,26 @@ class AppLocalizationsPt extends AppLocalizations {
   }
 
   @override
-  String get invitationStatusPending => 'Convite pendente';
+  String get invitationCardHeading => 'Convite para um círculo';
 
   @override
-  String get invitationStatusActive => 'Ativo';
-
-  @override
-  String get invitationStatusDeclined => 'Recusado';
-
-  @override
-  String invitationStatusSemantics(String label) {
-    return 'Status do convite: $label';
-  }
-
-  @override
-  String invitationCardSemantics(String circleName, String inviter, int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    return 'Convite para entrar em $circleName, enviado por $inviter, $countString membros';
+  String invitationCardSemantics(String inviter) {
+    return 'Convite para entrar em um círculo, enviado por $inviter';
   }
 
   @override
   String invitationCardInvitedBySemantics(String inviter) {
-    return 'Convidado pelo identificador criptográfico $inviter';
+    return 'Convite enviado pelo identificador criptográfico $inviter';
   }
 
   @override
   String invitationCardInvitedBy(String inviter) {
-    return 'Convidado por: $inviter';
+    return 'Convite de: $inviter';
   }
 
   @override
-  String invitationCardMemberCount(int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    String _temp0 = intl.Intl.pluralLogic(
-      count,
-      locale: localeName,
-      other: '$countString membros',
-      many: '$countString de membros',
-      one: '1 membro',
-    );
-    return '$_temp0';
-  }
+  String get invitationCardNicknameNote =>
+      'Seu apelido para esta pessoa, não o nome público dela';
 
   @override
   String get invitationCardJustNow => 'Agora mesmo';
@@ -1880,38 +1865,6 @@ class AppLocalizationsPt extends AppLocalizations {
   @override
   String get profileSyncStatusRetrySemantics =>
       'Tentar publicar seu perfil de novo';
-
-  @override
-  String keyDisplayCopiedToClipboard(String label) {
-    return '$label copiada para a área de transferência';
-  }
-
-  @override
-  String keyDisplaySemantics(String label, String state) {
-    return '$label: $state';
-  }
-
-  @override
-  String get keyDisplayStateRevealed => 'revelada';
-
-  @override
-  String get keyDisplayStateHidden => 'oculta';
-
-  @override
-  String get keyDisplayHideTooltip => 'Ocultar';
-
-  @override
-  String get keyDisplayRevealTooltip => 'Revelar';
-
-  @override
-  String get keyDisplayCopyTooltip => 'Copiar';
-
-  @override
-  String get keyDisplayCompactCopied =>
-      'Chave copiada para a área de transferência';
-
-  @override
-  String get keyDisplayCompactTapToCopy => 'Toque para copiar';
 
   @override
   String get npubQrCopiedSnack =>

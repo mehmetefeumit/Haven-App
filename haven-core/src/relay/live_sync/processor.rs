@@ -57,7 +57,7 @@ use std::sync::Arc;
 
 use nostr::{Event, JsonUtil};
 
-use crate::circle::CircleManager;
+use crate::circle::{CircleManager, DirectoryReconcile};
 use crate::nostr::mls::types::{
     GroupId, IngestOutcome, LocationMessageResult, PublishWork, ScreenedIngest,
 };
@@ -389,12 +389,25 @@ impl EngineProcessor {
         // those, resolving engine publish work as we go.
         self.route_events(&ingest.effects.events, nostr_group_id, created_at_secs);
         self.resolve_publish_work(&ingest.effects.publish).await;
-        self.drain_convergence(
-            &ingest.effects.pending_convergence,
-            nostr_group_id,
-            created_at_secs,
-        )
-        .await;
+        let mut directory = self
+            .circle
+            .directory_verdict_for_events(&ingest.effects.events);
+        directory = directory.max(
+            self.drain_convergence(
+                &ingest.effects.pending_convergence,
+                nostr_group_id,
+                created_at_secs,
+            )
+            .await,
+        );
+        // Live sync is the default receive plane, so this — not the poll path —
+        // is where an inbound commit normally lands. Once per event batch, after
+        // convergence has drained, so a roster read is of applied state.
+        if let Some(mode) = directory {
+            self.circle
+                .reconcile_member_directory_best_effort(mode)
+                .await;
+        }
 
         // The hold-back gate. NOT a cursor advance: no arm here writes a cursor,
         // because no engine verdict binds this envelope's `created_at` to what it
@@ -420,22 +433,28 @@ impl EngineProcessor {
     /// routes the drained events and resolves publish work (publishing the
     /// auto-commit over the relay plane, Rule 13). A quiet group (nothing pending)
     /// exits immediately with no delay, so only a leave pays the re-tick cost.
+    ///
+    /// Returns the strongest member-directory verdict the drained events imply,
+    /// for the single reconcile the caller runs once the drain is complete.
     async fn drain_convergence(
         &self,
         initial_pending: &[GroupId],
         nostr_group_id: &[u8],
         event_created_at_secs: i64,
-    ) {
+    ) -> Option<DirectoryReconcile> {
+        let mut directory = None;
         let mut pending: Vec<GroupId> = initial_pending.to_vec();
         for _ in 0..MAX_CONVERGENCE_RETICKS {
             if pending.is_empty() {
-                return;
+                return directory;
             }
             let mut next: Vec<GroupId> = Vec::new();
             for gid in &pending {
                 if let Ok(more) = self.circle.session().advance_convergence(gid).await {
                     self.route_events(&more.events, nostr_group_id, event_created_at_secs);
                     self.resolve_publish_work(&more.publish).await;
+                    directory =
+                        directory.max(self.circle.directory_verdict_for_events(&more.events));
                     next.extend(more.pending_convergence);
                 }
             }
@@ -444,6 +463,7 @@ impl EngineProcessor {
                 tokio::time::sleep(CONVERGENCE_RETICK_DELAY).await;
             }
         }
+        directory
     }
 
     /// Routes an engine `GroupEvent` batch onto the fan-out bus.
@@ -532,7 +552,13 @@ impl EngineProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::circle::{CircleConfig, DirectoryTier, MemberKeyPackage};
+    use crate::location::LocationMessage;
+    use crate::nostr::mls::types::{EpochId, GroupEvent, MessageId};
     use crate::relay::cursor::STREAM_GROUP_445;
+    use crate::relay::maintenance::build_kp_maintenance_events;
+    use nostr::Keys;
+    use tempfile::TempDir;
 
     #[test]
     fn per_circle_cursor_stream_keys_are_distinct_and_group_scoped() {
@@ -541,5 +567,337 @@ mod tests {
         assert_ne!(a, b, "each circle gets its own group cursor");
         assert!(a.starts_with(STREAM_GROUP_445));
         assert_ne!(a, crate::relay::cursor::STREAM_INBOX_1059);
+    }
+
+    // ── Member-directory wiring (picker plan §5.5) ───────────────────────────
+    //
+    // `process_group_event` is one of the two production write sites the M11
+    // migration to live sync as the default receive plane actually exercises
+    // (`docs/MEMBER_PICKER_PLAN.md` §5.5) — unlike the poll path
+    // (`CircleManager::decrypt_location`), which in production almost never
+    // fires now. These tests drive the REAL wiring: a real MLS circle, a real
+    // inbound commit or location message, fed through this module's own
+    // `process_group_event`, read back from the real SQLCipher directory table
+    // via the public accessor — never a mock of
+    // `reconcile_member_directory_best_effort`.
+
+    /// A read time comfortably fixed, far in the past relative to any real wall
+    /// clock a test run can hold — see `circle::manager::tests::DIR_NOW` for the
+    /// same idiom. `ranked_directory_members` purges only rows with a finite
+    /// `purge_after`, and every row this suite writes is a live co-membership
+    /// (`DIRECTORY_PURGE_NEVER`), so the exact value only needs to be a stable
+    /// constant, never a race against the setup helpers' own real-clock writes.
+    const DIR_READ_AT: i64 = 20_000 * 86_400;
+
+    async fn make_kp_event(manager: &CircleManager, keys: &Keys, relays: &[String]) -> Event {
+        build_kp_maintenance_events(manager.session(), keys, relays, None, None)
+            .await
+            .expect("build key package event")
+            .event
+    }
+
+    /// A freshly generated identity's `KeyPackage`, ready to be added to a
+    /// circle. The throwaway session behind it is dropped after minting.
+    async fn make_member_with_relays(relays: Vec<String>) -> MemberKeyPackage {
+        let dir = TempDir::new().unwrap();
+        let keys = Keys::generate();
+        let member = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
+        let event = make_kp_event(&member, &keys, &relays).await;
+        MemberKeyPackage {
+            key_package_event: event,
+            inbox_relays: relays,
+            nip65_relays: vec![],
+        }
+    }
+
+    /// A real two-party MLS circle (Alice admin, Bob member), converged: Alice
+    /// creates and confirms, Bob holds and accepts the engine-produced welcome.
+    /// `bob` is an `Arc` because [`EngineProcessor::new`] needs one.
+    struct AliceBob {
+        alice: CircleManager,
+        _alice_dir: TempDir,
+        alice_keys: Keys,
+        bob: Arc<CircleManager>,
+        _bob_dir: TempDir,
+        mls_group_id: GroupId,
+        nostr_group_id: [u8; 32],
+        relays: Vec<String>,
+    }
+
+    async fn setup_alice_bob() -> AliceBob {
+        let relays = vec!["wss://relay.test.com".to_string()];
+
+        let alice_dir = TempDir::new().unwrap();
+        let alice_keys = Keys::generate();
+        let alice = CircleManager::new_unencrypted(alice_dir.path(), &alice_keys).unwrap();
+
+        let bob_dir = TempDir::new().unwrap();
+        let bob_keys = Keys::generate();
+        let bob = CircleManager::new_unencrypted(bob_dir.path(), &bob_keys).unwrap();
+
+        let bob_kp_event = make_kp_event(&bob, &bob_keys, &relays).await;
+        let bob_member = MemberKeyPackage {
+            key_package_event: bob_kp_event,
+            inbox_relays: relays.clone(),
+            nip65_relays: vec![],
+        };
+
+        let config = CircleConfig::new("Test Circle").with_relays(relays.clone());
+        let creation = alice
+            .create_circle(&alice_keys, vec![bob_member], &config, &relays)
+            .await
+            .expect("create two-party circle");
+        alice
+            .confirm_published(creation.pending)
+            .await
+            .expect("confirm create");
+
+        let mls_group_id = creation.circle.mls_group_id.clone();
+        let nostr_group_id = creation.circle.nostr_group_id;
+
+        let welcome = creation.welcome_events.first().expect("one welcome");
+        bob.process_gift_wrapped_invitation(&bob_keys, &welcome.event)
+            .await
+            .expect("bob holds welcome");
+        bob.accept_invitation(&welcome.event.id)
+            .await
+            .expect("bob accepts welcome");
+
+        AliceBob {
+            alice,
+            _alice_dir: alice_dir,
+            alice_keys,
+            bob: Arc::new(bob),
+            _bob_dir: bob_dir,
+            mls_group_id,
+            nostr_group_id,
+            relays,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_real_inbound_add_commit_drained_through_process_group_event_writes_a_directory_row()
+    {
+        // The headline gap: nothing proved that `process_group_event`'s own
+        // reconcile call — not a mock of it — turns a real inbound commit into
+        // a real row. Isolated from every OTHER write site by construction:
+        // Carol's pubkey never reaches Bob any other way in this test — not
+        // through a welcome (Bob never processes Carol's), so her row can only
+        // be explained by this call.
+        let fx = setup_alice_bob().await;
+        let carol = make_member_with_relays(fx.relays.clone()).await;
+        let carol_hex = carol.key_package_event.pubkey.to_hex();
+
+        let before = fx
+            .bob
+            .ranked_directory_members(DIR_READ_AT)
+            .expect("directory read");
+        assert!(
+            !before.iter().any(|e| e.pubkey_hex == carol_hex),
+            "precondition: Carol is nobody to Bob yet"
+        );
+
+        let add = fx
+            .alice
+            .add_members_with_welcomes(&fx.alice_keys, &fx.mls_group_id, vec![carol], &fx.relays)
+            .await
+            .expect("alice adds carol");
+        fx.alice
+            .confirm_published(add.pending)
+            .await
+            .expect("confirm add");
+
+        let processor = EngineProcessor::new(Arc::clone(&fx.bob), EventBus::new());
+        let outcome = processor
+            .process_group_event(&add.commit_event, &fx.nostr_group_id)
+            .await;
+        assert_eq!(
+            outcome,
+            GroupProcessOutcome::Applied,
+            "sanity: the commit really applied — a failure here would make the \
+             absence check below meaningless"
+        );
+
+        let after = fx
+            .bob
+            .ranked_directory_members(DIR_READ_AT)
+            .expect("directory read");
+        let carol_row = after.iter().find(|e| e.pubkey_hex == carol_hex).expect(
+            "process_group_event must reconcile the directory after a real \
+             inbound commit — deleting that call, or making it a no-op, must \
+             fail this assertion",
+        );
+        assert_eq!(carol_row.tier, DirectoryTier::Current);
+    }
+
+    #[tokio::test]
+    async fn a_batch_of_only_location_messages_triggers_no_reconcile_at_all() {
+        // The performance-review counterpart to the test above: an ordinary
+        // location update must never pay for a multi-circle roster walk. Pinned
+        // at the ROW level rather than "the roster is unchanged", because
+        // `sync_co_members`'s promotion is idempotent when co-membership itself
+        // doesn't change (the UPSERT re-derives the SAME `last_shared_day` on a
+        // no-op pass, storage_member_directory.rs:180) — a byte-diff taken right
+        // after ordinary setup would pass even if a regression made this call
+        // reconcile on every location. Forcing `last_shared_day` onto a fixed,
+        // far-past day FIRST makes a spurious reconcile impossible to miss: a
+        // real one always writes the REAL wall-clock day, which cannot equal the
+        // constant below now or in the future.
+        const FAR_PAST_DAY_SECS: i64 = 20_000 * 86_400; // 2024-10-04.
+
+        let fx = setup_alice_bob().await;
+        let alice_hex = fx.alice_keys.public_key().to_hex();
+
+        assert!(
+            fx.bob
+                .reconcile_member_directory(DirectoryReconcile::Rewrite, FAR_PAST_DAY_SECS)
+                .await
+                .expect("reconcile"),
+            "precondition: bob's converged roster is readable"
+        );
+        let before = fx
+            .bob
+            .ranked_directory_members(DIR_READ_AT)
+            .expect("directory read");
+        let before_row = before
+            .iter()
+            .find(|e| e.pubkey_hex == alice_hex)
+            .cloned()
+            .expect("precondition: alice is bob's co-member");
+        assert_eq!(
+            before_row.last_shared_day,
+            FAR_PAST_DAY_SECS / 86_400,
+            "precondition: the forced stamp really landed"
+        );
+
+        let loc = LocationMessage::new(1.0, 2.0);
+        let (event, ngid, _relays) = fx
+            .alice
+            .encrypt_location(&fx.mls_group_id, &fx.alice_keys.public_key(), &loc, 60)
+            .await
+            .expect("alice encrypts");
+
+        let processor = EngineProcessor::new(Arc::clone(&fx.bob), EventBus::new());
+        let outcome = processor.process_group_event(&event, &ngid).await;
+        assert_eq!(
+            outcome,
+            GroupProcessOutcome::Applied,
+            "sanity: the location really applied — a failure here would make \
+             the row-unchanged assertion below meaningless"
+        );
+
+        let after = fx
+            .bob
+            .ranked_directory_members(DIR_READ_AT)
+            .expect("directory read");
+        let after_row = after
+            .iter()
+            .find(|e| e.pubkey_hex == alice_hex)
+            .cloned()
+            .expect("alice's row must still exist");
+        assert_eq!(
+            after_row, before_row,
+            "a location-only batch must never touch the directory row — any \
+             difference here (including a bumped last_shared_day) means a \
+             reconcile ran where the plan says one must not"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_directory_verdict_merge_prefers_withdrawal_over_an_ordinary_update_either_order() {
+        // §6.2/§5.5: both write sites fold a `DirectoryReconcile` across a
+        // drain with `Option::max` over the strength-ordered enum
+        // (`Rewrite < RewriteWithdrawing`), never reading a roster mid-drain.
+        // This proves the merge itself is commutative and that a withdrawal
+        // present ANYWHERE in the batch wins, using the exact function both
+        // `process_group_event` and `catchup::ingest_one` call
+        // (`CircleManager::directory_verdict_for_events`), fed a REAL event
+        // batch from a genuine inbound commit mixed with a hand-built
+        // `GroupStateInvalidated`.
+        //
+        // The invalidated event is necessarily hand-built rather than
+        // engine-emitted: producing one for real needs a losing branch from two
+        // concurrent publishers, which — per
+        // `circle::manager::tests::a_withdrawn_add_is_deleted_rather_than_kept_as_a_recent_contact`
+        // — is out of reach for a deterministic unit test and is covered
+        // black-box by the F2 convergence gate
+        // (`tests/live_sync_out_of_order_commit_e2e.rs`) instead. Its shape (a
+        // real group id, a plausible epoch/reason) is exactly what the fold
+        // switches on, so hand-building it exercises the same match arm a real
+        // one would.
+        let fx = setup_alice_bob().await;
+        let carol = make_member_with_relays(fx.relays.clone()).await;
+        let add = fx
+            .alice
+            .add_members_with_welcomes(&fx.alice_keys, &fx.mls_group_id, vec![carol], &fx.relays)
+            .await
+            .expect("alice adds carol");
+        fx.alice
+            .confirm_published(add.pending)
+            .await
+            .expect("confirm add");
+
+        // Capture the REAL events the engine emits for a genuine ordinary
+        // commit, straight from the same `SessionManager::process_event` both
+        // write sites call.
+        let screened = fx
+            .bob
+            .session()
+            .process_event(&add.commit_event)
+            .await
+            .expect("engine ingest");
+        let ScreenedIngest::Ingested(ingest) = screened else {
+            panic!("a real commit for a live group must reach the engine");
+        };
+        assert_eq!(
+            ingest.outcome,
+            IngestOutcome::Processed,
+            "precondition: bob really applied the add"
+        );
+        let real_events = ingest.effects.events;
+        let ordinary = fx.bob.directory_verdict_for_events(&real_events);
+        assert_eq!(
+            ordinary,
+            Some(DirectoryReconcile::Rewrite),
+            "precondition: this real batch alone implies an ordinary rewrite"
+        );
+
+        let invalidated = GroupEvent::GroupStateInvalidated {
+            group_id: fx.mls_group_id.clone(),
+            epoch: EpochId(1),
+            invalidated_commit_id: MessageId::new(vec![1]),
+            reason: cgka_traits::engine::GroupStateInvalidationReason::SupersededByBranchSelection,
+        };
+        let withdrawing = fx
+            .bob
+            .directory_verdict_for_events(std::slice::from_ref(&invalidated));
+        assert_eq!(withdrawing, Some(DirectoryReconcile::RewriteWithdrawing));
+
+        // The inter-stage merge processor.rs/catchup.rs perform, both orders.
+        assert_eq!(
+            ordinary.max(withdrawing),
+            Some(DirectoryReconcile::RewriteWithdrawing)
+        );
+        assert_eq!(
+            withdrawing.max(ordinary),
+            Some(DirectoryReconcile::RewriteWithdrawing)
+        );
+
+        // The intra-batch fold, invalidation first and invalidation last.
+        let mut front = vec![invalidated.clone()];
+        front.extend(real_events.clone());
+        assert_eq!(
+            fx.bob.directory_verdict_for_events(&front),
+            Some(DirectoryReconcile::RewriteWithdrawing),
+            "a withdrawal ahead of the real update in the batch must still win"
+        );
+
+        let mut back = real_events;
+        back.push(invalidated);
+        assert_eq!(
+            fx.bob.directory_verdict_for_events(&back),
+            Some(DirectoryReconcile::RewriteWithdrawing),
+            "and behind it — the fold must not be order-dependent"
+        );
     }
 }

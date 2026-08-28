@@ -9,13 +9,18 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/circles/name_circle_page.dart';
 import 'package:haven/src/pages/circles/qr_scanner_page.dart';
+import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/member_directory_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/member_directory_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/key_package_kind.dart';
+import 'package:haven/src/utils/member_pick_state.dart';
 import 'package:haven/src/utils/npub_validator.dart';
+import 'package:haven/src/widgets/circles/member_picker.dart';
 import 'package:haven/src/widgets/widgets.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -43,6 +48,11 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
   /// Selected member npubs.
   final List<String> _selectedMembers = [];
 
+  /// [_selectedMembers], mirrored as a [Set] so the picker's O(1) staged-npub
+  /// lookup never rebuilds a fresh `Set` from the list on every keystroke —
+  /// kept in sync wherever [_selectedMembers] is mutated.
+  final Set<String> _stagedNpubs = {};
+
   /// Validation status per member.
   final Map<String, ValidationStatus> _memberStatus = {};
 
@@ -58,9 +68,21 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
   /// General error message.
   String? _errorMessage;
 
+  /// What is currently typed in the search field, held here because the list
+  /// beside the field is derived from it. The field itself still owns the
+  /// text that renders the caret.
+  String _query = '';
+
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
+    // Someone who shares no circles yet has nobody to pick, so the guidance
+    // is still the right content; someone who does gets rows instead of a
+    // placeholder telling them to type. Loading counts as neither.
+    final directory = ref.watch(memberDirectoryProvider);
+    final directoryIsEmpty = directory.valueOrNull?.entries.isEmpty ?? false;
+    final showGuidance = _selectedMembers.isEmpty && directoryIsEmpty;
+
     return Scaffold(
       appBar: AppBar(title: Text(l10n.createCircleTitle)),
       body: Padding(
@@ -68,58 +90,90 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Search bar
-            MemberSearchBar(
-              onMemberAdded: _onMemberAdded,
-              onQrScanRequested: _openQrScanner,
-              existingMembers: _selectedMembers,
-            ),
-            const SizedBox(height: HavenSpacing.lg),
-
-            // Selected members header
-            if (_selectedMembers.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(bottom: HavenSpacing.sm),
-                // Wrap, not Row: at a large text scale the count and
-                // "Clear all" together exceed the body width, and a Row can
-                // only overflow where a Wrap moves the button to its own line.
-                child: Wrap(
-                  alignment: WrapAlignment.spaceBetween,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    Text(
-                      l10n.createCircleSelectedCount(_selectedMembers.length),
-                      style: Theme.of(context).textTheme.titleSmall,
-                    ),
-                    if (_selectedMembers.isNotEmpty)
-                      TextButton(
-                        onPressed: _clearAll,
-                        child: Text(l10n.commonClearAll),
-                      ),
-                  ],
-                ),
-              ),
-
-            // Member list or empty state. The placeholder is intrinsically
-            // sized, so it needs a viewport rather than this Expanded's tight
-            // leftover height — see [HavenEmptyState].
+            // ONE viewport for everything except the CTA, matching the sibling
+            // AddMemberPage. Pinning the field and the section heading above a
+            // pinned button makes the fixed chrome taller than the body at a
+            // 2x text scale, which is how CI run 31462924650 clipped that page
+            // on a device LARGER than the 320dp budget.
             Expanded(
-              child: _selectedMembers.isEmpty
-                  ? HavenScrollFill(child: _buildEmptyState())
-                  : _buildMemberList(),
-            ),
-
-            // Error message
-            if (_errorMessage != null)
-              Padding(
-                padding: const EdgeInsets.only(bottom: HavenSpacing.base),
-                child: Text(
-                  _errorMessage!,
-                  style: TextStyle(color: Theme.of(context).colorScheme.error),
-                ),
+              child: CustomScrollView(
+                slivers: [
+                  SliverToBoxAdapter(
+                    child: MemberSearchField(
+                      onMemberAdded: _onMemberAdded,
+                      onQrScanRequested: _openQrScanner,
+                      onQueryChanged: (query) =>
+                          setState(() => _query = query),
+                      entryStateFor: _entryStateFor,
+                    ),
+                  ),
+                  const SliverToBoxAdapter(
+                    child: SizedBox(height: HavenSpacing.lg),
+                  ),
+                  if (_selectedMembers.isNotEmpty) ...[
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: const EdgeInsets.only(bottom: HavenSpacing.sm),
+                        // Wrap, not Row: at a large text scale the count and
+                        // "Clear all" together exceed the body width, and a
+                        // Row can only overflow where a Wrap moves the button
+                        // to its own line.
+                        child: Wrap(
+                          alignment: WrapAlignment.spaceBetween,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            Text(
+                              l10n.createCircleSelectedCount(
+                                _selectedMembers.length,
+                              ),
+                              style: Theme.of(context).textTheme.titleSmall,
+                            ),
+                            TextButton(
+                              onPressed: _clearAll,
+                              child: Text(l10n.commonClearAll),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    SliverList.builder(
+                      itemCount: _selectedMembers.length,
+                      itemBuilder: _buildMemberTile,
+                    ),
+                  ],
+                  MemberPickerResults(
+                    query: _query,
+                    stagedNpubs: _stagedNpubs,
+                    // No circle exists yet, so nobody can already be in it.
+                    circleMemberPubkeysHex: const {},
+                    circleMemberNpubs: const {},
+                    onSelected: _onCandidateSelected,
+                    onStrangerSelected: _onMemberAdded,
+                  ),
+                  if (showGuidance)
+                    SliverFillRemaining(
+                      hasScrollBody: false,
+                      child: _buildEmptyState(),
+                    ),
+                  // Unreserved-height chrome, so it trails the scrolling body
+                  // rather than growing the pinned area under it.
+                  if (_errorMessage != null)
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: HavenSpacing.base),
+                        child: Text(
+                          _errorMessage!,
+                          style: TextStyle(
+                            color: Theme.of(context).colorScheme.error,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
               ),
+            ),
+            const SizedBox(height: HavenSpacing.base),
 
-            // Continue button
             FilledButton(
               key: WidgetKeys.createCircleContinue,
               onPressed: _canContinue ? _onContinue : null,
@@ -130,6 +184,25 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
       ),
     );
   }
+
+  /// Whether [npub] can be staged, answered entirely from what is already on
+  /// this device.
+  ///
+  /// This screen previously read no identity at all: a user could stage their
+  /// own npub, `_validateMember` would find their own KeyPackage, mark it
+  /// valid, and carry it into circle creation (plan §9.5).
+  MemberPickState _entryStateFor(String npub) {
+    return resolveEntryPickState(
+      npub,
+      stagedNpubs: _stagedNpubs,
+      // No circle exists yet, so nobody can already be in it.
+      circleMemberNpubs: const {},
+      selfNpub: ref.read(identityProvider).valueOrNull?.npub,
+    );
+  }
+
+  void _onCandidateSelected(MemberCandidate candidate) =>
+      _onMemberAdded(candidate.npub);
 
   Widget _buildEmptyState() {
     final l10n = AppLocalizations.of(context);
@@ -142,23 +215,18 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
     );
   }
 
-  Widget _buildMemberList() {
-    return ListView.builder(
-      itemCount: _selectedMembers.length,
-      itemBuilder: (context, index) {
-        final npub = _selectedMembers[index];
-        final status = _memberStatus[npub] ?? ValidationStatus.validating;
-        final error = _memberErrors[npub];
-        final isNetworkFailure = _networkFailures.contains(npub);
+  Widget _buildMemberTile(BuildContext context, int index) {
+    final npub = _selectedMembers[index];
+    final status = _memberStatus[npub] ?? ValidationStatus.validating;
+    final error = _memberErrors[npub];
+    final isNetworkFailure = _networkFailures.contains(npub);
 
-        return PendingMemberTile(
-          npub: npub,
-          status: status,
-          errorMessage: error,
-          onRemove: () => _onMemberRemoved(npub),
-          onRetry: isNetworkFailure ? () => _retryMember(npub) : null,
-        );
-      },
+    return PendingMemberTile(
+      npub: npub,
+      status: status,
+      errorMessage: error,
+      onRemove: () => _onMemberRemoved(npub),
+      onRetry: isNetworkFailure ? () => _retryMember(npub) : null,
     );
   }
 
@@ -174,6 +242,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
   void _onMemberAdded(String npub) {
     setState(() {
       _selectedMembers.add(npub);
+      _stagedNpubs.add(npub);
       _memberStatus[npub] = ValidationStatus.validating;
       _errorMessage = null;
     });
@@ -185,6 +254,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
   void _onMemberRemoved(String npub) {
     setState(() {
       _selectedMembers.remove(npub);
+      _stagedNpubs.remove(npub);
       _memberStatus.remove(npub);
       _memberKeyPackages.remove(npub);
       _memberErrors.remove(npub);
@@ -195,6 +265,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
   void _clearAll() {
     setState(() {
       _selectedMembers.clear();
+      _stagedNpubs.clear();
       _memberStatus.clear();
       _memberKeyPackages.clear();
       _memberErrors.clear();
@@ -265,26 +336,30 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
 
     if (result != null && mounted) {
       final l10n = AppLocalizations.of(context);
-      // Extract and validate the npub from QR result
       final npub = NpubValidator.extract(result);
-      if (npub != null && !_selectedMembers.contains(npub)) {
-        _onMemberAdded(npub);
-      } else if (npub != null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(l10n.createCircleMemberAlreadyAdded)),
-        );
-      } else {
+      if (npub == null) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(l10n.createCircleNoIdInQr)),
         );
+        return;
       }
+      // A scanned code is an entry, so it answers to the same refusals as a
+      // typed one: scanning your own QR code must not stage you either.
+      final refusal = memberPickRefusalMessage(l10n, _entryStateFor(npub));
+      if (refusal != null) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(refusal)));
+        return;
+      }
+      _onMemberAdded(npub);
     }
   }
 
   Future<void> _onContinue() async {
     // Collect KeyPackages for all valid members
     final keyPackages = _selectedMembers
-        .where((npub) => _memberKeyPackages.containsKey(npub))
+        .where(_memberKeyPackages.containsKey)
         .map((npub) => _memberKeyPackages[npub]!)
         .toList();
 

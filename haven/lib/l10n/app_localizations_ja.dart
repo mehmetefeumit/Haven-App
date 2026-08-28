@@ -108,22 +108,10 @@ class AppLocalizationsJa extends AppLocalizations {
   String get onboardingValueProp1Title => 'あなたを見られるのはサークルのメンバーだけ';
 
   @override
-  String get onboardingValueProp1Body =>
-      '位置情報は端末を離れる前にこの端末上で暗号化されるため、読み取れるのはあなたが選んだサークルだけです。Haven も含め、ほかの誰にも読めません。Haven はオープンソースなので、そのことは誰でも確認できます。';
-
-  @override
   String get onboardingValueProp2Title => '誰にも止められない';
 
   @override
-  String get onboardingValueProp2Body =>
-      'Haven には中央サーバーがありません。暗号化されたメッセージは、「リレー」と呼ばれる独立したサーバーを経由して届き、どのリレーを使うかはあなたが選びます。特定の企業や政府が単独でこのネットワークを止めることはできません。';
-
-  @override
   String get onboardingValueProp3Title => 'アカウントは不要';
-
-  @override
-  String get onboardingValueProp3Body =>
-      'メールアドレスも電話番号も、登録も不要です。Haven が作る識別情報の秘密鍵は、あなたの端末から外に出ることがありません。だから、誰かが引き渡せるアカウントそのものが存在しません。';
 
   @override
   String get onboardingValueProp1Summary => '端末上で暗号化。あなたが選んだサークルだけが読めます。';
@@ -205,25 +193,13 @@ class AppLocalizationsJa extends AppLocalizations {
   String get settingsIdentityTitle => '識別情報';
 
   @override
-  String get settingsIdentitySubtitle => 'プロフィール、鍵、写真の共有';
-
-  @override
   String get settingsRelaysTitle => 'リレー';
-
-  @override
-  String get settingsRelaysSubtitle => '招待があなたに届く経路';
 
   @override
   String get settingsLocationTitle => '位置情報';
 
   @override
-  String get settingsLocationSubtitle => 'バックグラウンド共有と権限';
-
-  @override
   String get settingsMapStyleTitle => '地図のスタイル';
-
-  @override
-  String get settingsAppearanceSubtitle => 'テーマと言語';
 
   @override
   String get settingsAboutTitle => 'このアプリについて';
@@ -492,9 +468,6 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get privacyTitle => 'プライバシー';
-
-  @override
-  String get privacySubtitle => 'Haven がどう動くか、ほかの人に何が見えるか';
 
   @override
   String get privacyHubSummary =>
@@ -892,9 +865,6 @@ class AppLocalizationsJa extends AppLocalizations {
   String get createCircleNoValidMembers => '招待できる有効なメンバーがいません';
 
   @override
-  String get createCircleMemberAlreadyAdded => 'このメンバーはすでに追加されています';
-
-  @override
   String get createCircleNoIdInQr => 'QRコードに有効なIDが見つかりませんでした';
 
   @override
@@ -1072,9 +1042,6 @@ class AppLocalizationsJa extends AppLocalizations {
   String get qrScannerScanning => 'スキャン中...';
 
   @override
-  String get circleMemberInvitationPending => '招待保留中';
-
-  @override
   String get circleMemberNoRecentLocation => '最近の位置情報はありません';
 
   @override
@@ -1109,9 +1076,6 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get circleMemberAdmin => '管理者';
-
-  @override
-  String get circleMemberHintPending => '招待保留中';
 
   @override
   String get circleMemberHintNoLocation => '位置情報がありません';
@@ -1168,6 +1132,54 @@ class AppLocalizationsJa extends AppLocalizations {
   String get memberSearchAlreadyAdded => 'このメンバーはすでに追加されています';
 
   @override
+  String get memberPickerSectionRoster => 'あなたのサークルのメンバー';
+
+  @override
+  String get memberPickerTierRoster => 'あなたのサークルのメンバーです';
+
+  @override
+  String get memberPickerNoMatches => 'あなたのサークルには一致するメンバーがいません';
+
+  @override
+  String get memberPickerLoading => 'あなたのサークルのメンバーを読み込んでいます';
+
+  @override
+  String get memberPickerDirectoryUnavailable => '今はあなたのサークルのメンバーを読み込めません';
+
+  @override
+  String memberPickerMatchesAnnouncement(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return '一致するメンバー: $countString人';
+  }
+
+  @override
+  String get memberPickerReasonSelf => 'これはあなた自身のIDです';
+
+  @override
+  String get memberPickerReadPublicKey => '公開鍵を読み上げる';
+
+  @override
+  String get memberPickerSectionRecent => '最近あなたのサークルにいた人';
+
+  @override
+  String get memberPickerTierRecent => '最近あなたのサークルにいました';
+
+  @override
+  String get memberPickerNicknameNote => 'あなたが設定したニックネームで、相手が公開している名前ではありません';
+
+  @override
+  String memberPickerCollisionCircleLabel(String circleName) {
+    return 'サークル: $circleName';
+  }
+
+  @override
+  String get memberPickerStrangerLookupNote =>
+      'Haven は、この人が公開している名前を1つのリレーに問い合わせました。そのリレーには、この端末がたった今この鍵について問い合わせたことが分かります。ただし、この問い合わせには署名が付いていないため、Haven でのあなたの識別情報とは結びつきません。写真はまだダウンロードしていません。';
+
+  @override
   String selectedMembersMore(int count) {
     final intl.NumberFormat countNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
@@ -1177,26 +1189,11 @@ class AppLocalizationsJa extends AppLocalizations {
   }
 
   @override
-  String get invitationStatusPending => '招待保留中';
+  String get invitationCardHeading => 'サークルへの招待';
 
   @override
-  String get invitationStatusActive => 'アクティブ';
-
-  @override
-  String get invitationStatusDeclined => '辞退済み';
-
-  @override
-  String invitationStatusSemantics(String label) {
-    return '招待の状態: $label';
-  }
-
-  @override
-  String invitationCardSemantics(String circleName, String inviter, int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    return '$circleName への招待。招待者は $inviter、メンバー$countString人';
+  String invitationCardSemantics(String inviter) {
+    return 'サークルへの招待が $inviter から届いています';
   }
 
   @override
@@ -1210,18 +1207,7 @@ class AppLocalizationsJa extends AppLocalizations {
   }
 
   @override
-  String invitationCardMemberCount(int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    String _temp0 = intl.Intl.pluralLogic(
-      count,
-      locale: localeName,
-      other: '$countString人のメンバー',
-    );
-    return '$_temp0';
-  }
+  String get invitationCardNicknameNote => 'あなたが設定したニックネームで、相手が公開している名前ではありません';
 
   @override
   String get invitationCardJustNow => 'たった今';
@@ -1768,37 +1754,6 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get profileSyncStatusRetrySemantics => 'プロフィールの公開を再試行';
-
-  @override
-  String keyDisplayCopiedToClipboard(String label) {
-    return '$labelをクリップボードにコピーしました';
-  }
-
-  @override
-  String keyDisplaySemantics(String label, String state) {
-    return '$label: $state';
-  }
-
-  @override
-  String get keyDisplayStateRevealed => '表示中';
-
-  @override
-  String get keyDisplayStateHidden => '非表示';
-
-  @override
-  String get keyDisplayHideTooltip => '隠す';
-
-  @override
-  String get keyDisplayRevealTooltip => '表示';
-
-  @override
-  String get keyDisplayCopyTooltip => 'コピー';
-
-  @override
-  String get keyDisplayCompactCopied => '鍵をクリップボードにコピーしました';
-
-  @override
-  String get keyDisplayCompactTapToCopy => 'タップしてコピー';
 
   @override
   String get npubQrCopiedSnack => '公開鍵をクリップボードにコピーしました';

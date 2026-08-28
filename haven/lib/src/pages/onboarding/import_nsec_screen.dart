@@ -16,6 +16,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/constants/text_input_privacy.dart';
 import 'package:haven/src/pages/onboarding/onboarding_scaffold.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
@@ -115,6 +116,13 @@ class _ImportNsecScreenState extends ConsumerState<ImportNsecScreen> {
             autocorrect: false,
             enableSuggestions: false,
             obscureText: true,
+            // Security Rule 6 reaches past Haven's own storage: the keyboard
+            // learned-word dictionary and the platform autofill service are
+            // OS-side stores that survive logout and ride the device backup.
+            // `obscureText` gates neither, and an empty autofill hint list —
+            // the framework default — still enables autofill.
+            enableIMEPersonalizedLearning: false,
+            autofillHints: kNoAutofill,
             textInputAction: TextInputAction.done,
             inputFormatters: [FilteringTextInputFormatter.singleLineFormatter],
             decoration: InputDecoration(

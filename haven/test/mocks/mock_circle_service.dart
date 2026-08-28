@@ -8,6 +8,20 @@ import 'dart:async';
 
 import 'package:haven/src/services/circle_service.dart';
 
+/// A test pubkey in hex, paired with [kTestNpub].
+const String kTestPubkeyHex =
+    'abc123def456abc123def456abc123def456abc123def456abc123def456abcd';
+
+/// [kTestPubkeyHex] in NIP-19 bech32 form — a REAL encoding, checksum
+/// included, not a hand-typed lookalike.
+///
+/// Fixtures must take both halves from here rather than writing two
+/// independent literals: a widget renders one form and a test searches for
+/// the other, so an unrelated pair turns "never renders the hex" into an
+/// assertion about a string the widget was never going to produce.
+const String kTestNpub =
+    'npub140qj8hh5264uzg7773t2hsfrmm69d27py000g44tcy3aaazk40xskwpam3';
+
 /// A mock [CircleService] for testing.
 ///
 /// Allows tests to control:
@@ -20,12 +34,17 @@ class MockCircleService implements CircleService {
   /// By default, returns empty lists and succeeds on all operations.
   MockCircleService({
     List<Circle>? circles,
+    List<Invitation>? invitations,
     this.shouldThrowOnGetCircles = false,
     this.shouldThrowOnLeaveCircle = false,
     this.errorMessage = 'Mock error',
-  }) : _circles = circles ?? [];
+  }) : _circles = circles ?? [],
+       _invitations = invitations ?? [];
 
   final List<Circle> _circles;
+
+  /// Pending invitations returned by [getPendingInvitations].
+  final List<Invitation> _invitations;
 
   /// Whether [getVisibleCircles] should throw an exception.
   final bool shouldThrowOnGetCircles;
@@ -149,7 +168,7 @@ class MockCircleService implements CircleService {
   @override
   Future<List<Invitation>> getPendingInvitations() async {
     methodCalls.add('getPendingInvitations');
-    return [];
+    return List<Invitation>.of(_invitations);
   }
 
   @override
@@ -186,7 +205,7 @@ class MockCircleService implements CircleService {
       mlsGroupId: const [1, 2, 3, 4],
       circleName: 'Mock Circle',
       inviterPubkey: 'mock_inviter_pubkey',
-      memberCount: 2,
+      inviterNpub: 'npub1mockinviter',
       invitedAt: DateTime.now(),
     );
   }
@@ -583,6 +602,69 @@ class MockCircleService implements CircleService {
     return 0;
   }
 
+  /// Rows returned by [rankedDirectoryMembers]. Settable directly by tests.
+  List<DirectoryEntry> directoryEntries = [];
+
+  /// Whether [rankedDirectoryMembers] should throw.
+  bool shouldThrowOnRankedDirectoryMembers = false;
+
+  /// `now` captured from the last [rankedDirectoryMembers] call.
+  DateTime? rankedDirectoryMembersCalledWithNow;
+
+  @override
+  Future<List<DirectoryEntry>> rankedDirectoryMembers({DateTime? now}) async {
+    methodCalls.add('rankedDirectoryMembers');
+    rankedDirectoryMembersCalledWithNow = now;
+    if (shouldThrowOnRankedDirectoryMembers) {
+      throw const CircleServiceException('Mock rankedDirectoryMembers error');
+    }
+    return List<DirectoryEntry>.of(directoryEntries);
+  }
+
+  /// Return value for [reconcileMemberDirectory]. Defaults to `true`
+  /// (refreshed, nothing deferred).
+  bool reconcileMemberDirectoryResult = true;
+
+  /// Whether [reconcileMemberDirectory] should throw.
+  bool shouldThrowOnReconcileMemberDirectory = false;
+
+  /// Number of times [reconcileMemberDirectory] has been called.
+  int reconcileMemberDirectoryCallCount = 0;
+
+  /// Run (if set) on every [reconcileMemberDirectory] call, before it
+  /// returns — lets a test simulate the real relationship between the two
+  /// calls (a reconcile is what makes a later [rankedDirectoryMembers] read
+  /// non-empty) by mutating [directoryEntries] here.
+  void Function(MockCircleService mock)? reconcileMemberDirectoryEffect;
+
+  @override
+  Future<bool> reconcileMemberDirectory({DateTime? now}) async {
+    methodCalls.add('reconcileMemberDirectory');
+    reconcileMemberDirectoryCallCount++;
+    if (shouldThrowOnReconcileMemberDirectory) {
+      throw const CircleServiceException(
+        'Mock reconcileMemberDirectory error',
+      );
+    }
+    reconcileMemberDirectoryEffect?.call(this);
+    return reconcileMemberDirectoryResult;
+  }
+
+  /// Return value for [allContactDisplayNames]. Settable directly by tests.
+  Map<String, String> contactDisplayNames = {};
+
+  /// Whether [allContactDisplayNames] should throw.
+  bool shouldThrowOnAllContactDisplayNames = false;
+
+  @override
+  Future<Map<String, String>> allContactDisplayNames() async {
+    methodCalls.add('allContactDisplayNames');
+    if (shouldThrowOnAllContactDisplayNames) {
+      throw const CircleServiceException('Mock allContactDisplayNames error');
+    }
+    return Map<String, String>.of(contactDisplayNames);
+  }
+
   @override
   Future<List<LocationEventResult>> decryptLocation({
     required String eventJson,
@@ -668,6 +750,18 @@ class MockCircleService implements CircleService {
   /// Whether [setContactDisplayName] should throw an exception.
   bool shouldThrowOnSetContactDisplayName = false;
 
+  /// Whether [getContactDisplayName] should throw an exception.
+  bool shouldThrowOnGetContactDisplayName = false;
+
+  @override
+  Future<String?> getContactDisplayName({required String pubkey}) async {
+    methodCalls.add('getContactDisplayName');
+    if (shouldThrowOnGetContactDisplayName) {
+      throw const CircleServiceException('Mock getContactDisplayName error');
+    }
+    return nicknames[pubkey];
+  }
+
   @override
   Future<void> setContactDisplayName({
     required String pubkey,
@@ -741,18 +835,12 @@ class TestCircleFactory {
     String? npub,
     String? displayName,
     bool isAdmin = false,
-    MembershipStatus status = MembershipStatus.accepted,
   }) {
     return CircleMember(
-      pubkey:
-          pubkey ??
-          'abc123def456abc123def456abc123def456abc123def456abc123def456abcd',
-      npub:
-          npub ??
-          'npub140qj8hh5264uzg7773t2hsfrmm69d27py000g44tcy3aaazk40xskwpam3',
+      pubkey: pubkey ?? kTestPubkeyHex,
+      npub: npub ?? kTestNpub,
       displayName: displayName,
       isAdmin: isAdmin,
-      status: status,
     );
   }
 }

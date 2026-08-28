@@ -78,6 +78,14 @@ class MockProfileService implements ProfileService {
   /// Set to make [getMemberProfile] throw.
   bool shouldThrowOnGetMemberProfile = false;
 
+  /// Set to make [getCachedMemberProfiles] throw.
+  ///
+  /// The real implementation never throws — an unreadable row costs that
+  /// person their name and a store that will not open yields an empty map —
+  /// so this models a NON-CONFORMING implementation, and exists to prove the
+  /// callers above it stay usable even then.
+  bool shouldThrowOnGetCachedMemberProfiles = false;
+
   /// Set to make [refreshMemberProfiles] throw.
   bool shouldThrowOnRefreshMemberProfiles = false;
 
@@ -88,6 +96,21 @@ class MockProfileService implements ProfileService {
   /// in-flight window explicit rather than racing the scheduler, so the test
   /// cannot flake under parallel load.
   Completer<void>? refreshGate;
+
+  /// Profiles returned by [resolveTypedStrangerProfile], keyed by the EXACT
+  /// npub argument — not by hex, since the whole point of that method is
+  /// accepting a key nothing local has decoded to hex yet. Settable directly
+  /// by tests.
+  final Map<String, Profile> strangerProfiles = {};
+
+  /// Set to make [resolveTypedStrangerProfile] throw.
+  bool shouldThrowOnResolveTypedStrangerProfile = false;
+
+  /// When set, [resolveTypedStrangerProfile] blocks on this until it
+  /// completes — same shape as [refreshGate], so a widget test can hold the
+  /// picker's stranger-row resolve in flight deterministically (no sleeps,
+  /// no timing races).
+  Completer<void>? resolveTypedStrangerProfileGate;
 
   /// When set, [updateOwnProfile] blocks on this until it completes.
   Completer<void>? updateOwnProfileGate;
@@ -235,6 +258,36 @@ class MockProfileService implements ProfileService {
   }
 
   @override
+  Future<Map<String, Profile>> getCachedMemberProfiles(
+    List<String> pubkeyHexes,
+  ) async {
+    methodCalls.add((
+      method: 'getCachedMemberProfiles',
+      args: {'pubkeyHexes': List<String>.of(pubkeyHexes)},
+    ));
+    if (shouldThrowOnGetCachedMemberProfiles) throw _genericError;
+    return {
+      for (final pubkeyHex in pubkeyHexes)
+        if (memberProfiles.containsKey(pubkeyHex))
+          // Bytes stripped, as the real read strips them: a double that
+          // handed back picture bytes would let a caller depend on bytes
+          // production never supplies.
+          pubkeyHex: _withoutPictureBytes(memberProfiles[pubkeyHex]!),
+    };
+  }
+
+  static Profile _withoutPictureBytes(Profile profile) {
+    return Profile(
+      pubkeyHex: profile.pubkeyHex,
+      name: profile.name,
+      displayName: profile.displayName,
+      about: profile.about,
+      pictureHash: profile.pictureHash,
+      knownAt: profile.knownAt,
+    );
+  }
+
+  @override
   Future<Map<String, Profile>> refreshMemberProfiles(
     List<String> pubkeyHexes, {
     Duration maxAge = profileInteractiveMaxAge,
@@ -251,5 +304,17 @@ class MockProfileService implements ProfileService {
         if (memberProfiles.containsKey(pubkeyHex))
           pubkeyHex: memberProfiles[pubkeyHex]!,
     };
+  }
+
+  @override
+  Future<Profile?> resolveTypedStrangerProfile(String npub) async {
+    methodCalls.add((
+      method: 'resolveTypedStrangerProfile',
+      args: {'npub': npub},
+    ));
+    final gate = resolveTypedStrangerProfileGate;
+    if (gate != null && !gate.isCompleted) await gate.future;
+    if (shouldThrowOnResolveTypedStrangerProfile) throw _genericError;
+    return strangerProfiles[npub];
   }
 }

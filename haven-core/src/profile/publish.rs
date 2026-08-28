@@ -67,10 +67,28 @@ fn superseding_created_at(previous_created_at: Option<u64>) -> Timestamp {
 
 /// Builds a signed kind-0 metadata event for the local user's OWN profile.
 ///
-/// Clones `meta`, applies the NIP-24 name rule
-/// ([`enforce_name_rule`] — mirror a non-blank `display_name` into a blank
-/// `name`), and signs with the user's Nostr identity `keys`. Adds **no**
-/// client/app tags.
+/// Sanitizes `meta`'s name fields ([`ProfileMetadata::sanitized`]), applies the
+/// NIP-24 name rule ([`enforce_name_rule`] — mirror a non-blank `display_name`
+/// into a blank `name`), and signs with the user's Nostr identity `keys`. Adds
+/// **no** client/app tags.
+///
+/// # The display-name sanitizer runs HERE on the publish side
+///
+/// This is the only builder that puts a *name* on the wire, so it is the one
+/// place that can promise a name Haven publishes carries no bidi override and
+/// no zero-width padding into anybody else's client. It has to be the builder
+/// rather than a caller: the republish base is normally the freshly-fetched
+/// relay copy and only falls back to the (already-sanitized) local row on a
+/// total read miss, so sanitizing at a call site would make the published form
+/// depend on network conditions.
+///
+/// A name with nothing renderable left sanitizes to `None`, and the field is
+/// then simply OMITTED — the publish is never refused. Omission is what every
+/// consumer's name precedence already handles (it falls through to the npub),
+/// whereas refusing would strand the picture and bio edits riding the same
+/// event. The deprecated `custom` name keys are emptied rather than removed for
+/// the same reason [`ProfileMetadata::sanitized`] gives: `custom` is what makes
+/// a republish preserve fields written by other clients.
 ///
 /// `previous_created_at` is the `created_at` of the freshest kind-0 being
 /// superseded (or `None` for a first publish). The event is stamped via
@@ -86,7 +104,14 @@ pub fn build_metadata_event(
     meta: &ProfileMetadata,
     previous_created_at: Option<u64>,
 ) -> Result<Event> {
-    let mut metadata = meta.as_metadata().clone();
+    // Sanitize BEFORE the name rule, never after. `enforce_name_rule` decides
+    // blankness with `str::trim`, which removes neither U+202E (not whitespace,
+    // so the rule would not fire and the published object would carry no `name`
+    // at all) nor the LRM/ALM/ZWNJ/ZWJ/tag characters the sanitizer
+    // deliberately KEEPS. Running the sanitizer first is therefore the only
+    // reason the two fields can never disagree: it — and not `trim` — is what
+    // resolves an unrenderable `name` to `None` for the rule to fill.
+    let mut metadata = meta.sanitized().into_metadata();
     enforce_name_rule(&mut metadata);
     EventBuilder::metadata(&metadata)
         .custom_created_at(superseding_created_at(previous_created_at))
@@ -306,6 +331,256 @@ mod tests {
                 .and_then(serde_json::Value::as_bool),
             Some(true),
             "unknown custom field survives the build"
+        );
+    }
+
+    // ---- the publish path sanitizes ----------------------------------------
+
+    #[test]
+    fn a_published_name_carries_no_bidi_override() {
+        // The override IS the attack: it reorders everything after it, so one
+        // name renders in a peer's client as a different name entirely. Haven
+        // must never be the client that puts one on the wire.
+        let keys = Keys::generate();
+        let md = md_from(r#"{"display_name":"Ali\u202Ece"}"#);
+        let event = build_metadata_event(&keys, &md, None).expect("build");
+        let parsed = Metadata::from_json(&event.content).expect("content is metadata json");
+        assert_eq!(parsed.display_name.as_deref(), Some("Alice"));
+        assert!(
+            !event.content.contains('\u{202E}'),
+            "a bidi override reached the wire: {}",
+            event.content
+        );
+    }
+
+    #[test]
+    fn a_published_name_is_capped_at_the_grapheme_limit() {
+        let keys = Keys::generate();
+        let md = ProfileMetadata::from_metadata(Metadata::new().display_name("a".repeat(60)));
+        let event = build_metadata_event(&keys, &md, None).expect("build");
+        let parsed = Metadata::from_json(&event.content).expect("metadata");
+        assert_eq!(
+            parsed.display_name.as_deref(),
+            Some("a".repeat(48).as_str())
+        );
+        assert_eq!(
+            parsed.name.as_deref(),
+            Some("a".repeat(48).as_str()),
+            "the mirrored `name` is capped too — the two fields never disagree"
+        );
+    }
+
+    #[test]
+    fn a_published_name_has_its_whitespace_collapsed() {
+        // Visible in the EVENT, not merely in the local row: a name broken
+        // across two lines reads as one name to the eye and as two very
+        // different strings to anyone comparing them.
+        let keys = Keys::generate();
+        let md = md_from(r#"{"display_name":"  Ada\n\n  Lovelace  "}"#);
+        let event = build_metadata_event(&keys, &md, None).expect("build");
+        let parsed = Metadata::from_json(&event.content).expect("metadata");
+        assert_eq!(parsed.display_name.as_deref(), Some("Ada Lovelace"));
+    }
+
+    #[test]
+    fn a_name_that_sanitizes_to_nothing_publishes_no_name_at_all() {
+        // The choice, pinned: OMIT the field rather than refuse the publish or
+        // emit an empty string. An absent name is what every consumer's
+        // precedence already handles — it falls through to the npub — whereas
+        // refusing would strand the user's picture and bio edits on the device
+        // behind a failure with no remedy the UI could offer.
+        let keys = Keys::generate();
+        let md = md_from(r#"{"display_name":"\u202E\u200B","picture":"https://x.test/y.jpg"}"#);
+        let event = build_metadata_event(&keys, &md, None).expect("build");
+        let parsed = Metadata::from_json(&event.content).expect("metadata");
+        assert_eq!(parsed.display_name, None);
+        assert_eq!(parsed.name, None, "no empty-string name is published");
+        assert_eq!(
+            parsed.picture.as_deref(),
+            Some("https://x.test/y.jpg"),
+            "the rest of the profile still publishes"
+        );
+        assert_eq!(
+            ProfileMetadata::from_metadata(parsed).resolve_display_name(),
+            None,
+            "a consumer falls through the precedence to the npub"
+        );
+    }
+
+    #[test]
+    fn a_name_that_sanitizes_to_nothing_falls_through_to_the_next_candidate() {
+        let keys = Keys::generate();
+        let md = md_from(r#"{"name":"alice","display_name":"\u2066\u2069"}"#);
+        let event = build_metadata_event(&keys, &md, None).expect("build");
+        let parsed = Metadata::from_json(&event.content).expect("metadata");
+        assert_eq!(parsed.display_name, None);
+        assert_eq!(
+            ProfileMetadata::from_metadata(parsed).resolve_display_name(),
+            Some("alice")
+        );
+    }
+
+    #[test]
+    fn the_name_rule_mirrors_the_sanitized_display_name_over_an_invisible_name() {
+        // The ordering proof. A `name` built only from characters the sanitizer
+        // removes is NOT blank to `enforce_name_rule` (U+202E is not
+        // whitespace), so running the rule LAST would leave the published object
+        // with no `name` at all — the NIP-24 rule silently defeated by an
+        // invisible field.
+        let keys = Keys::generate();
+        let md = md_from(r#"{"name":"\u202E","display_name":"Alice"}"#);
+        let event = build_metadata_event(&keys, &md, None).expect("build");
+        let parsed = Metadata::from_json(&event.content).expect("metadata");
+        assert_eq!(parsed.name.as_deref(), Some("Alice"));
+        assert_eq!(parsed.display_name.as_deref(), Some("Alice"));
+    }
+
+    /// The invisible characters the sanitizer deliberately KEEPS, none of which
+    /// `str::trim` removes.
+    const KEPT_INVISIBLES: &[char] = &[
+        '\u{200E}',
+        '\u{200F}',
+        '\u{061C}',
+        '\u{200C}',
+        '\u{200D}',
+        '\u{FE0F}',
+        '\u{E0041}',
+    ];
+
+    #[test]
+    fn the_name_rule_mirrors_over_a_name_of_kept_invisible_characters_too() {
+        // The other half of the ordering proof, and the half the strip-list
+        // example above cannot reach: `trim` removes no LRM, ALM, ZWNJ, ZWJ or
+        // tag character, so a `name` built from those is not blank to the rule
+        // either. Haven published `{"name":"\u{200E}","display_name":"Alice"}`
+        // verbatim — two names that disagree, one of them invisible — until the
+        // sanitizer stopped calling an unrenderable name non-empty.
+        let keys = Keys::generate();
+        for invisible in KEPT_INVISIBLES {
+            assert!(
+                !invisible.to_string().trim().is_empty(),
+                "trim cannot see it"
+            );
+            let md = ProfileMetadata::from_metadata(
+                Metadata::new()
+                    .name(invisible.to_string())
+                    .display_name("Alice"),
+            );
+            let event = build_metadata_event(&keys, &md, None).expect("build");
+            let parsed = Metadata::from_json(&event.content).expect("metadata");
+            assert_eq!(
+                parsed.name.as_deref(),
+                Some("Alice"),
+                "U+{:04X} must not survive as a name",
+                *invisible as u32
+            );
+            assert_eq!(parsed.display_name.as_deref(), Some("Alice"));
+        }
+    }
+
+    #[test]
+    fn a_profile_of_only_kept_invisible_characters_publishes_no_name() {
+        // With nothing to mirror, both fields must be omitted rather than
+        // published as invisible text a peer's client renders as a blank row.
+        let keys = Keys::generate();
+        for invisible in KEPT_INVISIBLES {
+            let md = ProfileMetadata::from_metadata(
+                Metadata::new()
+                    .name(invisible.to_string())
+                    .display_name(invisible.to_string()),
+            );
+            let event = build_metadata_event(&keys, &md, None).expect("build");
+            let parsed = Metadata::from_json(&event.content).expect("metadata");
+            assert_eq!(parsed.name, None, "U+{:04X}", *invisible as u32);
+            assert_eq!(parsed.display_name, None, "U+{:04X}", *invisible as u32);
+        }
+    }
+
+    #[test]
+    fn sanitizing_covers_the_deprecated_name_keys_without_deleting_them() {
+        // Every field the name precedence can return, or the sanitizer is
+        // bypassed outright by a profile carrying its payload in the legacy
+        // camelCase keys. They are EMPTIED rather than removed when nothing
+        // renderable survives: `custom` is what makes a republish preserve
+        // another client's fields, so this must not become a delete path.
+        let keys = Keys::generate();
+        let md = md_from(r#"{"displayName":"ca\u2066rol","username":"\uFEFF","about":"bio"}"#);
+        let event = build_metadata_event(&keys, &md, None).expect("build");
+        let parsed = Metadata::from_json(&event.content).expect("metadata");
+        assert_eq!(
+            parsed
+                .custom
+                .get("displayName")
+                .and_then(serde_json::Value::as_str),
+            Some("carol")
+        );
+        assert_eq!(
+            parsed
+                .custom
+                .get("username")
+                .and_then(serde_json::Value::as_str),
+            Some(""),
+            "the key survives so a republish does not drop another client's field"
+        );
+        assert_eq!(
+            ProfileMetadata::from_metadata(parsed).resolve_display_name(),
+            Some("carol"),
+            "an emptied key is skipped by the precedence, never rendered blank"
+        );
+    }
+
+    #[test]
+    fn another_clients_field_survives_a_sanitizing_publish() {
+        // The preservation invariant has to hold on the path that actually
+        // REWRITES a field, not only on the untouched-name path.
+        let keys = Keys::generate();
+        let md = md_from(
+            r#"{"display_name":"Ali\u202Ece","lud16":"alice@wallet","website":"https://a.test","bot":true}"#,
+        );
+        let event = build_metadata_event(&keys, &md, None).expect("build");
+        let parsed = Metadata::from_json(&event.content).expect("metadata");
+        assert_eq!(parsed.display_name.as_deref(), Some("Alice"));
+        assert_eq!(parsed.lud16.as_deref(), Some("alice@wallet"));
+        assert_eq!(parsed.website.as_deref(), Some("https://a.test"));
+        assert_eq!(
+            parsed
+                .custom
+                .get("bot")
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+            "an unknown third-party field survives a sanitizing publish"
+        );
+    }
+
+    #[test]
+    fn republishing_an_already_clean_profile_is_byte_identical() {
+        // The shape a real republish takes: the base is what the relays hold,
+        // i.e. the content of the previous publish. Sanitization is idempotent,
+        // so the second pass must not drift the payload by a single byte —
+        // otherwise every republish would look like a changed profile to any
+        // peer diffing it.
+        let keys = Keys::generate();
+        let md = md_from(
+            r#"{"display_name":"  Ada\u202E\nLovelace  ","lud16":"ada@wallet","bot":true}"#,
+        );
+        let first = build_metadata_event(&keys, &md, None).expect("build 1");
+        assert_eq!(
+            Metadata::from_json(&first.content)
+                .expect("metadata")
+                .display_name
+                .as_deref(),
+            Some("Ada Lovelace"),
+            "the first publish is what must already be sanitized"
+        );
+        let second = build_metadata_event(
+            &keys,
+            &md_from(&first.content),
+            Some(first.created_at.as_secs()),
+        )
+        .expect("build 2");
+        assert_eq!(
+            second.content, first.content,
+            "a republish of an already-sanitized profile changed the payload"
         );
     }
 

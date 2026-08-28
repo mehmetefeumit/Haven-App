@@ -13,23 +13,29 @@ import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/join_watcher_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
+import 'package:haven/src/providers/member_directory_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/member_directory_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/key_package_kind.dart';
+import 'package:haven/src/utils/member_pick_state.dart';
 import 'package:haven/src/utils/npub_validator.dart';
+import 'package:haven/src/widgets/circles/member_picker.dart';
 import 'package:haven/src/widgets/widgets.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Page that lets a circle admin add new members to an existing circle.
 ///
-/// Reuses the same [MemberSearchBar] + [PendingMemberTile] picker pattern
-/// as the create-circle flow but combines selection and confirmation on a
-/// single screen (no separate naming step — the circle already exists).
+/// Shares its shape with the create-circle step: a [MemberSearchField], the
+/// [MemberPickerResults] list of people already known from other circles,
+/// and the [PendingMemberTile] staging list — combined with confirmation on
+/// a single screen, because the circle already exists and there is no
+/// naming step to follow.
 class AddMemberPage extends ConsumerStatefulWidget {
   /// Creates an [AddMemberPage].
   const AddMemberPage({required this.circle, super.key});
@@ -44,6 +50,26 @@ class AddMemberPage extends ConsumerStatefulWidget {
 class _AddMemberPageState extends ConsumerState<AddMemberPage> {
   /// Selected member npubs.
   final List<String> _selectedMembers = [];
+
+  /// [_selectedMembers], mirrored as a [Set] so the picker's O(1) staged-npub
+  /// lookup never rebuilds a fresh `Set` from the list on every keystroke —
+  /// kept in sync wherever [_selectedMembers] is mutated.
+  final Set<String> _stagedNpubs = {};
+
+  /// This circle's member pubkeys, LOWER-CASED once: [resolveMemberPickState]
+  /// requires its `circleMemberPubkeysHex` already normalised, so folding
+  /// happens here — once, when the roster is known — rather than per
+  /// rendered row per keystroke. `widget.circle` does not change for the
+  /// life of this page, so this needs computing only once.
+  late final Set<String> _circleMemberPubkeysHexLower = {
+    for (final member in widget.circle.members) member.pubkey.toLowerCase(),
+  };
+
+  /// This circle's member npubs, computed once for the same reason as
+  /// [_circleMemberPubkeysHexLower].
+  late final Set<String> _circleMemberNpubs = {
+    for (final member in widget.circle.members) member.npub,
+  };
 
   /// Validation status per member.
   final Map<String, ValidationStatus> _memberStatus = {};
@@ -60,10 +86,22 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
   /// True while the add operation is in flight.
   bool _isAdding = false;
 
+  /// What is currently typed in the search field, held here because the list
+  /// beside the field is derived from it. The field itself still owns the
+  /// text that renders the caret.
+  String _query = '';
+
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     final colorScheme = Theme.of(context).colorScheme;
+
+    // Someone who shares no circles yet has nobody to pick, so the guidance
+    // is still the right content; someone who does gets rows instead of a
+    // placeholder telling them to type. Loading counts as neither.
+    final directory = ref.watch(memberDirectoryProvider);
+    final directoryIsEmpty = directory.valueOrNull?.entries.isEmpty ?? false;
+    final showGuidance = _selectedMembers.isEmpty && directoryIsEmpty;
 
     return Scaffold(
       appBar: AppBar(
@@ -95,16 +133,18 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
               child: CustomScrollView(
                 slivers: [
                   SliverToBoxAdapter(
-                    child: MemberSearchBar(
+                    child: MemberSearchField(
                       onMemberAdded: _onMemberAdded,
                       onQrScanRequested: _openQrScanner,
-                      existingMembers: _selectedMembers,
+                      onQueryChanged: (query) =>
+                          setState(() => _query = query),
+                      entryStateFor: _entryStateFor,
                     ),
                   ),
                   const SliverToBoxAdapter(
                     child: SizedBox(height: HavenSpacing.lg),
                   ),
-                  if (_selectedMembers.isNotEmpty)
+                  if (_selectedMembers.isNotEmpty) ...[
                     SliverToBoxAdapter(
                       child: Padding(
                         padding: const EdgeInsets.only(bottom: HavenSpacing.sm),
@@ -130,7 +170,20 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
                         ),
                       ),
                     ),
-                  if (_selectedMembers.isEmpty)
+                    SliverList.builder(
+                      itemCount: _selectedMembers.length,
+                      itemBuilder: _buildMemberTile,
+                    ),
+                  ],
+                  MemberPickerResults(
+                    query: _query,
+                    stagedNpubs: _stagedNpubs,
+                    circleMemberPubkeysHex: _circleMemberPubkeysHexLower,
+                    circleMemberNpubs: _circleMemberNpubs,
+                    onSelected: _onCandidateSelected,
+                    onStrangerSelected: _onMemberAdded,
+                  ),
+                  if (showGuidance)
                     SliverFillRemaining(
                       hasScrollBody: false,
                       child: Column(
@@ -145,13 +198,8 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
                         ],
                       ),
                     )
-                  else ...[
-                    SliverList.builder(
-                      itemCount: _selectedMembers.length,
-                      itemBuilder: _buildMemberTile,
-                    ),
+                  else
                     SliverToBoxAdapter(child: _buildSharingNote()),
-                  ],
                 ],
               ),
             ),
@@ -186,6 +234,21 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
       ),
     );
   }
+
+  /// Whether [npub] can be staged, answered entirely from what is already on
+  /// this device — so it holds with no network, unlike the KeyPackage-derived
+  /// check in [_validateMember] below.
+  MemberPickState _entryStateFor(String npub) {
+    return resolveEntryPickState(
+      npub,
+      stagedNpubs: _stagedNpubs,
+      circleMemberNpubs: _circleMemberNpubs,
+      selfNpub: ref.read(identityProvider).valueOrNull?.npub,
+    );
+  }
+
+  void _onCandidateSelected(MemberCandidate candidate) =>
+      _onMemberAdded(candidate.npub);
 
   Widget _buildEmptyState() {
     final l10n = AppLocalizations.of(context);
@@ -255,6 +318,7 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
   void _onMemberAdded(String npub) {
     setState(() {
       _selectedMembers.add(npub);
+      _stagedNpubs.add(npub);
       _memberStatus[npub] = ValidationStatus.validating;
     });
     _validateMember(npub);
@@ -263,6 +327,7 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
   void _onMemberRemoved(String npub) {
     setState(() {
       _selectedMembers.remove(npub);
+      _stagedNpubs.remove(npub);
       _memberStatus.remove(npub);
       _memberKeyPackages.remove(npub);
       _memberErrors.remove(npub);
@@ -273,6 +338,7 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
   void _clearAll() {
     setState(() {
       _selectedMembers.clear();
+      _stagedNpubs.clear();
       _memberStatus.clear();
       _memberKeyPackages.clear();
       _memberErrors.clear();
@@ -379,17 +445,22 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
     if (result != null && mounted) {
       final l10n = AppLocalizations.of(context);
       final npub = NpubValidator.extract(result);
-      if (npub != null && !_selectedMembers.contains(npub)) {
-        _onMemberAdded(npub);
-      } else if (npub != null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(l10n.createCircleMemberAlreadyAdded)),
-        );
-      } else {
+      if (npub == null) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text(l10n.createCircleNoIdInQr)));
+        return;
       }
+      // A scanned code is an entry, so it answers to the same three refusals
+      // as a typed one: scanning your own QR code must not stage you either.
+      final refusal = memberPickRefusalMessage(l10n, _entryStateFor(npub));
+      if (refusal != null) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(refusal)));
+        return;
+      }
+      _onMemberAdded(npub);
     }
   }
 

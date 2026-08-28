@@ -116,11 +116,7 @@ Future<void> confirmAndRemoveMember({
 /// less than the row it came from is a confirmation the user cannot check.
 @visibleForTesting
 String resolveRemovalDisplayName(WidgetRef ref, CircleMember member) {
-  final npubFallback = NpubValidator.truncate(
-    member.npub,
-    prefixLength: 12,
-    suffixLength: 6,
-  );
+  final npubFallback = NpubValidator.shortenForDisplay(member.npub);
   final profile = publicProfilesEnabled
       ? ref.read(memberProfileProvider(member.pubkey)).valueOrNull
       : null;

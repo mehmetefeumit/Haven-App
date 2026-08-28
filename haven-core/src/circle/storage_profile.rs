@@ -33,10 +33,11 @@ use rusqlite::{params, Connection, OptionalExtension};
 use zeroize::Zeroizing;
 
 use super::error::{CircleError, Result};
+use super::manager::CircleManager;
 use super::storage::CircleStorage;
 use crate::profile::types::{CachedProfile, ProfileMetadata, ProfileState};
 use crate::profile::ProfileRelaySalt;
-use crate::profile::{merge_edits, picture_is_current};
+use crate::profile::{merge_edits, picture_is_current, PICTURE_CACHE_MAX_PEOPLE};
 
 /// `user_settings` key holding the per-install profile-relay salt as 64
 /// lowercase hex characters.
@@ -62,6 +63,70 @@ const PROFILE_RELAY_SALT_KEY: &str = "profile_relay_salt_v1";
 /// a bounded number of relays no matter how long the ladder runs).
 pub const PROFILE_MISS_BACKOFF_SECS: &[i64] = &[30, 120, 480, 1_800, 21_600];
 
+/// Everything a renderer needs about one pubkey's cached profile: the row plus
+/// the two picture facts that live in a different table.
+///
+/// Produced only by [`CircleStorage::cached_profile_views`], whose whole reason
+/// to exist is to resolve all three under a single connection lock.
+#[derive(Clone, Debug)]
+pub struct CachedProfileView {
+    /// The cached kind-0 row, or an `Unknown` placeholder when none is stored.
+    pub profile: CachedProfile,
+    /// Whether cached picture bytes exist AND are still the current ones — see
+    /// [`CircleStorage::has_current_picture`] for what "current" means.
+    pub has_picture: bool,
+    /// Hex SHA-256 of those bytes, and `None` whenever [`Self::has_picture`] is
+    /// false so it can never key a decode of stale bytes.
+    pub picture_sha256_hex: Option<String>,
+}
+
+impl CachedProfileView {
+    /// The view of a pubkey with no cached kind-0.
+    ///
+    /// Deliberately identical to the view of a stored `Unknown` row: a recorded
+    /// miss and a pubkey never looked up both mean "no kind-0 resolved", and a
+    /// reader that treated them differently would be claiming knowledge the
+    /// cache does not have.
+    fn unresolved(pubkey_hex: String) -> Self {
+        Self {
+            profile: CachedProfile {
+                pubkey_hex,
+                metadata: ProfileMetadata::default(),
+                state: ProfileState::Unknown,
+                event_created_at: 0,
+                fetched_at: 0,
+            },
+            has_picture: false,
+            picture_sha256_hex: None,
+        }
+    }
+}
+
+/// Whether cached picture bytes are the CURRENT ones, or `None` when the answer
+/// depends on the staging flag.
+///
+/// The one place the currency rule lives, shared by the single-pubkey read and
+/// the batch so the two cannot disagree about whether an avatar is stale. A
+/// cached row with an EMPTY url is a locally STAGED own picture — bytes the user
+/// just chose, with no Blossom URL yet — and comparing that (nonexistent) URL
+/// against the still-old kind-0 `picture` would report it stale and blank the
+/// avatar the save was supposed to show.
+fn picture_currency(current_url: Option<&str>, cached_url: Option<&str>) -> Option<bool> {
+    if cached_url == Some("") {
+        return None;
+    }
+    Some(picture_is_current(current_url, cached_url))
+}
+
+/// Lowercase hex of a stored content hash.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut acc, b| {
+        let _ = write!(acc, "{b:02x}");
+        acc
+    })
+}
+
 /// The backoff to apply after a miss, given the author's `miss_count` *before*
 /// the increment. Saturates on the last rung of [`PROFILE_MISS_BACKOFF_SECS`].
 fn miss_backoff_secs(prior_miss_count: i64) -> i64 {
@@ -77,7 +142,13 @@ fn miss_backoff_secs(prior_miss_count: i64) -> i64 {
 impl CircleStorage {
     // ==================== kind-0 metadata cache ====================
 
-    /// Inserts or replaces a cached profile row (keyed by pubkey hex).
+    /// Inserts or replaces a cached profile row (keyed by pubkey hex), and
+    /// returns the row as it was actually STORED.
+    ///
+    /// Returning the stored row is not a convenience: the optimistic publish
+    /// path renders what this hands back, so a caller building an FFI view from
+    /// the row it assembled would render exactly the text
+    /// [`Self::write_profile_row`] had just sanitized away.
     ///
     /// This write is unconditional; callers gate freshness with
     /// [`Self::newer_than_cached`] before invoking it. A miss (no kind-0 for a
@@ -88,13 +159,12 @@ impl CircleStorage {
     ///
     /// Returns [`CircleError::Storage`] on lock poisoning and
     /// [`CircleError::Database`] on `SQLite` failure.
-    pub fn upsert_profile(&self, cached: &CachedProfile) -> Result<()> {
+    pub fn upsert_profile(&self, cached: &CachedProfile) -> Result<CachedProfile> {
         let conn = self
             .conn()
             .lock()
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
-        Self::write_profile_row(&conn, cached)?;
-        Ok(())
+        Ok(Self::write_profile_row(&conn, cached)?)
     }
 
     /// Upserts a **fetched** profile only when it should supersede the cached
@@ -150,7 +220,9 @@ impl CircleStorage {
             // Read under the SAME lock (the connection mutex is not reentrant,
             // so the public reader would deadlock here).
             match Self::read_pending_edits(&conn, &cached.pubkey_hex)? {
-                None => Self::write_profile_row(&conn, cached)?,
+                None => {
+                    Self::write_profile_row(&conn, cached)?;
+                }
                 Some(pending) => {
                     let merged = merge_edits(&cached.metadata, &pending.to_edits(None));
                     Self::write_profile_row(
@@ -184,6 +256,70 @@ impl CircleStorage {
         )
         .optional()
         .map_err(Into::into)
+    }
+
+    /// Returns the whole cached view — row plus picture facts — for a batch of
+    /// pubkey hexes, under ONE connection lock.
+    ///
+    /// Per-pubkey semantics are [`Self::get_profile`] paired with
+    /// [`Self::has_current_picture`] and
+    /// [`Self::get_profile_picture_sha256_hex`], which is what the single-pubkey
+    /// FFI read composes from three separate lock acquisitions. A caller that
+    /// wants N of them concurrently gets N blocking threads that all queue on
+    /// this connection anyway, so the batch takes the lock once and issues the
+    /// reads under it.
+    ///
+    /// One row is returned per input pubkey, in input order: a pubkey with no
+    /// cached kind-0 yields a synthesized `Unknown` row rather than being
+    /// omitted, so it is indistinguishable from the negative-cache row a
+    /// recorded miss leaves behind — which is the honest answer, since both mean
+    /// "no kind-0 resolved".
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::upsert_profile`].
+    pub fn cached_profile_views(&self, pubkeys_hex: &[String]) -> Result<Vec<CachedProfileView>> {
+        if pubkeys_hex.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        let mut stmt = conn.prepare(
+            "SELECT p.pubkey, p.metadata_json, p.state, p.event_created_at, p.fetched_at,
+                    pic.url, pic.sha256, sync.picture_staged
+             FROM profiles p
+             LEFT JOIN profile_pictures pic ON pic.pubkey = p.pubkey
+             LEFT JOIN profile_sync_state sync ON sync.pubkey = p.pubkey
+             WHERE p.pubkey = ?1",
+        )?;
+        let mut out = Vec::with_capacity(pubkeys_hex.len());
+        for pubkey_hex in pubkeys_hex {
+            let view = stmt
+                .query_row(params![pubkey_hex], |row| {
+                    let profile = Self::map_profile_row(row)?;
+                    let cached_url: Option<String> = row.get(5)?;
+                    let sha256: Option<Vec<u8>> = row.get(6)?;
+                    let staged: Option<i64> = row.get(7)?;
+                    let has_picture =
+                        picture_currency(profile.metadata.picture(), cached_url.as_deref())
+                            .unwrap_or_else(|| staged.is_some_and(|flag| flag != 0));
+                    Ok(CachedProfileView {
+                        profile,
+                        has_picture,
+                        // Paired with `has_picture` here rather than by the
+                        // caller, so no reader can key a decode of stale bytes
+                        // on a hash the currency check just rejected.
+                        picture_sha256_hex: has_picture
+                            .then(|| sha256.as_deref().map(sha256_hex))
+                            .flatten(),
+                    })
+                })
+                .optional()?;
+            out.push(view.unwrap_or_else(|| CachedProfileView::unresolved(pubkey_hex.clone())));
+        }
+        Ok(out)
     }
 
     /// Returns cached profiles for a batch of pubkey hexes (present rows only).
@@ -619,13 +755,7 @@ impl CircleStorage {
                 |r| r.get::<_, Vec<u8>>(0),
             )
             .optional()?;
-        Ok(sha256.map(|bytes| {
-            use std::fmt::Write as _;
-            bytes.iter().fold(String::new(), |mut acc, b| {
-                let _ = write!(acc, "{b:02x}");
-                acc
-            })
-        }))
+        Ok(sha256.as_deref().map(sha256_hex))
     }
 
     /// Whether cached picture bytes exist AND their recorded URL still equals the
@@ -646,10 +776,9 @@ impl CircleStorage {
     /// As [`Self::upsert_profile`].
     pub fn has_current_picture(&self, pubkey_hex: &str, current_url: Option<&str>) -> Result<bool> {
         let cached_url = self.get_profile_picture_url(pubkey_hex)?;
-        if cached_url.as_deref() == Some("") {
-            return self.profile_picture_is_staged(pubkey_hex);
-        }
-        Ok(picture_is_current(current_url, cached_url.as_deref()))
+        // Only the staged case needs the third query, so it stays lazy.
+        picture_currency(current_url, cached_url.as_deref())
+            .map_or_else(|| self.profile_picture_is_staged(pubkey_hex), Ok)
     }
 
     /// Deletes the cached picture row for a single pubkey hex (per-pubkey, unlike
@@ -851,7 +980,8 @@ impl CircleStorage {
         u8::try_from(miss_count.max(0)).unwrap_or(u8::MAX)
     }
 
-    /// Writes (insert-or-replace) a picture row on an ALREADY-LOCKED connection.
+    /// Writes (insert-or-replace) a picture row on an ALREADY-LOCKED connection,
+    /// then evicts down to [`PICTURE_CACHE_MAX_PEOPLE`].
     ///
     /// Split out of [`Self::upsert_profile_picture`] so the own-profile sync
     /// commit can re-stamp a staged row with its real Blossom URL from inside
@@ -859,6 +989,10 @@ impl CircleStorage {
     /// is not reentrant, so calling the public method there would deadlock
     /// rather than block — and duplicating the statement would give the picture
     /// row two writers that could drift apart.
+    ///
+    /// Being the single writer is also what makes it the right place for the
+    /// cap: the population can only grow here, so bounding it here bounds it
+    /// everywhere.
     pub(super) fn write_profile_picture_row(
         conn: &Connection,
         pubkey_hex: &str,
@@ -879,19 +1013,105 @@ impl CircleStorage {
                 updated_at = excluded.updated_at",
             params![pubkey_hex, url, sha256, canonical, thumbnail, updated_at],
         )?;
+        Self::prune_picture_cache(conn, pubkey_hex)
+    }
+
+    /// Evicts least-recently-used picture rows until at most
+    /// [`PICTURE_CACHE_MAX_PEOPLE`] other people's pictures remain (owner
+    /// decision D5).
+    ///
+    /// # What "recently used" means here
+    ///
+    /// `MAX(updated_at, fetched_at)` — the later of the last time these bytes
+    /// were written and the last time a relay answered for this person's
+    /// kind-0. The second half is the load-bearing one: `touch_profiles_hit`
+    /// advances `fetched_at` for exactly the authors the current refresh cycle
+    /// asked about, i.e. the people the app is currently rendering, so a
+    /// co-member seen daily keeps re-ranking even though their photo never
+    /// changes. Ranking on `updated_at` alone would evict them ahead of a
+    /// stranger whose avatar happened to be downloaded once. A person with no
+    /// `profiles` row at all sorts as `updated_at` and is evicted first, which
+    /// is the honest answer for bytes no cached identity refers to.
+    ///
+    /// # Two rows are never evicted
+    ///
+    /// * **The row just written.** A first-sight download can arrive with an
+    ///   older `fetched_at` than everyone else's, and a cache that evicts what
+    ///   it was just asked to store would re-download it forever.
+    /// * **The local user's own row**, identified by its `profile_sync_state`
+    ///   outbox row. It may hold a STAGED picture — sanitized bytes with an
+    ///   empty `url` whose Blossom upload has not landed — which exists nowhere
+    ///   else and cannot be re-downloaded; evicting it would silently discard
+    ///   the photo the user just chose, and would drop the picture arm of the
+    ///   retraction gate ([`Self::has_published_profile`]) with it. Staging
+    ///   writes the picture row BEFORE the outbox row, so on a first-ever
+    ///   staging the just-written exclusion is what protects it; both writes
+    ///   share one transaction, so no other write can interleave.
+    fn prune_picture_cache(conn: &Connection, just_written: &str) -> rusqlite::Result<()> {
+        let cached: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM profile_pictures
+              WHERE pubkey NOT IN (SELECT pubkey FROM profile_sync_state)",
+            [],
+            |r| r.get(0),
+        )?;
+        let excess = cached - i64::from(PICTURE_CACHE_MAX_PEOPLE);
+        if excess <= 0 {
+            return Ok(());
+        }
+        // Both statements run under the caller's already-held lock (and, where
+        // there is one, its transaction), so the count cannot go stale between
+        // them.
+        conn.execute(
+            "DELETE FROM profile_pictures WHERE pubkey IN (
+                 SELECT pic.pubkey
+                   FROM profile_pictures pic
+                   LEFT JOIN profiles p ON p.pubkey = pic.pubkey
+                  WHERE pic.pubkey <> ?1
+                    AND pic.pubkey NOT IN (SELECT pubkey FROM profile_sync_state)
+                  ORDER BY MAX(pic.updated_at, COALESCE(p.fetched_at, 0)) ASC,
+                           pic.pubkey ASC
+                  LIMIT ?2
+             )",
+            params![just_written, excess],
+        )?;
         Ok(())
     }
 
-    /// Writes (insert-or-replace) a profile row on an already-locked connection.
+    /// Writes (insert-or-replace) a profile row on an already-locked
+    /// connection, returning the row as it was actually stored.
     ///
     /// Shared by [`Self::upsert_profile`] (unconditional),
     /// [`Self::upsert_profile_if_newer`] (which first reads the existing row
     /// under the same lock) and the own-profile sync's staging / commit
     /// transactions, keeping the `INSERT … ON CONFLICT` SQL in one place.
+    ///
+    /// # The display-name sanitizer runs HERE
+    ///
+    /// This is the only writer of `profiles.metadata_json`, and therefore the
+    /// only point at which a name from a stranger's kind-0 becomes a row Haven
+    /// will render. The sibling writers `touch_profiles_hit` and
+    /// `record_profile_misses` both write the literal `'{}'` on INSERT and
+    /// leave `metadata_json` alone on conflict, so "one write site for the
+    /// name" is a fact about this function rather than about the table.
+    ///
+    /// Sanitizing here — rather than at each render site — is what makes it
+    /// impossible for a consumer to forget. It returns the sanitized row for
+    /// the same reason: `stage_own_profile_edits` hands its result straight to
+    /// the UI, and a returned row that differed from the stored one would be a
+    /// rendering path that skipped the sanitizer.
     pub(super) fn write_profile_row(
         conn: &rusqlite::Connection,
         cached: &CachedProfile,
-    ) -> rusqlite::Result<()> {
+    ) -> rusqlite::Result<CachedProfile> {
+        // Field by field, not `..cached.clone()`: the struct update would clone
+        // `metadata` only to drop it for the sanitized copy on the next line.
+        let cached = CachedProfile {
+            pubkey_hex: cached.pubkey_hex.clone(),
+            metadata: cached.metadata.sanitized(),
+            state: cached.state,
+            event_created_at: cached.event_created_at,
+            fetched_at: cached.fetched_at,
+        };
         let metadata_json = cached.metadata.as_metadata().as_json();
         conn.execute(
             "INSERT INTO profiles (pubkey, metadata_json, state, event_created_at, fetched_at)
@@ -909,7 +1129,7 @@ impl CircleStorage {
                 cached.fetched_at,
             ],
         )?;
-        Ok(())
+        Ok(cached)
     }
 
     /// Maps a `profiles` row to a [`CachedProfile`].
@@ -924,7 +1144,13 @@ impl CircleStorage {
         let metadata = Metadata::from_json(&metadata_json).unwrap_or_default();
         Ok(CachedProfile {
             pubkey_hex,
-            metadata: ProfileMetadata::from_metadata(metadata),
+            // Sanitized on the way OUT as well as on the way in. The write side
+            // cleans everything stored from now on; this covers the rows an
+            // upgraded install already holds, which `upsert_profile_if_newer`
+            // would decline to rewrite until a strictly newer kind-0 arrived —
+            // i.e. possibly never. The sanitizer is idempotent, so a row
+            // written by the current code passes through unchanged.
+            metadata: ProfileMetadata::from_metadata(metadata).sanitized(),
             state: ProfileState::from_db_value(state),
             event_created_at,
             fetched_at,
@@ -951,10 +1177,28 @@ impl CircleStorage {
     }
 }
 
+impl CircleManager {
+    /// See [`CircleStorage::cached_profile_views`].
+    ///
+    /// Sits beside the storage method rather than with the manager's other
+    /// profile passthroughs because the whole point of the call is the single
+    /// lock acquisition, and a caller reading it here can see what it forwards
+    /// to.
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn cached_profile_views(&self, pubkeys_hex: &[String]) -> Result<Vec<CachedProfileView>> {
+        self.storage.cached_profile_views(pubkeys_hex)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind};
+
+    use crate::avatar::StagedPicture;
 
     /// Reads the raw miss-cache columns for a pubkey (`None` when no row).
     fn miss_state(storage: &CircleStorage, pubkey_hex: &str) -> Option<(i64, i64)> {
@@ -996,6 +1240,19 @@ mod tests {
         vec![pubkey_hex.to_string()]
     }
 
+    /// The stored `metadata_json`, read WITHOUT `map_profile_row` — otherwise a
+    /// write-side assertion could be satisfied by the read-side sanitizer.
+    fn raw_metadata_json(storage: &CircleStorage, pubkey_hex: &str) -> Option<String> {
+        let conn = storage.conn().lock().unwrap();
+        conn.query_row(
+            "SELECT metadata_json FROM profiles WHERE pubkey = ?1",
+            params![pubkey_hex],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .unwrap()
+    }
+
     fn known_profile(
         pubkey_hex: &str,
         name: &str,
@@ -1010,6 +1267,113 @@ mod tests {
             event_created_at: created_at,
             fetched_at,
         }
+    }
+
+    #[test]
+    fn write_profile_row_sanitizes_every_renderable_name_it_stores() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let md = Metadata::new()
+            .display_name("Ali\u{202E}ce")
+            .name("bo\u{200B}b")
+            .custom_field("displayName", "ca\u{2066}rol")
+            .custom_field("username", "\u{0000}");
+        storage
+            .upsert_profile(&CachedProfile {
+                pubkey_hex: "aa".to_string(),
+                metadata: ProfileMetadata::from_metadata(md),
+                state: ProfileState::Known,
+                event_created_at: 1_000,
+                fetched_at: 1_000,
+            })
+            .unwrap();
+
+        let raw = raw_metadata_json(&storage, "aa").expect("row present");
+        assert!(!raw.contains('\u{202E}'), "bidi override reached the DB");
+        assert!(!raw.contains('\u{200B}'), "zero-width space reached the DB");
+        assert!(!raw.contains('\u{2066}'), "isolate reached the DB");
+        assert!(!raw.contains('\u{0000}'), "NUL reached the DB");
+
+        let got = storage.get_profile("aa").unwrap().expect("row present");
+        assert_eq!(got.metadata.display_name(), Some("Alice"));
+        assert_eq!(got.metadata.name(), Some("bob"));
+        assert_eq!(got.metadata.resolve_display_name(), Some("Alice"));
+    }
+
+    #[test]
+    fn a_row_written_before_the_sanitizer_existed_is_sanitized_on_read() {
+        // An upgraded install keeps its cached rows, and
+        // `upsert_profile_if_newer` declines to rewrite one until a strictly
+        // newer kind-0 arrives — which for an abandoned pubkey is never.
+        let storage = CircleStorage::in_memory().unwrap();
+        {
+            let conn = storage.conn().lock().unwrap();
+            conn.execute(
+                "INSERT INTO profiles (pubkey, metadata_json, state, event_created_at, fetched_at)
+                 VALUES ('aa', ?1, 1, 1000, 1000)",
+                params![r#"{"display_name":"Ali\u202Ece"}"#],
+            )
+            .unwrap();
+        }
+
+        let got = storage.get_profile("aa").unwrap().expect("row present");
+        assert_eq!(got.metadata.display_name(), Some("Alice"));
+        assert_eq!(
+            storage.get_profiles(&one("aa")).unwrap()[0]
+                .metadata
+                .display_name(),
+            Some("Alice"),
+            "the batch read shares the mapper"
+        );
+    }
+
+    #[test]
+    fn the_other_two_profile_writers_never_write_a_name() {
+        // Sanitizing in `write_profile_row` covers the whole table only because
+        // the sibling writers leave `metadata_json` alone: on conflict neither
+        // updates it, and on insert both seed an empty object.
+        let storage = CircleStorage::in_memory().unwrap();
+        storage
+            .upsert_profile(&known_profile("aa", "alice", 1, 1))
+            .unwrap();
+        storage.touch_profiles_hit(&one("aa"), 2).unwrap();
+        storage.record_profile_misses(&one("aa"), 3).unwrap();
+        assert_eq!(
+            raw_metadata_json(&storage, "aa").as_deref(),
+            Some(r#"{"name":"alice"}"#)
+        );
+
+        storage.touch_profiles_hit(&one("bb"), 2).unwrap();
+        storage.record_profile_misses(&one("cc"), 3).unwrap();
+        assert_eq!(raw_metadata_json(&storage, "bb").as_deref(), Some("{}"));
+        assert_eq!(raw_metadata_json(&storage, "cc").as_deref(), Some("{}"));
+    }
+
+    #[test]
+    fn upsert_profile_returns_the_row_it_stored() {
+        // The optimistic publish path hands this return value straight to the
+        // UI. A returned row that differed from the WRITTEN one would be a
+        // rendering path that skipped the sanitizer — the screen showing
+        // exactly the text the sanitizer had just rejected, then silently
+        // correcting itself on the next read.
+        let storage = CircleStorage::in_memory().unwrap();
+        let hostile = CachedProfile {
+            pubkey_hex: "aa".to_string(),
+            metadata: ProfileMetadata::from_metadata(
+                Metadata::new().display_name("Ada\u{202E}  Lovelace"),
+            ),
+            state: ProfileState::Known,
+            event_created_at: 1_000,
+            fetched_at: 1_000,
+        };
+
+        let returned = storage.upsert_profile(&hostile).unwrap();
+
+        assert_eq!(returned.metadata.display_name(), Some("Ada Lovelace"));
+        assert_eq!(
+            storage.get_profile("aa").unwrap().unwrap().metadata,
+            returned.metadata,
+            "returned row must equal the stored row"
+        );
     }
 
     #[test]
@@ -1060,6 +1424,205 @@ mod tests {
         assert!(got.iter().any(|p| p.pubkey_hex == "cc"));
         // Empty input short-circuits.
         assert!(storage.get_profiles(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_batch_view_answers_for_every_pubkey_in_input_order() {
+        // The picker keys its candidates by pubkey, so a batch that silently
+        // dropped the unresolved ones would make "we looked and found nothing"
+        // indistinguishable from "we never asked".
+        let storage = CircleStorage::in_memory().unwrap();
+        storage
+            .upsert_profile(&known_profile("cc", "carol", 1, 1))
+            .unwrap();
+        storage
+            .upsert_profile(&known_profile("aa", "alice", 1, 1))
+            .unwrap();
+
+        let views = storage
+            .cached_profile_views(&["aa".to_string(), "bb".to_string(), "cc".to_string()])
+            .unwrap();
+        assert_eq!(
+            views
+                .iter()
+                .map(|v| v.profile.pubkey_hex.as_str())
+                .collect::<Vec<_>>(),
+            vec!["aa", "bb", "cc"],
+            "one answer per input pubkey, in the order asked"
+        );
+        assert_eq!(views[0].profile.metadata.name(), Some("alice"));
+        assert_eq!(views[2].profile.metadata.name(), Some("carol"));
+
+        assert!(storage.cached_profile_views(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_unresolved_pubkey_reads_as_the_negative_cache_row_it_would_become() {
+        // A recorded miss and a pubkey never looked up make the same claim
+        // about the PERSON — "no kind-0 resolved" — and every renderable field
+        // must say so identically, or a blank synthesized row would read as a
+        // name somebody actually published.
+        let storage = CircleStorage::in_memory().unwrap();
+        storage.record_profile_misses(&one("bb"), 4_000).unwrap();
+
+        let views = storage
+            .cached_profile_views(&["aa".to_string(), "bb".to_string()])
+            .unwrap();
+        for (view, pubkey) in views.iter().zip(["aa", "bb"]) {
+            assert_eq!(view.profile.pubkey_hex, pubkey);
+            assert_eq!(view.profile.state, ProfileState::Unknown);
+            assert_eq!(view.profile.metadata.name(), None);
+            assert_eq!(view.profile.metadata.display_name(), None);
+            assert_eq!(view.profile.event_created_at, 0);
+            assert!(!view.has_picture);
+            assert!(view.picture_sha256_hex.is_none());
+        }
+        // The one field the two legitimately differ in is cache bookkeeping,
+        // not a claim about the person: a seeded miss carries the clock its
+        // backoff is measured from, while a pubkey with no row has no fetch to
+        // report and says `0` — the same "never" the FFI's own unresolved
+        // placeholder ships.
+        assert_eq!(views[0].profile.fetched_at, 0);
+        assert_eq!(views[1].profile.fetched_at, 4_000);
+    }
+
+    #[test]
+    fn the_batch_view_agrees_with_the_single_pubkey_reads_it_replaces() {
+        // The batch exists to take the connection lock once, not to answer
+        // differently. Every interesting picture state is compared against the
+        // three single-pubkey reads the FFI composes today.
+        let storage = CircleStorage::in_memory().unwrap();
+        let with_picture = Metadata::new()
+            .name("alice")
+            .picture(url::Url::parse("https://blossom.example/abc").unwrap());
+        storage
+            .upsert_profile(&CachedProfile {
+                pubkey_hex: "aa".to_string(),
+                metadata: ProfileMetadata::from_metadata(with_picture),
+                state: ProfileState::Known,
+                event_created_at: 1_000,
+                fetched_at: 2_000,
+            })
+            .unwrap();
+        storage
+            .upsert_profile_picture(
+                "aa",
+                "https://blossom.example/abc",
+                &[0xAB; 32],
+                b"canonical",
+                b"thumb",
+                2_000,
+            )
+            .unwrap();
+        // Bytes cached against a URL the kind-0 no longer names: stale.
+        storage
+            .upsert_profile(&known_profile("bb", "bob", 1_000, 2_000))
+            .unwrap();
+        storage
+            .upsert_profile_picture(
+                "bb",
+                "https://blossom.example/gone",
+                &[0xCD; 32],
+                b"canonical",
+                b"thumb",
+                2_000,
+            )
+            .unwrap();
+        // A locally STAGED own picture: bytes with no URL yet.
+        storage
+            .upsert_profile(&known_profile("cc", "carol", 1_000, 2_000))
+            .unwrap();
+        storage
+            .stage_own_profile_picture(
+                "cc",
+                &crate::avatar::StagedPicture::from_sanitized_cache(
+                    b"canonical".to_vec(),
+                    b"thumb".to_vec(),
+                ),
+                2_000,
+            )
+            .unwrap();
+        // No picture row at all.
+        storage
+            .upsert_profile(&known_profile("dd", "dave", 1_000, 2_000))
+            .unwrap();
+
+        let pubkeys = vec![
+            "aa".to_string(),
+            "bb".to_string(),
+            "cc".to_string(),
+            "dd".to_string(),
+            "ee".to_string(),
+        ];
+        for (view, pubkey) in storage
+            .cached_profile_views(&pubkeys)
+            .unwrap()
+            .iter()
+            .zip(&pubkeys)
+        {
+            let single = storage.get_profile(pubkey).unwrap();
+            let expected_has_picture = single.as_ref().is_some_and(|cached| {
+                storage
+                    .has_current_picture(pubkey, cached.metadata.picture())
+                    .unwrap()
+            });
+            assert_eq!(
+                view.has_picture, expected_has_picture,
+                "has_picture disagreed for {pubkey}"
+            );
+            assert_eq!(
+                view.picture_sha256_hex,
+                expected_has_picture
+                    .then(|| storage.get_profile_picture_sha256_hex(pubkey).unwrap())
+                    .flatten(),
+                "picture hash disagreed for {pubkey}"
+            );
+            if let Some(cached) = single {
+                assert_eq!(view.profile.metadata.name(), cached.metadata.name());
+                assert_eq!(view.profile.state, cached.state);
+                assert_eq!(view.profile.fetched_at, cached.fetched_at);
+                assert_eq!(view.profile.event_created_at, cached.event_created_at);
+            }
+        }
+    }
+
+    #[test]
+    fn a_stale_picture_hash_can_never_ride_along_with_stale_bytes() {
+        // `has_picture` false means the cached bytes are NOT what the member's
+        // kind-0 currently names, so shipping their hash would let the avatar
+        // layer key its decode cache on bytes it must not draw.
+        let storage = CircleStorage::in_memory().unwrap();
+        storage
+            .upsert_profile(&known_profile("aa", "alice", 1_000, 2_000))
+            .unwrap();
+        storage
+            .upsert_profile_picture(
+                "aa",
+                "https://blossom.example/gone",
+                &[0xAB; 32],
+                b"canonical",
+                b"thumb",
+                2_000,
+            )
+            .unwrap();
+
+        let view = storage
+            .cached_profile_views(&one("aa"))
+            .unwrap()
+            .pop()
+            .expect("one answer per input pubkey");
+        assert!(!view.has_picture, "the cached URL is not the current one");
+        assert!(
+            view.picture_sha256_hex.is_none(),
+            "the hash of bytes that must not be drawn may not cross the boundary"
+        );
+        assert!(
+            storage
+                .get_profile_picture_sha256_hex("aa")
+                .unwrap()
+                .is_some(),
+            "the hash IS stored — this test is about what the view exports"
+        );
     }
 
     #[test]
@@ -1136,6 +1699,292 @@ mod tests {
         // Missing → None.
         assert!(storage.get_profile_picture("bb").unwrap().is_none());
         assert!(storage.get_profile_thumbnail("bb").unwrap().is_none());
+    }
+
+    // ==================== Picture-cache cap (owner decision D5) ====================
+
+    /// A distinct, realistic 32-byte pubkey hex.
+    fn pk(i: u32) -> String {
+        format!("{i:064x}")
+    }
+
+    /// Caches a picture for `pubkey_hex` through the public writer, with
+    /// per-pubkey bytes so an eviction cannot be mistaken for an overwrite.
+    fn put_picture(storage: &CircleStorage, pubkey_hex: &str, updated_at: i64) {
+        storage
+            .upsert_profile_picture(
+                pubkey_hex,
+                &format!("https://blossom.example/{pubkey_hex}"),
+                &[0xAB; 32],
+                format!("canonical-{pubkey_hex}").as_bytes(),
+                format!("thumb-{pubkey_hex}").as_bytes(),
+                updated_at,
+            )
+            .unwrap();
+    }
+
+    /// Every pubkey with cached picture bytes, ascending.
+    fn cached_picture_pubkeys(storage: &CircleStorage) -> Vec<String> {
+        let conn = storage.conn().lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT pubkey FROM profile_pictures ORDER BY pubkey")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        rows
+    }
+
+    /// Fills the cache to exactly the cap, oldest first: `pk(0)` is the least
+    /// recently used and `pk(CAP - 1)` the most.
+    fn fill_to_cap(storage: &CircleStorage) {
+        for i in 0..PICTURE_CACHE_MAX_PEOPLE {
+            put_picture(storage, &pk(i), 1_000 + i64::from(i));
+        }
+    }
+
+    #[test]
+    fn the_capacity_plus_one_th_picture_evicts_exactly_the_least_recently_used_one() {
+        let storage = CircleStorage::in_memory().unwrap();
+        fill_to_cap(&storage);
+        assert_eq!(
+            cached_picture_pubkeys(&storage).len(),
+            PICTURE_CACHE_MAX_PEOPLE as usize
+        );
+
+        put_picture(&storage, &pk(PICTURE_CACHE_MAX_PEOPLE), 9_000);
+
+        // Exactly one row left: the oldest. Everything else — including the
+        // newcomer — is still there, byte for byte.
+        let mut expected: Vec<String> = (1..=PICTURE_CACHE_MAX_PEOPLE).map(pk).collect();
+        expected.sort();
+        assert_eq!(cached_picture_pubkeys(&storage), expected);
+        for i in 1..=PICTURE_CACHE_MAX_PEOPLE {
+            assert_eq!(
+                &*storage.get_profile_picture(&pk(i)).unwrap().unwrap(),
+                format!("canonical-{}", pk(i)).as_bytes(),
+                "{} must be untouched",
+                pk(i)
+            );
+        }
+    }
+
+    #[test]
+    fn an_eviction_removes_the_bytes_rather_than_hiding_them() {
+        let storage = CircleStorage::in_memory().unwrap();
+        fill_to_cap(&storage);
+        put_picture(&storage, &pk(PICTURE_CACHE_MAX_PEOPLE), 9_000);
+
+        let evicted = pk(0);
+        assert!(storage.get_profile_picture(&evicted).unwrap().is_none());
+        assert!(storage.get_profile_thumbnail(&evicted).unwrap().is_none());
+        assert!(storage.get_profile_picture_url(&evicted).unwrap().is_none());
+        assert!(storage
+            .get_profile_picture_sha256_hex(&evicted)
+            .unwrap()
+            .is_none());
+        // And no row is merely blanked: SQLCipher only stops storing the
+        // plaintext once the row is gone.
+        let conn = storage.conn().lock().unwrap();
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM profile_pictures WHERE pubkey = ?1",
+                params![evicted],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn an_eviction_keeps_the_cached_name_and_lets_the_avatar_be_re_downloaded() {
+        // The kind-0 row is not part of the picture cache: evicting bytes must
+        // cost an avatar re-download, never a member's resolved NAME.
+        let storage = CircleStorage::in_memory().unwrap();
+        let evicted = pk(0);
+        let md = Metadata::new()
+            .name("Ada")
+            .picture(nostr::Url::parse(&format!("https://blossom.example/{evicted}")).unwrap());
+        storage
+            .upsert_profile(&CachedProfile {
+                pubkey_hex: evicted.clone(),
+                metadata: ProfileMetadata::from_metadata(md),
+                state: ProfileState::Known,
+                event_created_at: 10,
+                fetched_at: 10,
+            })
+            .unwrap();
+        fill_to_cap(&storage);
+        // Before the eviction the avatar is genuinely current, so the
+        // post-eviction assertion below cannot pass vacuously.
+        assert!(storage.cached_profile_views(&one(&evicted)).unwrap()[0].has_picture);
+
+        put_picture(&storage, &pk(PICTURE_CACHE_MAX_PEOPLE), 9_000);
+
+        let view = storage.cached_profile_views(&one(&evicted)).unwrap();
+        assert_eq!(view[0].profile.metadata.name(), Some("Ada"));
+        assert!(
+            !view[0].has_picture,
+            "an evicted avatar must read as absent, so the Dart gate re-downloads it"
+        );
+        assert!(view[0].picture_sha256_hex.is_none());
+    }
+
+    #[test]
+    fn the_cache_never_exceeds_the_cap_however_many_people_are_seen() {
+        let storage = CircleStorage::in_memory().unwrap();
+        for i in 0..(PICTURE_CACHE_MAX_PEOPLE * 4) {
+            put_picture(&storage, &pk(i), 1_000 + i64::from(i));
+            assert!(
+                cached_picture_pubkeys(&storage).len() <= PICTURE_CACHE_MAX_PEOPLE as usize,
+                "cap exceeded after {} insertions",
+                i + 1
+            );
+        }
+        assert_eq!(
+            cached_picture_pubkeys(&storage).len(),
+            PICTURE_CACHE_MAX_PEOPLE as usize
+        );
+    }
+
+    #[test]
+    fn a_cache_already_over_the_cap_is_pruned_all_the_way_down_in_one_write() {
+        // The shape of an install upgraded from before the cap existed: the
+        // first picture write must bring it back inside the bound, not shave
+        // one row off it.
+        let storage = CircleStorage::in_memory().unwrap();
+        {
+            // Straight to SQL, bypassing the capped writer.
+            let conn = storage.conn().lock().unwrap();
+            for i in 0..500 {
+                conn.execute(
+                    "INSERT INTO profile_pictures
+                         (pubkey, url, sha256, canonical, thumbnail, updated_at)
+                     VALUES (?1, 'https://blossom.example/x', ?2, ?3, ?4, ?5)",
+                    params![
+                        pk(i),
+                        &[0xABu8; 32][..],
+                        b"c".as_slice(),
+                        b"t".as_slice(),
+                        1_000 + i64::from(i)
+                    ],
+                )
+                .unwrap();
+            }
+        }
+        put_picture(&storage, &pk(9_999), 9_000);
+        assert_eq!(
+            cached_picture_pubkeys(&storage).len(),
+            PICTURE_CACHE_MAX_PEOPLE as usize
+        );
+    }
+
+    #[test]
+    fn eviction_never_takes_the_row_it_was_just_asked_to_store() {
+        // A first-sight download can carry an older stamp than everything
+        // already cached. A cache that evicted it would re-download forever.
+        let storage = CircleStorage::in_memory().unwrap();
+        for i in 0..PICTURE_CACHE_MAX_PEOPLE {
+            put_picture(&storage, &pk(i), 5_000 + i64::from(i));
+        }
+        let newcomer = pk(PICTURE_CACHE_MAX_PEOPLE);
+        put_picture(&storage, &newcomer, 1);
+
+        assert!(storage.get_profile_picture(&newcomer).unwrap().is_some());
+        // The oldest of the OTHERS went instead.
+        assert!(storage.get_profile_picture(&pk(0)).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_person_the_refresh_cycle_still_answers_for_outranks_a_stale_download() {
+        // `touch_profiles_hit` is the recency signal: a co-member whose photo
+        // never changes but whose kind-0 is still being resolved must outrank
+        // one whose bytes are newer but who nobody asks about any more.
+        let storage = CircleStorage::in_memory().unwrap();
+        fill_to_cap(&storage);
+        storage.touch_profiles_hit(&one(&pk(0)), 9_000).unwrap();
+
+        put_picture(&storage, &pk(PICTURE_CACHE_MAX_PEOPLE), 5_000);
+
+        assert!(
+            storage.get_profile_picture(&pk(0)).unwrap().is_some(),
+            "the oldest DOWNLOAD is not the least recently used person"
+        );
+        assert!(storage.get_profile_picture(&pk(1)).unwrap().is_none());
+    }
+
+    #[test]
+    fn the_own_staged_picture_is_never_evicted() {
+        // Staged bytes exist NOWHERE else — the Blossom upload has not landed,
+        // so there is no URL to re-download them from. Evicting them would
+        // silently discard the photo the user just chose.
+        let storage = CircleStorage::in_memory().unwrap();
+        let own = Keys::generate().public_key().to_hex();
+        storage
+            .stage_own_profile_picture(
+                &own,
+                &StagedPicture::from_sanitized_cache(
+                    b"own-canonical".to_vec(),
+                    b"own-thumb".to_vec(),
+                ),
+                100,
+            )
+            .unwrap();
+
+        for i in 0..(PICTURE_CACHE_MAX_PEOPLE * 2) {
+            put_picture(&storage, &pk(i), 1_000 + i64::from(i));
+        }
+
+        assert_eq!(
+            &*storage.get_profile_picture(&own).unwrap().unwrap(),
+            b"own-canonical"
+        );
+        assert!(storage.profile_picture_is_staged(&own).unwrap());
+        // The own row rides ON TOP of the cap rather than consuming a slot.
+        assert_eq!(
+            cached_picture_pubkeys(&storage).len(),
+            PICTURE_CACHE_MAX_PEOPLE as usize + 1
+        );
+    }
+
+    #[test]
+    fn eviction_never_disarms_the_retraction_gate() {
+        // The own picture with a REAL url is one of the three arms of
+        // `has_published_profile`. Evicting it would turn the retraction
+        // actions into no-ops for a user who does have something to retract.
+        let storage = CircleStorage::in_memory().unwrap();
+        let keys = Keys::generate();
+        let own = keys.public_key().to_hex();
+        storage
+            .stage_own_profile_picture(
+                &own,
+                &StagedPicture::from_sanitized_cache(
+                    b"own-canonical".to_vec(),
+                    b"own-thumb".to_vec(),
+                ),
+                100,
+            )
+            .unwrap();
+        // What the sync commit's re-stamp does: same writer, real Blossom URL.
+        put_picture(&storage, &own, 100);
+        assert!(storage.has_published_profile(&keys.public_key()).unwrap());
+
+        for i in 0..(PICTURE_CACHE_MAX_PEOPLE * 2) {
+            put_picture(&storage, &pk(i), 1_000 + i64::from(i));
+        }
+        // Eviction really did run — otherwise the assertion below would hold
+        // for a cache that never evicts anything.
+        assert_eq!(
+            cached_picture_pubkeys(&storage).len(),
+            PICTURE_CACHE_MAX_PEOPLE as usize + 1
+        );
+
+        assert!(
+            storage.has_published_profile(&keys.public_key()).unwrap(),
+            "the picture arm of the retraction gate must survive eviction"
+        );
     }
 
     #[test]

@@ -111,22 +111,10 @@ class AppLocalizationsFr extends AppLocalizations {
   String get onboardingValueProp1Title => 'Seuls vos cercles peuvent vous voir';
 
   @override
-  String get onboardingValueProp1Body =>
-      'Votre position est chiffrée sur votre appareil avant de le quitter, de sorte que seuls les cercles que vous choisissez peuvent la lire, jamais Haven ni qui que ce soit d\'autre. Comme Haven est open source, chacun peut le vérifier.';
-
-  @override
   String get onboardingValueProp2Title => 'Personne ne peut le fermer';
 
   @override
-  String get onboardingValueProp2Body =>
-      'Haven n\'a pas de serveur central. Vos messages chiffrés transitent par des serveurs indépendants appelés relais, et vous choisissez lesquels utiliser. Aucune entreprise ni aucun gouvernement ne peut à lui seul éteindre le réseau.';
-
-  @override
   String get onboardingValueProp3Title => 'Aucun compte requis';
-
-  @override
-  String get onboardingValueProp3Body =>
-      'Pas d\'e-mail, pas de numéro de téléphone, pas d\'inscription. Haven crée une identité dont la clé secrète ne quitte jamais votre téléphone : il n\'existe donc aucun compte que quiconque pourrait remettre à un tiers.';
 
   @override
   String get onboardingValueProp1Summary =>
@@ -214,26 +202,13 @@ class AppLocalizationsFr extends AppLocalizations {
   String get settingsIdentityTitle => 'Identité';
 
   @override
-  String get settingsIdentitySubtitle => 'Profil, clés et partage de photo';
-
-  @override
   String get settingsRelaysTitle => 'Relais';
-
-  @override
-  String get settingsRelaysSubtitle => 'Là où les invitations vous parviennent';
 
   @override
   String get settingsLocationTitle => 'Position';
 
   @override
-  String get settingsLocationSubtitle =>
-      'Partage en arrière-plan et autorisations';
-
-  @override
   String get settingsMapStyleTitle => 'Style de carte';
-
-  @override
-  String get settingsAppearanceSubtitle => 'Thème et langue';
 
   @override
   String get settingsAboutTitle => 'À propos';
@@ -524,10 +499,6 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get privacyTitle => 'Confidentialité';
-
-  @override
-  String get privacySubtitle =>
-      'Comment Haven fonctionne et ce que les autres voient';
 
   @override
   String get privacyHubSummary =>
@@ -948,9 +919,6 @@ class AppLocalizationsFr extends AppLocalizations {
   String get createCircleNoValidMembers => 'Aucun membre valide à inviter';
 
   @override
-  String get createCircleMemberAlreadyAdded => 'Membre déjà ajouté';
-
-  @override
   String get createCircleNoIdInQr =>
       'Aucun identifiant valide trouvé dans le code QR';
 
@@ -1144,9 +1112,6 @@ class AppLocalizationsFr extends AppLocalizations {
   String get qrScannerScanning => 'Analyse...';
 
   @override
-  String get circleMemberInvitationPending => 'Invitation en attente';
-
-  @override
   String get circleMemberNoRecentLocation => 'Aucune position récente';
 
   @override
@@ -1181,9 +1146,6 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get circleMemberAdmin => 'Admin';
-
-  @override
-  String get circleMemberHintPending => 'invitation en attente';
 
   @override
   String get circleMemberHintNoLocation => 'aucune position disponible';
@@ -1243,6 +1205,56 @@ class AppLocalizationsFr extends AppLocalizations {
   String get memberSearchAlreadyAdded => 'Membre déjà ajouté';
 
   @override
+  String get memberPickerSectionRoster => 'Membres de vos cercles';
+
+  @override
+  String get memberPickerTierRoster => 'Membre de vos cercles';
+
+  @override
+  String get memberPickerNoMatches => 'Aucun résultat dans vos cercles';
+
+  @override
+  String get memberPickerLoading => 'Chargement des membres de vos cercles';
+
+  @override
+  String get memberPickerDirectoryUnavailable =>
+      'Pour le moment, impossible de charger la liste des membres de vos cercles';
+
+  @override
+  String memberPickerMatchesAnnouncement(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return 'Résultats : $countString';
+  }
+
+  @override
+  String get memberPickerReasonSelf => 'C\'est votre propre identifiant';
+
+  @override
+  String get memberPickerReadPublicKey => 'Lire la clé publique à voix haute';
+
+  @override
+  String get memberPickerSectionRecent => 'Récemment dans vos cercles';
+
+  @override
+  String get memberPickerTierRecent => 'Récemment dans vos cercles';
+
+  @override
+  String get memberPickerNicknameNote =>
+      'Votre surnom pour cette personne, pas son nom public';
+
+  @override
+  String memberPickerCollisionCircleLabel(String circleName) {
+    return 'Cercle : $circleName';
+  }
+
+  @override
+  String get memberPickerStrangerLookupNote =>
+      'Haven a demandé à un relais le nom publié de cette personne. Ce relais peut voir que cet appareil vient de se renseigner sur cette clé, mais la demande ne porte aucune signature : elle n\'est donc pas associée à votre identité Haven. Aucune photo n\'a encore été téléchargée.';
+
+  @override
   String selectedMembersMore(int count) {
     final intl.NumberFormat countNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
@@ -1252,53 +1264,26 @@ class AppLocalizationsFr extends AppLocalizations {
   }
 
   @override
-  String get invitationStatusPending => 'Invitation en attente';
+  String get invitationCardHeading => 'Invitation à rejoindre un cercle';
 
   @override
-  String get invitationStatusActive => 'Actif';
-
-  @override
-  String get invitationStatusDeclined => 'Refusée';
-
-  @override
-  String invitationStatusSemantics(String label) {
-    return 'Statut de l\'invitation : $label';
-  }
-
-  @override
-  String invitationCardSemantics(String circleName, String inviter, int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    return 'Invitation à rejoindre $circleName, invité par $inviter, $countString membres';
+  String invitationCardSemantics(String inviter) {
+    return 'Invitation à rejoindre un cercle, envoyée par $inviter';
   }
 
   @override
   String invitationCardInvitedBySemantics(String inviter) {
-    return 'Invité par l\'identifiant cryptographique $inviter';
+    return 'Invitation envoyée par l\'identifiant cryptographique $inviter';
   }
 
   @override
   String invitationCardInvitedBy(String inviter) {
-    return 'Invité par : $inviter';
+    return 'Envoyée par : $inviter';
   }
 
   @override
-  String invitationCardMemberCount(int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    String _temp0 = intl.Intl.pluralLogic(
-      count,
-      locale: localeName,
-      other: '$countString membres',
-      many: '$countString membres',
-      one: '$countString membre',
-    );
-    return '$_temp0';
-  }
+  String get invitationCardNicknameNote =>
+      'Votre surnom pour cette personne, pas son nom public';
 
   @override
   String get invitationCardJustNow => 'À l\'instant';
@@ -1886,37 +1871,6 @@ class AppLocalizationsFr extends AppLocalizations {
   @override
   String get profileSyncStatusRetrySemantics =>
       'Réessayer de publier votre profil';
-
-  @override
-  String keyDisplayCopiedToClipboard(String label) {
-    return '$label copié dans le presse-papiers';
-  }
-
-  @override
-  String keyDisplaySemantics(String label, String state) {
-    return '$label : $state';
-  }
-
-  @override
-  String get keyDisplayStateRevealed => 'révélée';
-
-  @override
-  String get keyDisplayStateHidden => 'masquée';
-
-  @override
-  String get keyDisplayHideTooltip => 'Masquer';
-
-  @override
-  String get keyDisplayRevealTooltip => 'Révéler';
-
-  @override
-  String get keyDisplayCopyTooltip => 'Copier';
-
-  @override
-  String get keyDisplayCompactCopied => 'Clé copiée dans le presse-papiers';
-
-  @override
-  String get keyDisplayCompactTapToCopy => 'Appuyez pour copier';
 
   @override
   String get npubQrCopiedSnack => 'Clé publique copiée dans le presse-papiers';

@@ -3,6 +3,14 @@
   "pinned_dependencies": {
     "mdk_rev": "e391adc133a9b60e420da7a0446f014a180ac8d2"
   },
+  "ratchet_override": {
+    "reason": "The About page's three value-prop cards were removed at the owner's request, and the *Body strings they rendered had no other surface, so they were deleted from all 13 ARB files rather than left as dead copy the manifest still claims. No promise is retired: each of the three invariants keeps the Title and Summary keys that make the same claim on the onboarding intro screen, and every cited test and guard is unchanged. Delete this block in the next commit that touches the manifest — once this lands on the base ref the drop is no longer a diff, and a stale allowance fails the ratchet.",
+    "items": [
+      "INV-K-SECRET-KEY-NEVER-LEAVES-DEVICE.assertion:onboardingValueProp3Body",
+      "INV-O-ENCRYPTED-ON-DEVICE-BEFORE-IT-LEAVES.assertion:onboardingValueProp1Body",
+      "INV-O-NO-FIRST-PARTY-SERVER.assertion:onboardingValueProp2Body"
+    ]
+  },
   "accepted_deviations": [
     {
       "id": "P1",
@@ -97,7 +105,6 @@
   ],
   "non_claim_arb_keys": {
     "privacyTitle": "Page title on the Privacy hub; no factual claim.",
-    "privacySubtitle": "One-line hub subtitle; describes what the section covers, asserts nothing.",
     "privacyGroupBasicsHeading": "Section grouping heading; no factual claim.",
     "privacyGroupHowLocationTravelsHeading": "Section grouping heading; no factual claim.",
     "privacyGroupTheLimitsHeading": "Section grouping heading; no factual claim.",
@@ -2065,7 +2072,6 @@
       "assertion_arb_keys": [
         "privacyYourKeysSecretStaysHere",
         "onboardingCreateIdentityBody",
-        "onboardingValueProp3Body",
         "onboardingValueProp3Summary"
       ],
       "disclosure_arb_keys": [
@@ -3155,6 +3161,141 @@
       ]
     },
     {
+      "id": "INV-D-DIRECTORY-HOLDS-NO-CIRCLE-IDENTIFIER",
+      "title": "The member directory records people, never which circle they came from",
+      "statement": "member_directory carries exactly six columns — pubkey, is_current, last_shared_day, tier, rank_key, purge_after — and is WITHOUT ROWID, so it stores no implicit arrival-order counter either; no statement naming that table may also name a circle, group or MLS identifier; sync_co_members writes the UNION across all circles in one pass, so no row is attributable to a circle even by write timing. This becomes false if the table gains such a column by DDL or by a migration ALTER, if it regains a rowid (each pass inserts its NEW pubkeys in sorted order, so a descending pubkey step between consecutive rowids marks a batch boundary — a circle's roster), if a companion table re-creates the person-to-circle join beside it, or if a second writer outside the directory storage module inserts one.",
+      "status": "ratcheted",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "doc_anchors": [],
+      "symbols": [
+        {
+          "file": "haven-core/src/circle/storage_member_directory.rs",
+          "symbol": "sync_co_members"
+        },
+        {
+          "file": "haven-core/src/circle/manager.rs",
+          "symbol": "reconcile_member_directory"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/circle/storage_member_directory.rs",
+          "name": "member_directory_has_no_circle_or_group_column"
+        },
+        {
+          "file": "haven-core/src/circle/storage_member_directory.rs",
+          "name": "the_union_is_stamped_current_and_never_purged"
+        },
+        {
+          "file": "haven-core/src/circle/storage_member_directory.rs",
+          "name": "a_pubkey_dropping_out_of_the_union_ages_out_rather_than_vanishing"
+        },
+        {
+          "file": "haven-core/src/circle/storage_member_directory.rs",
+          "name": "member_directory_stores_no_arrival_order"
+        },
+        {
+          "file": "haven-core/src/circle/storage_member_directory.rs",
+          "name": "a_database_created_before_without_rowid_is_rebuilt_on_open"
+        },
+        {
+          "file": "haven-core/src/circle/manager.rs",
+          "name": "the_union_spans_every_circle_in_one_pass"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_member_directory_privacy.sh"
+      ],
+      "residual": "NO CIRCLE IDENTIFIER IS STORED; a limited circle inference is still available to an adversary holding the decrypted database. Everyone who leaves in the same day bucket freezes on the same last_shared_day, so a departure COHORT is visible, and for a user with few circles that cohort often IS one circle's roster. Day bucketing raises the cost of that re-partition and does not eliminate it (docs/MEMBER_PICKER_PLAN.md §6.1, which drops first_seen_day AND updated_day — the two columns that carried departure timing — along with second-granularity stamps and, since the WITHOUT ROWID conversion, the implicit rowid, precisely because each of them made it cheap). The bucket does not cross the FFI either: DirectoryEntryFfi carries pubkey_hex, npub and tier and nothing else, so the cohort stamp is legible only to someone reading the decrypted table directly, never to the UI layer. Scope: for CURRENT circles the same adversary can already read the full partition out of the engine's session.sqlite, so the directory only adds partition information for circles whose other rows delete_circle has already cascaded away."
+    },
+    {
+      "id": "INV-D-DIRECTORY-RETENTION-BOUNDED",
+      "title": "A departed co-member is deleted from the directory three days later",
+      "statement": "DIRECTORY_RETENTION_DAYS is 3 (259 200 s, owner decision D3, reduced from a drafted 7); a co-member absent from the union freezes at purge_after = (last_shared_day + 3) * 86400 and is removed by prune_expired_directory_members DELETING the row, never by a read hiding it, and a deliberate removal in either direction deletes the row immediately. The deadline binds the DISK, not only the display: the purge runs at every process start (CircleManager::new, a bare DELETE needing no MLS session and no roster read), inside the ranked read's own transaction before it selects, and in every reconcile — so the three days hold on an install that never opens the picker and never reconciles. Every one of those sweeps is the same comparison against the DEVICE WALL CLOCK — chrono::Utc::now() at process start, DateTime.now() marshalled as now_unix_secs for the ranked read and the reconcile — with no monotonic floor anywhere in the path, so the deadline binds only while that clock does. This becomes false if the constant changes, if an expired row is filtered out of a read instead of deleted, or if any of those three sweeps stops running.",
+      "status": "ratcheted",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "doc_anchors": [],
+      "symbols": [
+        {
+          "file": "haven-core/src/circle/storage_member_directory.rs",
+          "symbol": "DIRECTORY_RETENTION_DAYS"
+        },
+        {
+          "file": "haven-core/src/circle/storage_member_directory.rs",
+          "symbol": "prune_expired_directory_members"
+        },
+        {
+          "file": "haven-core/src/circle/manager.rs",
+          "symbol": "sweep_expired_directory_members"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/circle/storage_member_directory.rs",
+          "name": "retention_is_the_owner_decided_three_days"
+        },
+        {
+          "file": "haven-core/src/circle/storage_member_directory.rs",
+          "name": "retention_ends_exactly_three_days_after_the_last_shared_day"
+        },
+        {
+          "file": "haven-core/src/circle/storage_member_directory.rs",
+          "name": "expired_rows_are_deleted_by_the_purge_not_hidden_by_the_read"
+        },
+        {
+          "file": "haven-core/src/circle/storage_member_directory.rs",
+          "name": "explicit_removal_deletes_the_row_immediately"
+        },
+        {
+          "file": "haven-core/src/circle/storage_member_directory.rs",
+          "name": "a_departure_noticed_late_does_not_extend_retention"
+        },
+        {
+          "file": "haven-core/src/circle/storage_member_directory.rs",
+          "name": "an_idle_install_erases_an_expired_row_on_the_ranked_read_alone"
+        },
+        {
+          "file": "haven-core/src/circle/manager.rs",
+          "name": "opening_the_manager_erases_a_row_no_reconcile_would_have_reached"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_member_directory_privacy.sh"
+      ],
+      "residual": "TWO RESIDUALS, BOTH IRREDUCIBLE AT THIS LAYER. (1) THE DEADLINE IS ENFORCED BY THREE ON-DEMAND SWEEPS, NOT BY A TIMER. An expired row is deleted at the next process start, at the next ranked read, or at the next reconcile — whichever comes first — and no read can return one, because the read sweeps inside its own transaction before it selects. What remains is the interval between the deadline and the next of those events on a device where the app never runs at all: the row is still on disk, unread by anything, until the process that would read it starts and erases it first. (2) THE CLOCK IS UNTRUSTED IN BOTH DIRECTIONS, and there is no monotonic floor anywhere in the path. A forward jump purges EARLY, which costs recent contacts and is self-healing for current members. A BACKWARD jump is the mirror case and is worse for the promise: purge_expired is DELETE ... WHERE purge_after < ?1, so a rolled-back clock makes every one of the three sweeps a no-op — expiry is not delayed but suspended — and because the ranked read's in-transaction sweep is that same comparison, a row past its window stays both STORED and RETURNABLE for as long as the clock reads earlier than its deadline. Closing this needs a trusted clock: SQLCipher offers no monotonic counter and a boot-relative clock does not survive a reboot, so it is stated rather than fixed. It is stated because a disclosure claiming a fixed window depends on it — and that copy (owner decision D6) is DEFERRED with the Settings privacy page pending a major overhaul, not merely unwritten, which is why this entry carries no disclosure key. The copy-tie test that would pin the wording to DIRECTORY_RETENTION_DAYS is deferred with it, so until the overhaul nothing mechanically prevents the constant and the eventual copy from drifting; the constant itself stays test-enforced (retention_is_the_owner_decided_three_days). The drafted paragraph and its clause-by-clause constraints are preserved in docs/MEMBER_PICKER_PLAN.md D6."
+    },
+    {
+      "id": "INV-D-DIRECTORY-NEVER-LEAVES-SQLCIPHER",
+      "title": "The member directory exists only inside the encrypted circles.db",
+      "statement": "The directory is stored only as rows in the SQLCipher-encrypted circles.db whose key lives in the platform keyring, and in no SharedPreferences/NSUserDefaults entry, flutter_secure_storage item or sidecar file — so deleting the circles.db file set on this device destroys it, which is the whole of the logout guarantee. This becomes false if any Rust, Dart or native path gives those rows a second home the logout deletion does not reach. The Dart half of the guard scans the directory surface discovered BOTH by filename convention and by import closure over the row/staged-pick/query-fold modules — a convention-only scan left member_avatar.dart, search_fold.dart, create_circle_page.dart and add_member_page.dart outside it, so a preferences write from any of them would have passed.",
+      "status": "enforced",
+      "assertion_arb_keys": [],
+      "disclosure_arb_keys": [],
+      "non_arb_claims": [],
+      "doc_anchors": [
+        "haven-core/SECURITY.md#database-encryption"
+      ],
+      "symbols": [
+        {
+          "file": "haven-core/src/circle/storage_member_directory.rs",
+          "symbol": "ranked_directory_members"
+        }
+      ],
+      "tests": [
+        {
+          "file": "haven-core/src/circle/storage_member_directory.rs",
+          "name": "the_member_directory_does_not_outlive_the_circles_db_file"
+        }
+      ],
+      "guards": [
+        "scripts/ci/check_member_directory_privacy.sh"
+      ]
+    },
+    {
       "id": "INV-D-SCREENSHOTS-BLOCKED-ON-ANDROID",
       "title": "FLAG_SECURE covers every Activity in the Android process",
       "statement": "HavenApplication.onCreate registers an activity-lifecycle callback that SETS FLAG_SECURE in onActivityCreated, no Activity sets it per-Activity, and the manifest still names HavenApplication — so the block covers the photo-crop Activity and any future plugin Activity, not just MainActivity. This becomes false if any one of those four links is removed.",
@@ -3308,7 +3449,6 @@
       "status": "enforced",
       "assertion_arb_keys": [
         "onboardingValueProp1Title",
-        "onboardingValueProp1Body",
         "onboardingValueProp1Summary"
       ],
       "disclosure_arb_keys": [],
@@ -3338,10 +3478,9 @@
       "title": "Haven runs no server of its own for circle traffic",
       "statement": "Publishes target exactly the user's own relay list and the live-sync engine connects only to configured relays, never a gossip-discovered one — there is no Haven-operated endpoint in the location path. This becomes false if any publisher or engine client acquires a hardcoded first-party destination.",
       "status": "ratcheted",
-      "residual": "The 'you choose which ones to use' half is NOT true of the whole app: the eight profile relays and six discovery relays are contacted unconditionally and cannot be removed (INV-P-P3), the Blossom host is hardcoded to blossom.primal.net, and the tile provider is hardcoded to Stadia. Nothing fails if that gap widens. See the report's copy-defect section — onboardingValueProp2Body directly contradicts privacyRelaysDetailIndexers.",
+      "residual": "The 'you choose which ones to use' half is NOT true of the whole app: the eight profile relays and six discovery relays are contacted unconditionally and cannot be removed (INV-P-P3), the Blossom host is hardcoded to blossom.primal.net, and the tile provider is hardcoded to Stadia. Nothing fails if that gap widens. See the report's copy-defect section — onboardingValueProp2Summary's 'a relay network you choose' contradicts privacyRelaysDetailIndexers.",
       "assertion_arb_keys": [
         "onboardingValueProp2Title",
-        "onboardingValueProp2Body",
         "onboardingValueProp2Summary",
         "relaySettingsBackendCaption",
         "aboutHeroTagline"

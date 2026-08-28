@@ -539,14 +539,14 @@ Invitation _createTestInvitation({
   List<int>? mlsGroupId,
   String circleName = 'Test Circle',
   String inviterPubkey = 'test_pubkey',
-  int memberCount = 2,
+  String inviterNpub = 'npub1test',
   DateTime? invitedAt,
 }) {
   return Invitation(
     mlsGroupId: mlsGroupId ?? [1, 2, 3, 4],
     circleName: circleName,
     inviterPubkey: inviterPubkey,
-    memberCount: memberCount,
+    inviterNpub: inviterNpub,
     invitedAt: invitedAt ?? DateTime.now(),
   );
 }
@@ -1127,7 +1127,7 @@ class _MockCircleServiceMixedBatch
         mlsGroupId: const [0xAA, 0xBB, 0xCC, 0xDD],
         circleName: 'New Circle',
         inviterPubkey: 'alice_pubkey',
-        memberCount: 2,
+        inviterNpub: 'npub1alice',
         invitedAt: DateTime.now(),
       );
     }

@@ -24,7 +24,7 @@
 //!
 //! [`SessionManager`]: crate::nostr::mls::SessionManager
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -34,14 +34,15 @@ use super::contamination::ContaminationSource;
 use super::error::{CircleError, Result};
 use super::leave::{plan_leave, LeavePlan};
 use super::storage::CircleStorage;
+use super::storage_member_directory::DirectoryTier;
 use super::types::{
     Circle, CircleConfig, CircleMember, CircleMembership, CircleType, CircleWithMembers, Contact,
     GiftWrappedWelcome, Invitation, MemberKeyPackage, MembershipStatus,
 };
 use crate::location::LocationMessage;
 use crate::nostr::mls::types::{
-    GroupEvent, GroupId, GroupIdExt, KeyPackage, LocationGroupConfig, LocationMessageResult,
-    PendingStateRef, PublishWork, SessionEffects, TransportMessage,
+    ConvergedRoster, GroupEvent, GroupId, GroupIdExt, KeyPackage, LocationGroupConfig,
+    LocationMessageResult, PendingStateRef, PublishWork, SessionEffects, TransportMessage,
 };
 use crate::nostr::mls::{bounded_retention_secs, redact_hex_sequences};
 use crate::nostr::mls::{PendingWelcome, PendingWelcomeStore, SessionManager};
@@ -83,7 +84,54 @@ pub struct CircleManager {
     /// Serializes everything that publishes or retracts the OWN public profile
     /// — see [`Self::profile_sync_lock`].
     profile_sync_lock: tokio::sync::Mutex<()>,
+    /// Serializes the member-directory reconcile's read-union → write-union
+    /// against itself and against [`Self::remove_members`]' row delete.
+    ///
+    /// Without it the walk is invoked concurrently from live sync, catch-up and
+    /// the Dart FFI with no ordering: a pass that read a circle's roster before
+    /// the user tapped Remove would re-insert the removed person afterwards, and
+    /// because the union rewrite DEMOTES rather than deletes, they would come
+    /// back with a three-day timer instead of being gone (owner decision D3).
+    directory_lock: tokio::sync::Mutex<()>,
+    /// Single-flight state for [`Self::reconcile_member_directory_best_effort`].
+    ///
+    /// A peer leaving a circle of M produces up to M−1 competing auto-commits,
+    /// and each reconcile walks every circle through
+    /// `has_pending_convergence_inputs`, which deserialises every retained MLS
+    /// message at epoch ≥ tip−5 — a circle's whole location history, because a
+    /// circle's epoch only advances on a membership commit. Collapsing a storm
+    /// into one walk (carrying the strongest verdict asked for while it ran) is
+    /// what keeps that off the latency of Add / Remove / Create Member, which
+    /// Dart awaits inline through `confirm_published`.
+    directory_flight: Mutex<DirectoryFlight>,
+    /// Groups the engine has reported `Unrecoverable` during THIS session.
+    ///
+    /// `EpochState` has no accessor and is never persisted, so the
+    /// `GroupUnrecoverable` event is the only signal there is. In-memory
+    /// because that is exactly the state's scope: the one legal exit,
+    /// `EpochState::repair_to_stable`, has no caller in the engine at the
+    /// pinned rev, so the state is terminal within a session and gone after
+    /// one — the same lifetime as hydration quarantine, and for the same
+    /// reason. An unrecoverable group answers roster reads `Ok` with the roster
+    /// frozen at its last stable epoch, so a reconcile that trusted it would
+    /// re-stamp those people `Current` with the never-purge sentinel on every
+    /// pass, and no removal there could ever be observed.
+    unrecoverable_groups: Mutex<HashSet<GroupId>>,
     pub(crate) storage: CircleStorage,
+}
+
+/// Single-flight bookkeeping for the member-directory reconcile.
+///
+/// `running` and `owed` are read and written under ONE lock so a runner that
+/// finds nothing owed and a caller that queues a verdict cannot interleave into
+/// a lost wake-up: the runner clears `running` in the same critical section in
+/// which it observes `owed` empty.
+#[derive(Default)]
+struct DirectoryFlight {
+    /// A walk is in progress and will drain `owed` before it finishes.
+    running: bool,
+    /// The strongest verdict asked for while a walk was in progress.
+    owed: Option<DirectoryReconcile>,
 }
 
 impl CircleManager {
@@ -121,12 +169,16 @@ impl CircleManager {
         let storage = CircleStorage::new(&db_path, circle_db_hex_key)?;
         Self::backfill_contamination_ledger(&storage);
         Self::prune_retired_profile_pool(&storage);
+        Self::sweep_expired_directory_members(&storage);
 
         Ok(Self {
             session: Arc::new(session),
             pending_welcomes: PendingWelcomeStore::new(),
             create_pending: Mutex::new(HashMap::new()),
             profile_sync_lock: tokio::sync::Mutex::new(()),
+            directory_lock: tokio::sync::Mutex::new(()),
+            directory_flight: Mutex::new(DirectoryFlight::default()),
+            unrecoverable_groups: Mutex::new(HashSet::new()),
             storage,
         })
     }
@@ -182,6 +234,38 @@ impl CircleManager {
         }
     }
 
+    /// Enforces the member directory's retention deadline at process start,
+    /// best-effort.
+    ///
+    /// The three-day window is a promise about the DISK, and every other caller
+    /// of the purge needs something to happen first: a membership change, a
+    /// publish resolution, a welcome accept, or the user opening the picker. An
+    /// install with a stable circle produces none of those, so without this a
+    /// departed co-member's pubkey outlives the window by however long the user
+    /// goes without inviting anyone.
+    ///
+    /// Process start is the trigger because it is the one an idle device still
+    /// produces — every foreground launch and every background wake builds a
+    /// manager — and because a bare purge is a single indexed DELETE on
+    /// `circles.db`: no roster read, no MLS session, nothing that could make it
+    /// a new wake or a new battery cost. It rides an open this constructor was
+    /// already performing, beside the two maintenance passes above it.
+    ///
+    /// Failure is logged rather than propagated, as they are: the next launch
+    /// retries, the ranked read sweeps the same rows before it can show one, and
+    /// a manager that refused to open over a retention sweep would take location
+    /// sharing down with the picker's index.
+    fn sweep_expired_directory_members(storage: &CircleStorage) {
+        match storage.prune_expired_directory_members(chrono::Utc::now().timestamp()) {
+            Ok(0) => {}
+            Ok(n) => log::info!("member directory: purged {n} expired row(s) at startup"),
+            Err(e) => log::warn!(
+                "member directory retention sweep failed (retries next launch): {}",
+                redact_hex_sequences(&e.to_string())
+            ),
+        }
+    }
+
     /// Creates a new circle manager with a fixed-key (test) MLS session.
     ///
     /// # Warning
@@ -204,12 +288,16 @@ impl CircleManager {
         let storage = CircleStorage::new(&db_path, None)?;
         Self::backfill_contamination_ledger(&storage);
         Self::prune_retired_profile_pool(&storage);
+        Self::sweep_expired_directory_members(&storage);
 
         Ok(Self {
             session: Arc::new(session),
             pending_welcomes: PendingWelcomeStore::new(),
             create_pending: Mutex::new(HashMap::new()),
             profile_sync_lock: tokio::sync::Mutex::new(()),
+            directory_lock: tokio::sync::Mutex::new(()),
+            directory_flight: Mutex::new(DirectoryFlight::default()),
+            unrecoverable_groups: Mutex::new(HashSet::new()),
             storage,
         })
     }
@@ -439,7 +527,10 @@ impl CircleManager {
             created_at: now,
             updated_at: now,
         };
-        self.storage.save_circle(&circle)?;
+        // The STORED circle, not the struct assembled above: `save_circle`
+        // sanitizes the display name, and this value is handed straight back to
+        // the caller for rendering.
+        let circle = self.storage.save_circle(&circle)?;
         // Contamination ledger: this set is about to carry the circle's kind-445
         // traffic and its commits, so it is permanently excluded from the
         // profile pool. Recorded BEFORE the welcomes go out — over-recording (a
@@ -926,7 +1017,23 @@ impl CircleManager {
             .leave_group(mls_group_id)
             .await
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
-        take_proposal(effects)
+        let event = take_proposal(effects)?;
+        // Recorded only once the engine has accepted the departure, and durably,
+        // because a peer may commit this `SelfRemove` before the local teardown
+        // runs — possibly in another process. From that commit onward the
+        // engine's `Group.removed` says only "you are out", never "who decided",
+        // so this marker is the whole difference between ageing this circle's
+        // co-members out over three days (R5) and deleting them as if someone
+        // had cut the user off (D3). Best-effort: a leave must not fail because
+        // the picker's index could not be annotated.
+        if let Err(e) = self.storage.mark_leave_intent(mls_group_id) {
+            log::warn!(
+                "leave-intent marker not recorded; this circle's co-members may be \
+                 dropped from the directory instead of ageing out: {}",
+                redact_hex_sequences(&e.to_string())
+            );
+        }
+        Ok(event)
     }
 
     /// Finalizes a leave by removing the local circle row.
@@ -936,11 +1043,28 @@ impl CircleManager {
     /// `removed` (retained inactive, spec `member-departure.md`). Haven removes
     /// its own circle row here. Safe for the `OrphanLocalOnly` plan.
     ///
+    /// Reconciles the member directory afterwards, in the ORDINARY (`Rewrite`)
+    /// mode. `delete_circle` deliberately does not cascade to the directory, so
+    /// without this the circle's co-members would keep `is_current = 1` and the
+    /// never-purge sentinel for ever: not merely past retention but *unable to
+    /// expire*, still rendered under "Members of your circles" — a claim about
+    /// a member list that no longer exists on this device. Demotion, never
+    /// deletion, is the point (plan §5.5's trap): this is also the finalizer of
+    /// a VOLUNTARY leave, and the person the user just left a circle with is
+    /// exactly the contact requirement R5 exists to keep for three days.
+    ///
+    /// `now_unix_secs` is the clock that retention deadline is computed against;
+    /// it is a parameter so the outcome is pinned to a value rather than to when
+    /// the test happens to run.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the circle-row deletion fails.
-    pub fn complete_leave(&self, mls_group_id: &GroupId) -> Result<()> {
+    /// Returns an error if the circle-row deletion fails. The directory refresh
+    /// is best-effort and never fails the leave.
+    pub async fn complete_leave(&self, mls_group_id: &GroupId, now_unix_secs: i64) -> Result<()> {
         let _existed = self.storage.delete_circle(mls_group_id)?;
+        self.reconcile_member_directory_at(DirectoryReconcile::Rewrite, now_unix_secs)
+            .await;
         Ok(())
     }
 
@@ -952,8 +1076,12 @@ impl CircleManager {
     /// # Errors
     ///
     /// Returns an error if the circle-row deletion fails.
-    pub fn abandon_circle_local_only(&self, mls_group_id: &GroupId) -> Result<()> {
-        self.complete_leave(mls_group_id)
+    pub async fn abandon_circle_local_only(
+        &self,
+        mls_group_id: &GroupId,
+        now_unix_secs: i64,
+    ) -> Result<()> {
+        self.complete_leave(mls_group_id, now_unix_secs).await
     }
 
     // ==================== Publish-before-apply (Rule 13) ====================
@@ -972,15 +1100,20 @@ impl CircleManager {
             .session
             .confirm_published(pending)
             .await
-            .map(|_| ())
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())));
         // A confirmed create KEEPS its eagerly-persisted rows; just drop the
         // rollback binding so a subsequent stray `publish_failed` can never
         // delete a now-live circle (F2). A no-op for every non-create pending.
-        if result.is_ok() {
-            let _ = self.take_create_pending(pending);
-        }
-        result
+        let effects = match result {
+            Ok(effects) => effects,
+            Err(e) => return Err(e),
+        };
+        let _ = self.take_create_pending(pending);
+        // Confirming is the first moment an announced membership is APPLIED
+        // rather than projected, so it is a directory write site.
+        let mode = self.publish_outcome_verdict(&effects.events);
+        self.reconcile_member_directory_best_effort(mode).await;
+        Ok(())
     }
 
     /// Reports that a staged publish failed; the engine discards the staged
@@ -994,24 +1127,47 @@ impl CircleManager {
             .session
             .publish_failed(pending)
             .await
-            .map(|_| ())
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())));
         // F2: a rolled-back create must not strand a ghost circle row. Delete the
         // eagerly-persisted rows ONLY on a SUCCESSFUL rollback (the engine
         // actually discarded the staged create); an unknown / already-resolved
         // pending — e.g. one already confirmed — leaves storage untouched. A
         // no-op for every non-create pending (auto-commit / evolution).
-        if result.is_ok() {
-            if let Some(group_id) = self.take_create_pending(pending) {
-                if let Err(e) = self.storage.delete_circle(&group_id) {
-                    log::warn!(
-                        "create rollback: circle-row cleanup failed (self-heals on logout wipe): {}",
-                        redact_hex_sequences(&e.to_string())
-                    );
-                }
+        let effects = match result {
+            Ok(effects) => effects,
+            Err(e) => return Err(e),
+        };
+        if let Some(group_id) = self.take_create_pending(pending) {
+            if let Err(e) = self.storage.delete_circle(&group_id) {
+                log::warn!(
+                    "create rollback: circle-row cleanup failed (self-heals on logout wipe): {}",
+                    redact_hex_sequences(&e.to_string())
+                );
             }
         }
-        result
+        // Restores anyone [`Self::remove_members`] optimistically deleted for the
+        // commit that was just discarded.
+        let mode = self.publish_outcome_verdict(&effects.events);
+        self.reconcile_member_directory_best_effort(mode).await;
+        Ok(())
+    }
+
+    /// The directory verdict a resolved publish implies — at least a rewrite,
+    /// and a WITHDRAWING one when the engine's own effects say so.
+    ///
+    /// Never hard-coded to [`DirectoryReconcile::Rewrite`]. Resolving a pending
+    /// ref does not merely apply or discard the staged commit: confirming ends
+    /// in `replay_buffered_messages` (`cgka-engine/src/publish.rs:255`), which
+    /// runs a full ingest including convergence, so this batch can carry the
+    /// `GroupStateInvalidated` of a commit branch selection has just withdrawn.
+    /// Reading that as an ordinary rewrite would demote a member who never
+    /// existed to a three-day "recent contact" instead of deleting them,
+    /// leaving them searchable and one tap from live location.
+    fn publish_outcome_verdict(&self, events: &[GroupEvent]) -> DirectoryReconcile {
+        self.directory_verdict_for_events(events)
+            .map_or(DirectoryReconcile::Rewrite, |verdict| {
+                verdict.max(DirectoryReconcile::Rewrite)
+            })
     }
 
     // ==================== Member Management ====================
@@ -1095,6 +1251,13 @@ impl CircleManager {
         mls_group_id: &GroupId,
         member_pubkeys: &[String],
     ) -> Result<CommitToPublish> {
+        // Held across the stage AND the directory delete, so no concurrent
+        // reconcile can sit between them: a walk that read this circle's roster
+        // a moment ago would otherwise re-insert the person this method just
+        // removed, and a union rewrite demotes rather than deletes, so they
+        // would return as a three-day "recent contact" instead of being gone.
+        let _directory = self.directory_lock.lock().await;
+
         if let Some(mut circle) = self.storage.get_circle(mls_group_id)? {
             circle.updated_at = chrono::Utc::now().timestamp();
             self.storage.save_circle(&circle)?;
@@ -1106,6 +1269,24 @@ impl CircleManager {
             .await
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
         let (commit_event, _welcomes, pending) = take_group_evolution(effects)?;
+
+        // Owner decision D3, the "you remove them" direction: the row goes at
+        // STAGING time, deliberately not waiting for a relay ack. Erring toward
+        // deleting a row a rollback would restore costs a convenience —
+        // `publish_failed` reconciles and puts it back; erring the other way
+        // leaves someone the user just removed one tap from receiving live
+        // location. Gated on the engine having accepted the removal, because a
+        // rejected one (`NotGroupAdmin`) removed nobody.
+        for pubkey_hex in member_pubkeys {
+            if let Err(e) = self.storage.delete_directory_member(pubkey_hex) {
+                log::warn!(
+                    "member directory: removal row not deleted (the next reconcile \
+                     demotes it instead of deleting it): {}",
+                    redact_hex_sequences(&e.to_string())
+                );
+            }
+        }
+
         Ok(CommitToPublish {
             commit_event,
             pending,
@@ -1204,6 +1385,334 @@ impl CircleManager {
         self.storage.delete_contact(pubkey)
     }
 
+    // ==================== Member directory (picker) ====================
+
+    /// Rewrites the local member directory from the union of current
+    /// co-members across every visible circle, then sweeps expired rows.
+    ///
+    /// Returns `false` when the pass DEFERRED: a circle's membership commit is
+    /// still in flight, so its roster is the engine's optimistic projection and
+    /// nothing was written or purged. The caller simply reads the directory as
+    /// it stands; the next membership change reconciles again.
+    ///
+    /// Passing the union — never a per-circle roster — is also what keeps the
+    /// table free of circle attribution: every current co-member is stamped in
+    /// one pass, so no row can be tied to a circle even by write timing.
+    ///
+    /// # Circles this pass refuses to trust
+    ///
+    /// Two engine states answer a roster read `Ok` while the answer is not
+    /// applied state, and both SKIP rather than defer — deferring on either
+    /// would freeze the whole directory for the life of the session, which is
+    /// the failure the skip exists to avoid, reached from the other side. Their
+    /// members age out on the ordinary window and are restored by the first
+    /// reconcile after the group recovers:
+    ///
+    /// * a circle quarantined at session-open hydration, which cannot heal
+    ///   before the next session open; and
+    /// * a circle the engine has reported `Unrecoverable`, whose roster is
+    ///   frozen at its last stable epoch — re-stamping it every pass would pin
+    ///   those people `Current` with the never-purge sentinel for ever, and no
+    ///   removal there could ever be observed. Also un-healable in-session:
+    ///   the state's only legal exit has no caller at the pinned rev.
+    ///
+    /// # What may enter it
+    ///
+    /// Only rosters from groups the engine reports settled
+    /// ([`ConvergedRoster::Converged`]). A roster read while a commit is staged
+    /// is the engine's optimistic projection, and branch selection can withdraw
+    /// a commit that was already published and confirmed — a row created from
+    /// that state would describe a co-membership that never happened.
+    ///
+    /// [`DirectoryReconcile::RewriteWithdrawing`] is the other half of that
+    /// rule: when the engine HAS withdrawn state, anyone who drops out of the
+    /// union is deleted rather than aged out, because storage cannot tell a
+    /// withdrawn add from an ordinary departure (the schema carries no
+    /// `first_seen_day` — it is a partition leak) and the fold that surfaces the
+    /// withdrawal keeps only the group id, so the individual superseded commit
+    /// is not recoverable either. That verdict is DURABLE: it is recorded before
+    /// the pass runs and cleared only by a withdrawing pass that completed, so a
+    /// deferral, an error or a process death re-arms it instead of losing it.
+    ///
+    /// # What this does NOT promise
+    ///
+    /// It is not all-or-nothing. Nothing is written while any roster is still
+    /// unread, so a partial union can never be persisted, and an error before
+    /// the deletes leaves the directory exactly as it was. The retire set lands
+    /// as ONE transaction, so it is applied whole or not at all; a failure
+    /// after it still leaves those rows deleted, which is the safe direction —
+    /// an over-eager delete costs a convenience the next successful pass
+    /// restores, while the alternative leaves someone whose membership ended
+    /// still offered as a co-member.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CircleError::Mls`] if a circle's roster read failed for any
+    /// reason other than the engine not holding that group, and
+    /// [`CircleError::Database`]/[`CircleError::Storage`] on a directory write
+    /// failure.
+    pub async fn reconcile_member_directory(
+        &self,
+        mode: DirectoryReconcile,
+        now_unix_secs: i64,
+    ) -> Result<bool> {
+        // Serializes the read-union → write-union against every other reconcile
+        // and against `remove_members` (see [`Self::directory_lock`]).
+        let _serialized = self.directory_lock.lock().await;
+
+        // A withdrawal is owed until a withdrawing pass actually completes.
+        // Recorded BEFORE any read, because the reasons this pass may not finish
+        // — a circle mid-publish, a transient backend failure — are exactly the
+        // conditions a multi-admin commit race produces, i.e. the conditions
+        // that generate withdrawals in the first place.
+        if mode == DirectoryReconcile::RewriteWithdrawing {
+            self.storage.set_directory_withdrawal_owed(true)?;
+        }
+        let mode = if self.storage.directory_withdrawal_owed()? {
+            DirectoryReconcile::RewriteWithdrawing
+        } else {
+            mode
+        };
+
+        // Read once: both sets are fixed for the life of the session, so a
+        // per-circle query would buy a lock acquisition per circle for an answer
+        // that cannot change between them.
+        let quarantined: HashSet<GroupId> = self
+            .session
+            .quarantined_group_ids()
+            .await
+            .into_iter()
+            .collect();
+        let unrecoverable = self.unrecoverable_group_ids();
+
+        let mut union: BTreeSet<String> = BTreeSet::new();
+        // Rosters of circles this device has been EVICTED from by someone else.
+        // Their members are former co-members whose relationship was severed
+        // without the user's say (owner decision D3, the "they remove you"
+        // direction), so they are deleted rather than aged out — but only if no
+        // live circle still puts them in the union.
+        let mut severed: BTreeSet<String> = BTreeSet::new();
+
+        for circle in self.storage.get_all_circles()? {
+            let group_id = &circle.mls_group_id;
+            // Quarantine is read explicitly rather than inferred from the
+            // engine's `UnknownGroup` mapping, so the skip does not depend on
+            // that mapping staying in place.
+            if quarantined.contains(group_id) || unrecoverable.contains(group_id) {
+                continue;
+            }
+            let Some(membership) = self.storage.get_membership(group_id)? else {
+                continue;
+            };
+            if !membership.status.is_visible() {
+                continue;
+            }
+            match self.session.converged_member_pubkeys(group_id).await {
+                Ok(ConvergedRoster::Converged {
+                    member_pubkeys_hex,
+                    removed,
+                }) => {
+                    if removed {
+                        // `Group.removed` is set from a pure roster diff and
+                        // says only that this device is out, never who decided
+                        // — a peer committing the user's OWN `SelfRemove` sets
+                        // it exactly as an eviction does. Severing on a leave
+                        // the user chose would erase the co-members of the
+                        // circle they just left, which is the very case the
+                        // three-day window exists for, so a circle with a
+                        // recorded local leave intent contributes to NEITHER
+                        // set and its members age out normally.
+                        if !self.storage.has_leave_intent(group_id)? {
+                            severed.extend(member_pubkeys_hex);
+                        }
+                    } else {
+                        union.extend(member_pubkeys_hex);
+                    }
+                }
+                // No live group behind this circle row: nothing to read, and an
+                // empty roster is not evidence that its members left.
+                Ok(ConvergedRoster::Absent) => {}
+                Ok(ConvergedRoster::NotConverged) => return Ok(false),
+                Err(e) => return Err(CircleError::Mls(redact_hex_sequences(&e.to_string()))),
+            }
+        }
+
+        // Every roster contains this device. The directory is a list of OTHER
+        // people; a self row would offer the user to themselves in "members of
+        // your circles".
+        let own_hex = self.session.identity_pubkey().to_hex();
+        union.remove(&own_hex);
+        severed.remove(&own_hex);
+
+        // One deduplicated delete pass over both destructive sets, rather than
+        // one loop each: under the withdrawing verdict the severed set is
+        // largely a subset of the sweep set, and a person can only be deleted
+        // once.
+        let withdrawn: Vec<String> = if mode == DirectoryReconcile::RewriteWithdrawing {
+            self.storage
+                .ranked_directory_members(now_unix_secs)?
+                .into_iter()
+                .filter(|entry| entry.tier == DirectoryTier::Current)
+                .map(|entry| entry.pubkey_hex)
+                .filter(|pubkey_hex| !union.contains(pubkey_hex))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let retire: Vec<String> = severed
+            .difference(&union)
+            .chain(&withdrawn)
+            .collect::<BTreeSet<&String>>()
+            .into_iter()
+            .cloned()
+            .collect();
+        self.storage.delete_directory_members(&retire)?;
+
+        let union: Vec<String> = union.into_iter().collect();
+        self.storage.sync_co_members(&union, now_unix_secs)?;
+        self.storage
+            .prune_expired_directory_members(now_unix_secs)?;
+        if mode == DirectoryReconcile::RewriteWithdrawing {
+            self.storage.set_directory_withdrawal_owed(false)?;
+        }
+        Ok(true)
+    }
+
+    /// The whole member directory in picker order — current co-members first,
+    /// then recent ones.
+    ///
+    /// Deletes everyone past the retention window before selecting, so the
+    /// three days hold on an install that never reaches
+    /// [`Self::reconcile_member_directory`] — nothing here hides a row it
+    /// leaves on disk (owner decision D3). `now_unix_secs` is the current Unix
+    /// seconds clock.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database read fails.
+    pub fn ranked_directory_members(
+        &self,
+        now_unix_secs: i64,
+    ) -> Result<Vec<super::DirectoryEntry>> {
+        self.storage.ranked_directory_members(now_unix_secs)
+    }
+
+    /// Runs a reconcile as a best-effort side effect of a write site, logging a
+    /// failure instead of failing the operation that triggered it.
+    ///
+    /// The directory is a convenience surface: a membership change must not fail
+    /// because the picker's index could not be refreshed. A deferral is silent
+    /// (a commit in flight is ordinary); a genuine failure is logged, because
+    /// while it persists a departed co-member keeps reading as current.
+    pub(crate) async fn reconcile_member_directory_best_effort(&self, mode: DirectoryReconcile) {
+        self.reconcile_member_directory_at(mode, chrono::Utc::now().timestamp())
+            .await;
+    }
+
+    /// [`Self::reconcile_member_directory_best_effort`] against a caller-owned
+    /// clock, single-flighted.
+    ///
+    /// At most one walk runs at a time. A caller that arrives while one is in
+    /// progress leaves its verdict behind — folded to the STRONGEST asked for,
+    /// so a withdrawal is never downgraded by an ordinary rewrite queued beside
+    /// it — and returns immediately; the running walk drains the slot before it
+    /// finishes. That is what collapses a commit storm (a peer leaving a circle
+    /// of M produces up to M−1 competing auto-commits, each of which would
+    /// otherwise walk every circle) and a catch-up backlog into one pass.
+    ///
+    /// A verdict picked up by an in-flight walk is reconciled against THAT
+    /// walk's clock, not the queuing caller's — the two are the same wall clock
+    /// in production, and only a caller that owns its clock (the leave path)
+    /// passes anything else, at a moment when nothing else is running.
+    async fn reconcile_member_directory_at(&self, mode: DirectoryReconcile, now_unix_secs: i64) {
+        {
+            let mut flight = self
+                .directory_flight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            flight.owed = Some(flight.owed.map_or(mode, |owed| owed.max(mode)));
+            if flight.running {
+                return;
+            }
+            flight.running = true;
+        }
+        loop {
+            // `owed` is taken and `running` cleared in ONE critical section, so
+            // a caller that queues a verdict either sees `running` and is
+            // adopted by this walk, or finds it clear and runs the walk itself.
+            // Splitting them would drop a verdict queued in the gap.
+            let next = {
+                let mut flight = self
+                    .directory_flight
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let taken = flight.owed.take();
+                if taken.is_none() {
+                    flight.running = false;
+                }
+                drop(flight);
+                taken
+            };
+            let Some(next) = next else { return };
+            if let Err(e) = self.reconcile_member_directory(next, now_unix_secs).await {
+                log::warn!(
+                    "member directory reconcile failed (retries on the next membership change): {}",
+                    redact_hex_sequences(&e.to_string())
+                );
+            }
+        }
+    }
+
+    /// The directory verdict for a folded receive batch, recording any group the
+    /// engine reported unrecoverable on the way through.
+    ///
+    /// A method rather than a bare call to
+    /// [`DirectoryReconcile::for_receive_results`] because the recording is the
+    /// only signal Haven gets: `EpochState` has no accessor and is never
+    /// persisted, so `Unrecoverable` is observable exactly once, as the event
+    /// that announces it.
+    pub(crate) fn directory_verdict_for_results(
+        &self,
+        results: &[LocationMessageResult],
+    ) -> Option<DirectoryReconcile> {
+        self.note_unrecoverable(results.iter().filter_map(|result| match result {
+            LocationMessageResult::Unrecoverable { group_id } => Some(group_id.clone()),
+            _ => None,
+        }));
+        DirectoryReconcile::for_receive_results(results)
+    }
+
+    /// [`Self::directory_verdict_for_results`] over a raw engine event batch,
+    /// for the receive planes that hold `GroupEvent`s rather than folded
+    /// results.
+    pub(crate) fn directory_verdict_for_events(
+        &self,
+        events: &[GroupEvent],
+    ) -> Option<DirectoryReconcile> {
+        self.note_unrecoverable(events.iter().filter_map(|event| match event {
+            GroupEvent::GroupUnrecoverable { group_id } => Some(group_id.clone()),
+            _ => None,
+        }));
+        DirectoryReconcile::for_group_events(events)
+    }
+
+    /// Adds `group_ids` to the session's unrecoverable set — see
+    /// [`Self::unrecoverable_groups`].
+    fn note_unrecoverable(&self, group_ids: impl IntoIterator<Item = GroupId>) {
+        self.unrecoverable_groups
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(group_ids);
+    }
+
+    /// The groups the engine has reported `Unrecoverable` during this session.
+    fn unrecoverable_group_ids(&self) -> HashSet<GroupId> {
+        self.unrecoverable_groups
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     // ==================== Invitation Handling ====================
 
     /// Processes a gift-wrapped Welcome event (kind 1059) into a held pending
@@ -1214,10 +1723,10 @@ impl CircleManager {
     /// the `KeyPackage` `e` tag and the `relays` tag, and the MLS Welcome's
     /// `GroupInfo` is encrypted — so the full roster and group name are
     /// unavailable by design. The one member the preview DOES prove is the
-    /// inviter (the NIP-59 seal author), so `member_count` reports the count
-    /// of provably-known members (1). Nothing is ingested until
-    /// [`Self::accept_invitation`]; declining leaves no on-wire trace
-    /// (Rule 10).
+    /// inviter, the NIP-59 seal author, and that identity is the whole of what
+    /// an [`Invitation`] may claim: a roster size cannot be derived from an
+    /// encrypted roster. Nothing is ingested until [`Self::accept_invitation`];
+    /// declining leaves no on-wire trace (Rule 10).
     ///
     /// # Errors
     ///
@@ -1274,7 +1783,6 @@ impl CircleManager {
             // id. DM-4: the Dart accept path passes the gift-wrap id.
             mls_group_id: GroupId::from_slice(gift_wrap_event.id.as_bytes()),
             circle_name: "New Circle".to_string(),
-            member_count: known_member_count(&inviter_pubkey),
             inviter_pubkey,
             invited_at: now,
         })
@@ -1282,8 +1790,8 @@ impl CircleManager {
 
     /// Gets all pending invitations (from the held-welcome store).
     ///
-    /// `member_count` reports the provably-known members pre-join (the
-    /// NIP-59-seal-authenticated inviter) — see
+    /// Each entry carries only what the transient peel proves — the
+    /// NIP-59-seal-authenticated inviter — see
     /// [`Self::process_gift_wrapped_invitation`].
     ///
     /// # Errors
@@ -1297,7 +1805,6 @@ impl CircleManager {
             .map(|(id, preview)| Invitation {
                 mls_group_id: GroupId::from_slice(id.as_bytes()),
                 circle_name: "New Circle".to_string(),
-                member_count: known_member_count(&preview.inviter_pubkey),
                 inviter_pubkey: preview.inviter_pubkey,
                 invited_at: 0,
             })
@@ -1388,6 +1895,14 @@ impl CircleManager {
         // contaminated. Record before the circle is usable.
         self.record_contaminated(&circle.relays, ContaminationSource::CircleRouting)?;
         self.pending_welcomes.remove(gift_wrap_id);
+
+        // Accepting is what makes the roster real, so it is the directory write
+        // site — never the preview above, which is seal-authenticated only
+        // (anyone can gift-wrap a welcome) and where a row would break
+        // decline-leaves-no-trace. Placed after the storage write so the circle
+        // the union is about to read is already persisted.
+        self.reconcile_member_directory_best_effort(DirectoryReconcile::Rewrite)
+            .await;
 
         self.get_circle(&group_id)
             .await?
@@ -1571,6 +2086,15 @@ impl CircleManager {
             }
         }
 
+        // ONE reconcile per ingest, after convergence has drained, so no roster
+        // is ever read mid-drain. `for_receive_results` owns the decision about
+        // WHICH results ask for one — a decrypted kind-445 never does
+        // (`app_message_past_epoch_limit` epochs of slack would resurrect
+        // someone removed several epochs ago).
+        if let Some(mode) = self.directory_verdict_for_results(&results) {
+            self.reconcile_member_directory_best_effort(mode).await;
+        }
+
         Ok(DecryptedIngest {
             results,
             auto_commits,
@@ -1635,7 +2159,7 @@ impl CircleManager {
 
         let mut clamped = location.clone();
         clamped.purge_after = derived_purge_after;
-        clamped.display_name = crate::location::types::sanitize_display_name(clamped.display_name);
+        clamped.display_name = crate::directory::sanitize_display_name(clamped.display_name);
 
         self.storage.upsert_last_known_location(&clamped)
     }
@@ -1655,8 +2179,7 @@ impl CircleManager {
             .storage
             .snapshot_last_known_for_circle(nostr_group_id, now_unix_secs)?;
         for row in &mut rows {
-            row.display_name =
-                crate::location::types::sanitize_display_name(row.display_name.take());
+            row.display_name = crate::directory::sanitize_display_name(row.display_name.take());
         }
         Ok(rows)
     }
@@ -2180,12 +2703,16 @@ impl CircleManager {
         self.storage.clear_profile_sync_state(pubkey_hex)
     }
 
-    /// See [`CircleStorage::upsert_profile`].
+    /// See [`CircleStorage::upsert_profile`], including why the row is returned
+    /// as STORED rather than as assembled.
     ///
     /// # Errors
     ///
     /// Propagates database errors.
-    pub fn upsert_profile(&self, cached: &crate::profile::CachedProfile) -> Result<()> {
+    pub fn upsert_profile(
+        &self,
+        cached: &crate::profile::CachedProfile,
+    ) -> Result<crate::profile::CachedProfile> {
         self.storage.upsert_profile(cached)
     }
 
@@ -2561,17 +3088,6 @@ fn nostr_group_id_from_commit_event(event: &Event) -> Option<[u8; 32]> {
     bytes.try_into().ok()
 }
 
-/// Count of members provably in a group from a pending-welcome preview.
-///
-/// Pre-join, the Welcome's `GroupInfo` (and with it the roster) is encrypted;
-/// the only member the transient peel proves is the inviter — the NIP-59 seal
-/// author who committed the Add. A group with a valid Welcome therefore has
-/// at least one known member (the inviter); an empty inviter (never produced
-/// by the peeler today) yields 0 rather than inventing a member.
-fn known_member_count(inviter_pubkey: &str) -> usize {
-    usize::from(!inviter_pubkey.is_empty())
-}
-
 /// Result of circle creation.
 ///
 /// Publish-before-apply (Rule 13): publish `welcome_events`, then confirm
@@ -2658,6 +3174,73 @@ impl std::fmt::Debug for CommitToPublish {
             .field("commit_event", &"<redacted>")
             .field("pending", &self.pending)
             .finish()
+    }
+}
+
+/// How strongly a receive batch asks the member directory to be rewritten.
+///
+/// Ordered by strength: `Rewrite < RewriteWithdrawing`, so a batch carrying both
+/// an ordinary departure and a withdrawal folds — through `Option::max` over the
+/// derived [`Ord`] — to the withdrawing verdict, and no reconcile ever runs
+/// mid-drain on a partial view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DirectoryReconcile {
+    /// Re-derive the union; anyone who drops out of it is demoted to a recent
+    /// contact and expires on the ordinary retention window.
+    Rewrite,
+    /// The engine has WITHDRAWN state it previously surfaced, so a pubkey that
+    /// drops out of the union may be someone a superseded commit added and who
+    /// was never a member. Delete them instead of ageing them out: storage
+    /// cannot tell the two apart (the schema carries no `first_seen_day` — a
+    /// partition leak), and the fold keeps only the group id, so the individual
+    /// superseded commit is not recoverable either.
+    RewriteWithdrawing,
+}
+
+impl DirectoryReconcile {
+    /// The strongest verdict a folded receive batch implies, or `None` when
+    /// nothing in it is a membership signal.
+    ///
+    /// * `Invalidated` → [`Self::RewriteWithdrawing`]. Deliberately not named
+    ///   after commits: the fold collapses `AppMessageInvalidated` into the same
+    ///   result, so this also fires for a dropped application message. Harmless
+    ///   for a re-read, and the engine has already written the rolled-back state
+    ///   by the time the app can drain the event.
+    /// * `GroupUpdate` / `Joined` → [`Self::Rewrite`].
+    /// * `Location` → `None`. An application message may be sealed up to
+    ///   `app_message_past_epoch_limit` epochs behind the tip, so treating its
+    ///   sender as a co-member would resurrect someone removed several epochs
+    ///   ago.
+    /// * `Unrecoverable` → `None`. That group's roster is frozen at its last
+    ///   stable epoch; reading it is what
+    ///   [`CircleManager::reconcile_member_directory`] skips, so asking for a
+    ///   pass on its account would achieve nothing.
+    #[must_use]
+    pub fn for_receive_results(results: &[LocationMessageResult]) -> Option<Self> {
+        results.iter().fold(None, |verdict, result| {
+            let implied = match result {
+                LocationMessageResult::Invalidated { .. } => Some(Self::RewriteWithdrawing),
+                LocationMessageResult::GroupUpdate { .. }
+                | LocationMessageResult::Joined { .. } => Some(Self::Rewrite),
+                LocationMessageResult::Location { .. }
+                | LocationMessageResult::Unrecoverable { .. } => None,
+            };
+            verdict.max(implied)
+        })
+    }
+
+    /// [`Self::for_receive_results`] over a raw engine event batch.
+    ///
+    /// Callers inside `haven-core` should prefer
+    /// [`CircleManager::directory_verdict_for_events`], which additionally
+    /// records the `Unrecoverable` groups the reconcile must skip.
+    #[must_use]
+    pub fn for_group_events(events: &[GroupEvent]) -> Option<Self> {
+        events.iter().fold(None, |verdict, event| {
+            let implied = SessionManager::location_result_from_event(event)
+                .and_then(|result| Self::for_receive_results(&[result]));
+            verdict.max(implied)
+        })
     }
 }
 
@@ -2872,6 +3455,1263 @@ mod tests {
             .unwrap();
     }
 
+    // ── Member directory (picker plan §5/§6) ─────────────────────────────────
+
+    /// Day 20 000 (2024-10-04) as unix seconds. Every directory test drives the
+    /// clock as an explicit `i64` so retention lands on exact values, never a
+    /// band, and never on wall-clock chance.
+    const DIR_DAY: i64 = 20_000;
+    const DIR_NOW: i64 = DIR_DAY * 86_400;
+    /// [`DIRECTORY_RETENTION_SECS`] restated where the assertions read it, so a
+    /// change to the window fails these tests rather than sliding past them.
+    const DIR_RETENTION: i64 = 3 * 86_400;
+    /// Day 40 000 (2079-07-27) as unix seconds — beyond any wall clock a test
+    /// run can hold.
+    ///
+    /// Used by the two tests that must distinguish DELETED from DEMOTED across
+    /// a production write site, whose own reconcile necessarily runs on the wall
+    /// clock. A row stamped here is demoted with a deadline three days past day
+    /// 40 000, which no wall-clock purge can reach — so "the row is gone" can
+    /// only mean something deleted it, never that it quietly expired.
+    const DIR_FAR_FUTURE: i64 = 40_000 * 86_400;
+
+    /// One row as it stands at [`DIR_FAR_FUTURE`] — see that constant for why
+    /// the two severed-path tests read there rather than at [`DIR_NOW`].
+    fn far_future_row(
+        manager: &CircleManager,
+        pubkey_hex: &str,
+    ) -> Option<crate::circle::DirectoryEntry> {
+        manager
+            .ranked_directory_members(DIR_FAR_FUTURE)
+            .expect("directory read")
+            .into_iter()
+            .find(|e| e.pubkey_hex == pubkey_hex)
+    }
+
+    /// Reads the directory at [`DIR_NOW`], which is inside the window of every
+    /// row these tests write — so the read's own retention sweep can never
+    /// remove a row, and a missing row is always attributable to the code under
+    /// test rather than to the act of looking.
+    fn directory_of(manager: &CircleManager) -> Vec<(String, DirectoryTier)> {
+        manager
+            .ranked_directory_members(DIR_NOW)
+            .expect("directory read")
+            .into_iter()
+            .map(|e| (e.pubkey_hex, e.tier))
+            .collect()
+    }
+
+    /// One row, read at [`DIR_NOW`] for the reason on [`directory_of`].
+    fn directory_row(
+        manager: &CircleManager,
+        pubkey_hex: &str,
+    ) -> Option<crate::circle::DirectoryEntry> {
+        manager
+            .ranked_directory_members(DIR_NOW)
+            .expect("directory read")
+            .into_iter()
+            .find(|e| e.pubkey_hex == pubkey_hex)
+    }
+
+    /// Runs `sql` against the engine's `session.sqlite` under the test
+    /// passphrase, to inject a storage fault the engine cannot produce on
+    /// demand.
+    ///
+    /// If this stops finding a table, MDK renamed it at the pinned rev — the
+    /// invariant under test is unchanged, only the injection needs re-aiming.
+    fn tamper_session_db(data_dir: &std::path::Path, sql: &str) {
+        let conn = rusqlite::Connection::open(data_dir.join("session.sqlite")).expect("open");
+        conn.pragma_update(None, "cipher_compatibility", 4i64)
+            .expect("cipher compatibility");
+        conn.pragma_update(None, "key", "haven-test-mls-passphrase")
+            .expect("sqlcipher key");
+        conn.execute_batch(sql).expect("tamper");
+    }
+
+    /// Creates and confirms a circle with one freshly-minted invitee, returning
+    /// its group id and the invitee's pubkey hex.
+    async fn create_confirmed_circle(
+        manager: &CircleManager,
+        keys: &Keys,
+        name: &str,
+    ) -> (GroupId, String) {
+        let relays = vec!["wss://relay.test.com".to_string()];
+        let member = make_member_with_relays(relays.clone(), vec![]).await;
+        let member_hex = member.key_package_event.pubkey.to_hex();
+        let config = CircleConfig::new(name).with_relays(relays.clone());
+        let creation = manager
+            .create_circle(keys, vec![member], &config, &relays)
+            .await
+            .expect("create circle");
+        manager
+            .confirm_published(creation.pending)
+            .await
+            .expect("confirm create");
+        (creation.circle.mls_group_id.clone(), member_hex)
+    }
+
+    #[tokio::test]
+    async fn a_staged_add_is_never_written_to_the_directory() {
+        // The hazard §5.2 names: `session.members()` returns the engine's
+        // OPTIMISTIC PROJECTION while a commit is staged, so the invitee is in
+        // the roster before any relay has seen the commit — and branch
+        // selection can still withdraw it. The gate, not the roster, is what
+        // keeps that person off disk.
+        let dir = TempDir::new().unwrap();
+        let keys = Keys::generate();
+        let relays = vec!["wss://relay.test.com".to_string()];
+        let manager = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
+
+        let member = make_member_with_relays(relays.clone(), vec![]).await;
+        let member_hex = member.key_package_event.pubkey.to_hex();
+        let config = CircleConfig::new("Staged").with_relays(relays.clone());
+        let creation = manager
+            .create_circle(&keys, vec![member], &config, &relays)
+            .await
+            .expect("create circle");
+        let group_id = creation.circle.mls_group_id.clone();
+
+        assert!(
+            manager
+                .session()
+                .member_pubkeys(&group_id)
+                .await
+                .unwrap()
+                .contains(&member_hex),
+            "precondition: the projected roster already carries the un-published invitee"
+        );
+        assert_eq!(
+            manager
+                .session()
+                .converged_member_pubkeys(&group_id)
+                .await
+                .unwrap(),
+            ConvergedRoster::NotConverged
+        );
+
+        assert!(
+            !manager
+                .reconcile_member_directory(DirectoryReconcile::Rewrite, DIR_NOW)
+                .await
+                .unwrap(),
+            "a circle mid-publish must defer the whole reconcile"
+        );
+        assert!(
+            directory_of(&manager).is_empty(),
+            "nothing may be written from a projection"
+        );
+
+        manager
+            .confirm_published(creation.pending)
+            .await
+            .expect("confirm create");
+        assert!(manager
+            .reconcile_member_directory(DirectoryReconcile::Rewrite, DIR_NOW)
+            .await
+            .unwrap());
+        assert_eq!(
+            directory_of(&manager),
+            vec![(member_hex, DirectoryTier::Current)],
+            "and everything may be written once the commit is applied"
+        );
+    }
+
+    #[tokio::test]
+    async fn opening_the_manager_erases_a_row_no_reconcile_would_have_reached() {
+        // The three days are a promise about the DISK. Every other purge caller
+        // needs something to happen first — a membership change, a publish
+        // resolution, a welcome accept, or the user opening the picker — and an
+        // install with a stable circle produces none of them, so without a sweep
+        // at process start a departed co-member's pubkey outlives the window by
+        // however long the user goes without inviting anyone.
+        //
+        // The rows are stamped at unix second 0, so their deadline is
+        // 1970-01-04: past for any clock a test run can hold, which is what lets
+        // this assert against the constructor's real `Utc::now()` without a
+        // timing race. The read is RAW — going through `ranked_directory_members`
+        // would sweep the same row itself and prove nothing about the open.
+        let dir = TempDir::new().unwrap();
+        let keys = Keys::generate();
+        {
+            let manager = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
+            manager
+                .storage
+                .sync_co_members(&["aa".to_string(), "bb".to_string()], 0)
+                .unwrap();
+            manager
+                .storage
+                .sync_co_members(&["bb".to_string()], 0)
+                .unwrap();
+        } // dropped: nothing is running, and nothing has reconciled.
+
+        let manager = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
+        let conn = manager.storage.conn().lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT pubkey FROM member_directory ORDER BY pubkey")
+            .unwrap();
+        let stored = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        drop(stmt);
+        drop(conn);
+        assert_eq!(
+            stored,
+            vec!["bb".to_string()],
+            "the expired row must be off the disk by the time the manager is \
+             usable, and the current co-member must survive — a sweep that \
+             emptied the table would pass a one-sided assertion"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_departure_ages_out_over_the_retention_window() {
+        let circle = setup_two_party_circle().await;
+        let bob_hex = circle.bob_keys.public_key().to_hex();
+        assert!(circle
+            .alice
+            .reconcile_member_directory(DirectoryReconcile::Rewrite, DIR_NOW)
+            .await
+            .unwrap());
+        assert_eq!(
+            directory_row(&circle.alice, &bob_hex).unwrap().tier,
+            DirectoryTier::Current
+        );
+
+        // Alice leaves: Bob drops out of the union without anything being
+        // withdrawn.
+        circle
+            .alice
+            .abandon_circle_local_only(&circle.mls_group_id, DIR_NOW)
+            .await
+            .unwrap();
+        assert!(circle
+            .alice
+            .reconcile_member_directory(DirectoryReconcile::Rewrite, DIR_NOW)
+            .await
+            .unwrap());
+
+        let row = directory_row(&circle.alice, &bob_hex).expect("recent contact retained");
+        assert_eq!(row.tier, DirectoryTier::Recent);
+        assert_eq!(row.last_shared_day, DIR_DAY);
+        assert_eq!(row.purge_after, DIR_NOW + DIR_RETENTION);
+    }
+
+    #[tokio::test]
+    async fn leaving_a_circle_gives_its_co_members_a_real_deadline() {
+        // `delete_circle` deliberately does not cascade to the directory, so
+        // without a reconcile at the leave finalizer the co-members of the
+        // circle just left keep `is_current = 1` and the never-purge sentinel:
+        // not merely past retention, but UNABLE TO EXPIRE, and still offered
+        // under "Members of your circles" — a claim about a member list that no
+        // longer exists on this device.
+        let circle = setup_two_party_circle().await;
+        let bob_hex = circle.bob_keys.public_key().to_hex();
+        assert!(circle
+            .alice
+            .reconcile_member_directory(DirectoryReconcile::Rewrite, DIR_NOW)
+            .await
+            .unwrap());
+        assert_eq!(
+            directory_row(&circle.alice, &bob_hex).unwrap().purge_after,
+            crate::circle::DIRECTORY_PURGE_NEVER,
+            "precondition: a current co-member has no deadline"
+        );
+
+        circle
+            .alice
+            .complete_leave(&circle.mls_group_id, DIR_NOW)
+            .await
+            .expect("complete leave");
+
+        // Read WITHOUT a further reconcile: the leave itself has to have done it.
+        let row = directory_row(&circle.alice, &bob_hex).expect("kept as a recent contact");
+        assert_eq!(
+            row.tier,
+            DirectoryTier::Recent,
+            "leaving must stop claiming them as a current member"
+        );
+        assert_eq!(
+            row.purge_after,
+            DIR_NOW + DIR_RETENTION,
+            "and must give them a real deadline, not the never-sentinel"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_voluntary_leave_does_not_delete_its_co_members() {
+        // The engine's `Group.removed` is set from a pure roster diff
+        // (`cgka-engine/src/message_processor/ingest.rs:928-934`): a peer
+        // committing the user's OWN `SelfRemove` and an admin evicting them are
+        // the SAME signal, and the `self_removed` set computed a few lines above
+        // is used only to attribute the notification. So the commit ingested
+        // below is deliberately an admin Remove — it produces exactly the state
+        // a committed voluntary leave produces, which is the whole point: only
+        // Haven's own record of the intent can tell them apart, and without it
+        // the severed-delete erases the person the user just left a circle with
+        // — the motivating case for requirement R5.
+        let circle = setup_two_party_circle().await;
+        let alice_hex = circle.alice_keys.public_key().to_hex();
+        circle
+            .bob
+            .storage
+            .sync_co_members(std::slice::from_ref(&alice_hex), DIR_FAR_FUTURE)
+            .unwrap();
+
+        // Bob asks to leave. The proposal never has to reach a relay for the
+        // intent to be real — and it must survive a process death, which is why
+        // the marker is durable rather than in memory.
+        circle
+            .bob
+            .propose_leave(&circle.mls_group_id)
+            .await
+            .expect("non-admin bob may propose SelfRemove");
+        assert!(
+            circle
+                .bob
+                .storage
+                .has_leave_intent(&circle.mls_group_id)
+                .unwrap(),
+            "precondition: proposing a leave records the intent"
+        );
+
+        let commit = circle
+            .alice
+            .remove_members(
+                &circle.mls_group_id,
+                &[circle.bob_keys.public_key().to_hex()],
+            )
+            .await
+            .expect("stage the commit that takes bob out");
+        circle
+            .alice
+            .confirm_published(commit.pending)
+            .await
+            .expect("confirm");
+        circle
+            .bob
+            .decrypt_location(&commit.commit_event)
+            .await
+            .expect("bob applies the commit that removed him");
+
+        assert!(
+            matches!(
+                circle
+                    .bob
+                    .session()
+                    .converged_member_pubkeys(&circle.mls_group_id)
+                    .await
+                    .unwrap(),
+                ConvergedRoster::Converged { removed: true, .. }
+            ),
+            "precondition: the engine reports the identical `removed` state it \
+             reports for an eviction"
+        );
+        let row = far_future_row(&circle.bob, &alice_hex)
+            .expect("a circle you chose to leave keeps its co-members for three days");
+        assert_eq!(row.tier, DirectoryTier::Recent);
+        assert!(
+            row.purge_after < crate::circle::DIRECTORY_PURGE_NEVER,
+            "and gives them a deadline rather than pinning them current"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_withdrawn_add_is_deleted_rather_than_kept_as_a_recent_contact() {
+        // §5.2: a commit can be withdrawn by branch selection AFTER it was
+        // published and confirmed, so a row written from it describes a
+        // co-membership that never happened. Storage cannot tell that from a
+        // departure — the schema deliberately carries no `first_seen_day` — so
+        // the caller must delete instead of demote. Driving a real branch
+        // selection needs two concurrent publishers (covered black-box by the
+        // F2 convergence gate); what is asserted here is the half this layer
+        // owns: under the withdrawing verdict, dropping out of the union DELETES.
+        let circle = setup_two_party_circle().await;
+        let bob_hex = circle.bob_keys.public_key().to_hex();
+        assert!(circle
+            .alice
+            .reconcile_member_directory(DirectoryReconcile::Rewrite, DIR_NOW)
+            .await
+            .unwrap());
+        assert!(directory_row(&circle.alice, &bob_hex).is_some());
+
+        // The circle row goes directly, NOT through the leave API: a leave
+        // finalizer runs its own ordinary rewrite, which would demote Bob to a
+        // recent contact before the withdrawing pass could see him as current —
+        // and the withdrawing sweep's subject is exactly a row that is still
+        // current and has just dropped out of the union.
+        circle
+            .alice
+            .storage
+            .delete_circle(&circle.mls_group_id)
+            .unwrap();
+        assert!(circle
+            .alice
+            .reconcile_member_directory(DirectoryReconcile::RewriteWithdrawing, DIR_NOW)
+            .await
+            .unwrap());
+
+        assert!(
+            directory_row(&circle.alice, &bob_hex).is_none(),
+            "a withdrawn add must leave no durable row, not a three-day one"
+        );
+        // And it stays gone: the row is deleted, not hidden by a read filter.
+        assert_eq!(
+            circle
+                .alice
+                .storage
+                .prune_expired_directory_members(DIR_NOW)
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_publish_outcome_carrying_a_withdrawal_is_not_downgraded_to_a_rewrite() {
+        // Resolving a pending ref is not just "apply or discard": confirming
+        // ends in `replay_buffered_messages` (`cgka-engine/src/publish.rs:255`),
+        // a full ingest that runs convergence and therefore emits
+        // `GroupStateInvalidated`. Hard-coding `Rewrite` at the two publish
+        // seams throws that away, and a phantom member gets a three-day timer
+        // instead of being deleted.
+        let (manager, _keys, _dir) = create_test_manager();
+        let group_id = random_group_id();
+        assert_eq!(
+            manager.publish_outcome_verdict(&[]),
+            DirectoryReconcile::Rewrite,
+            "an ordinary publish outcome still refreshes the union"
+        );
+        assert_eq!(
+            manager.publish_outcome_verdict(&[GroupEvent::EpochChanged {
+                group_id: group_id.clone(),
+                from: crate::nostr::mls::types::EpochId(1),
+                to: crate::nostr::mls::types::EpochId(2),
+            }]),
+            DirectoryReconcile::Rewrite
+        );
+        assert_eq!(
+            manager.publish_outcome_verdict(&[GroupEvent::GroupStateInvalidated {
+                group_id,
+                epoch: crate::nostr::mls::types::EpochId(1),
+                invalidated_commit_id: crate::nostr::mls::types::MessageId::new(vec![1]),
+                reason:
+                    cgka_traits::engine::GroupStateInvalidationReason::SupersededByBranchSelection,
+            }]),
+            DirectoryReconcile::RewriteWithdrawing,
+            "a withdrawal that arrives through a publish outcome is a withdrawal"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_deferred_withdrawal_is_re_armed_rather_than_lost() {
+        // §14 blamed process death, but the likelier loss is a deferral: ANY
+        // circle mid-publish returns the whole pass without writing, and a
+        // circle is most likely mid-publish during exactly the multi-admin
+        // commit race that produces a withdrawal. The debt is therefore durable
+        // and upgrades the next ordinary rewrite.
+        let dir = TempDir::new().unwrap();
+        let keys = Keys::generate();
+        let relays = vec!["wss://relay.test.com".to_string()];
+        let manager = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
+
+        let (settled_gid, member_hex) = create_confirmed_circle(&manager, &keys, "Settled").await;
+        assert!(manager
+            .reconcile_member_directory(DirectoryReconcile::Rewrite, DIR_NOW)
+            .await
+            .unwrap());
+        assert_eq!(
+            directory_row(&manager, &member_hex).unwrap().tier,
+            DirectoryTier::Current
+        );
+
+        // A second circle stuck mid-publish: from here every pass defers.
+        let staged = manager
+            .create_circle(
+                &keys,
+                vec![make_member_with_relays(relays.clone(), vec![]).await],
+                &CircleConfig::new("Staged").with_relays(relays.clone()),
+                &relays,
+            )
+            .await
+            .expect("create circle");
+        // The settled circle's member drops out of the union.
+        manager.storage.delete_circle(&settled_gid).unwrap();
+
+        assert!(
+            !manager
+                .reconcile_member_directory(DirectoryReconcile::RewriteWithdrawing, DIR_NOW)
+                .await
+                .unwrap(),
+            "the withdrawal arrives while another circle is mid-publish"
+        );
+        assert_eq!(
+            directory_row(&manager, &member_hex).unwrap().tier,
+            DirectoryTier::Current,
+            "a deferral writes nothing at all"
+        );
+        assert!(
+            manager.storage.directory_withdrawal_owed().unwrap(),
+            "and leaves the withdrawal owed"
+        );
+
+        // The mid-publish circle resolves; the NEXT pass asks only for an
+        // ordinary rewrite.
+        manager
+            .storage
+            .delete_circle(&staged.circle.mls_group_id)
+            .unwrap();
+        assert!(manager
+            .reconcile_member_directory(DirectoryReconcile::Rewrite, DIR_NOW)
+            .await
+            .unwrap());
+        assert!(
+            directory_row(&manager, &member_hex).is_none(),
+            "the owed withdrawal must upgrade it, deleting rather than ageing out"
+        );
+        assert!(
+            !manager.storage.directory_withdrawal_owed().unwrap(),
+            "and only a completed withdrawing pass clears the debt"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unrecoverable_circle_stops_re_stamping_its_members() {
+        // §5.3's second detector. An `Unrecoverable` group is still "live", so
+        // `converged_member_pubkeys` answers `Ok` with the roster frozen at its
+        // last stable epoch — which would re-stamp those people `Current` with
+        // the never-purge sentinel on every pass, so they could never age out
+        // and a removal there could never be observed. `EpochState` has no
+        // accessor and is never persisted, so the event that announces it is the
+        // only signal there is; it is fed here directly for the same reason.
+        let dir = TempDir::new().unwrap();
+        let keys = Keys::generate();
+        let manager = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
+        // One circle per way the news can arrive: the receive planes hold raw
+        // engine events, the poll path holds folded results, and a group missed
+        // by either entry point keeps its members pinned for ever.
+        let (event_gid, via_events_hex) = create_confirmed_circle(&manager, &keys, "Doomed").await;
+        let (result_gid, via_results_hex) =
+            create_confirmed_circle(&manager, &keys, "Also doomed").await;
+        assert!(manager
+            .reconcile_member_directory(DirectoryReconcile::Rewrite, DIR_NOW)
+            .await
+            .unwrap());
+        for member_hex in [&via_events_hex, &via_results_hex] {
+            assert_eq!(
+                directory_row(&manager, member_hex).unwrap().purge_after,
+                crate::circle::DIRECTORY_PURGE_NEVER,
+                "precondition: a current co-member is pinned against every clock"
+            );
+        }
+
+        assert_eq!(
+            manager.directory_verdict_for_events(&[GroupEvent::GroupUnrecoverable {
+                group_id: event_gid,
+            }]),
+            None,
+            "the event itself asks for no pass — the group it names is now unreadable"
+        );
+        assert_eq!(
+            manager.directory_verdict_for_results(&[LocationMessageResult::Unrecoverable {
+                group_id: result_gid,
+            }]),
+            None
+        );
+
+        assert!(manager
+            .reconcile_member_directory(DirectoryReconcile::Rewrite, DIR_NOW)
+            .await
+            .unwrap());
+        for member_hex in [&via_events_hex, &via_results_hex] {
+            let row = directory_row(&manager, member_hex).expect("still a recent contact");
+            assert_eq!(
+                row.tier,
+                DirectoryTier::Recent,
+                "an unrecoverable group's frozen roster must stop asserting present membership"
+            );
+            assert_eq!(
+                row.purge_after,
+                DIR_NOW + DIR_RETENTION,
+                "and its members must age out on the ordinary window"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reconcile_cannot_interleave_with_a_removal() {
+        // The walk reads every circle's roster and then writes the union, and it
+        // is driven concurrently by live sync, catch-up and the Dart FFI. A walk
+        // that read a roster before the user tapped Remove would re-insert the
+        // person `remove_members` had just deleted — and because the rewrite
+        // DEMOTES, they would return with a three-day timer instead of being
+        // gone, which is exactly what owner decision D3 forbids.
+        let circle = setup_two_party_circle().await;
+        let bob_hex = circle.bob_keys.public_key().to_hex();
+        assert!(circle
+            .alice
+            .reconcile_member_directory(DirectoryReconcile::Rewrite, DIR_NOW)
+            .await
+            .unwrap());
+        assert!(directory_row(&circle.alice, &bob_hex).is_some());
+
+        // Stands in for a walk that is mid-read: it holds the seam.
+        let walk = circle.alice.directory_lock.lock().await;
+
+        let removal = circle
+            .alice
+            .remove_members(&circle.mls_group_id, std::slice::from_ref(&bob_hex));
+        futures::pin_mut!(removal);
+        assert!(
+            futures::poll!(&mut removal).is_pending(),
+            "a removal must WAIT for the walk rather than deleting a row it is \
+             about to rewrite"
+        );
+        // ...and so must a second walk.
+        let second = circle
+            .alice
+            .reconcile_member_directory(DirectoryReconcile::Rewrite, DIR_NOW);
+        futures::pin_mut!(second);
+        assert!(
+            futures::poll!(&mut second).is_pending(),
+            "two walks must not read and write the union at the same time"
+        );
+        assert!(
+            directory_row(&circle.alice, &bob_hex).is_some(),
+            "nothing has happened while the seam is held"
+        );
+
+        drop(walk);
+        removal
+            .await
+            .expect("the removal completes once the seam frees");
+        assert!(
+            directory_row(&circle.alice, &bob_hex).is_none(),
+            "and the row is gone, with no walk able to have re-inserted it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reconcile_storm_collapses_into_one_walk_at_the_strongest_verdict() {
+        // `has_pending_convergence_inputs` deserialises every retained MLS
+        // message at epoch ≥ tip−5 — a circle's whole location history, because
+        // a circle's epoch only advances on a membership commit — per circle,
+        // per pass, under the session mutex. A peer leaving a circle of M
+        // produces up to M−1 competing auto-commits, and `confirm_published` is
+        // awaited inline from Dart, so an un-coalesced walk lands on the visible
+        // latency of Add / Remove / Create Member.
+        let dir = TempDir::new().unwrap();
+        let keys = Keys::generate();
+        let manager = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
+
+        let departing = "ee".repeat(32);
+        manager
+            .storage
+            .sync_co_members(std::slice::from_ref(&departing), DIR_NOW)
+            .unwrap();
+
+        // A walk is in progress; everything that arrives now must be folded into
+        // it rather than starting its own.
+        manager
+            .directory_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .running = true;
+
+        manager
+            .reconcile_member_directory_at(DirectoryReconcile::RewriteWithdrawing, DIR_NOW)
+            .await;
+        manager
+            .reconcile_member_directory_at(DirectoryReconcile::Rewrite, DIR_NOW)
+            .await;
+        assert_eq!(
+            directory_row(&manager, &departing).unwrap().tier,
+            DirectoryTier::Current,
+            "a queued request must not walk on its own"
+        );
+        assert_eq!(
+            manager
+                .directory_flight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .owed,
+            Some(DirectoryReconcile::RewriteWithdrawing),
+            "and an ordinary rewrite queued beside a withdrawal must never \
+             downgrade it"
+        );
+
+        // The walk finishes; the next caller adopts the whole backlog.
+        manager
+            .directory_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .running = false;
+        manager
+            .reconcile_member_directory_at(DirectoryReconcile::Rewrite, DIR_NOW)
+            .await;
+
+        assert!(
+            directory_row(&manager, &departing).is_none(),
+            "three requests, one walk, resolved at the strongest verdict asked for"
+        );
+        let flight = manager
+            .directory_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (running, owed) = (flight.running, flight.owed);
+        drop(flight);
+        assert!(!running, "the runner must release the flight");
+        assert_eq!(owed, None, "and must leave nothing owed behind it");
+    }
+
+    #[tokio::test]
+    async fn a_quarantined_circle_is_skipped_without_aborting_the_union() {
+        // A group quarantined at session-open hydration is indistinguishable
+        // from an unknown one on every engine accessor. Skipping it must not
+        // stop the rest of the union from being written — an aborting reconcile
+        // would freeze every peer's timestamp for the life of the session.
+        let dir = TempDir::new().unwrap();
+        let keys = Keys::generate();
+        let (quarantined_gid, stranded_hex) = {
+            let manager = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
+            create_confirmed_circle(&manager, &keys, "Quarantined").await
+        };
+        // Destroy the group-scoped OpenMLS state (leaving the Marmot record and
+        // the account's own signer intact) so the next open enumerates the group
+        // and fails to hydrate it.
+        tamper_session_db(
+            dir.path(),
+            "DELETE FROM openmls_values WHERE group_key IS NOT NULL;",
+        );
+
+        let manager = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
+        assert_eq!(
+            manager.session().quarantined_group_ids().await,
+            vec![quarantined_gid],
+            "precondition: hydration quarantined the tampered group"
+        );
+
+        let (_healthy_gid, healthy_hex) = create_confirmed_circle(&manager, &keys, "Healthy").await;
+        assert!(
+            manager
+                .reconcile_member_directory(DirectoryReconcile::Rewrite, DIR_NOW)
+                .await
+                .unwrap(),
+            "a quarantined circle is a skip, never an abort"
+        );
+
+        assert_eq!(
+            directory_row(&manager, &healthy_hex).unwrap().tier,
+            DirectoryTier::Current
+        );
+        assert_eq!(
+            directory_row(&manager, &stranded_hex).unwrap().tier,
+            DirectoryTier::Recent,
+            "the quarantined circle contributes nobody, so its members age out \
+             on the ordinary window and are restored when the next session open \
+             re-hydrates the group"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_read_failure_aborts_the_rewrite_and_the_purge_together() {
+        // A pubkey missing because its circle could not be read is
+        // indistinguishable from one who left, so a partial union must write
+        // nothing — AND sweep nothing, or the abort would still act on stale
+        // retention it can no longer justify.
+        let dir = TempDir::new().unwrap();
+        let keys = Keys::generate();
+        let manager = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
+        let (_gid, member_hex) = create_confirmed_circle(&manager, &keys, "Readable").await;
+
+        // A departed contact whose retention has already elapsed at the clock
+        // the aborting reconcile will be handed.
+        let departed = "aa".repeat(32);
+        manager
+            .storage
+            .sync_co_members(&[member_hex.clone(), departed.clone()], DIR_NOW)
+            .unwrap();
+        manager
+            .storage
+            .sync_co_members(std::slice::from_ref(&member_hex), DIR_NOW)
+            .unwrap();
+
+        // Inject a genuine backend read failure inside the roster read.
+        tamper_session_db(dir.path(), "DROP TABLE cgka_messages;");
+        let err = manager
+            .reconcile_member_directory(DirectoryReconcile::Rewrite, DIR_NOW + DIR_RETENTION + 1)
+            .await
+            .expect_err("a backend read failure must surface, not be swallowed");
+        assert!(matches!(err, CircleError::Mls(_)));
+
+        assert_eq!(
+            directory_row(&manager, &departed).unwrap().tier,
+            DirectoryTier::Recent,
+            "the purge must not run on a union the reconcile refused to trust"
+        );
+        assert_eq!(
+            directory_row(&manager, &member_hex).unwrap().tier,
+            DirectoryTier::Current,
+            "and neither may the rewrite"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_reconcile_sweeps_expired_rows_at_the_exact_boundary() {
+        let dir = TempDir::new().unwrap();
+        let keys = Keys::generate();
+        let manager = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
+
+        let departed = "bb".repeat(32);
+        manager
+            .storage
+            .sync_co_members(std::slice::from_ref(&departed), DIR_NOW)
+            .unwrap();
+        manager.storage.sync_co_members(&[], DIR_NOW).unwrap();
+
+        assert!(manager
+            .reconcile_member_directory(DirectoryReconcile::Rewrite, DIR_NOW + DIR_RETENTION)
+            .await
+            .unwrap());
+        assert!(
+            directory_row(&manager, &departed).is_some(),
+            "the boundary second is still inside the window"
+        );
+
+        assert!(manager
+            .reconcile_member_directory(DirectoryReconcile::Rewrite, DIR_NOW + DIR_RETENTION + 1)
+            .await
+            .unwrap());
+        assert!(
+            directory_row(&manager, &departed).is_none(),
+            "the next second is outside it"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_picker_read_sweeps_on_an_install_where_no_reconcile_ever_runs() {
+        // The clock the caller passes must reach the DELETE. A device that sees
+        // no membership change, no ingest and no catch-up runs nothing but this
+        // read, so it is the whole of the three-day promise there.
+        let dir = TempDir::new().unwrap();
+        let keys = Keys::generate();
+        let manager = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
+
+        let departed = "dd".repeat(32);
+        manager
+            .storage
+            .sync_co_members(std::slice::from_ref(&departed), DIR_NOW)
+            .unwrap();
+        manager.storage.sync_co_members(&[], DIR_NOW).unwrap();
+        assert!(directory_row(&manager, &departed).is_some());
+
+        assert!(
+            manager
+                .ranked_directory_members(DIR_NOW + DIR_RETENTION + 1)
+                .expect("directory read")
+                .is_empty(),
+            "past the window, the read must offer nobody"
+        );
+        // Read back at a clock that cannot sweep: a display filter would still
+        // have the row here.
+        assert!(
+            directory_row(&manager, &departed).is_none(),
+            "and must have deleted them, not hidden them"
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_a_member_deletes_their_row_before_the_commit_is_published() {
+        // Owner decision D3, the "you remove them" direction. Deleting at
+        // staging time is deliberate: until this returns, the person the user
+        // just removed is still one tap from being re-offered as a co-member.
+        let circle = setup_two_party_circle().await;
+        let bob_hex = circle.bob_keys.public_key().to_hex();
+        assert!(circle
+            .alice
+            .reconcile_member_directory(DirectoryReconcile::Rewrite, DIR_NOW)
+            .await
+            .unwrap());
+        assert!(directory_row(&circle.alice, &bob_hex).is_some());
+
+        let commit = circle
+            .alice
+            .remove_members(&circle.mls_group_id, std::slice::from_ref(&bob_hex))
+            .await
+            .expect("stage removal");
+
+        assert!(
+            directory_row(&circle.alice, &bob_hex).is_none(),
+            "the removal must not wait for a relay ack, and must not age out"
+        );
+        drop(commit);
+    }
+
+    #[tokio::test]
+    async fn being_removed_from_a_circle_deletes_its_co_members_immediately() {
+        // Owner decision D3, the "they remove you" direction. `Group.removed`
+        // is the only signal for it, and it survives until an authenticated
+        // re-join or a branch selection that supersedes the removal.
+        let circle = setup_two_party_circle().await;
+        let alice_hex = circle.alice_keys.public_key().to_hex();
+        // Stamped at [`DIR_FAR_FUTURE`] so a mere DEMOTION would still be
+        // readable afterwards: the write site below reconciles on the wall
+        // clock, and a row whose deadline the wall clock has passed would be
+        // swept whether or not anything severed it.
+        circle
+            .bob
+            .storage
+            .sync_co_members(std::slice::from_ref(&alice_hex), DIR_FAR_FUTURE)
+            .unwrap();
+        assert_eq!(
+            far_future_row(&circle.bob, &alice_hex).unwrap().tier,
+            DirectoryTier::Current
+        );
+
+        let commit = circle
+            .alice
+            .remove_members(
+                &circle.mls_group_id,
+                &[circle.bob_keys.public_key().to_hex()],
+            )
+            .await
+            .expect("stage removal");
+        circle
+            .alice
+            .confirm_published(commit.pending)
+            .await
+            .expect("confirm removal");
+        circle
+            .bob
+            .decrypt_location(&commit.commit_event)
+            .await
+            .expect("bob applies his own eviction");
+
+        assert!(
+            matches!(
+                circle
+                    .bob
+                    .session()
+                    .converged_member_pubkeys(&circle.mls_group_id)
+                    .await
+                    .unwrap(),
+                ConvergedRoster::Converged { removed: true, .. }
+            ),
+            "precondition: the engine records the eviction"
+        );
+        assert!(
+            !circle
+                .bob
+                .storage
+                .has_leave_intent(&circle.mls_group_id)
+                .unwrap(),
+            "precondition: bob never asked to leave — this is the other direction"
+        );
+        assert!(
+            far_future_row(&circle.bob, &alice_hex).is_none(),
+            "a severed co-membership is deleted, not retained for three days"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_location_message_never_touches_the_directory() {
+        // §5.5: decrypting a kind-445 is not a membership signal. An
+        // application message may be sealed up to `app_message_past_epoch_limit`
+        // epochs behind the tip, so treating a sender as a co-member would
+        // resurrect someone removed several epochs ago.
+        let circle = setup_two_party_circle().await;
+        let bob_hex = circle.bob_keys.public_key().to_hex();
+        let send = || async {
+            circle
+                .bob
+                .encrypt_location(
+                    &circle.mls_group_id,
+                    &circle.bob_keys.public_key(),
+                    &LocationMessage::new(1.0, 2.0),
+                    60,
+                )
+                .await
+                .expect("bob sends")
+                .0
+        };
+        let live = send().await;
+        let held_back = send().await;
+
+        // A tripwire only a reconcile can move: this pubkey is in no circle, so
+        // any rewrite demotes it out of `Current`.
+        let tripwire = "cc".repeat(32);
+        circle
+            .alice
+            .storage
+            .sync_co_members(&[bob_hex.clone(), tripwire.clone()], DIR_NOW)
+            .unwrap();
+
+        let results = circle.alice.decrypt_location(&live).await.unwrap();
+        assert!(
+            results
+                .iter()
+                .any(|r| matches!(r, LocationMessageResult::Location { .. })),
+            "precondition: the message really decrypted"
+        );
+        assert_eq!(
+            directory_row(&circle.alice, &tripwire).unwrap().tier,
+            DirectoryTier::Current,
+            "a decrypted location must not trigger a rewrite"
+        );
+
+        // Now Bob is removed and his row is gone; the message he sealed at the
+        // earlier epoch cannot bring it back.
+        let commit = circle
+            .alice
+            .remove_members(&circle.mls_group_id, std::slice::from_ref(&bob_hex))
+            .await
+            .expect("stage removal");
+        circle
+            .alice
+            .confirm_published(commit.pending)
+            .await
+            .expect("confirm removal");
+        assert!(directory_row(&circle.alice, &bob_hex).is_none());
+
+        circle
+            .alice
+            .decrypt_location(&held_back)
+            .await
+            .expect("the past-epoch message is handled, whatever the verdict");
+        assert!(
+            directory_row(&circle.alice, &bob_hex).is_none(),
+            "a past-epoch message from a removed member must not resurrect them"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_union_spans_every_circle_in_one_pass() {
+        // Constraint §4.3: callers pass the union across all circles, never a
+        // per-circle partition — which is also what stops a row being tied to a
+        // circle by its write time.
+        let dir = TempDir::new().unwrap();
+        let keys = Keys::generate();
+        let manager = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
+        let (_first, first_hex) = create_confirmed_circle(&manager, &keys, "First").await;
+        let (_second, second_hex) = create_confirmed_circle(&manager, &keys, "Second").await;
+
+        assert!(manager
+            .reconcile_member_directory(DirectoryReconcile::Rewrite, DIR_NOW)
+            .await
+            .unwrap());
+
+        let first = directory_row(&manager, &first_hex).expect("first circle's member");
+        let second = directory_row(&manager, &second_hex).expect("second circle's member");
+        assert_eq!(first.tier, DirectoryTier::Current);
+        assert_eq!(second.tier, DirectoryTier::Current);
+        assert_eq!(
+            (first.tier, first.last_shared_day, first.purge_after),
+            (second.tier, second.last_shared_day, second.purge_after),
+            "one pass across all circles: every field the row stores is equal, \
+             so no member of one circle is stamped apart from a member of another"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_local_identity_is_never_its_own_directory_entry() {
+        let circle = setup_two_party_circle().await;
+        assert!(circle
+            .alice
+            .reconcile_member_directory(DirectoryReconcile::Rewrite, DIR_NOW)
+            .await
+            .unwrap());
+
+        let entries = directory_of(&circle.alice);
+        assert!(entries
+            .iter()
+            .any(|(pk, _)| *pk == circle.bob_keys.public_key().to_hex()));
+        assert!(
+            !entries
+                .iter()
+                .any(|(pk, _)| *pk == circle.alice_keys.public_key().to_hex()),
+            "the directory lists other people; a self row would offer the user \
+             to themselves"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_welcome_preview_writes_no_directory_row() {
+        // Pre-accept a welcome is seal-authenticated only — anyone can gift-wrap
+        // one — and a row written here would break decline-leaves-no-trace.
+        let relays = vec!["wss://relay.test.com".to_string()];
+        let alice_dir = TempDir::new().unwrap();
+        let alice_keys = Keys::generate();
+        let alice = CircleManager::new_unencrypted(alice_dir.path(), &alice_keys).unwrap();
+        let bob_dir = TempDir::new().unwrap();
+        let bob_keys = Keys::generate();
+        let bob = CircleManager::new_unencrypted(bob_dir.path(), &bob_keys).unwrap();
+
+        let bob_kp_event = make_kp_event(&bob, &bob_keys, &relays).await;
+        let config = CircleConfig::new("Preview").with_relays(relays.clone());
+        let creation = alice
+            .create_circle(
+                &alice_keys,
+                vec![MemberKeyPackage {
+                    key_package_event: bob_kp_event,
+                    inbox_relays: relays.clone(),
+                    nip65_relays: vec![],
+                }],
+                &config,
+                &relays,
+            )
+            .await
+            .expect("create circle");
+        alice
+            .confirm_published(creation.pending)
+            .await
+            .expect("confirm create");
+        let welcome = creation.welcome_events.first().expect("one welcome");
+
+        bob.process_gift_wrapped_invitation(&bob_keys, &welcome.event)
+            .await
+            .expect("bob holds the welcome");
+        assert!(
+            directory_of(&bob).is_empty(),
+            "holding a welcome must write nobody"
+        );
+
+        bob.accept_invitation(&welcome.event.id)
+            .await
+            .expect("bob accepts");
+        assert!(
+            directory_row(&bob, &alice_keys.public_key().to_hex()).is_some(),
+            "accepting is what makes the roster real"
+        );
+    }
+
+    #[test]
+    fn only_membership_signals_ask_for_a_directory_rewrite() {
+        let location = || LocationMessageResult::Location {
+            sender_pubkey: "aa".repeat(32),
+            content: String::new(),
+            group_id: random_group_id(),
+            epoch: 1,
+        };
+        let update = || LocationMessageResult::GroupUpdate {
+            group_id: random_group_id(),
+        };
+        let joined = || LocationMessageResult::Joined {
+            group_id: random_group_id(),
+        };
+        let invalidated = || LocationMessageResult::Invalidated {
+            group_id: random_group_id(),
+        };
+        let unrecoverable = || LocationMessageResult::Unrecoverable {
+            group_id: random_group_id(),
+        };
+
+        assert_eq!(DirectoryReconcile::for_receive_results(&[]), None);
+        assert_eq!(
+            DirectoryReconcile::for_receive_results(&[location()]),
+            None,
+            "a decrypted kind-445 may be up to five epochs old and is never a \
+             membership signal"
+        );
+        assert_eq!(
+            DirectoryReconcile::for_receive_results(&[unrecoverable()]),
+            None,
+            "an unrecoverable group's roster is frozen at its last stable epoch"
+        );
+        assert_eq!(
+            DirectoryReconcile::for_receive_results(&[update()]),
+            Some(DirectoryReconcile::Rewrite)
+        );
+        assert_eq!(
+            DirectoryReconcile::for_receive_results(&[joined()]),
+            Some(DirectoryReconcile::Rewrite)
+        );
+        assert_eq!(
+            DirectoryReconcile::for_receive_results(&[invalidated()]),
+            Some(DirectoryReconcile::RewriteWithdrawing)
+        );
+        assert_eq!(
+            DirectoryReconcile::for_receive_results(&[
+                location(),
+                update(),
+                invalidated(),
+                unrecoverable()
+            ]),
+            Some(DirectoryReconcile::RewriteWithdrawing),
+            "a withdrawal in the batch outranks an ordinary rewrite"
+        );
+    }
+
+    #[test]
+    fn the_engine_event_verdict_matches_the_folded_one() {
+        let group_id = random_group_id();
+        assert_eq!(
+            DirectoryReconcile::for_group_events(&[GroupEvent::GroupCreated {
+                group_id: group_id.clone()
+            }]),
+            None,
+            "a local create is not an inbound membership change"
+        );
+        assert_eq!(
+            DirectoryReconcile::for_group_events(&[GroupEvent::EpochChanged {
+                group_id: group_id.clone(),
+                from: crate::nostr::mls::types::EpochId(1),
+                to: crate::nostr::mls::types::EpochId(2),
+            }]),
+            Some(DirectoryReconcile::Rewrite)
+        );
+        assert_eq!(
+            DirectoryReconcile::for_group_events(&[
+                GroupEvent::GroupUnrecoverable {
+                    group_id: group_id.clone()
+                },
+                GroupEvent::GroupStateInvalidated {
+                    group_id,
+                    epoch: crate::nostr::mls::types::EpochId(1),
+                    invalidated_commit_id: crate::nostr::mls::types::MessageId::new(vec![1]),
+                    reason: cgka_traits::engine::GroupStateInvalidationReason::
+                        SupersededByBranchSelection,
+                },
+            ]),
+            Some(DirectoryReconcile::RewriteWithdrawing)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_group_reads_as_absent_rather_than_a_read_failure() {
+        // `find_group` collapses quarantine and "never seen" into `None`; this
+        // accessor must make the same call so a stored circle row with no live
+        // group is skipped instead of aborting every reconcile.
+        let (manager, _keys, _dir) = create_test_manager();
+        assert_eq!(
+            manager
+                .session()
+                .converged_member_pubkeys(&random_group_id())
+                .await
+                .unwrap(),
+            ConvergedRoster::Absent
+        );
+        assert!(manager.session().quarantined_group_ids().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_circle_row_with_no_live_group_is_skipped_not_treated_as_empty() {
+        let dir = TempDir::new().unwrap();
+        let keys = Keys::generate();
+        let manager = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
+        let (_gid, member_hex) = create_confirmed_circle(&manager, &keys, "Live").await;
+        // A stored circle whose MLS group the engine never held.
+        save_stored_circle(&manager, MembershipStatus::Accepted);
+
+        assert!(manager
+            .reconcile_member_directory(DirectoryReconcile::Rewrite, DIR_NOW)
+            .await
+            .unwrap());
+        assert_eq!(
+            directory_of(&manager),
+            vec![(member_hex, DirectoryTier::Current)]
+        );
+    }
+
     // ── Welcome-delivery cascade ─────────────────────────────────────────────
 
     #[tokio::test]
@@ -3060,6 +4900,35 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn create_circle_returns_the_name_as_stored_not_as_typed() {
+        // The returned struct is itself a rendering path — the caller draws the
+        // new circle from it before anything re-reads storage — so asserting on
+        // a re-read here would prove nothing about what gets drawn. Bidi
+        // override + zero-width space: exactly what `sanitize_circle_name`
+        // strips, so an unsanitized return cannot pass by accident.
+        const TYPED: &str = "Fa\u{202E}mi\u{200B}ly";
+
+        let relays = vec!["wss://relay.test.com".to_string()];
+        let dir = TempDir::new().unwrap();
+        let alice_keys = Keys::generate();
+        let alice = CircleManager::new_unencrypted(dir.path(), &alice_keys).unwrap();
+
+        let member = make_member_with_relays(relays.clone(), vec![]).await;
+        let config = CircleConfig::new(TYPED).with_relays(relays.clone());
+
+        let creation = alice
+            .create_circle(&alice_keys, vec![member], &config, &relays)
+            .await
+            .expect("create");
+
+        assert_eq!(
+            creation.circle.display_name, "Family",
+            "create_circle must hand back the sanitized name it stored, not the \
+             raw one it was handed"
+        );
+    }
+
     // ── Create rollback / ghost-row cleanup (F2/F3) ──────────────────────────
 
     #[tokio::test]
@@ -3224,10 +5093,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_invitation_reports_known_inviter_member_count() {
-        // FE-2 regression pin: a processed-but-unaccepted welcome must report
-        // the provably-known members — the NIP-59-seal-authenticated inviter,
-        // never 0 — through BOTH the process return and the pending list.
+    async fn pending_invitation_reports_the_seal_authenticated_inviter() {
+        // FE-2 regression pin: a processed-but-unaccepted welcome must surface
+        // the ONE identity a pre-join peel proves — the NIP-59 seal author —
+        // through BOTH the process return and the pending list. It must surface
+        // nothing else: the roster is inside the still-encrypted Welcome, so a
+        // member count here could only ever have been a fabricated constant.
         let relays = vec!["wss://relay.test.com".to_string()];
         let alice_dir = TempDir::new().unwrap();
         let alice_keys = Keys::generate();
@@ -3252,17 +5123,14 @@ mod tests {
             .process_gift_wrapped_invitation(&bob_keys, &welcome.event)
             .await
             .expect("bob holds welcome");
-        assert_eq!(
-            processed.member_count, 1,
-            "the invitation must count the authenticated inviter"
-        );
         assert_eq!(processed.inviter_pubkey, alice_keys.public_key().to_hex());
 
         let pending = bob.get_pending_invitations().unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(
-            pending[0].member_count, 1,
-            "the pending list must preserve the known-inviter count"
+            pending[0].inviter_pubkey,
+            alice_keys.public_key().to_hex(),
+            "the pending list must preserve the seal-authenticated inviter"
         );
     }
 
@@ -3797,11 +5665,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn complete_leave_nonexistent_group_succeeds() {
+    #[tokio::test]
+    async fn complete_leave_nonexistent_group_succeeds() {
         let (manager, _keys, _dir) = create_test_manager();
         manager
-            .complete_leave(&GroupId::from_slice(&[0u8; 32]))
+            .complete_leave(&GroupId::from_slice(&[0u8; 32]), DIR_NOW)
+            .await
             .expect("complete_leave should not fail when row is missing");
     }
 
@@ -3818,7 +5687,8 @@ mod tests {
             .unwrap()
             .is_some());
         tp.alice
-            .complete_leave(&tp.mls_group_id)
+            .complete_leave(&tp.mls_group_id, DIR_NOW)
+            .await
             .expect("complete_leave");
         assert!(tp
             .alice
@@ -3839,7 +5709,8 @@ mod tests {
             .expect("advance cursor");
         assert!(tp.alice.read_sync_cursor(&key).unwrap().is_some());
         tp.alice
-            .complete_leave(&tp.mls_group_id)
+            .complete_leave(&tp.mls_group_id, DIR_NOW)
+            .await
             .expect("complete_leave");
         assert!(
             tp.alice.read_sync_cursor(&key).unwrap().is_none(),

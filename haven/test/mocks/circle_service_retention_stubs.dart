@@ -52,6 +52,15 @@ mixin CircleServiceRetentionStubs {
 
   Future<int> pruneExpiredLastKnown({DateTime? now}) async => 0;
 
+  Future<List<DirectoryEntry>> rankedDirectoryMembers({DateTime? now}) async =>
+      const [];
+
+  Future<bool> reconcileMemberDirectory({DateTime? now}) async => true;
+
+  Future<Map<String, String>> allContactDisplayNames() async => const {};
+
+  Future<String?> getContactDisplayName({required String pubkey}) async => null;
+
   Future<void> setContactDisplayName({
     required String pubkey,
     String? displayName,

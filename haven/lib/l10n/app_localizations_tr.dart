@@ -110,22 +110,10 @@ class AppLocalizationsTr extends AppLocalizations {
       'Sizi yalnızca çevreleriniz görebilir';
 
   @override
-  String get onboardingValueProp1Body =>
-      'Konumunuz cihazınızdan çıkmadan önce şifrelenir; böylece yalnızca seçtiğiniz çevreler onu okuyabilir, Haven ya da başka biri asla okuyamaz. Haven açık kaynak olduğundan bunu herkes doğrulayabilir.';
-
-  @override
   String get onboardingValueProp2Title => 'Kimse kapatamaz';
 
   @override
-  String get onboardingValueProp2Body =>
-      'Haven\'ın merkezi bir sunucusu yoktur. Şifreli mesajlarınız, aktarıcı adı verilen bağımsız sunucular üzerinden iletilir ve hangilerini kullanacağınızı siz seçersiniz. Tek bir şirket ya da hükümet bu ağı kapatamaz.';
-
-  @override
   String get onboardingValueProp3Title => 'Hesaba gerek yok';
-
-  @override
-  String get onboardingValueProp3Body =>
-      'E-posta yok, telefon numarası yok, kayıt yok. Haven, gizli anahtarı telefonunuzdan hiç çıkmayan bir kimlik oluşturur; bu yüzden kimsenin teslim edebileceği bir hesap da yoktur.';
 
   @override
   String get onboardingValueProp1Summary =>
@@ -214,26 +202,13 @@ class AppLocalizationsTr extends AppLocalizations {
   String get settingsIdentityTitle => 'Kimlik';
 
   @override
-  String get settingsIdentitySubtitle =>
-      'Profil, anahtarlar ve fotoğraf paylaşımı';
-
-  @override
   String get settingsRelaysTitle => 'Aktarıcılar';
-
-  @override
-  String get settingsRelaysSubtitle => 'Davetlerin size ulaştığı yer';
 
   @override
   String get settingsLocationTitle => 'Konum';
 
   @override
-  String get settingsLocationSubtitle => 'Arka planda paylaşım ve izinler';
-
-  @override
   String get settingsMapStyleTitle => 'Harita stili';
-
-  @override
-  String get settingsAppearanceSubtitle => 'Tema ve dil';
 
   @override
   String get settingsAboutTitle => 'Hakkında';
@@ -518,10 +493,6 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyTitle => 'Gizlilik';
-
-  @override
-  String get privacySubtitle =>
-      'Haven nasıl çalışır ve başkaları neyi görebilir';
 
   @override
   String get privacyHubSummary =>
@@ -936,9 +907,6 @@ class AppLocalizationsTr extends AppLocalizations {
   String get createCircleNoValidMembers => 'Davet edilecek geçerli üye yok';
 
   @override
-  String get createCircleMemberAlreadyAdded => 'Üye zaten eklendi';
-
-  @override
   String get createCircleNoIdInQr => 'QR kodunda geçerli bir kimlik bulunamadı';
 
   @override
@@ -1124,9 +1092,6 @@ class AppLocalizationsTr extends AppLocalizations {
   String get qrScannerScanning => 'Taranıyor...';
 
   @override
-  String get circleMemberInvitationPending => 'Davet Bekliyor';
-
-  @override
   String get circleMemberNoRecentLocation => 'Yakın zamanlı konum yok';
 
   @override
@@ -1161,9 +1126,6 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get circleMemberAdmin => 'Yönetici';
-
-  @override
-  String get circleMemberHintPending => 'davet bekliyor';
 
   @override
   String get circleMemberHintNoLocation => 'konum yok';
@@ -1222,6 +1184,57 @@ class AppLocalizationsTr extends AppLocalizations {
   String get memberSearchAlreadyAdded => 'Üye zaten eklendi';
 
   @override
+  String get memberPickerSectionRoster => 'Çevrelerinizdeki üyeler';
+
+  @override
+  String get memberPickerTierRoster => 'Çevrelerinizdeki üye';
+
+  @override
+  String get memberPickerNoMatches => 'Çevrelerinizde eşleşen kimse yok';
+
+  @override
+  String get memberPickerLoading => 'Çevrelerinizdeki kişi listesi okunuyor';
+
+  @override
+  String get memberPickerDirectoryUnavailable =>
+      'Çevrelerinizdeki kişi listesi şu anda okunamadı';
+
+  @override
+  String memberPickerMatchesAnnouncement(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return 'Eşleşme sayısı: $countString';
+  }
+
+  @override
+  String get memberPickerReasonSelf => 'Bu sizin kendi kimliğiniz';
+
+  @override
+  String get memberPickerReadPublicKey => 'Açık anahtarı sesli oku';
+
+  @override
+  String get memberPickerSectionRecent =>
+      'Son zamanlarda çevrelerinizdeki kişiler';
+
+  @override
+  String get memberPickerTierRecent => 'Son zamanlarda çevrelerinizdeydi';
+
+  @override
+  String get memberPickerNicknameNote =>
+      'Sizin verdiğiniz takma ad, kişinin herkese açık adı değil';
+
+  @override
+  String memberPickerCollisionCircleLabel(String circleName) {
+    return 'Çevre: $circleName';
+  }
+
+  @override
+  String get memberPickerStrangerLookupNote =>
+      'Haven, bu kişinin yayımlanmış adını bir aktarıcıya sordu. O aktarıcı, bu cihazın az önce bu anahtarı sorduğunu görür — ama bu istek imza taşımadığı için Haven kimliğinizle ilişkilendirilmez. Henüz hiçbir fotoğraf indirilmedi.';
+
+  @override
   String selectedMembersMore(int count) {
     final intl.NumberFormat countNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
@@ -1231,26 +1244,11 @@ class AppLocalizationsTr extends AppLocalizations {
   }
 
   @override
-  String get invitationStatusPending => 'Davet Bekliyor';
+  String get invitationCardHeading => 'Çevre daveti';
 
   @override
-  String get invitationStatusActive => 'Etkin';
-
-  @override
-  String get invitationStatusDeclined => 'Reddedildi';
-
-  @override
-  String invitationStatusSemantics(String label) {
-    return 'Davet durumu: $label';
-  }
-
-  @override
-  String invitationCardSemantics(String circleName, String inviter, int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    return '$circleName çevresine katılma daveti, davet eden $inviter, $countString üye';
+  String invitationCardSemantics(String inviter) {
+    return 'Sizi bir çevreye $inviter davet etti';
   }
 
   @override
@@ -1264,19 +1262,8 @@ class AppLocalizationsTr extends AppLocalizations {
   }
 
   @override
-  String invitationCardMemberCount(int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    String _temp0 = intl.Intl.pluralLogic(
-      count,
-      locale: localeName,
-      other: '$countString üye',
-      one: '1 üye',
-    );
-    return '$_temp0';
-  }
+  String get invitationCardNicknameNote =>
+      'Sizin verdiğiniz takma ad, kişinin herkese açık adı değil';
 
   @override
   String get invitationCardJustNow => 'Az önce';
@@ -1850,37 +1837,6 @@ class AppLocalizationsTr extends AppLocalizations {
   @override
   String get profileSyncStatusRetrySemantics =>
       'Profilinizi yayımlamayı yeniden dene';
-
-  @override
-  String keyDisplayCopiedToClipboard(String label) {
-    return '$label panoya kopyalandı';
-  }
-
-  @override
-  String keyDisplaySemantics(String label, String state) {
-    return '$label: $state';
-  }
-
-  @override
-  String get keyDisplayStateRevealed => 'gösteriliyor';
-
-  @override
-  String get keyDisplayStateHidden => 'gizli';
-
-  @override
-  String get keyDisplayHideTooltip => 'Gizle';
-
-  @override
-  String get keyDisplayRevealTooltip => 'Göster';
-
-  @override
-  String get keyDisplayCopyTooltip => 'Kopyala';
-
-  @override
-  String get keyDisplayCompactCopied => 'Anahtar panoya kopyalandı';
-
-  @override
-  String get keyDisplayCompactTapToCopy => 'Kopyalamak için dokunun';
 
   @override
   String get npubQrCopiedSnack => 'Açık anahtar panoya kopyalandı';

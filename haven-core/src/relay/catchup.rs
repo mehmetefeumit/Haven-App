@@ -981,6 +981,7 @@ async fn ingest_one(
 
     persist_locations(circle_mgr, &ingest.effects.events, ngid, own_hex);
     resolve_publish_work(circle_mgr, relay_mgr, &ingest.effects.publish).await;
+    let mut directory = circle_mgr.directory_verdict_for_events(&ingest.effects.events);
 
     // Release any queued convergence work + persist its locations, re-ticking a
     // group that stays pending until its jitter-delayed `SelfRemove` auto-commit
@@ -997,6 +998,7 @@ async fn ingest_one(
             if let Ok(more) = circle_mgr.session().advance_convergence(gid).await {
                 persist_locations(circle_mgr, &more.events, ngid, own_hex);
                 resolve_publish_work(circle_mgr, relay_mgr, &more.publish).await;
+                directory = directory.max(circle_mgr.directory_verdict_for_events(&more.events));
                 next.extend(more.pending_convergence);
             }
         }
@@ -1004,6 +1006,17 @@ async fn ingest_one(
         if !pending.is_empty() {
             tokio::time::sleep(CONVERGENCE_RETICK_DELAY).await;
         }
+    }
+
+    // A commit that lands in the background isolate is applied state like any
+    // other, and its withdrawal is the one signal the directory cannot
+    // reconstruct later — the fold keeps no per-commit record, so a rewrite that
+    // waits for the next foreground trigger would age a withdrawn add out over
+    // three days instead of deleting it.
+    if let Some(mode) = directory {
+        circle_mgr
+            .reconcile_member_directory_best_effort(mode)
+            .await;
     }
 
     match ingest.outcome {
@@ -2721,6 +2734,239 @@ mod tests {
             ingest_one(&mgr, &relay_mgr, &unexpired, &ngid, &own).await,
             ReceiveOnlyOutcome::NoEvidence,
             "only Haven's own pre-auth screen may produce `NoEvidence`"
+        );
+    }
+
+    // ── Member-directory wiring (picker plan §5.5) ───────────────────────────
+    //
+    // `ingest_one` is the OTHER production write site the plan's corrected §5.5
+    // list names — the WorkManager background-isolate counterpart to
+    // `live_sync::processor::EngineProcessor::process_group_event`, "the same
+    // shape in the WorkManager isolate". These drive the REAL wiring: a real
+    // MLS circle, a real inbound commit or location message, fed through
+    // `ingest_one` itself, read back from the real SQLCipher directory table —
+    // never a mock of `reconcile_member_directory_best_effort`.
+
+    use crate::circle::{CircleConfig, DirectoryReconcile, DirectoryTier, MemberKeyPackage};
+    use crate::location::LocationMessage;
+    use crate::nostr::mls::types::GroupId;
+    use crate::relay::maintenance::build_kp_maintenance_events;
+    use nostr::Event;
+
+    /// See `live_sync::processor::tests::DIR_READ_AT` for why this is a fixed
+    /// far-past constant rather than a real clock reading.
+    const DIR_READ_AT: i64 = 20_000 * 86_400;
+
+    async fn make_kp_event(manager: &CircleManager, keys: &Keys, relays: &[String]) -> Event {
+        build_kp_maintenance_events(manager.session(), keys, relays, None, None)
+            .await
+            .expect("build key package event")
+            .event
+    }
+
+    /// A freshly generated identity's `KeyPackage`, ready to be added to a
+    /// circle. The throwaway session behind it is dropped after minting.
+    async fn make_member_with_relays(relays: Vec<String>) -> MemberKeyPackage {
+        let dir = TempDir::new().unwrap();
+        let keys = Keys::generate();
+        let member = CircleManager::new_unencrypted(dir.path(), &keys).unwrap();
+        let event = make_kp_event(&member, &keys, &relays).await;
+        MemberKeyPackage {
+            key_package_event: event,
+            inbox_relays: relays,
+            nip65_relays: vec![],
+        }
+    }
+
+    /// A real two-party MLS circle (Alice admin, Bob member), converged: Alice
+    /// creates and confirms, Bob holds and accepts the engine-produced welcome.
+    struct AliceBob {
+        alice: CircleManager,
+        _alice_dir: TempDir,
+        alice_keys: Keys,
+        bob: CircleManager,
+        _bob_dir: TempDir,
+        bob_keys: Keys,
+        mls_group_id: GroupId,
+        nostr_group_id: [u8; 32],
+        relays: Vec<String>,
+    }
+
+    async fn setup_alice_bob() -> AliceBob {
+        let relays = vec!["wss://relay.test.com".to_string()];
+
+        let alice_dir = TempDir::new().unwrap();
+        let alice_keys = Keys::generate();
+        let alice = CircleManager::new_unencrypted(alice_dir.path(), &alice_keys).unwrap();
+
+        let bob_dir = TempDir::new().unwrap();
+        let bob_keys = Keys::generate();
+        let bob = CircleManager::new_unencrypted(bob_dir.path(), &bob_keys).unwrap();
+
+        let bob_kp_event = make_kp_event(&bob, &bob_keys, &relays).await;
+        let bob_member = MemberKeyPackage {
+            key_package_event: bob_kp_event,
+            inbox_relays: relays.clone(),
+            nip65_relays: vec![],
+        };
+
+        let config = CircleConfig::new("Test Circle").with_relays(relays.clone());
+        let creation = alice
+            .create_circle(&alice_keys, vec![bob_member], &config, &relays)
+            .await
+            .expect("create two-party circle");
+        alice
+            .confirm_published(creation.pending)
+            .await
+            .expect("confirm create");
+
+        let mls_group_id = creation.circle.mls_group_id.clone();
+        let nostr_group_id = creation.circle.nostr_group_id;
+
+        let welcome = creation.welcome_events.first().expect("one welcome");
+        bob.process_gift_wrapped_invitation(&bob_keys, &welcome.event)
+            .await
+            .expect("bob holds welcome");
+        bob.accept_invitation(&welcome.event.id)
+            .await
+            .expect("bob accepts welcome");
+
+        AliceBob {
+            alice,
+            _alice_dir: alice_dir,
+            alice_keys,
+            bob,
+            _bob_dir: bob_dir,
+            bob_keys,
+            mls_group_id,
+            nostr_group_id,
+            relays,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_real_inbound_add_commit_drained_through_ingest_one_writes_a_directory_row() {
+        // The catch-up counterpart of
+        // `live_sync::processor::tests::a_real_inbound_add_commit_drained_through_process_group_event_writes_a_directory_row`.
+        // Isolated the same way: Carol's pubkey never reaches Bob except
+        // through this call.
+        let fx = setup_alice_bob().await;
+        let relay_mgr = RelayManager::new();
+        let bob_own_hex = fx.bob_keys.public_key().to_hex();
+        let carol = make_member_with_relays(fx.relays.clone()).await;
+        let carol_hex = carol.key_package_event.pubkey.to_hex();
+
+        let before = fx
+            .bob
+            .ranked_directory_members(DIR_READ_AT)
+            .expect("directory read");
+        assert!(
+            !before.iter().any(|e| e.pubkey_hex == carol_hex),
+            "precondition: Carol is nobody to Bob yet"
+        );
+
+        let add = fx
+            .alice
+            .add_members_with_welcomes(&fx.alice_keys, &fx.mls_group_id, vec![carol], &fx.relays)
+            .await
+            .expect("alice adds carol");
+        fx.alice
+            .confirm_published(add.pending)
+            .await
+            .expect("confirm add");
+
+        let outcome = ingest_one(
+            &fx.bob,
+            &relay_mgr,
+            &add.commit_event,
+            &fx.nostr_group_id,
+            &bob_own_hex,
+        )
+        .await;
+        assert_eq!(
+            outcome,
+            ReceiveOnlyOutcome::Applied,
+            "sanity: the commit really applied — a failure here would make the \
+             absence check below meaningless"
+        );
+
+        let after = fx
+            .bob
+            .ranked_directory_members(DIR_READ_AT)
+            .expect("directory read");
+        let carol_row = after.iter().find(|e| e.pubkey_hex == carol_hex).expect(
+            "ingest_one must reconcile the directory after a real inbound \
+             commit — deleting that call, or making it a no-op, must fail this \
+             assertion",
+        );
+        assert_eq!(carol_row.tier, DirectoryTier::Current);
+    }
+
+    #[tokio::test]
+    async fn a_batch_of_only_location_messages_through_ingest_one_triggers_no_reconcile() {
+        // The catch-up counterpart of
+        // `live_sync::processor::tests::a_batch_of_only_location_messages_triggers_no_reconcile_at_all`
+        // — see that test for why the oracle is a fixed far-past
+        // `last_shared_day` stamp rather than a byte-diff of the row right
+        // after setup.
+        const FAR_PAST_DAY_SECS: i64 = 20_000 * 86_400; // 2024-10-04.
+
+        let fx = setup_alice_bob().await;
+        let relay_mgr = RelayManager::new();
+        let bob_own_hex = fx.bob_keys.public_key().to_hex();
+        let alice_hex = fx.alice_keys.public_key().to_hex();
+
+        assert!(
+            fx.bob
+                .reconcile_member_directory(DirectoryReconcile::Rewrite, FAR_PAST_DAY_SECS)
+                .await
+                .expect("reconcile"),
+            "precondition: bob's converged roster is readable"
+        );
+        let before = fx
+            .bob
+            .ranked_directory_members(DIR_READ_AT)
+            .expect("directory read");
+        let before_row = before
+            .iter()
+            .find(|e| e.pubkey_hex == alice_hex)
+            .cloned()
+            .expect("precondition: alice is bob's co-member");
+        assert_eq!(
+            before_row.last_shared_day,
+            FAR_PAST_DAY_SECS / 86_400,
+            "precondition: the forced stamp really landed"
+        );
+
+        let loc = LocationMessage::new(3.0, 4.0);
+        let (event, ngid, _relays) = fx
+            .alice
+            .encrypt_location(&fx.mls_group_id, &fx.alice_keys.public_key(), &loc, 60)
+            .await
+            .expect("alice encrypts");
+
+        let outcome = ingest_one(&fx.bob, &relay_mgr, &event, &ngid, &bob_own_hex).await;
+        assert_eq!(
+            outcome,
+            ReceiveOnlyOutcome::Applied,
+            "sanity: the location really applied — a failure here would make \
+             the row-unchanged assertion below meaningless"
+        );
+
+        let after = fx
+            .bob
+            .ranked_directory_members(DIR_READ_AT)
+            .expect("directory read");
+        let after_row = after
+            .iter()
+            .find(|e| e.pubkey_hex == alice_hex)
+            .cloned()
+            .expect("alice's row must still exist");
+        assert_eq!(
+            after_row, before_row,
+            "a location-only batch must never touch the directory row — any \
+             difference here (including a bumped last_shared_day) means a \
+             reconcile ran where the plan says one must not"
         );
     }
 }

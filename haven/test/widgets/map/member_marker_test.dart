@@ -286,6 +286,25 @@ void main() {
       expect(s.label, 'Jane member marker');
     });
 
+    testWidgets('spoken age appears at the same 5-minute bound as the pill', (
+      tester,
+    ) async {
+      // The two must not drift: a spoken age with no visible pill would tell a
+      // screen-reader user a marker is stale while a sighted user sees nothing.
+      await tester.pumpWidget(
+        _wrap(
+          _marker(
+            displayName: 'Jane',
+            lastSeen: DateTime.now().subtract(const Duration(minutes: 4)),
+          ),
+        ),
+      );
+      expect(
+        tester.getSemantics(find.byType(MemberMarker)).label,
+        'Jane member marker',
+      );
+    });
+
     testWidgets(
         'on-screen label is generic when no display name (never the '
         'initials/pubkey)', (
@@ -356,13 +375,25 @@ void main() {
   });
 
   group('MemberMarker age pill', () {
-    testWidgets('shows the pill for an on-screen marker at age >= 1 min', (
+    testWidgets('shows the pill for an on-screen marker at age >= 5 min', (
       tester,
     ) async {
       final lastSeen = DateTime.now().subtract(const Duration(minutes: 5));
       await tester.pumpWidget(_wrap(_marker(lastSeen: lastSeen)));
       await tester.pump(const Duration(milliseconds: 200));
       expect(find.text('5m'), findsOneWidget);
+    });
+
+    testWidgets('stays untagged below 5 minutes', (tester) async {
+      // A healthy peer publishes every ~2 min (up to 168 s under jitter), so
+      // a 4-minute-old fix is an ON-TIME one that happened to arrive late.
+      // Tagging it is exactly the noise the 5-minute bound exists to prevent.
+      // Four minutes rather than 4:59 leaves a full minute of slack, so a slow
+      // test machine cannot tip the age over the bound.
+      final lastSeen = DateTime.now().subtract(const Duration(minutes: 4));
+      await tester.pumpWidget(_wrap(_marker(lastSeen: lastSeen)));
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(find.textContaining('m'), findsNothing);
     });
 
     testWidgets('keeps the pill for an on-screen marker that has a tail', (

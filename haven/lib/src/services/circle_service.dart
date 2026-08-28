@@ -22,15 +22,19 @@ class CircleServiceException implements Exception {
   String toString() => 'CircleServiceException: $message';
 }
 
-/// Membership status for a circle member.
+/// The local user's own invitation state for a circle.
+///
+/// Never a statement about a peer: processing an MLS Welcome emits nothing
+/// on the wire and produces no artifact any other device can observe, so no
+/// device can tell whether anyone else ever joined.
 enum MembershipStatus {
-  /// Invitation sent but not yet accepted.
+  /// This device has been invited but has not accepted yet.
   pending,
 
-  /// Member has accepted and is active.
+  /// This device accepted and holds live MLS state for the circle.
   accepted,
 
-  /// Member has declined the invitation.
+  /// This device declined the invitation.
   declined,
 }
 
@@ -133,7 +137,6 @@ class CircleMember {
     required this.pubkey,
     required this.npub,
     required this.isAdmin,
-    required this.status,
     this.displayName,
   });
 
@@ -149,9 +152,6 @@ class CircleMember {
   /// Whether this member is an admin of the circle.
   final bool isAdmin;
 
-  /// Member's invitation status.
-  final MembershipStatus status;
-
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -163,9 +163,81 @@ class CircleMember {
   int get hashCode => pubkey.hashCode;
 
   @override
-  String toString() =>
-      'CircleMember(pubkey: ${pubkey.substring(0, 8)}..., status: $status)';
+  String toString() => 'CircleMember(pubkey: ${pubkey.substring(0, 8)}...)';
 }
+
+/// Which section of the member picker a directory row belongs to (plan
+/// §6.1/§7.2, P3). Mirrors the FFI `DirectoryTierFfi` as a Dart-level type so
+/// no FFI enum leaks above the service layer.
+///
+/// A tier is a claim about ROSTER PROVENANCE and nothing more: this pubkey
+/// is (or recently was) on the member list of a circle on this device,
+/// placed there by an MLS-authenticated commit. It says nothing about
+/// whether that person accepted, joined, or is active — none of which Haven
+/// can observe — so UI copy built on it must not either.
+enum DirectoryTier {
+  /// On the member list of a circle on this device, as of the last
+  /// reconcile.
+  current,
+
+  /// Not on any current member list; retained for at most the directory
+  /// retention window (3 days) after the last day they were.
+  recent,
+}
+
+/// One row of the local member directory (plan §6.1/§7.2, P3).
+///
+/// A pure local read of `circles.db` — no relay traffic, no network. The
+/// directory is the only source of WHO the picker offers and WHICH TIER;
+/// names and pictures still come from the kind-0 profile cache, and local
+/// petnames from the contacts table.
+@immutable
+class DirectoryEntry {
+  /// Creates a [DirectoryEntry].
+  const DirectoryEntry({
+    required this.pubkeyHex,
+    required this.npub,
+    required this.tier,
+  });
+
+  /// Lowercase-hex Nostr identity key.
+  final String pubkeyHex;
+
+  /// The same key in NIP-19 bech32 (`npub1…`) — the form every
+  /// anti-impersonation surface renders.
+  final String npub;
+
+  /// Which picker section this row belongs to.
+  final DirectoryTier tier;
+
+  // The day bucket a co-member's row is ranked/retired by stays in Rust —
+  // ordering is the ranked read's `ORDER BY`, and nothing on this side reads
+  // or renders by it, so it is deliberately never exported over the FFI
+  // (`DirectoryEntryFfi`'s doc, `rust_builder/src/api.rs`): exporting it would
+  // hand this layer a departure-cohort timestamp with no reader to justify
+  // it.
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DirectoryEntry &&
+          runtimeType == other.runtimeType &&
+          pubkeyHex == other.pubkeyHex &&
+          npub == other.npub &&
+          tier == other.tier;
+
+  @override
+  int get hashCode => Object.hash(pubkeyHex, npub, tier);
+
+  @override
+  String toString() => 'DirectoryEntry(${_shortKey(pubkeyHex)}, tier: $tier)';
+}
+
+/// The leading 8 hex characters of [pubkeyHex] — or all of it when it is
+/// shorter, because a `toString` that can raise turns one diagnostic into
+/// two failures on the very path that reached for it.
+String _shortKey(String pubkeyHex) =>
+    pubkeyHex.length > 8 ? '${pubkeyHex.substring(0, 8)}...' : pubkeyHex;
 
 /// Result of creating a circle.
 ///
@@ -244,7 +316,7 @@ class Invitation {
     required this.mlsGroupId,
     required this.circleName,
     required this.inviterPubkey,
-    required this.memberCount,
+    required this.inviterNpub,
     required this.invitedAt,
   });
 
@@ -257,14 +329,17 @@ class Invitation {
   /// Public key of the person who invited you.
   final String inviterPubkey;
 
-  /// Number of members in the circle.
-  final int memberCount;
+  /// The inviter's public key in NIP-19 bech32 form (`npub1...`).
+  ///
+  /// Carried alongside [inviterPubkey] rather than replacing it: the hex is
+  /// the profile-cache key and the identity comparison, the npub is the only
+  /// form a user can check against what the inviter actually handed them —
+  /// which is exactly what deciding whether to join a stranger's
+  /// live-location circle requires.
+  final String inviterNpub;
 
   /// When the invitation was received.
   final DateTime invitedAt;
-
-  @override
-  String toString() => 'Invitation(memberCount: $memberCount)';
 }
 
 /// Encrypted location event ready for relay publishing.
@@ -879,6 +954,55 @@ abstract class CircleService {
   ///
   /// Returns the number of rows removed.
   Future<int> pruneExpiredLastKnown({DateTime? now});
+
+  /// The local member directory in picker order: current co-members first,
+  /// then people who shared a circle within the retention window, each block
+  /// newest-shared first before this layer re-sorts by name (plan §6.1/§7.2,
+  /// P3).
+  ///
+  /// A pure local read — no relay traffic, no network. Deletes every row past
+  /// the retention window before selecting, so opening the picker is enough
+  /// to keep the three days honest on a device that has seen no membership
+  /// change since the row was written. [now] defaults to [DateTime.now] when
+  /// null.
+  ///
+  /// Throws [CircleServiceException] on a genuine storage failure.
+  Future<List<DirectoryEntry>> rankedDirectoryMembers({DateTime? now});
+
+  /// Refreshes the member directory from the union of current co-members
+  /// across every visible circle, then sweeps expired rows.
+  ///
+  /// Returns `false` when the refresh DEFERRED because a circle's membership
+  /// commit is still in flight — nothing was written and nothing was purged,
+  /// and the caller should simply read the directory as it stands. Every
+  /// membership change already refreshes the directory from inside Rust
+  /// (plan §5.5); this exists so a caller can bring a directory that has not
+  /// seen one of those changes since this feature shipped up to date. [now]
+  /// defaults to [DateTime.now] when null.
+  ///
+  /// Throws [CircleServiceException] on a genuine storage/roster-read
+  /// failure. The directory is left untouched on any error.
+  Future<bool> reconcileMemberDirectory({DateTime? now});
+
+  /// Every locally-saved contact petname, keyed by pubkey (hex).
+  ///
+  /// The directory's only source of a petname for a tier-[DirectoryTier.recent]
+  /// person: unlike a current co-member, they have no [CircleMember] row to
+  /// carry [CircleMember.displayName] from. Purely local; never touches a
+  /// relay.
+  ///
+  /// Throws [CircleServiceException] on a genuine storage failure.
+  Future<Map<String, String>> allContactDisplayNames();
+
+  /// Returns the local petname saved for [pubkey], or `null` when none is.
+  ///
+  /// The read half of [setContactDisplayName], for the surfaces that show a
+  /// person Haven has no [CircleMember] row for — a pending invitation's
+  /// inviter is a stranger until Accept, but may still be someone the user
+  /// nicknamed in another circle. Purely local; never touches a relay.
+  ///
+  /// Throws [CircleServiceException] on a genuine storage failure.
+  Future<String?> getContactDisplayName({required String pubkey});
 
   /// Sets or clears a member's local petname (contact `display_name`).
   ///

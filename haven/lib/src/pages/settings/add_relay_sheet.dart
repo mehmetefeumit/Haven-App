@@ -11,6 +11,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/constants/text_input_privacy.dart';
 import 'package:haven/src/services/relay_preferences_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/relay_url_validator.dart';
@@ -188,6 +189,11 @@ class _AddRelaySheetState extends State<_AddRelaySheet> {
                     focusNode: _focusNode,
                     autocorrect: false,
                     enableSuggestions: false,
+                    // A relay URL is a network association; the keyboard's
+                    // learned-word dictionary is outside Haven's storage and
+                    // its logout wipe.
+                    enableIMEPersonalizedLearning: false,
+                    autofillHints: kNoAutofill,
                     keyboardType: TextInputType.url,
                     textInputAction: TextInputAction.done,
                     onSubmitted: canSubmit ? (_) => _submit() : null,

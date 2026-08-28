@@ -471,14 +471,20 @@ class NostrCircleService implements CircleService {
   }
 
   /// Converts FFI member to service member.
+  ///
+  /// A roster row establishes provenance and nothing else: this pubkey was
+  /// placed in the group by an MLS-authenticated commit, with its identity
+  /// proof verified. It says nothing about whether that person's device ever
+  /// processed the invitation — no such signal exists to carry here.
+  /// Processing a Welcome emits nothing on the wire, MLS has no join
+  /// acknowledgement, and the group state stores no per-peer join flag or
+  /// liveness.
   CircleMember _convertMember(CircleMemberFfi ffiMember) {
     return CircleMember(
       pubkey: ffiMember.pubkey,
       npub: ffiMember.npub,
       displayName: ffiMember.displayName,
       isAdmin: ffiMember.isAdmin,
-      // Members in a visible circle have accepted their invitation
-      status: MembershipStatus.accepted,
     );
   }
 
@@ -503,7 +509,7 @@ class NostrCircleService implements CircleService {
       mlsGroupId: ffiInvitation.mlsGroupId.toList(),
       circleName: ffiInvitation.circleName,
       inviterPubkey: ffiInvitation.inviterPubkey,
-      memberCount: ffiInvitation.memberCount,
+      inviterNpub: ffiInvitation.inviterNpub,
       invitedAt: _timestampToDateTime(ffiInvitation.invitedAt),
     );
   }
@@ -1846,7 +1852,72 @@ class NostrCircleService implements CircleService {
     }
   }
 
+  DirectoryEntry _convertDirectoryEntry(DirectoryEntryFfi ffi) {
+    return DirectoryEntry(
+      pubkeyHex: ffi.pubkeyHex,
+      npub: ffi.npub,
+      tier: switch (ffi.tier) {
+        DirectoryTierFfi.current => DirectoryTier.current,
+        DirectoryTierFfi.recent => DirectoryTier.recent,
+      },
+    );
+  }
+
+  @override
+  Future<List<DirectoryEntry>> rankedDirectoryMembers({DateTime? now}) async {
+    final manager = await _ensureInitialized();
+    final nowSecs = (now ?? DateTime.now()).millisecondsSinceEpoch ~/ 1000;
+    try {
+      final rows = await manager.rankedDirectoryMembers(nowUnixSecs: nowSecs);
+      return rows.map(_convertDirectoryEntry).toList();
+    } on Object catch (e) {
+      debugPrint('Failed to read member directory: ${e.runtimeType}');
+      throw const CircleServiceException('Failed to read member directory');
+    }
+  }
+
+  @override
+  Future<bool> reconcileMemberDirectory({DateTime? now}) async {
+    final manager = await _ensureInitialized();
+    final nowSecs = (now ?? DateTime.now()).millisecondsSinceEpoch ~/ 1000;
+    try {
+      return await manager.reconcileMemberDirectory(nowUnixSecs: nowSecs);
+    } on Object catch (e) {
+      debugPrint('Failed to reconcile member directory: ${e.runtimeType}');
+      throw const CircleServiceException(
+        'Failed to reconcile member directory',
+      );
+    }
+  }
+
+  @override
+  Future<Map<String, String>> allContactDisplayNames() async {
+    final manager = await _ensureInitialized();
+    try {
+      final contacts = await manager.getAllContacts();
+      return {
+        for (final contact in contacts)
+          if (contact.displayName != null) contact.pubkey: contact.displayName!,
+      };
+    } on Object catch (e) {
+      debugPrint('Failed to read local nicknames: ${e.runtimeType}');
+      throw const CircleServiceException('Failed to read nicknames');
+    }
+  }
+
   // ==================== Contact Management ====================
+
+  @override
+  Future<String?> getContactDisplayName({required String pubkey}) async {
+    final manager = await _ensureInitialized();
+    try {
+      final contact = await manager.getContact(pubkey: pubkey);
+      return contact?.displayName;
+    } on Object catch (e) {
+      debugPrint('Failed to read local nickname: ${e.runtimeType}');
+      throw const CircleServiceException('Failed to read nickname');
+    }
+  }
 
   @override
   Future<void> setContactDisplayName({

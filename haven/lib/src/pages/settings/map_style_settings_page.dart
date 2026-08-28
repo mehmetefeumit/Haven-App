@@ -86,8 +86,8 @@ class _MapStyleOption {
 
 /// The ordered list of selectable map styles.
 ///
-/// The single source of truth for both this page's radio list and the
-/// settings-hub subtitle ([mapStyleLabel]). "Minimal" is first so it is the
+/// The single source of truth for both this page's radio list and the preview's
+/// spoken label ([mapStyleLabel]). "Minimal" is first so it is the
 /// natural default; it is the only theme-aware style (its dark twin exists), so
 /// its subtitle is the one that mentions following the light/dark theme.
 const List<_MapStyleOption> _options = [
@@ -123,7 +123,7 @@ String _outdoorsSubtitle(AppLocalizations l10n) =>
 
 /// Returns the user-facing label for [selection].
 ///
-/// Used by the settings hub to summarize the current choice without
+/// Names the current choice in the preview's semantics label without
 /// duplicating the option strings. An unrecognised selection (e.g. one pinned
 /// to a style not exposed as a row) falls back to the first option, "Minimal".
 String mapStyleLabel(AppLocalizations l10n, MapStyleSelection selection) {

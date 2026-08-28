@@ -258,9 +258,9 @@ class ProfilePendingState {
 /// callers should trigger right after a local save (see
 /// `utils/profile_sync_trigger.dart`) and which the UI can also honestly
 /// report the progress of via [pendingSyncState]. Every method's allow-status:
-/// - Reads ([getOwnProfile], [getMemberProfile], [refreshMemberProfiles])
-///   are always allowed — another client's already-published data is
-///   public regardless of anything Haven does.
+/// - Reads ([getOwnProfile], [getMemberProfile], [getCachedMemberProfiles],
+///   [refreshMemberProfiles]) are always allowed — another client's
+///   already-published data is public regardless of anything Haven does.
 /// - Local writes ([updateOwnProfile], [setOwnAvatar]) always save and queue.
 /// - [syncOwnProfile] always attempts to publish whatever is queued.
 /// - Retraction ([removeOwnAvatar]) is always allowed, but is a no-op
@@ -382,6 +382,29 @@ abstract class ProfileService {
     bool forceRefresh = false,
   });
 
+  /// Reads the ALREADY-CACHED profiles for [pubkeyHexes] in ONE batch, and
+  /// without resolving picture bytes.
+  ///
+  /// The read a name-only surface wants: [getMemberProfile] loads each
+  /// person's 96px thumbnail whenever one is cached, so a caller that keeps
+  /// only [Profile.pictureHash] pays a decrypt, an FFI copy and the peak
+  /// memory for a thumbnail per person and then drops it. The returned
+  /// [Profile]s therefore always have a `null` [Profile.pictureBytes], and
+  /// [Profile.pictureHash] is how a row that does want the bytes asks for
+  /// them later.
+  ///
+  /// Never touches the network — unlike [refreshMemberProfiles], a pubkey
+  /// with no cache entry stays absent rather than being fetched.
+  ///
+  /// **Never throws.** A pubkey whose row resolved nothing (a negative-cache
+  /// entry: looked up, nothing found) is simply absent from the result, and a
+  /// failure to open the store or read the batch at all yields an empty map:
+  /// one unresolvable person must cost that person their name, never the
+  /// whole picker.
+  Future<Map<String, Profile>> getCachedMemberProfiles(
+    List<String> pubkeyHexes,
+  );
+
   /// Batch-refreshes profiles for [pubkeyHexes] in a single relay fetch.
   ///
   /// Callers should pass the **union** of all known member pubkeys across
@@ -409,4 +432,31 @@ abstract class ProfileService {
     List<String> pubkeyHexes, {
     Duration maxAge = profileInteractiveMaxAge,
   });
+
+  /// Resolves ONE typed stranger's published profile by [npub] — the member
+  /// picker's typed-stranger resolve (plan §10 D2).
+  ///
+  /// [npub] MUST already be a complete, validated npub the caller has decided
+  /// is worth a single-key network lookup — this method itself does no
+  /// eligibility gating (that lives in the picker: a complete-match check, a
+  /// local-directory check, and a self/staged/in-circle check, all run
+  /// BEFORE this is ever called). It is a SINGLETON lookup, never a batch:
+  /// unlike [refreshMemberProfiles], which exists precisely to avoid a
+  /// per-circle roster partition, this asks about exactly the one key a user
+  /// just typed or pasted, and nothing else about their circles.
+  ///
+  /// Never downloads a picture: like [getMemberProfile], only bytes already
+  /// cached (if any) are read. A stranger's picture URL is an HTTP GET to a
+  /// host THEY chose, from the user's IP — that must never fire merely
+  /// because their npub was typed.
+  ///
+  /// Returns `null` when nothing resolved (including an npub that is
+  /// syntactically well-formed but fails to decode) so the caller falls back
+  /// to rendering the bare npub — never an error for that case.
+  ///
+  /// Always allowed (a read) — another pubkey's already-published data is
+  /// public regardless of anything Haven's own UI does.
+  ///
+  /// Throws [ProfileServiceException] on a genuine failure.
+  Future<Profile?> resolveTypedStrangerProfile(String npub);
 }

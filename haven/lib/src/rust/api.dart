@@ -6,9 +6,9 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_commit_to_publish`, `convert_location_result`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_legacy_mls_db_files`, `delete_mls_session_db_files`, `delete_superseded_kp`, `delete_tile_db_files`, `ensure_own_identity`, `from_cached`, `from_report`, `from_state`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `maintenance_now_secs`, `mark_kp_slot_retirement_done`, `nip65_relay_list_urls`, `no_network`, `now_ms`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `profile_view`, `purge_key_package_past_not_after`, `record_retired_slot`, `redact_profile_err`, `reinstall_after_timed_out_stop`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `republish_key_package`, `retire_malformed_kp_slot`, `retract_kp_slots`, `run_blocking`, `sync_reason_to_ffi`, `tile_err_to_string`, `unknown`, `usable_profile_pool`
+// These functions are ignored because they are not marked as `pub`: `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_commit_to_publish`, `convert_location_result`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_legacy_mls_db_files`, `delete_mls_session_db_files`, `delete_superseded_kp`, `delete_tile_db_files`, `ensure_own_identity`, `from_cached`, `from_report`, `from_state`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `maintenance_now_secs`, `mark_kp_slot_retirement_done`, `nip65_relay_list_urls`, `no_network`, `now_ms`, `now_secs`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `profile_view`, `purge_key_package_past_not_after`, `record_retired_slot`, `redact_directory_err`, `redact_profile_err`, `reinstall_after_timed_out_stop`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `republish_key_package`, `retire_malformed_kp_slot`, `retract_kp_slots`, `run_blocking`, `sync_reason_to_ffi`, `tile_err_to_string`, `truncate_chars`, `unknown`, `usable_profile_pool`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`, `KpPublishPlan`, `KpRetirementInputs`, `KpRetirementTick`, `ProfileStampLists`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`, `default`
 
 /// Initializes the platform-specific keyring credential store.
@@ -283,6 +283,36 @@ Future<DecryptedLocationFfi> parseEngineLocation({
   contentJson: contentJson,
   senderPubkey: senderPubkey,
 );
+
+/// Normalises a member-search query into the key the directory matches on.
+///
+/// Single source of truth for [`haven_core::directory::fold_for_search`]: the
+/// stored search keys are folded by that same function, so a second
+/// implementation in Dart could not be proven to agree with it. Dart has no
+/// NFKD at all, and its `toLowerCase` disagrees on the cases the fold exists
+/// for — `Ärger`, `Straße`, `Đurđević`, `Çağrı` — so porting it would mean a
+/// second Unicode database drifting against this one on every dependency bump.
+///
+/// It does NOT diverge on `İstanbul` or `ΟΔΥΣΣΕΑΣ`, contrary to an earlier
+/// draft of this comment. Those two disagree with `str::to_lowercase`, whose
+/// `Final_Sigma` context rule and combining-dot output the fold deliberately
+/// rejects (see `fold_for_search`) — landing exactly where Dart already lands.
+/// They argue against a design haven-core turned down, not against this one.
+///
+/// `#[frb(sync)]` is load-bearing, not an optimisation. The picker folds the
+/// query on every keystroke and filters in the same frame; an async call
+/// returns on a later event-loop turn, so the list would trail the caret by a
+/// frame and the design would need a debounce it does not otherwise want.
+/// Sync is safe here for the reason [`default_relays`] is: pure CPU over a
+/// field-length-bounded string, no I/O and no lock, so nothing blocks the UI
+/// isolate (contrast [`CircleManagerFfi::get_cached_profile`], which is async
+/// precisely because it is three SQLCipher queries).
+///
+/// Callers must tolerate this throwing when the bridge is not initialised —
+/// every `flutter test` — the way `constants/relays.dart` already does for
+/// [`default_relays`].
+String foldForSearch({required String query}) =>
+    RustLib.instance.api.crateApiFoldForSearch(query: query);
 
 /// Returns the canonical default relay list shared by Rust and Dart.
 ///
@@ -561,7 +591,8 @@ Future<ForceReleaseOutcomeFfi> forceReleaseLiveSession() =>
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>>
 abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Wipes local state for the `Abandon` plan — sole-member cleanup with
-  /// no MLS commit and no relay publish. (Storage-only; sync in the core.)
+  /// no MLS commit and no relay publish. Refreshes the member directory for
+  /// the same reason as [`complete_leave`](Self::complete_leave).
   Future<void> abandonCircleLocalOnly({required List<int> mlsGroupId});
 
   /// Accepts an invitation to join a circle, keyed by the gift-wrap event id.
@@ -683,7 +714,11 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   });
 
   /// Removes the local circle row after a successful leave sequence, or
-  /// for the `OrphanLocalOnly` plan. (Storage-only; sync in the core.)
+  /// for the `OrphanLocalOnly` plan.
+  ///
+  /// Also refreshes the member directory, so the departed circle's co-members
+  /// stop reading as current members and start their retention window —
+  /// deleting the circle row does not cascade to the directory.
   Future<void> completeLeave({required List<int> mlsGroupId});
 
   /// Confirms a staged commit was published (≥1-relay OK-ack) so the engine
@@ -1062,6 +1097,27 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Returns a redacted error string on database failure.
   Future<ProfileMetadataFfi?> getCachedProfile({required String pubkeyHex});
 
+  /// [`Self::get_cached_profile`] for a whole set, resolved under ONE
+  /// connection lock.
+  ///
+  /// Returns one row per input pubkey, in input order. A pubkey with no
+  /// cached kind-0 comes back `is_known: false` rather than being dropped, so
+  /// "looked up, nothing found" and "never fetched" read the same — which is
+  /// what they mean.
+  ///
+  /// Pure cache read (no network), and the read a name-only surface wants:
+  /// issuing the single-pubkey call per member costs one blocking thread and
+  /// three `SQLCipher` queries EACH, and every one of those threads then
+  /// queues on the same connection mutex — so the concurrency buys nothing
+  /// and the threads are pure cost.
+  ///
+  /// # Errors
+  ///
+  /// Returns a redacted error string on database failure.
+  Future<List<ProfileMetadataFfi>> getCachedProfiles({
+    required List<String> pubkeysHex,
+  });
+
   /// Gets a circle by its MLS group ID.
   ///
   /// Async: resolving the roster reads the Dark Matter session (which is
@@ -1085,8 +1141,8 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Each [`InvitationFfi`] carries pre-join STAND-IN fields (the gift-wrap
   /// event id as `mlsGroupId`, `"New Circle"` as the name) because the real
   /// MLS group state lives inside the still-encrypted 1059 held until Accept
-  /// (F3). `memberCount` reports the provably-known members pre-join — the
-  /// NIP-59-seal-authenticated inviter, i.e. 1 — never the full roster. The
+  /// (F3). `inviterPubkey`/`inviterNpub` are the only roster fact a pre-join
+  /// preview can prove — the NIP-59 seal author — never the full roster. The
   /// gift-wrap id is the key the caller passes to
   /// [`accept_invitation`](Self::accept_invitation) /
   /// [`decline_invitation`](Self::decline_invitation).
@@ -1302,6 +1358,42 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// pass the same `pending` token.
   Future<void> publishFailed({required PendingStateRefFfi pending});
 
+  /// The local member directory in picker order: current co-members first,
+  /// then people who shared a circle within the retention window, each block
+  /// newest-shared first.
+  ///
+  /// A pure local read of `circles.db` — no relay traffic, no network.
+  ///
+  /// Deletes everyone past the retention window before selecting, so opening
+  /// the picker is enough to keep the three days honest on a device that has
+  /// seen no membership change since the row was written.
+  /// `now_unix_secs` is the current Unix **seconds** clock.
+  ///
+  /// # Errors
+  ///
+  /// Returns a redacted error string on database failure.
+  Future<List<DirectoryEntryFfi>> rankedDirectoryMembers({
+    required PlatformInt64 nowUnixSecs,
+  });
+
+  /// Refreshes the member directory from the union of current co-members
+  /// across every visible circle, then sweeps expired rows.
+  ///
+  /// Returns `false` when the refresh DEFERRED because a circle's membership
+  /// commit is still in flight — nothing was written and nothing was purged,
+  /// and the caller should simply read the directory as it stands.
+  ///
+  /// Membership changes already refresh the directory from inside Rust; this
+  /// exists so a surface that OPENS the picker can bring it up to date on a
+  /// device that has not seen a membership change since the feature shipped.
+  /// `now_unix_secs` is the current Unix **seconds** clock.
+  ///
+  /// # Errors
+  ///
+  /// Returns a redacted error string if a circle's roster could not be read or
+  /// the directory could not be written. The directory is left untouched.
+  Future<bool> reconcileMemberDirectory({required PlatformInt64 nowUnixSecs});
+
   /// Records a successful publication so the unpublish path can issue a
   /// NIP-09 deletion later. Pass the `event_id_hex`, `kind`, and
   /// `published_at_secs` returned in
@@ -1395,6 +1487,46 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// returning identity re-seeds cleanly instead of resuming at a stale
   /// floor. Errors are redacted.
   Future<void> resetAllSyncCursors();
+
+  /// Resolves ONE typed stranger's published profile — the member-picker
+  /// "typed-stranger resolve" (plan §10 D2).
+  ///
+  /// A THIN wrapper over [`Self::fetch_member_profiles`] for exactly one
+  /// pubkey: salted single-relay assignment, pool selection, pacing, the
+  /// contamination ledger and the staleness/negative-cache machinery are all
+  /// inherited verbatim by delegating to it, rather than re-implemented
+  /// here. This function adds no relay selection of its own — two
+  /// alternatives were evaluated and rejected: fetching from a relay outside
+  /// the pubkey's salted assignment would add a THIRD relay to that
+  /// pubkey's disclosure set (the design bounds it to two for the life of
+  /// the install), and decoy padding is theatre, since each author routes to
+  /// its own salted relay independently, so a decoy only helps if it
+  /// happens to hash to the SAME relay.
+  ///
+  /// The one thing this adds over `fetch_member_profiles`: `pubkey` accepts
+  /// EITHER hex or bech32 (`npub1…`), via `PublicKey::parse` (the pattern
+  /// already used to resolve another user's pubkey in
+  /// `relay/manager.rs`). `fetch_member_profiles` itself stays hex-only
+  /// (`PublicKey::from_hex`) — Dart has no npub-to-hex decoder, so that
+  /// translation has to happen on this side of the boundary.
+  ///
+  /// A `pubkey` that parses (bech32 checksum included) but resolves to no
+  /// known kind-0 still returns `Ok(Some(..))`, with `is_known: false` —
+  /// the caller renders that as "nothing found", exactly like any other
+  /// unresolved pubkey. Only a `pubkey` that FAILS to parse returns
+  /// `Ok(None)`: Dart's `NpubValidator` checks only the `npub1` prefix,
+  /// length and bech32 charset — no checksum — so a charset-valid npub can
+  /// still fail to parse here, and that must read as "nothing found", never
+  /// as an error.
+  ///
+  /// # Errors
+  ///
+  /// Returns a redacted error string on relay or database failure (never on
+  /// a malformed `pubkey`, which yields `Ok(None)` instead).
+  Future<ProfileMetadataFfi?> resolveStrangerProfile({
+    required String pubkey,
+    required PlatformInt64 maxAgeSecs,
+  });
 
   /// Restores the curated profile pool non-destructively (adds back any
   /// missing curated entry; keeps the user's own additions).
@@ -2698,6 +2830,59 @@ class DecryptedLocationFfi {
           expiresAt == other.expiresAt;
 }
 
+/// One member-directory row, as the picker reads it.
+///
+/// WHO and WHICH SECTION, and nothing else. The row's day buckets stay in Rust:
+/// nothing across this boundary ranks, groups or renders by them — ordering is
+/// the ranked read's `ORDER BY` — so exporting `last_shared_day` would hand the
+/// UI layer the departure-cohort stamp with no reader to justify it.
+class DirectoryEntryFfi {
+  /// Lowercase-hex Nostr identity key.
+  final String pubkeyHex;
+
+  /// The same key in NIP-19 bech32 (`npub1…`), the form every anti-
+  /// impersonation surface renders.
+  final String npub;
+
+  /// Which picker section this row belongs to.
+  final DirectoryTierFfi tier;
+
+  const DirectoryEntryFfi({
+    required this.pubkeyHex,
+    required this.npub,
+    required this.tier,
+  });
+
+  @override
+  int get hashCode => pubkeyHex.hashCode ^ npub.hashCode ^ tier.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DirectoryEntryFfi &&
+          runtimeType == other.runtimeType &&
+          pubkeyHex == other.pubkeyHex &&
+          npub == other.npub &&
+          tier == other.tier;
+}
+
+/// Which section of the member picker a directory row belongs to.
+///
+/// Mirrors [`haven_core::circle::DirectoryTier`]. The tier is a claim about
+/// ROSTER PROVENANCE and nothing more: this pubkey is (or recently was) on the
+/// member list of a circle on this device, placed there by an MLS-authenticated
+/// commit. It says nothing about whether that person accepted, joined, or is
+/// active — none of which Haven can observe — so the UI copy built on it must
+/// not either.
+enum DirectoryTierFfi {
+  /// On the member list of a circle on this device, as of the last reconcile.
+  current,
+
+  /// Not on any current member list; retained for at most the directory
+  /// retention window after the last day they were.
+  recent,
+}
+
 /// Encrypted location event ready for relay publishing (FFI-friendly).
 ///
 /// Contains the signed kind 445 event and routing metadata.
@@ -2949,8 +3134,14 @@ class InvitationFfi {
   /// Public key (hex) of who invited us.
   final String inviterPubkey;
 
-  /// Number of members in the circle.
-  final int memberCount;
+  /// The inviter's public key in NIP-19 bech32 format (`npub1...`).
+  ///
+  /// A derived encoding of [`Self::inviter_pubkey`], carried alongside it
+  /// rather than replacing it: the hex is the cache key and the identity
+  /// comparison, the npub is the only form a user can check against what the
+  /// inviter actually handed them. Deciding whether to join a stranger's
+  /// live-location circle is exactly where that check has to be possible.
+  final String inviterNpub;
 
   /// When we were invited (Unix timestamp).
   final PlatformInt64 invitedAt;
@@ -2959,7 +3150,7 @@ class InvitationFfi {
     required this.mlsGroupId,
     required this.circleName,
     required this.inviterPubkey,
-    required this.memberCount,
+    required this.inviterNpub,
     required this.invitedAt,
   });
 
@@ -2968,7 +3159,7 @@ class InvitationFfi {
       mlsGroupId.hashCode ^
       circleName.hashCode ^
       inviterPubkey.hashCode ^
-      memberCount.hashCode ^
+      inviterNpub.hashCode ^
       invitedAt.hashCode;
 
   @override
@@ -2979,7 +3170,7 @@ class InvitationFfi {
           mlsGroupId == other.mlsGroupId &&
           circleName == other.circleName &&
           inviterPubkey == other.inviterPubkey &&
-          memberCount == other.memberCount &&
+          inviterNpub == other.inviterNpub &&
           invitedAt == other.invitedAt;
 }
 

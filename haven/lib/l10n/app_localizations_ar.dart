@@ -113,22 +113,10 @@ class AppLocalizationsAr extends AppLocalizations {
   String get onboardingValueProp1Title => 'دوائرك وحدها تستطيع رؤيتك';
 
   @override
-  String get onboardingValueProp1Body =>
-      'يُشفَّر موقعك على جهازك قبل أن يغادره، بحيث لا يقدر على قراءته سوى الدوائر التي تختارها، ولا تقدر على ذلك Haven ولا أي جهة أخرى. ولأن Haven مفتوح المصدر، يمكن لأي شخص التحقق من ذلك.';
-
-  @override
   String get onboardingValueProp2Title => 'لا يستطيع أحد إيقافه';
 
   @override
-  String get onboardingValueProp2Body =>
-      'لا يملك Haven خادمًا مركزيًا. تنتقل رسائلك المشفّرة عبر خوادم مستقلة تُسمّى مُرحِّلات، وأنت تختار أيها تستخدم. ولا تستطيع أي شركة أو حكومة بمفردها إيقاف الشبكة.';
-
-  @override
   String get onboardingValueProp3Title => 'لا حاجة إلى حساب';
-
-  @override
-  String get onboardingValueProp3Body =>
-      'لا بريد إلكتروني، ولا رقم هاتف، ولا تسجيل. يُنشئ Haven هوية مفتاحها السري لا يغادر هاتفك أبدًا، فلا يوجد حساب يستطيع أحد تسليمه.';
 
   @override
   String get onboardingValueProp1Summary =>
@@ -216,25 +204,13 @@ class AppLocalizationsAr extends AppLocalizations {
   String get settingsIdentityTitle => 'الهوية';
 
   @override
-  String get settingsIdentitySubtitle => 'الملف الشخصي والمفاتيح ومشاركة الصور';
-
-  @override
   String get settingsRelaysTitle => 'المُرحِّلات';
-
-  @override
-  String get settingsRelaysSubtitle => 'حيث تصلك الدعوات';
 
   @override
   String get settingsLocationTitle => 'الموقع';
 
   @override
-  String get settingsLocationSubtitle => 'المشاركة في الخلفية والأذونات';
-
-  @override
   String get settingsMapStyleTitle => 'نمط الخريطة';
-
-  @override
-  String get settingsAppearanceSubtitle => 'السمة واللغة';
 
   @override
   String get settingsAboutTitle => 'حول';
@@ -523,9 +499,6 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get privacyTitle => 'الخصوصية';
-
-  @override
-  String get privacySubtitle => 'كيف يعمل Haven وما يستطيع الآخرون رؤيته';
 
   @override
   String get privacyHubSummary =>
@@ -893,7 +866,7 @@ class AppLocalizationsAr extends AppLocalizations {
   String get circlesYourCircles => 'دوائرك';
 
   @override
-  String get circlesEmptyTitle => 'لا توجد دوائر بعد';
+  String get circlesEmptyTitle => 'لا توجد دوائر بعدُ';
 
   @override
   String get circlesEmptyMessage =>
@@ -933,9 +906,6 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get createCircleNoValidMembers => 'لا أعضاء صالحون للدعوة';
-
-  @override
-  String get createCircleMemberAlreadyAdded => 'العضو مُضاف بالفعل';
 
   @override
   String get createCircleNoIdInQr => 'لم يُعثَر على معرّف صالح في رمز QR';
@@ -1064,7 +1034,7 @@ class AppLocalizationsAr extends AppLocalizations {
       'بمجرّد قبولهم، سيرون مواقع الجميع من تلك اللحظة فصاعدًا، ولن يروا أبدًا أي شيء أُرسِل قبل انضمامهم. وسيرون أيضًا المفاتيح العامة لكل من هم في هذه الدائرة بالفعل.';
 
   @override
-  String get addMemberAlreadyInCircle => 'موجود في هذه الدائرة بالفعل';
+  String get addMemberAlreadyInCircle => 'العضو موجود في هذه الدائرة بالفعل';
 
   @override
   String addMemberSendInvitation(int count) {
@@ -1143,9 +1113,6 @@ class AppLocalizationsAr extends AppLocalizations {
   String get qrScannerScanning => 'جارٍ المسح...';
 
   @override
-  String get circleMemberInvitationPending => 'الدعوة معلّقة';
-
-  @override
   String get circleMemberNoRecentLocation => 'لا موقع حديث';
 
   @override
@@ -1180,9 +1147,6 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get circleMemberAdmin => 'مشرف';
-
-  @override
-  String get circleMemberHintPending => 'الدعوة معلّقة';
 
   @override
   String get circleMemberHintNoLocation => 'لا موقع متاح';
@@ -1240,6 +1204,56 @@ class AppLocalizationsAr extends AppLocalizations {
   String get memberSearchAlreadyAdded => 'العضو مُضاف بالفعل';
 
   @override
+  String get memberPickerSectionRoster => 'أعضاء دوائرك';
+
+  @override
+  String get memberPickerTierRoster => 'مِن أعضاء دوائرك';
+
+  @override
+  String get memberPickerNoMatches => 'لا نتائج مطابقة في دوائرك';
+
+  @override
+  String get memberPickerLoading => 'جارٍ تجهيز قائمة الأشخاص في دوائرك';
+
+  @override
+  String get memberPickerDirectoryUnavailable =>
+      'تعذّر الآن تحميل قائمة الأشخاص في دوائرك';
+
+  @override
+  String memberPickerMatchesAnnouncement(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return 'النتائج المطابقة: $countString';
+  }
+
+  @override
+  String get memberPickerReasonSelf => 'هذا معرّفك أنت';
+
+  @override
+  String get memberPickerReadPublicKey => 'نطق المفتاح العام';
+
+  @override
+  String get memberPickerSectionRecent => 'أشخاص كانوا في دوائرك مؤخّرًا';
+
+  @override
+  String get memberPickerTierRecent => 'مِن الذين كانوا في دوائرك مؤخّرًا';
+
+  @override
+  String get memberPickerNicknameNote =>
+      'اسمك المستعار لهذا الشخص، لا اسمه العلني';
+
+  @override
+  String memberPickerCollisionCircleLabel(String circleName) {
+    return 'الدائرة: $circleName';
+  }
+
+  @override
+  String get memberPickerStrangerLookupNote =>
+      'طلب Haven من مُرحِّل أن يبحث عن الاسم العلني لهذا الشخص. ويرى ذلك المُرحِّل أن هذا الجهاز سأل للتو عن هذا المفتاح. لكن هذا الطلب لا يحمل أي توقيع، فهو غير مرتبط بهويتك في Haven. ولم تُنزَّل أي صورة حتى الآن.';
+
+  @override
   String selectedMembersMore(int count) {
     final intl.NumberFormat countNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
@@ -1249,26 +1263,11 @@ class AppLocalizationsAr extends AppLocalizations {
   }
 
   @override
-  String get invitationStatusPending => 'الدعوة معلّقة';
+  String get invitationCardHeading => 'دعوة إلى دائرة';
 
   @override
-  String get invitationStatusActive => 'نشط';
-
-  @override
-  String get invitationStatusDeclined => 'مرفوضة';
-
-  @override
-  String invitationStatusSemantics(String label) {
-    return 'حالة الدعوة: $label';
-  }
-
-  @override
-  String invitationCardSemantics(String circleName, String inviter, int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    return 'دعوة للانضمام إلى $circleName، بدعوة من $inviter، $countString أعضاء';
+  String invitationCardSemantics(String inviter) {
+    return 'دعوة للانضمام إلى دائرة، أرسلها $inviter';
   }
 
   @override
@@ -1282,23 +1281,8 @@ class AppLocalizationsAr extends AppLocalizations {
   }
 
   @override
-  String invitationCardMemberCount(int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    String _temp0 = intl.Intl.pluralLogic(
-      count,
-      locale: localeName,
-      other: '$countString عضو',
-      many: '$countString عضوًا',
-      few: '$countString أعضاء',
-      two: 'عضوان',
-      one: 'عضو واحد',
-      zero: 'لا أعضاء',
-    );
-    return '$_temp0';
-  }
+  String get invitationCardNicknameNote =>
+      'اسمك المستعار لهذا الشخص، لا اسمه العلني';
 
   @override
   String get invitationCardJustNow => 'الآن للتو';
@@ -1894,37 +1878,6 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get profileSyncStatusRetrySemantics => 'إعادة محاولة نشر ملفك الشخصي';
-
-  @override
-  String keyDisplayCopiedToClipboard(String label) {
-    return 'تم نسخ $label إلى الحافظة';
-  }
-
-  @override
-  String keyDisplaySemantics(String label, String state) {
-    return '$label: $state';
-  }
-
-  @override
-  String get keyDisplayStateRevealed => 'ظاهر';
-
-  @override
-  String get keyDisplayStateHidden => 'مخفي';
-
-  @override
-  String get keyDisplayHideTooltip => 'إخفاء';
-
-  @override
-  String get keyDisplayRevealTooltip => 'إظهار';
-
-  @override
-  String get keyDisplayCopyTooltip => 'نسخ';
-
-  @override
-  String get keyDisplayCompactCopied => 'تم نسخ المفتاح إلى الحافظة';
-
-  @override
-  String get keyDisplayCompactTapToCopy => 'اضغط للنسخ';
 
   @override
   String get npubQrCopiedSnack => 'تم نسخ المفتاح العام إلى الحافظة';

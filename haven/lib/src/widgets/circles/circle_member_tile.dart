@@ -1,4 +1,4 @@
-/// Tile displaying a circle member with status.
+/// Tile displaying a circle member.
 library;
 
 import 'package:flutter/material.dart';
@@ -10,14 +10,13 @@ import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/feature_flags.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/member_profile_provider.dart';
-import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/member_display.dart';
 import 'package:haven/src/utils/npub_validator.dart';
+import 'package:haven/src/widgets/circles/member_avatar.dart';
 import 'package:haven/src/widgets/circles/member_detail_sheet.dart';
-import 'package:haven/src/widgets/identity/avatar.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Width beyond which the "Admin" chip ellipsizes instead of pushing the
@@ -34,11 +33,6 @@ const double _adminChipMaxExtent = 120;
 /// costs no visual change; the box exists so the progress indicator that
 /// replaces it mid-removal does not resize the row.
 const double _removeAffordanceExtent = 40;
-
-// npub is 63 chars; show enough of the distinguishing prefix (after the
-// constant "npub1" HRP) and suffix to differentiate members at a glance.
-String _shortNpub(String npub) =>
-    NpubValidator.truncate(npub, prefixLength: 12, suffixLength: 6);
 
 /// Rendering state of the admin remove action on a member row.
 ///
@@ -60,7 +54,7 @@ enum MemberRemoveStatus {
   inProgress,
 }
 
-/// Displays a circle member with their status and actions.
+/// Displays a circle member with their name and actions.
 ///
 /// When [member] is the current user, the title and avatar use the display
 /// name saved in settings (via `IdentityService.setDisplayName`) rather
@@ -70,14 +64,10 @@ enum MemberRemoveStatus {
 ///
 /// When [hasLocation] is `false` the tile is rendered in a disabled
 /// Material state and [onTap] is ignored, so a user can see at a glance
-/// which members can be centered on the map. Accepted members with no
-/// cached location display a "No recent location" hint; pending invitees
-/// keep the existing "Invitation Pending" status.
+/// which members can be centered on the map, and the row displays a
+/// "No recent location" hint.
 ///
-/// The avatar area shows the member's public profile picture — self via
-/// [ownProfileProvider], others via [memberProfileProvider(pubkey)] — when
-/// [publicProfilesEnabled] and a picture is known, falling back to the
-/// initials-based [CircleAvatar] otherwise. Tapping the avatar opens
+/// The avatar area is a [MemberAvatar]. Tapping it opens
 /// [showMemberDetailSheet] (nickname editing + copy-npub) without disturbing
 /// the row's own tap-to-center / long-press-to-copy gestures.
 class CircleMemberTile extends ConsumerWidget {
@@ -97,7 +87,7 @@ class CircleMemberTile extends ConsumerWidget {
 
   /// Callback when the tile is tapped.
   ///
-  /// Ignored when [hasLocation] is `false` or the member is pending.
+  /// Ignored when [hasLocation] is `false`.
   final VoidCallback? onTap;
 
   /// Optional trailing widget (e.g., remove button). When provided, it
@@ -142,10 +132,10 @@ class CircleMemberTile extends ConsumerWidget {
     // from. When this tile is the viewer's own row we must source the name
     // and thumbnail from `ownProfileProvider` instead, otherwise the user
     // never sees their own name/picture reflected in the member list. See
-    // [_MemberAvatar].
+    // [MemberAvatar].
     final isSelf = isSelfMember(member, currentUserPubkey: currentUserPubkey);
 
-    final npubFallback = _shortNpub(member.npub);
+    final npubFallback = NpubValidator.shortenForDisplay(member.npub);
 
     // Self keeps its dedicated resolution path (today's settings-name
     // branch) so the member list and the Identity page always agree (D6 /
@@ -180,13 +170,11 @@ class CircleMemberTile extends ConsumerWidget {
     // resolved, matching the pre-migration contract of `_initialFor`.
     final effectiveDisplayName = hasRealName ? displayedName : null;
 
-    final isPending = member.status == MembershipStatus.pending;
-    final isInteractive = onTap != null && !isPending && hasLocation;
+    final isInteractive = onTap != null && hasLocation;
 
     final canCopy = member.npub.isNotEmpty;
     final semanticHint = _semanticsHint(
       l10n,
-      isPending: isPending,
       hasLocation: hasLocation,
       isInteractive: isInteractive,
     );
@@ -255,22 +243,24 @@ class CircleMemberTile extends ConsumerWidget {
       child: ListTile(
         leading: GestureDetector(
           onTap: () => showMemberDetailSheet(context, ref, member),
-          child: _MemberAvatar(
+          child: MemberAvatar(
             pubkey: member.pubkey,
             displayName: effectiveDisplayName,
             isCurrentUser: isSelf,
           ),
         ),
+        // A resolved name is a convenience label and may ellipsize. The npub
+        // fallback may not: clipping its tail drops the bech32 checksum the
+        // 12/6 form exists for, taking an impersonation from ~2^65 back to
+        // ~2^35. It wraps instead, and the tile grows to fit.
         title: Text(
           displayedName,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          textDirection: effectiveDisplayName == null
-              ? TextDirection.ltr
-              : null,
-          style: effectiveDisplayName == null
-              ? HavenTypography.mono.copyWith(fontSize: 14)
-              : null,
+          maxLines: hasRealName ? 1 : null,
+          overflow: hasRealName ? TextOverflow.ellipsis : null,
+          textDirection: hasRealName ? null : TextDirection.ltr,
+          style: hasRealName
+              ? null
+              : HavenTypography.mono.copyWith(fontSize: 14),
         ),
         subtitle: _buildSubtitle(
           context,
@@ -322,22 +312,6 @@ class CircleMemberTile extends ConsumerWidget {
     ColorScheme colorScheme,
     String? effectiveDisplayName,
   ) {
-    if (member.status == MembershipStatus.pending) {
-      return Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Icon(LucideIcons.clock, size: 14, color: HavenSecurityColors.warning),
-          const SizedBox(width: HavenSpacing.xs),
-          Text(
-            l10n.circleMemberInvitationPending,
-            style: Theme.of(
-              context,
-            ).textTheme.bodySmall?.copyWith(color: HavenSecurityColors.warning),
-          ),
-        ],
-      );
-    }
-
     if (!hasLocation) {
       return Text(
         l10n.circleMemberNoRecentLocation,
@@ -348,11 +322,12 @@ class CircleMemberTile extends ConsumerWidget {
     }
 
     if (effectiveDisplayName != null) {
-      // Show the member's npub as subtitle when we have a display name
+      // The npub moves to the subtitle once a name occupies the title, and
+      // keeps the same no-ellipsis rule the title applies to it — the roster
+      // is where a user checks who they are sharing live location with, so it
+      // must not clip the six checksum characters the 12/6 form exists for.
       return Text(
-        _shortNpub(member.npub),
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
+        NpubValidator.shortenForDisplay(member.npub),
         textDirection: TextDirection.ltr,
         style: HavenTypography.monoSmall.copyWith(
           color: colorScheme.onSurfaceVariant,
@@ -459,136 +434,12 @@ class CircleMemberTile extends ConsumerWidget {
 
   String _semanticsHint(
     AppLocalizations l10n, {
-    required bool isPending,
     required bool hasLocation,
     required bool isInteractive,
   }) {
-    if (isPending) return l10n.circleMemberHintPending;
     if (!hasLocation) return l10n.circleMemberHintNoLocation;
     if (!isInteractive) return l10n.circleMemberHintMember;
     return l10n.circleMemberHintTapToCenter;
-  }
-}
-
-/// Avatar widget for a circle member.
-///
-/// When [publicProfilesEnabled], watches the pubkey's public profile —
-/// self via [ownProfileProvider], others via `memberProfileProvider(pubkey)`
-/// — and renders [Profile.pictureBytes] via [HavenAvatar] when available.
-/// Falls back to an initials-based [CircleAvatar] when no picture is known,
-/// the provider is loading, or an error occurs. No shimmer is shown during
-/// loading — that would leak "avatar incoming" to a bystander observing the
-/// UI. When [publicProfilesEnabled] is off, always renders the initials
-/// fallback (no fetching).
-///
-/// When [isCurrentUser] is `true`, the thumbnail is sourced from
-/// [ownProfileProvider] (the OWN-profile store) rather than
-/// `memberProfileProvider` (the received-member store). The viewer's own
-/// profile is resolved locally/by their own publishes, not by receiving a
-/// broadcast from themselves, so self and other members read from two
-/// distinct stores; reading the member store for self would always miss.
-/// Sourcing from [ownProfileProvider] also means the row refreshes the
-/// instant the user sets or clears their picture in settings (that
-/// controller invalidates it). Diameter (logical px) shared by both
-/// member-avatar branches so the image avatar and the initials
-/// [CircleAvatar] are always rendered at the same size. Matches Material's
-/// default [CircleAvatar] radius of 20 (→ 40dp): the initials fallback
-/// keeps its standard list dimensions while the image variant grows to
-/// match it rather than rendering smaller.
-const double _memberAvatarDiameter = 40;
-
-class _MemberAvatar extends ConsumerWidget {
-  const _MemberAvatar({
-    required this.pubkey,
-    this.displayName,
-    this.isCurrentUser = false,
-  });
-
-  final String pubkey;
-  final String? displayName;
-
-  /// Whether this tile represents the current user (the viewer).
-  ///
-  /// When `true`, the avatar is read from [ownProfileProvider] instead of
-  /// the per-member received-profile store.
-  final bool isCurrentUser;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final colorScheme = Theme.of(context).colorScheme;
-    // Desaturated HSL hue derived from the pubkey gives each member a stable
-    // tint without the brand-blue/red collisions of Colors.primaries.
-    final hue = (pubkey.hashCode.abs() % 360).toDouble();
-    final tint = HSLColor.fromAHSL(1, hue, 0.30, 0.55).toColor();
-
-    final initial = _initialFor(displayName, pubkey);
-
-    // Build the initials fallback once; reused by both branches.
-    final initialsAvatar = CircleAvatar(
-      radius: _memberAvatarDiameter / 2,
-      backgroundColor: tint.withValues(alpha: 0.18),
-      foregroundColor: colorScheme.onSurface,
-      child: Text(
-        initial,
-        style: TextStyle(
-          fontWeight: FontWeight.w600,
-          color: colorScheme.onSurface,
-        ),
-      ),
-    );
-
-    if (!publicProfilesEnabled) return initialsAvatar;
-
-    // Resolve the picture bytes from the correct store:
-    // - self: the own-profile store (ownProfileProvider), keyed by pubkey
-    //   only. Invalidated by OwnProfileController on set/clear/save, so this
-    //   row refreshes the instant the user changes their picture.
-    // - others: the plain-pubkey-keyed member-profile store (D6 — no
-    //   mlsGroupId component; the same pubkey resolves the same profile
-    //   across every shared circle).
-    // Both providers are autoDispose — released when the tile leaves the tree.
-    final thumbnailBytes = isCurrentUser
-        ? ref.watch(ownProfileProvider).valueOrNull?.pictureBytes
-        : ref.watch(memberProfileProvider(pubkey)).valueOrNull?.pictureBytes;
-
-    // On loading or error: show initials (no shimmer — bystander privacy).
-    // On data: show HavenAvatar with image bytes when non-null.
-    //
-    // Wrap the whole initials-or-image decision in a single AnimatedSwitcher
-    // so a nil→image transition crossfades rather than hard-popping.
-    // The ValueKey differentiates the two widget types so Flutter knows to
-    // animate the swap. No shimmer — bystander privacy.
-    return AnimatedSwitcher(
-      duration: const Duration(milliseconds: 200),
-      child: thumbnailBytes == null
-          ? KeyedSubtree(key: const ValueKey('initials'), child: initialsAvatar)
-          : HavenAvatar(
-              key: const ValueKey('image'),
-              imageBytes: thumbnailBytes,
-              initials: initial,
-              publicKey: pubkey,
-              // Match the initials CircleAvatar exactly so a member with a
-              // profile picture is the same size as one showing initials.
-              diameter: _memberAvatarDiameter,
-            ),
-    );
-  }
-
-  // The FFI today always delivers a 64-char lowercase hex pubkey, but we
-  // don't want a malformed record (short pubkey + no display name) to crash
-  // the whole member list. Pick a deterministic fallback glyph instead.
-  static String _initialFor(String? displayName, String pubkey) {
-    final name = displayName;
-    if (name != null && name.isNotEmpty) {
-      return name.characters.first.toUpperCase();
-    }
-    if (pubkey.length > 5) {
-      return pubkey[5].toUpperCase();
-    }
-    if (pubkey.isNotEmpty) {
-      return pubkey.characters.first.toUpperCase();
-    }
-    return '?';
   }
 }
 
@@ -629,7 +480,7 @@ class PendingMemberTile extends StatelessWidget {
     return ListTile(
       leading: _buildLeadingIcon(l10n, colorScheme),
       title: Text(
-        NpubValidator.truncate(npub),
+        NpubValidator.shortenForDisplay(npub),
         style: HavenTypography.mono.copyWith(fontSize: 14),
       ),
       subtitle: _buildSubtitle(context, l10n),

@@ -6,23 +6,32 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/constants/feature_flags.dart';
 import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/providers/circles_provider.dart';
+import 'package:haven/src/providers/contact_nickname_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/providers/join_watcher_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
+import 'package:haven/src/providers/member_profile_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/member_display.dart';
+import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/utils/profile_refresh_trigger.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// A card widget that displays a pending circle invitation.
 ///
-/// Shows invitation details including circle name, inviter pubkey,
-/// member count, and time since invitation. Provides buttons to
-/// accept or decline the invitation.
+/// Shows who invited you, at which public key, and how long ago. Provides
+/// buttons to accept or decline the invitation.
+///
+/// Deliberately shows neither a circle name nor a member count: pre-join
+/// both live inside the still-encrypted Welcome, so the only values Haven
+/// could put there are stand-ins presented as facts.
 class InvitationCard extends ConsumerStatefulWidget {
   /// Creates an invitation card.
   const InvitationCard({required this.invitation, super.key});
@@ -36,6 +45,38 @@ class InvitationCard extends ConsumerStatefulWidget {
 
 /// Which action the user triggered, for showing the correct loading spinner.
 enum _LoadingAction { none, accepting, declining }
+
+/// Wraps [text] in U+2068 FIRST STRONG ISOLATE / U+2069 POP DIRECTIONAL
+/// ISOLATE.
+///
+/// Applied to a kind-0 display name — attacker-chosen, anyone can publish any
+/// name — wherever it is interpolated into a RENDERED paragraph beside app
+/// text. The bidirectional algorithm resolves run boundaries across a whole
+/// paragraph, so an unisolated strong-RTL name (or one carrying an
+/// unterminated U+202E override) reorders the words around it; the isolate
+/// confines both effects to the name. Every locale happens to put this
+/// placeholder last today, but a translation that moves it is an ARB edit
+/// away, so the defence is structural rather than positional.
+///
+/// On a semantics LABEL the calculus is different, not exempt: TTS and
+/// braille both read a label's codepoints in logical order, so an override
+/// embedded in it cannot visually reorder anything for either — there is no
+/// paragraph layout for it to escape. This card's own "Invited by" label
+/// (below) is left un-isolated, and correctly so: the name is the LAST thing
+/// in that joined string, so even where a label's raw text IS instead
+/// rendered visibly — by an accessibility inspector, a semantics-tree dump,
+/// or screenshot tooling, all of which do lay text out — there is nothing
+/// after the name in this particular string left to reorder. Where a label
+/// instead JOINS the untrusted text with OTHER label content that follows it
+/// in the same string, isolate it there too: it is free (never spoken, never
+/// a braille cell) and keeps that trailing content from being swallowed by
+/// an unterminated override under those visual consumers.
+/// `MemberCandidateTile._semanticsLabel` in member_picker.dart is exactly
+/// that case — its identity is followed by the tier, the nickname note, the
+/// collision note and any refusal reason in one joined string, so it stays
+/// isolated there. The npub needs neither treatment — bech32 is ASCII by
+/// construction and cannot carry a direction control.
+String _bidiIsolate(String text) => '\u2068$text\u2069';
 
 class _InvitationCardState extends ConsumerState<InvitationCard> {
   _LoadingAction _loadingAction = _LoadingAction.none;
@@ -80,14 +121,6 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
     } else {
       return l10n.invitationCardJustNow;
     }
-  }
-
-  /// Truncates a pubkey to show first 8 and last 4 hex characters.
-  String _truncatePubkey(String pubkey) {
-    if (pubkey.length <= 12) {
-      return pubkey;
-    }
-    return '${pubkey.substring(0, 8)}...${pubkey.substring(pubkey.length - 4)}';
   }
 
   /// Handles accepting the invitation.
@@ -250,14 +283,41 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
-    final circleName = widget.invitation.circleName;
+
+    final inviterPubkey = widget.invitation.inviterPubkey;
+    final npub = NpubValidator.shortenForDisplay(widget.invitation.inviterNpub);
+    // A pure local cache read — no relay traffic, and nothing on this screen
+    // triggers a fetch. An inviter is a stranger until the invitation is
+    // accepted, and every pubkey handed to the batch refresh is also handed
+    // to the picture download, so a name appears here only for someone
+    // already cached (a re-invite, or an existing co-member); everyone else
+    // stays the npub.
+    final profile = publicProfilesEnabled
+        ? ref.watch(memberProfileProvider(inviterPubkey)).valueOrNull
+        : null;
+    // The petname the user saved for this person somewhere else. An
+    // invitation has no `CircleMember` row to carry it — the inviter is a
+    // stranger until Accept — so without this read the one name an attacker
+    // cannot forge would lose to the one they chose (plan §7.2). Non-blank
+    // here is exactly the case where the resolver returns the nickname, so
+    // it doubles as "the name below came from you".
+    final nickname = ref
+        .watch(contactNicknameProvider(inviterPubkey))
+        .valueOrNull
+        ?.trim();
+    final hasNickname = nickname != null && nickname.isNotEmpty;
+    // The resolver returns [npub] itself when nothing resolved, so comparing
+    // against it is how this screen learns whether a NAME exists — the same
+    // contract `circle_member_tile` relies on.
+    final inviterName = resolveEffectiveMemberName(
+      localOverride: nickname,
+      profile: profile,
+      npubFallback: npub,
+    );
+    final hasName = inviterName != npub;
 
     return Semantics(
-      label: l10n.invitationCardSemantics(
-        circleName,
-        _truncatePubkey(widget.invitation.inviterPubkey),
-        widget.invitation.memberCount,
-      ),
+      label: l10n.invitationCardSemantics(inviterName),
       child: Card(
         margin: const EdgeInsets.symmetric(
           horizontal: HavenSpacing.base,
@@ -268,38 +328,76 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Circle name
+              // Heading. NOT the circle's name — that is still inside the
+              // encrypted Welcome pre-join, and the stand-in this replaces
+              // was a hard-coded English literal ("New Circle") shown as the
+              // card's largest, boldest element in every locale.
               Text(
-                circleName,
+                l10n.invitationCardHeading,
                 style: theme.textTheme.titleMedium?.copyWith(
                   fontWeight: FontWeight.bold,
                 ),
               ),
               const SizedBox(height: HavenSpacing.sm),
 
-              // Inviter pubkey
-              Semantics(
-                label: l10n.invitationCardInvitedBySemantics(
-                  _truncatePubkey(widget.invitation.inviterPubkey),
-                ),
-                child: Text(
-                  l10n.invitationCardInvitedBy(
-                    _truncatePubkey(widget.invitation.inviterPubkey),
+              // Inviter. A resolved name becomes the value of the "Invited
+              // by" line, but the npub NEVER leaves the card: a kind-0 name
+              // is attacker-chosen — anyone can publish any name — so on the
+              // screen whose output is live location sharing the name is the
+              // convenience and the key is the identity.
+              //
+              // Rendered with a resolved name bidi-isolated, announced
+              // without: the isolate protects a layout the label never
+              // undergoes, and would otherwise put two invisible code points
+              // into every announcement of this line. The npub-only case
+              // keeps its own label, which says what the string IS rather
+              // than reading a bech32 blob out as a name.
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Flexible(
+                    child: Semantics(
+                      label: hasName
+                          ? l10n.invitationCardInvitedBy(inviterName)
+                          : l10n.invitationCardInvitedBySemantics(npub),
+                      excludeSemantics: true,
+                      child: Text(
+                        l10n.invitationCardInvitedBy(
+                          hasName ? _bidiIsolate(inviterName) : npub,
+                        ),
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
                   ),
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
+                  // Outside the excluded subtree above, so the mark keeps a
+                  // semantics node of its own.
+                  if (hasNickname)
+                    _NicknameMark(label: l10n.invitationCardNicknameNote),
+                ],
+              ),
+              if (hasName) ...[
+                const SizedBox(height: HavenSpacing.xs),
+                // Its own `Text`, forced LTR and never concatenated with the
+                // name: within ONE paragraph the bidi algorithm resolves run
+                // boundaries across the whole string, so a strong-RTL name
+                // could visually reorder the key beside it. Separate widgets
+                // cannot interact. It also never ellipsizes — clipping the
+                // tail would drop the bech32 checksum the 12/6 form exists
+                // for.
+                Semantics(
+                  label: l10n.invitationCardInvitedBySemantics(npub),
+                  excludeSemantics: true,
+                  child: Text(
+                    npub,
+                    textDirection: TextDirection.ltr,
+                    style: HavenTypography.monoSmall.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(height: HavenSpacing.xs),
-
-              // Member count
-              Text(
-                l10n.invitationCardMemberCount(widget.invitation.memberCount),
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
+              ],
               const SizedBox(height: HavenSpacing.xs),
 
               // Time ago
@@ -311,9 +409,15 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
               ),
               const SizedBox(height: HavenSpacing.md),
 
-              // Action buttons
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
+              // Action buttons. An `OverflowBar` rather than a `Row`: at
+              // accessibility text scales the two labels stop fitting side by
+              // side on a narrow phone, and a Row clips the accept affordance
+              // off the edge instead of stacking it.
+              OverflowBar(
+                alignment: MainAxisAlignment.end,
+                overflowAlignment: OverflowBarAlignment.end,
+                spacing: HavenSpacing.sm,
+                overflowSpacing: HavenSpacing.sm,
                 children: [
                   // Decline button
                   OutlinedButton(
@@ -327,7 +431,6 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
                           )
                         : Text(l10n.invitationCardDecline),
                   ),
-                  const SizedBox(width: HavenSpacing.sm),
 
                   // Accept button
                   FilledButton(
@@ -347,6 +450,63 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
                 ],
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The mark that says the name beside it is the user's own petname.
+///
+/// Deliberately not a chip, a badge, or a colour: it answers "where did this
+/// name come from", which is provenance, not trust. Nothing on this card may
+/// look like a verification — the invitation screen is exactly where a user
+/// would over-read one — so it inherits the muted colour of the line it
+/// annotates rather than taking an accent. `HavenSecurityColors.encrypted`
+/// and `warning` are doubly excluded: both fail WCAG AA at text contrast
+/// (3.30:1 and 3.19:1), and the green already means "KeyPackage validated"
+/// elsewhere in the app.
+class _NicknameMark extends StatelessWidget {
+  const _NicknameMark({required this.label});
+
+  /// Announced by a screen reader and shown on long-press. The mark carries
+  /// no visible text of its own: a running caption beside every nicknamed
+  /// name would be louder than the name.
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    // Scaled by hand because `Icon` does not follow the text scaler: at 2x
+    // an unscaled 14dp glyph beside 28dp text reads as a rendering artefact
+    // rather than as a mark.
+    final glyphSize = MediaQuery.textScalerOf(context).scale(14);
+    // The glyph's own box is the Tooltip's whole hit region, and at default
+    // text scale that box is 14x14 — below the 24x24dp WCAG 2.2 minimum
+    // long-press target, reached only once the glyph itself has grown past
+    // it (~1.72x). Pad the HIT REGION out to 24dp without touching the
+    // glyph's rendered size (plan F6 — same fix as member_picker.dart's
+    // `_PickerNicknameMark`, which this class mirrors).
+    final hitTargetSize = glyphSize < 24 ? 24.0 : glyphSize;
+
+    return Padding(
+      padding: const EdgeInsetsDirectional.only(start: HavenSpacing.xs),
+      // Excluded from semantics so the icon's own label is announced once,
+      // not twice (a tooltip contributes its message to the same node).
+      child: Tooltip(
+        message: label,
+        excludeFromSemantics: true,
+        child: SizedBox(
+          width: hitTargetSize,
+          height: hitTargetSize,
+          child: Center(
+            child: Icon(
+              LucideIcons.tag,
+              size: glyphSize,
+              color: theme.colorScheme.onSurfaceVariant,
+              semanticLabel: label,
+            ),
           ),
         ),
       ),

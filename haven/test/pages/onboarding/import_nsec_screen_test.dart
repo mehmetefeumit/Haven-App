@@ -144,6 +144,25 @@ void main() {
     );
     expect(service.importCalls, ['nsec1abcdefghij']);
   });
+
+  testWidgets('never lets the OS keep the pasted secret key', (tester) async {
+    final service = _RecordingIdentityService();
+
+    await pumpLocalized(
+      tester,
+      const ImportNsecScreen(),
+      overrides: buildOverrides(service: service),
+    );
+
+    final field = tester.widget<TextField>(find.byType(TextField));
+    // Security Rule 6: a secret key must not be exposed. The learned-word
+    // dictionary and the platform autofill service are both OS-side stores
+    // Haven cannot reach, wipe on logout, or keep out of a device backup —
+    // and `obscureText` gates neither.
+    expect(field.enableIMEPersonalizedLearning, isFalse);
+    expect(field.autofillHints, isNull);
+    expect(field.obscureText, isTrue);
+  });
 }
 
 class _RecordingIdentityService implements IdentityService {

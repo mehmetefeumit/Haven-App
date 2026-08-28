@@ -14,6 +14,22 @@
 //! changed-URL / cleared-URL invariants exhaustively unit-testable and keeps the
 //! FFI orchestration a thin translation of these decisions.
 
+/// How many OTHER people's pictures the byte cache may hold at once.
+///
+/// Owner decision D5 (`docs/MEMBER_PICKER_PLAN.md` §10): the member picker
+/// instantiates a provider per newly built row, so a fling issues reads — and,
+/// on a first sight, downloads — far faster than they resolve, against a store
+/// whose population was otherwise bounded by nothing at all. Fifty is above the
+/// natural roster-sized population §9.4 expects, so the cap makes the ceiling
+/// explicit rather than emergent.
+///
+/// The local user's OWN picture is not part of this count and is never evicted:
+/// it is the photo they chose (possibly still staged, with no public URL yet),
+/// not a cache of somebody else's, and re-downloading it is not always even
+/// possible. Enforced in `CircleStorage::write_profile_picture_row`, the single
+/// writer of the `profile_pictures` table.
+pub const PICTURE_CACHE_MAX_PEOPLE: u32 = 50;
+
 /// Trims `value` and returns it only when it is present and not
 /// whitespace-only — a blank `picture` field means "no picture".
 fn non_blank(value: Option<&str>) -> Option<&str> {

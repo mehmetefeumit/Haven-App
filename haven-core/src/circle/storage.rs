@@ -23,8 +23,8 @@ use nostr::EventId;
 
 use super::error::{CircleError, Result};
 use super::types::{
-    Circle, CircleMembership, CircleType, CircleUiState, Contact, LastKnownLocation,
-    MembershipStatus,
+    sanitize_circle_name, Circle, CircleMembership, CircleType, CircleUiState, Contact,
+    LastKnownLocation, MembershipStatus,
 };
 use crate::nostr::mls::types::{GroupId, GroupIdExt};
 
@@ -412,6 +412,13 @@ impl CircleStorage {
         // stays rollback-journal so the concurrency reasoning cannot drift.)
         Self::apply_hardening_pragmas(&conn)?;
 
+        // Runs BEFORE the CREATE batch, unlike every other migration below:
+        // `CREATE TABLE IF NOT EXISTS` does not alter an existing table, and
+        // SQLite cannot convert a rowid table to WITHOUT ROWID in place, so the
+        // legacy shape has to be gone before the declaration below can take
+        // effect on an upgraded install.
+        super::storage_member_directory::migrate_directory_to_without_rowid(&conn)?;
+
         conn.execute_batch(
             r"
             -- Circle metadata (app-level, not MLS state)
@@ -748,6 +755,55 @@ impl CircleStorage {
                 source     TEXT NOT NULL,
                 first_seen INTEGER NOT NULL
             );
+
+            -- The local member directory: everyone this device currently shares
+            -- a circle with, plus everyone it shared one with in the last
+            -- `DIRECTORY_RETENTION_DAYS` (see storage_member_directory).
+            --
+            -- Deliberately NO circle / group column, and none may ever be added
+            -- (`INV-D-DIRECTORY-HOLDS-NO-CIRCLE-IDENTIFIER`; structurally
+            -- asserted by a PRAGMA table_info test in
+            -- storage_member_directory.rs). The table records PEOPLE, never
+            -- which circle a person came from: `sync_co_members` writes the
+            -- UNION across all circles in one pass, so no row can be attributed
+            -- to a circle even by write timing.
+            --
+            -- `last_shared_day` is a DAY bucket, never unix seconds: a
+            -- second-granularity stamp re-encodes the write cluster that the
+            -- union rewrite exists to destroy. `purge_after` is the one derived
+            -- second value, and it is day-aligned by construction
+            -- (`(last_shared_day + retention) * 86400`), so it discloses
+            -- nothing finer either.
+            --
+            -- WITHOUT ROWID for the same reason, and it is load-bearing: an
+            -- implicit rowid is an arrival-order counter, and each sync pass
+            -- inserts that pass's NEW pubkeys in sorted order, so a descending
+            -- pubkey step between consecutive rowids marks a batch boundary —
+            -- these people arrived together, i.e. a circle's roster. That is
+            -- the `first_seen_day` partition leak the schema drops, re-created
+            -- implicitly by the storage engine. WITHOUT ROWID stores the rows in
+            -- primary-key order instead, so no arrival order is recoverable, and
+            -- the row is more compact besides. `PRAGMA table_info` never reports
+            -- a rowid, so this is pinned by reading `sqlite_master` instead.
+            --
+            -- `purge_after` is NOT NULL with `9223372036854775807` (i64::MAX)
+            -- meaning NEVER — the sentinel a current co-member carries. NULL
+            -- was rejected because it breaks every read: `>= now` drops the
+            -- row, `ORDER BY` sorts NULLs first, and min()/count(col)/BETWEEN/
+            -- NOT IN silently exclude them.
+            --
+            -- `is_current` and `tier` are kept in lockstep (`is_current = 1`
+            -- exactly when `tier = 0`) by the single writer in
+            -- storage_member_directory; `rank_key` is the materialized
+            -- within-tier sort key. A test pins all three so they cannot drift.
+            CREATE TABLE IF NOT EXISTS member_directory (
+                pubkey           TEXT PRIMARY KEY,
+                is_current       INTEGER NOT NULL DEFAULT 0,
+                last_shared_day  INTEGER NOT NULL DEFAULT 0,
+                tier             INTEGER NOT NULL,
+                rank_key         INTEGER NOT NULL,
+                purge_after      INTEGER NOT NULL
+            ) WITHOUT ROWID;
             ",
         )?;
 
@@ -1044,10 +1100,21 @@ impl CircleStorage {
     ///
     /// If a circle with the same `mls_group_id` exists, it will be updated.
     ///
+    /// The display name is normalized by [`sanitize_circle_name`] on the way in,
+    /// as it is in the other writer ([`Self::record_processed_invitation`]) and
+    /// on the way out — the same write-AND-read wiring the kind-0 name cache
+    /// uses, and for the same reason: the write side cleans everything stored
+    /// from now on, the read side covers rows an upgraded install already holds.
+    ///
+    /// Returns the circle as it was actually STORED, for the same reason
+    /// [`Self::write_profile_row`] does: `create_circle` hands its result
+    /// straight back to the UI, so a caller rendering the struct it assembled
+    /// would render exactly the text this write had just sanitized away.
+    ///
     /// # Errors
     ///
     /// Returns an error if the database operation fails.
-    pub fn save_circle(&self, circle: &Circle) -> Result<()> {
+    pub fn save_circle(&self, circle: &Circle) -> Result<Circle> {
         let conn = self
             .conn
             .lock()
@@ -1056,6 +1123,18 @@ impl CircleStorage {
         // Serialize relays as JSON array
         let relays_json = serde_json::to_string(&circle.relays)
             .map_err(|e| CircleError::Storage(format!("Failed to serialize relays: {e}")))?;
+
+        // Bind the sanitized name once and write THAT, so what is returned and
+        // what lands in the row cannot drift apart.
+        let circle = Circle {
+            mls_group_id: circle.mls_group_id.clone(),
+            nostr_group_id: circle.nostr_group_id,
+            display_name: sanitize_circle_name(circle.display_name.clone()),
+            circle_type: circle.circle_type,
+            relays: circle.relays.clone(),
+            created_at: circle.created_at,
+            updated_at: circle.updated_at,
+        };
 
         conn.execute(
             r"
@@ -1079,7 +1158,7 @@ impl CircleStorage {
             ],
         )?;
 
-        Ok(())
+        Ok(circle)
     }
 
     /// Retrieves a circle by its MLS group ID.
@@ -1147,7 +1226,12 @@ impl CircleStorage {
                 Ok(Some(Circle {
                     mls_group_id: GroupId::from_slice(&mls_group_id),
                     nostr_group_id,
-                    display_name,
+                    // Sanitized on the way OUT as well as in, for the rows an
+                    // upgraded install already holds: nothing rewrites a
+                    // circle row until its group is renamed, i.e. possibly
+                    // never. The sanitizer is idempotent, so a row written by
+                    // the current code passes through unchanged.
+                    display_name: sanitize_circle_name(display_name),
                     circle_type,
                     relays,
                     created_at,
@@ -1226,7 +1310,9 @@ impl CircleStorage {
                     Ok(Circle {
                         mls_group_id: GroupId::from_slice(&mls_group_id),
                         nostr_group_id,
-                        display_name,
+                        // See `get_circle`: read-side sanitization covers rows
+                        // stored before the sanitizer was wired.
+                        display_name: sanitize_circle_name(display_name),
                         circle_type,
                         relays,
                         created_at,
@@ -1293,6 +1379,13 @@ impl CircleStorage {
             "DELETE FROM circle_memberships WHERE mls_group_id = ?1",
             params![mls_group_id.as_slice()],
         )?;
+        // The leave-intent marker outlives nothing: a circle that is gone has
+        // no leave to be in progress, and a stale marker would make a LATER
+        // eviction from a re-joined group read as voluntary.
+        tx.execute(
+            "DELETE FROM user_settings WHERE key = ?1",
+            params![Self::leave_intent_key(mls_group_id)],
+        )?;
         tx.execute(
             "DELETE FROM circles WHERE mls_group_id = ?1",
             params![mls_group_id.as_slice()],
@@ -1351,6 +1444,124 @@ impl CircleStorage {
             );
         }
         Ok(existed)
+    }
+
+    // ============ Leave intent + directory withdrawal bookkeeping ============
+
+    /// The `user_settings` key carrying the leave-intent marker for one group.
+    fn leave_intent_key(mls_group_id: &GroupId) -> String {
+        format!("leave_intent_v1:{}", hex::encode(mls_group_id.as_slice()))
+    }
+
+    /// Records that THIS device asked to leave `mls_group_id`.
+    ///
+    /// The engine cannot answer the question this marker exists for. A peer's
+    /// commit of our own `SelfRemove` and an admin evicting us produce the
+    /// identical `Group.removed` flag — it is set from a pure roster diff
+    /// (`cgka-engine/src/message_processor/ingest.rs:928-934`), and the
+    /// `self_removed` set the same function computes is used only to attribute
+    /// the notification, never to gate the flag. Without a local record of the
+    /// intent, "I left" is indistinguishable from "they removed me", and the
+    /// member directory would delete the co-members of the circle the user just
+    /// walked out of — the exact relationship requirement R5 exists to keep.
+    ///
+    /// Durable, because the leave is two-phase: the proposal is published and
+    /// the local teardown happens later, and a process death in between must
+    /// not lose the intent. Cleared by [`Self::delete_circle`], which is what
+    /// every leave finalizer runs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CircleError::Storage`] on lock poisoning and
+    /// [`CircleError::Database`] on `SQLite` failure.
+    pub fn mark_leave_intent(&self, mls_group_id: &GroupId) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO user_settings (key, value) VALUES (?1, '1')",
+            params![Self::leave_intent_key(mls_group_id)],
+        )?;
+        Ok(())
+    }
+
+    /// Whether this device asked to leave `mls_group_id` — see
+    /// [`Self::mark_leave_intent`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::mark_leave_intent`].
+    pub fn has_leave_intent(&self, mls_group_id: &GroupId) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        let found: Option<String> = conn
+            .query_row(
+                "SELECT value FROM user_settings WHERE key = ?1",
+                params![Self::leave_intent_key(mls_group_id)],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
+    /// Sentinel recording that the member directory owes a withdrawing sweep.
+    const DIRECTORY_WITHDRAWAL_OWED_KEY: &'static str = "directory_withdrawal_owed_v1";
+
+    /// Whether a withdrawal has been observed that no reconcile has yet acted
+    /// on.
+    ///
+    /// The engine keeps no per-commit record of what a superseded commit
+    /// created, so the ONLY chance to delete a row a withdrawn commit minted is
+    /// the reconcile that follows the withdrawal. That reconcile can decline to
+    /// run — any circle mid-publish defers the whole pass, and a mid-publish
+    /// circle is most likely precisely during the multi-admin commit race that
+    /// produced the withdrawal. Persisting the debt turns "the next reconcile
+    /// happens to succeed" into a guarantee.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::mark_leave_intent`].
+    pub fn directory_withdrawal_owed(&self) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        let found: Option<String> = conn
+            .query_row(
+                "SELECT value FROM user_settings WHERE key = ?1",
+                params![Self::DIRECTORY_WITHDRAWAL_OWED_KEY],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
+    /// Sets or clears the withdrawal debt — see
+    /// [`Self::directory_withdrawal_owed`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::mark_leave_intent`].
+    pub fn set_directory_withdrawal_owed(&self, owed: bool) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        if owed {
+            conn.execute(
+                "INSERT OR REPLACE INTO user_settings (key, value) VALUES (?1, '1')",
+                params![Self::DIRECTORY_WITHDRAWAL_OWED_KEY],
+            )?;
+        } else {
+            conn.execute(
+                "DELETE FROM user_settings WHERE key = ?1",
+                params![Self::DIRECTORY_WITHDRAWAL_OWED_KEY],
+            )?;
+        }
+        Ok(())
     }
 
     // ==================== Membership Operations ====================
@@ -2314,7 +2525,10 @@ impl CircleStorage {
             params![
                 circle.mls_group_id.as_slice(),
                 &circle.nostr_group_id[..],
-                &circle.display_name,
+                // The one path where the name is REMOTE-supplied: a joined
+                // circle's `display_name` is verbatim the MLS group-profile
+                // name the inviter chose.
+                sanitize_circle_name(circle.display_name.clone()),
                 circle.circle_type.as_str(),
                 &relays_json,
                 circle.created_at,
@@ -2692,6 +2906,134 @@ mod tests {
         storage.save_circle(&circle).unwrap();
         let retrieved = storage.get_circle(&circle.mls_group_id).unwrap().unwrap();
         assert_eq!(retrieved.circle_type, CircleType::DirectShare);
+    }
+
+    // ==================== Circle-name sanitization ====================
+
+    /// The stored `display_name`, read WITHOUT the row mapper — otherwise a
+    /// write-side assertion could be satisfied by the read-side sanitizer.
+    fn raw_circle_name(storage: &CircleStorage, mls_group_id: &GroupId) -> String {
+        let conn = storage.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT display_name FROM circles WHERE mls_group_id = ?1",
+            params![mls_group_id.as_slice()],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap()
+    }
+
+    /// Writes a circle row straight to SQL, bypassing every writer — the shape
+    /// of a row an install stored before the sanitizer was wired.
+    fn insert_raw_circle(storage: &CircleStorage, circle: &Circle) {
+        let conn = storage.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO circles (mls_group_id, nostr_group_id, display_name, circle_type, relays, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, '[]', ?5, ?6)",
+            params![
+                circle.mls_group_id.as_slice(),
+                &circle.nostr_group_id[..],
+                &circle.display_name,
+                circle.circle_type.as_str(),
+                circle.created_at,
+                circle.updated_at,
+            ],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn save_circle_sanitizes_the_name_it_stores() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let circle = Circle {
+            display_name: "Fa\u{202E}mi\u{200B}ly".to_string(),
+            ..create_test_circle(1)
+        };
+        storage.save_circle(&circle).unwrap();
+        assert_eq!(raw_circle_name(&storage, &circle.mls_group_id), "Family");
+    }
+
+    #[test]
+    fn a_joined_circles_remote_name_is_sanitized_before_it_is_stored() {
+        // `record_processed_invitation` is the write site for a circle whose
+        // name Haven did NOT author: it is verbatim the MLS group-profile name
+        // the inviter chose.
+        let storage = CircleStorage::in_memory().unwrap();
+        let circle = Circle {
+            display_name: "Ne\u{2066}igh\u{200B}bours".to_string(),
+            ..create_test_circle(7)
+        };
+        let membership = CircleMembership {
+            status: MembershipStatus::Accepted,
+            ..create_test_membership(7)
+        };
+        storage
+            .record_processed_invitation(&EventId::all_zeros(), &circle, &membership, 1_700)
+            .unwrap();
+        assert_eq!(
+            raw_circle_name(&storage, &circle.mls_group_id),
+            "Neighbours"
+        );
+    }
+
+    #[test]
+    fn a_circle_row_written_before_the_sanitizer_existed_is_sanitized_on_read() {
+        // Both read sites, because a row that only ONE of them cleans still
+        // reaches a rendered line through the other.
+        let storage = CircleStorage::in_memory().unwrap();
+        let circle = Circle {
+            display_name: "Fa\u{202E}mi\u{200B}ly".to_string(),
+            ..create_test_circle(3)
+        };
+        insert_raw_circle(&storage, &circle);
+
+        let single = storage.get_circle(&circle.mls_group_id).unwrap().unwrap();
+        assert_eq!(single.display_name, "Family");
+
+        let all = storage.get_all_circles().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].display_name, "Family");
+    }
+
+    #[test]
+    fn an_unbounded_remote_circle_name_is_capped_at_the_display_name_limit() {
+        // The picker renders this name on one line; nothing else bounds it.
+        let storage = CircleStorage::in_memory().unwrap();
+        let circle = Circle {
+            display_name: "x".repeat(4_000),
+            ..create_test_circle(4)
+        };
+        storage.save_circle(&circle).unwrap();
+        let stored = storage.get_circle(&circle.mls_group_id).unwrap().unwrap();
+        assert_eq!(
+            stored.display_name.chars().count(),
+            crate::directory::DISPLAY_NAME_MAX_GRAPHEMES
+        );
+    }
+
+    #[test]
+    fn two_circle_names_differing_only_by_padding_read_back_identical() {
+        // The disambiguator (member-picker plan §7.2.2) decides that a circle
+        // "sets a row apart" by comparing names. Padding that renders as
+        // nothing must not make two identical-looking names compare unequal.
+        let storage = CircleStorage::in_memory().unwrap();
+        let honest = Circle {
+            display_name: "Family".to_string(),
+            ..create_test_circle(5)
+        };
+        let spoofed = Circle {
+            display_name: "Fam\u{200B}ily".to_string(),
+            ..create_test_circle(6)
+        };
+        storage.save_circle(&honest).unwrap();
+        storage.save_circle(&spoofed).unwrap();
+
+        let names: Vec<String> = storage
+            .get_all_circles()
+            .unwrap()
+            .into_iter()
+            .map(|c| c.display_name)
+            .collect();
+        assert_eq!(names, vec!["Family".to_string(), "Family".to_string()]);
     }
 
     // ==================== Membership Tests ====================

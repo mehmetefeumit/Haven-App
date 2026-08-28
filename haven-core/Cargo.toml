@@ -157,6 +157,29 @@ url = "2"
 # Async utilities
 futures = "0.3"
 
+# Unicode text handling for the member directory (`src/directory`): NFKD +
+# combining-mark detection for the search fold, grapheme-cluster segmentation
+# for the display sanitizer's length cap.
+#
+# `unicode-normalization` already resolves at 0.1.25 through `nostr 0.44.7`
+# (`cargo tree -i unicode-normalization`), so naming it here unifies rather than
+# widening the dependency graph — same posture as `hmac` / `async-trait`.
+#
+# `unicode-segmentation` is a genuine ADDITION, and the only one this work
+# makes. It carries no dependencies of its own and comes from the same
+# maintainers as `unicode-normalization`. It is here because a display name is
+# capped in GRAPHEME CLUSTERS, not chars: `char`-counting splits a flag emoji
+# between its two regional indicators and a Devanagari conjunct from its
+# matra, and there is no correct hand-rolled shortcut — UAX #29 needs the
+# Extend / Prepend / SpacingMark / Regional_Indicator / Extended_Pictographic
+# tables, which is precisely what this crate is. Neither
+# `unicode-normalization` nor `std` segments.
+#
+# General categories are deliberately NOT taken from a crate: see
+# `src/directory/format_chars.rs` for why the `Cf` table is spelled out.
+unicode-normalization = "0.1"
+unicode-segmentation = "1.12"
+
 # Secure memory handling
 zeroize = { version = "1.8", features = ["derive"] }
 

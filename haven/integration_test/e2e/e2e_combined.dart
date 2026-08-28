@@ -180,7 +180,7 @@ import 'package:haven/src/rust/api.dart'
         InvitationFfi,
         MemberKeyPackageFfi,
         RelayManagerFfi;
-import 'package:haven/src/services/circle_service.dart' show Circle, MembershipStatus;
+import 'package:haven/src/services/circle_service.dart' show Circle;
 import 'package:haven/src/services/live_sync_resubscriber.dart'
     show LiveSyncResubscriber;
 import 'package:haven/src/services/location_sharing_service.dart' show MemberLocation;
@@ -1535,17 +1535,19 @@ void main() {
             'guarantee as the old membershipStatus=="pending" check, via the '
             'API production actually uses for pending invites.',
       );
-      // The pending invitation must report at least the inviter (>= 1
-      // member). This exercises the Welcome-derived member_count path and
-      // guards a regression that drops the embedded NostrGroupData count.
+      // The inviter is the one roster fact a pre-join preview can prove: the
+      // Welcome's GroupInfo is encrypted, so the NIP-59 seal author is all
+      // Dave's device can authenticate. Losing it would leave the accept
+      // screen unable to say who is asking.
       expect(
-        daveInvites.single.memberCount,
-        greaterThanOrEqualTo(1),
+        daveInvites.single.inviterPubkey.toLowerCase(),
+        equals(fe2Alice.pubkeyHex.toLowerCase()),
         reason:
-            '[FE-2] the pending invitation reports '
-            '${daveInvites.single.memberCount} member(s); expected >= 1 (the '
-            'inviter at minimum). A 0 here means the Welcome member-count '
-            'parse regressed.',
+            '[FE-2] the pending invitation must name Alice '
+            '(${_redactPk(fe2Alice.pubkeyHex)}) as the inviter; got '
+            '${_redactPk(daveInvites.single.inviterPubkey)}. A mismatch means '
+            'the seal-author attribution regressed, and the accept screen '
+            'would attribute the invite to the wrong key.',
       );
       // Symmetric "did not auto-accept" invariant: Dave's visible set must
       // be EMPTY. `getVisibleCircles` admits Accepted memberships only
@@ -3193,7 +3195,7 @@ Future<CircleWithMembersFfi> _aliceAddsCarolViaUi({
   );
 
   // Enter Carol's npub into the search field. The UI is the same
-  // MemberSearchBar + PendingMemberTile picker used in CreateCirclePage,
+  // MemberSearchField + PendingMemberTile picker used in CreateCirclePage,
   // sharing the WidgetKeys.memberSearchInput key.
   await tester.enterText(
     find.byKey(WidgetKeys.memberSearchInput),
@@ -5553,31 +5555,13 @@ Future<void> _assertAliceCirclesProviderHasFamily({
         "Alice's circlesProvider returned a member set "
         '(${actualSet.length} members) that does not match the '
         'expected 3-member set ${expectedSet.map(_redactPk).toList()}. '
-        'Either Bob or Carol did not appear as an accepted member '
-        'in the production CircleService after both accepted their '
-        'invitations.',
+        'Either Bob or Carol is missing from the roster the production '
+        'CircleService returns, after both accepted their invitations.',
   );
-
-  // Every member surfaced by the production CircleService is always
-  // treated as accepted (visible circles only contain accepted members
-  // — see `NostrCircleService._convertMember`). Asserting this here
-  // makes the conversion contract explicit and catches any future
-  // regression that would expose pending/declined members through
-  // `getVisibleCircles`.
-  for (final member in family.members) {
-    expect(
-      member.status,
-      equals(MembershipStatus.accepted),
-      reason:
-          'All members of a visible circle must have '
-          '`MembershipStatus.accepted` — '
-          '${_redactPk(member.pubkey)} has ${member.status} instead.',
-    );
-  }
 
   debugPrint(
     '[e2e_combined:alice] circlesProvider assertion OK — '
-    '"$_circleName" with ${family.members.length} accepted members.',
+    '"$_circleName" with ${family.members.length} members on the roster.',
   );
 }
 

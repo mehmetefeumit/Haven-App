@@ -110,22 +110,10 @@ class AppLocalizationsFa extends AppLocalizations {
       'فقط حلقه‌هایت می‌توانند تو را ببینند';
 
   @override
-  String get onboardingValueProp1Body =>
-      'موقعیت مکانی تو پیش از خروج از دستگاهت رمزگذاری می‌شود، پس فقط حلقه‌هایی که خودت انتخاب می‌کنی می‌توانند آن را بخوانند؛ نه Haven و نه هیچ‌کس دیگر. چون Haven متن‌باز است، هرکسی می‌تواند این را بررسی و تأیید کند.';
-
-  @override
   String get onboardingValueProp2Title => 'هیچ‌کس نمی‌تواند آن را خاموش کند';
 
   @override
-  String get onboardingValueProp2Body =>
-      'Haven هیچ سرور مرکزی ندارد. پیام‌های رمزگذاری‌شده‌ات از میان سرورهای مستقلی می‌گذرند که رله نامیده می‌شوند، و خودت انتخاب می‌کنی از کدام‌ها استفاده کنی. هیچ شرکت یا دولتی به‌تنهایی نمی‌تواند این شبکه را خاموش کند.';
-
-  @override
   String get onboardingValueProp3Title => 'نیازی به حساب کاربری نیست';
-
-  @override
-  String get onboardingValueProp3Body =>
-      'بدون ایمیل، بدون شمارهٔ تلفن، بدون ثبت‌نام. Haven هویتی می‌سازد که کلید خصوصی‌اش هرگز از گوشی‌ات بیرون نمی‌رود، پس هیچ حسابی هم وجود ندارد که کسی بتواند آن را تحویل دهد.';
 
   @override
   String get onboardingValueProp1Summary =>
@@ -213,25 +201,13 @@ class AppLocalizationsFa extends AppLocalizations {
   String get settingsIdentityTitle => 'هویت';
 
   @override
-  String get settingsIdentitySubtitle => 'نمایه، کلیدها و اشتراک عکس';
-
-  @override
   String get settingsRelaysTitle => 'رله‌ها';
-
-  @override
-  String get settingsRelaysSubtitle => 'جایی که دعوت‌ها به تو می‌رسند';
 
   @override
   String get settingsLocationTitle => 'موقعیت مکانی';
 
   @override
-  String get settingsLocationSubtitle => 'اشتراک‌گذاری در پس‌زمینه و مجوزها';
-
-  @override
   String get settingsMapStyleTitle => 'سبک نقشه';
-
-  @override
-  String get settingsAppearanceSubtitle => 'تم و زبان';
 
   @override
   String get settingsAboutTitle => 'درباره';
@@ -517,10 +493,6 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get privacyTitle => 'حریم خصوصی';
-
-  @override
-  String get privacySubtitle =>
-      'Haven چگونه کار می‌کند و دیگران چه چیزی را می‌بینند';
 
   @override
   String get privacyHubSummary =>
@@ -931,9 +903,6 @@ class AppLocalizationsFa extends AppLocalizations {
   String get createCircleNoValidMembers => 'عضو معتبری برای دعوت وجود ندارد';
 
   @override
-  String get createCircleMemberAlreadyAdded => 'این عضو از قبل افزوده شده است';
-
-  @override
   String get createCircleNoIdInQr => 'شناسهٔ معتبری در کد QR یافت نشد';
 
   @override
@@ -1119,9 +1088,6 @@ class AppLocalizationsFa extends AppLocalizations {
   String get qrScannerScanning => 'در حال اسکن...';
 
   @override
-  String get circleMemberInvitationPending => 'دعوت در انتظار';
-
-  @override
   String get circleMemberNoRecentLocation => 'موقعیت اخیری وجود ندارد';
 
   @override
@@ -1156,9 +1122,6 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get circleMemberAdmin => 'مدیر';
-
-  @override
-  String get circleMemberHintPending => 'دعوت در انتظار';
 
   @override
   String get circleMemberHintNoLocation => 'موقعیتی در دسترس نیست';
@@ -1218,6 +1181,56 @@ class AppLocalizationsFa extends AppLocalizations {
   String get memberSearchAlreadyAdded => 'این عضو از قبل افزوده شده است';
 
   @override
+  String get memberPickerSectionRoster => 'اعضای حلقه‌هایت';
+
+  @override
+  String get memberPickerTierRoster => 'عضوِ حلقه‌هایت';
+
+  @override
+  String get memberPickerNoMatches => 'در حلقه‌هایت نتیجه‌ای یافت نشد';
+
+  @override
+  String get memberPickerLoading => 'در حال خواندن فهرست افرادِ حلقه‌هایت';
+
+  @override
+  String get memberPickerDirectoryUnavailable =>
+      'فعلاً نتوانستیم فهرست افرادِ حلقه‌هایت را بارگذاری کنیم';
+
+  @override
+  String memberPickerMatchesAnnouncement(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return 'نتایج: $countString';
+  }
+
+  @override
+  String get memberPickerReasonSelf => 'این شناسهٔ خودت است';
+
+  @override
+  String get memberPickerReadPublicKey => 'خواندن کلید عمومی با صدای بلند';
+
+  @override
+  String get memberPickerSectionRecent => 'به‌تازگی در حلقه‌هایت';
+
+  @override
+  String get memberPickerTierRecent => 'به‌تازگی در حلقه‌هایت';
+
+  @override
+  String get memberPickerNicknameNote =>
+      'نام مستعاری که خودت برایش گذاشته‌ای، نه نام عمومی‌اش';
+
+  @override
+  String memberPickerCollisionCircleLabel(String circleName) {
+    return 'حلقه: $circleName';
+  }
+
+  @override
+  String get memberPickerStrangerLookupNote =>
+      'Haven از یک رله خواست که نام عمومی این شخص را جست‌وجو کند. آن رله می‌بیند که این دستگاه همین حالا دربارهٔ این کلید پرسیده است. اما این درخواست هیچ امضایی ندارد، پس به هویتت در Haven گره نمی‌خورد. هنوز هیچ عکسی دانلود نشده است.';
+
+  @override
   String selectedMembersMore(int count) {
     final intl.NumberFormat countNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
@@ -1227,52 +1240,26 @@ class AppLocalizationsFa extends AppLocalizations {
   }
 
   @override
-  String get invitationStatusPending => 'دعوت در انتظار';
+  String get invitationCardHeading => 'دعوت به حلقه';
 
   @override
-  String get invitationStatusActive => 'فعال';
-
-  @override
-  String get invitationStatusDeclined => 'رد شده';
-
-  @override
-  String invitationStatusSemantics(String label) {
-    return 'وضعیت دعوت: $label';
-  }
-
-  @override
-  String invitationCardSemantics(String circleName, String inviter, int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    return 'دعوت به پیوستن به $circleName، دعوت‌شده از سوی $inviter، $countString عضو';
+  String invitationCardSemantics(String inviter) {
+    return 'دعوتی برای پیوستن به یک حلقه، از سوی $inviter';
   }
 
   @override
   String invitationCardInvitedBySemantics(String inviter) {
-    return 'دعوت‌شده از سوی شناسهٔ رمزنگاری $inviter';
+    return 'دعوت‌کننده: شناسهٔ رمزنگاری $inviter';
   }
 
   @override
   String invitationCardInvitedBy(String inviter) {
-    return 'دعوت‌شده از سوی: $inviter';
+    return 'دعوت‌کننده: $inviter';
   }
 
   @override
-  String invitationCardMemberCount(int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    String _temp0 = intl.Intl.pluralLogic(
-      count,
-      locale: localeName,
-      other: '$countString عضو',
-      one: '$countString عضو',
-    );
-    return '$_temp0';
-  }
+  String get invitationCardNicknameNote =>
+      'نام مستعاری که خودت برایش گذاشته‌ای، نه نام عمومی‌اش';
 
   @override
   String get invitationCardJustNow => 'همین حالا';
@@ -1837,37 +1824,6 @@ class AppLocalizationsFa extends AppLocalizations {
   @override
   String get profileSyncStatusRetrySemantics =>
       'تلاش دوباره برای انتشار نمایه‌ات';
-
-  @override
-  String keyDisplayCopiedToClipboard(String label) {
-    return '$label در کلیپ‌بورد کپی شد';
-  }
-
-  @override
-  String keyDisplaySemantics(String label, String state) {
-    return '$label: $state';
-  }
-
-  @override
-  String get keyDisplayStateRevealed => 'نمایش‌داده‌شده';
-
-  @override
-  String get keyDisplayStateHidden => 'پنهان';
-
-  @override
-  String get keyDisplayHideTooltip => 'پنهان کردن';
-
-  @override
-  String get keyDisplayRevealTooltip => 'نمایش';
-
-  @override
-  String get keyDisplayCopyTooltip => 'کپی';
-
-  @override
-  String get keyDisplayCompactCopied => 'کلید در کلیپ‌بورد کپی شد';
-
-  @override
-  String get keyDisplayCompactTapToCopy => 'برای کپی ضربه بزن';
 
   @override
   String get npubQrCopiedSnack => 'کلید عمومی در کلیپ‌بورد کپی شد';

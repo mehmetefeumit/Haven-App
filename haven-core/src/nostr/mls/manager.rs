@@ -61,7 +61,9 @@ use transport_nostr_peeler::{NostrMlsPeeler, NostrTransportEvent};
 use super::retention::RetentionBoundPeeler;
 use super::signer::HavenIdentityProofSigner;
 use super::storage::{LiveSessionGuard, StorageConfig};
-use super::types::{LocationGroupConfig, LocationMessageResult, PreAuthRejection, ScreenedIngest};
+use super::types::{
+    ConvergedRoster, LocationGroupConfig, LocationMessageResult, PreAuthRejection, ScreenedIngest,
+};
 use super::welcome::WelcomePreview;
 use crate::nostr::error::{NostrError, Result};
 use crate::nostr::event::{KIND_LOCATION_UPDATE, LEGACY_KIND_LOCATION_UPDATE};
@@ -840,8 +842,9 @@ impl SessionManager {
     ///
     /// # Errors
     ///
-    /// Returns an error if the event is not a welcome addressed to this client
-    /// or is malformed.
+    /// Returns an error if the event is not a welcome addressed to this client,
+    /// is malformed, or carries no verifiable seal author (see
+    /// [`inviter_from_sender`]).
     pub async fn preview_welcome(&self, gift_wrap: &Event) -> Result<WelcomePreview> {
         let msg = Self::event_to_transport_message(gift_wrap)?;
         let peeled = self
@@ -851,11 +854,9 @@ impl SessionManager {
             .map_err(map_mls_err)?;
         // `peeled.content` holds the decrypted welcome bytes; drop it by not
         // binding it. Only the seal author (inviter) is retained.
-        let inviter_pubkey = peeled
-            .sender
-            .map(|m| hex::encode(m.as_slice()))
-            .unwrap_or_default();
-        Ok(WelcomePreview { inviter_pubkey })
+        Ok(WelcomePreview {
+            inviter_pubkey: inviter_from_sender(peeled.sender.as_ref())?,
+        })
     }
 
     /// Accepts a held welcome by ingesting the still-encrypted 1059 into the
@@ -997,6 +998,79 @@ impl SessionManager {
             .epoch(group_id)
             .map(|e| e.0)
             .map_err(map_mls_err)
+    }
+
+    /// The engine group ids that failed session-open hydration and were skipped.
+    ///
+    /// Quarantine is deliberately indistinguishable from "unknown" on every
+    /// engine accessor — `ensure_group_live` returns `UnknownGroup` for a
+    /// quarantined group — so a caller that must tell "temporarily unreadable"
+    /// from "genuinely failed to read" has to ask here.
+    ///
+    /// "Quarantined" means *for the life of this session*, not for ever:
+    /// entries are added only at session open and cleared only by
+    /// `retry_hydrate_quarantined_group`, which Haven never calls, so the next
+    /// open re-attempts hydration from scratch and a transiently-bad group heals
+    /// on a restart.
+    ///
+    /// The upstream `GroupHydrationQuarantineReason` is dropped: Haven exposes
+    /// no per-group recovery surface to branch on, and every consumer needs only
+    /// the identity of the groups it must skip.
+    pub async fn quarantined_group_ids(&self) -> Vec<GroupId> {
+        self.session
+            .lock()
+            .await
+            .quarantined_groups()
+            .into_iter()
+            .map(|(group_id, _reason)| group_id)
+            .collect()
+    }
+
+    /// The group's roster, read under the same lock as the gate that says
+    /// whether it is safe to persist.
+    ///
+    /// # Why the gate and the read are one call
+    ///
+    /// [`Self::members`] returns the engine's OPTIMISTIC PROJECTION for any
+    /// group in `PendingPublish`: the send paths overwrite the stored member
+    /// list with the post-merge set before anything is published, so someone
+    /// added by a commit no relay has seen — and that branch selection can still
+    /// withdraw — is in the roster the instant `send()` returns. Gating through
+    /// a separate call would release the session lock between the verdict and
+    /// the read, and a commit staged in that window would hand the caller
+    /// exactly the projection the gate exists to refuse.
+    ///
+    /// # What the gate is
+    ///
+    /// * [`Self::epoch`] resolves to the engine's PROJECTED epoch while
+    ///   `group_record().epoch` stays at the prior value; the two are re-derived
+    ///   together only by the merge and the rollback, so they differ exactly in
+    ///   `PendingPublish` and `Merging`.
+    /// * `has_pending_convergence_inputs` reports whether a stored
+    ///   `Created`/`Retryable` message record inside the rewind window projects
+    ///   to a commit or an application message. It FAILS OPEN — a row it cannot
+    ///   decode or project is skipped, and an absent group reads `false` — so
+    ///   `false` means "nothing resolvable is outstanding", never "clean slate".
+    ///   That is why it is paired with the epoch equality instead of trusted
+    ///   alone.
+    ///
+    /// Two states satisfy the epoch equality without being settled: `Recovering`
+    /// and `Unrecoverable` both report `last_stable_epoch`, which is what
+    /// storage already holds. A third, a zero-invitee create still in
+    /// `PendingPublish`, projects epoch 0 against a stored epoch 0 — its roster
+    /// is the creator alone, so it carries no peer to mis-persist, but a caller
+    /// reading [`ConvergedRoster::Converged`] as "no commit is in flight" would
+    /// be wrong.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for any engine failure other than an absent or
+    /// quarantined group, both of which are [`ConvergedRoster::Absent`].
+    pub async fn converged_member_pubkeys(&self, group_id: &GroupId) -> Result<ConvergedRoster> {
+        let session = self.session.lock().await;
+        let verdict = converged_roster(&session, group_id);
+        drop(session);
+        verdict.map_err(map_mls_err)
     }
 
     /// The group's Nostr routing: `(nostr_group_id, relays)` decoded from the
@@ -1160,6 +1234,42 @@ impl SessionManager {
             _ => None,
         }
     }
+}
+
+/// The [`ConvergedRoster`] verdict for one group, taken from a single, already
+/// acquired session guard.
+///
+/// Split out of [`SessionManager::converged_member_pubkeys`] so the guard is
+/// held across the three engine reads (making them describe one instant) and
+/// still released before the error mapping runs.
+fn converged_roster(
+    session: &AccountDeviceSession,
+    group_id: &GroupId,
+) -> std::result::Result<ConvergedRoster, SessionError> {
+    let group = match session.group_record(group_id) {
+        Ok(group) => group,
+        // A never-seen group surfaces as `Storage(NotFound)`; a group
+        // quarantined at hydration surfaces as `UnknownGroup`. Both mean "no
+        // live group here", which is a skip — never a read failure.
+        Err(SessionError::Engine(
+            EngineError::UnknownGroup(_)
+            | EngineError::Storage(cgka_traits::storage::StorageError::NotFound),
+        )) => return Ok(ConvergedRoster::Absent),
+        Err(e) => return Err(e),
+    };
+    if session.epoch(group_id)? != group.epoch
+        || session.has_pending_convergence_inputs(group_id)?
+    {
+        return Ok(ConvergedRoster::NotConverged);
+    }
+    Ok(ConvergedRoster::Converged {
+        member_pubkeys_hex: session
+            .members(group_id)?
+            .into_iter()
+            .map(|m| hex::encode(m.id.as_slice()))
+            .collect(),
+        removed: group.removed,
+    })
 }
 
 /// The MIP-03 `SelfRemove` feature registry Haven installs on every session.
@@ -1329,9 +1439,61 @@ fn has_location_hashtag(inner: &serde_json::Value) -> bool {
         })
 }
 
+/// The inviter a welcome preview may show, from the seal author the transient
+/// peel exposed.
+///
+/// Refuses anything that is not a public key rather than previewing a blank or
+/// uncheckable identity: the peel proves nothing else about an invitation, and
+/// the anti-impersonation mitigation on the accept screen is entirely that the
+/// user can compare the inviter's npub with what they were handed. The peeler
+/// has never yet produced an authorless welcome — but `sender` is an `Option`,
+/// so the state is representable, and `hex_to_npub("")` returns its own input,
+/// which put an EMPTY npub beside an Accept button for live location sharing.
+///
+/// # Errors
+///
+/// Returns [`NostrError::InvalidEvent`] when the peel exposes no usable author.
+fn inviter_from_sender(sender: Option<&MemberId>) -> Result<String> {
+    sender
+        .and_then(|m| PublicKey::from_slice(m.as_slice()).ok())
+        .map(|pk| pk.to_hex())
+        .ok_or_else(|| NostrError::InvalidEvent("welcome has no verifiable sender".to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_welcome_preview_carries_the_seal_author_as_canonical_hex() {
+        let keys = Keys::generate();
+        let sender = MemberId::new(keys.public_key().to_bytes().to_vec());
+        assert_eq!(
+            inviter_from_sender(Some(&sender)).expect("a real author previews"),
+            keys.public_key().to_hex()
+        );
+    }
+
+    #[test]
+    fn a_welcome_with_no_usable_seal_author_is_refused_not_previewed_blank() {
+        // The seal author is the ONLY thing a transient peel proves about an
+        // invitation, and the anti-impersonation mitigation on the accept
+        // screen is entirely that the user can check the inviter's npub
+        // against what they were handed. `hex_to_npub("")` returns its own
+        // input, so a blank author reached the FFI as a blank npub — an
+        // unattributable request to share live location, rendered beside an
+        // Accept button. A refusal the user can act on is the weaker failure.
+        for unusable in [
+            None,
+            Some(MemberId::new(Vec::new())),
+            Some(MemberId::new(vec![0xAB; 16])),
+        ] {
+            assert!(
+                inviter_from_sender(unusable.as_ref()).is_err(),
+                "{unusable:?} must not preview"
+            );
+        }
+    }
     use cgka_traits::types::EpochId;
     use nostr::Tag;
     use std::env;

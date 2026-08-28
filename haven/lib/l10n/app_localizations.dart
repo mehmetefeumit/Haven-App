@@ -270,43 +270,25 @@ abstract class AppLocalizations {
   /// **'What makes Haven different'**
   String get onboardingValuePropsTitle;
 
-  /// Headline of the first onboarding value-prop card (also reused on the About page).
+  /// Headline of the first onboarding value-prop card.
   ///
   /// In en, this message translates to:
   /// **'Only your circles can see you'**
   String get onboardingValueProp1Title;
 
-  /// Body of the first onboarding value-prop card (also reused on the About page).
-  ///
-  /// In en, this message translates to:
-  /// **'Your location is encrypted on your device before it leaves, so only the circles you choose can read it, never Haven or anyone else. Because Haven is open source, anyone can verify that.'**
-  String get onboardingValueProp1Body;
-
-  /// Headline of the second onboarding value-prop card (also reused on the About page).
+  /// Headline of the second onboarding value-prop card.
   ///
   /// In en, this message translates to:
   /// **'No one can shut it down'**
   String get onboardingValueProp2Title;
 
-  /// Body of the second onboarding value-prop card (also reused on the About page).
-  ///
-  /// In en, this message translates to:
-  /// **'Haven has no central server. Your encrypted messages travel through independent servers called relays, and you choose which ones to use. No single company or government can switch the network off.'**
-  String get onboardingValueProp2Body;
-
-  /// Headline of the third onboarding value-prop card (also reused on the About page).
+  /// Headline of the third onboarding value-prop card.
   ///
   /// In en, this message translates to:
   /// **'No account needed'**
   String get onboardingValueProp3Title;
 
-  /// Body of the third onboarding value-prop card (also reused on the About page).
-  ///
-  /// In en, this message translates to:
-  /// **'No email, no phone number, no sign-up. Haven creates an identity whose secret key never leaves your phone, so there is no account for anyone to hand over.'**
-  String get onboardingValueProp3Body;
-
-  /// Short one-line summary of the first value prop, shown under its title on the onboarding intro screen. The longer onboardingValueProp1Body is shown on the About page instead. Keep it to roughly one short sentence so the intro screen fits without scrolling.
+  /// Short one-line summary of the first value prop, shown under its title on the onboarding intro screen. Keep it to roughly one short sentence so the intro screen fits without scrolling.
   ///
   /// In en, this message translates to:
   /// **'Encrypted on your device, so only the circles you choose can read it.'**
@@ -318,7 +300,7 @@ abstract class AppLocalizations {
   /// **'No central server . It runs on a relay network you choose.'**
   String get onboardingValueProp2Summary;
 
-  /// Short one-line summary of the third value prop, shown under its title on the onboarding intro screen. Keep it to roughly one short sentence so the intro screen fits without scrolling. Must stay consistent with onboardingValueProp3Body, which it summarises: an earlier version claimed 'nothing links it to you', which over-claimed (the user's network address is visible to every relay, and the same key carries a renameable public profile). Keep the claim narrowed to key custody.
+  /// Short one-line summary of the third value prop, shown under its title on the onboarding intro screen. Keep it to roughly one short sentence so the intro screen fits without scrolling. An earlier version claimed 'nothing links it to you', which over-claimed (the user's network address is visible to every relay, and the same key carries a renameable public profile). Keep the claim narrowed to key custody.
   ///
   /// In en, this message translates to:
   /// **'No email, phone, or sign-up. Your secret key never leaves your phone.'**
@@ -456,23 +438,11 @@ abstract class AppLocalizations {
   /// **'Identity'**
   String get settingsIdentityTitle;
 
-  /// Subtitle under the Identity tile on the Settings hub.
-  ///
-  /// In en, this message translates to:
-  /// **'Profile, keys, and photo sharing'**
-  String get settingsIdentitySubtitle;
-
   /// Title of the Relays tile on the Settings hub, opening the relay settings page.
   ///
   /// In en, this message translates to:
   /// **'Relays'**
   String get settingsRelaysTitle;
-
-  /// Subtitle under the Relays tile on the Settings hub.
-  ///
-  /// In en, this message translates to:
-  /// **'Where invitations reach you'**
-  String get settingsRelaysSubtitle;
 
   /// Title of the Location tile on the Settings hub, opening the location settings page.
   ///
@@ -480,23 +450,11 @@ abstract class AppLocalizations {
   /// **'Location'**
   String get settingsLocationTitle;
 
-  /// Subtitle under the Location tile on the Settings hub.
-  ///
-  /// In en, this message translates to:
-  /// **'Background sharing and permissions'**
-  String get settingsLocationSubtitle;
-
   /// Title of the Map style tile on the Settings hub, opening the map-style picker.
   ///
   /// In en, this message translates to:
   /// **'Map style'**
   String get settingsMapStyleTitle;
-
-  /// Subtitle under the Appearance tile on the Settings hub. The Appearance tile title reuses appearanceTitle.
-  ///
-  /// In en, this message translates to:
-  /// **'Theme and language'**
-  String get settingsAppearanceSubtitle;
 
   /// Title of the About tile on the Settings hub, opening the About page.
   ///
@@ -965,12 +923,6 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Privacy'**
   String get privacyTitle;
-
-  /// Subtitle of the Privacy row in the Settings menu. Sets the expectation that this section explains the technology as well as the privacy consequences.
-  ///
-  /// In en, this message translates to:
-  /// **'How Haven works and what others can see'**
-  String get privacySubtitle;
 
   /// Always-visible summary paragraph at the top of the Privacy hub — the thirty-second answer for a reader who taps nothing else. Audience: non-technical, no Nostr knowledge assumed. Must promise honesty about limits, not only reassurance. Keep sentences under 25 words. The third sentence is factually load-bearing: the profile (kind 0) is NOT the only public thing — the kind-10002/10050 relay lists and the kind-30443 KeyPackage are published under the same identity key, and relay-list publishing is on by default (haven-core/src/circle/storage_relay_prefs.rs). An earlier version claimed the name and photo were 'the one thing that is public', which the app's own privacyRelaysMeansForYou and privacyRelaysDetailKeyListIsPublic contradicted. Match the enumeration already used in privacyRelaysMeansForYou in this locale.
   ///
@@ -1602,12 +1554,6 @@ abstract class AppLocalizations {
   /// **'No valid members to invite'**
   String get createCircleNoValidMembers;
 
-  /// Snackbar shown when a scanned member is already in the selected list.
-  ///
-  /// In en, this message translates to:
-  /// **'Member already added'**
-  String get createCircleMemberAlreadyAdded;
-
   /// Snackbar shown when a scanned QR code contains no recognizable member ID.
   ///
   /// In en, this message translates to:
@@ -1812,12 +1758,6 @@ abstract class AppLocalizations {
   /// **'Scanning...'**
   String get qrScannerScanning;
 
-  /// Subtitle/badge shown for a member whose circle invitation has not yet been accepted.
-  ///
-  /// In en, this message translates to:
-  /// **'Invitation Pending'**
-  String get circleMemberInvitationPending;
-
   /// Subtitle shown for an accepted member with no cached location.
   ///
   /// In en, this message translates to:
@@ -1871,12 +1811,6 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Admin'**
   String get circleMemberAdmin;
-
-  /// Accessibility hint appended to a member's name when their invitation is pending.
-  ///
-  /// In en, this message translates to:
-  /// **'invitation pending'**
-  String get circleMemberHintPending;
 
   /// Accessibility hint appended to a member's name when no location is available.
   ///
@@ -1986,59 +1920,119 @@ abstract class AppLocalizations {
   /// **'Member already added'**
   String get memberSearchAlreadyAdded;
 
+  /// Heading above the list of people offered as picks when inviting someone to a circle. It states ONLY that each pubkey is on the member list of a circle stored on this device. Haven cannot observe whether any of them ever accepted an invitation — processing an MLS Welcome puts nothing on the wire — so this heading must never say or imply joined, accepted, confirmed, verified, active, connected, or sharing with you.
+  ///
+  /// In en, this message translates to:
+  /// **'Members of your circles'**
+  String get memberPickerSectionRoster;
+
+  /// Spoken by screen readers as part of every picker row's label, because a reader swiping row by row never hears the heading above them. Same claim, and the same restrictions, as memberPickerSectionRoster, phrased for one person.
+  ///
+  /// In en, this message translates to:
+  /// **'Member of your circles'**
+  String get memberPickerTierRoster;
+
+  /// Shown, and announced once, when what was typed matches nobody in the user's circles. The person can still be invited by pasting their full ID, so this must not read as a dead end.
+  ///
+  /// In en, this message translates to:
+  /// **'No matches in your circles'**
+  String get memberPickerNoMatches;
+
+  /// Screen-reader label for the progress indicator shown while the on-device list of co-members is read. No relay is contacted; do not imply a download.
+  ///
+  /// In en, this message translates to:
+  /// **'Loading people from your circles'**
+  String get memberPickerLoading;
+
+  /// Shown in place of the picker's list when the on-device directory of co-members could not be read at all (a storage or lookup fault) — distinct from memberPickerNoMatches, which means the read SUCCEEDED and simply matched nobody, and distinct from the silent empty state on a fresh install, which means the read succeeded and truthfully found no co-members yet. This string must never be read as either of those: it says the answer is unknown, not that it is empty or negative. The person can still be invited by pasting or scanning their full ID, so this must not read as a dead end, and must not display any raw error text (Security Rule 8 — never surface exception detail to the UI).
+  ///
+  /// In en, this message translates to:
+  /// **'Couldn\'t load who\'s in your circles right now'**
+  String get memberPickerDirectoryUnavailable;
+
+  /// Announced to screen readers once a search has settled, giving how many people match what was typed. Deliberately a label-and-number construction rather than a sentence, so that no language needs a plural form for it.
+  ///
+  /// In en, this message translates to:
+  /// **'Matches: {count}'**
+  String memberPickerMatchesAnnouncement(int count);
+
+  /// Why someone cannot be added: the entered ID, or the row, is the user's own identity. Shown under the search field when the user enters their own ID, and as the reason on a disabled picker row. Must stay distinct from 'Already in this circle' — being unable to invite yourself is a different fact from already being a member.
+  ///
+  /// In en, this message translates to:
+  /// **'This is your own ID'**
+  String get memberPickerReasonSelf;
+
+  /// Screen-reader custom action on a picker row that SPEAKS the person's public key aloud — it does not display or open it. The word 'aloud' is load-bearing: without it, four of the first five translators rendered 'read' in the read-with-your-eyes sense, which many languages distinguish with a different verb entirely (German vorlesen vs lesen). Translate the speaking sense. This label is also a fixed string and must never contain the key itself: Flutter interns custom-action labels in a process-wide map with no prune path, so a per-person label would hold identifier text for the life of the process.
+  ///
+  /// In en, this message translates to:
+  /// **'Read public key aloud'**
+  String get memberPickerReadPublicKey;
+
+  /// Heading above the SECOND section of the invite picker (below memberPickerSectionRoster): people who shared a circle with the user within the last few days but are no longer on any current circle's member list (P3, plan §7.2). States ONLY roster provenance, exactly like memberPickerSectionRoster — Haven cannot observe whether any of them ever accepted an invitation or is still reachable, so this heading must never say or imply joined, accepted, confirmed, verified, active, connected, or sharing with you.
+  ///
+  /// In en, this message translates to:
+  /// **'Recently in your circles'**
+  String get memberPickerSectionRecent;
+
+  /// Spoken by screen readers as part of every tier-1 (recent) picker row's label, because a reader swiping row by row never hears the heading above them. Same claim, and the same restrictions, as memberPickerSectionRecent, phrased so it also reads naturally appended to one person's name.
+  ///
+  /// In en, this message translates to:
+  /// **'Recently in your circles'**
+  String get memberPickerTierRecent;
+
+  /// Tooltip shown on long-press on the small mark beside a picker row's name when the name shown is the local nickname the user saved for that person, rather than their public Nostr name. On THIS surface the mark carries no semantics label of its own — its enclosing Semantics node drops every descendant, so a screen reader hears this string only as ONE CLAUSE inside the row's own joined label, spoken together with the person's name and tier, never as its own announcement the way a standalone icon label would be. Translate it so it reads naturally appended after a name in a list of short clauses, not as a self-contained sentence. States where the name came from and nothing more — it is NOT a verification, trust, safety or identity-confirmation claim, and must not be translated as one. Same string and purpose as invitationCardNicknameNote on the invitation card, where the mark DOES carry its own semantics label as a separate node — the wording is shared between the two screens, but only invitationCardNicknameNote is spoken that way.
+  ///
+  /// In en, this message translates to:
+  /// **'Your nickname for them, not their public name'**
+  String get memberPickerNicknameNote;
+
+  /// Shown on an invite-picker row, and included in its screen-reader label, ONLY when another row in the FIRST section (memberPickerSectionRoster, tier-0) resolves to the exact same displayed name as this one. It can never appear in the recent section: a tier-1 person is no longer a co-member of anything, so no current circle could be the reason their name collides. {circleName} is chosen to be UNIQUE to this row among every row it collides with — the alphabetically first of THIS row's own circles that is NOT also a circle any OTHER colliding row's person shares with the user, so the two colliding rows normally name DIFFERENT circles. When no such circle exists (every one of this row's circles is also shared by a rival), this note is omitted for that row entirely rather than repeating a name a colliding row already shows. It is emphatically NOT a circle the two colliding people share with each other (such a circle could not tell them apart); never translate it as a shared, common or mutual circle. Translate as a label-and-value construction, exactly like memberPickerMatchesAnnouncement: the circle noun in its plain citation form, a colon, then the name. NEVER render it as a prepositional or locative phrase — on real circle names 'In {circleName}' collides with ordinary locative idiom ('In Family', 'In Brooklyn', and the per-locale equivalents of the very names nameCircleNameHint itself suggests), which in a location-sharing app announces a place the person is not. The label-value shape also avoids case government and possessive re-readings, and it needs no quotation marks, which screen readers do not speak at default verbosity. This is the ONE exception to the rule that Haven never names a circle on this screen (plan §7.2); do not reuse this copy, or invent similar copy, anywhere else the picker shows a person. {circleName} is a name the user (or someone in the circle) chose locally.
+  ///
+  /// In en, this message translates to:
+  /// **'Circle: {circleName}'**
+  String memberPickerCollisionCircleLabel(String circleName);
+
+  /// Shown on the ONE row that appears when the user types or pastes a complete, valid npub for someone not already in the local directory (plan §10 D2), and spoken as the screen-reader label on that row's loading spinner while the lookup is in flight. Appears whether or not anything resolves. Discloses exactly four things and no more: (1) Haven asked ONE public relay (never more — see docs/MEMBER_PICKER_PLAN.md, the design deliberately adds no fan-out of its own — it never pads with decoys, and it issues one request per attempt through the existing per-author relay assignment, whose own ladder is bounded by PROFILE_MAX_RELAY_RANK); (2) that relay can see THIS DEVICE asked about THAT KEY at THAT MOMENT — do not soften this into 'may be able to see' or omit it, it is a real, unavoidable disclosure; (3) the request is NOT tied to the user's Haven identity, because it carries no cryptographic signature and therefore cannot answer a relay's NIP-42 AUTH challenge — translate 'signature' in the cryptographic sense (the same sense as privacyYourKeysDetailFormats' 'Signing happens inside the app'), not a handwritten or email signature; (4) no photo is downloaded at this stage (only the published name, if any, is looked up). Do NOT use a word meaning 'anonymous' or 'anonymously' anywhere in this string — it overclaims: the network address and timing of the request are still visible to the relay, which is exactly what point (2) discloses. Do not add or imply a duration, a retry count, or which relay was asked.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven asked a relay to look up this person\'s published name. That relay can see this device asked about this key just now — but the request carries no signature, so it isn\'t tied to your Haven identity. No photo is downloaded yet.'**
+  String get memberPickerStrangerLookupNote;
+
   /// Indicator shown after the visible member chips for the remaining members, e.g. '+2 more'.
   ///
   /// In en, this message translates to:
   /// **'+{count} more'**
   String selectedMembersMore(int count);
 
-  /// Status badge label for a member with a pending circle invitation.
+  /// Heading of a pending circle invitation card, and the largest text on it. Deliberately NOT the circle's name: pre-join the name is still inside the encrypted Welcome, so the card can only say what the item IS. Must not name, number or otherwise imply a specific circle.
   ///
   /// In en, this message translates to:
-  /// **'Invitation Pending'**
-  String get invitationStatusPending;
+  /// **'Circle invitation'**
+  String get invitationCardHeading;
 
-  /// Status badge label for an active (accepted) member.
+  /// Accessibility label summarizing an invitation card. {inviter} is the inviter's local nickname if the user saved one, else their resolved public name, else their shortened npub. 'a circle' is indefinite on purpose — see invitationCardHeading; do not reintroduce a circle name or a member count, neither of which Haven knows before the invitation is accepted. 'sent by', NOT 'invited by': the participle in 'invited by' agrees with the READER, whose gender Haven never asks for — five translators independently hit this and each replaced it with a send-verb attached to the invitation. Keep {inviter} LAST: it usually resolves to a ~21-character npub, and a screen-reader listener needs the gist before the key.
   ///
   /// In en, this message translates to:
-  /// **'Active'**
-  String get invitationStatusActive;
+  /// **'Invitation to join a circle, sent by {inviter}'**
+  String invitationCardSemantics(String inviter);
 
-  /// Status badge label for a member who declined the invitation.
-  ///
-  /// In en, this message translates to:
-  /// **'Declined'**
-  String get invitationStatusDeclined;
-
-  /// Accessibility label announcing a member's invitation status. {label} is one of the status labels.
-  ///
-  /// In en, this message translates to:
-  /// **'Invitation status: {label}'**
-  String invitationStatusSemantics(String label);
-
-  /// Accessibility label summarizing an invitation card. {circleName} is the circle name, {inviter} is a truncated public key, {count} is the member count (always shown with the plural noun 'members', matching the original copy).
-  ///
-  /// In en, this message translates to:
-  /// **'Invitation to join {circleName}, invited by {inviter}, {count} members'**
-  String invitationCardSemantics(String circleName, String inviter, int count);
-
-  /// Accessibility label for the inviter row of an invitation card. {inviter} is a truncated public key.
+  /// Accessibility label for the inviter row of an invitation card. {inviter} is the inviter's shortened npub.
   ///
   /// In en, this message translates to:
   /// **'Invited by cryptographic identifier {inviter}'**
   String invitationCardInvitedBySemantics(String inviter);
 
-  /// Visible inviter line on an invitation card. {inviter} is a truncated public key.
+  /// Visible inviter line on an invitation card. {inviter} is the nickname the user saved for the inviter when there is one, else the inviter's resolved public name, else their shortened npub; the npub is then shown on its own line beneath.
   ///
   /// In en, this message translates to:
   /// **'Invited by: {inviter}'**
   String invitationCardInvitedBy(String inviter);
 
-  /// Member-count line on an invitation card.
+  /// Tooltip and screen-reader label on the small mark beside the inviter line when the name shown is the nickname the user saved on this device rather than the inviter's public Nostr name. States where the name came from and nothing more: it is NOT a verification, trust, safety or identity-confirmation claim, and must not be translated as one.
   ///
   /// In en, this message translates to:
-  /// **'{count, plural, =1{1 member} other{{count} members}}'**
-  String invitationCardMemberCount(int count);
+  /// **'Your nickname for them, not their public name'**
+  String get invitationCardNicknameNote;
 
   /// Relative time shown on an invitation card when it arrived moments ago.
   ///
@@ -2801,60 +2795,6 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Retry publishing your profile'**
   String get profileSyncStatusRetrySemantics;
-
-  /// Snackbar confirming a labelled key (e.g. 'Public Key') was copied to the clipboard from the KeyDisplay widget.
-  ///
-  /// In en, this message translates to:
-  /// **'{label} copied to clipboard'**
-  String keyDisplayCopiedToClipboard(String label);
-
-  /// Accessibility label for the KeyDisplay container, naming the key and whether it is revealed or hidden.
-  ///
-  /// In en, this message translates to:
-  /// **'{label}: {state}'**
-  String keyDisplaySemantics(String label, String state);
-
-  /// Accessibility state word used in the KeyDisplay semantics label when the key is fully shown.
-  ///
-  /// In en, this message translates to:
-  /// **'revealed'**
-  String get keyDisplayStateRevealed;
-
-  /// Accessibility state word used in the KeyDisplay semantics label when the key is truncated.
-  ///
-  /// In en, this message translates to:
-  /// **'hidden'**
-  String get keyDisplayStateHidden;
-
-  /// Tooltip on the KeyDisplay button that re-truncates a revealed key.
-  ///
-  /// In en, this message translates to:
-  /// **'Hide'**
-  String get keyDisplayHideTooltip;
-
-  /// Tooltip on the KeyDisplay button that reveals the full key.
-  ///
-  /// In en, this message translates to:
-  /// **'Reveal'**
-  String get keyDisplayRevealTooltip;
-
-  /// Tooltip on the KeyDisplay button that copies the key to the clipboard.
-  ///
-  /// In en, this message translates to:
-  /// **'Copy'**
-  String get keyDisplayCopyTooltip;
-
-  /// Snackbar confirming a key was copied from the CompactKeyDisplay widget.
-  ///
-  /// In en, this message translates to:
-  /// **'Key copied to clipboard'**
-  String get keyDisplayCompactCopied;
-
-  /// Tooltip on the CompactKeyDisplay row inviting the user to tap and copy the key.
-  ///
-  /// In en, this message translates to:
-  /// **'Tap to copy'**
-  String get keyDisplayCompactTapToCopy;
 
   /// Snackbar confirming the npub public key was copied to the clipboard from the QR widget.
   ///

@@ -9,8 +9,7 @@ export 'circles/circle_member_tile.dart';
 export 'circles/circle_selector.dart';
 export 'circles/circles_bottom_sheet.dart';
 export 'circles/invitation_card.dart';
-export 'circles/invitation_status_badge.dart';
-export 'circles/member_search_bar.dart';
+export 'circles/member_search_field.dart';
 export 'circles/selected_members_list.dart';
 
 // Common widgets
@@ -31,7 +30,6 @@ export 'debug/debug_log_overlay.dart';
 
 // Identity widgets
 export 'identity/avatar.dart';
-export 'identity/key_display.dart';
 export 'identity/npub_qr_code.dart';
 
 // Location widgets

@@ -36,7 +36,6 @@ void main() {
             pubkey: 'abc',
             npub: 'npub1abc',
             isAdmin: true,
-            status: MembershipStatus.accepted,
           ),
         ],
       );

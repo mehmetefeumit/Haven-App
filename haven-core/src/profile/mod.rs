@@ -65,7 +65,9 @@ pub use fetch::{fetch_own_profile, fetch_profiles_assigned, AssignedFetch};
 pub use merge::{enforce_name_rule, merge_edits};
 pub use outbox::{merge_base, PendingEdits, PendingSnapshot};
 pub use parse::parse_newest_metadata;
-pub use picture_cache::{picture_is_current, picture_sync_action, PictureSyncAction};
+pub use picture_cache::{
+    picture_is_current, picture_sync_action, PictureSyncAction, PICTURE_CACHE_MAX_PEOPLE,
+};
 pub use publish::{
     build_blank_metadata_event, build_metadata_event, build_nip09_deletion, publish_metadata,
 };

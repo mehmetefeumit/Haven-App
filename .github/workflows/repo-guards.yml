@@ -50,6 +50,18 @@
 #     true; the script's header carries the authoritative enumeration and
 #     deliberately restates no count.
 #
+#   Member-directory privacy          scripts/ci/check_member_directory_privacy.sh
+#     The local member directory is a contact list: everyone this device shares
+#     a circle with, plus everyone it shared one with in the last three days.
+#     It turns into a social graph if a row can be attributed to a circle, into
+#     a permanent record if the purge stops running, and it outlives identity
+#     deletion if a second copy lands outside the SQLCipher database that
+#     logout deletes. The module's own tests pin the column list, the three-day
+#     constant and the DELETE; this guard covers only what those tests cannot
+#     see — a second writer or a companion 'directory' table, an ALTER on a
+#     migration path a fresh open never takes, the directory API being wired up
+#     without its purge, and a sidecar in Rust, Dart or native code. Plan: docs/MEMBER_PICKER_PLAN.md §6.1 / §10 D3 / §13.
+#
 #   Profile-relay override single site scripts/ci/check_profile_override_single_site.sh
 #     The kind-0 plane's test-only relay override is install-once, so a second
 #     call site throws and the winner depends on call order — which is how
@@ -565,6 +577,24 @@ jobs:
       - name: Public-profile privacy boundaries
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_profile_privacy_boundaries.sh
+
+      - name: Member-directory privacy boundaries
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_member_directory_privacy.sh
+
+      # The guard above reasons at statement level over SQL embedded in Rust,
+      # and both of its own first-draft bugs were extractor bugs that a green
+      # tree hid: a `tr -s '[:space:]'` squeeze folded the newlines the `;`
+      # split had just produced, handing every rule ONE chunk containing the
+      # whole file. Its fixtures therefore pin each rule against a real
+      # violation AND against prose naming every forbidden token, because a
+      # source scan that matches documentation instead of code is this repo's
+      # recorded failure mode. The retention-coupling fixtures pin both
+      # directions of the arming rule: nothing wired is not a violation, and a
+      # purge named only in a comment does not count as wired.
+      - name: Member-directory guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_member_directory_privacy.sh --self-test
 
       - name: Android INTERNET permission
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}

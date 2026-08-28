@@ -279,6 +279,47 @@ class NostrProfileService implements ProfileService {
   }
 
   @override
+  Future<Map<String, Profile>> getCachedMemberProfiles(
+    List<String> pubkeyHexes,
+  ) async {
+    if (pubkeyHexes.isEmpty) return const {};
+    final List<ProfileMetadataFfi> rows;
+    try {
+      final manager = await _circleManagerFactory();
+      // ONE FFI hop resolved under a single connection lock, not a fan-out of
+      // one call (and three SQLCipher queries) per pubkey — see
+      // `getCachedProfiles`'s own doc for the measured cost of the fan-out
+      // this replaced. Returns one row per input pubkey, in input order.
+      rows = await manager.getCachedProfiles(pubkeysHex: pubkeyHexes);
+    } on Object catch (e) {
+      debugPrint('[Profile] getCachedMemberProfiles: ${e.runtimeType}');
+      return const {};
+    }
+
+    final profiles = <String, Profile>{};
+    for (final ffi in rows) {
+      // `isKnown: false` is a NEGATIVE-CACHE row: the pubkey was looked up
+      // and nothing was found (or never resolved at all — the batch read
+      // synthesizes the same row for both), so its blank metadata would
+      // claim a name the person does not have. Absent, exactly like a row
+      // that never existed.
+      if (!ffi.isKnown) continue;
+      profiles[ffi.pubkeyHex] = Profile(
+        pubkeyHex: ffi.pubkeyHex,
+        name: ffi.name,
+        displayName: ffi.displayName,
+        about: ffi.about,
+        // No `pictureBytes`, deliberately — see the interface contract. The
+        // hash is what a row uses to fetch its own bytes when it scrolls
+        // into view, and to key the decode cache.
+        pictureHash: ffi.pictureSha256Hex,
+        knownAt: DateTime.fromMillisecondsSinceEpoch(ffi.fetchedAt * 1000),
+      );
+    }
+    return profiles;
+  }
+
+  @override
   Future<Map<String, Profile>> refreshMemberProfiles(
     List<String> pubkeyHexes, {
     Duration maxAge = profileInteractiveMaxAge,
@@ -335,6 +376,29 @@ class NostrProfileService implements ProfileService {
     } on Object catch (e) {
       debugPrint('[Profile] refreshMemberProfiles: ${e.runtimeType}');
       throw const ProfileServiceException('Failed to refresh member profiles');
+    }
+  }
+
+  @override
+  Future<Profile?> resolveTypedStrangerProfile(String npub) async {
+    try {
+      final manager = await _circleManagerFactory();
+      final ffi = await manager.resolveStrangerProfile(
+        pubkey: npub,
+        maxAgeSecs: profileInteractiveMaxAge.inSeconds,
+      );
+      if (ffi == null || !ffi.isKnown) return null;
+      // Thumbnail-only, `forcePictureLookup` left at its default `false`:
+      // mirrors getMemberProfile exactly. `refreshMemberProfiles`'s
+      // `forcePictureLookup: true` is part of its BATCHED, paced download
+      // flow (`downloadMemberPictures`) — copying that here would force a
+      // picture download for a stranger the instant their npub resolves,
+      // which is exactly what D2 forbids. No picture-handling code is added
+      // by this method; that restraint IS the implementation.
+      return await _toProfile(manager, ffi, fullResolution: false);
+    } on Object catch (e) {
+      debugPrint('[Profile] resolveTypedStrangerProfile: ${e.runtimeType}');
+      throw const ProfileServiceException('Failed to resolve profile');
     }
   }
 

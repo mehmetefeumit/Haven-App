@@ -147,5 +147,30 @@ void main() {
         'Enter a relay address like wss://relay.example.com.',
       );
     });
+
+    testWidgets('opts the URL field out of IME personalized learning', (
+      tester,
+    ) async {
+      await _openSheet(tester, RelayCategory.inbox);
+
+      // A relay URL is a network association, and the keyboard's learned-word
+      // dictionary is outside Haven's storage, its logout wipe, and its
+      // threat model. autocorrect/enableSuggestions do not gate it.
+      final field = tester.widget<TextField>(find.byType(TextField));
+      expect(field.enableIMEPersonalizedLearning, isFalse);
+    });
+
+    testWidgets('offers the URL field to no platform autofill service', (
+      tester,
+    ) async {
+      await _openSheet(tester, RelayCategory.inbox);
+
+      // A relay URL is not something an autofill service holds, so the
+      // feature buys the user nothing here while still handing it the
+      // current editing value — an empty hint list is the framework default
+      // and does NOT disable autofill.
+      final field = tester.widget<TextField>(find.byType(TextField));
+      expect(field.autofillHints, isNull);
+    });
   });
 }

@@ -9,7 +9,8 @@
 /// - refreshRoster swallows service failures (never throws to the caller).
 /// - Concurrent triggers coalesce into one fetch plus at most one follow-up,
 ///   keeping the strictest pending tier.
-/// - refreshAll builds the all-circles union plus the own pubkey (§1.7).
+/// - refreshAll builds the all-circles union plus the own pubkey (§1.7), and
+///   never widens it to a pending invitation's inviter.
 library;
 
 import 'dart:async';
@@ -312,16 +313,23 @@ void main() {
   group('refreshAll union (migration plan §1.7)', () {
     const pubkeyC =
         'cccc1234cccc1234cccc1234cccc1234cccc1234cccc1234cccc1234cccc1234';
+    // A stranger who has only sent an invitation. Hex and npub are a real
+    // bech32 pair so the fixture cannot drift into asserting nothing.
+    const inviterPubkey =
+        'eeee1234eeee1234eeee1234eeee1234eeee1234eeee1234eeee1234eeee1234';
+    const inviterNpub =
+        'npub1amhpyd8wacfrfmhwzg6wamsjxnhwuy35amhpyd8wacfrfmhwzg6qq5h28z';
 
     ProviderContainer makeUnionContainer(
       MockProfileService svc,
-      List<Circle> circles,
-    ) {
+      List<Circle> circles, {
+      List<Invitation> invitations = const [],
+    }) {
       return ProviderContainer(
         overrides: [
           profileServiceProvider.overrideWithValue(svc),
           circleServiceProvider.overrideWithValue(
-            MockCircleService(circles: circles),
+            MockCircleService(circles: circles, invitations: invitations),
           ),
           identityProvider.overrideWith((ref) async => testIdentity),
         ],
@@ -415,6 +423,48 @@ void main() {
                   .args['pubkeyHexes']!
               as List<String>;
       expect(sent.where((p) => p == pubkeyA), hasLength(1));
+    });
+
+    test('excludes the inviter of a pending invitation', () async {
+      // A pending inviter is a stranger who has done nothing but gift-wrap
+      // the user an event. Every pubkey in this batch also reaches the
+      // picture path — `membersNeedingPictureDownload` gates on `!hasPicture`
+      // alone, with no staleness or miss backoff — so folding one in would
+      // GET an image from a host THAT STRANGER chose, from the user's real
+      // IP, on every trigger, before accept or decline. It would also write a
+      // durable profile row that declining does not remove.
+      final svc = MockProfileService();
+      final container = makeUnionContainer(
+        svc,
+        [
+          TestCircleFactory.createCircle(
+            members: [TestCircleFactory.createMember(pubkey: pubkeyA)],
+          ),
+        ],
+        invitations: [
+          Invitation(
+            mlsGroupId: const [9],
+            circleName: 'Invited Circle',
+            inviterPubkey: inviterPubkey,
+            inviterNpub: inviterNpub,
+            invitedAt: DateTime(2024),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container
+          .read(memberProfileRefreshProvider.notifier)
+          .refreshAll(maxAge: profileInteractiveMaxAge);
+      await Future<void>.delayed(Duration.zero);
+
+      final sent =
+          svc.methodCalls
+                  .firstWhere((c) => c.method == 'refreshMemberProfiles')
+                  .args['pubkeyHexes']!
+              as List<String>;
+      expect(sent, contains(pubkeyA));
+      expect(sent, isNot(contains(inviterPubkey)));
     });
   });
 

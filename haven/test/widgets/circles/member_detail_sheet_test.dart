@@ -30,10 +30,10 @@ const _memberPubkey =
 const _memberNpub =
     'npub1hwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwasxw04hu';
 
-/// Mirrors the sheet's private `_shortNpub` truncation (12/6) so assertions
-/// stay in sync with production formatting.
-String _shortNpub(String npub) =>
-    NpubValidator.truncate(npub, prefixLength: 12, suffixLength: 6);
+/// The sheet's private `_shortNpub` is [NpubValidator.shortenForDisplay];
+/// calling the canonical helper keeps assertions in sync with production
+/// formatting instead of restating the 12/6 literals.
+String _shortNpub(String npub) => NpubValidator.shortenForDisplay(npub);
 
 const _selfPubkey =
     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -45,7 +45,6 @@ CircleMember _buildMember({String? displayName}) => CircleMember(
   npub: _memberNpub,
   displayName: displayName,
   isAdmin: false,
-  status: MembershipStatus.accepted,
 );
 
 Widget _buildHarness({
@@ -229,7 +228,6 @@ void main() {
             pubkey: _selfPubkey,
             npub: _selfNpub,
             isAdmin: false,
-            status: MembershipStatus.accepted,
           ),
           isSelf: true,
           selfDisplayName: 'Alice',
@@ -254,7 +252,6 @@ void main() {
               pubkey: _selfPubkey,
               npub: _selfNpub,
               isAdmin: false,
-              status: MembershipStatus.accepted,
             ),
             isSelf: true,
             selfDisplayName: 'Alice',
@@ -268,6 +265,37 @@ void main() {
   });
 
   group('MemberDetailSheet — nickname save / clear / cancel', () {
+    testWidgets('opts the nickname field out of IME personalized learning', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_buildHarness(member: _buildMember()));
+      await tester.pumpAndSettle();
+
+      // A petname is a contact name the user chose to keep only on this
+      // device; the keyboard's learned-word dictionary is outside Haven's
+      // encrypted storage, outside its logout wipe, and inside the OS backup.
+      final field = tester.widget<TextField>(
+        find.byKey(WidgetKeys.memberNicknameField),
+      );
+      expect(field.enableIMEPersonalizedLearning, isFalse);
+    });
+
+    testWidgets('offers the nickname field to no platform autofill service', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_buildHarness(member: _buildMember()));
+      await tester.pumpAndSettle();
+
+      // A petname the user invented is not something an autofill service
+      // holds, so the feature buys nothing here while still handing it the
+      // current editing value — an empty hint list is the framework default
+      // and does NOT disable autofill.
+      final field = tester.widget<TextField>(
+        find.byKey(WidgetKeys.memberNicknameField),
+      );
+      expect(field.autofillHints, isNull);
+    });
+
     testWidgets(
       'Save Nickname calls setContactDisplayName with the trimmed text',
       (tester) async {
@@ -507,7 +535,6 @@ void main() {
                           pubkey: _selfPubkey,
                           npub: _selfNpub,
                           isAdmin: false,
-                          status: MembershipStatus.accepted,
                         ),
                       ),
                       child: const Text('open'),

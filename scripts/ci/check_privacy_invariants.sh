@@ -1660,8 +1660,8 @@ the deviation reads as undocumented."
 # `check_no_undeclared_skips.sh` applies to stale skip declarations).
 #
 # A DROPPED ASSERTION KEY is a weakening in its own right, and its absence here
-# was a free laundering route: moving `onboardingValueProp1Body` ("encrypted on
-# your device … never Haven or anyone else") out of its invariant and into
+# was a free laundering route: moving `onboardingValueProp1Summary` ("encrypted
+# on your device … only the circles you choose") out of its invariant and into
 # `non_claim_arb_keys` with a plausible reason passed every rule, moved no
 # count in rule 14 (non-claim keys count toward the same total), and left the
 # ratchet silent. The README closes that route for `kind: "none"`; this closes

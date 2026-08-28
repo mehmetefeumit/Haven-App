@@ -24,6 +24,7 @@ import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/circles/circle_member_tile.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
 import 'package:latlong2/latlong.dart' hide Circle;
@@ -680,6 +681,59 @@ void main() {
         await tester.pump();
 
         expect(fakeController.moveCalls, isEmpty);
+      },
+    );
+
+    // Roster presence is the WHOLE membership signal Haven has. Processing
+    // an MLS Welcome emits nothing on the wire and leaves no artifact any
+    // other device can see, so a member row can never mean "they joined" or
+    // "they are active" — only "an MLS-authenticated commit placed this
+    // verified identity in the group". The one participation signal that
+    // does exist locally is a decrypted location, and it is right here in
+    // this build method: gating rows on it would silently hide every real
+    // co-member who has sharing turned off. This test fails the moment the
+    // list is "improved" by filtering on activity.
+    testWidgets(
+      'every roster member gets a row even when nobody has ever sent a '
+      'location',
+      (tester) async {
+        final self = TestCircleFactory.createMember(
+          pubkey: selfPubkey,
+          displayName: 'Alice',
+        );
+        final bob = TestCircleFactory.createMember(
+          pubkey: bobPubkey,
+          displayName: 'Bob',
+        );
+        final carol = TestCircleFactory.createMember(
+          pubkey: carolPubkey,
+          displayName: 'Carol',
+        );
+        final circle = TestCircleFactory.createCircle(
+          members: [self, bob, carol],
+        );
+
+        await pumpSheetWith(
+          tester,
+          circle: circle,
+          // Nobody has ever sent a location and the viewer has no fix of
+          // their own, so the sheet knows all three are silent and renders
+          // them anyway.
+          locations: const [],
+          identity: buildIdentity(),
+        );
+
+        expect(find.byType(CircleMemberTile), findsNWidgets(3));
+        for (final pubkey in const [selfPubkey, bobPubkey, carolPubkey]) {
+          expect(
+            find.byKey(WidgetKeys.memberTile(pubkey)),
+            findsOneWidget,
+            reason:
+                'A roster member with no cached location must still be '
+                'listed — silence is not absence from the circle.',
+          );
+        }
+        expect(find.text('No recent location'), findsNWidgets(3));
       },
     );
   });

@@ -12,6 +12,7 @@ import 'package:flutter/semantics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/feature_flags.dart';
+import 'package:haven/src/constants/text_input_privacy.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
@@ -295,6 +296,11 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
                 // blocks typing.
                 enabled: _loaded,
                 maxLength: 64,
+                // Publishing this name is the user's choice; the keyboard's
+                // learned-word dictionary is a different recipient — outside
+                // Haven's storage and its logout wipe.
+                enableIMEPersonalizedLearning: false,
+                autofillHints: kNoAutofill,
                 // Hide the default 0/64 counter — it adds visual noise to a
                 // single-field card.
                 buildCounter:

@@ -112,22 +112,10 @@ class AppLocalizationsNe extends AppLocalizations {
       'तपाईंका सर्कलले मात्र तपाईंलाई देख्न सक्छन्';
 
   @override
-  String get onboardingValueProp1Body =>
-      'तपाईंको स्थान यन्त्र छोड्नुअघि नै तपाईंको यन्त्रमा इन्क्रिप्ट हुन्छ, त्यसैले तपाईंले रोजेका सर्कलले मात्र यसलाई पढ्न सक्छन्, कहिल्यै Haven वा अरू कसैले होइन। Haven खुला स्रोत भएकाले जो कसैले पनि यो कुरा प्रमाणित गर्न सक्छ।';
-
-  @override
   String get onboardingValueProp2Title => 'कसैले पनि यसलाई बन्द गर्न सक्दैन';
 
   @override
-  String get onboardingValueProp2Body =>
-      'Haven को कुनै केन्द्रीय सर्भर छैन। तपाईंका इन्क्रिप्टेड सन्देशहरू रिले भनिने स्वतन्त्र सर्भरहरूमार्फत यात्रा गर्छन्, र कुन प्रयोग गर्ने भन्ने तपाईं आफै छान्नुहुन्छ। कुनै एक्लो कम्पनी वा सरकारले यो सञ्जाल बन्द गर्न सक्दैन।';
-
-  @override
   String get onboardingValueProp3Title => 'खाता आवश्यक छैन';
-
-  @override
-  String get onboardingValueProp3Body =>
-      'इमेल छैन, फोन नम्बर छैन, साइन-अप छैन। Haven ले यस्तो परिचय बनाउँछ जसको गोप्य कुञ्जी कहिल्यै तपाईंको फोनबाट बाहिर जाँदैन, त्यसैले कसैले सुम्पन सक्ने कुनै खाता नै हुँदैन।';
 
   @override
   String get onboardingValueProp1Summary =>
@@ -216,25 +204,13 @@ class AppLocalizationsNe extends AppLocalizations {
   String get settingsIdentityTitle => 'परिचय';
 
   @override
-  String get settingsIdentitySubtitle => 'प्रोफाइल, कुञ्जी, र फोटो साझेदारी';
-
-  @override
   String get settingsRelaysTitle => 'रिलेहरू';
-
-  @override
-  String get settingsRelaysSubtitle => 'निमन्त्रणा तपाईंकहाँ पुग्ने ठाउँ';
 
   @override
   String get settingsLocationTitle => 'स्थान';
 
   @override
-  String get settingsLocationSubtitle => 'पृष्ठभूमि साझेदारी र अनुमति';
-
-  @override
   String get settingsMapStyleTitle => 'नक्सा शैली';
-
-  @override
-  String get settingsAppearanceSubtitle => 'थिम र भाषा';
 
   @override
   String get settingsAboutTitle => 'बारेमा';
@@ -518,9 +494,6 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get privacyTitle => 'गोपनीयता';
-
-  @override
-  String get privacySubtitle => 'Haven कसरी काम गर्छ र अरूले के देख्न सक्छन्';
 
   @override
   String get privacyHubSummary =>
@@ -933,9 +906,6 @@ class AppLocalizationsNe extends AppLocalizations {
   String get createCircleNoValidMembers => 'निमन्त्रणा गर्न कुनै वैध सदस्य छैन';
 
   @override
-  String get createCircleMemberAlreadyAdded => 'सदस्य पहिल्यै थपिएको छ';
-
-  @override
   String get createCircleNoIdInQr => 'QR कोडमा कुनै वैध ID फेला परेन';
 
   @override
@@ -1122,9 +1092,6 @@ class AppLocalizationsNe extends AppLocalizations {
   String get qrScannerScanning => 'स्क्यान गर्दै...';
 
   @override
-  String get circleMemberInvitationPending => 'निमन्त्रणा बाँकी';
-
-  @override
   String get circleMemberNoRecentLocation => 'हालसालैको कुनै स्थान छैन';
 
   @override
@@ -1159,9 +1126,6 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get circleMemberAdmin => 'एडमिन';
-
-  @override
-  String get circleMemberHintPending => 'निमन्त्रणा बाँकी';
 
   @override
   String get circleMemberHintNoLocation => 'कुनै स्थान उपलब्ध छैन';
@@ -1220,6 +1184,56 @@ class AppLocalizationsNe extends AppLocalizations {
   String get memberSearchAlreadyAdded => 'सदस्य पहिल्यै थपिएको छ';
 
   @override
+  String get memberPickerSectionRoster => 'तपाईंका सर्कलका सदस्यहरू';
+
+  @override
+  String get memberPickerTierRoster => 'तपाईंका सर्कलका सदस्य';
+
+  @override
+  String get memberPickerNoMatches => 'तपाईंका सर्कलमा मिल्ने कोही फेला परेन';
+
+  @override
+  String get memberPickerLoading => 'तपाईंका सर्कलका मानिसहरू लोड गर्दै';
+
+  @override
+  String get memberPickerDirectoryUnavailable =>
+      'तपाईंका सर्कलका मानिसहरूको सूची अहिलेलाई लोड गर्न सकिएन';
+
+  @override
+  String memberPickerMatchesAnnouncement(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return 'मिल्ने व्यक्ति: $countString';
+  }
+
+  @override
+  String get memberPickerReasonSelf => 'यो तपाईंको आफ्नै ID हो';
+
+  @override
+  String get memberPickerReadPublicKey => 'सार्वजनिक कुञ्जी पढेर सुनाउनुहोस्';
+
+  @override
+  String get memberPickerSectionRecent => 'हालसालै तपाईंका सर्कलमा रहेकाहरू';
+
+  @override
+  String get memberPickerTierRecent => 'हालसालै तपाईंका सर्कलमा';
+
+  @override
+  String get memberPickerNicknameNote =>
+      'तपाईंले राखेको उपनाम, तिनको सार्वजनिक नाम होइन';
+
+  @override
+  String memberPickerCollisionCircleLabel(String circleName) {
+    return 'सर्कल: $circleName';
+  }
+
+  @override
+  String get memberPickerStrangerLookupNote =>
+      'Haven ले एउटा रिलेलाई यी व्यक्तिको प्रकाशित नाम सोध्यो। यो यन्त्रले भर्खरै यही कुञ्जीबारे सोधेको कुरा त्यो रिलेले देख्छ — तर यो अनुरोधले कुनै हस्ताक्षर बोक्दैन, त्यसैले यो तपाईंको Haven परिचयसँग जोडिँदैन। अहिलेसम्म कुनै फोटो डाउनलोड भएको छैन।';
+
+  @override
   String selectedMembersMore(int count) {
     final intl.NumberFormat countNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
@@ -1229,31 +1243,16 @@ class AppLocalizationsNe extends AppLocalizations {
   }
 
   @override
-  String get invitationStatusPending => 'निमन्त्रणा बाँकी';
+  String get invitationCardHeading => 'कुनै सर्कलको निमन्त्रणा';
 
   @override
-  String get invitationStatusActive => 'सक्रिय';
-
-  @override
-  String get invitationStatusDeclined => 'अस्वीकृत';
-
-  @override
-  String invitationStatusSemantics(String label) {
-    return 'निमन्त्रणा स्थिति: $label';
-  }
-
-  @override
-  String invitationCardSemantics(String circleName, String inviter, int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    return '$circleName मा सामेल हुने निमन्त्रणा, $inviter ले निमन्त्रणा गरेको, $countString सदस्य';
+  String invitationCardSemantics(String inviter) {
+    return 'एउटा सर्कलमा सामेल हुने निमन्त्रणा, $inviter बाट आएको हो';
   }
 
   @override
   String invitationCardInvitedBySemantics(String inviter) {
-    return 'क्रिप्टोग्राफिक पहिचानकर्ता $inviter ले निमन्त्रणा गरेको';
+    return 'क्रिप्टोग्राफिक पहिचानकर्ता $inviter बाट आएको निमन्त्रणा';
   }
 
   @override
@@ -1262,19 +1261,8 @@ class AppLocalizationsNe extends AppLocalizations {
   }
 
   @override
-  String invitationCardMemberCount(int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    String _temp0 = intl.Intl.pluralLogic(
-      count,
-      locale: localeName,
-      other: '$countString सदस्य',
-      one: '१ सदस्य',
-    );
-    return '$_temp0';
-  }
+  String get invitationCardNicknameNote =>
+      'तपाईंले राखेको उपनाम, तिनको सार्वजनिक नाम होइन';
 
   @override
   String get invitationCardJustNow => 'भर्खरै';
@@ -1849,37 +1837,6 @@ class AppLocalizationsNe extends AppLocalizations {
   @override
   String get profileSyncStatusRetrySemantics =>
       'आफ्नो प्रोफाइल प्रकाशित गर्न पुनः प्रयास गर्नुहोस्';
-
-  @override
-  String keyDisplayCopiedToClipboard(String label) {
-    return '$label क्लिपबोर्डमा प्रतिलिपि गरियो';
-  }
-
-  @override
-  String keyDisplaySemantics(String label, String state) {
-    return '$label: $state';
-  }
-
-  @override
-  String get keyDisplayStateRevealed => 'देखाइएको';
-
-  @override
-  String get keyDisplayStateHidden => 'लुकाइएको';
-
-  @override
-  String get keyDisplayHideTooltip => 'लुकाउनुहोस्';
-
-  @override
-  String get keyDisplayRevealTooltip => 'देखाउनुहोस्';
-
-  @override
-  String get keyDisplayCopyTooltip => 'प्रतिलिपि गर्नुहोस्';
-
-  @override
-  String get keyDisplayCompactCopied => 'कुञ्जी क्लिपबोर्डमा प्रतिलिपि गरियो';
-
-  @override
-  String get keyDisplayCompactTapToCopy => 'प्रतिलिपि गर्न ट्याप गर्नुहोस्';
 
   @override
   String get npubQrCopiedSnack =>

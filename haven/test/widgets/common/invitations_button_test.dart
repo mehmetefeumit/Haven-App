@@ -12,12 +12,17 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/invitations/invitations_page.dart';
+import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/invitation_count_provider.dart';
 import 'package:haven/src/providers/invitation_poll_status_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
+import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/widgets/common/invitations_button.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+import '../../mocks/mock_circle_service.dart';
+import '../../mocks/mock_profile_service.dart';
 
 /// No-op Settle Pill notifier so the navigated-to InvitationsPage's initState
 /// refresh never touches the real identity/relay stack here.
@@ -37,6 +42,12 @@ Widget _buildApp({required int invitationCount}) {
       // in the InvitationsPage that gets navigated to.
       pendingInvitationsProvider.overrideWith((ref) async => <Invitation>[]),
       invitationPollStatusProvider.overrideWith(_NoopPollStatus.new),
+      // Same reason: that page's initState also drives the batched public
+      // profile refresh, which reads circles, identity and the profile
+      // service.
+      circleServiceProvider.overrideWithValue(MockCircleService()),
+      profileServiceProvider.overrideWithValue(MockProfileService()),
+      identityProvider.overrideWith((ref) async => null),
     ],
     child: MaterialApp(
       theme: ThemeData(

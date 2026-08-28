@@ -15,7 +15,6 @@ import 'package:haven/src/pages/settings/map_style_settings_page.dart';
 import 'package:haven/src/pages/settings/privacy_page.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
-import 'package:haven/src/providers/map_style_provider.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/widgets.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -24,14 +23,13 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 ///
 /// Provides navigation to sub-settings pages for identity, privacy,
 /// notifications, and about information.
-class SettingsPage extends ConsumerWidget {
+class SettingsPage extends StatelessWidget {
   /// Creates the settings page.
   const SettingsPage({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
-    final mapStyle = ref.watch(mapStyleControllerProvider);
 
     return Scaffold(
       appBar: AppBar(title: Text(l10n.settingsTitle)),
@@ -40,7 +38,6 @@ class SettingsPage extends ConsumerWidget {
           HavenSettingsTile(
             icon: LucideIcons.user,
             title: l10n.settingsIdentityTitle,
-            subtitle: l10n.settingsIdentitySubtitle,
             onTap: () {
               Navigator.push(
                 context,
@@ -53,7 +50,6 @@ class SettingsPage extends ConsumerWidget {
           HavenSettingsTile(
             icon: LucideIcons.server,
             title: l10n.settingsRelaysTitle,
-            subtitle: l10n.settingsRelaysSubtitle,
             onTap: () {
               Navigator.push(
                 context,
@@ -66,7 +62,6 @@ class SettingsPage extends ConsumerWidget {
           HavenSettingsTile(
             icon: LucideIcons.mapPin,
             title: l10n.settingsLocationTitle,
-            subtitle: l10n.settingsLocationSubtitle,
             onTap: () {
               Navigator.push(
                 context,
@@ -79,7 +74,6 @@ class SettingsPage extends ConsumerWidget {
           HavenSettingsTile(
             icon: LucideIcons.layers,
             title: l10n.settingsMapStyleTitle,
-            subtitle: mapStyleLabel(l10n, mapStyle),
             onTap: () {
               Navigator.push(
                 context,
@@ -92,7 +86,6 @@ class SettingsPage extends ConsumerWidget {
           HavenSettingsTile(
             icon: LucideIcons.palette,
             title: l10n.appearanceTitle,
-            subtitle: l10n.settingsAppearanceSubtitle,
             onTap: () {
               Navigator.push(
                 context,
@@ -106,7 +99,6 @@ class SettingsPage extends ConsumerWidget {
             key: WidgetKeys.privacyTile,
             icon: LucideIcons.shieldCheck,
             title: l10n.privacyTitle,
-            subtitle: l10n.privacySubtitle,
             onTap: () {
               Navigator.push(
                 context,

@@ -109,22 +109,10 @@ class AppLocalizationsEn extends AppLocalizations {
   String get onboardingValueProp1Title => 'Only your circles can see you';
 
   @override
-  String get onboardingValueProp1Body =>
-      'Your location is encrypted on your device before it leaves, so only the circles you choose can read it, never Haven or anyone else. Because Haven is open source, anyone can verify that.';
-
-  @override
   String get onboardingValueProp2Title => 'No one can shut it down';
 
   @override
-  String get onboardingValueProp2Body =>
-      'Haven has no central server. Your encrypted messages travel through independent servers called relays, and you choose which ones to use. No single company or government can switch the network off.';
-
-  @override
   String get onboardingValueProp3Title => 'No account needed';
-
-  @override
-  String get onboardingValueProp3Body =>
-      'No email, no phone number, no sign-up. Haven creates an identity whose secret key never leaves your phone, so there is no account for anyone to hand over.';
 
   @override
   String get onboardingValueProp1Summary =>
@@ -212,25 +200,13 @@ class AppLocalizationsEn extends AppLocalizations {
   String get settingsIdentityTitle => 'Identity';
 
   @override
-  String get settingsIdentitySubtitle => 'Profile, keys, and photo sharing';
-
-  @override
   String get settingsRelaysTitle => 'Relays';
-
-  @override
-  String get settingsRelaysSubtitle => 'Where invitations reach you';
 
   @override
   String get settingsLocationTitle => 'Location';
 
   @override
-  String get settingsLocationSubtitle => 'Background sharing and permissions';
-
-  @override
   String get settingsMapStyleTitle => 'Map style';
-
-  @override
-  String get settingsAppearanceSubtitle => 'Theme and language';
 
   @override
   String get settingsAboutTitle => 'About';
@@ -512,9 +488,6 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get privacyTitle => 'Privacy';
-
-  @override
-  String get privacySubtitle => 'How Haven works and what others can see';
 
   @override
   String get privacyHubSummary =>
@@ -927,9 +900,6 @@ class AppLocalizationsEn extends AppLocalizations {
   String get createCircleNoValidMembers => 'No valid members to invite';
 
   @override
-  String get createCircleMemberAlreadyAdded => 'Member already added';
-
-  @override
   String get createCircleNoIdInQr => 'No valid ID found in QR code';
 
   @override
@@ -1115,9 +1085,6 @@ class AppLocalizationsEn extends AppLocalizations {
   String get qrScannerScanning => 'Scanning...';
 
   @override
-  String get circleMemberInvitationPending => 'Invitation Pending';
-
-  @override
   String get circleMemberNoRecentLocation => 'No recent location';
 
   @override
@@ -1152,9 +1119,6 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get circleMemberAdmin => 'Admin';
-
-  @override
-  String get circleMemberHintPending => 'invitation pending';
 
   @override
   String get circleMemberHintNoLocation => 'no location available';
@@ -1212,6 +1176,56 @@ class AppLocalizationsEn extends AppLocalizations {
   String get memberSearchAlreadyAdded => 'Member already added';
 
   @override
+  String get memberPickerSectionRoster => 'Members of your circles';
+
+  @override
+  String get memberPickerTierRoster => 'Member of your circles';
+
+  @override
+  String get memberPickerNoMatches => 'No matches in your circles';
+
+  @override
+  String get memberPickerLoading => 'Loading people from your circles';
+
+  @override
+  String get memberPickerDirectoryUnavailable =>
+      'Couldn\'t load who\'s in your circles right now';
+
+  @override
+  String memberPickerMatchesAnnouncement(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return 'Matches: $countString';
+  }
+
+  @override
+  String get memberPickerReasonSelf => 'This is your own ID';
+
+  @override
+  String get memberPickerReadPublicKey => 'Read public key aloud';
+
+  @override
+  String get memberPickerSectionRecent => 'Recently in your circles';
+
+  @override
+  String get memberPickerTierRecent => 'Recently in your circles';
+
+  @override
+  String get memberPickerNicknameNote =>
+      'Your nickname for them, not their public name';
+
+  @override
+  String memberPickerCollisionCircleLabel(String circleName) {
+    return 'Circle: $circleName';
+  }
+
+  @override
+  String get memberPickerStrangerLookupNote =>
+      'Haven asked a relay to look up this person\'s published name. That relay can see this device asked about this key just now — but the request carries no signature, so it isn\'t tied to your Haven identity. No photo is downloaded yet.';
+
+  @override
   String selectedMembersMore(int count) {
     final intl.NumberFormat countNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
@@ -1221,26 +1235,11 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
-  String get invitationStatusPending => 'Invitation Pending';
+  String get invitationCardHeading => 'Circle invitation';
 
   @override
-  String get invitationStatusActive => 'Active';
-
-  @override
-  String get invitationStatusDeclined => 'Declined';
-
-  @override
-  String invitationStatusSemantics(String label) {
-    return 'Invitation status: $label';
-  }
-
-  @override
-  String invitationCardSemantics(String circleName, String inviter, int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    return 'Invitation to join $circleName, invited by $inviter, $countString members';
+  String invitationCardSemantics(String inviter) {
+    return 'Invitation to join a circle, sent by $inviter';
   }
 
   @override
@@ -1254,19 +1253,8 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
-  String invitationCardMemberCount(int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    String _temp0 = intl.Intl.pluralLogic(
-      count,
-      locale: localeName,
-      other: '$countString members',
-      one: '1 member',
-    );
-    return '$_temp0';
-  }
+  String get invitationCardNicknameNote =>
+      'Your nickname for them, not their public name';
 
   @override
   String get invitationCardJustNow => 'Just now';
@@ -1831,37 +1819,6 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get profileSyncStatusRetrySemantics => 'Retry publishing your profile';
-
-  @override
-  String keyDisplayCopiedToClipboard(String label) {
-    return '$label copied to clipboard';
-  }
-
-  @override
-  String keyDisplaySemantics(String label, String state) {
-    return '$label: $state';
-  }
-
-  @override
-  String get keyDisplayStateRevealed => 'revealed';
-
-  @override
-  String get keyDisplayStateHidden => 'hidden';
-
-  @override
-  String get keyDisplayHideTooltip => 'Hide';
-
-  @override
-  String get keyDisplayRevealTooltip => 'Reveal';
-
-  @override
-  String get keyDisplayCopyTooltip => 'Copy';
-
-  @override
-  String get keyDisplayCompactCopied => 'Key copied to clipboard';
-
-  @override
-  String get keyDisplayCompactTapToCopy => 'Tap to copy';
 
   @override
   String get npubQrCopiedSnack => 'Public key copied to clipboard';

@@ -304,6 +304,115 @@ void main() {
     });
   });
 
+  group('grapheme cap (kCircleNameMaxGraphemes)', () {
+    // Rust silently truncates a stored circle name at
+    // DISPLAY_NAME_MAX_GRAPHEMES (48 clusters); the field's own cap must be
+    // tied to that same number, and counted the same way, or typing stops
+    // somewhere the stored name does not.
+    testWidgets(
+      'the field caps input at kCircleNameMaxGraphemes, tighter than the '
+      'looser kCircleNameMaxLength the validator still backstops',
+      (tester) async {
+        await pumpPage(tester);
+        final field = tester.widget<TextField>(
+          find.descendant(
+            of: find.byKey(WidgetKeys.circleNameInput),
+            matching: find.byType(TextField),
+          ),
+        );
+
+        expect(field.maxLength, equals(kCircleNameMaxGraphemes));
+        expect(kCircleNameMaxGraphemes, lessThan(kCircleNameMaxLength));
+      },
+    );
+
+    testWidgets(
+      'the cap counts grapheme clusters, not UTF-16 code units — typing '
+      'past it stops on a whole cluster, never mid-cluster',
+      (tester) async {
+        await pumpPage(tester);
+
+        // A flag emoji is ONE grapheme cluster (a regional-indicator pair)
+        // but FOUR UTF-16 code units. A code-unit-based cap of 48 would cut
+        // this string off inside a flag, corrupting it; a cluster-aware cap
+        // (what Flutter's `maxLength` actually counts) stops on a whole one.
+        const flag = '🇺🇸';
+        final overCap = flag * (kCircleNameMaxGraphemes + 5);
+        expect(overCap.length, greaterThan(kCircleNameMaxLength));
+
+        await tester.enterText(
+          find.byKey(WidgetKeys.circleNameInput),
+          overCap,
+        );
+        await tester.pump();
+
+        final committed = tester
+            .widget<TextField>(
+              find.descendant(
+                of: find.byKey(WidgetKeys.circleNameInput),
+                matching: find.byType(TextField),
+              ),
+            )
+            .controller!
+            .text;
+
+        expect(committed.characters.length, equals(kCircleNameMaxGraphemes));
+        expect(committed, equals(flag * kCircleNameMaxGraphemes));
+      },
+    );
+
+    testWidgets(
+      'a name at exactly the cap can still be submitted without a "too '
+      'long" error',
+      (tester) async {
+        await pumpPage(tester);
+
+        final atCap = 'a' * kCircleNameMaxGraphemes;
+        await tester.enterText(find.byKey(WidgetKeys.circleNameInput), atCap);
+        await tester.pump();
+
+        final formState = tester.state<FormState>(find.byType(Form));
+        expect(formState.validate(), isTrue);
+      },
+    );
+  });
+
+  testWidgets('opts the circle-name field out of IME personalized learning', (
+    tester,
+  ) async {
+    await pumpPage(tester);
+
+    // A circle name describes a social grouping the app otherwise never
+    // renders at rest; the keyboard's learned-word dictionary is outside
+    // Haven's storage, its logout wipe, and its threat model. Read from the
+    // TextField the TextFormField builds, which is where the flag lands.
+    final field = tester.widget<TextField>(
+      find.descendant(
+        of: find.byKey(WidgetKeys.circleNameInput),
+        matching: find.byType(TextField),
+      ),
+    );
+    expect(field.enableIMEPersonalizedLearning, isFalse);
+  });
+
+  testWidgets('offers the circle-name field to no platform autofill service', (
+    tester,
+  ) async {
+    await pumpPage(tester);
+
+    // A circle name is not something an autofill service holds, so the
+    // feature buys the user nothing here while still handing it the current
+    // editing value — an empty hint list is the framework default and does
+    // NOT disable autofill.
+    final field = tester.widget<TextField>(
+      find.descendant(
+        of: find.byKey(WidgetKeys.circleNameInput),
+        matching: find.byType(TextField),
+      ),
+    );
+    expect(field.autofillHints, isNull);
+  });
+
   // ---------------------------------------------------------------------
   // Create flow: the snackbar must report what actually happened, not the
   // number of people the user selected to invite.

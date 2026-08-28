@@ -315,6 +315,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DecryptedLocationFfi dco_decode_decrypted_location_ffi(dynamic raw);
 
   @protected
+  DirectoryEntryFfi dco_decode_directory_entry_ffi(dynamic raw);
+
+  @protected
+  DirectoryTierFfi dco_decode_directory_tier_ffi(dynamic raw);
+
+  @protected
   EncryptedLocationFfi dco_decode_encrypted_location_ffi(dynamic raw);
 
   @protected
@@ -383,6 +389,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ContactFfi> dco_decode_list_contact_ffi(dynamic raw);
+
+  @protected
+  List<DirectoryEntryFfi> dco_decode_list_directory_entry_ffi(dynamic raw);
 
   @protected
   List<FfiGroupSpec> dco_decode_list_ffi_group_spec(dynamic raw);
@@ -876,6 +885,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  DirectoryEntryFfi sse_decode_directory_entry_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DirectoryTierFfi sse_decode_directory_tier_ffi(SseDeserializer deserializer);
+
+  @protected
   EncryptedLocationFfi sse_decode_encrypted_location_ffi(
     SseDeserializer deserializer,
   );
@@ -964,6 +981,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ContactFfi> sse_decode_list_contact_ffi(SseDeserializer deserializer);
+
+  @protected
+  List<DirectoryEntryFfi> sse_decode_list_directory_entry_ffi(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<FfiGroupSpec> sse_decode_list_ffi_group_spec(
@@ -1566,6 +1588,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_directory_entry_ffi(
+    DirectoryEntryFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_directory_tier_ffi(
+    DirectoryTierFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_encrypted_location_ffi(
     EncryptedLocationFfi self,
     SseSerializer serializer,
@@ -1670,6 +1704,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_contact_ffi(
     List<ContactFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_directory_entry_ffi(
+    List<DirectoryEntryFfi> self,
     SseSerializer serializer,
   );
 

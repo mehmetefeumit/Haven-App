@@ -40,6 +40,11 @@ use nostr::{Event, EventId};
 #[derive(Clone)]
 pub struct WelcomePreview {
     /// The inviter's public key (hex-encoded), from the NIP-59 seal author.
+    ///
+    /// Never empty, and always a well-formed public key: the preview is only
+    /// ever built by `SessionManager::preview_welcome`, which refuses a welcome
+    /// whose peel exposes no usable author rather than previewing a blank
+    /// identity beside an Accept button.
     pub inviter_pubkey: String,
 }
 

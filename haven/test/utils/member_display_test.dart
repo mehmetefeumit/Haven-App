@@ -21,14 +21,12 @@ void main() {
     String pubkey = selfPubkey,
     String? displayName,
     bool isAdmin = false,
-    MembershipStatus status = MembershipStatus.accepted,
   }) {
     return CircleMember(
       pubkey: pubkey,
       npub: 'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq',
       displayName: displayName,
       isAdmin: isAdmin,
-      status: status,
     );
   }
 

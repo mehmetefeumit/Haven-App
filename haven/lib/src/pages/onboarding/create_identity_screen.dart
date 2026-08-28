@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/constants/text_input_privacy.dart';
 import 'package:haven/src/pages/onboarding/onboarding_scaffold.dart';
 import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
@@ -338,6 +339,11 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
             focusNode: _focusNode,
             textCapitalization: TextCapitalization.words,
             textInputAction: TextInputAction.done,
+            // Publishing this name is the user's choice; the keyboard's
+            // learned-word dictionary is a different recipient — outside
+            // Haven's storage and its logout wipe.
+            enableIMEPersonalizedLearning: false,
+            autofillHints: kNoAutofill,
             onChanged: (_) => _userEdited = true,
             // The consequential action requires an explicit CTA tap — the
             // keyboard "done" key only dismisses the keyboard.

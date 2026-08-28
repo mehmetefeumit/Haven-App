@@ -15,6 +15,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/feature_flags.dart';
+import 'package:haven/src/constants/text_input_privacy.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/member_profile_provider.dart';
@@ -87,11 +88,7 @@ class _MemberDetailSheetState extends ConsumerState<MemberDetailSheet> {
     super.dispose();
   }
 
-  String get _shortNpub => NpubValidator.truncate(
-    widget.member.npub,
-    prefixLength: 12,
-    suffixLength: 6,
-  );
+  String get _shortNpub => NpubValidator.shortenForDisplay(widget.member.npub);
 
   Future<void> _copyNpub() async {
     final l10n = AppLocalizations.of(context);
@@ -267,6 +264,11 @@ class _MemberDetailSheetState extends ConsumerState<MemberDetailSheet> {
                 controller: _nicknameController,
                 enabled: !_saving,
                 maxLength: 64,
+                // A petname is a contact name kept only on this device; the
+                // keyboard learned-word dictionary is outside Haven's
+                // encrypted storage and its logout wipe.
+                enableIMEPersonalizedLearning: false,
+                autofillHints: kNoAutofill,
                 buildCounter:
                     (
                       _, {

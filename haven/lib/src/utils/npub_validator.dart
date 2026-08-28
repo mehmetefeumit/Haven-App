@@ -80,21 +80,37 @@ abstract final class NpubValidator {
     }
   }
 
-  /// Truncates an npub for display.
+  /// Leading characters kept by [shortenForDisplay], counted from the very
+  /// start — so 12 spends 5 on the constant `npub1` HRP and exposes 7 bech32
+  /// data characters.
+  static const int _displayPrefixLength = 12;
+
+  /// Trailing characters kept by [shortenForDisplay], taken from the END of
+  /// the string, where the 6-character bech32 checksum lives.
+  static const int _displaySuffixLength = 6;
+
+  /// Shortens an npub to the one format Haven displays it in:
+  /// `npub1abcdefg...uvwxyz`.
   ///
-  /// Returns a shortened version like "npub1abc...xyz".
+  /// Deliberately takes no lengths. The format is an anti-impersonation
+  /// control, and every weaker variant this replaced (10/4, 8/4, 6/3) was
+  /// reached by passing a smaller literal at one call site.
   ///
-  /// The [prefixLength] and [suffixLength] control how many characters
-  /// to show at each end.
-  static String truncate(
-    String npub, {
-    int prefixLength = 10,
-    int suffixLength = 4,
-  }) {
-    if (npub.length <= prefixLength + suffixLength + 3) {
+  /// An npub is `npub1` + 52 data characters + a 6-character bech32 checksum
+  /// over the whole payload. A 12-character prefix therefore pins only 7 data
+  /// characters — about 2^35, ~34 seconds of grinding at 10^9 keys/s to mint
+  /// a key a user reads as identical to someone else's. Pinning the trailing
+  /// checksum as well raises that to about 2^65 (~1200 years), because an
+  /// attacker can only SAMPLE keys, never solve for a target checksum.
+  ///
+  /// So the suffix must come from the end, and a "cleaner" prefix-only or
+  /// shorter form is a real regression — on the very screens where a user
+  /// confirms who they are about to share live location with.
+  static String shortenForDisplay(String npub) {
+    if (npub.length <= _displayPrefixLength + _displaySuffixLength + 3) {
       return npub;
     }
-    return '${npub.substring(0, prefixLength)}...${npub.substring(npub.length - suffixLength)}';
+    return '${npub.substring(0, _displayPrefixLength)}...${npub.substring(npub.length - _displaySuffixLength)}';
   }
 
   /// Extracts an npub from various input formats.

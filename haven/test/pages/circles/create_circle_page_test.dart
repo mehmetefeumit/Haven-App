@@ -7,16 +7,28 @@ library;
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/circles/create_circle_page.dart';
+import 'package:haven/src/providers/circles_provider.dart';
+import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/member_directory_service.dart';
+import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/npub_validator.dart';
+import 'package:haven/src/widgets/circles/circle_member_tile.dart';
+import 'package:haven/src/widgets/circles/member_picker.dart';
 
 import '../../helpers/localized_app_harness.dart';
+import '../../mocks/mock_member_directory_service.dart';
+import '../../mocks/mock_profile_service.dart';
 import '../../mocks/mock_relay_service.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -25,6 +37,37 @@ const _testNpub1 =
     'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqspcd5';
 const _testNpub2 =
     'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqs9n5u';
+
+const _selfHex =
+    '5e1f0000000000000000000000000000000000000000000000000000000000ff';
+const _selfNpub =
+    'npub1tc0sqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqql7pytwqgs';
+const _aliceHex =
+    'a11ce0000000000000000000000000000000000000000000000000000000cafe';
+const _aliceNpub =
+    'npub15ywwqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqetlqhgm683';
+
+final _identity = Identity(
+  pubkeyHex: _selfHex,
+  npub: _selfNpub,
+  createdAt: DateTime(2024),
+);
+
+/// A directory holding one named co-member, folded with a plain lower-case
+/// because `RustLib` is not initialised in a `flutter test` process.
+MemberDirectory _aliceDirectory() => buildDirectory(
+  entries: const [
+    DirectoryEntry(
+      pubkeyHex: _aliceHex,
+      npub: _aliceNpub,
+      tier: DirectoryTier.current,
+    ),
+  ],
+  profiles: const {
+    _aliceHex: Profile(pubkeyHex: _aliceHex, displayName: 'Alice Aardvark'),
+  },
+  fold: (value) => value.toLowerCase(),
+);
 
 KeyPackageData _makeKeyPackage(String pubkey) => KeyPackageData(
   pubkey: pubkey,
@@ -42,9 +85,20 @@ KeyPackageData _makeLegacyKeyPackage(String pubkey) => KeyPackageData(
 
 /// Builds the test app with a Material 2 theme to avoid the ink_sparkle
 /// shader issue in test environments.
-Widget _buildApp(MockRelayService mockRelay) {
+Widget _buildApp(
+  MockRelayService mockRelay, {
+  MemberDirectory? directory,
+}) {
   return ProviderScope(
-    overrides: [relayServiceProvider.overrideWithValue(mockRelay)],
+    overrides: [
+      relayServiceProvider.overrideWithValue(mockRelay),
+      memberDirectoryServiceProvider.overrideWithValue(
+        MockMemberDirectoryService(directory: directory),
+      ),
+      profileServiceProvider.overrideWithValue(MockProfileService()),
+      identityProvider.overrideWith((_) async => _identity),
+      circlesProvider.overrideWith((ref) => Future.value(const <Circle>[])),
+    ],
     child: MaterialApp(
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
@@ -300,6 +354,7 @@ void main() {
       TextScaler textScaler = TextScaler.noScaling,
       Locale locale = const Locale('en'),
       double bottomInset = 336,
+      MemberDirectory? directory,
     }) async {
       tester.view.devicePixelRatio = 1.0;
       tester.view.physicalSize = const Size(393, 852);
@@ -312,6 +367,14 @@ void main() {
         ProviderScope(
           overrides: [
             relayServiceProvider.overrideWithValue(MockRelayService()),
+            memberDirectoryServiceProvider.overrideWithValue(
+              MockMemberDirectoryService(directory: directory),
+            ),
+            profileServiceProvider.overrideWithValue(MockProfileService()),
+            identityProvider.overrideWith((_) async => _identity),
+            circlesProvider.overrideWith(
+              (ref) => Future.value(const <Circle>[]),
+            ),
           ],
           child: MaterialApp(
             locale: locale,
@@ -370,6 +433,186 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(tester.takeException(), isNull);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // The picker: people you already share a circle with (R2/R4)
+  // -------------------------------------------------------------------------
+  group('CreateCirclePage — the picker', () {
+    testWidgets('C1. offers co-members by name and key, with no relay call', (
+      tester,
+    ) async {
+      final mock = MockRelayService();
+      await tester.pumpWidget(
+        _buildApp(mock, directory: _aliceDirectory()),
+      );
+      await tester.pumpAndSettle();
+
+      final l10n = l10nOf(tester, CreateCirclePage);
+      expect(find.text(l10n.memberPickerSectionRoster), findsOneWidget);
+      expect(find.text('Alice Aardvark'), findsOneWidget);
+      expect(
+        find.text(NpubValidator.shortenForDisplay(_aliceNpub)),
+        findsOneWidget,
+        reason: 'a name is attacker-chosen; the key is what pins the person',
+      );
+      expect(
+        mock.methodCalls,
+        isEmpty,
+        reason: 'R2/R4 add no wire traffic — the roster is already local',
+      );
+    });
+
+    testWidgets('C2. tapping a row stages that person', (tester) async {
+      final mock = MockRelayService(keyPackageResult: _makeKeyPackage('hex'));
+      await tester.pumpWidget(
+        _buildApp(mock, directory: _aliceDirectory()),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Alice Aardvark'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(PendingMemberTile), findsOneWidget);
+      expect(
+        tester.widget<PendingMemberTile>(find.byType(PendingMemberTile)).npub,
+        _aliceNpub,
+      );
+      final button = tester.widget<FilledButton>(
+        find.widgetWithText(FilledButton, 'Continue'),
+      );
+      expect(button.onPressed, isNotNull);
+    });
+
+    testWidgets('C3. a staged person is shown on a disabled row, with the '
+        'reason', (tester) async {
+      final mock = MockRelayService(keyPackageResult: _makeKeyPackage('hex'));
+      await tester.pumpWidget(
+        _buildApp(mock, directory: _aliceDirectory()),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Alice Aardvark'));
+      await tester.pumpAndSettle();
+
+      final l10n = l10nOf(tester, CreateCirclePage);
+      expect(find.byType(MemberCandidateTile), findsOneWidget);
+      expect(find.text(l10n.memberSearchAlreadyAdded), findsOneWidget);
+
+      await tester.tap(find.text('Alice Aardvark'));
+      await tester.pumpAndSettle();
+      expect(
+        find.byType(PendingMemberTile),
+        findsOneWidget,
+        reason: 'a second tap on a refused row must stage nothing',
+      );
+    });
+
+    testWidgets('C4. with no shared circles yet, the guidance still stands', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_buildApp(MockRelayService()));
+      await tester.pumpAndSettle();
+
+      final l10n = l10nOf(tester, CreateCirclePage);
+      expect(find.text(l10n.createCircleEmptyTitle), findsOneWidget);
+      expect(find.text(l10n.memberPickerSectionRoster), findsNothing);
+    });
+
+    testWidgets('C5. typing filters the offered people in the same frame', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildApp(MockRelayService(), directory: _aliceDirectory()),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.byType(TextField), 'zzz');
+      await tester.pump();
+      expect(find.text('Alice Aardvark'), findsNothing);
+
+      await tester.enterText(find.byType(TextField), 'aardvark');
+      await tester.pump();
+      expect(find.text('Alice Aardvark'), findsOneWidget);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // The self-check: this screen previously read no identity at all, so a user
+  // could stage their own npub, `_validateMember` would find their own
+  // KeyPackage, mark it valid, and carry it into circle creation (§9.5).
+  // -------------------------------------------------------------------------
+  group('CreateCirclePage — you cannot invite yourself', () {
+    testWidgets('C6. entering your own ID is refused by name, and staged '
+        'nowhere', (tester) async {
+      final mock = MockRelayService(keyPackageResult: _makeKeyPackage('hex'));
+      await tester.pumpWidget(_buildApp(mock));
+      await tester.pumpAndSettle();
+
+      await _addMember(tester, _selfNpub);
+      await tester.pumpAndSettle();
+
+      final l10n = l10nOf(tester, CreateCirclePage);
+      expect(find.text(l10n.memberPickerReasonSelf), findsOneWidget);
+      expect(find.byType(PendingMemberTile), findsNothing);
+      final button = tester.widget<FilledButton>(
+        find.widgetWithText(FilledButton, 'Continue'),
+      );
+      expect(button.onPressed, isNull);
+    });
+
+    testWidgets('C7. the refusal costs no relay lookup, so it holds offline', (
+      tester,
+    ) async {
+      final mock = MockRelayService(keyPackageResult: _makeKeyPackage('hex'));
+      await tester.pumpWidget(_buildApp(mock));
+      await tester.pumpAndSettle();
+
+      await _addMember(tester, _selfNpub);
+      await tester.pumpAndSettle();
+
+      expect(
+        mock.methodCalls,
+        isEmpty,
+        reason:
+            'the check that shipped ran on a hex pubkey read out of a FETCHED '
+            'KeyPackage, so with no network it never fired at all',
+      );
+    });
+
+    testWidgets('C9. the driver sequence — type by key, submit with done — '
+        'enables a FilledButton Continue', (tester) async {
+      // Exactly what `e2e_combined.dart` does. If any clause of this breaks
+      // the lane does not fail, it hangs to a 60 s timeout: the driver waits
+      // for a FilledButton whose onPressed is non-null, and returns false
+      // forever for any other widget type.
+      final mock = MockRelayService(keyPackageResult: _makeKeyPackage('hex'));
+      await tester.pumpWidget(_buildApp(mock, directory: _aliceDirectory()));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.byKey(WidgetKeys.memberSearchInput),
+        _testNpub1,
+      );
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+
+      final cta = tester.widget(find.byKey(WidgetKeys.createCircleContinue));
+      expect(cta, isA<FilledButton>());
+      expect((cta as FilledButton).onPressed, isNotNull);
+    });
+
+    testWidgets('C8. someone else is still staged normally', (tester) async {
+      final mock = MockRelayService(keyPackageResult: _makeKeyPackage('hex'));
+      await tester.pumpWidget(_buildApp(mock));
+      await tester.pumpAndSettle();
+
+      await _addMember(tester, _testNpub1);
+      await tester.pumpAndSettle();
+
+      expect(find.byType(PendingMemberTile), findsOneWidget);
+      expect(mock.methodCalls, contains('fetchKeyPackage'));
     });
   });
 }

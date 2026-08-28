@@ -37,6 +37,7 @@ pub mod relay_prefs;
 mod storage;
 mod storage_contamination;
 mod storage_key_packages;
+mod storage_member_directory;
 mod storage_profile;
 mod storage_profile_sync;
 pub(crate) mod storage_relay_prefs;
@@ -47,15 +48,22 @@ pub use error::{CircleError, Result};
 pub use leave::LeavePlan;
 pub use manager::{
     AddMembersResult, CircleCreationResult, CircleManager, CommitToPublish, DecryptedIngest,
+    DirectoryReconcile,
 };
 pub use profile_sync::{ProfileSyncOutcome, ProfileSyncReport};
 pub use relay_prefs::RelayType;
 pub use storage::CircleStorage;
 pub use storage_key_packages::{PublishedKeyPackageRow, KEY_PACKAGE_KIND};
+pub use storage_member_directory::{
+    DirectoryEntry, DirectoryTier, DIRECTORY_PURGE_NEVER, DIRECTORY_RETENTION_DAYS,
+    DIRECTORY_RETENTION_SECS,
+};
+pub use storage_profile::CachedProfileView;
 pub use storage_profile_sync::{ProfilePendingState, ProfileSyncCommit};
 pub use storage_relay_prefs::{PublishedEventRecord, UserRelayRow};
 pub use types::{
-    default_relays, set_default_relays_for_test, Circle, CircleConfig, CircleMember,
-    CircleMembership, CircleType, CircleUiState, CircleWithMembers, Contact, GiftWrappedWelcome,
-    Invitation, LastKnownLocation, MemberKeyPackage, MembershipStatus, PRODUCTION_DEFAULT_RELAYS,
+    default_relays, sanitize_circle_name, set_default_relays_for_test, Circle, CircleConfig,
+    CircleMember, CircleMembership, CircleType, CircleUiState, CircleWithMembers, Contact,
+    GiftWrappedWelcome, Invitation, LastKnownLocation, MemberKeyPackage, MembershipStatus,
+    PRODUCTION_DEFAULT_RELAYS,
 };

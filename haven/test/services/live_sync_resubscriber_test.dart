@@ -134,7 +134,6 @@ CircleMember _member(String pubkey) => CircleMember(
   pubkey: pubkey,
   npub: 'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq',
   isAdmin: false,
-  status: MembershipStatus.accepted,
 );
 
 /// Builds a circle with a deterministic [tag]-derived `nostrGroupId`

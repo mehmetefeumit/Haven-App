@@ -147,8 +147,9 @@ pub fn merge_base(
 mod tests {
     use super::*;
     use crate::profile::merge::merge_edits;
+    use crate::profile::publish::build_metadata_event;
     use crate::profile::types::ProfileState;
-    use nostr::{JsonUtil, Metadata};
+    use nostr::{JsonUtil, Keys, Metadata};
 
     fn edits(display_name: Option<&str>, about: Option<&str>) -> PendingEdits {
         PendingEdits {
@@ -325,6 +326,34 @@ mod tests {
              not merely missing",
         );
         assert_eq!(republished.display_name(), Some("Me v2"));
+    }
+
+    #[test]
+    fn the_published_name_is_the_same_whether_the_base_was_fetched_or_local() {
+        // The asymmetry this closes. The base is normally the freshly-FETCHED
+        // relay copy, which carries the name exactly as it was typed
+        // (`resolve_author` builds it in memory and never touches the DB
+        // sanitizer), and falls back to the SANITIZED local row only when every
+        // pool relay is unreachable. Sanitizing in the builder is what makes
+        // both paths emit the same bytes, so what leaves the device does not
+        // depend on network conditions.
+        let keys = Keys::generate();
+        let fetched = row(r#"{"display_name":"Ali\u202Ece"}"#, 100);
+        let local = row(r#"{"display_name":"Alice"}"#, 100);
+
+        let publish = |fetched: Option<&CachedProfile>| {
+            let (base, floor) = merge_base(fetched, Some(&local));
+            let merged = merge_edits(&base, &PendingEdits::default().to_edits(None));
+            build_metadata_event(&keys, &merged, floor)
+                .expect("build")
+                .content
+        };
+
+        assert_eq!(
+            publish(Some(&fetched)),
+            publish(None),
+            "the published payload changed with the relay read outcome"
+        );
     }
 
     #[test]

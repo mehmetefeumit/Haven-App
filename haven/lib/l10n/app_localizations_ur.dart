@@ -110,22 +110,10 @@ class AppLocalizationsUr extends AppLocalizations {
       'آپ کو صرف آپ کے حلقے ہی دیکھ سکتے ہیں';
 
   @override
-  String get onboardingValueProp1Body =>
-      'آپ کا مقام آپ کے آلے سے نکلنے سے پہلے ہی اسی پر خفیہ ہو جاتا ہے، چنانچہ اسے صرف وہی حلقے پڑھ سکتے ہیں جنہیں آپ منتخب کرتے ہیں، کبھی Haven یا کوئی اور نہیں۔ چونکہ Haven اوپن سورس ہے، اس لیے کوئی بھی اس کی تصدیق کر سکتا ہے۔';
-
-  @override
   String get onboardingValueProp2Title => 'اسے کوئی بند نہیں کر سکتا';
 
   @override
-  String get onboardingValueProp2Body =>
-      'Haven کا کوئی مرکزی سرور نہیں ہے۔ آپ کے خفیہ کردہ پیغامات آزاد سرورز سے گزرتے ہیں جنہیں ریلے کہا جاتا ہے، اور آپ خود چنتے ہیں کہ کون سے استعمال کرنے ہیں۔ کوئی ایک کمپنی یا حکومت اس نیٹ ورک کو بند نہیں کر سکتی۔';
-
-  @override
   String get onboardingValueProp3Title => 'کسی اکاؤنٹ کی ضرورت نہیں';
-
-  @override
-  String get onboardingValueProp3Body =>
-      'نہ ای میل، نہ فون نمبر، نہ سائن اپ۔ Haven ایسی شناخت بناتا ہے جس کی خفیہ کلید کبھی آپ کے فون سے باہر نہیں جاتی، اس لیے کوئی ایسا اکاؤنٹ ہی نہیں ہوتا جسے کوئی کسی کے حوالے کر سکے۔';
 
   @override
   String get onboardingValueProp1Summary =>
@@ -213,25 +201,13 @@ class AppLocalizationsUr extends AppLocalizations {
   String get settingsIdentityTitle => 'شناخت';
 
   @override
-  String get settingsIdentitySubtitle => 'پروفائل، کلیدیں اور تصویر شیئرنگ';
-
-  @override
   String get settingsRelaysTitle => 'ریلے';
-
-  @override
-  String get settingsRelaysSubtitle => 'جہاں دعوت نامے آپ تک پہنچتے ہیں';
 
   @override
   String get settingsLocationTitle => 'مقام';
 
   @override
-  String get settingsLocationSubtitle => 'پس منظر میں شیئرنگ اور اجازتیں';
-
-  @override
   String get settingsMapStyleTitle => 'نقشے کا انداز';
-
-  @override
-  String get settingsAppearanceSubtitle => 'تھیم اور زبان';
 
   @override
   String get settingsAboutTitle => 'تعارف';
@@ -512,10 +488,6 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get privacyTitle => 'رازداری';
-
-  @override
-  String get privacySubtitle =>
-      'Haven کیسے کام کرتا ہے اور دوسرے کیا دیکھ سکتے ہیں';
 
   @override
   String get privacyHubSummary =>
@@ -930,9 +902,6 @@ class AppLocalizationsUr extends AppLocalizations {
       'دعوت دینے کے لیے کوئی درست رکن نہیں';
 
   @override
-  String get createCircleMemberAlreadyAdded => 'رکن پہلے ہی شامل ہے';
-
-  @override
   String get createCircleNoIdInQr => 'QR کوڈ میں کوئی درست ID نہیں ملی';
 
   @override
@@ -1119,9 +1088,6 @@ class AppLocalizationsUr extends AppLocalizations {
   String get qrScannerScanning => 'اسکین ہو رہا ہے...';
 
   @override
-  String get circleMemberInvitationPending => 'دعوت زیر التوا';
-
-  @override
   String get circleMemberNoRecentLocation => 'کوئی حالیہ مقام نہیں';
 
   @override
@@ -1156,9 +1122,6 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get circleMemberAdmin => 'منتظم';
-
-  @override
-  String get circleMemberHintPending => 'دعوت زیر التوا';
 
   @override
   String get circleMemberHintNoLocation => 'کوئی مقام دستیاب نہیں';
@@ -1216,6 +1179,57 @@ class AppLocalizationsUr extends AppLocalizations {
   String get memberSearchAlreadyAdded => 'رکن پہلے ہی شامل ہے';
 
   @override
+  String get memberPickerSectionRoster => 'آپ کے حلقوں کے ارکان';
+
+  @override
+  String get memberPickerTierRoster => 'آپ کے حلقوں کا رکن';
+
+  @override
+  String get memberPickerNoMatches => 'آپ کے حلقوں میں کوئی مماثل نتیجہ نہیں';
+
+  @override
+  String get memberPickerLoading =>
+      'آپ کے حلقوں کے لوگوں کی فہرست لوڈ ہو رہی ہے';
+
+  @override
+  String get memberPickerDirectoryUnavailable =>
+      'فی الحال آپ کے حلقوں کے لوگوں کی فہرست لوڈ نہ ہو سکی';
+
+  @override
+  String memberPickerMatchesAnnouncement(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return 'مماثل نتائج: $countString';
+  }
+
+  @override
+  String get memberPickerReasonSelf => 'یہ آپ کی اپنی ID ہے';
+
+  @override
+  String get memberPickerReadPublicKey => 'عوامی کلید پڑھ کر سنائیں';
+
+  @override
+  String get memberPickerSectionRecent => 'حال ہی میں آپ کے حلقوں میں';
+
+  @override
+  String get memberPickerTierRecent => 'حال ہی میں آپ کے حلقوں میں';
+
+  @override
+  String get memberPickerNicknameNote =>
+      'آپ کا مقرر کردہ عرفی نام، ان کا عوامی نام نہیں';
+
+  @override
+  String memberPickerCollisionCircleLabel(String circleName) {
+    return 'حلقہ: $circleName';
+  }
+
+  @override
+  String get memberPickerStrangerLookupNote =>
+      'Haven نے ایک ریلے سے کہا کہ اس شخص کا عوامی نام تلاش کرے۔ وہ ریلے دیکھتا ہے کہ اس آلے نے ابھی ابھی اس کلید کے بارے میں پوچھا ہے۔ مگر اس درخواست پر دستخط نہیں ہوتے، اس لیے یہ آپ کی Haven شناخت سے نہیں جڑتی۔ ابھی تک کوئی تصویر ڈاؤن لوڈ نہیں ہوئی۔';
+
+  @override
   String selectedMembersMore(int count) {
     final intl.NumberFormat countNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
@@ -1225,26 +1239,11 @@ class AppLocalizationsUr extends AppLocalizations {
   }
 
   @override
-  String get invitationStatusPending => 'دعوت زیر التوا';
+  String get invitationCardHeading => 'کسی حلقے کا دعوت نامہ';
 
   @override
-  String get invitationStatusActive => 'فعال';
-
-  @override
-  String get invitationStatusDeclined => 'مسترد';
-
-  @override
-  String invitationStatusSemantics(String label) {
-    return 'دعوت کی حالت: $label';
-  }
-
-  @override
-  String invitationCardSemantics(String circleName, String inviter, int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    return '$circleName میں شامل ہونے کی دعوت، $inviter کی جانب سے، $countString ارکان';
+  String invitationCardSemantics(String inviter) {
+    return 'کسی حلقے میں شامل ہونے کی دعوت، جو $inviter نے دی ہے';
   }
 
   @override
@@ -1254,23 +1253,12 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String invitationCardInvitedBy(String inviter) {
-    return 'دعوت دینے والا: $inviter';
+    return '$inviter کی جانب سے';
   }
 
   @override
-  String invitationCardMemberCount(int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    String _temp0 = intl.Intl.pluralLogic(
-      count,
-      locale: localeName,
-      other: '$countString ارکان',
-      one: '1 رکن',
-    );
-    return '$_temp0';
-  }
+  String get invitationCardNicknameNote =>
+      'آپ کا مقرر کردہ عرفی نام، ان کا عوامی نام نہیں';
 
   @override
   String get invitationCardJustNow => 'ابھی ابھی';
@@ -1281,7 +1269,7 @@ class AppLocalizationsUr extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String countString = countNumberFormat.format(count);
 
-    return '${countString}d ago';
+    return '${countString}d پہلے';
   }
 
   @override
@@ -1290,7 +1278,7 @@ class AppLocalizationsUr extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String countString = countNumberFormat.format(count);
 
-    return '${countString}h ago';
+    return '${countString}h پہلے';
   }
 
   @override
@@ -1299,7 +1287,7 @@ class AppLocalizationsUr extends AppLocalizations {
         intl.NumberFormat.decimalPattern(localeName);
     final String countString = countNumberFormat.format(count);
 
-    return '${countString}m ago';
+    return '${countString}m پہلے';
   }
 
   @override
@@ -1840,37 +1828,6 @@ class AppLocalizationsUr extends AppLocalizations {
   @override
   String get profileSyncStatusRetrySemantics =>
       'اپنا پروفائل دوبارہ شائع کرنے کی کوشش کریں';
-
-  @override
-  String keyDisplayCopiedToClipboard(String label) {
-    return '$label کلپ بورڈ پر کاپی ہو گئی';
-  }
-
-  @override
-  String keyDisplaySemantics(String label, String state) {
-    return '$label: $state';
-  }
-
-  @override
-  String get keyDisplayStateRevealed => 'ظاہر';
-
-  @override
-  String get keyDisplayStateHidden => 'پوشیدہ';
-
-  @override
-  String get keyDisplayHideTooltip => 'چھپائیں';
-
-  @override
-  String get keyDisplayRevealTooltip => 'ظاہر کریں';
-
-  @override
-  String get keyDisplayCopyTooltip => 'کاپی کریں';
-
-  @override
-  String get keyDisplayCompactCopied => 'کلید کلپ بورڈ پر کاپی ہو گئی';
-
-  @override
-  String get keyDisplayCompactTapToCopy => 'کاپی کرنے کے لیے تھپتھپائیں';
 
   @override
   String get npubQrCopiedSnack => 'عوامی کلید کلپ بورڈ پر کاپی ہو گئی';

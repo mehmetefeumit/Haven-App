@@ -131,6 +131,44 @@ impl std::fmt::Debug for ScreenedIngest {
     }
 }
 
+/// A group's roster plus the verdict on whether it may be persisted.
+///
+/// Produced by
+/// [`SessionManager::converged_member_pubkeys`](crate::nostr::mls::SessionManager::converged_member_pubkeys).
+///
+/// Deliberately three variants rather than `Option<Vec<String>>`, because the
+/// two non-roster cases are opposite caller obligations: a group whose commit is
+/// still in flight invalidates the WHOLE read (its roster is the engine's
+/// optimistic projection, and a union built from it would record people who may
+/// never become members), while a group the engine simply does not hold is
+/// nothing to read and must be skipped. Collapsing them costs either a silently
+/// wrong union or a reconcile that never runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConvergedRoster {
+    /// The group is settled — the stored and projected epochs agree and no
+    /// resolvable convergence input is outstanding — and this is its roster.
+    Converged {
+        /// `Member.id` (the Nostr identity key) hex-encoded, lowercase. Never
+        /// `Member.credential`, which is the MLS leaf SIGNATURE key: upstream's
+        /// own field doc calls `id` the "signature public key", but
+        /// `marmot_members` fills `id` from `basic.identity()` and `credential`
+        /// from `m.signature_key` (`cgka-engine/src/group_lifecycle.rs:946-951`).
+        member_pubkeys_hex: Vec<String>,
+        /// Whether THIS device has been removed from the group and the removal
+        /// is still canonical. The listed people are then former co-members, not
+        /// current ones — the flag clears on an authenticated re-join, or when
+        /// branch selection supersedes the removal that set it.
+        removed: bool,
+    },
+    /// A commit is staged, in flight, or buffered: any roster read now is the
+    /// engine's optimistic post-merge projection, not applied state.
+    NotConverged,
+    /// The engine holds no live group under this id — never seen, deleted, or
+    /// quarantined at session-open hydration (which is deliberately
+    /// indistinguishable from unknown on every accessor).
+    Absent,
+}
+
 /// Extension trait restoring the old MDK `GroupId::from_slice` constructor over
 /// the Dark Matter [`GroupId`].
 ///

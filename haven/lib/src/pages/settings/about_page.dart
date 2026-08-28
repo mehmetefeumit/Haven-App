@@ -1,8 +1,7 @@
 /// About page for Haven.
 ///
-/// Identity, attribution and legal information: the app's value propositions,
-/// open-source licenses, the OpenStreetMap/Stadia attribution links, and the
-/// version footer.
+/// Identity, attribution and legal information: the open-source licenses, the
+/// OpenStreetMap/Stadia attribution links, and the version footer.
 ///
 /// The privacy and technology explanations that used to live here now sit in
 /// the Privacy section (`privacy_page.dart`), one level above About in
@@ -21,8 +20,8 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Page displaying Haven's identity, attribution and legal information.
 ///
-/// Hero, then info cards, then legal actions, then the version footer — one
-/// plain scrolling column.
+/// Hero, then legal actions, then the version footer — one plain scrolling
+/// column.
 ///
 /// The footer is deliberately NOT pinned to the bottom of the viewport. This
 /// page used to do that with `ConstrainedBox(minHeight:) + IntrinsicHeight +
@@ -48,91 +47,13 @@ class AboutPage extends StatelessWidget {
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(HavenSpacing.base),
           child: Column(
-                      children: [
-                        _HeroSection(
-                          colorScheme: colorScheme,
-                          textTheme: textTheme,
-                        ),
-                        const SizedBox(height: HavenSpacing.xl),
-                        _buildInfoRow(
-                          context,
-                          icon: LucideIcons.lock,
-                          title: l10n.onboardingValueProp1Title,
-                          description: l10n.onboardingValueProp1Body,
-                        ),
-                        _buildInfoRow(
-                          context,
-                          icon: LucideIcons.network,
-                          title: l10n.onboardingValueProp2Title,
-                          description: l10n.onboardingValueProp2Body,
-                        ),
-                        _buildInfoRow(
-                          context,
-                          icon: LucideIcons.userX,
-                          title: l10n.onboardingValueProp3Title,
-                          description: l10n.onboardingValueProp3Body,
-                        ),
-                        const SizedBox(height: HavenSpacing.sm),
-                        const _LegalLinks(),
-                        const SizedBox(height: HavenSpacing.xl),
-                        _Footer(colorScheme: colorScheme, textTheme: textTheme),
-                      ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  /// Builds a single privacy/feature info row.
-  ///
-  /// Matches the onboarding `_ValuePropCard` styling so the About page
-  /// reads as a continuation of the onboarding visual language.
-  Widget _buildInfoRow(
-    BuildContext context, {
-    required IconData icon,
-    required String title,
-    required String description,
-  }) {
-    final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
-
-    return Semantics(
-      label: '$title. $description',
-      container: true,
-      child: Padding(
-        padding: const EdgeInsets.only(bottom: HavenSpacing.md),
-        child: Card(
-          child: Padding(
-            padding: const EdgeInsets.all(HavenSpacing.base),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(HavenSpacing.md),
-                  decoration: BoxDecoration(
-                    color: colorScheme.primaryContainer,
-                    borderRadius: BorderRadius.circular(HavenSpacing.md),
-                  ),
-                  child: Icon(icon, color: colorScheme.onPrimaryContainer),
-                ),
-                const SizedBox(width: HavenSpacing.base),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(title, style: theme.textTheme.titleMedium),
-                      const SizedBox(height: HavenSpacing.xs),
-                      Text(
-                        description,
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          color: colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
+            children: [
+              _HeroSection(colorScheme: colorScheme, textTheme: textTheme),
+              const SizedBox(height: HavenSpacing.xl),
+              const _LegalLinks(),
+              const SizedBox(height: HavenSpacing.xl),
+              _Footer(colorScheme: colorScheme, textTheme: textTheme),
+            ],
           ),
         ),
       ),

@@ -694,11 +694,24 @@ fi
 # ---------------------------------------------------------------------------
 # Check 7: the §1.7 union invariant — kind-0 fetches must cover the union of
 # ALL circles' members, never a per-circle roster partition (which would hand
-# the relay exact co-membership clusters).
+# the relay exact co-membership clusters) — WITH ONE NAMED, NARROWLY-SCOPED
+# EXCEPTION: the member picker's typed-stranger resolve (plan §10 D2), a
+# SINGLE complete, already-validated npub the user just typed or pasted, which
+# is not a roster partition at all — it names no circle and carries no
+# co-membership signal. D2 deliberately *loosens* this check; that is a
+# recorded DESIGN decision (plan §10 D2, §13 "Check 7 extension — Reframe"),
+# not a guard tweak, and the loosening is confined to its own call site exactly
+# as tightly as the two entry points below.
 #
-# The union is built in exactly one place (`refreshAll`). Enforce that by
-# confining the two lower-level, arbitrary-pubkey-list entry points to their
-# owning files, so a future call site cannot pass `circle.members.map(...)`.
+# The union is built in exactly one place (`refreshAll`), and the single-key
+# exception is built in exactly one other place
+# (`NostrProfileService.resolveTypedStrangerProfile`, itself gated by three
+# caller-side eligibility checks in `member_picker.dart` before it ever fires).
+# Enforce all three by confining their lower-level, arbitrary-pubkey-list or
+# singleton entry points to their owning files, so a future call site cannot
+# pass `circle.members.map(...)` through any of them, and so a fourth caller
+# cannot bypass D2's own eligibility gates by firing a second singleton
+# resolve from somewhere else.
 # ---------------------------------------------------------------------------
 log "Scanning haven/lib for kind-0 fetch calls outside their owning module (§1.7 union invariant) ..."
 
@@ -719,9 +732,28 @@ if [[ -n "${fetch_hits}" ]]; then
   union_violations+="${fetch_hits}"$'\n'
 fi
 
+#
+# Three files are excluded, not one, because this method — unlike
+# `fetchMemberProfiles` above — is declared on the `ProfileService`
+# INTERFACE, not only implemented: `profile_service.dart`'s abstract
+# signature line contains the same substring but fires no request at all, and
+# `stranger_profile_provider.dart` is the ONE sanctioned Riverpod indirection
+# the picker watches (`strangerProfileResolveProvider`) — a thin, single-npub
+# forward with no roster-shaped parameter to abuse. A fourth file matching
+# this pattern is a real, new call site and must fail.
+stranger_hits="$(grep -rn 'resolveTypedStrangerProfile(' "${LIB_DIR}" \
+  --include='*.dart' 2>/dev/null \
+  | grep -v '/services/nostr_profile_service\.dart:' \
+  | grep -v '/services/profile_service\.dart:' \
+  | grep -v '/providers/stranger_profile_provider\.dart:' \
+  | grep -v '/rust/' || true)"
+if [[ -n "${stranger_hits}" ]]; then
+  union_violations+="${stranger_hits}"$'\n'
+fi
+
 if [[ -n "${union_violations}" ]]; then
   printf '%s' "${union_violations}" >&2
-  fail "kind-0 fetch entry point used outside its owning module — call MemberProfileRefreshNotifier.refreshAll() (or triggerProfileRefresh) instead, so every fetch carries the union of ALL circles' members and never a per-circle roster partition (migration plan §1.7)"
+  fail "kind-0 fetch entry point used outside its owning module — call MemberProfileRefreshNotifier.refreshAll() (or triggerProfileRefresh) for the roster fetch, or NostrProfileService.resolveTypedStrangerProfile for a single validated typed-stranger npub (D2's sanctioned exception) — so every batched fetch carries the union of ALL circles' members, and the one single-key exception stays confined to its own call site (migration plan §1.7, D2)"
 fi
 
 # ---------------------------------------------------------------------------

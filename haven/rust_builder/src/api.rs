@@ -1086,6 +1086,17 @@ fn now_ms() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
+/// Returns the current unix time in **seconds**.
+///
+/// Clamped like [`now_ms`]; the core's retention arithmetic treats a negative
+/// value as a very old clock, which purges early rather than late.
+fn now_secs() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
 /// Maps a [`TileCacheError`] to a generic boundary string.
 ///
 /// The error types are already redaction-safe (their `Display` never carries
@@ -1479,6 +1490,7 @@ use haven_core::circle::{
     Circle as CoreCircle, CircleConfig as CoreCircleConfig, CircleManager as CoreCircleManager,
     CircleMember as CoreCircleMember, CircleType as CoreCircleType,
     CircleWithMembers as CoreCircleWithMembers, Contact as CoreContact,
+    DirectoryEntry as CoreDirectoryEntry, DirectoryReconcile, DirectoryTier as CoreDirectoryTier,
     Invitation as CoreInvitation,
 };
 use haven_core::nostr::mls::types::{GroupId, GroupIdExt, PendingStateRef};
@@ -1558,12 +1570,21 @@ pub struct ContactFfi {
     pub updated_at: i64,
 }
 
+/// The first `max` CHARACTERS of `value`, for the redacting `Debug` impls.
+///
+/// By chars, never `&s[..max]`: a byte slice panics on a char boundary, and a
+/// panic inside a `Debug` impl unwinds through whatever was logging — which at
+/// this layer is a call that must never unwind across the FFI boundary.
+fn truncate_chars(value: &str, max: usize) -> String {
+    value.chars().take(max).collect()
+}
+
 impl std::fmt::Debug for ContactFfi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ContactFfi")
             .field(
                 "pubkey",
-                &format_args!("{}...", &self.pubkey[..16.min(self.pubkey.len())]),
+                &format_args!("{}...", truncate_chars(&self.pubkey, 16)),
             )
             .field("display_name", &"<redacted>")
             .field("notes", &"<redacted>")
@@ -1617,11 +1638,11 @@ impl std::fmt::Debug for CircleMemberFfi {
         f.debug_struct("CircleMemberFfi")
             .field(
                 "pubkey",
-                &format_args!("{}...", &self.pubkey[..16.min(self.pubkey.len())]),
+                &format_args!("{}...", truncate_chars(&self.pubkey, 16)),
             )
             .field(
                 "npub",
-                &format_args!("{}...", &self.npub[..16.min(self.npub.len())]),
+                &format_args!("{}...", truncate_chars(&self.npub, 16)),
             )
             .field("display_name", &"<redacted>")
             .field("is_admin", &self.is_admin)
@@ -1640,12 +1661,105 @@ impl From<&CoreCircleMember> for CircleMemberFfi {
     }
 }
 
+/// Which section of the member picker a directory row belongs to.
+///
+/// Mirrors [`haven_core::circle::DirectoryTier`]. The tier is a claim about
+/// ROSTER PROVENANCE and nothing more: this pubkey is (or recently was) on the
+/// member list of a circle on this device, placed there by an MLS-authenticated
+/// commit. It says nothing about whether that person accepted, joined, or is
+/// active — none of which Haven can observe — so the UI copy built on it must
+/// not either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectoryTierFfi {
+    /// On the member list of a circle on this device, as of the last reconcile.
+    Current,
+    /// Not on any current member list; retained for at most the directory
+    /// retention window after the last day they were.
+    Recent,
+}
+
+impl From<CoreDirectoryTier> for DirectoryTierFfi {
+    fn from(tier: CoreDirectoryTier) -> Self {
+        match tier {
+            CoreDirectoryTier::Current => Self::Current,
+            CoreDirectoryTier::Recent => Self::Recent,
+        }
+    }
+}
+
+/// One member-directory row, as the picker reads it.
+///
+/// WHO and WHICH SECTION, and nothing else. The row's day buckets stay in Rust:
+/// nothing across this boundary ranks, groups or renders by them — ordering is
+/// the ranked read's `ORDER BY` — so exporting `last_shared_day` would hand the
+/// UI layer the departure-cohort stamp with no reader to justify it.
+#[derive(Clone)]
+pub struct DirectoryEntryFfi {
+    /// Lowercase-hex Nostr identity key.
+    pub pubkey_hex: String,
+    /// The same key in NIP-19 bech32 (`npub1…`), the form every anti-
+    /// impersonation surface renders.
+    pub npub: String,
+    /// Which picker section this row belongs to.
+    pub tier: DirectoryTierFfi,
+}
+
+/// Redacting `Debug`, mirroring [`CircleMemberFfi`]: these are PUBLIC keys, but
+/// they are never printed in full so accidental `{:?}` formatting cannot leak a
+/// list of the user's contacts (Security Rule 6).
+impl std::fmt::Debug for DirectoryEntryFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DirectoryEntryFfi")
+            .field(
+                "pubkey_hex",
+                &format_args!("{}...", truncate_chars(&self.pubkey_hex, 16)),
+            )
+            .field(
+                "npub",
+                &format_args!("{}...", truncate_chars(&self.npub, 16)),
+            )
+            .field("tier", &self.tier)
+            .finish()
+    }
+}
+
+impl From<CoreDirectoryEntry> for DirectoryEntryFfi {
+    fn from(e: CoreDirectoryEntry) -> Self {
+        Self {
+            npub: hex_to_npub(&e.pubkey_hex),
+            pubkey_hex: e.pubkey_hex,
+            tier: e.tier.into(),
+        }
+    }
+}
+
+/// Redacts a member-directory failure before it crosses the FFI.
+///
+/// One helper for both directory entry points, because the two share the risk:
+/// a roster read fails per-CIRCLE, so its message can carry an MLS group id, and
+/// the directory's own rows are a list of the user's contacts. Neither may reach
+/// the Dart layer (Security Rules #6/#8).
+fn redact_directory_err(e: impl std::fmt::Display) -> String {
+    haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+}
+
 /// Bech32-encodes a hex Nostr public key as an `npub1...` string (NIP-19).
 ///
 /// An npub is a PUBLIC key, so it is safe to compute and expose across FFI.
 /// On the (in practice impossible) parse/encode failure of a well-formed hex
 /// member pubkey, falls back to the original hex so the UI never renders an
 /// empty identifier.
+///
+/// # This is a re-encoding, not a validation
+///
+/// `PublicKey::parse` accepts hex, bech32 or a NIP-21 URI and — on the pinned
+/// `nostr` — decodes 32 bytes without touching secp256k1; the curve check lives
+/// in `PublicKey::xonly`, which nothing on this path calls. So the fallback
+/// fires on a STRUCTURALLY unusable string, never on a well-formed key that is
+/// off-curve, and this function costs a hex decode plus a bech32 encode (~0.4 µs
+/// per key, measured release/x86-64) rather than the ~3.6 µs an x-only parse
+/// would. Both halves are pinned below: skipping a parse that does not happen
+/// would buy nothing, and it would silently change what the fallback means.
 fn hex_to_npub(hex: &str) -> String {
     use nostr::prelude::ToBech32 as _;
     nostr::PublicKey::parse(hex)
@@ -1687,19 +1801,37 @@ pub struct InvitationFfi {
     pub circle_name: String,
     /// Public key (hex) of who invited us.
     pub inviter_pubkey: String,
-    /// Number of members in the circle.
-    pub member_count: u32,
+    /// The inviter's public key in NIP-19 bech32 format (`npub1...`).
+    ///
+    /// A derived encoding of [`Self::inviter_pubkey`], carried alongside it
+    /// rather than replacing it: the hex is the cache key and the identity
+    /// comparison, the npub is the only form a user can check against what the
+    /// inviter actually handed them. Deciding whether to join a stranger's
+    /// live-location circle is exactly where that check has to be possible.
+    pub inviter_npub: String,
     /// When we were invited (Unix timestamp).
     pub invited_at: i64,
 }
 
+/// Redacting `Debug` matching the sibling `*Ffi` types (`ContactFfi`,
+/// [`CircleMemberFfi`]): `inviter_pubkey`/`inviter_npub` are PUBLIC keys but,
+/// per Security Rule 6 (no key material in logs), are truncated to a short
+/// prefix so accidental `{:?}` formatting cannot leak a full identifier. Both
+/// encodings are truncated — they are the same 32 bytes, so redacting one alone
+/// would redact nothing.
 impl std::fmt::Debug for InvitationFfi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InvitationFfi")
             .field("mls_group_id", &"<redacted>")
             .field("circle_name", &self.circle_name)
-            .field("inviter_pubkey", &self.inviter_pubkey)
-            .field("member_count", &self.member_count)
+            .field(
+                "inviter_pubkey",
+                &format_args!("{}...", truncate_chars(&self.inviter_pubkey, 16)),
+            )
+            .field(
+                "inviter_npub",
+                &format_args!("{}...", truncate_chars(&self.inviter_npub, 16)),
+            )
             .field("invited_at", &self.invited_at)
             .finish()
     }
@@ -1710,8 +1842,8 @@ impl From<&CoreInvitation> for InvitationFfi {
         Self {
             mls_group_id: i.mls_group_id.as_slice().to_vec(),
             circle_name: i.circle_name.clone(),
+            inviter_npub: hex_to_npub(&i.inviter_pubkey),
             inviter_pubkey: i.inviter_pubkey.clone(),
-            member_count: i.member_count as u32,
             invited_at: i.invited_at,
         }
     }
@@ -2927,27 +3059,28 @@ impl CircleManagerFfi {
     }
 
     /// Removes the local circle row after a successful leave sequence, or
-    /// for the `OrphanLocalOnly` plan. (Storage-only; sync in the core.)
+    /// for the `OrphanLocalOnly` plan.
+    ///
+    /// Also refreshes the member directory, so the departed circle's co-members
+    /// stop reading as current members and start their retention window —
+    /// deleting the circle row does not cascade to the directory.
     pub async fn complete_leave(&self, mls_group_id: Vec<u8>) -> Result<(), String> {
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            let group_id = GroupId::from_slice(&mls_group_id);
-            inner.complete_leave(&group_id).map_err(|e| e.to_string())
-        })
-        .await
+        let group_id = GroupId::from_slice(&mls_group_id);
+        self.inner
+            .complete_leave(&group_id, now_secs())
+            .await
+            .map_err(|e| e.to_string())
     }
 
     /// Wipes local state for the `Abandon` plan — sole-member cleanup with
-    /// no MLS commit and no relay publish. (Storage-only; sync in the core.)
+    /// no MLS commit and no relay publish. Refreshes the member directory for
+    /// the same reason as [`complete_leave`](Self::complete_leave).
     pub async fn abandon_circle_local_only(&self, mls_group_id: Vec<u8>) -> Result<(), String> {
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            let group_id = GroupId::from_slice(&mls_group_id);
-            inner
-                .abandon_circle_local_only(&group_id)
-                .map_err(|e| e.to_string())
-        })
-        .await
+        let group_id = GroupId::from_slice(&mls_group_id);
+        self.inner
+            .abandon_circle_local_only(&group_id, now_secs())
+            .await
+            .map_err(|e| e.to_string())
     }
 
     // ==================== Publish-before-apply (Rule 13) ====================
@@ -3241,8 +3374,8 @@ impl CircleManagerFfi {
     /// Each [`InvitationFfi`] carries pre-join STAND-IN fields (the gift-wrap
     /// event id as `mlsGroupId`, `"New Circle"` as the name) because the real
     /// MLS group state lives inside the still-encrypted 1059 held until Accept
-    /// (F3). `memberCount` reports the provably-known members pre-join — the
-    /// NIP-59-seal-authenticated inviter, i.e. 1 — never the full roster. The
+    /// (F3). `inviterPubkey`/`inviterNpub` are the only roster fact a pre-join
+    /// preview can prove — the NIP-59 seal author — never the full roster. The
     /// gift-wrap id is the key the caller passes to
     /// [`accept_invitation`](Self::accept_invitation) /
     /// [`decline_invitation`](Self::decline_invitation).
@@ -3905,6 +4038,62 @@ impl CircleManagerFfi {
         .await?;
         // Reasonable: never expect billions of rows.
         Ok(u32::try_from(removed).unwrap_or(u32::MAX))
+    }
+
+    // ==================== Member directory (picker) ====================
+
+    /// The local member directory in picker order: current co-members first,
+    /// then people who shared a circle within the retention window, each block
+    /// newest-shared first.
+    ///
+    /// A pure local read of `circles.db` — no relay traffic, no network.
+    ///
+    /// Deletes everyone past the retention window before selecting, so opening
+    /// the picker is enough to keep the three days honest on a device that has
+    /// seen no membership change since the row was written.
+    /// `now_unix_secs` is the current Unix **seconds** clock.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error string on database failure.
+    pub async fn ranked_directory_members(
+        &self,
+        now_unix_secs: i64,
+    ) -> Result<Vec<DirectoryEntryFfi>, String> {
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .ranked_directory_members(now_unix_secs)
+                .map(|rows| rows.into_iter().map(DirectoryEntryFfi::from).collect())
+                .map_err(redact_directory_err)
+        })
+        .await
+    }
+
+    /// Refreshes the member directory from the union of current co-members
+    /// across every visible circle, then sweeps expired rows.
+    ///
+    /// Returns `false` when the refresh DEFERRED because a circle's membership
+    /// commit is still in flight — nothing was written and nothing was purged,
+    /// and the caller should simply read the directory as it stands.
+    ///
+    /// Membership changes already refresh the directory from inside Rust; this
+    /// exists so a surface that OPENS the picker can bring it up to date on a
+    /// device that has not seen a membership change since the feature shipped.
+    /// `now_unix_secs` is the current Unix **seconds** clock.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error string if a circle's roster could not be read or
+    /// the directory could not be written. The directory is left untouched.
+    pub async fn reconcile_member_directory(&self, now_unix_secs: i64) -> Result<bool, String> {
+        self.inner
+            // Never the withdrawing variant: only the receive paths know that
+            // the engine withdrew state, and asking for it from here would
+            // delete every ordinary departure instead of ageing it out.
+            .reconcile_member_directory(DirectoryReconcile::Rewrite, now_unix_secs)
+            .await
+            .map_err(redact_directory_err)
     }
 
     // ==================== Relay preferences (kind 10050 / 10051) ====================
@@ -5022,6 +5211,55 @@ impl CircleManagerFfi {
         Ok(out)
     }
 
+    /// Resolves ONE typed stranger's published profile — the member-picker
+    /// "typed-stranger resolve" (plan §10 D2).
+    ///
+    /// A THIN wrapper over [`Self::fetch_member_profiles`] for exactly one
+    /// pubkey: salted single-relay assignment, pool selection, pacing, the
+    /// contamination ledger and the staleness/negative-cache machinery are all
+    /// inherited verbatim by delegating to it, rather than re-implemented
+    /// here. This function adds no relay selection of its own — two
+    /// alternatives were evaluated and rejected: fetching from a relay outside
+    /// the pubkey's salted assignment would add a THIRD relay to that
+    /// pubkey's disclosure set (the design bounds it to two for the life of
+    /// the install), and decoy padding is theatre, since each author routes to
+    /// its own salted relay independently, so a decoy only helps if it
+    /// happens to hash to the SAME relay.
+    ///
+    /// The one thing this adds over `fetch_member_profiles`: `pubkey` accepts
+    /// EITHER hex or bech32 (`npub1…`), via `PublicKey::parse` (the pattern
+    /// already used to resolve another user's pubkey in
+    /// `relay/manager.rs`). `fetch_member_profiles` itself stays hex-only
+    /// (`PublicKey::from_hex`) — Dart has no npub-to-hex decoder, so that
+    /// translation has to happen on this side of the boundary.
+    ///
+    /// A `pubkey` that parses (bech32 checksum included) but resolves to no
+    /// known kind-0 still returns `Ok(Some(..))`, with `is_known: false` —
+    /// the caller renders that as "nothing found", exactly like any other
+    /// unresolved pubkey. Only a `pubkey` that FAILS to parse returns
+    /// `Ok(None)`: Dart's `NpubValidator` checks only the `npub1` prefix,
+    /// length and bech32 charset — no checksum — so a charset-valid npub can
+    /// still fail to parse here, and that must read as "nothing found", never
+    /// as an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error string on relay or database failure (never on
+    /// a malformed `pubkey`, which yields `Ok(None)` instead).
+    pub async fn resolve_stranger_profile(
+        &self,
+        pubkey: String,
+        max_age_secs: i64,
+    ) -> Result<Option<ProfileMetadataFfi>, String> {
+        let Ok(parsed) = nostr::PublicKey::parse(&pubkey) else {
+            return Ok(None);
+        };
+        let mut resolved = self
+            .fetch_member_profiles(vec![parsed.to_hex()], max_age_secs)
+            .await?;
+        Ok(resolved.pop())
+    }
+
     /// The profile-plane relays usable right now, or `None` when the pool has
     /// underflowed.
     ///
@@ -5358,6 +5596,48 @@ impl CircleManagerFfi {
                 return Ok(None);
             };
             profile_view(&inner, &cached).map(Some)
+        })
+        .await
+    }
+
+    /// [`Self::get_cached_profile`] for a whole set, resolved under ONE
+    /// connection lock.
+    ///
+    /// Returns one row per input pubkey, in input order. A pubkey with no
+    /// cached kind-0 comes back `is_known: false` rather than being dropped, so
+    /// "looked up, nothing found" and "never fetched" read the same — which is
+    /// what they mean.
+    ///
+    /// Pure cache read (no network), and the read a name-only surface wants:
+    /// issuing the single-pubkey call per member costs one blocking thread and
+    /// three `SQLCipher` queries EACH, and every one of those threads then
+    /// queues on the same connection mutex — so the concurrency buys nothing
+    /// and the threads are pure cost.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error string on database failure.
+    pub async fn get_cached_profiles(
+        &self,
+        pubkeys_hex: Vec<String>,
+    ) -> Result<Vec<ProfileMetadataFfi>, String> {
+        if pubkeys_hex.is_empty() {
+            return Ok(Vec::new());
+        }
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            Ok(inner
+                .cached_profile_views(&pubkeys_hex)
+                .map_err(redact_profile_err)?
+                .into_iter()
+                .map(|view| {
+                    ProfileMetadataFfi::from_cached(
+                        &view.profile,
+                        view.has_picture,
+                        view.picture_sha256_hex,
+                    )
+                })
+                .collect())
         })
         .await
     }
@@ -5755,7 +6035,13 @@ impl CircleManagerFfi {
             event_created_at: i64::try_from(event.created_at.as_secs()).unwrap_or(i64::MAX),
             fetched_at: now,
         };
-        self.inner
+        // SHADOWED by the row as stored, never the row as assembled: `merged`
+        // is built on the freshest RELAY copy, which another Nostr client may
+        // have written, so the assembled row still carries whatever name that
+        // client published. Rendering it would show the user exactly the text
+        // the sanitizer stripped out of both the DB row and the event.
+        let cached = self
+            .inner
             .upsert_profile(&cached)
             .map_err(redact_profile_err)?;
         self.inner
@@ -5902,6 +6188,39 @@ impl CircleManagerFfi {
 }
 
 // ==================== Top-level sync helpers ====================
+
+/// Normalises a member-search query into the key the directory matches on.
+///
+/// Single source of truth for [`haven_core::directory::fold_for_search`]: the
+/// stored search keys are folded by that same function, so a second
+/// implementation in Dart could not be proven to agree with it. Dart has no
+/// NFKD at all, and its `toLowerCase` disagrees on the cases the fold exists
+/// for — `Ärger`, `Straße`, `Đurđević`, `Çağrı` — so porting it would mean a
+/// second Unicode database drifting against this one on every dependency bump.
+///
+/// It does NOT diverge on `İstanbul` or `ΟΔΥΣΣΕΑΣ`, contrary to an earlier
+/// draft of this comment. Those two disagree with `str::to_lowercase`, whose
+/// `Final_Sigma` context rule and combining-dot output the fold deliberately
+/// rejects (see `fold_for_search`) — landing exactly where Dart already lands.
+/// They argue against a design haven-core turned down, not against this one.
+///
+/// `#[frb(sync)]` is load-bearing, not an optimisation. The picker folds the
+/// query on every keystroke and filters in the same frame; an async call
+/// returns on a later event-loop turn, so the list would trail the caret by a
+/// frame and the design would need a debounce it does not otherwise want.
+/// Sync is safe here for the reason [`default_relays`] is: pure CPU over a
+/// field-length-bounded string, no I/O and no lock, so nothing blocks the UI
+/// isolate (contrast [`CircleManagerFfi::get_cached_profile`], which is async
+/// precisely because it is three SQLCipher queries).
+///
+/// Callers must tolerate this throwing when the bridge is not initialised —
+/// every `flutter test` — the way `constants/relays.dart` already does for
+/// [`default_relays`].
+#[frb(sync)]
+#[must_use]
+pub fn fold_for_search(query: String) -> String {
+    haven_core::directory::fold_for_search(&query)
+}
 
 /// Returns the canonical default relay list shared by Rust and Dart.
 ///
@@ -8794,6 +9113,112 @@ mod tests {
     }
 
     #[test]
+    fn hex_to_npub_encodes_rather_than_validates_the_key() {
+        // What the fallback actually distinguishes, pinned so a future
+        // "skip the parse" optimisation cannot quietly move the line. Only a
+        // STRUCTURALLY unusable string falls back; a well-formed 32-byte value
+        // is re-encoded whether or not it is a point on secp256k1 — which is
+        // right for a display encoding, and is why there is no curve parse here
+        // to remove.
+        let off_curve = "00".repeat(32);
+        assert!(
+            nostr::PublicKey::from_hex(&off_curve)
+                .expect("32 well-formed bytes")
+                .xonly()
+                .is_err(),
+            "the fixture must not be a valid curve point, or it proves nothing"
+        );
+        assert!(
+            hex_to_npub(&off_curve).starts_with("npub1"),
+            "a well-formed 32-byte key is encoded, not rejected"
+        );
+
+        for structurally_unusable in ["", "7e7e9c42", &"aa".repeat(33), "zz".repeat(32).as_str()] {
+            assert_eq!(
+                hex_to_npub(structurally_unusable),
+                structurally_unusable,
+                "anything that is not 32 decodable bytes must round-trip as itself"
+            );
+        }
+
+        // Idempotent: an npub handed in comes back unchanged, so a caller that
+        // encodes twice cannot double-encode an identifier the user checks.
+        let npub = "npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg";
+        assert_eq!(hex_to_npub(npub), npub);
+    }
+
+    #[test]
+    fn directory_entry_ffi_carries_the_npub_and_the_tier_unchanged() {
+        // The picker renders the npub, never the hex (§7.1), so the mapping owes
+        // the UI a bech32 form; and the tier must survive the crossing intact,
+        // because it is what the two section headers claim.
+        let hex = "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e";
+        let ffi = DirectoryEntryFfi::from(CoreDirectoryEntry {
+            pubkey_hex: hex.to_string(),
+            tier: CoreDirectoryTier::Recent,
+            last_shared_day: 20_000,
+            purge_after: 1_728_259_200,
+        });
+        assert_eq!(ffi.pubkey_hex, hex);
+        assert_eq!(
+            ffi.npub,
+            "npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg"
+        );
+        assert_eq!(ffi.tier, DirectoryTierFfi::Recent);
+        assert_eq!(
+            DirectoryTierFfi::from(CoreDirectoryTier::Current),
+            DirectoryTierFfi::Current
+        );
+    }
+
+    #[test]
+    fn directory_entry_ffi_exports_no_day_bucket() {
+        // Nothing past this boundary reads a day bucket: the picker's order is
+        // the ranked read's ORDER BY, and no Dart surface renders or sorts on
+        // one. Exporting a departure-cohort stamp with no reader is the test
+        // `first_seen_day` failed (plan §6.1), applied to the FFI struct — and
+        // the redacting `Debug` below would print it in full. Destructuring the
+        // whole struct is what makes this fail on a RE-ADDED field, not only on
+        // the one removed.
+        let core = CoreDirectoryEntry {
+            pubkey_hex: "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e"
+                .to_string(),
+            tier: CoreDirectoryTier::Recent,
+            last_shared_day: 20_000,
+            purge_after: 1_728_259_200,
+        };
+        let DirectoryEntryFfi {
+            pubkey_hex: _,
+            npub: _,
+            tier: _,
+        } = DirectoryEntryFfi::from(core.clone());
+        let debug = format!("{:?}", DirectoryEntryFfi::from(core));
+        assert!(
+            !debug.contains("20000") && !debug.contains("1728259200"),
+            "a day bucket crossed the FFI boundary: {debug}"
+        );
+    }
+
+    #[test]
+    fn directory_entry_ffi_debug_never_prints_a_whole_contact_list() {
+        // Security Rule 6: these are public keys, but a `{:?}` of the picker's
+        // rows is a list of the user's contacts and must not land in a log.
+        let hex = "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e";
+        let ffi = DirectoryEntryFfi::from(CoreDirectoryEntry {
+            pubkey_hex: hex.to_string(),
+            tier: CoreDirectoryTier::Current,
+            last_shared_day: 20_000,
+            purge_after: i64::MAX,
+        });
+        let debug = format!("{ffi:?}");
+        assert!(!debug.contains(hex), "full pubkey in Debug output: {debug}");
+        assert!(
+            !debug.contains(&ffi.npub),
+            "full npub in Debug output: {debug}"
+        );
+    }
+
+    #[test]
     fn circle_member_ffi_from_core_populates_npub() {
         let hex = "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e";
         let core = CoreCircleMember {
@@ -8851,6 +9276,125 @@ mod tests {
             "debug output must contain the truncated npub prefix: {dbg}"
         );
         assert!(dbg.contains("is_admin: true"), "debug output: {dbg}");
+    }
+
+    /// The inviter's key as the accept screen must be able to show it.
+    ///
+    /// The invitation card is where a user decides whether to join a stranger's
+    /// live-location circle, so the identifier it renders has to be the one the
+    /// inviter can hand over out-of-band and the user can compare character by
+    /// character. A hex fragment is not that: nobody publishes their key as hex.
+    #[test]
+    fn invitation_ffi_from_core_populates_the_inviter_npub() {
+        let hex = "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e";
+        let ffi = InvitationFfi::from(&CoreInvitation {
+            mls_group_id: GroupId::from_slice(&[7u8; 32]),
+            circle_name: "New Circle".to_string(),
+            inviter_pubkey: hex.to_string(),
+            invited_at: 42,
+        });
+
+        assert_eq!(
+            ffi.inviter_pubkey, hex,
+            "the hex stays — callers key their profile cache on it"
+        );
+        assert_eq!(
+            ffi.inviter_npub,
+            "npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg"
+        );
+        assert_eq!(ffi.inviter_npub.len(), 63, "a full NIP-19 npub");
+        assert!(ffi.inviter_npub.starts_with("npub1"));
+    }
+
+    #[test]
+    fn the_inviter_npub_round_trips_back_to_the_same_hex() {
+        // The two fields must name the SAME key: the npub is what a human
+        // compares and the hex is what the code compares, so a mismatch would
+        // let an impersonation check pass against a key nobody verified.
+        use nostr::prelude::FromBech32 as _;
+        let hex = "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e";
+        let ffi = InvitationFfi::from(&CoreInvitation {
+            mls_group_id: GroupId::from_slice(&[7u8; 32]),
+            circle_name: "New Circle".to_string(),
+            inviter_pubkey: hex.to_string(),
+            invited_at: 42,
+        });
+        let decoded = nostr::PublicKey::from_bech32(&ffi.inviter_npub).expect("valid npub");
+        assert_eq!(decoded.to_hex(), ffi.inviter_pubkey);
+    }
+
+    #[test]
+    fn invitation_ffi_debug_redacts_both_inviter_key_encodings() {
+        // Mirrors `CircleMemberFfi`: public keys are still identifiers, so
+        // neither encoding may be printed in full (Security Rule 6). Truncating
+        // only one would be no protection at all — they are the same 32 bytes.
+        let hex = "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e";
+        let npub = "npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg";
+        let ffi = InvitationFfi::from(&CoreInvitation {
+            mls_group_id: GroupId::from_slice(&[7u8; 32]),
+            circle_name: "New Circle".to_string(),
+            inviter_pubkey: hex.to_string(),
+            invited_at: 42,
+        });
+        let dbg = format!("{ffi:?}");
+
+        assert!(
+            !dbg.contains(hex),
+            "debug output must not contain the full hex pubkey: {dbg}"
+        );
+        assert!(
+            !dbg.contains(npub),
+            "debug output must not contain the full npub: {dbg}"
+        );
+        assert!(
+            dbg.contains(&format!("{}...", &hex[..16])),
+            "debug output must contain the truncated hex prefix: {dbg}"
+        );
+        assert!(
+            dbg.contains(&format!("{}...", &npub[..16])),
+            "debug output must contain the truncated npub prefix: {dbg}"
+        );
+        assert!(
+            dbg.contains("mls_group_id: \"<redacted>\""),
+            "the group id stays redacted: {dbg}"
+        );
+    }
+
+    #[test]
+    fn a_redacting_debug_impl_never_panics_on_a_multibyte_identifier() {
+        // Nothing in these types constrains an identifier to ASCII, and a
+        // byte-sliced truncation panics when the bound lands mid-character
+        // (`田` is three bytes, so byte 16 does). A panic here unwinds through
+        // whatever was logging — at this layer, a call that must never unwind
+        // across the FFI boundary.
+        let wide = "田".repeat(64);
+        let expected = format!("{}...", "田".repeat(16));
+
+        let contact = ContactFfi {
+            pubkey: wide.clone(),
+            display_name: None,
+            notes: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        assert!(format!("{contact:?}").contains(&expected));
+
+        let member = CircleMemberFfi {
+            npub: wide.clone(),
+            pubkey: wide.clone(),
+            display_name: None,
+            is_admin: false,
+        };
+        assert!(format!("{member:?}").matches(&expected).count() >= 2);
+
+        let invitation = InvitationFfi {
+            mls_group_id: vec![7u8; 32],
+            circle_name: "New Circle".to_string(),
+            inviter_pubkey: wide.clone(),
+            inviter_npub: wide,
+            invited_at: 42,
+        };
+        assert!(format!("{invitation:?}").matches(&expected).count() >= 2);
     }
 
     /// Verifies that `init_keyring_store()` succeeds when a keyring backend
@@ -10643,8 +11187,9 @@ mod live_sync_ffi_tests {
 #[cfg(debug_assertions)] // the ws:// loopback + in-memory-keyring seams are debug-only
 mod maintenance_real_ffi_tests {
     use super::{
-        allow_ws_loopback_for_test, use_in_memory_keyring_for_test, CircleManagerFfi,
-        KpMaintenanceActionFfi, ProfileSyncOutcomeFfi, RelayManagerFfi, RelayTypeFfi,
+        allow_ws_loopback_for_test, hex_to_npub, profile_now_secs, use_in_memory_keyring_for_test,
+        CachedProfile, CircleManagerFfi, KpMaintenanceActionFfi, ProfileMetadata, ProfileState,
+        ProfileSyncOutcomeFfi, RelayManagerFfi, RelayTypeFfi,
     };
     use haven_core::circle::RelayType;
     use nostr::{Keys, Kind};
@@ -10654,10 +11199,10 @@ mod maintenance_real_ffi_tests {
 
     /// A fresh, unique data dir for a real `CircleManagerFfi`. Uses pid + a
     /// monotonic counter so concurrent tests never collide; removed on drop.
-    struct DataDir(std::path::PathBuf);
+    pub(super) struct DataDir(std::path::PathBuf);
 
     impl DataDir {
-        fn new(tag: &str) -> Self {
+        pub(super) fn new(tag: &str) -> Self {
             static COUNTER: AtomicU64 = AtomicU64::new(0);
             let n = COUNTER.fetch_add(1, Ordering::Relaxed);
             let pid = std::process::id();
@@ -10666,7 +11211,7 @@ mod maintenance_real_ffi_tests {
             Self(path)
         }
 
-        fn as_str(&self) -> String {
+        pub(super) fn as_str(&self) -> String {
             self.0.to_string_lossy().to_string()
         }
     }
@@ -10682,7 +11227,7 @@ mod maintenance_real_ffi_tests {
     /// headless) and the `ws://` loopback opt-in (so the real relay manager +
     /// the storage `add_user_relay` path accept MockRelay's `ws://127.0.0.1`
     /// URL). Both are install-once and idempotent.
-    fn install_test_seams() {
+    pub(super) fn install_test_seams() {
         // Idempotent; a second install returns Err which we ignore.
         let _ = use_in_memory_keyring_for_test();
         let _ = allow_ws_loopback_for_test();
@@ -10690,7 +11235,7 @@ mod maintenance_real_ffi_tests {
 
     /// A generic 32-byte identity secret. Deterministic per test call is fine —
     /// the keys never touch a real network beyond the local MockRelay.
-    fn secret_bytes(keys: &Keys) -> Vec<u8> {
+    pub(super) fn secret_bytes(keys: &Keys) -> Vec<u8> {
         keys.secret_key().to_secret_bytes().to_vec()
     }
 
@@ -10774,7 +11319,11 @@ mod maintenance_real_ffi_tests {
 
     /// Fetches every event of `kind` authored by `author` from a single relay,
     /// via a bare publisher client (mirrors the mirror test's `fetch_by_kind`).
-    async fn fetch_by_kind(author: nostr::PublicKey, kind: Kind, relay: &str) -> Vec<nostr::Event> {
+    pub(super) async fn fetch_by_kind(
+        author: nostr::PublicKey,
+        kind: Kind,
+        relay: &str,
+    ) -> Vec<nostr::Event> {
         let client = nostr_sdk::Client::builder().build();
         client.add_relay(relay).await.expect("add relay");
         client.connect().await;
@@ -13027,6 +13576,83 @@ mod maintenance_real_ffi_tests {
     }
 
     // ------------------------------------------------------------------------
+    // Typed-stranger resolve (D2): a THIN wrapper over `fetch_member_profiles`
+    // whose only job is accepting npub as well as hex. Two promises, neither
+    // covered by `fetch_member_profiles`'s own tests: a checksum-invalid npub
+    // (charset-valid, so Dart's own `NpubValidator` cannot catch it) must read
+    // as "nothing found", never as an error; and the npub form must resolve
+    // the exact same row the hex form does.
+    // ------------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resolve_stranger_profile_reports_nothing_found_for_a_checksum_invalid_npub() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+
+        let keys = Keys::generate();
+        let dir = DataDir::new("resolve_stranger_bad_checksum");
+        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+
+        // Charset-valid — passes Dart's `NpubValidator` (prefix, length, bech32
+        // charset) — but checksum-invalid, so `PublicKey::parse` fails. No relay
+        // is ever dialed: the parse failure returns before the pool is even
+        // consulted.
+        let bogus_npub = "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqspcd5";
+        let result = circle
+            .resolve_stranger_profile(bogus_npub.to_string(), 3600)
+            .await
+            .expect("a malformed pubkey must yield Ok(None), never an error");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resolve_stranger_profile_resolves_npub_to_the_same_row_as_hex() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+
+        let keys = Keys::generate();
+        let dir = DataDir::new("resolve_stranger_npub_equals_hex");
+        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+
+        // Pre-seed a freshly-fetched row directly (bypassing the network) and
+        // pass a `max_age_secs` large enough that `profiles_due` reports it NOT
+        // due — neither call below touches a relay. This test is about the
+        // hex<->npub translation this wrapper adds, not the fetch/staleness
+        // machinery `fetch_member_profiles` already covers on its own.
+        let stranger_keys = Keys::generate();
+        let stranger_hex = stranger_keys.public_key().to_hex();
+        let stranger_npub = hex_to_npub(&stranger_hex);
+        circle
+            .inner
+            .upsert_profile_if_newer(&CachedProfile {
+                pubkey_hex: stranger_hex.clone(),
+                metadata: ProfileMetadata::from_metadata(nostr::Metadata::new().name("stranger")),
+                state: ProfileState::Known,
+                event_created_at: 1,
+                fetched_at: profile_now_secs(),
+            })
+            .expect("seed a pre-fetched profile row");
+
+        let via_npub = circle
+            .resolve_stranger_profile(stranger_npub, 86_400)
+            .await
+            .expect("resolve via npub")
+            .expect("the pre-seeded row must resolve");
+        let via_hex = circle
+            .resolve_stranger_profile(stranger_hex.clone(), 86_400)
+            .await
+            .expect("resolve via hex")
+            .expect("the pre-seeded row must resolve");
+
+        assert_eq!(via_npub.pubkey_hex, stranger_hex);
+        assert_eq!(via_npub.pubkey_hex, via_hex.pubkey_hex);
+        assert_eq!(via_npub.name.as_deref(), Some("stranger"));
+        assert_eq!(via_npub.name, via_hex.name);
+        assert!(via_npub.is_known);
+    }
+
+    // ------------------------------------------------------------------------
     // Retraction vs. the local-first outbox.
     //
     // Both retractions are no-ops for a pubkey that never published, so neither
@@ -13043,6 +13669,100 @@ mod maintenance_real_ffi_tests {
              415478da63f8cfc0c000c20cffffff6700001eef04fc731c53cc0000000049454e44ae426082",
         )
         .expect("static PNG fixture")
+    }
+
+    // ------------------------------------------------------------------------
+    // The BATCHED cached read. A name-only surface asks for a whole roster at
+    // once, and issuing the single-pubkey call per member costs a blocking
+    // thread and three SQLCipher queries EACH — every one of which then queues
+    // on the same connection mutex, so the concurrency buys nothing.
+    // ------------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_batched_cached_read_answers_per_pubkey_exactly_as_the_single_one_does() {
+        use nostr::prelude::ToBech32 as _;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+
+        let keys = Keys::generate();
+        let dir = DataDir::new("profile_batch_read");
+        let circle = CircleManagerFfi::new(dir.as_str(), secret_bytes(&keys))
+            .expect("CircleManagerFfi::new");
+
+        let resolved = Keys::generate().public_key();
+        let unresolved = Keys::generate().public_key().to_hex();
+        circle
+            .inner
+            .upsert_profile(&CachedProfile {
+                pubkey_hex: resolved.to_hex(),
+                metadata: ProfileMetadata::from_metadata(nostr::Metadata::new().name("alice")),
+                state: ProfileState::Known,
+                event_created_at: 1_000,
+                fetched_at: 2_000,
+            })
+            .expect("seed a cached profile");
+
+        let asked = vec![unresolved.clone(), resolved.to_hex()];
+        let rows = circle
+            .get_cached_profiles(asked.clone())
+            .await
+            .expect("batch read");
+        assert_eq!(
+            rows.iter()
+                .map(|r| r.pubkey_hex.clone())
+                .collect::<Vec<_>>(),
+            asked,
+            "one row per pubkey asked for, in the order asked — the caller keys \
+             its candidates by pubkey and cannot re-derive a dropped one"
+        );
+        assert!(
+            !rows[0].is_known,
+            "a pubkey with nothing cached must say so rather than be omitted"
+        );
+        assert!(rows[0].name.is_none() && rows[0].display_name.is_none());
+        assert!(rows[1].is_known);
+        assert_eq!(rows[1].name.as_deref(), Some("alice"));
+        assert_eq!(
+            rows[1].npub,
+            resolved.to_bech32().expect("bech32"),
+            "the npub is computed at the boundary, exactly as the single read does"
+        );
+
+        // The whole claim of the batch: it takes the lock once, and answers
+        // otherwise identically to the call it replaces.
+        for (row, pubkey_hex) in rows.iter().zip(&asked) {
+            let single = circle
+                .get_cached_profile(pubkey_hex.clone())
+                .await
+                .expect("single read");
+            match single {
+                Some(one) => {
+                    assert_eq!(one.pubkey_hex, row.pubkey_hex);
+                    assert_eq!(one.npub, row.npub);
+                    assert_eq!(one.name, row.name);
+                    assert_eq!(one.display_name, row.display_name);
+                    assert_eq!(one.about, row.about);
+                    assert_eq!(one.is_known, row.is_known);
+                    assert_eq!(one.fetched_at, row.fetched_at);
+                    assert_eq!(one.has_picture, row.has_picture);
+                    assert_eq!(one.picture_sha256_hex, row.picture_sha256_hex);
+                }
+                None => assert!(
+                    !row.is_known && row.name.is_none(),
+                    "where the single read has no row at all, the batch must \
+                     report an unresolved pubkey — never a blank name"
+                ),
+            }
+        }
+
+        assert!(
+            circle
+                .get_cached_profiles(Vec::new())
+                .await
+                .expect("empty batch")
+                .is_empty(),
+            "an empty ask must not reach the database"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -13463,6 +14183,322 @@ mod maintenance_real_ffi_tests {
                 .has_published_profile(&keys.public_key())
                 .expect("gate read"),
             "nothing was published",
+        );
+    }
+}
+
+// ============================================================================
+// Member directory (picker) — REAL-FFI end-to-end.
+//
+// The two entry points Dart reaches — `ranked_directory_members` and
+// `reconcile_member_directory` — are driven against a REAL `CircleManagerFfi`
+// (real Dark Matter `session.sqlite` + `circles.db` on the in-memory keyring)
+// and a REAL co-member whose KeyPackage was published to an in-process
+// MockRelay. Nothing here is a hand-written mirror of the core logic; the
+// assertions read the FFI's own answers.
+//
+// Security: only public keys, tiers and counts are asserted on — never a group
+// id, a KeyPackage byte or a welcome.
+// ============================================================================
+#[cfg(test)]
+#[cfg(debug_assertions)] // the ws:// loopback + in-memory-keyring seams are debug-only
+mod member_directory_real_ffi_tests {
+    use super::maintenance_real_ffi_tests::{
+        fetch_by_kind, install_test_seams, secret_bytes, DataDir,
+    };
+    use super::{
+        CircleManagerFfi, DirectoryTierFfi, MemberKeyPackageFfi, RelayManagerFfi, RelayTypeFfi,
+    };
+    use haven_core::circle::DIRECTORY_RETENTION_SECS;
+    use nostr::{Keys, Kind};
+    use nostr_relay_builder::MockRelay;
+
+    /// The start of the current UTC day, in Unix seconds.
+    ///
+    /// Not a fixed historical constant: every membership write site reconciles
+    /// against the PROCESS clock, so a test clock in the past would have those
+    /// internal passes purge the very row under test. Day-aligned, so the
+    /// retention arithmetic in the assertions is exact.
+    fn today_start() -> i64 {
+        super::now_secs().div_euclid(86_400) * 86_400
+    }
+
+    /// Publishes a REAL kind-30443 KeyPackage for a second identity and returns
+    /// it in the shape `create_circle` consumes.
+    ///
+    /// The member's own manager is dropped before returning: its Rule-14
+    /// session guard is not needed once the package is on the relay, and
+    /// holding it would keep a second live session open for the whole test.
+    async fn published_member(url: &str, keys: &Keys) -> MemberKeyPackageFfi {
+        let dir = DataDir::new("directory_member");
+        {
+            let member =
+                CircleManagerFfi::new(dir.as_str(), secret_bytes(keys)).expect("member manager");
+            let relays = RelayManagerFfi::new_instance()
+                .await
+                .expect("RelayManagerFfi::new_instance");
+            member
+                .add_user_relay(url.to_string(), RelayTypeFfi::Nip65)
+                .await
+                .expect("register the member's own relay");
+            let outcome = relays
+                .maintain_key_package(&member, secret_bytes(keys))
+                .await
+                .expect("publish a key package");
+            assert_eq!(
+                outcome.relays_healed, 1,
+                "the relay must have ACKed the package before it can be fetched"
+            );
+        }
+        let published = fetch_by_kind(keys.public_key(), Kind::Custom(30443), url).await;
+        MemberKeyPackageFfi {
+            key_package_json: serde_json::to_string(
+                published.first().expect("the acked package is served back"),
+            )
+            .expect("serialize the key package event"),
+            inbox_relays: vec![url.to_string()],
+            nip65_relays: Vec::new(),
+        }
+    }
+
+    /// Creates a circle through the FFI and confirms its staged create, which is
+    /// what makes the roster converged (Rule 13) and therefore readable by the
+    /// reconcile.
+    async fn confirmed_circle(
+        owner: &CircleManagerFfi,
+        keys: &Keys,
+        url: &str,
+        members: Vec<MemberKeyPackageFfi>,
+        name: &str,
+    ) -> super::CircleCreationResultFfi {
+        let created = owner
+            .create_circle(
+                secret_bytes(keys),
+                members,
+                name.to_string(),
+                None,
+                "location_sharing".to_string(),
+                vec![url.to_string()],
+                vec![url.to_string()],
+            )
+            .await
+            .expect("create circle");
+        owner
+            .confirm_published(created.pending)
+            .await
+            .expect("confirm the staged create");
+        created
+    }
+
+    // ------------------------------------------------------------------------
+    // The picker's read: a confirmed circle's co-member is offered as CURRENT,
+    // under the npub every anti-impersonation surface renders, and the read
+    // sweeps the retention window rather than merely hiding what it passed.
+    // ------------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_ranked_read_offers_a_confirmed_co_member_and_sweeps_its_own_window() {
+        use nostr::prelude::ToBech32 as _;
+
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let now = today_start();
+        let relay = MockRelay::run().await.expect("start MockRelay");
+        let url = relay.url().await.to_string();
+
+        let member_keys = Keys::generate();
+        let member = published_member(&url, &member_keys).await;
+
+        let owner_keys = Keys::generate();
+        let dir = DataDir::new("directory_owner");
+        let owner =
+            CircleManagerFfi::new(dir.as_str(), secret_bytes(&owner_keys)).expect("owner manager");
+
+        assert!(
+            owner
+                .ranked_directory_members(now)
+                .await
+                .expect("read an empty directory")
+                .is_empty(),
+            "an install with no circles offers nobody"
+        );
+
+        let created = confirmed_circle(&owner, &owner_keys, &url, vec![member], "Trip").await;
+        assert!(
+            owner
+                .reconcile_member_directory(now)
+                .await
+                .expect("reconcile"),
+            "a converged roster must reconcile rather than defer"
+        );
+
+        let entries = owner.ranked_directory_members(now).await.expect("read");
+        assert_eq!(
+            entries.len(),
+            1,
+            "the roster's other member, and never the local user themselves"
+        );
+        assert_eq!(entries[0].pubkey_hex, member_keys.public_key().to_hex());
+        assert_eq!(
+            entries[0].npub,
+            member_keys.public_key().to_bech32().expect("bech32"),
+            "the picker renders the npub, so the boundary must encode it — a \
+             fallback to raw hex is what an unusable identity check looks like"
+        );
+        assert_eq!(entries[0].tier, DirectoryTierFfi::Current);
+
+        // Leaving the circle demotes them; reading past the window ERASES them.
+        owner
+            .abandon_circle_local_only(created.circle.mls_group_id.clone())
+            .await
+            .expect("abandon");
+        let entries = owner.ranked_directory_members(now).await.expect("read");
+        assert_eq!(entries.len(), 1, "a departed co-member is retained a while");
+        assert_eq!(entries[0].tier, DirectoryTierFfi::Recent);
+
+        assert!(
+            owner
+                .ranked_directory_members(now + DIRECTORY_RETENTION_SECS + 1)
+                .await
+                .expect("read past the window")
+                .is_empty(),
+            "the read itself must enforce the retention deadline — an install \
+             that never reconciles again is exactly where the promise breaks"
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // The reconcile's MODE. `reconcile_member_directory` asks for
+    // `DirectoryReconcile::Rewrite` and must never ask for the withdrawing
+    // variant: only the receive paths know the engine withdrew state, and
+    // asking for it from the picker would DELETE every ordinary departure
+    // instead of ageing it out — a person the user last shared a circle with an
+    // hour ago would vanish from "recently shared with".
+    //
+    // The two modes differ only for a row that is CURRENT while its person is
+    // absent from the union, and every write site reconciles as it writes — so
+    // the only way to reach that state is to make those internal passes DEFER,
+    // which an in-flight membership commit does. Hence the staged, unconfirmed
+    // second circle: it holds the internal reconciles off until the call under
+    // test has run, and rolling it back is what lets the next internal pass
+    // complete and act on the mode this one asked for.
+    // ------------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_picker_reconcile_never_asks_for_the_withdrawing_mode() {
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let now = today_start();
+        let relay = MockRelay::run().await.expect("start MockRelay");
+        let url = relay.url().await.to_string();
+
+        let member_keys = Keys::generate();
+        let member = published_member(&url, &member_keys).await;
+
+        let owner_keys = Keys::generate();
+        let dir = DataDir::new("directory_mode");
+        let owner =
+            CircleManagerFfi::new(dir.as_str(), secret_bytes(&owner_keys)).expect("owner manager");
+
+        let shared = confirmed_circle(&owner, &owner_keys, &url, vec![member], "Trip").await;
+        assert!(owner
+            .reconcile_member_directory(now)
+            .await
+            .expect("reconcile"));
+        assert_eq!(
+            owner
+                .ranked_directory_members(now)
+                .await
+                .expect("read")
+                .first()
+                .expect("the co-member is offered")
+                .tier,
+            DirectoryTierFfi::Current
+        );
+
+        // A staged, unconfirmed create: from here every reconcile defers.
+        let other_keys = Keys::generate();
+        let other = published_member(&url, &other_keys).await;
+        let staged = owner
+            .create_circle(
+                secret_bytes(&owner_keys),
+                vec![other],
+                "Errands".to_string(),
+                None,
+                "location_sharing".to_string(),
+                vec![url.clone()],
+                vec![url.clone()],
+            )
+            .await
+            .expect("stage a second create");
+
+        // THE CALL UNDER TEST. It defers — and a withdrawing ask would have
+        // recorded a withdrawal as owed before deferring, which is sticky.
+        assert!(
+            !owner
+                .reconcile_member_directory(now)
+                .await
+                .expect("reconcile"),
+            "an in-flight membership commit must defer, not write a partial view"
+        );
+
+        // Leave the shared circle. Its own reconcile defers too, so the
+        // co-member stays CURRENT while no longer being in any roster.
+        owner
+            .abandon_circle_local_only(shared.circle.mls_group_id.clone())
+            .await
+            .expect("abandon");
+        assert_eq!(
+            owner
+                .ranked_directory_members(now)
+                .await
+                .expect("read")
+                .first()
+                .expect("still offered")
+                .tier,
+            DirectoryTierFfi::Current,
+            "the deferral must have left the row untouched, or the state this \
+             test discriminates on never existed"
+        );
+
+        // Roll the staged create back. Nothing is in flight now, so THIS
+        // internal pass completes — under the verdict the deferred call left
+        // behind.
+        owner
+            .publish_failed(staged.pending)
+            .await
+            .expect("roll the staged create back");
+
+        let entries = owner.ranked_directory_members(now).await.expect("read");
+        assert_eq!(
+            entries.len(),
+            1,
+            "the picker's reconcile must age a departed co-member out, never \
+             delete them: a withdrawing ask erases someone the user shared a \
+             circle with minutes ago"
+        );
+        assert_eq!(entries[0].pubkey_hex, member_keys.public_key().to_hex());
+        assert_eq!(entries[0].tier, DirectoryTierFfi::Recent);
+    }
+
+    // ------------------------------------------------------------------------
+    // Error redaction at the directory boundary.
+    // ------------------------------------------------------------------------
+    #[test]
+    fn a_directory_failure_carries_no_identifier_across_the_boundary() {
+        // Both directory entry points map their failures through this one
+        // helper. A roster read fails per-CIRCLE, so its message can carry an
+        // MLS group id, and `e.to_string()` would hand it to Dart verbatim
+        // (Security Rules #6/#8).
+        let group_id = "ab".repeat(32);
+        let redacted = super::redact_directory_err(haven_core::circle::CircleError::Mls(format!(
+            "roster read failed for group {group_id}"
+        )));
+        assert!(
+            !redacted.contains(&group_id),
+            "the group id survived redaction: {redacted}"
+        );
+        assert!(
+            redacted.contains("roster read failed"),
+            "the diagnosis must survive, only the identifier goes: {redacted}"
         );
     }
 }

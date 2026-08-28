@@ -111,22 +111,10 @@ class AppLocalizationsRu extends AppLocalizations {
   String get onboardingValueProp1Title => 'Вас видят только ваши круги';
 
   @override
-  String get onboardingValueProp1Body =>
-      'Ваше местоположение шифруется прямо на устройстве, ещё до отправки, поэтому прочитать его могут только выбранные вами круги — никогда Haven и никто другой. А поскольку Haven имеет открытый исходный код, в этом может убедиться любой.';
-
-  @override
   String get onboardingValueProp2Title => 'Никто не может его отключить';
 
   @override
-  String get onboardingValueProp2Body =>
-      'У Haven нет центрального сервера. Ваши зашифрованные сообщения идут через независимые серверы, которые называют реле, и вы сами выбираете, какими из них пользоваться. Ни одна компания и ни одно государство не могут отключить эту сеть.';
-
-  @override
   String get onboardingValueProp3Title => 'Аккаунт не нужен';
-
-  @override
-  String get onboardingValueProp3Body =>
-      'Никакой почты, телефона или регистрации. Haven создаёт личность, секретный ключ которой никогда не покидает ваш телефон, поэтому нет и аккаунта, который кто-либо мог бы передать третьим лицам.';
 
   @override
   String get onboardingValueProp1Summary =>
@@ -214,25 +202,13 @@ class AppLocalizationsRu extends AppLocalizations {
   String get settingsIdentityTitle => 'Личность';
 
   @override
-  String get settingsIdentitySubtitle => 'Профиль, ключи и обмен фото';
-
-  @override
   String get settingsRelaysTitle => 'Реле';
-
-  @override
-  String get settingsRelaysSubtitle => 'Где вас находят приглашения';
 
   @override
   String get settingsLocationTitle => 'Местоположение';
 
   @override
-  String get settingsLocationSubtitle => 'Фоновый обмен и разрешения';
-
-  @override
   String get settingsMapStyleTitle => 'Стиль карты';
-
-  @override
-  String get settingsAppearanceSubtitle => 'Тема и язык';
 
   @override
   String get settingsAboutTitle => 'О приложении';
@@ -520,9 +496,6 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get privacyTitle => 'Приватность';
-
-  @override
-  String get privacySubtitle => 'Как работает Haven и что видят другие';
 
   @override
   String get privacyHubSummary =>
@@ -942,9 +915,6 @@ class AppLocalizationsRu extends AppLocalizations {
       'Нет подходящих участников для приглашения';
 
   @override
-  String get createCircleMemberAlreadyAdded => 'Участник уже добавлен';
-
-  @override
   String get createCircleNoIdInQr => 'В QR-коде не найден действительный ID';
 
   @override
@@ -1142,9 +1112,6 @@ class AppLocalizationsRu extends AppLocalizations {
   String get qrScannerScanning => 'Сканирование...';
 
   @override
-  String get circleMemberInvitationPending => 'Приглашение ожидает ответа';
-
-  @override
   String get circleMemberNoRecentLocation => 'Нет недавнего местоположения';
 
   @override
@@ -1179,9 +1146,6 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get circleMemberAdmin => 'Админ';
-
-  @override
-  String get circleMemberHintPending => 'приглашение ожидает ответа';
 
   @override
   String get circleMemberHintNoLocation => 'местоположение недоступно';
@@ -1240,6 +1204,56 @@ class AppLocalizationsRu extends AppLocalizations {
   String get memberSearchAlreadyAdded => 'Участник уже добавлен';
 
   @override
+  String get memberPickerSectionRoster => 'Участники ваших кругов';
+
+  @override
+  String get memberPickerTierRoster => 'Состоит в ваших кругах';
+
+  @override
+  String get memberPickerNoMatches => 'В ваших кругах совпадений нет';
+
+  @override
+  String get memberPickerLoading => 'Читаем списки участников ваших кругов';
+
+  @override
+  String get memberPickerDirectoryUnavailable =>
+      'Сейчас не удалось прочитать списки участников ваших кругов';
+
+  @override
+  String memberPickerMatchesAnnouncement(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return 'Совпадений: $countString';
+  }
+
+  @override
+  String get memberPickerReasonSelf => 'Это ваш собственный ID';
+
+  @override
+  String get memberPickerReadPublicKey => 'Озвучить публичный ключ';
+
+  @override
+  String get memberPickerSectionRecent => 'Недавно в ваших кругах';
+
+  @override
+  String get memberPickerTierRecent => 'Недавно в ваших кругах';
+
+  @override
+  String get memberPickerNicknameNote =>
+      'Ваш псевдоним для этого человека, а не его публичное имя';
+
+  @override
+  String memberPickerCollisionCircleLabel(String circleName) {
+    return 'В круге «$circleName»';
+  }
+
+  @override
+  String get memberPickerStrangerLookupNote =>
+      'Haven запросил у одного реле опубликованное имя этого человека. Реле видит, что это устройство только что спросило об этом ключе, но запрос не подписан, поэтому не связан с вашей личностью в Haven. Фото пока не скачано.';
+
+  @override
   String selectedMembersMore(int count) {
     final intl.NumberFormat countNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
@@ -1249,54 +1263,26 @@ class AppLocalizationsRu extends AppLocalizations {
   }
 
   @override
-  String get invitationStatusPending => 'Приглашение ожидает ответа';
+  String get invitationCardHeading => 'Приглашение в круг';
 
   @override
-  String get invitationStatusActive => 'Активен';
-
-  @override
-  String get invitationStatusDeclined => 'Отклонено';
-
-  @override
-  String invitationStatusSemantics(String label) {
-    return 'Статус приглашения: $label';
-  }
-
-  @override
-  String invitationCardSemantics(String circleName, String inviter, int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    return 'Приглашение вступить в $circleName от $inviter, участников: $countString';
+  String invitationCardSemantics(String inviter) {
+    return 'Приглашение вступить в круг. Вас приглашает $inviter';
   }
 
   @override
   String invitationCardInvitedBySemantics(String inviter) {
-    return 'Пригласил криптографический идентификатор $inviter';
+    return 'Приглашает криптографический идентификатор $inviter';
   }
 
   @override
   String invitationCardInvitedBy(String inviter) {
-    return 'Пригласил: $inviter';
+    return 'Приглашает: $inviter';
   }
 
   @override
-  String invitationCardMemberCount(int count) {
-    final intl.NumberFormat countNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
-
-    String _temp0 = intl.Intl.pluralLogic(
-      count,
-      locale: localeName,
-      other: '$countString участника',
-      many: '$countString участников',
-      few: '$countString участника',
-      one: '$countString участник',
-    );
-    return '$_temp0';
-  }
+  String get invitationCardNicknameNote =>
+      'Ваш псевдоним для этого человека, а не его публичное имя';
 
   @override
   String get invitationCardJustNow => 'Только что';
@@ -1876,37 +1862,6 @@ class AppLocalizationsRu extends AppLocalizations {
   @override
   String get profileSyncStatusRetrySemantics =>
       'Повторить публикацию вашего профиля';
-
-  @override
-  String keyDisplayCopiedToClipboard(String label) {
-    return '$label скопировано в буфер обмена';
-  }
-
-  @override
-  String keyDisplaySemantics(String label, String state) {
-    return '$label: $state';
-  }
-
-  @override
-  String get keyDisplayStateRevealed => 'показан';
-
-  @override
-  String get keyDisplayStateHidden => 'скрыт';
-
-  @override
-  String get keyDisplayHideTooltip => 'Скрыть';
-
-  @override
-  String get keyDisplayRevealTooltip => 'Показать';
-
-  @override
-  String get keyDisplayCopyTooltip => 'Скопировать';
-
-  @override
-  String get keyDisplayCompactCopied => 'Ключ скопирован в буфер обмена';
-
-  @override
-  String get keyDisplayCompactTapToCopy => 'Нажмите, чтобы скопировать';
 
   @override
   String get npubQrCopiedSnack => 'Публичный ключ скопирован в буфер обмена';

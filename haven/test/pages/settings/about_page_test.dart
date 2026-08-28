@@ -6,6 +6,7 @@
 /// locales is how the copy drifted out of sync with the code in the first place.
 library;
 
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/pages/settings/about_page.dart';
 import 'package:haven/src/widgets/common/haven_logo.dart';
@@ -21,8 +22,7 @@ void main() {
     expect(find.byType(HavenLogo), findsOneWidget);
     expect(find.text('Haven'), findsOneWidget);
     // Guard the surrounding page plumbing so a hero change can't silently
-    // drop the value-prop rows or the footer.
-    expect(find.text('Only your circles can see you'), findsOneWidget);
+    // drop the footer.
     expect(find.text('Version 0.1.0'), findsOneWidget);
   });
 
@@ -32,6 +32,31 @@ void main() {
     expect(find.text('Open-source licenses'), findsOneWidget);
     expect(find.text('Report a map issue'), findsOneWidget);
     expect(find.text('Support OpenStreetMap'), findsOneWidget);
+  });
+
+  testWidgets('no longer carries the value-prop cards', (tester) async {
+    await pumpLocalized(tester, const AboutPage());
+
+    // The three feature cards were removed: About is identity, attribution and
+    // legal only, and the value props are the onboarding intro screen's job.
+    expect(find.text('Only your circles can see you'), findsNothing);
+    expect(find.text('No one can shut it down'), findsNothing);
+    expect(find.text('No account needed'), findsNothing);
+
+    // The card assertion is the copy-independent half: the legal actions are
+    // the only Card left, so nothing sits between the hero tagline and the
+    // licenses tile.
+    expect(find.byType(Card), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.text('Open-source licenses')).dy,
+      greaterThan(
+        tester
+            .getBottomLeft(
+              find.text('Private and censorship-resistant location sharing.'),
+            )
+            .dy,
+      ),
+    );
   });
 
   testWidgets('no longer carries the privacy disclosures', (tester) async {

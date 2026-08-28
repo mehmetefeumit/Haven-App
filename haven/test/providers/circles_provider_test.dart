@@ -226,7 +226,6 @@ void main() {
             pubkey: 'new-member-pubkey',
             npub: 'npub1new-member-pubkey',
             isAdmin: false,
-            status: MembershipStatus.accepted,
           ),
         ],
       );
@@ -383,6 +382,16 @@ class _ThrowingCircleService implements CircleService {
   Future<int> pruneExpiredLastKnown({DateTime? now}) async => 0;
 
   @override
+  Future<List<DirectoryEntry>> rankedDirectoryMembers({DateTime? now}) async =>
+      const [];
+
+  @override
+  Future<bool> reconcileMemberDirectory({DateTime? now}) async => true;
+
+  @override
+  Future<Map<String, String>> allContactDisplayNames() async => const {};
+
+  @override
   Future<List<LocationEventResult>> decryptLocation({
     required String eventJson,
   }) async => throw UnimplementedError();
@@ -403,6 +412,9 @@ class _ThrowingCircleService implements CircleService {
     required List<int> identitySecretBytes,
     required List<String> eventIds,
   }) async => throw UnimplementedError();
+
+  @override
+  Future<String?> getContactDisplayName({required String pubkey}) async => null;
 
   @override
   Future<void> setContactDisplayName({
@@ -557,6 +569,16 @@ class _ThrowingErrorCircleService implements CircleService {
   Future<int> pruneExpiredLastKnown({DateTime? now}) async => 0;
 
   @override
+  Future<List<DirectoryEntry>> rankedDirectoryMembers({DateTime? now}) async =>
+      const [];
+
+  @override
+  Future<bool> reconcileMemberDirectory({DateTime? now}) async => true;
+
+  @override
+  Future<Map<String, String>> allContactDisplayNames() async => const {};
+
+  @override
   Future<List<LocationEventResult>> decryptLocation({
     required String eventJson,
   }) async => throw UnimplementedError();
@@ -577,6 +599,9 @@ class _ThrowingErrorCircleService implements CircleService {
     required List<int> identitySecretBytes,
     required List<String> eventIds,
   }) async => throw UnimplementedError();
+
+  @override
+  Future<String?> getContactDisplayName({required String pubkey}) async => null;
 
   @override
   Future<void> setContactDisplayName({

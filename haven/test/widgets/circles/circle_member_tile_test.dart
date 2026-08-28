@@ -13,14 +13,14 @@
 // Test readability trumps value compression: cases that test the "self"
 // branch explicitly pass `pubkey: selfPubkey` even though it matches the
 // helper default, so the reader sees the contract being tested on the
-// same line as the expectation. Same for status / admin flags.
+// same line as the expectation. Same for admin flags.
 // ignore_for_file: avoid_redundant_argument_values
 library;
 
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/semantics.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -53,11 +53,10 @@ void main() {
   const otherNpub =
       'npub1hwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwasxw04hu';
 
-  // Mirrors the widget's private `_shortNpub` truncation so assertions below
-  // stay in sync with production formatting without duplicating the magic
-  // numbers at every call site.
-  String shortNpub(String npub) =>
-      NpubValidator.truncate(npub, prefixLength: 12, suffixLength: 6);
+  // The tile renders npubs through the canonical display format; calling the
+  // same helper keeps assertions below in sync with production formatting
+  // without restating the 12/6 literals at every call site.
+  String shortNpub(String npub) => NpubValidator.shortenForDisplay(npub);
 
   Identity buildIdentity({String pubkeyHex = selfPubkey}) {
     return Identity(
@@ -72,14 +71,12 @@ void main() {
     String? npub,
     String? displayName,
     bool isAdmin = false,
-    MembershipStatus status = MembershipStatus.accepted,
   }) {
     return CircleMember(
       pubkey: pubkey,
       npub: npub ?? (pubkey == otherPubkey ? otherNpub : selfNpub),
       displayName: displayName,
       isAdmin: isAdmin,
-      status: status,
     );
   }
 
@@ -92,6 +89,8 @@ void main() {
     VoidCallback? onTap,
     VoidCallback? onRemove,
     bool hasLocation = true,
+    Locale locale = const Locale('en'),
+    TextScaler textScaler = TextScaler.noScaling,
   }) async {
     await tester.pumpWidget(
       ProviderScope(
@@ -105,8 +104,13 @@ void main() {
           profileServiceProvider.overrideWithValue(MockProfileService()),
         ],
         child: MaterialApp(
+          locale: locale,
           localizationsDelegates: AppLocalizations.localizationsDelegates,
           supportedLocales: AppLocalizations.supportedLocales,
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(context).copyWith(textScaler: textScaler),
+            child: child!,
+          ),
           home: Scaffold(
             body: CircleMemberTile(
               member: member,
@@ -120,6 +124,14 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+  }
+
+  /// Constrains the test view to the narrowest phone Haven supports.
+  void useNarrowPhone(WidgetTester tester) {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(320, 900);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
   }
 
   group('CircleMemberTile — self member', () {
@@ -378,48 +390,6 @@ void main() {
     });
   });
 
-  group('CircleMemberTile — pending subtitle', () {
-    testWidgets(
-      'pending status suppresses pubkey subtitle for self display name',
-      (tester) async {
-        await pumpTile(
-          tester,
-          member: buildMember(
-            pubkey: selfPubkey,
-            status: MembershipStatus.pending,
-          ),
-          identity: buildIdentity(),
-          displayName: 'Alice',
-        );
-
-        expect(find.text('Alice'), findsOneWidget);
-        expect(find.text('Invitation Pending'), findsOneWidget);
-        // Npub subtitle is replaced by the pending indicator — make sure
-        // we don't accidentally render both.
-        final subtitleText = shortNpub(selfNpub);
-        expect(find.text(subtitleText), findsNothing);
-      },
-    );
-
-    testWidgets('pending status renders for non-self members too', (
-      tester,
-    ) async {
-      await pumpTile(
-        tester,
-        member: buildMember(
-          pubkey: otherPubkey,
-          displayName: 'Bob',
-          status: MembershipStatus.pending,
-        ),
-        identity: buildIdentity(),
-        displayName: 'Alice',
-      );
-
-      expect(find.text('Bob'), findsOneWidget);
-      expect(find.text('Invitation Pending'), findsOneWidget);
-    });
-  });
-
   group('CircleMemberTile — interaction', () {
     testWidgets('onTap callback is invoked when tile is tapped', (
       tester,
@@ -491,7 +461,6 @@ void main() {
                     pubkey: selfPubkey,
                     npub: selfNpub,
                     isAdmin: false,
-                    status: MembershipStatus.accepted,
                   ),
                 ),
               ),
@@ -528,7 +497,6 @@ void main() {
                     pubkey: selfPubkey,
                     npub: selfNpub,
                     isAdmin: false,
-                    status: MembershipStatus.accepted,
                   ),
                 ),
               ),
@@ -568,7 +536,6 @@ void main() {
                   pubkey: selfPubkey,
                   npub: selfNpub,
                   isAdmin: false,
-                  status: MembershipStatus.accepted,
                 ),
               ),
             ),
@@ -604,7 +571,6 @@ void main() {
                   pubkey: selfPubkey,
                   npub: selfNpub,
                   isAdmin: false,
-                  status: MembershipStatus.accepted,
                 ),
               ),
             ),
@@ -648,7 +614,6 @@ void main() {
                   pubkey: selfPubkey,
                   npub: selfNpub,
                   isAdmin: false,
-                  status: MembershipStatus.accepted,
                 ),
               ),
             ),
@@ -695,8 +660,7 @@ void main() {
     });
 
     testWidgets(
-      'subtitle widget is absent when status is accepted and only pubkey '
-      'is shown',
+      'subtitle widget is absent when only the pubkey is shown',
       (tester) async {
         await pumpTile(
           tester,
@@ -705,14 +669,12 @@ void main() {
           displayName: null,
         );
 
-        // The pending-indicator subtitle is absent, and — since there is no
-        // display name — the npub-subtitle branch is skipped too (the npub
-        // is shown as the TITLE instead). Assert directly on
-        // ListTile.subtitle rather than searching for the truncated-npub
+        // Since there is no display name the npub-subtitle branch is
+        // skipped (the npub is shown as the TITLE instead). Assert directly
+        // on ListTile.subtitle rather than searching for the truncated-npub
         // text: the title and subtitle now share the same truncation
         // format (`_shortNpub`), so the text alone can no longer
         // distinguish "rendered as title" from "rendered as subtitle".
-        expect(find.text('Invitation Pending'), findsNothing);
         final tile = tester.widget<ListTile>(find.byType(ListTile));
         expect(
           tile.subtitle,
@@ -756,6 +718,126 @@ void main() {
   });
 
   // ---------------------------------------------------------------------------
+  // The npub carries the anti-impersonation guarantee: 12 leading characters
+  // pin ~2^35, and only the 6-character bech32 checksum from the very end
+  // takes that to ~2^65, because an attacker can sample keys but never solve
+  // for a target checksum. Clipping the tail is therefore not a cosmetic
+  // degradation — it silently returns the roster to a grindable ~34 seconds.
+  // The invitation card was hardened against exactly this; the roster is the
+  // other surface where a user decides who sees their live location.
+  // ---------------------------------------------------------------------------
+
+  group('CircleMemberTile — the npub is never clipped', () {
+    RenderParagraph paragraphOf(WidgetTester tester, String text) =>
+        tester.renderObject<RenderParagraph>(find.text(text));
+
+    testWidgets('subtitle npub survives 2x on a 320dp phone', (tester) async {
+      useNarrowPhone(tester);
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: otherPubkey, displayName: 'Alice'),
+        identity: buildIdentity(),
+        textScaler: const TextScaler.linear(2),
+      );
+
+      final npub = shortNpub(otherNpub);
+      expect(find.text(npub), findsOneWidget);
+      expect(paragraphOf(tester, npub).didExceedMaxLines, isFalse);
+    });
+
+    testWidgets('subtitle npub survives 2x beside a long-word locale chip', (
+      tester,
+    ) async {
+      // Spanish spells the admin chip "Administrador", the widest trailing
+      // this row can carry; the subtitle competes with it for the same width.
+      useNarrowPhone(tester);
+      await pumpTile(
+        tester,
+        member: buildMember(
+          pubkey: otherPubkey,
+          displayName: 'Alice',
+          isAdmin: true,
+        ),
+        identity: buildIdentity(),
+        locale: const Locale('es'),
+        textScaler: const TextScaler.linear(2),
+      );
+
+      final npub = shortNpub(otherNpub);
+      expect(paragraphOf(tester, npub).didExceedMaxLines, isFalse);
+    });
+
+    testWidgets('subtitle npub survives 2x in an RTL locale', (tester) async {
+      useNarrowPhone(tester);
+      await pumpTile(
+        tester,
+        member: buildMember(
+          pubkey: otherPubkey,
+          displayName: 'Alice',
+          isAdmin: true,
+        ),
+        identity: buildIdentity(),
+        locale: const Locale('ar'),
+        textScaler: const TextScaler.linear(2),
+      );
+
+      final npub = shortNpub(otherNpub);
+      expect(
+        Directionality.of(tester.element(find.byType(CircleMemberTile))),
+        TextDirection.rtl,
+      );
+      // Unclipped, and still laid out left-to-right in the order given.
+      expect(paragraphOf(tester, npub).didExceedMaxLines, isFalse);
+      expect(paragraphOf(tester, npub).textDirection, TextDirection.ltr);
+      expect(tester.widget<Text>(find.text(npub)).data, npub);
+    });
+
+    testWidgets('title npub survives 2x when no name resolved', (tester) async {
+      // With nothing to resolve, the npub IS the title — the same clipping
+      // rule has to hold there.
+      useNarrowPhone(tester);
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: otherPubkey),
+        identity: buildIdentity(),
+        textScaler: const TextScaler.linear(2),
+      );
+
+      final npub = shortNpub(otherNpub);
+      expect(find.text(npub), findsOneWidget);
+      expect(paragraphOf(tester, npub).didExceedMaxLines, isFalse);
+    });
+
+    testWidgets('a resolved NAME still degrades instead of the row', (
+      tester,
+    ) async {
+      // The exemption is for the key, not for every title: an arbitrarily
+      // long display name is attacker-chosen and must still ellipsize, or one
+      // member could push every other row off the screen.
+      useNarrowPhone(tester);
+
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: otherPubkey, displayName: 'Al'),
+        identity: buildIdentity(),
+      );
+      final shortNameHeight = tester.getSize(find.byType(ListTile)).height;
+
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: otherPubkey, displayName: 'Al' * 200),
+        identity: buildIdentity(),
+      );
+
+      expect(tester.getSize(find.byType(ListTile)).height, shortNameHeight);
+      expect(
+        tester.widget<Text>(find.text('Al' * 200)).overflow,
+        TextOverflow.ellipsis,
+      );
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Defensive: malformed CircleMember values must not crash the list.
   // Before the avatar hardening, `pubkey[5]` on a short pubkey would throw
   // RangeError, taking down the whole bottom sheet.
@@ -771,7 +853,6 @@ void main() {
           pubkey: 'abc',
           npub: '',
           isAdmin: false,
-          status: MembershipStatus.accepted,
         ),
         identity: buildIdentity(),
         displayName: 'Alice',
@@ -788,7 +869,6 @@ void main() {
           pubkey: '',
           npub: '',
           isAdmin: false,
-          status: MembershipStatus.accepted,
         ),
         identity: buildIdentity(),
         displayName: null,
@@ -881,33 +961,6 @@ void main() {
       },
     );
 
-    testWidgets(
-      'pending status keeps "Invitation Pending" regardless of hasLocation',
-      (tester) async {
-        await pumpTile(
-          tester,
-          member: buildMember(
-            pubkey: otherPubkey,
-            displayName: 'Bob',
-            status: MembershipStatus.pending,
-          ),
-          identity: buildIdentity(),
-          displayName: 'Alice',
-          hasLocation: false,
-          onTap: () {},
-        );
-
-        expect(find.text('Invitation Pending'), findsOneWidget);
-        expect(
-          find.text('No recent location'),
-          findsNothing,
-          reason:
-              'Pending invitation status must take precedence over the '
-              'no-location hint so users see the right call-to-action.',
-        );
-      },
-    );
-
     testWidgets('tapping tile with hasLocation=false does NOT invoke onTap', (
       tester,
     ) async {
@@ -945,30 +998,6 @@ void main() {
 
       expect(tapCount, 1);
     });
-
-    testWidgets(
-      'tapping pending member with onTap still does NOT invoke callback',
-      (tester) async {
-        var tapCount = 0;
-        await pumpTile(
-          tester,
-          member: buildMember(
-            pubkey: otherPubkey,
-            displayName: 'Bob',
-            status: MembershipStatus.pending,
-          ),
-          identity: buildIdentity(),
-          displayName: 'Alice',
-          hasLocation: true,
-          onTap: () => tapCount++,
-        );
-
-        await tester.tap(find.byType(ListTile));
-        await tester.pumpAndSettle();
-
-        expect(tapCount, 0);
-      },
-    );
 
     testWidgets(
       'admin chip renders with no locator icon when interactive',
@@ -1084,25 +1113,6 @@ void main() {
         find.bySemanticsLabel('Bob, no location available'),
         findsOneWidget,
       );
-    });
-
-    testWidgets('semantics label reflects pending invitation state', (
-      tester,
-    ) async {
-      await pumpTile(
-        tester,
-        member: buildMember(
-          pubkey: otherPubkey,
-          displayName: 'Bob',
-          status: MembershipStatus.pending,
-        ),
-        identity: buildIdentity(),
-        displayName: 'Alice',
-        hasLocation: false,
-        onTap: () {},
-      );
-
-      expect(find.bySemanticsLabel('Bob, invitation pending'), findsOneWidget);
     });
   });
 
@@ -1422,7 +1432,6 @@ void main() {
                   pubkey: selfPubkey,
                   npub: selfNpub,
                   isAdmin: false,
-                  status: MembershipStatus.accepted,
                 ),
               ),
             ),
@@ -1558,9 +1567,9 @@ void main() {
   // truncated display value) to the clipboard, fires a medium-impact
   // haptic, and shows a confirming SnackBar. `ListTile.onLongPress` is
   // wired whenever `member.npub` is non-empty (`canCopy`) — independent of
-  // `hasLocation`/`isInteractive` and of `MembershipStatus` — so it works
-  // for every row, including non-interactive ("No recent location") and
-  // pending-invitation rows. The same action is also exposed as an
+  // `hasLocation`/`isInteractive` — so it works for every row, including
+  // non-interactive ("No recent location") ones. The same action is also
+  // exposed as an
   // accessible, labeled CustomSemanticsAction on the outer Semantics node
   // in the common case (no admin remove button present) — discoverable by
   // both TalkBack and VoiceOver, unlike a raw Semantics.onLongPress.
@@ -1699,30 +1708,6 @@ void main() {
       },
     );
 
-    testWidgets('copies the npub for a pending (not-yet-accepted) member', (
-      tester,
-    ) async {
-      await pumpTile(
-        tester,
-        member: buildMember(
-          pubkey: otherPubkey,
-          displayName: 'Bob',
-          status: MembershipStatus.pending,
-        ),
-        identity: buildIdentity(),
-        displayName: 'Alice',
-      );
-
-      await tester.longPress(find.byType(ListTile));
-      await tester.pumpAndSettle();
-
-      final call = clipboardCall();
-      expect(call, isNotNull);
-      expect((call!.arguments as Map)['text'], otherNpub);
-
-      await drainSnackBarTimer(tester);
-    });
-
     testWidgets(
       'exposes copy as an accessible custom action when no admin remove '
       'button is present',
@@ -1838,5 +1823,71 @@ void main() {
         handle.dispose();
       },
     );
+  });
+
+  // ---------------------------------------------------------------------------
+  // PendingMemberTile — npub display format.
+  //
+  // The staged-invitee row of the create-circle / add-member flow. It shipped
+  // `NpubValidator.truncate`'s 10/4 default while the accepted-member tile
+  // above used 12/6, so the same person read differently on the two screens
+  // and the confirmation surface carried the weaker form (plan §7.1).
+  // ---------------------------------------------------------------------------
+
+  group('PendingMemberTile — npub display format', () {
+    Future<void> pumpPendingTile(
+      WidgetTester tester, {
+      required String npub,
+      ValidationStatus status = ValidationStatus.valid,
+    }) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Scaffold(
+            body: PendingMemberTile(npub: npub, status: status),
+          ),
+        ),
+      );
+      // Not pumpAndSettle: the `validating` state renders an indefinite
+      // progress indicator that never settles. The tile is stateless, so the
+      // first frame already carries the rendered title.
+    }
+
+    String renderedTitle(WidgetTester tester) =>
+        (tester.widget<ListTile>(find.byType(ListTile)).title! as Text).data!;
+
+    testWidgets('renders the npub in the canonical format', (tester) async {
+      await pumpPendingTile(tester, npub: otherNpub);
+
+      expect(renderedTitle(tester), shortNpub(otherNpub));
+    });
+
+    testWidgets('keeps the trailing checksum, not a prefix alone', (
+      tester,
+    ) async {
+      await pumpPendingTile(tester, npub: otherNpub);
+
+      final title = renderedTitle(tester);
+      expect(title.length, 21);
+      expect(title, startsWith(otherNpub.substring(0, 12)));
+      expect(title, endsWith(otherNpub.substring(otherNpub.length - 6)));
+    });
+
+    testWidgets('uses the same format in every validation status', (
+      tester,
+    ) async {
+      for (final status in ValidationStatus.values) {
+        await pumpPendingTile(tester, npub: otherNpub, status: status);
+        expect(
+          renderedTitle(tester),
+          shortNpub(otherNpub),
+          reason:
+              'The npub identifies the person regardless of whether their '
+              'KeyPackage resolved, so $status must not change how much of '
+              'it the user gets to check.',
+        );
+      }
+    });
   });
 }

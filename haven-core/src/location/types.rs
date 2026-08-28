@@ -207,23 +207,6 @@ impl LocationMessage {
     }
 }
 
-/// Sanitizes a display name: trims whitespace, strips control characters,
-/// and caps at 64 characters. Returns `None` if the result is empty.
-#[must_use]
-pub fn sanitize_display_name(name: Option<String>) -> Option<String> {
-    name.map(|n| n.trim().to_string())
-        .filter(|n| !n.is_empty())
-        .map(|n| n.chars().filter(|c| !c.is_control()).collect::<String>())
-        .filter(|n| !n.is_empty())
-        .map(|n| {
-            if n.chars().count() > 64 {
-                n.chars().take(64).collect()
-            } else {
-                n
-            }
-        })
-}
-
 /// Settings for location sharing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocationSettings {
@@ -434,17 +417,9 @@ mod tests {
     //
     // New clients never populate `LocationMessage.display_name` (names moved to
     // public kind-0 profiles at the migration). The field survives only for
-    // read-tolerance of OLD-client location JSON, and `sanitize_display_name`
-    // lives on to serve the local petname / last-known-location path. These
-    // tests exercise the surviving sanitizer and the serde read-tolerance.
-
-    #[test]
-    fn sanitize_display_name_passes_clean_name() {
-        assert_eq!(
-            sanitize_display_name(Some("Alice".to_string())),
-            Some("Alice".to_string())
-        );
-    }
+    // read-tolerance of OLD-client location JSON; the sanitizer that guards it
+    // now lives in `crate::directory` alongside the search fold, and is tested
+    // there. These tests cover the serde read-tolerance only.
 
     #[test]
     fn display_name_none_by_default() {
@@ -552,42 +527,5 @@ mod tests {
         let json = original.to_string().unwrap();
         let deserialized = LocationMessage::from_string(&json).unwrap();
         assert_eq!(deserialized.display_name, Some("Alice".to_string()));
-    }
-
-    #[test]
-    fn display_name_sanitize_trims_whitespace() {
-        assert_eq!(
-            sanitize_display_name(Some("  Alice  ".to_string())),
-            Some("Alice".to_string())
-        );
-    }
-
-    #[test]
-    fn display_name_sanitize_strips_control_chars() {
-        assert_eq!(
-            sanitize_display_name(Some("Ali\x00ce\n".to_string())),
-            Some("Alice".to_string())
-        );
-    }
-
-    #[test]
-    fn display_name_sanitize_truncates_at_64_chars() {
-        let long_name = "A".repeat(100);
-        let sanitized = sanitize_display_name(Some(long_name));
-        assert_eq!(sanitized.as_ref().map(|n| n.chars().count()), Some(64));
-    }
-
-    #[test]
-    fn display_name_sanitize_empty_becomes_none() {
-        assert_eq!(sanitize_display_name(Some(String::new())), None);
-        assert_eq!(sanitize_display_name(Some("   ".to_string())), None);
-    }
-
-    #[test]
-    fn display_name_sanitize_only_control_chars_becomes_none() {
-        assert_eq!(
-            sanitize_display_name(Some("\x00\x01\x02".to_string())),
-            None
-        );
     }
 }

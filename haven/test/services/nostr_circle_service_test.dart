@@ -323,12 +323,10 @@ void main() {
           npub:
               'npub1424242424242424242424242424242424242424242424242424qamrcaj',
           isAdmin: true,
-          status: MembershipStatus.accepted,
         );
 
         expect(member.pubkey.length, 64);
         expect(member.isAdmin, true);
-        expect(member.status, MembershipStatus.accepted);
       });
 
       test('creates with optional fields', () {
@@ -338,7 +336,6 @@ void main() {
           npub:
               'npub1424242424242424242424242424242424242424242424242424qamrcaj',
           isAdmin: false,
-          status: MembershipStatus.pending,
           displayName: 'Alice',
         );
 
@@ -352,7 +349,6 @@ void main() {
           npub:
               'npub1424242424242424242424242424242424242424242424242424qamrcaj',
           isAdmin: true,
-          status: MembershipStatus.accepted,
           displayName: 'Alice',
         );
 
@@ -362,21 +358,19 @@ void main() {
           npub:
               'npub1424242424242424242424242424242424242424242424242424qamrcaj',
           isAdmin: false,
-          status: MembershipStatus.pending,
           displayName: 'Different Name',
         );
 
         expect(member1, equals(member2));
       });
 
-      test('toString includes truncated pubkey and status', () {
+      test('toString includes truncated pubkey', () {
         const member = CircleMember(
           pubkey:
               'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
           npub:
               'npub1424242424242424242424242424242424242424242424242424qamrcaj',
           isAdmin: true,
-          status: MembershipStatus.accepted,
         );
 
         final str = member.toString();
@@ -391,7 +385,6 @@ void main() {
             ),
           ),
         );
-        expect(str, contains('accepted'));
       });
     });
 
@@ -460,13 +453,14 @@ void main() {
           circleName: 'Family',
           inviterPubkey:
               'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-          memberCount: 5,
+          inviterNpub:
+              'npub15feryxhrdz9m6y09mr8wrerwzgj6f8ntxvhxyrdlm5aahn0t09nl4ujy86',
           invitedAt: DateTime.now(),
         );
 
         expect(invitation.circleName, 'Family');
         expect(invitation.inviterPubkey.length, 64);
-        expect(invitation.memberCount, 5);
+        expect(invitation.inviterNpub, startsWith('npub1'));
       });
     });
 

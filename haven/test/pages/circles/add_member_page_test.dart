@@ -24,12 +24,19 @@ import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/member_directory_service.dart';
+import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/npub_validator.dart';
+import 'package:haven/src/widgets/circles/circle_member_tile.dart';
+import 'package:haven/src/widgets/circles/member_picker.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../helpers/localized_app_harness.dart';
 import '../../mocks/mock_circle_service.dart';
+import '../../mocks/mock_member_directory_service.dart';
+import '../../mocks/mock_profile_service.dart';
 import '../../mocks/mock_relay_service.dart';
 
 // ---------------------------------------------------------------------------
@@ -44,9 +51,19 @@ const _newMemberNpub =
 const _newMemberHex =
     'aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd';
 
-/// The hex pubkey already present in the test circle's member list.
-const _existingMemberHex =
-    'abc123def456abc123def456abc123def456abc123def456abc123def456abcd';
+/// The hex pubkey already present in the test circle's member list — and
+/// the local user's own, since the viewer is that circle's admin.
+const _existingMemberHex = kTestPubkeyHex;
+
+/// The npub half of [_existingMemberHex]. Both halves come from the same
+/// place: the entry check compares npubs and the row check compares hex, so
+/// an unrelated pair would make one of them silently untestable.
+const _existingMemberNpub = kTestNpub;
+
+const _aliceHex =
+    'a11ce0000000000000000000000000000000000000000000000000000000cafe';
+const _aliceNpub =
+    'npub15ywwqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqetlqhgm683';
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -55,9 +72,32 @@ const _existingMemberHex =
 /// The test identity (self = admin of the circle).
 final _testIdentity = Identity(
   pubkeyHex: _existingMemberHex,
-  npub: 'npub1test',
+  npub: _existingMemberNpub,
   createdAt: DateTime(2024),
 );
+
+/// A directory holding one named co-member from ANOTHER circle, folded with a
+/// plain lower-case because `RustLib` is not initialised in a `flutter test`
+/// process.
+MemberDirectory _aliceDirectory() {
+  return buildDirectory(
+    entries: const [
+      DirectoryEntry(
+        pubkeyHex: _aliceHex,
+        npub: _aliceNpub,
+        tier: DirectoryTier.current,
+      ),
+    ],
+    profiles: const {
+      _aliceHex: Profile(pubkeyHex: _aliceHex, displayName: 'Alice Aardvark'),
+      _existingMemberHex: Profile(
+        pubkeyHex: _existingMemberHex,
+        displayName: 'Existing Member',
+      ),
+    },
+    fold: (value) => value.toLowerCase(),
+  );
+}
 
 /// Builds a [KeyPackageData] whose `eventJson` carries [pubkeyHex] under the
 /// current (Dark Matter, kind 30443) KeyPackage kind.
@@ -171,9 +211,14 @@ class _FakeIdentityNotifier extends IdentityNotifier {
 List<Override> _overrides({
   required MockRelayService mockRelay,
   required MockCircleService mockCircle,
+  MemberDirectory? directory,
 }) {
   return [
     relayServiceProvider.overrideWithValue(mockRelay),
+    memberDirectoryServiceProvider.overrideWithValue(
+      MockMemberDirectoryService(directory: directory),
+    ),
+    profileServiceProvider.overrideWithValue(MockProfileService()),
     circleServiceProvider.overrideWithValue(mockCircle),
     identityServiceProvider.overrideWithValue(const _MockIdentityService()),
     identityProvider.overrideWith((_) async => _testIdentity),
@@ -195,9 +240,14 @@ Widget _buildApp({
   required Circle circle,
   required MockRelayService mockRelay,
   required MockCircleService mockCircle,
+  MemberDirectory? directory,
 }) {
   return ProviderScope(
-    overrides: _overrides(mockRelay: mockRelay, mockCircle: mockCircle),
+    overrides: _overrides(
+      mockRelay: mockRelay,
+      mockCircle: mockCircle,
+      directory: directory,
+    ),
     child: MaterialApp(
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
@@ -248,7 +298,7 @@ void main() {
       // AppBar title reflects the circle name.
       expect(find.text('Add to Test Circle'), findsOneWidget);
 
-      // Empty-state content. The MemberSearchBar also shows a userPlus prefix
+      // Empty-state content. The MemberSearchField also shows a userPlus prefix
       // icon so there are at least two — assert the presence of both the icon
       // and the helper text to confirm the empty state renders.
       expect(find.byIcon(LucideIcons.userPlus), findsWidgets);
@@ -962,6 +1012,260 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(tester.takeException(), isNull);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // The picker: people you already share a circle with (R2/R4)
+  // -------------------------------------------------------------------------
+  group('AddMemberPage — the picker', () {
+    testWidgets('A1. offers co-members by name and key, with no relay call', (
+      tester,
+    ) async {
+      final mockRelay = MockRelayService();
+      await tester.pumpWidget(
+        _buildApp(
+          circle: _makeCircle(),
+          mockRelay: mockRelay,
+          mockCircle: MockCircleService(),
+          directory: _aliceDirectory(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final l10n = l10nOf(tester, AddMemberPage);
+      expect(find.text(l10n.memberPickerSectionRoster), findsOneWidget);
+      expect(find.byType(MemberCandidateTile), findsOneWidget);
+      expect(find.text('Alice Aardvark'), findsOneWidget);
+      expect(
+        find.text(NpubValidator.shortenForDisplay(_aliceNpub)),
+        findsOneWidget,
+      );
+      expect(mockRelay.methodCalls, isEmpty);
+    });
+
+    testWidgets('A2. tapping a row stages that person', (tester) async {
+      await tester.pumpWidget(
+        _buildApp(
+          circle: _makeCircle(),
+          mockRelay: MockRelayService(keyPackageResult: _makeKp(_newMemberHex)),
+          mockCircle: MockCircleService(),
+          directory: _aliceDirectory(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Alice Aardvark'));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<PendingMemberTile>(find.byType(PendingMemberTile)).npub,
+        _aliceNpub,
+      );
+      expect(
+        tester
+            .widget<FilledButton>(find.byKey(WidgetKeys.addMemberConfirm))
+            .onPressed,
+        isNotNull,
+      );
+    });
+
+    testWidgets('A3. someone already in THIS circle is shown, disabled, with '
+        'that reason — not hidden', (tester) async {
+      // Hiding them would empty the list for a user whose only circle is the
+      // one being added to, and would hide the very person being searched for.
+      final mockRelay = MockRelayService();
+      await tester.pumpWidget(
+        _buildApp(
+          circle: _makeCircle(
+            members: [
+              TestCircleFactory.createMember(
+                pubkey: _existingMemberHex,
+                npub: _existingMemberNpub,
+                isAdmin: true,
+              ),
+              TestCircleFactory.createMember(
+                pubkey: _aliceHex,
+                npub: _aliceNpub,
+              ),
+            ],
+          ),
+          mockRelay: mockRelay,
+          mockCircle: MockCircleService(),
+          directory: _aliceDirectory(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final l10n = l10nOf(tester, AddMemberPage);
+      expect(find.text('Alice Aardvark'), findsOneWidget);
+      expect(find.text(l10n.addMemberAlreadyInCircle), findsOneWidget);
+      expect(find.text(l10n.memberSearchAlreadyAdded), findsNothing);
+
+      await tester.tap(find.text('Alice Aardvark'));
+      await tester.pumpAndSettle();
+      expect(find.byType(PendingMemberTile), findsNothing);
+      expect(mockRelay.methodCalls, isEmpty);
+    });
+
+    testWidgets('A4. typing filters the offered people in the same frame', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildApp(
+          circle: _makeCircle(),
+          mockRelay: MockRelayService(),
+          mockCircle: MockCircleService(),
+          directory: _aliceDirectory(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.byType(TextField), 'zzz');
+      await tester.pump();
+      expect(find.text('Alice Aardvark'), findsNothing);
+
+      await tester.enterText(find.byType(TextField), 'aardvark');
+      await tester.pump();
+      expect(find.text('Alice Aardvark'), findsOneWidget);
+    });
+
+    testWidgets('A5. with no shared circles yet, the guidance still stands', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildApp(
+          circle: _makeCircle(),
+          mockRelay: MockRelayService(),
+          mockCircle: MockCircleService(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final l10n = l10nOf(tester, AddMemberPage);
+      expect(find.text(l10n.createCircleEmptyTitle), findsOneWidget);
+      expect(find.text(l10n.memberPickerSectionRoster), findsNothing);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // The self-check. This page caught self only incidentally — as "Already in
+  // this circle" — and that check sat AFTER a KeyPackage fetch, so offline it
+  // failed open and the self-add was never identified (§9.5).
+  // -------------------------------------------------------------------------
+  group('AddMemberPage — you cannot invite yourself', () {
+    testWidgets('A6. entering your own ID is refused as YOU, not as a member', (
+      tester,
+    ) async {
+      final mockRelay = MockRelayService(
+        keyPackageResult: _makeKp(_existingMemberHex),
+      );
+      await tester.pumpWidget(
+        _buildApp(
+          circle: _makeCircle(),
+          mockRelay: mockRelay,
+          mockCircle: MockCircleService(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await _addMember(tester, _existingMemberNpub);
+      await tester.pumpAndSettle();
+
+      final l10n = l10nOf(tester, AddMemberPage);
+      expect(find.text(l10n.memberPickerReasonSelf), findsOneWidget);
+      expect(find.text(l10n.addMemberAlreadyInCircle), findsNothing);
+      expect(find.byType(PendingMemberTile), findsNothing);
+    });
+
+    testWidgets('A7. the refusal costs no relay lookup, so it holds offline', (
+      tester,
+    ) async {
+      final mockRelay = MockRelayService(
+        keyPackageResult: _makeKp(_existingMemberHex),
+      );
+      await tester.pumpWidget(
+        _buildApp(
+          circle: _makeCircle(),
+          mockRelay: mockRelay,
+          mockCircle: MockCircleService(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await _addMember(tester, _existingMemberNpub);
+      await tester.pumpAndSettle();
+
+      expect(
+        mockRelay.methodCalls,
+        isEmpty,
+        reason:
+            'the shipped check read a hex pubkey out of a FETCHED KeyPackage, '
+            'so with no network it never ran at all',
+      );
+    });
+
+    testWidgets('A9. the driver sequence — type by key, submit with done — '
+        'enables a FilledButton confirm', (tester) async {
+      // Exactly what `e2e_combined.dart` does on this page. A break here
+      // hangs the lane for 60 s rather than failing it.
+      await tester.pumpWidget(
+        _buildApp(
+          circle: _makeCircle(),
+          mockRelay: MockRelayService(keyPackageResult: _makeKp(_newMemberHex)),
+          mockCircle: MockCircleService(),
+          directory: _aliceDirectory(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.byKey(WidgetKeys.memberSearchInput),
+        _newMemberNpub,
+      );
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+
+      final cta = tester.widget(find.byKey(WidgetKeys.addMemberConfirm));
+      expect(cta, isA<FilledButton>());
+      expect((cta as FilledButton).onPressed, isNotNull);
+    });
+
+    testWidgets('A8. an existing member who is NOT you keeps their own '
+        'reason', (tester) async {
+      final mockRelay = MockRelayService();
+      await tester.pumpWidget(
+        _buildApp(
+          circle: _makeCircle(
+            members: [
+              TestCircleFactory.createMember(
+                pubkey: _existingMemberHex,
+                npub: _existingMemberNpub,
+                isAdmin: true,
+              ),
+              TestCircleFactory.createMember(
+                pubkey: _aliceHex,
+                npub: _aliceNpub,
+              ),
+            ],
+          ),
+          mockRelay: mockRelay,
+          mockCircle: MockCircleService(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await _addMember(tester, _aliceNpub);
+      await tester.pumpAndSettle();
+
+      final l10n = l10nOf(tester, AddMemberPage);
+      expect(find.text(l10n.addMemberAlreadyInCircle), findsOneWidget);
+      expect(find.text(l10n.memberPickerReasonSelf), findsNothing);
+      expect(
+        mockRelay.methodCalls,
+        isEmpty,
+        reason: 'roster npubs are already on the device',
+      );
     });
   });
 }

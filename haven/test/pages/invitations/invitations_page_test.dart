@@ -5,6 +5,7 @@
 /// - Loading state
 /// - Empty state display
 /// - Invitation list rendering
+/// - Opening the page issues no profile relay fetch for the inviters
 library;
 
 import 'dart:async';
@@ -16,6 +17,7 @@ import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/invitations/invitations_page.dart';
 import 'package:haven/src/providers/invitation_poll_status_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
+import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/circles/invitation_card.dart';
@@ -24,6 +26,8 @@ import 'package:haven/src/widgets/common/refresh_ring/refresh_ring_button.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../helpers/localized_app_harness.dart';
+import '../../mocks/mock_circle_service.dart';
+import '../../mocks/mock_profile_service.dart';
 
 /// Completer used by the loading test so the future never completes
 /// without leaving a pending Timer.
@@ -39,7 +43,10 @@ class _NoopPollStatus extends InvitationPollStatusNotifier {
   Future<void> refresh() async {}
 }
 
-Widget _buildApp({required AsyncValue<List<Invitation>> invitationsState}) {
+Widget _buildApp({
+  required AsyncValue<List<Invitation>> invitationsState,
+  MockProfileService? profileService,
+}) {
   return ProviderScope(
     overrides: [
       pendingInvitationsProvider.overrideWith((ref) {
@@ -54,6 +61,13 @@ Widget _buildApp({required AsyncValue<List<Invitation>> invitationsState}) {
       }),
       // Stub the Settle Pill so the page's refresh has no side effects.
       invitationPollStatusProvider.overrideWith(_NoopPollStatus.new),
+      // The cards read the inviter's name out of the profile cache, which
+      // must stay off the real FFI stack in a widget test.
+      profileServiceProvider.overrideWithValue(
+        profileService ?? MockProfileService(),
+      ),
+      // ...and the local petname out of the contact table, same reason.
+      circleServiceProvider.overrideWithValue(MockCircleService()),
     ],
     child: MaterialApp(
       localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -73,7 +87,8 @@ Invitation _createInvitation({String circleName = 'Test'}) {
     circleName: circleName,
     inviterPubkey:
         'abc123def456abc123def456abc123def456abc123def456abc123def456abcd',
-    memberCount: 3,
+    inviterNpub:
+        'npub140qj8hh5264uzg7773t2hsfrmm69d27py000g44tcy3aaazk40xskwpam3',
     invitedAt: DateTime.now(),
   );
 }
@@ -138,7 +153,7 @@ void main() {
       expect(find.text(l10n.invitationsEmptyMessage), findsOneWidget);
     });
 
-    testWidgets('shows invitation cards when invitations exist', (
+    testWidgets('shows one card per invitation, none of them named', (
       tester,
     ) async {
       final invitations = [
@@ -151,9 +166,39 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      final l10n = l10nOf(tester, InvitationsPage);
       expect(find.byType(InvitationCard), findsNWidgets(2));
-      expect(find.text('Family'), findsOneWidget);
-      expect(find.text('Work'), findsOneWidget);
+      // Every card is headed the same, because pre-join Haven knows nothing
+      // that distinguishes one circle from another: the name lives inside
+      // the encrypted Welcome. A card that showed one would be showing the
+      // stand-in.
+      expect(find.text(l10n.invitationCardHeading), findsNWidgets(2));
+      expect(find.text('Family'), findsNothing);
+      expect(find.text('Work'), findsNothing);
+    });
+
+    testWidgets('opening the page fetches no profile for the inviters', (
+      tester,
+    ) async {
+      // An inviter is a stranger until the invitation is accepted. A batch
+      // refresh here would put their pubkey in the union, and every pubkey in
+      // the union also reaches the picture download — a GET to a host THEY
+      // chose, from the user's real IP, for a card that renders no image at
+      // all. The name is a local cache read or nothing.
+      final profileService = MockProfileService();
+
+      await tester.pumpWidget(
+        _buildApp(
+          invitationsState: AsyncValue.data([_createInvitation()]),
+          profileService: profileService,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        profileService.methodCalls.map((call) => call.method),
+        isNot(contains('refreshMemberProfiles')),
+      );
     });
 
     testWidgets('shows error message on error', (tester) async {

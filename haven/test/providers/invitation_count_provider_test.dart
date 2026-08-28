@@ -88,7 +88,7 @@ Invitation _createTestInvitation({String circleName = 'Test'}) {
     mlsGroupId: [1, 2, 3, 4],
     circleName: circleName,
     inviterPubkey: 'test_pubkey',
-    memberCount: 2,
+    inviterNpub: 'npub1test',
     invitedAt: DateTime.now(),
   );
 }

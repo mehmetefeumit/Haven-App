@@ -31,8 +31,10 @@ import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/location_settings_launcher.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/maintenance_service.dart';
+import 'package:haven/src/services/member_directory_service.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_identity_service.dart';
+import 'package:haven/src/services/nostr_member_directory_service.dart';
 import 'package:haven/src/services/nostr_profile_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/nostr_subscription_service.dart';
@@ -184,6 +186,26 @@ final profileServiceProvider = Provider<ProfileService>((ref) {
       }
       return circleService.getCircleManagerFfi();
     },
+  );
+});
+
+/// Provides the member-directory service singleton.
+///
+/// Composes services rather than opening anything of its own: the roster
+/// comes from [circleServiceProvider] and names come from the local kind-0
+/// cache behind [profileServiceProvider], so the directory adds no storage
+/// and no relay traffic. See `docs/MEMBER_PICKER_PLAN.md` (R2/R4).
+///
+/// Takes a `circleServiceFactory` that re-reads per call, exactly as
+/// [profileServiceProvider] above does and for the same reason: a captured
+/// instance would survive the `ref.invalidate(circleServiceProvider)` that
+/// `createIdentity`/`importFromNsec` perform to retire the wiped, latched
+/// service, and the picker would be empty for the rest of the process.
+final memberDirectoryServiceProvider = Provider<MemberDirectoryService>((ref) {
+  return NostrMemberDirectoryService(
+    circleServiceFactory: () => ref.read(circleServiceProvider),
+    profileService: ref.read(profileServiceProvider),
+    identityService: ref.read(identityServiceProvider),
   );
 });
 

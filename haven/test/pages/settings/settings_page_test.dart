@@ -11,14 +11,15 @@ import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/settings/privacy_page.dart';
 import 'package:haven/src/pages/settings/settings_page.dart';
 import 'package:haven/src/test_keys.dart';
+import 'package:haven/src/widgets/widgets.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() {
-    // Theme / map-style / debug providers read SharedPreferences; seed an
-    // empty store so they build with defaults.
+    // The providers reached from this page and the Privacy hub read
+    // SharedPreferences; seed an empty store so they build with defaults.
     SharedPreferences.setMockInitialValues(<String, Object>{});
   });
 
@@ -52,6 +53,22 @@ void main() {
     expect(find.text('Map style'), findsOneWidget);
     expect(find.text('Appearance'), findsOneWidget);
     expect(find.text('About'), findsOneWidget);
+  });
+
+  testWidgets('every hub row is title-only', (tester) async {
+    await tester.pumpWidget(build());
+    await tester.pumpAndSettle();
+
+    // Asserted on the tiles rather than on the removed strings, so a new row
+    // that arrives with a subtitle fails here too. The debug-overlay switch is
+    // a SwitchListTile and deliberately keeps its supporting line.
+    final tiles = tester.widgetList<HavenSettingsTile>(
+      find.byType(HavenSettingsTile),
+    );
+    expect(tiles, isNotEmpty);
+    for (final tile in tiles) {
+      expect(tile.subtitle, isNull, reason: '"${tile.title}" has a subtitle');
+    }
   });
 
   testWidgets('shows a Privacy entry directly above About', (tester) async {

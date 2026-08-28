@@ -187,6 +187,28 @@ impl MembershipStatus {
     }
 }
 
+/// Normalizes a circle's display name for rendering.
+///
+/// A joined circle's name is verbatim the MLS group-profile name — chosen by
+/// whoever created the group and changeable by any admin — and the member
+/// picker renders it to break a display-name collision between two co-members
+/// (`docs/MEMBER_PICKER_PLAN.md` §7.2). That makes it remote-supplied text on a
+/// rendered line, so it goes through the same
+/// [`sanitize_display_name`][crate::directory::sanitize_display_name] every
+/// other rendered name does: the invisible-character strip and whitespace
+/// collapse FIRST, then the 48-cluster / 32-`char`-per-cluster cap. The order is
+/// the point — a cap applied to unsanitized input lets zero-width padding decide
+/// where the name ends.
+///
+/// A name with nothing renderable left becomes the EMPTY string rather than the
+/// invisible characters it was built from: Dart's `trim()` does not remove LRM,
+/// so a caller could not otherwise tell "blank" from "blank-looking" and would
+/// render an empty row an impersonator controls.
+#[must_use]
+pub fn sanitize_circle_name(name: String) -> String {
+    crate::directory::sanitize_display_name(Some(name)).unwrap_or_default()
+}
+
 /// A circle (group of people who share locations).
 ///
 /// This is the application-level representation of a group, containing
@@ -197,7 +219,10 @@ pub struct Circle {
     pub mls_group_id: GroupId,
     /// Nostr group ID (32 bytes, used in h-tags for routing).
     pub nostr_group_id: [u8; 32],
-    /// User-facing display name (local only).
+    /// User-facing display name. Locally stored, but NOT locally authored on a
+    /// joined circle: it is the MLS group-profile name the creator chose and
+    /// any admin may change. Normalized by [`sanitize_circle_name`] at the
+    /// storage boundary, which is what makes it safe to render.
     pub display_name: String,
     /// Type of circle.
     pub circle_type: CircleType,
@@ -473,10 +498,13 @@ pub struct Invitation {
     pub circle_name: String,
     /// Public key (hex) of who invited us.
     pub inviter_pubkey: String,
-    /// Number of members in the circle.
-    pub member_count: usize,
     /// When we were invited (Unix timestamp).
     pub invited_at: i64,
+}
+
+/// The first `max` CHARACTERS of `value`, for the redacting `Debug` impls.
+fn truncate_chars(value: &str, max: usize) -> String {
+    value.chars().take(max).collect()
 }
 
 impl std::fmt::Debug for Invitation {
@@ -484,8 +512,13 @@ impl std::fmt::Debug for Invitation {
         f.debug_struct("Invitation")
             .field("mls_group_id", &"<redacted>")
             .field("circle_name", &self.circle_name)
-            .field("inviter_pubkey", &self.inviter_pubkey)
-            .field("member_count", &self.member_count)
+            .field(
+                "inviter_pubkey",
+                // By CHARS, never `&s[..16]`: a byte slice of a String nothing
+                // guarantees is hex panics on a char boundary, and a Debug impl
+                // that panics takes the log line's caller with it.
+                &format_args!("{}...", truncate_chars(&self.inviter_pubkey, 16)),
+            )
             .field("invited_at", &self.invited_at)
             .finish()
     }
@@ -722,7 +755,6 @@ mod tests {
             mls_group_id: GroupId::from_slice(&[0x11; 8]),
             circle_name: "Family Circle".to_string(),
             inviter_pubkey: "pubkey456".to_string(),
-            member_count: 5,
             invited_at: 9000,
         };
 
@@ -730,7 +762,41 @@ mod tests {
         assert!(debug_str.contains("<redacted>"));
         assert!(debug_str.contains("Family Circle"));
         assert!(debug_str.contains("pubkey456"));
-        assert!(debug_str.contains("member_count: 5"));
+    }
+
+    #[test]
+    fn invitation_debug_truncates_a_real_inviter_pubkey() {
+        // The sibling test's fixture is shorter than the truncation bound, so
+        // it cannot tell a truncating impl from a full-printing one. A real
+        // 64-char hex key can: Rule 6 covers the inviter's identity key just
+        // as `Contact`/`CircleMember` already cover a member's.
+        let pubkey = "a".repeat(64);
+        let invitation = Invitation {
+            mls_group_id: GroupId::from_slice(&[0x11; 8]),
+            circle_name: "Family Circle".to_string(),
+            inviter_pubkey: pubkey.clone(),
+            invited_at: 9000,
+        };
+
+        let debug_str = format!("{invitation:?}");
+        assert!(!debug_str.contains(&pubkey));
+        assert!(debug_str.contains(&format!("{}...", &pubkey[..16])));
+    }
+
+    #[test]
+    fn invitation_debug_does_not_panic_on_a_non_ascii_pubkey() {
+        // Nothing in the type constrains `inviter_pubkey` to hex, and a
+        // byte-sliced truncation panics when byte 16 lands mid-character (it
+        // does here: `田` is three bytes) — inside a `Debug` impl, i.e. inside
+        // whatever was logging.
+        let invitation = Invitation {
+            mls_group_id: GroupId::from_slice(&[0x11; 8]),
+            circle_name: "Family Circle".to_string(),
+            inviter_pubkey: "田".repeat(64),
+            invited_at: 9000,
+        };
+        let debug_str = format!("{invitation:?}");
+        assert!(debug_str.contains(&format!("{}...", "田".repeat(16))));
     }
 
     #[test]
@@ -909,5 +975,107 @@ mod tests {
         // Empty input must be rejected without touching the OnceLock.
         let err = set_default_relays_for_test(vec![]).expect_err("empty input must error");
         assert!(err.to_lowercase().contains("non-empty"));
+    }
+
+    // ==================== Circle-name sanitization ====================
+
+    /// Every invisible character `sanitize_display_name` deliberately KEEPS.
+    ///
+    /// These are the residual with which one circle name can still render
+    /// identically to another and compare unequal — the reason the picker's
+    /// disambiguator must compare FOLDED circle names, not sanitized ones.
+    const KEPT_INVISIBLES: &[char] = &[
+        '\u{200C}',  // ZWNJ — Persian/Urdu spelling
+        '\u{200D}',  // ZWJ — Devanagari conjuncts, emoji glue
+        '\u{200E}',  // LRM
+        '\u{200F}',  // RLM
+        '\u{061C}',  // ALM
+        '\u{FE0F}',  // VS-16
+        '\u{E0041}', // a tag character
+    ];
+
+    #[test]
+    fn a_bidi_override_never_survives_into_a_rendered_circle_name() {
+        // RLO makes the rendered order differ from the string; its effect IS
+        // the attack, so it is stripped rather than kept.
+        assert_eq!(sanitize_circle_name("Fam\u{202E}ily".to_string()), "Family");
+    }
+
+    #[test]
+    fn zero_width_padding_never_survives_into_a_rendered_circle_name() {
+        // The whole point of the padding is that these two render the same
+        // while comparing unequal. After sanitization they ARE equal, so the
+        // picker's exact-equality comparison is sound for this class.
+        assert_eq!(
+            sanitize_circle_name("Fam\u{200B}ily".to_string()),
+            sanitize_circle_name("Family".to_string())
+        );
+    }
+
+    #[test]
+    fn the_strip_runs_before_the_cap() {
+        // 48 letters, each preceded by a zero-width space: 96 grapheme
+        // clusters unsanitized, 48 after the strip. Capping first would end
+        // the name at 24 letters — i.e. padding would decide where a circle
+        // name stops.
+        let padded = "\u{200B}a".repeat(crate::directory::DISPLAY_NAME_MAX_GRAPHEMES);
+        assert_eq!(
+            sanitize_circle_name(padded),
+            "a".repeat(crate::directory::DISPLAY_NAME_MAX_GRAPHEMES)
+        );
+    }
+
+    #[test]
+    fn a_remote_circle_name_is_capped() {
+        let long = "x".repeat(crate::directory::DISPLAY_NAME_MAX_GRAPHEMES * 4);
+        assert_eq!(
+            sanitize_circle_name(long).chars().count(),
+            crate::directory::DISPLAY_NAME_MAX_GRAPHEMES
+        );
+    }
+
+    #[test]
+    fn a_circle_name_with_nothing_renderable_left_is_empty_not_blank_looking() {
+        // `is_empty()` must be TRUE, so a renderer can fall through to its own
+        // placeholder. A kept-but-invisible name would pass `!is_empty()` and
+        // Dart's `trim()` does not remove LRM either.
+        let name = sanitize_circle_name("\u{200E}\u{200C}\u{FE0F}".to_string());
+        assert!(name.is_empty(), "expected empty, got {name:?}");
+    }
+
+    #[test]
+    fn a_legitimate_name_keeps_its_orthography_and_its_emoji() {
+        // The strip must not damage the names the keep-list exists for.
+        assert_eq!(
+            sanitize_circle_name("می\u{200C}رود".to_string()),
+            "می\u{200C}رود"
+        );
+        assert_eq!(
+            sanitize_circle_name("Family \u{2764}\u{FE0F}".to_string()),
+            "Family \u{2764}\u{FE0F}"
+        );
+    }
+
+    #[test]
+    fn the_search_fold_collapses_every_invisible_the_sanitizer_keeps() {
+        // Defect 1(3): sanitization alone does NOT make two visually identical
+        // circle names compare equal, because the keep-list characters survive
+        // it by design. `fold_for_search` strips all of them, which is what
+        // makes it the right normalisation for the picker's disambiguator to
+        // compare on. A character added to the sanitizer's keep-list without a
+        // matching entry in `is_invisible` fails here.
+        let plain = crate::directory::fold_for_search(&sanitize_circle_name("Family".to_string()));
+        for kept in KEPT_INVISIBLES {
+            let spoofed = sanitize_circle_name(format!("Fam{kept}ily"));
+            assert_ne!(
+                spoofed, "Family",
+                "{kept:?} is expected to SURVIVE sanitization — that is the residual"
+            );
+            assert_eq!(
+                crate::directory::fold_for_search(&spoofed),
+                plain,
+                "the fold must collapse {kept:?}, or the disambiguator stays spoofable"
+            );
+        }
     }
 }

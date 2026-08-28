@@ -49,9 +49,20 @@ String _compassDirectionLabel(AppLocalizations l10n, CompassDirection d) {
   }
 }
 
+/// How stale a member's last fix must be before the marker is tagged with its
+/// age.
+///
+/// Owner-chosen (2026-08-24), and it must stay clear of the publish cadence:
+/// a healthy peer's freshest fix is already up to `kLocationPublishMaxInterval`
+/// (168 s) old before propagation, so anything near that tags nearly every
+/// marker nearly all the time and a pill that is always there stops reading as
+/// "this one is behind". Both the visible pill and the spoken age share this
+/// bound, so a screen reader never announces an age a sighted user cannot see.
+const Duration _agePillThreshold = Duration(minutes: 5);
+
 /// Formats a [Duration] into a compact age string for the visible pill.
 ///
-/// Returns `null` for ages under one minute — fresh data reads as "no pill"
+/// Returns `null` below [_agePillThreshold] — recent data reads as "no pill"
 /// rather than "just now", which would be visual noise on the common case.
 /// [l10n] is threaded in because this top-level helper has no [BuildContext].
 /// Minutes are the ONLY unit: a marker is evicted once it passes
@@ -62,7 +73,7 @@ String _compassDirectionLabel(AppLocalizations l10n, CompassDirection d) {
 /// eviction window is ever widened, a stale marker reads "90m" rather than
 /// silently losing its age pill.
 String? _formatAge(AppLocalizations l10n, Duration age) {
-  if (age.inMinutes < 1) return null;
+  if (age < _agePillThreshold) return null;
   return l10n.memberMarkerMinutesShort(age.inMinutes);
 }
 
@@ -71,7 +82,7 @@ String? _formatAge(AppLocalizations l10n, Duration age) {
 /// [l10n] is threaded in because this top-level helper has no [BuildContext].
 /// Minutes-only for the same reason as [_formatAge] — see the note there.
 String? _formatAgeForSemantics(AppLocalizations l10n, Duration age) {
-  if (age.inMinutes < 1) return null;
+  if (age < _agePillThreshold) return null;
   return l10n.memberMarkerMinutesAgoSemantics(age.inMinutes);
 }
 

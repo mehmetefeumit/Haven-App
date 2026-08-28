@@ -463,7 +463,7 @@ class _MockCircleServiceThrowsOnFirst
       mlsGroupId: const [1, 2, 3, 4],
       circleName: 'Mock Circle',
       inviterPubkey: 'mock_inviter_pubkey',
-      memberCount: 2,
+      inviterNpub: 'npub1mockinviter',
       invitedAt: DateTime.now(),
     );
   }
@@ -564,7 +564,7 @@ class _MockCircleServiceMixedErrors
       mlsGroupId: const [1, 2, 3, 4],
       circleName: 'Mock Circle',
       inviterPubkey: 'mock_inviter_pubkey',
-      memberCount: 2,
+      inviterNpub: 'npub1mockinviter',
       invitedAt: DateTime.now(),
     );
   }

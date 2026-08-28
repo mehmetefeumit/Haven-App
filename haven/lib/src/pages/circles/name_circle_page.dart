@@ -117,6 +117,13 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
                       TextFormField(
                         key: WidgetKeys.circleNameInput,
                         controller: _nameController,
+                        // Grapheme clusters (Flutter's own `maxLength`
+                        // counts via the `characters` package, never
+                        // splitting a cluster) — matches the real cap
+                        // `sanitize_circle_name` enforces at rest, so
+                        // nothing typed here is ever silently truncated
+                        // after Create is tapped.
+                        maxLength: kCircleNameMaxGraphemes,
                         decoration: InputDecoration(
                           labelText: l10n.nameCircleNameLabel,
                           hintText: l10n.nameCircleNameHint,
@@ -134,6 +141,10 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
                         textCapitalization: TextCapitalization.words,
                         autofocus: true,
                         enabled: !_isCreating,
+                        // A circle name names a social grouping; the keyboard
+                        // learned-word dictionary is outside Haven's storage
+                        // and its logout wipe.
+                        enableIMEPersonalizedLearning: false,
                       ),
                       const SizedBox(height: HavenSpacing.lg),
 
