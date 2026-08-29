@@ -3,14 +3,6 @@
   "pinned_dependencies": {
     "mdk_rev": "e391adc133a9b60e420da7a0446f014a180ac8d2"
   },
-  "ratchet_override": {
-    "reason": "The About page's three value-prop cards were removed at the owner's request, and the *Body strings they rendered had no other surface, so they were deleted from all 13 ARB files rather than left as dead copy the manifest still claims. No promise is retired: each of the three invariants keeps the Title and Summary keys that make the same claim on the onboarding intro screen, and every cited test and guard is unchanged. Delete this block in the next commit that touches the manifest — once this lands on the base ref the drop is no longer a diff, and a stale allowance fails the ratchet.",
-    "items": [
-      "INV-K-SECRET-KEY-NEVER-LEAVES-DEVICE.assertion:onboardingValueProp3Body",
-      "INV-O-ENCRYPTED-ON-DEVICE-BEFORE-IT-LEAVES.assertion:onboardingValueProp1Body",
-      "INV-O-NO-FIRST-PARTY-SERVER.assertion:onboardingValueProp2Body"
-    ]
-  },
   "accepted_deviations": [
     {
       "id": "P1",
@@ -77,6 +69,12 @@
       "source": "haven-core/SECURITY.md#database-encryption",
       "summary": "On iOS the SQLCipher DB keys use kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly rather than the library default kSecAttrAccessibleWhenUnlocked, so a background wake can open the database while the device is locked. Owner-approved to enable locked-device background location sharing.",
       "forbidden_claim": "Copy must not claim a locked phone protects Haven's data at rest. A still-powered-on device unlocked at least once since boot can have the OS surrender the DB key WHILE LOCKED; only a device powered off and not yet unlocked keeps it sealed. NOTE: no user-facing string discloses this today — see docs/privacy/README.md, known gaps."
+    },
+    {
+      "id": "IOS-BACKUP",
+      "source": "docs/MEMBER_PICKER_PLAN.md#10-decisions-taken-owner-2026-08-24",
+      "summary": "Owner decision D8 (2026-08-28) accepts the iOS backup posture UNCHANGED now that circles.db carries the member directory — the payload change D5 said would deserve its own decision on its own timeline. The Haven data directory is getApplicationDocumentsDirectory() + '/haven' with no platform branch (haven/lib/src/services/data_directory_provider.dart:44-47), so on iOS circles.db, its -journal sidecar and session.sqlite sit in Documents/, the most-backed-up location the OS offers, and NSURLIsExcludedFromBackupKey appears NOWHERE in the tree — not in haven/ios/Runner/, not in any Dart or Rust path, not in a checked-in plugin. Android is unaffected: allowBackup=\"false\" with no dataExtractionRules and no fullBackupContent (haven/android/app/src/main/AndroidManifest.xml:48), so the posture is asymmetric and one-sided. What travels into a backup is ciphertext whose key is a ThisDeviceOnly Keychain item (see IOS-KEYCHAIN), so a restore onto a DIFFERENT device cannot open it; a SAME-DEVICE restore can, and reinstates a snapshot taken before a logout or a Delete Identity. wipe_all_mls_state deletes circles.db and session.sqlite with their sidecars and destroys both keyring entries (haven/rust_builder/src/api.rs:877, :983-986), but that destruction is DEVICE-LOCAL rather than absolute and no code Haven can write reaches into a backup to finish it.",
+      "forbidden_claim": "Copy must not claim that logging out or deleting your identity IRREVERSIBLY destroys the on-device member directory — nor anything else living in circles.db — because a same-device restore from an iOS backup can bring the encrypted file back. The claim that IS true is bounded: the deletion removes the file set from this device, and what a backup carries cannot be opened on a different device. Copy must equally not present the backup as harmless because it is encrypted — 'another device cannot read it' is the true half; 'a backup holds nothing of yours' is not. NOTE: no user-facing string discloses this today. identityAdvancedDeleteBody stays inside the line by describing the act ('deletes your identity and all circle data from this phone') and asserting no permanence; the member-directory disclosure (owner decision D6) is deferred with the Settings privacy page, so no invariant carries status accepted_deviation against this entry — filing one would require inventing a disclosure that does not exist, the same reason P4 is referenced by no invariant. INV-D-DIRECTORY-NEVER-LEAVES-SQLCIPHER stays 'enforced' and names this deviation in its statement and its note."
     },
     {
       "id": "CONV-BUFFER",
@@ -582,6 +580,8 @@
       "status": "enforced",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [
+        "fgsChannelDescription",
+        "fgsNotificationSharing",
         "locationSettingsIntro",
         "privacyWhatOthersSeeCannotPause"
       ],
@@ -892,8 +892,8 @@
     },
     {
       "id": "INV-E-NO-PERIODIC-REKEY",
-      "title": "Keys change on membership change only, never on a timer",
-      "statement": "Both periodic (MIP-03 SHOULD) and post-join 24 h (MIP-02 MUST) leaf-key self-update are disabled, so one epoch key can cover weeks of messages and a former member keeps whatever they saved during their epochs; re-introducing a production self-update timer would change the property the copy describes.",
+      "title": "Keys change on membership change or an explicit repair, never on a timer",
+      "statement": "Both periodic (MIP-03 SHOULD) and post-join 24 h (MIP-02 MUST) leaf-key self-update are disabled, so one epoch key can cover weeks of messages and a former member keeps whatever they saved during their epochs. At code level several admin commits advance an epoch (a membership change, a relay-list update via update_circle_relays, and each half of an admin handoff). What a USER can reach today is two: changing who is in a circle, and - if they are its sole admin - tapping Repair on a circle whose delivery has broken (Unit E, docs/EPOCH_ROTATION_REPAIR_PLAN.md), which is rate-limited to once per circle per 24 h and reachable only from the foreground service layer. That user-reachable scoping is what the disclosure copy describes; a screen that lets a user edit a circle's relays would add a third and MUST revisit privacyEncryptionKeysChangeOnMembership and privacyEncryptionDetailEpochs. The absolute half of this invariant is unchanged and is what the copy promises: NOTHING re-keys on a timer. Re-introducing a production self-update timer, or making the repair schedulable, would change the property the copy describes; scripts/ci/check_epoch_repair_isolation.sh and haven/test/lints/self_update_disabled_test.dart both enforce that it stays user-triggered and foreground-only.",
       "status": "accepted_deviation",
       "accepted_deviation_id": "M5",
       "assertion_arb_keys": [],
@@ -906,13 +906,23 @@
         "haven-core/SECURITY.md#self-update-disabled-m5--accepted-mip-02mip-03-deviation"
       ],
       "symbols": [],
+      "guards": [
+        "scripts/ci/check_epoch_repair_isolation.sh"
+      ],
       "tests": [
         {
           "file": "haven/test/lints/self_update_disabled_test.dart",
           "name": "no production self-update timer is re-introduced"
+        },
+        {
+          "file": "haven/test/lints/self_update_disabled_test.dart",
+          "name": "no scheduled driver re-keys a circle anywhere in lib/"
+        },
+        {
+          "file": "haven/test/lints/self_update_disabled_test.dart",
+          "name": "the deleted self-update provider stays deleted"
         }
-      ],
-      "guards": []
+      ]
     },
     {
       "id": "INV-E-REMOVAL-ADVANCES-EPOCH",
@@ -2375,7 +2385,7 @@
     {
       "id": "INV-K-M5-SELF-UPDATE-DISABLED",
       "title": "Leaf keys do not rotate on a timer (M5)",
-      "statement": "enablePeriodicSelfUpdate is false and no production file drives the self-update provider outside a flag-gated call site, so MLS epoch keys advance only on real membership change — never periodically and never 24h post-join.",
+      "statement": "No production file drives an MLS re-key on a schedule. The self-update provider that once did was a documented no-op and was DELETED with Unit E; the only epoch change a user can trigger is the explicit Repair action, which is admin-only, rate-limited to once per circle per 24 h, and reachable only from the foreground service layer. So MLS epoch keys advance on a real membership change or an explicit user repair — never periodically and never 24 h post-join.",
       "status": "accepted_deviation",
       "accepted_deviation_id": "M5",
       "assertion_arb_keys": [],
@@ -2387,8 +2397,8 @@
       ],
       "symbols": [
         {
-          "file": "haven/lib/src/providers/self_update_provider.dart",
-          "symbol": "enablePeriodicSelfUpdate"
+          "file": "haven-core/src/circle/rotation.rs",
+          "symbol": "rotation_decision"
         }
       ],
       "tests": [
@@ -2398,10 +2408,16 @@
         },
         {
           "file": "haven/test/lints/self_update_disabled_test.dart",
-          "name": "every selfUpdateProvider read/invalidate is in a flag-gated file"
+          "name": "no scheduled driver re-keys a circle anywhere in lib/"
+        },
+        {
+          "file": "haven/test/lints/self_update_disabled_test.dart",
+          "name": "the deleted self-update provider stays deleted"
         }
       ],
-      "guards": []
+      "guards": [
+        "scripts/ci/check_epoch_repair_isolation.sh"
+      ]
     },
     {
       "id": "INV-P-PROFILE-PUBLISH-IS-UNCONDITIONAL",
@@ -3218,7 +3234,9 @@
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
       "non_arb_claims": [],
-      "doc_anchors": [],
+      "doc_anchors": [
+        "docs/MEMBER_PICKER_PLAN.md#10-decisions-taken-owner-2026-08-24"
+      ],
       "symbols": [
         {
           "file": "haven-core/src/circle/storage_member_directory.rs",
@@ -3266,18 +3284,19 @@
       "guards": [
         "scripts/ci/check_member_directory_privacy.sh"
       ],
-      "residual": "TWO RESIDUALS, BOTH IRREDUCIBLE AT THIS LAYER. (1) THE DEADLINE IS ENFORCED BY THREE ON-DEMAND SWEEPS, NOT BY A TIMER. An expired row is deleted at the next process start, at the next ranked read, or at the next reconcile — whichever comes first — and no read can return one, because the read sweeps inside its own transaction before it selects. What remains is the interval between the deadline and the next of those events on a device where the app never runs at all: the row is still on disk, unread by anything, until the process that would read it starts and erases it first. (2) THE CLOCK IS UNTRUSTED IN BOTH DIRECTIONS, and there is no monotonic floor anywhere in the path. A forward jump purges EARLY, which costs recent contacts and is self-healing for current members. A BACKWARD jump is the mirror case and is worse for the promise: purge_expired is DELETE ... WHERE purge_after < ?1, so a rolled-back clock makes every one of the three sweeps a no-op — expiry is not delayed but suspended — and because the ranked read's in-transaction sweep is that same comparison, a row past its window stays both STORED and RETURNABLE for as long as the clock reads earlier than its deadline. Closing this needs a trusted clock: SQLCipher offers no monotonic counter and a boot-relative clock does not survive a reboot, so it is stated rather than fixed. It is stated because a disclosure claiming a fixed window depends on it — and that copy (owner decision D6) is DEFERRED with the Settings privacy page pending a major overhaul, not merely unwritten, which is why this entry carries no disclosure key. The copy-tie test that would pin the wording to DIRECTORY_RETENTION_DAYS is deferred with it, so until the overhaul nothing mechanically prevents the constant and the eventual copy from drifting; the constant itself stays test-enforced (retention_is_the_owner_decided_three_days). The drafted paragraph and its clause-by-clause constraints are preserved in docs/MEMBER_PICKER_PLAN.md D6."
+      "residual": "TWO RESIDUALS, BOTH IRREDUCIBLE AT THIS LAYER AND BOTH NOW OWNER-ACCEPTED RATHER THAN OPEN (decision D9, 2026-08-28, docs/MEMBER_PICKER_PLAN.md §10). (1) THE DEADLINE IS ENFORCED BY THREE ON-DEMAND SWEEPS, NOT BY A TIMER. An expired row is deleted at the next process start, at the next ranked read, or at the next reconcile — whichever comes first — and no read can return one, because the read sweeps inside its own transaction before it selects. What remains is the interval between the deadline and the next of those events on a device where the app never runs at all: the row is still on disk, unread by anything, until the process that would read it starts and erases it first. THAT ENFORCEMENT MODEL IS A DECISION, NOT AN INTERIM STATE: a timer and a background wake were both considered and declined under D9, because they buy the earlier deletion of a row nothing can read — the ranked read sweeps inside its own transaction before it selects — at the price of periodic wakeups. (2) THE CLOCK IS UNTRUSTED IN BOTH DIRECTIONS, and there is no monotonic floor anywhere in the path. A forward jump purges EARLY, which costs recent contacts and is self-healing for current members. A BACKWARD jump is the mirror case and is worse for the promise: purge_expired is DELETE ... WHERE purge_after < ?1, so a rolled-back clock makes every one of the three sweeps a no-op — expiry is not delayed but suspended — and because the ranked read's in-transaction sweep is that same comparison, a row past its window stays both STORED and RETURNABLE for as long as the clock reads earlier than its deadline. Closing this needs a trusted clock: SQLCipher offers no monotonic counter and a boot-relative clock does not survive a reboot, so it is stated rather than fixed, and D9 accepts it in the same breath as the sweep model; the eventual copy may not resolve it by promising a fixed wall-clock window. It is stated because a disclosure claiming a fixed window depends on it — and that copy (owner decision D6) is DEFERRED with the Settings privacy page pending a major overhaul, not merely unwritten, which is why this entry carries no disclosure key. The copy-tie test that would pin the wording to DIRECTORY_RETENTION_DAYS is deferred with it, so until the overhaul nothing mechanically prevents the constant and the eventual copy from drifting; the constant itself stays test-enforced (retention_is_the_owner_decided_three_days). The drafted paragraph and its clause-by-clause constraints are preserved in docs/MEMBER_PICKER_PLAN.md D6."
     },
     {
       "id": "INV-D-DIRECTORY-NEVER-LEAVES-SQLCIPHER",
       "title": "The member directory exists only inside the encrypted circles.db",
-      "statement": "The directory is stored only as rows in the SQLCipher-encrypted circles.db whose key lives in the platform keyring, and in no SharedPreferences/NSUserDefaults entry, flutter_secure_storage item or sidecar file — so deleting the circles.db file set on this device destroys it, which is the whole of the logout guarantee. This becomes false if any Rust, Dart or native path gives those rows a second home the logout deletion does not reach. The Dart half of the guard scans the directory surface discovered BOTH by filename convention and by import closure over the row/staged-pick/query-fold modules — a convention-only scan left member_avatar.dart, search_fold.dart, create_circle_page.dart and add_member_page.dart outside it, so a preferences write from any of them would have passed.",
+      "statement": "The directory is stored only as rows in the SQLCipher-encrypted circles.db whose key lives in the platform keyring, and in no SharedPreferences/NSUserDefaults entry, flutter_secure_storage item or sidecar file — so deleting the circles.db file set is the whole of the logout guarantee, and that deletion is DEVICE-LOCAL rather than absolute: on iOS the file set sits in the backed-up Documents directory and a same-device restore can reinstate a pre-logout snapshot (accepted deviation IOS-BACKUP, owner decision D8). This becomes false if any Rust, Dart or native path gives those rows a second home the logout deletion does not reach. The Dart half of the guard scans the directory surface discovered BOTH by filename convention and by import closure over the row/staged-pick/query-fold modules — a convention-only scan left member_avatar.dart, search_fold.dart, create_circle_page.dart and add_member_page.dart outside it, so a preferences write from any of them would have passed.",
       "status": "enforced",
       "assertion_arb_keys": [],
       "disclosure_arb_keys": [],
       "non_arb_claims": [],
       "doc_anchors": [
-        "haven-core/SECURITY.md#database-encryption"
+        "haven-core/SECURITY.md#database-encryption",
+        "docs/MEMBER_PICKER_PLAN.md#10-decisions-taken-owner-2026-08-24"
       ],
       "symbols": [
         {
@@ -3293,7 +3312,8 @@
       ],
       "guards": [
         "scripts/ci/check_member_directory_privacy.sh"
-      ]
+      ],
+      "note": "Status stays 'enforced' under owner decision D8 (2026-08-28), which accepts the iOS backup posture unchanged. What this invariant checks is that the rows have NO SECOND HOME — no preferences entry, no secure-storage item, no sidecar file, no second Connection — and an iOS backup is not a second home Haven writes: it is the OS copying the one home wholesale, still inside SQLCipher, still keyed by a ThisDeviceOnly Keychain item. The rows are never outside the encrypted container, which is the claim as titled, so a downgrade would report Haven's storage discipline as partly enforced when it is not partly anything, and would spend the ratchet's signal on the event this row exists to catch: the day a real second home appears. What the backup DOES falsify is the corollary — 'deleting the file set destroys it' read as absolute — and that corollary is now scoped in the statement and registered as deviation IOS-BACKUP, whose forbidden_claim binds the copy. Status 'accepted_deviation' was not available: rule 9 requires a disclosure, and the member-directory disclosure (decision D6) is deferred with the Settings privacy page, so filing one would mean inventing a disclosure that does not exist."
     },
     {
       "id": "INV-D-SCREENSHOTS-BLOCKED-ON-ANDROID",
@@ -3449,7 +3469,8 @@
       "status": "enforced",
       "assertion_arb_keys": [
         "onboardingValueProp1Title",
-        "onboardingValueProp1Summary"
+        "onboardingValueProp1Summary",
+        "fgsChannelDescription"
       ],
       "disclosure_arb_keys": [],
       "event_kinds": [

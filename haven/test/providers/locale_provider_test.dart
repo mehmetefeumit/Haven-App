@@ -130,4 +130,55 @@ void main() {
       expect(container.read(localeControllerProvider), const Locale('en'));
     });
   });
+
+  // The callers with no BuildContext — today the Android foreground-service
+  // notification — read their copy through here. Resolving to a different
+  // language from the one on screen would be invisible in the UI and visible
+  // only in the notification shade, so the resolution is pinned to the same
+  // algorithm and inputs MaterialApp uses.
+  group('appLocalizationsProvider', () {
+    final binding = TestWidgetsFlutterBinding.ensureInitialized();
+
+    tearDown(binding.platformDispatcher.clearLocalesTestValue);
+
+    test('resolves the chosen language', () {
+      final container = ProviderContainer(
+        overrides: [
+          localeControllerProvider.overrideWith(
+            (ref) => LocaleController(const Locale('ja')),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      expect(container.read(appLocalizationsProvider).localeName, 'ja');
+    });
+
+    test('follows the device locale when no language is chosen', () {
+      binding.platformDispatcher.localesTestValue = const [Locale('de')];
+
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+
+      expect(container.read(appLocalizationsProvider).localeName, 'de');
+    });
+
+    test('walks down the device preference list rather than throwing', () {
+      binding.platformDispatcher.localesTestValue = const [
+        Locale('xx'),
+        Locale('fr'),
+      ];
+
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+
+      expect(
+        container.read(appLocalizationsProvider).localeName,
+        'fr',
+        reason: 'MaterialApp resolves down the same list, so stopping at the '
+            'first entry would put the notification in a language the UI is '
+            'not using — and looking up an unsupported locale directly throws',
+      );
+    });
+  });
 }

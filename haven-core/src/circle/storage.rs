@@ -36,6 +36,41 @@ pub struct CircleStorage {
     conn: Mutex<Connection>,
 }
 
+/// Presence-only delivery timestamps for one circle.
+///
+/// Milliseconds since the Unix epoch on the LOCAL clock. `None` means "never
+/// observed", which is a different statement from "stopped" — see
+/// [`CircleStorage::circle_health`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CircleHealth {
+    /// When a relay last acknowledged a location publish for this circle.
+    pub last_publish_acked_at_ms: Option<i64>,
+    /// When a peer's location for this circle was last decrypted and persisted.
+    pub last_peer_event_at_ms: Option<i64>,
+}
+
+/// Presence-only epoch-rotation bookkeeping for one circle.
+///
+/// Milliseconds since the Unix epoch on the LOCAL clock, and nothing else — the
+/// gates in [`crate::circle::rotation`] need two ages, not a history. `None`
+/// means "never observed", which the gates treat as no evidence rather than as a
+/// fresh event.
+///
+/// Deliberately separate from [`CircleHealth`] even though both live in the
+/// `circle_health` row: `CircleHealth` is mirrored across the FFI for the
+/// delivery banner, and these two instants have no reader outside the repair
+/// decision.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CircleRotationState {
+    /// When the engine last reported an `EpochChanged` for this circle.
+    pub last_epoch_change_seen_at_ms: Option<i64>,
+    /// When a repair rotation for this circle was last CONFIRMED published.
+    pub last_rotation_at_ms: Option<i64>,
+    /// When this circle last produced an MLS-AUTHENTICATED inbound group event
+    /// — see [`CircleStorage::note_inbound_group_event`].
+    pub last_inbound_event_at_ms: Option<i64>,
+}
+
 impl CircleStorage {
     /// Crate-private accessor used by sibling modules
     /// (e.g. [`super::storage_relay_prefs`]) to extend `CircleStorage` with
@@ -376,6 +411,46 @@ impl CircleStorage {
         Ok(())
     }
 
+    /// Test-only: rebuilds `circle_health` in its PRE-rotation shape (no
+    /// `last_epoch_change_seen_at_ms` / `last_rotation_at_ms`), preserving every
+    /// existing row, and clears the migration sentinel.
+    ///
+    /// The counterpart of
+    /// [`Self::downgrade_profiles_to_pre_miss_columns_for_test`], and for the
+    /// same reason: a fresh database never needs the `ALTER`, so only a
+    /// manufactured "created by an older build" database proves
+    /// [`Self::migrate_add_rotation_columns`] runs and keeps the delivery
+    /// history the banner is derived from.
+    #[cfg(test)]
+    pub(crate) fn downgrade_circle_health_to_pre_rotation_columns_for_test(&self) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.execute_batch(
+            r"
+            BEGIN;
+            CREATE TABLE circle_health_pre_rotation (
+                nostr_group_id           BLOB PRIMARY KEY,
+                last_publish_acked_at_ms INTEGER,
+                last_peer_event_at_ms    INTEGER
+            );
+            INSERT INTO circle_health_pre_rotation
+                (nostr_group_id, last_publish_acked_at_ms, last_peer_event_at_ms)
+                SELECT nostr_group_id, last_publish_acked_at_ms, last_peer_event_at_ms
+                FROM circle_health;
+            DROP TABLE circle_health;
+            ALTER TABLE circle_health_pre_rotation RENAME TO circle_health;
+            COMMIT;
+            ",
+        )?;
+        conn.execute(
+            "DELETE FROM user_settings WHERE key = ?1",
+            params![Self::ROTATION_COLUMNS_KEY],
+        )?;
+        Ok(())
+    }
+
     /// Initializes the database schema.
     #[allow(
         clippy::too_many_lines,
@@ -490,6 +565,43 @@ impl CircleStorage {
                 ON last_known_locations(purge_after);
             CREATE INDEX IF NOT EXISTS idx_lkl_group
                 ON last_known_locations(nostr_group_id);
+
+            -- Per-circle delivery liveness, so a pipeline that has silently
+            -- died stops looking healthy (see
+            -- `docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md`). Every failure
+            -- mode analysed there is invisible to the user precisely because
+            -- Haven measures FLAGS (a running engine, an enabled toggle) and
+            -- never DELIVERY. These two columns are the delivery measurement.
+            --
+            -- Presence-only by construction: two millisecond instants and
+            -- nothing else. No coordinates, no pubkeys, no relay URLs, and the
+            -- key is the public `nostr_group_id` the `circles` table already
+            -- stores — never the real MLS group id (Security Rule 4). Dropped
+            -- with the circle in `delete_circle`, so leaving a circle leaves no
+            -- residue saying when it last worked.
+            --
+            -- Both columns are written from the foreground isolate AND the
+            -- Android foreground service, so they advance by monotonic MAX:
+            -- the two planes have independent notions of 'now' and can commit
+            -- out of order, and a health timestamp that can move backwards
+            -- would manufacture an outage that never happened.
+            -- `last_epoch_change_seen_at_ms` / `last_rotation_at_ms` join the
+            -- same row because they are the same KIND of fact — two more
+            -- presence-only instants about one circle, keyed by the same public
+            -- id and dropped by the same `delete_circle` — and because the
+            -- epoch-rotation repair reads them alongside `last_peer_event_at_ms`
+            -- in a single decision (`circle::rotation`). Kept off the `circles`
+            -- row deliberately: that row is the `Circle` value the FFI mirrors,
+            -- so widening it would push two internal bookkeeping instants across
+            -- the language boundary for no caller.
+            CREATE TABLE IF NOT EXISTS circle_health (
+                nostr_group_id                BLOB PRIMARY KEY,
+                last_publish_acked_at_ms      INTEGER,
+                last_peer_event_at_ms         INTEGER,
+                last_epoch_change_seen_at_ms  INTEGER,
+                last_rotation_at_ms           INTEGER,
+                last_inbound_event_at_ms      INTEGER
+            );
 
             -- Idempotency cache for NIP-59 gift-wrap (kind 1059) invitation
             -- processing. The invitation poller uses a 2-day lookback window,
@@ -823,6 +935,10 @@ impl CircleStorage {
         // table (never a drop — that would blank every cached display name).
         Self::migrate_add_profile_miss_columns(&conn)?;
 
+        // Epoch-rotation bookkeeping: additive ALTER of the EXISTING
+        // `circle_health` table, for the same reason.
+        Self::migrate_add_rotation_columns(&conn)?;
+
         Ok(())
     }
 
@@ -889,6 +1005,70 @@ impl CircleStorage {
         )?;
         if added > 0 {
             log::info!("profile migration: added {added} miss-cache column(s) to `profiles`");
+        }
+        Ok(())
+    }
+
+    /// Sentinel for whether the `circle_health` rotation columns have been
+    /// added.
+    const ROTATION_COLUMNS_KEY: &'static str = "circle_rotation_columns_v1";
+
+    /// One-shot, sentinel-guarded addition of
+    /// `circle_health.last_epoch_change_seen_at_ms` and
+    /// `circle_health.last_rotation_at_ms`, the two instants the epoch-rotation
+    /// repair gates read (`circle::rotation`).
+    ///
+    /// `CREATE TABLE IF NOT EXISTS` does not alter an existing table, so a
+    /// database created before these columns existed would keep the two-column
+    /// shape and every rotation statement would fail with `no such column`.
+    /// Additive `ALTER`, never a drop: `circle_health` carries the delivery
+    /// timestamps the "sharing paused" banner derives from, and recreating the
+    /// table would erase every circle's history of when it last worked — turning
+    /// an upgrade into a banner that cannot fire.
+    ///
+    /// Both columns are nullable with no default, so a pre-existing row reads
+    /// exactly as a circle that has never rotated and never been seen to change
+    /// epoch — which is the truth, and which the gates treat as "no evidence"
+    /// rather than "too recent".
+    ///
+    /// Idempotent twice over, like [`Self::migrate_add_profile_miss_columns`]:
+    /// the sentinel makes it once-per-database and [`Self::table_has_column`]
+    /// makes a fresh database (whose `CREATE TABLE` already declares both) a
+    /// clean no-op rather than a `duplicate column name` error.
+    fn migrate_add_rotation_columns(conn: &Connection) -> Result<()> {
+        let already: Option<String> = conn
+            .query_row(
+                "SELECT value FROM user_settings WHERE key = ?1",
+                params![Self::ROTATION_COLUMNS_KEY],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        if already.is_some() {
+            return Ok(());
+        }
+
+        let mut added = 0usize;
+        for column in [
+            "last_epoch_change_seen_at_ms",
+            "last_rotation_at_ms",
+            "last_inbound_event_at_ms",
+        ] {
+            if !Self::table_has_column(conn, "circle_health", column)? {
+                // The column names are compile-time constants from the array
+                // above, never user input.
+                conn.execute_batch(&format!(
+                    "ALTER TABLE circle_health ADD COLUMN {column} INTEGER;"
+                ))?;
+                added += 1;
+            }
+        }
+
+        conn.execute(
+            "INSERT OR REPLACE INTO user_settings (key, value) VALUES (?1, '1')",
+            params![Self::ROTATION_COLUMNS_KEY],
+        )?;
+        if added > 0 {
+            log::info!("circle migration: added {added} rotation column(s) to `circle_health`");
         }
         Ok(())
     }
@@ -1431,6 +1611,12 @@ impl CircleStorage {
             )?;
             tx.execute(
                 "DELETE FROM last_known_locations WHERE nostr_group_id = ?1",
+                params![ngid],
+            )?;
+            // ...and the delivery-health row, for the same reason: a leave must
+            // not leave behind a record of when this circle last worked.
+            tx.execute(
+                "DELETE FROM circle_health WHERE nostr_group_id = ?1",
                 params![ngid],
             )?;
         }
@@ -2131,6 +2317,262 @@ impl CircleStorage {
         )?;
 
         Ok(rows)
+    }
+
+    // ==================== Delivery Health ====================
+
+    /// Records that at least one relay acknowledged a location publish.
+    ///
+    /// `at_ms` is the LOCAL clock at the moment of the ack, in milliseconds
+    /// since the Unix epoch. "Acked" means acked: the caller must have an
+    /// affirmative relay OK, never merely a successful send (Security Rule 13's
+    /// principle — a publish that no relay accepted delivered nothing).
+    ///
+    /// Advance is monotonic-max, so a late write from the other isolate cannot
+    /// drag the timestamp backwards and invent an outage.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn note_publish_acked(&self, nostr_group_id: &[u8; 32], at_ms: i64) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        conn.execute(
+            r"
+            INSERT INTO circle_health (nostr_group_id, last_publish_acked_at_ms)
+            VALUES (?1, ?2)
+            ON CONFLICT(nostr_group_id) DO UPDATE SET
+                last_publish_acked_at_ms = max(
+                    coalesce(circle_health.last_publish_acked_at_ms, excluded.last_publish_acked_at_ms),
+                    excluded.last_publish_acked_at_ms
+                )
+            ",
+            params![&nostr_group_id[..], at_ms],
+        )?;
+
+        Ok(())
+    }
+
+    /// Records that a peer's location was decrypted and persisted for a circle.
+    ///
+    /// `at_ms` is the LOCAL receipt clock, not the sender's timestamp: this
+    /// column answers "is anything still arriving", which a peer's own clock
+    /// cannot be trusted to describe. Monotonic-max for the same reason as
+    /// [`Self::note_publish_acked`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn note_peer_event(&self, nostr_group_id: &[u8; 32], at_ms: i64) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        conn.execute(
+            r"
+            INSERT INTO circle_health (nostr_group_id, last_peer_event_at_ms)
+            VALUES (?1, ?2)
+            ON CONFLICT(nostr_group_id) DO UPDATE SET
+                last_peer_event_at_ms = max(
+                    coalesce(circle_health.last_peer_event_at_ms, excluded.last_peer_event_at_ms),
+                    excluded.last_peer_event_at_ms
+                )
+            ",
+            params![&nostr_group_id[..], at_ms],
+        )?;
+
+        Ok(())
+    }
+
+    /// Reads a circle's delivery-health timestamps.
+    ///
+    /// A circle that has never published or never received returns
+    /// [`CircleHealth::default`] (both `None`). That is not the same as "it is
+    /// broken", and callers must not treat it as such: a circle whose peer has
+    /// simply never shared is indistinguishable here from one whose receive
+    /// plane is dead, so only a timestamp that once existed and has since gone
+    /// stale is evidence of a fault.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn circle_health(&self, nostr_group_id: &[u8; 32]) -> Result<CircleHealth> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        let health = conn
+            .query_row(
+                "SELECT last_publish_acked_at_ms, last_peer_event_at_ms
+                 FROM circle_health WHERE nostr_group_id = ?1",
+                params![&nostr_group_id[..]],
+                |row| {
+                    Ok(CircleHealth {
+                        last_publish_acked_at_ms: row.get(0)?,
+                        last_peer_event_at_ms: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?
+            .unwrap_or_default();
+
+        Ok(health)
+    }
+
+    /// Records that the group's MLS epoch was observed to change.
+    ///
+    /// `at_ms` is the LOCAL clock at the moment the engine reported an
+    /// `EpochChanged`, which is the only MLS-authenticated statement that the
+    /// group's sender ratchets restarted. Monotonic-max for the same
+    /// cross-isolate reason as [`Self::note_publish_acked`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn note_epoch_change_seen(&self, nostr_group_id: &[u8; 32], at_ms: i64) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        conn.execute(
+            r"
+            INSERT INTO circle_health (nostr_group_id, last_epoch_change_seen_at_ms)
+            VALUES (?1, ?2)
+            ON CONFLICT(nostr_group_id) DO UPDATE SET
+                last_epoch_change_seen_at_ms = max(
+                    coalesce(
+                        circle_health.last_epoch_change_seen_at_ms,
+                        excluded.last_epoch_change_seen_at_ms
+                    ),
+                    excluded.last_epoch_change_seen_at_ms
+                )
+            ",
+            params![&nostr_group_id[..], at_ms],
+        )?;
+
+        Ok(())
+    }
+
+    /// Records that the engine surfaced an MLS-authenticated inbound group event
+    /// for this circle.
+    ///
+    /// # What may and may not stamp this
+    ///
+    /// Only an event the ENGINE produced from a receive funnel — i.e. something
+    /// MLS authenticated. Deliberately NOT "every kind-445 that arrived":
+    ///
+    /// * A 445 Haven's pre-auth screen rejected, and a 445 the engine merely
+    ///   FAILED on, are both mintable by any observer of the circle's public
+    ///   `#h` tag. Letting either stamp this would hand that observer a way to
+    ///   hold the epoch-rotation repair permanently shut
+    ///   ([`crate::circle::rotation`] gate 4) — a denial channel bought for the
+    ///   price of publishing junk.
+    /// * An undecryptable application message is exactly what a circle with an
+    ///   exhausted sender ratchet receives on every cadence tick. Stamping on it
+    ///   would keep the quiescence gate closed forever on precisely the circles
+    ///   the repair exists to fix.
+    ///
+    /// Monotonic-max, like every other column in this table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn note_inbound_group_event(&self, nostr_group_id: &[u8; 32], at_ms: i64) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        conn.execute(
+            r"
+            INSERT INTO circle_health (nostr_group_id, last_inbound_event_at_ms)
+            VALUES (?1, ?2)
+            ON CONFLICT(nostr_group_id) DO UPDATE SET
+                last_inbound_event_at_ms = max(
+                    coalesce(
+                        circle_health.last_inbound_event_at_ms,
+                        excluded.last_inbound_event_at_ms
+                    ),
+                    excluded.last_inbound_event_at_ms
+                )
+            ",
+            params![&nostr_group_id[..], at_ms],
+        )?;
+
+        Ok(())
+    }
+
+    /// Records that a repair rotation for this circle was CONFIRMED published.
+    ///
+    /// Written on the confirm, never on the stage: a commit no relay accepted
+    /// changed nothing, and burning the rate limit for it would leave a stuck
+    /// circle unable to retry for a day (Security Rule 13's principle applied to
+    /// bookkeeping). Monotonic-max, like every other column in this table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn note_rotation_confirmed(&self, nostr_group_id: &[u8; 32], at_ms: i64) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        conn.execute(
+            r"
+            INSERT INTO circle_health (nostr_group_id, last_rotation_at_ms)
+            VALUES (?1, ?2)
+            ON CONFLICT(nostr_group_id) DO UPDATE SET
+                last_rotation_at_ms = max(
+                    coalesce(circle_health.last_rotation_at_ms, excluded.last_rotation_at_ms),
+                    excluded.last_rotation_at_ms
+                )
+            ",
+            params![&nostr_group_id[..], at_ms],
+        )?;
+
+        Ok(())
+    }
+
+    /// Reads a circle's epoch-rotation bookkeeping.
+    ///
+    /// Both `None` for a circle that has never been seen to change epoch and has
+    /// never been repaired — which the gates read as "no evidence", never as
+    /// "too recent" (see [`crate::circle::rotation::rotation_decision`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn circle_rotation_state(&self, nostr_group_id: &[u8; 32]) -> Result<CircleRotationState> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        let state = conn
+            .query_row(
+                "SELECT last_epoch_change_seen_at_ms, last_rotation_at_ms,
+                        last_inbound_event_at_ms
+                 FROM circle_health WHERE nostr_group_id = ?1",
+                params![&nostr_group_id[..]],
+                |row| {
+                    Ok(CircleRotationState {
+                        last_epoch_change_seen_at_ms: row.get(0)?,
+                        last_rotation_at_ms: row.get(1)?,
+                        last_inbound_event_at_ms: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?
+            .unwrap_or_default();
+
+        Ok(state)
     }
 
     // ==================== Sync Cursors ====================
@@ -3400,7 +3842,7 @@ mod tests {
     /// (`storage-sqlite`'s `session.sqlite`) is a SEPARATE database owned by the
     /// single process-global `SessionManager`; its concurrent-writer safety comes
     /// from the one `tokio::sync::Mutex<AccountDeviceSession>` (Rule 14), not from
-    /// this crate's PRAGMAs — this crate never opens the MLS DB directly.
+    /// this crate's PRAGMAs — the sweep's own connection shares those options and lock.
     #[test]
     fn m7b_m4_circles_db_is_rollback_journal_not_wal() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -4341,6 +4783,195 @@ mod tests {
 
         // Running again is a no-op (sentinel set) and must not error.
         storage.reinitialize_for_test().unwrap();
+    }
+
+    // ==================== Delivery Health ====================
+
+    #[test]
+    fn circle_health_unwritten_reads_as_never_observed() {
+        let storage = CircleStorage::in_memory().unwrap();
+
+        // Anti-vacuity for every assertion below, and the distinction the
+        // banner depends on: "never observed" is not "stopped".
+        assert_eq!(
+            storage.circle_health(&[1; 32]).unwrap(),
+            CircleHealth::default()
+        );
+    }
+
+    #[test]
+    fn circle_health_round_trips_both_timestamps_independently() {
+        let storage = CircleStorage::in_memory().unwrap();
+
+        storage
+            .note_publish_acked(&[1; 32], 1_700_000_000_000)
+            .unwrap();
+        assert_eq!(
+            storage.circle_health(&[1; 32]).unwrap(),
+            CircleHealth {
+                last_publish_acked_at_ms: Some(1_700_000_000_000),
+                last_peer_event_at_ms: None,
+            },
+            "recording a publish ack must not invent a peer event"
+        );
+
+        storage
+            .note_peer_event(&[1; 32], 1_700_000_050_000)
+            .unwrap();
+        assert_eq!(
+            storage.circle_health(&[1; 32]).unwrap(),
+            CircleHealth {
+                last_publish_acked_at_ms: Some(1_700_000_000_000),
+                last_peer_event_at_ms: Some(1_700_000_050_000),
+            },
+            "recording a peer event must not clear the publish ack"
+        );
+    }
+
+    #[test]
+    fn the_rotation_columns_migration_keeps_the_delivery_history_it_widens() {
+        // A database created before this unit shipped has the two-column
+        // `circle_health`. The migration must ALTER it, not recreate it: those
+        // rows are the only record of when each circle last worked, and dropping
+        // them would turn an upgrade into a "sharing paused" banner that can
+        // never fire.
+        let storage = CircleStorage::in_memory().unwrap();
+        storage
+            .note_publish_acked(&[7; 32], 1_700_000_000_000)
+            .unwrap();
+        storage
+            .note_peer_event(&[7; 32], 1_700_000_050_000)
+            .unwrap();
+
+        storage
+            .downgrade_circle_health_to_pre_rotation_columns_for_test()
+            .unwrap();
+        // Control: the fixture really did produce the older shape, so the
+        // assertions below are attributable to the migration.
+        assert!(
+            storage.circle_rotation_state(&[7; 32]).is_err(),
+            "fixture: the pre-rotation shape must not answer a rotation read"
+        );
+
+        storage.reinitialize_for_test().unwrap();
+
+        assert_eq!(
+            storage.circle_health(&[7; 32]).unwrap(),
+            CircleHealth {
+                last_publish_acked_at_ms: Some(1_700_000_000_000),
+                last_peer_event_at_ms: Some(1_700_000_050_000),
+            },
+            "the migration must preserve every delivery timestamp it widens"
+        );
+        assert_eq!(
+            storage.circle_rotation_state(&[7; 32]).unwrap(),
+            CircleRotationState::default(),
+            "a pre-existing row reads as never rotated and never seen to change epoch"
+        );
+
+        // Idempotent: a second open must neither fail nor lose anything.
+        storage.reinitialize_for_test().unwrap();
+        storage
+            .note_rotation_confirmed(&[7; 32], 1_700_000_100_000)
+            .unwrap();
+        storage
+            .note_epoch_change_seen(&[7; 32], 1_700_000_090_000)
+            .unwrap();
+        assert_eq!(
+            storage.circle_rotation_state(&[7; 32]).unwrap(),
+            CircleRotationState {
+                last_epoch_change_seen_at_ms: Some(1_700_000_090_000),
+                last_rotation_at_ms: Some(1_700_000_100_000),
+                last_inbound_event_at_ms: None,
+            }
+        );
+    }
+
+    #[test]
+    fn rotation_timestamps_never_move_backwards() {
+        // Both isolates write these, on independent clocks and out of order. A
+        // timestamp that could move backwards would re-open a rotation window
+        // that had already closed.
+        let storage = CircleStorage::in_memory().unwrap();
+        storage.note_rotation_confirmed(&[3; 32], 2_000).unwrap();
+        storage.note_rotation_confirmed(&[3; 32], 1_000).unwrap();
+        storage.note_epoch_change_seen(&[3; 32], 2_000).unwrap();
+        storage.note_epoch_change_seen(&[3; 32], 1_000).unwrap();
+        storage.note_inbound_group_event(&[3; 32], 2_000).unwrap();
+        storage.note_inbound_group_event(&[3; 32], 1_000).unwrap();
+        assert_eq!(
+            storage.circle_rotation_state(&[3; 32]).unwrap(),
+            CircleRotationState {
+                last_epoch_change_seen_at_ms: Some(2_000),
+                last_rotation_at_ms: Some(2_000),
+                last_inbound_event_at_ms: Some(2_000),
+            }
+        );
+    }
+
+    #[test]
+    fn circle_health_is_per_circle() {
+        let storage = CircleStorage::in_memory().unwrap();
+
+        storage
+            .note_peer_event(&[1; 32], 1_700_000_000_000)
+            .unwrap();
+
+        assert_eq!(
+            storage.circle_health(&[2; 32]).unwrap(),
+            CircleHealth::default(),
+            "one healthy circle must not mask another circle's outage"
+        );
+    }
+
+    #[test]
+    fn circle_health_advance_is_monotonic() {
+        let storage = CircleStorage::in_memory().unwrap();
+
+        // The foreground isolate and the Android foreground service both write
+        // these, with independent clocks and no ordering between them. A late
+        // write that moved a timestamp backwards would manufacture an outage.
+        storage
+            .note_publish_acked(&[1; 32], 1_700_000_100_000)
+            .unwrap();
+        storage
+            .note_publish_acked(&[1; 32], 1_700_000_000_000)
+            .unwrap();
+        storage
+            .note_peer_event(&[1; 32], 1_700_000_100_000)
+            .unwrap();
+        storage
+            .note_peer_event(&[1; 32], 1_700_000_000_000)
+            .unwrap();
+
+        assert_eq!(
+            storage.circle_health(&[1; 32]).unwrap(),
+            CircleHealth {
+                last_publish_acked_at_ms: Some(1_700_000_100_000),
+                last_peer_event_at_ms: Some(1_700_000_100_000),
+            }
+        );
+    }
+
+    #[test]
+    fn delete_circle_removes_its_health_row() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let circle = create_test_circle(1);
+        storage.save_circle(&circle).unwrap();
+        storage
+            .note_publish_acked(&circle.nostr_group_id, 1_700_000_000_000)
+            .unwrap();
+        storage
+            .note_peer_event(&circle.nostr_group_id, 1_700_000_000_000)
+            .unwrap();
+
+        storage.delete_circle(&circle.mls_group_id).unwrap();
+
+        assert_eq!(
+            storage.circle_health(&circle.nostr_group_id).unwrap(),
+            CircleHealth::default(),
+            "leaving a circle must leave no record of when it last worked"
+        );
     }
 
     // ==================== Sync Cursors ====================

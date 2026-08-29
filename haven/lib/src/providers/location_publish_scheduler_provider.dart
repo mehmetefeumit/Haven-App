@@ -60,9 +60,11 @@ import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/providers/sharing_health_provider.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/jittered_scheduler.dart';
+import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/publish_stagger.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -106,11 +108,13 @@ final locationPublishJitterSamplerProvider =
   };
 });
 
-/// Hex-encodes a `nostrGroupId` for use as a per-circle scheduler key. Matches
-/// the existing `LocationSharingService._circleKey` / `LiveSyncResubscriber`
-/// convention (the public `#h` value — never the real MLS group id, Rule 4).
-String _circleKey(List<int> nostrGroupId) =>
-    nostrGroupId.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+/// Hex-encodes a `nostrGroupId` for use as a per-circle scheduler key.
+///
+/// Delegates to [sharingCircleKey] rather than re-implementing it: the same key
+/// now also indexes the sharing-health model, and two copies of one encoder in
+/// one file is exactly how the scheduler's keys and the health model's keys
+/// would drift apart.
+String _circleKey(List<int> nostrGroupId) => sharingCircleKey(nostrGroupId);
 
 /// Owns one [JitteredScheduler] per eligible circle for the foreground session.
 class LocationPublishSchedulerNotifier extends Notifier<void> {
@@ -302,14 +306,65 @@ class LocationPublishSchedulerNotifier extends Notifier<void> {
       final position = await locationService.getCurrentLocation();
       if (!_isCurrent(generation) || !_active) return;
 
-      await service.publishLocation(
+      final outcome = await service.publishLocation(
         mlsGroupId: circle.mlsGroupId,
+        nostrGroupId: circle.nostrGroupId,
         senderPubkeyHex: identity.pubkeyHex,
         latitude: position.latitude,
         longitude: position.longitude,
       );
+      switch (outcome) {
+        // A `PublishResult` no relay accepted delivered nothing, and used to be
+        // indistinguishable here from a success — the outcome was dropped
+        // entirely. Record it so the sharing-health model can see the plane die.
+        case LocationPublishSent(:final result):
+          _recordPublishOutcome(circle, acked: result.acceptedBy.isNotEmpty);
+        // A deferral is NOT a publish failure: nothing was rejected, the MLS
+        // engine simply could not encrypt. It gets its own health verdict so
+        // the banner can name the real cause, and deliberately does NOT reach
+        // `recordPublishOutcome` — a deferred send has no relay verdict to
+        // report, and `notePublishAcked` stays untouched (nothing was acked).
+        case LocationPublishDeferred(:final unresolvedInputs, :final repaired):
+          debugPrint(
+            '[LocationPublishScheduler] send deferred by the MLS engine — '
+            'gating=$unresolvedInputs, repaired=$repaired',
+          );
+          _recordDeferredSend(circle);
+      }
     } on Object catch (e) {
       debugPrint('[LocationPublishScheduler] per-circle publish failed: '
+          '${e.runtimeType}');
+      _recordPublishOutcome(circle, acked: false);
+    }
+  }
+
+  /// Feeds one publish verdict to the sharing-health model.
+  ///
+  /// Never throws: this is diagnostics, and a failure to record must not be
+  /// able to take down the publish chain it is observing.
+  void _recordPublishOutcome(Circle circle, {required bool acked}) {
+    try {
+      ref
+          .read(sharingHealthProvider.notifier)
+          .recordPublishOutcome(_circleKey(circle.nostrGroupId), acked: acked);
+    } on Object catch (e) {
+      debugPrint('[LocationPublishScheduler] health record failed: '
+          '${e.runtimeType}');
+    }
+  }
+
+  /// Feeds a deferred send to the sharing-health model.
+  ///
+  /// Never throws, for the same reason [_recordPublishOutcome] does not: this
+  /// is diagnostics, and a failure to record must not take down the publish
+  /// chain it is observing.
+  void _recordDeferredSend(Circle circle) {
+    try {
+      ref
+          .read(sharingHealthProvider.notifier)
+          .recordDeferredSend(_circleKey(circle.nostrGroupId));
+    } on Object catch (e) {
+      debugPrint('[LocationPublishScheduler] deferred record failed: '
           '${e.runtimeType}');
     }
   }

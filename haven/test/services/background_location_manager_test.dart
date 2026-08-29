@@ -116,6 +116,145 @@ void main() {
         );
       },
     );
+
+    // -------------------------------------------------------------------------
+    // Case 6: timestamp in the FUTURE (backward clock jump) → false
+    // -------------------------------------------------------------------------
+    test(
+      'returns false when the stored timestamp is in the future '
+      '(backward clock jump)',
+      () async {
+        // A backward clock jump — NTP correction, a manual date change, an
+        // RTC that comes up wrong at boot — leaves a timestamp the foreground
+        // wrote at a wall-clock time that is now in the future. The age is
+        // then NEGATIVE, which `age < threshold` alone reads as "the
+        // foreground just wrote this": the FGS mutes its own publish cycle
+        // for as long as the clock takes to catch up, silently, with the
+        // toggle still reading ON. Hours of a future stamp is entirely
+        // reachable (a device that briefly believed it was in another day).
+        final storedMs =
+            DateTime.now().millisecondsSinceEpoch + 6 * 60 * 60 * 1000;
+        final result = await check(storedMs);
+        expect(
+          result,
+          isFalse,
+          reason:
+              'an impossible (future) timestamp must read as stale, never as '
+              'a live foreground — otherwise a backward clock jump mutes the '
+              'background publisher until the clock catches up',
+        );
+      },
+    );
+  });
+
+  // ---------------------------------------------------------------------------
+  // Battery-optimization verdict persistence
+  // ---------------------------------------------------------------------------
+
+  group('BackgroundLocationManager — battery-optimization verdict', () {
+    test('defaults to not-denied when nothing was ever recorded', () async {
+      SharedPreferences.setMockInitialValues({});
+
+      expect(
+        await BackgroundLocationManager.isBatteryOptimizationDenied(),
+        isFalse,
+        reason:
+            'an absent key means the question was never asked (or this is '
+            'not Android); it must never render the advisory',
+      );
+    });
+
+    test('round-trips the recorded verdict in both directions', () async {
+      SharedPreferences.setMockInitialValues({});
+
+      await BackgroundLocationManager.recordBatteryOptimizationDenied(
+        denied: true,
+      );
+      expect(
+        await BackgroundLocationManager.isBatteryOptimizationDenied(),
+        isTrue,
+        reason:
+            'a declined exemption must OUTLIVE the transient snackbar — that '
+            'is the whole point of persisting it',
+      );
+
+      await BackgroundLocationManager.recordBatteryOptimizationDenied(
+        denied: false,
+      );
+      expect(
+        await BackgroundLocationManager.isBatteryOptimizationDenied(),
+        isFalse,
+        reason:
+            'granting the exemption later must clear the advisory, not leave '
+            'a permanent warning',
+      );
+    });
+
+    test('a failed probe degrades to the last recorded answer, not to '
+        '"exemption held"', () async {
+      // The plugin channel is absent on this host, which is the same shape as
+      // a real probe failure. Falling back to `false` there would silently
+      // retract a warning the OS never withdrew; falling back to the last
+      // recorded answer keeps the surface truthful until the next successful
+      // probe.
+      Future<bool> failingProbe() async =>
+          throw StateError('channel unavailable');
+
+      SharedPreferences.setMockInitialValues({
+        kBatteryOptimizationDeniedKey: true,
+      });
+      expect(
+        await BackgroundLocationManager.refreshBatteryOptimizationDenied(
+          probeExemption: failingProbe,
+        ),
+        isTrue,
+      );
+
+      SharedPreferences.setMockInitialValues({});
+      expect(
+        await BackgroundLocationManager.refreshBatteryOptimizationDenied(
+          probeExemption: failingProbe,
+        ),
+        isFalse,
+        reason:
+            'with nothing recorded there is nothing to warn about — the '
+            'fallback must not invent a denial either',
+      );
+    });
+
+    test('a successful probe overwrites a stale recorded answer', () async {
+      // The write-back is what makes the persisted value a usable fallback
+      // rather than a permanent first impression.
+      SharedPreferences.setMockInitialValues({
+        kBatteryOptimizationDeniedKey: true,
+      });
+
+      expect(
+        await BackgroundLocationManager.refreshBatteryOptimizationDenied(
+          probeExemption: () async => true, // exemption now held
+        ),
+        isFalse,
+      );
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool(kBatteryOptimizationDeniedKey), isFalse);
+    });
+
+    test('the verdict is cleared when the identity is deleted', () async {
+      // Every SharedPreferences key needs a deliberate fate on the delete path
+      // (scripts/ci/check_identity_delete_prefs_residue.sh). This one is
+      // cleared rather than kept: a fresh identity must not inherit a warning
+      // earned by the deleted one, and it re-probes live on its first visit
+      // to the settings page anyway.
+      SharedPreferences.setMockInitialValues({
+        kBatteryOptimizationDeniedKey: true,
+        kBackgroundLastPublishMsKey: 1234,
+      });
+
+      await BackgroundLocationManager.clearPublishHistoryOnIdentityDelete();
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool(kBatteryOptimizationDeniedKey), isNull);
+    });
   });
 
   // ---------------------------------------------------------------------------

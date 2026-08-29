@@ -1,7 +1,7 @@
 # Member picker: resolved names, local directory, and recent contacts
 
-Status: **APPROVED for implementation.** All six owner decisions taken
-(2026-08-24, §10). Produced by seven domain expert agents, then attacked by four
+Status: **APPROVED for implementation.** All nine owner decisions taken
+(2026-08-24 through 2026-08-28, §10). Produced by seven domain expert agents, then attacked by four
 independent reviewers who reproduced the empirical claims and refuted several.
 Corrections from that round are marked **[R]**.
 
@@ -1430,6 +1430,104 @@ defect. Russian found a sharper variant: the obvious one-sentence repair lets an
 circle"* — smuggling an apparent circle identity into the one string that exists
 to avoid naming one.
 
+**D8 — iOS backup posture: ACCEPTED, no change (owner, 2026-08-28).** D5 held
+this open deliberately: the posture was acceptable *while the payload was small*,
+and that reason "changes when the payload becomes a named, photographed contact
+list, so it deserves its own decision on its own timeline." P3 shipped that
+payload. The trigger is met, the decision is taken, and it is **no change**.
+
+**The posture, verified rather than assumed.** `circles.db` — which now carries
+the member directory beside the circles, the cached kind-0 names and the profile
+pictures — is opened at `<data dir>/circles.db` (`manager.rs:169`), and the data
+dir is `getApplicationDocumentsDirectory()` + `/haven` with **no platform
+branch** (`data_directory_provider.dart:44-47`; that file's own doc records the
+iOS App-Group branch as still unwritten). On iOS that is `Documents/`, the
+**most-backed-up location the OS offers**, and **`NSURLIsExcludedFromBackupKey`
+appears nowhere in the tree** — not in `haven/ios/Runner/`, not in any Dart or
+Rust path, not in a checked-in plugin. Android is unaffected:
+`allowBackup="false"`, with no `dataExtractionRules` and no
+`fullBackupContent` anywhere (`AndroidManifest.xml:48`). The asymmetry is real
+and one-sided. What travels into the backup is ciphertext whose key is a
+Keychain item marked `…ThisDeviceOnly` (deviation `IOS-KEYCHAIN`), so a restore
+onto a **different** device cannot open it; a **same-device** restore can, and
+that is the half that costs something.
+
+**The consequence is a copy constraint, not a code one.** Logout and Delete
+Identity destroy the directory by deleting the `circles.db` file set — the file
+and its `-journal`/`-wal`/`-shm` sidecars, plus `session.sqlite` and both keyring
+entries (`api.rs:877`, `:983-986`). A same-device restore reinstates a snapshot
+taken *before* that deletion, so the destruction is **device-local, not
+absolute**, and there is no reach-into-the-backup Haven could write. Registered
+in `docs/privacy/privacy_invariants.json` as accepted deviation **`IOS-BACKUP`**,
+whose `forbidden_claim` binds every future string: **no user-facing copy may say
+that logging out or deleting your identity *irreversibly* destroys the on-device
+directory**, or anything else living in `circles.db`. Today's copy survives that
+test, but only just — `identityAdvancedDeleteBody` says "deletes your identity
+and all circle data **from this phone**", which describes the act and claims no
+permanence — and D6's closing sentence, the one that already refuses to imply a
+forgetting the app does not perform, must not acquire one.
+
+**`INV-D-DIRECTORY-NEVER-LEAVES-SQLCIPHER` stays `enforced`, deliberately.** What
+that invariant checks is that the rows have **no second home** — no
+`SharedPreferences`/`NSUserDefaults` entry, no secure-storage item, no sidecar
+file, no second `Connection` — and a backup is not a second home Haven writes: it
+is the OS copying the one home wholesale, still inside SQLCipher, still keyed by
+a device-only Keychain item. The rows are never outside the encrypted container,
+which is the claim as titled. Downgrading would report Haven's storage discipline
+as partly enforced when it is not partly anything, and would spend the ratchet's
+signal on the wrong event — the ratchet exists to catch the day a real second
+home appears. What the backup falsifies is the *corollary* the statement had
+appended, "deleting the file set destroys it" read as absolute; that corollary is
+now scoped in the statement, and a `note` on the invariant carries the backup
+case with the deviation named. `accepted_deviation` was not available either:
+that status requires a disclosure (manifest rule 9) and the directory's
+disclosure is D6, deferred — filing it would mean inventing a disclosure that
+does not exist, which is exactly why deviation `P4` is referenced by no invariant
+at all.
+
+**D9 — Retention enforcement: ACCEPTED as three on-demand sweeps, no scheduler
+(owner, 2026-08-28).** The three-day window is held by three runs of one
+`DELETE … WHERE purge_after < ?1` (`storage_member_directory.rs:491-496`): at
+every process start (`CircleManager::new` → `sweep_expired_directory_members`,
+`manager.rs:172`, `:258-267`), inside the ranked read's own transaction *before*
+it selects (`storage_member_directory.rs:341`), and at the tail of every
+reconcile (`manager.rs:1573-1574`). **There is no timer and no background wake.**
+Nothing in `maintenance_scheduler_provider.dart` names the directory; the one
+hourly `Timer.periodic` (`map_shell.dart:676`) prunes last-known *locations*; and
+the bare sweep has no FFI export a scheduler could call. The Android catch-up
+worker and the iOS background path reach the startup sweep only because building
+a `CircleManager` is something they already do.
+
+A timer and a background wake were both considered and **declined**: they would
+buy the earlier deletion of a row **nothing can read** — the read that would
+return it purges first, in the same transaction — at the price of periodic
+wakeups, on a battery budget this feature has no claim on.
+
+**Two accepted consequences, both of which the eventual copy must survive.**
+First, on a device where the app is never opened an expired row **outlives its
+deadline on disk**, until the next process start, ranked read or reconcile —
+whichever comes first. Second, all three sweeps compare against the **device wall
+clock** with no monotonic floor anywhere in the path (`chrono::Utc::now()` at
+startup; `DateTime.now()` marshalled through `nowUnixSecs` for the other two,
+`nostr_circle_service.dart:1869,1882`; `ClockSkewDetector` is wired to location
+publishing and names the directory nowhere), so a forward jump purges early and a
+backward jump makes every sweep a no-op — expiry is not delayed but
+**suspended**, and because the ranked read's sweep is that same comparison such a
+row stays both stored *and* returnable. Irreducible without a trusted clock
+(§14); accepted here rather than left open.
+
+**D6's drafted paragraph was built for exactly this, and it is still accurate.**
+Its two load-bearing sentences — *"Nothing counts down in the background"* and
+*"it is erased no later than the next time you start the app or open the list of
+people to invite"* — are true of **storage**, not merely of display; they name
+the two triggers a user can actually cause; and they describe no countdown and no
+timer. Nothing in D6 needs rewording on account of D9. **One caveat travels with
+them and must not be lost:** both sentences are silently conditional on the clock
+moving forward, because "past its three days" means real time to a reader and
+device time to the code. Whoever writes the final copy inherits that, and may not
+resolve it by promising a fixed wall-clock window — which is why §14 states the
+clock residual as a *disclosure* dependency rather than a code one.
+
 ## 11. Phasing
 
 | Phase | Content | New FFI | Req |
@@ -1551,15 +1649,15 @@ already pin. `check_directory_logic_not_in_ffi.sh` and
 |---|---|
 | Locale-correct folding is impossible without a locale | Rules documented; each non-equivalence has a test asserting the *limitation*. Copy must not promise "finds any spelling" |
 | ~~Stroke/ligature letters (`đ ø ł æ þ`) need an explicit table~~ — **CLOSED.** The table shipped (`haven-core/src/directory/fold.rs:68-82`): `æ→ae`, `ð đ→d`, `ħ→h`, `ı→i`, `ł→l`, `ø→o`, `œ→oe`, `ß→ss`, `þ→th`, `ŧ→t` — wider than the six the gap named, keyed on lowercase and applied AFTER the post-NFKD lowercase pass (§6.2's [P0] ordering) | Residual: the table is closed-world. A stroke or ligature letter outside it stays in the key — a search miss, never a wrong match. `fold_transliterates_stroke_and_ligature_letters` and `fold_transliterates_uppercase_stroke_letters_via_the_lowercase_table` pin what is covered |
-| **The retention clock is untrusted in BOTH directions** — every sweep compares `purge_after` against the device wall clock (`chrono::Utc::now()` at process start; `DateTime.now()` marshalled through `nowUnixSecs` for the ranked read and the reconcile, `nostr_circle_service.dart:1869,1882`), and there is **no monotonic floor anywhere in the path** | Forward jump: purges EARLY — bounded, affects only recent contacts, self-healing for current members. **Backward jump is the mirror case and is worse for the promise.** `purge_expired` is `DELETE … WHERE purge_after < ?1`, so under a rolled-back clock the three sweeps still run and delete nothing; and because the ranked read's in-transaction sweep is that same comparison, a row past its window is both **still stored** and **still returned** for as long as the clock reads earlier than its deadline. Expiry is not delayed, it is suspended. Irreducible without a trusted clock — SQLCipher offers no monotonic counter and a boot-relative clock does not survive a reboot — so it is stated, not fixed. It is stated *here* because a disclosure that claims a fixed window (D6) depends on it |
-| ~~**[P3] Retention is enforced on demand, not by a timer** — a device that neither opens the picker nor reconciles keeps expired rows **on disk** past three days~~ — **[P4] CLOSED.** `CircleManager::new` sweeps at every process start, the trigger an idle device still produces, at the cost of one indexed DELETE on a database open that already happens | Residual: still three on-demand sweeps rather than a timer, so the row survives the interval between its deadline and the next process start, ranked read or reconcile — during which nothing can read it, because the read that would purges first. A device on which the app never runs at all keeps it until the app next runs. Note also that `sync_co_members` can mint an already-expired row: a departure noticed days late expires against the last day shared, not the day it was noticed — the conservative direction |
+| **The retention clock is untrusted in BOTH directions** — every sweep compares `purge_after` against the device wall clock (`chrono::Utc::now()` at process start; `DateTime.now()` marshalled through `nowUnixSecs` for the ranked read and the reconcile, `nostr_circle_service.dart:1869,1882`), and there is **no monotonic floor anywhere in the path** | Forward jump: purges EARLY — bounded, affects only recent contacts, self-healing for current members. **Backward jump is the mirror case and is worse for the promise.** `purge_expired` is `DELETE … WHERE purge_after < ?1`, so under a rolled-back clock the three sweeps still run and delete nothing; and because the ranked read's in-transaction sweep is that same comparison, a row past its window is both **still stored** and **still returned** for as long as the clock reads earlier than its deadline. Expiry is not delayed, it is suspended. Irreducible without a trusted clock — SQLCipher offers no monotonic counter and a boot-relative clock does not survive a reboot — so it is stated, not fixed. It is stated *here* because a disclosure that claims a fixed window (D6) depends on it. **Accepted alongside the enforcement model (D9, owner 2026-08-28)**, which takes both residuals in one decision: the eventual copy may not resolve this by promising a fixed wall-clock window |
+| ~~**[P3] Retention is enforced on demand, not by a timer** — a device that neither opens the picker nor reconciles keeps expired rows **on disk** past three days~~ — **[P4] CLOSED.** `CircleManager::new` sweeps at every process start, the trigger an idle device still produces, at the cost of one indexed DELETE on a database open that already happens | **ACCEPTED, not open (D9, owner 2026-08-28)** — a timer and a background wake were both considered and declined: they buy the earlier deletion of a row nothing can read, at the price of periodic wakeups. Residual, and still a residual: three on-demand sweeps rather than a timer, so the row survives the interval between its deadline and the next process start, ranked read or reconcile — during which nothing can read it, because the read that would purges first. A device on which the app never runs at all keeps it until the app next runs. Note also that `sync_co_members` can mint an already-expired row: a departure noticed days late expires against the last day shared, not the day it was noticed — the conservative direction |
 | `api.rs` logic is invisible to the coverage gate | Accept it, or measure `rust_builder` separately |
 | Screen-reader *perception* is untestable | Emit-once is machine-checked; perception stays a manual pre-release item |
 | Egress proof is closed-world only over Nostr relay frames | §12 |
 | Day bucketing raises the re-partition cost, does not eliminate it | §6.1 |
-| **iOS backup carries the encrypted DB** | Ciphertext + device-only key; a different-device restore cannot open it, a same-device restore can. Own decision, own timeline (D5) |
+| **iOS backup carries the encrypted DB** — **ACCEPTED, not open (D8, owner 2026-08-28)**; D5's trigger fired when the payload became a named, photographed contact list, and the decision taken was *no change* | Residual, and still a residual. `circles.db` sits under `getApplicationDocumentsDirectory()/haven` with no platform branch and **no `NSURLIsExcludedFromBackupKey` anywhere in the tree**, so it travels into every iOS backup; Android is unaffected (`allowBackup="false"`). Ciphertext + a `…ThisDeviceOnly` Keychain key means a different-device restore cannot open it — a **same-device restore can**, which makes the logout/Delete-Identity deletion device-local rather than absolute. Registered as accepted deviation **`IOS-BACKUP`** in `docs/privacy/privacy_invariants.json`; its `forbidden_claim` binds all future copy — nothing may say a logout or an identity deletion *irreversibly* destroys the directory. `INV-D-DIRECTORY-NEVER-LEAVES-SQLCIPHER` stays `enforced` and carries the reasoning in its `note` (D8) |
 | **Android Content Capture reads on-screen text** | Cannot be closed by the app for this surface; disclosure deferred with D6 |
-| **[P4] The D6 disclosure copy is deferred, and its copy-tie test is deferred with it** — the owner deferred the Settings privacy page pending a major overhaul, so `privacyWhatOthersSeeMembersDirectory` exists in no ARB file and `haven-core/tests/privacy_copy_ties.rs` carries no member-directory case | **Until the overhaul, nothing mechanically prevents `DIRECTORY_RETENTION_DAYS` and the eventual paragraph from drifting.** The constant stays test-enforced on its own (`retention_is_the_owner_decided_three_days`, `retention_ends_exactly_three_days_after_the_last_shared_day`); it is the copy→constant *link* that is absent, and only that. The drafted paragraph and its six load-bearing clauses are recorded in D6 so the overhaul does not rewrite it from scratch, and `INV-D-DIRECTORY-RETENTION-BOUNDED` carries empty `disclosure_arb_keys` for exactly this reason. Two constraints the honest copy must keep: the window is held by **three on-demand sweeps, not a scheduler**, so a row can outlive its deadline on disk until the next launch — during which no read can return it, because the read purges first; and the copy **must not claim Haven forgets who you shared a circle with** — Haven calls no group delete and the pinned MDK engine has none to call (`StorageProvider::delete_group` is never invoked from engine code; a left group's record is retained — `cgka-engine/src/engine.rs:200`), so the MLS store retains every circle's name and full roster until identity deletion |
+| **[P4] The D6 disclosure copy is deferred, and its copy-tie test is deferred with it** — the owner deferred the Settings privacy page pending a major overhaul, so `privacyWhatOthersSeeMembersDirectory` exists in no ARB file and `haven-core/tests/privacy_copy_ties.rs` carries no member-directory case | **Until the overhaul, nothing mechanically prevents `DIRECTORY_RETENTION_DAYS` and the eventual paragraph from drifting.** The constant stays test-enforced on its own (`retention_is_the_owner_decided_three_days`, `retention_ends_exactly_three_days_after_the_last_shared_day`); it is the copy→constant *link* that is absent, and only that. The drafted paragraph and its six load-bearing clauses are recorded in D6 so the overhaul does not rewrite it from scratch, and `INV-D-DIRECTORY-RETENTION-BOUNDED` carries empty `disclosure_arb_keys` for exactly this reason. Two constraints the honest copy must keep: the window is held by **three on-demand sweeps, not a scheduler** (**D9**, accepted 2026-08-28), so a row can outlive its deadline on disk until the next launch — during which no read can return it, because the read purges first; and the copy **must not claim Haven forgets who you shared a circle with** — Haven calls no group delete and the pinned MDK engine has none to call (`StorageProvider::delete_group` is never invoked from engine code; a left group's record is retained — `cgka-engine/src/engine.rs:200`), so the MLS store retains every circle's name and full roster until identity deletion |
 | ~~**[P0] Devanagari matras are dropped by the fold**~~ — **FIXED.** The fold now drops a mark only where it is optional pointing (§6.2); `कमला`/`कमल`, `राम`/`रमा` and `ガンダム`/`ガンタム` are distinct keys again | Residual: hi/ne/ja get no folding at all beyond case + NFKD, and hiragana is **not** unified with katakana, so a Japanese user typing `たなか` will not find `タナカ`. That is a search MISS (retypeable), not a wrong match. Copy must not promise "finds any spelling" |
 | **Kana script unification is not implemented** — the one-line `U+3041..3096 → +0x60` map that would make `だいすけ` ≡ `ダイスケ` | Deliberately out of scope: it reduces false negatives, whereas the fix above removed false positives. Raise as its own change if `ja` search quality is measured |
 | **`fetch_my_profile`'s `get_profile(...).unwrap_or(cp)` fallback would render an unsanitized fetched row** | Unreachable — `upsert_profile_if_newer` and `touch_profiles_hit` both leave a row, so the `unwrap_or` never fires. Closing it properly means `upsert_profile_if_newer` returning the winning row, as `upsert_profile` now does |

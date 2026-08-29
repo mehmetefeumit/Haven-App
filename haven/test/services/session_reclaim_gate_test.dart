@@ -50,22 +50,57 @@ void main() {
   });
 
   group('the reclaim has exactly one call site', () {
-    test('forceReleaseLiveSession is called from one place in lib/', () {
-      final hits = <String>[];
+    /// Every shape in which a file can get hold of the destructive call.
+    ///
+    /// A bare `contains('forceReleaseLiveSession(')` is NOT enough, and the gap
+    /// was live: the UI isolate's route is wired as a TEAR-OFF
+    /// (`forceReleaseLiveSession: forceReleaseLiveSession,`) with no
+    /// parenthesis anywhere, so a whole second route to the lever was added and
+    /// this guard — the guard whose entire job is to notice that — stayed
+    /// green. Matching the identifier followed by any of `( , : )` covers the
+    /// call, the tear-off, the named argument and the parameter declaration,
+    /// and deliberately has no leading word boundary so the foreground
+    /// service's `_forceReleaseLiveSession(` wrapper is caught by the same
+    /// pattern. The `;` is not decoration either: `final probe =
+    /// forceReleaseLiveSession;` is a complete route with neither a
+    /// parenthesis nor a comma, and it stayed green without it.
+    final routeToTheLever = RegExp(r'forceReleaseLiveSession\s*[(,:;)]');
+
+    /// The files allowed to reach it, each with the reason it is allowed.
+    ///
+    /// Asserted as a SET rather than a count: a count answers "how many", which
+    /// a swap of one sanctioned file for an unsanctioned one leaves unchanged.
+    const sanctioned = <String>{
+      // The background isolate's own reclaim, behind the liveness probe and
+      // the gates asserted below.
+      'lib/src/services/background_location_task.dart',
+      // The UI isolate's wiring: the tear-off is injected into
+      // NostrCircleService here and NOWHERE else, so the background isolate's
+      // own circle service (built with `withInjectedManager`) cannot reach it.
+      'lib/src/providers/service_providers.dart',
+      // The UI isolate's consumer, behind the handover-verdict and
+      // registry-re-read gates asserted below.
+      'lib/src/services/nostr_circle_service.dart',
+    };
+
+    test('only the sanctioned files can reach forceReleaseLiveSession', () {
+      final hits = <String>{};
       for (final entity in Directory('lib').listSync(recursive: true)) {
         if (entity is! File || !entity.path.endsWith('.dart')) continue;
         // Skip the generated bindings, which necessarily declare it.
         if (entity.path.contains('/rust/')) continue;
-        final text = entity.readAsStringSync();
-        if (text.contains('forceReleaseLiveSession(')) hits.add(entity.path);
+        if (routeToTheLever.hasMatch(entity.readAsStringSync())) {
+          hits.add(entity.path);
+        }
       }
       expect(
         hits,
-        hasLength(1),
-        reason: 'a second call site would need its own copy of every gate '
-            'below; found: $hits',
+        sanctioned,
+        reason: 'every route to this call needs its own complete set of gates '
+            '— it stops the live-sync engine, and against an isolate that is '
+            'actually alive that destroys live receive and frees nothing. A '
+            'new file here means a new set of gates nobody has written.',
       );
-      expect(hits.single, endsWith('background_location_task.dart'));
     });
 
     test('the only call site is inside the gated helper', () {
@@ -402,6 +437,136 @@ void main() {
         reason: 'the open must not throw past its caller, or onStart aborts '
             'before building the services recovery depends on',
       );
+    });
+  });
+
+  group('the UI isolate route is gated too', () {
+    // The SECOND route to the same destructive call, added for C1: a Rule-14
+    // guard held by this isolate's own live-sync engine after a stop that timed
+    // out, which the foreground service's reclaim can never take (it probes the
+    // main isolate, finds it alive, and correctly declines forever). Its gates
+    // are different from the reclaim's — there is no liveness to infer, because
+    // this isolate is deciding about itself — but they are gates all the same,
+    // and they are the reason the file above is allowed to name the lever.
+    late String eligibility;
+    late String release;
+
+    setUpAll(() {
+      final src = File(
+        'lib/src/services/nostr_circle_service.dart',
+      ).readAsStringSync();
+
+      final recoverAt = src.indexOf(
+        'Future<bool> _recoverHeldSession(String dataDir) async {',
+      );
+      final releaseAt = src.indexOf(
+        'Future<bool> _forceReleaseOrphanedSession(String dataDir) async {',
+      );
+      expect(
+        recoverAt,
+        isNonNegative,
+        reason: 'the UI-isolate recovery must exist; if it was renamed, '
+            'update these guards rather than deleting them',
+      );
+      expect(releaseAt, greaterThan(recoverAt));
+
+      // Sliced so a mention in a doc comment elsewhere in this 1900-line file
+      // can never satisfy an ordering claim about these two bodies.
+      eligibility = src.substring(recoverAt, releaseAt);
+      release = src.substring(
+        releaseAt,
+        src.indexOf('\n  /// Ensures the manager is initialized', releaseAt),
+      );
+    });
+
+    test('only a timedOut handover reaches the lever', () {
+      // `backgrounded` is the one that MUST never get through: it means the
+      // pause-time handoff is working as designed and the foreground service
+      // legitimately holds the session, so force-releasing would end the
+      // user's background location sharing to satisfy a routine maintenance
+      // tick. Asserted as an allow-list rather than a deny-list, so a verdict
+      // added to `HandoverOutcome` later cannot quietly become eligible.
+      final verdicts = RegExp(r'HandoverOutcome\.(\w+)')
+          .allMatches(eligibility)
+          .map((m) => m.group(1))
+          .toSet();
+      expect(
+        verdicts,
+        {'released', 'timedOut'},
+        reason: 'a verdict compared here is a verdict that can route to the '
+            'force-release; `backgrounded` would cost the user background '
+            'sharing, and `stopFailed`/`notHeld` establish nothing about who '
+            'holds the guard',
+      );
+
+      final gate = eligibility.indexOf(
+        'if (outcome != HandoverOutcome.timedOut) return false;',
+      );
+      final call = eligibility.indexOf('_forceReleaseOrphanedSession(dataDir)');
+      expect(gate, isNonNegative, reason: 'the verdict gate must be intact');
+      expect(
+        call,
+        greaterThan(gate),
+        reason: 'the gate must precede the call, not follow it',
+      );
+    });
+
+    test('the registry is re-read immediately before the release', () {
+      // The handover's own answer is a snapshot from BEFORE it stopped and
+      // polled the service. Spending a call that stops the live-sync engine on
+      // a stale reading is exactly the "destroys live receive and frees
+      // nothing" case this whole file exists to prevent.
+      final read = release.indexOf('await readRegistry(dataDir)');
+      final declineIfFree = release.indexOf('if (!held) return false;');
+      final call = release.indexOf('await forceRelease()');
+      expect(read, isNonNegative, reason: 'the registry must be re-read');
+      expect(declineIfFree, greaterThan(read));
+      expect(
+        call,
+        greaterThan(declineIfFree),
+        reason: 'a free guard must decline BEFORE the destructive call',
+      );
+
+      // Nothing awaited may sit between the decline and the call: an await
+      // there is a window in which the answer can go stale again.
+      final between = release.substring(declineIfFree, call);
+      expect(
+        between.contains('await'),
+        isFalse,
+        reason: 'the re-read must be immediately before the call; an await in '
+            'between reintroduces the staleness it exists to close',
+      );
+    });
+
+    test('an unanswerable registry is not read as a free guard', () {
+      // Fail CLOSED in both directions: "cannot tell" must neither open blind
+      // nor fire the lever.
+      final read = release.indexOf('await readRegistry(dataDir)');
+      final catchAt = release.indexOf('on Object catch', read);
+      expect(catchAt, isNonNegative);
+      // Bounded by the clause's own closing brace at method-body indentation —
+      // a bare `indexOf('}')` stops at the first `${...}` interpolation inside
+      // the log line and would read as "no return here" even when one follows.
+      final clauseEnd = release.indexOf('\n    }', catchAt);
+      expect(clauseEnd, greaterThan(catchAt));
+      expect(
+        release.substring(catchAt, clauseEnd),
+        contains('return false'),
+        reason: 'a query that cannot answer must decline, not proceed',
+      );
+    });
+
+    test('neither half retries in a loop', () {
+      // One shot. Looping would stop the foreground service (and this
+      // isolate's engine) once per pass while making no progress against a
+      // guard neither can reach.
+      for (final body in <String>[eligibility, release]) {
+        expect(
+          RegExp(r'\b(while|for)\s*\(').hasMatch(body),
+          isFalse,
+          reason: 'the recovery must be attempted once per initialize',
+        );
+      }
     });
   });
 }

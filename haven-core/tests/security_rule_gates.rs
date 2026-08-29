@@ -485,6 +485,10 @@ async fn deliver_through_receiver(
         tx,
         processor,
         Arc::new(AtomicBool::new(false)),
+        // The wedged flag: irrelevant here (this harness keeps its worker end
+        // alive), and asserted where it matters in
+        // `supervisor::a_dead_worker_raises_the_wedged_flag_and_surfaces_a_status`.
+        Arc::new(AtomicBool::new(false)),
         cancel_rx,
     ));
     drop(btx);

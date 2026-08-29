@@ -13,7 +13,7 @@ import 'package:haven/src/rust/api.dart';
 /// pollers run and the engine is never started.
 ///
 /// Kept as a compile-time `const` (single source of truth) so the unused path
-/// tree-shakes out of a release build, mirroring `enablePeriodicSelfUpdate`.
+/// tree-shakes out of a release build.
 ///
 /// **M11 two-phase rollout (Phase B — LIVE):** this is a `bool.fromEnvironment`
 /// const — STILL compile-time (the RHS is a const expression, so `if

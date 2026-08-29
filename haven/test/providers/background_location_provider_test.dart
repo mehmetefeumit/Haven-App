@@ -7,11 +7,14 @@
 ///   4. BackgroundSharingNotifier Android-seam permission cases (T9–T11)
 library;
 
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/locale_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/identity_service.dart';
@@ -92,8 +95,15 @@ class _ServiceCallTracker {
   int startCallCount = 0;
   int stopCallCount = 0;
 
-  Future<void> start({required Function callback}) async {
+  /// Notification text carried by the most recent start request.
+  String? lastNotificationText;
+
+  Future<void> start({
+    required Function callback,
+    required String notificationText,
+  }) async {
     startCallCount++;
+    lastNotificationText = notificationText;
   }
 
   Future<void> stop() async {
@@ -399,6 +409,191 @@ void main() {
         );
       },
     );
+
+    // -----------------------------------------------------------------------
+    // The notification is the only Haven surface a backgrounded user reads,
+    // and the service isolate cannot localize: it has no widget tree. So the
+    // text has to be resolved HERE, in the app's language, and handed over.
+    // -----------------------------------------------------------------------
+    test(
+      'the start request carries the notification text in the app language',
+      () async {
+        SharedPreferences.setMockInitialValues({
+          kBackgroundSharingKey: true,
+          kLocationDisclosureBackgroundAcceptedKey: true,
+        });
+
+        final tracker = _ServiceCallTracker();
+
+        final container = ProviderContainer(
+          overrides: [
+            platformIsAndroidProvider.overrideWithValue(true),
+            identityServiceProvider.overrideWithValue(
+              _FakeIdentityService(identity: _loadedIdentity),
+            ),
+            backgroundServiceFunctionsProvider.overrideWithValue((
+              start: tracker.start,
+              stop: tracker.stop,
+            )),
+            localeControllerProvider.overrideWith(
+              (ref) => LocaleController(const Locale('tr')),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        container.read(backgroundSharingProvider.notifier);
+        await Future<void>.delayed(Duration.zero);
+        await container.read(identityProvider.future);
+        container.read(backgroundServiceLifecycleProvider);
+        await Future<void>.delayed(Duration.zero);
+
+        expect(
+          tracker.lastNotificationText,
+          lookupAppLocalizations(const Locale('tr')).fgsNotificationSharing,
+          reason: 'the service must be started with the copy for the chosen '
+              'language, because it can never resolve one itself',
+        );
+        expect(
+          tracker.lastNotificationText,
+          isNot(
+            lookupAppLocalizations(const Locale('en')).fgsNotificationSharing,
+          ),
+          reason: 'and a resolution that quietly falls back to English would '
+              'satisfy the assertion above only by coincidence',
+        );
+      },
+    );
+
+    // -----------------------------------------------------------------------
+    // Resume re-assert: a silently-dead FGS must be restarted without the
+    // user guessing to toggle sharing off and on.
+    // -----------------------------------------------------------------------
+    test(
+      'a foreground resume re-asserts startService while enabled, and stops '
+      'doing so once the provider is disposed',
+      () async {
+        SharedPreferences.setMockInitialValues({
+          kBackgroundSharingKey: true,
+          kLocationDisclosureBackgroundAcceptedKey: true,
+        });
+
+        final binding = TestWidgetsFlutterBinding.ensureInitialized();
+        final tracker = _ServiceCallTracker();
+
+        final container = ProviderContainer(
+          overrides: [
+            platformIsAndroidProvider.overrideWithValue(true),
+            identityServiceProvider.overrideWithValue(
+              _FakeIdentityService(identity: _loadedIdentity),
+            ),
+            backgroundServiceFunctionsProvider.overrideWithValue((
+              start: tracker.start,
+              stop: tracker.stop,
+            )),
+          ],
+        );
+
+        container.read(backgroundSharingProvider.notifier);
+        await Future<void>.delayed(Duration.zero);
+        await container.read(identityProvider.future);
+        container.read(backgroundServiceLifecycleProvider);
+        await Future<void>.delayed(Duration.zero);
+        expect(tracker.startCallCount, equals(1), reason: 'baseline start');
+
+        // The provider's INPUTS have not changed, so nothing re-evaluates it.
+        // This is exactly the state a silently-dead service leaves behind (an
+        // OEM battery manager killed it; a restart after the FGS handed the
+        // MLS session back failed) — and before this, the only recovery was
+        // for the user to guess at toggling sharing off and on again.
+        binding
+          ..handleAppLifecycleStateChanged(AppLifecycleState.inactive)
+          ..handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+        await Future<void>.delayed(Duration.zero);
+
+        expect(
+          tracker.startCallCount,
+          equals(2),
+          reason:
+              'a resume must re-assert the service; startService itself '
+              'no-ops when it is already running, and `resumed` is the only '
+              'lifecycle state Android 12+ accepts a '
+              'FOREGROUND_SERVICE_LOCATION start from',
+        );
+
+        // Only `resumed` re-asserts: a pause must not try to start a service
+        // from a non-visible activity (Android 12+ rejects that outright).
+        binding
+          ..handleAppLifecycleStateChanged(AppLifecycleState.inactive)
+          ..handleAppLifecycleStateChanged(AppLifecycleState.hidden)
+          ..handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        await Future<void>.delayed(Duration.zero);
+        expect(
+          tracker.startCallCount,
+          equals(2),
+          reason: 'backgrounding must not issue a start request',
+        );
+
+        // Disposing the provider must detach the observer, or a torn-down
+        // container keeps resurrecting the service after opt-out.
+        container.dispose();
+        binding
+          ..handleAppLifecycleStateChanged(AppLifecycleState.hidden)
+          ..handleAppLifecycleStateChanged(AppLifecycleState.inactive)
+          ..handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+        await Future<void>.delayed(Duration.zero);
+        expect(
+          tracker.startCallCount,
+          equals(2),
+          reason:
+              'the lifecycle observer must be removed on dispose — a leaked '
+              'one would restart the service for a container that is gone',
+        );
+      },
+    );
+
+    test('no lifecycle observer is installed on a non-Android platform',
+        () async {
+      SharedPreferences.setMockInitialValues({
+        kBackgroundSharingKey: true,
+        kLocationDisclosureBackgroundAcceptedKey: true,
+      });
+
+      final binding = TestWidgetsFlutterBinding.ensureInitialized();
+      final tracker = _ServiceCallTracker();
+
+      final container = ProviderContainer(
+        overrides: [
+          platformIsAndroidProvider.overrideWithValue(false),
+          identityServiceProvider.overrideWithValue(
+            _FakeIdentityService(identity: _loadedIdentity),
+          ),
+          backgroundServiceFunctionsProvider.overrideWithValue((
+            start: tracker.start,
+            stop: tracker.stop,
+          )),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      container.read(backgroundSharingProvider.notifier);
+      await Future<void>.delayed(Duration.zero);
+      await container.read(identityProvider.future);
+      container.read(backgroundServiceLifecycleProvider);
+
+      binding
+        ..handleAppLifecycleStateChanged(AppLifecycleState.inactive)
+        ..handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        tracker.startCallCount,
+        equals(0),
+        reason:
+            'iOS has no foreground service; a resume there must not reach '
+            'the Android plugin at all',
+      );
+    });
 
     // -----------------------------------------------------------------------
     // T7: enabled=false → stop called; identity=null → stop called
@@ -905,6 +1100,77 @@ void main() {
             reason:
                 'kBackgroundSharingKey must be persisted to true even when '
                 'battery optimization is denied (soft warning, not fatal)',
+          );
+          expect(
+            prefs.getBool(kBatteryOptimizationDeniedKey),
+            isTrue,
+            reason:
+                'the denial must OUTLIVE the returned result: the settings '
+                'page shows it once in a snackbar and onboarding discards it '
+                'entirely, so without this the user can never afterwards '
+                'discover why an OEM keeps killing the service',
+          );
+        },
+      );
+
+      // -----------------------------------------------------------------------
+      // The granted case must CLEAR a previously recorded denial, or the
+      // advisory becomes permanent once shown.
+      // -----------------------------------------------------------------------
+      test(
+        'Android (seam) + enable + Granted clears a previously recorded '
+        'battery-optimization denial',
+        () async {
+          SharedPreferences.setMockInitialValues({
+            kBatteryOptimizationDeniedKey: true,
+          });
+
+          final notifier = BackgroundSharingNotifier(
+            ensurePermissions: stubReturning(const EnsurePermissionsGranted()),
+            isAndroid: true,
+          );
+          await Future<void>.delayed(Duration.zero);
+
+          await notifier.setEnabled(enabled: true);
+
+          final prefs = await SharedPreferences.getInstance();
+          expect(
+            prefs.getBool(kBatteryOptimizationDeniedKey),
+            isFalse,
+            reason:
+                'a user who granted the exemption on a later attempt must '
+                'stop seeing the advisory — a write-once flag would leave a '
+                'permanent warning about a solved problem',
+          );
+        },
+      );
+
+      // -----------------------------------------------------------------------
+      // A notification denial aborts BEFORE the battery probe, so it must not
+      // fabricate a verdict about a question the OS was never asked.
+      // -----------------------------------------------------------------------
+      test(
+        'Android (seam) + enable + NotificationDenied records no '
+        'battery-optimization verdict',
+        () async {
+          final notifier = BackgroundSharingNotifier(
+            ensurePermissions: stubReturning(
+              const EnsurePermissionsNotificationDenied(),
+            ),
+            isAndroid: true,
+          );
+          await Future<void>.delayed(Duration.zero);
+
+          await notifier.setEnabled(enabled: true);
+
+          final prefs = await SharedPreferences.getInstance();
+          expect(
+            prefs.getBool(kBatteryOptimizationDeniedKey),
+            isNull,
+            reason:
+                'ensurePermissions returns before probing the battery '
+                'exemption on a notification denial; recording either answer '
+                'would be a guess',
           );
         },
       );

@@ -90,6 +90,7 @@ import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/member_profile_refresh_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/providers/sharing_health_provider.dart';
 import 'package:haven/src/services/relay_service.dart';
 
 // ---------------------------------------------------------------------------
@@ -431,6 +432,34 @@ class MaintenanceSchedulerNotifier extends Notifier<void> {
         'stillConnecting=${result.relaysStillConnecting}, '
         'disconnected=${result.relaysDisconnected})',
       );
+      // Clear the sharing-health model's lost-subscription latch when this
+      // tick proves the receive plane is whole again.
+      //
+      // NOTHING else can clear it. The engine raises `RelayError` on every
+      // relay `CLOSED`, emits nothing when its own jittered repair task
+      // successfully re-issues the REQ, and `Connected` fires only on a SOCKET
+      // transition — which a `CLOSED` does not cause. So
+      // `paused(receiveSubscriptionLost)` was a latch with no reset: one
+      // throttled subscription on one relay left a permanent "sharing has
+      // stopped" banner up while locations kept arriving on the other relays,
+      // which is a worse failure than the silence it replaced.
+      //
+      // `healthy`, `resubscribed` and `targetedReanchor` are all proof: this
+      // tick probes the pool AND the live subscription model, so each verdict
+      // means every REQ the session expects is present (`targetedReanchor`
+      // differs from `resubscribed` only in repair COST — see its doc on
+      // `SubscriptionHealthAction`). `engineOff` proves nothing — there is no
+      // session to inspect — and must not clear anything.
+      switch (result.action) {
+        case SubscriptionHealthAction.healthy:
+        case SubscriptionHealthAction.resubscribed:
+        case SubscriptionHealthAction.targetedReanchor:
+          ref
+              .read(sharingHealthProvider.notifier)
+              .recordRelaySubscriptionRestored();
+        case SubscriptionHealthAction.engineOff:
+          break;
+      }
     } on Object catch (e) {
       debugPrint('[Maintenance] health tick threw: ${e.runtimeType}');
     } finally {

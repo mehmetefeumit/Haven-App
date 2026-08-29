@@ -131,8 +131,17 @@
 #     PUBLISHING alive (and keep opt-out users suspended): Info.plist
 #     `location` background mode, exactly one geolocator stream call site,
 #     AppleSettings background flags keyed off the background-sharing toggle
-#     (never hardcoded), the C4 disable-while-paused watcher installed
-#     outside the liveSync-gated path, presence-only location logging.
+#     (never hardcoded, and BOTH arms of the distance filter — the background
+#     arm must be kCLDistanceFilterNone, the opt-out arm must stay 1 m), the
+#     C4 disable-while-paused watcher installed outside the liveSync-gated
+#     path, presence-only location logging, and the relaunch region armed and
+#     released with SLC under the same consent predicate. Its `--self-test`
+#     runs as its own step: the two function-shaped checks pin invariants
+#     nothing behavioural can observe — a settings object whose only symptom
+#     is "iOS suspended the app" hours later and off-device, and a region that
+#     can only ever fire after a real termination (owner checklist,
+#     docs/M7_BACKGROUND_SHARING.md §6 item 2b) — so a rotted guard would take
+#     both invariants with it in silence.
 #
 #   Location access gate ordering     scripts/ci/check_location_access_gate.sh
 #     No stored coordinate may outlive the user's location access. The
@@ -151,6 +160,13 @@
 #   Locale stays device-local         scripts/ci/check_locale_privacy.sh
 #     The app language must remain a local preference and never be referenced
 #     from the service layer (nothing locale-shaped may reach a relay).
+#
+#   Epoch-repair isolation            scripts/ci/check_epoch_repair_isolation.sh
+#     The epoch-rotation repair authors an MLS commit, so it must run only on
+#     the foreground service layer (Rule 14 / gate 5) and must never be driven
+#     by a timer — the user-facing copy and INV-E-NO-PERIODIC-REKEY both promise
+#     keys change on a membership change or an explicit repair, never
+#     periodically.
 #
 #   No exporter-label override        scripts/ci/check_no_exporter_label_override.sh
 #     The transport-nostr-peeler's with_exporter_label hook is the only local
@@ -217,6 +233,28 @@
 #     analyzer lint `haven/test/lints/mls_session_handle_release_test.dart`,
 #     which runs in the Flutter lane because it needs a toolchain this job
 #     deliberately has none of.
+#
+#   Teardown drain budget derivation  scripts/ci/check_teardown_drain_budget.sh
+#     The Dart `kBackgroundTeardownDrainBudget` — how long the Android
+#     foreground service's `onDestroy` waits for an in-flight location publish,
+#     and the number `handoverTimeout` is derived from — must stay equal to ONE
+#     relay publish attempt in Rust (`CONNECTION_TIMEOUT + DEFAULT_TIMEOUT`).
+#     Two languages, no shared header: drift is silent either way, costing a
+#     routinely-abandoned publish or a user waiting out a teardown that already
+#     finished.
+#
+#   Live-sync restart budget derivation  scripts/ci/check_live_sync_restart_budget.sh
+#     The Dart `kLiveSyncRestartBudget` bounds one `ensureRunning()` — the only
+#     periodic recovery the live-sync receive plane has, since MapShell arms its
+#     next self-heal from that future's completion. It is the engine's own
+#     stop+start bound (`RELAY_LIFECYCLE_OP_TIMEOUT_SECS`,
+#     `SUBSCRIBE_CONNECT_WAIT_SECS`), so the two per-op magnitudes must stay
+#     mirrored across the FFI — and the initializer must literally name them, so
+#     a hardcoded budget with the right number still fails. It also pins the
+#     resume re-anchor's throttle (`kLocationPublishOverlapGuard`) against
+#     `GROUP_RESUBSCRIBE_BUFFER_SECS`: raise the Rust buffer and re-anchors
+#     become wasted 7-day inbox replays, raise the Dart guard and resumes
+#     silently lose the one repair a relay-`CLOSED` REQ has.
 #
 #   No key logging                    scripts/ci/check_no_key_logging.sh
 #     Security Rule 6 at the SOURCE. `scan-logs-for-secrets.sh` matches seven
@@ -654,6 +692,14 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_ios_background_publish.sh
 
+      # Its two function-shaped checks pin invariants nothing behavioural can
+      # see: a stream-settings object whose only symptom is "iOS suspended the
+      # app" hours later, and a relaunch region that can only ever fire after a
+      # real termination. A rotted guard would take both with it silently.
+      - name: iOS background publish guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_ios_background_publish.sh --self-test
+
       # The gate that stops a cached GPS fix outliving the consent for it is
       # enforced by nothing but statement ORDER — the permission/provider
       # checks used to sit BELOW the warm-cache and last-known shortcuts, so
@@ -677,6 +723,14 @@ jobs:
       - name: Locale stays device-local
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_locale_privacy.sh
+
+      - name: Epoch-repair isolation
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_epoch_repair_isolation.sh
+
+      - name: Epoch-repair isolation guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_epoch_repair_isolation.sh --self-test
 
       - name: No exporter-label override
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
@@ -759,6 +813,35 @@ jobs:
       - name: MLS session single-owner guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_mls_session_single_owner.sh --self-test
+
+      # The other half of that handoff: how long the foreground service is
+      # allowed to spend NOT letting go. The budget is one relay publish attempt
+      # by definition, and the two constants that define it live on opposite
+      # sides of the FFI with nothing but this to hold them together.
+      - name: Teardown drain budget matches the relay attempt it derives from
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_teardown_drain_budget.sh
+
+      # Both drift directions plus both "the constant I read is gone" cases,
+      # so a guard that silently stopped comparing anything fails loudly.
+      - name: Teardown drain budget guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_teardown_drain_budget.sh --self-test
+
+      # The receive-plane counterpart: `kLiveSyncRestartBudget` bounds the one
+      # periodic recovery the live-sync build has, and is the engine's own
+      # stop+start bound by definition. Same two-language, no-shared-header
+      # problem; drift either abandons restarts that would have succeeded or
+      # stalls the backstop with a dead receive plane.
+      - name: Live-sync restart budget matches the engine bounds it derives from
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_live_sync_restart_budget.sh
+
+      # Both drift directions on both constants, plus both "the constant I read
+      # is gone" cases.
+      - name: Live-sync restart budget guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_live_sync_restart_budget.sh --self-test
 
       # Security Rule 6's SOURCE half. The runtime scanner it complements can
       # only see what a lane executed, at a level the build let through, in one

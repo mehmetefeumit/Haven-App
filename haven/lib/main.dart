@@ -96,17 +96,14 @@ Future<void> main() async {
   // it, and the dedicated M7 background lane (which TESTS this system) does not
   // either — only the UI/protocol e2e_combined lane, which does not exercise the
   // foreground service, opts out.
-  if (!const bool.fromEnvironment('HAVEN_E2E_NO_BACKGROUND')) {
+  const backgroundSystemEnabled = !bool.fromEnvironment(
+    'HAVEN_E2E_NO_BACKGROUND',
+  );
+  if (backgroundSystemEnabled) {
     // Port + liveness responder together. `MapShell.initState` calls this too,
     // so an entrypoint that builds the app without running this `main()` — an
     // integration-test target, say — still registers the channel. Idempotent.
     ensureForegroundTaskComms();
-    // Configure the foreground-service notification channel up-front so
-    // the channel exists before any `startService` request is issued.
-    // Android does not allow modifying a channel's importance after
-    // creation, so the channel id needs to match the one used at start
-    // time (see `BackgroundLocationManager.init`).
-    BackgroundLocationManager.init();
   }
   await RustLib.init();
 
@@ -310,6 +307,22 @@ Future<void> main() async {
   // (identical semantics to ProviderScope — same widget; container is
   // created outside the widget tree so we can hold a reference).
   final container = ProviderContainer(overrides: overrides);
+
+  if (backgroundSystemEnabled) {
+    // Configure the foreground-service notification channel before any
+    // `startService` request can be issued — the first one comes from a
+    // provider, so it cannot precede `runApp`.
+    //
+    // Deliberately here rather than at the top of `main()`: the channel's name
+    // and description are user-visible in Android's system settings, and only
+    // the container can resolve them in the language the app is about to
+    // render in (it holds the persisted locale override).
+    final l10n = container.read(appLocalizationsProvider);
+    BackgroundLocationManager.init(
+      channelName: l10n.fgsChannelName,
+      channelDescription: l10n.fgsChannelDescription,
+    );
+  }
 
   // M7-D: Register the iOS background catch-up channel handler.
   // Must run after the ProviderContainer is created (the handler reads

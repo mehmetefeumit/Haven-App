@@ -1,4 +1,5 @@
-/// The "this phone's clock is wrong" surface.
+/// The clock-fault surface: this phone's clock, or a disagreement between
+/// this phone and one other member.
 ///
 /// ## Why the user has to be told at all
 ///
@@ -60,11 +61,37 @@ class ClockSkewCopy {
 /// Returns `null` for [ClockSkewSignal.none] — there is nothing to say. Pure,
 /// so every branch is unit-testable without pumping a widget.
 ///
-/// The two bodies say different things because the two faults are different
-/// user experiences: with a relay rejection the user's location is going
-/// nowhere at all, whereas with the peer signal it is being sent and quietly
+/// The bodies say different things because the faults are different user
+/// experiences: with a relay rejection the user's location is going nowhere at
+/// all, whereas with a CORROBORATED peer signal it is being sent and quietly
 /// discarded. Collapsing them into one sentence would make the second one a
 /// lie in the direction that matters (it would imply the send itself failed).
+///
+/// ## The sole-source branch, and why it cannot share the corroborated copy
+///
+/// [ClockSkewSignal.peersAheadOfDevice] fires on ONE member when no second
+/// member is reachable to corroborate it (`ClockSkewDetector`'s sole-source
+/// exception — a two-member circle can never produce one). That evidence is
+/// strictly weaker, in two ways that the corroborated copy asserts anyway:
+///
+/// * **Whose clock.** With one peer, "we are behind" and "they are ahead" are
+///   indistinguishable. Worse, the two devices are not symmetric observers: a
+///   peer running 150 s fast makes THIS device fire while the peer's own
+///   detector stays silent (negative offsets are structurally uninformative,
+///   see `recordPeerTimestamp`), so the corroborated title — "This phone's
+///   clock is wrong" — would accuse the innocent device and never the guilty
+///   one.
+/// * **Whether anything is lost.** Both sides screen the NIP-40 expiration
+///   with 228 s of retention plus 60 s of receiver grace, so nothing is
+///   dropped anywhere until the gap passes `kClockSkewTotalLossThreshold`
+///   (288 s). The signal fires at `kClockSkewAlertThreshold` (120 s), so
+///   across the whole 120–288 s band the corroborated body — "the locations
+///   it sends expire before anyone can see them" — is simply false, and its
+///   remedy cannot clear a banner the user has nothing to fix.
+///
+/// Hence the third copy bundle: it names the disagreement, names no culprit,
+/// hedges the loss as a possibility, and offers a remedy that only rules THIS
+/// phone out. The corroborated branch is untouched.
 ///
 /// The magnitude is deliberately NOT rendered. It is an estimate derived from
 /// a handful of samples, and a precise-looking "your clock is 6 h 2 m slow" is
@@ -83,12 +110,27 @@ ClockSkewCopy? resolveClockSkewCopy(
         message: l10n.clockSkewBodyRejected,
       );
     case ClockSkewSignal.peersAheadOfDevice:
+      if (isSoleSourceVerdict(status)) {
+        return ClockSkewCopy(
+          title: l10n.clockSkewTitleDisagreement,
+          message: l10n.clockSkewBodyDisagreement,
+        );
+      }
       return ClockSkewCopy(
         title: l10n.clockSkewTitle,
         message: l10n.clockSkewBodyBehind,
       );
   }
 }
+
+/// Whether [status] rests on a single peer, i.e. on evidence that cannot
+/// attribute the fault or prove a loss.
+///
+/// The one predicate both the copy choice and the recovery announcement branch
+/// on, so the two can never disagree about which fault was on screen.
+bool isSoleSourceVerdict(ClockSkewStatus status) =>
+    status.signal == ClockSkewSignal.peersAheadOfDevice &&
+    status.corroboratingSources == 1;
 
 /// Banner announcing that this device's clock is breaking location sharing.
 ///
@@ -125,7 +167,13 @@ class ClockSkewBanner extends ConsumerWidget {
         unawaited(
           SemanticsService.sendAnnouncement(
             View.of(context),
-            l10n.clockSkewResolvedAnnouncement,
+            // The general announcement says Haven "is sharing your location
+            // again", which is an over-claim for the sole-source fault: there,
+            // sharing may never have stopped (see resolveClockSkewCopy).
+            // Branch on the verdict that WAS on screen, not the cleared one.
+            isSoleSourceVerdict(previous)
+                ? l10n.clockSkewDisagreementResolvedAnnouncement
+                : l10n.clockSkewResolvedAnnouncement,
             Directionality.of(context),
           ),
         );

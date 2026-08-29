@@ -6,6 +6,45 @@ import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/subscription_service.dart';
 
+/// Mirror of `RELAY_LIFECYCLE_OP_TIMEOUT_SECS` in
+/// `haven-core/src/relay/live_sync/config.rs` — the engine's own bound on ONE
+/// relay control-plane op. Pinned across the language boundary by
+/// `scripts/ci/check_live_sync_restart_budget.sh`.
+const int _kRelayLifecycleOpTimeoutSecs = 10;
+
+/// Mirror of `SUBSCRIBE_CONNECT_WAIT_SECS` in the same Rust module — the
+/// early-returning handshake grace a `start` waits before its first REQ.
+/// Pinned by the same guard.
+const int _kSubscribeConnectWaitSecs = 5;
+
+/// How many [_kRelayLifecycleOpTimeoutSecs]-bounded ops one full restart can
+/// spend.
+///
+/// `LiveSyncCore::stop_inner` bounds three (`unsubscribe_all`,
+/// `client.shutdown`, the router clear) and `NostrSubscriptionService.stop`
+/// retries a failed `stopSession()` once against the core that Rust reinstalls
+/// into `SESSION` — so the stop half is six. The start half adds no
+/// lifecycle-timeout op of its own, only [_kSubscribeConnectWaitSecs].
+const int _kLifecycleOpsPerRestart = 6;
+
+/// Upper bound on one [LiveSyncResubscriber.ensureRunning] call.
+///
+/// DERIVED, not chosen: it is exactly what the Rust engine allows ITSELF to
+/// spend on a stop + start, so Dart gives up only once the engine provably
+/// has. Every await inside a full restart is an FFI round-trip with no
+/// Dart-side bound, and this is driven from `MapShell`'s periodic backstop
+/// whose next tick is armed from THIS future's completion — so a hang here
+/// used to kill the only recovery path there is, permanently, for the rest of
+/// the process.
+///
+/// Comfortably under the backstop's own 90 s jitter floor, so a bounded-out
+/// restart always re-arms before the next tick rather than stacking.
+const Duration kLiveSyncRestartBudget = Duration(
+  seconds:
+      _kLifecycleOpsPerRestart * _kRelayLifecycleOpTimeoutSecs +
+      _kSubscribeConnectWaitSecs,
+);
+
 /// The decision computed from an accepted-circle-set change: whether the
 /// live-sync engine must re-subscribe, plus the new subscription [groups] and
 /// their canonical [signature] to (re)start it with.
@@ -90,11 +129,13 @@ class Delta {
 /// Owned by `MapShell`, which feeds it `circlesProvider` snapshots and
 /// disposes it.
 class LiveSyncResubscriber {
-  /// Creates a re-subscriber over the already-started [engine].
+  /// Creates a re-subscriber over [engine].
   ///
-  /// [initialGroups] is the group set [engine] was started with — the seed
-  /// for the incremental `_running` map [computeDelta] diffs a fresh snapshot
-  /// against. [initialSignature] is its [signatureForGroups]; a later
+  /// [initialGroups] is the group set [engine] is running — or, when this is
+  /// built before any session exists, the set it is WANTED to run, which
+  /// [ensureRunning] then performs the first start from. Either way it is the
+  /// seed for the incremental `_running` map [computeDelta] diffs a fresh
+  /// snapshot against. [initialSignature] is its [signatureForGroups]; a later
   /// snapshot with the same signature is a no-op.
   /// [inboxRelays] re-reads the user's inbox relays for the full-restart
   /// fallback. [debounce] coalesces a burst of changes into a single apply.
@@ -140,7 +181,8 @@ class LiveSyncResubscriber {
 
   /// Filters [circles] to the accepted subset and maps each to the engine's
   /// [FfiGroupSpec] subscription spec. Pure — no `ref`, no FFI, no flag; the
-  /// same derivation `MapShell._startLiveSync` uses for the initial start.
+  /// same derivation `MapShell._ensureLiveSyncInstalled` seeds this class
+  /// with, which is what the initial start then runs from.
   static List<FfiGroupSpec> groupsForCircles(List<Circle> circles) => [
     for (final c in circles)
       if (c.membershipStatus == MembershipStatus.accepted)
@@ -270,8 +312,25 @@ class LiveSyncResubscriber {
         );
       }
       // Serialize behind any in-flight apply so engine calls never interleave.
-      _chain = _chain.then((_) => _applyDelta(delta));
+      _chainNext(() => _applyDelta(delta), 'delta apply');
     });
+  }
+
+  /// Appends [body] to the serialized chain, absorbing any error it lets
+  /// escape.
+  ///
+  /// The absorbing is not politeness. `.then` on an ERRORED future skips its
+  /// callback and re-propagates, so a single escaped throw would leave `_chain`
+  /// permanently errored — silently disabling every later delta apply AND every
+  /// later self-heal for the rest of the session, with nothing observable but a
+  /// map that stops updating. [label] names the leg in the log; the error type
+  /// only (Security Rule 8).
+  Future<void> _chainNext(Future<void> Function() body, String label) {
+    return _chain = _chain
+        .then((_) => body())
+        .catchError((Object e) {
+          debugPrint('[LiveSyncResubscriber] $label failed: ${e.runtimeType}');
+        });
   }
 
   /// Applies one incremental [delta] to the running session: unsubscribe every
@@ -310,10 +369,12 @@ class LiveSyncResubscriber {
   /// MLS database. That last one is deliberately possible, so an unbounded
   /// consequence for it is not acceptable — this is what bounds it.
   ///
-  /// Idempotent and cheap when healthy: it only acts on an engine that is both
-  /// wanted (a non-empty running set) and not running.
+  /// Idempotent and cheap when healthy: on a running engine it costs one
+  /// `isRunning` read.
   ///
-  /// Serialized on `_chain`, so it can never interleave with an apply.
+  /// Serialized on `_chain`, so it can never interleave with an apply — and
+  /// bounded by [kLiveSyncRestartBudget], so neither a throw nor a hang inside
+  /// the restart can strand the caller.
   Future<bool> ensureRunning() {
     if (_disposed) return Future<bool>.value(false);
     // Queue behind any in-flight apply or restart, exactly as
@@ -333,19 +394,63 @@ class LiveSyncResubscriber {
     // Two concurrent heals are just as reachable as a heal racing a delta: the
     // periodic timer and the resume-triggered call share no debounce.
     final completer = Completer<bool>();
-    _chain = _chain.then((_) async {
+    final leg = _chainNext(() async {
       completer.complete(await _ensureRunningLocked());
-    });
-    return completer.future;
+    }, 'self-heal restart');
+    // `_chainNext` absorbs a throw to keep the chain usable; this is what still
+    // gives the CALLER an answer in that case. Without it a throwing restart
+    // left `MapShell._healLiveSyncIfStopped` awaiting a future nothing would
+    // ever complete, and its `whenComplete` re-arm therefore never ran — one
+    // failure removed the only periodic recovery path there is.
+    unawaited(
+      leg.whenComplete(() {
+        if (!completer.isCompleted) completer.complete(false);
+      }),
+    );
+    // A HANG is the other half of the same defect, and no `catchError` catches
+    // one. Bounded by what the engine allows itself — see
+    // [kLiveSyncRestartBudget]. The chained body is deliberately NOT abandoned:
+    // it still holds the chain, so nothing starts a second engine behind its
+    // back (Security Rule 14); the caller simply stops waiting and retries on
+    // its own cadence.
+    return completer.future.timeout(
+      kLiveSyncRestartBudget,
+      onTimeout: () => false,
+    );
   }
 
   /// The body of [ensureRunning], run only from inside `_chain`.
+  ///
+  /// An EMPTY running set is still a session worth starting, which is why
+  /// there is no "nothing was ever subscribed" early return: the engine's
+  /// inbox REQ (kind 1059 gift wraps) is how INVITATIONS arrive and exists
+  /// independently of any circle, so refusing to restart an empty set left a
+  /// brand-new account — the one account guaranteed to have no circles — with
+  /// no live invitation delivery and no way back from a failed start.
+  /// `MapShell` now performs its FIRST start through here for exactly that
+  /// reason: one start path, serialized on one chain.
+  ///
+  /// NO circles AND no inbox relays is a REACHABLE state, and it fails safely.
+  ///
+  /// An earlier version of this comment claimed it was unreachable. That was
+  /// wrong on both halves: `relay_settings_page.dart` only marks the PROFILE
+  /// pool unremovable, so every inbox row offers removal; and
+  /// `seed_defaults_if_unseeded` returns early once its sentinel exists, so it
+  /// never re-seeds a list the user has deliberately emptied
+  /// (`InboxRelaysNotifier`'s `fallbackDefaultRelays` only covers a seeding
+  /// THROW). A user who removes every inbox relay really does leave it empty.
+  ///
+  /// What saves it is that the engine refuses rather than pretending: with no
+  /// relays at all the bucket subscribe never gets a REQ accepted, so
+  /// `start_session` tears down and returns an error instead of installing a
+  /// session that reports `isRunning` while issuing zero REQs. This therefore
+  /// answers `false` and the caller backs off — a visible, honest failure, not
+  /// a healthy-looking deaf engine. The residual cost is a repeating heal
+  /// failure for an account that has configured no relays, which is a
+  /// configuration problem the sharing-health model is the right place to
+  /// surface; no branch is added here for it.
   Future<bool> _ensureRunningLocked() async {
     if (_disposed) return false;
-    // Nothing was ever subscribed, so there is no session to restore and no
-    // group set to restore it with. A caller must go through
-    // [onCirclesChanged] first.
-    if (_running.isEmpty) return false;
     // Re-read under the chain rather than trusting a pre-queue observation: an
     // apply that ran while this was queued may already have restarted it.
     if (_engine.isRunning) return true;

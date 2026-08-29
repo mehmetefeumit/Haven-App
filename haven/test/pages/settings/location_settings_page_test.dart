@@ -103,11 +103,22 @@ class _FakeIosLocationAuth implements IosLocationAuthService {
 /// [iosAuthStatus] — the status reported by the overridden
 /// [iosLocationAuthServiceProvider]; drives the iOS "limited in background"
 /// note. Defaults to [IosAuthStatus.always] (not limited).
+///
+/// [batteryOptProbe] — replaces the live OS probe behind
+/// [batteryOptimizationDeniedProvider]. The provider's own Android gate and
+/// re-probe logic still run, so a test can prove the gate as well as the
+/// advisory.
+///
+/// [openBatteryOptSettings] — replaces the platform-channel opener behind the
+/// advisory's action button.
 Widget _buildApp({
   required EnsurePermissionsFn ensurePermissions,
   required _FakeDisclosureController fakeDisclosure,
   bool isAndroid = false,
   IosAuthStatus iosAuthStatus = IosAuthStatus.always,
+  BatteryOptimizationProbeFn? batteryOptProbe,
+  OpenBatteryOptimizationSettingsFn? openBatteryOptSettings,
+  TextScaler textScaler = TextScaler.noScaling,
 }) {
   return ProviderScope(
     overrides: [
@@ -121,11 +132,25 @@ Widget _buildApp({
       iosLocationAuthServiceProvider.overrideWithValue(
         _FakeIosLocationAuth(iosAuthStatus),
       ),
+      platformIsAndroidProvider.overrideWithValue(isAndroid),
+      if (batteryOptProbe != null)
+        batteryOptimizationProbeProvider.overrideWithValue(batteryOptProbe),
+      if (openBatteryOptSettings != null)
+        openBatteryOptimizationSettingsProvider.overrideWithValue(
+          openBatteryOptSettings,
+        ),
     ],
-    child: const MaterialApp(
+    child: MaterialApp(
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
-      home: LocationSettingsPage(),
+      // MaterialApp rebuilds MediaQuery from the view, so a MediaQuery around
+      // the whole app would be discarded; the builder is the supported way in.
+      builder: (context, child) => MediaQuery.withClampedTextScaling(
+        minScaleFactor: textScaler.scale(1),
+        maxScaleFactor: textScaler.scale(1),
+        child: child!,
+      ),
+      home: const LocationSettingsPage(),
     ),
   );
 }
@@ -542,6 +567,307 @@ void main() {
           findsOneWidget,
         );
         expect(find.text('Open settings'), findsOneWidget);
+      },
+    );
+
+    // -------------------------------------------------------------------------
+    // Tests 12–15: the standing battery-optimization advisory.
+    //
+    // `ensurePermissions` asks for the exemption exactly ONCE, when background
+    // sharing is first enabled, and a decline is common. Before this the
+    // answer reached only a transient snackbar (and onboarding discarded it
+    // outright), so a user whose OEM keeps killing the foreground service had
+    // no way to discover why.
+    // -------------------------------------------------------------------------
+    testWidgets(
+      '12. a persisted battery-optimization denial renders a standing '
+      'advisory with an action',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({
+          kBackgroundSharingKey: true,
+          kLocationDisclosureBackgroundAcceptedKey: true,
+        });
+
+        await tester.pumpWidget(
+          _buildApp(
+            ensurePermissions: _stubThatThrows(),
+            fakeDisclosure: _FakeDisclosureController(false),
+            isAndroid: true,
+            batteryOptProbe: () async => true,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.textContaining('Battery optimization is still on'),
+          findsOneWidget,
+        );
+        expect(find.text('Open settings'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      '13. the advisory is hidden while the exemption is granted, and on iOS',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({
+          kBackgroundSharingKey: true,
+          kLocationDisclosureBackgroundAcceptedKey: true,
+        });
+
+        // Exemption granted on Android → nothing to advise about.
+        await tester.pumpWidget(
+          _buildApp(
+            ensurePermissions: _stubThatThrows(),
+            fakeDisclosure: _FakeDisclosureController(false),
+            isAndroid: true,
+            batteryOptProbe: () async => false,
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.textContaining('Battery optimization is still on'),
+          findsNothing,
+        );
+
+        // Off Android the probe must never even be CALLED: battery
+        // optimization is an Android concept, the plugin channel does not
+        // exist there, and a flag restored from an Android backup must not
+        // surface irrelevant advice. The probe throws to prove it is unused.
+        await tester.pumpWidget(
+          _buildApp(
+            ensurePermissions: _stubThatThrows(),
+            fakeDisclosure: _FakeDisclosureController(false),
+            batteryOptProbe: () async =>
+                throw StateError('probe must not run off Android'),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.textContaining('Battery optimization is still on'),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets(
+      '14. the advisory is hidden while background sharing is off',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+
+        await tester.pumpWidget(
+          _buildApp(
+            ensurePermissions: _stubThatThrows(),
+            fakeDisclosure: _FakeDisclosureController(false),
+            isAndroid: true,
+            batteryOptProbe: () async => true,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.textContaining('Battery optimization is still on'),
+          findsNothing,
+          reason:
+              'no foreground service exists to be killed while sharing is '
+              'off; advising about it there is noise',
+        );
+      },
+    );
+
+    testWidgets(
+      '15. the advisory action opens the system screen and clears once the '
+      'exemption is granted there',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({
+          kBackgroundSharingKey: true,
+          kLocationDisclosureBackgroundAcceptedKey: true,
+        });
+
+        var opened = 0;
+        // The system screen reports nothing back, so the page re-probes on
+        // return. Model the user granting it while they were away.
+        var denied = true;
+
+        await tester.pumpWidget(
+          _buildApp(
+            ensurePermissions: _stubThatThrows(),
+            fakeDisclosure: _FakeDisclosureController(false),
+            isAndroid: true,
+            batteryOptProbe: () async => denied,
+            openBatteryOptSettings: () async {
+              opened++;
+              return denied = false;
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.textContaining('Battery optimization is still on'),
+          findsOneWidget,
+        );
+
+        await tester.tap(find.text('Open settings'));
+        await tester.pumpAndSettle();
+
+        expect(opened, equals(1));
+        expect(
+          find.textContaining('Battery optimization is still on'),
+          findsNothing,
+          reason:
+              'a granted exemption must clear the advisory without leaving '
+              'the page — otherwise it reads as a warning about a solved '
+              'problem',
+        );
+      },
+    );
+
+    testWidgets(
+      '16. the advisory tracks an exemption changed OUTSIDE Haven, both ways',
+      (tester) async {
+        // The exemption can be granted or revoked from Android Settings, or
+        // by an OEM battery manager, without ever passing through
+        // `setEnabled` or the advisory's own button. A page that trusted the
+        // persisted flag would assert "battery optimization is still on"
+        // forever after a grant made outside the app — and would stay silent
+        // forever after a revocation. Both directions are the live probe's
+        // whole reason to exist.
+        SharedPreferences.setMockInitialValues({
+          kBackgroundSharingKey: true,
+          kLocationDisclosureBackgroundAcceptedKey: true,
+          // The persisted flag says "denied" and is deliberately WRONG here:
+          // if the page read it instead of probing, this test would show the
+          // advisory and fail on the first expectation.
+          kBatteryOptimizationDeniedKey: true,
+        });
+
+        var denied = false;
+        await tester.pumpWidget(
+          _buildApp(
+            ensurePermissions: _stubThatThrows(),
+            fakeDisclosure: _FakeDisclosureController(false),
+            isAndroid: true,
+            batteryOptProbe: () async => denied,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.textContaining('Battery optimization is still on'),
+          findsNothing,
+          reason:
+              'granted outside Haven: the live OS answer must win over the '
+              'stale persisted one',
+        );
+
+        // …and revoked later, again without Haven being told.
+        denied = true;
+        final element = tester.element(find.byType(LocationSettingsPage));
+        ProviderScope.containerOf(
+          element,
+        ).invalidate(batteryOptimizationDeniedProvider);
+        await tester.pumpAndSettle();
+
+        expect(
+          find.textContaining('Battery optimization is still on'),
+          findsOneWidget,
+          reason:
+              'a revocation made outside Haven must bring the advisory back',
+        );
+      },
+    );
+
+    testWidgets(
+      '17. the advisory stays on screen at a 200% text scale on the smallest '
+      'phone',
+      (tester) async {
+        // Same shape as clock_skew_banner_test's 200% case. The advisory is
+        // an `_ActionableNote`: a full-sentence message beside its icon, with
+        // the action button STACKED UNDERNEATH rather than sitting alongside
+        // — which is what lets both wrap at the largest scale either platform
+        // offers. An advisory the user cannot read is the same as no
+        // advisory, and the layout this replaced did not merely crowd, it
+        // asserted and rendered an error box in the note's place.
+        const viewport = Size(320, 568);
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = viewport;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        SharedPreferences.setMockInitialValues({
+          kBackgroundSharingKey: true,
+          kLocationDisclosureBackgroundAcceptedKey: true,
+        });
+
+        await tester.pumpWidget(
+          _buildApp(
+            ensurePermissions: _stubThatThrows(),
+            fakeDisclosure: _FakeDisclosureController(false),
+            isAndroid: true,
+            batteryOptProbe: () async => true,
+            textScaler: const TextScaler.linear(2),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // The page is a ListView, so at this scale the advisory sits below
+        // the fold and is not built until scrolled to — which is the correct
+        // behaviour, and is why this scrolls rather than asserting it is
+        // already on screen.
+        final advisory =
+            find.textContaining('Battery optimization is still on');
+        await tester.scrollUntilVisible(advisory, 120);
+        await tester.pumpAndSettle();
+
+        expect(advisory, findsOneWidget);
+        expect(find.text('Open settings'), findsOneWidget);
+        expect(
+          tester.takeException(),
+          isNull,
+          reason: 'the advisory row must not overflow at a 200% text scale',
+        );
+      },
+    );
+
+    testWidgets(
+      '18. the iOS "Always required" note also survives a 200% text scale',
+      (tester) async {
+        // The battery advisory and this note share one layout
+        // (`_ActionableNote`), because both used to be a ListTile whose
+        // trailing button consumed the whole tile at this scale. This note
+        // predates the advisory, so without its own case the shared fix would
+        // be pinned on only one of the two users.
+        const viewport = Size(320, 568);
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = viewport;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        SharedPreferences.setMockInitialValues({
+          kBackgroundSharingKey: true,
+          kLocationDisclosureBackgroundAcceptedKey: true,
+        });
+
+        await tester.pumpWidget(
+          _buildApp(
+            ensurePermissions: _stubThatThrows(),
+            fakeDisclosure: _FakeDisclosureController(false),
+            iosAuthStatus: IosAuthStatus.whenInUse,
+            textScaler: const TextScaler.linear(2),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final note = find.textContaining('with your current permission');
+        await tester.scrollUntilVisible(note, 120);
+        await tester.pumpAndSettle();
+
+        expect(note, findsOneWidget);
+        expect(find.text('Open settings'), findsOneWidget);
+        expect(
+          tester.takeException(),
+          isNull,
+          reason: 'the iOS note must not overflow at a 200% text scale',
+        );
       },
     );
   });

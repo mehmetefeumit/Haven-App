@@ -617,7 +617,7 @@ class _MockCircleServiceWithInvitations
   }
 
   @override
-  Future<EncryptedLocation> encryptLocation({
+  Future<EncryptLocationOutcome> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
     required double latitude,
@@ -710,7 +710,7 @@ class _ThrowingCircleServiceInvitations
   }
 
   @override
-  Future<EncryptedLocation> encryptLocation({
+  Future<EncryptLocationOutcome> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
     required double latitude,
@@ -794,7 +794,7 @@ class _MockCircleServiceThrowsOnProcess
   }
 
   @override
-  Future<EncryptedLocation> encryptLocation({
+  Future<EncryptLocationOutcome> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
     required double latitude,
@@ -1044,7 +1044,7 @@ class _MockCircleServiceReturnsNull
   }) async => null; // Already-processed — silent no-op.
 
   @override
-  Future<EncryptedLocation> encryptLocation({
+  Future<EncryptLocationOutcome> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
     required double latitude,
@@ -1136,7 +1136,7 @@ class _MockCircleServiceMixedBatch
   }
 
   @override
-  Future<EncryptedLocation> encryptLocation({
+  Future<EncryptLocationOutcome> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
     required double latitude,

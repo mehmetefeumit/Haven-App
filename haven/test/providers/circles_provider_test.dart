@@ -338,7 +338,7 @@ class _ThrowingCircleService implements CircleService {
   }) async => throw UnimplementedError();
 
   @override
-  Future<EncryptedLocation> encryptLocation({
+  Future<EncryptLocationOutcome> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
     required double latitude,
@@ -421,6 +421,13 @@ class _ThrowingCircleService implements CircleService {
     required String pubkey,
     String? displayName,
   }) async {}
+
+
+  @override
+  Future<EpochRepairResult> repairCircleEpoch(
+    Circle circle, {
+    required String selfPubkeyHex,
+  }) async => const EpochRepairApplied();
 
   @override
   Future<void> updateCircleRelays({
@@ -525,7 +532,7 @@ class _ThrowingErrorCircleService implements CircleService {
   }) async => throw UnimplementedError();
 
   @override
-  Future<EncryptedLocation> encryptLocation({
+  Future<EncryptLocationOutcome> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
     required double latitude,
@@ -608,6 +615,13 @@ class _ThrowingErrorCircleService implements CircleService {
     required String pubkey,
     String? displayName,
   }) async {}
+
+
+  @override
+  Future<EpochRepairResult> repairCircleEpoch(
+    Circle circle, {
+    required String selfPubkeyHex,
+  }) async => const EpochRepairApplied();
 
   @override
   Future<void> updateCircleRelays({

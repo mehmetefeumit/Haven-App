@@ -19,6 +19,7 @@ import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/location_publish_scheduler_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/providers/sharing_health_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/location_service.dart';
@@ -61,6 +62,7 @@ void main() {
     bool disclosureAccepted = true,
     int sample = 120,
     LocationService? locationService,
+    _SpyHealthNotifier? health,
   }) {
     SharedPreferences.setMockInitialValues({
       if (disclosureAccepted) kLocationDisclosureAcceptedKey: true,
@@ -72,6 +74,7 @@ void main() {
     );
     final container = ProviderContainer(
       overrides: [
+        if (health != null) sharingHealthProvider.overrideWith(() => health),
         identityServiceProvider.overrideWithValue(
           _MockIdentityService(identity: identity),
         ),
@@ -316,6 +319,64 @@ void main() {
         reason: 'resumed: schedulers re-armed from the current roster',
       );
     });
+
+    test('a DEFERRED send routes to the health model as a deferral, never as '
+        'a publish verdict', () async {
+      // The engine queued the update instead of encrypting it. Nothing reached
+      // a relay, so there is no publish verdict to report — recording one
+      // would either claim a delivery that never happened or blame a relay
+      // that was never asked. It must reach `recordDeferredSend` instead, so
+      // the banner can name the real cause.
+      final a = TestCircleFactory.createCircle(
+        mlsGroupId: const [1],
+        nostrGroupId: const [10],
+        members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+      );
+      final spy = _SpyHealthNotifier();
+      final env = build([a], health: spy);
+      final notifier = await ready(env.container);
+      env.mock.deferNextEncrypt = const LocationSendDeferred(
+        unresolvedInputs: 2,
+        discardedIntents: 1,
+        repaired: false,
+        commits: [],
+        proposals: [],
+      );
+
+      await notifier.triggerTickForTest(_hex(const [10]));
+
+      expect(
+        spy.deferredKeys,
+        [_hex(const [10])],
+        reason: 'the deferral must be recorded against the circle it happened '
+            'to, keyed the same way every other health input is',
+      );
+      expect(
+        spy.publishOutcomes,
+        isEmpty,
+        reason: 'a deferral is not a publish verdict — recording one would '
+            'mis-attribute the outage to the relay plane',
+      );
+    });
+
+    test('a SENT publish still routes to the publish verdict', () async {
+      // Anti-vacuity for the test above: the same harness, without a deferral,
+      // must take the ordinary path.
+      final a = TestCircleFactory.createCircle(
+        mlsGroupId: const [1],
+        nostrGroupId: const [10],
+        members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+      );
+      final spy = _SpyHealthNotifier();
+      final env = build([a], health: spy);
+      final notifier = await ready(env.container);
+
+      await notifier.triggerTickForTest(_hex(const [10]));
+
+      expect(spy.deferredKeys, isEmpty);
+      expect(spy.publishOutcomes.single.key, _hex(const [10]));
+      expect(spy.publishOutcomes.single.acked, isTrue);
+    });
   });
 }
 
@@ -397,4 +458,26 @@ class _FixedLocationService implements LocationService {
   @override
   Future<LocationPermissionStatus> checkPermission() async =>
       LocationPermissionStatus.always;
+}
+
+/// Records which sharing-health input each publish outcome routed to.
+///
+/// Subclasses the real notifier rather than faking it, so the override keeps
+/// every other behaviour (and would fail to compile if the recording API it
+/// pins were renamed).
+class _SpyHealthNotifier extends SharingHealthNotifier {
+  final List<String> deferredKeys = [];
+  final List<({String key, bool acked})> publishOutcomes = [];
+
+  @override
+  void recordDeferredSend(String circleKey) {
+    deferredKeys.add(circleKey);
+    super.recordDeferredSend(circleKey);
+  }
+
+  @override
+  void recordPublishOutcome(String circleKey, {required bool acked}) {
+    publishOutcomes.add((key: circleKey, acked: acked));
+    super.recordPublishOutcome(circleKey, acked: acked);
+  }
 }

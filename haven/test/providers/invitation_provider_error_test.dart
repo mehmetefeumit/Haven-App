@@ -371,7 +371,7 @@ class _MockCircleServiceThrowsErrorOnProcess
   }
 
   @override
-  Future<EncryptedLocation> encryptLocation({
+  Future<EncryptLocationOutcome> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
     required double latitude,
@@ -469,7 +469,7 @@ class _MockCircleServiceThrowsOnFirst
   }
 
   @override
-  Future<EncryptedLocation> encryptLocation({
+  Future<EncryptLocationOutcome> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
     required double latitude,
@@ -570,7 +570,7 @@ class _MockCircleServiceMixedErrors
   }
 
   @override
-  Future<EncryptedLocation> encryptLocation({
+  Future<EncryptLocationOutcome> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
     required double latitude,

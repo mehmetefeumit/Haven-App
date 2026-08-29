@@ -99,3 +99,42 @@ final localeControllerProvider =
     StateNotifierProvider<LocaleController, Locale?>(
       (ref) => LocaleController(null),
     );
+
+/// Resolves the localized bundle for [selected] (`null` = follow the device).
+///
+/// The root [MaterialApp]'s own algorithm, applied to the same inputs, so a
+/// string resolved through here is never in a different language from the one
+/// on screen. Extracted from [appLocalizationsProvider] because one caller
+/// needs the resolution without a container: `BackgroundLocationManager`'s
+/// defensive channel setup, which runs on entrypoints where no `ProviderScope`
+/// exists and can therefore only pass `null`.
+AppLocalizations resolveAppLocalizations(Locale? selected) =>
+    lookupAppLocalizations(
+      basicLocaleListResolution(
+        selected != null
+            ? <Locale>[selected]
+            : WidgetsBinding.instance.platformDispatcher.locales,
+        AppLocalizations.supportedLocales,
+      ),
+    );
+
+/// The localized strings for the language the app is currently rendering in.
+///
+/// For the callers that must localize copy without a [BuildContext]: today the
+/// Android foreground-service notification, whose text is resolved here in the
+/// UI isolate and handed to `BackgroundLocationManager`. The service isolate
+/// runs no widget tree and so has no localizations of its own — it never
+/// resolves a string, it only displays one it was given.
+///
+/// Exposes the resolved bundle and never the [Locale]:
+/// `check_locale_privacy.sh` confines [localeControllerProvider] to this file,
+/// and that confinement is the point — a consumer can render copy in the user's
+/// language without ever holding the language tag, which is a fingerprinting
+/// signal if it escapes.
+///
+/// Resolution is [resolveAppLocalizations] — the root [MaterialApp]'s own
+/// algorithm, applied to the same inputs, so a string resolved here is never in
+/// a different language from the one on screen.
+final appLocalizationsProvider = Provider<AppLocalizations>((ref) {
+  return resolveAppLocalizations(ref.watch(localeControllerProvider));
+});

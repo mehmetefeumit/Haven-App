@@ -369,6 +369,10 @@ class AppLocalizationsTr extends AppLocalizations {
       'Açık. Bazı telefonlarda pil optimizasyonu paylaşımı duraklatabilir. Güvenilir kalması için Haven\'ı pil optimizasyonundan hariç tutun.';
 
   @override
+  String get locationSettingsBatteryOptNote =>
+      'Haven için pil optimizasyonu hâlâ açık. Bazı telefonlar, arka planda paylaşımı uyarmadan durdurmak için bu ayarı kullanır. Paylaşımın güvenilir kalması için Haven\'ı hariç tutun.';
+
+  @override
   String get locationSettingsErrorSnack => 'Bir sorun oluştu';
 
   @override
@@ -405,6 +409,24 @@ class AppLocalizationsTr extends AppLocalizations {
   @override
   String get locationSettingsIosGuidance =>
       'Arka planda paylaşım açıkken Haven kesintisiz bir konum oturumu sürdürür ve iOS durum çubuğunda mavi bir gösterge görüntüler. Ayrıca \"Her Zaman\" iznini verirseniz Haven, iOS uygulamayı kapattıktan sonra da çevrelerinizdeki gelişmeleri yakalayabilir.';
+
+  @override
+  String get fgsNotificationSharing =>
+      'Haven konum bilgisi gönderiyor ve alıyor';
+
+  @override
+  String get fgsNotificationPaused =>
+      'Haven duraklatıldı — paylaşımı sürdürmek için uygulamayı açın';
+
+  @override
+  String get fgsNotificationOpen => 'Haven ekranda açık';
+
+  @override
+  String get fgsChannelName => 'Konum paylaşımı';
+
+  @override
+  String get fgsChannelDescription =>
+      'Haven\'ın şifreli konumunuzu arka planda paylaşmaya devam etmesini sağlar.';
 
   @override
   String get mapStyleTitle => 'Harita stili';
@@ -679,7 +701,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyEncryptionKeysChangeOnMembership =>
-      'Bir çevreden ayrılmanız, üyelerinin daha önce kaydettiklerini geri almaz. Haven anahtarları yalnızca biri katıldığında ya da ayrıldığında değiştirir; belirli aralıklarla asla değiştirmez. Bu yüzden tek bir anahtar haftalarca süren mesajları kapsayabilir ve bir üyenin o süre içinde kaydettiği her şey onun için okunabilir kalır. Yine de o üye, ayrıldıktan sonra gönderilen hiçbir şeyi açamaz.';
+      'Bir çevreden ayrılmanız, üyelerinin daha önce kaydettiklerini geri almaz. Haven, biri katıldığında ya da ayrıldığında anahtarları değiştirir. Artık mesaj gelmeyen bir çevreyi kendi yöneticisi onardığında da değiştirir. Haven, anahtarları belirli aralıklarla asla değiştirmez. Bu yüzden tek bir anahtar haftalar boyunca gönderilen mesajları kapsayabilir ve bir üyenin o süre içinde kaydettiği her şey onun için okunabilir kalır. Yine de o üye, ayrıldıktan sonra gönderilen hiçbir şeyi açamaz.';
 
   @override
   String get privacyEncryptionMeansForYou =>
@@ -691,7 +713,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get privacyEncryptionDetailEpochs =>
-      'Her anahtar dönemine epoch denir ve bir çevre yeni bir epoch\'a yalnızca üyeleri değiştiğinde geçer. Cihazınız, hâlâ gelmekte olan mesajları açmaya yetecek kadarını, yani içinde bulunduğu epoch ile son birkaç epoch\'un anahtarlarını tutar; gerisini atar. Üyeleri aylardır değişmemiş bir çevre, hâlâ başladığı epoch\'tadır.';
+      'Her anahtar dönemine epoch denir. Bir çevre, üyeleri değiştiğinde ya da artık mesaj gelmediği için yöneticisi tarafından onarıldığında yeni bir epoch\'a geçer. Cihazınız, hâlâ gelmekte olan mesajları açmaya yetecek kadarını, yani mevcut epoch ile son birkaç epoch\'un anahtarlarını tutar; gerisini atar. Kimsenin katılmadığı ya da ayrılmadığı ve hiç onarılması gerekmemiş bir çevre, hâlâ başladığı epoch\'tadır.';
 
   @override
   String get privacyWhatOthersSeeTitle =>
@@ -2015,6 +2037,123 @@ class AppLocalizationsTr extends AppLocalizations {
   @override
   String get clockSkewResolvedAnnouncement =>
       'Saat sorunu giderildi. Haven konumunuzu yeniden paylaşıyor.';
+
+  @override
+  String get clockSkewTitleDisagreement =>
+      'Çevrelerinizden birindeki saatlerden biri yanlış';
+
+  @override
+  String get clockSkewBodyDisagreement =>
+      'Bu telefonun saati ile başka bir üyenin saati arasında iki dakika veya daha fazla fark var. Yanlış olan bu telefonunki ise, gönderdiği konumlar kimse görmeden geçerliliğini yitirebilir. Bu telefonun saatinin yanlış olmadığından emin olmak için sistem ayarlarından tarih ve saatin otomatik ayarlanmasını açın.';
+
+  @override
+  String get clockSkewDisagreementResolvedAnnouncement =>
+      'Saat uyarısı kalktı.';
+
+  @override
+  String get sharingHealthTitleStopped => 'Konum paylaşımı durdu';
+
+  @override
+  String get sharingHealthTitleNotSending => 'Konumunuz paylaşılmıyor';
+
+  @override
+  String get sharingHealthTitleNotReceiving =>
+      'Diğer üyelerin konumları gelmiyor';
+
+  @override
+  String sharingHealthNoUpdatesMinutes(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'Yaklaşık $countString dakikadır güncelleme yok',
+      one: 'Yaklaşık 1 dakikadır güncelleme yok',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String sharingHealthNoUpdatesHours(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'Yaklaşık $countString saattir güncelleme yok',
+      one: 'Yaklaşık 1 saattir güncelleme yok',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String sharingHealthNoUpdatesDays(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'Yaklaşık $countString gündür güncelleme yok',
+      one: 'Yaklaşık 1 gündür güncelleme yok',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get sharingHealthRepairAction => 'Onar';
+
+  @override
+  String get sharingHealthRepairUnavailableHint =>
+      'Onarım bu çevre için kullanılamaz';
+
+  @override
+  String get sharingHealthRepairHint =>
+      'Aktarıcılara yeniden bağlanır, konumunuzu göndermeyi tekrar dener ve bu çevrenin yöneticisiyseniz ona yeni bir anahtar verebilir';
+
+  @override
+  String get sharingHealthRepairSent =>
+      'Onarım gönderildi. Diğer üyelerin telefonları onu aldığında konumları yeniden gelmeye başlayacak.';
+
+  @override
+  String get sharingHealthRepairNotOwner =>
+      'Bu çevreyi yalnızca yöneticisi onarabilir. Ondan sizi çıkarıp yeniden eklemesini isteyin.';
+
+  @override
+  String get sharingHealthRepairNeedsNewCircle =>
+      'Bu çevre bu telefonda onarılamaz. Aynı kişilerle yeni bir çevre oluşturun.';
+
+  @override
+  String get sharingHealthRepairNothingToDo =>
+      'Şu anda onarılacak bir şey yok. Haven denemeye devam edecek.';
+
+  @override
+  String get sharingHealthRepairUnresolvedAnnouncement =>
+      'Konum paylaşımı hâlâ çalışmıyor.';
+
+  @override
+  String get sharingHealthResumedAnnouncement =>
+      'Konum paylaşımı yeniden çalışıyor.';
+
+  @override
+  String circleMemberLastSeenMinutes(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'Son görülme $countString dakika önce',
+      one: 'Son görülme 1 dakika önce',
+    );
+    return '$_temp0';
+  }
 
   @override
   String get mapThisLocation => 'bu konum';

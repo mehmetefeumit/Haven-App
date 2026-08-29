@@ -21,15 +21,39 @@ class NostrSubscriptionService implements SubscriptionService {
   NostrSubscriptionService({
     required LiveEventRouter router,
     required Future<LiveSyncFfi> Function() engineFactory,
+    this.onStopOutcome,
   }) : _router = router,
        _engineFactory = engineFactory;
 
   final LiveEventRouter _router;
   final Future<LiveSyncFfi> Function() _engineFactory;
 
+  /// Notified with the result of every [stop].
+  ///
+  /// [stop] already RETURNS the outcome, so this exists for the stops no caller
+  /// awaits: the failed-start cleanup and `_onStreamClosed`'s
+  /// `unawaited(stop())`. A stop that leaves the guard held is exactly as
+  /// serious there as on the pause path, and without this it would be visible
+  /// only in a debug log.
+  final void Function(LiveSyncStopOutcome)? onStopOutcome;
+
   LiveSyncFfi? _engine;
   StreamSubscription<FfiRelayEvent>? _sub;
 
+  /// Whether the last [stop] left the engine still holding the Rule-14 guard.
+  ///
+  /// [stop] clears `_engine` before it returns, so a SECOND stop finds nothing
+  /// to stop and would answer [LiveSyncStopOutcome.idle] — "nothing was holding
+  /// anything" — while the wedged core Rust reinstalled into `SESSION` still
+  /// owns the guard. The pause path reads that answer to decide whether to
+  /// dispose its own manager, so an unlatched `stillHolding` becomes an
+  /// orphaned guard one pause later: exactly the wedge this all exists to stop.
+  ///
+  /// Cleared only by a successful [start], which is the one event that PROVES
+  /// the wedge is gone — Rust's `start_session` fails closed ("previous live
+  /// session did not stop; refusing to start a second") unless the previous
+  /// core actually drained.
+  bool _stopLeftGuardHeld = false;
 
   /// Serializes the async event handlers: each [LiveEventRouter.handleEvent] is
   /// chained after the previous one completes.
@@ -62,6 +86,9 @@ class NostrSubscriptionService implements SubscriptionService {
       built = engine;
       await engine.startSession(groups: groups, inboxRelays: inboxRelays);
       _engine = engine;
+      // A session that started is proof the previous core drained (Rust refuses
+      // to install a second over a live one), so the wedge latch is discharged.
+      _stopLeftGuardHeld = false;
       // Ownership has transferred to `_engine`; `stop()` disposes it from here
       // on, so the failure path below must NOT also dispose it.
       built = null;
@@ -188,8 +215,33 @@ class NostrSubscriptionService implements SubscriptionService {
   /// the cancel is expected to be a near-instant no-op.
   static const Duration _cancelTimeout = Duration(seconds: 2);
 
+  /// Stops the engine, retrying ONCE if the first attempt did not drain.
+  ///
+  /// A failed `stopSession()` is not a lost call: Rust reinstalls the
+  /// timed-out core into the process-global `SESSION` precisely so a retry has
+  /// something to stop (`rust_builder/src/api.rs`
+  /// `reinstall_after_timed_out_stop`), and a second call re-takes it and
+  /// re-joins the SAME outstanding supervisor handles under a fresh budget. So
+  /// the retry is not a hopeful repeat of an identical operation — it is a
+  /// second, later join of tasks that were merely still finishing, and it is
+  /// the last chance anything gets: once this method returns, no Dart handle in
+  /// any isolate references that core.
+  Future<LiveSyncStopOutcome> _stopEngineWithRetry(LiveSyncFfi engine) async {
+    for (var attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await engine.stopSession();
+        return LiveSyncStopOutcome.stopped;
+      } on Object catch (e) {
+        debugPrint(
+          '[Subscription] stop attempt $attempt failed: ${e.runtimeType}',
+        );
+      }
+    }
+    return LiveSyncStopOutcome.stillHolding;
+  }
+
   @override
-  Future<void> stop() async {
+  Future<LiveSyncStopOutcome> stop() async {
     // Reset the serialized chain so a subsequent start() begins clean: any old
     // in-flight handlers still run to completion on their own reference, but the
     // NEXT session's events do not chain behind the previous session's.
@@ -207,12 +259,16 @@ class NostrSubscriptionService implements SubscriptionService {
     // Calling stopSession() first lets the native task end (and the Dart
     // stream complete) BEFORE we ever cancel, so the cancel below becomes a
     // trivial no-op on an already-closed stream.
+    var outcome = LiveSyncStopOutcome.idle;
     if (engine != null) {
-      try {
-        await engine.stopSession();
-      } on Object catch (e) {
-        debugPrint('[Subscription] stop failed: ${e.runtimeType}');
+      outcome = await _stopEngineWithRetry(engine);
+      if (outcome == LiveSyncStopOutcome.stillHolding) {
+        _stopLeftGuardHeld = true;
       }
+    } else if (_stopLeftGuardHeld) {
+      // No handle left to stop, but the guard was never released — report the
+      // state, not the absence of work.
+      outcome = LiveSyncStopOutcome.stillHolding;
     }
     try {
       // Defensive bound: even if some other holder keeps the native task
@@ -241,5 +297,15 @@ class NostrSubscriptionService implements SubscriptionService {
     } on Object catch (e) {
       debugPrint('[Subscription] engine dispose failed: ${e.runtimeType}');
     }
+    // Reported AFTER the dispose so an observer never sees "stopped" while the
+    // handle is still alive. Guarded like every other step: this method is
+    // reached from `unawaited(stop())`, where a throw has no caller to catch
+    // it.
+    try {
+      onStopOutcome?.call(outcome);
+    } on Object catch (e) {
+      debugPrint('[Subscription] stop-outcome callback: ${e.runtimeType}');
+    }
+    return outcome;
   }
 }

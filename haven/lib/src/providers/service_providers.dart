@@ -14,13 +14,20 @@ import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/providers/live_sync_provider.dart';
+import 'package:haven/src/providers/locale_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/member_profile_refresh_provider.dart';
+// Intentional 2-file import cycle with sharing_health_provider.dart: the
+// engine's status signals must DRIVE the health model's typed inputs, and that
+// model in turn reads services from here. Dart resolves the cycle fine — both
+// sides are lazily initialised top-level finals.
+import 'package:haven/src/providers/sharing_health_provider.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/mls_session_handover.dart';
 import 'package:haven/src/services/background_location_task.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/catchup_service.dart';
+import 'package:haven/src/services/circle_health_service.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/clock_skew_detector.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
@@ -145,20 +152,29 @@ final circleServiceProvider = Provider<CircleService>((ref) {
     // auto-restart, before any Activity exists, and nothing otherwise makes it
     // let go. Wired only here, in the UI isolate: the background isolate is
     // usually the holder.
-    sessionHandover: (dataDir) async =>
-        await requestSessionHandover(
-          dataDir: dataDir,
-          // The process-local registry, never an error string — Haven's FFI
-          // errors interpolate remote-authored text, so classifying them would
-          // let a circle admin stop the user's background service at will.
-          isSessionLive: (dir) => isSessionLive(dataDir: dir),
-          stopService: BackgroundLocationManager.stopService,
-          restartService: () => BackgroundLocationManager.startService(
-            callback: backgroundCallback,
-          ),
-          backgroundSharingEnabled: ref.read(backgroundSharingProvider),
-        ) ==
-        HandoverOutcome.released,
+    sessionHandover: (dataDir) => requestSessionHandover(
+      dataDir: dataDir,
+      // The process-local registry, never an error string — Haven's FFI
+      // errors interpolate remote-authored text, so classifying them would
+      // let a circle admin stop the user's background service at will.
+      isSessionLive: (dir) => isSessionLive(dataDir: dir),
+      stopService: BackgroundLocationManager.stopService,
+      restartService: () => BackgroundLocationManager.startService(
+        callback: backgroundCallback,
+        // Resolved in this isolate: the service's own isolate has no
+        // localizations (see `appLocalizationsProvider`).
+        notificationText:
+            ref.read(appLocalizationsProvider).fgsNotificationSharing,
+      ),
+      backgroundSharingEnabled: ref.read(backgroundSharingProvider),
+    ),
+    // Second recovery lever, for the holder the handover CANNOT reach: this
+    // isolate's own live-sync engine, left owning the guard by a stop that
+    // timed out and reinstalled the wedged core into the Rust-global `SESSION`.
+    // Wired only here — the background isolate reaches the same call through
+    // its own liveness-probed reclaim, and must not have a second, ungated one.
+    isSessionLive: (dir) => isSessionLive(dataDir: dir),
+    forceReleaseLiveSession: forceReleaseLiveSession,
   );
 });
 
@@ -221,6 +237,22 @@ final clockSkewDetectorProvider = Provider<ClockSkewDetector>((ref) {
   return detector;
 });
 
+/// Provides the per-circle delivery-health recorder.
+///
+/// Same `circleManagerFactory` shape as [profileServiceProvider], for the same
+/// reason: never open a second manager over the same SQLCipher database.
+final circleHealthServiceProvider = Provider<CircleHealthService>((ref) {
+  return NostrCircleHealthService(
+    circleManagerFactory: () async {
+      final circleService = ref.read(circleServiceProvider);
+      if (circleService is! NostrCircleService) {
+        throw StateError('circle service is not Nostr-backed');
+      }
+      return circleService.getCircleManagerFfi();
+    },
+  );
+});
+
 /// Provides the location sharing service singleton.
 ///
 /// Uses [LocationSharingService] for encrypt-publish-fetch-decrypt pipeline.
@@ -230,6 +262,7 @@ final locationSharingServiceProvider = Provider<LocationSharingService>((ref) {
     relayService: ref.read(relayServiceProvider),
     identityService: ref.read(identityServiceProvider),
     clockSkewDetector: ref.read(clockSkewDetectorProvider),
+    healthService: ref.read(circleHealthServiceProvider),
   );
 });
 
@@ -282,6 +315,49 @@ Future<DecryptedLocation?> parseStreamedLocation(
   }
 }
 
+/// Feeds one engine status reason to the sharing-health model's typed
+/// subscription inputs.
+///
+/// The engine now EMITS these (Unit C's Rust half): `relayError` is raised when
+/// a relay ends one of our REQs with `CLOSED` — which nostr-relay-pool then
+/// deletes and never re-issues — or when the ingest worker dies, and those are
+/// exactly the two ways the receive plane goes dead while every flag in the app
+/// still reads healthy. `connected` / `backgroundResumed` are the engine
+/// reporting that it has re-issued, so they clear the verdict.
+///
+/// The other reasons deliberately feed nothing here: `disconnected` /
+/// `reconnecting` are per-relay socket transitions that
+/// [SyncStatusNotifier] already aggregates into the phase the health model
+/// listens to (a momentary drop on mobile is not an outage), and
+/// `unprocessable` / `inboxError` are per-event failures that say nothing about
+/// whether the subscription still exists. The switch is exhaustive so a new FFI
+/// variant is a compile error rather than a silently ignored signal.
+///
+/// Named rather than inlined into [subscriptionServiceProvider] so the
+/// production mapping is what tests exercise (same reason as
+/// [parseStreamedLocation]).
+@visibleForTesting
+void recordRelaySubscriptionSignal(
+  SharingHealthNotifier health,
+  FfiSyncStatusReason reason,
+) {
+  switch (reason) {
+    case FfiSyncStatusReason.relayError:
+      health.recordRelaySubscriptionLost();
+    case FfiSyncStatusReason.connected:
+    case FfiSyncStatusReason.backgroundResumed:
+      health.recordRelaySubscriptionRestored();
+    case FfiSyncStatusReason.connecting:
+    case FfiSyncStatusReason.reconnecting:
+    case FfiSyncStatusReason.disconnected:
+    case FfiSyncStatusReason.unprocessable:
+    case FfiSyncStatusReason.inboxError:
+    case FfiSyncStatusReason.sessionStarted:
+    case FfiSyncStatusReason.sessionStopped:
+      break;
+  }
+}
+
 /// Provides the live-sync subscription service (M6-3).
 ///
 /// Builds a [LiveSyncFfi] engine (via the single authoritative MLS manager +
@@ -330,10 +406,22 @@ final subscriptionServiceProvider = Provider<SubscriptionService>((ref) {
       );
       _safeInvalidate(() => ref.invalidate(circlesProvider), 'circles');
     },
-    onStatus: (reason) => _safeInvalidate(
-      () => ref.read(syncStatusProvider.notifier).onStatus(reason),
-      'syncStatus',
-    ),
+    onStatus: (reason) {
+      _safeInvalidate(
+        () => ref.read(syncStatusProvider.notifier).onStatus(reason),
+        'syncStatus',
+      );
+      // Guarded SEPARATELY from the line above: these are two independent
+      // consumers of one signal, and a failure to reach either must not cost
+      // the other.
+      _safeInvalidate(
+        () => recordRelaySubscriptionSignal(
+          ref.read(sharingHealthProvider.notifier),
+          reason,
+        ),
+        'sharingHealth',
+      );
+    },
   );
 
   return NostrSubscriptionService(

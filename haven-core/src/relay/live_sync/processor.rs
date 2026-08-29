@@ -53,9 +53,10 @@
 //! so a busy circle's cursor advance cannot bury a quiet co-multiplexed
 //! circle's un-applied commit.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, PoisonError};
 
-use nostr::{Event, JsonUtil};
+use nostr::{Event, JsonUtil, SubscriptionId};
 
 use crate::circle::{CircleManager, DirectoryReconcile};
 use crate::nostr::mls::types::{
@@ -70,6 +71,7 @@ use crate::relay::auto_commit::{
 use super::anchor::{CursorAnchors, InboxAnchor};
 use super::event::{LiveSyncEvent, SyncStatusReason};
 use super::event_bus::EventBus;
+use super::repair::RepairKey;
 
 /// Per-circle group-cursor stream key (a distinct stream per
 /// `hex(nostr_group_id)`).
@@ -120,6 +122,84 @@ pub enum GroupProcessOutcome {
     Unprocessable,
 }
 
+/// When each live REQ last delivered ANYTHING — an event, or the relay's `EOSE`.
+///
+/// The liveness signal relay connection state cannot give. nostr-relay-pool
+/// deletes a subscription on most `CLOSED` reasons and never re-issues it, so a
+/// relay can keep the socket open — reading `Connected` to every connectivity
+/// check — while the REQ that carried this device's circles no longer exists.
+/// The only observable difference is that nothing arrives on it any more.
+///
+/// Keyed per `(relay, subscription)`, NOT per circle. A REQ is issued to several
+/// relays and a repair re-issues to only the one that ended it, so a per-circle
+/// clock would let one relay that re-subscribes every few seconds keep the
+/// circle's clock fresh while the bucket's OTHER relays sat silent — masking
+/// exactly the failure this exists to find.
+///
+/// Seeded when a subscription is issued, so silence is measured from the REQ and
+/// not from process start, and written monotonically so an out-of-order note
+/// cannot make a live REQ look silent.
+///
+/// Presence-only `Debug` (a count, never a relay or a sub-id) per Rules 4/6.
+#[derive(Default)]
+struct DeliveryLog {
+    inner: Mutex<HashMap<RepairKey, i64>>,
+}
+
+impl std::fmt::Debug for DeliveryLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let len = self
+            .inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len();
+        f.debug_struct("DeliveryLog").field("reqs", &len).finish()
+    }
+}
+
+impl DeliveryLog {
+    /// Starts this REQ's silence window at `at_secs` — the instant it was
+    /// issued. Overwrites: a new REQ is a new observation window, and what the
+    /// previous one delivered says nothing about whether this one is served.
+    fn open(&self, key: &RepairKey, at_secs: i64) {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key.clone(), at_secs);
+    }
+
+    /// Records a delivery on an ALREADY-OPEN window.
+    ///
+    /// Never creates one: a relay must not be able to conjure delivery state for
+    /// a REQ this session does not have open.
+    fn note(&self, key: &RepairKey, at_secs: i64) {
+        if let Some(prev) = self
+            .inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_mut(key)
+        {
+            *prev = (*prev).max(at_secs);
+        }
+    }
+
+    fn last(&self, key: &RepairKey) -> Option<i64> {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(key)
+            .copied()
+    }
+
+    /// Drops every relay's window for one subscription (its REQ was closed).
+    fn forget_sub(&self, sub_id: &SubscriptionId) {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|key, _| key.sub_id != *sub_id);
+    }
+}
+
 /// The receive engine's group/inbox event processor.
 ///
 /// Holds the single MLS-state owner ([`CircleManager`], whose one process-global
@@ -140,6 +220,8 @@ pub struct EngineProcessor {
     /// local clock reading. A gift wrap's own `created_at` reaches it in no
     /// direction; see [`InboxAnchor`].
     inbox_anchor: InboxAnchor,
+    /// Per-REQ delivery liveness — the signal `RelayStatus` cannot give.
+    delivery: DeliveryLog,
 }
 
 impl EngineProcessor {
@@ -156,6 +238,7 @@ impl EngineProcessor {
             publisher: None,
             anchors: CursorAnchors::default(),
             inbox_anchor: InboxAnchor::default(),
+            delivery: DeliveryLog::default(),
         }
     }
 
@@ -174,6 +257,7 @@ impl EngineProcessor {
             publisher: Some(publisher),
             anchors: CursorAnchors::default(),
             inbox_anchor: InboxAnchor::default(),
+            delivery: DeliveryLog::default(),
         }
     }
 
@@ -389,6 +473,12 @@ impl EngineProcessor {
         // those, resolving engine publish work as we go.
         self.route_events(&ingest.effects.events, nostr_group_id, created_at_secs);
         self.resolve_publish_work(&ingest.effects.publish).await;
+        // Receive-side observation for the epoch-rotation repair's quiescence
+        // gate (`circle::rotation`). Placed on the AUTHENTICATED batch, never on
+        // the raw kind-445: an event the engine rejected is mintable by any
+        // observer of the circle's public `#h`.
+        self.circle
+            .note_inbound_group_events(&ingest.effects.events);
         let mut directory = self
             .circle
             .directory_verdict_for_events(&ingest.effects.events);
@@ -453,6 +543,7 @@ impl EngineProcessor {
                 if let Ok(more) = self.circle.session().advance_convergence(gid).await {
                     self.route_events(&more.events, nostr_group_id, event_created_at_secs);
                     self.resolve_publish_work(&more.publish).await;
+                    self.circle.note_inbound_group_events(&more.events);
                     directory =
                         directory.max(self.circle.directory_verdict_for_events(&more.events));
                     next.extend(more.pending_convergence);
@@ -540,6 +631,45 @@ impl EngineProcessor {
         self.bus.send(LiveSyncEvent::Welcome {
             gift_wrap_json: event.as_json(),
         });
+    }
+
+    /// Starts the silence window for one REQ endpoint, at the local instant that
+    /// REQ was issued.
+    ///
+    /// The session MUST call this for every `(relay, subscription)` pair it
+    /// issues, and for ONLY the pairs it issues — a single-relay repair re-seeds
+    /// that relay alone, leaving the bucket's other relays' windows running.
+    pub fn open_delivery_window(&self, key: &RepairKey, opened_at_secs: i64) {
+        self.delivery.open(key, opened_at_secs);
+    }
+
+    /// Records that one REQ endpoint delivered something.
+    ///
+    /// Called for an event or an `EOSE` on a subscription the router resolved,
+    /// on the LOCAL clock and independent of any ingest verdict: the question is
+    /// "is this REQ still carrying traffic", which a rejected event answers just
+    /// as well as an applied one. The event's own `created_at` plays no part —
+    /// it is remote-chosen, and would let one backdated event mint permanent
+    /// silence or one future-dated one mask a real blackout.
+    pub fn note_delivery(&self, key: &RepairKey) {
+        self.delivery.note(key, chrono::Utc::now().timestamp());
+    }
+
+    /// When this REQ endpoint last delivered anything (seconds), or `None` if it
+    /// has no open window.
+    ///
+    /// The delivery half of the health tick: a relay that keeps the socket open
+    /// but silently deleted our REQ is `Connected` and mute, and this is the only
+    /// thing that can tell the difference (see [`super::repair`]).
+    #[must_use]
+    pub fn last_delivery_secs(&self, key: &RepairKey) -> Option<i64> {
+        self.delivery.last(key)
+    }
+
+    /// Drops every relay's silence window for one subscription — its REQ was
+    /// closed, so nothing is owed on it any more.
+    pub fn forget_delivery_for_sub(&self, sub_id: &SubscriptionId) {
+        self.delivery.forget_sub(sub_id);
     }
 
     /// Emits a bare status signal on the bus (e.g. to surface a recovered worker

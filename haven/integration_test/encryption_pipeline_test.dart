@@ -347,7 +347,7 @@ void main() {
         // --------------------------------------------------------------
         // 8. Alice encrypts the sentinel location (first message).
         // --------------------------------------------------------------
-        final encrypted = await aliceManager.encryptLocation(
+        final encrypted = (await aliceManager.encryptLocation(
           mlsGroupId: Uint8List.fromList(mlsGroupId),
           senderPubkeyHex: alicePubkeyHex,
           latitude: _sentinelLat,
@@ -355,7 +355,7 @@ void main() {
           updateIntervalSecs: BigInt.from(
             kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
           ),
-        );
+        )).sent!;
 
         final eventJson = encrypted.eventJson;
 
@@ -548,7 +548,7 @@ void main() {
         // 11. Alice encrypts a SECOND location with different sentinel
         //     coordinates to verify ephemeral-key uniqueness per message.
         // --------------------------------------------------------------
-        final encrypted2 = await aliceManager.encryptLocation(
+        final encrypted2 = (await aliceManager.encryptLocation(
           mlsGroupId: Uint8List.fromList(mlsGroupId),
           senderPubkeyHex: alicePubkeyHex,
           latitude: _sentinelLat2,
@@ -556,7 +556,7 @@ void main() {
           updateIntervalSecs: BigInt.from(
             kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
           ),
-        );
+        )).sent!;
 
         final eventJson2 = encrypted2.eventJson;
 
@@ -784,7 +784,7 @@ void main() {
         // ----------------------------------------------------------------
         // Alice encrypts a location with the sentinel coordinates.
         // ----------------------------------------------------------------
-        final encrypted = await aliceManager.encryptLocation(
+        final encrypted = (await aliceManager.encryptLocation(
           mlsGroupId: mlsGroupId,
           senderPubkeyHex: alicePubkeyHex,
           latitude: _sentinelLat,
@@ -792,7 +792,7 @@ void main() {
           updateIntervalSecs: BigInt.from(
             kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
           ),
-        );
+        )).sent!;
 
         // Sanity: the event is still opaque (no plaintext coords).
         for (final forbidden in _forbiddenLatSubstrings) {

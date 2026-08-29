@@ -13,6 +13,13 @@ import 'package:haven/src/services/circle_service.dart';
 
 /// No-op stubs for last-known-location methods.
 mixin CircleServiceRetentionStubs {
+  /// The epoch repair is a foreground user action no retention-surface fake
+  /// exercises; a fake that DOES care overrides this.
+  Future<EpochRepairResult> repairCircleEpoch(
+    Circle circle, {
+    required String selfPubkeyHex,
+  }) async => const EpochRepairApplied();
+
   Future<void> upsertLastKnownLocation({
     required List<int> nostrGroupId,
     required String senderPubkey,

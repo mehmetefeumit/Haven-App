@@ -28,6 +28,7 @@ library;
 
 import 'dart:async';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart';
@@ -111,7 +112,12 @@ class _FakeLocationService implements LocationService {
     }
     final fresh = StreamController<Position>();
     _controllers.add(fresh);
-    addTearDown(fresh.close);
+    // Released, never awaited. These controllers are created inside a
+    // `fakeAsync` zone, and once a test has closed one there itself, `close()`
+    // hands back a done-future that only that zone's microtask queue can
+    // complete — and the queue stops running when the body returns. Awaiting it
+    // here would hang the teardown, not the code under test.
+    addTearDown(() => unawaited(fresh.close()));
     return fresh.stream;
   }
 
@@ -161,8 +167,8 @@ Position _position() => Position(
   timestamp: DateTime.now(),
 );
 
-/// Compressed so the watchdog-driven behaviours are testable without
-/// wall-clock waits. See [locationAccessProbeIntervalProvider].
+/// Compressed so one [_settle] covers a dozen probe cycles.
+/// See [locationAccessProbeIntervalProvider].
 const _probeInterval = Duration(milliseconds: 10);
 
 /// A probe interval so long the watchdog cannot fire during a test.
@@ -174,10 +180,39 @@ const _probeInterval = Duration(milliseconds: 10);
 /// bug it was written for. (This is exactly what mutation M1 exposed.)
 const _watchdogDisabled = Duration(minutes: 5);
 
-/// Long enough for several probe cycles (each probe awaits SharedPreferences
-/// plus two service calls), short enough to keep the suite fast.
-Future<void> _settle() =>
-    Future<void>.delayed(const Duration(milliseconds: 120));
+/// A [test] whose body runs on a FAKE clock.
+///
+/// Every behaviour below is a function of elapsed time, and settling with a
+/// wall-clock `Future.delayed` raced the compressed probe interval: it passed
+/// only while the machine was idle enough to deliver a 10 ms timer inside the
+/// 120 ms window, and failed under parallel load. `Timer` is zone-scoped, so
+/// wrapping the body IS the seam — the notifier's watchdog then advances
+/// exactly when a test says so, and needs no production hook to be driven.
+void _timedTest(String description, void Function(FakeAsync async) body) =>
+    test(description, () => fakeAsync(body));
+
+/// Advances the fake clock over a dozen probe cycles.
+///
+/// [FakeAsync.elapse] flushes microtasks around every timer it fires, and every
+/// `await` a probe makes (SharedPreferences plus the two service calls)
+/// resolves on a microtask — so when this returns, each probe due inside the
+/// window has finished and re-armed. Deliberately many intervals wide: callers
+/// care that the watchdog got its chances, not which tick answered.
+void _settle(FakeAsync async) => async.elapse(_probeInterval * 12);
+
+/// Writes the persisted disclosure flag from inside a [_timedTest] body.
+///
+/// The store behind `SharedPreferences.setMockInitialValues` is in-memory, so
+/// the whole write resolves on microtasks — no clock movement, and nothing for
+/// a probe to race.
+void _acceptDisclosure(FakeAsync async) {
+  unawaited(
+    SharedPreferences.getInstance().then(
+      (prefs) => prefs.setBool(kLocationDisclosureAcceptedKey, true),
+    ),
+  );
+  async.flushMicrotasks();
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -237,9 +272,9 @@ void main() {
   /// refuses to call an askable denial a revocation until access has actually
   /// been granted once (see F5 / the `never asked` group). Without this the
   /// permission tests would silently be testing the first-run path instead.
-  Future<void> establishAccess(ProviderContainer container) async {
+  void establishAccess(ProviderContainer container, FakeAsync async) {
     service.controller.add(_position());
-    await _settle();
+    _settle(async);
     expect(
       container.read(locationAccessProvider),
       LocationAccessStatus.available,
@@ -253,13 +288,14 @@ void main() {
   // -------------------------------------------------------------------------
 
   group('baseline', () {
-    test('starts available and stays available while fixes arrive', () async {
+    _timedTest(
+        'starts available and stays available while fixes arrive', (async) {
       final container = harness();
       expect(container.read(locationAccessProvider),
           LocationAccessStatus.available);
 
       service.controller.add(_position());
-      await _settle();
+      _settle(async);
 
       expect(
         container.read(locationAccessProvider),
@@ -275,7 +311,8 @@ void main() {
   // -------------------------------------------------------------------------
 
   group('detection', () {
-    test('an AsyncError on the position stream surfaces the state', () async {
+    _timedTest(
+        'an AsyncError on the position stream surfaces the state', (async) {
       // THE `whenData` GAP. Before the fix this error reached two listeners
       // and both discarded it.
       //
@@ -287,7 +324,7 @@ void main() {
       // sharing just died should not wait a probe interval to be told.
       final container = harness(probeInterval: _watchdogDisabled);
       service.controller.add(_position());
-      await _settle();
+      _settle(async);
       expect(container.read(locationAccessProvider),
           LocationAccessStatus.available);
 
@@ -296,7 +333,7 @@ void main() {
         StateError('location service disabled'),
         StackTrace.empty,
       );
-      await _settle();
+      _settle(async);
 
       expect(
         container.read(locationAccessProvider),
@@ -306,21 +343,21 @@ void main() {
       );
     });
 
-    test('a stream that completes WITHOUT error also surfaces the state',
-        () async {
+    _timedTest('a stream that completes WITHOUT error also surfaces the state',
+        (async) {
       // The other half of the gap, and the one an error-only fix would miss:
       // Riverpod leaves a completed stream sitting on its last AsyncData, so
       // no listener of any kind ever fires again. Only the silence watchdog
       // can notice this.
       final container = harness();
       service.controller.add(_position());
-      await _settle();
+      _settle(async);
       expect(container.read(locationAccessProvider),
           LocationAccessStatus.available);
 
       service.serviceEnabled = false;
-      await service.controller.close();
-      await _settle();
+      unawaited(service.controller.close());
+      _settle(async);
 
       expect(
         container.read(locationAccessProvider),
@@ -330,13 +367,13 @@ void main() {
       );
     });
 
-    test('a stream that never delivers a first fix is noticed', () async {
+    _timedTest('a stream that never delivers a first fix is noticed', (async) {
       // Cold start into a disabled provider: nothing is ever emitted, so
       // there is no AsyncData to arm anything from except the initial
       // AsyncLoading.
       final container = harness();
       service.serviceEnabled = false;
-      await _settle();
+      _settle(async);
 
       expect(
         container.read(locationAccessProvider),
@@ -344,8 +381,9 @@ void main() {
       );
     });
 
-    test('a stream that goes silent while the PLATFORM still reports access '
-        'is not surfaced — the Android app-ops residual', () async {
+    _timedTest(
+        'a stream that goes silent while the PLATFORM still reports access '
+        'is not surfaced — the Android app-ops residual', (async) {
       // THE ANDROID `appops set <pkg> android:fine_location deny` CASE, modelled
       // as it actually behaves.
       //
@@ -364,14 +402,14 @@ void main() {
         ..serviceEnabled = true
         ..permission = LocationPermissionStatus.whileInUse;
       service.controller.add(_position());
-      await _settle();
+      _settle(async);
       expect(container.read(locationAccessProvider),
           LocationAccessStatus.available);
 
       // Deliberately no addError, no close, no permission change: the platform
       // goes on claiming everything is fine while nothing is delivered.
-      await _settle();
-      await _settle();
+      _settle(async);
+      _settle(async);
 
       expect(
         container.read(locationAccessProvider),
@@ -383,9 +421,10 @@ void main() {
             '`isLocationServiceEnabled()` is true, `checkPermission()` is '
             'granted, the stream is open and un-errored. The only remaining '
             'signal is the silence itself, and silence is NOT evidence — the '
-            'stream carries `distanceFilter: 1`, so a stationary device (a '
-            'phone on a desk, a user asleep, anyone indoors without a fix) '
-            'legitimately emits nothing for hours. Surfacing on that would '
+            'stream carries a 1 m `distanceFilter` (Android, and iOS while '
+            'background sharing is off), so a stationary device (a phone on a '
+            'desk, a user asleep, anyone indoors without a fix) legitimately '
+            'emits nothing for hours. Surfacing on that would '
             'raise "your location sharing has stopped" over a perfectly '
             'healthy session, which is the false alarm '
             '"a silent stream with healthy access does NOT raise a false '
@@ -408,8 +447,9 @@ void main() {
       );
     });
 
-    test('the cause comes from the platform probe, never from the error object',
-        () async {
+    _timedTest(
+        'the cause comes from the platform probe, never from the error object',
+        (async) {
       // Platform-asymmetric by nature: Android raises a clean
       // `LocationServiceDisabledException`, but an iOS denial arrives as a
       // generic update failure indistinguishable from a transient GPS
@@ -423,7 +463,7 @@ void main() {
       // to reach at all (see the `never asked` group). Without this the test
       // would be asserting the first-run path and quietly stop covering the
       // error-vs-probe attribution it is named for.
-      await establishAccess(container);
+      establishAccess(container, async);
       service
         ..serviceEnabled = true
         ..permission = LocationPermissionStatus.denied;
@@ -433,7 +473,7 @@ void main() {
         StateError('LocationServiceDisabledException'),
         StackTrace.empty,
       );
-      await _settle();
+      _settle(async);
 
       expect(
         container.read(locationAccessProvider),
@@ -443,15 +483,16 @@ void main() {
       );
     });
 
-    test('a silent stream with healthy access does NOT raise a false alarm',
-        () async {
+    _timedTest(
+        'a silent stream with healthy access does NOT raise a false alarm',
+        (async) {
       // A stationary device indoors legitimately stops producing fixes while
       // location is perfectly enabled. Surfacing there would train users to
       // ignore the banner.
       final container = harness();
       service.controller.add(_position());
-      await service.controller.close();
-      await _settle();
+      unawaited(service.controller.close());
+      _settle(async);
 
       expect(
         container.read(locationAccessProvider),
@@ -465,15 +506,15 @@ void main() {
   // -------------------------------------------------------------------------
 
   group('recovery', () {
-    test('clears when access returns, without a restart', () async {
+    _timedTest('clears when access returns, without a restart', (async) {
       final container = harness();
       service.serviceEnabled = false;
-      await _settle();
+      _settle(async);
       expect(container.read(locationAccessProvider),
           LocationAccessStatus.serviceDisabled);
 
       service.serviceEnabled = true;
-      await _settle();
+      _settle(async);
 
       expect(
         container.read(locationAccessProvider),
@@ -484,15 +525,15 @@ void main() {
       );
     });
 
-    test('re-subscribes the position stream on recovery', () async {
+    _timedTest('re-subscribes the position stream on recovery', (async) {
       final container = harness();
       final before = service.streamSubscriptions;
       service.serviceEnabled = false;
-      await _settle();
+      _settle(async);
       expect(container.read(locationAccessProvider).isBlocked, isTrue);
 
       service.serviceEnabled = true;
-      await _settle();
+      _settle(async);
 
       expect(
         service.streamSubscriptions,
@@ -502,8 +543,9 @@ void main() {
       );
     });
 
-    test('recovers from the Android ZOMBIE stream: off/on, not just error',
-        () async {
+    _timedTest(
+        'recovers from the Android ZOMBIE stream: off/on, not just error',
+        (async) {
       // The full Android sequence, which no error-driven design survives:
       //
       //   provider off → onProviderDisabled errors into the stream AND calls
@@ -516,20 +558,20 @@ void main() {
       // NEW stream — which is what this asserts end to end.
       final container = harness();
       service.controller.add(_position());
-      await _settle();
+      _settle(async);
 
       // --- provider off
       service.serviceEnabled = false;
       final zombie = service.controller;
       zombie.addError(StateError('provider disabled'), StackTrace.empty);
-      await _settle();
+      _settle(async);
       expect(container.read(locationAccessProvider),
           LocationAccessStatus.serviceDisabled);
 
       // --- provider on. The zombie stays open and silent forever; nothing
       // will ever arrive on it.
       service.serviceEnabled = true;
-      await _settle();
+      _settle(async);
 
       expect(
         container.read(locationAccessProvider),
@@ -544,13 +586,13 @@ void main() {
 
       // And the rebuilt stream is genuinely live: a fix on it flows through.
       service.controller.add(_position());
-      await _settle();
+      _settle(async);
       expect(container.read(locationAccessProvider),
           LocationAccessStatus.available);
       expect(zombie.hasListener, isFalse);
     });
 
-    test('clears even when the position stream NEVER revives', () async {
+    _timedTest('clears even when the position stream NEVER revives', (async) {
       // The load-bearing one. Two independent layers can keep the Android
       // stream dead for the rest of the session:
       //
@@ -569,14 +611,14 @@ void main() {
       service
         ..handBackTheCorpse = true
         ..serviceEnabled = false;
-      await _settle();
+      _settle(async);
       expect(container.read(locationAccessProvider),
           LocationAccessStatus.serviceDisabled);
 
       // The user fixes it. No fix will EVER arrive: the corpse neither emits
       // nor closes, exactly like the real thing.
       service.serviceEnabled = true;
-      await _settle();
+      _settle(async);
 
       expect(
         container.read(locationAccessProvider),
@@ -586,11 +628,11 @@ void main() {
       );
     });
 
-    test('recovers repeatedly across several off/on cycles', () async {
+    _timedTest('recovers repeatedly across several off/on cycles', (async) {
       final container = harness();
       for (var cycle = 0; cycle < 3; cycle++) {
         service.serviceEnabled = false;
-        await _settle();
+        _settle(async);
         expect(
           container.read(locationAccessProvider),
           LocationAccessStatus.serviceDisabled,
@@ -598,7 +640,7 @@ void main() {
         );
 
         service.serviceEnabled = true;
-        await _settle();
+        _settle(async);
         expect(
           container.read(locationAccessProvider),
           LocationAccessStatus.available,
@@ -607,8 +649,8 @@ void main() {
       }
     });
 
-    test('a delivered fix clears the state without churning the stream',
-        () async {
+    _timedTest('a delivered fix clears the state without churning the stream',
+        (async) {
       // ATTRIBUTION, not tidiness. With the compressed watchdog running this
       // test's HEADLINE assertion — that the state clears — passed even with
       // the entire delivered-fix fast path deleted: the 10 ms timer probed a
@@ -622,7 +664,7 @@ void main() {
       // to nothing but the AsyncData branch.
       final container = harness(probeInterval: _watchdogDisabled);
       service.controller.add(_position());
-      await _settle();
+      _settle(async);
       expect(container.read(locationAccessProvider),
           LocationAccessStatus.available);
 
@@ -631,7 +673,7 @@ void main() {
         StateError('provider disabled'),
         StackTrace.empty,
       );
-      await _settle();
+      _settle(async);
       expect(container.read(locationAccessProvider),
           LocationAccessStatus.serviceDisabled);
 
@@ -640,7 +682,7 @@ void main() {
       service.serviceEnabled = true;
       final subscriptionsBefore = service.streamSubscriptions;
       service.controller.add(_position());
-      await _settle();
+      _settle(async);
 
       expect(
         container.read(locationAccessProvider),
@@ -663,25 +705,26 @@ void main() {
   // -------------------------------------------------------------------------
 
   group('cause discrimination (through the notifier)', () {
-    test('service disabled and permission denied are distinguished', () async {
+    _timedTest(
+        'service disabled and permission denied are distinguished', (async) {
       final container = harness();
       // Explicit, because an askable denial is only a REVOCATION once access
       // has been held (see the `never asked` group). Without this the second
       // half of this test would quietly be exercising the first-run path and
       // asserting the wrong thing.
-      await establishAccess(container);
+      establishAccess(container, async);
 
       service
         ..serviceEnabled = false
         ..permission = LocationPermissionStatus.whileInUse;
-      await _settle();
+      _settle(async);
       expect(container.read(locationAccessProvider),
           LocationAccessStatus.serviceDisabled);
 
       service
         ..serviceEnabled = true
         ..permission = LocationPermissionStatus.denied;
-      await _settle();
+      _settle(async);
       expect(
         container.read(locationAccessProvider),
         LocationAccessStatus.permissionDenied,
@@ -690,12 +733,12 @@ void main() {
       );
     });
 
-    test('permanently denied is distinguished from denied', () async {
+    _timedTest('permanently denied is distinguished from denied', (async) {
       final container = harness();
       service
         ..serviceEnabled = true
         ..permission = LocationPermissionStatus.deniedForever;
-      await _settle();
+      _settle(async);
 
       expect(
         container.read(locationAccessProvider),
@@ -703,12 +746,12 @@ void main() {
       );
     });
 
-    test('both blockers at once get their own state', () async {
+    _timedTest('both blockers at once get their own state', (async) {
       final container = harness();
       service
         ..serviceEnabled = false
         ..permission = LocationPermissionStatus.deniedForever;
-      await _settle();
+      _settle(async);
 
       expect(
         container.read(locationAccessProvider),
@@ -718,11 +761,11 @@ void main() {
       );
     });
 
-    test('an unreadable platform yields unknown, never an accusation',
-        () async {
+    _timedTest('an unreadable platform yields unknown, never an accusation',
+        (async) {
       final container = harness();
       service.serviceCheckError = StateError('channel down');
-      await _settle();
+      _settle(async);
 
       expect(
         container.read(locationAccessProvider),
@@ -730,13 +773,14 @@ void main() {
       );
     });
 
-    test('a readable service check survives an unreadable permission check',
-        () async {
+    _timedTest(
+        'a readable service check survives an unreadable permission check',
+        (async) {
       final container = harness();
       service
         ..serviceEnabled = false
         ..permissionCheckError = StateError('channel down');
-      await _settle();
+      _settle(async);
 
       expect(
         container.read(locationAccessProvider),
@@ -752,8 +796,8 @@ void main() {
   // -------------------------------------------------------------------------
 
   group('never asked (through the notifier)', () {
-    test('an askable denial before access was ever held stays quiet',
-        () async {
+    _timedTest('an askable denial before access was ever held stays quiet',
+        (async) {
       // THE FIRST-RUN FALSE ACCUSATION. The user accepts the in-app prominent
       // disclosure — which persists the flag IMMEDIATELY, opening this gate —
       // and `getCurrentLocation()` then calls `requestPermission()`. While the
@@ -770,7 +814,7 @@ void main() {
       service
         ..serviceEnabled = true
         ..permission = LocationPermissionStatus.denied;
-      await _settle();
+      _settle(async);
 
       expect(
         container.read(locationAccessProvider),
@@ -787,18 +831,18 @@ void main() {
       );
     });
 
-    test('the same reading IS a revocation once access has been held',
-        () async {
+    _timedTest('the same reading IS a revocation once access has been held',
+        (async) {
       // The other side of the rule, and the anti-vacuity for the test above:
       // identical platform values, opposite verdict, the only difference being
       // that Haven has actually had access this session.
       final container = harness();
-      await establishAccess(container);
+      establishAccess(container, async);
 
       service
         ..serviceEnabled = true
         ..permission = LocationPermissionStatus.denied;
-      await _settle();
+      _settle(async);
 
       expect(
         container.read(locationAccessProvider),
@@ -808,8 +852,9 @@ void main() {
       );
     });
 
-    test('a granted probe alone (no fix) is enough to arm the revocation claim',
-        () async {
+    _timedTest(
+        'a granted probe alone (no fix) is enough to arm the revocation claim',
+        (async) {
       // The other way Haven learns it holds access. It matters on its own:
       // a stream that never delivers (stationary indoors) would otherwise
       // leave a genuine later revocation permanently unreportable.
@@ -817,13 +862,13 @@ void main() {
       service
         ..serviceEnabled = true
         ..permission = LocationPermissionStatus.whileInUse;
-      await _settle();
+      _settle(async);
       expect(container.read(locationAccessProvider),
           LocationAccessStatus.available);
       expect(service.permissionChecks, greaterThan(0));
 
       service.permission = LocationPermissionStatus.denied;
-      await _settle();
+      _settle(async);
 
       expect(
         container.read(locationAccessProvider),
@@ -831,7 +876,8 @@ void main() {
       );
     });
 
-    test('a hard denial is surfaced even when access was never held', () async {
+    _timedTest(
+        'a hard denial is surfaced even when access was never held', (async) {
       // `deniedForever` is exempt: on every platform it is an explicit,
       // unambiguous "no" that the app can no longer prompt for, so there is
       // nothing ambiguous to protect the user from. iOS in particular only
@@ -840,7 +886,7 @@ void main() {
       service
         ..serviceEnabled = true
         ..permission = LocationPermissionStatus.deniedForever;
-      await _settle();
+      _settle(async);
 
       expect(
         container.read(locationAccessProvider),
@@ -848,8 +894,8 @@ void main() {
       );
     });
 
-    test('a disabled provider is still named while the permission is not',
-        () async {
+    _timedTest('a disabled provider is still named while the permission is not',
+        (async) {
       // Half the reading is unambiguous and actionable; half is not. Naming
       // only the half Haven can stand behind beats both alternatives —
       // silence (the user is not told about a real blocker) and the combined
@@ -858,7 +904,7 @@ void main() {
       service
         ..serviceEnabled = false
         ..permission = LocationPermissionStatus.denied;
-      await _settle();
+      _settle(async);
 
       expect(
         container.read(locationAccessProvider),
@@ -872,9 +918,9 @@ void main() {
   // -------------------------------------------------------------------------
 
   group('probe racing the OS settings write', () {
-    test(
+    _timedTest(
         'a probe that answers available while the stream faulted rechecks '
-        'FAST, not on the slow cadence', () async {
+        'FAST, not on the slow cadence', (async) {
       // THE CI RUN 30977235075 DEFECT. On Android
       // `isLocationServiceEnabled()` races the OS write behind
       // `cmd location set-location-enabled false` / Quick Settings, so the
@@ -890,7 +936,7 @@ void main() {
       // would prove nothing about the bug it was written for.
       final container = harness(probeInterval: _watchdogDisabled);
       service.controller.add(_position());
-      await _settle();
+      _settle(async);
       expect(container.read(locationAccessProvider),
           LocationAccessStatus.available);
 
@@ -903,7 +949,7 @@ void main() {
         StateError('location service disabled'),
         StackTrace.empty,
       );
-      await _settle();
+      _settle(async);
 
       expect(
         container.read(locationAccessProvider),
@@ -913,24 +959,25 @@ void main() {
       );
     });
 
-    test('the fast recheck is BOUNDED — a healthy device settles back down',
-        () async {
+    _timedTest(
+        'the fast recheck is BOUNDED — a healthy device settles back down',
+        (async) {
       // A single dropped stream event on a device whose location is genuinely
       // fine must not buy an unbounded fast-probe loop.
       final container = harness(probeInterval: _watchdogDisabled);
       service.controller.add(_position());
-      await _settle();
+      _settle(async);
 
       service.controller.addError(
         StateError('transient stream blip'),
         StackTrace.empty,
       );
-      await _settle();
+      _settle(async);
       final afterBudget = service.serviceChecks;
 
       // Well past the budget's worth of fast rechecks.
-      await _settle();
-      await _settle();
+      _settle(async);
+      _settle(async);
 
       expect(
         container.read(locationAccessProvider),
@@ -945,25 +992,25 @@ void main() {
       );
     });
 
-    test('a delivered fix cancels the fast rechecks', () async {
+    _timedTest('a delivered fix cancels the fast rechecks', (async) {
       // The stream proving itself alive settles the contradiction in the
       // probe's favour — there is nothing left to recheck.
       final container = harness(probeInterval: _watchdogDisabled);
       service.controller.add(_position());
-      await _settle();
+      _settle(async);
 
       service.controller.addError(
         StateError('transient stream blip'),
         StackTrace.empty,
       );
-      await _settle();
+      _settle(async);
 
       service.controller.add(_position());
-      await _settle();
+      _settle(async);
       final afterFix = service.serviceChecks;
 
-      await _settle();
-      await _settle();
+      _settle(async);
+      _settle(async);
 
       expect(container.read(locationAccessProvider),
           LocationAccessStatus.available);
@@ -976,8 +1023,9 @@ void main() {
   });
 
   group('watchdog liveness', () {
-    test('a probe that THROWS does not disarm the watchdog for the session',
-        () async {
+    _timedTest(
+        'a probe that THROWS does not disarm the watchdog for the session',
+        (async) {
       // `refresh()` is documented "never throws", but its `_armWatchdog()` used
       // to be the last statement with no `try`/`finally` — so a throw from any
       // of the `ref` calls outside its try blocks skipped the re-arm, and every
@@ -1002,7 +1050,7 @@ void main() {
       );
 
       service.serviceEnabled = false;
-      await _settle();
+      _settle(async);
       expect(
         container.read(locationAccessProvider),
         LocationAccessStatus.serviceDisabled,
@@ -1018,7 +1066,7 @@ void main() {
       // The user fixes it. Only a still-armed watchdog can ever notice.
       container.read(failOwnLocation.notifier).state = false;
       service.serviceEnabled = true;
-      await _settle();
+      _settle(async);
 
       expect(
         container.read(locationAccessProvider),
@@ -1028,7 +1076,7 @@ void main() {
       );
     });
 
-    test('suspend() stops probing until something re-arms it', () async {
+    _timedTest('suspend() stops probing until something re-arms it', (async) {
       // The app is paused: nobody can see the banner, and a recovery edge
       // fired while backgrounded would invalidate `locationStreamProvider` —
       // which with background sharing OFF also runs that provider's
@@ -1036,15 +1084,15 @@ void main() {
       // serves from.
       final container = harness();
       service.serviceEnabled = false;
-      await _settle();
+      _settle(async);
       expect(container.read(locationAccessProvider),
           LocationAccessStatus.serviceDisabled);
 
       container.read(locationAccessProvider.notifier).suspend();
       final checksAtSuspend = service.serviceChecks;
       service.serviceEnabled = true;
-      await _settle();
-      await _settle();
+      _settle(async);
+      _settle(async);
 
       expect(
         service.serviceChecks,
@@ -1059,7 +1107,11 @@ void main() {
       );
 
       // The resume path: `_onResumed` calls refresh() before anything else.
-      await container.read(locationAccessProvider.notifier).refresh();
+      // Microtasks only, no clock movement — so the verdict below is
+      // attributable to this call, and cannot be a watchdog tick that slipped
+      // in behind it.
+      unawaited(container.read(locationAccessProvider.notifier).refresh());
+      async.flushMicrotasks();
       expect(
         container.read(locationAccessProvider),
         LocationAccessStatus.available,
@@ -1069,7 +1121,7 @@ void main() {
 
       // ...and the watchdog is genuinely live again, not merely correct once.
       service.serviceEnabled = false;
-      await _settle();
+      _settle(async);
       expect(container.read(locationAccessProvider),
           LocationAccessStatus.serviceDisabled);
     });
@@ -1225,7 +1277,7 @@ void main() {
   // -------------------------------------------------------------------------
 
   group('stale position', () {
-    test('entering blocked clears the shared own-location', () async {
+    _timedTest('entering blocked clears the shared own-location', (async) {
       // `obfuscatedLocationProvider` is what the circles sheet uses to centre
       // on "me". Leaving it populated would let another surface keep treating
       // a pre-outage fix as the user's current position.
@@ -1234,19 +1286,19 @@ void main() {
           const LatLng(51.5, -0.12);
 
       service.serviceEnabled = false;
-      await _settle();
+      _settle(async);
 
       expect(container.read(locationAccessProvider).isBlocked, isTrue);
       expect(container.read(obfuscatedLocationProvider), isNull);
     });
 
-    test('a healthy session never clears the own-location', () async {
+    _timedTest('a healthy session never clears the own-location', (async) {
       final container = harness();
       container.read(obfuscatedLocationProvider.notifier).state =
           const LatLng(51.5, -0.12);
 
       service.controller.add(_position());
-      await _settle();
+      _settle(async);
 
       expect(container.read(obfuscatedLocationProvider), isNotNull);
     });
@@ -1257,8 +1309,8 @@ void main() {
   // -------------------------------------------------------------------------
 
   group('disclosure gate', () {
-    test('stays quiet before the prominent disclosure is accepted, and '
-        'surfaces the moment it is granted', () async {
+    _timedTest('stays quiet before the prominent disclosure is accepted, and '
+        'surfaces the moment it is granted', (async) {
       // Pre-consent, "no location" is the user's own choice and the map
       // already says so in its own empty state. A fault claim here would be
       // both wrong and a second, contradictory surface.
@@ -1272,7 +1324,7 @@ void main() {
       service
         ..serviceEnabled = false
         ..permission = LocationPermissionStatus.denied;
-      await _settle();
+      _settle(async);
 
       expect(
         container.read(locationAccessProvider),
@@ -1281,9 +1333,8 @@ void main() {
             'answered',
       );
 
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool(kLocationDisclosureAcceptedKey, true);
-      await _settle();
+      _acceptDisclosure(async);
+      _settle(async);
 
       expect(
         container.read(locationAccessProvider).isBlocked,
@@ -1294,7 +1345,8 @@ void main() {
       );
     });
 
-    test('reads the PERSISTED flag, not in-memory disclosure state', () async {
+    _timedTest(
+        'reads the PERSISTED flag, not in-memory disclosure state', (async) {
       // The gate deliberately consults SharedPreferences and nothing else.
       // `LocationDisclosureController.ensureDisclosed` persists before it
       // publishes anything in memory, and `_syncFromPrefs` derives memory FROM
@@ -1305,7 +1357,7 @@ void main() {
       // still works with no disclosure controller in the picture at all.
       final container = harness();
       service.serviceEnabled = false;
-      await _settle();
+      _settle(async);
 
       expect(container.read(locationAccessProvider).isBlocked, isTrue);
     });

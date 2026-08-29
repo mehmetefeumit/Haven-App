@@ -9,6 +9,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:haven/src/constants/location.dart';
 
+import 'package:haven/src/services/circle_health_service.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/clock_skew_detector.dart';
 import 'package:haven/src/services/identity_service.dart';
@@ -84,6 +85,61 @@ class LocationFetchResult {
   final bool groupUpdated;
 }
 
+/// The outcome of a [LocationSharingService.publishLocation] call.
+///
+/// Sealed so a caller cannot forget the deferred case. A deferral is not an
+/// error — nothing failed, the MLS engine simply could not encrypt yet — so it
+/// is returned rather than thrown, and it carries presence-only counters the
+/// sharing-health model reads.
+@immutable
+sealed class LocationPublishOutcome {
+  /// Const base constructor.
+  const LocationPublishOutcome();
+}
+
+/// The location was encrypted and handed to the relays.
+@immutable
+final class LocationPublishSent extends LocationPublishOutcome {
+  /// Creates a [LocationPublishSent].
+  const LocationPublishSent(this.result);
+
+  /// The relay verdict. `acceptedBy.isEmpty` still means nothing was delivered.
+  final PublishResult result;
+}
+
+/// The MLS engine deferred the send; no location reached the relays.
+///
+/// Any commit the engine staged in the same call has already been run through
+/// the Rule-13 publish-then-confirm ladder by [LocationSharingService]; the
+/// counters here are for the health model and for logs.
+@immutable
+final class LocationPublishDeferred extends LocationPublishOutcome {
+  /// Creates a [LocationPublishDeferred].
+  const LocationPublishDeferred({
+    required this.unresolvedInputs,
+    required this.discardedIntents,
+    required this.repaired,
+    required this.stagedCommits,
+    required this.publishedProposals,
+  });
+
+  /// Stored rows still gating outbound sends for this circle. Zero means the
+  /// next scheduled publish should encrypt normally.
+  final int unresolvedInputs;
+
+  /// Queued location intents the engine-side repair discarded.
+  final int discardedIntents;
+
+  /// Whether the repair left the circle with nothing gating.
+  final bool repaired;
+
+  /// How many staged commits were handed back and run through the ladder.
+  final int stagedCommits;
+
+  /// How many bare proposals were published.
+  final int publishedProposals;
+}
+
 /// Service for sharing and receiving locations through circles.
 ///
 /// Coordinates the encryption, relay publishing, fetching, and
@@ -123,11 +179,15 @@ class LocationSharingService {
   /// the verdict of every publish, and every MLS-authenticated peer timestamp
   /// this service decrypts. Optional so existing tests that do not care about
   /// clock skew construct unchanged; production always supplies the singleton.
+  /// [healthService] receives the two delivery instants the sharing-health
+  /// model reads (a relay-ACKed publish, a persisted peer location). Optional
+  /// for the same reason.
   LocationSharingService({
     required CircleService circleService,
     required RelayService relayService,
     IdentityService? identityService,
     ClockSkewDetector? clockSkewDetector,
+    CircleHealthService? healthService,
     this.maxSeenEventIds = _defaultMaxSeenEventIds,
     this.cacheEvictionGrace = _defaultCacheEvictionGrace,
     DateTime Function() now = DateTime.now,
@@ -140,6 +200,7 @@ class LocationSharingService {
        _relayService = relayService,
        _identityService = identityService,
        _clockSkewDetector = clockSkewDetector,
+       _healthService = healthService,
        _now = now;
 
   /// Maximum number of event IDs retained in [_seenEventIds] before
@@ -165,6 +226,7 @@ class LocationSharingService {
   final RelayService _relayService;
   final IdentityService? _identityService;
   final ClockSkewDetector? _clockSkewDetector;
+  final CircleHealthService? _healthService;
   final DateTime Function() _now;
 
   /// Cached lowercase-hex own pubkey. Resolved lazily once per process and
@@ -228,16 +290,21 @@ class LocationSharingService {
   /// Encrypts the location via MLS, then publishes the kind 445 event
   /// to the circle's relays.
   ///
+  /// [nostrGroupId] is the circle's PUBLIC `#h` value (never the real MLS
+  /// group id, Security Rule 4) and is used only to key the delivery-health
+  /// record; it never reaches the wire from here.
+  ///
   /// Returns the publish result.
-  Future<PublishResult> publishLocation({
+  Future<LocationPublishOutcome> publishLocation({
     required List<int> mlsGroupId,
+    required List<int> nostrGroupId,
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
   }) async {
     // Step 1: Encrypt location
     debugPrint('[LocationService] Encrypting location via MLS...');
-    final encrypted = await _circleService.encryptLocation(
+    final outcome = await _circleService.encryptLocation(
       mlsGroupId: mlsGroupId,
       senderPubkeyHex: senderPubkeyHex,
       latitude: latitude,
@@ -255,6 +322,22 @@ class LocationSharingService {
       updateIntervalSecs:
           kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
     );
+    // The engine QUEUED the update instead of encrypting it. That is a state,
+    // not a failure: it carries staged work the caller must still resolve, and
+    // counters the sharing-health model reads. Narrowed here so every later
+    // step below can assume there really is an event.
+    //
+    // Switched, not cast: an `as` would compile happily against a third variant
+    // added later and fail at RUNTIME, on the publish path, in the background —
+    // exactly where a silent failure is hardest to notice. The switch makes the
+    // analyzer name this site instead.
+    final EncryptedLocation encrypted;
+    switch (outcome) {
+      case LocationSendDeferred():
+        return _handleDeferredSend(deferred: outcome, mlsGroupId: mlsGroupId);
+      case LocationEncrypted(encrypted: final e):
+        encrypted = e;
+    }
     // Surface the event id prefix (8 hex chars, public on relays) so that
     // when a receiver later logs an `evt=<prefix>` line we can correlate
     // it back to the originating publish. The full event id never lands in
@@ -297,13 +380,132 @@ class LocationSharingService {
       rethrow;
     }
     _clockSkewDetector?.recordPublishResult(publishResult);
+    // Delivery liveness, and ONLY on an affirmative ACK. A `PublishResult`
+    // whose `acceptedBy` is empty reached no relay that kept it, so stamping it
+    // would make a dead publish plane read as healthy — the principle behind
+    // Security Rule 13: acked means acked, never merely sent.
+    if (publishResult.acceptedBy.isNotEmpty) {
+      await _healthService?.notePublishAcked(
+        nostrGroupId: nostrGroupId,
+        at: _now(),
+      );
+    }
     debugPrint(
       '[LocationService] evt=$encryptedEvtTag publish done — '
       'accepted=${publishResult.acceptedBy.length}, '
       'rejected=${publishResult.rejectedBy.length}, '
       'failed=${publishResult.failed.length}',
     );
-    return publishResult;
+    return LocationPublishSent(publishResult);
+  }
+
+  /// Handles a DEFERRED encrypt: runs the Rule-13 ladder over anything the
+  /// engine staged, publishes any bare proposal, and folds the result into a
+  /// typed outcome.
+  ///
+  /// Deliberately reports NOTHING to the clock-skew detector. That detector
+  /// reasons about relay verdicts on our own timestamps, and a deferral never
+  /// reached a relay — feeding it a non-event would dilute the evidence it
+  /// needs to distinguish a wrong device clock from an unreachable relay.
+  /// [notePublishAcked] is likewise not stamped: nothing was delivered, and
+  /// Security Rule 13's "acked means acked" applies to liveness too.
+  Future<LocationPublishDeferred> _handleDeferredSend({
+    required LocationSendDeferred deferred,
+    required List<int> mlsGroupId,
+  }) async {
+    debugPrint(
+      '[LocationService] send DEFERRED by the MLS engine — '
+      'gating=${deferred.unresolvedInputs}, repaired=${deferred.repaired}, '
+      'discardedIntents=${deferred.discardedIntents}, '
+      'stagedCommits=${deferred.commits.length}, '
+      'proposals=${deferred.proposals.length}',
+    );
+
+    // The staged work needs the circle's CURRENT relays, and a deferral is the
+    // one send path that carries no relay list of its own (there is no event).
+    Circle? circle;
+    try {
+      circle = await _circleService.getCircle(mlsGroupId);
+    } on Object catch (e) {
+      debugPrint(
+        '[LocationService] deferred send: circle lookup failed: '
+        '${e.runtimeType}',
+      );
+    }
+
+    var publishedProposals = 0;
+    if (deferred.commits.isNotEmpty) {
+      if (circle == null) {
+        // No relays to publish to. Rolling back is the only Rule-13-safe
+        // disposition left: leaving the ref unresolved pins the group in
+        // `PendingPublish`, where every later send fails outright.
+        for (final commit in deferred.commits) {
+          try {
+            await _circleService.failPendingCommit(commit.pendingToken);
+          } on Object catch (e) {
+            debugPrint(
+              '[LocationService] deferred send: rollback failed: '
+              '${e.runtimeType}',
+            );
+          }
+        }
+      } else {
+        await _publishAutoCommits(
+          autoCommits: deferred.commits,
+          circle: circle,
+        );
+      }
+    }
+
+    if (deferred.proposals.isNotEmpty && circle != null) {
+      publishedProposals = await _publishDeferredProposals(
+        proposals: deferred.proposals,
+        relays: circle.relays,
+      );
+    }
+
+    return LocationPublishDeferred(
+      unresolvedInputs: deferred.unresolvedInputs,
+      discardedIntents: deferred.discardedIntents,
+      repaired: deferred.repaired,
+      stagedCommits: deferred.commits.length,
+      publishedProposals: publishedProposals,
+    );
+  }
+
+  /// Publishes bare proposal events, returning how many reached ≥1 relay.
+  ///
+  /// No confirm step: a proposal carries no staged state, so there is nothing
+  /// to apply or roll back. A failure is logged and swallowed — the durable
+  /// leave request that produced it makes a later convergence pass re-emit it,
+  /// so losing one costs a cycle, never correctness.
+  Future<int> _publishDeferredProposals({
+    required List<String> proposals,
+    required List<String> relays,
+  }) async {
+    if (relays.isEmpty) return 0;
+    var published = 0;
+    for (final eventJson in proposals) {
+      try {
+        final result = await _relayService.publishEvent(
+          eventJson: eventJson,
+          relays: relays,
+        );
+        if (result.acceptedBy.isNotEmpty) {
+          published++;
+        } else {
+          debugPrint(
+            '[LocationService] deferred send: proposal rejected by all relays',
+          );
+        }
+      } on Object catch (e) {
+        debugPrint(
+          '[LocationService] deferred send: proposal publish failed: '
+          '${e.runtimeType}',
+        );
+      }
+    }
+    return published;
   }
 
   /// Tracks which circles have already been hydrated from the persistent
@@ -568,6 +770,17 @@ class LocationSharingService {
         '[LocationService] upsertLastKnownLocation failed: ${e.runtimeType}',
       );
     }
+
+    // Delivery liveness for the RECEIVE plane, stamped with the local receipt
+    // clock rather than `decrypted.timestamp`: the question this answers is
+    // "is anything still arriving", and a peer's own clock cannot answer it —
+    // a peer running fast would otherwise keep the circle looking live long
+    // after it went silent. This is the one funnel every receive plane (poll
+    // fetch, evolution poll, live-sync stream) reaches, in both isolates.
+    await _healthService?.notePeerEvent(
+      nostrGroupId: circle.nostrGroupId,
+      at: _now(),
+    );
 
     // Merge into the in-memory cache. Newer-timestamp wins.
     final cache = _locationCache.putIfAbsent(circleKey, () => {});

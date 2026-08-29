@@ -41,7 +41,7 @@ import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/fresh_secret.dart';
 import 'package:haven/src/services/leaver_backstop.dart';
 import 'package:haven/src/services/mls_session_handover.dart'
-    show appIsForegrounded;
+    show HandoverOutcome, appIsForegrounded;
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/pending_leave_service.dart';
 import 'package:haven/src/services/relay_service.dart';
@@ -68,10 +68,14 @@ class NostrCircleService implements CircleService {
     KeyringInitializer? keyringInitializer,
     bool enableLeaverBackstop = false,
     Future<List<int>> Function()? identitySecretBytesProvider,
-    Future<bool> Function(String dataDir)? sessionHandover,
+    Future<HandoverOutcome> Function(String dataDir)? sessionHandover,
+    Future<bool> Function(String dataDir)? isSessionLive,
+    Future<ForceReleaseOutcomeFfi> Function()? forceReleaseLiveSession,
     bool Function()? isForegrounded,
   }) : _relayService = relayService,
        _sessionHandover = sessionHandover,
+       _isSessionLive = isSessionLive,
+       _forceReleaseLiveSession = forceReleaseLiveSession,
        _isForegrounded = isForegrounded ?? appIsForegrounded,
        _dataDirectoryProvider =
            dataDirectoryProvider ?? const PathProviderDataDirectory(),
@@ -104,6 +108,13 @@ class NostrCircleService implements CircleService {
        // handover would be asking the service to stop itself. It also never
        // opens a manager here — one is injected.
        _sessionHandover = null,
+       // Same reason, and one more: force-releasing the process-global
+       // live-sync session is the BACKGROUND isolate's destructive lever, gated
+       // on a liveness probe it owns (`background_location_task.dart`). Wiring
+       // it here would give that isolate a second, ungated route to the same
+       // call.
+       _isSessionLive = null,
+       _forceReleaseLiveSession = null,
        // Never consulted: the pause-time handoff is a UI-isolate concern and
        // this constructor's service never calls `initialize()` (the manager is
        // already open, and `releaseForHandoff` is never called on it).
@@ -125,11 +136,23 @@ class NostrCircleService implements CircleService {
   /// never calls [initialize] (the manager is already open).
   final Future<List<int>> Function()? _identitySecretBytesProvider;
 
-  /// Recovers a Rule-14 guard held by another isolate, returning whether it was
-  /// released. Null disables recovery — correct for the background isolate
+  /// Asks the foreground service to give the Rule-14 guard back, reporting how
+  /// that went. Null disables recovery — correct for the background isolate
   /// (which is usually the HOLDER, so stopping the service would be asking it
   /// to stop itself) and for tests that inject a manager directly.
-  final Future<bool> Function(String dataDir)? _sessionHandover;
+  final Future<HandoverOutcome> Function(String dataDir)? _sessionHandover;
+
+  /// Reads the process-local Rule-14 registry. Injected rather than called
+  /// through the FFI directly so [_forceReleaseOrphanedSession] is decidable in
+  /// a unit test — and NEVER replaced by classifying an error string, which
+  /// would hand a circle admin (who controls the group's routing relays, and so
+  /// the text Haven interpolates into relay errors) a lever on this decision.
+  final Future<bool> Function(String dataDir)? _isSessionLive;
+
+  /// Drops the process-global live-sync session's manager `Arc`s. Null for
+  /// every service that is not the UI isolate's own — see
+  /// [_forceReleaseOrphanedSession] for why only that one may call it.
+  final Future<ForceReleaseOutcomeFfi> Function()? _forceReleaseLiveSession;
 
   /// Whether the app is currently foregrounded. Consulted only while
   /// [_handedOff] holds — see [releaseForHandoff] for why the handoff must
@@ -369,8 +392,7 @@ class NostrCircleService implements CircleService {
         // background sharing off or the process dies.
         //
         // ONE recovery attempt, then give up and report the original failure.
-        final handover = _sessionHandover;
-        if (handover == null || !await handover(dataDir)) rethrow;
+        if (!await _recoverHeldSession(dataDir)) rethrow;
         manager = await open();
       }
       // M10 (H1 in-flight race): the service may have been wiped/latched while
@@ -417,6 +439,90 @@ class NostrCircleService implements CircleService {
       _initCompleter = null;
       completer.completeError(e, stackTrace);
     }
+  }
+
+  /// Tries to free the Rule-14 guard that just blocked an open, returning
+  /// whether a single retry is worth attempting.
+  ///
+  /// Two holders are possible and they need opposite treatment. The foreground
+  /// service is asked to let go, politely, by [_sessionHandover]. But the guard
+  /// can also be held by THIS isolate's own live-sync engine after a stop that
+  /// timed out: Rust reinstalls that wedged core into the process-global
+  /// `SESSION` so a retry has a handle to it, and if the pause path had already
+  /// disposed this isolate's `CircleManagerFfi`, nothing in Dart references the
+  /// guard any more. The service's reclaim cannot break that tie either — it
+  /// probes the main isolate, finds it alive, and correctly declines forever.
+  /// So the only actor that can fix it is this one, and it must recognise the
+  /// case from the handover's own verdict rather than guess.
+  Future<bool> _recoverHeldSession(String dataDir) async {
+    final handover = _sessionHandover;
+    if (handover == null) return false;
+    final outcome = await handover(dataDir);
+    debugPrint('[CircleService] open blocked; handover=${outcome.name}');
+    if (outcome == HandoverOutcome.released) return true;
+    // ONE eligible verdict, deliberately. `timedOut` is the only one that says
+    // both halves of what the lever below needs: the guard WAS held (the
+    // handover checked before it stopped anything) and the foreground service
+    // stopping did not free it. Every other verdict fails one half —
+    // `backgrounded` is the pause-time handoff working as designed and must
+    // never reach a call that ends background sharing; `stopFailed` leaves the
+    // service's own state unknown; `notHeld` says the guard was free, so the
+    // re-read below would answer `false` in every realizable case and the only
+    // way past it is a race that would aim the release at a holder this
+    // isolate has not established anything about.
+    if (outcome != HandoverOutcome.timedOut) return false;
+    return _forceReleaseOrphanedSession(dataDir);
+  }
+
+  /// Drops the process-global live-sync session so this isolate can re-open the
+  /// MLS database.
+  ///
+  /// # Why this is safe HERE and gated everywhere else
+  ///
+  /// `SESSION` is the UI isolate's own engine. Reaching this line means that
+  /// isolate is foregrounded (the handover returns `backgrounded` otherwise),
+  /// holds no manager (it is inside its own failing open), and has watched the
+  /// foreground service be stopped without the guard clearing. Stopping an
+  /// engine it can no longer feed costs it nothing it still had, and
+  /// `LiveSyncResubscriber` starts a fresh one once the open succeeds. The
+  /// background isolate makes the same call only behind a liveness probe
+  /// precisely because THERE the engine belongs to someone else, and killing
+  /// it would destroy live receive for a foreground that was working.
+  ///
+  /// Reads the registry again rather than trusting the handover's earlier
+  /// answer: that answer is a snapshot from before the service was stopped and
+  /// polled, and a lever this destructive is not spent on a stale one.
+  Future<bool> _forceReleaseOrphanedSession(String dataDir) async {
+    final readRegistry = _isSessionLive;
+    final forceRelease = _forceReleaseLiveSession;
+    if (readRegistry == null || forceRelease == null) return false;
+
+    final bool held;
+    try {
+      held = await readRegistry(dataDir);
+    } on Object catch (e) {
+      // Cannot tell is not "free" — never open blind (Rule 14).
+      debugPrint('[CircleService] guard query failed: ${e.runtimeType}');
+      return false;
+    }
+    if (!held) return false;
+
+    final ForceReleaseOutcomeFfi outcome;
+    try {
+      outcome = await forceRelease();
+      debugPrint('[CircleService] orphaned live session released: '
+          '${outcome.name}');
+    } on Object catch (e) {
+      debugPrint('[CircleService] force release failed: ${e.runtimeType}');
+      return false;
+    }
+    // `drained` and `stopTimedOut` both changed something — neither PROMISES a
+    // free guard (other holders are untouched, and `acquire` stays the
+    // authority), so the retry is what asks. `noSession` is different in kind:
+    // the slot was already empty, so this call positively released nothing and
+    // the guard is held by something else entirely. Retrying on that is an open
+    // guaranteed to fail the same way.
+    return outcome != ForceReleaseOutcomeFfi.noSession;
   }
 
   /// Ensures the manager is initialized.
@@ -1285,6 +1391,131 @@ class NostrCircleService implements CircleService {
     }
   }
 
+  @override
+  Future<EpochRepairResult> repairCircleEpoch(
+    Circle circle, {
+    required String selfPubkeyHex,
+  }) async {
+    final manager = await _ensureInitialized();
+    final groupId = Uint8List.fromList(circle.mlsGroupId);
+
+    // FETCH FIRST, and let it settle.
+    //
+    // The core's exact race gate reads DURABLE storage: a departure proposal
+    // this device has ingested declines the repair cleanly, while one still
+    // sitting on a relay does not. Draining once here converts a same-epoch
+    // race into a `pendingProposal` decline for free. The engine's ordering
+    // makes the race survivable either way — see `circle::rotation`: priority
+    // decides the tie only at the `fork_recovery` seam, so the rotation usually
+    // wins rather than always, and whichever branch wins, one of them
+    // converges. The cost is at most one extra epoch, never a fork — this is
+    // the cheap half of the belt.
+    //
+    // Best-effort: a fetch that fails leaves the repair on the engine's
+    // guarantee, which is strictly better than refusing to repair at all.
+    //
+    // `runCatchup` sweeps every visible circle rather than just this one; that
+    // is more work than strictly needed and exactly the drain we want, and it
+    // is the seam that already exists rather than a second fetch path.
+    try {
+      await _relayService.runCatchup(
+        circle: manager,
+        ownPubkeyHex: selfPubkeyHex,
+      );
+    } on Object catch (e) {
+      debugPrint('[EpochRepair] pre-fetch failed: ${e.runtimeType}');
+    }
+
+    final frb_api.RepairRotationOutcomeFfi outcome;
+    try {
+      outcome = await manager.repairEpochRotation(
+        mlsGroupId: groupId,
+        nowSecs: BigInt.from(DateTime.now().millisecondsSinceEpoch ~/ 1000),
+      );
+    } on Object catch (e) {
+      // Rule 8: the type only. Engine text can carry group ids and
+      // remote-authored content.
+      debugPrint('[EpochRepair] failed: ${e.runtimeType}');
+      throw const CircleServiceException('Failed to repair the circle');
+    }
+
+    final skipped = outcome.skipped;
+    if (skipped != null) {
+      debugPrint('[EpochRepair] declined: $skipped');
+      return EpochRepairSkipped(skipped);
+    }
+
+    // Read the circle's CURRENT relay set rather than trusting the cached
+    // `circle.relays` the caller happened to be holding: an admin may have
+    // rotated the routing set since, and publishing a commit to a stale set
+    // sends it where the members are no longer listening — the same reason
+    // `updateCircleRelays` reads before staging. Empty aborts rather than
+    // publishing nowhere.
+    final relays = await _circleRelays(groupId);
+    if (relays == null || relays.isEmpty) {
+      debugPrint('[EpochRepair] circle relays unavailable — aborting');
+      throw const CircleServiceException('Failed to repair the circle');
+    }
+
+    final deferred = outcome.deferredSend;
+    if (deferred != null) {
+      // Same Rule-13 ladder a deferred location send runs: publish each staged
+      // commit, confirm on a ≥1-relay ack, roll back otherwise. Dropping one
+      // would pin the group in `PendingPublish`, where every later send fails.
+      await _resolveDeferredWork(manager, relays, deferred);
+      return const EpochRepairDeferred();
+    }
+
+    final rotated = outcome.rotated;
+    if (rotated == null) {
+      // Unreachable by the FFI contract (exactly one field is set), but a
+      // silent `null` here would look like a successful repair that never
+      // happened.
+      debugPrint('[EpochRepair] outcome carried no arm');
+      throw const CircleServiceException('Failed to repair the circle');
+    }
+
+    final published = await _publishAndConfirm(
+      manager: manager,
+      commitEventJson: rotated.commitEventJson,
+      pending: rotated.pending,
+      relays: relays,
+      label: 'epoch repair',
+    );
+    if (!published) {
+      throw const CircleServiceException('Failed to repair the circle');
+    }
+    return const EpochRepairApplied();
+  }
+
+  /// Publishes and resolves every staged commit a deferred repair handed back.
+  ///
+  /// Bare proposals are published without a confirm — they carry no staged
+  /// state, and a re-proposed `SelfRemove` is re-driven by the durable leave
+  /// request if the publish is lost.
+  Future<void> _resolveDeferredWork(
+    CircleManagerFfi manager,
+    List<String> relays,
+    DeferredSendFfi deferred,
+  ) async {
+    for (final commit in deferred.commits) {
+      await _publishAndConfirm(
+        manager: manager,
+        commitEventJson: commit.commitEventJson,
+        pending: commit.pending,
+        relays: relays,
+        label: 'epoch repair deferred commit',
+      );
+    }
+    for (final proposalJson in deferred.proposals) {
+      await _publishEvolutionEvent(
+        proposalJson,
+        relays,
+        label: 'epoch repair deferred proposal',
+      );
+    }
+  }
+
   /// Publishes a staged commit's event; confirms the pending state on
   /// success or rolls it back on failure so the engine never applies a
   /// commit that no relay acknowledged. Returns `true` iff the event
@@ -1391,7 +1622,7 @@ class NostrCircleService implements CircleService {
   }
 
   @override
-  Future<EncryptedLocation> encryptLocation({
+  Future<EncryptLocationOutcome> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
     required double latitude,
@@ -1409,11 +1640,42 @@ class NostrCircleService implements CircleService {
         updateIntervalSecs: BigInt.from(updateIntervalSecs),
       );
 
-      return EncryptedLocation(
-        eventJson: result.eventJson,
-        nostrGroupId: result.nostrGroupId.toList(),
-        relays: result.relays,
+      // Exactly one of the two is non-null; the Rust side builds it that way.
+      // A deferral is narrowed FIRST so that a future binding change which
+      // somehow produced both could never be silently read as a plain send.
+      final deferred = result.deferredSend;
+      if (deferred != null) {
+        return LocationSendDeferred(
+          unresolvedInputs: deferred.unresolvedInputs,
+          discardedIntents: deferred.discardedIntents,
+          repaired: deferred.repaired,
+          commits: [
+            for (final c in deferred.commits)
+              PendingAutoCommit(
+                commitEventJson: c.commitEventJson,
+                pendingToken: PendingCommitToken(c.pending.token),
+              ),
+          ],
+          proposals: List<String>.from(deferred.proposals),
+        );
+      }
+      final sent = result.sent;
+      if (sent == null) {
+        // Neither arm set: the binding and this mapping have drifted. Fail
+        // closed rather than invent an empty event.
+        throw const CircleServiceException(
+          'Failed to encrypt location: empty outcome',
+        );
+      }
+      return LocationEncrypted(
+        EncryptedLocation(
+          eventJson: sent.eventJson,
+          nostrGroupId: sent.nostrGroupId.toList(),
+          relays: sent.relays,
+        ),
       );
+    } on CircleServiceException {
+      rethrow;
     } on Object catch (_) {
       debugPrint('[Circle] Location encryption failed');
       throw const CircleServiceException('Failed to encrypt location');

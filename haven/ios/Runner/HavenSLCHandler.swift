@@ -27,6 +27,27 @@ import Flutter
 /// (re-)attempted at launch and on every `applicationDidEnterBackground`
 /// (AppDelegate, A3 — closes the launch-arm-before-mirror-write lag).
 ///
+/// ## Relaunch region (paired with SLC, same gates)
+///
+/// SLC is driven by cell-tower transitions, so where towers are sparse
+/// (rural areas, a single-tower town, indoors on Wi-Fi only) a terminated app
+/// can go a long way before the OS decides anything "significant" happened.
+/// Region monitoring is a second, independent relaunch source with the same
+/// termination survival: one ~500 m circular region centred on the last
+/// delivered fix, re-centred on every SLC delivery, so leaving the
+/// neighbourhood relaunches Haven even when SLC stays quiet. Exit only —
+/// entry would fire immediately on re-arm and buy nothing.
+///
+/// It is armed and torn down strictly with SLC (same `isEnabled()` predicate,
+/// same Always requirement, released by `stopMonitoring()`), adds no
+/// UserDefaults key, and reaches Dart through the SAME `runCatchup` channel,
+/// so the receive-only guarantee and the consent chokepoint are unchanged. No
+/// coordinate is ever logged (Security Rule 6): the region's centre is passed
+/// to CoreLocation and never to a log line.
+///
+/// Ceiling, stated honestly: like SLC, this cannot be proven on the Simulator
+/// — see the owner checklist in `docs/M7_BACKGROUND_SHARING.md` §6.
+///
 /// ## Strong channel capture
 ///
 /// The `FlutterMethodChannel` is held as a strong stored property. There is
@@ -71,6 +92,37 @@ final class HavenSLCHandler: NSObject, CLLocationManagerDelegate {
   /// `backgroundCatchupEnabled` constant. With the flag OFF this is always
   /// false, so native scheduling never starts regardless of bg-sharing state.
   private static let kBgCatchupEnabledKey = "flutter.background_catchup_enabled"
+
+  /// Identifier of the single relaunch region. Stable, so re-registering
+  /// replaces the previous circle instead of accumulating regions (iOS caps an
+  /// app at 20) and so `stopMonitoring()` can find it again after a relaunch,
+  /// when `monitoredRegions` is restored by the OS rather than by this class.
+  private static let relaunchRegionIdentifier = "haven.relaunch"
+
+  /// Radius of the relaunch region, in metres. Chosen to match the OS's own
+  /// ~500 m significant-change criterion: a smaller circle would wake the app
+  /// on ordinary movement around home, a larger one would take longer than SLC
+  /// to notice a real departure, and either way this is the backstop for the
+  /// case where SLC does not fire at all.
+  private static let relaunchRegionRadiusMeters: CLLocationDistance = 500
+
+  /// Oldest fix the region may be centred on.
+  ///
+  /// `CLLocationManager.location` is whatever CoreLocation last retrieved, and
+  /// on a region-triggered relaunch it is NOT guaranteed to post-date the
+  /// crossing — it can be a cached fix from an earlier session, i.e. the
+  /// user's home. Centring the new circle there would pin it to a place the
+  /// device has already left, so the NEXT departure never crosses a boundary
+  /// and the relaunch source goes quiet exactly when it is needed. Skipping
+  /// instead leaves the previous circle in place (no worse) and lets the next
+  /// SLC delivery, which always carries a genuinely fresh location, re-centre
+  /// it. Generous rather than tight, and knowingly so: at vehicle speed a
+  /// 300 s-old fix is already ~8 km away, far outside the circle it would
+  /// centre. That direction is unreachable here — a crossing-triggered wake
+  /// carries a fix seconds old, and SLC delivers its own — so the bound only
+  /// ever has to reject a previous session's cache, which is the case that
+  /// silently pins the circle to the user's home.
+  private static let relaunchRegionMaxFixAge: TimeInterval = 300
 
   private let locationManager = CLLocationManager()
 
@@ -164,15 +216,69 @@ final class HavenSLCHandler: NSObject, CLLocationManagerDelegate {
       return
     }
     locationManager.startMonitoringSignificantLocationChanges()
+    // Arm the relaunch region from whatever fix CoreLocation already holds.
+    // A cold launch with no cached fix simply arms nothing here; the first SLC
+    // delivery centres it.
+    refreshRelaunchRegion(around: locationManager.location)
   }
 
-  /// Stops SLC monitoring unconditionally.
+  /// Stops SLC monitoring and releases the relaunch region unconditionally.
   ///
   /// Called from the Dart teardown channel when the user disables background
   /// sharing, so SLC wakes stop immediately after opt-out.
   func stopMonitoring() {
     locationManager.stopMonitoringSignificantLocationChanges()
+    stopRelaunchRegion()
     endBackgroundTask()
+  }
+
+  /// Re-centres the single relaunch region on [location].
+  ///
+  /// No-op when there is no fix to centre on, when that fix is older than
+  /// `relaunchRegionMaxFixAge`, when region monitoring is unavailable on this
+  /// device, or when the enable predicate no longer holds — the last of which
+  /// makes this safe to call from any delivery path.
+  ///
+  /// The region APIs used here (`CLCircularRegion`,
+  /// `isMonitoringAvailable(for:)`, `startMonitoring(for:)`) are deprecated in
+  /// favour of `CLMonitor` from iOS 17, but remain functional and are the only
+  /// option at this target's floor (`IPHONEOS_DEPLOYMENT_TARGET = 15.5`). They
+  /// compile as warnings only — no `SWIFT_TREAT_WARNINGS_AS_ERRORS` is set on
+  /// the Runner target.
+  private func refreshRelaunchRegion(around location: CLLocation?) {
+    guard isEnabled(),
+      locationManager.authorizationStatus == .authorizedAlways,
+      CLLocationManager.isMonitoringAvailable(for: CLCircularRegion.self),
+      let fix = location,
+      -fix.timestamp.timeIntervalSinceNow <= Self.relaunchRegionMaxFixAge
+    else { return }
+
+    // `maximumRegionMonitoringDistance` reports -1 when region monitoring is
+    // unavailable or unauthorized, and a bare `min` would then hand
+    // CoreLocation a negative radius.
+    let maxRadius = locationManager.maximumRegionMonitoringDistance
+    let region = CLCircularRegion(
+      center: fix.coordinate,
+      radius: maxRadius > 0
+        ? min(Self.relaunchRegionRadiusMeters, maxRadius)
+        : Self.relaunchRegionRadiusMeters,
+      identifier: Self.relaunchRegionIdentifier
+    )
+    // Exit only: an entry trigger fires the instant the region is armed around
+    // the device's own position, which would wake the app for nothing.
+    region.notifyOnEntry = false
+    region.notifyOnExit = true
+    // Same identifier → replaces the previous circle rather than adding one.
+    locationManager.startMonitoring(for: region)
+  }
+
+  /// Stops monitoring the relaunch region, including one restored by the OS
+  /// after a relaunch (this class never held a reference to that instance).
+  private func stopRelaunchRegion() {
+    for region in locationManager.monitoredRegions
+    where region.identifier == Self.relaunchRegionIdentifier {
+      locationManager.stopMonitoring(for: region)
+    }
   }
 
   // MARK: - CLLocationManagerDelegate
@@ -190,15 +296,27 @@ final class HavenSLCHandler: NSObject, CLLocationManagerDelegate {
     // Re-check intent on every wake (C2 durable-intent re-check).
     guard isEnabled() else { return }
 
-    // Open a background execution window. iOS typically grants ~23 s for
-    // tasks started from a location delegate in the background.
-    if bgTaskId == .invalid {
-      bgTaskId = UIApplication.shared.beginBackgroundTask(withName: "haven.slc.catchup") {
-        // Expiration handler: end the task gracefully.
-        self.endBackgroundTask()
-      }
-    }
+    // Follow the device with the relaunch region so a termination is always
+    // recoverable from wherever the app was last known to be.
+    refreshRelaunchRegion(around: locations.last)
 
+    beginCatchupWindow()
+    triggerDartCatchup()
+  }
+
+  /// Fires when the device leaves the relaunch region, including on the
+  /// relaunch of a terminated app. Same receive-only catch-up as an SLC wake.
+  func locationManager(_ manager: CLLocationManager, didExitRegion region: CLRegion) {
+    guard isEnabled(), region.identifier == Self.relaunchRegionIdentifier else { return }
+
+    // The circle just exited will not fire again on a continuing journey, so
+    // re-centre it. `manager.location` is usually the fix that triggered this
+    // crossing, but nothing guarantees it post-dates it — the staleness bound
+    // inside `refreshRelaunchRegion` is what stops a cached fix from an
+    // earlier session pinning the new circle where the device no longer is.
+    refreshRelaunchRegion(around: manager.location)
+
+    beginCatchupWindow()
     triggerDartCatchup()
   }
 
@@ -206,6 +324,17 @@ final class HavenSLCHandler: NSObject, CLLocationManagerDelegate {
     // Log type only — never the error message (could contain location data).
     debugLog("SLC didFailWithError: \(type(of: error))")
     endBackgroundTask()
+  }
+
+  func locationManager(
+    _ manager: CLLocationManager,
+    monitoringDidFailFor region: CLRegion?,
+    withError error: Error
+  ) {
+    // Type only: the identifier is a Haven constant, but the error may carry
+    // region details. SLC remains armed, so this degrades the relaunch
+    // coverage rather than disabling it.
+    debugLog("region monitoring failed: \(type(of: error))")
   }
 
   // MARK: - Dart channel trigger
@@ -238,6 +367,17 @@ final class HavenSLCHandler: NSObject, CLLocationManagerDelegate {
   }
 
   // MARK: - Background task lifecycle
+
+  /// Opens a background execution window if one is not already open. iOS
+  /// typically grants ~23 s for tasks started from a location delegate in the
+  /// background.
+  private func beginCatchupWindow() {
+    guard bgTaskId == .invalid else { return }
+    bgTaskId = UIApplication.shared.beginBackgroundTask(withName: "haven.slc.catchup") {
+      // Expiration handler: end the task gracefully.
+      self.endBackgroundTask()
+    }
+  }
 
   private func endBackgroundTask() {
     guard bgTaskId != .invalid else { return }

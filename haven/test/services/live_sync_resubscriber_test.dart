@@ -21,9 +21,10 @@ class _StartCall {
 
 /// A [SubscriptionService] that records start/stop calls + their group args.
 ///
-/// Constructed "already started" (mirrors how `MapShell._startLiveSync` builds
-/// the re-subscriber AFTER the initial `start()`). Only the 4 abstract members
-/// are implemented — the engine internals are never exercised here.
+/// Constructed "already started", which is the steady state a delta applies
+/// against; the tests that exercise a restart stop it first. Only the 4
+/// abstract members are implemented — the engine internals are never exercised
+/// here.
 class _RecordingEngine implements SubscriptionService {
   _RecordingEngine({
     this.stopGate,
@@ -34,6 +35,7 @@ class _RecordingEngine implements SubscriptionService {
     this.throwOnStart = false,
     this.throwOnSubscribe = false,
     this.throwOnUnsubscribe = false,
+    this.throwOnIsRunning = false,
   });
 
   /// When set, [stop] awaits this before completing, so a test can hold a
@@ -72,6 +74,14 @@ class _RecordingEngine implements SubscriptionService {
   /// counterpart to [throwOnSubscribe].
   final bool throwOnUnsubscribe;
 
+  /// When true, [isRunning] throws. Models the FFI read itself failing, which
+  /// is the one step of the restart path that sits OUTSIDE `_fullRestart`'s
+  /// own try/catch — i.e. the only way a throw reaches the serialized chain.
+  /// Mutable so a test can heal the engine after the throw and prove the chain
+  /// still works. The message embeds a fake group id to prove it is never
+  /// logged.
+  bool throwOnIsRunning;
+
   final List<_StartCall> startCalls = [];
 
   /// Every [subscribeCircle] call, in call order.
@@ -96,13 +106,14 @@ class _RecordingEngine implements SubscriptionService {
   }
 
   @override
-  Future<void> stop() async {
+  Future<LiveSyncStopOutcome> stop() async {
     stopCalls++;
     _running = false;
     if (throwOnStop) {
       throw Exception('boom for nostr group ${'ab' * 16}');
     }
     if (stopGate != null) await stopGate;
+    return LiveSyncStopOutcome.stopped;
   }
 
   @override
@@ -127,7 +138,12 @@ class _RecordingEngine implements SubscriptionService {
   }
 
   @override
-  bool get isRunning => _running;
+  bool get isRunning {
+    if (throwOnIsRunning) {
+      throw Exception('boom for nostr group ${'ab' * 16}');
+    }
+    return _running;
+  }
 }
 
 CircleMember _member(String pubkey) => CircleMember(
@@ -955,16 +971,33 @@ void main() {
       resub.dispose();
     });
 
-    test('does nothing when no session was ever wanted', () async {
-      // An empty running set means nothing was subscribed, so there is no group
-      // set to restore and a "restart" would start an empty session.
+    test('a circle-less account is still started — the inbox REQ lives there',
+        () async {
+      // This used to assert the opposite ("an empty running set means nothing
+      // was subscribed"), and that reading was wrong: the engine's inbox REQ
+      // (kind 1059 gift wraps) is how INVITATIONS arrive and exists
+      // independently of any circle. Refusing to start an empty set therefore
+      // left the one account guaranteed to have no circles — a brand-new one —
+      // with no live invitation delivery and no way back from a failed start.
+      // It is also what made this the entry point for `MapShell`'s FIRST start,
+      // so that every start in the app goes through one serialized chain.
       final engine = _RecordingEngine();
       final resub = _resub(engine, const []);
       await engine.stop();
       engine.startCalls.clear();
 
-      expect(await resub.ensureRunning(), isFalse);
-      expect(engine.startCalls, isEmpty);
+      expect(await resub.ensureRunning(), isTrue);
+      expect(
+        engine.startCalls,
+        hasLength(1),
+        reason: 'a session with no circles is still a session',
+      );
+      expect(engine.startCalls.single.groups, isEmpty);
+      expect(
+        engine.startCalls.single.inboxRelays,
+        isNotEmpty,
+        reason: 'the inbox relays are the whole point of starting this session',
+      );
       resub.dispose();
     });
 
@@ -1070,6 +1103,100 @@ void main() {
 
       expect(await resub.ensureRunning(), isFalse);
       resub.dispose();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // The caller ALWAYS gets an answer.
+  //
+  // `MapShell` arms its next self-heal from this future's completion, so a
+  // restart that neither completes nor throws visibly removes the only
+  // periodic recovery the live-sync build has — permanently, for the rest of
+  // the process. Both halves are covered: an escaped throw and a hang.
+  // -------------------------------------------------------------------------
+  group('ensureRunning is unstrandable', () {
+    test('an escaped throw answers immediately, not by timing out', () {
+      fakeAsync((async) {
+        final engine = _RecordingEngine(throwOnIsRunning: true);
+        final resub = _resub(engine, [_circle(tag: 1)]);
+
+        bool? answer;
+        unawaited(resub.ensureRunning().then((v) => answer = v));
+        async.flushMicrotasks();
+
+        expect(
+          answer,
+          isFalse,
+          reason: 'no time has elapsed, so this can only have come from the '
+              'error path — waiting out kLiveSyncRestartBudget instead would '
+              'leave the heal timer un-armed for over a minute, and before '
+              'that bound existed, forever',
+        );
+        resub.dispose();
+      });
+    });
+
+    test('an escaped throw does not poison the chain for later applies', () {
+      // `.then` on an ERRORED future skips its callback and re-propagates, so
+      // one escaped throw would leave `_chain` permanently errored — silently
+      // disabling every later delta apply too, with nothing observable but a
+      // map that stops updating.
+      fakeAsync((async) {
+        final engine = _RecordingEngine(throwOnIsRunning: true);
+        final resub = _resub(
+          engine,
+          [_circle(tag: 1)],
+          debounce: Duration.zero,
+        );
+
+        unawaited(resub.ensureRunning());
+        async.flushMicrotasks();
+
+        engine.throwOnIsRunning = false;
+        resub.onCirclesChanged([_circle(tag: 1), _circle(tag: 2)]);
+        async.elapse(const Duration(seconds: 1));
+
+        expect(
+          engine.subscribeCalls.map((g) => g.nostrGroupId.first),
+          [2],
+          reason: 'the chain must still carry work after an escaped throw',
+        );
+        resub.dispose();
+      });
+    });
+
+    test('a hung restart answers within the engine-derived budget', () {
+      // Every await inside a full restart is an FFI round-trip with no
+      // Dart-side bound of its own.
+      fakeAsync((async) {
+        final engine = _RecordingEngine(startGate: Completer<void>().future);
+        final resub = _resub(engine, [_circle(tag: 1)]);
+        unawaited(engine.stop());
+        async.flushMicrotasks();
+        engine.startCalls.clear();
+
+        bool? answer;
+        unawaited(resub.ensureRunning().then((v) => answer = v));
+
+        async.elapse(kLiveSyncRestartBudget - const Duration(seconds: 1));
+        expect(
+          answer,
+          isNull,
+          reason: 'giving up before the engine has spent its own bound would '
+              'abandon restarts that were still going to succeed',
+        );
+
+        async.elapse(const Duration(seconds: 2));
+        expect(answer, isFalse);
+        expect(
+          engine.startCalls,
+          hasLength(1),
+          reason: 'only the CALLER stops waiting: the hung start still holds '
+              'the chain, so nothing may launch a second engine behind its '
+              'back (Security Rule 14)',
+        );
+        resub.dispose();
+      });
     });
   });
 }

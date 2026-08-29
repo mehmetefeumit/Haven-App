@@ -239,6 +239,13 @@ nostr-relay-builder = "0.44"
 # day a dependency stops asking for it. Dev-only.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
 nostr-sdk = { version = "0.44", default-features = false, features = ["nip44", "nip59"] }
+# Basic MLS credential + signer, for the ONE test that drives OpenMLS directly
+# (`ratchet_forward_distance_e2e`): the sender-ratchet exhaustion boundary cannot
+# be walked through the engine's send path (which re-scans every retained message
+# per send, so 1000 sends is quadratic), and no MDK API exposes a signer. Already
+# in the graph at 0.5.0 via cgka-engine, so this adds ZERO crates; dev-only, so it
+# never ships.
+openmls_basic_credential = "0.5"
 # Enable test-utils feature for integration tests
 haven-core = { path = ".", features = ["test-utils"] }
 

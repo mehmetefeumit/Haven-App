@@ -8,6 +8,8 @@ library;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:haven/src/constants/location.dart';
+import 'package:haven/src/providers/locale_provider.dart'
+    show resolveAppLocalizations;
 import 'package:haven/src/services/background_catchup_worker.dart';
 import 'package:haven/src/services/ios_background_catchup.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -78,6 +80,9 @@ class BackgroundLocationManager {
   /// Used to short-circuit redundant `updateService` calls that would
   /// cause the notification to redraw (audible chime / animation on some OEMs).
   /// Reset to `null` by [stopService] so the next start re-applies text.
+  ///
+  /// Holds the RESOLVED text, not a message key, so a language change reads as
+  /// a genuine difference and repaints rather than being deduped away.
   static String? _lastNotificationText;
 
   /// Initializes the foreground task configuration.
@@ -86,10 +91,21 @@ class BackgroundLocationManager {
   /// or the lifecycle provider) so the channel exists by the time
   /// [startService] is called.
   ///
-  /// **Note**: Android does **not** allow modifying notification channel
-  /// importance after creation. Bumping the channel id is the only way
-  /// to change importance in shipped builds.
-  static void init() {
+  /// [channelName] and [channelDescription] are what Android shows for this
+  /// channel in the system settings app, so they are user-visible copy and must
+  /// arrive already localized — this class has no widget tree and cannot
+  /// resolve them (same rule as [startService]'s `notificationText`).
+  ///
+  /// **Note**: Android locks a notification channel's IMPORTANCE at creation;
+  /// bumping the channel id is the only way to change it in shipped builds. Its
+  /// name and description carry no such lock — `createNotificationChannel`
+  /// updates both for an existing id — so re-running `init()` with a new
+  /// language re-labels the channel in place, and the user sees the change on
+  /// the next launch after switching languages.
+  static void init({
+    required String channelName,
+    required String channelDescription,
+  }) {
     if (_initialized) return;
 
     FlutterForegroundTask.init(
@@ -103,9 +119,8 @@ class BackgroundLocationManager {
         // status notification. DEFAULT was causing it to compete with
         // high-priority alerts on some OEMs.
         channelId: 'haven_location_v3',
-        channelName: 'Location Sharing',
-        channelDescription:
-            'Keeps Haven sharing your encrypted location in the background.',
+        channelName: channelName,
+        channelDescription: channelDescription,
         // channelImportance and priority default to LOW in 9.2.x, which is
         // correct: visible in the notification drawer, no sound, no heads-up.
         // Hide notification content from the lock screen — only the
@@ -165,6 +180,98 @@ class BackgroundLocationManager {
     return const EnsurePermissionsGranted();
   }
 
+  /// Last recorded answer to "does Android still battery-optimize Haven?".
+  ///
+  /// A FALLBACK only — the live answer comes from
+  /// [refreshBatteryOptimizationDenied]. Persisted so a failed probe degrades
+  /// to the last known truth instead of silently claiming the exemption is
+  /// held. Absent key → `false` (never asked, or not Android).
+  static Future<bool> isBatteryOptimizationDenied() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.reload();
+      return prefs.getBool(kBatteryOptimizationDeniedKey) ?? false;
+    } on Object catch (e) {
+      debugPrint(
+        '[BackgroundManager] battery-opt read failed: ${e.runtimeType}',
+      );
+      return false;
+    }
+  }
+
+  /// Records whether Android still applies battery optimization to Haven.
+  ///
+  /// Called with the answer the OS just gave, so the advisory the user sees
+  /// is never a guess: [ensurePermissions] returning
+  /// [EnsurePermissionsBatteryOptDenied] writes `true`, a granted exemption
+  /// writes `false`.
+  static Future<void> recordBatteryOptimizationDenied({
+    required bool denied,
+  }) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(kBatteryOptimizationDeniedKey, denied);
+    } on Object catch (e) {
+      debugPrint(
+        '[BackgroundManager] battery-opt write failed: ${e.runtimeType}',
+      );
+    }
+  }
+
+  /// Asks Android whether it still battery-optimizes Haven, and records the
+  /// answer.
+  ///
+  /// The persisted flag alone is a WRITE-ONLY cache: the exemption can be
+  /// granted or revoked from Android Settings, or by an OEM battery manager,
+  /// without ever passing through Haven — so a page that trusted the flag
+  /// would keep asserting "battery optimization is still on" forever after a
+  /// grant made outside the app. This is the live read; the flag it refreshes
+  /// exists only so a failed probe has something truthful to fall back to.
+  ///
+  /// Android-only by construction: the caller
+  /// (`batteryOptimizationDeniedProvider`) gates on the platform, so the
+  /// plugin channel is never touched elsewhere. Off Android the plugin answers
+  /// `true` (exempt) without a channel call, which is why that gate — not this
+  /// method — is what keeps the persisted flag from being overwritten there.
+  ///
+  /// [probeExemption] is a test seam for the failure branch: the real probe
+  /// cannot be made to fail on a test host, and the branch decides whether a
+  /// transient channel error silently retracts a warning the OS never
+  /// withdrew.
+  static Future<bool> refreshBatteryOptimizationDenied({
+    @visibleForTesting Future<bool> Function()? probeExemption,
+  }) async {
+    try {
+      final exempt = await (probeExemption == null
+          ? FlutterForegroundTask.isIgnoringBatteryOptimizations
+          : probeExemption());
+      await recordBatteryOptimizationDenied(denied: !exempt);
+      return !exempt;
+    } on Object catch (e) {
+      debugPrint(
+        '[BackgroundManager] battery-opt probe failed: ${e.runtimeType}',
+      );
+      return isBatteryOptimizationDenied();
+    }
+  }
+
+  /// Opens Android's battery-optimization settings screen, then re-probes.
+  ///
+  /// Returns the refreshed "still optimized" answer so the caller can update
+  /// its UI without a second read. `openIgnoreBatteryOptimizationSettings`
+  /// only navigates — the user may grant, deny, or simply come back — so the
+  /// exemption is always re-read rather than assumed.
+  static Future<bool> openBatteryOptimizationSettings() async {
+    try {
+      await FlutterForegroundTask.openIgnoreBatteryOptimizationSettings();
+    } on Object catch (e) {
+      debugPrint(
+        '[BackgroundManager] battery-opt settings failed: ${e.runtimeType}',
+      );
+    }
+    return refreshBatteryOptimizationDenied();
+  }
+
   /// Starts the background location sharing service.
   ///
   /// On Android, creates a foreground service with a persistent
@@ -175,8 +282,28 @@ class BackgroundLocationManager {
   /// background-start restriction for `FOREGROUND_SERVICE_LOCATION`).
   /// Callers should call [ensurePermissions] before this method so the
   /// notification is visible and the service survives Doze mode.
-  static Future<void> startService({required Function callback}) async {
-    init();
+  ///
+  /// [notificationText] must already be localized. The service isolate has no
+  /// widget tree and therefore no localizations, so every string this class
+  /// shows is resolved by the caller in the UI isolate (see
+  /// `appLocalizationsProvider`) and passed in.
+  static Future<void> startService({
+    required Function callback,
+    required String notificationText,
+  }) async {
+    if (!_initialized) {
+      // `main()` configures the channel in the user's chosen language long
+      // before the app can reach this, so only an entrypoint that never ran it
+      // (an integration-test target) lands here — and it still needs a channel,
+      // because the plugin cannot start a service without one. The device
+      // locale is the best this layer can see: it has no container, and so no
+      // access to an in-app language override.
+      final l10n = resolveAppLocalizations(null);
+      init(
+        channelName: l10n.fgsChannelName,
+        channelDescription: l10n.fgsChannelDescription,
+      );
+    }
 
     final isRunning = await FlutterForegroundTask.isRunningService;
     if (isRunning) {
@@ -191,7 +318,7 @@ class BackgroundLocationManager {
       serviceId: 4831,
       serviceTypes: [ForegroundServiceTypes.location],
       notificationTitle: 'Haven',
-      notificationText: 'Haven is sending and receiving location information',
+      notificationText: notificationText,
       callback: callback,
     );
 
@@ -200,8 +327,7 @@ class BackgroundLocationManager {
         debugPrint('[BackgroundManager] Service started');
         // Seed the dedup field so the first updateNotification with the same
         // start-time text becomes a true no-op and avoids a redundant redraw.
-        _lastNotificationText =
-            'Haven is sending and receiving location information';
+        _lastNotificationText = notificationText;
       case ServiceRequestFailure(:final error):
         debugPrint('[BackgroundManager] Start failed: ${error.runtimeType}');
     }
@@ -210,10 +336,12 @@ class BackgroundLocationManager {
   /// Updates the running service's notification text without restarting.
   ///
   /// Used to differentiate the notification copy when the app is in the
-  /// foreground vs. backgrounded (e.g. "Haven is open" vs. "Sharing
-  /// your location"). Silently no-ops if the service is not running or
-  /// if [text] is identical to the last text sent (dedup to prevent OEM
+  /// foreground vs. backgrounded (`fgsNotificationOpen` vs.
+  /// `fgsNotificationSharing`). Silently no-ops if the service is not running
+  /// or if [text] is identical to the last text sent (dedup to prevent OEM
   /// notification-drawer chime and reflow animation on rapid calls).
+  ///
+  /// [text] must already be localized, for the reason given on [startService].
   static Future<void> updateNotification({required String text}) async {
     if (_lastNotificationText == text) return; // dedup
     final isRunning = await FlutterForegroundTask.isRunningService;
@@ -305,6 +433,22 @@ class BackgroundLocationManager {
   /// killed (OOM, force-stop) without the clean-pause write of `0` —
   /// after `2 * kBackgroundRepeatInterval` the background isolate will
   /// resume publishing.
+  ///
+  /// A timestamp in the FUTURE is treated as stale, not as active. A backward
+  /// clock jump (NTP correction, manual date change, timezone-less RTC on
+  /// boot) makes the age negative, which a bare `age < threshold` test reads
+  /// as "the foreground just wrote this" — muting the FGS's publish cycle for
+  /// as long as it takes the clock to catch up, which can be hours.
+  ///
+  /// The tolerance is deliberately ZERO — no "a few ms ahead is fine" slack —
+  /// because there is no source of spurious futures to absorb: the writer
+  /// ([markForegroundActive]) and this reader read the SAME wall clock, and
+  /// the write happens-before the read, so a negative age can only mean the
+  /// clock genuinely stepped backwards in between. And a spurious `false`
+  /// would be cheap even if one could occur: it cannot let the background
+  /// isolate steal a live foreground session, because the reclaim path gates
+  /// on its own fail-closed two-probe liveness check
+  /// (`_attemptSessionReclaim`) rather than on this flag.
   static Future<bool> isForegroundActive() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -316,6 +460,7 @@ class BackgroundLocationManager {
       final age = DateTime.now().difference(
         DateTime.fromMillisecondsSinceEpoch(ts),
       );
+      if (age < Duration.zero) return false;
       return age < stalenessThreshold;
     } on Object catch (e) {
       debugPrint(
@@ -440,6 +585,12 @@ class BackgroundLocationManager {
     await Future.wait([
       prefs.remove(kBackgroundLastPublishMsKey),
       prefs.remove(kBackgroundSessionReclaimAtMsKey),
+      // The battery-optimization verdict is a cached OS answer, not identity
+      // data, but it is cleared here rather than kept: it is only ever shown
+      // while background sharing is on, the next identity re-probes it live on
+      // its first settings visit, and leaving it would greet a fresh identity
+      // with a warning inherited from the deleted one.
+      prefs.remove(kBatteryOptimizationDeniedKey),
     ]);
   }
 

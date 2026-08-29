@@ -92,30 +92,56 @@ String? checkRelayVerdictRaised(ClockSkewStatus status) {
       'reaches no consumer, so nothing can surface it.';
 }
 
-/// Holds when ONE member reporting a time in this device's future does **not**
-/// raise the peer signal.
+/// Holds when the ONLY member Haven has heard from raises the peer signal on
+/// its own.
 ///
-/// The negative half of the corroboration rule, and the one a revert to
-/// `minCorroboratingSources = 1` fails. A lone peer's clock being wrong is far
-/// more likely than everyone else's, so a single sample is never evidence
-/// about *us*.
+/// The sole-source half of the corroboration rule, and the one a revert to a
+/// flat `minCorroboratingSources = 2` fails. A two-member circle can never
+/// produce a second corroborating member, so a rule that always waits for one
+/// leaves the most common circle size structurally unable to see a
+/// disagreement it can never corroborate. Corroboration is still what makes a
+/// lone member's report evidence about *this device* rather than about that
+/// member — so the moment a second member is heard the exception is withdrawn
+/// and the two-source bar governs again, unchanged. That direction is
+/// unobservable on this lane (the backward jump puts every real peer ahead),
+/// so it is pinned by `clock_skew_detector_test.dart` instead.
 ///
-/// [sourcesFed] is asserted rather than trusted: a predicate handed zero
-/// samples would pass vacuously, which is the failure shape this repo keeps
-/// finding.
-String? checkSingleSourceStaysSilent(
+/// A sole source supports a strictly weaker claim than a corroborated one, and
+/// the banner must say so — see [checkSoleSourceCopyHedged].
+///
+/// [sourcesFed] is asserted rather than trusted: a predicate handed zero or
+/// two samples would be answering a different question, which is the failure
+/// shape this repo keeps finding.
+String? checkSoleSourceRaisesVerdict(
   ClockSkewStatus status, {
   required int sourcesFed,
+  required int thresholdSecs,
 }) {
   if (sourcesFed != 1) {
-    return 'HARNESS: the single-source probe was fed $sourcesFed sample(s), '
-        'not 1, so it proves nothing about corroboration.';
+    return 'HARNESS: the sole-source probe was fed $sourcesFed sample(s), '
+        'not 1, so it proves nothing about a two-member circle.';
   }
-  if (status.signal == ClockSkewSignal.none) return null;
-  return 'ONE member reporting a future time already raised '
-      '"${status.signal.name}" (${status.corroboratingSources} source(s)). '
-      'Corroboration is what makes the peer signal evidence about this device '
-      'rather than about that member.';
+  if (status.signal != ClockSkewSignal.peersAheadOfDevice) {
+    return 'the only member this device can hear from reported a time more '
+        'than ${thresholdSecs}s ahead and the verdict is still '
+        '"${status.signal.name}". No second member exists to corroborate it, '
+        'so a rule that waits for one is silent forever on the commonest '
+        'circle size — while every publish keeps reporting success.';
+  }
+  if (status.complaint != DeviceClockComplaint.behind) {
+    return 'the sole-source verdict fired with complaint '
+        '"${status.complaint?.name ?? '-'}" instead of "behind" — the copy '
+        'shown to the user is chosen from the direction, so a wrong direction '
+        'is wrong advice.';
+  }
+  if (status.corroboratingSources != 1) {
+    return 'the sole-source verdict claims '
+        '${status.corroboratingSources} corroborating source(s) from ONE '
+        'member. The count is the evidence the verdict rests on and must not '
+        'be inflated to the nominal '
+        '${ClockSkewDetector.minCorroboratingSources}.';
+  }
+  return null;
 }
 
 /// Holds when two distinct MLS-authenticated members agreeing that this device
@@ -176,6 +202,52 @@ String? checkFaultSurfaced({
   if (!renderedTexts.contains(expectedBody)) {
     return 'the $fault banner rendered ${renderedTexts.length} text(s) but '
         'none of them is the copy this fault is supposed to show.';
+  }
+  return null;
+}
+
+/// Holds when a SOLE-SOURCE verdict is surfaced with copy that neither
+/// accuses this phone nor claims a loss.
+///
+/// The evidence is one member, which establishes a disagreement and nothing
+/// else. Two things the corroborated copy asserts anyway:
+///
+/// * **Whose clock.** The two devices are not symmetric observers — a peer
+///   running fast makes THIS device fire while the peer's own detector stays
+///   silent (negative offsets are structurally uninformative) — so
+///   `clockSkewTitle` ("this phone's clock is wrong") would accuse the
+///   innocent device and never the guilty one.
+/// * **Whether anything is lost.** Both sides tolerate 228 s of retention plus
+///   60 s of receiver grace, so nothing is dropped until the gap passes 288 s,
+///   while the signal fires at 120 s. Across that band `clockSkewBodyBehind`
+///   ("the locations it sends expire before anyone can see them") is false,
+///   and its remedy cannot clear it.
+///
+/// So this is not a style check: the two corroborated strings are the exact
+/// user-visible false claims, and the oracle names them.
+String? checkSoleSourceCopyHedged({
+  required List<String> renderedTexts,
+  required String hedgedTitle,
+  required String hedgedBody,
+  required String corroboratedTitle,
+  required String corroboratedBody,
+}) {
+  if (renderedTexts.isEmpty) {
+    return 'the sole-source verdict painted NOTHING, so the fault is as '
+        'silent as it was before the surface existed.';
+  }
+  for (final banned in <String>[corroboratedTitle, corroboratedBody]) {
+    if (renderedTexts.contains(banned)) {
+      return 'a verdict resting on ONE member rendered the corroborated '
+          'copy, which asserts both that this phone is the wrong one and that '
+          'its locations are already expiring. Neither follows from one '
+          'sample, and the second is false anywhere under a 288 s gap.';
+    }
+  }
+  if (!renderedTexts.contains(hedgedTitle) ||
+      !renderedTexts.contains(hedgedBody)) {
+    return 'the sole-source verdict rendered ${renderedTexts.length} text(s), '
+        'but not the hedged title AND body this case is required to show.';
   }
   return null;
 }

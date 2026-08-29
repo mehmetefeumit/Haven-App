@@ -396,9 +396,9 @@ Recorded here rather than papered over:
   circle another member's location updates may sit on a relay indefinitely and
   read as group control. Owner decision: disclose that residue too, or accept
   that the scoped sentence is where the disclosure stops.
-* **`onboardingValueProp2Title` / `…Body` overclaim.** "No one can shut it down"
-  / "No single company or government can switch the network off" is backable on
-  the location plane and false app-wide: the map has exactly one provider by CI
+* **`onboardingValueProp2Title` / `…Summary` overclaim.** "No one can shut it
+  down" / "It runs on a relay network you choose" is backable on the location
+  plane and false app-wide: the map has exactly one provider by CI
   enforcement, the eight profile relays cannot be removed by the user
   (`usable_profile_relays()` re-unions the pool), and the Blossom host is a
   single hardcoded server. The app's own privacy copy

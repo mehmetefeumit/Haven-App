@@ -282,9 +282,13 @@ List<PrivacyBlock> privacyBlocksFor(
     PrivacyPara(l10n.privacyEncryptionWhenSomeoneJoins),
     PrivacyPara(l10n.privacyEncryptionWhenSomeoneLeaves),
     // A warning rather than a plain paragraph because it is the one place the
-    // reader could otherwise walk away with a false belief: Haven rotates keys
-    // only on membership change, so one key covers a whole epoch and a removed
-    // member keeps whatever they archived from it.
+    // reader could otherwise walk away with a false belief: Haven never rotates
+    // keys on a timer, so one key covers a whole epoch and a removed member
+    // keeps whatever they archived from it. (Keys DO change on a membership
+    // change and on the circle ADMIN's explicit Repair — the role, not the
+    // creator, because an admin handoff separates them — see
+    // `docs/EPOCH_ROTATION_REPAIR_PLAN.md` — but neither is periodic, which is
+    // what makes the epoch long.)
     PrivacyNote(
       l10n.privacyEncryptionKeysChangeOnMembership,
       tone: HavenInfoNoteTone.warning,

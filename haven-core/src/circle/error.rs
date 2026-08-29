@@ -92,6 +92,56 @@ pub enum CircleError {
     /// cannot leak a pubkey, relay URL, or MLS group ID (Security Rule #8).
     #[error("No reachable relay for welcome delivery")]
     MissingWelcomeRelays,
+
+    /// The MLS engine QUEUED the location update instead of encrypting it, so
+    /// there is no event to publish.
+    ///
+    /// `cgka-engine`'s `do_send` persists a `QueuedOutboundIntent` and returns
+    /// `SendResult::Queued` whenever any stored message inside the group's
+    /// convergence window is still `Created` or `Retryable`. A Haven circle's
+    /// epoch only advances on a membership change, so that window is the
+    /// circle's entire life: ONE inbound row that can never be resolved — a
+    /// `Created` row orphaned by a kill mid-ingest, or a `Retryable` row left
+    /// by a decrypt that can never succeed — silently stops the device sending
+    /// for that circle, permanently and across restarts.
+    ///
+    /// This is a distinct, ACTIONABLE outcome, not the opaque
+    /// [`Self::Mls`] string it replaced. It is an `Err` because the caller has
+    /// no event to publish; it is TYPED so the FFI can classify it by matching
+    /// a Rust variant instead of testing the flattened error prose — a test
+    /// Haven forbids elsewhere for good reason (error strings interpolate
+    /// remote-authored text, so a substring match is a remotely-influenceable
+    /// control channel; see `nostr::mls::storage::is_session_live`).
+    ///
+    /// Every field is a count or a flag. The variant carries no group id, no
+    /// message id, no epoch and no payload, so the derived `Debug` and the
+    /// `Display` above are leak-free by construction (Security Rules 4/8) —
+    /// the same posture as [`Self::LastMemberAbandon`] and
+    /// [`Self::AlreadyProcessed`]. The caller already knows which circle it
+    /// asked about, so naming it here would add nothing but exposure.
+    #[error(
+        "Send deferred: {unresolved_inputs} unresolved convergence input(s), \
+         {discarded_intents} queued intent(s) discarded, repaired={repaired}, \
+         work={work:?}"
+    )]
+    SendDeferred {
+        /// Stored rows still gating outbound sends for this circle, read AFTER
+        /// everything else this outcome describes. Zero means the next send
+        /// should encrypt.
+        unresolved_inputs: usize,
+        /// Queued location intents dropped so a stalled circle cannot
+        /// accumulate one stale fix per publish cycle.
+        discarded_intents: usize,
+        /// Whether the circle was left with nothing gating.
+        repaired: bool,
+        /// Publish work the engine staged or emitted during this deferral.
+        /// **The caller MUST run the Rule-13 ladder over
+        /// [`work.commits`](crate::circle::DeferredWork::commits)** — publish,
+        /// then confirm on a ≥1-relay ack — or the group stays in
+        /// `PendingPublish` and stops sending entirely. Empty in the ordinary
+        /// stuck-row case.
+        work: crate::circle::DeferredWork,
+    },
 }
 
 /// Result type alias for circle operations.
@@ -183,6 +233,44 @@ mod tests {
     fn last_member_abandon_display_is_opaque() {
         let err = CircleError::LastMemberAbandon;
         assert_eq!(err.to_string(), "Last member abandon");
+    }
+
+    #[test]
+    fn send_deferred_display_reports_counts_and_nothing_else() {
+        let err = CircleError::SendDeferred {
+            unresolved_inputs: 2,
+            discarded_intents: 1,
+            repaired: false,
+            work: crate::circle::DeferredWork::default(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Send deferred: 2 unresolved convergence input(s), \
+             1 queued intent(s) discarded, repaired=false, \
+             work=DeferredWork { commits_count: 0, proposals_count: 0 }"
+        );
+    }
+
+    #[test]
+    fn send_deferred_debug_carries_no_identifier() {
+        // Structural, not incidental: every field is a count, a flag, or a type
+        // whose own `Debug` is presence-only, so a later field addition has to
+        // face this assertion rather than quietly start printing a group id
+        // through the derived `Debug` (Rule 8).
+        let debug = format!(
+            "{:?}",
+            CircleError::SendDeferred {
+                unresolved_inputs: 3,
+                discarded_intents: 0,
+                repaired: true,
+                work: crate::circle::DeferredWork::default(),
+            }
+        );
+        assert_eq!(
+            debug,
+            "SendDeferred { unresolved_inputs: 3, discarded_intents: 0, repaired: true, \
+             work: DeferredWork { commits_count: 0, proposals_count: 0 } }"
+        );
     }
 
     #[test]

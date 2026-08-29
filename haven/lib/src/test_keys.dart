@@ -182,6 +182,14 @@ abstract final class WidgetKeys {
   static Key markerTeardrop(String pubkeyHex) =>
       ValueKey('marker_teardrop_$pubkeyHex');
 
+  /// Root [Card] of the sharing-health banner.
+  static const Key sharingHealthBanner = Key('sharing_health_banner');
+
+  /// The single remedy button on the sharing-health banner.
+  static const Key sharingHealthRepairButton = Key(
+    'sharing_health_repair_button',
+  );
+
   // ---------------------------------------------------------------------------
   // Location disclosure
   // ---------------------------------------------------------------------------

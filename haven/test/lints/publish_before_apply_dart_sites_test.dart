@@ -846,4 +846,152 @@ void main() {
       },
     );
   });
+
+  group('the epoch repair resolves every staged commit it is handed', () {
+    // ## Why this needs its own structural check
+    //
+    // `repairCircleEpoch` is the one Rule-13 site with NO behavioural Dart
+    // test: `NostrCircleService` reaches the core through a concrete
+    // `CircleManagerFfi`, which cannot be constructed or mocked without the
+    // native library. Both ways of breaking it therefore stayed GREEN — delete
+    // the `_publishAndConfirm(...)` call and return `EpochRepairApplied()`
+    // anyway, or delete the `_resolveDeferredWork(...)` call — while leaving a
+    // `PendingStateRef` unresolved, which pins the group in `PendingPublish`
+    // where every later send fails.
+    //
+    // So the pairing is asserted on the SOURCE instead: whatever the body does,
+    // each arm must reach its resolver.
+
+    late String body;
+
+    setUpAll(() {
+      body = _methodBody(
+        File('lib/src/services/nostr_circle_service.dart').readAsStringSync(),
+        'repairCircleEpoch',
+      );
+    });
+
+    test('the rotated arm reaches the publish-then-confirm ladder', () {
+      expect(
+        body.contains('_publishAndConfirm('),
+        isTrue,
+        reason:
+            'a staged rotation must be published and then confirmed on a '
+            '>=1-relay ack (or rolled back). Returning EpochRepairApplied '
+            'without the ladder applies a commit no relay ever saw.',
+      );
+    });
+
+    test('the deferred arm reaches the deferred-work resolver', () {
+      expect(
+        body.contains('_resolveDeferredWork('),
+        isTrue,
+        reason:
+            'the engine can stage a peer eviction inside the same call. '
+            'Dropping it leaves the group in PendingPublish, where every '
+            'later send fails.',
+      );
+    });
+
+    test('no pending ref is read without flowing into a resolver', () {
+      // The shape a partial refactor leaves behind: the code reads
+      // `outcome.rotated.pending` (or a commit's `.pending`) to log or return
+      // it, and never hands it to anything that confirms or rolls back.
+      final resolvers = [
+        '_publishAndConfirm(',
+        '_resolveDeferredWork(',
+        'confirmPublished(',
+        'publishFailed(',
+      ];
+      final readsPending = body.contains('.pending');
+      if (!readsPending) return;
+      expect(
+        resolvers.any(body.contains),
+        isTrue,
+        reason:
+            'repairCircleEpoch reads a PendingStateRef but never resolves it. '
+            'An unresolved ref is a permanent send blackout for that circle.',
+      );
+    });
+
+    test('the fetch happens BEFORE the repair is asked for', () {
+      // Ordering is the whole point of the pre-fetch: a departure proposal
+      // still sitting on a relay turns a clean `pendingProposal` decline into
+      // a same-epoch race. Asking the core first and fetching afterwards would
+      // read as correct and buy nothing.
+      //
+      // Position alone is not enough. `unawaited(_relayService.runCatchup(…))`
+      // sits in exactly the right place, passes the analyzer, and settles
+      // nothing before the core is asked — so the pin is on the AWAIT, which is
+      // the part that makes the ordering real.
+      final fetchAt = body.indexOf('await _relayService.runCatchup(');
+      final repairAt = body.indexOf('repairEpochRotation(');
+      expect(
+        fetchAt,
+        isNot(-1),
+        reason:
+            'the pre-fetch must be AWAITED; an un-awaited call is correctly '
+            'placed and buys nothing',
+      );
+      expect(repairAt, isNot(-1), reason: 'the FFI call is missing');
+      expect(
+        fetchAt,
+        lessThan(repairAt),
+        reason:
+            'runCatchup must be awaited BEFORE repairEpochRotation, so a '
+            'proposal that had not yet reached this device becomes a decline '
+            'rather than a race',
+      );
+    });
+
+    test('the body extractor is not vacuous', () {
+      // Every assertion above is a `contains` over this string, so a extractor
+      // that silently returned the whole file — or an empty one — would make
+      // them all meaningless in one direction or the other.
+      expect(body, contains('repairEpochRotation('));
+      expect(
+        body.contains('Future<void> updateCircleRelays('),
+        isFalse,
+        reason: 'the extractor must return ONE method body, not the file',
+      );
+    });
+  });
+
+}
+
+/// The source text of [methodName]'s body, brace-matched.
+///
+/// Deliberately textual rather than AST-based: these assertions are about which
+/// helper names appear in one method, and a parse would add a visitor for no
+/// extra precision. `the body extractor is not vacuous` pins both failure
+/// directions (returning everything, returning nothing).
+String _methodBody(String source, String methodName) {
+  final signature = RegExp('\\b$methodName\\s*\\(').firstMatch(source);
+  if (signature == null) {
+    throw StateError('$methodName not found');
+  }
+  // Skip the PARAMETER list before looking for the body brace: a method with
+  // named parameters has a `{` inside its parens, and taking that one returns
+  // the parameter list instead of the body — which reads as a passing test
+  // that inspected almost nothing.
+  var parens = 0;
+  var cursor = signature.end - 1;
+  for (; cursor < source.length; cursor++) {
+    if (source[cursor] == '(') parens++;
+    if (source[cursor] == ')') {
+      parens--;
+      if (parens == 0) break;
+    }
+  }
+  final open = source.indexOf('{', cursor);
+  if (open == -1) throw StateError(r'$methodName has no body');
+  var depth = 0;
+  for (var i = open; i < source.length; i++) {
+    if (source[i] == '{') depth++;
+    if (source[i] == '}') {
+      depth--;
+      if (depth == 0) return source.substring(open, i + 1);
+    }
+  }
+  throw StateError('$methodName body is unterminated');
 }

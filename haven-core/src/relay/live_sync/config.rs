@@ -207,6 +207,63 @@ pub const BACKOFF_MIN_SECS: u64 = 1;
 /// Maximum supervisor reconnect backoff (seconds).
 pub const BACKOFF_MAX_SECS: u64 = 30;
 
+/// Spread (basis points, `10_000` = 100%) applied to every re-subscribe backoff
+/// in [`super::repair`].
+///
+/// PRIVACY, not politeness. A relay that ends one of our REQs with `CLOSED`
+/// chooses the instant we react; an un-jittered delay would make the re-issue
+/// land at an exactly predictable offset from that instant, which is a
+/// per-device timing signature a relay can provoke at will — and, by ending the
+/// same client's REQ on two relays at once, correlate sockets that carry
+/// different sub-ids precisely so they cannot be linked (PSI-2). Sampling from
+/// `±25%` costs nothing and removes the provoked signature. `OsRng` only, for
+/// the same reason [`crate::location::ttl`] gives.
+pub const BACKOFF_JITTER_FRACTION_BP: u16 = 2_500;
+
+/// The jitter must never consume the whole delay (a zero delay is no backoff).
+const _: () = assert!(BACKOFF_JITTER_FRACTION_BP < 10_000);
+
+/// How many kind-445 retention windows a group REQ may deliver NOTHING — no
+/// event, no `EOSE` — before the health tick re-anchors it.
+///
+/// The window itself is [`delivery_silence_window_secs`]; this is the multiple.
+/// Three is the smallest value that cannot fire on a healthy circle whose only
+/// publisher is at the cadence ceiling: a member re-publishes at most every
+/// `168 s`, [`LOCATION_MESSAGE_RETENTION_SECS`] adds the network buffer on top,
+/// and the relay drops each event at that TTL — so three consecutive retention
+/// windows with nothing delivered means no active publisher's event has landed
+/// across three full relay-residency periods.
+///
+/// [`LOCATION_MESSAGE_RETENTION_SECS`]: crate::location::ttl::LOCATION_MESSAGE_RETENTION_SECS
+pub const DELIVERY_SILENCE_RETENTION_MULTIPLE: i64 = 3;
+
+/// Seconds of complete delivery silence on one REQ that make the health tick
+/// re-anchor it (see [`DELIVERY_SILENCE_RETENTION_MULTIPLE`]).
+///
+/// Derived from the publish cadence, never a magic number: it is
+/// `DELIVERY_SILENCE_RETENTION_MULTIPLE ×` the group's kind-445 retention.
+///
+/// # What this arm can and cannot claim
+///
+/// A receiver CANNOT know whether a peer is publishing — every circle whose
+/// members have sharing off is legitimately silent forever. So silence is never
+/// read as failure, and it never escalates to a whole-session re-anchor
+/// ([`super::health::health_needs_targeted_reanchor`] is its own predicate for
+/// exactly that reason). The remedy is re-issuing the specific `(relay, sub)`
+/// endpoints that went quiet, through the same jittered per-endpoint backoff a
+/// relay `CLOSED` uses — bounded work (Security Rule 12), and a successful
+/// re-issue's own `EOSE` resets that endpoint's window.
+///
+/// It applies to GROUP REQs only. A silent inbox REQ is the normal state, and
+/// re-issuing it means asking for a seven-day gift-wrap replay keyed on this
+/// device's `#p`; see [`super::health`] for why that arm was removed rather than
+/// tuned.
+#[must_use]
+pub const fn delivery_silence_window_secs() -> i64 {
+    DELIVERY_SILENCE_RETENTION_MULTIPLE
+        * crate::location::ttl::LOCATION_MESSAGE_RETENTION_SECS.cast_signed()
+}
+
 /// Scheduled health-check cadence (seconds, 15 minutes). Body lands in M8.
 pub const HEALTH_CHECK_SECS: u64 = 900;
 

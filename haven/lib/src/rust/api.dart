@@ -6,9 +6,9 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_commit_to_publish`, `convert_location_result`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_legacy_mls_db_files`, `delete_mls_session_db_files`, `delete_superseded_kp`, `delete_tile_db_files`, `ensure_own_identity`, `from_cached`, `from_report`, `from_state`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `maintenance_now_secs`, `mark_kp_slot_retirement_done`, `nip65_relay_list_urls`, `no_network`, `now_ms`, `now_secs`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `profile_view`, `purge_key_package_past_not_after`, `record_retired_slot`, `redact_directory_err`, `redact_profile_err`, `reinstall_after_timed_out_stop`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `republish_key_package`, `retire_malformed_kp_slot`, `retract_kp_slots`, `run_blocking`, `sync_reason_to_ffi`, `tile_err_to_string`, `truncate_chars`, `unknown`, `usable_profile_pool`
+// These functions are ignored because they are not marked as `pub`: `build_relay_list_event_for`, `build_relay_list_unpublish_for`, `commit_event_to_json`, `convert_commit_to_publish`, `convert_deferred_send`, `convert_location_result`, `current_cache`, `current_picture_hash`, `delete_circles_db_files`, `delete_db_files`, `delete_legacy_mls_db_files`, `delete_mls_session_db_files`, `delete_superseded_kp`, `delete_tile_db_files`, `ensure_own_identity`, `from_cached`, `from_report`, `from_state`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hex_to_npub`, `keys_from_secret_bytes`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `maintenance_now_secs`, `mark_kp_slot_retirement_done`, `nip65_relay_list_urls`, `no_network`, `now_ms`, `now_secs`, `platform_init_keyring`, `profile_now_secs`, `profile_picture_delay`, `profile_stamp_lists`, `profile_view`, `purge_key_package_past_not_after`, `record_retired_slot`, `redact_directory_err`, `redact_profile_err`, `reinstall_after_timed_out_stop`, `relay_list_urls_for`, `relay_list_urls`, `relay_list_wire_kind`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mls_session_db_key`, `remove_tiles_db_key`, `republish_key_package`, `retire_malformed_kp_slot`, `retract_kp_slots`, `run_blocking`, `sync_reason_to_ffi`, `tile_err_to_string`, `truncate_chars`, `unknown`, `usable_profile_pool`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`, `KpPublishPlan`, `KpRetirementInputs`, `KpRetirementTick`, `ProfileStampLists`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`, `default`
 
 /// Initializes the platform-specific keyring credential store.
@@ -713,6 +713,9 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required RelayTypeFfi relayType,
   });
 
+  /// Reads a circle's delivery-health timestamps.
+  Future<CircleHealthFfi> circleHealth({required List<int> nostrGroupId});
+
   /// Removes the local circle row after a successful leave sequence, or
   /// for the `OrphanLocalOnly` plan.
   ///
@@ -1006,7 +1009,16 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   ///   removing it is an FFI signature change; do NOT reintroduce a per-send
   ///   TTL path here without re-reading `haven-core/SECURITY.md`, "Outer
   ///   kind:445 metadata".
-  Future<EncryptedLocationFfi> encryptLocation({
+  ///
+  /// # The deferred outcome
+  ///
+  /// Returns [`EncryptLocationOutcomeFfi`], not a bare event: the engine can
+  /// QUEUE the update instead of encrypting it, and that is a distinct,
+  /// actionable state rather than a failure. It is detected by matching the
+  /// `CircleError::SendDeferred` VARIANT — never by inspecting error prose,
+  /// which interpolates remote-authored text and would hand a remote party a
+  /// classification channel (see `nostr::mls::storage::is_session_live`).
+  Future<EncryptLocationOutcomeFfi> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
     required double latitude,
@@ -1228,6 +1240,27 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     dataDir: dataDir,
     identitySecretBytes: identitySecretBytes,
   );
+
+  /// Records that a peer's location was decrypted and persisted for a circle.
+  ///
+  /// `at_ms` is the caller's local RECEIPT clock, never the sender's
+  /// timestamp: this answers "is anything still arriving", and a peer's own
+  /// clock cannot be trusted to answer that.
+  Future<void> notePeerEvent({
+    required List<int> nostrGroupId,
+    required PlatformInt64 atMs,
+  });
+
+  /// Records that ≥1 relay ACKed a location publish for a circle.
+  ///
+  /// `at_ms` is the caller's local clock in milliseconds. Call this ONLY on
+  /// an affirmative relay ACK — a `PublishResult` with an empty `acceptedBy`
+  /// delivered nothing, and stamping it would make a dead publish plane read
+  /// as healthy, which is the exact defect this column exists to end.
+  Future<void> notePublishAcked({
+    required List<int> nostrGroupId,
+    required PlatformInt64 atMs,
+  });
 
   /// The NIP-40 window Haven asks relays to keep the location messages THIS
   /// device sends into a circle.
@@ -1483,6 +1516,50 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required RelayTypeFfi relayType,
   });
 
+  /// Repairs a circle whose sender ratchets are exhausted, by committing a
+  /// byte-identical `UpdateAppComponents(admin-policy.v1)`.
+  ///
+  /// This is a **ratchet reset**, not key rotation: applying the commit
+  /// derives a fresh `encryption_secret`, so every sender ratchet in the group
+  /// restarts at generation 0 and a peer whose messages had run past
+  /// `maximum_forward_distance` becomes decryptable again. The commit carries
+  /// no `UpdatePath`, so it rotates no leaf key and provides **no**
+  /// post-compromise security. Never describe it as key rotation in code, in
+  /// logs, or in user copy.
+  ///
+  /// # The caller MUST fetch first
+  ///
+  /// Await one relay fetch / live-sync drain for this circle and let it settle
+  /// BEFORE calling this. A departure proposal sitting on a relay that has not
+  /// yet reached this device turns into a same-epoch race; the same proposal
+  /// ingested first turns into a clean `PendingProposal` decline. The engine's
+  /// deterministic ordering makes the race survivable (one extra epoch, never
+  /// a fork), but the fetch converts a race into a decline for free.
+  ///
+  /// # Rule 14 / gate 5
+  ///
+  /// Foreground service layer ONLY — never from a background isolate. Enforced
+  /// by `scripts/ci/check_epoch_repair_isolation.sh`, not by this comment.
+  ///
+  /// # Outcomes
+  ///
+  /// Exactly one field of [`RepairRotationOutcomeFfi`] is `Some`:
+  /// `rotated` → publish then confirm on a ≥1-relay ACK (or roll back);
+  /// `deferred_send` → run that same ladder over its `commits`;
+  /// `skipped` → a normal, user-visible answer, NOT a failure.
+  ///
+  /// `now_secs` is the wall clock in Unix seconds.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error string only for a real failure — no circle row, an
+  /// unreadable store, or an engine rejection that is not about epoch state
+  /// (a non-`Stable` epoch is a `skipped` outcome, not an error).
+  Future<RepairRotationOutcomeFfi> repairEpochRotation({
+    required List<int> mlsGroupId,
+    required BigInt nowSecs,
+  });
+
   /// Resets ALL sync cursors (bulk) for the wipe-on-logout path, so a
   /// returning identity re-seeds cleanly instead of resuming at a stale
   /// floor. Errors are redacted.
@@ -1661,6 +1738,24 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   Future<bool> stillAMember({
     required List<int> mlsGroupId,
     required String pubkeyHex,
+  });
+
+  /// Gives a terminal disposition to stored convergence inputs the relay can
+  /// no longer redeliver, across every circle, and reports what still gates
+  /// outbound sends.
+  ///
+  /// The "repair sharing" entry point: a future-epoch application row is kept
+  /// `Retryable` by the engine so a late commit can still resolve it, and
+  /// when that commit never arrives the row gates every send for its circle
+  /// — through restarts, because hydration keeps it for the same reason. This
+  /// is the only thing that clears one. `now_secs` is the wall clock in Unix
+  /// seconds.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the MLS message store cannot be read or written.
+  Future<ConvergenceSweepFfi> sweepUnresolvableInputs({
+    required BigInt nowSecs,
   });
 
   /// Publishes whatever the own-profile outbox is holding.
@@ -2580,6 +2675,39 @@ class CircleFfi {
           updatedAt == other.updatedAt;
 }
 
+/// Presence-only delivery timestamps for one circle (FFI-friendly).
+///
+/// Mirrors `haven_core::circle::CircleHealth`. Two millisecond instants on the
+/// LOCAL clock and nothing else — no coordinates, no pubkeys, no relay URLs —
+/// so this type is safe to render into a UI banner without leaking internal
+/// state. `None` means "never observed", which the Flutter health model must
+/// keep distinct from "stopped": a circle whose peer has never shared looks
+/// identical here to one whose receive plane is dead.
+class CircleHealthFfi {
+  /// When a relay last ACKed a location publish for this circle (ms).
+  final PlatformInt64? lastPublishAckedAtMs;
+
+  /// When a peer's location for this circle was last persisted (ms).
+  final PlatformInt64? lastPeerEventAtMs;
+
+  const CircleHealthFfi({this.lastPublishAckedAtMs, this.lastPeerEventAtMs});
+
+  static Future<CircleHealthFfi> default_() =>
+      RustLib.instance.api.crateApiCircleHealthFfiDefault();
+
+  @override
+  int get hashCode =>
+      lastPublishAckedAtMs.hashCode ^ lastPeerEventAtMs.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CircleHealthFfi &&
+          runtimeType == other.runtimeType &&
+          lastPublishAckedAtMs == other.lastPublishAckedAtMs &&
+          lastPeerEventAtMs == other.lastPeerEventAtMs;
+}
+
 /// Circle member with resolved local contact info (FFI-friendly).
 class CircleMemberFfi {
   /// Nostr public key (hex) - always available.
@@ -2737,6 +2865,54 @@ class ContactFfi {
           updatedAt == other.updatedAt;
 }
 
+/// Presence-only report of one stuck-convergence-input sweep — FFI mirror of
+/// `haven_core::nostr::mls::types::ConvergenceSweep`.
+///
+/// Counts only: no group ids, message ids, epochs or payloads, so the derived
+/// `Debug` is leak-free by construction and the whole struct can reach the UI
+/// unredacted (Security Rules 4/6/8).
+class ConvergenceSweepFfi {
+  /// Stored application-message rows given a terminal disposition because the
+  /// relay can no longer redeliver them.
+  final int disposedMessages;
+
+  /// Durably queued outbound location intents discarded.
+  final int discardedIntents;
+
+  /// Rows still gating outbound sends after the pass.
+  final int gatingRows;
+
+  /// Whether nothing still gates — i.e. the next send should encrypt.
+  final bool settled;
+
+  const ConvergenceSweepFfi({
+    required this.disposedMessages,
+    required this.discardedIntents,
+    required this.gatingRows,
+    required this.settled,
+  });
+
+  static Future<ConvergenceSweepFfi> default_() =>
+      RustLib.instance.api.crateApiConvergenceSweepFfiDefault();
+
+  @override
+  int get hashCode =>
+      disposedMessages.hashCode ^
+      discardedIntents.hashCode ^
+      gatingRows.hashCode ^
+      settled.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ConvergenceSweepFfi &&
+          runtimeType == other.runtimeType &&
+          disposedMessages == other.disposedMessages &&
+          discardedIntents == other.discardedIntents &&
+          gatingRows == other.gatingRows &&
+          settled == other.settled;
+}
+
 /// The folded outcome of ingesting one received `kind:445` — FFI mirror of
 /// `haven_core::circle::DecryptedIngest`.
 ///
@@ -2830,6 +3006,71 @@ class DecryptedLocationFfi {
           expiresAt == other.expiresAt;
 }
 
+/// Publish work handed back by a DEFERRED location send — FFI mirror of
+/// `haven_core::circle::DeferredWork` plus the outcome's counters.
+///
+/// The engine QUEUED the location update instead of encrypting it, so there is
+/// no event to publish for the location itself. Two things still need doing,
+/// and both are the caller's:
+///
+/// 1. **Rule 13.** [`Self::commits`] carries any commit the engine STAGED
+///    inside that same call — a peer `SelfRemove` eviction that came due. Each
+///    MUST be published and then confirmed via
+///    [`CircleManagerFfi::confirm_published`] on a ≥1-relay ACK (or rolled back
+///    via [`CircleManagerFfi::publish_failed`]). Dropping one leaves the group
+///    in `PendingPublish`, where every later send fails.
+/// 2. [`Self::proposals`] carries bare proposals (no staged state, nothing to
+///    confirm): publish-or-lose, and recoverable — a re-proposed `SelfRemove`
+///    is driven by the durable leave request, so a later convergence pass
+///    re-emits it.
+///
+/// The three scalars are presence-only counters for the sharing-health model.
+class DeferredSendFfi {
+  /// Stored rows still gating outbound sends for this circle, read after the
+  /// in-place repair. `0` means the next send should encrypt.
+  final int unresolvedInputs;
+
+  /// Queued location intents the repair discarded so a stalled circle cannot
+  /// bank one stale fix per publish cycle.
+  final int discardedIntents;
+
+  /// Whether the circle was left with nothing gating.
+  final bool repaired;
+
+  /// Staged commits awaiting the publish → confirm ladder (Rule 13).
+  final List<CommitToPublishFfi> commits;
+
+  /// JSON-serialized bare proposal events to publish (no confirm).
+  final List<String> proposals;
+
+  const DeferredSendFfi({
+    required this.unresolvedInputs,
+    required this.discardedIntents,
+    required this.repaired,
+    required this.commits,
+    required this.proposals,
+  });
+
+  @override
+  int get hashCode =>
+      unresolvedInputs.hashCode ^
+      discardedIntents.hashCode ^
+      repaired.hashCode ^
+      commits.hashCode ^
+      proposals.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DeferredSendFfi &&
+          runtimeType == other.runtimeType &&
+          unresolvedInputs == other.unresolvedInputs &&
+          discardedIntents == other.discardedIntents &&
+          repaired == other.repaired &&
+          commits == other.commits &&
+          proposals == other.proposals;
+}
+
 /// One member-directory row, as the picker reads it.
 ///
 /// WHO and WHICH SECTION, and nothing else. The row's day buckets stay in Rust:
@@ -2881,6 +3122,41 @@ enum DirectoryTierFfi {
   /// Not on any current member list; retained for at most the directory
   /// retention window after the last day they were.
   recent,
+}
+
+/// What [`CircleManagerFfi::encrypt_location`] produced: either an event to
+/// publish, or a typed deferral.
+///
+/// Struct shape with two `Option`s rather than a tagged enum, following the
+/// same convention as [`LeavePlanFfi`] and [`DecryptOutcomeFfi`] — it avoids
+/// pulling Dart `freezed` into the bindings while preserving all the
+/// information. **Exactly one of the two is `Some`**; the Dart wrapper narrows
+/// that into a sealed type so call sites cannot forget a case.
+///
+/// This exists because the deferral used to be flattened to an error STRING.
+/// Classifying it in Dart would then have meant substring-matching error prose,
+/// which Haven forbids: error strings interpolate remote-authored text (a relay
+/// URL, a peer's component), so a `contains` over them is a control channel a
+/// remote party can write. The variant is matched in Rust instead.
+class EncryptLocationOutcomeFfi {
+  /// The signed kind-445 event and its routing, when the engine encrypted.
+  final EncryptedLocationFfi? sent;
+
+  /// The typed deferral, when the engine queued instead.
+  final DeferredSendFfi? deferredSend;
+
+  const EncryptLocationOutcomeFfi({this.sent, this.deferredSend});
+
+  @override
+  int get hashCode => sent.hashCode ^ deferredSend.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is EncryptLocationOutcomeFfi &&
+          runtimeType == other.runtimeType &&
+          sent == other.sent &&
+          deferredSend == other.deferredSend;
 }
 
 /// Encrypted location event ready for relay publishing (FFI-friendly).
@@ -4213,6 +4489,55 @@ enum RelayTypeFfi {
   profile,
 }
 
+/// What [`CircleManagerFfi::repair_epoch_rotation`] did — FFI mirror of
+/// `haven_core::circle::RepairRotationOutcome`.
+///
+/// Struct shape with three `Option`s rather than a tagged enum, following the
+/// same convention as [`EncryptLocationOutcomeFfi`] and [`LeavePlanFfi`] — it
+/// keeps Dart `freezed` out of the bindings while preserving all the
+/// information. **Exactly one of the three is `Some`**; the Dart wrapper narrows
+/// that into a sealed type so call sites cannot forget a case.
+///
+/// Matched by VARIANT in Rust, never by testing error prose: Haven's error
+/// strings interpolate remote-authored text, so a `contains` over one is a
+/// channel a remote party can write.
+class RepairRotationOutcomeFfi {
+  /// The staged ratchet-reset commit, when every gate was open. Publish
+  /// `commit_event_json`, then confirm on a ≥1-relay ACK or roll back.
+  final CommitToPublishFfi? rotated;
+
+  /// The gate that declined, when nothing was staged and nothing changed.
+  final SkipReasonFfi? skipped;
+
+  /// The circle is send-gated: nothing was staged, and any work the engine
+  /// surfaced during the in-place repair is here for the same Rule-13 ladder a
+  /// deferred location send uses.
+  ///
+  /// Named `deferred_send`, not `deferred`, for the reason Unit B's field is:
+  /// FRB mangles `deferred` to `deferred_` in Dart, where it collides with
+  /// deferred imports.
+  final DeferredSendFfi? deferredSend;
+
+  const RepairRotationOutcomeFfi({
+    this.rotated,
+    this.skipped,
+    this.deferredSend,
+  });
+
+  @override
+  int get hashCode =>
+      rotated.hashCode ^ skipped.hashCode ^ deferredSend.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RepairRotationOutcomeFfi &&
+          runtimeType == other.runtimeType &&
+          rotated == other.rotated &&
+          skipped == other.skipped &&
+          deferredSend == other.deferredSend;
+}
+
 /// Signed location event (FFI wrapper for outer event kind 445).
 ///
 /// This is the outer event ready for relay transmission.
@@ -4275,6 +4600,46 @@ class SignedLocationEventFfi {
           sig == other.sig;
 }
 
+/// Why an epoch-rotation repair was declined — FFI mirror of
+/// `haven_core::circle::SkipReason`.
+///
+/// Fieldless by construction: a skip is surfaced to the UI and to logs, and no
+/// variant may carry a group id, a pubkey or an epoch (Security Rules 4/6/8).
+///
+/// **Three of these route differently and the UI must not collapse them.**
+/// [`Self::NotSoleAdmin`] and [`Self::EpochUnrecoverable`] are terminal for this
+/// device — offering a retry would be a loop that cannot succeed — while every
+/// other variant means "try again shortly".
+enum SkipReasonFfi {
+  /// This device is not the circle's ONLY admin, so it must not commit. Either
+  /// somebody else can, or an admin handoff is mid-flight. Terminal for this
+  /// device: the remedy is to ask the circle's owner to remove and re-add you.
+  notSoleAdmin,
+
+  /// The engine's epoch state is not `Stable` but will settle on its own (a
+  /// commit is staged, merging, or recovering). Retryable.
+  epochNotStable,
+
+  /// The engine has frozen this group at its last stable epoch and refuses
+  /// further group state. NEVER clears by waiting — the circle has to be
+  /// re-created, or this member re-added.
+  epochUnrecoverable,
+
+  /// The group's epoch changed too recently for a ratchet to be exhausted.
+  recentEpochChange,
+
+  /// The circle produced an MLS-authenticated inbound group event too recently
+  /// to rule out a peer committing at the same epoch.
+  recentInboundTraffic,
+
+  /// A stored proposal is still waiting for a commit, so a remaining member
+  /// may auto-commit it at any moment.
+  pendingProposal,
+
+  /// This circle was already repaired inside the 24-hour rate limit.
+  rotatedRecently,
+}
+
 /// What an M8-4 subscription-health tick did (FFI mirror of
 /// [`haven_core::relay::live_sync::HealthAction`]).
 ///
@@ -4288,8 +4653,19 @@ enum SubscriptionHealthActionFfi {
   /// The engine is running and every relay is connected — nothing to do.
   healthy,
 
-  /// A relay had dropped; every subscription was re-anchored at its cursor.
+  /// A relay had dropped, or a REQ the session expects was missing from the
+  /// pool, so the WHOLE session was re-anchored (pool reconnected, every
+  /// subscription re-issued at its cursor).
   resubscribed,
+
+  /// Delivery silence alone: every socket was up and every REQ registered, so
+  /// only the `(relay, sub)` endpoints that had gone quiet were re-issued.
+  ///
+  /// Distinct from [`Self::Resubscribed`] because the two differ by orders of
+  /// magnitude in cost, and because this one is EXPECTED on a device whose
+  /// circles are simply idle — a consumer that folded it into `Resubscribed`
+  /// would show a normal quiet device as repeatedly losing its relays.
+  targetedReanchor,
 }
 
 /// Presence-only result of an M8-4 subscription-health maintenance tick.
@@ -4313,11 +4689,30 @@ class SubscriptionHealthOutcomeFfi {
   /// Relays found dropped at check time (`0` when engine off).
   final int relaysDisconnected;
 
+  /// `(relay, subscription)` REQ pairs the active session expected to be live
+  /// (`0` when engine off or no session has started).
+  final int subscriptionsExpected;
+
+  /// How many of those the relay pool still held. A shortfall against
+  /// `subscriptions_expected` is a REQ a relay ended with `CLOSED` that
+  /// nothing upstream will re-issue — the receive blackout the relay
+  /// connection counters cannot see, because the socket stays up.
+  final int subscriptionsLive;
+
+  /// Group REQs, still present in the pool, that had delivered neither an
+  /// event nor an `EOSE` within the delivery-silence window. The inbox is
+  /// never counted (a quiet inbox is the normal state). This is what a
+  /// [`SubscriptionHealthActionFfi::TargetedReanchor`] acted on.
+  final int subscriptionsSilent;
+
   const SubscriptionHealthOutcomeFfi({
     required this.action,
     required this.relaysTotal,
     required this.relaysStillConnecting,
     required this.relaysDisconnected,
+    required this.subscriptionsExpected,
+    required this.subscriptionsLive,
+    required this.subscriptionsSilent,
   });
 
   @override
@@ -4325,7 +4720,10 @@ class SubscriptionHealthOutcomeFfi {
       action.hashCode ^
       relaysTotal.hashCode ^
       relaysStillConnecting.hashCode ^
-      relaysDisconnected.hashCode;
+      relaysDisconnected.hashCode ^
+      subscriptionsExpected.hashCode ^
+      subscriptionsLive.hashCode ^
+      subscriptionsSilent.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -4335,7 +4733,10 @@ class SubscriptionHealthOutcomeFfi {
           action == other.action &&
           relaysTotal == other.relaysTotal &&
           relaysStillConnecting == other.relaysStillConnecting &&
-          relaysDisconnected == other.relaysDisconnected;
+          relaysDisconnected == other.relaysDisconnected &&
+          subscriptionsExpected == other.subscriptionsExpected &&
+          subscriptionsLive == other.subscriptionsLive &&
+          subscriptionsSilent == other.subscriptionsSilent;
 }
 
 /// A cached tile and its conditional-revalidation metadata, for Dart.

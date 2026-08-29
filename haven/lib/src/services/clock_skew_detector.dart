@@ -174,15 +174,17 @@ class ClockSkewDetector {
       'haven.clock.device_clock_rejected';
 
   /// Distinct MLS-authenticated members that must independently agree before
-  /// the peer signal fires.
+  /// the peer signal fires — whenever that many members are *available* to
+  /// agree. See [_evaluate] for the sole-source exception.
   ///
-  /// Two, not one: a single member's clock being wrong is far more likely than
-  /// everyone else's, so one sample is never evidence about *us*. Because
-  /// samples are keyed by member id, one member can never supply two of them —
-  /// firing this signal falsely requires two *colluding* members who are
-  /// already trusted with the user's location, and the worst they achieve is a
-  /// warning banner: the verdict never changes what Haven signs, publishes, or
-  /// stores.
+  /// Two, not one: while a second member is reachable, that member's agreement
+  /// with our clock is direct evidence that the odd one out is the outlier,
+  /// and a single member's clock being wrong is far more likely than everyone
+  /// else's. Because samples are keyed by member id, one member can never
+  /// supply two of them — firing this signal falsely requires two *colluding*
+  /// members who are already trusted with the user's location, and the worst
+  /// they achieve is a warning banner: the verdict never changes what Haven
+  /// signs, publishes, or stores.
   static const int minCorroboratingSources = 2;
 
   /// How long a peer sample stays evidence.
@@ -498,13 +500,48 @@ class ClockSkewDetector {
 
     final now = _now();
     final corroborating = <int>[];
+    var liveSources = 0;
     for (final sample in _peerSamples.values) {
       if (now.difference(sample.observedAt) > peerSampleTtl) continue;
+      liveSources++;
       if (sample.offsetSecs >= kClockSkewAlertThreshold.inSeconds) {
         corroborating.add(sample.offsetSecs);
       }
     }
-    if (corroborating.length < minCorroboratingSources) {
+    // The sole-source exception. [minCorroboratingSources] asks a second
+    // member to break the tie between "our clock is behind" and "theirs is
+    // ahead" — but in a two-member circle there IS no second member, so the
+    // bar is not merely unmet, it is unmeetable, and the most common circle
+    // size was structurally blind to a fault that loses 100 % of its
+    // updates silently (the whole reason this detector exists).
+    //
+    // Firing on one member is therefore allowed ONLY when that member is the
+    // only one Haven has heard from inside [peerSampleTtl]. The moment a
+    // second member is heard the exception is withdrawn and the two-source
+    // bar governs again, so a verdict raised while alone clears if that
+    // second member turns out to agree with this device. Everything above one
+    // live sample behaves exactly as it did before — this is an added
+    // exception, not a relaxed bar.
+    //
+    // What a sole source can and cannot support, exactly: with one peer,
+    // "we are behind" and "they are ahead" are indistinguishable from inside
+    // this process. Nor does a disagreement of this size prove any loss —
+    // both sides screen the NIP-40 expiration with
+    // `LOCATION_MESSAGE_RETENTION_SECS` (228 s) +
+    // `RECEIVER_EXPIRATION_GRACE_SECS` (60 s) of tolerance, so nothing is
+    // dropped anywhere until the gap passes [kClockSkewTotalLossThreshold]
+    // (288 s), well above the 120 s that raises this. Between the two, all
+    // that is known is that the clocks disagree.
+    //
+    // That is why the sole-source verdict must NOT be surfaced with the copy
+    // the corroborated one uses: `resolveClockSkewCopy`
+    // (`widgets/location/clock_skew_banner.dart`) branches on
+    // `corroboratingSources == 1` and renders a hedged title and body that
+    // name neither a culprit nor a loss. Anything that raises this signal on
+    // one source without that branch is a user-visible false claim.
+    final soleSource =
+        liveSources == 1 && corroborating.length == 1;
+    if (!soleSource && corroborating.length < minCorroboratingSources) {
       return ClockSkewStatus.healthy;
     }
     corroborating.sort();

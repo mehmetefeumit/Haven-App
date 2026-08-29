@@ -351,6 +351,10 @@ class AppLocalizationsJa extends AppLocalizations {
       'オンになりました。一部の端末では、バッテリー最適化により共有が一時停止することがあります。確実に動かすには、Haven をバッテリー最適化の対象から除外してください。';
 
   @override
+  String get locationSettingsBatteryOptNote =>
+      'Haven はまだバッテリー最適化の対象になっています。一部の端末では、これによりバックグラウンド共有が予告なく停止されることがあります。共有を確実に続けるには、Haven を対象から除外してください。';
+
+  @override
   String get locationSettingsErrorSnack => '問題が発生しました';
 
   @override
@@ -385,6 +389,22 @@ class AppLocalizationsJa extends AppLocalizations {
   @override
   String get locationSettingsIosGuidance =>
       'バックグラウンド共有がオンの間、Haven は位置情報の取得を継続するため、iOS のステータスバーに青い表示が出ます。さらに「常に許可」を選ぶと、iOS がアプリを終了した後も、Haven がサークルの更新に追いつけるようになります。';
+
+  @override
+  String get fgsNotificationSharing => 'Haven が位置情報を送受信しています';
+
+  @override
+  String get fgsNotificationPaused => 'Haven は一時停止中です。アプリを開くと共有を再開します';
+
+  @override
+  String get fgsNotificationOpen => 'Haven は画面に表示されています';
+
+  @override
+  String get fgsChannelName => '位置情報の共有';
+
+  @override
+  String get fgsChannelDescription =>
+      'Haven がバックグラウンドにある間も、暗号化された位置情報の共有を続けます。';
 
   @override
   String get mapStyleTitle => '地図のスタイル';
@@ -645,7 +665,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get privacyEncryptionKeysChangeOnMembership =>
-      'サークルを抜けても、メンバーがすでに保存したものを取り戻すことはできません。Haven が鍵を変えるのは、誰かが参加するか抜けたときだけで、一定時間ごとに変わることはありません。そのため、1つの鍵が何週間分ものメッセージをカバーすることがあり、その間にメンバーが保存したものは、その人にとって読める状態のまま残ります。ただし、その人が抜けたあとに送られたものは開けません。';
+      'サークルを抜けても、メンバーがすでに保存したものを取り戻すことはできません。Haven が鍵を変えるのは、誰かが参加するか抜けたときと、メッセージが届かなくなったサークルをその管理者が修復したときで、一定時間ごとに変わることはありません。そのため、1つの鍵が何週間分ものメッセージをカバーすることがあり、その間にメンバーが保存したものは、その人にとって読める状態のまま残ります。ただし、その人が抜けたあとに送られたものは開けません。';
 
   @override
   String get privacyEncryptionMeansForYou =>
@@ -657,7 +677,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get privacyEncryptionDetailEpochs =>
-      '鍵が有効な各期間は「エポック」と呼ばれ、サークルが新しいエポックに移るのは、メンバーの構成が変わったときだけです。この端末は、現在のエポックと直近のいくつかのエポックの鍵、つまり届く途中のメッセージを開けるだけの分を保持し、残りは破棄します。数か月間メンバーの構成が変わっていないサークルは、今も最初のエポックのままです。';
+      '鍵が有効な各期間は「エポック」と呼ばれます。サークルが新しいエポックに移るのは、メンバーの構成が変わったときと、メッセージが届かなくなったサークルをその管理者が修復したときです。この端末は、現在のエポックと直近のいくつかのエポックの鍵、つまり届く途中のメッセージを開けるだけの分を保持し、残りは破棄します。メンバーの出入りが一度もなく、修復も必要になっていないサークルは、今も最初のエポックのままです。';
 
   @override
   String get privacyWhatOthersSeeTitle => 'メンバーに見えるもの、リレーに見えるもの';
@@ -1928,6 +1948,113 @@ class AppLocalizationsJa extends AppLocalizations {
   @override
   String get clockSkewResolvedAnnouncement =>
       '時刻の問題が解消しました。Haven が位置情報の共有を再開しました';
+
+  @override
+  String get clockSkewTitleDisagreement => 'いずれかのサークルに時刻が正しくない端末があります';
+
+  @override
+  String get clockSkewBodyDisagreement =>
+      'この端末の時刻と、別のメンバーの端末の時刻が2分以上ずれています。もし間違っているのがこの端末の時刻であれば、送信する位置情報が誰にも見られないまま有効期限が切れるおそれがあります。少なくともこの端末が原因ではないことを確かめるには、端末の設定で日付と時刻の自動設定をオンにしてください。';
+
+  @override
+  String get clockSkewDisagreementResolvedAnnouncement => '時刻の警告が消えました';
+
+  @override
+  String get sharingHealthTitleStopped => '位置情報の共有が停止しました';
+
+  @override
+  String get sharingHealthTitleNotSending => '自分の位置情報が共有されていません';
+
+  @override
+  String get sharingHealthTitleNotReceiving => 'ほかのメンバーの位置情報が届いていません';
+
+  @override
+  String sharingHealthNoUpdatesMinutes(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '約$countString分間、更新なし',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String sharingHealthNoUpdatesHours(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '約$countString時間、更新なし',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String sharingHealthNoUpdatesDays(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '約$countString日間、更新なし',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get sharingHealthRepairAction => '修復';
+
+  @override
+  String get sharingHealthRepairUnavailableHint => 'このサークルでは修復を利用できません';
+
+  @override
+  String get sharingHealthRepairHint =>
+      'リレーに接続し直して、位置情報の送信をやり直し、あなたがこのサークルの管理者の場合は、新しい鍵に切り替えることがあります';
+
+  @override
+  String get sharingHealthRepairSent =>
+      '修復を送信しました。ほかのメンバーには、それぞれの端末が受け取ってから反映されます。';
+
+  @override
+  String get sharingHealthRepairNotOwner =>
+      'このサークルを修復できるのは管理者だけです。あなたを削除して、もう一度追加するよう管理者に頼んでください。';
+
+  @override
+  String get sharingHealthRepairNeedsNewCircle =>
+      'このサークルはこの端末では修復できません。同じメンバーで新しいサークルを作成してください。';
+
+  @override
+  String get sharingHealthRepairNothingToDo =>
+      '今のところ修復は必要ありません。Haven が自動で試し続けます。';
+
+  @override
+  String get sharingHealthRepairUnresolvedAnnouncement => '位置情報の共有はまだ復旧していません';
+
+  @override
+  String get sharingHealthResumedAnnouncement => '位置情報の共有が復旧しました';
+
+  @override
+  String circleMemberLastSeenMinutes(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: '最終確認 $countString分前',
+    );
+    return '$_temp0';
+  }
 
   @override
   String get mapThisLocation => 'この場所';

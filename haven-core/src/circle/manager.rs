@@ -33,6 +33,7 @@ use nostr::{Event, EventId, Keys, PublicKey};
 use super::contamination::ContaminationSource;
 use super::error::{CircleError, Result};
 use super::leave::{plan_leave, LeavePlan};
+use super::rotation::{rotation_decision, RotationDecision, RotationInputs, SkipReason};
 use super::storage::CircleStorage;
 use super::storage_member_directory::DirectoryTier;
 use super::types::{
@@ -41,11 +42,47 @@ use super::types::{
 };
 use crate::location::LocationMessage;
 use crate::nostr::mls::types::{
-    ConvergedRoster, GroupEvent, GroupId, GroupIdExt, KeyPackage, LocationGroupConfig,
-    LocationMessageResult, PendingStateRef, PublishWork, SessionEffects, TransportMessage,
+    ConvergedRoster, ConvergenceSweep, GroupEvent, GroupId, GroupIdExt, KeyPackage,
+    LocationGroupConfig, LocationMessageResult, PendingStateRef, PublishWork, SessionEffects,
+    TransportMessage,
 };
 use crate::nostr::mls::{bounded_retention_secs, redact_hex_sequences};
 use crate::nostr::mls::{PendingWelcome, PendingWelcomeStore, SessionManager};
+
+/// The wall clock in Unix seconds, floored at the epoch.
+///
+/// `unsigned_abs()` would be the obvious conversion and is wrong: on a device
+/// whose clock has slipped before 1970 it turns a small negative timestamp into
+/// a huge positive one, and every age comparison built on it then reports every
+/// stored row as ancient — mass-retiring rows that are seconds old. Saturating
+/// to `0` instead makes a pre-epoch clock retire NOTHING, which is the direction
+/// a clock this broken should fail in.
+fn now_secs() -> u64 {
+    u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0)
+}
+
+/// Converts a stored millisecond instant to Unix seconds, dropping a pre-epoch
+/// value rather than wrapping it.
+///
+/// Same fail-safe direction as [`now_secs`]: a negative stamp is a clock this
+/// device cannot trust, and reading it as "never observed" makes the rotation
+/// gates fall back on the gates that do not depend on it.
+fn secs_from_ms(at_ms: Option<i64>) -> Option<u64> {
+    at_ms
+        .and_then(|ms| u64::try_from(ms).ok())
+        .map(|ms| ms / 1_000)
+}
+
+/// Re-renders a storage error with any hex sequence removed.
+///
+/// A `rusqlite::Error` message can quote the failing statement and its bound
+/// parameters, and on the circle tables those parameters carry the circle's
+/// `nostr_group_id`. Rule 8 keeps that off the FFI boundary, so a storage
+/// failure crosses it as prose that says what broke and nothing about which
+/// circle it broke on.
+fn redact_storage_error(err: &CircleError) -> CircleError {
+    CircleError::Storage(redact_hex_sequences(&err.to_string()))
+}
 
 /// Formats the first 8 hex chars of an event ID for diagnostic logging.
 ///
@@ -81,6 +118,11 @@ pub struct CircleManager {
     /// In-memory: an unresolved create at process exit self-clears on restart
     /// (the engine also rolls the staged create back at hydrate).
     create_pending: Mutex<HashMap<PendingStateRef, GroupId>>,
+    /// Binds each in-flight repair-rotation `pending` to the circle whose 24-hour
+    /// rate limit it spends, so [`Self::confirm_published`] records the rotation
+    /// and [`Self::publish_failed`] does not — see
+    /// [`Self::register_rotation_pending`].
+    rotation_pending: Mutex<HashMap<PendingStateRef, [u8; 32]>>,
     /// Serializes everything that publishes or retracts the OWN public profile
     /// — see [`Self::profile_sync_lock`].
     profile_sync_lock: tokio::sync::Mutex<()>,
@@ -175,6 +217,7 @@ impl CircleManager {
             session: Arc::new(session),
             pending_welcomes: PendingWelcomeStore::new(),
             create_pending: Mutex::new(HashMap::new()),
+            rotation_pending: Mutex::new(HashMap::new()),
             profile_sync_lock: tokio::sync::Mutex::new(()),
             directory_lock: tokio::sync::Mutex::new(()),
             directory_flight: Mutex::new(DirectoryFlight::default()),
@@ -294,6 +337,7 @@ impl CircleManager {
             session: Arc::new(session),
             pending_welcomes: PendingWelcomeStore::new(),
             create_pending: Mutex::new(HashMap::new()),
+            rotation_pending: Mutex::new(HashMap::new()),
             profile_sync_lock: tokio::sync::Mutex::new(()),
             directory_lock: tokio::sync::Mutex::new(()),
             directory_flight: Mutex::new(DirectoryFlight::default()),
@@ -1000,6 +1044,278 @@ impl CircleManager {
         })
     }
 
+    // ==================== Epoch-rotation repair (C4) ========================
+
+    /// Repairs a circle whose sender ratchets are exhausted, by committing a
+    /// byte-identical `UpdateAppComponents(admin-policy.v1)`.
+    ///
+    /// This is a **ratchet reset**, not key rotation: applying the commit
+    /// derives a fresh `encryption_secret`, so every sender ratchet in the group
+    /// restarts at generation 0 and a peer whose messages had run past
+    /// `maximum_forward_distance` becomes decryptable again. The commit carries
+    /// no `UpdatePath`, so it rotates no leaf key and provides **no**
+    /// post-compromise security — see [`crate::circle::rotation`].
+    ///
+    /// Repair-TRIGGERED, never periodic: the caller is the user's "Repair"
+    /// action (or the automatic repair behind it), and every gate in
+    /// [`rotation_decision`] must be open. `now_secs` is the wall clock in Unix
+    /// seconds, injected so the gates are testable without sleeping.
+    ///
+    /// # Honest limit
+    ///
+    /// It repairs the ADMIN-stuck case only. A stuck non-admin cannot author any
+    /// commit (every commit-producing `SendIntent` is admin-gated) and there is
+    /// no "please rekey" message in the protocol, so its remedy is to ask the
+    /// circle's owner to remove and re-add it — until MDK exposes a bare
+    /// self-update intent (`docs/EPOCH_ROTATION_REPAIR_PLAN.md` §6).
+    ///
+    /// # Publish-before-apply (Rule 13)
+    ///
+    /// On [`RepairRotationOutcome::Rotated`] the caller publishes
+    /// [`CommitToPublish::commit_event`] to the circle's relays, then calls
+    /// [`Self::confirm_published`] on a ≥1-relay OK-ack or
+    /// [`Self::publish_failed`] on failure. Nothing is confirmed here. The
+    /// 24-hour rate limit is recorded by [`Self::confirm_published`] itself, so
+    /// a repair no relay accepted costs the user nothing and can be retried at
+    /// once.
+    ///
+    /// On [`RepairRotationOutcome::Deferred`] the caller runs that SAME ladder
+    /// over every [`DeferredWork::commits`] entry: the engine staged that work
+    /// during the repair, and leaving it unresolved pins the group in
+    /// `PendingPublish`, where every later send fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CircleError::NotFound`] if no circle row matches, or
+    /// [`CircleError::Mls`] if the engine or the message store cannot be read,
+    /// or rejects the commit for a reason other than a non-`Stable` epoch state
+    /// (which is a [`SkipReason::EpochNotStable`] skip, not a failure).
+    pub async fn repair_epoch_rotation(
+        &self,
+        mls_group_id: &GroupId,
+        now_secs: u64,
+    ) -> Result<RepairRotationOutcome> {
+        // Storage errors reach the FFI boundary as prose, and a rusqlite message
+        // can quote the failing statement — which on these two tables carries
+        // the circle's `nostr_group_id` as hex. Every other fallible call in
+        // this function is redacted; these two were the gap.
+        let circle = self
+            .storage
+            .get_circle(mls_group_id)
+            .map_err(|e| redact_storage_error(&e))?
+            .ok_or_else(|| CircleError::NotFound("Circle not found: <redacted>".to_string()))?;
+
+        let self_id = self.session.self_id().await;
+        let admins = self
+            .session
+            .admin_pubkeys(mls_group_id)
+            .await
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+        let rotation_state = self
+            .storage
+            .circle_rotation_state(&circle.nostr_group_id)
+            .map_err(|e| redact_storage_error(&e))?;
+        // Fail CLOSED: a store this device cannot read is not evidence that
+        // nobody is about to commit, and a rotation raced against a peer's
+        // auto-commit is exactly the same-epoch sibling the engine's in-memory
+        // `committed_from` cannot reconcile across a restart (M11 §H2).
+        let pending_proposal = match self.session.has_pending_proposal(mls_group_id).await {
+            Ok(pending) => pending,
+            Err(e) => {
+                log::warn!(
+                    "epoch-rotation repair: reading the proposal window failed; \
+                     declining the repair: {}",
+                    redact_hex_sequences(&e.to_string())
+                );
+                true
+            }
+        };
+
+        let decision = rotation_decision(&RotationInputs {
+            self_id: self_id.as_slice(),
+            admins: &admins,
+            // The only non-`Stable` state this device can observe BEFORE
+            // attempting the send; `PendingPublish` / `Merging` / `Recovering`
+            // have no getter at MDK `e391adc` and arrive as the typed rejection
+            // below instead.
+            group_is_unrecoverable: self.unrecoverable_group_ids().contains(mls_group_id),
+            last_epoch_change_at: secs_from_ms(rotation_state.last_epoch_change_seen_at_ms),
+            last_rotation_at: secs_from_ms(rotation_state.last_rotation_at_ms),
+            last_inbound_event_at: secs_from_ms(rotation_state.last_inbound_event_at_ms),
+            pending_proposal,
+            now: now_secs,
+        });
+        if let RotationDecision::Skip(reason) = decision {
+            return Ok(RepairRotationOutcome::Skipped(reason));
+        }
+
+        // The send gate, checked BEFORE the intent exists. `do_send` does not
+        // reject a send it cannot perform — it QUEUES it, durably, and the queue
+        // drains later into a real commit with none of the gates above
+        // re-evaluated and no rate limit charged. Queued intent ids are not
+        // deduplicated either, so without this every Repair tap on a stalled
+        // circle would bank another epoch bump, all landing in a burst the
+        // moment the circle unblocks. Asking the gate first means the intent is
+        // never issued at all.
+        if self.gating_input_count(mls_group_id).await > 0 {
+            let report = self
+                .repair_deferred_send(mls_group_id, Vec::new(), now_secs)
+                .await;
+            return Ok(RepairRotationOutcome::Deferred {
+                unresolved_inputs: report.unresolved_inputs,
+                discarded_intents: report.discarded_intents,
+                repaired: report.repaired,
+                work: report.work,
+            });
+        }
+
+        // Byte-identical: the admin set the engine just reported, re-encoded.
+        // `admin_changes(before, after)` therefore yields nothing, so the commit
+        // emits no `GroupStateChange` and no member sees a phantom "admins
+        // changed" row.
+        let effects = match self
+            .session
+            .update_admin_policy(mls_group_id, &admins)
+            .await
+        {
+            Ok(effects) => effects,
+            Err(crate::nostr::NostrError::EpochNotStable) => {
+                return Ok(RepairRotationOutcome::Skipped(SkipReason::EpochNotStable));
+            }
+            Err(crate::nostr::NostrError::EpochUnrecoverable) => {
+                return Ok(RepairRotationOutcome::Skipped(
+                    SkipReason::EpochUnrecoverable,
+                ));
+            }
+            Err(e) => return Err(CircleError::Mls(redact_hex_sequences(&e.to_string()))),
+        };
+
+        // Gate 7, checked BEFORE `take_group_evolution` — which would otherwise
+        // report a queued rotation as "produced no GroupEvolution publish work",
+        // the same opaque error `encrypt_location` used to hand back. The
+        // pre-check above models what it can; this stays as the fail-safe for
+        // what it cannot (a non-`Stable` state the engine reports by queueing,
+        // and `stage_due_self_remove_auto_commit` staging an eviction inside
+        // this very call).
+        if !effects.queued.is_empty() {
+            // The intent is already banked at this point, so it must be taken
+            // back out — see
+            // [`SessionManager::discard_queued_repair_rotation_intents`].
+            let discarded = self
+                .discard_queued_repair_rotation(mls_group_id, &admins)
+                .await;
+            let report = self
+                .repair_deferred_send(mls_group_id, effects.publish, now_secs)
+                .await;
+            log::warn!(
+                "epoch-rotation repair deferred: {} input(s) still gating, \
+                 {} queued rotation(s) taken back, {} staged commit(s) handed back",
+                report.unresolved_inputs,
+                discarded,
+                report.work.commits.len()
+            );
+            return Ok(RepairRotationOutcome::Deferred {
+                unresolved_inputs: report.unresolved_inputs,
+                discarded_intents: report.discarded_intents,
+                repaired: report.repaired,
+                work: report.work,
+            });
+        }
+
+        let (commit_event, pending) = self.take_rotation_commit(effects).await?;
+        self.register_rotation_pending(pending, circle.nostr_group_id);
+        Ok(RepairRotationOutcome::Rotated(CommitToPublish {
+            commit_event,
+            pending,
+        }))
+    }
+
+    /// Extracts the staged rotation commit, rolling the engine's staged state
+    /// back if the transport message cannot be turned into an event.
+    ///
+    /// A staged commit whose message will not serialize must be rolled back,
+    /// never dropped: an unresolved `PendingStateRef` pins the group in
+    /// `PendingPublish`, where every later send fails the engine's "requires
+    /// Stable" gate — a total, permanent send blackout bought for a
+    /// serialization error. Same disposition [`Self::collect_deferred_work`]
+    /// uses on the same failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns whatever [`take_group_evolution`] rejected, after the rollback.
+    async fn take_rotation_commit(
+        &self,
+        effects: SessionEffects,
+    ) -> Result<(Event, PendingStateRef)> {
+        // Read the pending ref BEFORE `take_group_evolution` consumes the
+        // effects, so a failure inside it still has something to roll back.
+        let staged_pending = effects.publish.iter().find_map(|work| match work {
+            PublishWork::GroupEvolution { pending, .. } => Some(*pending),
+            _ => None,
+        });
+        match take_group_evolution(effects) {
+            Ok((commit_event, _welcomes, pending)) => Ok((commit_event, pending)),
+            Err(e) => {
+                if let Some(pending) = staged_pending {
+                    let _ = self.publish_failed(pending).await;
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Takes a queued repair rotation back out of the engine's outbound queue,
+    /// or `0` if the store cannot be written.
+    ///
+    /// Best-effort for the same reason every other step of a deferral is: the
+    /// outcome must stay an actionable "sharing is stalled" signal. A discard
+    /// that fails leaves ONE banked rotation, which the next drain turns into a
+    /// single extra epoch bump — noisy, but not a burst, and the log line says
+    /// so.
+    async fn discard_queued_repair_rotation(
+        &self,
+        mls_group_id: &GroupId,
+        current_admins: &[[u8; 32]],
+    ) -> usize {
+        self.session
+            .discard_queued_repair_rotation_intents(mls_group_id, current_admins)
+            .await
+            .unwrap_or_else(|e| {
+                log::warn!(
+                    "epoch-rotation repair: taking the queued rotation back failed; one \
+                     extra epoch bump may land when the circle unblocks: {}",
+                    redact_hex_sequences(&e.to_string())
+                );
+                0
+            })
+    }
+
+    /// Binds a staged repair rotation to the circle whose rate limit it spends,
+    /// so [`Self::confirm_published`] can record it without the caller having to
+    /// remember to.
+    ///
+    /// Folded into the confirm rather than exposed as a separate
+    /// `note_rotation_confirmed` FFI call for a safety reason, not a size one: a
+    /// caller that forgot the extra call would leave the circle with no rate
+    /// limit at all, and the failure would be silent. The map is in memory
+    /// because the binding only has to outlive the publish attempt — a process
+    /// death before the confirm leaves the commit unapplied, which is exactly
+    /// the state a missing rate-limit record describes.
+    fn register_rotation_pending(&self, pending: PendingStateRef, nostr_group_id: [u8; 32]) {
+        self.rotation_pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(pending, nostr_group_id);
+    }
+
+    /// Removes and returns the circle bound to `pending` in the rotation map.
+    fn take_rotation_pending(&self, pending: PendingStateRef) -> Option<[u8; 32]> {
+        self.rotation_pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&pending)
+    }
+
     /// Final step of every non-abandoning leave: returns a `SelfRemove` proposal
     /// event so peers can advance past the caller.
     ///
@@ -1104,11 +1420,33 @@ impl CircleManager {
         // A confirmed create KEEPS its eagerly-persisted rows; just drop the
         // rollback binding so a subsequent stray `publish_failed` can never
         // delete a now-live circle (F2). A no-op for every non-create pending.
+        // Taken BEFORE the early return: on a rejected confirm the binding is
+        // dead either way, and leaving it in the map keeps a ref nothing will
+        // ever resolve. Bounded and memory-only, but a map that only grows is
+        // not a shape to leave in a long-lived session.
+        let rotation = self.take_rotation_pending(pending);
         let effects = match result {
             Ok(effects) => effects,
             Err(e) => return Err(e),
         };
         let _ = self.take_create_pending(pending);
+        // A repair rotation spends its circle's 24-hour rate limit HERE, not
+        // when it was staged: a commit no relay accepted reset nobody's ratchet,
+        // and charging the user for it would leave a stuck circle unrepairable
+        // for a day.
+        if let Some(nostr_group_id) = rotation {
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            if let Err(e) = self
+                .storage
+                .note_rotation_confirmed(&nostr_group_id, now_ms)
+            {
+                log::warn!(
+                    "epoch-rotation repair: recording the rate limit failed; the circle may \
+                     accept another repair sooner than intended: {}",
+                    redact_hex_sequences(&e.to_string())
+                );
+            }
+        }
         // Confirming is the first moment an announced membership is APPLIED
         // rather than projected, so it is a directory write site.
         let mode = self.publish_outcome_verdict(&effects.events);
@@ -1133,6 +1471,11 @@ impl CircleManager {
         // actually discarded the staged create); an unknown / already-resolved
         // pending — e.g. one already confirmed — leaves storage untouched. A
         // no-op for every non-create pending (auto-commit / evolution).
+        // A rolled-back rotation spent nothing: drop the binding without
+        // recording it, so the user can retry the repair immediately. Taken
+        // before the early return for the same reason as in
+        // `confirm_published` — a rejected rollback leaves the ref just as dead.
+        let _ = self.take_rotation_pending(pending);
         let effects = match result {
             Ok(effects) => effects,
             Err(e) => return Err(e),
@@ -1164,6 +1507,11 @@ impl CircleManager {
     /// existed to a three-day "recent contact" instead of deleting them,
     /// leaving them searchable and one tap from live location.
     fn publish_outcome_verdict(&self, events: &[GroupEvent]) -> DirectoryReconcile {
+        // The send-side epoch-change write site: confirming our own commit is an
+        // epoch change, and it is the one that does NOT arrive through a receive
+        // funnel. Not an INBOUND observation, so the quiescence stamp is
+        // deliberately not written here.
+        self.note_epoch_changes(events);
         self.directory_verdict_for_events(events)
             .map_or(DirectoryReconcile::Rewrite, |verdict| {
                 verdict.max(DirectoryReconcile::Rewrite)
@@ -1685,6 +2033,12 @@ impl CircleManager {
     /// [`Self::directory_verdict_for_results`] over a raw engine event batch,
     /// for the receive planes that hold `GroupEvent`s rather than folded
     /// results.
+    ///
+    /// Records nothing but the unrecoverable set. The epoch-change and
+    /// inbound-observation facts have exactly ONE write site per path — the
+    /// receive planes call [`Self::note_inbound_group_events`], the
+    /// publish-before-apply resolution calls [`Self::note_epoch_changes`] — so
+    /// that a plane doing both cannot record the same fact twice.
     pub(crate) fn directory_verdict_for_events(
         &self,
         events: &[GroupEvent],
@@ -1694,6 +2048,93 @@ impl CircleManager {
             _ => None,
         }));
         DirectoryReconcile::for_group_events(events)
+    }
+
+    /// Records that an MLS-AUTHENTICATED inbound group event arrived for every
+    /// circle named in `events`, and the epoch-change instant for each
+    /// `EpochChanged` among them.
+    ///
+    /// Call this ONLY from a receive funnel. Two properties depend on it:
+    ///
+    /// * **Only authenticated events may stamp it.** An engine event batch is
+    ///   the output of MLS authentication, so nothing an observer of the
+    ///   circle's public `#h` can mint reaches here. Stamping on "a kind-445
+    ///   arrived" instead would hand that observer a way to hold the repair gate
+    ///   shut for free (`circle::rotation` gate 4).
+    /// * **Only INBOUND events may stamp it.** `publish_outcome_verdict` runs
+    ///   the same fold for our OWN confirm/rollback, which is why that path
+    ///   calls [`Self::note_epoch_changes`] and not this.
+    pub(crate) fn note_inbound_group_events(&self, events: &[GroupEvent]) {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut stamped: HashSet<&GroupId> = HashSet::new();
+        for event in events {
+            let group_id = group_id_of(event);
+            if !stamped.insert(group_id) {
+                continue;
+            }
+            match self.storage.get_circle(group_id) {
+                Ok(Some(circle)) => {
+                    if let Err(e) = self
+                        .storage
+                        .note_inbound_group_event(&circle.nostr_group_id, now_ms)
+                    {
+                        log::warn!(
+                            "inbound group-event observation not recorded: {}",
+                            redact_hex_sequences(&e.to_string())
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => log::warn!(
+                    "inbound group-event observation: circle lookup failed: {}",
+                    redact_hex_sequences(&e.to_string())
+                ),
+            }
+        }
+        self.note_epoch_changes(events);
+    }
+
+    /// Records the wall-clock instant of every `EpochChanged` in `events`.
+    ///
+    /// `EpochChanged` is the ONLY MLS-authenticated statement that a group's
+    /// sender ratchets restarted, and the engine emits it from all three places
+    /// an epoch can move: applying a peer's commit, confirming our own, and a
+    /// convergence reorg. The folded [`LocationMessageResult::GroupUpdate`]
+    /// cannot stand in for it — that variant also covers `PendingCommitRecovered`
+    /// and `GroupHydrationRecovered`, neither of which resets a ratchet, and
+    /// treating them as epoch changes would park a genuinely stuck circle behind
+    /// gate 3 for a day for no reason.
+    ///
+    /// Best-effort: an unrecorded epoch change only makes the repair gate more
+    /// permissive on the next tap, which the rate limit and the quiescence gate
+    /// still bound.
+    fn note_epoch_changes(&self, events: &[GroupEvent]) {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        for event in events {
+            let GroupEvent::EpochChanged { group_id, .. } = event else {
+                continue;
+            };
+            match self.storage.get_circle(group_id) {
+                Ok(Some(circle)) => {
+                    if let Err(e) = self
+                        .storage
+                        .note_epoch_change_seen(&circle.nostr_group_id, now_ms)
+                    {
+                        log::warn!(
+                            "epoch-change observation not recorded: {}",
+                            redact_hex_sequences(&e.to_string())
+                        );
+                    }
+                }
+                // A group with no circle row (a create still mid-flight, or a
+                // circle already deleted) has nothing to record against.
+                Ok(None) => {}
+                Err(e) => log::warn!(
+                    "epoch-change observation: circle lookup failed: {}",
+                    redact_hex_sequences(&e.to_string())
+                ),
+            }
+        }
     }
 
     /// Adds `group_ids` to the session's unrecoverable set — see
@@ -1943,7 +2384,9 @@ impl CircleManager {
     /// # Errors
     ///
     /// Returns an error if the circle is not found, serialization fails, or the
-    /// engine rejects the send.
+    /// engine rejects the send. Returns [`CircleError::SendDeferred`] when the
+    /// engine QUEUED the update instead of encrypting it — see that variant and
+    /// [`Self::deferred_send_outcome`].
     pub async fn encrypt_location(
         &self,
         mls_group_id: &GroupId,
@@ -1970,9 +2413,256 @@ impl CircleManager {
             .send_location(mls_group_id, content)
             .await
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+
+        // The engine queued rather than encrypted. Checked BEFORE
+        // `take_app_message`, which would otherwise report the queue as "no
+        // publish work" — the opaque error every Dart caller dropped into a
+        // `debugPrint` while the device silently stopped sharing.
+        if !effects.queued.is_empty() {
+            return Err(self
+                .deferred_send_outcome(mls_group_id, effects.publish, now_secs())
+                .await);
+        }
         let event = take_app_message(effects)?;
 
         Ok((event, circle.nostr_group_id, circle.relays))
+    }
+
+    /// Turns a deferred (queued) send into a typed, actionable outcome.
+    ///
+    /// Infallible by construction — every internal failure is logged and folded
+    /// into the returned outcome, because the ONE thing this must never do is
+    /// replace an actionable "sharing is stalled" signal with an unrelated
+    /// error string.
+    ///
+    /// # Two causes, two paths
+    ///
+    /// `should_queue_outbound_intent` is true for exactly two reasons, and they
+    /// need opposite handling:
+    ///
+    /// 1. **A staged auto-commit** — a peer's `SelfRemove` came due and the
+    ///    engine staged the eviction commit inside this very call, draining it
+    ///    into `publish`. Nothing is stuck; the circle is mid-handshake. Hand
+    ///    the work back (see [`DeferredWork`] for why neither confirming,
+    ///    rolling back, nor dropping is acceptable) and do NOT sweep: a group
+    ///    in `PendingPublish` has no stuck row to clear, and a sweep would
+    ///    report a repair nobody performed.
+    /// 2. **A stored row the convergence gate cannot settle** — then `publish`
+    ///    is empty and the repair below is the whole response.
+    ///
+    /// # The repair, in order
+    ///
+    /// 1. **Sweep this circle.** One pass does both halves: it discards the
+    ///    location intent the engine just queued (a fix is ephemeral — the next
+    ///    cadence tick carries a fresher one, and a queue that grows one row per
+    ///    publish cycle is the other half of the leak), and it retires any
+    ///    stored row the relay can no longer redeliver. The retirement is the
+    ///    only step that can clear a future-epoch row: convergence re-feeds it
+    ///    on every pass and deliberately keeps it `Retryable` so a late commit
+    ///    can still resolve it.
+    /// 2. **Advance convergence**, which releases everything step 1 unblocked
+    ///    (the engine's `advance_convergence` runs
+    ///    `advance_convergence_inputs_until_settled`, including
+    ///    `retry_deferred_peels`, before draining queued work). Anything it
+    ///    stages is surfaced, never resolved here — same rule as above.
+    /// 3. **Re-read the gate, read-only.** A second mutating sweep would retire
+    ///    rows nobody asked about and report a pass the caller never requested.
+    ///
+    /// No send is retried here. The next scheduled publish re-enters
+    /// [`Self::encrypt_location`] with a current fix, which is both simpler and
+    /// more accurate than resending the one that was queued.
+    async fn deferred_send_outcome(
+        &self,
+        mls_group_id: &GroupId,
+        publish: Vec<PublishWork>,
+        now_secs: u64,
+    ) -> CircleError {
+        let report = self
+            .repair_deferred_send(mls_group_id, publish, now_secs)
+            .await;
+        CircleError::SendDeferred {
+            unresolved_inputs: report.unresolved_inputs,
+            discarded_intents: report.discarded_intents,
+            repaired: report.repaired,
+            work: report.work,
+        }
+    }
+
+    /// The repair itself, shaped as a value rather than as an error.
+    ///
+    /// Split out of [`Self::deferred_send_outcome`] so a deferred EPOCH ROTATION
+    /// — which has no location event to lose and therefore is not an error —
+    /// can run the identical repair and return the identical work without
+    /// destructuring an error to get at it (see
+    /// [`Self::repair_epoch_rotation`]). The behaviour is exactly what
+    /// `encrypt_location` had; only the shape moved.
+    async fn repair_deferred_send(
+        &self,
+        mls_group_id: &GroupId,
+        publish: Vec<PublishWork>,
+        now_secs: u64,
+    ) -> DeferredSendReport {
+        let mut work = self.collect_deferred_work(&publish).await;
+        if !work.is_empty() {
+            // No stored row is stuck here, so there is nothing to retire — but
+            // the engine still QUEUED the location fix that triggered this
+            // deferral, and leaving it banked until the next session open is
+            // exactly the stale-position leak `SendDeferred` promises not to
+            // have. Discard it on this branch too.
+            let discarded_intents = self.discard_queued_location_intents(mls_group_id).await;
+            return DeferredSendReport {
+                unresolved_inputs: self.gating_input_count(mls_group_id).await,
+                discarded_intents,
+                repaired: false,
+                work,
+            };
+        }
+
+        let sweep = match self
+            .session
+            .sweep_unresolvable_inputs_for_group(mls_group_id, now_secs)
+            .await
+        {
+            Ok(sweep) => sweep,
+            Err(e) => {
+                log::warn!(
+                    "deferred send: convergence sweep failed: {}",
+                    redact_hex_sequences(&e.to_string())
+                );
+                ConvergenceSweep::default()
+            }
+        };
+
+        match self.session.advance_convergence(mls_group_id).await {
+            Ok(effects) => {
+                let advanced = self.collect_deferred_work(&effects.publish).await;
+                work.commits.extend(advanced.commits);
+                work.proposals.extend(advanced.proposals);
+            }
+            Err(e) => log::warn!(
+                "deferred send: advancing convergence failed: {}",
+                redact_hex_sequences(&e.to_string())
+            ),
+        }
+
+        let unresolved_inputs = self.gating_input_count(mls_group_id).await;
+        log::warn!(
+            "send deferred by the MLS engine: {unresolved_inputs} input(s) still gating after \
+             repair ({} queued location intent(s) discarded, {} stale input(s) retired, \
+             {} staged commit(s) handed back)",
+            sweep.discarded_intents,
+            sweep.disposed_messages,
+            work.commits.len()
+        );
+        DeferredSendReport {
+            unresolved_inputs,
+            discarded_intents: sweep.discarded_intents,
+            repaired: unresolved_inputs == 0 && work.is_empty(),
+            work,
+        }
+    }
+
+    /// Collects every publish item a deferred send drained, converting staged
+    /// commits to [`CommitToPublish`] and bare proposals to signed events.
+    ///
+    /// Nothing is confirmed and nothing is rolled back — see [`DeferredWork`].
+    /// An item whose transport message cannot be serialized is the ONE case
+    /// that must still be resolved here, because there is no event for a caller
+    /// to publish: it is rolled back (`publish_failed`) rather than left
+    /// staged, which matches [`Self::collect_auto_commits`] on the receive path.
+    async fn collect_deferred_work(&self, work: &[PublishWork]) -> DeferredWork {
+        let mut out = DeferredWork::default();
+        for item in work {
+            match item {
+                PublishWork::AutoPublish { msg, pending }
+                | PublishWork::GroupEvolution { msg, pending, .. } => {
+                    match SessionManager::transport_message_to_event(msg) {
+                        Ok(commit_event) => out.commits.push(CommitToPublish {
+                            commit_event,
+                            pending: *pending,
+                        }),
+                        Err(_) => {
+                            let _ = self.publish_failed(*pending).await;
+                        }
+                    }
+                }
+                // A create can never surface on a send path for an existing
+                // group; if the engine ever emitted one there would be no event
+                // to publish here (welcomes only), so roll it back rather than
+                // silently pin the group.
+                PublishWork::GroupCreated { pending, .. } => {
+                    let _ = self.publish_failed(*pending).await;
+                }
+                PublishWork::Proposal { msg } => {
+                    match SessionManager::transport_message_to_event(msg) {
+                        Ok(event) => out.proposals.push(event),
+                        Err(e) => log::warn!(
+                            "deferred send: dropping an unserializable proposal: {}",
+                            redact_hex_sequences(&e.to_string())
+                        ),
+                    }
+                }
+                PublishWork::ApplicationMessage { .. } => {}
+            }
+        }
+        out
+    }
+
+    /// Discards the circle's queued location intents, or `0` if the store
+    /// cannot be written.
+    ///
+    /// Best-effort for the same reason every other step of a deferral is: the
+    /// outcome must stay an actionable "sharing is stalled" signal, never be
+    /// replaced by an unrelated storage error.
+    async fn discard_queued_location_intents(&self, mls_group_id: &GroupId) -> usize {
+        self.session
+            .discard_queued_location_intents(mls_group_id)
+            .await
+            .unwrap_or_else(|e| {
+                log::warn!(
+                    "deferred send: discarding the queued location intent failed: {}",
+                    redact_hex_sequences(&e.to_string())
+                );
+                0
+            })
+    }
+
+    /// Rows still gating outbound sends for a circle, or `0` if the store
+    /// cannot be read.
+    ///
+    /// Read-only. Zero on failure is the fail-SAFE direction here: it makes the
+    /// outcome claim "repaired", and a wrong "repaired" only costs one more
+    /// deferral on the next cadence tick, whereas a wrong "still stuck" would
+    /// park a working circle behind a repair banner forever.
+    async fn gating_input_count(&self, mls_group_id: &GroupId) -> usize {
+        self.session
+            .gating_input_count(mls_group_id)
+            .await
+            .unwrap_or_else(|e| {
+                log::warn!(
+                    "deferred send: reading the send gate failed: {}",
+                    redact_hex_sequences(&e.to_string())
+                );
+                0
+            })
+    }
+
+    /// Gives a terminal disposition to stored convergence inputs the relay can
+    /// no longer redeliver, across every circle, and reports what is still
+    /// gating outbound sends.
+    ///
+    /// The manual counterpart to the sweep that already runs at session open:
+    /// this is the entrypoint a "repair sharing" affordance calls. `now_secs`
+    /// is the wall clock in Unix seconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the MLS message store cannot be read or written.
+    pub async fn sweep_unresolvable_inputs(&self, now_secs: u64) -> Result<ConvergenceSweep> {
+        self.session
+            .sweep_unresolvable_inputs(now_secs)
+            .await
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
     }
 
     /// The group relays a `kind:445` commit routes to, resolved from its `#h`
@@ -2037,6 +2727,10 @@ impl CircleManager {
             });
         };
 
+        // This plane folds to results rather than routing raw events, so it is
+        // its own receive-observation write site (the other planes call
+        // `note_inbound_group_events` at their own `process_event` seam).
+        self.note_inbound_group_events(&ingest.effects.events);
         let mut results = fold_group_events(&ingest.effects.events);
         let mut auto_commits = Vec::new();
         self.collect_auto_commits(&ingest.effects.publish, &mut auto_commits)
@@ -2056,6 +2750,7 @@ impl CircleManager {
             let mut next: Vec<GroupId> = Vec::new();
             for gid in &pending {
                 if let Ok(more) = self.session.advance_convergence(gid).await {
+                    self.note_inbound_group_events(&more.events);
                     results.extend(fold_group_events(&more.events));
                     self.collect_auto_commits(&more.publish, &mut auto_commits)
                         .await;
@@ -2182,6 +2877,36 @@ impl CircleManager {
             row.display_name = crate::directory::sanitize_display_name(row.display_name.take());
         }
         Ok(rows)
+    }
+
+    // ==================== Delivery Health ====================
+
+    /// Records a relay-acknowledged location publish for a circle (presence only).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn note_publish_acked(&self, nostr_group_id: &[u8; 32], at_ms: i64) -> Result<()> {
+        self.storage.note_publish_acked(nostr_group_id, at_ms)
+    }
+
+    /// Records a decrypted, persisted peer location for a circle (presence
+    /// only).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn note_peer_event(&self, nostr_group_id: &[u8; 32], at_ms: i64) -> Result<()> {
+        self.storage.note_peer_event(nostr_group_id, at_ms)
+    }
+
+    /// Reads a circle's delivery-health timestamps.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn circle_health(&self, nostr_group_id: &[u8; 32]) -> Result<super::CircleHealth> {
+        self.storage.circle_health(nostr_group_id)
     }
 
     /// Removes the last-known location for a single sender in a circle.
@@ -3063,6 +3788,29 @@ fn take_app_message(effects: SessionEffects) -> Result<Event> {
     ))
 }
 
+/// The circle an engine [`GroupEvent`] is about.
+///
+/// Exhaustive on purpose: every variant at MDK `e391adc` carries a `group_id`,
+/// so a new one that does not breaks compilation here instead of silently
+/// dropping out of the receive observation that gate 4 reads.
+const fn group_id_of(event: &GroupEvent) -> &GroupId {
+    match event {
+        GroupEvent::GroupCreated { group_id }
+        | GroupEvent::GroupJoined { group_id, .. }
+        | GroupEvent::MessageReceived { group_id, .. }
+        | GroupEvent::AppMessageInvalidated { group_id, .. }
+        | GroupEvent::GroupStateChanged { group_id, .. }
+        | GroupEvent::GroupHydrationQuarantined { group_id, .. }
+        | GroupEvent::EpochChanged { group_id, .. }
+        | GroupEvent::ForkRecovered { group_id, .. }
+        | GroupEvent::CommitRolledBack { group_id, .. }
+        | GroupEvent::GroupStateInvalidated { group_id, .. }
+        | GroupEvent::GroupUnrecoverable { group_id }
+        | GroupEvent::PendingCommitRecovered { group_id, .. }
+        | GroupEvent::GroupHydrationRecovered { group_id, .. } => group_id,
+    }
+}
+
 /// Folds an engine [`GroupEvent`] batch into location-facing results.
 fn fold_group_events(events: &[GroupEvent]) -> Vec<LocationMessageResult> {
     events
@@ -3173,6 +3921,135 @@ impl std::fmt::Debug for CommitToPublish {
         f.debug_struct("CommitToPublish")
             .field("commit_event", &"<redacted>")
             .field("pending", &self.pending)
+            .finish()
+    }
+}
+
+/// What [`CircleManager::repair_epoch_rotation`] did.
+///
+/// Not a `Result` shape: a declined repair is a normal answer the UI shows, and
+/// a deferred one carries work the caller must publish. Only a genuine failure
+/// (an unreadable store, an engine rejection that is not about epoch state) is
+/// an `Err`.
+pub enum RepairRotationOutcome {
+    /// The commit is staged. Publish it, then confirm on a ≥1-relay OK-ack or
+    /// roll it back (Rule 13) — see [`CircleManager::repair_epoch_rotation`].
+    Rotated(CommitToPublish),
+    /// A gate declined the repair; nothing was staged and nothing changed.
+    Skipped(SkipReason),
+    /// The engine QUEUED the rotation instead of staging it, because the circle
+    /// is send-gated. The repair ran anyway (the same one a deferred location
+    /// send runs), and anything it staged is here: the caller MUST run the
+    /// publish → confirm/roll-back ladder over
+    /// [`DeferredWork::commits`], or the group stays in `PendingPublish` and
+    /// stops sending entirely.
+    ///
+    /// Carries the same counters as [`CircleError::SendDeferred`], and for the
+    /// same reason: `unresolved_inputs == 0` is what a caller reads as "the
+    /// next send will encrypt", so it must never be a placeholder.
+    Deferred {
+        /// Stored rows still gating outbound sends, read AFTER the repair.
+        unresolved_inputs: usize,
+        /// Queued location intents the repair discarded.
+        discarded_intents: usize,
+        /// Whether the circle was left with nothing gating and nothing staged.
+        repaired: bool,
+        /// Publish work the engine staged during the repair (Rule 13).
+        work: DeferredWork,
+    },
+}
+
+// Presence-only: the commit event's `h` tag carries the `nostr_group_id`
+// (Rules 4/8). `SkipReason` and `DeferredWork` are already leak-free.
+impl std::fmt::Debug for RepairRotationOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rotated(_) => f.write_str("Rotated"),
+            Self::Skipped(reason) => f.debug_tuple("Skipped").field(reason).finish(),
+            Self::Deferred {
+                unresolved_inputs,
+                discarded_intents,
+                repaired,
+                work,
+            } => f
+                .debug_struct("Deferred")
+                .field("unresolved_inputs", unresolved_inputs)
+                .field("discarded_intents", discarded_intents)
+                .field("repaired", repaired)
+                .field("work", work)
+                .finish(),
+        }
+    }
+}
+
+/// The result of the repair a deferred send performs, before it is shaped into
+/// a [`CircleError::SendDeferred`] or a [`RepairRotationOutcome::Deferred`].
+struct DeferredSendReport {
+    /// Stored rows still gating outbound sends, read AFTER the repair.
+    unresolved_inputs: usize,
+    /// Queued location intents dropped so a stalled circle cannot accumulate
+    /// one stale fix per publish cycle.
+    discarded_intents: usize,
+    /// Whether the circle was left with nothing gating and nothing staged.
+    repaired: bool,
+    /// Publish work the engine staged or emitted during the deferral.
+    work: DeferredWork,
+}
+
+/// Publish work the engine drained during a DEFERRED send, handed to the caller
+/// instead of being resolved here.
+///
+/// # Why this is surfaced rather than resolved
+///
+/// `cgka-engine`'s `should_queue_outbound_intent` returns true in exactly two
+/// situations, and one of them STAGES a commit: when a peer's `SelfRemove`
+/// proposal has become due, `stage_due_self_remove_auto_commit` stages the
+/// eviction auto-commit and reports "queued" for the send that triggered it.
+/// `collect_effects` then drains that commit into the very `SessionEffects` the
+/// deferred send returns, carrying a [`PendingStateRef`].
+///
+/// Both obvious dispositions are wrong (Rule 13):
+///
+/// - **Confirming** applies a commit no relay has acked.
+/// - **Rolling back** (`publish_failed`) looks safe and is not: the engine
+///   removes the in-memory `scheduled_self_remove_auto_commits` entry *before*
+///   staging and `do_publish_failed` does not re-arm it, while a redelivery of
+///   the proposal short-circuits to `Buffered` without rescheduling. The
+///   eviction is then never re-staged and the leaver stays in the circle
+///   forever.
+/// - **Dropping it** silently leaves the group in `PendingPublish`, where every
+///   later send fails the engine's "send requires Stable" gate — a total send
+///   blackout.
+///
+/// So the only correct disposition is the one the receive path already uses:
+/// hand the caller the publish → ack → `confirm_published` / `publish_failed`
+/// ladder it already runs for [`DecryptedIngest::auto_commits`].
+#[derive(Default)]
+pub struct DeferredWork {
+    /// Staged commits: publish each, then [`CircleManager::confirm_published`]
+    /// on a ≥1-relay ack, or [`CircleManager::publish_failed`] on failure.
+    pub commits: Vec<CommitToPublish>,
+    /// Bare proposals the engine emitted (no staged state, nothing to confirm).
+    /// Publish-or-lose, but recoverable: a re-proposed `SelfRemove` is driven by
+    /// the durable `LeaveRequest`, so a later convergence pass re-emits it.
+    pub proposals: Vec<Event>,
+}
+
+impl DeferredWork {
+    /// Whether the engine handed back nothing to publish.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.commits.is_empty() && self.proposals.is_empty()
+    }
+}
+
+// Presence-only: a proposal event's `h` tag carries the `nostr_group_id` and its
+// content is group ciphertext, so only counts are printed (Rules 4/6/8).
+impl std::fmt::Debug for DeferredWork {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeferredWork")
+            .field("commits_count", &self.commits.len())
+            .field("proposals_count", &self.proposals.len())
             .finish()
     }
 }
@@ -3296,6 +4173,123 @@ mod tests {
     use crate::relay::maintenance::build_kp_maintenance_events;
     use nostr::JsonUtil as _;
     use tempfile::TempDir;
+
+    /// Independent detector for a contiguous hex run >= 16 chars (the shape of
+    /// a circle's `nostr_group_id`). Written from scratch — NOT via the
+    /// redactor — so it cannot mask a redactor regression.
+    fn has_hex_run_ge16(s: &str) -> bool {
+        let mut run = 0usize;
+        for b in s.bytes() {
+            if b.is_ascii_hexdigit() {
+                run += 1;
+                if run >= 16 {
+                    return true;
+                }
+            } else {
+                run = 0;
+            }
+        }
+        false
+    }
+
+    /// Rule 8: a storage failure on the repair surface crosses the FFI boundary
+    /// as prose, and a rusqlite message can quote the failing statement — which
+    /// on `circles` and `circle_health` carries the circle's `nostr_group_id`.
+    #[test]
+    fn a_storage_error_carrying_a_group_id_is_redacted_on_the_repair_surface() {
+        let group_id_hex = hex::encode([0xab_u8; 32]);
+        assert!(
+            has_hex_run_ge16(&group_id_hex),
+            "detector sanity: a 32-byte id is a >=16 hex run"
+        );
+        let raw = CircleError::Storage(format!(
+            "no such column in UPDATE circle_health SET ... WHERE nostr_group_id = \
+             x'{group_id_hex}'"
+        ));
+        assert!(
+            has_hex_run_ge16(&raw.to_string()),
+            "fixture sanity: the unredacted error DOES carry the id"
+        );
+
+        let surfaced = redact_storage_error(&raw).to_string();
+
+        assert!(
+            !surfaced.contains(&group_id_hex),
+            "the circle id crossed the boundary: {surfaced}"
+        );
+        assert!(
+            !has_hex_run_ge16(&surfaced),
+            "a long hex run survived redaction: {surfaced}"
+        );
+        assert!(
+            surfaced.contains("circle_health"),
+            "redaction must keep what broke, not blank the message: {surfaced}"
+        );
+    }
+
+    /// The `circles` read is on the same surface and needs its own proof.
+    ///
+    /// Its query failure is a `rusqlite::Error`, which reaches `CircleError`
+    /// as `Database` through the `#[from]` — a different variant from the lock
+    /// path's `Storage` two lines above it. So `Storage` here can only mean the
+    /// value passed through the redactor, and dropping the `map_err` shows up
+    /// as `Database`, which no string assertion could catch.
+    #[tokio::test]
+    async fn a_broken_circles_read_arrives_redacted_not_raw() {
+        let (manager, keys, temp_dir) = create_test_manager();
+        let (group_id, _member) = create_confirmed_circle(&manager, &keys, "Circles").await;
+
+        let conn = rusqlite::Connection::open(temp_dir.path().join("circles.db")).unwrap();
+        conn.execute_batch("ALTER TABLE circles RENAME TO circles_x")
+            .unwrap();
+        drop(conn);
+
+        let err = manager
+            .repair_epoch_rotation(&group_id, now_secs())
+            .await
+            .expect_err("a missing table must not read as an absent circle");
+
+        assert!(
+            matches!(err, CircleError::Storage(_)),
+            "the circles read bypassed the redactor: {err:?}"
+        );
+        assert!(
+            !has_hex_run_ge16(&err.to_string()),
+            "a long hex run reached the boundary: {err}"
+        );
+    }
+
+    /// The mapping is ON the path, not merely defined beside it.
+    ///
+    /// `circle_rotation_state` returns `CircleError::Database` natively, so a
+    /// real storage failure reaching the caller as `Database` would prove the
+    /// `map_err` had been dropped — which no string assertion could catch,
+    /// because rusqlite's own message for a missing table carries no hex.
+    #[tokio::test]
+    async fn a_storage_failure_on_the_repair_surface_arrives_redacted_not_raw() {
+        let (manager, keys, temp_dir) = create_test_manager();
+        let (group_id, _member) = create_confirmed_circle(&manager, &keys, "Redaction").await;
+
+        // Break the table the rotation-state read depends on, from a second
+        // connection to the same unencrypted file.
+        let conn = rusqlite::Connection::open(temp_dir.path().join("circles.db")).unwrap();
+        conn.execute_batch("DROP TABLE circle_health").unwrap();
+        drop(conn);
+
+        let err = manager
+            .repair_epoch_rotation(&group_id, now_secs())
+            .await
+            .expect_err("a missing table must not read as a clean rotation state");
+
+        assert!(
+            matches!(err, CircleError::Storage(_)),
+            "the storage error bypassed the redactor: {err:?}"
+        );
+        assert!(
+            !has_hex_run_ge16(&err.to_string()),
+            "a long hex run reached the boundary: {err}"
+        );
+    }
 
     // ── Construction helpers (new-stack idiom) ───────────────────────────────
 
@@ -5636,6 +6630,1332 @@ mod tests {
         );
     }
 
+    // ── Epoch-rotation repair (Unit E / C4) ──────────────────────────────────
+
+    /// A clock far enough past every rotation window for gates 3, 4 and 6 to be
+    /// open on a circle whose rows were written "now".
+    fn past_every_rotation_window() -> u64 {
+        now_secs() + crate::circle::rotation::ROTATION_MIN_EPOCH_AGE_SECS + 3_600
+    }
+
+    /// The `nostr_group_id` of an in-flight `EpochChanged` observation.
+    fn rotation_state(
+        manager: &CircleManager,
+        ngid: &[u8; 32],
+    ) -> crate::circle::CircleRotationState {
+        manager
+            .storage
+            .circle_rotation_state(ngid)
+            .expect("rotation state")
+    }
+
+    #[tokio::test]
+    async fn a_sole_admin_repairs_a_quiet_circle_and_the_peer_applies_the_commit() {
+        let tp = setup_two_party_circle().await;
+        let before = tp
+            .alice
+            .session()
+            .epoch(&tp.mls_group_id)
+            .await
+            .expect("alice epoch");
+
+        let RepairRotationOutcome::Rotated(commit) = tp
+            .alice
+            .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+            .await
+            .expect("the repair must not fail for the sole admin of a quiet circle")
+        else {
+            panic!("the sole admin of a quiet circle must stage a rotation");
+        };
+
+        tp.alice
+            .confirm_published(commit.pending)
+            .await
+            .expect("confirm the rotation on a relay ack");
+        tp.bob
+            .decrypt_location(&commit.commit_event)
+            .await
+            .expect("bob ingests the rotation commit");
+
+        for (who, mgr) in [("alice", &tp.alice), ("bob", &tp.bob)] {
+            assert_eq!(
+                mgr.session()
+                    .epoch(&tp.mls_group_id)
+                    .await
+                    .unwrap_or_else(|e| panic!("{who} epoch: {e}")),
+                before + 1,
+                "{who} must have applied the rotation"
+            );
+        }
+        // The commit is byte-identical policy, so the admin set is unchanged —
+        // this is a ratchet reset, not a membership or permission change.
+        assert_eq!(
+            tp.bob
+                .session()
+                .admin_pubkeys(&tp.mls_group_id)
+                .await
+                .expect("bob admins"),
+            vec![tp.alice_keys.public_key().to_bytes()],
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repair_no_relay_acked_applies_nothing_and_leaves_the_circle_sending() {
+        // Publish-before-apply (Rule 13) on the rotation path. A staged commit
+        // that no relay accepted must roll back to the SAME epoch — otherwise
+        // the author is a branch ahead of every peer, which is the fork the
+        // engine's in-memory `committed_from` cannot reconcile across a restart
+        // — and the circle must still be able to send afterwards.
+        let tp = setup_two_party_circle().await;
+        let before = tp
+            .alice
+            .session()
+            .epoch(&tp.mls_group_id)
+            .await
+            .expect("alice epoch");
+
+        let RepairRotationOutcome::Rotated(commit) = tp
+            .alice
+            .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+            .await
+            .expect("repair")
+        else {
+            panic!("expected a staged rotation");
+        };
+        tp.alice
+            .publish_failed(commit.pending)
+            .await
+            .expect("zero acks roll the rotation back");
+
+        assert_eq!(
+            tp.alice
+                .session()
+                .epoch(&tp.mls_group_id)
+                .await
+                .expect("alice epoch"),
+            before,
+            "a rotation no relay acked must leave the epoch exactly where it was"
+        );
+        assert_eq!(
+            tp.bob
+                .session()
+                .epoch(&tp.mls_group_id)
+                .await
+                .expect("bob epoch"),
+            before,
+            "control: the peer never saw the commit, so it cannot have moved either"
+        );
+
+        // The circle still SENDS — a rolled-back rotation must not leave the
+        // group pinned in `PendingPublish`, where every later send would fail.
+        let (event, ngid, _relays) = tp
+            .alice
+            .encrypt_location(
+                &tp.mls_group_id,
+                &tp.alice_keys.public_key(),
+                &LocationMessage::new(51.5, -0.12),
+                60,
+            )
+            .await
+            .expect("a rolled-back rotation must not gate the next location send");
+        assert_eq!(ngid, tp.nostr_group_id);
+        let results = tp
+            .bob
+            .decrypt_location(&event)
+            .await
+            .expect("bob ingests the location");
+        assert!(
+            results
+                .iter()
+                .any(|r| matches!(r, LocationMessageResult::Location { .. })),
+            "the peer must still decrypt what the author sends after a rolled-back repair"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_repair_emits_no_phantom_group_state_change_on_either_side() {
+        // A byte-identical admin policy diffs to nothing, so neither the author
+        // nor the peer may synthesize a kind-1210 "admins changed" row. A phantom
+        // one would tell every member that somebody's permissions changed when
+        // nothing did — a documentation-accuracy failure the user reads directly.
+        let tp = setup_two_party_circle().await;
+        let RepairRotationOutcome::Rotated(commit) = tp
+            .alice
+            .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+            .await
+            .expect("repair")
+        else {
+            panic!("expected a staged rotation");
+        };
+
+        // Author side: the session's own confirm effects, unfolded.
+        let author = tp
+            .alice
+            .session()
+            .confirm_published(commit.pending)
+            .await
+            .expect("confirm");
+        assert!(
+            !author
+                .events
+                .iter()
+                .any(|e| matches!(e, GroupEvent::GroupStateChanged { .. })),
+            "the author's confirm must emit no GroupStateChanged: {:?}",
+            author.events
+        );
+        assert!(
+            author
+                .events
+                .iter()
+                .any(|e| matches!(e, GroupEvent::EpochChanged { .. })),
+            "control: the confirm must still report the epoch change"
+        );
+
+        // Peer side: the raw ingest effects, before any folding.
+        let peer = tp
+            .bob
+            .session()
+            .process_event(&commit.commit_event)
+            .await
+            .expect("bob ingests");
+        let peer = peer.ingested().expect("the commit reached the engine");
+        assert!(
+            !peer
+                .effects
+                .events
+                .iter()
+                .any(|e| matches!(e, GroupEvent::GroupStateChanged { .. })),
+            "the peer's ingest must emit no GroupStateChanged: {:?}",
+            peer.effects.events
+        );
+        assert!(
+            peer.effects
+                .events
+                .iter()
+                .any(|e| matches!(e, GroupEvent::EpochChanged { .. })),
+            "control: the peer must still report the epoch change"
+        );
+    }
+
+    #[test]
+    fn the_repair_outcome_debug_carries_no_identifier() {
+        // `Rotated` wraps a `CommitToPublish` whose commit event's `h` tag is the
+        // circle's `nostr_group_id`; a derived `Debug` would print it through any
+        // stray log line (Rules 4/8). Structural, so a later payload addition has
+        // to face this assertion.
+        assert_eq!(
+            format!(
+                "{:?}",
+                RepairRotationOutcome::Skipped(SkipReason::NotSoleAdmin)
+            ),
+            "Skipped(NotSoleAdmin)"
+        );
+        assert_eq!(
+            format!(
+                "{:?}",
+                RepairRotationOutcome::Deferred {
+                    unresolved_inputs: 2,
+                    discarded_intents: 1,
+                    repaired: false,
+                    work: DeferredWork::default(),
+                }
+            ),
+            "Deferred { unresolved_inputs: 2, discarded_intents: 1, repaired: false, \
+             work: DeferredWork { commits_count: 0, proposals_count: 0 } }"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_admin_is_declined_the_repair() {
+        // The honest limit of this unit, pinned: a stuck NON-admin has no
+        // self-service repair, because every commit-producing intent is
+        // admin-gated. It must be told so, not handed an opaque engine error.
+        let tp = setup_two_party_circle().await;
+        assert!(matches!(
+            tp.bob
+                .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+                .await
+                .expect("a declined repair is an outcome, not a failure"),
+            RepairRotationOutcome::Skipped(SkipReason::NotSoleAdmin)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_group_with_a_commit_already_staged_declines_the_repair_as_busy() {
+        // Gate 2's interim mechanism, end to end. `AccountDeviceSession` exposes
+        // no epoch-state getter at MDK `e391adc`, so a non-`Stable` group is only
+        // discoverable by attempting the send: the engine answers
+        // `InvalidTransition { from: "PendingPublish", .. }`, which
+        // `SessionManager::update_admin_policy` maps to the typed
+        // `NostrError::EpochNotStable` BEFORE `map_mls_err` stringifies it.
+        // Reaching that arm requires a real staged commit, which is what this
+        // test manufactures — the token-set tests pin the classifier, and this
+        // pins that the classifier is actually on the path.
+        let tp = setup_two_party_circle().await;
+        let staged = tp
+            .alice
+            .propose_admin_handoff(&tp.mls_group_id, &tp.bob_keys.public_key())
+            .await
+            .expect("stage a handoff commit and leave it unconfirmed");
+
+        assert!(
+            matches!(
+                tp.alice
+                    .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+                    .await
+                    .expect("a busy group is a typed outcome, never an opaque MLS error"),
+                RepairRotationOutcome::Skipped(SkipReason::EpochNotStable)
+            ),
+            "a group with a commit already staged must decline the repair as busy"
+        );
+
+        // Control, so the assertion above is attributable to the epoch state and
+        // not to some other gate: resolving the staged commit makes the very same
+        // call succeed.
+        tp.alice
+            .publish_failed(staged.pending)
+            .await
+            .expect("roll the staged handoff back");
+        let RepairRotationOutcome::Rotated(commit) = tp
+            .alice
+            .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+            .await
+            .expect("outcome")
+        else {
+            panic!("once the group is Stable again the repair must go through");
+        };
+        tp.alice
+            .publish_failed(commit.pending)
+            .await
+            .expect("leave nothing staged");
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_repair_records_the_rate_limit_and_a_rolled_back_one_does_not() {
+        // Publish-before-apply applied to bookkeeping: a repair no relay accepted
+        // reset nobody's ratchet, so it must not lock the user out of retrying
+        // for a day — while a confirmed one must.
+        let tp = setup_two_party_circle().await;
+        let now = past_every_rotation_window();
+
+        let RepairRotationOutcome::Rotated(rolled_back) = tp
+            .alice
+            .repair_epoch_rotation(&tp.mls_group_id, now)
+            .await
+            .expect("repair")
+        else {
+            panic!("expected a staged rotation");
+        };
+        tp.alice
+            .publish_failed(rolled_back.pending)
+            .await
+            .expect("roll the rotation back");
+        assert_eq!(
+            rotation_state(&tp.alice, &tp.nostr_group_id).last_rotation_at_ms,
+            None,
+            "a rolled-back repair must spend nothing"
+        );
+
+        let RepairRotationOutcome::Rotated(confirmed) = tp
+            .alice
+            .repair_epoch_rotation(&tp.mls_group_id, now)
+            .await
+            .expect("the rolled-back repair must be immediately retryable")
+        else {
+            panic!("expected a second staged rotation");
+        };
+        let wall_clock_before_confirm = chrono::Utc::now().timestamp_millis();
+        tp.alice
+            .confirm_published(confirmed.pending)
+            .await
+            .expect("confirm");
+        let recorded = rotation_state(&tp.alice, &tp.nostr_group_id)
+            .last_rotation_at_ms
+            .expect("a confirmed repair must spend the circle's rate limit");
+        assert!(
+            recorded >= wall_clock_before_confirm,
+            "the rate limit is stamped at the CONFIRM, not at the stage"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_recent_rotation_record_declines_the_repair() {
+        // Gate 6 on its own, with every other gate open: the rate limit must
+        // hold even on a circle whose epoch-change observation is missing (a
+        // circle repaired on another device, a storage row lost).
+        let tp = setup_two_party_circle().await;
+        let now = past_every_rotation_window();
+        tp.alice
+            .storage
+            .note_rotation_confirmed(
+                &tp.nostr_group_id,
+                i64::try_from(now).expect("clock fits") * 1_000,
+            )
+            .expect("seed a rotation record");
+
+        assert!(matches!(
+            tp.alice
+                .repair_epoch_rotation(&tp.mls_group_id, now)
+                .await
+                .expect("outcome"),
+            RepairRotationOutcome::Skipped(SkipReason::RotatedRecently)
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_epoch_change_is_recorded_by_the_author_and_by_the_peer() {
+        // The durable input gate 3 reads. Both sides must record it, because
+        // either device may be the one holding the exhausted ratchet.
+        let tp = setup_two_party_circle().await;
+        assert_eq!(
+            rotation_state(&tp.alice, &tp.nostr_group_id).last_epoch_change_seen_at_ms,
+            None,
+            "control: creating a circle is not an epoch CHANGE"
+        );
+        assert_eq!(
+            rotation_state(&tp.bob, &tp.nostr_group_id).last_epoch_change_seen_at_ms,
+            None,
+        );
+
+        let RepairRotationOutcome::Rotated(commit) = tp
+            .alice
+            .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+            .await
+            .expect("repair")
+        else {
+            panic!("expected a staged rotation");
+        };
+        tp.alice
+            .confirm_published(commit.pending)
+            .await
+            .expect("confirm");
+        tp.bob
+            .decrypt_location(&commit.commit_event)
+            .await
+            .expect("bob ingests");
+
+        assert!(
+            rotation_state(&tp.alice, &tp.nostr_group_id)
+                .last_epoch_change_seen_at_ms
+                .is_some(),
+            "the author records the epoch change its own confirm applied"
+        );
+        assert!(
+            rotation_state(&tp.bob, &tp.nostr_group_id)
+                .last_epoch_change_seen_at_ms
+                .is_some(),
+            "the peer records the epoch change it ingested"
+        );
+
+        // Gate 3 now declines a repair on the CURRENT clock, without needing the
+        // rotation record: an epoch that just moved has fresh ratchets.
+        assert!(matches!(
+            tp.alice
+                .repair_epoch_rotation(&tp.mls_group_id, now_secs())
+                .await
+                .expect("outcome"),
+            RepairRotationOutcome::Skipped(SkipReason::RecentEpochChange)
+        ));
+    }
+
+    #[tokio::test]
+    async fn recent_inbound_traffic_declines_the_repair() {
+        let tp = setup_two_party_circle().await;
+        let now = past_every_rotation_window();
+        let recent_ms = i64::try_from(now).expect("clock fits") * 1_000;
+        tp.alice
+            .storage
+            .note_inbound_group_event(&tp.nostr_group_id, recent_ms)
+            .expect("record an inbound group event");
+
+        assert!(matches!(
+            tp.alice
+                .repair_epoch_rotation(&tp.mls_group_id, now)
+                .await
+                .expect("outcome"),
+            RepairRotationOutcome::Skipped(SkipReason::RecentInboundTraffic)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_decrypted_peer_location_is_the_inbound_traffic_the_gate_counts() {
+        // The stamp is written from the RECEIVE funnel, on the engine's own
+        // authenticated event batch — not from a bare "a kind-445 arrived", and
+        // not from the delivery-health column, which is stamped by Dart only
+        // after a location was decrypted AND persisted and is therefore
+        // structurally absent on the very circles this repair exists to fix.
+        let tp = setup_two_party_circle().await;
+        assert_eq!(
+            rotation_state(&tp.alice, &tp.nostr_group_id).last_inbound_event_at_ms,
+            None,
+            "control: nothing has been received yet"
+        );
+
+        let (event, _ngid, _relays) = tp
+            .bob
+            .encrypt_location(
+                &tp.mls_group_id,
+                &tp.bob_keys.public_key(),
+                &LocationMessage::new(48.85, 2.35),
+                60,
+            )
+            .await
+            .expect("bob sends");
+        tp.alice
+            .decrypt_location(&event)
+            .await
+            .expect("alice receives");
+
+        let stamped = rotation_state(&tp.alice, &tp.nostr_group_id)
+            .last_inbound_event_at_ms
+            .expect("receiving a peer location must stamp the inbound observation");
+        // And the gate reads it: a circle that just heard from a peer is not
+        // quiescent, whatever the rotation windows say.
+        let now = secs_from_ms(Some(stamped)).expect("a positive stamp");
+        assert!(matches!(
+            tp.alice
+                .repair_epoch_rotation(&tp.mls_group_id, now)
+                .await
+                .expect("outcome"),
+            RepairRotationOutcome::Skipped(SkipReason::RecentInboundTraffic)
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_uncommitted_peer_proposal_declines_the_repair() {
+        // The auto-committer race, closed exactly. Bob's `SelfRemove` proposal
+        // is committable by ANY remaining member (the auto-committer is not
+        // admin-gated), so while it is stored uncommitted, Alice must not author
+        // a competing commit at the same epoch — however quiet the circle looks.
+        let tp = setup_two_party_circle().await;
+        // Bob must leave the admin set first? He is not an admin, so he can
+        // SelfRemove directly.
+        let proposal = tp
+            .bob
+            .propose_leave(&tp.mls_group_id)
+            .await
+            .expect("bob proposes to leave");
+        tp.alice
+            .session()
+            .process_event(&proposal)
+            .await
+            .expect("alice ingests the proposal");
+
+        assert!(matches!(
+            tp.alice
+                .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+                .await
+                .expect("outcome"),
+            RepairRotationOutcome::Skipped(SkipReason::PendingProposal)
+        ));
+    }
+
+    /// Leaves Alice — still the circle's sole admin — one epoch BEHIND Bob with
+    /// a real future-epoch application row in her store, which is the one shape
+    /// the engine deliberately never resolves and therefore the one that gates
+    /// every send for the circle.
+    ///
+    /// The divergence is produced the way production produces it: a commit the
+    /// relays actually accepted (so Bob applied it) that this device never
+    /// learned of and rolled back — `docs/EPOCH_ROTATION_REPAIR_PLAN.md` §2,
+    /// the cross-restart twin fork. A rolled-back rotation spends no rate limit
+    /// and records no epoch change, so every rotation gate is still open
+    /// afterwards.
+    async fn send_gated_sole_admin_circle() -> TwoPartyCircle {
+        let tp = setup_two_party_circle().await;
+        let RepairRotationOutcome::Rotated(delivered) = tp
+            .alice
+            .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+            .await
+            .expect("repair")
+        else {
+            panic!("expected a staged rotation");
+        };
+        tp.bob
+            .decrypt_location(&delivered.commit_event)
+            .await
+            .expect("bob applies the commit the relays accepted");
+        tp.alice
+            .publish_failed(delivered.pending)
+            .await
+            .expect("alice never learned of the ack and rolls back");
+
+        let ahead = tp
+            .bob
+            .session()
+            .epoch(&tp.mls_group_id)
+            .await
+            .expect("bob epoch");
+        assert_eq!(
+            ahead,
+            tp.alice
+                .session()
+                .epoch(&tp.mls_group_id)
+                .await
+                .expect("alice epoch")
+                + 1,
+            "fixture: bob must be exactly one epoch ahead of the sole admin"
+        );
+
+        tp.bob
+            .encrypt_location(
+                &tp.mls_group_id,
+                &tp.bob_keys.public_key(),
+                &LocationMessage::new(9.0, 9.0),
+                60,
+            )
+            .await
+            .expect("bob sends at the higher epoch");
+        let row = tp
+            .bob
+            .session()
+            .stored_convergence_input_for_test(
+                &tp.mls_group_id,
+                crate::nostr::mls::types::OpenMlsContentKind::Application,
+                ahead,
+            )
+            .await
+            .expect("bob's own row at the higher epoch");
+        tp.alice
+            .session()
+            .stage_convergence_input_for_test(
+                &row,
+                crate::nostr::mls::types::MessageState::Retryable,
+                0,
+            )
+            .await
+            .expect("alice stores the future-epoch row she could not decrypt");
+        tp
+    }
+
+    #[tokio::test]
+    async fn a_rotation_racing_a_departure_at_one_epoch_resolves_to_the_rotation() {
+        // What ACTUALLY closes the same-epoch race for a proposal that reached a
+        // peer but not us — the engine, not gate 4's clock.
+        //
+        // Both commits carry the same `source_epoch`, so `CommitOrderingKey::cmp`
+        // breaks the tie on `priority`, and the LOWEST key wins
+        // (`fork_recovery.rs`: a candidate `>=` the incumbent loses). The repair
+        // is an `UpdateAppComponents(admin-policy.v1)`, which
+        // `commit_ordering_priority_for_staged` classifies `Privileged`; a
+        // SelfRemove-only auto-commit is `Ordinary`, and `Privileged` is declared
+        // first so it sorts below. The rotation therefore wins on EVERY replica,
+        // and the departure is re-driven one epoch later from the durable
+        // `LeaveRequest`.
+        //
+        // This is the test that fails if MDK ever reorders
+        // `CommitOrderingPriority` — at which point the residual stops being
+        // "one extra epoch" and the gate-4 reasoning has to be redone.
+        let tp = setup_two_party_circle().await;
+        let start = tp
+            .alice
+            .session()
+            .epoch(&tp.mls_group_id)
+            .await
+            .expect("alice epoch");
+
+        // Alice stages her repair FIRST, at the current epoch, without having
+        // seen Bob's proposal — the exact case gate 4 cannot cover.
+        let RepairRotationOutcome::Rotated(rotation) = tp
+            .alice
+            .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+            .await
+            .expect("repair")
+        else {
+            panic!("expected a staged rotation");
+        };
+
+        // Bob departs; the auto-committer stages the eviction at the SAME source
+        // epoch on a peer that has not seen the rotation.
+        let proposal = tp
+            .bob
+            .propose_leave(&tp.mls_group_id)
+            .await
+            .expect("bob proposes to leave");
+
+        // Both commits are now published and both members ingest both.
+        tp.alice
+            .confirm_published(rotation.pending)
+            .await
+            .expect("alice's rotation is acked and applied");
+        let bob_saw_rotation = tp
+            .bob
+            .decrypt_location_collecting_commits(&rotation.commit_event)
+            .await
+            .expect("bob ingests the rotation");
+        for staged in bob_saw_rotation.auto_commits {
+            // Bob may have staged his own eviction alongside; it lost, so it is
+            // rolled back rather than published.
+            let _ = tp.bob.publish_failed(staged.pending).await;
+        }
+        let alice_saw_departure = tp
+            .alice
+            .decrypt_location_collecting_commits(&proposal)
+            .await
+            .expect("alice ingests the departure proposal");
+
+        // The rotation is the branch BOTH devices are on.
+        let alice_epoch = tp
+            .alice
+            .session()
+            .epoch(&tp.mls_group_id)
+            .await
+            .expect("alice epoch");
+        assert!(
+            alice_epoch > start,
+            "the rotation must have advanced the author's epoch"
+        );
+        assert_eq!(
+            tp.bob
+                .session()
+                .epoch(&tp.mls_group_id)
+                .await
+                .expect("bob epoch"),
+            start + 1,
+            "the peer must land on the rotation's epoch, not on a competing branch"
+        );
+
+        assert_departure_completes_one_epoch_later(&tp, &alice_saw_departure).await;
+    }
+
+    /// The second half of the race test: the losing departure is not dropped —
+    /// Bob's durable `LeaveRequest` re-proposes it at the new epoch on his next
+    /// convergence drain, and Alice commits that.
+    async fn assert_departure_completes_one_epoch_later(
+        tp: &TwoPartyCircle,
+        alice_saw_departure: &DecryptedIngest,
+    ) {
+        // Bob's proposal was made at the OLD epoch, so the rotation superseded
+        // it — nothing Alice can commit.
+        assert!(
+            alice_saw_departure.auto_commits.is_empty(),
+            "a proposal below the tip is superseded, not committable"
+        );
+        let bob_hex = hex::encode(tp.bob_keys.public_key().to_bytes());
+        assert!(
+            tp.alice
+                .session()
+                .member_pubkeys(&tp.mls_group_id)
+                .await
+                .expect("alice roster")
+                .contains(&bob_hex),
+            "control: bob is still a member at this point, so the assertion below is real"
+        );
+
+        // And the departure is not LOST: Bob's durable `LeaveRequest` re-proposes
+        // it at the new epoch on his next convergence drain, which is the
+        // engine's own re-drive, not anything Haven schedules.
+        let redriven = {
+            let effects = tp
+                .bob
+                .session()
+                .advance_convergence(&tp.mls_group_id)
+                .await
+                .expect("bob's convergence re-drives his leave request");
+            effects
+                .publish
+                .iter()
+                .find_map(|work| match work {
+                    PublishWork::Proposal { msg } => {
+                        SessionManager::transport_message_to_event(msg).ok()
+                    }
+                    _ => None,
+                })
+                .expect("the durable LeaveRequest must be re-proposed at the new epoch")
+        };
+        let staged = tp
+            .alice
+            .decrypt_location_collecting_commits(&redriven)
+            .await
+            .expect("alice ingests the re-proposed departure");
+        for eviction in staged.auto_commits {
+            tp.alice
+                .confirm_published(eviction.pending)
+                .await
+                .expect("alice publishes and confirms the eviction");
+        }
+        assert!(
+            !tp.alice
+                .session()
+                .member_pubkeys(&tp.mls_group_id)
+                .await
+                .expect("alice roster")
+                .contains(&bob_hex),
+            "the departure must complete one epoch later, never be dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repair_is_possible_again_once_the_departure_commits() {
+        // The pending-proposal gate must CLEAR. A stored proposal row is retired
+        // by nothing — the engine's ingest arm stores it and never marks it
+        // `Processed` — so what makes it stop counting is the group moving past
+        // the epoch it was made for. If that ever stopped working, every circle
+        // that has ever had a departure would become permanently unrepairable,
+        // and silently, because a skip is indistinguishable from a healthy
+        // circle.
+        let tp = setup_two_party_circle().await;
+        let proposal = tp
+            .bob
+            .propose_leave(&tp.mls_group_id)
+            .await
+            .expect("bob proposes to leave");
+
+        // The real receive path: ingesting the proposal STAGES the eviction the
+        // auto-committer scheduled, so the engine is now mid-commit.
+        let ingest = tp
+            .alice
+            .decrypt_location_collecting_commits(&proposal)
+            .await
+            .expect("alice ingests the proposal");
+        let [eviction] = <[CommitToPublish; 1]>::try_from(ingest.auto_commits)
+            .unwrap_or_else(|c| panic!("expected exactly one staged eviction, got {}", c.len()));
+        assert!(
+            matches!(
+                tp.alice
+                    .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+                    .await
+                    .expect("outcome"),
+                RepairRotationOutcome::Skipped(SkipReason::EpochNotStable)
+            ),
+            "a circle with an eviction already staged must not also stage a rotation"
+        );
+
+        // Resolve the departure through the real Rule-13 ladder.
+        tp.alice
+            .confirm_published(eviction.pending)
+            .await
+            .expect("confirm the eviction on a relay ack");
+
+        assert!(
+            !tp.alice
+                .session()
+                .has_pending_proposal(&tp.mls_group_id)
+                .await
+                .expect("read the proposal window"),
+            "moving past the proposal's epoch must clear the gate"
+        );
+        assert!(matches!(
+            tp.alice
+                .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+                .await
+                .expect("outcome"),
+            RepairRotationOutcome::Rotated(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_future_epoch_proposal_still_gates_the_repair() {
+        // The proposal bound is `source_epoch >= tip`, not `== tip`, and the
+        // upper half matters: a proposal sealed ABOVE this device's tip becomes
+        // committable the moment the device catches up, so narrowing the bound
+        // to equality would let a repair race a departure the device is already
+        // holding but has not yet caught up to.
+        //
+        // Built the way Unit B builds its future-epoch fixtures: a REAL row a
+        // real device really stored, copied verbatim into a device whose tip is
+        // below it.
+        let tp = send_gated_sole_admin_circle().await;
+        let ahead = tp
+            .bob
+            .session()
+            .epoch(&tp.mls_group_id)
+            .await
+            .expect("bob epoch");
+        assert_eq!(
+            ahead,
+            tp.alice
+                .session()
+                .epoch(&tp.mls_group_id)
+                .await
+                .expect("alice epoch")
+                + 1,
+            "fixture: bob must be one epoch ahead of alice"
+        );
+        assert!(
+            !tp.alice
+                .session()
+                .has_pending_proposal(&tp.mls_group_id)
+                .await
+                .expect("read the proposal window"),
+            "control: nothing gates before the proposal is staged"
+        );
+
+        tp.bob
+            .propose_leave(&tp.mls_group_id)
+            .await
+            .expect("bob proposes to leave at his own, higher epoch");
+        let row = tp
+            .bob
+            .session()
+            .stored_convergence_input_for_test(
+                &tp.mls_group_id,
+                crate::nostr::mls::types::OpenMlsContentKind::Proposal,
+                ahead,
+            )
+            .await
+            .expect("bob's own proposal row at the higher epoch");
+        tp.alice
+            .session()
+            .stage_convergence_input_for_test(
+                &row,
+                crate::nostr::mls::types::MessageState::Created,
+                0,
+            )
+            .await
+            .expect("alice stores the future-epoch proposal");
+
+        assert!(
+            tp.alice
+                .session()
+                .has_pending_proposal(&tp.mls_group_id)
+                .await
+                .expect("read the proposal window"),
+            "a proposal above the tip is still committable once this device catches up"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_pending_proposal_gate_survives_a_process_restart() {
+        // The gate reads DURABLE storage, not the engine's in-memory
+        // auto-commit schedule — which is exactly why it still holds after the
+        // force-stop-and-relaunch that is the only lever a user actually has.
+        let dir = TempDir::new().unwrap();
+        let alice_keys = Keys::generate();
+        let bob_dir = TempDir::new().unwrap();
+        let bob_keys = Keys::generate();
+        let relays = vec!["wss://relay.test.com".to_string()];
+
+        let mls_group_id = {
+            let alice = CircleManager::new_unencrypted(dir.path(), &alice_keys).unwrap();
+            let bob = CircleManager::new_unencrypted(bob_dir.path(), &bob_keys).unwrap();
+            let bob_kp_event = make_kp_event(&bob, &bob_keys, &relays).await;
+            let creation = alice
+                .create_circle(
+                    &alice_keys,
+                    vec![MemberKeyPackage {
+                        key_package_event: bob_kp_event,
+                        inbox_relays: relays.clone(),
+                        nip65_relays: vec![],
+                    }],
+                    &CircleConfig::new("Restart Circle").with_relays(relays.clone()),
+                    &relays,
+                )
+                .await
+                .expect("create");
+            alice
+                .confirm_published(creation.pending)
+                .await
+                .expect("confirm create");
+            let welcome = creation.welcome_events.first().expect("one welcome");
+            bob.process_gift_wrapped_invitation(&bob_keys, &welcome.event)
+                .await
+                .expect("bob holds welcome");
+            bob.accept_invitation(&welcome.event.id)
+                .await
+                .expect("bob accepts");
+
+            let gid = creation.circle.mls_group_id.clone();
+            let proposal = bob
+                .propose_leave(&gid)
+                .await
+                .expect("bob proposes to leave");
+            // Ingest WITHOUT resolving the eviction, so the proposal row is left
+            // exactly as a process killed mid-departure would leave it.
+            let ingest = alice
+                .decrypt_location_collecting_commits(&proposal)
+                .await
+                .expect("alice ingests the proposal");
+            for commit in ingest.auto_commits {
+                alice
+                    .publish_failed(commit.pending)
+                    .await
+                    .expect("nothing was published, so nothing may be applied");
+            }
+            gid
+        };
+
+        // Both managers are dropped here: the session guard is released, every
+        // in-memory schedule is gone, and only SQLCipher survives.
+        let alice = CircleManager::new_unencrypted(dir.path(), &alice_keys)
+            .expect("reopen the same database");
+        assert!(
+            alice
+                .session()
+                .has_pending_proposal(&mls_group_id)
+                .await
+                .expect("read the proposal window"),
+            "a stored proposal must still gate after a restart"
+        );
+        assert!(matches!(
+            alice
+                .repair_epoch_rotation(&mls_group_id, past_every_rotation_window())
+                .await
+                .expect("outcome"),
+            RepairRotationOutcome::Skipped(SkipReason::PendingProposal)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_rotation_whose_commit_cannot_be_serialized_is_rolled_back() {
+        // Rule 13's other edge. If the staged commit's transport message will
+        // not turn into an event, dropping the `PendingStateRef` would leave the
+        // group in `PendingPublish` — where every later send fails the engine's
+        // "requires Stable" gate, permanently, for a serialization error.
+        use cgka_traits::transport::{TransportEnvelope, TransportSource};
+
+        let tp = setup_two_party_circle().await;
+        let effects = tp
+            .alice
+            .session()
+            .update_admin_policy(
+                &tp.mls_group_id,
+                &tp.alice
+                    .session()
+                    .admin_pubkeys(&tp.mls_group_id)
+                    .await
+                    .expect("admins"),
+            )
+            .await
+            .expect("stage a real rotation");
+        let pending = effects
+            .publish
+            .iter()
+            .find_map(|work| match work {
+                PublishWork::GroupEvolution { pending, .. } => Some(*pending),
+                _ => None,
+            })
+            .expect("the engine staged a commit");
+
+        // The SAME pending ref the engine really holds, carried by a message
+        // whose payload is not the JSON the peeler DTO parses.
+        let unserializable = SessionEffects {
+            events: Vec::new(),
+            publish: vec![PublishWork::GroupEvolution {
+                msg: TransportMessage {
+                    id: cgka_traits::types::MessageId::new(vec![7; 32]),
+                    payload: b"not json".to_vec(),
+                    timestamp: cgka_traits::transport::Timestamp(0),
+                    causal_deps: Vec::new(),
+                    source: TransportSource("test".to_string()),
+                    envelope: TransportEnvelope::GroupMessage {
+                        transport_group_id: tp.nostr_group_id.to_vec(),
+                    },
+                },
+                welcomes: Vec::new(),
+                pending,
+            }],
+            queued: Vec::new(),
+            pending_convergence: Vec::new(),
+        };
+
+        tp.alice
+            .take_rotation_commit(unserializable)
+            .await
+            .expect_err("an unserializable commit must not be reported as staged");
+
+        // The promise: the group is Stable again, so the circle still sends.
+        tp.alice
+            .encrypt_location(
+                &tp.mls_group_id,
+                &tp.alice_keys.public_key(),
+                &LocationMessage::new(51.5, -0.12),
+                60,
+            )
+            .await
+            .expect("a rolled-back rotation must leave the circle able to send");
+    }
+
+    #[tokio::test]
+    async fn an_undecryptable_peer_message_does_not_hold_the_repair_shut() {
+        // The mirror-image defect of an inert quiescence gate, and the reason
+        // the inbound stamp is written from the engine's AUTHENTICATED event
+        // batch rather than from "a kind-445 arrived": a circle whose sender
+        // ratchet is exhausted receives a peer publish on every cadence tick and
+        // decrypts none of them. If those stamped the gate, the repair would be
+        // unreachable on exactly the circles it exists to fix.
+        let tp = setup_two_party_circle().await;
+        // A 445 for this circle that no member can decrypt: real routing, real
+        // kind, ciphertext the engine cannot peel.
+        let (real, _ngid, _relays) = tp
+            .bob
+            .encrypt_location(
+                &tp.mls_group_id,
+                &tp.bob_keys.public_key(),
+                &LocationMessage::new(1.0, 2.0),
+                60,
+            )
+            .await
+            .expect("bob sends");
+        let forged = nostr::EventBuilder::new(real.kind, "ZGVmaW5pdGVseSBub3QgY2lwaGVydGV4dA==")
+            .tags(real.tags.clone())
+            .sign_with_keys(&Keys::generate())
+            .expect("sign the undecryptable event");
+        let _ = tp.alice.decrypt_location(&forged).await;
+
+        assert_eq!(
+            rotation_state(&tp.alice, &tp.nostr_group_id).last_inbound_event_at_ms,
+            None,
+            "an event the engine could not authenticate must not stamp the quiescence gate — \
+             it is mintable by any observer of the circle's public `h` tag"
+        );
+        assert!(matches!(
+            tp.alice
+                .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+                .await
+                .expect("outcome"),
+            RepairRotationOutcome::Rotated(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_repair_discard_removes_the_no_op_policy_and_nothing_else() {
+        // The DIRECT test of the take-back. Reaching it through
+        // `repair_epoch_rotation` cannot exercise its discriminator, because the
+        // pre-check returns first on every send-gated shape a test can build —
+        // so a `panic!` on entry to the discard used to stay green.
+        let tp = setup_two_party_circle().await;
+        let alice = tp.alice_keys.public_key().to_bytes();
+        let bob = tp.bob_keys.public_key().to_bytes();
+
+        // The repair's own payload: the CURRENT policy, re-stated.
+        let no_op = SessionManager::admin_policy_payload_for_test(&[alice])
+            .expect("encode the current policy");
+        // A real membership change: durable user intent parked behind the same
+        // send gate, which must survive.
+        let handoff =
+            SessionManager::admin_policy_payload_for_test(&[alice, bob]).expect("encode a handoff");
+        assert_ne!(no_op, handoff, "fixture: the two payloads must differ");
+
+        for data in [no_op, handoff.clone()] {
+            tp.alice
+                .session()
+                .queue_admin_policy_intent_for_test(&tp.mls_group_id, data)
+                .await
+                .expect("queue an intent");
+        }
+        assert_eq!(
+            tp.alice
+                .session()
+                .queued_admin_policy_payloads_for_test(&tp.mls_group_id)
+                .await
+                .expect("read the queue")
+                .len(),
+            2,
+            "fixture: both intents must be queued before the discard runs"
+        );
+
+        let removed = tp
+            .alice
+            .session()
+            .discard_queued_repair_rotation_intents(&tp.mls_group_id, &[alice])
+            .await
+            .expect("discard");
+
+        assert_eq!(removed, 1, "exactly the repair's own intent is taken back");
+        assert_eq!(
+            tp.alice
+                .session()
+                .queued_admin_policy_payloads_for_test(&tp.mls_group_id)
+                .await
+                .expect("read the queue"),
+            vec![handoff],
+            "the survivor must be the membership change, byte for byte"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_pre_check_keeps_a_send_gated_repair_out_of_the_engines_send_path() {
+        // MUST-1's first defence, pinned independently of its second.
+        //
+        // The probe is a decoy intent carrying the repair's own payload. If the
+        // pre-check fires, the repair never issues an intent and therefore never
+        // runs the take-back, so the decoy survives untouched. If the pre-check
+        // is removed, the repair queues its own rotation, reaches the take-back,
+        // and the take-back removes the decoy along with it — because the bytes
+        // are identical. That difference is the only externally visible trace of
+        // which of the two defences ran.
+        let tp = send_gated_sole_admin_circle().await;
+        let alice = tp.alice_keys.public_key().to_bytes();
+        let decoy = SessionManager::admin_policy_payload_for_test(&[alice])
+            .expect("encode the current policy");
+        tp.alice
+            .session()
+            .queue_admin_policy_intent_for_test(&tp.mls_group_id, decoy.clone())
+            .await
+            .expect("queue the decoy");
+
+        assert!(matches!(
+            tp.alice
+                .repair_epoch_rotation(&tp.mls_group_id, now_secs())
+                .await
+                .expect("outcome"),
+            RepairRotationOutcome::Deferred { .. }
+        ));
+
+        assert_eq!(
+            tp.alice
+                .session()
+                .queued_admin_policy_payloads_for_test(&tp.mls_group_id)
+                .await
+                .expect("read the queue"),
+            vec![decoy],
+            "a repair the pre-check declined must never reach the engine's send path, so it \
+             has nothing to take back"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_send_gated_circle_defers_the_repair_instead_of_reporting_no_work() {
+        // Gate 7. A repair issued while the circle is send-gated must surface a
+        // typed deferral carrying whatever the engine staged — not the opaque
+        // "produced no GroupEvolution publish work" error, which is exactly the
+        // string every caller used to drop on the floor while the device
+        // silently stopped sharing.
+        let tp = send_gated_sole_admin_circle().await;
+        match tp
+            .alice
+            .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+            .await
+            .expect("a send-gated repair is a typed outcome, never an error")
+        {
+            RepairRotationOutcome::Deferred { .. } => {}
+            RepairRotationOutcome::Rotated(commit) => {
+                // Leave nothing staged before failing.
+                tp.alice
+                    .publish_failed(commit.pending)
+                    .await
+                    .expect("roll back");
+                panic!("the future-epoch row must gate the rotation send");
+            }
+            RepairRotationOutcome::Skipped(reason) => {
+                panic!("expected a deferral, got Skipped({reason:?})")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_send_gated_repair_banks_no_rotation_however_often_it_is_tapped() {
+        // The engine does not REJECT a send it cannot perform — it QUEUES it,
+        // durably, and drains it later into a real commit with none of the
+        // repair's gates re-evaluated and no rate limit charged. Queued intent
+        // ids are not deduplicated, so a user tapping Repair on a stalled circle
+        // would bank one epoch bump per tap, all landing in a burst the moment
+        // the circle unblocks. Nothing may be left behind.
+        let tp = send_gated_sole_admin_circle().await;
+        // A clock the sweep's age rule cannot use to retire the gating row, so
+        // the circle stays gated across all three taps and the assertion is
+        // about the banking, not about the repair having quietly succeeded.
+        let now = now_secs();
+
+        for tap in 1..=3 {
+            assert!(
+                matches!(
+                    tp.alice
+                        .repair_epoch_rotation(&tp.mls_group_id, now)
+                        .await
+                        .expect("outcome"),
+                    RepairRotationOutcome::Deferred { .. }
+                ),
+                "tap {tap} must defer"
+            );
+            assert!(
+                tp.alice
+                    .session()
+                    .queued_admin_policy_payloads_for_test(&tp.mls_group_id)
+                    .await
+                    .expect("read the queue")
+                    .is_empty(),
+                "tap {tap} left a rotation banked in the engine's outbound queue"
+            );
+        }
+
+        // Unblock the circle and drain: nothing may come out, and the epoch must
+        // not move. This is the assertion the burst would break.
+        let before = tp
+            .alice
+            .session()
+            .epoch(&tp.mls_group_id)
+            .await
+            .expect("alice epoch");
+        tp.alice
+            .sweep_unresolvable_inputs(now + 10 * 60)
+            .await
+            .expect("retire the gating row");
+        tp.alice
+            .session()
+            .advance_convergence(&tp.mls_group_id)
+            .await
+            .expect("drain whatever the queue holds");
+        assert_eq!(
+            tp.alice
+                .session()
+                .epoch(&tp.mls_group_id)
+                .await
+                .expect("alice epoch"),
+            before,
+            "unblocking a circle that was tapped three times must not replay three rotations"
+        );
+
+        // And the repair still works once, deliberately, afterwards.
+        assert!(matches!(
+            tp.alice
+                .repair_epoch_rotation(&tp.mls_group_id, past_every_rotation_window())
+                .await
+                .expect("outcome"),
+            RepairRotationOutcome::Rotated(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_send_gated_repair_leaves_a_queued_membership_change_alone() {
+        // The discard is keyed on the admin-policy payload equalling the CURRENT
+        // policy — which is what makes a repair rotation a no-op re-statement and
+        // a handoff something else entirely. A real membership intent parked
+        // behind the same send gate is durable user intent and must survive.
+        let tp = send_gated_sole_admin_circle().await;
+        let now = now_secs();
+
+        // Queue a REAL admin-policy change (promote Bob) behind the same gate.
+        let handoff = tp
+            .alice
+            .propose_admin_handoff(&tp.mls_group_id, &tp.bob_keys.public_key())
+            .await;
+        assert!(
+            handoff.is_err(),
+            "the send gate must queue the handoff rather than stage it"
+        );
+        let queued_before = tp
+            .alice
+            .session()
+            .queued_admin_policy_payloads_for_test(&tp.mls_group_id)
+            .await
+            .expect("read the queue");
+        assert_eq!(
+            queued_before.len(),
+            1,
+            "fixture: exactly one real membership intent must be queued"
+        );
+
+        assert!(matches!(
+            tp.alice
+                .repair_epoch_rotation(&tp.mls_group_id, now)
+                .await
+                .expect("outcome"),
+            RepairRotationOutcome::Deferred { .. }
+        ));
+
+        assert_eq!(
+            tp.alice
+                .session()
+                .queued_admin_policy_payloads_for_test(&tp.mls_group_id)
+                .await
+                .expect("read the queue"),
+            queued_before,
+            "the repair's discard must not touch a queued membership change"
+        );
+    }
+
     #[tokio::test]
     async fn propose_admin_handoff_rejects_a_non_member_successor() {
         // Admin is a capability over group state; granting it to someone with no
@@ -6716,6 +9036,158 @@ mod tests {
             "the single session construction site must live in \
              SessionManager::open_session, found {}",
             sites[0]
+        );
+    }
+    #[test]
+    fn every_mls_database_open_site_is_sanctioned() {
+        // The Rule-14 companion to the test above. That one pins the number of
+        // hydrated SESSIONS; this one pins the number of raw CONNECTIONS to the
+        // same encrypted database, because the stuck-convergence-input sweep
+        // needs a second one: neither `AccountDeviceSession` nor
+        // `cgka_engine::Engine` exposes its `StorageProvider`, so there is no
+        // public way to retire a stored message or discard a queued intent
+        // without opening `session.sqlite` again.
+        //
+        // A second CONNECTION is not a second SESSION — it hydrates no epoch
+        // state, no OpenMLS group and no exporter secret — but "it only touches
+        // message rows" is a property of the code, not of the type, so it is
+        // asserted here rather than left to a reviewer. A THIRD open site is the
+        // shape that would quietly break the argument.
+        // Scans PRODUCTION lines only: an in-file `#[cfg(test)] mod tests` may
+        // legitimately open a database (the wrong-key round trip in
+        // `nostr/mls/storage.rs` does), and those opens are not live sessions.
+        // Every file in this crate puts its test module last, so stopping at the
+        // first `#[cfg(test)]` is exact rather than approximate — and a file that
+        // ever stops doing so trips the "found no open sites" guard below rather
+        // than silently under-reporting.
+        fn walk_production_sites(dir: &std::path::Path, needle: &str, sites: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).expect("read_dir") {
+                let path = entry.expect("entry").path();
+                if path.is_dir() {
+                    walk_production_sites(&path, needle, sites);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let src = std::fs::read_to_string(&path).expect("read source");
+                for (i, line) in src.lines().enumerate() {
+                    let t = line.trim_start();
+                    if t.starts_with("#[cfg(test)]") {
+                        break;
+                    }
+                    if t.starts_with("//") || t.starts_with('*') {
+                        continue;
+                    }
+                    if line.contains(needle) {
+                        sites.push(format!("{}:{}", path.display(), i + 1));
+                    }
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let needle = concat!("SqliteAccountStorage", "::open_encrypted");
+        let mut production: Vec<String> = Vec::new();
+        walk_production_sites(&root, needle, &mut production);
+        // Both sanctioned opens live in the MLS module: the session's own
+        // storage (`StorageConfig::open_encrypted_storage`) and the sweep's
+        // message store (`SessionManager::open_session`).
+        assert_eq!(
+            production.len(),
+            2,
+            "exactly two MLS-database open sites are sanctioned (the session's storage \
+             and the sweep's message store); found: {production:?}"
+        );
+        for site in &production {
+            let site = site.replace('\\', "/");
+            assert!(
+                site.contains("nostr/mls/storage.rs") || site.contains("nostr/mls/manager.rs"),
+                "an MLS-database open outside the MLS module cannot be reasoned about \
+                 for Rule 14, found {site}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_sweeps_second_connection_touches_only_message_shaped_storage() {
+        // What makes the second connection safe is not that it is "read-mostly"
+        // — it writes — but WHICH tables it can reach. Message records and the
+        // outbound-intent queue carry no key material and no group state: a row
+        // in `Created`/`Retryable` was never applied, so re-stating it cannot
+        // move an epoch, consume a proposal, or touch a ratchet. Reaching
+        // `mls_storage()`, a snapshot, a welcome, or a group WRITE would break
+        // that argument instantly and silently, so the reachable surface is
+        // pinned by name here.
+        // Everything the sweep, its read-only counterpart, and the two test
+        // fixtures legitimately need. `convergence_policy` is the READ half of
+        // `ConvergencePolicyStorage` (the sweep reads the persisted rewind
+        // window); `put_convergence_policy` is deliberately absent.
+        const ALLOWED: &[&str] = &[
+            // GroupStorage (reads only)
+            "get_group",
+            "list_groups",
+            // MessageStorage
+            "get_message",
+            "put_message",
+            "list_messages",
+            "update_message_state",
+            // OutboundIntentStorage. `put_queued_outbound_intent` is reachable
+            // only from the test-only `queue_admin_policy_intent_for_test`
+            // fixture, for the same reason `put_message` is here: the engine
+            // keeps `queue_outbound_intent` `pub(crate)`, so the discard's
+            // payload discriminator has no other way to be exercised directly.
+            // Still message-shaped — the intent queue holds no key material and
+            // no group state.
+            "list_queued_outbound_intents",
+            "put_queued_outbound_intent",
+            "delete_queued_outbound_intent",
+            // ConvergencePolicyStorage (read half)
+            "convergence_policy",
+        ];
+
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/nostr/mls/manager.rs"),
+        )
+        .expect("read the session manager source");
+        let mut seen: Vec<String> = Vec::new();
+        for line in source.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") || trimmed.starts_with('*') {
+                continue;
+            }
+            for receiver in ["message_store.", "store."] {
+                let mut rest = line;
+                while let Some(at) = rest.find(receiver) {
+                    // Only a genuine method position: `.foo(` or `.foo()?`.
+                    let tail = &rest[at + receiver.len()..];
+                    let name: String = tail
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect();
+                    if !name.is_empty() {
+                        seen.push(name);
+                    }
+                    rest = &rest[at + receiver.len()..];
+                }
+            }
+        }
+        assert!(
+            !seen.is_empty(),
+            "the scanner found no message-store calls at all; the sweep was renamed or \
+             removed — update this guard rather than deleting it"
+        );
+        let mut forbidden: Vec<&String> = seen
+            .iter()
+            .filter(|name| !ALLOWED.contains(&name.as_str()))
+            .collect();
+        forbidden.sort();
+        forbidden.dedup();
+        assert!(
+            forbidden.is_empty(),
+            "the sweep's second connection reached storage outside the message-shaped \
+             surface that makes it Rule-14-safe: {forbidden:?}. Reaching group writes, \
+             snapshots, welcomes or mls_storage() from a non-session connection is a \
+             confidentiality argument this test exists to protect."
         );
     }
 }

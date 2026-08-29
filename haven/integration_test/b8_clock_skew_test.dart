@@ -167,8 +167,12 @@ const String kOkRejectionClassified = '[b8] OK rejection-classified';
 /// …and reached a consumer that can act on it, raising its verdict.
 const String kOkRejectionVerdict = '[b8] OK rejection-verdict';
 
-/// ONE member reporting a future time does NOT accuse this device's clock.
-const String kOkPeerSingleSourceSilent = '[b8] OK peer-single-source-silent';
+/// The ONLY member a two-member circle can hear from raises the verdict alone.
+const String kOkPeerSoleSourceRaised = '[b8] OK peer-sole-source-raised';
+
+/// …and is surfaced with copy that neither accuses this phone nor claims a
+/// loss, because one member establishes neither.
+const String kOkPeerSoleSourceHedged = '[b8] OK peer-sole-source-hedged';
 
 /// TWO distinct MLS-authenticated members agreeing DOES raise the verdict.
 const String kOkPeerCorroborated = '[b8] OK peer-corroborated';
@@ -619,11 +623,30 @@ void main() {
         peerTimestamp: sampleA.timestamp,
       );
       gate(
-        kOkPeerSingleSourceSilent,
-        'slow-clock-single-source',
-        checkSingleSourceStaysSilent(
+        kOkPeerSoleSourceRaised,
+        'slow-clock-sole-source',
+        checkSoleSourceRaisesVerdict(
           peerDetector.status,
           sourcesFed: peerDetector.trackedSourceCountForTest,
+          thresholdSecs: kClockSkewAlertThreshold.inSeconds,
+        ),
+      );
+
+      // Rendered while the sole-source state is LIVE — the second sample
+      // below ends it permanently, and a verdict resting on one member is
+      // exactly where the corroborated copy becomes a false claim (it names
+      // this phone as the wrong one, and says its locations are already
+      // expiring, neither of which one sample supports).
+      final soleSourceTexts = await _renderBanner(tester, peerDetector);
+      gate(
+        kOkPeerSoleSourceHedged,
+        'slow-clock-sole-source-copy',
+        checkSoleSourceCopyHedged(
+          renderedTexts: soleSourceTexts,
+          hedgedTitle: l10n.clockSkewTitleDisagreement,
+          hedgedBody: l10n.clockSkewBodyDisagreement,
+          corroboratedTitle: l10n.clockSkewTitle,
+          corroboratedBody: l10n.clockSkewBodyBehind,
         ),
       );
 
@@ -975,7 +998,7 @@ Future<_PublishOutcome> _publishLocation({
   required TestRelay relay,
   required ({double lat, double lon}) coords,
 }) async {
-  final encrypted = await alice.circleManager.encryptLocation(
+  final encrypted = (await alice.circleManager.encryptLocation(
     mlsGroupId: circle.mlsGroupId,
     senderPubkeyHex: alice.pubkeyHex,
     latitude: coords.lat,
@@ -986,7 +1009,7 @@ Future<_PublishOutcome> _publishLocation({
     // component, not from this value, but passing the production number
     // keeps the inner message identical to a real send.
     updateIntervalSecs: BigInt.from(198),
-  );
+  )).sent!;
   final (accepted, msg) = await relay.publishAndAwaitOk(encrypted.eventJson);
   final id = _eventIdOf(encrypted.eventJson);
   debugPrint(
@@ -1010,13 +1033,13 @@ Future<({Object? error, String eventId})> _publishViaProductionPath({
   required NostrRelayService relayService,
   required ({double lat, double lon}) coords,
 }) async {
-  final encrypted = await alice.circleManager.encryptLocation(
+  final encrypted = (await alice.circleManager.encryptLocation(
     mlsGroupId: circle.mlsGroupId,
     senderPubkeyHex: alice.pubkeyHex,
     latitude: coords.lat,
     longitude: coords.lon,
     updateIntervalSecs: BigInt.from(198),
-  );
+  )).sent!;
   final id = _eventIdOf(encrypted.eventJson);
   Object? error;
   try {

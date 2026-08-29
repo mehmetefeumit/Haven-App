@@ -373,6 +373,10 @@ class AppLocalizationsNe extends AppLocalizations {
       'सक्रिय। केही फोनमा ब्याट्री अप्टिमाइजेसनले साझेदारी रोक्न सक्छ। भरपर्दो राख्न Haven लाई ब्याट्री अप्टिमाइजेसनबाट छुट दिनुहोस्।';
 
   @override
+  String get locationSettingsBatteryOptNote =>
+      'Haven का लागि ब्याट्री अप्टिमाइजेसन अझै सक्रिय छ। केही फोनले कुनै चेतावनी नदिई पृष्ठभूमि साझेदारी रोक्न यसैको प्रयोग गर्छन्। साझेदारी भरपर्दो राख्न Haven लाई यसबाट छुट दिनुहोस्।';
+
+  @override
   String get locationSettingsErrorSnack => 'केही गडबड भयो';
 
   @override
@@ -408,6 +412,24 @@ class AppLocalizationsNe extends AppLocalizations {
   @override
   String get locationSettingsIosGuidance =>
       'पृष्ठभूमि साझेदारी सक्रिय हुँदा, Haven ले तपाईंको स्थान निरन्तर प्रयोग गरिरहन्छ र iOS ले निलो स्थिति-पट्टी सूचक देखाउँछ। \"सधैँ\" अनुमति दिनुभयो भने, iOS ले एप बन्द गरेपछि पनि Haven ले तपाईंका सर्कलका छुटेका अपडेटहरू ल्याउन सक्छ।';
+
+  @override
+  String get fgsNotificationSharing =>
+      'Haven ले स्थान अपडेट पठाउँदै र प्राप्त गर्दै छ';
+
+  @override
+  String get fgsNotificationPaused =>
+      'Haven अहिले रोकिएको छ — साझेदारी फेरि सुरु गर्न एप खोल्नुहोस्';
+
+  @override
+  String get fgsNotificationOpen => 'Haven अहिले खुला छ';
+
+  @override
+  String get fgsChannelName => 'स्थान साझेदारी';
+
+  @override
+  String get fgsChannelDescription =>
+      'Haven लाई तपाईंको इन्क्रिप्टेड स्थान पृष्ठभूमिमा साझा गरिरहन दिन्छ।';
 
   @override
   String get mapStyleTitle => 'नक्सा शैली';
@@ -679,7 +701,7 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get privacyEncryptionKeysChangeOnMembership =>
-      'सर्कल छाड्दा त्यसका सदस्यले पहिले नै सङ्ग्रह गरिसकेको कुरा फिर्ता हुँदैन। Haven ले कुञ्जी कोही सामेल हुँदा वा छाड्दा मात्र बदल्छ, कुनै निश्चित अन्तरालमा कहिल्यै होइन। त्यसैले एउटै कुञ्जीले हप्तौँका सन्देश ओगट्न सक्छ, र त्यस अवधिमा कुनै सदस्यले सङ्ग्रह गरेको जुनसुकै कुरा तिनका लागि पढ्न मिल्ने नै रहन्छ। तर तिनले छाडेपछि पठाइएको कुनै पनि कुरा खोल्न सक्दैनन्।';
+      'सर्कल छाड्दा त्यसका सदस्यले पहिले नै सङ्ग्रह गरिसकेको कुरा फिर्ता हुँदैन। कोही सामेल हुँदा वा छाड्दा, र सर्कलमा सन्देश आउन छाडेपछि त्यसको एडमिनले त्यसलाई मिलाउँदा, Haven ले कुञ्जी बदल्छ — कुनै निश्चित अन्तरालमा कहिल्यै होइन। त्यसैले एउटै कुञ्जीले हप्तौँका सन्देश ओगट्न सक्छ, र त्यस अवधिमा कुनै सदस्यले सङ्ग्रह गरेको जुनसुकै कुरा तिनका लागि पढ्न मिल्ने नै रहन्छ। तर तिनले छाडेपछि पठाइएको कुनै पनि कुरा खोल्न सक्दैनन्।';
 
   @override
   String get privacyEncryptionMeansForYou =>
@@ -691,7 +713,7 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get privacyEncryptionDetailEpochs =>
-      'कुञ्जीको प्रत्येक अवधिलाई एपोक भनिन्छ, र सर्कल नयाँ एपोकमा त्यति बेला मात्र सर्छ जब त्यसको सदस्यता बदलिन्छ। तपाईंको फोनले हालको एपोक र पछिल्ला केही एपोकका कुञ्जी, अर्थात् अझै आइरहेका सन्देश खोल्न पुग्ने जति मात्र राख्छ, र बाँकी हटाउँछ। महिनौँदेखि सदस्यता नबदलिएको सर्कल आज पनि सुरु भएकै एपोकमा छ।';
+      'कुञ्जीको प्रत्येक अवधिलाई एपोक भनिन्छ। सर्कलको सदस्यता बदलिँदा, र सन्देश आउन छाडेपछि त्यसको एडमिनले त्यसलाई मिलाउँदा, सर्कल नयाँ एपोकमा सर्छ। तपाईंको फोनले हालको एपोक र पछिल्ला केही एपोकका कुञ्जी, अर्थात् अझै आइरहेका सन्देश खोल्न पुग्ने जति मात्र राख्छ, र बाँकी हटाउँछ। कोही पनि सामेल नभएको, कसैले नछाडेको र कहिल्यै मिलाउनु नपरेको सर्कल आज पनि सुरु भएकै एपोकमा छ।';
 
   @override
   String get privacyWhatOthersSeeTitle =>
@@ -2020,6 +2042,123 @@ class AppLocalizationsNe extends AppLocalizations {
   @override
   String get clockSkewResolvedAnnouncement =>
       'घडीको समस्या हटेको छ। Haven ले फेरि तपाईंको स्थान साझा गर्दै छ।';
+
+  @override
+  String get clockSkewTitleDisagreement =>
+      'तपाईंका कुनै एक सर्कलमा एउटा घडी मिलेको छैन';
+
+  @override
+  String get clockSkewBodyDisagreement =>
+      'यो फोनको घडी र अर्को एक जना सदस्यको घडीबीच दुई मिनेट वा त्यसभन्दा बढी फरक छ। यदि नमिलेको घडी यो फोनकै हो भने, यसले पठाउने स्थानहरूको समयसीमा कसैले देख्नुअघि नै सकिन सक्छ। यो फोनको घडी चाहिँ मिलेको छ भन्ने सुनिश्चित गर्न सिस्टम सेटिङमा मिति र समय स्वतः सेट गर्ने सुविधा सक्रिय गर्नुहोस्।';
+
+  @override
+  String get clockSkewDisagreementResolvedAnnouncement =>
+      'घडीको चेतावनी हटेको छ।';
+
+  @override
+  String get sharingHealthTitleStopped => 'स्थान साझेदारी रोकिएको छ';
+
+  @override
+  String get sharingHealthTitleNotSending => 'तपाईंको स्थान साझा भइरहेको छैन';
+
+  @override
+  String get sharingHealthTitleNotReceiving =>
+      'अरू सदस्यका स्थान तपाईंसम्म आइरहेका छैनन्';
+
+  @override
+  String sharingHealthNoUpdatesMinutes(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'करिब $countString मिनेटदेखि कुनै अपडेट छैन',
+      one: 'करिब १ मिनेटदेखि कुनै अपडेट छैन',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String sharingHealthNoUpdatesHours(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'करिब $countString घण्टादेखि कुनै अपडेट छैन',
+      one: 'करिब १ घण्टादेखि कुनै अपडेट छैन',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String sharingHealthNoUpdatesDays(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'करिब $countString दिनदेखि कुनै अपडेट छैन',
+      one: 'करिब १ दिनदेखि कुनै अपडेट छैन',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get sharingHealthRepairAction => 'मिलाउनुहोस्';
+
+  @override
+  String get sharingHealthRepairUnavailableHint =>
+      'यो सर्कलका लागि मिलाउने सुविधा उपलब्ध छैन';
+
+  @override
+  String get sharingHealthRepairHint =>
+      'रिलेहरूसँग फेरि जोडिन्छ, तपाईंको स्थान पठाउन पुनः प्रयास गर्छ, र तपाईं यो सर्कलको एडमिन हुनुहुन्छ भने यसलाई नयाँ कुञ्जी दिन सक्छ';
+
+  @override
+  String get sharingHealthRepairSent =>
+      'मिलाउने परिवर्तन पठाइयो। अरूका फोनले यो प्राप्त गरेपछि तिनीहरूको स्थान फेरि आउन थाल्नेछ।';
+
+  @override
+  String get sharingHealthRepairNotOwner =>
+      'यो सर्कलको एडमिनले मात्र यसलाई मिलाउन सक्छन्। तपाईंलाई हटाएर फेरि थप्न तिनलाई भन्नुहोस्।';
+
+  @override
+  String get sharingHealthRepairNeedsNewCircle =>
+      'यो सर्कल यस फोनमा मिलाउन सकिँदैन। उही व्यक्तिहरूसँग नयाँ सर्कल बनाउनुहोस्।';
+
+  @override
+  String get sharingHealthRepairNothingToDo =>
+      'अहिले मिलाउनुपर्ने केही छैन। Haven ले प्रयास गरिरहनेछ।';
+
+  @override
+  String get sharingHealthRepairUnresolvedAnnouncement =>
+      'स्थान साझेदारी अझै चलेको छैन।';
+
+  @override
+  String get sharingHealthResumedAnnouncement =>
+      'स्थान साझेदारी फेरि चल्न थालेको छ।';
+
+  @override
+  String circleMemberLastSeenMinutes(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'पछिल्लो स्थान $countString मिनेट अघि',
+      one: 'पछिल्लो स्थान १ मिनेट अघि',
+    );
+    return '$_temp0';
+  }
 
   @override
   String get mapThisLocation => 'यो स्थान';

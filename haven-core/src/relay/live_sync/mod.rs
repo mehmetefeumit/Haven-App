@@ -38,6 +38,7 @@ pub mod gate;
 pub mod health;
 pub mod planes;
 pub mod processor;
+pub mod repair;
 pub mod router;
 pub mod session;
 pub mod supervisor;
@@ -48,8 +49,8 @@ pub use event::{LiveSyncEvent, SyncStatusReason};
 pub use event_bus::{classify_recv, EventBus, RecvDisposition};
 pub use gate::generate_session_salt;
 pub use health::{
-    health_needs_resubscribe, health_still_connecting, HealthAction, RelayHealthSnapshot,
-    SubscriptionHealthOutcome,
+    delivery_is_silent, health_needs_resubscribe, health_needs_targeted_reanchor,
+    health_still_connecting, HealthAction, RelayHealthSnapshot, SubscriptionHealthOutcome,
 };
 pub use planes::{
     build_relay_set_subscriptions, derive_dynamic_group_sub_id, derive_sub_id, CircleSpec,

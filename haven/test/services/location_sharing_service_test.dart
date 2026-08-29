@@ -131,6 +131,7 @@ void main() {
       test('calls encrypt then publish', () async {
         await service.publishLocation(
           mlsGroupId: [1, 2, 3],
+          nostrGroupId: [4, 5, 6],
           senderPubkeyHex: 'abc123',
           latitude: 37.7749,
           longitude: -122.4194,
@@ -158,6 +159,7 @@ void main() {
           // no valid event exists on the relay.
           await service.publishLocation(
             mlsGroupId: [1, 2, 3],
+            nostrGroupId: [4, 5, 6],
             senderPubkeyHex: 'abc123',
             latitude: 37.7749,
             longitude: -122.4194,
@@ -2443,7 +2445,7 @@ class _ThrowOnFirstDecryptService
       DecryptLocationOutcome(results: _decryptOrThrow(), autoCommits: const []);
 
   @override
-  Future<EncryptedLocation> encryptLocation({
+  Future<EncryptLocationOutcome> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
     required double latitude,

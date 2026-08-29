@@ -13,10 +13,15 @@
 #                               typed device-clock fault, not as a generic
 #                               publish failure;
 #   rejection-verdict           …and reaches a consumer that raises a verdict;
-#   peer-single-source-silent   ONE member reporting a future time does NOT
-#                               accuse this device's clock;
+#   peer-sole-source-raised     the ONLY member a two-member circle can hear
+#                               from accuses this device's clock on its own
+#                               (a second corroborating member is structurally
+#                               unavailable there);
+#   peer-sole-source-hedged     …and is surfaced with copy that neither
+#                               accuses this phone nor claims a loss, because
+#                               one member establishes neither;
 #   peer-corroborated           TWO distinct MLS-authenticated members
-#                               agreeing DOES;
+#                               agreeing does too, reporting both sources;
 #   surface-rejected            the fast-clock fault reaches the user;
 #   surface-behind              the slow-clock fault reaches the user;
 #   surface-distinct            …and the two say different things (one means
@@ -139,7 +144,8 @@ required_ok_markers() {
   printf '%s\n' \
     'rejection-classified' \
     'rejection-verdict' \
-    'peer-single-source-silent' \
+    'peer-sole-source-raised' \
+    'peer-sole-source-hedged' \
     'peer-corroborated' \
     'surface-rejected' \
     'surface-behind' \
@@ -301,7 +307,8 @@ run_self_test() {
     '08-03 04:42:33.001  1234  1300 I flutter : [b8] CLOCK_OBSERVED 2 -21599' \
     '08-03 04:43:03.001  1234  1300 I flutter : [b8] REQ_CLOCK 3 -21600' \
     '08-03 04:43:33.001  1234  1300 I flutter : [b8] CLOCK_OBSERVED 3 -21600' \
-    '08-03 04:43:34.001  1234  1300 I flutter : [b8] OK peer-single-source-silent' \
+    '08-03 04:43:34.001  1234  1300 I flutter : [b8] OK peer-sole-source-raised' \
+    '08-03 04:43:34.501  1234  1300 I flutter : [b8] OK peer-sole-source-hedged' \
     '08-03 04:43:35.001  1234  1300 I flutter : [b8] OK peer-corroborated' \
     '08-03 04:43:36.001  1234  1300 I flutter : [b8] OK surface-behind' \
     '08-03 04:43:50.001  1234  1300 I flutter : [b8] EVIDENCE backward-skew-publish: born already expired, refused at ingest' \
@@ -610,7 +617,8 @@ run_self_test() {
     '08-03 04:41:41.001  1234  1300 I flutter : [b8] FINDING clock-fault-classification: the refusal reached Dart as RelayServiceException with NO device-clock classification' \
     '08-03 04:41:42.001  1234  1300 I flutter : [b8] FINDING clock-fault-verdict: the detector verdict is still none' \
     '08-03 04:41:43.001  1234  1300 I flutter : [b8] FINDING clock-fault-surface-rejected: the banner painted NOTHING' \
-    '08-03 04:43:34.001  1234  1300 I flutter : [b8] OK peer-single-source-silent' \
+    '08-03 04:43:34.001  1234  1300 I flutter : [b8] OK peer-sole-source-raised' \
+    '08-03 04:43:34.501  1234  1300 I flutter : [b8] OK peer-sole-source-hedged' \
     '08-03 04:43:35.001  1234  1300 I flutter : [b8] OK peer-corroborated' \
     '08-03 04:43:36.001  1234  1300 I flutter : [b8] OK surface-behind' \
     '08-03 04:44:50.001  1234  1300 I flutter : [b8] OK surface-distinct' \
@@ -629,23 +637,25 @@ run_self_test() {
     fail=1
   fi
 
-  # (16c) `minCorroboratingSources` reverted to 1. Everything else still
+  # (16c) The sole-source exception removed, so a two-member circle waits
+  #       forever for a second member that cannot exist. Everything else still
   #       works, so exactly ONE name goes missing — the near-miss a
   #       coarse "any OK line present" check would bless.
   printf '%s\n' \
     '08-03 04:41:41.001  1234  1300 I flutter : [b8] OK rejection-classified' \
     '08-03 04:41:42.001  1234  1300 I flutter : [b8] OK rejection-verdict' \
     '08-03 04:41:43.001  1234  1300 I flutter : [b8] OK surface-rejected' \
-    '08-03 04:43:34.001  1234  1300 I flutter : [b8] FINDING slow-clock-single-source: ONE member reporting a future time already raised peersAheadOfDevice' \
+    '08-03 04:43:34.001  1234  1300 I flutter : [b8] FINDING slow-clock-sole-source: the only member this device can hear from reported a time more than 120s ahead and the verdict is still none' \
+    '08-03 04:43:34.501  1234  1300 I flutter : [b8] OK peer-sole-source-hedged' \
     '08-03 04:43:35.001  1234  1300 I flutter : [b8] OK peer-corroborated' \
     '08-03 04:43:36.001  1234  1300 I flutter : [b8] OK surface-behind' \
     '08-03 04:44:50.001  1234  1300 I flutter : [b8] OK surface-distinct' \
     '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=1 evidence=2' \
     > "${tmp}/reverted-corroboration.log"
   got="$(missing_ok_markers "${tmp}/reverted-corroboration.log" | tr '\n' ',')"
-  if [[ "${got}" != "peer-single-source-silent," ]]; then
-    echo "SELF-TEST FAIL (16c): a corroboration rule reverted to one source" \
-         "must be reported as missing exactly 'peer-single-source-silent,'," \
+  if [[ "${got}" != "peer-sole-source-raised," ]]; then
+    echo "SELF-TEST FAIL (16c): a corroboration rule that lost its sole-source exception" \
+         "must be reported as missing exactly 'peer-sole-source-raised,'," \
          "got '${got}'" >&2
     fail=1
   fi
@@ -657,7 +667,8 @@ run_self_test() {
     '08-03 04:41:41.001  1234  1300 I flutter : [b8] OK rejection-classified' \
     '08-03 04:41:42.001  1234  1300 I flutter : [b8] OK rejection-verdict' \
     '08-03 04:41:43.001  1234  1300 I flutter : [b8] OK surface-rejected' \
-    '08-03 04:43:34.001  1234  1300 I flutter : [b8] OK peer-single-source-silent' \
+    '08-03 04:43:34.001  1234  1300 I flutter : [b8] OK peer-sole-source-raised' \
+    '08-03 04:43:34.501  1234  1300 I flutter : [b8] OK peer-sole-source-hedged' \
     '08-03 04:43:35.001  1234  1300 I flutter : [b8] OK peer-corroborated' \
     '08-03 04:43:36.001  1234  1300 I flutter : [b8] OK surface-behind' \
     '08-03 04:44:50.001  1234  1300 I flutter : [b8] FINDING clock-fault-copy: both faults render the SAME body' \
@@ -687,6 +698,32 @@ run_self_test() {
     fail=1
   fi
 
+  # (16g) The sole-source verdict raised, but rendered with the CORROBORATED
+  #       copy — the branch in `resolveClockSkewCopy` removed. Everything else
+  #       still holds, including the verdict itself, so exactly ONE name goes
+  #       missing. Without this the lane would stay green while the banner
+  #       told the user their phone's clock is wrong (on one member's word,
+  #       and possibly the innocent phone) and that locations are already
+  #       expiring (false anywhere under a 288 s gap).
+  printf '%s\n' \
+    '08-03 04:41:41.001  1234  1300 I flutter : [b8] OK rejection-classified' \
+    '08-03 04:41:42.001  1234  1300 I flutter : [b8] OK rejection-verdict' \
+    '08-03 04:41:43.001  1234  1300 I flutter : [b8] OK surface-rejected' \
+    '08-03 04:43:34.001  1234  1300 I flutter : [b8] OK peer-sole-source-raised' \
+    '08-03 04:43:34.501  1234  1300 I flutter : [b8] FINDING slow-clock-sole-source-copy: a verdict resting on ONE member rendered the corroborated copy' \
+    '08-03 04:43:35.001  1234  1300 I flutter : [b8] OK peer-corroborated' \
+    '08-03 04:43:36.001  1234  1300 I flutter : [b8] OK surface-behind' \
+    '08-03 04:44:50.001  1234  1300 I flutter : [b8] OK surface-distinct' \
+    '08-03 04:45:00.001  1234  1300 I flutter : [b8] ALL_PHASES_COMPLETE findings=1 evidence=2' \
+    > "${tmp}/reverted-sole-source-copy.log"
+  got="$(missing_ok_markers "${tmp}/reverted-sole-source-copy.log" | tr '\n' ',')"
+  if [[ "${got}" != "peer-sole-source-hedged," ]]; then
+    echo "SELF-TEST FAIL (16g): a sole-source verdict rendered with the" \
+         "corroborated copy must be reported as missing exactly" \
+         "'peer-sole-source-hedged,', got '${got}'" >&2
+    fail=1
+  fi
+
   # --- (17) FAIL CLOSED on a log that says nothing. -------------------------
   #
   # A drive that never started, a logcat capture that never attached, or a
@@ -711,7 +748,7 @@ run_self_test() {
     echo "run-b8-clock-skew.sh --self-test: FAILED" >&2
     return 1
   fi
-  echo "run-b8-clock-skew.sh --self-test: all 17 fixture groups passed"
+  echo "run-b8-clock-skew.sh --self-test: all 18 fixture groups passed"
   return 0
 }
 

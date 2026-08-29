@@ -433,7 +433,7 @@ void main() {
                 timeout: const Duration(seconds: 60),
               );
 
-              final enc = await aliceManager.encryptLocation(
+              final enc = (await aliceManager.encryptLocation(
                 mlsGroupId: mlsGroupId,
                 senderPubkeyHex: alice.pubkeyHex,
                 latitude: 51.5,
@@ -442,7 +442,7 @@ void main() {
                   kLocationPublishMaxInterval.inSeconds +
                       kTtlNetworkBufferSeconds,
                 ),
-              );
+              )).sent!;
 
               // Publish to the now-updated relay set: [R1, R2].
               final relayMgr = await RelayManagerFfi.newInstance();
@@ -991,7 +991,7 @@ void main() {
               final beforeLocationPublishTs =
                   DateTime.now().millisecondsSinceEpoch ~/ 1000 - 1;
 
-              final enc = await aliceManager.encryptLocation(
+              final enc = (await aliceManager.encryptLocation(
                 mlsGroupId: mlsGroupId,
                 senderPubkeyHex: alice.pubkeyHex,
                 latitude: 48.8566,
@@ -1000,7 +1000,7 @@ void main() {
                   kLocationPublishMaxInterval.inSeconds +
                       kTtlNetworkBufferSeconds,
                 ),
-              );
+              )).sent!;
 
               // Publish ONLY to the new relay set [R2].
               final relayMgr = await RelayManagerFfi.newInstance();

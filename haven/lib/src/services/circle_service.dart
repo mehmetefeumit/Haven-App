@@ -9,6 +9,7 @@
 library;
 
 import 'package:flutter/foundation.dart';
+import 'package:haven/src/rust/api.dart' show SkipReasonFfi;
 
 /// Exception thrown when circle operations fail.
 class CircleServiceException implements Exception {
@@ -513,6 +514,70 @@ class PendingAutoCommit {
   final PendingCommitToken pendingToken;
 }
 
+/// The outcome of a [CircleService.encryptLocation] call.
+///
+/// Sealed so the compiler, not a reviewer, is responsible for every call site
+/// handling the deferral: the MLS engine can QUEUE a location update instead of
+/// encrypting it, and that is an actionable state rather than a failure. Before
+/// this type it was flattened to an opaque exception string that every caller
+/// dropped into a `debugPrint`, which is precisely how a device could stop
+/// sharing without anything noticing.
+@immutable
+sealed class EncryptLocationOutcome {
+  /// Const base constructor.
+  const EncryptLocationOutcome();
+}
+
+/// The engine encrypted the update; [encrypted] is ready to publish.
+@immutable
+final class LocationEncrypted extends EncryptLocationOutcome {
+  /// Creates a [LocationEncrypted].
+  const LocationEncrypted(this.encrypted);
+
+  /// The signed kind-445 event and its routing.
+  final EncryptedLocation encrypted;
+}
+
+/// The engine QUEUED the update instead of encrypting it.
+///
+/// There is no location event to publish. Two obligations remain, and both are
+/// the caller's:
+///
+/// * **Rule 13.** [commits] carries any commit the engine staged inside that
+///   same call — a peer `SelfRemove` eviction that came due. Each must be
+///   published and then confirmed on a ≥1-relay ACK (or rolled back). Dropping
+///   one leaves the group in `PendingPublish`, where every later send fails.
+/// * [proposals] carries bare proposal events: publish-or-lose, nothing to
+///   confirm, and recoverable — a later convergence pass re-emits them.
+@immutable
+final class LocationSendDeferred extends EncryptLocationOutcome {
+  /// Creates a [LocationSendDeferred].
+  const LocationSendDeferred({
+    required this.unresolvedInputs,
+    required this.discardedIntents,
+    required this.repaired,
+    required this.commits,
+    required this.proposals,
+  });
+
+  /// Stored rows still gating outbound sends for this circle after the
+  /// in-place repair. Zero means the next send should encrypt.
+  final int unresolvedInputs;
+
+  /// Queued location intents the repair discarded, so a stalled circle cannot
+  /// bank one stale fix per publish cycle.
+  final int discardedIntents;
+
+  /// Whether the repair left the circle with nothing gating.
+  final bool repaired;
+
+  /// Staged commits awaiting the publish-then-confirm ladder (Rule 13).
+  final List<PendingAutoCommit> commits;
+
+  /// JSON-serialized bare proposal events to publish (no confirm).
+  final List<String> proposals;
+}
+
 /// The folded outcome of ingesting one received `kind:445` via
 /// [CircleService.decryptLocationCollectingCommits] — the folded
 /// location-facing results AND any receive-side auto-commit the caller MUST
@@ -720,8 +785,13 @@ abstract class CircleService {
   /// argument. Must still be in `[60, 3600]`, which the Rust FFI validates —
   /// that range check is now its only effect.
   ///
+  /// Returns an [EncryptLocationOutcome]: either [LocationEncrypted] with the
+  /// event to publish, or [LocationSendDeferred] when the engine queued the
+  /// update instead. A deferral is NOT an exception — it carries work the
+  /// caller must still do (see [LocationSendDeferred]).
+  ///
   /// Throws [CircleServiceException] if encryption fails.
-  Future<EncryptedLocation> encryptLocation({
+  Future<EncryptLocationOutcome> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
     required double latitude,
@@ -1039,6 +1109,88 @@ abstract class CircleService {
     required List<int> mlsGroupId,
     required List<String> newRelays,
   });
+
+  /// Repairs a circle whose message delivery has stopped because a sender
+  /// ratchet ran out, by committing a byte-identical admin-policy update.
+  ///
+  /// This is a **ratchet reset**, not key rotation: applying the commit
+  /// restarts every sender ratchet in the group, so a peer whose messages this
+  /// device could no longer decrypt becomes readable again. The commit carries
+  /// no `UpdatePath`, so it rotates no leaf key and provides no
+  /// post-compromise security — never describe it as key rotation in code, in
+  /// logs, or in user copy.
+  ///
+  /// Fetches once for the circle BEFORE asking the core, so a departure
+  /// proposal sitting on a relay becomes a clean
+  /// [EpochRepairSkipped] decline instead of a same-epoch race.
+  ///
+  /// Foreground only (Rule 14): never call this from a background isolate.
+  /// Enforced by `scripts/ci/check_epoch_repair_isolation.sh`.
+  ///
+  /// Returns a typed [EpochRepairResult]; a declined repair is a normal answer,
+  /// not a failure. Throws [CircleServiceException] only on a real failure, and
+  /// never with raw engine text (Security Rule 8).
+  Future<EpochRepairResult> repairCircleEpoch(
+    Circle circle, {
+    required String selfPubkeyHex,
+  });
+}
+
+/// What [CircleService.repairCircleEpoch] did.
+///
+/// Sealed so the compiler owns exhaustiveness at every call site — the three
+/// outcomes route to different user-facing copy, and collapsing them would put
+/// a user in a retry loop that cannot succeed.
+sealed class EpochRepairResult {
+  /// Creates an [EpochRepairResult].
+  const EpochRepairResult();
+}
+
+/// The repair committed: the ratchet reset is published and applied locally.
+///
+/// Peers apply it on their own next epoch pass, so delivery does not recover
+/// the instant this returns — copy must not promise that it does.
+final class EpochRepairApplied extends EpochRepairResult {
+  /// Creates an [EpochRepairApplied].
+  const EpochRepairApplied();
+}
+
+/// A gate declined the repair; nothing was staged and nothing changed.
+final class EpochRepairSkipped extends EpochRepairResult {
+  /// Creates an [EpochRepairSkipped] carrying the gate that declined.
+  const EpochRepairSkipped(this.reason);
+
+  /// Which gate declined. [SkipReasonFfi.notSoleAdmin] and
+  /// [SkipReasonFfi.epochUnrecoverable] are terminal for this device; every
+  /// other reason is retryable.
+  final SkipReasonFfi reason;
+
+  /// Whether waiting could change this answer.
+  ///
+  /// `false` for the two reasons that never clear on their own, so the UI can
+  /// offer a different remedy instead of a retry — and, in the banner, disable
+  /// the control rather than invite a loop that cannot succeed.
+  ///
+  /// An exhaustive `switch` with NO `_` on purpose. A `!=` chain fails OPEN: a
+  /// new terminal reason added upstream would silently classify as retryable
+  /// and be offered as a retry. This way it fails to COMPILE instead.
+  bool get isRetryable => switch (reason) {
+    SkipReasonFfi.notSoleAdmin || SkipReasonFfi.epochUnrecoverable => false,
+    SkipReasonFfi.epochNotStable ||
+    SkipReasonFfi.recentEpochChange ||
+    SkipReasonFfi.recentInboundTraffic ||
+    SkipReasonFfi.pendingProposal ||
+    SkipReasonFfi.rotatedRecently => true,
+  };
+}
+
+/// The circle is send-gated, so nothing was staged.
+///
+/// Any work the engine surfaced during the in-place repair has already been run
+/// through the Rule-13 publish ladder by the service.
+final class EpochRepairDeferred extends EpochRepairResult {
+  /// Creates an [EpochRepairDeferred].
+  const EpochRepairDeferred();
 }
 
 /// KeyPackage data for a user.

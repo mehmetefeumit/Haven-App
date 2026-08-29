@@ -223,10 +223,21 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  CommitToPublishFfi dco_decode_box_autoadd_commit_to_publish_ffi(dynamic raw);
+
+  @protected
   ContactFfi dco_decode_box_autoadd_contact_ffi(dynamic raw);
 
   @protected
   DecryptedLocationFfi dco_decode_box_autoadd_decrypted_location_ffi(
+    dynamic raw,
+  );
+
+  @protected
+  DeferredSendFfi dco_decode_box_autoadd_deferred_send_ffi(dynamic raw);
+
+  @protected
+  EncryptedLocationFfi dco_decode_box_autoadd_encrypted_location_ffi(
     dynamic raw,
   );
 
@@ -269,6 +280,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  SkipReasonFfi dco_decode_box_autoadd_skip_reason_ffi(dynamic raw);
+
+  @protected
   TileCacheEntryFfi dco_decode_box_autoadd_tile_cache_entry_ffi(dynamic raw);
 
   @protected
@@ -293,6 +307,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   CircleFfi dco_decode_circle_ffi(dynamic raw);
 
   @protected
+  CircleHealthFfi dco_decode_circle_health_ffi(dynamic raw);
+
+  @protected
   CircleMemberFfi dco_decode_circle_member_ffi(dynamic raw);
 
   @protected
@@ -305,6 +322,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ContactFfi dco_decode_contact_ffi(dynamic raw);
 
   @protected
+  ConvergenceSweepFfi dco_decode_convergence_sweep_ffi(dynamic raw);
+
+  @protected
   DecryptLocationOutcomeFfi dco_decode_decrypt_location_outcome_ffi(
     dynamic raw,
   );
@@ -313,10 +333,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DecryptedLocationFfi dco_decode_decrypted_location_ffi(dynamic raw);
 
   @protected
+  DeferredSendFfi dco_decode_deferred_send_ffi(dynamic raw);
+
+  @protected
   DirectoryEntryFfi dco_decode_directory_entry_ffi(dynamic raw);
 
   @protected
   DirectoryTierFfi dco_decode_directory_tier_ffi(dynamic raw);
+
+  @protected
+  EncryptLocationOutcomeFfi dco_decode_encrypt_location_outcome_ffi(
+    dynamic raw,
+  );
 
   @protected
   EncryptedLocationFfi dco_decode_encrypted_location_ffi(dynamic raw);
@@ -460,10 +488,23 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  CommitToPublishFfi? dco_decode_opt_box_autoadd_commit_to_publish_ffi(
+    dynamic raw,
+  );
+
+  @protected
   ContactFfi? dco_decode_opt_box_autoadd_contact_ffi(dynamic raw);
 
   @protected
   DecryptedLocationFfi? dco_decode_opt_box_autoadd_decrypted_location_ffi(
+    dynamic raw,
+  );
+
+  @protected
+  DeferredSendFfi? dco_decode_opt_box_autoadd_deferred_send_ffi(dynamic raw);
+
+  @protected
+  EncryptedLocationFfi? dco_decode_opt_box_autoadd_encrypted_location_ffi(
     dynamic raw,
   );
 
@@ -490,6 +531,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PublicIdentity? dco_decode_opt_box_autoadd_public_identity(dynamic raw);
+
+  @protected
+  SkipReasonFfi? dco_decode_opt_box_autoadd_skip_reason_ffi(dynamic raw);
 
   @protected
   TileCacheEntryFfi? dco_decode_opt_box_autoadd_tile_cache_entry_ffi(
@@ -561,7 +605,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   RelayTypeFfi dco_decode_relay_type_ffi(dynamic raw);
 
   @protected
+  RepairRotationOutcomeFfi dco_decode_repair_rotation_outcome_ffi(dynamic raw);
+
+  @protected
   SignedLocationEventFfi dco_decode_signed_location_event_ffi(dynamic raw);
+
+  @protected
+  SkipReasonFfi dco_decode_skip_reason_ffi(dynamic raw);
 
   @protected
   SubscriptionHealthActionFfi dco_decode_subscription_health_action_ffi(
@@ -769,10 +819,25 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  CommitToPublishFfi sse_decode_box_autoadd_commit_to_publish_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ContactFfi sse_decode_box_autoadd_contact_ffi(SseDeserializer deserializer);
 
   @protected
   DecryptedLocationFfi sse_decode_box_autoadd_decrypted_location_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DeferredSendFfi sse_decode_box_autoadd_deferred_send_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  EncryptedLocationFfi sse_decode_box_autoadd_encrypted_location_ffi(
     SseDeserializer deserializer,
   );
 
@@ -825,6 +890,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  SkipReasonFfi sse_decode_box_autoadd_skip_reason_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   TileCacheEntryFfi sse_decode_box_autoadd_tile_cache_entry_ffi(
     SseDeserializer deserializer,
   );
@@ -857,6 +927,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   CircleFfi sse_decode_circle_ffi(SseDeserializer deserializer);
 
   @protected
+  CircleHealthFfi sse_decode_circle_health_ffi(SseDeserializer deserializer);
+
+  @protected
   CircleMemberFfi sse_decode_circle_member_ffi(SseDeserializer deserializer);
 
   @protected
@@ -873,6 +946,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ContactFfi sse_decode_contact_ffi(SseDeserializer deserializer);
 
   @protected
+  ConvergenceSweepFfi sse_decode_convergence_sweep_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   DecryptLocationOutcomeFfi sse_decode_decrypt_location_outcome_ffi(
     SseDeserializer deserializer,
   );
@@ -883,12 +961,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  DeferredSendFfi sse_decode_deferred_send_ffi(SseDeserializer deserializer);
+
+  @protected
   DirectoryEntryFfi sse_decode_directory_entry_ffi(
     SseDeserializer deserializer,
   );
 
   @protected
   DirectoryTierFfi sse_decode_directory_tier_ffi(SseDeserializer deserializer);
+
+  @protected
+  EncryptLocationOutcomeFfi sse_decode_encrypt_location_outcome_ffi(
+    SseDeserializer deserializer,
+  );
 
   @protected
   EncryptedLocationFfi sse_decode_encrypted_location_ffi(
@@ -1068,12 +1154,27 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  CommitToPublishFfi? sse_decode_opt_box_autoadd_commit_to_publish_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ContactFfi? sse_decode_opt_box_autoadd_contact_ffi(
     SseDeserializer deserializer,
   );
 
   @protected
   DecryptedLocationFfi? sse_decode_opt_box_autoadd_decrypted_location_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DeferredSendFfi? sse_decode_opt_box_autoadd_deferred_send_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  EncryptedLocationFfi? sse_decode_opt_box_autoadd_encrypted_location_ffi(
     SseDeserializer deserializer,
   );
 
@@ -1102,6 +1203,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PublicIdentity? sse_decode_opt_box_autoadd_public_identity(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  SkipReasonFfi? sse_decode_opt_box_autoadd_skip_reason_ffi(
     SseDeserializer deserializer,
   );
 
@@ -1199,9 +1305,17 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   RelayTypeFfi sse_decode_relay_type_ffi(SseDeserializer deserializer);
 
   @protected
+  RepairRotationOutcomeFfi sse_decode_repair_rotation_outcome_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   SignedLocationEventFfi sse_decode_signed_location_event_ffi(
     SseDeserializer deserializer,
   );
+
+  @protected
+  SkipReasonFfi sse_decode_skip_reason_ffi(SseDeserializer deserializer);
 
   @protected
   SubscriptionHealthActionFfi sse_decode_subscription_health_action_ffi(
@@ -1442,6 +1556,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_commit_to_publish_ffi(
+    CommitToPublishFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_contact_ffi(
     ContactFfi self,
     SseSerializer serializer,
@@ -1450,6 +1570,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_decrypted_location_ffi(
     DecryptedLocationFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_deferred_send_ffi(
+    DeferredSendFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_encrypted_location_ffi(
+    EncryptedLocationFfi self,
     SseSerializer serializer,
   );
 
@@ -1514,6 +1646,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_skip_reason_ffi(
+    SkipReasonFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_tile_cache_entry_ffi(
     TileCacheEntryFfi self,
     SseSerializer serializer,
@@ -1553,6 +1691,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_circle_ffi(CircleFfi self, SseSerializer serializer);
 
   @protected
+  void sse_encode_circle_health_ffi(
+    CircleHealthFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_circle_member_ffi(
     CircleMemberFfi self,
     SseSerializer serializer,
@@ -1574,6 +1718,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_contact_ffi(ContactFfi self, SseSerializer serializer);
 
   @protected
+  void sse_encode_convergence_sweep_ffi(
+    ConvergenceSweepFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_decrypt_location_outcome_ffi(
     DecryptLocationOutcomeFfi self,
     SseSerializer serializer,
@@ -1586,6 +1736,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_deferred_send_ffi(
+    DeferredSendFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_directory_entry_ffi(
     DirectoryEntryFfi self,
     SseSerializer serializer,
@@ -1594,6 +1750,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_directory_tier_ffi(
     DirectoryTierFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_encrypt_location_outcome_ffi(
+    EncryptLocationOutcomeFfi self,
     SseSerializer serializer,
   );
 
@@ -1814,6 +1976,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_commit_to_publish_ffi(
+    CommitToPublishFfi? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_contact_ffi(
     ContactFfi? self,
     SseSerializer serializer,
@@ -1822,6 +1990,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_decrypted_location_ffi(
     DecryptedLocationFfi? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_deferred_send_ffi(
+    DeferredSendFfi? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_encrypted_location_ffi(
+    EncryptedLocationFfi? self,
     SseSerializer serializer,
   );
 
@@ -1858,6 +2038,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_public_identity(
     PublicIdentity? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_skip_reason_ffi(
+    SkipReasonFfi? self,
     SseSerializer serializer,
   );
 
@@ -1979,10 +2165,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_relay_type_ffi(RelayTypeFfi self, SseSerializer serializer);
 
   @protected
+  void sse_encode_repair_rotation_outcome_ffi(
+    RepairRotationOutcomeFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_signed_location_event_ffi(
     SignedLocationEventFfi self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_skip_reason_ffi(SkipReasonFfi self, SseSerializer serializer);
 
   @protected
   void sse_encode_subscription_health_action_ffi(

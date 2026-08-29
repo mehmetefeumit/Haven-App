@@ -22,7 +22,15 @@
 pub enum SyncStatusReason {
     /// The engine is establishing relay connections.
     Connecting,
-    /// All required relays are connected.
+    /// The receive plane is serving: all required relays are connected at
+    /// session start, **and** — emitted again later — a REQ this device had lost
+    /// is live once more.
+    ///
+    /// The second meaning is what pairs with [`Self::RelayError`]. A relay
+    /// `CLOSED` emits `RelayError`; when the repair puts that REQ back on the
+    /// wire, this is the recovery signal, so a consumer showing "sharing may be
+    /// paused" on the error has something to clear it on. Without it that banner
+    /// would stand indefinitely, because the repair is otherwise silent.
     Connected,
     /// A relay dropped and the engine is re-establishing it.
     Reconnecting,

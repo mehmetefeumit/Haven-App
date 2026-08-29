@@ -368,6 +368,10 @@ class AppLocalizationsFa extends AppLocalizations {
       'روشن است. بهینه‌سازی باتری ممکن است روی برخی گوشی‌ها اشتراک‌گذاری را متوقف کند. برای اینکه قابل‌اعتماد بماند، Haven را از بهینه‌سازی باتری مستثنا کن.';
 
   @override
+  String get locationSettingsBatteryOptNote =>
+      'بهینه‌سازی باتری برای Haven هنوز روشن است. برخی گوشی‌ها با همین قابلیت، اشتراک‌گذاری در پس‌زمینه را بدون هشدار متوقف می‌کنند. Haven را از آن مستثنا کن تا اشتراک‌گذاری قابل‌اعتماد بماند.';
+
+  @override
   String get locationSettingsErrorSnack => 'مشکلی پیش آمد';
 
   @override
@@ -404,6 +408,24 @@ class AppLocalizationsFa extends AppLocalizations {
   @override
   String get locationSettingsIosGuidance =>
       'تا وقتی اشتراک‌گذاری در پس‌زمینه روشن است، Haven یک نشست پیوستهٔ موقعیت مکانی را فعال نگه می‌دارد و iOS یک نشانگر آبی در نوار وضعیت نمایش می‌دهد. اگر مجوز «همیشه» را هم بدهی، Haven می‌تواند پس از آنکه iOS برنامه را بست، خودش را با حلقه‌هایت به‌روز کند.';
+
+  @override
+  String get fgsNotificationSharing =>
+      'Haven در حال ارسال و دریافت موقعیت مکانی است';
+
+  @override
+  String get fgsNotificationPaused =>
+      'Haven موقتاً متوقف است — برنامه را باز کن تا اشتراک‌گذاری از سر گرفته شود';
+
+  @override
+  String get fgsNotificationOpen => 'Haven باز است';
+
+  @override
+  String get fgsChannelName => 'اشتراک‌گذاری موقعیت مکانی';
+
+  @override
+  String get fgsChannelDescription =>
+      'این اعلان، Haven را فعال نگه می‌دارد تا موقعیت مکانی رمزگذاری‌شده‌ات را در پس‌زمینه به اشتراک بگذارد.';
 
   @override
   String get mapStyleTitle => 'سبک نقشه';
@@ -676,7 +698,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get privacyEncryptionKeysChangeOnMembership =>
-      'ترک کردن یک حلقه، آنچه را اعضایش پیش‌تر ذخیره کرده‌اند پس نمی‌گیرد. Haven کلیدها را فقط وقتی عوض می‌کند که کسی بپیوندد یا برود، هرگز بر پایهٔ زمان‌بندی. پس یک کلید می‌تواند هفته‌ها پیام را پوشش بدهد، و هر چه عضوی در آن مدت ذخیره کرده برایش خواندنی می‌ماند. با این حال او نمی‌تواند چیزی را که پس از رفتنش فرستاده شده باز کند.';
+      'ترک کردن یک حلقه، آنچه را اعضایش پیش‌تر ذخیره کرده‌اند پس نمی‌گیرد. Haven کلیدها را وقتی عوض می‌کند که کسی بپیوندد یا برود، یا وقتی مدیر یک حلقه، پس از آنکه دیگر پیامی از آن نرسید، مشکلش را رفع کند؛ هرگز کلیدها را بر پایهٔ زمان‌بندی عوض نمی‌کند. پس یک کلید می‌تواند پیام‌های چند هفته را پوشش بدهد، و هر چه عضوی در آن مدت ذخیره کرده برایش خواندنی می‌ماند. با این حال او نمی‌تواند چیزی را که پس از رفتنش فرستاده شده باز کند.';
 
   @override
   String get privacyEncryptionMeansForYou =>
@@ -688,7 +710,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get privacyEncryptionDetailEpochs =>
-      'به هر بازه‌ای که یک کلید در آن کار می‌کند «دوره» می‌گویند، و یک حلقه تنها وقتی به دورهٔ تازه می‌رود که اعضایش عوض شوند. دستگاهت کلیدهای دورهٔ کنونی و چند دورهٔ اخیر را نگه می‌دارد، همان‌قدر که برای باز کردن پیام‌های هنوز در راه بس باشد، و بقیه را دور می‌ریزد. حلقه‌ای که ماه‌هاست اعضایش عوض نشده‌اند، هنوز در همان دوره‌ای است که با آن آغاز شده.';
+      'به هر بازه‌ای که یک کلید در آن کار می‌کند «دوره» می‌گویند. یک حلقه وقتی به دورهٔ تازه می‌رود که اعضایش عوض شوند، و همچنین وقتی مدیرش، پس از آنکه دیگر پیامی از آن نرسید، مشکلش را رفع کند. دستگاهت کلیدهای دورهٔ کنونی و چند دورهٔ اخیر را نگه می‌دارد، به‌اندازه‌ای که برای باز کردن پیام‌هایی که هنوز در راه‌اند کافی باشد، و بقیه را دور می‌ریزد. حلقه‌ای که نه کسی به آن پیوسته و نه کسی از آن رفته، و هرگز نیازی به رفع مشکل نداشته، هنوز در همان دوره‌ای است که با آن آغاز شده.';
 
   @override
   String get privacyWhatOthersSeeTitle =>
@@ -2004,6 +2026,125 @@ class AppLocalizationsFa extends AppLocalizations {
   @override
   String get clockSkewResolvedAnnouncement =>
       'مشکل ساعت برطرف شد. Haven دوباره موقعیت مکانی‌ات را به اشتراک می‌گذارد.';
+
+  @override
+  String get clockSkewTitleDisagreement =>
+      'ساعتی در یکی از حلقه‌هایت درست نیست';
+
+  @override
+  String get clockSkewBodyDisagreement =>
+      'ساعت این گوشی و ساعت یکی دیگر از اعضا دو دقیقه یا بیشتر با هم اختلاف دارند. اگر ساعت این گوشی درست نباشد، ممکن است موقعیت مکانی‌ات پیش از آنکه کسی آن را ببیند منقضی شود. برای اینکه مطمئن شوی مشکل از این گوشی نیست، در تنظیمات سیستم تنظیم خودکار تاریخ و ساعت را روشن کن.';
+
+  @override
+  String get clockSkewDisagreementResolvedAnnouncement =>
+      'هشدار ساعت برطرف شد.';
+
+  @override
+  String get sharingHealthTitleStopped =>
+      'اشتراک‌گذاری موقعیت مکانی متوقف شده است';
+
+  @override
+  String get sharingHealthTitleNotSending =>
+      'موقعیت مکانی‌ات به اشتراک گذاشته نمی‌شود';
+
+  @override
+  String get sharingHealthTitleNotReceiving =>
+      'موقعیت مکانی دیگران را دریافت نمی‌کنی';
+
+  @override
+  String sharingHealthNoUpdatesMinutes(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'حدود $countString دقیقه بدون به‌روزرسانی',
+      one: 'حدود $countString دقیقه بدون به‌روزرسانی',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String sharingHealthNoUpdatesHours(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'حدود $countString ساعت بدون به‌روزرسانی',
+      one: 'حدود $countString ساعت بدون به‌روزرسانی',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String sharingHealthNoUpdatesDays(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'حدود $countString روز بدون به‌روزرسانی',
+      one: 'حدود $countString روز بدون به‌روزرسانی',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get sharingHealthRepairAction => 'رفع مشکل';
+
+  @override
+  String get sharingHealthRepairUnavailableHint =>
+      'رفع مشکل برای این حلقه در دسترس نیست';
+
+  @override
+  String get sharingHealthRepairHint =>
+      'دوباره به رله‌ها وصل می‌شود و موقعیت مکانی‌ات را دوباره می‌فرستد، و اگر مدیر این حلقه باشی، ممکن است کلید تازه‌ای به آن بدهد';
+
+  @override
+  String get sharingHealthRepairSent =>
+      'پیامِ رفع مشکل فرستاده شد. دیگران وقتی گوشی‌هایشان آن را دریافت کنند، هماهنگ می‌شوند.';
+
+  @override
+  String get sharingHealthRepairNotOwner =>
+      'فقط مدیر این حلقه می‌تواند مشکلش را رفع کند. از او بخواه تو را حذف کند و دوباره اضافه کند.';
+
+  @override
+  String get sharingHealthRepairNeedsNewCircle =>
+      'مشکل این حلقه روی این گوشی رفع نمی‌شود. یک حلقهٔ تازه با همان افراد بساز.';
+
+  @override
+  String get sharingHealthRepairNothingToDo =>
+      'فعلاً چیزی برای رفع کردن نیست. Haven به تلاش ادامه می‌دهد.';
+
+  @override
+  String get sharingHealthRepairUnresolvedAnnouncement =>
+      'اشتراک‌گذاری موقعیت مکانی هنوز کار نمی‌کند.';
+
+  @override
+  String get sharingHealthResumedAnnouncement =>
+      'اشتراک‌گذاری موقعیت مکانی دوباره کار می‌کند.';
+
+  @override
+  String circleMemberLastSeenMinutes(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'آخرین بار $countString دقیقه پیش دیده شد',
+      one: 'آخرین بار $countString دقیقه پیش دیده شد',
+    );
+    return '$_temp0';
+  }
 
   @override
   String get mapThisLocation => 'این موقعیت';

@@ -112,6 +112,11 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
             // reports always there).
             ref.invalidate(iosLocationPermissionProvider);
         }
+
+        // Every enable path re-probes the battery-optimization exemption, so
+        // re-read the verdict `setEnabled` just persisted. The standing
+        // advisory below then appears (or clears) without leaving the page.
+        ref.invalidate(batteryOptimizationDeniedProvider);
       }
     } on Object catch (e) {
       debugPrint('[LocationSettings] ${e.runtimeType}');
@@ -125,6 +130,17 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  /// Opens Android's battery-optimization screen and re-reads the verdict.
+  ///
+  /// The system screen reports nothing back, so the exemption is re-probed
+  /// when the user returns; invalidating is what clears the advisory once they
+  /// grant it.
+  Future<void> _openBatteryOptimizationSettings() async {
+    await ref.read(openBatteryOptimizationSettingsProvider)();
+    if (!mounted) return;
+    ref.invalidate(batteryOptimizationDeniedProvider);
   }
 
   @override
@@ -142,6 +158,14 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
     final iosLimited =
         ref.watch(iosLocationPermissionProvider).valueOrNull ==
         IosAuthStatus.whenInUse;
+
+    // Android only: background sharing is on but Android still applies
+    // battery optimization to Haven. The provider owns both the platform gate
+    // and the live OS probe (it answers `false` off Android), so this branch
+    // is reachable in widget tests — the guidance card below deliberately is
+    // not.
+    final batteryOptDenied =
+        ref.watch(batteryOptimizationDeniedProvider).valueOrNull ?? false;
 
     return Scaffold(
       appBar: AppBar(title: Text(l10n.locationSettingsTitle)),
@@ -188,19 +212,26 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
           // so this never renders off iOS.
           if (sharingEnabled && iosLimited) ...[
             const SizedBox(height: HavenSpacing.base),
-            Card(
-              child: ListTile(
-                leading: const Icon(
-                  LucideIcons.triangleAlert,
-                  color: HavenSecurityColors.warning,
-                  size: 20,
-                ),
-                title: Text(l10n.locationSettingsIosLimitedNote),
-                trailing: TextButton(
-                  onPressed: geo.Geolocator.openAppSettings,
-                  child: Text(l10n.commonOpenSettings),
-                ),
-              ),
+            _ActionableNote(
+              icon: LucideIcons.triangleAlert,
+              message: l10n.locationSettingsIosLimitedNote,
+              actionLabel: l10n.commonOpenSettings,
+              onAction: geo.Geolocator.openAppSettings,
+            ),
+          ],
+
+          // Android residual note: sharing is on but Android may still
+          // battery-optimize Haven, which is how OEM battery managers kill a
+          // long-running foreground service. The one-off snackbar said this
+          // once, at the moment the user declined; this line is what makes the
+          // state discoverable afterwards.
+          if (sharingEnabled && batteryOptDenied) ...[
+            const SizedBox(height: HavenSpacing.base),
+            _ActionableNote(
+              icon: LucideIcons.batteryWarning,
+              message: l10n.locationSettingsBatteryOptNote,
+              actionLabel: l10n.commonOpenSettings,
+              onAction: _openBatteryOptimizationSettings,
             ),
           ],
 
@@ -279,6 +310,62 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
             ),
           ],
         ],
+      ),
+    );
+  }
+}
+
+/// A warning note with one action, laid out so it survives a 200 % text scale.
+///
+/// NOT a `ListTile` with a `trailing:` button, which is what both of these
+/// notes used to be: `ListTile` gives the trailing widget its intrinsic width
+/// first, and at the largest text scale both platforms offer a button reading
+/// "Open settings" consumes the whole tile on a 320 pt phone — Flutter then
+/// asserts ("Trailing widget consumes the entire tile width") and the note is
+/// replaced by an error box. Stacking the action UNDER the message lets both
+/// wrap instead.
+class _ActionableNote extends StatelessWidget {
+  const _ActionableNote({
+    required this.icon,
+    required this.message,
+    required this.actionLabel,
+    required this.onAction,
+  });
+
+  final IconData icon;
+  final String message;
+  final String actionLabel;
+  final VoidCallback onAction;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(HavenSpacing.base),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  icon,
+                  color: HavenSecurityColors.warning,
+                  size: 20,
+                ),
+                const SizedBox(width: HavenSpacing.md),
+                Expanded(child: Text(message)),
+              ],
+            ),
+            Align(
+              alignment: AlignmentDirectional.centerEnd,
+              child: TextButton(
+                onPressed: onAction,
+                child: Text(actionLabel),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

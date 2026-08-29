@@ -376,8 +376,20 @@ enum SubscriptionHealthAction {
   /// The engine is running and every relay is connected — nothing to do.
   healthy,
 
-  /// A relay had dropped; every subscription was re-anchored at its cursor.
+  /// A relay had dropped, or a REQ the session expects was missing from the
+  /// pool, so the WHOLE session was re-anchored (pool reconnected, every
+  /// subscription re-issued at its cursor).
   resubscribed,
+
+  /// Delivery silence alone: every socket was up and every REQ registered, so
+  /// only the `(relay, sub)` endpoints that had gone quiet were re-issued.
+  ///
+  /// Distinct from [resubscribed] because the two differ by orders of magnitude
+  /// in cost, and because this one is EXPECTED on a device whose circles are
+  /// simply idle — folding it into [resubscribed] would show a normal quiet
+  /// device as repeatedly losing its relays. For "did the receive plane get
+  /// repaired?" purposes a caller should treat it like [resubscribed].
+  targetedReanchor,
 }
 
 /// Presence-only result of an M8 subscription-health maintenance tick.
@@ -393,6 +405,9 @@ class SubscriptionHealthResult {
     this.relaysTotal = 0,
     this.relaysStillConnecting = 0,
     this.relaysDisconnected = 0,
+    this.subscriptionsExpected = 0,
+    this.subscriptionsLive = 0,
+    this.subscriptionsSilent = 0,
   });
 
   /// An empty (engine-off) result — the best-effort failure fallback.
@@ -412,6 +427,27 @@ class SubscriptionHealthResult {
 
   /// Relays found dropped at check time (0 when engine off).
   final int relaysDisconnected;
+
+  /// `(relay, subscription)` REQ pairs the active session expected to be live
+  /// (0 when engine off or no session has started).
+  final int subscriptionsExpected;
+
+  /// How many of those the relay pool still held.
+  ///
+  /// A shortfall against [subscriptionsExpected] is a REQ a relay ended with
+  /// `CLOSED` that nothing upstream will re-issue. It is the only counter that
+  /// can show a receive blackout behind a live socket — the relay stays
+  /// connected, so [relaysDisconnected] reads 0 throughout.
+  final int subscriptionsLive;
+
+  /// Group REQs, still present in the pool, that had delivered neither an event
+  /// nor an `EOSE` within the delivery-silence window.
+  ///
+  /// The inbox is never counted (a quiet inbox is the normal state). This is
+  /// what a [SubscriptionHealthAction.targetedReanchor] acted on. Not a failure
+  /// signal on its own: a circle whose members are not sharing is legitimately
+  /// silent forever.
+  final int subscriptionsSilent;
 }
 
 /// Presence-only result of the one-time legacy KeyPackage retraction

@@ -22,6 +22,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/mls_session_handover.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/relay_service.dart';
@@ -162,6 +163,14 @@ class _FakeManager implements CircleManagerFfi {
       throw UnimplementedError('unexpected call: ${invocation.memberName}');
 }
 
+/// [DataDirectoryProvider] that resolves, so an `initialize()` reaches the real
+/// open — which then fails on the absent Rust bridge, the failure every
+/// recovery seam hangs off.
+class _FixedDataDirectoryProvider implements DataDirectoryProvider {
+  @override
+  Future<String> getDataDirectory() async => '/haven-test-data';
+}
+
 /// [DataDirectoryProvider] that appends a tag to a shared call-order list
 /// before throwing, so tests can verify execution order.
 class _OrderTrackingDataDirectoryProvider implements DataDirectoryProvider {
@@ -178,6 +187,7 @@ class _OrderTrackingDataDirectoryProvider implements DataDirectoryProvider {
 
 void main() {
   _handoffTests();
+  _orphanedGuardRecoveryTests();
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('CircleService - Data Structures', () {
@@ -1376,6 +1386,218 @@ void _handoffTests() {
         branch.indexOf('manager.dispose()'),
         isNonNegative,
         reason: 'a refused adoption must release the guard it just took',
+      );
+    });
+  });
+}
+
+/// Behavioural coverage for the SECOND recovery lever: a Rule-14 guard held by
+/// this isolate's own orphaned live-sync session.
+///
+/// The wedge it closes is permanent and survives every reopen. A pause-time
+/// `stop()` that times out reinstalls the wedged live-sync core into the Rust
+/// static `SESSION`; the pause path then disposes this isolate's own
+/// `CircleManagerFfi`, so the guard is held by something no Dart handle in any
+/// isolate references. The foreground service cannot open it (held) and its
+/// reclaim declines forever (this isolate answers its liveness probe), so the
+/// only actor left is this one — and only when the handover has ESTABLISHED
+/// that the service is not the holder.
+///
+/// The open itself cannot succeed here (`CircleManagerFfi.newInstance` needs
+/// the Rust bridge and throws a `StateError` without it), which is exactly the
+/// failing open these seams hang off. Open ATTEMPTS are counted through the
+/// identity-secret provider, which `withFreshSecret` calls once per open.
+void _orphanedGuardRecoveryTests() {
+  /// One `initialize()` against a scripted set of seams.
+  ///
+  /// [handover] `null` models a service with no handover wired at all (the
+  /// background isolate, and every test that injects a manager).
+  Future<({int opens, int handovers, int guardReads, int forceReleases})> run({
+    required HandoverOutcome? handover,
+    bool guardHeld = true,
+    bool guardReadThrows = false,
+    bool forceReleaseThrows = false,
+    ForceReleaseOutcomeFfi releaseOutcome = ForceReleaseOutcomeFfi.drained,
+  }) async {
+    var opens = 0;
+    var handovers = 0;
+    var guardReads = 0;
+    var forceReleases = 0;
+
+    final service = NostrCircleService(
+      relayService: _StubRelayService(),
+      dataDirectoryProvider: _FixedDataDirectoryProvider(),
+      keyringInitializer: () async {},
+      identitySecretBytesProvider: () async {
+        opens++;
+        // A fresh buffer per call: `withFreshSecret` scrubs what it is given.
+        return List<int>.filled(32, 7);
+      },
+      sessionHandover: handover == null
+          ? null
+          : (_) async {
+              handovers++;
+              return handover;
+            },
+      isSessionLive: (_) async {
+        guardReads++;
+        if (guardReadThrows) throw Exception('registry unavailable');
+        return guardHeld;
+      },
+      forceReleaseLiveSession: () async {
+        forceReleases++;
+        if (forceReleaseThrows) throw Exception('session lock poisoned');
+        return releaseOutcome;
+      },
+    );
+
+    // Every open fails in this harness, so `initialize()` always surfaces the
+    // original failure; what varies is how hard it tried first.
+    await expectLater(service.initialize(), throwsA(anything));
+
+    return (
+      opens: opens,
+      handovers: handovers,
+      guardReads: guardReads,
+      forceReleases: forceReleases,
+    );
+  }
+
+  group('a guard the stopped foreground service did not release', () {
+    test('a timed-out handover force-releases and retries once', () async {
+      // THE C1 signature: the service was asked to stop, complied or not, and
+      // the guard is still there afterwards — so the holder is this isolate's
+      // own reinstalled live-sync core.
+      final r = await run(handover: HandoverOutcome.timedOut);
+      expect(r.forceReleases, 1);
+      expect(
+        r.opens,
+        2,
+        reason: 'exactly one retry — the release is worthless without an open '
+            'to use it, and a second retry would just re-stop the engine',
+      );
+    });
+
+    test('a stopTimedOut release still buys the retry', () async {
+      // None of the outcomes PROMISES a free guard — other holders are
+      // untouched by that call and `acquire` stays the authority — so a
+      // release that changed something is worth one open to ask.
+      final r = await run(
+        handover: HandoverOutcome.timedOut,
+        releaseOutcome: ForceReleaseOutcomeFfi.stopTimedOut,
+      );
+      expect(r.forceReleases, 1);
+      expect(r.opens, 2);
+    });
+
+    test('a noSession release does NOT buy a retry', () async {
+      // Different in kind from the other two outcomes: the slot was already
+      // empty, so this call positively released nothing and the guard belongs
+      // to something else entirely. The retry would be an open guaranteed to
+      // fail exactly as the first one did.
+      final r = await run(
+        handover: HandoverOutcome.timedOut,
+        releaseOutcome: ForceReleaseOutcomeFfi.noSession,
+      );
+      expect(r.forceReleases, 1);
+      expect(
+        r.opens,
+        1,
+        reason: 'nothing was released, so nothing changed for the retry',
+      );
+    });
+
+    test('nothing is force-released when the guard is free', () async {
+      // A failure with a free guard is something else entirely — a locked
+      // keyring, a full disk. Stopping the live-sync engine would destroy live
+      // receive to fix a problem it has nothing to do with.
+      final r = await run(handover: HandoverOutcome.timedOut, guardHeld: false);
+      expect(r.forceReleases, 0);
+      expect(r.guardReads, 1, reason: 'the registry decides, and it was asked');
+      expect(r.opens, 1, reason: 'nothing changed, so a retry is a guess');
+    });
+
+    test('a registry that cannot answer is not read as a held guard',
+        () async {
+      // Fail closed in BOTH directions: an unanswerable query must not trigger
+      // the destructive call either.
+      final r = await run(
+        handover: HandoverOutcome.timedOut,
+        guardReadThrows: true,
+      );
+      expect(r.forceReleases, 0);
+      expect(r.opens, 1);
+    });
+  });
+
+  group('the handover already settled it', () {
+    test('a released guard is retried WITHOUT force-releasing', () async {
+      // The foreground service let go. Stopping this isolate's live-sync engine
+      // on top of that is pure loss: live receive dies and nothing is gained.
+      final r = await run(handover: HandoverOutcome.released);
+      expect(r.forceReleases, 0);
+      expect(r.guardReads, 0, reason: 'there is nothing left to decide');
+      expect(r.opens, 2, reason: 'the retry is what uses the released guard');
+    });
+  });
+
+  group('verdicts that must NOT reach the destructive lever', () {
+    test('a backgrounded open never force-releases', () async {
+      // The pause-time handoff working as designed: the service legitimately
+      // holds the session and this open is routine background maintenance.
+      // Force-releasing here would end background location sharing to satisfy
+      // a task that can wait for the next foreground.
+      final r = await run(handover: HandoverOutcome.backgrounded);
+      expect(r.forceReleases, 0);
+      expect(r.guardReads, 0);
+      expect(r.opens, 1);
+    });
+
+    test('a failed stop leaves the service state unknown, so nothing fires',
+        () async {
+      final r = await run(handover: HandoverOutcome.stopFailed);
+      expect(r.forceReleases, 0);
+      expect(r.opens, 1);
+    });
+
+    test('a notHeld handover never force-releases', () async {
+      // `notHeld` IS the handover reporting a free guard. Every realizable
+      // case is answered `false` by the re-read a moment later, so the only
+      // way past it is a race in which the guard was taken in between — by
+      // something this isolate has established nothing about. Eligibility is
+      // therefore `timedOut` alone: one verdict, one meaning.
+      final r = await run(handover: HandoverOutcome.notHeld);
+      expect(r.forceReleases, 0);
+      expect(
+        r.guardReads,
+        0,
+        reason: 'a verdict that is not eligible must not even reach the '
+            're-read, let alone the lever',
+      );
+      expect(r.opens, 1, reason: 'the original failure is surfaced');
+    });
+
+    test('a service with no handover wired never force-releases', () async {
+      // The background isolate's own `NostrCircleService` has neither seam, so
+      // the ungated second route to `forceReleaseLiveSession` does not exist.
+      final r = await run(handover: null);
+      expect(r.handovers, 0);
+      expect(r.forceReleases, 0);
+      expect(r.opens, 1);
+    });
+  });
+
+  group('the release itself failing', () {
+    test('a throwing force-release does not buy a retry', () async {
+      final r = await run(
+        handover: HandoverOutcome.timedOut,
+        forceReleaseThrows: true,
+      );
+      expect(r.forceReleases, 1);
+      expect(
+        r.opens,
+        1,
+        reason: 'nothing was released, so the retry would hit the same guard',
       );
     });
   });

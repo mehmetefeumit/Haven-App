@@ -36,8 +36,8 @@ import 'package:haven/src/services/circle_service.dart';
 ///   ..read(evolutionPollerProvider);
 /// ```
 ///
-/// This pattern mirrors how `invitationPollerProvider` and
-/// `selfUpdateProvider` are triggered throughout the app.
+/// This pattern mirrors how `invitationPollerProvider` is triggered
+/// throughout the app.
 final evolutionPollerProvider = FutureProvider<bool>((ref) async {
   final circleService = ref.read(circleServiceProvider);
   final locationSharingService = ref.read(locationSharingServiceProvider);

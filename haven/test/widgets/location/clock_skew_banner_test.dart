@@ -18,6 +18,13 @@ import 'package:haven/src/widgets/location/clock_skew_banner.dart';
 
 import '../../helpers/localized_app_harness.dart';
 
+/// A clock frozen at a fixed instant so the peer-sample arithmetic is exact.
+class _FixedClock {
+  final DateTime now = DateTime.utc(2026, 8, 28, 12);
+
+  DateTime call() => now;
+}
+
 void main() {
   late AppLocalizations l10n;
 
@@ -64,6 +71,81 @@ void main() {
       );
       expect(behind, isNotNull);
       expect(behind!.message, isNot(rejected!.message));
+    });
+
+    test('a SOLE-SOURCE peer verdict never accuses this phone, and never '
+        'claims a loss', () {
+      // The evidence is one member, so two things are unknown and must not be
+      // asserted. (a) WHOSE clock: the two devices are not symmetric
+      // observers — a peer running fast makes THIS device fire while the
+      // peer's own detector stays silent — so the corroborated title would
+      // accuse the innocent device and never the guilty one. (b) WHETHER
+      // anything is lost: both sides tolerate 228 s + 60 s, so nothing is
+      // dropped until the gap passes kClockSkewTotalLossThreshold (288 s),
+      // while this fires at kClockSkewAlertThreshold (120 s).
+      final sole = resolveClockSkewCopy(
+        const ClockSkewStatus(
+          signal: ClockSkewSignal.peersAheadOfDevice,
+          complaint: DeviceClockComplaint.behind,
+          offsetSecs: 150,
+          corroboratingSources: 1,
+        ),
+        l10n,
+      );
+      expect(sole, isNotNull);
+      expect(sole!.title, l10n.clockSkewTitleDisagreement);
+      expect(sole.message, l10n.clockSkewBodyDisagreement);
+      expect(
+        sole.title,
+        isNot(l10n.clockSkewTitle),
+        reason: 'the corroborated title names this phone as the wrong one',
+      );
+      expect(
+        sole.message,
+        isNot(l10n.clockSkewBodyBehind),
+        reason:
+            'the corroborated body asserts the locations DO expire, which is '
+            'false across the whole 120-288 s band',
+      );
+    });
+
+    test('a CORROBORATED peer verdict still uses the accusing copy', () {
+      // The negative twin: two independent members agreeing IS evidence about
+      // this device, so the hedged copy would under-state a real, total loss.
+      for (final sources in <int>[2, 3]) {
+        final copy = resolveClockSkewCopy(
+          ClockSkewStatus(
+            signal: ClockSkewSignal.peersAheadOfDevice,
+            complaint: DeviceClockComplaint.behind,
+            offsetSecs: 21600,
+            corroboratingSources: sources,
+          ),
+          l10n,
+        )!;
+        expect(copy.title, l10n.clockSkewTitle, reason: '$sources sources');
+        expect(
+          copy.message,
+          l10n.clockSkewBodyBehind,
+          reason: '$sources sources',
+        );
+      }
+    });
+
+    test('the relay rejection keeps the accusing copy regardless of the '
+        'source count', () {
+      // `corroboratingSources` is 0 for a relay verdict, so a branch written
+      // as "sources != 2" rather than "peer signal AND sources == 1" would
+      // hedge a fault the relay reported directly — and that one really does
+      // mean nothing is being shared.
+      final copy = resolveClockSkewCopy(
+        const ClockSkewStatus(
+          signal: ClockSkewSignal.relayRejectedTimestamp,
+          complaint: DeviceClockComplaint.ahead,
+        ),
+        l10n,
+      )!;
+      expect(copy.title, l10n.clockSkewTitle);
+      expect(copy.message, l10n.clockSkewBodyRejected);
     });
 
     test('never renders the measured offset', () {
@@ -189,6 +271,60 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(announcements, [l10n.clockSkewResolvedAnnouncement]);
+    });
+
+    testWidgets('announces the SOLE-SOURCE recovery without claiming sharing '
+        'resumed', (tester) async {
+      // The general announcement says Haven "is sharing your location again".
+      // For the one-member fault that is an over-claim in the same direction
+      // the banner body avoids: sharing may never have stopped, because
+      // nothing is dropped until the gap passes 288 s. The announcement is
+      // spoken to someone who cannot see the screen to check, so it is the
+      // last place to guess.
+      final announcements = <String>[];
+      tester.binding.defaultBinaryMessenger
+          .setMockDecodedMessageHandler<dynamic>(SystemChannels.accessibility, (
+        dynamic message,
+      ) async {
+        final map = message! as Map<Object?, Object?>;
+        if (map['type'] == 'announce') {
+          final data = map['data']! as Map<Object?, Object?>;
+          announcements.add(data['message']! as String);
+        }
+        return null;
+      });
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger
+            .setMockDecodedMessageHandler<dynamic>(
+              SystemChannels.accessibility,
+              null,
+            ),
+      );
+
+      final clock = _FixedClock();
+      final detector = ClockSkewDetector(now: clock.call);
+      addTearDown(detector.dispose);
+
+      await pump(tester, detector);
+      // ONE member, 150 s ahead: inside the sole-source exception, and inside
+      // the band where nothing is lost.
+      detector.recordPeerTimestamp(
+        senderPubkey: 'aa' * 32,
+        peerTimestamp: clock.now.add(const Duration(seconds: 150)),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text(l10n.clockSkewBodyDisagreement), findsOneWidget);
+
+      detector.reset();
+      await tester.pumpAndSettle();
+
+      expect(
+        announcements,
+        [l10n.clockSkewDisagreementResolvedAnnouncement],
+        reason:
+            'the sole-source clear must not announce that sharing resumed — '
+            'it may never have stopped',
+      );
     });
 
     testWidgets('stays on screen at a 200% text scale on the smallest phone', (

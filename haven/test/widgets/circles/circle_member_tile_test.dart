@@ -36,9 +36,17 @@ import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/widgets/circles/circle_member_tile.dart';
 import 'package:haven/src/widgets/identity/avatar.dart';
+import 'package:haven/src/widgets/map/member_marker.dart'
+    show kMemberAgePillThreshold;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../mocks/mock_profile_service.dart';
+
+/// Fixed "now" for the last-seen tests, so an age assertion is arithmetic
+/// rather than a race with the wall clock.
+final _tileNow = DateTime.utc(2026, 8, 28, 12);
+
+DateTime _lastSeenAgo(Duration age) => _tileNow.subtract(age);
 
 void main() {
   const selfPubkey =
@@ -89,6 +97,8 @@ void main() {
     VoidCallback? onTap,
     VoidCallback? onRemove,
     bool hasLocation = true,
+    DateTime? lastSeen,
+    DateTime Function()? now,
     Locale locale = const Locale('en'),
     TextScaler textScaler = TextScaler.noScaling,
   }) async {
@@ -118,6 +128,8 @@ void main() {
               onTap: onTap,
               onRemove: onRemove,
               hasLocation: hasLocation,
+              lastSeen: lastSeen,
+              now: now ?? DateTime.now,
             ),
           ),
         ),
@@ -1824,6 +1836,118 @@ void main() {
       },
     );
   });
+
+  // ---------------------------------------------------------------------------
+  // "Last seen" — the roster's half of the staleness story.
+  //
+  // The promise: a member whose location has gone stale says so on the row, on
+  // the SAME threshold and in the SAME unit as their marker's age pill, so the
+  // list and the map can never state different ages for one person. And a
+  // member whose location is fresh says nothing, for the same reason a fresh
+  // marker has no pill — an age that is always shown stops reading as "this one
+  // is behind".
+  // ---------------------------------------------------------------------------
+
+  group('last-seen line', () {
+    testWidgets('is absent below the marker age-pill threshold', (tester) async {
+      // Anti-vacuity for every assertion below, and the "do not cry wolf" half
+      // of the promise.
+      final l10n = await AppLocalizations.delegate.load(const Locale('en'));
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: otherPubkey),
+        identity: buildIdentity(),
+        lastSeen: _lastSeenAgo(
+          kMemberAgePillThreshold - const Duration(minutes: 1),
+        ),
+        now: () => _tileNow,
+      );
+
+      expect(find.text(l10n.circleMemberLastSeenMinutes(4)), findsNothing);
+    });
+
+    testWidgets('appears once the location is as stale as the marker pill', (
+      tester,
+    ) async {
+      final l10n = await AppLocalizations.delegate.load(const Locale('en'));
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: otherPubkey),
+        identity: buildIdentity(),
+        lastSeen: _lastSeenAgo(kMemberAgePillThreshold),
+        now: () => _tileNow,
+      );
+
+      expect(
+        find.text(
+          l10n.circleMemberLastSeenMinutes(kMemberAgePillThreshold.inMinutes),
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('reports minutes at every age, exactly as the pill does', (
+      tester,
+    ) async {
+      // Minutes-only, deliberately: the marker pill reads "90m" at an hour and
+      // a half, and a row reading "1 hour ago" beside it would be two answers
+      // to one question.
+      final l10n = await AppLocalizations.delegate.load(const Locale('en'));
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: otherPubkey),
+        identity: buildIdentity(),
+        lastSeen: _lastSeenAgo(const Duration(minutes: 90)),
+        now: () => _tileNow,
+      );
+
+      expect(find.text(l10n.circleMemberLastSeenMinutes(90)), findsOneWidget);
+    });
+
+    testWidgets('is absent when the member has no location at all', (
+      tester,
+    ) async {
+      // "No recent location" already says everything there is to say; adding an
+      // age to it would be an age of nothing.
+      final l10n = await AppLocalizations.delegate.load(const Locale('en'));
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: otherPubkey),
+        identity: buildIdentity(),
+        hasLocation: false,
+      );
+
+      expect(find.text(l10n.circleMemberNoRecentLocation), findsOneWidget);
+      expect(find.text(l10n.circleMemberLastSeenMinutes(90)), findsNothing);
+    });
+
+    testWidgets('is spoken as part of the row, not left in a silent subtitle', (
+      tester,
+    ) async {
+      // The row excludes its descendants' semantics whenever no interactive
+      // child forces them back on, so a subtitle-only age would be invisible to
+      // a screen reader on exactly the common case.
+      final l10n = await AppLocalizations.delegate.load(const Locale('en'));
+      final handle = tester.ensureSemantics();
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: otherPubkey),
+        identity: buildIdentity(),
+        lastSeen: _lastSeenAgo(const Duration(minutes: 12)),
+        now: () => _tileNow,
+      );
+
+      expect(
+        find.bySemanticsLabel(
+          RegExp(RegExp.escape(l10n.circleMemberLastSeenMinutes(12))),
+        ),
+        findsOneWidget,
+      );
+
+      handle.dispose();
+    });
+  });
+
 
   // ---------------------------------------------------------------------------
   // PendingMemberTile — npub display format.

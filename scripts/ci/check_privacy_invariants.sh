@@ -1051,6 +1051,34 @@ checker enforces the v1 contract and cannot vouch for another."
     fail=1
   fi
 
+  # A key written TWICE inside one object is not a style slip: every JSON reader
+  # here — jq included — keeps the last occurrence and discards the first
+  # silently, so a manifest can cite a guard and a set of tests, parse cleanly,
+  # and bind neither. That is exactly what happened to INV-E-NO-PERIODIC-REKEY,
+  # whose new "guards" and "tests" were shadowed by stale empty ones written
+  # below them; every check downstream then passed on what survived.
+  #
+  # Counted, not pattern-matched, because by the time jq has decoded an object
+  # the shadowed value is gone. The streaming parser still visits it, so the
+  # document's value count exceeds the decoded one by exactly the number of
+  # shadowed values — and for a duplicate-free document the two are equal,
+  # because the stream visits precisely the values the parse keeps.
+  local n_decoded n_streamed
+  require_jq
+  n_decoded="$(jqm "${manifest}" '
+      [ paths as $p
+        | select( (getpath($p) | type) as $t
+                  | ($t != "object" and $t != "array")
+                    or (getpath($p) | length) == 0 ) ] | length')"
+  n_streamed="$(jq -n --stream '[inputs | select(length == 2)] | length' "${manifest}" 2>/dev/null)"
+  if [[ "${n_decoded}" != "${n_streamed}" ]]; then
+    fail_msg "[rule 1] the manifest holds ${n_streamed} values but the parse keeps \
+${n_decoded}: a key is written twice inside one object, and the FIRST occurrence is \
+silently discarded — so what the manifest appears to declare is not what any check \
+sees. Find the repeated key and merge the two into one."
+    fail=1
+  fi
+
   local inv status residual dev_id n_assert n_disc n_disc_claims n_tests n_guards
   while IFS=$'\037' read -r inv status residual dev_id n_assert n_disc n_disc_claims n_tests n_guards; do
     [[ -n "${inv}" ]] || continue
@@ -1830,7 +1858,7 @@ ${MANIFEST_REL}. Ratcheting against the old path — a rename is not a fresh sta
 # ---------------------------------------------------------------------------
 FIXTURES=0
 SELFTEST_FAILS=0
-EXPECTED_FIXTURES=98
+EXPECTED_FIXTURES=99
 
 _expect() { # _expect <label> <want-rc> <want-tag-or-'-'> <command...>
   local label="$1" want="$2" tag="$3" got=0 err
@@ -2269,6 +2297,11 @@ self_test() {
     '.invariants[0].id = "inv_lowercase"'
   _fixture "unknown status fails" 1 '[rule 1]' \
     '.invariants[0].status = "mostly"'
+  # CRITICAL: the shape that shadowed a real invariant's guards and tests. It
+  # cannot be built with a jq filter — jq collapses duplicates on the way in —
+  # so it is injected as raw text, which is also how it reaches the repository.
+  _fixture "*** a duplicate key inside one invariant fails ***" 1 '[rule 1]' "" \
+    "sed 's|\"guards\": \[|\"guards\": [], \"guards\": [|' docs/privacy/privacy_invariants.json > m.json && mv m.json docs/privacy/privacy_invariants.json"
 
   log "self-test: rule 2 — symbols"
   _fixture "missing symbol file fails" 1 '[rule 2]' \

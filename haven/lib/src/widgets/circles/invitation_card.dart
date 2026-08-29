@@ -180,11 +180,12 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
 
       // Post-welcome self-update is intentionally NOT issued here.
       //
-      // As of M5, periodic + post-join self-update is disabled entirely
-      // (`enablePeriodicSelfUpdate = false`) because leaderless self-update
-      // is the dominant MLS fork generator — there is no rotation to
-      // delegate to (the MIP-02 deviation is documented/accepted in
-      // SECURITY.md). Historical reasons it was never issued inline anyway:
+      // Haven issues no periodic or post-join self-update at all: leaderless
+      // self-update is the dominant MLS fork generator (the MIP-02 deviation
+      // is documented/accepted in SECURITY.md). The only epoch change a user
+      // can trigger is the explicit Repair action
+      // (`docs/EPOCH_ROTATION_REPAIR_PLAN.md`), which is admin-only and
+      // rate-limited. Historical reasons it was never issued inline anyway:
       //
       // 1. Single-joiner race: an immediate `selfUpdate` here advances
       //    the joiner's local epoch to N+1 while the just-fired

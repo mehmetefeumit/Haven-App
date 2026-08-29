@@ -158,10 +158,11 @@ const int _kContradictedProbeAttempts = 5;
 /// The probe cadence actually used, so tests can compress it.
 ///
 /// A seam, not a setting: production reads
-/// [kLocationAccessProbeInterval] and nothing in the app overrides it. Without
-/// it, the two behaviours that only the watchdog can produce — a stream that
-/// stops without erroring, and recovery on a stream that never comes back —
-/// would be untestable except through wall-clock waits.
+/// [kLocationAccessProbeInterval] and nothing in the app overrides it. Tests
+/// run the watchdog on a fake clock, and override this to ATTRIBUTE a
+/// detection: a cadence too long to fire inside a test window is the only way
+/// to prove the stream-error path found something the watchdog would otherwise
+/// have found anyway.
 final locationAccessProbeIntervalProvider = Provider<Duration>((ref) {
   return kLocationAccessProbeInterval;
 });
@@ -170,7 +171,7 @@ final locationAccessProbeIntervalProvider = Provider<Duration>((ref) {
 ///
 /// The same kind of seam as [locationAccessProbeIntervalProvider], and for the
 /// same reason: the contradiction path is only observable as a DELAY, so
-/// without an override the tests that pin it would be wall-clock waits.
+/// pinning it needs a delay the test controls.
 final locationAccessContradictedRetryProvider = Provider<Duration>((ref) {
   return kLocationAccessContradictedRetryDelay;
 });

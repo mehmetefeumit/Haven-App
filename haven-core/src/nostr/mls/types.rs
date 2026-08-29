@@ -14,6 +14,7 @@
 //! byte contract is identical; bring [`GroupIdExt`] into scope to use it.
 
 // ── Dark Matter re-exports (the DM-3 consumer surface) ───────────────────────
+pub use cgka_engine::openmls_projection::OpenMlsContentKind;
 pub use cgka_session::{CreateGroupEffects, IngestEffects, PublishWork, SessionEffects};
 pub use cgka_traits::app_components::AppComponentData;
 pub use cgka_traits::engine::{
@@ -23,6 +24,7 @@ pub use cgka_traits::engine::{
 pub use cgka_traits::engine_state::PendingStateRef;
 pub use cgka_traits::group::{Group as MlsGroup, Member as MlsMember};
 pub use cgka_traits::ingest::{IngestOutcome, StaleReason};
+pub use cgka_traits::message::{MessageRecord, MessageState};
 pub use cgka_traits::transport::TransportMessage;
 pub use cgka_traits::types::{EpochId, GroupId, MemberId, MessageId};
 pub use nostr::Event;
@@ -367,6 +369,95 @@ impl std::fmt::Debug for LocationMessageResult {
     }
 }
 
+// ── Stuck convergence inputs (the outbound send gate) ────────────────────────
+
+/// How old a stored convergence input must be before re-delivery can no longer
+/// resolve it.
+///
+/// A kind-445 application message published by a current Haven build carries a
+/// NIP-40 `expiration` of `created_at + LOCATION_MESSAGE_RETENTION_SECS`, so a
+/// conformant relay has deleted the event by then and no receive plane can
+/// fetch it again; [`RECEIVER_EXPIRATION_GRACE_SECS`] adds the same clock-skew
+/// slack the receiver-side screen in
+/// [`SessionManager::process_event`](crate::nostr::mls::SessionManager::process_event)
+/// allows before it drops a replay.
+///
+/// # This is a heuristic about the relay, not a proof about the event
+///
+/// The screen reads each event's OWN `expiration` tag; this constant reasons
+/// from a message's `created_at` and Haven's own retention policy. Another
+/// Marmot client in the same circle may declare a LONGER
+/// `message-retention.v1` (0x8005), so its 445s can outlive
+/// `created_at + 228 s` on a relay and still be redeliverable when this rule
+/// calls them unresolvable. The cost of that mismatch is bounded and is not a
+/// correctness risk: at worst one peer location update is dropped that could
+/// have been re-fetched — the same outcome as any missed publish cycle, healed
+/// by the sender's next one. It is emphatically NOT a fork risk, because the
+/// rule is only ever applied to application messages, which change no group
+/// state (see [`SessionManager::sweep_unresolvable_inputs`]).
+///
+/// [`RECEIVER_EXPIRATION_GRACE_SECS`]: crate::location::ttl::RECEIVER_EXPIRATION_GRACE_SECS
+/// [`SessionManager::sweep_unresolvable_inputs`]: crate::nostr::mls::SessionManager::sweep_unresolvable_inputs
+pub const UNRESOLVABLE_INPUT_MAX_AGE_SECS: u64 =
+    crate::location::ttl::LOCATION_MESSAGE_RETENTION_SECS
+        + crate::location::ttl::RECEIVER_EXPIRATION_GRACE_SECS;
+
+/// Whether an event stamped `created_at_secs` is past the point where a relay
+/// still holds it, as judged at `now_secs`.
+///
+/// STRICTLY greater, matching `process_event`'s `Timestamp::now() > grace`
+/// comparison exactly: at precisely [`UNRESOLVABLE_INPUT_MAX_AGE_SECS`] the
+/// receive screen still ACCEPTS the event, so the sweep must not have disposed
+/// of it yet. Saturating, so a `created_at` in the future is simply never old.
+#[must_use]
+pub const fn beyond_relay_retention(created_at_secs: u64, now_secs: u64) -> bool {
+    now_secs.saturating_sub(created_at_secs) > UNRESOLVABLE_INPUT_MAX_AGE_SECS
+}
+
+/// What one pass of
+/// [`SessionManager::sweep_unresolvable_inputs`](crate::nostr::mls::SessionManager::sweep_unresolvable_inputs)
+/// found and did.
+///
+/// Counts only — no group ids, message ids, epochs or payloads — so the derived
+/// `Debug` is leak-free by construction (Security Rules 4/6/8) and the whole
+/// struct can be surfaced to the UI and to logs unredacted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConvergenceSweep {
+    /// Stored APPLICATION-message rows given the terminal
+    /// [`MessageState::Failed`](cgka_traits::message::MessageState) disposition
+    /// because the relay can no longer redeliver them.
+    pub disposed_messages: usize,
+    /// Durably queued outbound location intents deleted. A queued fix is
+    /// always stale by the time anything reads it — it is queued only because
+    /// the circle could not send — so the next cadence tick's position is
+    /// strictly better. Membership intents are never counted here.
+    pub discarded_intents: usize,
+    /// Rows still gating outbound sends after the pass — the engine's own
+    /// `Created`/`Retryable` commit-or-application predicate, mirrored.
+    pub gating_rows: usize,
+}
+
+impl ConvergenceSweep {
+    /// Whether no stored input still gates outbound sends.
+    ///
+    /// EXACTLY the engine's own `has_unresolved_convergence_inputs` predicate,
+    /// negated — same states, same content kinds, same future horizon, and the
+    /// same per-group rewind window the engine resolves (stored policy if one
+    /// is persisted, else the session's). So `true` here means the next send
+    /// will encrypt rather than queue, and it is safe for a UI to say so.
+    #[must_use]
+    pub const fn is_settled(&self) -> bool {
+        self.gating_rows == 0
+    }
+
+    /// Accumulates another group's pass into this one.
+    pub const fn absorb(&mut self, other: Self) {
+        self.disposed_messages += other.disposed_messages;
+        self.discarded_intents += other.discarded_intents;
+        self.gating_rows += other.gating_rows;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,6 +545,82 @@ mod tests {
         assert!(debug_str.contains("epoch: 7"));
         assert!(!debug_str.contains("090909"));
         assert!(!debug_str.contains("lat"));
+    }
+
+    #[test]
+    fn beyond_relay_retention_is_strict_at_the_boundary() {
+        let created = 1_000_000_u64;
+        let boundary = created + UNRESOLVABLE_INPUT_MAX_AGE_SECS;
+
+        // One second before the boundary and AT it, the receiver-side screen in
+        // `process_event` still accepts a replay of this event, so the sweep
+        // must not have disposed of it.
+        assert!(!beyond_relay_retention(created, boundary - 1));
+        assert!(!beyond_relay_retention(created, boundary));
+        // One second past it, `Timestamp::now() > expires_at + grace` holds and
+        // the row can never be resolved by re-delivery.
+        assert!(beyond_relay_retention(created, boundary + 1));
+    }
+
+    #[test]
+    fn beyond_relay_retention_never_fires_for_a_future_timestamp() {
+        // An outer `created_at` is chosen by whoever signed the event, so a
+        // forged future stamp must saturate rather than wrap into "ancient".
+        assert!(!beyond_relay_retention(u64::MAX, 0));
+        assert!(!beyond_relay_retention(2_000, 1_000));
+    }
+
+    #[test]
+    fn unresolvable_input_max_age_is_the_receive_screen_window() {
+        assert_eq!(
+            UNRESOLVABLE_INPUT_MAX_AGE_SECS,
+            crate::location::ttl::LOCATION_MESSAGE_RETENTION_SECS
+                + crate::location::ttl::RECEIVER_EXPIRATION_GRACE_SECS,
+            "the sweep's horizon must equal the receiver-side expiration screen's, \
+             or the sweep disposes of rows the receive path would still accept"
+        );
+    }
+
+    #[test]
+    fn convergence_sweep_absorbs_and_reports_settlement() {
+        let mut total = ConvergenceSweep::default();
+        assert!(total.is_settled());
+
+        total.absorb(ConvergenceSweep {
+            disposed_messages: 2,
+            discarded_intents: 1,
+            gating_rows: 0,
+        });
+        assert!(total.is_settled());
+
+        total.absorb(ConvergenceSweep {
+            disposed_messages: 1,
+            discarded_intents: 0,
+            gating_rows: 3,
+        });
+        assert_eq!(total.disposed_messages, 3);
+        assert_eq!(total.discarded_intents, 1);
+        assert_eq!(total.gating_rows, 3);
+        assert!(!total.is_settled());
+    }
+
+    #[test]
+    fn convergence_sweep_debug_carries_no_identifiers() {
+        let debug = format!(
+            "{:?}",
+            ConvergenceSweep {
+                disposed_messages: 1,
+                discarded_intents: 2,
+                gating_rows: 3,
+            }
+        );
+        assert!(debug.contains("disposed_messages: 1"));
+        // Structural: the type has no id-bearing field to leak. Assert the shape
+        // so a later field addition has to face this test.
+        assert_eq!(
+            debug,
+            "ConvergenceSweep { disposed_messages: 1, discarded_intents: 2, gating_rows: 3 }"
+        );
     }
 
     #[test]

@@ -32,7 +32,7 @@ import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/pending_leave_service.dart' show kPendingLeaveKey;
 import 'package:haven/src/services/pending_mls_wipe_service.dart';
 import 'package:haven/src/services/subscription_service.dart'
-    show SubscriptionService;
+    show LiveSyncStopOutcome, SubscriptionService;
 import 'package:haven/src/services/tile_prefetch_service.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -1628,10 +1628,11 @@ class _RecordingSubscriptionService implements SubscriptionService {
   }
 
   @override
-  Future<void> stop() async {
+  Future<LiveSyncStopOutcome> stop() async {
     stopCalls++;
     sharedLog.add('subscriptionService.stop');
     _running = false;
+    return LiveSyncStopOutcome.stopped;
   }
 
   @override

@@ -18,8 +18,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use nostr::{Filter, PublicKey, SubscriptionId};
-use nostr_sdk::pool::monitor::Monitor;
+use nostr::{Filter, PublicKey, RelayUrl, SubscriptionId};
+use nostr_sdk::pool::monitor::{Monitor, MonitorNotification};
 use nostr_sdk::{Client, ClientOptions, RelayPoolNotification, RelayPoolOptions, RelayStatus};
 use tokio::sync::{broadcast, watch, Mutex as TokioMutex, RwLock};
 use tokio::task::JoinHandle;
@@ -29,15 +29,16 @@ use crate::circle::CircleManager;
 use crate::relay::cursor::{since_for_stream, SubscribePhase, STREAM_INBOX_1059};
 
 use super::config::{
-    BUS_CAP, POOL_NOTIF_CAP, RELAY_LIFECYCLE_OP_TIMEOUT_SECS, SUBSCRIBE_CONNECT_WAIT_SECS,
-    SUBSCRIBE_MAX_ATTEMPTS, SUBSCRIBE_RETRY_WAIT_SECS,
+    delivery_silence_window_secs, BUS_CAP, POOL_NOTIF_CAP, RELAY_LIFECYCLE_OP_TIMEOUT_SECS,
+    SUBSCRIBE_CONNECT_WAIT_SECS, SUBSCRIBE_MAX_ATTEMPTS, SUBSCRIBE_RETRY_WAIT_SECS,
 };
 use super::error::{LiveSyncError, LiveSyncResult};
 use super::event::{LiveSyncEvent, SyncStatusReason};
 use super::event_bus::EventBus;
 use super::gate::generate_session_salt;
 use super::health::{
-    health_needs_resubscribe, HealthAction, RelayHealthSnapshot, SubscriptionHealthOutcome,
+    delivery_is_silent, health_needs_resubscribe, health_needs_targeted_reanchor, HealthAction,
+    RelayHealthSnapshot, SubscriptionHealthOutcome,
 };
 use super::planes::{
     build_relay_set_subscriptions, canonical_relay_set, derive_dynamic_group_sub_id,
@@ -45,6 +46,7 @@ use super::planes::{
     PlaneKind,
 };
 use super::processor::{group_cursor_stream, EngineProcessor};
+use super::repair::{ClosedKind, RepairKey, RepairQueue};
 use super::router::{Router, SubCtx};
 use super::supervisor::{intake_queue, run_receiver, run_worker};
 
@@ -93,9 +95,10 @@ fn build_engine_client() -> Client {
         .verify_subscriptions(false)
         .automatic_authentication(false)
         .pool(pool_opts);
-    // NO `.gossip(...)` — own-relays-only (PSI-8). Monitor enables reconnect
-    // re-anchoring (the task that consumes it is a follow-up; the pool's
-    // built-in auto-resubscribe already replays on reconnect meanwhile).
+    // NO `.gossip(...)` — own-relays-only (PSI-8). The `Monitor` is consumed by
+    // `run_monitor`, spawned with the supervisor tasks: it is the only place a
+    // relay's connect/drop transition becomes a status the UI can show, and
+    // without a consumer a dead socket was invisible to the user.
     Client::builder()
         .opts(client_opts)
         .monitor(Monitor::new(64))
@@ -214,7 +217,7 @@ pub struct LiveSyncCore {
     /// mutate the CURRENT set. `None` until [`Self::start`]. Read-modify-written
     /// only under the [`Self::lifecycle`] lock, so it never races a concurrent
     /// delta op or stop/resume.
-    active: RwLock<Option<ActiveSession>>,
+    active: Arc<RwLock<Option<ActiveSession>>>,
     /// Serializes the connection-lifecycle operations — [`Self::start`],
     /// [`Self::stop`], and [`Self::resume_after_background`] — so a `stop`'s
     /// `client.shutdown()` (which clears the engine pool via
@@ -225,6 +228,18 @@ pub struct LiveSyncCore {
     /// `subscribe_with_id_to` returns `Error::NoRelays` ("no relays") — the
     /// iOS-lane live-sync-start failure. The lock forces a total order: a start
     /// runs to completion (pool intact) before any stop tears it down.
+    ///
+    /// RELAY-TRIGGERED ACQUIRER: [`run_repair`] takes this lock to re-issue a REQ
+    /// a relay ended with `CLOSED`, so — unlike start/stop/resume — an acquisition
+    /// can be provoked from off-device. Two things bound what that buys an
+    /// adversary: the worker screens a `CLOSED` against the live router before it
+    /// is ever scheduled, and [`super::repair`]'s per-`(relay, sub)` jittered
+    /// backoff caps how often one endpoint can be re-issued. What a provoked
+    /// acquisition CAN still do is make a concurrent [`Self::stop`] wait, and that
+    /// wait is bounded only by `reissue`'s own shutdown checks — one on entry and
+    /// one per subscribe attempt — not by any timeout on the lock. The repair
+    /// task's side of the same hazard (waiting for a lock `stop` holds across its
+    /// task join) is closed by acquiring it under `cancel`; see [`run_repair`].
     ///
     /// INVARIANT this lock relies on: `client.shutdown()` (via [`Self::stop`]) is
     /// the ONLY operation that empties the engine client's relay pool. If a
@@ -238,7 +253,17 @@ pub struct LiveSyncCore {
     /// release this lock, that un-bounded subscribe is the sole thing that could
     /// delay logout. Revisit (bound the subscribe) only alongside an SDK upgrade
     /// where subscribe awaits relay confirmation (see `RELAY_LIFECYCLE_OP_TIMEOUT`).
-    lifecycle: TokioMutex<()>,
+    lifecycle: Arc<TokioMutex<()>>,
+    /// Raised by [`run_receiver`] when the ingest worker has exited: the receive
+    /// plane is down and cannot come back without a fresh session.
+    ///
+    /// Separate from `shutdown` because the two mean opposite things to a
+    /// caller: `shutdown` is "we stopped it", this is "it died". Folded into
+    /// [`Self::is_running`], which is what the Dart self-heal restarts on.
+    wedged: Arc<AtomicBool>,
+    /// Subscriptions a relay ended with `CLOSED`, awaiting re-issue by
+    /// [`run_repair`]. Written by the worker, drained by the repair task.
+    repair: Arc<RepairQueue>,
 }
 
 /// Upper bound on a single engine relay control-plane op before the engine gives
@@ -310,6 +335,192 @@ where
     ))
 }
 
+/// Everything issuing one REQ touches, borrowed from whoever drives it.
+///
+/// Extracted so the repair task ([`run_repair`]) re-issues a subscription
+/// through the SAME code the session's own start / resume / delta paths use. A
+/// second REQ builder would be a second place for the cursor-anchor ordering
+/// (open the generation BEFORE the REQ, at the same `now` the `since` is derived
+/// from), the accept-retry, and the shutdown interruption points to drift out of
+/// agreement — and the anchor ordering is the one whose drift is silent and
+/// permanent.
+struct SubscribeCtx<'a> {
+    client: &'a Client,
+    circle: &'a CircleManager,
+    processor: &'a EngineProcessor,
+    router: &'a RwLock<Router>,
+    shutdown: &'a AtomicBool,
+    own_pubkey: PublicKey,
+}
+
+impl SubscribeCtx<'_> {
+    /// Computes the bucket REQ `since` (seconds) as the minimum over the
+    /// bucket's circles' per-circle cursors, so a multiplexed `#h` REQ never
+    /// raises the `since` floor past any one circle's un-applied events.
+    fn bucket_since(&self, group_ids_hex: &[String], phase: SubscribePhase, now: i64) -> i64 {
+        group_ids_hex
+            .iter()
+            .map(|hex| {
+                let key = group_cursor_stream(hex);
+                let cursor = self
+                    .circle
+                    .read_sync_cursor(&key)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0);
+                since_for_stream(&key, cursor, phase, now)
+            })
+            .min()
+            .unwrap_or(0)
+    }
+
+    /// Issues ONE bucket subscription (`sub_id` + `filter` over `relays`) with a
+    /// BOUNDED accept-retry.
+    ///
+    /// [`nostr_sdk::Client::subscribe_with_id_to`] returns `Ok(Output)` even when
+    /// a relay dropped the REQ mid-handshake — the drop lands in `Output.failed`,
+    /// NOT in the `Result` — so a fire-and-forget `.await?` would proceed as
+    /// SUBSCRIBED while the circle is silently orphaned (no events ever
+    /// delivered). This inspects `Output.success`: a non-empty set (>= 1 relay
+    /// took the REQ) is accepted; an empty set (every relay dropped it) retries
+    /// after a short [`SUBSCRIBE_RETRY_WAIT`] connection wait, up to
+    /// [`SUBSCRIBE_MAX_ATTEMPTS`]. Exhausting the attempts returns
+    /// [`LiveSyncError::Relay`] so `start` tears the session down VISIBLY instead
+    /// of leaving a half-started engine with an orphaned circle.
+    ///
+    /// It bounds a WAIT (`wait_for_connection`, which returns early on connect),
+    /// never the subscribe call itself — a bound on the `verify_subscriptions`
+    /// cold subscribe previously regressed engine start (run b7dba45) — so it does
+    /// not reintroduce that regression.
+    async fn subscribe_bucket(
+        &self,
+        relays: Vec<String>,
+        sub_id: SubscriptionId,
+        filter: Filter,
+    ) -> LiveSyncResult<()> {
+        retry_until_accepted(
+            SUBSCRIBE_MAX_ATTEMPTS,
+            || async {
+                // Interruptible (teardown promptness): once a concurrent `stop`
+                // raises `shutdown`, abandon the subscribe AND its remaining retries
+                // at once and fail closed, so this lifecycle-lock holder releases
+                // the lock and `stop` proceeds. This is the "un-bounded subscribe"
+                // the lifecycle doc calls out as the one thing that could delay
+                // logout. Failing closed (never issuing the REQ) also cannot orphan
+                // a subscription onto a pool `stop` is about to empty.
+                if self.shutdown.load(Ordering::Acquire) {
+                    return Err(LiveSyncError::NoSession);
+                }
+                let output = self
+                    .client
+                    .subscribe_with_id_to(relays.clone(), sub_id.clone(), filter.clone(), None)
+                    .await
+                    .map_err(LiveSyncError::relay)?;
+                // >= 1 relay accepted the REQ ⇒ the bucket is subscribed (a shared
+                // relay set multiplexes, so one live socket still delivers).
+                Ok(!output.success.is_empty())
+            },
+            || self.client.wait_for_connection(SUBSCRIBE_RETRY_WAIT),
+        )
+        .await
+    }
+
+    /// Starts the per-endpoint silence window for every relay this REQ is issued
+    /// to.
+    fn open_delivery_windows(&self, relays: &[String], sub_id: &SubscriptionId, now: i64) {
+        for relay in relays {
+            let Ok(relay_url) = RelayUrl::parse(relay) else {
+                continue;
+            };
+            self.processor.open_delivery_window(
+                &RepairKey {
+                    relay_url,
+                    sub_id: sub_id.clone(),
+                },
+                now,
+            );
+        }
+    }
+
+    /// Registers the router, opens each circle's cursor-anchor generation, and
+    /// issues ONE group REQ over `relays` under `sub_id`.
+    ///
+    /// The anchor generation is opened BEFORE the REQ goes out, at the same
+    /// `now` the `since` is derived from, so the anchor is the local instant we
+    /// asked — never later than the request it vouches for, and never a value
+    /// any relay or event author can influence. Opening before the subscribe
+    /// also means a stored event arriving while the accept-retry is still
+    /// running already has a generation to hold back.
+    async fn issue_group(
+        &self,
+        relays: &[String],
+        sub_id: &SubscriptionId,
+        group_ids_hex: &[String],
+        phase: SubscribePhase,
+        now: i64,
+    ) -> LiveSyncResult<()> {
+        let group_ids: HashSet<String> = group_ids_hex.iter().cloned().collect();
+        self.router
+            .write()
+            .await
+            .register_group(relays, sub_id, &group_ids);
+        for hex in group_ids_hex {
+            self.processor.note_subscription_opened(hex, now);
+        }
+        // One silence window per REQ ENDPOINT, so a single-relay repair re-seeds
+        // only the relay it re-subscribed and the bucket's other relays keep
+        // running out (see `EngineProcessor::open_delivery_window`).
+        self.open_delivery_windows(relays, sub_id, now);
+        let since = self.bucket_since(group_ids_hex, phase, now);
+        let filter = group_filter(group_ids_hex, since);
+        self.subscribe_bucket(relays.to_vec(), sub_id.clone(), filter)
+            .await
+    }
+
+    /// Registers the router, opens the inbox cursor-anchor generation, and
+    /// issues the `kind:1059` REQ over `relays` under `sub_id`.
+    ///
+    /// The generation is opened on the SAME `now` the `since` is derived from,
+    /// for the same reason as the group plane — and it matters more here: this
+    /// is the ONLY input to the inbox advance, and no remote party can write it.
+    /// A gift wrap's own `created_at` is chosen by whoever wrapped it, and a
+    /// `#p`-routed wrap costs one NIP-44 encryption to a published npub (see
+    /// [`super::anchor::InboxAnchor`]).
+    async fn issue_inbox(
+        &self,
+        relays: &[String],
+        sub_id: &SubscriptionId,
+        phase: SubscribePhase,
+        now: i64,
+    ) -> LiveSyncResult<()> {
+        {
+            let mut router = self.router.write().await;
+            for relay in relays {
+                router.register(
+                    relay,
+                    sub_id,
+                    SubCtx {
+                        plane: PlaneKind::Inbox,
+                        group_ids_hex: HashSet::new(),
+                    },
+                );
+            }
+        }
+        self.processor.note_inbox_subscription_opened(now);
+        self.open_delivery_windows(relays, sub_id, now);
+        let inbox_cursor = self
+            .circle
+            .read_sync_cursor(STREAM_INBOX_1059)
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        let since = since_for_stream(STREAM_INBOX_1059, inbox_cursor, phase, now);
+        let filter = inbox_filter(self.own_pubkey, since);
+        self.subscribe_bucket(relays.to_vec(), sub_id.clone(), filter)
+            .await
+    }
+}
+
 impl LiveSyncCore {
     /// Builds an engine over `circle` for `own_pubkey`, with a fresh ephemeral
     /// sub-id salt and a dedicated engine `Client`. Does not connect or
@@ -340,8 +551,10 @@ impl LiveSyncCore {
             shutdown: Arc::new(AtomicBool::new(false)),
             tasks: StdMutex::new(Vec::new()),
             cancel_tx: watch::channel(false).0,
-            active: RwLock::new(None),
-            lifecycle: TokioMutex::new(()),
+            active: Arc::new(RwLock::new(None)),
+            lifecycle: Arc::new(TokioMutex::new(())),
+            wedged: Arc::new(AtomicBool::new(false)),
+            repair: Arc::new(RepairQueue::default()),
         }
     }
 
@@ -366,10 +579,25 @@ impl LiveSyncCore {
         &self.circle
     }
 
-    /// Whether the session is live (not yet stopped).
+    /// Whether the session is live: not stopped, and its ingest worker is still
+    /// alive.
+    ///
+    /// The second term is the fix for a silent death. `run_receiver` used to
+    /// match only `TrySendError::Full`, so a `Closed` channel — the worker
+    /// having exited — fell through with no signal at all, and this method (a
+    /// bare read of the shutdown flag) kept answering `true` for a session that
+    /// could never ingest another event. The Dart self-heal short-circuits on
+    /// exactly this value, so a dead engine reported itself healthy forever.
+    ///
+    /// Deliberately NOT folding in "every expected subscription is present". A
+    /// missing REQ is repairable in place, and it is repaired by
+    /// [`Self::maintain_subscription_health`] — which no-ops when this method
+    /// answers `false`. Reporting a missing subscription here would therefore
+    /// disable the one thing that heals it. It is reported through the health
+    /// snapshot instead, where it belongs.
     #[must_use]
     pub fn is_running(&self) -> bool {
-        !self.shutdown.load(Ordering::Acquire)
+        !self.shutdown.load(Ordering::Acquire) && !self.wedged.load(Ordering::Acquire)
     }
 
     /// Clamps any cursor parked in the FUTURE back to `now_secs`, on every
@@ -415,24 +643,22 @@ impl LiveSyncCore {
         }
     }
 
-    /// Computes the bucket REQ `since` (seconds) as the minimum over the
-    /// bucket's circles' per-circle cursors, so a multiplexed `#h` REQ never
-    /// raises the `since` floor past any one circle's un-applied events.
+    /// Borrows this session's REQ-issuing handles. The repair task builds the
+    /// same view over owned clones, so both drive one implementation.
+    fn ctx(&self) -> SubscribeCtx<'_> {
+        SubscribeCtx {
+            client: &self.client,
+            circle: &self.circle,
+            processor: &self.processor,
+            router: &self.router,
+            shutdown: &self.shutdown,
+            own_pubkey: self.own_pubkey,
+        }
+    }
+
+    /// See [`SubscribeCtx::bucket_since`].
     fn bucket_since(&self, group_ids_hex: &[String], phase: SubscribePhase, now: i64) -> i64 {
-        group_ids_hex
-            .iter()
-            .map(|hex| {
-                let key = group_cursor_stream(hex);
-                let cursor = self
-                    .circle
-                    .read_sync_cursor(&key)
-                    .ok()
-                    .flatten()
-                    .unwrap_or(0);
-                since_for_stream(&key, cursor, phase, now)
-            })
-            .min()
-            .unwrap_or(0)
+        self.ctx().bucket_since(group_ids_hex, phase, now)
     }
 
     /// Starts the session: seeds cold-start cursors, connects the relays, spawns
@@ -538,25 +764,7 @@ impl LiveSyncCore {
         // The worker just drains events and feeds them to the engine (which owns
         // convergence + publish-before-apply internally); no per-circle gate /
         // settle buffer / converge task is needed anymore (plan §5.4).
-        let receiver_task = tokio::spawn(run_receiver(
-            notifications,
-            tx,
-            Arc::clone(&self.processor),
-            Arc::clone(&self.shutdown),
-            self.cancel_tx.subscribe(),
-        ));
-        let worker_task = tokio::spawn(run_worker(
-            rx,
-            Arc::clone(&self.router),
-            Arc::clone(&self.processor),
-            self.own_pubkey,
-        ));
-        // Retained so `stop` can join them; see the `tasks` field doc.
-        {
-            let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
-            tasks.push(receiver_task);
-            tasks.push(worker_task);
-        }
+        self.spawn_supervisor(notifications, tx, rx);
 
         // Register the router + issue every REQ. A failure mid-way must leave a
         // CLEANLY-STOPPED engine, not a half-started one (orphaned tasks, stale
@@ -595,6 +803,58 @@ impl LiveSyncCore {
         Ok(())
     }
 
+    /// Spawns the session's four long-lived tasks and retains their handles so
+    /// [`Self::stop`] joins them.
+    ///
+    /// Being in `tasks` is what makes `stop` a happens-before edge for the
+    /// `Arc<CircleManager>` drops, and with them the Rule-14 `LiveSessionGuard`:
+    /// the receiver, the worker and the repair task each hold one. Anything that
+    /// spawns such a task outside this vec re-creates the orphaned-MLS-session
+    /// hazard (see the `tasks` field doc).
+    fn spawn_supervisor(
+        &self,
+        notifications: broadcast::Receiver<RelayPoolNotification>,
+        tx: tokio::sync::mpsc::Sender<super::supervisor::RawSignal>,
+        rx: tokio::sync::mpsc::Receiver<super::supervisor::RawSignal>,
+    ) {
+        let receiver_task = tokio::spawn(run_receiver(
+            notifications,
+            tx,
+            Arc::clone(&self.processor),
+            Arc::clone(&self.shutdown),
+            Arc::clone(&self.wedged),
+            self.cancel_tx.subscribe(),
+        ));
+        let worker_task = tokio::spawn(run_worker(
+            rx,
+            Arc::clone(&self.router),
+            Arc::clone(&self.processor),
+            Arc::clone(&self.repair),
+            self.own_pubkey,
+        ));
+        // The repair task re-issues a REQ a relay ended. It runs OUTSIDE the
+        // worker on purpose: a re-issue takes the lifecycle lock, and a worker
+        // parked on that lock during a start/resume would stall ingest for the
+        // whole network round-trip.
+        let repair_task = tokio::spawn(run_repair(self.repair_plane(), self.cancel_tx.subscribe()));
+        let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
+        tasks.push(receiver_task);
+        tasks.push(worker_task);
+        tasks.push(repair_task);
+        // The pool `Monitor` had no consumer, so a relay dropping was invisible
+        // to the user: `Disconnected` / `Reconnecting` were emitted by nothing.
+        // This task is the consumer. It holds ONLY the bus (no
+        // `Arc<CircleManager>`), so it adds no Rule-14 lifetime edge — it is
+        // joined here anyway so no task outlives `stop`.
+        if let Some(monitor) = self.client.monitor() {
+            tasks.push(tokio::spawn(run_monitor(
+                monitor.subscribe(),
+                self.bus.clone(),
+                self.cancel_tx.subscribe(),
+            )));
+        }
+    }
+
     /// Registers the router contexts and issues the multiplexed group + inbox
     /// REQs in `phase` (`Initial` on first start, `Resubscribe` on resume — a
     /// wider clock-skew buffer). A subscribe failure short-circuits; the caller
@@ -621,114 +881,27 @@ impl LiveSyncCore {
                 .collect::<Vec<_>>()
                 .join(",")
         );
+        let ctx = self.ctx();
         for g in group_subs {
-            let group_ids: HashSet<String> = g.group_ids_hex.iter().cloned().collect();
-            self.router
-                .write()
-                .await
-                .register_group(&g.relays, &g.sub_id, &group_ids);
-            // Open this bucket's cursor-anchor generation BEFORE the REQ goes
-            // out, so the anchor is the local instant we asked — never later
-            // than the request it vouches for, and never a value any relay or
-            // event author can influence. `now` is the same reading the `since`
-            // below is derived from. Opening before the subscribe also means a
-            // stored event that arrives while `subscribe_bucket` is still
-            // retrying already has a generation to hold back.
-            for hex in &g.group_ids_hex {
-                self.processor.note_subscription_opened(hex, now);
-            }
-            let since = self.bucket_since(&g.group_ids_hex, phase, now);
-            let filter = group_filter(&g.group_ids_hex, since);
-            self.subscribe_bucket(g.relays.clone(), g.sub_id.clone(), filter)
+            ctx.issue_group(&g.relays, &g.sub_id, &g.group_ids_hex, phase, now)
                 .await?;
         }
 
         if inbox_sub.relays.is_empty() {
             return Ok(());
         }
-        {
-            let mut router = self.router.write().await;
-            for relay in &inbox_sub.relays {
-                router.register(
-                    relay,
-                    &inbox_sub.sub_id,
-                    SubCtx {
-                        plane: PlaneKind::Inbox,
-                        group_ids_hex: HashSet::new(),
-                    },
-                );
-            }
-        }
-        // Open the inbox cursor-anchor generation BEFORE the REQ goes out, on
-        // the SAME `now` the `since` below is derived from — so the anchor is
-        // the local instant we asked, never later than the request it vouches
-        // for. This is the ONLY input to the inbox advance, and no remote party
-        // can write it: a gift wrap's own `created_at` is chosen by whoever
-        // wrapped it, and a `#p`-routed wrap costs one NIP-44 encryption to a
-        // published npub (see `live_sync::anchor::InboxAnchor`).
-        self.processor.note_inbox_subscription_opened(now);
-        let inbox_cursor = self
-            .circle
-            .read_sync_cursor(STREAM_INBOX_1059)
-            .ok()
-            .flatten()
-            .unwrap_or(0);
-        let since = since_for_stream(STREAM_INBOX_1059, inbox_cursor, phase, now);
-        let filter = inbox_filter(self.own_pubkey, since);
-        self.subscribe_bucket(inbox_sub.relays.clone(), inbox_sub.sub_id.clone(), filter)
-            .await?;
-        Ok(())
+        ctx.issue_inbox(&inbox_sub.relays, &inbox_sub.sub_id, phase, now)
+            .await
     }
 
-    /// Issues ONE bucket subscription (`sub_id` + `filter` over `relays`) with a
-    /// BOUNDED accept-retry, and is used by BOTH `register_and_subscribe` sites.
-    ///
-    /// [`nostr_sdk::Client::subscribe_with_id_to`] returns `Ok(Output)` even when
-    /// a relay dropped the REQ mid-handshake — the drop lands in `Output.failed`,
-    /// NOT in the `Result` — so a fire-and-forget `.await?` would proceed as
-    /// SUBSCRIBED while the circle is silently orphaned (no events ever
-    /// delivered). This inspects `Output.success`: a non-empty set (>= 1 relay
-    /// took the REQ) is accepted; an empty set (every relay dropped it) retries
-    /// after a short [`SUBSCRIBE_RETRY_WAIT`] connection wait, up to
-    /// [`SUBSCRIBE_MAX_ATTEMPTS`]. Exhausting the attempts returns
-    /// [`LiveSyncError::Relay`] so `start` tears the session down VISIBLY instead
-    /// of leaving a half-started engine with an orphaned circle.
-    ///
-    /// It bounds a WAIT (`wait_for_connection`, which returns early on connect),
-    /// never the subscribe call itself — a bound on the `verify_subscriptions`
-    /// cold subscribe previously regressed engine start (run b7dba45) — so it does
-    /// not reintroduce that regression.
+    /// See [`SubscribeCtx::subscribe_bucket`].
     async fn subscribe_bucket(
         &self,
         relays: Vec<String>,
         sub_id: SubscriptionId,
         filter: Filter,
     ) -> LiveSyncResult<()> {
-        retry_until_accepted(
-            SUBSCRIBE_MAX_ATTEMPTS,
-            || async {
-                // Interruptible (teardown promptness): once a concurrent `stop`
-                // raises `shutdown`, abandon the subscribe AND its remaining retries
-                // at once and fail closed, so this lifecycle-lock holder releases
-                // the lock and `stop` proceeds. This is the "un-bounded subscribe"
-                // the lifecycle doc calls out as the one thing that could delay
-                // logout. Failing closed (never issuing the REQ) also cannot orphan
-                // a subscription onto a pool `stop` is about to empty.
-                if self.shutdown.load(Ordering::Acquire) {
-                    return Err(LiveSyncError::NoSession);
-                }
-                let output = self
-                    .client
-                    .subscribe_with_id_to(relays.clone(), sub_id.clone(), filter.clone(), None)
-                    .await
-                    .map_err(LiveSyncError::relay)?;
-                // >= 1 relay accepted the REQ ⇒ the bucket is subscribed (a shared
-                // relay set multiplexes, so one live socket still delivers).
-                Ok(!output.success.is_empty())
-            },
-            || self.client.wait_for_connection(SUBSCRIBE_RETRY_WAIT),
-        )
-        .await
+        self.ctx().subscribe_bucket(relays, sub_id, filter).await
     }
 
     /// Stops the session: signals shutdown, CLOSEs every REQ, shuts down the
@@ -1188,8 +1361,11 @@ impl LiveSyncCore {
             }
             self.router.write().await.rollback_subscription(&sub_id);
             // Its REQ is closed: drop the anchor so no later EOSE for a recycled
-            // sub-id can advance a cursor for a circle we no longer follow.
+            // sub-id can advance a cursor for a circle we no longer follow, and
+            // the delivery windows so a REQ that no longer exists cannot be
+            // reported silent (and re-issued) by the health tick.
             self.processor.forget_subscription(group_id_hex);
+            self.processor.forget_delivery_for_sub(&sub_id);
             if let Some(active) = self.active.write().await.as_mut() {
                 active.group_subs.retain(|s| s.sub_id != sub_id);
             }
@@ -1245,6 +1421,102 @@ impl LiveSyncCore {
         self.bucket_since(remaining_hex, SubscribePhase::Resubscribe, now)
     }
 
+    /// Builds the owned handle set the repair task drives (see [`RepairPlane`]).
+    fn repair_plane(&self) -> RepairPlane {
+        RepairPlane {
+            client: self.client.clone(),
+            circle: Arc::clone(&self.circle),
+            processor: Arc::clone(&self.processor),
+            router: Arc::clone(&self.router),
+            shutdown: Arc::clone(&self.shutdown),
+            active: Arc::clone(&self.active),
+            lifecycle: Arc::clone(&self.lifecycle),
+            repair: Arc::clone(&self.repair),
+            own_pubkey: self.own_pubkey,
+        }
+    }
+
+    /// Probes the active session's REQs: how many the pool still holds, and
+    /// which have gone silent.
+    ///
+    /// Returns `(expected, live, silent_keys)`, all empty when no session is
+    /// active.
+    ///
+    /// Registration in nostr-relay-pool is LOCAL and survives a disconnect (the
+    /// pool replays it on reconnect), so a shortfall between `expected` and
+    /// `live` is not a relay that is merely mid-handshake — it is a REQ a
+    /// `CLOSED` deleted, which `should_resubscribe` will never bring back.
+    ///
+    /// A relay string that does not parse never entered the pool either, so it
+    /// is counted in neither: counting it as expected-but-missing would make the
+    /// health tick re-anchor forever over a url no REQ was ever issued to.
+    ///
+    /// # Why only the GROUP plane is checked for silence
+    ///
+    /// A silent inbox REQ is the NORMAL state — invitations are rare, so on a
+    /// typical device the inbox delivers nothing for weeks. Reading that as a
+    /// reason to act would make the arm fire on essentially every tick forever,
+    /// which is not a cheap no-op: it would re-issue the inbox REQ at `since =
+    /// cursor − 7 days` (NIP-59 mandates backdating, hence the lookback), so the
+    /// device would ask its relays to replay a week of gift wraps keyed on its
+    /// own `#p` every quarter of an hour — battery, relay load, and a standing
+    /// re-advertisement of "this npub is here, asking about itself".
+    ///
+    /// Nothing is given up. The inbox failure that actually matters is a relay
+    /// ending the REQ, and that is caught by the PRESENCE arm above (the deleted
+    /// subscription is gone from `client.subscriptions()`) and repaired by
+    /// [`run_repair`] within seconds.
+    async fn probe_subscriptions(&self) -> (usize, usize, Vec<RepairKey>) {
+        let Some(active) = self.active.read().await.clone() else {
+            return (0, 0, Vec::new());
+        };
+        let live = self.client.subscriptions().await;
+        let now = chrono::Utc::now().timestamp();
+        let window = delivery_silence_window_secs();
+        let is_live = |sub_id: &SubscriptionId, url: &RelayUrl| {
+            live.get(sub_id).is_some_and(|m| m.contains_key(url))
+        };
+
+        let mut expected = 0usize;
+        let mut present = 0usize;
+        let mut silent: Vec<RepairKey> = Vec::new();
+        for g in &active.group_subs {
+            for relay in &g.relays {
+                let Ok(url) = RelayUrl::parse(relay) else {
+                    continue;
+                };
+                expected += 1;
+                let key = RepairKey {
+                    relay_url: url,
+                    sub_id: g.sub_id.clone(),
+                };
+                if is_live(&key.sub_id, &key.relay_url) {
+                    present += 1;
+                    // Silence is only meaningful for a REQ the pool still holds;
+                    // one it no longer holds is the presence arm's business, and
+                    // counting it twice would re-anchor it twice.
+                    if self
+                        .processor
+                        .last_delivery_secs(&key)
+                        .is_some_and(|at| delivery_is_silent(at, now, window))
+                    {
+                        silent.push(key);
+                    }
+                }
+            }
+        }
+        for relay in &active.inbox_relays {
+            let Ok(url) = RelayUrl::parse(relay) else {
+                continue;
+            };
+            expected += 1;
+            if is_live(&active.inbox_sub_id, &url) {
+                present += 1;
+            }
+        }
+        (expected, present, silent)
+    }
+
     /// Presence-only snapshot of the engine pool's relay connectivity (M8-4).
     ///
     /// Folds nostr-relay-pool's eight [`RelayStatus`] variants into three
@@ -1265,7 +1537,7 @@ impl LiveSyncCore {
     /// produce a `Sleeping` relay, and were one to appear it is an intentional
     /// idle state — not a drop to heal. If that option is ever enabled and
     /// sleeping relays must be re-woken, that logic would be added here.
-    pub async fn relay_health(&self) -> RelayHealthSnapshot {
+    async fn health_probe(&self) -> (RelayHealthSnapshot, Vec<RepairKey>) {
         let relays = self.client.relays().await;
         let total = relays.len();
         let mut connected = 0usize;
@@ -1284,21 +1556,82 @@ impl LiveSyncCore {
                 RelayStatus::Sleeping => {}
             }
         }
-        RelayHealthSnapshot {
-            total,
-            connected,
-            still_connecting,
-            disconnected,
+        let (subscriptions_expected, subscriptions_live, silent) = self.probe_subscriptions().await;
+        (
+            RelayHealthSnapshot {
+                total,
+                connected,
+                still_connecting,
+                disconnected,
+                subscriptions_expected,
+                subscriptions_live,
+                subscriptions_silent: silent.len(),
+            },
+            silent,
+        )
+    }
+
+    /// Presence-only snapshot of the engine pool's relay connectivity and
+    /// subscription liveness. See [`Self::health_probe`] for the full contract.
+    pub async fn relay_health(&self) -> RelayHealthSnapshot {
+        self.health_probe().await.0
+    }
+
+    /// Re-issues exactly the REQ endpoints the delivery arm found silent.
+    ///
+    /// Routed through the repair schedule rather than calling
+    /// [`RepairPlane::reissue`] directly, so a silent endpoint that is ALREADY
+    /// being repaired after a `CLOSED` is not re-issued twice, and so the shared
+    /// jittered backoff governs how often one stubbornly quiet endpoint can be
+    /// re-issued (Security Rule 12). Draining the queue here rather than leaving
+    /// it to [`run_repair`] keeps the tick's reported outcome honest — it says
+    /// what it did, not what it hoped someone else would do. If the repair task
+    /// wins the race for a key, `take_due` simply returns fewer keys and the
+    /// re-issue still happens exactly once.
+    async fn reanchor_silent_subscriptions(&self, silent: Vec<RepairKey>) {
+        for key in &silent {
+            self.repair.note_closed(key, ClosedKind::Dropped);
         }
+        let due = self.repair.take_due();
+        if due.is_empty() {
+            return;
+        }
+        let plane = self.repair_plane();
+        let _lifecycle = self.lifecycle.lock().await;
+        for key in &due {
+            plane.reissue(key).await;
+        }
+        log::info!(
+            "[live_sync::health] re-anchored {} silent subscription(s)",
+            due.len()
+        );
     }
 
     /// Runs one subscription-health maintenance tick (M8-4).
     ///
-    /// A no-op ([`HealthAction::EngineOff`]) if the session has been stopped.
-    /// Otherwise it snapshots relay connectivity and, if any relay has dropped,
-    /// re-anchors every subscription at its persisted cursor via
-    /// [`Self::resume_after_background`] (reconnect + re-issue the same
-    /// subscription ids — no miss window).
+    /// A no-op ([`HealthAction::EngineOff`]) if the session has been stopped or
+    /// its ingest worker has died (neither is repairable in place — the caller
+    /// rebuilds the session). Otherwise it snapshots relay connectivity, live
+    /// subscription presence and per-REQ delivery, and applies ONE OF TWO
+    /// remedies:
+    ///
+    /// * a **dropped relay or a missing REQ** → the whole-session
+    ///   [`Self::resume_after_background`]: reconnect the pool and re-issue every
+    ///   subscription at its persisted cursor under the same subscription ids (no
+    ///   miss window). Sockets are involved, so nothing narrower would do;
+    /// * **delivery silence alone** → [`Self::reanchor_silent_subscriptions`],
+    ///   which re-issues ONLY the `(relay, sub)` endpoints that went quiet. Every
+    ///   socket is up and every REQ is registered, so a whole-session re-anchor
+    ///   would be pure cost — including the inbox's seven-day gift-wrap replay.
+    ///
+    /// The two report DIFFERENT actions — [`HealthAction::Resubscribed`] and
+    /// [`HealthAction::TargetedReanchor`] — because they differ by orders of
+    /// magnitude in cost and a targeted re-anchor is expected on an idle device;
+    /// the outcome's subscription counters say what the tick saw.
+    ///
+    /// The presence and delivery arms are what make this a repair for a relay
+    /// that keeps its socket open after deleting our REQ; connectivity alone
+    /// reads that state as perfectly healthy (see [`super::health`]).
     ///
     /// The `SESSION`-empty "engine off" gate lives at the FFI boundary; this
     /// method additionally guards on [`Self::is_running`] so a stopped-but-still
@@ -1311,10 +1644,20 @@ impl LiveSyncCore {
         if !self.is_running() {
             return Ok(SubscriptionHealthOutcome::engine_off());
         }
-        let snapshot = self.relay_health().await;
+        let (snapshot, silent) = self.health_probe().await;
         let action = if health_needs_resubscribe(snapshot) {
+            // A dropped relay or a REQ missing from the pool: the whole session
+            // needs re-anchoring, sockets included.
             self.resume_after_background().await?;
             HealthAction::Resubscribed
+        } else if health_needs_targeted_reanchor(snapshot) {
+            // Delivery silence only. Every socket is up and every REQ is
+            // registered, so a full `resume_after_background` would be gross
+            // overkill: it reconnects the pool and re-issues EVERY REQ on EVERY
+            // relay, including the inbox at a seven-day gift-wrap lookback. Only
+            // the endpoints that went quiet are re-issued.
+            self.reanchor_silent_subscriptions(silent).await;
+            HealthAction::TargetedReanchor
         } else {
             HealthAction::Healthy
         };
@@ -1323,7 +1666,282 @@ impl LiveSyncCore {
             relays_total: snapshot.total,
             relays_still_connecting: snapshot.still_connecting,
             relays_disconnected: snapshot.disconnected,
+            subscriptions_expected: snapshot.subscriptions_expected,
+            subscriptions_live: snapshot.subscriptions_live,
+            subscriptions_silent: snapshot.subscriptions_silent,
         })
+    }
+}
+
+/// The owned counterpart of [`SubscribeCtx`], for the task that outlives a
+/// borrow of the core.
+///
+/// Every handle here is a CLONE of one the session already holds — `Client` is
+/// internally `Arc`-backed, and the rest are `Arc`s — so this duplicates
+/// handles, never state: the repair task and the session act on the same pool,
+/// the same router, the same anchors and the same lifecycle lock.
+///
+/// **Rule 14.** It holds `Arc<CircleManager>` (directly and through the
+/// processor), so the task it drives MUST be one `stop` joins. It is spawned in
+/// [`LiveSyncCore::start`] and pushed onto `tasks` beside the receiver and the
+/// worker; anything that spawns it elsewhere re-creates the orphaned-MLS-session
+/// hazard the `tasks` field exists to close.
+struct RepairPlane {
+    client: Client,
+    circle: Arc<CircleManager>,
+    processor: Arc<EngineProcessor>,
+    router: Arc<RwLock<Router>>,
+    shutdown: Arc<AtomicBool>,
+    active: Arc<RwLock<Option<ActiveSession>>>,
+    lifecycle: Arc<TokioMutex<()>>,
+    repair: Arc<RepairQueue>,
+    own_pubkey: PublicKey,
+}
+
+impl RepairPlane {
+    fn ctx(&self) -> SubscribeCtx<'_> {
+        SubscribeCtx {
+            client: &self.client,
+            circle: &self.circle,
+            processor: &self.processor,
+            router: &self.router,
+            shutdown: &self.shutdown,
+            own_pubkey: self.own_pubkey,
+        }
+    }
+
+    /// Re-issues the one REQ `key` names, on the one relay that ended it.
+    ///
+    /// Best-effort: a re-issue that fails leaves the key's backoff armed, and
+    /// the 15-minute health tick is the standing backstop either way. Silent on
+    /// a `key` the active session no longer models — the session moved on, so
+    /// there is nothing to restore.
+    ///
+    /// Only the affected relay is re-subscribed. The other relays in the bucket
+    /// still hold the REQ, and re-issuing to them would ask each to replay its
+    /// stored window for nothing.
+    ///
+    /// # Lifecycle lock
+    ///
+    /// **The caller MUST hold the lifecycle lock** for the whole re-issue: that
+    /// is the invariant the lock documents — `client.shutdown()` (via `stop`)
+    /// empties the pool, so a subscribe not serialized against it can land on an
+    /// emptied pool and fail with the opaque `NoRelays`. Acquiring it is the
+    /// CALLER's job because it must be acquired cancellably; see [`run_repair`].
+    /// The subscribe's own shutdown check keeps a `stop` waiting on the lock
+    /// from being delayed by a network round-trip.
+    ///
+    /// # Cursor safety
+    ///
+    /// The re-issue goes through [`SubscribeCtx::issue_group`] /
+    /// [`SubscribeCtx::issue_inbox`] like every other REQ, so it opens a FRESH
+    /// cursor-anchor generation at the same local `now` its `since` is derived
+    /// from — never later than the request it vouches for. The superseded
+    /// generation's hold-backs go with it, which is safe for exactly the reason
+    /// [`super::anchor`] gives: the new REQ's floor comes from the PERSISTED
+    /// cursor, which those hold-backs already prevented from advancing.
+    /// `Resubscribe` phase widens the group buffer, so the gap the `CLOSED`
+    /// opened is re-fetched rather than skipped.
+    async fn reissue(&self, key: &RepairKey) {
+        if self.shutdown.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(active) = self.active.read().await.clone() else {
+            return;
+        };
+        let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(i64::MAX);
+        let ctx = self.ctx();
+
+        if key.sub_id == active.inbox_sub_id {
+            let Some(relay) = matching_relay(&active.inbox_relays, &key.relay_url) else {
+                return;
+            };
+            let outcome = ctx
+                .issue_inbox(
+                    std::slice::from_ref(relay),
+                    &key.sub_id,
+                    SubscribePhase::Resubscribe,
+                    now,
+                )
+                .await;
+            self.report_reissue("inbox", outcome.is_ok());
+            return;
+        }
+
+        let Some(sub) = active.group_subs.iter().find(|s| s.sub_id == key.sub_id) else {
+            return;
+        };
+        let Some(relay) = matching_relay(&sub.relays, &key.relay_url) else {
+            return;
+        };
+        let mut group_ids_hex: Vec<String> = sub.group_ids_hex.iter().cloned().collect();
+        group_ids_hex.sort();
+        let outcome = ctx
+            .issue_group(
+                std::slice::from_ref(relay),
+                &key.sub_id,
+                &group_ids_hex,
+                SubscribePhase::Resubscribe,
+                now,
+            )
+            .await;
+        self.report_reissue("group", outcome.is_ok());
+    }
+
+    /// Reports the outcome of one re-issue: presence-only log, plus — on success
+    /// — a [`SyncStatusReason::Connected`] on the bus.
+    ///
+    /// The `Connected` is what closes the consumer's false-alarm window. A
+    /// `CLOSED` emits `RelayError`, and without a matching recovery signal a UI
+    /// built on that status would show "sharing may be paused" until something
+    /// else happened to clear it — indefinitely, since the repair is silent.
+    /// Emitting `Connected` here means the consumer can pair the two: the REQ
+    /// this device lost is live again. Deliberately NOT a new enum variant —
+    /// that would need an FFI change this unit cannot make — and `Connected`
+    /// already means "the receive plane is serving", which is exactly what a
+    /// completed re-issue restores (see [`SyncStatusReason::Connected`]).
+    ///
+    /// A FAILED re-issue emits nothing: the endpoint is still down, the backoff
+    /// is already armed for another attempt, and the health tick remains the
+    /// standing backstop. Claiming recovery here would be the false-clear this
+    /// signal exists to prevent.
+    fn report_reissue(&self, plane: &str, ok: bool) {
+        if ok {
+            self.processor.emit_status(SyncStatusReason::Connected);
+            log::info!("[live_sync::repair] re-issued a relay-closed {plane} subscription");
+        } else {
+            log::warn!(
+                "[live_sync::repair] re-issuing a relay-closed {plane} subscription failed; \
+                 the health tick remains the backstop"
+            );
+        }
+    }
+}
+
+/// The stored relay string equal to `url`, if this REQ was issued to it.
+///
+/// Compared as parsed [`RelayUrl`]s rather than as text. A textual compare would
+/// in fact work today — [`run_worker`]'s router lookup is exactly that, and it
+/// works because `RelayUrl`'s rendering and the session's canonical relay string
+/// happen to agree. Parsing removes the dependency on that agreement instead of
+/// adding a second place that silently breaks when either normalization changes:
+/// here the two sides come from genuinely different origins (a relay's `CLOSED`
+/// versus [`super::planes::canonical_relay_set`]), and the failure mode of a
+/// mismatch is a repair that silently never fires.
+fn matching_relay<'a>(relays: &'a [String], url: &RelayUrl) -> Option<&'a String> {
+    relays
+        .iter()
+        .find(|r| RelayUrl::parse(r).is_ok_and(|parsed| parsed == *url))
+}
+
+/// The repair task: re-issues every REQ a relay ended, when its backoff allows.
+///
+/// Parks on the queue's notification or on the earliest pending deadline,
+/// whichever comes first, and exits on `cancel` — the same independent wake
+/// [`run_receiver`] relies on, for the same reason: a task parked in an `await`
+/// never observes the `shutdown` flag, and this one holds `Arc<CircleManager>`
+/// (Rule 14), so it must not be able to outlive `stop`.
+async fn run_repair(plane: RepairPlane, mut cancel: watch::Receiver<bool>) {
+    loop {
+        if plane.shutdown.load(Ordering::Acquire) {
+            break;
+        }
+        let deadline = plane.repair.next_deadline();
+        tokio::select! {
+            biased;
+            // `wait_for` (not `changed()`) so a cancel raised before this
+            // receiver existed is still observed — see `run_receiver`.
+            _ = cancel.wait_for(|cancelled| *cancelled) => break,
+            () = plane.repair.wake() => {}
+            () = sleep_until_opt(deadline) => {}
+        }
+        if plane.shutdown.load(Ordering::Acquire) {
+            break;
+        }
+        let due = plane.repair.take_due();
+        if due.is_empty() {
+            continue;
+        }
+        // Acquire the lifecycle lock WITH an escape hatch, never blindly.
+        // `stop` holds that lock across its own `join_tasks`, so a repair
+        // parked on it unconditionally could never be joined — and a timed-out
+        // join is exactly the orphaned Rule-14 `LiveSessionGuard` the `tasks`
+        // vec exists to prevent. `stop` raises cancel BEFORE contending for
+        // the lock, so this arm always wins that race.
+        let lifecycle = tokio::select! {
+            biased;
+            _ = cancel.wait_for(|cancelled| *cancelled) => break,
+            guard = plane.lifecycle.lock() => guard,
+        };
+        for key in due {
+            plane.reissue(&key).await;
+        }
+        drop(lifecycle);
+    }
+}
+
+/// Sleeps until `at`, or forever when nothing is scheduled.
+async fn sleep_until_opt(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// The pool `Monitor` consumer: turns relay status transitions into bus statuses.
+///
+/// Before this existed the `Monitor` was attached and read by nothing, so
+/// [`SyncStatusReason::Disconnected`] / [`SyncStatusReason::Reconnecting`] were
+/// emitted by no production code and a dropped relay was invisible to the user.
+///
+/// A relay coming up is reported as `Connecting` the first time and
+/// `Reconnecting` afterwards, because those mean different things to a UI: the
+/// first is startup, the second is a live session that lost a socket. The set of
+/// relays seen connected is bounded by the pool, and never logged.
+///
+/// Holds only the bus — no `Arc<CircleManager>` — so it adds no Rule-14 edge,
+/// and exits on `cancel` so `stop` still joins it.
+async fn run_monitor(
+    mut notifications: broadcast::Receiver<MonitorNotification>,
+    bus: EventBus,
+    mut cancel: watch::Receiver<bool>,
+) {
+    let mut ever_connected: HashSet<RelayUrl> = HashSet::new();
+    loop {
+        let notification = tokio::select! {
+            biased;
+            _ = cancel.wait_for(|cancelled| *cancelled) => break,
+            received = notifications.recv() => received,
+        };
+        match notification {
+            Ok(MonitorNotification::StatusChanged { relay_url, status }) => {
+                let reason = match status {
+                    RelayStatus::Connected => {
+                        ever_connected.insert(relay_url);
+                        Some(SyncStatusReason::Connected)
+                    }
+                    RelayStatus::Connecting => Some(if ever_connected.contains(&relay_url) {
+                        SyncStatusReason::Reconnecting
+                    } else {
+                        SyncStatusReason::Connecting
+                    }),
+                    RelayStatus::Disconnected | RelayStatus::Terminated | RelayStatus::Banned => {
+                        Some(SyncStatusReason::Disconnected)
+                    }
+                    // Not transitions a user can act on: `Initialized`/`Pending`
+                    // precede the connect attempt, and the engine never enables
+                    // `sleep_when_idle` so `Sleeping` cannot occur.
+                    RelayStatus::Initialized | RelayStatus::Pending | RelayStatus::Sleeping => None,
+                };
+                if let Some(reason) = reason {
+                    bus.send(LiveSyncEvent::Status { reason });
+                }
+            }
+            // A skipped status transition costs a status event, never state: the
+            // health tick re-derives connectivity from the pool itself.
+            Err(broadcast::error::RecvError::Lagged(_)) => {}
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
     }
 }
 
@@ -1629,6 +2247,562 @@ mod tests {
         );
     }
 
+    /// Builds one live group REQ (and, with `with_inbox`, the inbox REQ) against
+    /// `url` and records them in `active`, the way `start` would — but WITHOUT
+    /// the supervisor, so nothing races the cursor-anchor assertions below.
+    ///
+    /// Returns `(group_sub_id, inbox_sub_id)`.
+    async fn issue_live_subs(
+        core: &LiveSyncCore,
+        url: &str,
+        group_id_hex: &str,
+        with_inbox: bool,
+    ) -> (SubscriptionId, SubscriptionId) {
+        let _ = core.client.add_relay(url).await;
+        core.client.connect().await;
+        core.client
+            .wait_for_connection(Duration::from_secs(5))
+            .await;
+        let sub_id = SubscriptionId::new("test_group_0");
+        let inbox_sub_id = SubscriptionId::new("test_inbox_0");
+        let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap();
+        let relays = vec![url.to_string()];
+        core.ctx()
+            .issue_group(
+                &relays,
+                &sub_id,
+                std::slice::from_ref(&group_id_hex.to_string()),
+                SubscribePhase::Initial,
+                now,
+            )
+            .await
+            .expect("the initial REQ must be accepted by a connected relay");
+        if with_inbox {
+            core.ctx()
+                .issue_inbox(&relays, &inbox_sub_id, SubscribePhase::Initial, now)
+                .await
+                .expect("the inbox REQ must be accepted by a connected relay");
+        }
+        *core.active.write().await = Some(ActiveSession {
+            group_subs: vec![LiveGroupSub {
+                sub_id: sub_id.clone(),
+                relays: relays.clone(),
+                group_ids_hex: HashSet::from([group_id_hex.to_string()]),
+            }],
+            inbox_relays: if with_inbox { relays } else { Vec::new() },
+            inbox_sub_id: inbox_sub_id.clone(),
+        });
+        (sub_id, inbox_sub_id)
+    }
+
+    /// A `(relay, sub)` endpoint key for the test relay.
+    fn endpoint(url: &str, sub_id: &SubscriptionId) -> RepairKey {
+        RepairKey {
+            relay_url: RelayUrl::parse(url).unwrap(),
+            sub_id: sub_id.clone(),
+        }
+    }
+
+    /// The C3 repair, end to end against a real relay.
+    ///
+    /// nostr-relay-pool deletes a subscription on most `CLOSED` reasons and
+    /// `should_resubscribe` then answers `false` for the missing entry — so the
+    /// REQ is gone forever while the socket stays `Connected`. `client
+    /// .unsubscribe` reproduces exactly that pool state.
+    ///
+    /// Three things must follow: the health tick must SEE it with every relay
+    /// connected, the repair must put a fresh REQ back on the wire, and that REQ
+    /// must open a FRESH cursor-anchor generation (a re-issue that inherited the
+    /// spent generation could never advance the cursor again).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_relay_closed_subscription_is_re_issued_with_a_fresh_anchor_generation() {
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let relay = nostr_relay_builder::MockRelay::run()
+            .await
+            .expect("mock relay starts");
+        let url = relay.url().await.to_string();
+        let (core, _dir) = build_core();
+        let hex = "aa".repeat(32);
+        let (sub_id, _) = issue_live_subs(&core, &url, &hex, false).await;
+
+        assert!(
+            !core.client.subscription(&sub_id).await.is_empty(),
+            "precondition: the pool holds the REQ we just issued"
+        );
+        // Spend this generation's single advance, so a fresh one is observable.
+        core.processor.note_end_of_stored_events(&hex);
+        assert!(
+            !core.processor.note_end_of_stored_events(&hex),
+            "precondition: the generation's one advance is spent"
+        );
+
+        // What a `CLOSED` does inside the pool.
+        core.client.unsubscribe(&sub_id).await;
+        assert!(
+            core.client.subscription(&sub_id).await.is_empty(),
+            "precondition: the pool no longer holds the REQ"
+        );
+
+        let snapshot = core.relay_health().await;
+        assert_eq!(
+            snapshot.disconnected, 0,
+            "the socket is still up — which is exactly why connectivity cannot \
+             see this failure"
+        );
+        assert!(
+            snapshot.subscriptions_live < snapshot.subscriptions_expected,
+            "the health snapshot must notice the missing REQ"
+        );
+        assert!(
+            health_needs_resubscribe(snapshot),
+            "a REQ a relay ended must warrant a re-anchor even with every relay \
+             connected"
+        );
+
+        {
+            // `reissue` requires the lifecycle lock, exactly as `run_repair`
+            // acquires it (cancellably) before calling.
+            let _lifecycle = core.lifecycle.lock().await;
+            core.repair_plane()
+                .reissue(&RepairKey {
+                    relay_url: RelayUrl::parse(&url).unwrap(),
+                    sub_id: sub_id.clone(),
+                })
+                .await;
+        }
+
+        assert!(
+            !core.client.subscription(&sub_id).await.is_empty(),
+            "the repair must put a fresh REQ back on the wire"
+        );
+        assert!(
+            core.processor.note_end_of_stored_events(&hex),
+            "the re-issued REQ must open a FRESH cursor-anchor generation, or \
+             this circle's cursor could never advance again"
+        );
+        let _ = core.stop().await;
+    }
+
+    /// The whole wiring: the worker's CLOSED hook surfaces a status and hands
+    /// the key to the repair task, which re-issues the REQ.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_repair_task_re_issues_a_closed_subscription_and_reports_it() {
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let relay = nostr_relay_builder::MockRelay::run()
+            .await
+            .expect("mock relay starts");
+        let url = relay.url().await.to_string();
+        let (core, _dir) = build_core();
+        let hex = "bb".repeat(32);
+        let (sub_id, _) = issue_live_subs(&core, &url, &hex, false).await;
+        core.client.unsubscribe(&sub_id).await;
+
+        let mut bus = core.bus().subscribe();
+        let task = tokio::spawn(run_repair(core.repair_plane(), core.cancel_tx.subscribe()));
+
+        // Exactly what `run_worker` does for a CLOSED on a sub we own.
+        super::super::supervisor::note_subscription_closed(
+            &core.processor,
+            &core.repair,
+            &endpoint(&url, &sub_id),
+            ClosedKind::Dropped,
+        );
+
+        let reported = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(
+                    bus.recv().await,
+                    Ok(LiveSyncEvent::Status {
+                        reason: SyncStatusReason::RelayError
+                    })
+                ) {
+                    return true;
+                }
+            }
+        })
+        .await
+        .expect("a relay ending our REQ must be reported, not swallowed");
+        assert!(reported);
+
+        // The first Dropped incident is due immediately, so this settles as soon
+        // as the task is scheduled; the timeout only bounds a hang.
+        let restored = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if !core.client.subscription(&sub_id).await.is_empty() {
+                    return true;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the repair task must re-issue the REQ the relay ended");
+        assert!(restored);
+
+        let _ = core.stop().await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+    }
+
+    /// The delivery arm, wired end to end — and confined to the group plane.
+    ///
+    /// Two promises in one test, because they are the same mistake from either
+    /// side. A quiet INBOX must never count as silent: invitations are rare, so
+    /// on a typical device the inbox delivers nothing for weeks, and its REQ
+    /// carries a seven-day gift-wrap lookback — an arm that fired on it would
+    /// have every device replay a week of wraps keyed on its own `#p` on every
+    /// tick, forever. A silent GROUP bucket must be re-issued, and ONLY it.
+    ///
+    /// The window is backdated by re-opening that one endpoint's delivery
+    /// window, which is exactly what a REQ issued that long ago and never served
+    /// looks like; no clock is mocked and nothing sleeps.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_a_silent_group_req_is_re_issued_and_a_quiet_inbox_is_never_one() {
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let relay = nostr_relay_builder::MockRelay::run()
+            .await
+            .expect("mock relay starts");
+        let url = relay.url().await.to_string();
+        let (core, _dir) = build_core();
+        let hex = "cc".repeat(32);
+        let (group_sub, inbox_sub) = issue_live_subs(&core, &url, &hex, true).await;
+
+        // Spend both planes' advances, so a re-opened generation is observable.
+        core.processor.note_end_of_stored_events(&hex);
+        core.processor.note_inbox_end_of_stored_events();
+        assert!(!core.processor.note_end_of_stored_events(&hex));
+        assert!(!core.processor.note_inbox_end_of_stored_events());
+
+        // Both planes fresh: nothing is silent, nothing needs doing.
+        let fresh = core.relay_health().await;
+        assert_eq!(
+            fresh.subscriptions_silent, 0,
+            "a REQ issued a moment ago has not been silent — silence is measured from the REQ, not from process start"
+        );
+        assert!(!health_needs_resubscribe(fresh));
+        assert!(!health_needs_targeted_reanchor(fresh));
+        assert_eq!(
+            core.maintain_subscription_health().await.unwrap().action,
+            HealthAction::Healthy,
+            "a healthy plane must be able to report Healthy at all — an arm that fires on every tick makes this unreachable"
+        );
+
+        // Age the INBOX endpoint far past the window. It must STILL not count:
+        // a quiet inbox is the normal state, not a fault.
+        let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap();
+        let window = delivery_silence_window_secs();
+        core.processor
+            .open_delivery_window(&endpoint(&url, &inbox_sub), now - window * 10);
+        let inbox_aged = core.relay_health().await;
+        assert_eq!(
+            inbox_aged.subscriptions_silent, 0,
+            "the inbox plane is exempt from the silence arm"
+        );
+        assert!(!health_needs_targeted_reanchor(inbox_aged));
+
+        // Now age the GROUP endpoint.
+        core.processor
+            .open_delivery_window(&endpoint(&url, &group_sub), now - window);
+        let stale = core.relay_health().await;
+        assert_eq!(
+            stale.disconnected, 0,
+            "the socket is up and the registration is intact: connectivity and presence both read healthy"
+        );
+        assert_eq!(stale.subscriptions_live, stale.subscriptions_expected);
+        assert_eq!(stale.subscriptions_silent, 1, "exactly the group endpoint");
+        assert!(
+            !health_needs_resubscribe(stale),
+            "silence must not escalate to a whole-session re-anchor"
+        );
+        assert!(health_needs_targeted_reanchor(stale));
+
+        let outcome = core
+            .maintain_subscription_health()
+            .await
+            .expect("the targeted re-anchor must succeed against a live relay");
+        assert_eq!(
+            outcome.action,
+            HealthAction::TargetedReanchor,
+            "silence gets its own action: reporting a full Resubscribed would make \
+             an idle device look like it kept losing relays"
+        );
+        assert_eq!(outcome.subscriptions_silent, 1, "and it says what it saw");
+        assert_eq!(outcome.subscriptions_expected, outcome.subscriptions_live);
+
+        // Exactly one REQ was re-issued: the group bucket's generation is fresh
+        // again, and the inbox's is untouched.
+        assert!(
+            core.processor.note_end_of_stored_events(&hex),
+            "the silent group bucket must have been re-issued"
+        );
+        assert!(
+            !core.processor.note_inbox_end_of_stored_events(),
+            "the inbox REQ must NOT have been re-issued: re-issuing it means asking every relay for a seven-day gift-wrap replay keyed on this device's #p"
+        );
+        // The arm is self-limiting: the re-issue reseeds that endpoint's window.
+        assert_eq!(core.relay_health().await.subscriptions_silent, 0);
+        let _ = core.stop().await;
+    }
+
+    /// The recovery signal that closes the consumer's false-alarm window.
+    ///
+    /// A relay `CLOSED` emits `RelayError`; a UI built on that status would show
+    /// "sharing may be paused" until something cleared it, and the repair is
+    /// otherwise entirely silent. So a SUCCESSFUL re-issue must emit
+    /// `Connected`, and exactly once — a stream of them would be as useless as
+    /// none. A FAILED re-issue must emit nothing at all: the endpoint is still
+    /// down, and claiming recovery there is the false clear this exists to
+    /// prevent.
+    ///
+    /// No `start()` here, so nothing else on this core emits `Connected` (the
+    /// session-start status and the pool `Monitor` task are both absent) — the
+    /// count is therefore attributable to the repair alone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_successful_re_issue_reports_connected_and_a_failed_one_reports_nothing() {
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let relay = nostr_relay_builder::MockRelay::run()
+            .await
+            .expect("mock relay starts");
+        let url = relay.url().await.to_string();
+        let (core, _dir) = build_core();
+        let hex = "ff".repeat(32);
+        let (sub_id, _) = issue_live_subs(&core, &url, &hex, false).await;
+        core.client.unsubscribe(&sub_id).await;
+
+        let mut bus = core.bus().subscribe();
+        super::super::supervisor::note_subscription_closed(
+            &core.processor,
+            &core.repair,
+            &endpoint(&url, &sub_id),
+            ClosedKind::Dropped,
+        );
+        {
+            let _lifecycle = core.lifecycle.lock().await;
+            core.repair_plane().reissue(&endpoint(&url, &sub_id)).await;
+        }
+        assert!(
+            !core.client.subscription(&sub_id).await.is_empty(),
+            "precondition: the repair really did re-issue the REQ"
+        );
+
+        // The bus must carry exactly RelayError then Connected, in that order.
+        let mut seen: Vec<SyncStatusReason> = Vec::new();
+        while let Ok(Ok(LiveSyncEvent::Status { reason })) =
+            tokio::time::timeout(Duration::from_millis(200), bus.recv()).await
+        {
+            seen.push(reason);
+        }
+        assert_eq!(
+            seen,
+            vec![SyncStatusReason::RelayError, SyncStatusReason::Connected],
+            "a lost REQ must report the loss AND, once it is live again, exactly one recovery"
+        );
+
+        // Now a re-issue that cannot succeed: the active session names a relay
+        // that was never added to the pool, so the subscribe fails at the pool
+        // level (relay not found) and propagates without retrying.
+        let ghost = "wss://127.0.0.1:9/".to_string();
+        if let Some(active) = core.active.write().await.as_mut() {
+            active.group_subs[0].relays = vec![ghost.clone()];
+        }
+        let mut bus = core.bus().subscribe();
+        {
+            let _lifecycle = core.lifecycle.lock().await;
+            core.repair_plane()
+                .reissue(&endpoint(&ghost, &sub_id))
+                .await;
+        }
+        let mut seen_after: Vec<SyncStatusReason> = Vec::new();
+        while let Ok(Ok(LiveSyncEvent::Status { reason })) =
+            tokio::time::timeout(Duration::from_millis(200), bus.recv()).await
+        {
+            seen_after.push(reason);
+        }
+        assert!(
+            !seen_after.contains(&SyncStatusReason::Connected),
+            "a failed re-issue must never claim recovery, got {seen_after:?}"
+        );
+        let _ = core.stop().await;
+    }
+
+    /// A single-relay repair must re-seed only the relay it re-subscribed.
+    ///
+    /// The delivery clock is per `(relay, subscription)`, not per circle. Keyed
+    /// per circle, a relay that ends and re-subscribes our REQ every few seconds
+    /// would keep the circle's clock permanently fresh — masking genuine silence
+    /// on the bucket's OTHER relays, which is the failure the arm exists to find.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_single_relay_re_issue_does_not_refresh_the_other_relays_windows() {
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let relay_a = nostr_relay_builder::MockRelay::run().await.unwrap();
+        let relay_b = nostr_relay_builder::MockRelay::run().await.unwrap();
+        let url_a = relay_a.url().await.to_string();
+        let url_b = relay_b.url().await.to_string();
+        let (core, _dir) = build_core();
+        let hex = "ee".repeat(32);
+        let sub_id = SubscriptionId::new("test_group_0");
+
+        for url in [&url_a, &url_b] {
+            let _ = core.client.add_relay(url.as_str()).await;
+        }
+        core.client.connect().await;
+        core.client
+            .wait_for_connection(Duration::from_secs(5))
+            .await;
+        let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap();
+        let relays = vec![url_a.clone(), url_b.clone()];
+        core.ctx()
+            .issue_group(
+                &relays,
+                &sub_id,
+                std::slice::from_ref(&hex),
+                SubscribePhase::Initial,
+                now,
+            )
+            .await
+            .expect("the bucket REQ must be accepted");
+        *core.active.write().await = Some(ActiveSession {
+            group_subs: vec![LiveGroupSub {
+                sub_id: sub_id.clone(),
+                relays,
+                group_ids_hex: HashSet::from([hex.clone()]),
+            }],
+            inbox_relays: Vec::new(),
+            inbox_sub_id: SubscriptionId::new("test_inbox_0"),
+        });
+
+        // Both endpoints have gone quiet.
+        let window = delivery_silence_window_secs();
+        for url in [&url_a, &url_b] {
+            core.processor
+                .open_delivery_window(&endpoint(url, &sub_id), now - window);
+        }
+        assert_eq!(core.relay_health().await.subscriptions_silent, 2);
+
+        // Relay A alone ends and repairs its REQ.
+        {
+            let _lifecycle = core.lifecycle.lock().await;
+            core.repair_plane()
+                .reissue(&endpoint(&url_a, &sub_id))
+                .await;
+        }
+
+        let after = core.relay_health().await;
+        assert_eq!(
+            after.subscriptions_silent, 1,
+            "only relay A's window may be re-seeded; relay B is still silent and must stay countable"
+        );
+        assert!(
+            core.processor
+                .last_delivery_secs(&endpoint(&url_b, &sub_id))
+                .is_some_and(|at| delivery_is_silent(at, now, window)),
+            "relay B's silence must survive relay A's repair"
+        );
+        let _ = core.stop().await;
+    }
+
+    /// `stop` must join EVERY supervisor task, the repair task included, even
+    /// with a repair outstanding.
+    ///
+    /// This is the C1-orphan regression pin. `stop`'s `TimedOut` is not a
+    /// cosmetic outcome: the FFI reinstalls a timed-out core into the process
+    /// -global `SESSION`, which keeps `Arc<CircleManager>` — and with it the
+    /// Rule-14 `LiveSessionGuard` — held by a static no Dart handle in any
+    /// isolate references, leaving an MLS database no isolate can reopen for the
+    /// life of the process. Adding a task that `stop` cannot join is therefore
+    /// how this unit would have re-created the exact failure the analysis ranks
+    /// first.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_drains_every_supervisor_task_including_a_pending_repair() {
+        let (core, _relay, _dir, url) = started_core_with(&["dd".repeat(32).as_str()]).await;
+        let sub_id = SubscriptionId::new(core.live_group_subs_for_test().await[0].0.clone());
+
+        core.repair
+            .note_closed(&endpoint(&url, &sub_id), ClosedKind::Dropped);
+
+        let outcome = tokio::time::timeout(Duration::from_secs(20), core.stop())
+            .await
+            .expect("stop must not hang with a repair outstanding");
+        assert_eq!(
+            outcome,
+            StopOutcome::Drained,
+            "every supervisor task — receiver, worker, repair and monitor — must be joined by stop; a TimedOut here is the orphaned Rule-14 guard"
+        );
+    }
+
+    /// A repair waiting for the lifecycle lock must still be joinable.
+    ///
+    /// `stop` holds that lock across its OWN `join_tasks`, so a repair task that
+    /// waited for it unconditionally could not be joined while `stop` held it —
+    /// `stop` would report `TimedOut`, which is precisely the orphaned Rule-14
+    /// `LiveSessionGuard` (an MLS database no isolate can reopen for the life of
+    /// the process). The repair task therefore acquires the lock with `cancel`
+    /// as an escape hatch, and this pins that.
+    ///
+    /// Deterministic and discriminating: we HOLD the lock for the whole test and
+    /// never release it, and only raise cancel once the task has demonstrably
+    /// taken its key off the queue — after which its sole remaining step is the
+    /// lock we are holding. Without the escape hatch it parks there forever and
+    /// this test times out.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_repair_waiting_for_the_lifecycle_lock_still_exits_on_cancel() {
+        let (core, _dir) = build_core();
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let task = tokio::spawn(run_repair(core.repair_plane(), cancel_rx));
+
+        let held = core.lifecycle.lock().await;
+        assert_eq!(
+            core.repair.pending_len(),
+            0,
+            "precondition: the queue starts empty"
+        );
+        core.repair.note_closed(
+            &RepairKey {
+                relay_url: RelayUrl::parse("wss://relay.example").unwrap(),
+                sub_id: SubscriptionId::new("s_group_0"),
+            },
+            ClosedKind::Dropped,
+        );
+        // `note_closed` set the count to 1 synchronously in THIS task, and the
+        // only thing that lowers it is the repair task's `take_due`. So
+        // observing 0 here proves the task has dequeued the key and its sole
+        // remaining step is the lock we hold — whether or not it got there
+        // before this loop's first read. (Asserting `== 1` first would be the
+        // race: the task is free to dequeue the instant `note_closed` returns.)
+        while core.repair.pending_len() != 0 {
+            tokio::task::yield_now().await;
+        }
+
+        cancel_tx.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect(
+                "a repair waiting for the lifecycle lock must still exit on cancel; \
+                 parking there unconditionally is what makes stop report TimedOut \
+                 and orphan the Rule-14 guard",
+            )
+            .expect("the repair task must join cleanly");
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn a_wedged_receive_plane_reports_the_session_as_not_running() {
+        // `is_running` is what the Dart self-heal restarts on, so a dead ingest
+        // worker must flip it — otherwise the engine reports itself healthy
+        // forever while ingesting nothing.
+        let (core, _dir) = build_core();
+        assert!(core.is_running());
+        core.wedged.store(true, Ordering::Release);
+        assert!(
+            !core.is_running(),
+            "a dead worker must not read as a live session"
+        );
+        // ...and a health tick over a dead plane is a no-op, not a repair: the
+        // caller has to rebuild the session, which a re-anchor cannot do.
+        assert_eq!(
+            core.maintain_subscription_health().await.unwrap().action,
+            HealthAction::EngineOff
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stop_on_a_fresh_engine_returns_promptly() {
         let (core, _dir) = build_core();
@@ -1842,6 +3016,12 @@ mod tests {
             assert_eq!(outcome.action, HealthAction::Healthy);
             assert_eq!(outcome.relays_total, 0);
             assert_eq!(outcome.relays_disconnected, 0);
+            // No session started ⇒ nothing expected, nothing live, nothing
+            // silent. The counters must not report a shortfall out of an absent
+            // session model, or the consumer would read "REQs are missing".
+            assert_eq!(outcome.subscriptions_expected, 0);
+            assert_eq!(outcome.subscriptions_live, 0);
+            assert_eq!(outcome.subscriptions_silent, 0);
         });
     }
 

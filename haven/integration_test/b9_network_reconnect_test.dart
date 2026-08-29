@@ -849,13 +849,13 @@ void main() {
       // the app's recovery does not get.
       String? backlogEventId;
       try {
-        final encrypted = await bob.user.circleManager.encryptLocation(
+        final encrypted = (await bob.user.circleManager.encryptLocation(
           mlsGroupId: bobCircle.circle.mlsGroupId,
           senderPubkeyHex: bob.pubkeyHex,
           latitude: _backlogLatitude,
           longitude: _backlogLongitude,
           updateIntervalSecs: BigInt.from(198),
-        );
+        )).sent!;
         final decoded = jsonDecode(encrypted.eventJson);
         final id = decoded is Map<String, dynamic>
             ? decoded['id'] as String?

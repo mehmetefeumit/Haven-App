@@ -531,7 +531,7 @@ void main() {
         // post-removal "cannot decrypt" assertion would pass vacuously
         // if Bob never had working decryption in the first place.
         // ----------------------------------------------------------------
-        final preRemovalEncrypt = await aliceManager.encryptLocation(
+        final preRemovalEncrypt = (await aliceManager.encryptLocation(
           mlsGroupId: mlsGroupId,
           senderPubkeyHex: alicePubkeyHex,
           latitude: 40.111222,
@@ -539,7 +539,7 @@ void main() {
           updateIntervalSecs: BigInt.from(
             kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
           ),
-        );
+        )).sent!;
         final bobPreRemovalResults = await bobManager.decryptLocation(
           eventJson: preRemovalEncrypt.eventJson,
         );
@@ -647,7 +647,7 @@ void main() {
         }
 
         // Alice encrypts a fresh location at the new epoch.
-        final postRemovalEncrypt = await aliceManager.encryptLocation(
+        final postRemovalEncrypt = (await aliceManager.encryptLocation(
           mlsGroupId: mlsGroupId,
           senderPubkeyHex: alicePubkeyHex,
           latitude: 55.123456,
@@ -655,7 +655,7 @@ void main() {
           updateIntervalSecs: BigInt.from(
             kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
           ),
-        );
+        )).sent!;
 
         // Bob attempts to decrypt Alice's post-removal message. Having merged
         // his own eviction above, Bob's group state is invalid, so MDK fails

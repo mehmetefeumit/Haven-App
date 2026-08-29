@@ -13,10 +13,12 @@ import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/providers/sharing_health_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/services/publish_stagger.dart';
+import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/utils/member_display.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -269,11 +271,43 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
         '[LocationPublish] Encrypting (${circle.relays.length} relays)',
       );
       try {
-        final result = await service.publishLocation(
+        final outcome = await service.publishLocation(
           mlsGroupId: circle.mlsGroupId,
+          nostrGroupId: circle.nostrGroupId,
           senderPubkeyHex: identity.pubkeyHex,
           latitude: position.latitude,
           longitude: position.longitude,
+        );
+        // A deferral is not a publish verdict: the MLS engine never encrypted,
+        // so no relay accepted or rejected anything. It gets its own health
+        // input and skips `recordPublishOutcome` entirely.
+        //
+        // Switched, not cast: a third variant added later must be a COMPILE
+        // error here, not a runtime one on the publish path.
+        final PublishResult result;
+        switch (outcome) {
+          case LocationPublishDeferred():
+            debugPrint(
+              '[LocationPublish] send deferred by the MLS engine — '
+              'gating=${outcome.unresolvedInputs}, '
+              'repaired=${outcome.repaired}',
+            );
+            _recordDeferredSend(ref, circle);
+            // NOT counted as published. `published` is what this burst reports
+            // as delivered, and a deferral delivered nothing — inflating it
+            // would make a wholly stalled burst read as a complete one in the
+            // only number the caller gets back.
+            continue;
+          case LocationPublishSent(result: final r):
+            result = r;
+        }
+        // A `PublishResult` no relay accepted delivered nothing. That verdict
+        // used to end in the debugPrint below and nowhere else, which is why a
+        // send plane could die without the user ever being told.
+        _recordPublishOutcome(
+          ref,
+          circle,
+          acked: result.acceptedBy.isNotEmpty,
         );
         debugPrint(
           '[LocationPublish] Published — '
@@ -299,6 +333,7 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
         published++;
       } on Object catch (_) {
         debugPrint('[LocationPublish] Publish failed for circle');
+        _recordPublishOutcome(ref, circle, acked: false);
       }
     }
 
@@ -308,3 +343,33 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
     return 0;
   }
 });
+
+/// Feeds a deferred send to the sharing-health model.
+///
+/// Never throws, for the same reason [_recordPublishOutcome] does not.
+void _recordDeferredSend(Ref ref, Circle circle) {
+  try {
+    ref
+        .read(sharingHealthProvider.notifier)
+        .recordDeferredSend(sharingCircleKey(circle.nostrGroupId));
+  } on Object catch (e) {
+    debugPrint('[LocationPublish] deferred record failed: ${e.runtimeType}');
+  }
+}
+
+/// Feeds one publish verdict to the sharing-health model.
+///
+/// Never throws: this is diagnostics, and a failure to record must not be able
+/// to abort the burst it is observing.
+void _recordPublishOutcome(Ref ref, Circle circle, {required bool acked}) {
+  try {
+    ref
+        .read(sharingHealthProvider.notifier)
+        .recordPublishOutcome(
+          sharingCircleKey(circle.nostrGroupId),
+          acked: acked,
+        );
+  } on Object catch (e) {
+    debugPrint('[LocationPublish] health record failed: ${e.runtimeType}');
+  }
+}

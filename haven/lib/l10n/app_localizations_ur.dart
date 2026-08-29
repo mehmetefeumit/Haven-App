@@ -367,6 +367,10 @@ class AppLocalizationsUr extends AppLocalizations {
       'آن۔ بیٹری بہتری کچھ فونز پر شیئرنگ روک سکتی ہے۔ اسے بھروسے مند رکھنے کے لیے Haven کو بیٹری بہتری سے مستثنیٰ کریں۔';
 
   @override
+  String get locationSettingsBatteryOptNote =>
+      'Haven کے لیے بیٹری بہتری اب بھی آن ہے۔ کچھ فونز اسی کے ذریعے پس منظر میں شیئرنگ کو بغیر بتائے روک دیتے ہیں۔ شیئرنگ کو بھروسے مند رکھنے کے لیے Haven کو اس سے مستثنیٰ کریں۔';
+
+  @override
   String get locationSettingsErrorSnack => 'کچھ غلط ہو گیا';
 
   @override
@@ -402,6 +406,24 @@ class AppLocalizationsUr extends AppLocalizations {
   @override
   String get locationSettingsIosGuidance =>
       'جب پس منظر میں شیئرنگ آن ہو تو Haven مقام کا ایک مسلسل سیشن جاری رکھتا ہے اور iOS اسٹیٹس بار میں ایک نیلا اشارہ دکھاتا ہے۔ \"Always\" کی اجازت دینے سے یہ اضافی سہولت ملتی ہے کہ iOS کے ایپ بند کر دینے کے بعد Haven آپ کے حلقوں کی تازہ صورت حال حاصل کر سکے۔';
+
+  @override
+  String get fgsNotificationSharing =>
+      'Haven مقام کی معلومات بھیج اور وصول کر رہا ہے';
+
+  @override
+  String get fgsNotificationPaused =>
+      'Haven رکا ہوا ہے — شیئرنگ بحال کرنے کے لیے ایپ کھولیں';
+
+  @override
+  String get fgsNotificationOpen => 'Haven استعمال میں ہے';
+
+  @override
+  String get fgsChannelName => 'مقام کی شیئرنگ';
+
+  @override
+  String get fgsChannelDescription =>
+      'Haven کو پس منظر میں آپ کا خفیہ کردہ مقام شیئر کرتے رہنے دیتا ہے۔';
 
   @override
   String get mapStyleTitle => 'نقشے کا انداز';
@@ -672,7 +694,7 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get privacyEncryptionKeysChangeOnMembership =>
-      'کوئی حلقہ چھوڑ دینے سے وہ سب واپس نہیں آتا جو اس کے ارکان پہلے ہی محفوظ کر چکے ہیں۔ Haven کلیدیں صرف اُس وقت بدلتا ہے جب کوئی شامل ہو یا نکل جائے، کسی مقررہ وقفے پر کبھی نہیں۔ چنانچہ ایک ہی کلید ہفتوں کے پیغامات پر محیط ہو سکتی ہے، اور اُس عرصے میں کسی رکن نے جو کچھ محفوظ کیا ہو وہ اس کے لیے پڑھنے کے قابل رہتا ہے۔ پھر بھی وہ ایسی کوئی چیز نہیں کھول سکتا جو اس کے نکلنے کے بعد بھیجی گئی ہو۔';
+      'کوئی حلقہ چھوڑ دینے سے وہ سب واپس نہیں لیا جا سکتا جو اس کے ارکان پہلے ہی محفوظ کر چکے ہیں۔ Haven کلیدیں اُس وقت بدلتا ہے جب کوئی شامل ہو یا نکل جائے، یا جب ایسے حلقے کو، جس میں پیغامات آنے بند ہو گئے ہوں، اُس کا منتظم ٹھیک کرے؛ کسی مقررہ وقفے پر کلیدیں کبھی نہیں بدلتیں۔ چنانچہ ایک ہی کلید ہفتوں کے پیغامات پر محیط ہو سکتی ہے، اور اُس عرصے میں کسی رکن نے جو کچھ محفوظ کیا ہو وہ اس کے لیے پڑھنے کے قابل رہتا ہے۔ پھر بھی وہ ایسی کوئی چیز نہیں کھول سکتا جو اس کے نکلنے کے بعد بھیجی گئی ہو۔';
 
   @override
   String get privacyEncryptionMeansForYou =>
@@ -684,7 +706,7 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get privacyEncryptionDetailEpochs =>
-      'جس مدت تک ایک کلید کارآمد رہتی ہے، اسے ایک \"دور\" کہا جاتا ہے، اور حلقہ نئے دور میں صرف اُس وقت جاتا ہے جب اس کے ارکان بدلیں۔ آپ کا آلہ موجودہ دور اور چند حالیہ دوروں کی کلیدیں رکھتا ہے، اتنی جتنی راستے میں موجود پیغامات کھولنے کے لیے کافی ہوں، اور باقی پھینک دیتا ہے۔ جس حلقے کے ارکان مہینوں سے نہیں بدلے، وہ آج بھی اُسی دور پر ہے جس سے اس کا آغاز ہوا تھا۔';
+      'جس مدت تک ایک کلید کارآمد رہتی ہے، اسے ایک \"دور\" کہا جاتا ہے۔ حلقہ نئے دور میں اُس وقت جاتا ہے جب اس کے ارکان بدلیں، اور جب اس میں پیغامات آنے بند ہو جانے کے بعد اس کا منتظم اُسے ٹھیک کرے۔ آپ کا آلہ موجودہ دور اور چند حالیہ دوروں کی کلیدیں رکھتا ہے، اتنی جتنی راستے میں موجود پیغامات کھولنے کے لیے کافی ہوں، اور باقی پھینک دیتا ہے۔ جس حلقے میں نہ کوئی شامل ہوا ہو نہ کوئی نکلا ہو، اور جسے کبھی ٹھیک کرنے کی ضرورت نہ پڑی ہو، وہ آج بھی اُسی دور پر ہے جس سے اس کا آغاز ہوا تھا۔';
 
   @override
   String get privacyWhatOthersSeeTitle =>
@@ -2009,6 +2031,123 @@ class AppLocalizationsUr extends AppLocalizations {
   @override
   String get clockSkewResolvedAnnouncement =>
       'گھڑی کا مسئلہ ختم ہو گیا۔ Haven پھر سے آپ کا مقام شیئر کر رہا ہے۔';
+
+  @override
+  String get clockSkewTitleDisagreement =>
+      'آپ کے کسی حلقے میں کوئی گھڑی غلط ہے';
+
+  @override
+  String get clockSkewBodyDisagreement =>
+      'اس فون کی گھڑی اور کسی دوسرے رکن کی گھڑی میں دو منٹ یا اس سے زیادہ کا فرق ہے۔ اگر خرابی اسی فون کی گھڑی میں ہے، تو یہ فون جو مقام بھیجتا ہے، کسی کے دیکھنے سے پہلے اس کی میعاد ختم ہو سکتی ہے۔ سسٹم کی ترتیبات میں خودکار تاریخ اور وقت آن کریں تاکہ یہ اطمینان ہو جائے کہ غلط گھڑی اس فون کی نہیں ہے۔';
+
+  @override
+  String get clockSkewDisagreementResolvedAnnouncement =>
+      'گھڑی کا انتباہ ختم ہو گیا۔';
+
+  @override
+  String get sharingHealthTitleStopped => 'مقام کی شیئرنگ رک گئی ہے';
+
+  @override
+  String get sharingHealthTitleNotSending => 'آپ کا مقام شیئر نہیں ہو رہا';
+
+  @override
+  String get sharingHealthTitleNotReceiving =>
+      'آپ کو دوسروں کے مقامات نہیں مل رہے';
+
+  @override
+  String sharingHealthNoUpdatesMinutes(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'تقریباً $countString منٹ سے کوئی اپ ڈیٹ نہیں',
+      one: 'تقریباً 1 منٹ سے کوئی اپ ڈیٹ نہیں',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String sharingHealthNoUpdatesHours(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'تقریباً $countString گھنٹے سے کوئی اپ ڈیٹ نہیں',
+      one: 'تقریباً 1 گھنٹے سے کوئی اپ ڈیٹ نہیں',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String sharingHealthNoUpdatesDays(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'تقریباً $countString دن سے کوئی اپ ڈیٹ نہیں',
+      one: 'تقریباً 1 دن سے کوئی اپ ڈیٹ نہیں',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get sharingHealthRepairAction => 'ٹھیک کریں';
+
+  @override
+  String get sharingHealthRepairUnavailableHint =>
+      'ٹھیک کرنے کا بٹن اس حلقے کے لیے دستیاب نہیں';
+
+  @override
+  String get sharingHealthRepairHint =>
+      'ریلے سے کنکشن بحال کرتا ہے، آپ کا مقام بھیجنے کی دوبارہ کوشش کرتا ہے، اور اگر آپ اس حلقے کے منتظم ہیں تو اسے نئی کلید دے سکتا ہے';
+
+  @override
+  String get sharingHealthRepairSent =>
+      'حلقہ ٹھیک کرنے کی تبدیلی بھیج دی گئی ہے۔ دوسرے اُس وقت ہم آہنگ ہوں گے جب اُن کے فون یہ وصول کر لیں گے۔';
+
+  @override
+  String get sharingHealthRepairNotOwner =>
+      'اس حلقے کو اس کے منتظم کے سوا کوئی ٹھیک نہیں کر سکتا۔ اُن سے کہیں کہ وہ آپ کو ہٹا کر دوبارہ شامل کر لیں۔';
+
+  @override
+  String get sharingHealthRepairNeedsNewCircle =>
+      'اس حلقے کو اس فون پر ٹھیک نہیں کیا جا سکتا۔ اُنہی لوگوں کے ساتھ نیا حلقہ بنائیں۔';
+
+  @override
+  String get sharingHealthRepairNothingToDo =>
+      'ابھی ٹھیک کرنے کو کچھ نہیں ہے۔ Haven خود کوشش کرتا رہے گا۔';
+
+  @override
+  String get sharingHealthRepairUnresolvedAnnouncement =>
+      'مقام کی شیئرنگ اب بھی کام نہیں کر رہی۔';
+
+  @override
+  String get sharingHealthResumedAnnouncement =>
+      'مقام کی شیئرنگ پھر سے کام کر رہی ہے۔';
+
+  @override
+  String circleMemberLastSeenMinutes(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'آخری مقام $countString منٹ پہلے',
+      one: 'آخری مقام 1 منٹ پہلے',
+    );
+    return '$_temp0';
+  }
 
   @override
   String get mapThisLocation => 'یہ مقام';

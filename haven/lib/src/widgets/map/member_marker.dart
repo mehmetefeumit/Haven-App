@@ -58,12 +58,18 @@ String _compassDirectionLabel(AppLocalizations l10n, CompassDirection d) {
 /// marker nearly all the time and a pill that is always there stops reading as
 /// "this one is behind". Both the visible pill and the spoken age share this
 /// bound, so a screen reader never announces an age a sighted user cannot see.
-const Duration _agePillThreshold = Duration(minutes: 5);
+///
+/// Public because the members list gates its own "last seen" line on the SAME
+/// bound (`CircleMemberTile`). Two independently-chosen thresholds would let
+/// the roster and the map disagree about whether a member is stale, which is
+/// worse than either answer on its own.
+const Duration kMemberAgePillThreshold = Duration(minutes: 5);
 
 /// Formats a [Duration] into a compact age string for the visible pill.
 ///
-/// Returns `null` below [_agePillThreshold] — recent data reads as "no pill"
-/// rather than "just now", which would be visual noise on the common case.
+/// Returns `null` below [kMemberAgePillThreshold] — recent data reads as "no
+/// pill" rather than "just now", which would be visual noise on the common
+/// case.
 /// [l10n] is threaded in because this top-level helper has no [BuildContext].
 /// Minutes are the ONLY unit: a marker is evicted once it passes
 /// `expiresAt + cacheEvictionGrace` (~45 minutes), so an hours- or days-old
@@ -73,7 +79,7 @@ const Duration _agePillThreshold = Duration(minutes: 5);
 /// eviction window is ever widened, a stale marker reads "90m" rather than
 /// silently losing its age pill.
 String? _formatAge(AppLocalizations l10n, Duration age) {
-  if (age < _agePillThreshold) return null;
+  if (age < kMemberAgePillThreshold) return null;
   return l10n.memberMarkerMinutesShort(age.inMinutes);
 }
 
@@ -82,7 +88,7 @@ String? _formatAge(AppLocalizations l10n, Duration age) {
 /// [l10n] is threaded in because this top-level helper has no [BuildContext].
 /// Minutes-only for the same reason as [_formatAge] — see the note there.
 String? _formatAgeForSemantics(AppLocalizations l10n, Duration age) {
-  if (age < _agePillThreshold) return null;
+  if (age < kMemberAgePillThreshold) return null;
   return l10n.memberMarkerMinutesAgoSemantics(age.inMinutes);
 }
 

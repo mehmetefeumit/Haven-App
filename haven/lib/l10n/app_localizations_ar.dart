@@ -378,6 +378,10 @@ class AppLocalizationsAr extends AppLocalizations {
       'مُفعّلة. قد يوقف تحسين البطارية المشاركة مؤقتًا على بعض الهواتف. استثنِ Haven من تحسين البطارية للحفاظ على موثوقيتها.';
 
   @override
+  String get locationSettingsBatteryOptNote =>
+      'لا يزال تحسين البطارية مُفعّلًا لتطبيق Haven. وبعض الهواتف تستخدمه لإيقاف المشاركة في الخلفية دون سابق إنذار. استثنِ Haven منه للحفاظ على موثوقية المشاركة.';
+
+  @override
   String get locationSettingsErrorSnack => 'حدث خطأ ما';
 
   @override
@@ -413,6 +417,23 @@ class AppLocalizationsAr extends AppLocalizations {
   @override
   String get locationSettingsIosGuidance =>
       'ما دامت المشاركة في الخلفية مفعّلة، يحتفظ Haven بجلسة موقع متواصلة ويُظهر iOS مؤشرًا أزرق في شريط الحالة. ومنح إذن «دائمًا» يتيح لتطبيق Haven إضافةً إلى ذلك تدارك ما فاته من تحديثات دوائرك بعد أن يُغلق iOS التطبيق.';
+
+  @override
+  String get fgsNotificationSharing => 'يُرسل Haven معلومات الموقع ويستقبلها';
+
+  @override
+  String get fgsNotificationPaused =>
+      'تطبيق Haven متوقّف مؤقتًا — افتحه لاستئناف المشاركة';
+
+  @override
+  String get fgsNotificationOpen => 'تطبيق Haven مفتوح';
+
+  @override
+  String get fgsChannelName => 'مشاركة الموقع';
+
+  @override
+  String get fgsChannelDescription =>
+      'يتيح هذا الإشعار لتطبيق Haven أن يواصل مشاركة موقعك المشفّر في الخلفية.';
 
   @override
   String get mapStyleTitle => 'نمط الخريطة';
@@ -677,7 +698,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get privacyEncryptionKeysChangeOnMembership =>
-      'مغادرتك دائرة لا تسترجع ما حفظه أعضاؤها بالفعل. ولا يغيّر Haven المفاتيح إلا عند انضمام شخص أو مغادرته، ولا يفعل ذلك وفق مؤقّت أبدًا. لذا قد يغطّي مفتاح واحد رسائل أسابيع، ويبقى كل ما حفظه عضو في تلك المدة قابلًا للقراءة عنده. ومع ذلك لا يستطيع فتح أي شيء أُرسِل بعد مغادرته.';
+      'مغادرتك دائرةً لا تسترجع ما حفظه أعضاؤها بالفعل. ويغيّر Haven المفاتيح عند انضمام شخص أو مغادرته، أو عندما يُصلِح الدائرةَ مشرفُها بعد أن تتوقّف الرسائل عن الوصول إليها؛ ولا يغيّر Haven المفاتيح وفق مؤقّت أبدًا. لذا قد يغطّي مفتاح واحد الرسائلَ المُرسَلة على مدى أسابيع، ويبقى كل ما حفظه عضو في تلك المدة قابلًا للقراءة عنده. ومع ذلك لا يستطيع ذلك العضو فتح أي شيء أُرسِل بعد مغادرته.';
 
   @override
   String get privacyEncryptionMeansForYou =>
@@ -689,7 +710,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get privacyEncryptionDetailEpochs =>
-      'تُسمّى كل فترة يعمل فيها مفتاح واحد «حقبة»، ولا تنتقل الدائرة إلى حقبة جديدة إلا عند تغيّر عضويتها. ويحتفظ جهازك بمفاتيح الحقبة الحالية وبضع حقبات قريبة، بما يكفي لفتح الرسائل التي لا تزال في الطريق، ويتخلّص من الباقي. والدائرة التي لم تتغيّر عضويتها منذ أشهر لا تزال في الحقبة التي بدأت بها.';
+      'تُسمّى كل فترة يعمل فيها مفتاح واحد «حقبة». وتنتقل الدائرة إلى حقبة جديدة عند تغيّر عضويتها، وعندما يُصلِحها مشرفها بعد أن تتوقّف الرسائل عن الوصول إليها. ويحتفظ جهازك بمفاتيح الحقبة الحالية وبضع حِقَب سابقة، بما يكفي لفتح الرسائل التي لا تزال في الطريق، ويتخلّص من الباقي. والدائرة التي لم ينضمّ إليها أحد ولم يغادرها أحد، ولم تحتج إلى إصلاح قط، لا تزال في الحقبة التي بدأت بها.';
 
   @override
   String get privacyWhatOthersSeeTitle =>
@@ -2055,6 +2076,135 @@ class AppLocalizationsAr extends AppLocalizations {
   @override
   String get clockSkewResolvedAnnouncement =>
       'انتهت مشكلة الساعة. يشارك Haven موقعك من جديد.';
+
+  @override
+  String get clockSkewTitleDisagreement => 'ساعة في إحدى دوائرك غير مضبوطة';
+
+  @override
+  String get clockSkewBodyDisagreement =>
+      'تختلف ساعة هذا الهاتف عن ساعة عضو آخر بدقيقتين أو أكثر. وإن كان الخلل في ساعة هذا الهاتف، فقد تنتهي صلاحية تحديثات موقعك قبل أن يراها أحد. فعّل ضبط التاريخ والوقت تلقائيًا في إعدادات النظام لتستبعد أن يكون الخلل في هذا الهاتف.';
+
+  @override
+  String get clockSkewDisagreementResolvedAnnouncement => 'انتهى تحذير الساعة.';
+
+  @override
+  String get sharingHealthTitleStopped => 'توقّفت مشاركة الموقع';
+
+  @override
+  String get sharingHealthTitleNotSending => 'لا تتم مشاركة موقعك';
+
+  @override
+  String get sharingHealthTitleNotReceiving => 'لا تصلك مواقع الأعضاء';
+
+  @override
+  String sharingHealthNoUpdatesMinutes(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'لا تحديثات منذ نحو $countString دقيقة',
+      many: 'لا تحديثات منذ نحو $countString دقيقة',
+      few: 'لا تحديثات منذ نحو $countString دقائق',
+      two: 'لا تحديثات منذ نحو دقيقتين',
+      one: 'لا تحديثات منذ نحو دقيقة واحدة',
+      zero: 'لا تحديثات منذ أقل من دقيقة',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String sharingHealthNoUpdatesHours(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'لا تحديثات منذ نحو $countString ساعة',
+      many: 'لا تحديثات منذ نحو $countString ساعة',
+      few: 'لا تحديثات منذ نحو $countString ساعات',
+      two: 'لا تحديثات منذ نحو ساعتين',
+      one: 'لا تحديثات منذ نحو ساعة واحدة',
+      zero: 'لا تحديثات منذ أقل من ساعة',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String sharingHealthNoUpdatesDays(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'لا تحديثات منذ نحو $countString يوم',
+      many: 'لا تحديثات منذ نحو $countString يومًا',
+      few: 'لا تحديثات منذ نحو $countString أيام',
+      two: 'لا تحديثات منذ نحو يومين',
+      one: 'لا تحديثات منذ نحو يوم واحد',
+      zero: 'لا تحديثات منذ أقل من يوم',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get sharingHealthRepairAction => 'إصلاح';
+
+  @override
+  String get sharingHealthRepairUnavailableHint =>
+      'الإصلاح غير متاح لهذه الدائرة';
+
+  @override
+  String get sharingHealthRepairHint =>
+      'يعيد الاتصال بالمُرحِّلات، ويعيد محاولة إرسال موقعك، وقد يمنح الدائرة مفتاحًا جديدًا إن كنت مشرفها';
+
+  @override
+  String get sharingHealthRepairSent =>
+      'تم إرسال الإصلاح. وسيلحق الآخرون بهذا التغيير بمجرّد أن تستقبله هواتفهم.';
+
+  @override
+  String get sharingHealthRepairNotOwner =>
+      'لا يستطيع إصلاح هذه الدائرة إلا مشرفها. اطلب من المشرف إزالتك ثم إضافتك من جديد.';
+
+  @override
+  String get sharingHealthRepairNeedsNewCircle =>
+      'لا يمكن إصلاح هذه الدائرة على هذا الهاتف. أنشئ دائرةً جديدةً مع الأشخاص أنفسهم.';
+
+  @override
+  String get sharingHealthRepairNothingToDo =>
+      'لا شيء يحتاج إلى إصلاح الآن. وسيواصل Haven المحاولة.';
+
+  @override
+  String get sharingHealthRepairUnresolvedAnnouncement =>
+      'ما زالت مشاركة الموقع لا تعمل.';
+
+  @override
+  String get sharingHealthResumedAnnouncement => 'تعمل مشاركة الموقع من جديد.';
+
+  @override
+  String circleMemberLastSeenMinutes(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'آخر ظهور قبل $countString دقيقة',
+      many: 'آخر ظهور قبل $countString دقيقة',
+      few: 'آخر ظهور قبل $countString دقائق',
+      two: 'آخر ظهور قبل دقيقتين',
+      one: 'آخر ظهور قبل دقيقة واحدة',
+      zero: 'آخر ظهور قبل أقل من دقيقة',
+    );
+    return '$_temp0';
+  }
 
   @override
   String get mapThisLocation => 'هذا الموقع';

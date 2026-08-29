@@ -49,6 +49,7 @@ use super::config::WORKER_QUEUE_CAP;
 use super::event::SyncStatusReason;
 use super::planes::{group::GROUP_EVENT_KIND, PlaneKind};
 use super::processor::EngineProcessor;
+use super::repair::{ClosedKind, RepairKey, RepairQueue};
 use super::router::{Router, SubCtx};
 
 /// One routed relay event handed from the receiver to the worker.
@@ -62,14 +63,29 @@ pub struct RawEvent {
     pub event: Event,
 }
 
-/// What the receiver hands the worker: a delivered event, or a relay's
-/// end-of-stored-events for one subscription.
+/// What the receiver hands the worker: a delivered event, a relay's
+/// end-of-stored-events for one subscription, or a relay ending one.
 ///
-/// The two are carried on the SAME channel deliberately. EOSE is the live
+/// All three are carried on the SAME channel deliberately. EOSE is the live
 /// plane's only cursor-advance signal (see [`super::anchor`]), and it must be
 /// observed AFTER every stored event the relay sent before it — a separate
 /// channel would race the backlog and let the cursor claim events the worker
-/// has not ingested yet.
+/// has not ingested yet. A `CLOSED` rides it for the mirror-image reason: it
+/// triggers a re-issue, which opens a FRESH anchor generation, and an EOSE the
+/// relay sent before the `CLOSED` must be redeemed against the generation it
+/// actually belongs to. On a side channel the re-issue could overtake that EOSE
+/// and let it anchor the new generation at the new REQ's open time — a
+/// completeness claim the new REQ never made.
+///
+/// # What one channel does NOT fix
+///
+/// FIFO only orders what is IN this channel. The re-issue itself runs on the
+/// repair task, and a bucket's anchor is keyed by circle while a repair
+/// re-subscribes ONE relay — so a co-bucketed relay's EOSE for the OLD REQ can
+/// still arrive after the repair opened a new generation, and redeem it. That
+/// residual is closed in [`super::anchor::CursorAnchors::open_generation`],
+/// which carries an un-applied hold-back across the generation boundary, and NOT
+/// by this ordering. Do not read the paragraph above as covering it.
 ///
 /// `RawEvent` is boxed so the channel's slot size is set by the small EOSE
 /// variant rather than by a whole `nostr::Event`: the queue is bounded at
@@ -86,6 +102,21 @@ pub enum RawSignal {
         /// Subscription it terminates the stored phase of.
         subscription_id: SubscriptionId,
     },
+    /// A relay ended one subscription (`CLOSED`).
+    ///
+    /// Carries the CLASSIFICATION, never the relay's free-text reason: the text
+    /// is attacker-chosen and has exactly one use here — the NIP-01
+    /// machine-readable prefix that says whether nostr-relay-pool deleted the
+    /// subscription (see [`ClosedKind`]) — so it is resolved at the edge and
+    /// never travels further.
+    SubscriptionClosed {
+        /// Relay that ended it.
+        relay_url: RelayUrl,
+        /// Subscription it named. Not yet known to be ours.
+        subscription_id: SubscriptionId,
+        /// Whether the pool deleted the subscription or merely marked it closed.
+        kind: ClosedKind,
+    },
 }
 
 /// What the receiver loop should do with one pool notification.
@@ -95,6 +126,9 @@ pub enum NotifDisposition {
     Forward,
     /// A relay's `EOSE`: forward to the worker as a cursor-anchor signal.
     ForwardEose,
+    /// A relay's `CLOSED`: forward to the worker, which screens it against the
+    /// live router and, if it names one of OUR subscriptions, requests a repair.
+    ForwardClosed,
     /// The pool shut down: stop the loop cleanly.
     Stop,
     /// A relay message / auth / other notification we don't act on.
@@ -103,11 +137,26 @@ pub enum NotifDisposition {
 
 /// Classifies one pool notification (pure; testable without a runtime).
 ///
-/// `EndOfStoredEvents` is singled out of the `Message` arm because it is the
-/// only relay message the live plane trusts for anything: it is the relay
-/// stating that it has handed over everything it stored for a REQ, which is what
-/// lets the cursor advance to that REQ's LOCAL open time instead of to an event's
-/// remotely-chosen `created_at`.
+/// Two relay messages are singled out of the `Message` arm.
+///
+/// `EndOfStoredEvents` is the only one the live plane trusts for anything: it is
+/// the relay stating that it has handed over everything it stored for a REQ,
+/// which is what lets the cursor advance to that REQ's LOCAL open time instead
+/// of to an event's remotely-chosen `created_at`.
+///
+/// `Closed` is the only one that can END a REQ. nostr-relay-pool deletes the
+/// subscription for most `CLOSED` reasons and never re-issues it, not even on a
+/// later socket reconnect — a permanent receive blackout behind a `Connected`
+/// relay (see [`super::repair`]). Forwarding it is what lets the worker repair
+/// it. It carries a subscription id, so the worker can hold the relay to a
+/// subscription this session actually owns; naming an id we never issued buys a
+/// relay nothing.
+///
+/// `Notice` deliberately stays `Ignore`. It is free text chosen by the relay
+/// with no subscription id and no machine-readable form, so it identifies
+/// nothing to repair — acting on it would hand every relay a lever to trigger
+/// work and status churn on demand, which is precisely what the `CLOSED` screen
+/// exists to deny.
 #[must_use]
 pub const fn notification_disposition(n: &RelayPoolNotification) -> NotifDisposition {
     match n {
@@ -115,6 +164,7 @@ pub const fn notification_disposition(n: &RelayPoolNotification) -> NotifDisposi
         RelayPoolNotification::Shutdown => NotifDisposition::Stop,
         RelayPoolNotification::Message { message, .. } => match message {
             RelayMessage::EndOfStoredEvents(_) => NotifDisposition::ForwardEose,
+            RelayMessage::Closed { .. } => NotifDisposition::ForwardClosed,
             _ => NotifDisposition::Ignore,
         },
     }
@@ -222,6 +272,28 @@ pub fn canonical_group_hex(nostr_group_id: &[u8]) -> String {
     hex::encode(nostr_group_id)
 }
 
+/// Records that the ingest worker has exited, so a dead receive plane stops
+/// reading as a live one.
+///
+/// The intake channel reporting `Closed` means [`run_worker`] returned — it
+/// cannot be restarted, and every later delivery would go nowhere. Two things
+/// have to happen, and neither is optional:
+///
+/// * `wedged` makes [`super::session::LiveSyncCore::is_running`] answer `false`,
+///   which is the signal the Dart self-heal uses to rebuild the session. It is
+///   the ONLY channel that distinguishes this from any other relay trouble, so
+///   the status below does not have to.
+/// * a bus status, so the failure is visible rather than silent.
+///   [`SyncStatusReason::RelayError`] is used deliberately: this unit cannot add
+///   an FFI variant, and of the existing ones it is the only generic failure
+///   signal — `SessionStopped` would read as an intentional teardown and mute
+///   the very restart this needs.
+fn report_worker_gone(processor: &EngineProcessor, wedged: &AtomicBool) {
+    wedged.store(true, Ordering::Release);
+    processor.emit_status(SyncStatusReason::RelayError);
+    log::warn!("[live_sync::receiver] ingest worker exited; receive plane is down");
+}
+
 /// The RAW notifications receiver: forwards first-seen events onto `tx`, never
 /// blocking on decrypt, surviving `Lagged`, stopping only on `Closed`/`Shutdown`,
 /// the explicit `shutdown` flag, or `cancel`.
@@ -252,11 +324,21 @@ pub fn canonical_group_hex(nostr_group_id: &[u8]) -> String {
 /// generation then open. The receiver still routes nothing and ingests nothing.
 /// It shares the `Arc` graph the `mpsc::Sender` already keeps alive, so it adds
 /// no new lifetime edge for `cancel` to break.
+///
+/// # `wedged`
+///
+/// Raised when the intake channel reports `Closed` — the worker has exited, so
+/// nothing downstream will ever ingest again. Before this flag existed the
+/// receiver matched only `TrySendError::Full` and a dead worker fell through
+/// silently while `is_running()` (a shutdown flag) still answered `true`, so
+/// neither the Dart self-heal nor the health tick had any reason to restart the
+/// session. See [`super::session::LiveSyncCore::is_running`].
 pub async fn run_receiver(
     mut notifications: broadcast::Receiver<RelayPoolNotification>,
     tx: mpsc::Sender<RawSignal>,
     processor: Arc<EngineProcessor>,
     shutdown: Arc<AtomicBool>,
+    wedged: Arc<AtomicBool>,
     mut cancel: watch::Receiver<bool>,
 ) {
     loop {
@@ -288,14 +370,19 @@ pub async fn run_receiver(
                         // must THROTTLE, so the dropped event holds its circle's
                         // generation — nothing else records it, and the EOSE
                         // would otherwise advance the cursor straight over it.
-                        if let Err(mpsc::error::TrySendError::Full(RawSignal::Event(dropped))) = tx
-                            .try_send(RawSignal::Event(Box::new(RawEvent {
-                                relay_url,
-                                subscription_id,
-                                event: *event,
-                            })))
-                        {
-                            note_intake_drop(&processor, &dropped.event);
+                        match tx.try_send(RawSignal::Event(Box::new(RawEvent {
+                            relay_url,
+                            subscription_id,
+                            event: *event,
+                        }))) {
+                            Err(mpsc::error::TrySendError::Full(RawSignal::Event(dropped))) => {
+                                note_intake_drop(&processor, &dropped.event);
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                report_worker_gone(&processor, &wedged);
+                                break;
+                            }
+                            Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
                         }
                     }
                 }
@@ -309,10 +396,68 @@ pub async fn run_receiver(
                         // dropping it is the SAFE direction: a missed EOSE only
                         // means the cursor does not advance this generation, so
                         // the next REQ re-requests a wider window.
-                        let _ = tx.try_send(RawSignal::EndOfStoredEvents {
+                        if let Err(mpsc::error::TrySendError::Closed(_)) =
+                            tx.try_send(RawSignal::EndOfStoredEvents {
+                                relay_url,
+                                subscription_id: subscription_id.into_owned(),
+                            })
+                        {
+                            report_worker_gone(&processor, &wedged);
+                            break;
+                        }
+                    }
+                }
+                NotifDisposition::ForwardClosed => {
+                    if let RelayPoolNotification::Message {
+                        relay_url,
+                        message:
+                            RelayMessage::Closed {
+                                subscription_id,
+                                message,
+                            },
+                    } = n
+                    {
+                        // Classify at the edge: the reason is attacker-chosen
+                        // free text whose only use is its NIP-01 prefix, so it
+                        // is resolved here and never travels further.
+                        match tx.try_send(RawSignal::SubscriptionClosed {
                             relay_url,
                             subscription_id: subscription_id.into_owned(),
-                        });
+                            kind: ClosedKind::classify(&message),
+                        }) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                report_worker_gone(&processor, &wedged);
+                                break;
+                            }
+                            // A full intake queue drops this CLOSED, and unlike a
+                            // dropped EOSE that is NOT self-correcting: the REQ
+                            // stays deleted at the relay and no repair is
+                            // scheduled. It is nonetheless the right trade here,
+                            // and the floor is not the 15-minute tick's delivery
+                            // arm but its PRESENCE arm: the deleted REQ is gone
+                            // from `client.subscriptions()`, so
+                            // `subscriptions_live < subscriptions_expected` fires
+                            // deterministically on the very next tick — no
+                            // waiting out a silence window.
+                            //
+                            // The alternative — recording the repair straight
+                            // from this loop — is rejected on Rule 12: the
+                            // receiver holds no router, so it cannot tell one of
+                            // OUR subscription ids from an id a relay invented,
+                            // and a relay that floods CLOSEDs for arbitrary ids
+                            // while the queue is full would grow the backoff
+                            // table without bound. Losing a repair the presence
+                            // arm re-derives beats accepting relay-writable
+                            // unbounded state.
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                log::warn!(
+                                    "[live_sync::receiver] intake full; a relay CLOSED was \
+                                     dropped — the health tick's subscription-presence arm \
+                                     is the backstop"
+                                );
+                            }
+                        }
                     }
                 }
                 NotifDisposition::Stop => break,
@@ -346,6 +491,75 @@ pub async fn run_receiver(
     }
 }
 
+/// Records a relay ending one of OUR subscriptions: a visible status plus a
+/// scheduled re-issue.
+///
+/// The caller MUST have resolved a router context for `(relay_url, sub_id)`
+/// first. That lookup is the ownership screen: a `CLOSED` naming an id this
+/// session never issued finds no context and never reaches here, so a relay
+/// cannot make Haven re-subscribe — or even allocate a backoff entry — by
+/// inventing a subscription id.
+///
+/// Reached only in FIFO order behind every event and `EOSE` the relay sent ahead
+/// of the `CLOSED`, which is why they share one channel: the re-issue this
+/// schedules opens a fresh anchor generation, and the preceding `EOSE` must be
+/// redeemed against the generation it belongs to first (see [`RawSignal`]).
+///
+/// # Order of the two effects
+///
+/// The repair is SCHEDULED before the status is emitted, and that order is a
+/// contract, not an accident: a consumer seeing `RelayError` may rely on the
+/// repair already being queued. Emitting first published a state that had not
+/// happened yet — which made an observer that used the status as its
+/// happens-before edge race the scheduling under load.
+pub(crate) fn note_subscription_closed(
+    processor: &EngineProcessor,
+    repair: &RepairQueue,
+    key: &RepairKey,
+    kind: ClosedKind,
+) {
+    repair.note_closed(key, kind);
+    processor.emit_status(SyncStatusReason::RelayError);
+    // Presence-only (Security Rules 4/6): never the relay, the sub-id, the `#h`,
+    // or the relay's free-text reason.
+    log::warn!(
+        "[live_sync::worker] a relay ended one of our subscriptions (kind={kind:?}); repair scheduled"
+    );
+}
+
+/// Redeems a relay's `EOSE` against the cursor anchor of every stream that REQ
+/// serves.
+///
+/// The live plane's ONLY cursor-advance signal, on BOTH planes. It is redeemed
+/// in the worker, after it has already drained every stored event the relay sent
+/// ahead of it on the same channel, so the advance can never claim an event this
+/// worker has not ingested.
+fn anchor_end_of_stored_events(processor: &EngineProcessor, ctx: &SubCtx) {
+    match ctx.plane {
+        PlaneKind::Group => {
+            for group_hex in &ctx.group_ids_hex {
+                if processor.note_end_of_stored_events(group_hex) {
+                    log::debug!(
+                        "[live_sync::worker] EOSE anchored cursor group={}…",
+                        group_hex.get(..8).unwrap_or(group_hex.as_str()),
+                    );
+                }
+            }
+        }
+        // The inbox cursor used to be advanced by the FOREGROUND, from the gift
+        // wrap's own `created_at` — a field anyone who knows this user's
+        // (published) npub can choose freely, and one whose FUTURE direction
+        // pins every later inbox REQ floor at `now`, where NIP-59's mandatory
+        // backdating makes every genuine wrap invisible. It anchors here now, on
+        // the inbox REQ's local open time, exactly like a group bucket.
+        PlaneKind::Inbox => {
+            if processor.note_inbox_end_of_stored_events() {
+                log::debug!("[live_sync::worker] EOSE anchored inbox cursor");
+            }
+        }
+    }
+}
+
 /// The ingest worker: drains `rx`, routes each event, and awaits the engine
 /// ingest.
 ///
@@ -357,19 +571,34 @@ pub async fn run_receiver(
 ///
 /// `own_pubkey` is this session's identity key — the `#p` the inbox REQ asked
 /// for, and therefore what [`plane_wants_event`] holds an inbound gift wrap to.
+///
+/// `repair` is where a `CLOSED` for one of OUR subscriptions is recorded; the
+/// session's repair task re-issues it under the lifecycle lock.
 pub async fn run_worker(
     mut rx: mpsc::Receiver<RawSignal>,
     router: Arc<RwLock<Router>>,
     processor: Arc<EngineProcessor>,
+    repair: Arc<RepairQueue>,
     own_pubkey: PublicKey,
 ) {
     while let Some(signal) = rx.recv().await {
-        let (relay_url, subscription_id) = match &signal {
-            RawSignal::Event(raw) => (raw.relay_url.clone(), raw.subscription_id.clone()),
+        let key = match &signal {
+            RawSignal::Event(raw) => RepairKey {
+                relay_url: raw.relay_url.clone(),
+                sub_id: raw.subscription_id.clone(),
+            },
             RawSignal::EndOfStoredEvents {
                 relay_url,
                 subscription_id,
-            } => (relay_url.clone(), subscription_id.clone()),
+            }
+            | RawSignal::SubscriptionClosed {
+                relay_url,
+                subscription_id,
+                ..
+            } => RepairKey {
+                relay_url: relay_url.clone(),
+                sub_id: subscription_id.clone(),
+            },
         };
 
         // Resolve the subscription context (cloned so the router lock is not held
@@ -378,43 +607,26 @@ pub async fn run_worker(
             router
                 .read()
                 .await
-                .lookup(relay_url.as_str(), &subscription_id)
+                .lookup(key.relay_url.as_str(), &key.sub_id)
                 .cloned()
         };
         let Some(ctx) = ctx else { continue };
 
+        // This REQ endpoint is carrying traffic. Recorded for anything the
+        // router resolved — a CLOSED excepted, which is the relay ENDING the
+        // REQ, not serving it.
+        if !matches!(signal, RawSignal::SubscriptionClosed { .. }) {
+            processor.note_delivery(&key);
+        }
+
         let raw = match signal {
             RawSignal::Event(raw) => *raw,
+            RawSignal::SubscriptionClosed { kind, .. } => {
+                note_subscription_closed(&processor, &repair, &key, kind);
+                continue;
+            }
             RawSignal::EndOfStoredEvents { .. } => {
-                // The live plane's ONLY cursor-advance signal, on BOTH planes.
-                // It is handled HERE, after the worker has already drained every
-                // stored event the relay sent ahead of it on this same channel,
-                // so the advance can never claim an event this worker has not
-                // ingested.
-                match ctx.plane {
-                    PlaneKind::Group => {
-                        for group_hex in &ctx.group_ids_hex {
-                            if processor.note_end_of_stored_events(group_hex) {
-                                log::debug!(
-                                    "[live_sync::worker] EOSE anchored cursor group={}…",
-                                    group_hex.get(..8).unwrap_or(group_hex.as_str()),
-                                );
-                            }
-                        }
-                    }
-                    // The inbox cursor used to be advanced by the FOREGROUND,
-                    // from the gift wrap's own `created_at` — a field anyone who
-                    // knows this user's (published) npub can choose freely, and
-                    // one whose FUTURE direction pins every later inbox REQ
-                    // floor at `now`, where NIP-59's mandatory backdating makes
-                    // every genuine wrap invisible. It anchors here now, on the
-                    // inbox REQ's local open time, exactly like a group bucket.
-                    PlaneKind::Inbox => {
-                        if processor.note_inbox_end_of_stored_events() {
-                            log::debug!("[live_sync::worker] EOSE anchored inbox cursor");
-                        }
-                    }
-                }
+                anchor_end_of_stored_events(&processor, &ctx);
                 continue;
             }
         };
@@ -428,7 +640,24 @@ pub async fn run_worker(
         }
 
         match ctx.plane {
-            PlaneKind::Inbox => processor.process_inbox_event(&raw.event),
+            // Panic-isolated like the group arm below, and for the same reason:
+            // `process_inbox_event` serializes the wrap with `Event::as_json`,
+            // which is an infallible-looking wrapper over a `try_as_json`
+            // `unwrap`. It is synchronous, so `catch_unwind` is the isolation a
+            // joined `tokio::spawn` provides over there. `AssertUnwindSafe` is
+            // sound here because the only state touched is a broadcast send,
+            // which a panic in serialization cannot leave torn.
+            PlaneKind::Inbox => {
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    processor.process_inbox_event(&raw.event);
+                }))
+                .is_err()
+                {
+                    // Surface it rather than swallow it; the inbox cursor did
+                    // not advance, so the next REQ's lookback re-fetches.
+                    processor.emit_status(SyncStatusReason::InboxError);
+                }
+            }
             PlaneKind::Group => {
                 // Screened above, so the `#h` is present and multiplexed by this
                 // REQ; re-read it for the routing id.
@@ -640,11 +869,13 @@ mod tests {
     }
 
     #[test]
-    fn eose_is_forwarded_and_every_other_relay_message_is_ignored() {
+    fn eose_and_closed_are_forwarded_and_every_other_relay_message_is_ignored() {
         // EOSE is the live plane's ONLY cursor-advance signal, so dropping it
         // into the `Message` catch-all would silently freeze every per-circle
-        // cursor. The complement matters just as much: no other relay message
-        // may be mistaken for a completeness claim.
+        // cursor. CLOSED is the only message that ENDS a REQ, and the pool never
+        // re-issues most of them — dropping it into the catch-all is what made
+        // the receive blackout permanent. The complement matters just as much:
+        // no other relay message may be mistaken for either.
         let relay_url = RelayUrl::parse("wss://relay.example").unwrap();
         let eose = RelayPoolNotification::Message {
             relay_url: relay_url.clone(),
@@ -657,12 +888,32 @@ mod tests {
             NotifDisposition::ForwardEose
         );
 
-        for other in [
-            RelayMessage::Closed {
+        let closed = RelayPoolNotification::Message {
+            relay_url: relay_url.clone(),
+            message: RelayMessage::Closed {
                 subscription_id: std::borrow::Cow::Owned(SubscriptionId::new("sub")),
                 message: std::borrow::Cow::Borrowed("closed"),
             },
+        };
+        assert_eq!(
+            notification_disposition(&closed),
+            NotifDisposition::ForwardClosed,
+            "a CLOSED must reach the worker: the pool deleted the subscription \
+             and will never re-issue it"
+        );
+
+        for other in [
+            // Free relay text naming no subscription: it identifies nothing to
+            // repair, so acting on it would be a relay-triggered work lever.
             RelayMessage::Notice(std::borrow::Cow::Borrowed("hello")),
+            RelayMessage::Ok {
+                event_id: nostr::EventId::all_zeros(),
+                status: false,
+                message: std::borrow::Cow::Borrowed("rejected"),
+            },
+            RelayMessage::Auth {
+                challenge: std::borrow::Cow::Borrowed("challenge"),
+            },
         ] {
             assert_eq!(
                 notification_disposition(&RelayPoolNotification::Message {
@@ -670,7 +921,7 @@ mod tests {
                     message: other,
                 }),
                 NotifDisposition::Ignore,
-                "only EOSE may be read as end-of-stored-events",
+                "only EOSE and CLOSED are acted on",
             );
         }
     }
@@ -695,6 +946,7 @@ mod supervisor_isolation_tests {
 
     use super::{run_receiver, run_worker, RawEvent, RawSignal};
     use crate::circle::CircleManager;
+    use crate::relay::live_sync::repair::{ClosedKind, RepairKey, RepairQueue};
     use crate::relay::live_sync::{
         EngineProcessor, EventBus, LiveSyncEvent, PlaneKind, Router, SubCtx, SyncStatusReason,
     };
@@ -756,7 +1008,13 @@ mod supervisor_isolation_tests {
         );
 
         let (tx, worker_rx) = mpsc::channel::<RawSignal>(16);
-        tokio::spawn(run_worker(worker_rx, Arc::clone(&router), processor, own));
+        tokio::spawn(run_worker(
+            worker_rx,
+            Arc::clone(&router),
+            processor,
+            Arc::new(RepairQueue::default()),
+            own,
+        ));
 
         let wrap_for = |recipient: nostr::PublicKey| {
             EventBuilder::new(Kind::GiftWrap, "sealed")
@@ -836,6 +1094,7 @@ mod supervisor_isolation_tests {
             worker_rx,
             Arc::clone(&router),
             processor,
+            Arc::new(RepairQueue::default()),
             Keys::generate().public_key(),
         ));
 
@@ -880,6 +1139,358 @@ mod supervisor_isolation_tests {
         );
     }
 
+    /// A `CLOSED` naming one of OUR live subscriptions must schedule a repair;
+    /// one naming an id we never issued must do nothing at all.
+    ///
+    /// The second half is the security half: a relay chooses the id in a
+    /// `CLOSED`, so if an arbitrary id could reach the repair queue, any relay
+    /// could make this device allocate backoff state and re-subscribe on demand.
+    ///
+    /// Deterministic without sleeps: the UNOWNED close is delivered FIRST on the
+    /// same FIFO channel drained by one worker, so by the time the owned one's
+    /// `RelayError` reaches the bus the unowned one has already been handled. If
+    /// it had been recorded, it would be in the queue.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_closed_schedules_a_repair_only_for_a_subscription_we_own() {
+        let dir = TempDir::new().unwrap();
+        let keys = Keys::generate();
+        let circle = Arc::new(CircleManager::new_unencrypted(dir.path(), &keys).unwrap());
+        let bus = EventBus::new();
+        let mut rx_bus = bus.subscribe();
+        let processor = Arc::new(EngineProcessor::new(circle, bus.clone()));
+        let repair = Arc::new(RepairQueue::default());
+
+        let group_hex = hex::encode([0x77u8; 32]);
+        let ours = SubscriptionId::new("s_group_0");
+        let relay = "wss://relay.example".to_string();
+        let router = Arc::new(RwLock::new(Router::new()));
+        router.write().await.register_group(
+            std::slice::from_ref(&relay),
+            &ours,
+            &HashSet::from([group_hex]),
+        );
+
+        let (tx, worker_rx) = mpsc::channel::<RawSignal>(16);
+        tokio::spawn(run_worker(
+            worker_rx,
+            Arc::clone(&router),
+            processor,
+            Arc::clone(&repair),
+            Keys::generate().public_key(),
+        ));
+
+        let closed = |sub: &SubscriptionId| RawSignal::SubscriptionClosed {
+            relay_url: RelayUrl::parse(&relay).unwrap(),
+            subscription_id: sub.clone(),
+            kind: ClosedKind::Dropped,
+        };
+        tx.send(closed(&SubscriptionId::new("an_id_we_never_issued")))
+            .await
+            .unwrap();
+        tx.send(closed(&ours)).await.unwrap();
+
+        let saw_status = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match rx_bus.recv().await {
+                    Ok(LiveSyncEvent::Status {
+                        reason: SyncStatusReason::RelayError,
+                    }) => return true,
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => return false,
+                }
+            }
+        })
+        .await
+        .expect("a CLOSED on one of our subs must surface a status");
+        assert!(saw_status, "the worker dropped the bus before reporting");
+
+        let due = repair.take_due();
+        assert_eq!(
+            due,
+            vec![RepairKey {
+                relay_url: RelayUrl::parse(&relay).unwrap(),
+                sub_id: ours,
+            }],
+            "exactly the subscription we own may be scheduled for repair; a \
+             relay naming an arbitrary id must buy no work at all"
+        );
+    }
+
+    /// A `CLOSED` must not count as a delivery.
+    ///
+    /// It is the relay ENDING the REQ, not serving it. Counting it would let a
+    /// relay that ends and re-issues our subscription on a loop keep that
+    /// endpoint's silence window permanently fresh — hiding, from the one health
+    /// arm that measures delivery, the fact that nothing is arriving.
+    ///
+    /// The `RelayError` status is a sound happens-before edge for the
+    /// assertion because `note_subscription_closed` schedules and emits in that
+    /// order, and the delivery note (if any) would precede both.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_closed_is_not_counted_as_a_delivery() {
+        let dir = TempDir::new().unwrap();
+        let circle =
+            Arc::new(CircleManager::new_unencrypted(dir.path(), &Keys::generate()).unwrap());
+        let bus = EventBus::new();
+        let mut rx_bus = bus.subscribe();
+        let processor = Arc::new(EngineProcessor::new(circle, bus.clone()));
+
+        let group_hex = hex::encode([0x55u8; 32]);
+        let sub = SubscriptionId::new("s_group_0");
+        let relay = "wss://relay.example".to_string();
+        let key = RepairKey {
+            relay_url: RelayUrl::parse(&relay).unwrap(),
+            sub_id: sub.clone(),
+        };
+        let router = Arc::new(RwLock::new(Router::new()));
+        router.write().await.register_group(
+            std::slice::from_ref(&relay),
+            &sub,
+            &HashSet::from([group_hex]),
+        );
+
+        // A window opened well in the past, so any delivery note would be
+        // visible as a jump to ~now.
+        let opened_at = chrono::Utc::now().timestamp() - 10_000;
+        processor.open_delivery_window(&key, opened_at);
+
+        let (tx, worker_rx) = mpsc::channel::<RawSignal>(16);
+        tokio::spawn(run_worker(
+            worker_rx,
+            Arc::clone(&router),
+            Arc::clone(&processor),
+            Arc::new(RepairQueue::default()),
+            Keys::generate().public_key(),
+        ));
+
+        tx.send(RawSignal::SubscriptionClosed {
+            relay_url: key.relay_url.clone(),
+            subscription_id: sub,
+            kind: ClosedKind::Dropped,
+        })
+        .await
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(
+                    rx_bus.recv().await,
+                    Ok(LiveSyncEvent::Status {
+                        reason: SyncStatusReason::RelayError
+                    })
+                ) {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("the worker must handle the CLOSED");
+
+        assert_eq!(
+            processor.last_delivery_secs(&key),
+            Some(opened_at),
+            "a CLOSED must leave the silence window exactly where it was; \
+             refreshing it would let a relay that ends our REQ on a loop mask \
+             its own silence"
+        );
+    }
+
+    /// A `CLOSED` reaches the worker classified, and the classification is the
+    /// one that decides whether the pool kept the subscription.
+    #[tokio::test]
+    async fn the_receiver_forwards_a_closed_with_its_pool_disposition() {
+        let (btx, brx) = broadcast::channel::<RelayPoolNotification>(8);
+        let (mtx, mut mrx) = mpsc::channel::<RawSignal>(8);
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let (processor, _dir) = bare_processor();
+        let handle = tokio::spawn(run_receiver(
+            brx,
+            mtx,
+            processor,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            cancel_rx,
+        ));
+
+        let closed = |message: &'static str| RelayPoolNotification::Message {
+            relay_url: RelayUrl::parse("wss://relay.example").unwrap(),
+            message: nostr::RelayMessage::Closed {
+                subscription_id: std::borrow::Cow::Owned(SubscriptionId::new("s")),
+                message: std::borrow::Cow::Borrowed(message),
+            },
+        };
+        btx.send(closed("")).unwrap();
+        btx.send(closed("rate-limited: slow down")).unwrap();
+
+        let mut seen: Vec<ClosedKind> = Vec::new();
+        while seen.len() < 2 {
+            let signal = tokio::time::timeout(Duration::from_secs(2), mrx.recv())
+                .await
+                .expect("a CLOSED must be forwarded")
+                .expect("the receiver must not drop the channel");
+            if let RawSignal::SubscriptionClosed { kind, .. } = signal {
+                seen.push(kind);
+            }
+        }
+        assert_eq!(
+            seen,
+            vec![ClosedKind::Dropped, ClosedKind::Throttled],
+            "an unprefixed CLOSED is the case the pool DELETES the subscription \
+             for; `rate-limited:` is the one it keeps"
+        );
+
+        drop(btx);
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("receiver exits on Closed")
+            .expect("clean join");
+    }
+
+    /// A `CLOSED` the full intake queue drops must not wedge or stop the
+    /// receiver — and must not be mistaken for a dead worker.
+    ///
+    /// The repair it would have scheduled IS lost, which is deliberate: the
+    /// receiver holds no router, so recording one from here could not tell one
+    /// of our subscription ids from an id a relay invented, and a relay flooding
+    /// CLOSEDs while the queue is full would grow the backoff table without
+    /// bound (Rule 12). The backstop is the health tick's subscription-PRESENCE
+    /// arm — the deleted REQ is gone from `client.subscriptions()`, so it fires
+    /// deterministically on the next tick rather than waiting out a silence
+    /// window; that arm is pinned in the session tests.
+    ///
+    /// # Why this makes no ordering assumption
+    ///
+    /// The queue is filled once and NEVER drained, so both notifications below
+    /// are necessarily dropped — there is no freed slot for either to slip into,
+    /// and therefore no drain-then-refill choreography to lose a race with. The
+    /// oracle is that the broadcast empties: `is_empty()` covers BOTH sends, and
+    /// the receiver can only have taken the second one by continuing past the
+    /// first. A loop that stopped at the `CLOSED` would leave the marker
+    /// unreceived and time out here.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_closed_dropped_by_a_full_intake_queue_neither_wedges_nor_stops_the_receiver() {
+        let (btx, brx) = broadcast::channel::<RelayPoolNotification>(8);
+        // Capacity 1, filled through a second sender and never drained: every
+        // try_send from here on reports Full, never Closed.
+        let (mtx, _mrx) = mpsc::channel::<RawSignal>(1);
+        mtx.clone()
+            .try_send(RawSignal::EndOfStoredEvents {
+                relay_url: RelayUrl::parse("wss://relay.example").unwrap(),
+                subscription_id: SubscriptionId::new("filler"),
+            })
+            .expect("the queue takes its one slot");
+
+        let (processor, _dir) = bare_processor();
+        let wedged = Arc::new(AtomicBool::new(false));
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let handle = tokio::spawn(run_receiver(
+            brx,
+            mtx,
+            processor,
+            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&wedged),
+            cancel_rx,
+        ));
+
+        let relay_url = RelayUrl::parse("wss://relay.example").unwrap();
+        btx.send(RelayPoolNotification::Message {
+            relay_url: relay_url.clone(),
+            message: nostr::RelayMessage::Closed {
+                subscription_id: std::borrow::Cow::Owned(SubscriptionId::new("s")),
+                message: std::borrow::Cow::Borrowed(""),
+            },
+        })
+        .unwrap();
+        btx.send(RelayPoolNotification::Message {
+            relay_url,
+            message: nostr::RelayMessage::EndOfStoredEvents(std::borrow::Cow::Owned(
+                SubscriptionId::new("after_the_drop"),
+            )),
+        })
+        .unwrap();
+
+        // Both consumed ⇒ the loop continued past the dropped CLOSED.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !btx.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the receiver must consume BOTH notifications: stopping at the dropped CLOSED would leave the second one unreceived");
+
+        assert!(
+            !wedged.load(std::sync::atomic::Ordering::Acquire),
+            "a dropped CLOSED is backpressure, not a dead worker: flipping the wedged flag here would tear down a perfectly live session"
+        );
+
+        drop(btx);
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("receiver exits cleanly on Closed")
+            .expect("clean join");
+    }
+
+    /// The worker exiting must not be silent.
+    ///
+    /// `run_receiver` matched only `TrySendError::Full`, so a `Closed` channel —
+    /// the worker having returned — fell through with no signal: the receive
+    /// plane was dead while `is_running()` (a shutdown flag) still said `true`,
+    /// so nothing restarted it. The receiver must now raise the wedged flag,
+    /// surface a status, and stop.
+    #[tokio::test]
+    async fn a_dead_worker_raises_the_wedged_flag_and_surfaces_a_status() {
+        let (btx, brx) = broadcast::channel::<RelayPoolNotification>(8);
+        // Drop the worker end immediately: every try_send now reports `Closed`.
+        let (mtx, mrx) = mpsc::channel::<RawSignal>(8);
+        drop(mrx);
+
+        let dir = TempDir::new().unwrap();
+        let circle =
+            Arc::new(CircleManager::new_unencrypted(dir.path(), &Keys::generate()).unwrap());
+        let bus = EventBus::new();
+        let mut rx_bus = bus.subscribe();
+        let processor = Arc::new(EngineProcessor::new(circle, bus));
+        let wedged = Arc::new(AtomicBool::new(false));
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+
+        let handle = tokio::spawn(run_receiver(
+            brx,
+            mtx,
+            processor,
+            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&wedged),
+            cancel_rx,
+        ));
+
+        btx.send(RelayPoolNotification::Event {
+            relay_url: RelayUrl::parse("wss://relay.example").unwrap(),
+            subscription_id: SubscriptionId::new("s"),
+            event: Box::new(event_445("aa00", "x")),
+        })
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("a receiver with no worker must stop, not spin")
+            .expect("clean join");
+        assert!(
+            wedged.load(std::sync::atomic::Ordering::Acquire),
+            "a dead worker must make is_running() answer false"
+        );
+        let status = tokio::time::timeout(Duration::from_secs(2), rx_bus.recv())
+            .await
+            .expect("a dead worker must surface a status")
+            .expect("bus alive");
+        assert_eq!(
+            status,
+            LiveSyncEvent::Status {
+                reason: SyncStatusReason::RelayError
+            },
+            "the failure must be visible, not swallowed"
+        );
+        drop(btx);
+    }
+
     /// R7 (GAP-B+F): a broadcast `Lagged` must NOT kill `run_receiver` (losing
     /// deliveries beats losing the plane), and a `Closed` channel must stop it
     /// cleanly. We overfill a cap-4 broadcast BEFORE the receiver is polled so
@@ -920,6 +1531,7 @@ mod supervisor_isolation_tests {
             mtx,
             processor,
             Arc::clone(&shutdown),
+            Arc::new(AtomicBool::new(false)),
             cancel_rx,
         ));
 
@@ -982,6 +1594,7 @@ mod supervisor_isolation_tests {
             mtx,
             processor,
             Arc::clone(&shutdown),
+            Arc::new(AtomicBool::new(false)),
             cancel_rx,
         ));
 
@@ -1035,6 +1648,7 @@ mod supervisor_isolation_tests {
             mtx,
             processor,
             Arc::clone(&shutdown),
+            Arc::new(AtomicBool::new(false)),
             cancel_rx,
         ));
         tokio::time::timeout(Duration::from_secs(2), handle)

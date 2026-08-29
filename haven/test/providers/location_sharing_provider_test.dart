@@ -398,6 +398,67 @@ void main() {
     );
 
     test(
+      'a DEFERRED circle is not counted as published',
+      () async {
+        // MINOR-4. The return value is what the burst reports as delivered.
+        // A deferral delivered nothing — the MLS engine never encrypted — so
+        // counting it would make a wholly stalled burst indistinguishable
+        // from a complete one in the only number the caller gets back.
+        SharedPreferences.setMockInitialValues({
+          kLocationDisclosureAcceptedKey: true,
+        });
+
+        final circle = TestCircleFactory.createCircle(
+          mlsGroupId: const [1],
+          nostrGroupId: const [10],
+          members: [TestCircleFactory.createMember(pubkey: _selfPubkey)],
+        );
+        final mock = MockCircleService(circles: [circle])
+          ..deferNextEncrypt = const LocationSendDeferred(
+            unresolvedInputs: 1,
+            discardedIntents: 1,
+            repaired: false,
+            commits: [],
+            proposals: [],
+          );
+
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(
+              _MockIdentityService(identity: _gateIdentity),
+            ),
+            // A fix-returning double, NOT `_RecordingLocationService` (which
+            // throws): the burst must actually reach its per-circle publish
+            // loop, or the assertion below would pass for the wrong reason.
+            locationServiceProvider.overrideWithValue(_FixedLocationService()),
+            circleServiceProvider.overrideWithValue(mock),
+            locationSharingServiceProvider.overrideWithValue(
+              LocationSharingService(
+                circleService: mock,
+                relayService: MockRelayService(),
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        final result = await container.read(locationPublisherProvider.future);
+
+        expect(
+          mock.methodCalls,
+          contains('encryptLocation'),
+          reason: 'anti-vacuity: the burst must have reached the publish loop, '
+              'or the 0 below would prove nothing',
+        );
+        expect(
+          result,
+          0,
+          reason: 'the only circle deferred, so nothing was published',
+        );
+      },
+    );
+
+    test(
       'returns 0 and never calls getCurrentLocation when disclosure flag is absent',
       () async {
         // No disclosure key set — gate must block.

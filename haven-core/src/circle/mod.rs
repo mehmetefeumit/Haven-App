@@ -34,6 +34,7 @@ mod leave;
 mod manager;
 pub mod profile_sync;
 pub mod relay_prefs;
+pub mod rotation;
 mod storage;
 mod storage_contamination;
 mod storage_key_packages;
@@ -48,11 +49,12 @@ pub use error::{CircleError, Result};
 pub use leave::LeavePlan;
 pub use manager::{
     AddMembersResult, CircleCreationResult, CircleManager, CommitToPublish, DecryptedIngest,
-    DirectoryReconcile,
+    DeferredWork, DirectoryReconcile, RepairRotationOutcome,
 };
 pub use profile_sync::{ProfileSyncOutcome, ProfileSyncReport};
 pub use relay_prefs::RelayType;
-pub use storage::CircleStorage;
+pub use rotation::{RotationDecision, RotationInputs, SkipReason};
+pub use storage::{CircleHealth, CircleRotationState, CircleStorage};
 pub use storage_key_packages::{PublishedKeyPackageRow, KEY_PACKAGE_KIND};
 pub use storage_member_directory::{
     DirectoryEntry, DirectoryTier, DIRECTORY_PURGE_NEVER, DIRECTORY_RETENTION_DAYS,

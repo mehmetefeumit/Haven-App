@@ -374,6 +374,10 @@ class AppLocalizationsRu extends AppLocalizations {
       'Включено. На некоторых телефонах оптимизация батареи может приостанавливать обмен. Исключите Haven из оптимизации батареи, чтобы он работал надёжно.';
 
   @override
+  String get locationSettingsBatteryOptNote =>
+      'Оптимизация батареи для Haven всё ещё включена. На некоторых телефонах она без предупреждения останавливает фоновый обмен. Исключите Haven, чтобы обмен работал надёжно.';
+
+  @override
   String get locationSettingsErrorSnack => 'Что-то пошло не так';
 
   @override
@@ -409,6 +413,24 @@ class AppLocalizationsRu extends AppLocalizations {
   @override
   String get locationSettingsIosGuidance =>
       'Пока фоновый обмен включён, Haven поддерживает непрерывный сеанс геопозиции, а iOS показывает синий индикатор в строке состояния. Доступ «Всегда» дополнительно позволяет Haven получать пропущенные обновления ваших кругов после того, как iOS закроет приложение.';
+
+  @override
+  String get fgsNotificationSharing =>
+      'Haven отправляет и получает данные о местоположении';
+
+  @override
+  String get fgsNotificationPaused =>
+      'Haven приостановлен — откройте приложение, чтобы возобновить обмен';
+
+  @override
+  String get fgsNotificationOpen => 'Haven открыт на экране';
+
+  @override
+  String get fgsChannelName => 'Обмен местоположением';
+
+  @override
+  String get fgsChannelDescription =>
+      'Поддерживает обмен вашим зашифрованным местоположением, пока Haven работает в фоне.';
 
   @override
   String get mapStyleTitle => 'Стиль карты';
@@ -684,7 +706,7 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get privacyEncryptionKeysChangeOnMembership =>
-      'Уход из круга не отменяет того, что его участники уже сохранили. Haven меняет ключи только тогда, когда кто-то присоединяется или уходит, и никогда не делает этого по расписанию. Поэтому один ключ может покрывать недели сообщений, и всё, что участник сохранил за это время, остаётся ему доступным. Но открыть отправленное после его ухода он всё равно не сможет.';
+      'Уход из круга не отменяет того, что его участники уже сохранили. Haven меняет ключи, когда кто-то присоединяется или уходит, а также когда админ круга исправляет его после того, как в него перестали приходить сообщения, — и никогда не делает этого по расписанию. Поэтому один ключ может покрывать недели сообщений, и всё, что участник сохранил за это время, остаётся ему доступным. Но этот участник всё равно не сможет открыть то, что отправлено после его ухода.';
 
   @override
   String get privacyEncryptionMeansForYou =>
@@ -696,7 +718,7 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get privacyEncryptionDetailEpochs =>
-      'Каждый период действия ключа называется эпохой, и круг переходит к новой эпохе только при изменении состава. Ваше устройство хранит ключи текущей эпохи и нескольких недавних, чтобы открыть сообщения, которые ещё идут, а остальные удаляет. Круг, состав которого не менялся месяцами, до сих пор находится в той эпохе, с которой начинал.';
+      'Каждый период действия ключа называется эпохой. Круг переходит к новой эпохе при изменении состава, а также когда админ круга исправляет его после того, как в него перестали приходить сообщения. Ваше устройство хранит ключи текущей эпохи и нескольких недавних, чтобы открыть сообщения, которые ещё идут, а остальные ключи удаляет. Круг, состав которого не менялся и который ни разу не пришлось исправлять, до сих пор находится в той эпохе, с которой начинал.';
 
   @override
   String get privacyWhatOthersSeeTitle =>
@@ -2043,6 +2065,132 @@ class AppLocalizationsRu extends AppLocalizations {
   @override
   String get clockSkewResolvedAnnouncement =>
       'Проблема с часами устранена. Haven снова делится вашим местоположением.';
+
+  @override
+  String get clockSkewTitleDisagreement =>
+      'В одном из ваших кругов чьи-то часы идут неверно';
+
+  @override
+  String get clockSkewBodyDisagreement =>
+      'Часы этого телефона и часы другого участника расходятся на две минуты или больше. Если неверно идут часы именно этого телефона, у местоположений, которые он отправляет, срок жизни может истечь раньше, чем их успеют увидеть. Включите в системных настройках автоматическую установку даты и времени, чтобы убедиться, что дело не в этом телефоне.';
+
+  @override
+  String get clockSkewDisagreementResolvedAnnouncement =>
+      'Предупреждение о часах исчезло.';
+
+  @override
+  String get sharingHealthTitleStopped => 'Обмен местоположением прекратился';
+
+  @override
+  String get sharingHealthTitleNotSending =>
+      'Ваше местоположение не отправляется';
+
+  @override
+  String get sharingHealthTitleNotReceiving =>
+      'Вы не получаете местоположения участников';
+
+  @override
+  String sharingHealthNoUpdatesMinutes(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'Нет обновлений уже примерно $countString минуты',
+      many: 'Нет обновлений уже примерно $countString минут',
+      few: 'Нет обновлений уже примерно $countString минуты',
+      one: 'Нет обновлений уже примерно $countString минуту',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String sharingHealthNoUpdatesHours(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'Нет обновлений уже примерно $countString часа',
+      many: 'Нет обновлений уже примерно $countString часов',
+      few: 'Нет обновлений уже примерно $countString часа',
+      one: 'Нет обновлений уже примерно $countString час',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String sharingHealthNoUpdatesDays(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'Нет обновлений уже примерно $countString дня',
+      many: 'Нет обновлений уже примерно $countString дней',
+      few: 'Нет обновлений уже примерно $countString дня',
+      one: 'Нет обновлений уже примерно $countString день',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get sharingHealthRepairAction => 'Исправить';
+
+  @override
+  String get sharingHealthRepairUnavailableHint =>
+      'Кнопка «Исправить» недоступна для этого круга';
+
+  @override
+  String get sharingHealthRepairHint =>
+      'Переподключается к реле, повторяет отправку вашего местоположения и, если вы админ этого круга, может выдать ему новый ключ';
+
+  @override
+  String get sharingHealthRepairSent =>
+      'Исправление отправлено. Остальные участники подхватят его, когда оно дойдёт до их телефонов.';
+
+  @override
+  String get sharingHealthRepairNotOwner =>
+      'Исправить этот круг может только его админ. Попросите админа удалить вас и добавить снова.';
+
+  @override
+  String get sharingHealthRepairNeedsNewCircle =>
+      'Этот круг нельзя исправить на этом телефоне. Создайте новый круг с теми же людьми.';
+
+  @override
+  String get sharingHealthRepairNothingToDo =>
+      'Сейчас исправлять нечего. Haven продолжит попытки.';
+
+  @override
+  String get sharingHealthRepairUnresolvedAnnouncement =>
+      'Обмен местоположением всё ещё не работает.';
+
+  @override
+  String get sharingHealthResumedAnnouncement =>
+      'Обмен местоположением снова работает.';
+
+  @override
+  String circleMemberLastSeenMinutes(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'Последнее местоположение: $countString минуты назад',
+      many: 'Последнее местоположение: $countString минут назад',
+      few: 'Последнее местоположение: $countString минуты назад',
+      one: 'Последнее местоположение: $countString минуту назад',
+    );
+    return '$_temp0';
+  }
 
   @override
   String get mapThisLocation => 'это место';

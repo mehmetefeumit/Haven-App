@@ -61,6 +61,30 @@ pub enum NostrError {
     #[error("admin cannot leave the circle yet: self-demote (leave the admin set) first")]
     AdminSelfDemoteRequired,
 
+    /// The engine refused a commit because the group's epoch state is not
+    /// `Stable` (a commit is staged, merging, recovering, or unrecoverable).
+    ///
+    /// Haven's stable mapping of `EngineError::InvalidTransition` whose `from`
+    /// token names an `EpochState` variant. Matched on the TOKEN, which
+    /// `EpochState::name()` derives from the enum, never on the surrounding
+    /// message text — see `SessionManager::update_admin_policy`. Carries no
+    /// group id, no epoch, and no state name: the caller already knows which
+    /// circle it asked about, and the state itself is transient engine
+    /// bookkeeping the user cannot act on.
+    #[error("the circle's group state is busy; try again shortly")]
+    EpochNotStable,
+
+    /// The engine has frozen this group at its last stable epoch
+    /// (`EpochState::Unrecoverable`) and refuses to apply or ingest further
+    /// group state.
+    ///
+    /// Split from [`Self::EpochNotStable`] because the two need opposite
+    /// handling: that one clears on its own and invites a retry, this one never
+    /// does, so presenting it as "try again shortly" would put the user in a
+    /// loop that cannot succeed. Carries no group id and no epoch.
+    #[error("the circle's group state cannot be repaired on this device")]
+    EpochUnrecoverable,
+
     /// Group not found.
     #[error("Group not found: {0}")]
     GroupNotFound(String),

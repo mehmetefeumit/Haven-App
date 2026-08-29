@@ -666,7 +666,7 @@ void main() {
               );
 
               // Encrypt and publish a location to the circle's relays.
-              final enc = await aliceManager.encryptLocation(
+              final enc = (await aliceManager.encryptLocation(
                 mlsGroupId: creation.circle.mlsGroupId,
                 senderPubkeyHex: alice.pubkeyHex,
                 latitude: 51.5,
@@ -675,7 +675,7 @@ void main() {
                   kLocationPublishMaxInterval.inSeconds +
                       kTtlNetworkBufferSeconds,
                 ),
-              );
+              )).sent!;
 
               final relayMgr = await RelayManagerFfi.newInstance();
               await relayMgr.publishEvent(
@@ -872,7 +872,7 @@ void main() {
 
               final nostrGroupIdHex = _hex(creation.circle.nostrGroupId);
 
-              final enc = await aliceManager.encryptLocation(
+              final enc = (await aliceManager.encryptLocation(
                 mlsGroupId: creation.circle.mlsGroupId,
                 senderPubkeyHex: alice.pubkeyHex,
                 latitude: 48.85,
@@ -881,7 +881,7 @@ void main() {
                   kLocationPublishMaxInterval.inSeconds +
                       kTtlNetworkBufferSeconds,
                 ),
-              );
+              )).sent!;
 
               // Capture a `since` timestamp immediately before publishing
               // so the R2 negative-control query uses a tightly bounded
@@ -1094,7 +1094,7 @@ void main() {
               final nostrGroupIdHex = _hex(refreshed.circle.nostrGroupId);
 
               // Step 4: Publish a fresh 445 to circle.relays.
-              final enc = await aliceManager.encryptLocation(
+              final enc = (await aliceManager.encryptLocation(
                 mlsGroupId: refreshed.circle.mlsGroupId,
                 senderPubkeyHex: alice.pubkeyHex,
                 latitude: 35.68,
@@ -1103,7 +1103,7 @@ void main() {
                   kLocationPublishMaxInterval.inSeconds +
                       kTtlNetworkBufferSeconds,
                 ),
-              );
+              )).sent!;
 
               final sinceTs =
                   DateTime.now().millisecondsSinceEpoch ~/ 1000 - 2;

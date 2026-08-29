@@ -28,15 +28,14 @@ import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/legacy_cutover_provider.dart';
 import 'package:haven/src/providers/legacy_retraction_provider.dart';
 import 'package:haven/src/providers/live_sync_provider.dart';
+import 'package:haven/src/providers/locale_provider.dart';
 import 'package:haven/src/providers/location_access_provider.dart';
 import 'package:haven/src/providers/location_provider.dart';
 import 'package:haven/src/providers/location_publish_scheduler_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/maintenance_scheduler_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
-import 'package:haven/src/providers/self_update_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
-import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/background_idle_waiter.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/circle_service.dart';
@@ -60,6 +59,40 @@ import 'package:haven/src/widgets/common/settings_button.dart';
 import 'package:haven/src/widgets/debug/debug_log_overlay.dart';
 import 'package:haven/src/widgets/map/map_status_banners.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+/// A latch that lets concurrent callers share ONE run of an async build.
+///
+/// `MapShell` installs the live-sync re-subscriber from places that share no
+/// lock — startup, the periodic heal backstop, and the resume heal — and all of
+/// them park on the same `circlesProvider` read. Without this each would build
+/// its own `LiveSyncResubscriber` over the one engine: two independent
+/// serialization chains whose `stop()`/`start()` pairs interleave against a
+/// shared session, which is exactly the hazard
+/// `LiveSyncResubscriber.ensureRunning` exists to rule out (Security Rule 14),
+/// and the loser's `circlesProvider` listener would leak — re-subscribing an
+/// orphan on every circle-set change for the rest of the mount.
+///
+/// Extracted from `_MapShellState` rather than inlined so that invariant is
+/// PROVABLE: `MapShell` reaches the Rust bridge in `initState` and cannot be
+/// pumped in `flutter test` (CLAUDE.md), so an inline latch is only ever
+/// assertable by reading the source.
+@visibleForTesting
+class SingleFlight<T> {
+  Future<T>? _inFlight;
+
+  /// Whether a run is currently in flight.
+  bool get isBusy => _inFlight != null;
+
+  /// Runs [body], or joins the run already in flight.
+  ///
+  /// The latch is assigned before [body] can yield — `??=` evaluates its
+  /// right-hand side to completion of the SYNCHRONOUS prefix only — so a caller
+  /// arriving during the first `await` joins instead of starting a second run.
+  /// It is released when the run settles, INCLUDING when it throws, so a failed
+  /// install is retried on the next tick rather than latched forever.
+  Future<T> run(Future<T> Function() body) =>
+      _inFlight ??= body().whenComplete(() => _inFlight = null);
+}
 
 /// The main shell containing the map, bottom sheet, and floating controls.
 ///
@@ -111,6 +144,34 @@ class MapShell extends ConsumerStatefulWidget {
     required bool backgroundSharingEnabled,
     required bool isIOS,
   }) => backgroundSharingEnabled && isIOS;
+
+  /// Whether a resume should re-anchor the live-sync engine's subscriptions.
+  ///
+  /// [lastReanchorAt] is `null` until the first one; [now] is the resume
+  /// instant.
+  ///
+  /// The re-anchor runs AHEAD of the 30 s resume debounce (it is the only
+  /// repair for a relay-`CLOSED` REQ, and behind the debounce the glance
+  /// pattern reliably suppressed it), so it needs a throttle of its own or ten
+  /// shade-pull glances become ten pool reconnects and ten 7-day gift-wrap
+  /// replays — see `_onResumed` for that cost in full.
+  ///
+  /// [kLocationPublishOverlapGuard] (60 s) is the app's existing "do not repeat
+  /// a relay round-trip sooner than this" quantum, and it is numerically the
+  /// resubscribe clock-skew window `GROUP_RESUBSCRIBE_BUFFER_SECS` as well — so
+  /// a second re-anchor inside it re-queries a window the first already
+  /// covered and can deliver nothing new. That makes 60 s a derived floor, not
+  /// a chosen one.
+  ///
+  /// Exposed as a static so the throttle is unit-tested without pumping the
+  /// widget (which requires the Rust bridge).
+  @visibleForTesting
+  static bool shouldReanchorOnResume({
+    required DateTime? lastReanchorAt,
+    required DateTime now,
+  }) =>
+      lastReanchorAt == null ||
+      now.difference(lastReanchorAt) > kLocationPublishOverlapGuard;
 
   /// Vertical space the top-edge floating buttons occupy, measured from the
   /// safe-area inset: `HavenSpacing.sm` of offset plus the 48 dp Material
@@ -272,16 +333,22 @@ class _MapShellState extends ConsumerState<MapShell>
   /// never noticed.
   Timer? _liveSyncHealTimer;
 
-  /// The live-sync engine handle, captured in [_startLiveSync] so [dispose] can
-  /// stop it without `ref` (forbidden in dispose). `null` until started / when
-  /// `liveSyncEnabled` is off.
+  /// The live-sync engine handle, captured in [_ensureLiveSyncInstalled] so
+  /// [dispose] can stop it without `ref` (forbidden in dispose). `null` until
+  /// the engine is installed / when `liveSyncEnabled` is off.
   SubscriptionService? _liveSync;
 
   /// B0 (M11): re-subscribes the engine when the accepted-circle set changes
   /// mid-session (create / accept / leave), since the engine subscribes only to
-  /// the circles present at `start()`. Installed by [_startLiveSync]; `null`
-  /// until started / when `liveSyncEnabled` is off.
+  /// the circles present at `start()`. It also owns EVERY engine start,
+  /// including the first one. Installed by [_ensureLiveSyncInstalled]; `null`
+  /// until then / when `liveSyncEnabled` is off.
   LiveSyncResubscriber? _liveSyncResubscriber;
+
+  /// Serializes [_ensureLiveSyncInstalled] so concurrent callers share one
+  /// install — see [SingleFlight] for what two would cost.
+  final SingleFlight<LiveSyncResubscriber?> _installFlight =
+      SingleFlight<LiveSyncResubscriber?>();
 
   /// The `circlesProvider` listener feeding [_liveSyncResubscriber]. Closed on
   /// dispose so no re-subscribe fires after teardown.
@@ -292,6 +359,16 @@ class _MapShellState extends ConsumerState<MapShell>
   DateTime? _lastInvitationPollTime;
   DateTime? _lastEvolutionPollTime;
   final _resumeStopwatch = Stopwatch();
+
+  /// When the engine's subscriptions were last re-anchored from a resume.
+  ///
+  /// Separate from [_resumeStopwatch] on purpose: the resume debounce exists to
+  /// stop a glance re-running the whole resume sequence, and putting the
+  /// re-anchor behind it is what broke the repair (see [_onResumed]). This
+  /// throttles only the re-anchor, so the repair still runs on the FIRST
+  /// glance after a real gap.
+  DateTime? _lastReanchorAt;
+
 
   // ---- Motion-triggered publish state ----
   //
@@ -446,12 +523,10 @@ class _MapShellState extends ConsumerState<MapShell>
         ..read(invitationPollerProvider)
         ..read(evolutionPollerProvider);
     }
-    // Periodic + post-join leaf-key rotation is disabled (M5,
-    // `enablePeriodicSelfUpdate`): leaderless self-update is the dominant
-    // fork generator. Gated, not deleted, so it re-enables cleanly post-M3/M4.
-    if (enablePeriodicSelfUpdate) {
-      ref.read(selfUpdateProvider);
-    }
+    // No leaf-key rotation runs here, and none ever runs on a timer. A
+    // circle's epoch advances on a membership change, or on the user's own
+    // Repair action (`circle::rotation`); see
+    // `docs/EPOCH_ROTATION_REPAIR_PLAN.md`.
     // Startup sweep: prune any expired last-known-location rows so the
     // 1-day receiver retention window is honoured on disk.
     unawaited(_runPrune());
@@ -555,39 +630,76 @@ class _MapShellState extends ConsumerState<MapShell>
     }
   }
 
-  /// Builds the [FfiGroupSpec]s for the accepted circles + reads the inbox
-  /// relays, then starts the live-sync engine. Best-effort: a failure leaves
-  /// the app functional (the next resume retries via `resumeAfterBackground`).
+  /// Brings the live-sync receive plane up at startup.
+  ///
+  /// Runs once per mount (`_startupTasksStarted`), but is no longer the app's
+  /// only chance at a receive plane. It used to be: a one-shot `start()` whose
+  /// failure was logged and dropped, with the re-subscriber installed only
+  /// AFTERWARDS — so a single transient failure at launch left
+  /// [_liveSyncResubscriber] null, which makes [_healLiveSyncIfStopped] return
+  /// immediately forever and `resumeAfterBackground()` a no-op against a null
+  /// engine. One unlucky launch cost live receive for the whole process.
+  ///
+  /// Now the install and the first start are both retryable, and the first
+  /// start IS a heal — so every start in the app goes through the
+  /// re-subscriber's serialized chain and two of them can never race the one
+  /// engine (Security Rule 14).
   Future<void> _startLiveSync() async {
+    await _healLiveSyncIfStopped();
+    if (!mounted) return;
+    // Re-draw the backstop's interval from the outcome just recorded: a failed
+    // first start should retry on the backed-off cadence, not on the one
+    // `_startTimers` armed before any attempt had been made.
+    _rearmLiveSyncHealTimer();
+  }
+
+  /// Installs (or returns) the re-subscriber that owns every engine start.
+  ///
+  /// Idempotent and RETRYABLE — every heal tick re-attempts it, so a transient
+  /// failure to read the circle roster (the Android handoff window, an identity
+  /// that has not resolved yet) costs one tick rather than the process.
+  ///
+  /// The re-subscriber is built from the circle snapshot ALONE, before any
+  /// session exists: its `_running` set is the set the engine is WANTED to run,
+  /// and `ensureRunning`'s full restart performs the first start from it.
+  ///
+  /// Returns `null` when the snapshot could not be read.
+  Future<LiveSyncResubscriber?> _ensureLiveSyncInstalled() {
+    final installed = _liveSyncResubscriber;
+    if (installed != null) {
+      return Future<LiveSyncResubscriber?>.value(installed);
+    }
+    // Join the in-flight install rather than starting a second one.
+    return _installFlight.run(_installLiveSync);
+  }
+
+  /// The body of [_ensureLiveSyncInstalled], run at most once concurrently.
+  Future<LiveSyncResubscriber?> _installLiveSync() async {
     try {
       // Capture the handle so dispose() can stop it without `ref`.
-      _liveSync = ref.read(subscriptionServiceProvider);
+      // The explicit type argument is load-bearing: without it `??` gives the
+      // read its own nullable context type and `engine` infers as nullable.
+      final engine =
+          _liveSync ??
+          ref.read<SubscriptionService>(subscriptionServiceProvider);
+      _liveSync = engine;
       final circles = await ref.read(circlesProvider.future);
+      if (!mounted) return null;
       final groups = LiveSyncResubscriber.groupsForCircles(circles);
-      final inboxRelays = await ref.read(inboxRelaysProvider.future);
-      if (!mounted) return;
-      await _liveSync!.start(groups: groups, inboxRelays: inboxRelays);
-      // The widget may have been disposed during the start round-trips (rapid
-      // logout): dispose()'s `_liveSync?.stop()` ran before start() completed,
-      // so tear down the now-started session to avoid orphaning it.
-      if (!mounted) {
-        unawaited(_liveSync?.stop());
-        return;
-      }
-      // B0 (M11): the engine subscribes only to the circles present here at
-      // start(). Install a re-subscriber so a mid-session create / accept /
-      // leave re-anchors the engine to the new accepted-circle set (the
-      // M3-deferred stop+start interim) instead of silently receiving no live
-      // locations for the new circle until relaunch. `fireImmediately: true`
-      // closes the tiny race where the accepted set changed during the awaits
-      // above: the immediate fire is a no-op if the current set still matches
-      // the started signature, and re-anchors otherwise.
-      _liveSyncResubscriber = LiveSyncResubscriber(
-        engine: _liveSync!,
+      final resubscriber = LiveSyncResubscriber(
+        engine: engine,
         inboxRelays: () => ref.read(inboxRelaysProvider.future),
         initialSignature: LiveSyncResubscriber.signatureForGroups(groups),
         initialGroups: groups,
       );
+      _liveSyncResubscriber = resubscriber;
+      // B0 (M11): the engine subscribes only to the circles it was started
+      // with, so a mid-session create / accept / leave must re-anchor it to the
+      // new accepted set (the M3-deferred stop+start interim) instead of
+      // silently receiving no live locations for the new circle until relaunch.
+      // `fireImmediately: true` closes the race where the accepted set changed
+      // during the await above: the immediate fire is a no-op if the set still
+      // matches, and re-anchors otherwise.
       _liveSyncCirclesSub = ref.listenManual<AsyncValue<List<Circle>>>(
         circlesProvider,
         (_, next) {
@@ -595,6 +707,7 @@ class _MapShellState extends ConsumerState<MapShell>
         },
         fireImmediately: true,
       );
+      return resubscriber;
     } on Object catch (e) {
       // Type only, like every other catch in this file. The FFI error is a
       // Rust `Result<_, String>` that `redact_hex_sequences` has been over,
@@ -602,7 +715,8 @@ class _MapShellState extends ConsumerState<MapShell>
       // that no relay URL, group id or internal state rides along in the
       // remaining prose, and the debug/E2E builds this used to print in are
       // exactly the ones whose logs get captured and uploaded.
-      debugPrint('[MapShell] live-sync start failed: ${e.runtimeType}');
+      debugPrint('[MapShell] live-sync install failed: ${e.runtimeType}');
+      return null;
     }
   }
 
@@ -678,9 +792,9 @@ class _MapShellState extends ConsumerState<MapShell>
     });
 
     // The hourly leaf-key self-update timer was removed in M5: leaderless
-    // periodic + post-join self-update is the dominant MLS fork generator
-    // (see `enablePeriodicSelfUpdate`). Epochs now advance only on real
-    // membership changes.
+    // periodic self-update is the dominant MLS fork generator. Epochs advance
+    // on a real membership change, or on the user's own Repair action — never
+    // on a timer (`docs/EPOCH_ROTATION_REPAIR_PLAN.md` §3).
 
     // Poll for new invitations on a jittered cadence (nominal 2 min,
     // ±25%, sampled per tick). Fixed cadences are fingerprintable to
@@ -752,6 +866,11 @@ class _MapShellState extends ConsumerState<MapShell>
   ///
   /// One-shot and re-armed from its own callback rather than `Timer.periodic`,
   /// so each interval draws fresh jitter and can widen under backoff.
+  ///
+  /// Re-arming from `whenComplete` is only safe because `ensureRunning` is
+  /// bounded (`kLiveSyncRestartBudget`): a heal that could hang would otherwise
+  /// never complete, and this backstop — the only periodic recovery the
+  /// live-sync build has — would be gone for the rest of the process.
   void _rearmLiveSyncHealTimer() {
     if (!liveSyncEnabled) return;
     _liveSyncHealTimer?.cancel();
@@ -772,24 +891,60 @@ class _MapShellState extends ConsumerState<MapShell>
   ///
   /// Android + background-sharing only: it is the one configuration where
   /// another isolate needs the session while this one is merely paused.
-  Future<void> _handOffMlsSession() async {
+  ///
+  /// Returns whether the session was actually handed over. `false` means this
+  /// isolate kept it, so the service cannot publish for the whole backgrounded
+  /// window — a state the caller must not describe to the user as "sending and
+  /// receiving".
+  Future<bool> _handOffMlsSession() async {
     // The engine holds its own Arc on the circle manager, so it must go first
     // or the release frees nothing.
-    try {
-      await _liveSync?.stop();
-    } on Object catch (e) {
-      debugPrint('[MapShell] handoff: live-sync stop failed: ${e.runtimeType}');
+    final liveSync = _liveSync;
+    var stopOutcome = LiveSyncStopOutcome.idle;
+    if (liveSync != null) {
+      try {
+        stopOutcome = await liveSync.stop();
+      } on Object catch (e) {
+        debugPrint(
+          '[MapShell] handoff: live-sync stop failed: ${e.runtimeType}',
+        );
+        // Cannot tell whether the engine let go, so assume it did not: the
+        // wrong guess in the other direction is the one that wedges the app.
+        stopOutcome = LiveSyncStopOutcome.stillHolding;
+      }
+    }
+    debugPrint('[MapShell] handoff: live-sync stop=${stopOutcome.name}');
+
+    if (stopOutcome == LiveSyncStopOutcome.stillHolding) {
+      // Releasing now would be strictly destructive. The engine's supervisor
+      // tasks still hold their own `Arc<CircleManager>` — and with it the
+      // Rule-14 guard — so disposing THIS isolate's handle frees nothing; it
+      // just removes the last Dart reference to a guard a Rust static keeps
+      // registered. The foreground service then cannot open (the guard is
+      // held), its reclaim correctly declines (this isolate is provably
+      // alive), and the app comes back on resume to a database nothing can
+      // open: no circles, no map, no publishing, until a Force Stop.
+      //
+      // Keeping the handle costs this backgrounded session's background
+      // publishing — which was already impossible, since the guard was never
+      // going to be free for the service — and keeps the foreground working.
+      return false;
     }
 
     final service = ref.read(circleServiceProvider);
-    if (service is! NostrCircleService) return;
+    if (service is! NostrCircleService) return false;
     try {
       final released = service.releaseForHandoff();
       debugPrint('[MapShell] handoff: released=$released');
+      // `released` reports only whether there was a live handle to give away;
+      // the handoff itself is the LATCH this call sets either way, and that is
+      // what lets the service open. So the handoff happened.
+      return true;
     } on Object catch (e) {
       // Never throw out of the pause path: the framework dispatches it without
       // awaiting, and the service's own reclaim is the fallback.
       debugPrint('[MapShell] handoff failed: ${e.runtimeType}');
+      return false;
     }
   }
 
@@ -808,6 +963,13 @@ class _MapShellState extends ConsumerState<MapShell>
   /// feeding it today's snapshot re-decides the same change and applies it now.
   /// An unchanged set is a no-op there, and this runs only when a handoff was
   /// genuinely in effect.
+  ///
+  /// This replay reads `circlesProvider` while it may still hold the `[]` a
+  /// failed open during the handoff cached, so it DEPENDS on
+  /// [_invalidateHandoffWindowPoison] running immediately after it: the fresh
+  /// roster re-fires the same listener and supersedes the empty snapshot inside
+  /// the re-subscriber's own 500 ms debounce, before it can apply as a
+  /// "remove every circle" delta.
   void _endMlsSessionHandoff() {
     final service = ref.read(circleServiceProvider);
     if (service is! NostrCircleService) return;
@@ -824,6 +986,35 @@ class _MapShellState extends ConsumerState<MapShell>
     if (circles != null) _onLiveSyncCirclesChanged(circles);
   }
 
+  /// Drops provider state that a failed open during the pause window may have
+  /// cached as a permanent answer.
+  ///
+  /// While the Android MLS handoff holds, every `getCircleManagerFfi()` fails
+  /// closed by design — and the providers built on it do not all fail the same
+  /// way:
+  ///
+  ///   * `circlesProvider` swallows EVERY failure to `[]` and caches it as a
+  ///     SUCCESSFUL answer. A read that lost that race leaves an empty circle
+  ///     list and a bare map, with no error anywhere, for the rest of the
+  ///     process — which is what the field report described. Nothing can
+  ///     detect it after the fact, so it is always re-read.
+  ///   * `relayPreferencesServiceProvider` and `inboxRelaysProvider` DO cache
+  ///     their failure, as an `AsyncError` that nothing else ever retries — and
+  ///     the inbox list is what a full engine restart re-subscribes the
+  ///     gift-wrap REQ with, so a stuck error there costs invitations.
+  ///     Rebuilding them is not free (relay-list FFI reads, plus two
+  ///     publish-toggle writes for the service), and this runs on every resume
+  ///     ahead of the 30 s debounce, so only a cached error is dropped.
+  void _invalidateHandoffWindowPoison() {
+    ref.invalidate(circlesProvider);
+    if (ref.read(relayPreferencesServiceProvider).hasError) {
+      ref.invalidate(relayPreferencesServiceProvider);
+    }
+    if (ref.read(inboxRelaysProvider).hasError) {
+      ref.invalidate(inboxRelaysProvider);
+    }
+  }
+
   /// Restarts the live-sync engine if it stopped while a session is still
   /// wanted.
   ///
@@ -835,18 +1026,25 @@ class _MapShellState extends ConsumerState<MapShell>
   /// receive until the user relaunched the app. This bounds that to one tick.
   ///
   /// Cheap when healthy: `ensureRunning` short-circuits on a running engine.
+  ///
+  /// Installs the re-subscriber first, so this is also the app's FIRST start
+  /// and its retry (see [_ensureLiveSyncInstalled]). Bounded end to end:
+  /// `ensureRunning` answers within `kLiveSyncRestartBudget` whatever the
+  /// engine does, which is what lets the caller's `whenComplete` re-arm be
+  /// trusted.
   Future<void> _healLiveSyncIfStopped() async {
-    final resubscriber = _liveSyncResubscriber;
-    if (resubscriber == null) return;
-    try {
-      if (await resubscriber.ensureRunning()) {
-        _consecutiveHealFailures = 0;
-        return;
+    final resubscriber = await _ensureLiveSyncInstalled();
+    if (resubscriber != null) {
+      try {
+        if (await resubscriber.ensureRunning()) {
+          _consecutiveHealFailures = 0;
+          return;
+        }
+      } on Object catch (e) {
+        // Never surface the raw error (Rule 8) and never let a failed heal
+        // break the timer — the next tick retries.
+        debugPrint('[MapShell] live-sync heal failed: ${e.runtimeType}');
       }
-    } on Object catch (e) {
-      // Never surface the raw error (Rule 8) and never let a failed heal break
-      // the timer — the next tick retries.
-      debugPrint('[MapShell] live-sync heal failed: ${e.runtimeType}');
     }
     // Counted, not just logged: a relay set that is unreachable would otherwise
     // be swept on every tick indefinitely.
@@ -1052,6 +1250,15 @@ class _MapShellState extends ConsumerState<MapShell>
   // the awaited sequence runs to completion in the background without
   // blocking the framework's lifecycle dispatch.
   Future<void> _onPaused() async {
+    // FIRST, for the same reason `_onDetached` states: a heal tick landing
+    // mid-pause would restart the engine while the Android branch below is
+    // stopping it to hand the MLS session over — leaving a FRESH session
+    // holding the Rule-14 guard the foreground service is waiting for, which
+    // is strictly worse than not healing at all. `_handOffMlsSession` is
+    // awaited, so cancelling after it would leave the whole handoff window
+    // exposed.
+    _liveSyncHealTimer?.cancel();
+
     final bgEnabled = ref.read(backgroundSharingProvider);
 
     // Stop the foreground-active heartbeat before any handoff. On the
@@ -1082,6 +1289,11 @@ class _MapShellState extends ConsumerState<MapShell>
       // here.
       ref.read(locationPublishSchedulerProvider.notifier).stopScheduling();
       _stopMotionTrigger();
+      // Resolved before the awaits below: the handoff can outlive this State,
+      // and the foreground service never localizes anything itself — it has no
+      // widget tree, so both notification texts are resolved here and handed
+      // to it (see `appLocalizationsProvider`).
+      final l10n = ref.read(appLocalizationsProvider);
       // Fix 6: Await in order — persist seed FIRST, then release
       // ownership. If the background isolate picks up active=false
       // before the last-publish timestamp is written, it may seed its
@@ -1107,10 +1319,17 @@ class _MapShellState extends ConsumerState<MapShell>
       // This isolate stays alive and takes the session back on resume through
       // the ordinary handover, so nothing here is destructive. If it fails, the
       // service falls back to its own reclaim — slower, but it still recovers.
-      await _handOffMlsSession();
+      final handedOff = await _handOffMlsSession();
+      // The notification is the ONLY thing the user can see while backgrounded,
+      // so it must not claim work that cannot happen. A declined handoff means
+      // this isolate still holds the Rule-14 guard, so the service will not
+      // publish or receive at all until the app is reopened — which is also the
+      // action that repairs it (`NostrCircleService._recoverHeldSession`).
       unawaited(
         BackgroundLocationManager.updateNotification(
-          text: 'Haven is sending and receiving location information',
+          text: handedOff
+              ? l10n.fgsNotificationSharing
+              : l10n.fgsNotificationPaused,
         ),
       );
     } else if (Platform.isIOS) {
@@ -1129,6 +1348,18 @@ class _MapShellState extends ConsumerState<MapShell>
         // per-circle publish scheduler and `_motionSub` keep running exactly
         // as in the foreground, giving background publishing both a periodic
         // floor and movement-driven responsiveness.
+        //
+        // RECEIVE needs nothing armed here. The `maintenanceSchedulerProvider`
+        // health tick keeps running on this branch — the process stays fully
+        // executable, which is the branch's whole premise — and since Unit C's
+        // Rust half it is probe-first and repairs a dropped relay, a missing
+        // REQ and a delivery-silent REQ. A Dart-side re-anchor on top of it
+        // would be strictly worse than nothing: `resume_after_background`
+        // re-issues the INBOX REQ too, and `since_for_stream` takes the inbox
+        // branch BEFORE the phase match, so every call asks for
+        // `INBOX_GIFTWRAP_LOOKBACK_SECS` (7 days) of gift wraps keyed on this
+        // npub — replaying them all, each costing an identity-secret
+        // materialisation and an FFI NIP-59 unwrap.
       } else {
         // Toggle off — or its persisted value not yet loaded: the notifier
         // constructs `false` and resolves the stored value asynchronously,
@@ -1201,12 +1432,13 @@ class _MapShellState extends ConsumerState<MapShell>
     ref.invalidate(locationPublisherProvider);
 
     // Always cancel foreground-only timers — they are restarted (with
-    // platform-appropriate cadences) below where applicable.
+    // platform-appropriate cadences) below where applicable. The heal timer is
+    // NOT among them: it is cancelled at the top of this method, before the
+    // handoff it must not race.
     _receiveTimer?.cancel();
     _invitationTimer?.cancel();
     _pruneTimer?.cancel();
     _evolutionTimer?.cancel();
-    _liveSyncHealTimer?.cancel();
 
     // Cancel any in-flight post-circle-add burst window — its short fetch
     // cadence is meaningless once the user has backgrounded, and we must
@@ -1359,6 +1591,39 @@ class _MapShellState extends ConsumerState<MapShell>
     // and leave the engine down until the next circle-set change.
     _endMlsSessionHandoff();
 
+    // Then drop what the handoff window may have poisoned — immediately after
+    // the replay above, so the (possibly empty) snapshot it just fed the
+    // re-subscriber is superseded well inside that class's 500 ms debounce.
+    _invalidateHandoffWindowPoison();
+
+    // Re-anchor the engine's subscriptions BEFORE the debounce, deliberately —
+    // but on a guard of its own, NOT unthrottled.
+    //
+    // Ahead of the debounce because this is the only repair that recovers a
+    // REQ a relay ended with `CLOSED`, and behind the 30 s resume debounce the
+    // glance pattern that debounce exists to absorb (shade pull, lock-screen
+    // check, app-switcher peek) was exactly what kept it from ever running: a
+    // user opening the app BECAUSE peers had stopped appearing routinely got
+    // no repair.
+    //
+    // Guarded because a re-anchor is not the cheap REQ replace it looks like.
+    // `resume_after_background` reconnects the pool, waits out
+    // `SUBSCRIBE_CONNECT_WAIT`, and re-issues every REQ — including the inbox
+    // one, whose `since` is computed by `since_for_stream`'s inbox branch
+    // BEFORE the phase match, so it always asks for
+    // `INBOX_GIFTWRAP_LOOKBACK_SECS` (7 days) of gift wraps keyed on this
+    // npub. Every replayed wrap costs an identity-secret materialisation and
+    // an FFI NIP-59 unwrap. Ten glances must not be ten of those.
+    final resumeAt = DateTime.now();
+    if (liveSyncEnabled &&
+        MapShell.shouldReanchorOnResume(
+          lastReanchorAt: _lastReanchorAt,
+          now: resumeAt,
+        )) {
+      _lastReanchorAt = resumeAt;
+      unawaited(ref.read(subscriptionServiceProvider).resumeAfterBackground());
+    }
+
     // Heal BEFORE the debounce, deliberately.
     //
     // `_onPaused` cancels `_liveSyncHealTimer` and only `_startTimers()` (below,
@@ -1408,7 +1673,9 @@ class _MapShellState extends ConsumerState<MapShell>
       // representation of what the service is doing while the app is
       // in the foreground.
       unawaited(
-        BackgroundLocationManager.updateNotification(text: 'Haven is open'),
+        BackgroundLocationManager.updateNotification(
+          text: ref.read(appLocalizationsProvider).fgsNotificationOpen,
+        ),
       );
       final bgLastPublish =
           await BackgroundLocationManager.readLastPublishTime();
@@ -1443,11 +1710,8 @@ class _MapShellState extends ConsumerState<MapShell>
     );
     // Resume any own-profile publish left queued while backgrounded.
     triggerProfileSyncRetry(ref);
-    if (liveSyncEnabled) {
-      // Re-anchor the engine's subscriptions (lossless offline-gap backfill);
-      // the engine kept its connection, so this is a fast resubscribe.
-      unawaited(ref.read(subscriptionServiceProvider).resumeAfterBackground());
-    } else {
+    // (The engine re-anchor ran before the debounce — see the comment there.)
+    if (!liveSyncEnabled) {
       ref
         ..invalidate(invitationPollerProvider)
         ..read(invitationPollerProvider)
@@ -1456,13 +1720,6 @@ class _MapShellState extends ConsumerState<MapShell>
         // next location fetch, keeping the local MDK epoch in sync.
         ..invalidate(evolutionPollerProvider)
         ..read(evolutionPollerProvider);
-    }
-    // Periodic + post-join leaf-key rotation is disabled (M5,
-    // `enablePeriodicSelfUpdate`); gated so it re-enables cleanly post-M3/M4.
-    if (enablePeriodicSelfUpdate) {
-      ref
-        ..invalidate(selfUpdateProvider)
-        ..read(selfUpdateProvider);
     }
     // Reset the evolution- and invitation-poll overlap guards after the
     // on-resume trigger so the periodic timers do not double-fire within

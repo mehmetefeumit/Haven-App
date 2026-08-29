@@ -9,10 +9,11 @@ library;
 import 'dart:async';
 import 'dart:io' show Platform;
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/locale_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/background_catchup_worker.dart';
 import 'package:haven/src/services/background_location_manager.dart';
@@ -32,7 +33,11 @@ typedef EnsurePermissionsFn = Future<EnsurePermissionsResult> Function();
 /// Defined as a typedef so tests can inject a fake in place of
 /// [BackgroundLocationManager.startService] without hitting the real
 /// Android foreground-service plugin.
-typedef StartServiceFn = Future<void> Function({required Function callback});
+typedef StartServiceFn =
+    Future<void> Function({
+      required Function callback,
+      required String notificationText,
+    });
 
 /// Function type for stopping the background foreground service.
 ///
@@ -212,6 +217,15 @@ class BackgroundSharingNotifier extends StateNotifier<bool> {
       }
       // EnsurePermissionsGranted or EnsurePermissionsBatteryOptDenied:
       // persist true in both cases but surface the result for UI feedback.
+      //
+      // The battery-optimization answer is persisted too. The returned result
+      // only reaches a transient snackbar, and onboarding discards it
+      // entirely, so a declined exemption used to leave no trace at all — the
+      // user could never find out later why an OEM keeps killing the service.
+      // `LocationSettingsPage` renders it as a standing advisory.
+      await BackgroundLocationManager.recordBatteryOptimizationDenied(
+        denied: result is EnsurePermissionsBatteryOptDenied,
+      );
       state = true;
       try {
         final prefs = await SharedPreferences.getInstance();
@@ -310,6 +324,55 @@ final backgroundSharingProvider =
 /// test runners by overriding this provider in a [ProviderScope].
 final platformIsAndroidProvider = Provider<bool>((_) => Platform.isAndroid);
 
+/// Function type for asking Android whether it still battery-optimizes Haven.
+///
+/// A provider seam so widget tests can drive the advisory without the
+/// foreground-task platform channel.
+typedef BatteryOptimizationProbeFn = Future<bool> Function();
+
+/// Production probe: the live OS answer, which also refreshes the persisted
+/// fallback.
+final batteryOptimizationProbeProvider = Provider<BatteryOptimizationProbeFn>(
+  (_) => BackgroundLocationManager.refreshBatteryOptimizationDenied,
+);
+
+/// Whether Android still applies battery optimization to Haven.
+///
+/// `ensurePermissions` asks for the exemption exactly once, when background
+/// sharing is first enabled, and a decline is common — so without a standing
+/// surface a user whose OEM keeps killing the service has no way to discover
+/// why. `LocationSettingsPage` renders this as that surface.
+///
+/// The answer is PROBED, not merely read back. The exemption can be granted or
+/// revoked from Android Settings or by an OEM battery manager without ever
+/// passing through Haven, so a persisted-only value would keep asserting
+/// "battery optimization is still on" forever after a grant made outside the
+/// app — an over-promise in the direction that matters. The persisted flag
+/// survives only as the fallback for a failed probe.
+///
+/// Off Android the plugin channel is never touched and the answer is `false`:
+/// battery optimization is an Android concept, and a flag restored from an
+/// Android backup must not surface irrelevant advice on iOS.
+///
+/// Invalidate after anything that can change the answer (enabling sharing, a
+/// return from the system settings screen).
+final batteryOptimizationDeniedProvider = FutureProvider<bool>((ref) async {
+  if (!ref.watch(platformIsAndroidProvider)) return false;
+  return ref.watch(batteryOptimizationProbeProvider)();
+});
+
+/// Function type for opening Android's battery-optimization settings screen.
+///
+/// Returns the refreshed "still optimized" answer. A provider seam so widget
+/// tests can exercise the advisory's action without the platform channel.
+typedef OpenBatteryOptimizationSettingsFn = Future<bool> Function();
+
+/// Production opener for Android's battery-optimization settings screen.
+final openBatteryOptimizationSettingsProvider =
+    Provider<OpenBatteryOptimizationSettingsFn>(
+      (_) => BackgroundLocationManager.openBatteryOptimizationSettings,
+    );
+
 /// Production foreground-service function pair.
 ///
 /// Exposed as a Riverpod provider so tests can override start/stop without
@@ -387,7 +450,50 @@ final backgroundServiceLifecycleProvider = Provider<void>((ref) {
 
   // Start the service from the visible activity. Idempotent if the
   // service is already running.
-  unawaited(fns.start(callback: backgroundCallback));
+  //
+  // The notification text is resolved here because the service isolate has no
+  // widget tree and therefore no localizations of its own. Read rather than
+  // watched: it is a one-shot input to this call, not a dependency of a
+  // provider whose job is starting and stopping a service.
+  final l10n = ref.read(appLocalizationsProvider);
+  unawaited(
+    fns.start(
+      callback: backgroundCallback,
+      notificationText: l10n.fgsNotificationSharing,
+    ),
+  );
+
+  // Re-assert on every foreground return.
+  //
+  // This provider recomputes only when one of its INPUTS changes, so a
+  // service that died while the inputs stayed identical — an OEM battery
+  // manager killing it, or a restart that failed after the FGS handed the MLS
+  // session back — is never restarted, and the toggle still reads ON. The
+  // user's only recovery was to guess at toggling sharing off and on again.
+  // `startService` returns early when the service is already running, so the
+  // steady-state cost of this is one platform query per resume.
+  //
+  // `resumed` specifically: Android 12+ rejects a FOREGROUND_SERVICE_LOCATION
+  // start that does not originate from a visible activity, and `resumed` is
+  // the only lifecycle state that guarantees one (`paused` == onStop, which is
+  // already too late — see [BackgroundLocationManager]).
+  //
+  // Known interaction, bounded elsewhere: a resume also runs the MLS session
+  // handover, and this re-assert can land inside `requestSessionHandover`'s
+  // stop-then-poll window — restarting the service it is waiting to see gone,
+  // so the handover reports `timedOut` and the foreground open fails. The
+  // recovery is the force-release-and-retry on that path (unit A), not a
+  // narrower re-assert here: skipping the re-assert while a handover is in
+  // flight would reintroduce the silently-dead FGS this exists to catch,
+  // since a handover is exactly when a restart is most likely to have failed.
+  final resumeReassert = _ResumeReassertObserver(() {
+    // Re-read rather than reuse the text resolved above: this observer
+    // outlives the provider body and the app's language can change under it.
+    final text = ref.read(appLocalizationsProvider).fgsNotificationSharing;
+    unawaited(fns.start(callback: backgroundCallback, notificationText: text));
+  });
+  WidgetsBinding.instance.addObserver(resumeReassert);
+  ref.onDispose(() => WidgetsBinding.instance.removeObserver(resumeReassert));
 
   // M7-C: register the WorkManager periodic catch-up floor alongside the FGS.
   // registerBackgroundCatchup() self-no-ops when backgroundCatchupEnabled is
@@ -399,3 +505,21 @@ final backgroundServiceLifecycleProvider = Provider<void>((ref) {
   // the provider returns.
   unawaited(registerBackgroundCatchup());
 });
+
+/// Calls [_onResumed] on every transition to [AppLifecycleState.resumed].
+///
+/// A bare observer rather than `AppLifecycleListener`: that class asserts on
+/// transitions it considers illegal (`paused` → `resumed` among them), which
+/// would turn an unusual platform sequence into a debug-build crash. This
+/// only ever needs the one state.
+class _ResumeReassertObserver with WidgetsBindingObserver {
+  _ResumeReassertObserver(this._onResumed);
+
+  final VoidCallback _onResumed;
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) return;
+    _onResumed();
+  }
+}

@@ -767,6 +767,12 @@ class _SheetContent extends ConsumerWidget {
                       key: WidgetKeys.memberTile(member.pubkey),
                       member: member,
                       hasLocation: hasLocation,
+                      // The SAME value the map marker's age pill renders, so
+                      // the roster and the map can never state different ages
+                      // for one member. Null for the viewer's own row, whose
+                      // position comes from the live GPS stream and has no
+                      // "last seen" to report.
+                      lastSeen: memberLocation?.timestamp,
                       onRemove: canRemoveThisMember
                           ? () => confirmAndRemoveMember(
                               context: tileContext,

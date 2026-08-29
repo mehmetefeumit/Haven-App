@@ -93,29 +93,50 @@ void main() {
       ).readAsStringSync(),
     );
 
-    test('recovery is attempted at most once per initialize', () {
-      // The handover stops the foreground service and restarts it. Looping on
-      // it would stop and restart on every pass — thrashing the user's
-      // background location sharing and its notification — while never making
-      // progress against a guard held by something the handover cannot reach.
-      final at = source.indexOf('await handover(dataDir)');
-      expect(at, isNonNegative, reason: 'the recovery must be wired');
-
-      // The call must sit in a one-shot guard clause, not a loop condition.
-      final window = source.substring(
+    /// A ±200-character view around [needle], the window these one-shot
+    /// checks read.
+    String windowAround(String needle) {
+      final at = source.indexOf(needle);
+      expect(at, isNonNegative, reason: 'the recovery must be wired: $needle');
+      return source.substring(
         (at - 200).clamp(0, source.length),
-        at + 200,
+        (at + 200).clamp(0, source.length),
       );
+    }
+
+    test('recovery is attempted at most once per initialize', () {
+      // Both recovery levers are destructive. The handover stops the
+      // foreground service and restarts it; the force-release stops this
+      // isolate's live-sync engine. Looping on either would thrash the user's
+      // background location sharing (or their live receive) on every pass while
+      // never making progress against a guard neither can reach.
+      final callSite = windowAround('await _recoverHeldSession(dataDir)');
       expect(
-        RegExp(r'(while|for)\s*\([^)]*handover').hasMatch(window),
+        RegExp(r'(while|for)\s*\([^)]*_recoverHeldSession').hasMatch(callSite),
         isFalse,
         reason: 'the recovery must not be retried in a loop',
       );
       expect(
-        window.contains('rethrow'),
+        callSite.contains('rethrow'),
         isTrue,
-        reason: 'a declined or failed handover must surface the ORIGINAL '
+        reason: 'a declined or failed recovery must surface the ORIGINAL '
             'failure rather than being swallowed',
+      );
+
+      expect(
+        RegExp(r'(while|for)\s*\([^)]*handover').hasMatch(
+          windowAround('await handover(dataDir)'),
+        ),
+        isFalse,
+        reason: 'stopping and restarting the service per pass would thrash '
+            'background sharing and its notification',
+      );
+      expect(
+        RegExp(r'(while|for)\s*\([^)]*forceRelease').hasMatch(
+          windowAround('await forceRelease()'),
+        ),
+        isFalse,
+        reason: 'each pass would stop the live-sync engine again',
       );
     });
 
@@ -129,6 +150,14 @@ void main() {
         ctor.contains('_sessionHandover = null'),
         isTrue,
         reason: 'the holder must not be wired to stop itself',
+      );
+      expect(
+        ctor.contains('_forceReleaseLiveSession = null'),
+        isTrue,
+        reason: 'force-releasing the process-global live-sync session is the '
+            "background isolate's destructive lever, gated on a liveness "
+            'probe it owns; wiring it here would give that isolate a second, '
+            'ungated route to the same call',
       );
     });
   });

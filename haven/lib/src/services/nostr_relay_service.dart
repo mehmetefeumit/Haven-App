@@ -81,6 +81,36 @@ export 'package:haven/src/services/data_directory_provider.dart'
 ///
 /// Reads only counters, booleans and a closed enum; carries nothing that could
 /// leak (Security Rule 4/6/8).
+/// Maps the FFI subscription-health action to the service enum.
+///
+/// A top-level function rather than a private method for the same reason
+/// [classifyKeyPackageMaintenance] is one: `SubscriptionHealthActionFfi` is a
+/// plain generated value type, so every branch here stays reachable from a host
+/// `flutter test` with no FFI bridge.
+///
+/// Exhaustive with no `default`, deliberately: a new FFI variant must be a
+/// COMPILE error here, not a value that silently falls through to whichever
+/// branch happens to be last. The two re-anchor remedies stay separate all the
+/// way across the boundary — see [SubscriptionHealthAction.targetedReanchor].
+///
+/// Reads a closed enum and returns a closed enum; carries nothing that could
+/// leak (Security Rule 4/6/8).
+@visibleForTesting
+SubscriptionHealthAction mapSubscriptionHealthAction(
+  SubscriptionHealthActionFfi a,
+) {
+  switch (a) {
+    case SubscriptionHealthActionFfi.engineOff:
+      return SubscriptionHealthAction.engineOff;
+    case SubscriptionHealthActionFfi.healthy:
+      return SubscriptionHealthAction.healthy;
+    case SubscriptionHealthActionFfi.resubscribed:
+      return SubscriptionHealthAction.resubscribed;
+    case SubscriptionHealthActionFfi.targetedReanchor:
+      return SubscriptionHealthAction.targetedReanchor;
+  }
+}
+
 @visibleForTesting
 KeyPackageMaintenanceOutcome classifyKeyPackageMaintenance(
   KpMaintenanceOutcomeFfi r,
@@ -473,26 +503,17 @@ class NostrRelayService implements RelayService {
     try {
       final r = await rust_ffi.maintainSubscriptionHealth();
       return SubscriptionHealthResult(
-        action: _mapHealthAction(r.action),
+        action: mapSubscriptionHealthAction(r.action),
         relaysTotal: r.relaysTotal,
         relaysStillConnecting: r.relaysStillConnecting,
         relaysDisconnected: r.relaysDisconnected,
+        subscriptionsExpected: r.subscriptionsExpected,
+        subscriptionsLive: r.subscriptionsLive,
+        subscriptionsSilent: r.subscriptionsSilent,
       );
     } on Object catch (e) {
       debugPrint('[Maintenance] health tick failed: ${e.runtimeType}');
       return const SubscriptionHealthResult.empty();
-    }
-  }
-
-  /// Maps the FFI subscription-health action enum to the service enum.
-  SubscriptionHealthAction _mapHealthAction(SubscriptionHealthActionFfi a) {
-    switch (a) {
-      case SubscriptionHealthActionFfi.engineOff:
-        return SubscriptionHealthAction.engineOff;
-      case SubscriptionHealthActionFfi.healthy:
-        return SubscriptionHealthAction.healthy;
-      case SubscriptionHealthActionFfi.resubscribed:
-        return SubscriptionHealthAction.resubscribed;
     }
   }
 

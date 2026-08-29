@@ -981,6 +981,10 @@ async fn ingest_one(
 
     persist_locations(circle_mgr, &ingest.effects.events, ngid, own_hex);
     resolve_publish_work(circle_mgr, relay_mgr, &ingest.effects.publish).await;
+    // Receive-side observation for the epoch-rotation repair's quiescence gate
+    // (`circle::rotation`), on the AUTHENTICATED batch only — see the same call
+    // in the live-sync processor.
+    circle_mgr.note_inbound_group_events(&ingest.effects.events);
     let mut directory = circle_mgr.directory_verdict_for_events(&ingest.effects.events);
 
     // Release any queued convergence work + persist its locations, re-ticking a
@@ -998,6 +1002,7 @@ async fn ingest_one(
             if let Ok(more) = circle_mgr.session().advance_convergence(gid).await {
                 persist_locations(circle_mgr, &more.events, ngid, own_hex);
                 resolve_publish_work(circle_mgr, relay_mgr, &more.publish).await;
+                circle_mgr.note_inbound_group_events(&more.events);
                 directory = directory.max(circle_mgr.directory_verdict_for_events(&more.events));
                 next.extend(more.pending_convergence);
             }

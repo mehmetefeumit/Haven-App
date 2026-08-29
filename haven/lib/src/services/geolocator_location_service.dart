@@ -14,6 +14,22 @@ import 'package:geolocator/geolocator.dart' as geo;
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/services/location_service.dart';
 
+/// The value that reaches `CLLocationManager.distanceFilter` as
+/// `kCLDistanceFilterNone` — every fix is delivered, none suppressed.
+///
+/// Apple's stated requirement for uninterrupted background location updates
+/// (iOS 16.4+) is `allowsBackgroundLocationUpdates` on, `desiredAccuracy` at
+/// or below 100 m, and NO distance filter; a metre-scale filter is part of the
+/// shape the OS is documented to suspend while the device is stationary.
+///
+/// -1, not 0: geolocator's `LocationDistanceMapper` means to fold any
+/// non-positive value to the sentinel but compares the boxed `NSNumber`
+/// POINTER against zero (`geolocator_apple` 2.3.13,
+/// `Utils/LocationDistanceMapper.m`), so a non-nil 0 is forwarded verbatim as
+/// a 0 m filter instead. -1 IS `kCLDistanceFilterNone`, so it lands on the
+/// sentinel both today and under a fixed mapper.
+const int _kIosNoDistanceFilter = -1;
+
 /// Abstraction for geolocator static methods.
 ///
 /// This allows for dependency injection in tests.
@@ -606,8 +622,14 @@ class GeolocatorLocationService implements LocationService {
 
   /// Builds the [geo.LocationSettings] for the single continuous stream.
   ///
-  /// Mirrors [_currentPositionSettings] platform handling, both with a 1 m
-  /// distance filter for responsive, precise tracking.
+  /// Mirrors [_currentPositionSettings] platform handling. Android and the
+  /// iOS foreground-only stream use a 1 m distance filter for responsive,
+  /// precise tracking; the iOS background-capable stream drops the filter
+  /// entirely ([_kIosNoDistanceFilter]) because Apple's requirement for
+  /// uninterrupted background updates is that no distance filter is set. That
+  /// costs delivery frequency (and therefore battery) only for users who
+  /// asked for background sharing — opt-out users keep the 1 m filter, whose
+  /// stream never runs backgrounded anyway.
   ///
   /// On iOS the background-capable flags are a pure function of the user's
   /// background-sharing intent, NOT of lifecycle state:
@@ -634,7 +656,7 @@ class GeolocatorLocationService implements LocationService {
     if (_isIOS) {
       // Accuracy defaults to LocationAccuracy.best.
       return geo.AppleSettings(
-        distanceFilter: 1, // Update when device moves 1+ meter for precision
+        distanceFilter: backgroundSharingEnabled ? _kIosNoDistanceFilter : 1,
         allowBackgroundLocationUpdates: backgroundSharingEnabled,
         showBackgroundLocationIndicator: backgroundSharingEnabled,
         // Explicit (despite matching the plugin default) because an

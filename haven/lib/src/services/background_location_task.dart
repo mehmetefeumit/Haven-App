@@ -35,11 +35,14 @@ import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/rust/frb_generated.dart';
 import 'package:haven/src/services/background_identity_service.dart';
 import 'package:haven/src/services/background_location_manager.dart';
+import 'package:haven/src/services/circle_health_service.dart';
 import 'package:haven/src/services/circle_service.dart' show Circle;
 import 'package:haven/src/services/foreground_liveness_probe.dart';
 import 'package:haven/src/services/fresh_secret.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
+import 'package:haven/src/services/mls_session_handover.dart'
+    show kBackgroundTeardownDrainBudget;
 import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/pending_mls_wipe_service.dart';
@@ -187,6 +190,22 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   /// In-flight publish future, tracked so `onDestroy` can await it
   /// rather than nulling services mid-cycle.
   Future<void>? _inFlightPublish;
+
+  /// The commit-critical slice of [_inFlightPublish], if one is running.
+  ///
+  /// [_inFlightPublish] is the WHOLE cycle, and `onDestroy` abandons that after
+  /// [kBackgroundTeardownDrainBudget] so a stopping service is bounded. Most of
+  /// the cycle can be abandoned freely — a location is an MLS application
+  /// message, so a dropped one costs a sample. `fetchMemberLocations` cannot:
+  /// it may publish a receiver-side auto-commit and then confirm it, and a
+  /// teardown landing between those two steps leaves a commit neither confirmed
+  /// nor rolled back while possibly already on a relay (Rule 13, and the
+  /// `PendingPublish` wedge that follows from breaking it).
+  ///
+  /// So the commit-critical window gets its own future, which `onDestroy`
+  /// drains UNBOUNDED. Null whenever no such window is open, which is the
+  /// overwhelming majority of every cycle.
+  Future<void>? _inFlightCommitCritical;
 
   /// Independent per-circle publish scheduling (privacy: decorrelation). Each
   /// circle is registered on its own CSPRNG-staggered due-time when the
@@ -480,10 +499,45 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     // services. Without this, nulling `_relayService` mid-publish
     // would waste an MLS epoch advance (encrypt succeeds, publish
     // fails because the relay handle is gone).
+    //
+    // BOUNDED, because this wait is what the UI isolate's handover budget has
+    // to cover: an unbounded drain here is a foreground that sits on a blank
+    // map for as long as one relay's retry ladder feels like taking (~49 s).
+    // Every step of the cycle checks `_shuttingDown`, so the only work that can
+    // still be running is a single publish; this gives it one attempt's worth
+    // ([kBackgroundTeardownDrainBudget]) and then proceeds regardless.
+    //
+    // Abandoning that publish is a sample, not a fork: a location is an MLS
+    // APPLICATION message, so Rule 13's publish-before-apply contract is not in
+    // play — there is no staged commit to confirm or roll back, and the sender
+    // ratchet already advanced and persisted before the relay was ever
+    // contacted.
     try {
-      await _inFlightPublish;
+      await _inFlightPublish?.timeout(teardownDrainBudget);
     } on Object catch (_) {
-      // Publish errors are already handled inside `_publishCycle`.
+      // Publish errors are already handled inside `_publishCycle`; a
+      // TimeoutException here means the drain budget was spent, which is the
+      // designed outcome rather than a failure.
+    }
+
+    // ...and then UNBOUNDED for the one slice of that cycle where the budget
+    // above would be a correctness bug rather than a lost sample. A
+    // `fetchMemberLocations` can publish a receiver-side auto-commit and then
+    // confirm it; giving up between those two steps tears down the relay and
+    // disposes the manager underneath a commit that is possibly already on a
+    // relay, so it is neither confirmed nor rolled back — Rule 13 broken, and
+    // the group left in `PendingPublish`. Read AFTER the bounded drain above,
+    // which is what makes it observe whatever survived it. Null on the
+    // overwhelming majority of teardowns, so this costs nothing to have.
+    final commitCritical = _inFlightCommitCritical;
+    if (commitCritical != null) {
+      debugPrint('[BackgroundTask] onDestroy: draining commit-critical work');
+      try {
+        await commitCritical;
+      } on Object catch (_) {
+        // Handled per-circle inside the cycle; what matters here is that it
+        // reached its own conclusion rather than being cut short.
+      }
     }
 
     try {
@@ -643,6 +697,27 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       circleService: _circleService!,
       relayService: _relayService!,
       identityService: BackgroundIdentityService(_identityManager!),
+      // Delivery liveness for the RECEIVE plane while backgrounded. Without
+      // it this isolate's peer receipts never reach `circle_health`, and the
+      // foreground — whose cache is cleared on pause — comes back to a stale
+      // persisted stamp and shows a "not receiving" banner over a background
+      // session that was receiving perfectly.
+      //
+      // The factory reads the CURRENT `_circleManager` on every call rather
+      // than capturing today's handle: the reclaim path closes and re-opens
+      // the manager, and a captured handle would be a disposed one from the
+      // first reclaim onwards. `NostrCircleHealthService` swallows the throw
+      // below (health telemetry must never take down the receive path), so a
+      // window with no manager costs one unrecorded stamp, not a failure.
+      healthService: NostrCircleHealthService(
+        circleManagerFactory: () async {
+          final manager = _circleManager;
+          if (manager == null) {
+            throw StateError('no circle manager');
+          }
+          return manager;
+        },
+      ),
     );
   }
 
@@ -667,6 +742,9 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   /// acquire remains the authority and fails closed, so a lost race costs one
   /// cycle, never correctness.
   Future<bool> _ensureSession() async {
+    // Opening a session for a service that is stopping buys nothing and costs
+    // the teardown up to two 5 s liveness probes plus the gap between them.
+    if (_shuttingDown) return false;
     final dataDir = _dataDir;
     if (dataDir == null) return false;
 
@@ -882,6 +960,103 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     return forceReleaseLiveSession();
   }
 
+  /// Runs the Rule-13 ladder over the commits a DEFERRED send handed back.
+  ///
+  /// `should_queue_outbound_intent` returns true precisely when the engine has
+  /// just STAGED a peer's `SelfRemove` eviction, and that commit arrives on the
+  /// deferred outcome carrying a pending token. All three of the obvious
+  /// dispositions are wrong: confirming applies a commit no relay acked;
+  /// rolling it back drops the engine's retry schedule so the leaver never
+  /// leaves; dropping it pins the group in `PendingPublish`, where every later
+  /// send fails. Publish, then confirm on a ≥1-relay ACK, else roll back.
+  ///
+  /// Registered as [_inFlightCommitCritical] for the same reason a fetch is:
+  /// abandoning this between `publishEvent` and `confirmPublished` leaves a
+  /// commit that is neither confirmed nor rolled back while possibly already on
+  /// a relay. Never throws — a failure here must not abort the publish loop.
+  Future<void> _resolveDeferredCommits(
+    Circle circle,
+    DeferredSendFfi deferred,
+  ) async {
+    if (deferred.commits.isEmpty) return;
+    final work = _resolveDeferredCommitsInner(circle, deferred);
+    _inFlightCommitCritical = work;
+    try {
+      await work;
+    } finally {
+      _inFlightCommitCritical = null;
+    }
+  }
+
+  Future<void> _resolveDeferredCommitsInner(
+    Circle circle,
+    DeferredSendFfi deferred,
+  ) async {
+    for (final commit in deferred.commits) {
+      var published = false;
+      if (circle.relays.isNotEmpty) {
+        try {
+          final result = await _relayService!.publishEvent(
+            eventJson: commit.commitEventJson,
+            relays: circle.relays,
+          );
+          published = result.acceptedBy.isNotEmpty;
+        } on Object catch (e) {
+          debugPrint(
+            '[BackgroundTask] deferred commit publish failed: '
+            '${e.runtimeType}',
+          );
+        }
+      }
+      try {
+        if (published) {
+          await _circleManager!.confirmPublished(pending: commit.pending);
+        } else {
+          await _circleManager!.publishFailed(pending: commit.pending);
+        }
+      } on Object catch (e) {
+        debugPrint(
+          '[BackgroundTask] deferred commit '
+          '${published ? "confirm" : "rollback"} failed: ${e.runtimeType}',
+        );
+      }
+    }
+  }
+
+  /// Publishes the bare proposals a DEFERRED send handed back, to the circle's
+  /// relays.
+  ///
+  /// Mirrors the foreground's `LocationSharingService._publishDeferredProposals`.
+  /// No confirm step and no rollback: a proposal carries no staged state, so
+  /// there is nothing to apply. Losing one costs a cycle rather than
+  /// correctness — the durable leave request that produced it makes a later
+  /// convergence pass re-emit it — so every failure is logged and swallowed
+  /// rather than allowed to abort the publish loop.
+  Future<void> _publishDeferredProposals(
+    Circle circle,
+    DeferredSendFfi deferred,
+  ) async {
+    if (deferred.proposals.isEmpty || circle.relays.isEmpty) return;
+    for (final eventJson in deferred.proposals) {
+      try {
+        final result = await _relayService!.publishEvent(
+          eventJson: eventJson,
+          relays: circle.relays,
+        );
+        if (result.acceptedBy.isEmpty) {
+          debugPrint(
+            '[BackgroundTask] deferred proposal rejected by all relays',
+          );
+        }
+      } on Object catch (e) {
+        debugPrint(
+          '[BackgroundTask] deferred proposal publish failed: '
+          '${e.runtimeType}',
+        );
+      }
+    }
+  }
+
   Future<void> _publishCycle(DateTime timestamp) async {
     try {
       // Per-circle jitter now lives in `_dueTracker` (step 7 below), so there
@@ -1038,7 +1213,13 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       if (dueKeys.isEmpty) return;
 
       // 4. Acquire a GPS fix (only now that at least one circle is due).
-      final position = await _locationService!.getCurrentLocation();
+      //    Raced against teardown: a one-shot fix is the single longest step in
+      //    this cycle and nothing has been encrypted yet, so a stopping service
+      //    must not spend its window inside it.
+      final position = await _unlessShuttingDown(
+        _locationService!.getCurrentLocation(),
+      );
+      if (position == null) return;
 
       // 8. Encrypt and publish to each DUE circle, one at a time and MORE THAN
       //    A SECOND APART.
@@ -1068,6 +1249,11 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       final publishDeadline = publishPhaseStart.add(kPublishStaggerMaxSpread);
       DateTime? lastPublishStartedAt;
       for (final key in dueKeys) {
+        // A stop that arrives mid-burst must cost the in-flight publish only,
+        // not every circle still queued behind it. The existing check below
+        // fires only after a decorrelation wait, and a due circle with no wait
+        // skips it entirely.
+        if (_shuttingDown) break;
         final circle = byKey[key];
         if (circle == null) continue;
 
@@ -1102,7 +1288,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
         lastPublishStartedAt = DateTime.now();
 
         try {
-          final encrypted = await _circleManager!.encryptLocation(
+          final outcome = await _circleManager!.encryptLocation(
             mlsGroupId: circle.mlsGroupId,
             senderPubkeyHex: _pubkeyHex!,
             latitude: position.latitude,
@@ -1112,10 +1298,59 @@ class BackgroundLocationTaskHandler extends TaskHandler {
             ),
           );
 
-          await _relayService!.publishEvent(
+          // The MLS engine QUEUED this update instead of encrypting it. Nothing
+          // reached a relay, so nothing is stamped: `notePublishAcked` stays
+          // untouched and the circle is NOT re-armed on a fresh cadence, so the
+          // next cycle retries it promptly.
+          //
+          // This isolate has no Riverpod container, so it cannot call
+          // `sharingHealthProvider.recordDeferredSend`. It persists nothing new
+          // either — the deferral surfaces on the next FOREGROUND open through
+          // Unit D's model, which reads the MISSING publish-ack timestamp for
+          // this circle and derives the outage from its age. Adding a second
+          // persisted signal here would duplicate evidence the model already
+          // has, on an isolate whose clock is independent.
+          final deferred = outcome.deferredSend;
+          if (deferred != null) {
+            debugPrint(
+              '[BackgroundTask] send deferred by the MLS engine — '
+              'gating=${deferred.unresolvedInputs}, '
+              'repaired=${deferred.repaired}, '
+              'stagedCommits=${deferred.commits.length}',
+            );
+            await _resolveDeferredCommits(circle, deferred);
+            await _publishDeferredProposals(circle, deferred);
+            continue;
+          }
+          final encrypted = outcome.sent;
+          if (encrypted == null) {
+            // Neither arm set: the binding and this call site have drifted.
+            // Fail closed for this circle rather than dereference nothing —
+            // the same posture `NostrCircleService.encryptLocation` takes.
+            debugPrint(
+              '[BackgroundTask] encrypt returned an empty outcome — '
+              'skipping this circle',
+            );
+            continue;
+          }
+
+          final publishResult = await _relayService!.publishEvent(
             eventJson: encrypted.eventJson,
             relays: encrypted.relays,
           );
+
+          // Delivery liveness for the foreground service's own publishes.
+          // This isolate has no Riverpod container, so the persisted stamp is
+          // the ONLY channel by which the sharing-health model can learn that
+          // background publishing is (or has stopped) working. Recorded only
+          // on an affirmative relay ACK — a result no relay accepted delivered
+          // nothing, and stamping it would make a dead plane read as healthy.
+          if (publishResult.acceptedBy.isNotEmpty) {
+            await _circleManager!.notePublishAcked(
+              nostrGroupId: circle.nostrGroupId,
+              atMs: DateTime.now().millisecondsSinceEpoch,
+            );
+          }
 
           // Re-arm THIS circle on its own fresh jittered cadence (independent
           // per circle — the decorrelation guarantee).
@@ -1172,13 +1407,33 @@ class BackgroundLocationTaskHandler extends TaskHandler {
             );
             break;
           }
+          // LAST statement before the fetch, deliberately after the awaited
+          // foreground check above: a stop that lands while this iteration is
+          // suspended in that check must stop the NEXT fetch from starting, so
+          // that the only commit-critical work `onDestroy` can find running is
+          // one it can see in [_inFlightCommitCritical].
+          if (_shuttingDown) break;
+          // The invariant: a `fetchMemberLocations` that has STARTED is never
+          // abandoned. It can publish and then confirm a receiver-side
+          // auto-commit (a peer's SelfRemove), which is Rule 13 territory —
+          // dropping it between `publishEvent` and `confirmPublished` leaves a
+          // commit that is neither confirmed nor rolled back while possibly
+          // already on a relay. Publishing it under this future is what lets
+          // `onDestroy` wait for it WITHOUT a budget, unlike the location
+          // publish, which it may abandon.
           try {
-            await _locationSharingService!.fetchMemberLocations(circle: circle);
+            final fetch = _locationSharingService!.fetchMemberLocations(
+              circle: circle,
+            );
+            _inFlightCommitCritical = fetch;
+            await fetch;
             fetchCount++;
           } on Object catch (e) {
             debugPrint(
               '[BackgroundTask] Fetch failed for circle: ${e.runtimeType}',
             );
+          } finally {
+            _inFlightCommitCritical = null;
           }
         }
       }
@@ -1247,6 +1502,25 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     ]);
   }
 
+  /// Awaits [work], or gives up on it the moment [onDestroy] starts, in which
+  /// case the result is `null`.
+  ///
+  /// For the steps whose own duration is set by something outside this isolate
+  /// — a GPS fix, a relay round-trip — and which hold no MLS state while they
+  /// run, so abandoning one loses a location sample and nothing else. `stop()`
+  /// on the service side is what makes that trade worth taking: the sample was
+  /// about to stop being published anyway.
+  ///
+  /// `Future.any` ignores whatever the loser does afterwards, including an
+  /// error, so a late failure cannot surface as an unhandled async error.
+  Future<T?> _unlessShuttingDown<T>(Future<T> work) {
+    if (_shuttingDown) return Future<T?>.value();
+    return Future.any<T?>(<Future<T?>>[
+      work,
+      _shutdownSignal.future.then((_) => null),
+    ]);
+  }
+
   /// Test seam for [_sleepUnlessShuttingDown].
   ///
   /// The publish cycle it lives in is bridge-bound (it drives `CircleManagerFfi`
@@ -1255,6 +1529,37 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   /// becoming a teardown stall — so it is reachable on its own.
   @visibleForTesting
   Future<void> staggerWaitForTest(Duration d) => _sleepUnlessShuttingDown(d);
+
+  /// Test seam for [_unlessShuttingDown] — same reason as
+  /// [staggerWaitForTest]: the steps it wraps (the GPS one-shot) are
+  /// bridge/platform-bound, while the abandonment is the property.
+  @visibleForTesting
+  Future<T?> raceShutdownForTest<T>(Future<T> work) =>
+      _unlessShuttingDown(work);
+
+  /// Test seam for the in-flight cycle [onDestroy] drains.
+  ///
+  /// `_publishCycle` drives `CircleManagerFfi` directly, so `flutter test`
+  /// cannot produce a real one — but "teardown does not wait past the publish
+  /// already in flight" is exactly the bound the UI isolate's
+  /// `handoverTimeout` is derived from, so it is proven here rather than
+  /// assumed.
+  @visibleForTesting
+  set inFlightPublishForTest(Future<void> cycle) => _inFlightPublish = cycle;
+
+  /// Test seam for [_inFlightCommitCritical]. Same reason as
+  /// [inFlightPublishForTest], and the property is the opposite one: this
+  /// window must be drained WITHOUT a budget.
+  @visibleForTesting
+  set inFlightCommitCriticalForTest(Future<void> window) =>
+      _inFlightCommitCritical = window;
+
+  /// Test-only override for [kBackgroundTeardownDrainBudget].
+  ///
+  /// Production uses the real constant; shortening it in a test keeps the
+  /// bound-was-enforced case from costing 15 s of wall clock.
+  @visibleForTesting
+  Duration teardownDrainBudget = kBackgroundTeardownDrainBudget;
 
   /// Test seam for [_ensureSession].
   ///

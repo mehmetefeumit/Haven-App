@@ -373,6 +373,10 @@ class AppLocalizationsPt extends AppLocalizations {
       'Ativado. A otimização de bateria pode pausar o compartilhamento em alguns celulares. Exclua o Haven da otimização de bateria para mantê-lo confiável.';
 
   @override
+  String get locationSettingsBatteryOptNote =>
+      'A otimização de bateria continua ativada para o Haven. Alguns celulares a usam para interromper o compartilhamento em segundo plano sem avisar. Exclua o Haven da otimização para manter o compartilhamento confiável.';
+
+  @override
   String get locationSettingsErrorSnack => 'Algo deu errado';
 
   @override
@@ -409,6 +413,24 @@ class AppLocalizationsPt extends AppLocalizations {
   @override
   String get locationSettingsIosGuidance =>
       'Enquanto o compartilhamento em segundo plano está ativado, o Haven mantém uma sessão de localização contínua e o iOS mostra um indicador azul na barra de status. Conceder \"Sempre\" também permite que o Haven recupere as atualizações dos seus círculos depois que o iOS fechar o app.';
+
+  @override
+  String get fgsNotificationSharing =>
+      'O Haven está enviando e recebendo informações de localização';
+
+  @override
+  String get fgsNotificationPaused =>
+      'O Haven está em pausa — abra o app para retomar o compartilhamento';
+
+  @override
+  String get fgsNotificationOpen => 'O Haven está aberto';
+
+  @override
+  String get fgsChannelName => 'Compartilhamento de localização';
+
+  @override
+  String get fgsChannelDescription =>
+      'Mantém o Haven compartilhando sua localização criptografada em segundo plano.';
 
   @override
   String get mapStyleTitle => 'Estilo do mapa';
@@ -686,7 +708,7 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get privacyEncryptionKeysChangeOnMembership =>
-      'Sair de um círculo não recupera o que os membros dele já salvaram. O Haven troca as chaves apenas quando alguém entra ou sai, nunca por tempo decorrido. Por isso uma única chave pode cobrir semanas de mensagens, e tudo o que um membro salvou nesse período continua legível para ele. Ainda assim, ele não consegue abrir nada enviado depois que saiu.';
+      'Sair de um círculo não recupera o que os membros dele já salvaram. O Haven troca as chaves quando alguém entra ou sai, ou quando quem é admin de um círculo o corrige depois que o círculo deixa de receber localizações — nunca por tempo decorrido. Por isso uma única chave pode cobrir semanas de mensagens, e tudo o que um membro salvou nesse período continua legível para ele. Ainda assim, ele não consegue abrir nada enviado depois que saiu.';
 
   @override
   String get privacyEncryptionMeansForYou =>
@@ -698,7 +720,7 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get privacyEncryptionDetailEpochs =>
-      'Cada período de chave é chamado de epoch, e um círculo só passa para um novo quando a composição dele muda. Seu aparelho guarda as chaves do epoch atual e de alguns recentes, o suficiente para abrir as mensagens que ainda estão chegando, e descarta o resto. Um círculo cuja composição não muda há meses ainda está no epoch em que começou.';
+      'Cada período de chave é chamado de epoch. Um círculo passa para um novo epoch quando a composição dele muda e também quando quem é admin dele o corrige depois que o círculo deixa de receber localizações. Seu dispositivo guarda as chaves do epoch atual e de alguns recentes, o suficiente para abrir as mensagens que ainda estão chegando, e descarta o resto. Um círculo cuja composição nunca mudou, e que nunca precisou ser corrigido, ainda está no epoch em que começou.';
 
   @override
   String get privacyWhatOthersSeeTitle =>
@@ -2047,6 +2069,129 @@ class AppLocalizationsPt extends AppLocalizations {
   @override
   String get clockSkewResolvedAnnouncement =>
       'O relógio deste telefone já está certo. O Haven está compartilhando sua posição de novo.';
+
+  @override
+  String get clockSkewTitleDisagreement =>
+      'Um relógio em um dos seus círculos está errado';
+
+  @override
+  String get clockSkewBodyDisagreement =>
+      'O relógio deste telefone e o de outro membro estão com dois minutos ou mais de diferença. Se o errado for o deste telefone, as posições que ele envia podem expirar antes que alguém consiga vê-las. Ative a data e hora automáticas nas configurações do sistema para ter certeza de que não é o relógio deste telefone que está errado.';
+
+  @override
+  String get clockSkewDisagreementResolvedAnnouncement =>
+      'O aviso sobre o relógio desapareceu.';
+
+  @override
+  String get sharingHealthTitleStopped =>
+      'O compartilhamento de localização parou';
+
+  @override
+  String get sharingHealthTitleNotSending =>
+      'Sua posição não está sendo compartilhada';
+
+  @override
+  String get sharingHealthTitleNotReceiving =>
+      'Você não está recebendo localizações';
+
+  @override
+  String sharingHealthNoUpdatesMinutes(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'Sem atualizações há cerca de $countString minutos',
+      many: 'Sem atualizações há cerca de $countString de minutos',
+      one: 'Sem atualizações há cerca de 1 minuto',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String sharingHealthNoUpdatesHours(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'Sem atualizações há cerca de $countString horas',
+      many: 'Sem atualizações há cerca de $countString de horas',
+      one: 'Sem atualizações há cerca de 1 hora',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String sharingHealthNoUpdatesDays(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'Sem atualizações há cerca de $countString dias',
+      many: 'Sem atualizações há cerca de $countString de dias',
+      one: 'Sem atualizações há cerca de 1 dia',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get sharingHealthRepairAction => 'Corrigir';
+
+  @override
+  String get sharingHealthRepairUnavailableHint =>
+      'A opção Corrigir não está disponível para este círculo';
+
+  @override
+  String get sharingHealthRepairHint =>
+      'Reconecta aos relays, tenta enviar sua localização de novo e, se você for admin deste círculo, ele pode passar a usar uma chave nova';
+
+  @override
+  String get sharingHealthRepairSent =>
+      'Correção enviada. Os outros vão se atualizar assim que ela chegar no telefone deles.';
+
+  @override
+  String get sharingHealthRepairNotOwner =>
+      'Só quem é admin deste círculo pode corrigi-lo. Peça a essa pessoa para remover e adicionar você de novo.';
+
+  @override
+  String get sharingHealthRepairNeedsNewCircle =>
+      'Este círculo não pode ser corrigido neste telefone. Crie um novo círculo com as mesmas pessoas.';
+
+  @override
+  String get sharingHealthRepairNothingToDo =>
+      'Nada para corrigir por enquanto. O Haven vai continuar tentando.';
+
+  @override
+  String get sharingHealthRepairUnresolvedAnnouncement =>
+      'O compartilhamento de localização ainda não está funcionando.';
+
+  @override
+  String get sharingHealthResumedAnnouncement =>
+      'O compartilhamento de localização voltou a funcionar.';
+
+  @override
+  String circleMemberLastSeenMinutes(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'Última localização há $countString minutos',
+      many: 'Última localização há $countString de minutos',
+      one: 'Última localização há 1 minuto',
+    );
+    return '$_temp0';
+  }
 
   @override
   String get mapThisLocation => 'este local';

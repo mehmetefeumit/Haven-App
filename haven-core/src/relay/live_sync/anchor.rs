@@ -59,12 +59,29 @@ struct CircleAnchor {
 }
 
 impl CircleAnchor {
-    const fn opened(opened_at_secs: i64) -> Self {
+    /// Opens a generation, inheriting `carried_hold_back` from the one it
+    /// replaces (see [`CursorAnchors::open_generation`]).
+    const fn opened(opened_at_secs: i64, carried_hold_back: Option<i64>) -> Self {
         Self {
             opened_at_secs,
             eose_consumed: false,
-            hold_back_secs: None,
+            hold_back_secs: carried_hold_back,
         }
+    }
+
+    /// The hold-back the NEXT generation must inherit, if any.
+    ///
+    /// This is simply whatever hold-back has NOT yet been applied to the
+    /// persisted cursor — [`Self::consume_eose`] clears the field at the moment
+    /// it folds the value into an advance, so a hold-back that has already
+    /// moved the cursor is never inherited (inheriting it would pin the cursor
+    /// there permanently, since nothing clears an inherited value).
+    ///
+    /// A BURNED generation ([`CursorAnchors::suppress_open_generations`]) still
+    /// carries: burning issues no advance, so its hold-back reached the cursor
+    /// no more than an un-redeemed one did.
+    const fn hold_back_to_carry(&self) -> Option<i64> {
+        self.hold_back_secs
     }
 
     /// Records an event that was delivered but not applied.
@@ -77,16 +94,18 @@ impl CircleAnchor {
 
     /// The cursor value (ms) this generation's EOSE justifies, or `None` if the
     /// generation has already consumed its advance.
+    ///
+    /// Clears the hold-back as it folds it into the advance: from here the value
+    /// IS the persisted cursor, so [`Self::hold_back_to_carry`] must not hand it
+    /// to the next generation as if it were still outstanding.
     const fn consume_eose(&mut self, now_secs: i64) -> Option<i64> {
         if self.eose_consumed {
             return None;
         }
         self.eose_consumed = true;
-        Some(cursor_ms_for_window(
-            self.opened_at_secs,
-            self.hold_back_secs,
-            now_secs,
-        ))
+        let advance = cursor_ms_for_window(self.opened_at_secs, self.hold_back_secs, now_secs);
+        self.hold_back_secs = None;
+        Some(advance)
     }
 }
 
@@ -117,17 +136,42 @@ impl CursorAnchors {
     /// Opens a fresh generation for `group_id_hex`, anchored at the local clock
     /// reading `opened_at_secs` taken when its REQ was issued.
     ///
-    /// Replaces any previous generation outright: the previous one's hold-backs
-    /// belong to a window that has been superseded, and the new REQ's `since` is
-    /// derived from the (already held) persisted cursor.
+    /// Replaces the previous generation's open time and spends-a-single-advance
+    /// state outright — the new REQ's `since` is derived from the persisted
+    /// cursor — but **inherits an un-redeemed hold-back**.
+    ///
+    /// # Why the hold-back has to survive
+    ///
+    /// A bucket's anchor is keyed by circle, while its REQ is issued to SEVERAL
+    /// relays, and a repair re-issues to only the one that ended it
+    /// ([`super::session`]). So a generation opened at `T2` by a repair can be
+    /// redeemed by a co-bucketed relay's `EOSE` for the REQ issued at `T0` —
+    /// which vouches for nothing after `T0`. If the `T0` generation's hold-backs
+    /// were dropped, that stale `EOSE` would advance the cursor to `T2`, over
+    /// events the plane recorded as un-applied. Carrying them forward makes the
+    /// advance stop at them instead.
+    ///
+    /// Only a hold-back not yet APPLIED to the cursor is carried (see
+    /// [`CircleAnchor::hold_back_to_carry`]), so this cannot pin a cursor
+    /// forever: the moment a generation's `EOSE` folds the hold-back into an
+    /// advance, the value stops being inherited and a later generation is free
+    /// to advance again.
+    ///
+    /// The accepted cost: a hold-back is the one remotely-influenced number
+    /// here, so a forged un-appliable event now reaches one generation FURTHER
+    /// than it used to — until an `EOSE` applies it, rather than until the next
+    /// REQ. It buys a wider re-fetch and never a skip (the advance is a `min`,
+    /// and the cursor write is monotonic-max), which is the trade this module
+    /// makes everywhere: a stall costs bandwidth, a skip costs the backlog.
     pub fn open_generation(&self, group_id_hex: &str, opened_at_secs: i64) {
-        self.inner
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(
-                group_id_hex.to_string(),
-                CircleAnchor::opened(opened_at_secs),
-            );
+        let mut anchors = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let carried = anchors
+            .get(group_id_hex)
+            .and_then(CircleAnchor::hold_back_to_carry);
+        anchors.insert(
+            group_id_hex.to_string(),
+            CircleAnchor::opened(opened_at_secs, carried),
+        );
     }
 
     /// Records a delivered-but-unapplied event, holding this generation's
@@ -525,14 +569,37 @@ mod tests {
     }
 
     #[test]
-    fn a_new_generation_clears_the_previous_hold_back() {
-        // Hold-backs describe ONE window. Carrying them forward would let a
-        // single forged event pin a circle's cursor for the whole session.
+    fn a_carried_hold_back_is_bounded_by_the_next_advance_it_is_applied_to() {
+        // SUPERSEDES `a_new_generation_clears_the_previous_hold_back`, which
+        // pinned "a new generation clears the hold-back" outright. That is
+        // unsound: a repair re-issues ONE relay of a multiplexed bucket, so a
+        // co-bucketed relay's stale EOSE can redeem the new generation and
+        // advance straight over the un-applied events the old one recorded.
+        //
+        // The property that test was really protecting — a single forged event
+        // must not pin a circle's cursor for the whole session — is kept, and is
+        // what this asserts: the carry survives exactly until an EOSE folds it
+        // into an advance, and not one generation longer.
         let anchors = CursorAnchors::default();
         anchors.open_generation("aa00", OPENED);
         anchors.note_unapplied("aa00", 1);
+
+        // Re-issued before any EOSE: still owed, so still carried.
         anchors.open_generation("aa00", OPENED);
-        assert_eq!(anchors.note_eose("aa00", NOW), Some(OPENED * 1000));
+        assert_eq!(
+            anchors.note_eose("aa00", NOW),
+            Some(1000),
+            "an un-applied hold-back must survive a re-issue"
+        );
+
+        // That advance APPLIED it. It must not be inherited again, or the pin
+        // would last forever.
+        anchors.open_generation("aa00", OPENED);
+        assert_eq!(
+            anchors.note_eose("aa00", NOW),
+            Some(OPENED * 1000),
+            "one forged event buys ONE held-back advance, never a permanent pin"
+        );
     }
 
     #[test]
@@ -586,11 +653,82 @@ mod tests {
 
     #[test]
     fn hold_at_keeps_the_minimum_regardless_of_arrival_order() {
-        let mut anchor = CircleAnchor::opened(OPENED);
+        let mut anchor = CircleAnchor::opened(OPENED, None);
         anchor.hold_at(30);
         anchor.hold_at(70);
         anchor.hold_at(10);
         assert_eq!(anchor.hold_back_secs, Some(10));
+    }
+
+    #[test]
+    fn an_unredeemed_hold_back_survives_a_re_issued_req() {
+        // A bucket's anchor is keyed by circle, but its REQ goes to several
+        // relays and a repair re-issues to only the one that ended it. So a
+        // co-bucketed relay's EOSE for the OLD REQ can redeem the generation the
+        // repair just opened. If the old generation's hold-backs were dropped,
+        // that stale EOSE would advance the cursor past events recorded as
+        // un-applied — the loss the hold-back exists to prevent.
+        let anchors = CursorAnchors::default();
+        anchors.open_generation("aa00", OPENED);
+        anchors.note_unapplied("aa00", OPENED - 500);
+
+        // The repair re-issues on one relay: a fresh generation, much later.
+        anchors.open_generation("aa00", OPENED + 1_000);
+
+        let advanced = anchors
+            .note_eose("aa00", NOW + 5_000)
+            .expect("the fresh generation still has its advance");
+        assert_eq!(
+            advanced,
+            (OPENED - 500) * 1000,
+            "the advance must still stop at the un-applied event, not jump to \
+             the re-issue's open time"
+        );
+    }
+
+    #[test]
+    fn a_redeemed_hold_back_is_not_inherited_and_cannot_pin_the_cursor() {
+        // The other half: once an EOSE has applied a hold-back to the persisted
+        // cursor, inheriting it would pin every later generation at that
+        // position forever, because nothing ever clears an inherited value.
+        let anchors = CursorAnchors::default();
+        anchors.open_generation("aa00", OPENED);
+        anchors.note_unapplied("aa00", OPENED - 500);
+        assert_eq!(
+            anchors.note_eose("aa00", NOW),
+            Some((OPENED - 500) * 1000),
+            "the first generation applies the hold-back"
+        );
+
+        // The event has since been applied, so the next generation records no
+        // hold-back of its own — and must be free to advance.
+        anchors.open_generation("aa00", OPENED + 1_000);
+        assert_eq!(
+            anchors.note_eose("aa00", NOW + 5_000),
+            Some((OPENED + 1_000) * 1000),
+            "a spent hold-back must not be inherited, or the cursor would stall \
+             at it permanently"
+        );
+    }
+
+    #[test]
+    fn a_burned_generations_hold_back_is_also_carried_forward() {
+        // `suppress_open_generations` burns the advance WITHOUT issuing one, so
+        // the hold-back reached the persisted cursor no more than an un-redeemed
+        // one did. Treating "burned" as "applied" would let the next
+        // generation's advance jump straight over the un-applied event — the
+        // same loss, reached by the other door.
+        let anchors = CursorAnchors::default();
+        anchors.open_generation("aa00", OPENED);
+        anchors.note_unapplied("aa00", OPENED - 500);
+        anchors.suppress_open_generations();
+
+        anchors.open_generation("aa00", OPENED + 1_000);
+        assert_eq!(
+            anchors.note_eose("aa00", NOW + 5_000),
+            Some((OPENED - 500) * 1000),
+            "a burned generation applied nothing, so its hold-back is still owed"
+        );
     }
 
     #[test]

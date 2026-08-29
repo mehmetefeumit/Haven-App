@@ -202,6 +202,20 @@ const String kBackgroundSessionReclaimAtMsKey =
 /// costs a live-sync teardown each time.
 const Duration kBackgroundSessionReclaimBackoff = Duration(minutes: 15);
 
+/// SharedPreferences key recording that Android still applies battery
+/// optimization to Haven (the user declined the exemption, or revoked it
+/// later).
+///
+/// Persisted rather than re-probed on every page build because the answer is
+/// only obtainable from the Android plugin, and the page that surfaces it also
+/// renders on platforms and test hosts where that plugin is absent. Written by
+/// `BackgroundSharingNotifier.setEnabled` on every Android enable and by
+/// `BackgroundLocationManager.openBatteryOptimizationSettings` on return from
+/// the system screen. Android-only: never written on iOS, so it stays absent
+/// (= not denied) there.
+const String kBatteryOptimizationDeniedKey =
+    'haven.battery_optimization_denied';
+
 // ---------------------------------------------------------------------------
 // Device-clock skew
 // ---------------------------------------------------------------------------

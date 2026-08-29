@@ -41,6 +41,12 @@ class _FakeEngine implements LiveSyncFfi {
   /// [failStart].
   final bool failUnsubscribe;
 
+  /// How many LEADING [stopSession] calls throw, modelling the real FFI's
+  /// `StopOutcome::TimedOut` → `Err` (with the wedged core reinstalled into the
+  /// process-global `SESSION`, which is what makes a retry meaningful).
+  /// Set to 1 for "the retry succeeds", 2 for "it never lets go".
+  int failStopCalls = 0;
+
   final StreamController<FfiRelayEvent> controller =
       StreamController<FfiRelayEvent>();
   int startCalls = 0;
@@ -84,6 +90,9 @@ class _FakeEngine implements LiveSyncFfi {
   @override
   Future<void> stopSession() async {
     stopCalls++;
+    if (stopCalls <= failStopCalls) {
+      throw Exception('live session did not stop cleanly, group deadbeefcafe');
+    }
     _running = false;
     // Faithful to the real engine: `stopSession` tears down the native event
     // bus, which is what ends the `liveEvents()` stream. Without modelling that
@@ -642,6 +651,204 @@ void main() {
         1,
         reason: 'a re-entrant teardown would stop the session twice',
       );
+    });
+  });
+
+  group('a stop that did not drain is retried and reported', () {
+    // The C1 wedge. A `StopOutcome::TimedOut` reinstalls the wedged core into
+    // the Rust-global `SESSION` and returns `Err`. Swallowing that error and
+    // carrying on hands the guard to a static no Dart handle in any isolate
+    // references: the foreground service cannot open (held), its reclaim
+    // declines (this isolate is provably alive), and the app is dead until a
+    // Force Stop. The retry is the only lever, and it is only reachable from
+    // here — once this method returns nothing holds that core.
+
+    test('a first failure is retried and the second attempt succeeds',
+        () async {
+      final engine = _FakeEngine()..failStopCalls = 1;
+      final service = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async => engine,
+      );
+      await service.start(groups: const [], inboxRelays: const []);
+
+      final outcome = await service.stop();
+
+      expect(
+        engine.stopCalls,
+        2,
+        reason: 'the reinstalled core is re-joined by a second stopSession; '
+            'giving up after one leaves the guard held forever',
+      );
+      expect(outcome, LiveSyncStopOutcome.stopped);
+      expect(engine.disposed, isTrue);
+    });
+
+    test('a stop that never drains reports stillHolding, not success',
+        () async {
+      final engine = _FakeEngine()..failStopCalls = 2;
+      final service = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async => engine,
+      );
+      await service.start(groups: const [], inboxRelays: const []);
+
+      final outcome = await service.stop();
+
+      expect(engine.stopCalls, 2, reason: 'exactly one retry, not a loop');
+      expect(
+        outcome,
+        LiveSyncStopOutcome.stillHolding,
+        reason: 'the caller decides whether to dispose its own manager on '
+            'this answer; reporting success would make it dispose the last '
+            'Dart reference to a guard the engine still holds',
+      );
+    });
+
+    test('a clean stop reports stopped and an absent engine reports idle',
+        () async {
+      final engine = _FakeEngine();
+      final service = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async => engine,
+      );
+
+      expect(
+        await service.stop(),
+        LiveSyncStopOutcome.idle,
+        reason: 'nothing was running, so nothing was holding anything',
+      );
+
+      await service.start(groups: const [], inboxRelays: const []);
+      expect(await service.stop(), LiveSyncStopOutcome.stopped);
+      expect(engine.stopCalls, 1, reason: 'a clean stop is never retried');
+    });
+
+    test('a SECOND stop still reports the guard the first one left held',
+        () async {
+      // [stop] clears `_engine` before it returns, so the next stop finds
+      // nothing to stop. Answering `idle` there — "nothing was holding
+      // anything" — while the wedged core Rust reinstalled into `SESSION` still
+      // owns the guard would hand the pause path a green light one pause later,
+      // and it would dispose the last Dart reference to a held guard: C1,
+      // reached the long way round.
+      final engine = _FakeEngine()..failStopCalls = 2;
+      final service = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async => engine,
+      );
+      await service.start(groups: const [], inboxRelays: const []);
+
+      expect(await service.stop(), LiveSyncStopOutcome.stillHolding);
+      expect(
+        await service.stop(),
+        LiveSyncStopOutcome.stillHolding,
+        reason: 'the state is a property of the process-global session, not '
+            'of whether this object still has a handle to it',
+      );
+    });
+
+    test('a successful start discharges the still-holding latch', () async {
+      // The complement, and the only event that PROVES the wedge is gone: Rust
+      // refuses to install a second session over a live one, so a session that
+      // started means the previous core drained. Without this the service
+      // would report `stillHolding` forever and the pause path would never
+      // hand over again.
+      var built = 0;
+      final wedged = _FakeEngine()..failStopCalls = 2;
+      final fresh = _FakeEngine();
+      final service = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async => built++ == 0 ? wedged : fresh,
+      );
+
+      await service.start(groups: const [], inboxRelays: const []);
+      expect(await service.stop(), LiveSyncStopOutcome.stillHolding);
+
+      await service.start(groups: const [], inboxRelays: const []);
+      expect(await service.stop(), LiveSyncStopOutcome.stopped);
+      expect(
+        await service.stop(),
+        LiveSyncStopOutcome.idle,
+        reason: 'with the latch discharged, an absent engine is genuinely '
+            'nothing to stop',
+      );
+    });
+
+    test('a FAILED start does not discharge the latch', () async {
+      // The fail-closed half, and the one a plain "clear it at the top of
+      // start()" would get wrong. Rust's `start_session` takes the wedged core
+      // out of `SESSION`, tries to stop it again, and on a second timeout
+      // reinstalls it and refuses ("previous live session did not stop;
+      // refusing to start a second") — so a start that THREW is evidence the
+      // guard is still held, not evidence it was freed. Discharging the latch
+      // before that call resolves would answer `idle` on the next stop and
+      // hand the pause path a green light to dispose the last Dart reference
+      // to a held guard.
+      var built = 0;
+      final wedged = _FakeEngine()..failStopCalls = 2;
+      final refused = _FakeEngine(failStart: true);
+      final service = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async => built++ == 0 ? wedged : refused,
+      );
+
+      await service.start(groups: const [], inboxRelays: const []);
+      expect(await service.stop(), LiveSyncStopOutcome.stillHolding);
+
+      await expectLater(
+        service.start(groups: const [], inboxRelays: const []),
+        throwsA(isA<SubscriptionServiceException>()),
+      );
+
+      expect(
+        await service.stop(),
+        LiveSyncStopOutcome.stillHolding,
+        reason: 'the start that would have proven the wedge gone did not '
+            'happen, so the latch must survive it',
+      );
+    });
+
+    test('a throwing outcome observer cannot break the teardown', () async {
+      // The callback is somebody else's code (Unit D wires it to the UI). A
+      // throw from it must not escape a method reached from
+      // `unawaited(stop())`, where nothing can catch it — and must not lose
+      // the answer the caller is about to act on.
+      final engine = _FakeEngine();
+      final service = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async => engine,
+        onStopOutcome: (_) => throw StateError('observer blew up'),
+      );
+      await service.start(groups: const [], inboxRelays: const []);
+
+      expect(await service.stop(), LiveSyncStopOutcome.stopped);
+      expect(
+        engine.disposed,
+        isTrue,
+        reason: 'the release must already have happened — the observer runs '
+            'after it, precisely so it cannot prevent it',
+      );
+    });
+
+    test('the outcome reaches the callback on stops nobody awaits', () async {
+      // `_onStreamClosed` fires `unawaited(stop())`, and the failed-start path
+      // stops from inside its own catch. Neither has a caller to read the
+      // return value, and a guard left held there is exactly as serious.
+      final seen = <LiveSyncStopOutcome>[];
+      final engine = _FakeEngine()..failStopCalls = 2;
+      final service = NostrSubscriptionService(
+        router: _SpyRouter(),
+        engineFactory: () async => engine,
+        onStopOutcome: seen.add,
+      );
+      await service.start(groups: const [], inboxRelays: const []);
+
+      // The engine dies underneath us — teardown runs unawaited.
+      await engine.controller.close();
+      await pumpEventQueue();
+
+      expect(seen, [LiveSyncStopOutcome.stillHolding]);
     });
   });
 }

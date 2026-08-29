@@ -146,39 +146,90 @@ void main() {
       return detector;
     }
 
-    test('HEALTHY: one member ahead does NOT accuse this device', () {
+    test('HEALTHY: the sole member of a two-member circle raises the verdict',
+        () {
       final detector = detectorWithPeersAhead(1);
       addTearDown(detector.dispose);
       expect(
-        checkSingleSourceStaysSilent(detector.status, sourcesFed: 1),
+        checkSoleSourceRaisesVerdict(
+          detector.status,
+          sourcesFed: 1,
+          thresholdSecs: kClockSkewAlertThreshold.inSeconds,
+        ),
         isNull,
+      );
+      expect(
+        detector.status.corroboratingSources,
+        1,
+        reason: 'one member is one source; the count must not be inflated',
       );
     });
 
-    test('REVERTED: a rule that fires on one source is caught', () {
-      // `minCorroboratingSources` back to 1. A lone peer's clock being wrong
-      // is far likelier than everyone else's, so this would accuse the user of
-      // a fault they do not have.
-      final reason = checkSingleSourceStaysSilent(
+    test('REVERTED: a rule that always waits for a second member is caught',
+        () {
+      // The pre-fix behaviour. A two-member circle can never produce a second
+      // corroborating member, so this left the commonest circle size unable
+      // to see a fault that discards 100 % of its updates while every publish
+      // still reports success.
+      final reason = checkSoleSourceRaisesVerdict(
+        ClockSkewStatus.healthy,
+        sourcesFed: 1,
+        thresholdSecs: kClockSkewAlertThreshold.inSeconds,
+      );
+      expect(reason, isNotNull);
+      expect(reason, contains('corroborate'));
+    });
+
+    test('REVERTED: a sole-source verdict claiming two sources is caught', () {
+      // The count is the evidence the verdict rests on. Reporting the nominal
+      // two from one member would make the sole-source path indistinguishable
+      // from real corroboration in every log and diagnostic.
+      final reason = checkSoleSourceRaisesVerdict(
         const ClockSkewStatus(
           signal: ClockSkewSignal.peersAheadOfDevice,
           complaint: DeviceClockComplaint.behind,
           offsetSecs: 21600,
-          corroboratingSources: 1,
+          corroboratingSources: 2,
         ),
         sourcesFed: 1,
+        thresholdSecs: kClockSkewAlertThreshold.inSeconds,
       );
       expect(reason, isNotNull);
-      expect(reason, contains('Corroboration'));
+      expect(reason, contains('corroborating source'));
     });
 
-    test('the single-source probe cannot pass on zero samples', () {
-      // Vacuity guard: a detector that was fed nothing is silent for reasons
-      // that have nothing to do with the corroboration rule.
+    test('REVERTED: the wrong direction is caught on the sole-source path too',
+        () {
       expect(
-        checkSingleSourceStaysSilent(ClockSkewStatus.healthy, sourcesFed: 0),
+        checkSoleSourceRaisesVerdict(
+          const ClockSkewStatus(
+            signal: ClockSkewSignal.peersAheadOfDevice,
+            complaint: DeviceClockComplaint.ahead,
+            offsetSecs: 21600,
+            corroboratingSources: 1,
+          ),
+          sourcesFed: 1,
+          thresholdSecs: kClockSkewAlertThreshold.inSeconds,
+        ),
         isNotNull,
       );
+    });
+
+    test('the sole-source probe cannot pass on the wrong sample count', () {
+      // Vacuity guard, both ways. Zero samples means the detector was silent
+      // for reasons that have nothing to do with the rule; two means the
+      // probe is answering the corroboration question, not this one.
+      for (final fed in <int>[0, 2]) {
+        expect(
+          checkSoleSourceRaisesVerdict(
+            ClockSkewStatus.healthy,
+            sourcesFed: fed,
+            thresholdSecs: kClockSkewAlertThreshold.inSeconds,
+          ),
+          isNotNull,
+          reason: 'a probe fed $fed sample(s) proves nothing here',
+        );
+      }
     });
 
     test('HEALTHY: two distinct members ahead DO raise the verdict', () {
@@ -317,6 +368,62 @@ void main() {
         isNotNull,
       );
     });
+
+    test('HEALTHY: the hedged sole-source copy passes', () {
+      expect(
+        checkSoleSourceCopyHedged(
+          renderedTexts: const <String>['hedged title', 'hedged body'],
+          hedgedTitle: 'hedged title',
+          hedgedBody: 'hedged body',
+          corroboratedTitle: 'accusing title',
+          corroboratedBody: 'loss-claiming body',
+        ),
+        isNull,
+      );
+    });
+
+    test('REVERTED: the corroborated copy on a sole source is caught', () {
+      // The exact regression `resolveClockSkewCopy`'s branch prevents: one
+      // member's word rendered as "this phone's clock is wrong" plus "the
+      // locations it sends expire", neither of which one sample supports.
+      for (final banned in <String>['accusing title', 'loss-claiming body']) {
+        final reason = checkSoleSourceCopyHedged(
+          renderedTexts: <String>[banned, 'hedged body'],
+          hedgedTitle: 'hedged title',
+          hedgedBody: 'hedged body',
+          corroboratedTitle: 'accusing title',
+          corroboratedBody: 'loss-claiming body',
+        );
+        expect(reason, isNotNull, reason: 'banned text "$banned" passed');
+        expect(reason, contains('ONE member'));
+      }
+    });
+
+    test('REVERTED: a sole-source banner that paints nothing is caught', () {
+      final reason = checkSoleSourceCopyHedged(
+        renderedTexts: const <String>[],
+        hedgedTitle: 'hedged title',
+        hedgedBody: 'hedged body',
+        corroboratedTitle: 'accusing title',
+        corroboratedBody: 'loss-claiming body',
+      );
+      expect(reason, isNotNull);
+      expect(reason, contains('NOTHING'));
+    });
+
+    test('REVERTED: a hedged title without its hedged body is caught', () {
+      // Half a bundle is not a hedge: the body is where the loss claim lives.
+      expect(
+        checkSoleSourceCopyHedged(
+          renderedTexts: const <String>['hedged title', 'something else'],
+          hedgedTitle: 'hedged title',
+          hedgedBody: 'hedged body',
+          corroboratedTitle: 'accusing title',
+          corroboratedBody: 'loss-claiming body',
+        ),
+        isNotNull,
+      );
+    });
   });
 
   group('the healthy tree really is green', () {
@@ -349,6 +456,31 @@ void main() {
         checkFaultCopyDistinct(
           rejectedBody: rejected!.message,
           behindBody: behind!.message,
+        ),
+        isNull,
+      );
+
+      // …and the sole-source bundle really is a THIRD thing, not either of
+      // the two above. Pinned against the real localisations for the same
+      // reason: a copy change that reunified them would otherwise only
+      // surface 40 minutes into an emulator lane.
+      final sole = resolveClockSkewCopy(
+        const ClockSkewStatus(
+          signal: ClockSkewSignal.peersAheadOfDevice,
+          complaint: DeviceClockComplaint.behind,
+          offsetSecs: 150,
+          corroboratingSources: 1,
+        ),
+        l10n,
+      );
+      expect(sole, isNotNull);
+      expect(
+        checkSoleSourceCopyHedged(
+          renderedTexts: <String>[sole!.title, sole.message],
+          hedgedTitle: l10n.clockSkewTitleDisagreement,
+          hedgedBody: l10n.clockSkewBodyDisagreement,
+          corroboratedTitle: l10n.clockSkewTitle,
+          corroboratedBody: l10n.clockSkewBodyBehind,
         ),
         isNull,
       );

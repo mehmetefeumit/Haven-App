@@ -17,6 +17,7 @@ import 'package:haven/src/utils/member_display.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/widgets/circles/member_avatar.dart';
 import 'package:haven/src/widgets/circles/member_detail_sheet.dart';
+import 'package:haven/src/widgets/map/member_marker.dart' show kMemberAgePillThreshold;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Width beyond which the "Admin" chip ellipsizes instead of pushing the
@@ -77,6 +78,8 @@ class CircleMemberTile extends ConsumerWidget {
     this.onTap,
     this.trailing,
     this.hasLocation = true,
+    this.lastSeen,
+    this.now = DateTime.now,
     this.onRemove,
     this.removeStatus = MemberRemoveStatus.ready,
     super.key,
@@ -100,6 +103,25 @@ class CircleMemberTile extends ConsumerWidget {
   /// Defaults to `true` to preserve the widget's original behaviour when
   /// used outside the map-centric context.
   final bool hasLocation;
+
+  /// When this member's last known location was recorded, or `null` when there
+  /// is none (or when the row is the viewer's own).
+  ///
+  /// Rendered as a "last seen" line only once it is older than
+  /// [kMemberAgePillThreshold] — the SAME bound the map marker's age pill uses,
+  /// deliberately, so the roster and the map can never disagree about whether a
+  /// member is stale. A member whose location is fresh gets no line, for the
+  /// same reason a fresh marker gets no pill: an age that is always shown stops
+  /// reading as "this one is behind".
+  final DateTime? lastSeen;
+
+  /// Reads the current time when ageing [lastSeen].
+  ///
+  /// Injected rather than calling `DateTime.now()` inside `build`, mirroring
+  /// `LocationSharingService`: an age computed from a wall clock inside a
+  /// widget can only be tested by racing it, and the age is the whole point of
+  /// the line.
+  final DateTime Function() now;
 
   /// When non-null, renders an admin "Remove member" action in the
   /// trailing area. Set by the parent when the viewer is an admin and
@@ -178,6 +200,11 @@ class CircleMemberTile extends ConsumerWidget {
       hasLocation: hasLocation,
       isInteractive: isInteractive,
     );
+    // Spoken as part of the row label rather than left to the subtitle: the
+    // row excludes its descendants' semantics whenever no interactive child
+    // forces them back on, so a subtitle-only age is silent to a screen reader
+    // on exactly the common case.
+    final semanticAge = _lastSeenLabel(l10n);
 
     // Keep the ListTile visually enabled even when non-interactive: the
     // "disabled" state dims the title and avatar, which obscures the
@@ -228,7 +255,9 @@ class CircleMemberTile extends ConsumerWidget {
       // present, see `copyActions` above), so never mark it disabled — a
       // disabled node hides those actions from screen readers.
       enabled: isInteractive || copyActions.isNotEmpty,
-      label: '$displayedName, $semanticHint',
+      label: semanticAge == null
+          ? '$displayedName, $semanticHint'
+          : '$displayedName, $semanticHint, $semanticAge',
       excludeSemantics: descendantsExcluded,
       // In the excluded case the ListTile's own tap semantics are
       // dropped; forward tap-to-center to the outer node so screen
@@ -321,21 +350,51 @@ class CircleMemberTile extends ConsumerWidget {
       );
     }
 
-    if (effectiveDisplayName != null) {
-      // The npub moves to the subtitle once a name occupies the title, and
-      // keeps the same no-ellipsis rule the title applies to it — the roster
-      // is where a user checks who they are sharing live location with, so it
-      // must not clip the six checksum characters the 12/6 form exists for.
-      return Text(
-        NpubValidator.shortenForDisplay(member.npub),
-        textDirection: TextDirection.ltr,
-        style: HavenTypography.monoSmall.copyWith(
-          color: colorScheme.onSurfaceVariant,
-        ),
-      );
-    }
+    final staleLine = _lastSeenLabel(l10n);
 
-    return null;
+    // The npub moves to the subtitle once a name occupies the title, and
+    // keeps the same no-ellipsis rule the title applies to it — the roster
+    // is where a user checks who they are sharing live location with, so it
+    // must not clip the six checksum characters the 12/6 form exists for.
+    final npubLine = effectiveDisplayName == null
+        ? null
+        : Text(
+            NpubValidator.shortenForDisplay(member.npub),
+            textDirection: TextDirection.ltr,
+            style: HavenTypography.monoSmall.copyWith(
+              color: colorScheme.onSurfaceVariant,
+            ),
+          );
+
+    if (staleLine == null) return npubLine;
+
+    final ageText = Text(
+      staleLine,
+      style: Theme.of(
+        context,
+      ).textTheme.bodySmall?.copyWith(color: colorScheme.onSurfaceVariant),
+    );
+    if (npubLine == null) return ageText;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [npubLine, ageText],
+    );
+  }
+
+  /// The "last seen" line, or `null` when there is nothing worth saying.
+  ///
+  /// Gated on [kMemberAgePillThreshold] — the marker age pill's own bound — so
+  /// a member the map shows without a pill never gets an age here either.
+  /// Minutes at every age, for the same reason the pill is: one unit means the
+  /// two surfaces cannot round differently and read as different ages.
+  String? _lastSeenLabel(AppLocalizations l10n) {
+    final at = lastSeen;
+    if (at == null) return null;
+    final age = now().difference(at);
+    if (age < kMemberAgePillThreshold) return null;
+    return l10n.circleMemberLastSeenMinutes(age.inMinutes);
   }
 
   Widget? _buildTrailing(AppLocalizations l10n, String displayedName) {

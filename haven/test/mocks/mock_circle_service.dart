@@ -438,8 +438,13 @@ class MockCircleService implements CircleService {
   /// element and a naive `for` loop would lose.
   final Set<String> encryptLocationThrowKeys = {};
 
+  /// When set, the NEXT [encryptLocation] call returns this deferral instead
+  /// of an encrypted event, and the field is cleared. Models the MLS engine
+  /// queueing an update instead of encrypting it.
+  LocationSendDeferred? deferNextEncrypt;
+
   @override
-  Future<EncryptedLocation> encryptLocation({
+  Future<EncryptLocationOutcome> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
     required double latitude,
@@ -467,13 +472,22 @@ class MockCircleService implements CircleService {
       if (encryptLocationThrowKeys.contains(key)) {
         throw const CircleServiceException('simulated encryptLocation failure');
       }
-      if (_encryptIndex < encryptLocationResults.length) {
-        return encryptLocationResults[_encryptIndex++];
+      // A queued deferral takes precedence and is consumed once, so a test
+      // can make exactly one publish cycle defer and the next succeed.
+      final deferral = deferNextEncrypt;
+      if (deferral != null) {
+        deferNextEncrypt = null;
+        return deferral;
       }
-      return EncryptedLocation(
-        eventJson: '{"id":"mock-event-${_encryptIndex++}","kind":445}',
-        nostrGroupId: List.generate(32, (i) => i),
-        relays: const ['wss://relay.example.com'],
+      if (_encryptIndex < encryptLocationResults.length) {
+        return LocationEncrypted(encryptLocationResults[_encryptIndex++]);
+      }
+      return LocationEncrypted(
+        EncryptedLocation(
+          eventJson: '{"id":"mock-event-${_encryptIndex++}","kind":445}',
+          nostrGroupId: List.generate(32, (i) => i),
+          relays: const ['wss://relay.example.com'],
+        ),
       );
     } finally {
       _encryptInFlight--;
@@ -780,6 +794,31 @@ class MockCircleService implements CircleService {
 
   /// Whether [updateCircleRelays] should throw an exception.
   bool shouldThrowOnUpdateCircleRelays = false;
+
+
+  /// Recorded [repairCircleEpoch] invocations, in order.
+  final List<({Circle circle, String selfPubkeyHex})> repairCircleEpochCalls =
+      [];
+
+  /// What [repairCircleEpoch] returns when it does not throw.
+  EpochRepairResult repairCircleEpochResult = const EpochRepairApplied();
+
+  /// When set, [repairCircleEpoch] throws this instead of returning.
+  Object? repairCircleEpochError;
+
+  @override
+  Future<EpochRepairResult> repairCircleEpoch(
+    Circle circle, {
+    required String selfPubkeyHex,
+  }) async {
+    methodCalls.add('repairCircleEpoch');
+    repairCircleEpochCalls.add((
+      circle: circle,
+      selfPubkeyHex: selfPubkeyHex,
+    ));
+    if (repairCircleEpochError != null) throw repairCircleEpochError!;
+    return repairCircleEpochResult;
+  }
 
   @override
   Future<void> updateCircleRelays({

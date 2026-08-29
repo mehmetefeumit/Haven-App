@@ -12,8 +12,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/location_access_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/providers/sharing_health_provider.dart';
 import 'package:haven/src/services/clock_skew_detector.dart';
 import 'package:haven/src/services/location_settings_launcher.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/map/map_status_banners.dart';
 
 import '../../helpers/localized_app_harness.dart';
@@ -24,6 +26,19 @@ class _NoopLauncher implements LocationSettingsLauncher {
 
   @override
   Future<bool> openAppSettings() async => true;
+}
+
+/// A [SharingHealthNotifier] with the timer and the async derivation removed.
+class _StubHealthNotifier extends SharingHealthNotifier {
+  _StubHealthNotifier(this._initial);
+
+  final SharingHealth _initial;
+
+  @override
+  SharingHealth build() => _initial;
+
+  @override
+  Future<void> refresh() async {}
 }
 
 /// A [LocationAccessNotifier] with the platform wiring removed.
@@ -55,6 +70,7 @@ void main() {
     WidgetTester tester, {
     required LocationAccessStatus status,
     bool clockSkewed = false,
+    SharingHealth sharingHealth = SharingHealth.healthy,
   }) async {
     access = _StubAccessNotifier(status);
     detector = ClockSkewDetector();
@@ -68,9 +84,19 @@ void main() {
         locationAccessProvider.overrideWith(() => access),
         locationSettingsLauncherProvider.overrideWithValue(_NoopLauncher()),
         clockSkewDetectorProvider.overrideWithValue(detector),
+        sharingHealthProvider.overrideWith(
+          () => _StubHealthNotifier(sharingHealth),
+        ),
+        sharingHealthClockProvider.overrideWithValue(
+          () => DateTime.utc(2026, 8, 28, 12, 30),
+        ),
+        sharingRepairProvider.overrideWithValue(() async => null),
       ],
     );
   }
+
+  /// A fault old enough for the banner to have something to date.
+  final stoppedAt = DateTime.utc(2026, 8, 28, 12);
 
   group('precedence', () {
     testWidgets('shows nothing at all while both conditions are fine', (
@@ -141,6 +167,88 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(Card), findsOneWidget);
       expect(find.text(l10n.clockSkewTitle), findsOneWidget);
+    });
+
+    testWidgets('shows the sharing-health banner when only delivery is dead', (
+      tester,
+    ) async {
+      // The case the field incident produced: access is fine, the clock is
+      // fine, and nothing is being delivered. Before this banner the map said
+      // nothing at all.
+      await pumpSlot(
+        tester,
+        status: LocationAccessStatus.available,
+        sharingHealth: SharingHealth.receiveSilent(stoppedAt),
+      );
+
+      expect(find.byKey(WidgetKeys.sharingHealthBanner), findsOneWidget);
+      expect(find.text(l10n.sharingHealthTitleNotReceiving), findsOneWidget);
+    });
+
+    testWidgets('location access WINS over sharing health', (tester) async {
+      // Strictly upstream: with no fix to send, "nothing is being delivered"
+      // is the symptom, and its Repair button would retry a publish that
+      // cannot produce a location in the first place.
+      await pumpSlot(
+        tester,
+        status: LocationAccessStatus.serviceDisabled,
+        sharingHealth: SharingHealth.publishFailing(stoppedAt),
+      );
+
+      expect(find.text(l10n.mapLocationOffTitle), findsOneWidget);
+      expect(find.byKey(WidgetKeys.sharingHealthBanner), findsNothing);
+      expect(find.byType(Card), findsOneWidget);
+    });
+
+    testWidgets('the clock banner WINS over sharing health', (tester) async {
+      // A wrong clock is a CAUSE of the delivery silence: a publisher lagging
+      // past the retention window has every event discarded by correctly-
+      // clocked peers while relays still ACK it. Showing the symptom over the
+      // cause would also offer a Repair that republishes into the same failure.
+      await pumpSlot(
+        tester,
+        status: LocationAccessStatus.available,
+        clockSkewed: true,
+        sharingHealth: SharingHealth.publishFailing(stoppedAt),
+      );
+
+      expect(find.text(l10n.clockSkewTitle), findsOneWidget);
+      expect(find.byKey(WidgetKeys.sharingHealthBanner), findsNothing);
+      expect(find.byType(Card), findsOneWidget);
+    });
+
+    testWidgets('sharing health takes over when the clock is corrected', (
+      tester,
+    ) async {
+      // The still-true condition must not be swallowed by the one that
+      // cleared.
+      await pumpSlot(
+        tester,
+        status: LocationAccessStatus.available,
+        clockSkewed: true,
+        sharingHealth: SharingHealth.publishFailing(stoppedAt),
+      );
+      expect(find.byKey(WidgetKeys.sharingHealthBanner), findsNothing);
+
+      detector.reset();
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(WidgetKeys.sharingHealthBanner), findsOneWidget);
+      expect(find.byType(Card), findsOneWidget);
+    });
+
+    testWidgets('all three at once still renders exactly one card', (
+      tester,
+    ) async {
+      await pumpSlot(
+        tester,
+        status: LocationAccessStatus.serviceDisabled,
+        clockSkewed: true,
+        sharingHealth: SharingHealth.publishFailing(stoppedAt),
+      );
+
+      expect(find.byType(Card), findsOneWidget);
+      expect(find.text(l10n.mapLocationOffTitle), findsOneWidget);
     });
 
     testWidgets('the clock banner takes over when access is restored', (

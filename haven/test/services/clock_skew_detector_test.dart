@@ -391,10 +391,39 @@ void main() {
       return d;
     }
 
-    test('does NOT fire on a single outlying peer', () {
-      // The load-bearing negative. One member's clock being wrong is far more
-      // likely than everyone else's; a detector that fired here would blame
-      // the user's phone for someone else's fault.
+    test('does NOT fire on one outlying peer while another peer agrees with '
+        'this device', () {
+      // A regression pin on the UNCHANGED two-source bar, not evidence about
+      // the sole-source exception: this case passes identically with that
+      // exception reverted (mutation-checked), because two live samples take
+      // it out of the exception's reach entirely. It is here because the bar
+      // is what the exception is carved out of — while a second member is
+      // reachable, that member's agreement with our clock is what keeps a
+      // lone outlier from being read as evidence about this phone.
+      final clock = _FakeClock();
+      final detector = build(clock);
+
+      detector
+        ..recordPeerTimestamp(
+          senderPubkey: 'aa' * 32,
+          peerTimestamp: clock.now.add(const Duration(hours: 6)),
+        )
+        ..recordPeerTimestamp(
+          senderPubkey: 'bb' * 32,
+          peerTimestamp: clock.now,
+        );
+
+      expect(detector.status.signal, ClockSkewSignal.none);
+      expect(detector.status.corroboratingSources, 0);
+    });
+
+    test('fires on the ONLY peer of a two-member circle', () {
+      // The blind spot this closes. A two-member circle can never produce two
+      // corroborating members, so the old bar was not merely unmet but
+      // unmeetable — and a device whose clock is >= the alert threshold
+      // behind loses 100 % of its updates while every publish still reports
+      // success. The most common circle size was structurally unable to see
+      // the exact fault this detector exists to surface.
       final clock = _FakeClock();
       final detector = build(clock);
 
@@ -403,14 +432,48 @@ void main() {
         peerTimestamp: clock.now.add(const Duration(hours: 6)),
       );
 
-      expect(detector.status.signal, ClockSkewSignal.none);
-      expect(detector.status.corroboratingSources, 0);
+      final status = detector.status;
+      expect(status.signal, ClockSkewSignal.peersAheadOfDevice);
+      expect(status.complaint, DeviceClockComplaint.behind);
+      expect(
+        status.corroboratingSources,
+        1,
+        reason:
+            'the verdict must report the single source honestly, not inflate '
+            'it to the nominal two',
+      );
+      expect(status.offsetSecs, const Duration(hours: 6).inSeconds);
     });
 
-    test('does NOT fire on repeated samples from the SAME peer', () {
+    test('a second peer joining a two-member verdict can clear it', () {
+      // Follows directly from the rule: the sole-source exception applies
+      // only while a second member is unavailable. Once one is heard AND
+      // agrees with us, the two-source bar governs again and the banner must
+      // clear — otherwise a verdict raised while alone would outlive the
+      // evidence that refutes it.
+      final clock = _FakeClock();
+      final detector = build(clock);
+
+      detector.recordPeerTimestamp(
+        senderPubkey: 'aa' * 32,
+        peerTimestamp: clock.now.add(const Duration(hours: 6)),
+      );
+      expect(detector.status.signal, ClockSkewSignal.peersAheadOfDevice);
+
+      detector.recordPeerTimestamp(
+        senderPubkey: 'bb' * 32,
+        peerTimestamp: clock.now,
+      );
+
+      expect(detector.status.signal, ClockSkewSignal.none);
+    });
+
+    test('never counts repeated samples from the SAME peer as two sources',
+        () {
       // Samples are keyed by member id, so one member can never supply two of
       // them. Without this, a single skewed (or malicious) member could
-      // corroborate itself just by publishing twice.
+      // corroborate itself just by publishing twice, and would then survive a
+      // second, agreeing member joining the circle.
       final clock = _FakeClock();
       final detector = build(clock);
 
@@ -422,6 +485,23 @@ void main() {
         clock.now = clock.now.add(const Duration(seconds: 30));
       }
 
+      expect(detector.trackedSourceCountForTest, 1);
+      expect(
+        detector.status.corroboratingSources,
+        1,
+        reason:
+            'five publications from one member are still one member; only '
+            'the sole-source rule may fire here, never a fabricated second '
+            'source',
+      );
+
+      // And the proof that the count is real: one agreeing member is enough
+      // to clear it, which could not happen if the five samples had been
+      // counted as independent corroboration.
+      detector.recordPeerTimestamp(
+        senderPubkey: 'bb' * 32,
+        peerTimestamp: clock.now,
+      );
       expect(detector.status.signal, ClockSkewSignal.none);
     });
 
@@ -439,7 +519,18 @@ void main() {
           peerTimestamp: clock.now.add(const Duration(hours: 6)),
         );
 
-      expect(detector.status.signal, ClockSkewSignal.none);
+      expect(
+        detector.trackedSourceCountForTest,
+        1,
+        reason: 'the two casings are one member',
+      );
+      expect(
+        detector.status.corroboratingSources,
+        1,
+        reason:
+            'case folding must not manufacture a second corroborating source '
+            '— the verdict here is the sole-source one, not a two-peer one',
+      );
     });
 
     test('fires once two distinct members corroborate past the threshold', () {

@@ -365,6 +365,10 @@ class AppLocalizationsEn extends AppLocalizations {
       'On. Battery optimization may pause sharing on some phones. Exclude Haven from battery optimization to keep it reliable.';
 
   @override
+  String get locationSettingsBatteryOptNote =>
+      'Battery optimization is still on for Haven. Some phones use it to stop background sharing without warning. Exclude Haven to keep sharing reliable.';
+
+  @override
   String get locationSettingsErrorSnack => 'Something went wrong';
 
   @override
@@ -400,6 +404,24 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String get locationSettingsIosGuidance =>
       'While background sharing is on, Haven keeps a continuous location session and iOS shows a blue status-bar indicator. Granting \"Always\" additionally lets Haven catch up on your circles after iOS closes the app.';
+
+  @override
+  String get fgsNotificationSharing =>
+      'Haven is sending and receiving location information';
+
+  @override
+  String get fgsNotificationPaused =>
+      'Haven is paused — open the app to resume sharing';
+
+  @override
+  String get fgsNotificationOpen => 'Haven is open';
+
+  @override
+  String get fgsChannelName => 'Location Sharing';
+
+  @override
+  String get fgsChannelDescription =>
+      'Keeps Haven sharing your encrypted location in the background.';
 
   @override
   String get mapStyleTitle => 'Map style';
@@ -673,7 +695,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get privacyEncryptionKeysChangeOnMembership =>
-      'Leaving a circle does not take back what its members already saved. Haven changes keys only when someone joins or leaves, never on a timer. So one key can cover weeks of messages, and anything a member saved in that time stays readable to them. They still cannot open anything sent after they left.';
+      'Leaving a circle does not take back what its members already saved. Haven changes keys when someone joins or leaves, or when a circle\'s admin repairs it after it stops receiving — never on a timer. So one key can cover weeks of messages, and anything a member saved in that time stays readable to them. They still cannot open anything sent after they left.';
 
   @override
   String get privacyEncryptionMeansForYou =>
@@ -685,7 +707,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get privacyEncryptionDetailEpochs =>
-      'Each key period is called an epoch, and a circle moves to a new one only when its membership changes. Your device keeps the keys for the current epoch and a few recent ones, enough to open messages still arriving, and drops the rest. A circle whose membership has not changed in months is still on the epoch it started on.';
+      'Each key period is called an epoch. A circle moves to a new one when its membership changes, and when its admin repairs it after it stops receiving. Your device keeps the keys for the current epoch and a few recent ones, enough to open messages still arriving, and drops the rest. A circle nobody has joined or left, and that has never needed repairing, is still on the epoch it started on.';
 
   @override
   String get privacyWhatOthersSeeTitle =>
@@ -1996,6 +2018,124 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String get clockSkewResolvedAnnouncement =>
       'The clock problem is gone. Haven is sharing your location again.';
+
+  @override
+  String get clockSkewTitleDisagreement =>
+      'A clock in one of your circles is wrong';
+
+  @override
+  String get clockSkewBodyDisagreement =>
+      'This phone\'s clock and another member\'s disagree by two minutes or more. If this phone\'s is the wrong one, the locations it sends can expire before anyone sees them. Turn on automatic date and time in system settings to make sure this phone is not the one that is wrong.';
+
+  @override
+  String get clockSkewDisagreementResolvedAnnouncement =>
+      'The clock warning is gone.';
+
+  @override
+  String get sharingHealthTitleStopped => 'Location sharing has stopped';
+
+  @override
+  String get sharingHealthTitleNotSending =>
+      'Your location is not being shared';
+
+  @override
+  String get sharingHealthTitleNotReceiving =>
+      'You are not receiving locations';
+
+  @override
+  String sharingHealthNoUpdatesMinutes(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'No updates for about $countString minutes',
+      one: 'No updates for about 1 minute',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String sharingHealthNoUpdatesHours(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'No updates for about $countString hours',
+      one: 'No updates for about 1 hour',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String sharingHealthNoUpdatesDays(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'No updates for about $countString days',
+      one: 'No updates for about 1 day',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get sharingHealthRepairAction => 'Repair';
+
+  @override
+  String get sharingHealthRepairUnavailableHint =>
+      'Repair is unavailable for this circle';
+
+  @override
+  String get sharingHealthRepairHint =>
+      'Reconnects to the relays, retries sending your location, and, if you are this circle\'s admin, may give it a new key';
+
+  @override
+  String get sharingHealthRepairSent =>
+      'Repair sent. The others will catch up once their phones have picked it up.';
+
+  @override
+  String get sharingHealthRepairNotOwner =>
+      'Only this circle\'s admin can repair it. Ask them to remove you and add you back.';
+
+  @override
+  String get sharingHealthRepairNeedsNewCircle =>
+      'This circle cannot be repaired on this phone. Make a new circle with the same people.';
+
+  @override
+  String get sharingHealthRepairNothingToDo =>
+      'Nothing to repair right now. Haven will keep trying.';
+
+  @override
+  String get sharingHealthRepairUnresolvedAnnouncement =>
+      'Location sharing is still not working.';
+
+  @override
+  String get sharingHealthResumedAnnouncement =>
+      'Location sharing is working again.';
+
+  @override
+  String circleMemberLastSeenMinutes(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      count,
+      locale: localeName,
+      other: 'Last seen $countString minutes ago',
+      one: 'Last seen 1 minute ago',
+    );
+    return '$_temp0';
+  }
 
   @override
   String get mapThisLocation => 'this location';

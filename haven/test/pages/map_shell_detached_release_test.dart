@@ -16,6 +16,7 @@
 /// reordered, or widened into something unsafe.
 library;
 
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -147,7 +148,7 @@ void main() {
       // nothing — the foreground service still cannot open, and background
       // publishing stays dead for the whole session.
       final src = File('lib/src/pages/map_shell.dart').readAsStringSync();
-      final at = src.indexOf('Future<void> _handOffMlsSession() async {');
+      final at = src.indexOf('Future<bool> _handOffMlsSession() async {');
       expect(at, isNonNegative, reason: 'the handoff must exist');
       // Bounded by the NEXT member's doc, so the ordering below is read from
       // the handoff alone and cannot be satisfied by its mirror underneath it.
@@ -156,7 +157,7 @@ void main() {
         src.indexOf('\n  /// Takes the MLS session back', at),
       );
 
-      final stop = body.indexOf('_liveSync?.stop()');
+      final stop = body.indexOf('liveSync.stop()');
       final release = body.indexOf('releaseForHandoff()');
       expect(stop, isNonNegative);
       expect(release, isNonNegative);
@@ -164,6 +165,120 @@ void main() {
         stop,
         lessThan(release),
         reason: 'releasing before the engine stops frees nothing',
+      );
+    });
+
+    test('a stop that did not drain declines the release entirely', () {
+      // The C1 wedge, from the pause side. When the engine reports
+      // `stillHolding`, its supervisor tasks are still running and still hold
+      // the `Arc<CircleManager>` — so disposing THIS isolate's handle frees
+      // nothing and merely removes the last Dart reference to a guard a Rust
+      // static keeps registered. The service then cannot open (held), its
+      // reclaim declines (this isolate is provably alive), and the app returns
+      // to a database nothing can open until a Force Stop.
+      //
+      // Source-asserted for the same reason as the ordering above: the branch
+      // needs a live engine handle and a paused `MapShell`, neither of which
+      // this harness can produce.
+      final src = File('lib/src/pages/map_shell.dart').readAsStringSync();
+      final at = src.indexOf('Future<bool> _handOffMlsSession() async {');
+      final body = src.substring(
+        at,
+        src.indexOf('\n  /// Takes the MLS session back', at),
+      );
+
+      final refusal = body.indexOf('LiveSyncStopOutcome.stillHolding');
+      expect(
+        refusal,
+        isNonNegative,
+        reason: 'the pause path must read the stop outcome, not discard it',
+      );
+
+      // Anchored on the statement that BEGINS the release path, not on
+      // `releaseForHandoff()` itself. The method's own `if (service is!
+      // NostrCircleService) return false;` sits between the two, so a bound of
+      // "some return before the release call" is satisfied by that unrelated
+      // return even when the refusal's own return is deleted — i.e. it passed
+      // with C1 fully re-introduced. The first thing the release path does is
+      // read the provider, so a return that lands before THAT is necessarily
+      // the refusal's.
+      final releasePathStart = body.indexOf(
+        'final service = ref.read(circleServiceProvider)',
+      );
+      expect(
+        releasePathStart,
+        greaterThan(refusal),
+        reason: 'the refusal must be decided before the release path begins',
+      );
+      expect(
+        body.indexOf('return false;', refusal),
+        allOf(isNonNegative, lessThan(releasePathStart)),
+        reason: 'the refusal must SKIP the release, not merely log beside it',
+      );
+    });
+
+    test('a declined handoff does not leave the notification lying', () {
+      // The notification is the ONLY thing a backgrounded user can see, and the
+      // decline path above is a state this code now creates on purpose: the
+      // service will not publish or receive at all until the app is reopened.
+      // Leaving "Haven is sending and receiving location information" up there
+      // would make the one visible surface assert exactly what is not
+      // happening.
+      //
+      // Source-asserted like its siblings: the branch needs a live engine and a
+      // paused MapShell, neither of which this harness can produce.
+      final src = File('lib/src/pages/map_shell.dart').readAsStringSync();
+      final call = src.indexOf('await _handOffMlsSession();');
+      expect(call, isNonNegative);
+      // The window from the handoff to the end of the notification call that
+      // follows it, so an unrelated `updateNotification` elsewhere in the file
+      // (the resume path's `fgsNotificationOpen`) cannot satisfy this.
+      final window = src.substring(call, src.indexOf('    } else if', call));
+
+      expect(
+        window,
+        contains('updateNotification'),
+        reason: 'the pause path must still set the notification',
+      );
+      expect(
+        RegExp(r'handedOff\s*\?').hasMatch(window),
+        isTrue,
+        reason: 'the text must be chosen from the handoff RESULT — an '
+            'unconditional string is the claim that was wrong',
+      );
+      expect(
+        window,
+        contains('l10n.fgsNotificationSharing'),
+        reason: 'the honest text for a handoff that worked',
+      );
+      expect(
+        window,
+        contains('l10n.fgsNotificationPaused'),
+        reason: 'and an honest one for a handoff that did not, naming the '
+            'action that repairs it',
+      );
+    });
+
+    test('and neither of those two messages softens what it claims', () {
+      // The test above pins WHICH message each branch picks. Localizing the
+      // pair moved the copy itself out of the call site, so this pins what the
+      // two messages say: without it the branch could keep choosing correctly
+      // between two strings that no longer distinguish sending from stopped.
+      final arb =
+          jsonDecode(File('lib/l10n/app_en.arb').readAsStringSync())
+              as Map<String, dynamic>;
+
+      expect(
+        arb['fgsNotificationSharing'],
+        'Haven is sending and receiving location information',
+        reason: 'a backgrounded user is told BOTH halves are happening; '
+            'shortening this to "sharing" would hide the receive side',
+      );
+      expect(
+        arb['fgsNotificationPaused'],
+        allOf(startsWith('Haven is paused'), contains('open the app')),
+        reason: 'the declined-handoff text must state that Haven has stopped '
+            'AND name the action that repairs it — reopening the app',
       );
     });
 

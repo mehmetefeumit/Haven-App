@@ -61,6 +61,7 @@ void main() {
 
   Future<void> publish() => service.publishLocation(
     mlsGroupId: const [9, 9, 9],
+    nostrGroupId: const [1, 2, 3],
     senderPubkeyHex: 'ff' * 32,
     latitude: 1,
     longitude: 2,
@@ -169,19 +170,41 @@ void main() {
       expect(detector.status.complaint, DeviceClockComplaint.behind);
     });
 
-    test('one peer alone does not raise the signal through the service', () {
+    test('one peer alone DOES raise the signal through the service, and a '
+        'second, agreeing peer clears it', () async {
+      // A two-member circle has exactly this shape: one peer, forever. The
+      // service must funnel that evidence, not swallow it — otherwise the
+      // commonest circle size can never see a fault that discards every
+      // update while the publisher keeps getting a successful ACK. (This
+      // assertion was inverted when the rule always required two members;
+      // the DOCUMENTED behaviour moved, and the second half below keeps the
+      // corroboration promise under test rather than dropping it.)
       final now = DateTime.now();
-      return service
-          .ingestStreamedLocation(
-            circle: circle,
-            decrypted: _loc(
-              'aa' * 32,
-              timestamp: now.add(const Duration(hours: 6)),
-            ),
-          )
-          .then((_) {
-            expect(detector.status.signal, ClockSkewSignal.none);
-          });
+      await service.ingestStreamedLocation(
+        circle: circle,
+        decrypted: _loc(
+          'aa' * 32,
+          timestamp: now.add(const Duration(hours: 6)),
+        ),
+      );
+
+      expect(detector.status.signal, ClockSkewSignal.peersAheadOfDevice);
+      expect(detector.status.corroboratingSources, 1);
+
+      // …and once a second member IS reachable, its agreement with this
+      // device wins: corroboration still decides whenever it is available.
+      await service.ingestStreamedLocation(
+        circle: circle,
+        decrypted: _loc('bb' * 32, timestamp: now),
+      );
+
+      expect(
+        detector.status.signal,
+        ClockSkewSignal.none,
+        reason:
+            'a member who agrees with this clock is direct evidence that the '
+            'odd one out is the outlier, so the verdict must clear',
+      );
     });
 
     test('ordinary in-time peer locations keep the verdict healthy', () async {
@@ -205,10 +228,12 @@ void main() {
     );
     final result = await bare.publishLocation(
       mlsGroupId: const [9, 9, 9],
+      nostrGroupId: const [1, 2, 3],
       senderPubkeyHex: 'ff' * 32,
       latitude: 1,
       longitude: 2,
     );
-    expect(result.isSuccess, isTrue);
+    expect(result, isA<LocationPublishSent>());
+    expect((result as LocationPublishSent).result.isSuccess, isTrue);
   });
 }

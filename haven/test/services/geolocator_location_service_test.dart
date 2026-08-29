@@ -904,7 +904,17 @@ void main() {
           final captured = captureStreamSettings();
           expect(captured, isA<geo.AppleSettings>());
           final settings = captured as geo.AppleSettings;
-          expect(settings.distanceFilter, 1);
+          // -1 == kCLDistanceFilterNone. Apple's stated requirement for
+          // uninterrupted background updates is that NO distance filter is
+          // set; the 1 m filter this used to carry is part of the shape iOS
+          // is documented to suspend while stationary. Changed deliberately
+          // (the DOCUMENTED behaviour moved), not relaxed: the opt-out case
+          // below still pins 1 m, so the two branches cannot collapse.
+          //
+          // Not 0: geolocator's LocationDistanceMapper means to fold any
+          // non-positive value to the sentinel but compares the boxed
+          // NSNumber POINTER, so a 0 arrives at CoreLocation as a 0 m filter.
+          expect(settings.distanceFilter, -1);
           expect(settings.allowBackgroundLocationUpdates, isTrue);
           expect(settings.showBackgroundLocationIndicator, isTrue);
           expect(settings.pauseLocationUpdatesAutomatically, isFalse);
@@ -924,6 +934,11 @@ void main() {
           final captured = captureStreamSettings();
           expect(captured, isA<geo.AppleSettings>());
           final settings = captured as geo.AppleSettings;
+          // The 1 m filter is KEPT for opt-out users: dropping the filter is
+          // a background-execution requirement, and it costs delivery
+          // frequency (and battery) for a stream that never runs
+          // backgrounded. Pinned here so the two branches cannot converge.
+          expect(settings.distanceFilter, 1);
           // AppleSettings DEFAULTS allowBackgroundLocationUpdates to true;
           // the service must override it to false for opt-out users.
           expect(settings.allowBackgroundLocationUpdates, isFalse);

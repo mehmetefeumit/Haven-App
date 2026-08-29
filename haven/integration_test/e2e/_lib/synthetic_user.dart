@@ -453,13 +453,13 @@ class SyntheticUser {
     required TestRelay relay,
     Duration updateInterval = const Duration(seconds: 198),
   }) async {
-    final encrypted = await user.circleManager.encryptLocation(
+    final encrypted = (await user.circleManager.encryptLocation(
       mlsGroupId: circle.circle.mlsGroupId,
       senderPubkeyHex: pubkeyHex,
       latitude: latitude,
       longitude: longitude,
       updateIntervalSecs: BigInt.from(updateInterval.inSeconds),
-    );
+    )).sent!;
     final (accepted, msg) = await relay.publishAndAwaitOk(
       encrypted.eventJson,
     );

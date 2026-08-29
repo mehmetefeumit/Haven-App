@@ -39,6 +39,7 @@ use tokio::sync::Mutex;
 
 use cgka_engine::canonicalization::CanonicalizationPolicy;
 use cgka_engine::feature_registry::FeatureRegistry;
+use cgka_engine::openmls_projection::{project_mls_message, OpenMlsContentKind};
 use cgka_session::{
     AccountDeviceSession, CreateGroupEffects, IngestEffects, SessionConfig, SessionEffects,
     SessionError,
@@ -53,16 +54,22 @@ use cgka_traits::engine::{CreateGroupRequest, GroupEvent, KeyPackage, SendIntent
 use cgka_traits::engine_state::PendingStateRef;
 use cgka_traits::error::EngineError;
 use cgka_traits::group::{Group, Member};
+use cgka_traits::message::{MessageState, StoredMessagePayload};
 use cgka_traits::peeler::TransportPeeler;
-use cgka_traits::types::{GroupId, MemberId, MessageId};
-use storage_sqlite::SqlCipherKey;
+use cgka_traits::storage::{
+    ConvergencePolicyStorage, GroupStorage, MessageStorage, OutboundIntentStorage, StorageError,
+    StorageResult,
+};
+use cgka_traits::types::{EpochId, GroupId, MemberId, MessageId};
+use storage_sqlite::{SqlCipherKey, SqliteAccountStorage};
 use transport_nostr_peeler::{NostrMlsPeeler, NostrTransportEvent};
 
 use super::retention::RetentionBoundPeeler;
 use super::signer::HavenIdentityProofSigner;
 use super::storage::{LiveSessionGuard, StorageConfig};
 use super::types::{
-    ConvergedRoster, LocationGroupConfig, LocationMessageResult, PreAuthRejection, ScreenedIngest,
+    beyond_relay_retention, ConvergedRoster, ConvergenceSweep, LocationGroupConfig,
+    LocationMessageResult, PreAuthRejection, ScreenedIngest,
 };
 use super::welcome::WelcomePreview;
 use crate::nostr::error::{NostrError, Result};
@@ -97,6 +104,55 @@ const MAX_GROUP_RELAY_URL_LEN: usize = 512;
 /// (Security Rule 6/8).
 fn map_mls_err<E: std::fmt::Display>(e: E) -> NostrError {
     NostrError::MdkError(redact_hex_sequences(&e.to_string()))
+}
+
+/// The `EpochState` names that mean "this group is busy and will settle on its
+/// own", as `cgka_traits` stamps them into `InvalidTransition::from`.
+///
+/// Derived from `EpochState::name()`, which is a `match` over the enum — not
+/// prose. `"Stable"` is deliberately absent: it is the one state from which a
+/// commit is ACCEPTED, so it can never be the `from` of a refusal, and listing
+/// it would classify a hypothetical future refusal as retryable on no evidence.
+/// `"Unrecoverable"` is absent for the opposite reason — see
+/// [`EPOCH_UNRECOVERABLE_TOKEN`].
+const EPOCH_RETRYABLE_TOKENS: [&str; 3] = ["PendingPublish", "Merging", "Recovering"];
+
+/// The `EpochState` name that means "this group is frozen and waiting will not
+/// help".
+///
+/// Kept apart from [`EPOCH_RETRYABLE_TOKENS`] so the two reach the caller as
+/// different outcomes: a retry loop against a group the engine has given up on
+/// is a UI that can never succeed.
+const EPOCH_UNRECOVERABLE_TOKEN: &str = "Unrecoverable";
+
+/// Classifies an engine rejection as an epoch-state refusal, or `None` for every
+/// other failure.
+///
+/// # Why this is a token match rather than a distinct upstream variant
+///
+/// `cgka-engine` has ONE `InvalidTransition` variant and uses it for several
+/// unrelated refusals: a non-`Stable` epoch state (`from` = an `EpochState`
+/// name), a local copy marked removed (`from` = `"Removed"`), and a leave
+/// already in flight (`from` = `"Leaving"`). Only the epoch-state ones are
+/// about the group settling, and only some of THOSE are retryable — so the
+/// `from` token, which `EpochState::name()` derives from the enum, is the
+/// discriminator. It is stable in exactly the way the accompanying `reason`
+/// string is not; matching `reason` would be prose matching, which Haven
+/// forbids.
+///
+/// This is an interim: MDK `e391adc` exposes no `AccountDeviceSession`
+/// epoch-state getter and no distinct error variant, so there is nothing better
+/// to match. `docs/EPOCH_ROTATION_REPAIR_PLAN.md` §6 carries the upstream ask.
+fn epoch_state_rejection(error: &SessionError) -> Option<NostrError> {
+    let SessionError::Engine(EngineError::InvalidTransition(transition)) = error else {
+        return None;
+    };
+    if transition.from == EPOCH_UNRECOVERABLE_TOKEN {
+        return Some(NostrError::EpochUnrecoverable);
+    }
+    EPOCH_RETRYABLE_TOKENS
+        .contains(&transition.from)
+        .then_some(NostrError::EpochNotStable)
 }
 
 /// The convergence policy every Haven session installs.
@@ -155,6 +211,42 @@ pub struct SessionManager {
     /// intercept, and "nobody calls it" is a convention a future edit breaks
     /// silently. Wrapping makes it a type-level property instead.
     preview_peeler: RetentionBoundPeeler,
+    /// A second `storage-sqlite` handle on the SAME `session.sqlite`, used ONLY
+    /// by the stuck-convergence-input sweep
+    /// ([`Self::sweep_unresolvable_inputs`]), its read-only counterpart
+    /// ([`Self::gating_input_count`]) and the queued-intent discard
+    /// ([`Self::discard_queued_location_intents`]).
+    ///
+    /// # Why a second handle exists at all
+    ///
+    /// Neither [`AccountDeviceSession`] nor `cgka_engine::Engine` exposes its
+    /// `StorageProvider` (the engine's field is `pub(crate)`; the session has no
+    /// accessor at the pinned rev), and no public API gives a stored
+    /// `MessageRecord` a terminal disposition or deletes one queued outbound
+    /// intent. The three trait methods this needs —
+    /// [`MessageStorage::update_message_state`],
+    /// [`OutboundIntentStorage::delete_queued_outbound_intent`] and the two
+    /// list calls — are public on `cgka_traits::storage`, and
+    /// [`SqliteAccountStorage::open_encrypted`] is a public constructor. So the
+    /// smallest correct implementation opens the database a second time rather
+    /// than forking MDK. See the Unit B notes in
+    /// `docs/BACKGROUND_SHARING_FAILURE_ANALYSIS.md` for the upstream request
+    /// that would remove it.
+    ///
+    /// # Why this is not a second session (Security Rule 14)
+    ///
+    /// Rule 14 forbids a second live `AccountDeviceSession` because a second
+    /// HYDRATED session runs its own in-memory `EpochManager` and would reach
+    /// the same `(epoch, leaf, generation)` in the sender ratchet — key/nonce
+    /// reuse over location payloads. This handle hydrates nothing: it holds no
+    /// epoch state, no `OpenMLS` group, no exporter secret and no signer, and it
+    /// touches exactly two tables (message records and the outbound-intent
+    /// queue). It never reads or writes group state, ratchet state or key
+    /// material. Every access is taken while the [`Self::session`] mutex is
+    /// held, so no engine statement is ever in flight against the other
+    /// connection; `storage-sqlite` opens WAL with a 5 s `busy_timeout`, which
+    /// makes even an unexpected overlap a wait rather than a failure.
+    message_store: SqliteAccountStorage,
     /// Runtime Rule-14 enforcement: registers this session's `session.sqlite`
     /// path in a process-global set at open and releases it on drop, so a
     /// second `AccountDeviceSession::open` on the same DB file (e.g. a
@@ -214,6 +306,26 @@ impl SessionManager {
         // touches the on-disk state; if the engine open below fails, the guard
         // drops and releases the path (no false lockout on a legitimate retry).
         let live_guard = LiveSessionGuard::acquire(&db_path)?;
+        // Opened BEFORE the session and from the same key, which is then moved
+        // into `SessionConfig` — so the passphrase is never retained by Haven
+        // beyond this function. Both opens run `storage-sqlite`'s idempotent
+        // migrations; this one simply gets there first on a fresh database.
+        // The SAME options the session's own connection uses
+        // ([`StorageConfig::storage_options`]). `journal_mode` is DB-wide and
+        // PERSISTENT, so two connections opening one file with different
+        // options do not merely differ — the second silently re-writes the
+        // first's journalling mode. One source of truth removes the question.
+        let message_store = SqliteAccountStorage::open_encrypted_with_options(
+            &db_path,
+            &key,
+            StorageConfig::storage_options(),
+        )
+        .map_err(|e| {
+            NostrError::StorageError(format!(
+                "failed to open the MLS message store: {}",
+                redact_hex_sequences(&e.to_string())
+            ))
+        })?;
         let identity = keys.public_key().to_bytes().to_vec();
         // The engine's peeler owns NIP-59 welcome crypto; we keep an identical
         // clone (shared identity signer via Arc) for pre-accept preview peels.
@@ -258,10 +370,40 @@ impl SessionManager {
             .feature_registry(self_remove_feature_registry());
 
         let session = AccountDeviceSession::open(config).map_err(map_mls_err)?;
+        // Session-open sweep. A `Created` row orphaned by a kill mid-ingest, or
+        // a `Retryable` row left by a decrypt failure that can never succeed
+        // (an exhausted sender ratchet), gates EVERY later outbound send for
+        // its circle — `cgka_engine`'s `should_queue_outbound_intent` queues
+        // instead of encrypting while any such row sits in the convergence
+        // window, and a stable circle's epoch never moves, so that window is
+        // the circle's whole life. Rows whose event the relay has already
+        // deleted can never be resolved by re-delivery, so open is where they
+        // are cleared: it is the one moment every isolate and every background
+        // wake passes through, and it costs one indexed scan per group.
+        //
+        // Best-effort, exactly like `CircleManager`'s three startup passes: a
+        // session that refused to open because a repair scan failed would take
+        // location sharing down to fix location sharing. The pass is idempotent
+        // and re-runs at the next open (and on a deferred send).
+        match sweep_all_groups(&message_store, Timestamp::now().as_secs()) {
+            Ok(sweep) if sweep == ConvergenceSweep::default() => {}
+            Ok(sweep) => log::info!(
+                "MLS convergence sweep at open: {} stale input(s) retired, \
+                 {} queued location intent(s) discarded, {} row(s) still gating",
+                sweep.disposed_messages,
+                sweep.discarded_intents,
+                sweep.gating_rows
+            ),
+            Err(e) => log::warn!(
+                "MLS convergence sweep at open failed (retries next open): {}",
+                redact_hex_sequences(&e.to_string())
+            ),
+        }
         Ok(Self {
             session: Mutex::new(session),
             identity_pubkey: keys.public_key(),
             preview_peeler,
+            message_store,
             _live_guard: live_guard,
         })
     }
@@ -554,22 +696,32 @@ impl SessionManager {
     /// # Errors
     ///
     /// Returns [`NostrError::InvalidEvent`] if `admins` is empty (a group must
-    /// always retain at least one admin), or a redacted MLS error if the engine
-    /// rejects the commit.
+    /// always retain at least one admin), [`NostrError::EpochNotStable`] if the
+    /// group's epoch state will not accept a staged commit (see
+    /// [`epoch_state_rejection`]), or a redacted MLS error if the engine rejects
+    /// the commit for any other reason.
     pub async fn update_admin_policy(
         &self,
         group_id: &GroupId,
         admins: &[[u8; 32]],
     ) -> Result<SessionEffects> {
         let data = encode_admin_policy_v1(admins)?;
-        self.send(SendIntent::UpdateAppComponents {
-            group_id: group_id.clone(),
-            updates: vec![AppComponentData {
-                component_id: GROUP_ADMIN_POLICY_COMPONENT_ID,
-                data,
-            }],
-        })
-        .await
+        // Not `Self::send`: that funnels every rejection through `map_mls_err`,
+        // which stringifies the engine's typed `InvalidTransition` and destroys
+        // the one signal the epoch-rotation repair needs to distinguish "the
+        // group is busy, try later" from "this failed".
+        self.session
+            .lock()
+            .await
+            .send(SendIntent::UpdateAppComponents {
+                group_id: group_id.clone(),
+                updates: vec![AppComponentData {
+                    component_id: GROUP_ADMIN_POLICY_COMPONENT_ID,
+                    data,
+                }],
+            })
+            .await
+            .map_err(|e| epoch_state_rejection(&e).unwrap_or_else(|| map_mls_err(e)))
     }
 
     /// Low-level passthrough to `session.send`.
@@ -831,6 +983,423 @@ impl SessionManager {
             .publish_failed(pending)
             .await
             .map_err(map_mls_err)
+    }
+
+    // ── Stuck convergence inputs (the outbound send gate) ────────────────────
+
+    /// Gives a terminal disposition to every stored convergence input that the
+    /// relay can no longer redeliver, across every group, and reports what is
+    /// still gating outbound sends.
+    ///
+    /// `now_secs` is injected (Unix seconds) so the age rule is deterministic
+    /// under test; production callers pass the wall clock.
+    ///
+    /// # What it disposes of, and why that cannot fork a group
+    ///
+    /// ONLY `Created`/`Retryable` rows that project to an MLS **application**
+    /// message whose outer `created_at` is [`beyond_relay_retention`]. Such a
+    /// row was never applied: it changed no group state, advanced no epoch,
+    /// consumed no proposal, and left the `OpenMLS` ratchet exactly where it
+    /// was — its whole effect on the group is that the send gate counts it. The
+    /// sender's ratchet is derived, not consumed by a receiver, so the peer is
+    /// unaffected. And the receive plane's cursor never advanced past it (the
+    /// window advance is derived from the plane's own open time, never from an
+    /// event stamp), so nothing about re-request semantics changes either —
+    /// only the row's state, from "retry me" to `Failed`, which the engine
+    /// already reads as `Stale { AlreadySeen }` on a redelivery.
+    ///
+    /// COMMITS are never disposed of, at any age. Commits and proposals carry
+    /// no NIP-40 `expiration`, so a relay keeps them indefinitely and a later
+    /// delivery genuinely can resolve them; retiring one would strand this
+    /// device at an epoch the group has left — the fork this method must not
+    /// cause.
+    ///
+    /// # What it is FOR, given that the engine self-heals most rows
+    ///
+    /// A `Created`/`Retryable` application row **at or below** the group tip is
+    /// resolved by the engine itself: the next settled canonicalization pass
+    /// finds it undecryptable on the canonical branch and writes the terminal
+    /// `EpochInvalidated` (`openmls_projection::message_state_for_invalidated_reason`).
+    /// The shape that does NOT self-heal is a row whose MLS source epoch is
+    /// ABOVE the tip and within `max_rewind_commits` of it: that is kept
+    /// `Retryable` deliberately, so the commit that would make it decryptable
+    /// can still arrive. When that commit never comes — the sender left, the
+    /// relay dropped it, the receive plane missed its window — the row gates
+    /// every outbound send for the circle forever. This sweep is the only thing
+    /// that clears it, and the age rule is what makes clearing it safe.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the message store cannot be read or written.
+    pub async fn sweep_unresolvable_inputs(&self, now_secs: u64) -> Result<ConvergenceSweep> {
+        // Rule 14: hold the session mutex for the whole pass so no engine
+        // statement is in flight against the other connection while this one
+        // writes.
+        let _session = self.session.lock().await;
+        sweep_all_groups(&self.message_store, now_secs).map_err(map_storage_err)
+    }
+
+    /// [`Self::sweep_unresolvable_inputs`] restricted to one group.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the message store cannot be read or written.
+    pub async fn sweep_unresolvable_inputs_for_group(
+        &self,
+        group_id: &GroupId,
+        now_secs: u64,
+    ) -> Result<ConvergenceSweep> {
+        let _session = self.session.lock().await;
+        scan_group_inputs(
+            &self.message_store,
+            group_id,
+            now_secs,
+            ScanMode::RetireUnresolvable,
+        )
+        .map_err(map_storage_err)
+    }
+
+    /// How many stored rows still gate outbound sends for a group, WITHOUT
+    /// writing anything.
+    ///
+    /// The honest way to answer "will the next send encrypt?" after something
+    /// else has already changed the state — running a second full sweep to find
+    /// out would silently retire rows and report the count of a pass nobody
+    /// asked for.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the message store cannot be read.
+    pub async fn gating_input_count(&self, group_id: &GroupId) -> Result<usize> {
+        let _session = self.session.lock().await;
+        // `now_secs` is unused in `CountOnly` mode (nothing is aged out), so the
+        // caller is not asked for a clock it would have no use for.
+        scan_group_inputs(&self.message_store, group_id, 0, ScanMode::CountOnly)
+            .map(|scan| scan.gating_rows)
+            .map_err(map_storage_err)
+    }
+
+    /// Whether a stored proposal for this group is still waiting for a commit.
+    ///
+    /// Deliberately NOT answerable from the engine: a lone uncommitted proposal
+    /// is excluded from `has_unresolved_convergence_inputs` on purpose (a
+    /// proposal only takes effect once a commit consumes it, so it does not make
+    /// canonical state ambiguous), and the in-memory
+    /// `scheduled_self_remove_auto_commits` map is `pub(crate)` AND local to
+    /// this device — the member that will actually auto-commit the proposal is
+    /// somebody else.
+    ///
+    /// What this answers is the question the epoch-rotation repair has to ask:
+    /// *may another member commit at this epoch in a moment?* A stored
+    /// `Created`/`Retryable` proposal row inside the group's convergence window
+    /// is exactly that evidence, and it is durable, so it survives the restart
+    /// that clears every in-memory schedule.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the message store cannot be read.
+    pub async fn has_pending_proposal(&self, group_id: &GroupId) -> Result<bool> {
+        let _session = self.session.lock().await;
+        pending_proposal_in_window(&self.message_store, group_id).map_err(map_storage_err)
+    }
+
+    /// Discards a repair rotation the engine QUEUED instead of staging, and
+    /// returns how many rows were removed.
+    ///
+    /// A queued intent is durable and drains later through
+    /// `converge_and_drain_queued_outbound_intents` — at which point it becomes
+    /// a real commit with NONE of the repair's gates re-evaluated and no rate
+    /// limit charged. Intent ids are not deduplicated, so every Repair tap while
+    /// a circle is send-gated would bank another epoch bump, all of them landing
+    /// in a burst the moment the circle unblocks.
+    ///
+    /// The match is deliberately narrow: an `UpdateAppComponents` for this group
+    /// whose single update is the admin policy AND whose bytes equal the CURRENT
+    /// policy. That payload equality is the whole discriminator — it is what a
+    /// repair rotation is (a no-op re-statement) and what a real handoff or
+    /// self-demote is not, so a queued membership change parked behind the same
+    /// gate survives untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `current_admins` cannot be encoded, or if the message
+    /// store cannot be read or written.
+    pub async fn discard_queued_repair_rotation_intents(
+        &self,
+        group_id: &GroupId,
+        current_admins: &[[u8; 32]],
+    ) -> Result<usize> {
+        let no_op_policy = encode_admin_policy_v1(current_admins)?;
+        let _session = self.session.lock().await;
+        discard_queued_repair_rotation_intents(&self.message_store, group_id, &no_op_policy)
+            .map_err(map_storage_err)
+    }
+
+    /// The `admin-policy.v1` encoding of `admins`, as
+    /// [`Self::update_admin_policy`] would produce it.
+    ///
+    /// Test-only. Exposes the codec (which stays private) so a test can build
+    /// the exact bytes the repair-rotation discard discriminates on — a no-op
+    /// re-statement of the current policy versus a real membership change.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `admins` is empty.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn admin_policy_payload_for_test(admins: &[[u8; 32]]) -> Result<Vec<u8>> {
+        encode_admin_policy_v1(admins)
+    }
+
+    /// Hand-queues an `UpdateAppComponents(admin-policy.v1)` intent carrying
+    /// `data`, as the engine's own `queue_outbound_intent` would.
+    ///
+    /// Test-only. `queue_outbound_intent` is `pub(crate)` to the engine and
+    /// reachable only by driving a send the gate refuses, which cannot produce
+    /// two DIFFERENT policy payloads on demand — so the discard's
+    /// discriminator (payload equality) has no other way to be exercised
+    /// directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the message store cannot be written.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn queue_admin_policy_intent_for_test(
+        &self,
+        group_id: &GroupId,
+        data: Vec<u8>,
+    ) -> Result<()> {
+        use cgka_traits::storage::QueuedOutboundIntent;
+
+        let _session = self.session.lock().await;
+        let mut id = [0u8; 32];
+        OsRng.fill_bytes(&mut id);
+        self.message_store
+            .put_queued_outbound_intent(&QueuedOutboundIntent {
+                id: cgka_traits::types::MessageId::new(id.to_vec()),
+                group_id: group_id.clone(),
+                intent: SendIntent::UpdateAppComponents {
+                    group_id: group_id.clone(),
+                    updates: vec![AppComponentData {
+                        component_id: GROUP_ADMIN_POLICY_COMPONENT_ID,
+                        data,
+                    }],
+                },
+                created_at_ms: 0,
+            })
+            .map_err(map_storage_err)
+    }
+
+    /// The admin-policy payload of every queued `UpdateAppComponents` intent for
+    /// a group.
+    ///
+    /// Test-only. Lets a test distinguish "the repair banked nothing" from "the
+    /// repair banked a rotation" WITHOUT reading the engine's private queue
+    /// shape, and lets it show that a real membership intent parked behind the
+    /// same gate survived.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the message store cannot be read.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn queued_admin_policy_payloads_for_test(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<Vec<Vec<u8>>> {
+        let _session = self.session.lock().await;
+        let mut out = Vec::new();
+        for queued in self
+            .message_store
+            .list_queued_outbound_intents(group_id)
+            .map_err(map_storage_err)?
+        {
+            if let SendIntent::UpdateAppComponents { updates, .. } = &queued.intent {
+                for update in updates {
+                    if update.component_id == GROUP_ADMIN_POLICY_COMPONENT_ID {
+                        out.push(update.data.clone());
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Discards every durably queued outbound LOCATION intent for a group,
+    /// returning how many rows were removed.
+    ///
+    /// The half of the sweep that a deferral needs even when nothing is stuck:
+    /// an eviction-staged deferral has no unresolvable row to retire, but the
+    /// engine still queued the location fix that triggered it, and a fix that
+    /// waits for the next session open is a stale position on a peer's map.
+    /// See [`discard_queued_location_intents`] for why the discard is
+    /// unconditional and why it is `AppMessage`-only.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the message store cannot be read or written.
+    pub async fn discard_queued_location_intents(&self, group_id: &GroupId) -> Result<usize> {
+        let _session = self.session.lock().await;
+        discard_queued_location_intents(&self.message_store, group_id).map_err(map_storage_err)
+    }
+
+    /// Reads the MOST RECENTLY stored openmls-wire row of content `kind` whose
+    /// MLS source epoch satisfies `source_epoch_at_least`, verbatim.
+    ///
+    /// Most-recent rather than first, because a fixture almost always wants the
+    /// row a test JUST caused to be written — and taking the first match
+    /// silently hands back an older row at the same epoch, which is how a
+    /// fixture ends up staging a message the device under test has already
+    /// processed instead of one it has never seen.
+    ///
+    /// Test-only, and one half of the fixture pair: a test stages a stuck row by
+    /// taking a REAL row a real device really stored (with its real MLS wire
+    /// bytes and its real id) and writing it into the device under test with
+    /// [`Self::stage_convergence_input_for_test`]. The two halves are separate
+    /// so the source row can come from a DIFFERENT member's store — which is the
+    /// only way to obtain application bytes sealed at an epoch above this
+    /// device's tip, the one shape the engine deliberately never resolves.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the group holds no matching row, or the store cannot
+    /// be read.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn stored_convergence_input_for_test(
+        &self,
+        group_id: &GroupId,
+        kind: OpenMlsContentKind,
+        source_epoch_at_least: u64,
+    ) -> Result<cgka_traits::message::MessageRecord> {
+        let _session = self.session.lock().await;
+        self.message_store
+            .list_messages(group_id, EpochId(0))
+            .map_err(map_storage_err)?
+            .into_iter()
+            .rev()
+            .find(|record| {
+                gating_projection(&record.payload).is_some_and(|(_, projection)| {
+                    projection.kind == kind
+                        && projection
+                            .source_epoch
+                            .is_some_and(|epoch| epoch >= source_epoch_at_least)
+                })
+            })
+            .ok_or_else(|| {
+                NostrError::StorageError(
+                    "no stored message of that content kind and epoch to copy".to_string(),
+                )
+            })
+    }
+
+    /// Writes `source` into THIS device's store in `state`, its outer
+    /// `created_at` moved `backdated_by_secs` into the past.
+    ///
+    /// Test-only, and the other half of the fixture pair. It reproduces the
+    /// durable row a process kill leaves behind between
+    /// `persist_openmls_wire_message(.., Created)` and `process_message`, or the
+    /// row a decrypt failure leaves as `Retryable`.
+    ///
+    /// # The id is preserved, and that is the whole point
+    ///
+    /// `MessageRecord::id` MUST equal the `TransportMessage::id` embedded in the
+    /// payload. Production always writes them equal (`persist_openmls_wire_message`
+    /// stores `msg.id` as both), and the engine relies on it: every disposition
+    /// path resolves rows by the PAYLOAD-embedded id
+    /// (`project_pending_canonicalization_messages` →
+    /// `persist_openmls_canonicalization_dispositions`), while the send gate
+    /// reads `MessageRecord::state`. A fixture that minted a fresh record id
+    /// would therefore build a row the engine can never dispose of and the gate
+    /// can never stop counting — an artifact that "proves" a wedge production
+    /// cannot reach. Only `TransportMessage::timestamp` is altered here; the id
+    /// is an opaque key to every path that touches it, so backdating cannot
+    /// desynchronize anything.
+    ///
+    /// The record's `epoch` column is stamped with THIS device's current group
+    /// epoch, exactly as `persist_openmls_wire_message` stamps the receiver's
+    /// tip at ingest time.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the group is unknown or the store cannot be written.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn stage_convergence_input_for_test(
+        &self,
+        source: &cgka_traits::message::MessageRecord,
+        state: MessageState,
+        backdated_by_secs: u64,
+    ) -> Result<MessageId> {
+        use cgka_traits::message::MessageRecord;
+        use cgka_traits::transport::Timestamp as TransportTimestamp;
+
+        let _session = self.session.lock().await;
+        let group = self
+            .message_store
+            .get_group(&source.group_id)
+            .map_err(map_storage_err)?;
+
+        let decoded = StoredMessagePayload::decode(&source.payload)
+            .map_err(|e| NostrError::StorageError(format!("stored payload decode: {e}")))?;
+        // Preserved rather than rebuilt: an own published-and-confirmed commit
+        // carries a convergence stamp stored convergence needs, and a copy that
+        // silently dropped it would not be the row a crash leaves.
+        let stamp = decoded.own_commit_stamp().cloned();
+        let mut message = decoded.into_message();
+        message.timestamp =
+            TransportTimestamp(message.timestamp.0.saturating_sub(backdated_by_secs));
+        let id = message.id.clone();
+        let payload = match stamp {
+            Some(stamp) => StoredMessagePayload::own_commit_wire(message, stamp),
+            None => StoredMessagePayload::openmls_wire(message),
+        }
+        .encode()
+        .map_err(|e| NostrError::StorageError(format!("stored payload encode: {e}")))?;
+
+        self.message_store
+            .put_message(&MessageRecord {
+                id: id.clone(),
+                group_id: source.group_id.clone(),
+                epoch: group.epoch,
+                state,
+                payload,
+            })
+            .map_err(map_storage_err)?;
+        Ok(id)
+    }
+
+    /// The stored state of one message row, or `None` when no such row exists.
+    ///
+    /// Test-only: lets a test assert that the sweep changed exactly the row it
+    /// was supposed to and left the others alone.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn stored_message_state_for_test(
+        &self,
+        id: &MessageId,
+    ) -> Result<Option<MessageState>> {
+        let _session = self.session.lock().await;
+        match self.message_store.get_message(id) {
+            Ok(record) => Ok(Some(record.state)),
+            Err(StorageError::NotFound) => Ok(None),
+            Err(e) => Err(map_storage_err(e)),
+        }
+    }
+
+    /// How many outbound intents are durably queued for a group.
+    ///
+    /// Test-only: the discard path's observable effect.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn queued_intent_count_for_test(&self, group_id: &GroupId) -> Result<usize> {
+        let _session = self.session.lock().await;
+        self.message_store
+            .list_queued_outbound_intents(group_id)
+            .map(|queued| queued.len())
+            .map_err(map_storage_err)
     }
 
     // ── Welcomes (hold-before-ingest, F3) ────────────────────────────────────
@@ -1236,6 +1805,289 @@ impl SessionManager {
     }
 }
 
+/// Maps a `storage-sqlite` failure into Haven's redacted storage-error bucket.
+///
+/// Generic over the error type for the same reason [`map_mls_err`] is: it is
+/// used both as a `map_err` argument (by value) and on a formatted message.
+fn map_storage_err<E: std::fmt::Display>(e: E) -> NostrError {
+    NostrError::StorageError(redact_hex_sequences(&e.to_string()))
+}
+
+/// Decodes a stored payload into `(outer created_at, MLS projection)`, or
+/// `None` when the row is not an openmls-wire payload or does not project.
+///
+/// Deliberately the same fail-OPEN three-step chain the engine's own send gate
+/// uses (`decode -> as_openmls_wire -> project_mls_message`, mdk#752): a row
+/// this cannot read is not resolvable convergence work, so it neither gates nor
+/// gets a disposition here.
+fn gating_projection(
+    payload: &[u8],
+) -> Option<(
+    u64,
+    cgka_engine::openmls_projection::OpenMlsMessageProjection,
+)> {
+    let stored = StoredMessagePayload::decode(payload).ok()?;
+    let message = stored.as_openmls_wire()?;
+    let projection = project_mls_message(&message.payload).ok()?;
+    Some((message.timestamp.0, projection))
+}
+
+/// Whether a scan may WRITE.
+///
+/// Split so the "is anything still gating?" question can be asked without
+/// retiring rows as a side effect: a second mutating pass would dispose of rows
+/// nobody asked it to and report a count for a pass the caller never requested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanMode {
+    /// Retire unresolvable application rows and discard queued location
+    /// intents, then count what still gates.
+    RetireUnresolvable,
+    /// Count what gates. Writes nothing; `now_secs` is unused.
+    CountOnly,
+}
+
+/// The convergence rewind window this group's send gate will actually use.
+///
+/// Mirrors the engine's `convergence_policy_for_group` EXACTLY: the PERSISTED
+/// per-group policy if one is stored (`ConvergencePolicyStorage`, which
+/// `Engine::set_group_convergence_policy` is the only writer of), otherwise the
+/// policy this session installs.
+///
+/// Deliberately NOT `max(stored, session)`. A wider window is not the harmless
+/// direction it looks like: this window decides the GATING COUNT as well as the
+/// scan, so widening it over-counts — it reports rows as gating that the
+/// engine's own narrower window ignores, and a circle the engine would happily
+/// let send is then surfaced to the user as permanently stalled. Matching the
+/// engine is the only value that makes `gating_rows == 0` mean what it says.
+/// A stored policy that cannot be decoded is treated as absent, which is what
+/// the engine does with one it cannot validate.
+fn convergence_rewind_for_group(store: &SqliteAccountStorage, group_id: &GroupId) -> u64 {
+    store
+        .convergence_policy(group_id)
+        .ok()
+        .flatten()
+        .and_then(|bytes| serde_json::from_slice::<CanonicalizationPolicy>(&bytes).ok())
+        .map_or_else(
+            || session_convergence_policy().convergence.max_rewind_commits,
+            |policy| policy.convergence.max_rewind_commits,
+        )
+}
+
+/// One group's pass over the stored convergence inputs.
+///
+/// Mirrors `cgka_engine`'s `has_unresolved_convergence_inputs` exactly for the
+/// GATING count — the same `[tip - max_rewind, tip + max_rewind]` window, the
+/// same `Created`/`Retryable` states, the same commit-or-application content
+/// kinds, the same future-horizon skip — so `gating_rows == 0` is a faithful
+/// prediction of "the next send will encrypt rather than queue".
+///
+/// In [`ScanMode::RetireUnresolvable`] it also writes: the DISPOSITION is
+/// narrower than the gate on purpose (application messages only, and only past
+/// [`beyond_relay_retention`]), and queued location intents are discarded. See
+/// [`SessionManager::sweep_unresolvable_inputs`] for why a commit is never
+/// disposed of at any age.
+fn scan_group_inputs(
+    store: &SqliteAccountStorage,
+    group_id: &GroupId,
+    now_secs: u64,
+    mode: ScanMode,
+) -> StorageResult<ConvergenceSweep> {
+    let group = match store.get_group(group_id) {
+        Ok(group) => group,
+        // The engine's gate reads a missing group as "nothing gates"; so does
+        // this, rather than turning a deleted circle into a sweep failure.
+        Err(StorageError::NotFound) => return Ok(ConvergenceSweep::default()),
+        Err(e) => return Err(e),
+    };
+    let rewind = convergence_rewind_for_group(store, group_id);
+    let anchor = EpochId(group.epoch.0.saturating_sub(rewind));
+    let ceiling = group.epoch.0.saturating_add(rewind);
+    let retiring = mode == ScanMode::RetireUnresolvable;
+
+    let mut sweep = ConvergenceSweep::default();
+    for record in store.list_messages(group_id, anchor)? {
+        if !matches!(
+            record.state,
+            MessageState::Created | MessageState::Retryable
+        ) {
+            continue;
+        }
+        let Some((created_at, projection)) = gating_projection(&record.payload) else {
+            continue;
+        };
+        if retiring
+            && projection.kind == OpenMlsContentKind::Application
+            && beyond_relay_retention(created_at, now_secs)
+        {
+            // Retired regardless of where the row sits relative to the future
+            // horizon: an application message the relay has deleted can never
+            // become applicable, so keeping it "in case the tip advances into
+            // its window" only re-arms the gate later.
+            store.update_message_state(&record.id, MessageState::Failed)?;
+            sweep.disposed_messages += 1;
+            continue;
+        }
+        let beyond_horizon = projection.source_epoch.is_some_and(|epoch| epoch > ceiling);
+        if !beyond_horizon
+            && matches!(
+                projection.kind,
+                OpenMlsContentKind::Application | OpenMlsContentKind::Commit
+            )
+        {
+            sweep.gating_rows += 1;
+        }
+    }
+
+    if !retiring {
+        return Ok(sweep);
+    }
+
+    sweep.discarded_intents = discard_queued_location_intents(store, group_id)?;
+    Ok(sweep)
+}
+
+/// Whether the group holds a proposal that a member could still commit.
+///
+/// # Why the epoch bound is the whole predicate
+///
+/// A proposal is only committable at the epoch it was made for: MDK's own replay
+/// refuses one whose `source_epoch` no longer equals the group's
+/// (`replay_scheduled_self_remove_auto_commit`), and RFC 9420 says the same — a
+/// commit references proposals from the epoch it extends. A proposal BELOW the
+/// group record's epoch has already been superseded and cannot produce a
+/// competing commit.
+///
+/// That bound is not a refinement, it is the difference between a gate and a
+/// wedge. The engine never marks a proposal row `Processed`: its ingest arm
+/// stores the row and returns, and the row keeps its `Created` state for the
+/// life of the group. Counting `Created` proposal rows at ANY epoch would make
+/// every circle that has ever had a departure permanently unrepairable —
+/// silently, because a skip is indistinguishable from a healthy circle.
+/// `a_repair_is_possible_again_once_the_departure_commits` is the test that
+/// fails when this regresses.
+///
+/// A proposal above the future horizon is skipped for the same reason
+/// [`scan_group_inputs`] skips one: it cannot chain from the current tip yet, so
+/// no member can commit it.
+fn pending_proposal_in_window(
+    store: &SqliteAccountStorage,
+    group_id: &GroupId,
+) -> StorageResult<bool> {
+    let group = match store.get_group(group_id) {
+        Ok(group) => group,
+        // A missing group holds no proposals; the engine's own gate reads a
+        // missing group the same way.
+        Err(StorageError::NotFound) => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let rewind = convergence_rewind_for_group(store, group_id);
+    let anchor = EpochId(group.epoch.0.saturating_sub(rewind));
+    let ceiling = group.epoch.0.saturating_add(rewind);
+
+    for record in store.list_messages(group_id, anchor)? {
+        if !matches!(
+            record.state,
+            MessageState::Created | MessageState::Retryable
+        ) {
+            continue;
+        }
+        let Some((_created_at, projection)) = gating_projection(&record.payload) else {
+            continue;
+        };
+        if projection.kind != OpenMlsContentKind::Proposal {
+            continue;
+        }
+        // No source epoch is not "harmless": an undatable proposal cannot be
+        // shown to be superseded, so it counts. Production always carries one
+        // (`project_mls_message` reads it off the wire for the plaintext
+        // proposals MDK sends), so this is the fail-closed floor, not a path.
+        let committable = projection
+            .source_epoch
+            .is_none_or(|epoch| epoch >= group.epoch.0 && epoch <= ceiling);
+        if committable {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Deletes every durably queued outbound LOCATION intent for a group, returning
+/// how many rows were removed.
+///
+/// `AppMessage` is the ONLY intent Haven ever sends that is disposable:
+/// [`SessionManager::create_message`] is reached from
+/// [`SessionManager::send_location`] and nowhere else, so every queued app
+/// message is a location fix. A queued membership change (a leave, an invite) is
+/// durable user intent parked behind the same gate and is never touched.
+///
+/// Discarded UNCONDITIONALLY rather than by age. An intent is queued only
+/// because the circle could not send, so by the time anything reads it the fix
+/// has already missed at least one publish cycle and the next tick carries a
+/// better one — there is no age at which publishing it beats publishing a
+/// current position, and a stale marker on a peer's map is worse than no marker.
+/// (There is also no honest age to test: the engine stamps `created_at_ms` from
+/// `convergence_now_ms`, which is elapsed time since THIS engine started, not a
+/// wall clock, so it is neither comparable to a Unix timestamp nor stable across
+/// a restart.)
+/// Deletes every durably queued outbound intent for a group that is a repair
+/// rotation — an `UpdateAppComponents` carrying exactly one update, for the
+/// admin-policy component, whose bytes equal `no_op_policy`.
+///
+/// See [`SessionManager::discard_queued_repair_rotation_intents`] for why the
+/// payload equality is the discriminator and why nothing else may be discarded.
+fn discard_queued_repair_rotation_intents(
+    store: &SqliteAccountStorage,
+    group_id: &GroupId,
+    no_op_policy: &[u8],
+) -> StorageResult<usize> {
+    let mut discarded = 0;
+    for queued in store.list_queued_outbound_intents(group_id)? {
+        let SendIntent::UpdateAppComponents { updates, .. } = &queued.intent else {
+            continue;
+        };
+        let [update] = updates.as_slice() else {
+            continue;
+        };
+        if update.component_id == GROUP_ADMIN_POLICY_COMPONENT_ID && update.data == no_op_policy {
+            store.delete_queued_outbound_intent(&queued.id)?;
+            discarded += 1;
+        }
+    }
+    Ok(discarded)
+}
+
+fn discard_queued_location_intents(
+    store: &SqliteAccountStorage,
+    group_id: &GroupId,
+) -> StorageResult<usize> {
+    let mut discarded = 0;
+    for queued in store.list_queued_outbound_intents(group_id)? {
+        if matches!(queued.intent, SendIntent::AppMessage { .. }) {
+            store.delete_queued_outbound_intent(&queued.id)?;
+            discarded += 1;
+        }
+    }
+    Ok(discarded)
+}
+
+/// [`scan_group_inputs`] in [`ScanMode::RetireUnresolvable`] over every group
+/// the store holds.
+fn sweep_all_groups(
+    store: &SqliteAccountStorage,
+    now_secs: u64,
+) -> StorageResult<ConvergenceSweep> {
+    let mut total = ConvergenceSweep::default();
+    for group_id in store.list_groups()? {
+        total.absorb(scan_group_inputs(
+            store,
+            &group_id,
+            now_secs,
+            ScanMode::RetireUnresolvable,
+        )?);
+    }
+    Ok(total)
+}
+
 /// The [`ConvergedRoster`] verdict for one group, taken from a single, already
 /// acquired session guard.
 ///
@@ -1463,6 +2315,145 @@ fn inviter_from_sender(sender: Option<&MemberId>) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Gate 2: the epoch-state token match ──────────────────────────────────
+
+    #[test]
+    fn every_epoch_state_name_is_pinned_by_the_token_set() {
+        use cgka_traits::engine_state::{EpochState, PendingStateRef, StagedCommitHandle};
+        use cgka_traits::types::EpochId;
+
+        // Real states, built through the public transition API, so the tokens
+        // asserted here are the ones `EpochState::name()` actually produces —
+        // not literals copied from the upstream source.
+        let stable = EpochState::stable(EpochId(7));
+        let pending = stable
+            .clone()
+            .begin_pending(
+                EpochId(8),
+                StagedCommitHandle::from_bytes(Vec::new()),
+                PendingStateRef::new(1),
+            )
+            .expect("Stable -> PendingPublish is legal");
+        let merging = pending
+            .clone()
+            .confirm_publish()
+            .expect("PendingPublish -> Merging is legal");
+        let recovering = EpochState::stable(EpochId(7)).detect_fork(Vec::new());
+        let unrecoverable = EpochState::stable(EpochId(7)).to_unrecoverable();
+
+        // An exhaustive match, so a NEW upstream `EpochState` variant breaks
+        // compilation here rather than silently arriving as an `InvalidTransition`
+        // this classifier drops into the generic MLS-error bucket.
+        for state in [&stable, &pending, &merging, &recovering, &unrecoverable] {
+            let expected = match state {
+                EpochState::Stable { .. } => "Stable",
+                EpochState::PendingPublish(_) => "PendingPublish",
+                EpochState::Merging(_) => "Merging",
+                EpochState::Recovering(_) => "Recovering",
+                EpochState::Unrecoverable(_) => "Unrecoverable",
+            };
+            assert_eq!(state.name(), expected, "upstream renamed an epoch state");
+            // Every epoch state must land in EXACTLY one bucket: retryable,
+            // terminal, or `Stable` (which is never the `from` of a refusal,
+            // because it is the one state a commit is accepted from).
+            let retryable = EPOCH_RETRYABLE_TOKENS.contains(&state.name());
+            let terminal = state.name() == EPOCH_UNRECOVERABLE_TOKEN;
+            let accepting = state.name() == "Stable";
+            assert_eq!(
+                usize::from(retryable) + usize::from(terminal) + usize::from(accepting),
+                1,
+                "'{}' must be classified exactly once",
+                state.name()
+            );
+        }
+        assert!(
+            !EPOCH_RETRYABLE_TOKENS.contains(&"Stable"),
+            "`Stable` can never be a refusal's `from`; listing it would classify a future \
+             refusal as retryable on no evidence"
+        );
+    }
+
+    #[test]
+    fn only_an_epoch_state_transition_maps_to_epoch_not_stable() {
+        use cgka_traits::engine_state::InvalidTransition;
+
+        let refusal = |from: &'static str| {
+            SessionError::Engine(EngineError::InvalidTransition(InvalidTransition {
+                from,
+                to: "UpdateAppComponents",
+                reason: "update_app_components requires Stable",
+            }))
+        };
+
+        // The same `InvalidTransition` variant carries several unrelated
+        // refusals, and they need OPPOSITE handling.
+        for token in EPOCH_RETRYABLE_TOKENS {
+            assert!(
+                matches!(
+                    epoch_state_rejection(&refusal(token)),
+                    Some(NostrError::EpochNotStable)
+                ),
+                "'{token}' is a state the group leaves on its own and must read as retryable"
+            );
+        }
+        assert!(
+            matches!(
+                epoch_state_rejection(&refusal(EPOCH_UNRECOVERABLE_TOKEN)),
+                Some(NostrError::EpochUnrecoverable)
+            ),
+            "a frozen group must NOT read as retryable — that is a repair loop that can \
+             never succeed"
+        );
+        // `Stable` is not a refusal state; if one ever arrives it must not be
+        // guessed at.
+        assert!(epoch_state_rejection(&refusal("Stable")).is_none());
+
+        for token in ["Removed", "Leaving"] {
+            let err = SessionError::Engine(EngineError::InvalidTransition(InvalidTransition {
+                from: token,
+                to: "UpdateAppComponents",
+                reason: "local group copy is marked removed (self-evicted)",
+            }));
+            assert!(
+                epoch_state_rejection(&err).is_none(),
+                "'{token}' is not an epoch state and must not read as retryable"
+            );
+        }
+
+        // Nor may any other engine failure.
+        let other = SessionError::Engine(EngineError::UnknownGroup(GroupId::new(vec![9; 32])));
+        assert!(epoch_state_rejection(&other).is_none());
+    }
+
+    #[test]
+    fn the_epoch_not_stable_error_names_no_state_and_no_group() {
+        // It is surfaced to the user through `CircleError::Mls`, so its Display
+        // must carry no group id, no epoch, and not even the state name — which
+        // is engine bookkeeping the user cannot act on (Security Rule 8).
+        for (error, expected) in [
+            (
+                NostrError::EpochNotStable,
+                "the circle's group state is busy; try again shortly",
+            ),
+            (
+                NostrError::EpochUnrecoverable,
+                "the circle's group state cannot be repaired on this device",
+            ),
+        ] {
+            let rendered = error.to_string();
+            assert_eq!(rendered, expected);
+            for needle in EPOCH_RETRYABLE_TOKENS
+                .iter()
+                .chain(std::iter::once(&EPOCH_UNRECOVERABLE_TOKEN))
+            {
+                assert!(
+                    !rendered.contains(needle),
+                    "the surfaced message must not name the epoch state"
+                );
+            }
+        }
+    }
 
     #[test]
     fn a_welcome_preview_carries_the_seal_author_as_canonical_hex() {

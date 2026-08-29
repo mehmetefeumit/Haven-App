@@ -420,7 +420,7 @@ abstract class AppLocalizations {
   /// **'Cancel'**
   String get commonCancel;
 
-  /// Generic action that opens the OS app settings (e.g. to grant notifications or change location permission).
+  /// Generic action that opens an OS settings screen for Haven (e.g. to grant notifications, change location permission, or exclude Haven from battery optimization).
   ///
   /// In en, this message translates to:
   /// **'Open settings'**
@@ -708,6 +708,12 @@ abstract class AppLocalizations {
   /// **'On. Battery optimization may pause sharing on some phones. Exclude Haven from battery optimization to keep it reliable.'**
   String get locationSettingsBatteryOptSnack;
 
+  /// Android-only advisory shown on the location settings page, under the background-sharing toggle, for as long as the user has background sharing ON but has NOT granted Haven the battery-optimization exemption (the one-off snackbar locationSettingsBatteryOptSnack said the same thing once, at the moment they declined; this line persists so the state is discoverable later). It renders beside an 'Open settings' button that opens the system battery-optimization screen. Accuracy limits, both directions: it MUST NOT say sharing IS stopped or broken — on most phones an ongoing foreground service keeps running fine, and claiming a fault the user cannot see would train them to ignore the line; and it MUST keep 'some phones', because the real risk is vendor battery managers (Samsung, Xiaomi and similar), not stock Android Doze, which a foreground service already survives. 'Battery optimization' is Android's own settings-screen wording — use the term your locale's Android system settings use, not a literal translation, so the user can find the screen.
+  ///
+  /// In en, this message translates to:
+  /// **'Battery optimization is still on for Haven. Some phones use it to stop background sharing without warning. Exclude Haven to keep sharing reliable.'**
+  String get locationSettingsBatteryOptNote;
+
   /// Generic snackbar shown when toggling background sharing fails unexpectedly.
   ///
   /// In en, this message translates to:
@@ -767,6 +773,36 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'While background sharing is on, Haven keeps a continuous location session and iOS shows a blue status-bar indicator. Granting \"Always\" additionally lets Haven catch up on your circles after iOS closes the app.'**
   String get locationSettingsIosGuidance;
+
+  /// Text of the Android ongoing foreground-service notification while background sharing is on and Haven is in the background. This is the ONE surface a user sees for as long as Haven runs behind other apps, so it must state exactly what Haven is doing and nothing more. Both halves are load-bearing and both are literally true on this path: Haven is sending this device's location to its circles AND receiving the circles' locations. Do not shorten it to 'sharing your location' (that hides the receiving half), and do not add a promise about what happens if the system closes Haven. It is a statement about the app's activity, not an instruction to the user. Paired with the notification title 'Haven', which stays the untranslated product name.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven is sending and receiving location information'**
+  String get fgsNotificationSharing;
+
+  /// Text of the same Android foreground-service notification when Haven could not hand its encrypted-messaging session to the service, so the service can neither send nor receive until the user reopens Haven. 'Haven is paused' describes the APP's STATE: it is NOT an imperative ('pause Haven'), NOT the user's own state, and NOT a claim that the user pressed a pause control — Haven has no pause button. The second clause is the remedy and must stay actionable: reopening the app is what repairs this. Keep the state before the remedy, and keep it to one line — Android collapses this notification to a single line, so a translation that buries the state gets truncated away. A user must be able to tell it apart at a glance from fgsNotificationSharing, which is this same notification when the handover DID work.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven is paused — open the app to resume sharing'**
+  String get fgsNotificationPaused;
+
+  /// Text of the Android foreground-service notification while Haven is in the FOREGROUND: the service is running, but the app itself is doing the sending and receiving, so this line deliberately claims no background activity. 'open' is the app's STATE — Haven is currently open, in use, on screen. Never the imperative 'open Haven', which would instruct a user who already has it open, and never the 'open' of 'open source'. Very short by design so it survives the collapsed single-line notification without truncation. Contrast with fgsNotificationSharing, shown on this same notification once the app is backgrounded.
+  ///
+  /// In en, this message translates to:
+  /// **'Haven is open'**
+  String get fgsNotificationOpen;
+
+  /// Name of the Android notification CHANNEL the foreground-service notification belongs to. Shown in the system settings app (Settings > Apps > Haven > Notifications), in a list beside the app's other categories, and in the 'category' line the user long-presses the notification to reach — never inside Haven itself. So this is settings-page register, not notification register: a SHORT NOUN PHRASE naming a category of notifications, the way an OS settings list labels one. Not a sentence, not an instruction, no final period, and no verb — 'Location Sharing', never 'Haven is sharing your location' or 'Share location'. Keep it short: the system truncates it in a single-line list row. Follow the platform's own convention for this language on capitalization (English title-cases channel names; most languages do not).
+  ///
+  /// In en, this message translates to:
+  /// **'Location Sharing'**
+  String get fgsChannelName;
+
+  /// Description of that same Android notification channel, shown as one line of secondary text under fgsChannelName in the system settings app. Answers 'what are the notifications in this category for?' — it describes what the ongoing notification's service DOES, so the user can decide whether to keep the category enabled. Exactly ONE sentence, ending with a period, in the same calm settings-page register as fgsChannelName. 'encrypted' is a factual claim Haven makes everywhere about location data and must survive translation; 'in the background' means while the app is not on screen, not 'secretly'. Do not turn it into an instruction, a warning, or a promise about battery.
+  ///
+  /// In en, this message translates to:
+  /// **'Keeps Haven sharing your encrypted location in the background.'**
+  String get fgsChannelDescription;
 
   /// Title of the map-style settings page (AppBar).
   ///
@@ -1212,10 +1248,10 @@ abstract class AppLocalizations {
   /// **'When someone leaves a circle, it moves to another new key. They stop being able to read anything new once the rest of the circle has caught up, usually within a few minutes, longer for anyone who was offline at the time.'**
   String get privacyEncryptionWhenSomeoneLeaves;
 
-  /// Warning callout, Privacy → How the encryption works. THE most factually load-bearing string in the Privacy section. Haven disables periodic key rotation (an owner-accepted deviation documented in haven-core/SECURITY.md), so keys rotate ONLY on membership change and one key covers a whole epoch. Never translate this in a way that implies keys rotate regularly, and never use this locale's term for 'forward secrecy' here.
+  /// Warning callout, Privacy → How the encryption works. THE most factually load-bearing string in the Privacy section. Haven runs NO periodic key rotation (an owner-accepted deviation documented in haven-core/SECURITY.md), so one key covers a whole epoch. Keys change on exactly TWO triggers: a membership change, and the circle's sole ADMIN tapping Repair on a circle whose delivery has broken (docs/EPOCH_ROTATION_REPAIR_PLAN.md — admin-only, rate-limited to once a day). Name the ROLE, not the creator: after an admin handoff the creator can no longer do it, so 'the person who created the circle' is false. Use this locale's Admin badge wording (circleMemberAdmin), the same term sharingHealthRepairNotOwner uses. The absolute claim that must survive translation is 'never on a timer'; do NOT re-add an exclusivity word on the membership trigger, which would make the sentence false again. Do not translate 'repair' as reset / reinstall / restart — it names the Repair control in sharingHealthRepairAction, so use this locale's wording for that button. Never translate this in a way that implies keys rotate regularly, and never use this locale's term for 'forward secrecy' here.
   ///
   /// In en, this message translates to:
-  /// **'Leaving a circle does not take back what its members already saved. Haven changes keys only when someone joins or leaves, never on a timer. So one key can cover weeks of messages, and anything a member saved in that time stays readable to them. They still cannot open anything sent after they left.'**
+  /// **'Leaving a circle does not take back what its members already saved. Haven changes keys when someone joins or leaves, or when a circle\'s admin repairs it after it stops receiving — never on a timer. So one key can cover weeks of messages, and anything a member saved in that time stays readable to them. They still cannot open anything sent after they left.'**
   String get privacyEncryptionKeysChangeOnMembership;
 
   /// The practical takeaway for Privacy → How the encryption works, and the actionable consequence of the epoch caveat above.
@@ -1230,10 +1266,10 @@ abstract class AppLocalizations {
   /// **'MLS (Messaging Layer Security) is the same IETF standard used by other secure messengers. Haven reaches the Nostr network through the Marmot protocol, which defines how MLS groups travel over relays. The key each circle signs with is separate from your public Nostr identity key.'**
   String get privacyEncryptionDetailMls;
 
-  /// Technical-detail paragraph (collapsed by default), Privacy → How the encryption works. 'epoch' is a term of art; introduce it as the paragraph does rather than replacing it.
+  /// Technical-detail paragraph (collapsed by default), Privacy → How the encryption works. 'epoch' is a term of art; introduce it as the paragraph does rather than replacing it. A circle moves to a new epoch on exactly TWO triggers — a membership change, and the circle's sole ADMIN tapping Repair on a circle whose delivery has broken (docs/EPOCH_ROTATION_REPAIR_PLAN.md). Name the ROLE, not the creator: after an admin handoff the creator can no longer do it. Use this locale's Admin badge wording (circleMemberAdmin). An earlier version said 'only when its membership changes'; do NOT restore that exclusivity, it is false. The closing sentence must keep BOTH conditions (nobody joined or left AND it never needed repairing), or it claims more than the code guarantees.
   ///
   /// In en, this message translates to:
-  /// **'Each key period is called an epoch, and a circle moves to a new one only when its membership changes. Your device keeps the keys for the current epoch and a few recent ones, enough to open messages still arriving, and drops the rest. A circle whose membership has not changed in months is still on the epoch it started on.'**
+  /// **'Each key period is called an epoch. A circle moves to a new one when its membership changes, and when its admin repairs it after it stops receiving. Your device keeps the keys for the current epoch and a few recent ones, enough to open messages still arriving, and drops the rest. A circle nobody has joined or left, and that has never needed repairing, is still on the epoch it started on.'**
   String get privacyEncryptionDetailEpochs;
 
   /// Title of the Privacy topic contrasting what circle members can observe with what relay operators can observe. The two are deliberately on one page so the contrast is unmissable.
@@ -3108,7 +3144,7 @@ abstract class AppLocalizations {
   /// **'Your circles are not receiving your location, because the relays reject the time this phone stamps on it. Turn on automatic date and time in system settings to fix it.'**
   String get clockSkewBodyRejected;
 
-  /// Banner body when several independent circle members consistently report times ahead of this device (a clock running slow). Crucially this fault is INVISIBLE: the send succeeds and the data is then discarded, so the wording must convey 'sent but wasted', and MUST NEVER imply the send failed — that is the distinction from clockSkewBodyRejected, and the two bodies must not be merged. 'Expire' refers to a short time-to-live carried on each location update. Same remedy sentence as clockSkewBodyRejected; keep it identical in your locale so the fix reads the same in both faults.
+  /// Banner body when TWO OR MORE independent circle members consistently report times ahead of this device (a clock running slow). The one-member case is a DIFFERENT string (clockSkewBodyDisagreement) because a single peer cannot tell us whose clock is wrong; this one may accuse this phone precisely because several members agree. Crucially this fault is INVISIBLE: the send succeeds and the data is then discarded, so the wording must convey 'sent but wasted', and MUST NEVER imply the send failed — that is the distinction from clockSkewBodyRejected, and the two bodies must not be merged. 'Expire' refers to a short time-to-live carried on each location update. Same remedy sentence as clockSkewBodyRejected; keep it identical in your locale so the fix reads the same in both faults.
   ///
   /// In en, this message translates to:
   /// **'This phone is running behind the rest of your circles, so the locations it sends expire before anyone can see them. Turn on automatic date and time in system settings to fix it.'**
@@ -3119,6 +3155,120 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'The clock problem is gone. Haven is sharing your location again.'**
   String get clockSkewResolvedAnnouncement;
+
+  /// Title of the clock banner in the ONE-OTHER-MEMBER case, where Haven has heard from exactly one other member and therefore CANNOT tell whose clock is wrong — this phone's or theirs. It MUST NOT accuse this phone: that is what the other title (clockSkewTitle) is for, and it is used only when two or more members independently agree. Say 'one of your circles', NEVER 'this circle': the verdict is app-global (it is fed by every circle at once), so the banner can be on screen while the map is showing a different circle than the one the disagreement came from. Short headline (fits one or two lines beside an icon). 'Circle' is Haven's word for a sharing group and is already translated elsewhere in this file — reuse that term, in the plural.
+  ///
+  /// In en, this message translates to:
+  /// **'A clock in one of your circles is wrong'**
+  String get clockSkewTitleDisagreement;
+
+  /// Banner body paired with clockSkewTitleDisagreement: exactly one other member has been heard from, so the disagreement is certain but the CULPRIT is not. Three hard accuracy limits, all of which a careless translation breaks. (1) NEVER say this phone's clock is wrong, only that the two disagree. (2) NEVER say anything IS being lost: the protocol tolerates roughly four and a half minutes of disagreement, so between two minutes (when this fires) and that point nothing is lost yet — hence 'can expire', a possibility, never 'expire'. Compare clockSkewBodyBehind, which DOES assert real loss and is used only when several members agree. (3) The remedy is deliberately hedged: fixing this phone's clock only rules THIS phone out; it cannot fix the other member's. 'Two minutes' is the real alert threshold (120 seconds) — keep the number. 'Expire' refers to a short time-to-live carried on each location update. Use the same words for the automatic-date-and-time setting as clockSkewBodyRejected does in your locale (on iOS Settings > General > Date & Time > Set Automatically, on Android Settings > System > Date & time > Set time automatically).
+  ///
+  /// In en, this message translates to:
+  /// **'This phone\'s clock and another member\'s disagree by two minutes or more. If this phone\'s is the wrong one, the locations it sends can expire before anyone sees them. Turn on automatic date and time in system settings to make sure this phone is not the one that is wrong.'**
+  String get clockSkewBodyDisagreement;
+
+  /// Screen-reader announcement spoken once when the ONE-OTHER-MEMBER clock banner clears. Separate from clockSkewResolvedAnnouncement because that one says Haven 'is sharing your location again', which would be an over-claim here: in this case sharing may never have stopped at all (see clockSkewBodyDisagreement). It must ALSO not claim the clocks now agree: the banner can clear because a second member was heard and re-attributed the outlier, while the disagreeing sample is still live. So it states only that the WARNING is gone — the one thing that is certainly true — and says nothing about circles or clocks agreeing. Spoken, never read; keep it one short sentence and offer no action — there is nothing left to do.
+  ///
+  /// In en, this message translates to:
+  /// **'The clock warning is gone.'**
+  String get clockSkewDisagreementResolvedAnnouncement;
+
+  /// Headline of the map banner shown when BOTH directions of location sharing have stopped (the relay connection dropped): this device is neither sending nor receiving. Do not merge with the two directional headlines below — saying 'has stopped' when only one direction is broken would be inaccurate.
+  ///
+  /// In en, this message translates to:
+  /// **'Location sharing has stopped'**
+  String get sharingHealthTitleStopped;
+
+  /// Headline of the map banner shown when this device's location updates are no longer reaching any relay. Receiving may still be working, so this must NOT claim that all of sharing stopped.
+  ///
+  /// In en, this message translates to:
+  /// **'Your location is not being shared'**
+  String get sharingHealthTitleNotSending;
+
+  /// Headline of the map banner shown when other members' locations have stopped arriving. This device may still be sending its own, so this must NOT claim that all of sharing stopped.
+  ///
+  /// In en, this message translates to:
+  /// **'You are not receiving locations'**
+  String get sharingHealthTitleNotReceiving;
+
+  /// Body of the sharing-health map banner, under one hour. IMPORTANT: this ONE body is rendered under ALL THREE headlines (sharingHealthTitleStopped, sharingHealthTitleNotSending, sharingHealthTitleNotReceiving), so it must carry NO subject and NO verb agreeing with one — a translation that supplies a subject such as 'sharing' reads as a mismatch under the 'you are not receiving' headline, where the thing that stopped is the receiving. Keep it a bare noun phrase. 'About' is deliberate: the age is measured from the last delivery Haven can actually prove — a relay-acknowledged publish or a decrypted peer location — never from the moment a fault was noticed, because a fault noticed just now on a circle that has been silent for half an hour must not be dated 'a moment ago'. An 'update' here is one location message in either direction.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{No updates for about 1 minute} other{No updates for about {count} minutes}}'**
+  String sharingHealthNoUpdatesMinutes(int count);
+
+  /// Body of the sharing-health map banner when the gap is hours (under one day). Same subject-less rule as sharingHealthNoUpdatesMinutes — read that description first.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{No updates for about 1 hour} other{No updates for about {count} hours}}'**
+  String sharingHealthNoUpdatesHours(int count);
+
+  /// Body of the sharing-health map banner when the gap is a day or more. Same subject-less rule as sharingHealthNoUpdatesMinutes — read that description first.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{No updates for about 1 day} other{No updates for about {count} days}}'**
+  String sharingHealthNoUpdatesDays(int count);
+
+  /// Label of the single remedy button on the sharing-health map banner. Keep it short — it sits on one line inside the banner, next to a spinner while it runs. Prefer an imperative verb where the locale forms button labels that way; languages that label buttons with a verbal noun (Japanese 修復, Arabic إصلاح) should use their own convention rather than forcing an imperative. The word must be the same one that appears in sharingHealthRepairSent.
+  ///
+  /// In en, this message translates to:
+  /// **'Repair'**
+  String get sharingHealthRepairAction;
+
+  /// Accessibility hint spoken for the Repair button while it is DISABLED, Map → sharing-health banner. WCAG 2.1 SC 4.1.2: a disabled control must still say why it cannot be used. Shown for BOTH outcomes that never clear by waiting — this device is not the circle's admin, and the circle's encryption state is unrecoverable here — so it must be true of both. Do NOT say the circle cannot be repaired on this phone: in the first case it CAN be, just not by this user, which the banner line beside it says outright. Say only that the control is unavailable for this circle; the banner carries the reason. Must not invite a retry. It is sometimes the ONLY spoken statement of why the button is dead: the button is its own focusable node, so a user arriving by focus traversal hears this and not the banner line above it.
+  ///
+  /// In en, this message translates to:
+  /// **'Repair is unavailable for this circle'**
+  String get sharingHealthRepairUnavailableHint;
+
+  /// Accessibility hint spoken for the Repair button, describing what it actually does. It re-reads the circle list, re-anchors the relay subscriptions, re-runs the location publish, and MAY commit a new circle key. Two hedges are load-bearing and must both survive translation. (1) The key clause is conditional on ROLE: only this circle's sole admin can do it — use this locale's 'Admin' badge wording (circleMemberAdmin), not 'the person who created it', because after an admin handoff those differ. (2) 'may' is not politeness: five further gates (epoch too recent, circle too busy, a departure pending, already repaired today, engine state unsettled) decline silently even for the admin, so a flat promise would be wrong most of the time. Do not say 'rotates keys' or imply anything periodic. The commit carries no MLS UpdatePath: it resets the sender ratchets and gives NO post-compromise security, so 'new key' must stay that plain — never 'fresh', 'secure again', 'locks out', or any wording implying past or future traffic becomes unreadable to anyone.
+  ///
+  /// In en, this message translates to:
+  /// **'Reconnects to the relays, retries sending your location, and, if you are this circle\'s admin, may give it a new key'**
+  String get sharingHealthRepairHint;
+
+  /// Shown in the sharing-health banner AND spoken by the screen reader (it is folded into the banner's live-region label), Map. MUST NOT promise instant recovery: the repair changes this device's key material immediately, but every other member only applies it when they next RECEIVE it — which is a receive event on their side, not merely their next send — so their locations start arriving again some minutes later, longer if a phone is asleep. Do not translate as 'fixed' or 'sharing restored' — the honest claim is that the repair was sent and the others will follow once they have picked it up. 'Repair' must match sharingHealthRepairAction. The commit carries no MLS UpdatePath: it resets the sender ratchets and gives NO post-compromise security, so never strengthen this into 'secure again', 'locked out', or any wording implying past or future traffic becomes unreadable to anyone.
+  ///
+  /// In en, this message translates to:
+  /// **'Repair sent. The others will catch up once their phones have picked it up.'**
+  String get sharingHealthRepairSent;
+
+  /// Shown in the sharing-health banner AND spoken (folded into the live-region label), Map. Displayed when the user taps Repair on a circle where this device is not the SOLE admin — which is normally the circle's creator, but NOT always: after an admin handoff the creator is no longer the admin, and mid-handoff there are briefly two. So the copy must name the ROLE, not the creator: use whatever this locale uses for the 'Admin' badge (see circleMemberAdmin). Repairing needs that admin, and there is no message the app can send on the user's behalf, so the remedy is a real-world one: ask them to remove and re-add you. Say WHO can do it and WHAT to ask for; do not imply the app will do it, and do not suggest leaving and rejoining on your own (that is not the same thing and does not work).
+  ///
+  /// In en, this message translates to:
+  /// **'Only this circle\'s admin can repair it. Ask them to remove you and add you back.'**
+  String get sharingHealthRepairNotOwner;
+
+  /// Shown in the sharing-health banner AND spoken (folded into the live-region label), Map. Displayed when the circle's encryption state is unrecoverable on this device. This never clears by waiting, so the copy must NOT invite a retry — it is the one repair outcome with no second attempt, and the Repair button is disabled while it is on screen. Keep it concrete and non-technical: the remedy is a new circle with the same members. Do not mention epochs, MLS, or state machines.
+  ///
+  /// In en, this message translates to:
+  /// **'This circle cannot be repaired on this phone. Make a new circle with the same people.'**
+  String get sharingHealthRepairNeedsNewCircle;
+
+  /// Shown in the sharing-health banner AND spoken (folded into the live-region label), Map. Displayed when the repair ran but the key-change step declined for a reason that will clear on its own — the epoch changed too recently, the circle is busy, a departure is pending, it was already repaired today, or the engine state is unsettled. It exists so a tap is never SILENT. Must not sound like a failure and must not invite an immediate retry; the second sentence carries that. Keep it short: it is read aloud after the fault line.
+  ///
+  /// In en, this message translates to:
+  /// **'Nothing to repair right now. Haven will keep trying.'**
+  String get sharingHealthRepairNothingToDo;
+
+  /// Screen-reader announcement spoken once when the user has tapped Repair on the sharing-health banner and the banner is STILL showing afterwards. Without it, a screen-reader user gets no signal at all that the remedy did not work — the banner is a live region, which announces its appearance but never its persistence. Must not blame the user or promise a retry will help; it only reports the outcome.
+  ///
+  /// In en, this message translates to:
+  /// **'Location sharing is still not working.'**
+  String get sharingHealthRepairUnresolvedAnnouncement;
+
+  /// Screen-reader announcement spoken once when the sharing-health banner clears. A live region announces its appearance but never its removal, so this is the only signal a screen-reader user gets that sharing recovered.
+  ///
+  /// In en, this message translates to:
+  /// **'Location sharing is working again.'**
+  String get sharingHealthResumedAnnouncement;
+
+  /// Secondary line on a circle member's row in the members list, giving the age of their last known location. Shown only once the location is older than the threshold the map marker's age pill uses, so the list and the map never disagree. Deliberately expressed in minutes at every age (e.g. '90 minutes ago' rather than '1 hour ago') to match that pill exactly.
+  ///
+  /// In en, this message translates to:
+  /// **'{count, plural, =1{Last seen 1 minute ago} other{Last seen {count} minutes ago}}'**
+  String circleMemberLastSeenMinutes(int count);
 
   /// Generic fallback name for a member marker (used in the 'Open in Apple Maps' prompt) when the member has no display name.
   ///

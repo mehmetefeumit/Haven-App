@@ -2004,6 +2004,242 @@ impl std::fmt::Debug for CommitToPublishFfi {
     }
 }
 
+/// Publish work handed back by a DEFERRED location send — FFI mirror of
+/// `haven_core::circle::DeferredWork` plus the outcome's counters.
+///
+/// The engine QUEUED the location update instead of encrypting it, so there is
+/// no event to publish for the location itself. Two things still need doing,
+/// and both are the caller's:
+///
+/// 1. **Rule 13.** [`Self::commits`] carries any commit the engine STAGED
+///    inside that same call — a peer `SelfRemove` eviction that came due. Each
+///    MUST be published and then confirmed via
+///    [`CircleManagerFfi::confirm_published`] on a ≥1-relay ACK (or rolled back
+///    via [`CircleManagerFfi::publish_failed`]). Dropping one leaves the group
+///    in `PendingPublish`, where every later send fails.
+/// 2. [`Self::proposals`] carries bare proposals (no staged state, nothing to
+///    confirm): publish-or-lose, and recoverable — a re-proposed `SelfRemove`
+///    is driven by the durable leave request, so a later convergence pass
+///    re-emits it.
+///
+/// The three scalars are presence-only counters for the sharing-health model.
+#[derive(Clone)]
+pub struct DeferredSendFfi {
+    /// Stored rows still gating outbound sends for this circle, read after the
+    /// in-place repair. `0` means the next send should encrypt.
+    pub unresolved_inputs: u32,
+    /// Queued location intents the repair discarded so a stalled circle cannot
+    /// bank one stale fix per publish cycle.
+    pub discarded_intents: u32,
+    /// Whether the circle was left with nothing gating.
+    pub repaired: bool,
+    /// Staged commits awaiting the publish → confirm ladder (Rule 13).
+    pub commits: Vec<CommitToPublishFfi>,
+    /// JSON-serialized bare proposal events to publish (no confirm).
+    pub proposals: Vec<String>,
+}
+
+impl std::fmt::Debug for DeferredSendFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Both event lists carry `h` tags (the nostr_group_id) and group
+        // ciphertext, so only counts are printed (Rules 4/6/8).
+        f.debug_struct("DeferredSendFfi")
+            .field("unresolved_inputs", &self.unresolved_inputs)
+            .field("discarded_intents", &self.discarded_intents)
+            .field("repaired", &self.repaired)
+            .field("commits_count", &self.commits.len())
+            .field("proposals_count", &self.proposals.len())
+            .finish()
+    }
+}
+
+/// What [`CircleManagerFfi::encrypt_location`] produced: either an event to
+/// publish, or a typed deferral.
+///
+/// Struct shape with two `Option`s rather than a tagged enum, following the
+/// same convention as [`LeavePlanFfi`] and [`DecryptOutcomeFfi`] — it avoids
+/// pulling Dart `freezed` into the bindings while preserving all the
+/// information. **Exactly one of the two is `Some`**; the Dart wrapper narrows
+/// that into a sealed type so call sites cannot forget a case.
+///
+/// This exists because the deferral used to be flattened to an error STRING.
+/// Classifying it in Dart would then have meant substring-matching error prose,
+/// which Haven forbids: error strings interpolate remote-authored text (a relay
+/// URL, a peer's component), so a `contains` over them is a control channel a
+/// remote party can write. The variant is matched in Rust instead.
+#[derive(Clone)]
+pub struct EncryptLocationOutcomeFfi {
+    /// The signed kind-445 event and its routing, when the engine encrypted.
+    pub sent: Option<EncryptedLocationFfi>,
+    /// The typed deferral, when the engine queued instead.
+    pub deferred_send: Option<DeferredSendFfi>,
+}
+
+impl std::fmt::Debug for EncryptLocationOutcomeFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `EncryptedLocationFfi`'s own Debug prints the event JSON and the
+        // group id; keep this wrapper presence-only so a stray `{:?}` on the
+        // outcome cannot widen that exposure.
+        f.debug_struct("EncryptLocationOutcomeFfi")
+            .field("sent", &self.sent.as_ref().map(|_| "<redacted>"))
+            .field("deferred_send", &self.deferred_send)
+            .finish()
+    }
+}
+
+/// Presence-only report of one stuck-convergence-input sweep — FFI mirror of
+/// `haven_core::nostr::mls::types::ConvergenceSweep`.
+///
+/// Counts only: no group ids, message ids, epochs or payloads, so the derived
+/// `Debug` is leak-free by construction and the whole struct can reach the UI
+/// unredacted (Security Rules 4/6/8).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConvergenceSweepFfi {
+    /// Stored application-message rows given a terminal disposition because the
+    /// relay can no longer redeliver them.
+    pub disposed_messages: u32,
+    /// Durably queued outbound location intents discarded.
+    pub discarded_intents: u32,
+    /// Rows still gating outbound sends after the pass.
+    pub gating_rows: u32,
+    /// Whether nothing still gates — i.e. the next send should encrypt.
+    pub settled: bool,
+}
+
+impl From<haven_core::nostr::mls::types::ConvergenceSweep> for ConvergenceSweepFfi {
+    fn from(s: haven_core::nostr::mls::types::ConvergenceSweep) -> Self {
+        let c = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        Self {
+            disposed_messages: c(s.disposed_messages),
+            discarded_intents: c(s.discarded_intents),
+            gating_rows: c(s.gating_rows),
+            settled: s.is_settled(),
+        }
+    }
+}
+
+/// Converts a core `DeferredWork` plus the outcome's counters into the FFI
+/// mirror, serializing every staged commit and proposal event.
+///
+/// Split out of [`CircleManagerFfi::encrypt_location`] so the field-for-field
+/// mapping is unit-testable without an MLS session.
+fn convert_deferred_send(
+    unresolved_inputs: usize,
+    discarded_intents: usize,
+    repaired: bool,
+    work: haven_core::circle::DeferredWork,
+) -> Result<DeferredSendFfi, String> {
+    let c = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+    let commits = work
+        .commits
+        .into_iter()
+        .map(convert_commit_to_publish)
+        .collect::<Result<Vec<_>, _>>()?;
+    let proposals = work
+        .proposals
+        .iter()
+        .map(commit_event_to_json)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(DeferredSendFfi {
+        unresolved_inputs: c(unresolved_inputs),
+        discarded_intents: c(discarded_intents),
+        repaired,
+        commits,
+        proposals,
+    })
+}
+
+/// Why an epoch-rotation repair was declined — FFI mirror of
+/// `haven_core::circle::SkipReason`.
+///
+/// Fieldless by construction: a skip is surfaced to the UI and to logs, and no
+/// variant may carry a group id, a pubkey or an epoch (Security Rules 4/6/8).
+///
+/// **Three of these route differently and the UI must not collapse them.**
+/// [`Self::NotSoleAdmin`] and [`Self::EpochUnrecoverable`] are terminal for this
+/// device — offering a retry would be a loop that cannot succeed — while every
+/// other variant means "try again shortly".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReasonFfi {
+    /// This device is not the circle's ONLY admin, so it must not commit. Either
+    /// somebody else can, or an admin handoff is mid-flight. Terminal for this
+    /// device: the remedy is to ask the circle's owner to remove and re-add you.
+    NotSoleAdmin,
+    /// The engine's epoch state is not `Stable` but will settle on its own (a
+    /// commit is staged, merging, or recovering). Retryable.
+    EpochNotStable,
+    /// The engine has frozen this group at its last stable epoch and refuses
+    /// further group state. NEVER clears by waiting — the circle has to be
+    /// re-created, or this member re-added.
+    EpochUnrecoverable,
+    /// The group's epoch changed too recently for a ratchet to be exhausted.
+    RecentEpochChange,
+    /// The circle produced an MLS-authenticated inbound group event too recently
+    /// to rule out a peer committing at the same epoch.
+    RecentInboundTraffic,
+    /// A stored proposal is still waiting for a commit, so a remaining member
+    /// may auto-commit it at any moment.
+    PendingProposal,
+    /// This circle was already repaired inside the 24-hour rate limit.
+    RotatedRecently,
+}
+
+impl From<haven_core::circle::SkipReason> for SkipReasonFfi {
+    fn from(reason: haven_core::circle::SkipReason) -> Self {
+        use haven_core::circle::SkipReason as R;
+        match reason {
+            R::NotSoleAdmin => Self::NotSoleAdmin,
+            R::EpochNotStable => Self::EpochNotStable,
+            R::EpochUnrecoverable => Self::EpochUnrecoverable,
+            R::RecentEpochChange => Self::RecentEpochChange,
+            R::RecentInboundTraffic => Self::RecentInboundTraffic,
+            R::PendingProposal => Self::PendingProposal,
+            R::RotatedRecently => Self::RotatedRecently,
+        }
+    }
+}
+
+/// What [`CircleManagerFfi::repair_epoch_rotation`] did — FFI mirror of
+/// `haven_core::circle::RepairRotationOutcome`.
+///
+/// Struct shape with three `Option`s rather than a tagged enum, following the
+/// same convention as [`EncryptLocationOutcomeFfi`] and [`LeavePlanFfi`] — it
+/// keeps Dart `freezed` out of the bindings while preserving all the
+/// information. **Exactly one of the three is `Some`**; the Dart wrapper narrows
+/// that into a sealed type so call sites cannot forget a case.
+///
+/// Matched by VARIANT in Rust, never by testing error prose: Haven's error
+/// strings interpolate remote-authored text, so a `contains` over one is a
+/// channel a remote party can write.
+#[derive(Clone)]
+pub struct RepairRotationOutcomeFfi {
+    /// The staged ratchet-reset commit, when every gate was open. Publish
+    /// `commit_event_json`, then confirm on a ≥1-relay ACK or roll back.
+    pub rotated: Option<CommitToPublishFfi>,
+    /// The gate that declined, when nothing was staged and nothing changed.
+    pub skipped: Option<SkipReasonFfi>,
+    /// The circle is send-gated: nothing was staged, and any work the engine
+    /// surfaced during the in-place repair is here for the same Rule-13 ladder a
+    /// deferred location send uses.
+    ///
+    /// Named `deferred_send`, not `deferred`, for the reason Unit B's field is:
+    /// FRB mangles `deferred` to `deferred_` in Dart, where it collides with
+    /// deferred imports.
+    pub deferred_send: Option<DeferredSendFfi>,
+}
+
+impl std::fmt::Debug for RepairRotationOutcomeFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `CommitToPublishFfi`'s own Debug redacts the event JSON; keep this
+        // wrapper presence-only so a stray `{:?}` cannot widen that.
+        f.debug_struct("RepairRotationOutcomeFfi")
+            .field("rotated", &self.rotated.as_ref().map(|_| "<redacted>"))
+            .field("skipped", &self.skipped)
+            .field("deferred_send", &self.deferred_send)
+            .finish()
+    }
+}
+
 /// Encrypted location event ready for relay publishing (FFI-friendly).
 ///
 /// Contains the signed kind 445 event and routing metadata.
@@ -2047,6 +2283,22 @@ impl std::fmt::Debug for DecryptedLocationFfi {
             .field("expires_at", &self.expires_at)
             .finish()
     }
+}
+
+/// Presence-only delivery timestamps for one circle (FFI-friendly).
+///
+/// Mirrors `haven_core::circle::CircleHealth`. Two millisecond instants on the
+/// LOCAL clock and nothing else — no coordinates, no pubkeys, no relay URLs —
+/// so this type is safe to render into a UI banner without leaking internal
+/// state. `None` means "never observed", which the Flutter health model must
+/// keep distinct from "stopped": a circle whose peer has never shared looks
+/// identical here to one whose receive plane is dead.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CircleHealthFfi {
+    /// When a relay last ACKed a location publish for this circle (ms).
+    pub last_publish_acked_at_ms: Option<i64>,
+    /// When a peer's location for this circle was last persisted (ms).
+    pub last_peer_event_at_ms: Option<i64>,
 }
 
 /// A persisted last-known location for a circle member (FFI-friendly).
@@ -3564,6 +3816,15 @@ impl CircleManagerFfi {
     ///   removing it is an FFI signature change; do NOT reintroduce a per-send
     ///   TTL path here without re-reading `haven-core/SECURITY.md`, "Outer
     ///   kind:445 metadata".
+    ///
+    /// # The deferred outcome
+    ///
+    /// Returns [`EncryptLocationOutcomeFfi`], not a bare event: the engine can
+    /// QUEUE the update instead of encrypting it, and that is a distinct,
+    /// actionable state rather than a failure. It is detected by matching the
+    /// `CircleError::SendDeferred` VARIANT — never by inspecting error prose,
+    /// which interpolates remote-authored text and would hand a remote party a
+    /// classification channel (see `nostr::mls::storage::is_session_live`).
     pub async fn encrypt_location(
         &self,
         mls_group_id: Vec<u8>,
@@ -3571,7 +3832,7 @@ impl CircleManagerFfi {
         latitude: f64,
         longitude: f64,
         update_interval_secs: u64,
-    ) -> Result<EncryptedLocationFfi, String> {
+    ) -> Result<EncryptLocationOutcomeFfi, String> {
         // Validate at the FFI boundary so a buggy Dart caller cannot produce
         // already-expired (0) or multi-day TTLs. The range mirrors
         // `haven_core::location::ttl::{MIN,MAX}_UPDATE_INTERVAL_SECS`
@@ -3591,11 +3852,37 @@ impl CircleManagerFfi {
         // `encrypt_location` sends via the Dark Matter engine (async), so it
         // awaits directly on the current worker.
         let group_id = GroupId::from_slice(&mls_group_id);
-        let (event, nostr_group_id, relays) = self
+        let (event, nostr_group_id, relays) = match self
             .inner
             .encrypt_location(&group_id, &sender_pubkey, &location, update_interval_secs)
             .await
-            .map_err(|e| e.to_string())?;
+        {
+            Ok(sent) => sent,
+            // Matched by VARIANT. The counters and the staged work go straight
+            // back to Dart, which owns the Rule-13 ladder for `commits`.
+            Err(haven_core::circle::CircleError::SendDeferred {
+                unresolved_inputs,
+                discarded_intents,
+                repaired,
+                work,
+            }) => {
+                log::debug!(
+                    "[FFI encrypt] send deferred (gating={unresolved_inputs}, \
+                     repaired={repaired}, staged_commits={})",
+                    work.commits.len()
+                );
+                return Ok(EncryptLocationOutcomeFfi {
+                    sent: None,
+                    deferred_send: Some(convert_deferred_send(
+                        unresolved_inputs,
+                        discarded_intents,
+                        repaired,
+                        work,
+                    )?),
+                });
+            }
+            Err(e) => return Err(e.to_string()),
+        };
 
         let event_json =
             serde_json::to_string(&event).map_err(|e| format!("Failed to serialize event: {e}"))?;
@@ -3608,11 +3895,137 @@ impl CircleManagerFfi {
             relays.len()
         );
 
-        Ok(EncryptedLocationFfi {
-            event_json,
-            nostr_group_id: nostr_group_id.to_vec(),
-            relays,
+        Ok(EncryptLocationOutcomeFfi {
+            sent: Some(EncryptedLocationFfi {
+                event_json,
+                nostr_group_id: nostr_group_id.to_vec(),
+                relays,
+            }),
+            deferred_send: None,
         })
+    }
+
+    /// Repairs a circle whose sender ratchets are exhausted, by committing a
+    /// byte-identical `UpdateAppComponents(admin-policy.v1)`.
+    ///
+    /// This is a **ratchet reset**, not key rotation: applying the commit
+    /// derives a fresh `encryption_secret`, so every sender ratchet in the group
+    /// restarts at generation 0 and a peer whose messages had run past
+    /// `maximum_forward_distance` becomes decryptable again. The commit carries
+    /// no `UpdatePath`, so it rotates no leaf key and provides **no**
+    /// post-compromise security. Never describe it as key rotation in code, in
+    /// logs, or in user copy.
+    ///
+    /// # The caller MUST fetch first
+    ///
+    /// Await one relay fetch / live-sync drain for this circle and let it settle
+    /// BEFORE calling this. A departure proposal sitting on a relay that has not
+    /// yet reached this device turns into a same-epoch race; the same proposal
+    /// ingested first turns into a clean `PendingProposal` decline. The engine's
+    /// deterministic ordering makes the race survivable (one extra epoch, never
+    /// a fork), but the fetch converts a race into a decline for free.
+    ///
+    /// # Rule 14 / gate 5
+    ///
+    /// Foreground service layer ONLY — never from a background isolate. Enforced
+    /// by `scripts/ci/check_epoch_repair_isolation.sh`, not by this comment.
+    ///
+    /// # Outcomes
+    ///
+    /// Exactly one field of [`RepairRotationOutcomeFfi`] is `Some`:
+    /// `rotated` → publish then confirm on a ≥1-relay ACK (or roll back);
+    /// `deferred_send` → run that same ladder over its `commits`;
+    /// `skipped` → a normal, user-visible answer, NOT a failure.
+    ///
+    /// `now_secs` is the wall clock in Unix seconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string only for a real failure — no circle row, an
+    /// unreadable store, or an engine rejection that is not about epoch state
+    /// (a non-`Stable` epoch is a `skipped` outcome, not an error).
+    pub async fn repair_epoch_rotation(
+        &self,
+        mls_group_id: Vec<u8>,
+        now_secs: u64,
+    ) -> Result<RepairRotationOutcomeFfi, String> {
+        use haven_core::circle::RepairRotationOutcome as Outcome;
+
+        let group_id = GroupId::from_slice(&mls_group_id);
+        let outcome = self
+            .inner
+            .repair_epoch_rotation(&group_id, now_secs)
+            .await
+            .map_err(|e| e.to_string())?;
+        match outcome {
+            Outcome::Rotated(commit) => {
+                log::debug!("[FFI repair] epoch-rotation repair staged");
+                Ok(RepairRotationOutcomeFfi {
+                    rotated: Some(convert_commit_to_publish(commit)?),
+                    skipped: None,
+                    deferred_send: None,
+                })
+            }
+            Outcome::Skipped(reason) => {
+                log::debug!("[FFI repair] declined: {reason:?}");
+                Ok(RepairRotationOutcomeFfi {
+                    rotated: None,
+                    skipped: Some(reason.into()),
+                    deferred_send: None,
+                })
+            }
+            Outcome::Deferred {
+                unresolved_inputs,
+                discarded_intents,
+                repaired,
+                work,
+            } => {
+                log::debug!(
+                    "[FFI repair] send-gated (gating={unresolved_inputs}, \
+                     repaired={repaired}, staged_commits={})",
+                    work.commits.len()
+                );
+                // The REAL counters, never placeholders: `unresolved_inputs`
+                // reaches the sharing-health model, where `0` is read as "the
+                // next send will encrypt". Passing zeros here would tell the UI
+                // a stalled circle had recovered.
+                Ok(RepairRotationOutcomeFfi {
+                    rotated: None,
+                    skipped: None,
+                    deferred_send: Some(convert_deferred_send(
+                        unresolved_inputs,
+                        discarded_intents,
+                        repaired,
+                        work,
+                    )?),
+                })
+            }
+        }
+    }
+
+    /// Gives a terminal disposition to stored convergence inputs the relay can
+    /// no longer redeliver, across every circle, and reports what still gates
+    /// outbound sends.
+    ///
+    /// The "repair sharing" entry point: a future-epoch application row is kept
+    /// `Retryable` by the engine so a late commit can still resolve it, and
+    /// when that commit never arrives the row gates every send for its circle
+    /// — through restarts, because hydration keeps it for the same reason. This
+    /// is the only thing that clears one. `now_secs` is the wall clock in Unix
+    /// seconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the MLS message store cannot be read or written.
+    pub async fn sweep_unresolvable_inputs(
+        &self,
+        now_secs: u64,
+    ) -> Result<ConvergenceSweepFfi, String> {
+        self.inner
+            .sweep_unresolvable_inputs(now_secs)
+            .await
+            .map(Into::into)
+            .map_err(|e| e.to_string())
     }
 
     /// Decrypts / ingests a received `kind:445` event, returning the folded
@@ -3939,6 +4352,61 @@ impl CircleManagerFfi {
                 updated_at: loc.updated_at,
             })
             .collect())
+    }
+
+    // ==================== Delivery Health ====================
+
+    /// Records that ≥1 relay ACKed a location publish for a circle.
+    ///
+    /// `at_ms` is the caller's local clock in milliseconds. Call this ONLY on
+    /// an affirmative relay ACK — a `PublishResult` with an empty `acceptedBy`
+    /// delivered nothing, and stamping it would make a dead publish plane read
+    /// as healthy, which is the exact defect this column exists to end.
+    pub async fn note_publish_acked(
+        &self,
+        nostr_group_id: Vec<u8>,
+        at_ms: i64,
+    ) -> Result<(), String> {
+        let ngid = parse_nostr_group_id(&nostr_group_id)?;
+
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .note_publish_acked(&ngid, at_ms)
+                .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    /// Records that a peer's location was decrypted and persisted for a circle.
+    ///
+    /// `at_ms` is the caller's local RECEIPT clock, never the sender's
+    /// timestamp: this answers "is anything still arriving", and a peer's own
+    /// clock cannot be trusted to answer that.
+    pub async fn note_peer_event(&self, nostr_group_id: Vec<u8>, at_ms: i64) -> Result<(), String> {
+        let ngid = parse_nostr_group_id(&nostr_group_id)?;
+
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .note_peer_event(&ngid, at_ms)
+                .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    /// Reads a circle's delivery-health timestamps.
+    pub async fn circle_health(&self, nostr_group_id: Vec<u8>) -> Result<CircleHealthFfi, String> {
+        let ngid = parse_nostr_group_id(&nostr_group_id)?;
+
+        let inner = self.inner.clone();
+        let health =
+            run_blocking(move || inner.circle_health(&ngid).map_err(|e| e.to_string())).await?;
+
+        Ok(CircleHealthFfi {
+            last_publish_acked_at_ms: health.last_publish_acked_at_ms,
+            last_peer_event_at_ms: health.last_peer_event_at_ms,
+        })
     }
 
     /// Removes the last-known location for a single sender in a circle.
@@ -6998,8 +7466,18 @@ pub enum SubscriptionHealthActionFfi {
     EngineOff,
     /// The engine is running and every relay is connected — nothing to do.
     Healthy,
-    /// A relay had dropped; every subscription was re-anchored at its cursor.
+    /// A relay had dropped, or a REQ the session expects was missing from the
+    /// pool, so the WHOLE session was re-anchored (pool reconnected, every
+    /// subscription re-issued at its cursor).
     Resubscribed,
+    /// Delivery silence alone: every socket was up and every REQ registered, so
+    /// only the `(relay, sub)` endpoints that had gone quiet were re-issued.
+    ///
+    /// Distinct from [`Self::Resubscribed`] because the two differ by orders of
+    /// magnitude in cost, and because this one is EXPECTED on a device whose
+    /// circles are simply idle — a consumer that folded it into `Resubscribed`
+    /// would show a normal quiet device as repeatedly losing its relays.
+    TargetedReanchor,
 }
 
 impl From<haven_core::relay::live_sync::HealthAction> for SubscriptionHealthActionFfi {
@@ -7009,6 +7487,7 @@ impl From<haven_core::relay::live_sync::HealthAction> for SubscriptionHealthActi
             A::EngineOff => Self::EngineOff,
             A::Healthy => Self::Healthy,
             A::Resubscribed => Self::Resubscribed,
+            A::TargetedReanchor => Self::TargetedReanchor,
         }
     }
 }
@@ -7031,6 +7510,19 @@ pub struct SubscriptionHealthOutcomeFfi {
     pub relays_still_connecting: u32,
     /// Relays found dropped at check time (`0` when engine off).
     pub relays_disconnected: u32,
+    /// `(relay, subscription)` REQ pairs the active session expected to be live
+    /// (`0` when engine off or no session has started).
+    pub subscriptions_expected: u32,
+    /// How many of those the relay pool still held. A shortfall against
+    /// `subscriptions_expected` is a REQ a relay ended with `CLOSED` that
+    /// nothing upstream will re-issue — the receive blackout the relay
+    /// connection counters cannot see, because the socket stays up.
+    pub subscriptions_live: u32,
+    /// Group REQs, still present in the pool, that had delivered neither an
+    /// event nor an `EOSE` within the delivery-silence window. The inbox is
+    /// never counted (a quiet inbox is the normal state). This is what a
+    /// [`SubscriptionHealthActionFfi::TargetedReanchor`] acted on.
+    pub subscriptions_silent: u32,
 }
 
 impl From<haven_core::relay::live_sync::SubscriptionHealthOutcome>
@@ -7043,6 +7535,9 @@ impl From<haven_core::relay::live_sync::SubscriptionHealthOutcome>
             relays_total: c(o.relays_total),
             relays_still_connecting: c(o.relays_still_connecting),
             relays_disconnected: c(o.relays_disconnected),
+            subscriptions_expected: c(o.subscriptions_expected),
+            subscriptions_live: c(o.subscriptions_live),
+            subscriptions_silent: c(o.subscriptions_silent),
         }
     }
 }
@@ -11097,26 +11592,78 @@ mod live_sync_ffi_tests {
         assert_eq!(off.relays_total, 0);
         assert_eq!(off.relays_still_connecting, 0);
         assert_eq!(off.relays_disconnected, 0);
+        assert_eq!(off.subscriptions_expected, 0);
+        assert_eq!(off.subscriptions_live, 0);
+        assert_eq!(off.subscriptions_silent, 0);
 
         // A resubscribed outcome passes its counts through unchanged, including
-        // the still-connecting bucket.
+        // the still-connecting bucket and the subscription counters.
         let resub: SubscriptionHealthOutcomeFfi = SubscriptionHealthOutcome {
             action: HealthAction::Resubscribed,
             relays_total: 3,
             relays_still_connecting: 1,
             relays_disconnected: 2,
+            subscriptions_expected: 6,
+            subscriptions_live: 5,
+            subscriptions_silent: 0,
         }
         .into();
         assert_eq!(resub.action, SubscriptionHealthActionFfi::Resubscribed);
         assert_eq!(resub.relays_total, 3);
         assert_eq!(resub.relays_still_connecting, 1);
         assert_eq!(resub.relays_disconnected, 2);
+        assert_eq!(resub.subscriptions_expected, 6);
+        assert_eq!(
+            resub.subscriptions_live, 5,
+            "the shortfall a relay's CLOSED leaves must survive the boundary — it \
+             is the only counter that can show a blackout behind a live socket"
+        );
+        assert_eq!(resub.subscriptions_silent, 0);
+
+        // The targeted remedy is its OWN action across the boundary. Folding it
+        // into Resubscribed would make an idle device — whose circles are simply
+        // quiet — look like it kept losing relays.
+        let targeted: SubscriptionHealthOutcomeFfi = SubscriptionHealthOutcome {
+            action: HealthAction::TargetedReanchor,
+            relays_total: 2,
+            relays_still_connecting: 0,
+            relays_disconnected: 0,
+            subscriptions_expected: 4,
+            subscriptions_live: 4,
+            subscriptions_silent: 1,
+        }
+        .into();
+        assert_eq!(
+            targeted.action,
+            SubscriptionHealthActionFfi::TargetedReanchor
+        );
+        assert_eq!(targeted.relays_disconnected, 0);
+        assert_eq!(targeted.subscriptions_silent, 1);
 
         // Debug is presence-only: an action name + integer counters, nothing
-        // that could carry a relay url / group id.
+        // that could carry a relay url / group id or a subscription id.
         let dbg = format!("{resub:?}");
         assert!(dbg.contains("Resubscribed"));
         assert!(dbg.contains('3') && dbg.contains('2'));
+        assert!(!dbg.contains("ws://") && !dbg.contains("wss://"));
+    }
+
+    #[test]
+    fn health_action_maps_every_core_variant() {
+        // Exhaustive by construction: the `From` impl has no wildcard arm, so a
+        // new core variant is a COMPILE error rather than a silent misreport.
+        use haven_core::relay::live_sync::HealthAction as A;
+        for (core, ffi) in [
+            (A::EngineOff, SubscriptionHealthActionFfi::EngineOff),
+            (A::Healthy, SubscriptionHealthActionFfi::Healthy),
+            (A::Resubscribed, SubscriptionHealthActionFfi::Resubscribed),
+            (
+                A::TargetedReanchor,
+                SubscriptionHealthActionFfi::TargetedReanchor,
+            ),
+        ] {
+            assert_eq!(SubscriptionHealthActionFfi::from(core), ffi);
+        }
     }
 
     #[test]
@@ -14499,6 +15046,218 @@ mod member_directory_real_ffi_tests {
         assert!(
             redacted.contains("roster read failed"),
             "the diagnosis must survive, only the identifier goes: {redacted}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod repair_rotation_ffi_tests {
+    use super::{CommitToPublishFfi, PendingStateRefFfi, RepairRotationOutcomeFfi, SkipReasonFfi};
+    use haven_core::circle::SkipReason;
+
+    #[test]
+    fn every_skip_reason_crosses_the_boundary_as_itself() {
+        // Exhaustive: a new core `SkipReason` breaks compilation here rather
+        // than silently reaching the UI as the wrong routing decision. The three
+        // groupings below are what the banner branches on.
+        let cases = [
+            (SkipReason::NotSoleAdmin, SkipReasonFfi::NotSoleAdmin),
+            (SkipReason::EpochNotStable, SkipReasonFfi::EpochNotStable),
+            (
+                SkipReason::EpochUnrecoverable,
+                SkipReasonFfi::EpochUnrecoverable,
+            ),
+            (
+                SkipReason::RecentEpochChange,
+                SkipReasonFfi::RecentEpochChange,
+            ),
+            (
+                SkipReason::RecentInboundTraffic,
+                SkipReasonFfi::RecentInboundTraffic,
+            ),
+            (SkipReason::PendingProposal, SkipReasonFfi::PendingProposal),
+            (SkipReason::RotatedRecently, SkipReasonFfi::RotatedRecently),
+        ];
+        for (core, expected) in cases {
+            assert_eq!(SkipReasonFfi::from(core), expected);
+            // Exhaustiveness: this match has no wildcard.
+            let _routed = match core {
+                SkipReason::NotSoleAdmin | SkipReason::EpochUnrecoverable => "terminal",
+                SkipReason::EpochNotStable
+                | SkipReason::RecentEpochChange
+                | SkipReason::RecentInboundTraffic
+                | SkipReason::PendingProposal
+                | SkipReason::RotatedRecently => "retryable",
+            };
+        }
+    }
+
+    #[test]
+    fn the_outcome_debug_carries_no_identifier() {
+        // The staged commit's event JSON carries the circle's `h` tag, so a
+        // stray `{:?}` on the outcome must print nothing but presence
+        // (Security Rules 4/8).
+        let skipped = RepairRotationOutcomeFfi {
+            rotated: None,
+            skipped: Some(SkipReasonFfi::NotSoleAdmin),
+            deferred_send: None,
+        };
+        assert_eq!(
+            format!("{skipped:?}"),
+            "RepairRotationOutcomeFfi { rotated: None, skipped: Some(NotSoleAdmin), \
+             deferred_send: None }"
+        );
+
+        // The arm that actually carries a payload. `CommitToPublishFfi` holds
+        // the commit event JSON, whose `h` tag IS the circle's public group id,
+        // so this is the case a leak would come from.
+        let rotated = RepairRotationOutcomeFfi {
+            rotated: Some(CommitToPublishFfi {
+                commit_event_json: r#"{"tags":[["h","deadbeef"]]}"#.to_string(),
+                pending: PendingStateRefFfi { token: 1 },
+            }),
+            skipped: None,
+            deferred_send: None,
+        };
+        let debug = format!("{rotated:?}");
+        assert_eq!(
+            debug,
+            "RepairRotationOutcomeFfi { rotated: Some(\"<redacted>\"), skipped: None, \
+             deferred_send: None }"
+        );
+        assert!(
+            !debug.contains("deadbeef"),
+            "the commit event's h tag must never reach a log line: {debug}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod deferred_send_ffi_tests {
+    use super::{convert_deferred_send, ConvergenceSweepFfi, DeferredSendFfi};
+    use haven_core::circle::DeferredWork;
+    use haven_core::nostr::mls::types::{ConvergenceSweep, PendingStateRef};
+
+    /// A signed kind-445-shaped event, which is all the conversion needs (it
+    /// only serializes).
+    fn signed_event(content: &str) -> nostr::Event {
+        let keys = nostr::Keys::generate();
+        nostr::EventBuilder::new(nostr::Kind::Custom(445), content)
+            .sign_with_keys(&keys)
+            .expect("sign")
+    }
+
+    #[test]
+    fn every_field_of_a_deferral_reaches_the_ffi_shape() {
+        let commit_event = signed_event("staged-commit");
+        let proposal_event = signed_event("bare-proposal");
+        let commit_id = commit_event.id;
+        let proposal_id = proposal_event.id;
+
+        let ffi = convert_deferred_send(
+            3,
+            2,
+            false,
+            DeferredWork {
+                commits: vec![haven_core::circle::CommitToPublish {
+                    commit_event,
+                    pending: PendingStateRef::new(77),
+                }],
+                proposals: vec![proposal_event],
+            },
+        )
+        .expect("convert");
+
+        assert_eq!(ffi.unresolved_inputs, 3);
+        assert_eq!(ffi.discarded_intents, 2);
+        assert!(!ffi.repaired);
+        assert_eq!(ffi.commits.len(), 1);
+        // The pending token must survive: it is the ONLY handle Dart has for
+        // the Rule-13 confirm, and a dropped one pins the group in
+        // `PendingPublish`.
+        assert_eq!(ffi.commits[0].pending.token, 77);
+        assert!(ffi.commits[0]
+            .commit_event_json
+            .contains(&commit_id.to_hex()));
+        assert_eq!(ffi.proposals.len(), 1);
+        assert!(ffi.proposals[0].contains(&proposal_id.to_hex()));
+    }
+
+    #[test]
+    fn an_empty_deferral_carries_its_counters_and_no_work() {
+        let ffi = convert_deferred_send(0, 1, true, DeferredWork::default()).expect("convert");
+        assert_eq!(ffi.unresolved_inputs, 0);
+        assert_eq!(ffi.discarded_intents, 1);
+        assert!(ffi.repaired);
+        assert!(ffi.commits.is_empty());
+        assert!(ffi.proposals.is_empty());
+    }
+
+    #[test]
+    fn the_deferred_debug_is_presence_only() {
+        let ffi = convert_deferred_send(
+            1,
+            0,
+            false,
+            DeferredWork {
+                commits: vec![haven_core::circle::CommitToPublish {
+                    commit_event: signed_event("secret-ciphertext"),
+                    pending: PendingStateRef::new(9),
+                }],
+                proposals: vec![signed_event("another-secret")],
+            },
+        )
+        .expect("convert");
+        let debug = format!("{ffi:?}");
+        assert!(debug.contains("commits_count: 1"));
+        assert!(debug.contains("proposals_count: 1"));
+        assert!(
+            !debug.contains("secret-ciphertext") && !debug.contains("another-secret"),
+            "event payloads must never reach a Debug line: {debug}"
+        );
+    }
+
+    #[test]
+    fn the_sweep_report_maps_counts_and_settlement() {
+        let ffi: ConvergenceSweepFfi = ConvergenceSweep {
+            disposed_messages: 2,
+            discarded_intents: 1,
+            gating_rows: 0,
+        }
+        .into();
+        assert_eq!(ffi.disposed_messages, 2);
+        assert_eq!(ffi.discarded_intents, 1);
+        assert_eq!(ffi.gating_rows, 0);
+        assert!(
+            ffi.settled,
+            "no gating rows means the next send will encrypt"
+        );
+
+        let still_stuck: ConvergenceSweepFfi = ConvergenceSweep {
+            disposed_messages: 0,
+            discarded_intents: 0,
+            gating_rows: 4,
+        }
+        .into();
+        assert!(!still_stuck.settled);
+        assert_eq!(still_stuck.gating_rows, 4);
+    }
+
+    /// A `DeferredSendFfi` is only ever built by [`convert_deferred_send`];
+    /// this pins that the struct stays constructible field-by-field so the
+    /// test above cannot silently stop covering a newly added field.
+    #[test]
+    fn the_ffi_shape_has_exactly_the_fields_under_test() {
+        let d = DeferredSendFfi {
+            unresolved_inputs: 1,
+            discarded_intents: 2,
+            repaired: true,
+            commits: Vec::new(),
+            proposals: Vec::new(),
+        };
+        assert_eq!(
+            (d.unresolved_inputs, d.discarded_intents, d.repaired),
+            (1, 2, true)
         );
     }
 }

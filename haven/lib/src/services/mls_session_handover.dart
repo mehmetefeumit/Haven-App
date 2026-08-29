@@ -40,14 +40,66 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
 
+/// Ceiling on how long the foreground service's `onDestroy` WAITS for the
+/// location publish that was in flight when the stop arrived.
+///
+/// Lives here, beside [handoverTimeout], because the two are one number seen
+/// from both ends: `background_location_task.dart` enforces it on the drain,
+/// and this file must not give up before it could even have elapsed. Split
+/// across two files they drift. `scripts/ci/check_teardown_drain_budget.sh`
+/// pins the arithmetic below against the Rust constants it is derived from.
+///
+/// Sized to ONE relay publish attempt — `CONNECTION_TIMEOUT` (5 s) +
+/// `DEFAULT_TIMEOUT` (10 s) in `haven-core/src/relay/manager.rs` — not that
+/// module's full three-attempt ~49 s ladder. The retries exist to buy back a
+/// location sample, and a service that is stopping will not publish another.
+/// Rule 13 is not at stake for the step this bounds: a location is an MLS
+/// *application* message, so abandoning one costs a sample, never a commit.
+/// (The commit-critical half of a cycle is drained separately and UNBOUNDED —
+/// see `background_location_task.dart`.)
+///
+/// # What it does NOT bound
+///
+/// It bounds the WAIT, not the release. An abandoned publish keeps running in
+/// Rust, and its future still owns an `Arc<CoreCircleManager>` until the whole
+/// ladder finishes — so the Rule-14 guard can legitimately stay held for tens
+/// of seconds after `onDestroy` returns. Nothing here can shorten that; only
+/// the ladder finishing does.
+const Duration kBackgroundTeardownDrainBudget = Duration(
+  seconds: _teardownDrainBudgetSecs,
+);
+
+const int _teardownDrainBudgetSecs = 15;
+
+/// What the service spends after the drain: the bounded relay shutdown and the
+/// `dispose()` that actually frees this isolate's own handle, plus the stop
+/// request's own trip across the platform channel.
+const int _teardownAfterDrainSecs = 5;
+
 /// How long to wait for the service to release the guard before giving up.
 ///
-/// Covers the service's `onDestroy`, which awaits an in-flight publish cycle
-/// and a relay shutdown before disposing its manager. Too short and the retry
-/// fires while the guard is still held, wasting the one attempt; too long and
-/// the UI sits on a blank map. This is generous because the wait is only ever
-/// entered on a path that is otherwise permanently broken.
-const Duration handoverTimeout = Duration(seconds: 12);
+/// Derived, not chosen: give up sooner than the service's own teardown bound
+/// and this abandons a service that was going to comply, wastes the caller's
+/// one retry, and leaves the user on a blank map anyway. Summed in seconds
+/// rather than as `Duration`s because a default parameter value has to be
+/// `const`, and `Duration.+` is not.
+///
+/// # This is a floor on patience, not a promise
+///
+/// Waiting it out does NOT mean the guard must be free afterwards. A publish
+/// the service abandoned at [kBackgroundTeardownDrainBudget] keeps its
+/// `Arc<CoreCircleManager>` until its relay ladder ends (~49 s worst case), so
+/// a `timedOut` here can perfectly well mean "still shutting down" rather than
+/// "wedged". That is why `timedOut` is not treated as a dead end:
+/// `NostrCircleService._recoverHeldSession` follows it with a registry re-read,
+/// a force-release and ONE retry, which absorbs both readings without this
+/// number having to be big enough to cover the worst one.
+///
+/// The common case does not pay for any of it — an idle service destroys in
+/// milliseconds and the poll below exits as soon as the guard clears.
+const Duration handoverTimeout = Duration(
+  seconds: _teardownDrainBudgetSecs + _teardownAfterDrainSecs,
+);
 
 /// Gap between guard re-checks while waiting for the service to let go.
 const Duration handoverPollInterval = Duration(milliseconds: 250);

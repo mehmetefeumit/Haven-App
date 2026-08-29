@@ -19,6 +19,28 @@ class SubscriptionServiceException implements Exception {
   String toString() => 'SubscriptionServiceException: $message';
 }
 
+/// Whether stopping the live-sync session actually let go of the engine's
+/// `Arc<CircleManager>` — and with it the MLS database's Rule-14 guard.
+///
+/// Returned rather than swallowed because the two failing states are opposite
+/// instructions to the caller. A stop that drained means the guard is this
+/// isolate's to give away; a stop that did not means the engine's supervisor
+/// tasks are STILL ingesting through that manager, and anything the caller does
+/// next on the assumption it was released (disposing its own handle, handing
+/// the session to the foreground service) frees nothing and leaves the guard
+/// owned by a Rust static that no Dart handle in any isolate references.
+enum LiveSyncStopOutcome {
+  /// No engine was running, so nothing was holding anything.
+  idle,
+
+  /// The engine stopped and its handle was released.
+  stopped,
+
+  /// The engine reported a timed-out stop on both the attempt and the retry:
+  /// its supervisor tasks are still running and still hold the guard.
+  stillHolding,
+}
+
 /// Consumes the Rust live-sync engine's event stream for the session lifetime.
 ///
 /// Started on login, resumed on app-resume, stopped on logout. Gated behind
@@ -50,7 +72,11 @@ abstract class SubscriptionService {
   Future<void> unsubscribeCircle(Uint8List nostrGroupId);
 
   /// Stops + drops the session (logout / teardown). Idempotent.
-  Future<void> stop();
+  ///
+  /// Reports whether the engine actually released its manager `Arc` — see
+  /// [LiveSyncStopOutcome]. Callers that only tear down may ignore it; the
+  /// pause-time handoff must not.
+  Future<LiveSyncStopOutcome> stop();
 
   /// Whether a live session is currently running.
   bool get isRunning;
