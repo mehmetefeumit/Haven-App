@@ -407,13 +407,12 @@ run_check() { # <stack> <lcov-file>
         violations+=("$(printf 'BELOW   %s\n          %s%% < floor %s%% (%s/%s lines, manifest line %s).\n          Add tests for the uncovered lines. Lowering the floor is not a fix —\n          it converts a measured regression into a permitted one.' "${pattern}" "${pct}" "${floor}" "${agg_h}" "${agg_f}" "${MAN_LINE[$i]}")")
         ;;
       ratchet)
-        # Pin at the integer part of the measured value: it is the highest floor
-        # provably satisfied right now, and it cannot round a path up into an
-        # instant failure the way ceil() would.
+        # Name the floor the pin rule gives, never int(pct): a hand edit to the
+        # bare integer part passes this check and fails --lint as TOO-TIGHT.
         local suggested
-        suggested="$(awk -v p="${pct}" 'BEGIN { printf "%d", int(p) }')"
+        suggested="$(pin_for "${pct}")"
         printf '  %s%-7s%s %-9s %-56s %s\n' "${YELLOW}" "${pct}" "${RESET}" "${floor}%" "${pattern}" "${agg_h}/${agg_f}"
-        violations+=("$(printf 'RATCHET %s\n          %s%% now exceeds floor %s%% by >= %s points (manifest line %s).\n          Raise the floor to %s in scripts/ci/coverage_floors.txt.\n          The coverage is already earned; leaving the floor low licenses a\n          silent fall back to %s%%.' "${pattern}" "${pct}" "${floor}" "${margin}" "${MAN_LINE[$i]}" "${suggested}" "${floor}")")
+        violations+=("$(printf 'RATCHET %s\n          %s%% now exceeds floor %s%% by >= %s points (manifest line %s).\n          Raise the floor to %s (the pin rule, floor(measured) - %s), with:\n            %s --repin %s <lcov>\n          The coverage is already earned; leaving the floor low licenses a\n          silent fall back to %s%%.' "${pattern}" "${pct}" "${floor}" "${margin}" "${MAN_LINE[$i]}" "${suggested}" "${PIN_HEADROOM}" "${SCRIPT_NAME}.sh" "${stack}" "${floor}")")
         ;;
       *)
         printf '  %s%-7s%s %-9s %-56s %s\n' "${GREEN}" "${pct}" "${RESET}" "${floor}%" "${pattern}" "${agg_h}/${agg_f}"
@@ -910,10 +909,11 @@ EOF
   # failure is a puzzle rather than an instruction.
   local msg
   msg="$( ( HAVEN_COVERAGE_FLOORS="${tmp}/manifest.ok" run_check selftest "${tmp}/report.ratchet.lcov" ) 2>&1 || true )"
-  if printf '%s' "${msg}" | grep -q 'Raise the floor to 95'; then
-    printf '  %sPASS%s ratchet message names the new floor\n' "${GREEN}" "${RESET}"
+  # 191/200 = 95.50%: the pin rule says 93, and 95 (int) would fail --lint.
+  if printf '%s' "${msg}" | grep -q 'Raise the floor to 93 '; then
+    printf '  %sPASS%s ratchet message names the pin-rule floor\n' "${GREEN}" "${RESET}"
   else
-    printf '  %sFAIL%s ratchet message did not name the new floor (95)\n' "${RED}" "${RESET}" >&2
+    printf '  %sFAIL%s ratchet message did not name the pin-rule floor (93)\n' "${RED}" "${RESET}" >&2
     fails=1
   fi
 

@@ -68,8 +68,11 @@
 # matching nothing fails on purpose).
 # ===========================================================================
 #
-# All values below were measured from CI run 30964250098 (2026-08-04) on the
-# toolchains pinned in scripts/ci/coverage_toolchain.env, via
+# Each row's `# measured` comment is its provenance. Rows were first pinned
+# from CI run 30964250098 (2026-08-04) and are re-pinned by --repin from the
+# lcov artifact of a later run (flutter rows most recently from run
+# 33260090513, 2026-08-29), always on the toolchains pinned in
+# scripts/ci/coverage_toolchain.env, via
 #   cargo llvm-cov --all-features --lcov --ignore-filename-regex 'frb_generated'
 #   flutter test --coverage
 #
@@ -219,16 +222,16 @@ rust|src/tiles/|94                           # measured 96.11% (642/668)
 
 
 # ===========================================================================
-# haven (Flutter) — aggregate ~65% against a 50% gate, i.e. ~1600 lines of
-# slack shared across the package.
+# haven (Flutter) — aggregate ~72% against a 50% gate (9205/12811 on run
+# 33260090513), i.e. ~2800 lines of slack shared across the package.
 # ===========================================================================
 
 # --- The service layer as a whole -------------------------------------------
 # The clearest statement of why these floors exist: the whole service layer
 # sat at 48.96% — BELOW the 50% package gate — inside a package that gated
 # green, because the widget and provider suites paid for it out of the shared
-# budget. It has since crossed 51%, but with 2828 instrumented lines one
-# percentage point is 28 lines, so a single new uncovered file still moves this
+# budget. It has since climbed past 60%, but with ~3600 instrumented lines one
+# percentage point is 36 lines, so a single new uncovered file still moves this
 # row several points. That is exactly what the two points of headroom are for,
 # and why this row must never be pinned tight.
 flutter|lib/src/services/|58                 # measured 60.06% (1830/3047); was 46 (48.96%) before the
@@ -254,10 +257,11 @@ flutter|lib/src/services/subscription_service.dart|100      # measured 100.00% (
 
 # --- Background publishing and catch-up -------------------------------------
 # background_location_task.dart is the foreground-service isolate — the file
-# P0-1 lives in — at 1.69%. Its floor is 0 by arithmetic, and that is the point:
-# the row makes a near-zero VISIBLE in a reviewed file instead of leaving it
-# hidden inside a green aggregate, and the ratchet fires the moment anyone
-# covers 5% of it, forcing the number to be written down.
+# P0-1 lives in. First pinned at 1.69% (floor 0 by arithmetic) so a near-zero
+# stayed VISIBLE in a reviewed file instead of hidden inside a green aggregate.
+# It has since reached ~28%, but the background-wedge fixes of 2026-08-29
+# landed 62 new lines with 13 covered, leaving under a point of headroom: the
+# next uncovered line here reddens CI.
 flutter|lib/src/services/background_location_task.dart|27   # measured 29.30% (80/273)
 flutter|lib/src/services/background_location_manager.dart|52 # measured 54.08% (53/98)
 flutter|lib/src/services/background_catchup_worker.dart|26  # measured 28.40% (23/81)
@@ -265,13 +269,13 @@ flutter|lib/src/services/background_catchup_worker.dart|26  # measured 28.40% (2
 # --- MLS / relay / identity / profile FFI seams -----------------------------
 # The Dart side of every Rust call. Same reading as above: these numbers are
 # evidence of how thin the coverage is, pinned so it cannot get thinner.
-# nostr_relay_preferences_service.dart is at literal 0.00% — 88 instrumented
-# lines, not one of them executed by any test, entirely invisible to the 50%
-# gate.
-flutter|lib/src/services/nostr_circle_service.dart|10       # measured 12.55% (65/518)
+# nostr_relay_preferences_service.dart sat at literal 0.00% when first pinned
+# — 88 instrumented lines, none executed by any test, invisible to the 50%
+# gate — and has since been fully covered, so it is pinned exactly at 100.
+flutter|lib/src/services/nostr_circle_service.dart|12       # measured 14.43% (87/603)
 flutter|lib/src/services/nostr_identity_service.dart|52     # measured 54.62% (65/119)
-flutter|lib/src/services/nostr_profile_service.dart|36      # measured 38.74% (43/111)
-flutter|lib/src/services/nostr_relay_service.dart|16        # measured 18.09% (34/188); was 0 (0.63%, 1/158)
+flutter|lib/src/services/nostr_profile_service.dart|41      # measured 43.61% (58/133)
+flutter|lib/src/services/nostr_relay_service.dart|18        # measured 20.31% (39/192); was 0 (0.63%, 1/158)
                                                             # before classifyKeyPackageMaintenance was lifted
                                                             # out of the class. It decides whether a KeyPackage
                                                             # tick counts as reachable, and every branch of it is
@@ -296,7 +300,7 @@ flutter|lib/src/network/pinned_tile_client.dart|59|10       # measured 61.54% (8
 # --- Riverpod state and validators ------------------------------------------
 # The providers layer is where service results become UI state; the validators
 # are the input filters on relay URLs and npubs.
-flutter|lib/src/providers/|82                # measured 84.81% (1267/1494)
-flutter|lib/src/utils/|87                    # measured 89.15% (189/212)
+flutter|lib/src/providers/|83                # measured 85.43% (1577/1846)
+flutter|lib/src/utils/|90                    # measured 92.37% (218/236)
 flutter|lib/src/utils/relay_url_validator.dart|93           # measured 95.83% (23/24)
-flutter|lib/src/utils/npub_validator.dart|60                # measured 62.50% (20/32)
+flutter|lib/src/utils/npub_validator.dart|82                # measured 84.38% (27/32)
